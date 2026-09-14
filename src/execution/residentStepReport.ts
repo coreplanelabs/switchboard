@@ -24,6 +24,10 @@ export interface StepResult {
   stderr: string;
   exitCode: number;
   timedOut: boolean;
+  /** The sandbox SDK cut the process's output stream past its own retention
+   *  limit (one its typings do not name; about 2.3 MB observed): what is here
+   *  is a prefix. Distinct from the DO's char caps, which slice what arrived. */
+  truncated?: boolean;
 }
 
 /** Chars kept per stream in the STORED reason — it travels into DO storage,

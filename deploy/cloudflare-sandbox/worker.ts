@@ -21,7 +21,9 @@ import { BASH_TIMEOUT_MAX_MS, clampBashTimeout } from "../../src/execution/bashT
 import {
   base64ByteLength,
   MAX_READ_BYTES,
+  parseByteSize,
   readEncodingOf,
+  statCommandFor,
   type Base64ReadAnswer,
 } from "../../src/execution/binaryRead.js";
 import {
@@ -278,13 +280,25 @@ export default {
           if (typeof encoding !== "string") return json({ error: encoding.error }, 400);
           const path = abs(String(body.path ?? ""));
           if (encoding === "base64") {
+            // The size first, from `stat`, so the cap is judged before any
+            // read and the client can hold the decoded bytes to it — an SDK
+            // read that came back short would otherwise pass as the file.
+            const stat = await withSessionRecovery(sandbox, () => sandbox.exec(statCommandFor(path)));
+            if ((stat.exitCode ?? 0) !== 0) {
+              return json({ error: `read-failed: ${String(stat.stderr ?? stat.stdout ?? "").trim()}` }, 404);
+            }
+            const size = parseByteSize(String(stat.stdout ?? ""));
+            if (size === null) return json({ error: `read-failed: stat answered ${JSON.stringify(stat.stdout)}` }, 500);
+            if (size > MAX_READ_BYTES) return json({ encoding: "base64", tooLarge: true } satisfies Base64ReadAnswer);
             const file = await withSessionRecovery(sandbox, () => sandbox.readFile(path, { encoding: "base64" }));
             const content = typeof file === "string" ? file : (file?.content ?? "");
-            const answer: Base64ReadAnswer =
-              base64ByteLength(content) > MAX_READ_BYTES
-                ? { encoding: "base64", tooLarge: true }
-                : { encoding: "base64", content };
-            return json(answer);
+            const got = base64ByteLength(content);
+            if (got !== size) {
+              // 409, not 5xx: the client retries a 5xx twice over 30 s, and a
+              // short read is answered by the caller re-reading, not by waiting.
+              return json({ error: `read-inconsistent: ${path} is ${size} bytes but the read returned ${got}` }, 409);
+            }
+            return json({ encoding: "base64", content, size } satisfies Base64ReadAnswer);
           }
           const file = await withSessionRecovery(sandbox, () => sandbox.readFile(path));
           return json({ content: typeof file === "string" ? file : (file?.content ?? "") });

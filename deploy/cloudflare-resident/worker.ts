@@ -96,11 +96,14 @@ import {
 } from "../../src/execution/residentDepCache.js";
 import { parseWorktreeCleanliness, worktreeCleanlinessScript } from "../../src/execution/residentCleanliness.js";
 import {
-  base64ByteLength,
-  MAX_READ_BASE64_CHARS,
+  base64LengthOf,
+  chunkPlan,
   MAX_READ_BYTES,
+  parseByteSize,
+  readChunkCommandFor,
   readCommandFor,
   readEncodingOf,
+  statCommandFor,
   type Base64ReadAnswer,
   type ReadEncoding,
 } from "../../src/execution/binaryRead.js";
@@ -1692,7 +1695,7 @@ export class ResidentDO extends Sandbox<Env> {
   private async run(
     argv: readonly string[],
     opts: { cwd?: string; timeoutMs?: number; env?: Record<string, string> } = {},
-  ): Promise<{ stdout: string; stderr: string; exitCode: number; timedOut: boolean }> {
+  ): Promise<{ stdout: string; stderr: string; exitCode: number; timedOut: boolean; truncated?: boolean }> {
     const timeout = opts.timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
     const launch = {
       ...(opts.cwd ? { cwd: opts.cwd } : {}),
@@ -1727,7 +1730,15 @@ export class ResidentDO extends Sandbox<Env> {
     }
     try {
       const out = await proc.output({ encoding: "utf8", timeout: timeout + 30_000 });
-      return { stdout: out.stdout, stderr: out.stderr, exitCode: out.exitCode, timedOut: out.timedOut };
+      // `truncated` is the SDK saying the process log stream was cut past its
+      // own retention — the output here is a prefix, whatever our caps say.
+      return {
+        stdout: out.stdout,
+        stderr: out.stderr,
+        exitCode: out.exitCode,
+        timedOut: out.timedOut,
+        truncated: out.truncated,
+      };
     } catch (err) {
       if (isRuntimeReplacement(err)) {
         this.swapIncarnation(); // the container this incarnation's memos described is gone
@@ -3931,7 +3942,7 @@ export class ResidentDO extends Sandbox<Env> {
     timeoutMs: number,
     capBytes?: number,
     capFiles?: { out: string; err: string },
-  ): Promise<{ stdout: string; stderr: string; exitCode: number; timedOut: boolean }> {
+  ): Promise<{ stdout: string; stderr: string; exitCode: number; timedOut: boolean; truncated?: boolean }> {
     const injected = { GIT_TERMINAL_PROMPT: "0" };
     validateEnvNames(injected);
     const body = capBytes
@@ -3954,7 +3965,7 @@ export class ResidentDO extends Sandbox<Env> {
     command: string,
     timeoutMs: number,
     charCap: number,
-  ): Promise<{ stdout: string; stderr: string; exitCode: number; timedOut: boolean }> {
+  ): Promise<{ stdout: string; stderr: string; exitCode: number; timedOut: boolean; truncated?: boolean }> {
     const capBytes = capBytesFor(charCap);
     const files = execCapFiles();
     const r = await this.threadRun(user, worktreePath, command, timeoutMs, capBytes, files);
@@ -5161,7 +5172,7 @@ export class ResidentDO extends Sandbox<Env> {
       if (err instanceof RuntimeReplacedError) return runtimeReplacedErr(err);
       throw err;
     }
-    const truncated = r.stdout.length > EXEC_OUTPUT_CAP || r.stderr.length > EXEC_OUTPUT_CAP;
+    const truncated = r.stdout.length > EXEC_OUTPUT_CAP || r.stderr.length > EXEC_OUTPUT_CAP || r.truncated === true;
     const notes: string[] = [];
     if (r.timedOut)
       notes.push(
@@ -5201,31 +5212,68 @@ export class ResidentDO extends Sandbox<Env> {
     const resolved = confineThreadPath(pre.binding.worktreePath, path);
     if (!resolved)
       return { error: `path-escape: ${JSON.stringify(path)} does not stay inside the thread worktree`, status: 400 };
-    const cap = encoding === "base64" ? MAX_READ_BASE64_CHARS : READ_CONTENT_CAP;
+    if (encoding === "base64") return this.readThreadBytes(pre.binding, resolved);
     let r: Awaited<ReturnType<ResidentDO["threadRun"]>>;
     try {
       r = await this.threadRun(
         pre.binding.user,
         pre.binding.worktreePath,
-        readCommandFor(encoding, resolved),
+        readCommandFor(resolved),
         DEFAULT_EXEC_TIMEOUT_MS,
-        capBytesFor(cap),
+        capBytesFor(READ_CONTENT_CAP),
       );
     } catch (err) {
       if (err instanceof RuntimeReplacedError) return runtimeReplacedErr(err);
       throw err;
     }
     if (r.exitCode !== 0 || r.timedOut) return { error: `read-failed: ${describeStepFailure(r)}`, status: 404 };
-    const truncated = r.stdout.length > cap;
-    if (encoding === "base64") {
-      // Padding hides up to two bytes inside the cap's char count, so the
-      // decoded size is checked too — the cap is bytes, not characters.
-      const content = r.stdout.trimEnd();
-      return truncated || base64ByteLength(content) > MAX_READ_BYTES
-        ? { encoding, tooLarge: true }
-        : { encoding, content };
+    const truncated = r.stdout.length > READ_CONTENT_CAP || r.truncated === true;
+    return { content: truncated ? r.stdout.slice(0, READ_CONTENT_CAP) : r.stdout, truncated };
+  }
+
+  /** The bytes of a confined file as base64, as the thread user, in chunks
+   *  (src/execution/binaryRead.ts): one command's stdout crosses the SDK's
+   *  process log stream, which cuts a stream past a retention limit far below
+   *  the binary cap and says so only through `truncated` — a 12 MB file once
+   *  came back as 1.7 MB and was handed on as complete. So: `stat` first (the
+   *  cap is judged on the size, before any read), then chunks small enough
+   *  that no stream is ever cut; a chunk the SDK still flags, or one whose
+   *  length is not what the size promised, fails the read by name. The answer
+   *  carries the size for the client to check the decoded bytes against. */
+  private async readThreadBytes(
+    binding: { user: string; worktreePath: string },
+    resolved: string,
+  ): Promise<Base64ReadAnswer | ThreadErr> {
+    const run = (command: string, capChars: number) =>
+      this.threadRun(binding.user, binding.worktreePath, command, DEFAULT_EXEC_TIMEOUT_MS, capBytesFor(capChars));
+    try {
+      const stat = await run(statCommandFor(resolved), 64);
+      if (stat.exitCode !== 0 || stat.timedOut)
+        return { error: `read-failed: ${describeStepFailure(stat)}`, status: 404 };
+      const size = parseByteSize(stat.stdout);
+      if (size === null)
+        return { error: `read-failed: stat answered ${JSON.stringify(stat.stdout.slice(0, 64))}`, status: 500 };
+      if (size > MAX_READ_BYTES) return { encoding: "base64", tooLarge: true };
+      const chunks = chunkPlan(size);
+      const parts: string[] = [];
+      for (const [i, chunk] of chunks.entries()) {
+        const expected = base64LengthOf(chunk.length);
+        const r = await run(readChunkCommandFor(resolved, chunk), expected);
+        if (r.exitCode !== 0 || r.timedOut) return { error: `read-failed: ${describeStepFailure(r)}`, status: 404 };
+        const piece = r.stdout.trimEnd();
+        if (r.truncated === true || piece.length !== expected) {
+          return {
+            error: `read-inconsistent: chunk ${i + 1} of ${chunks.length} arrived as ${piece.length} of ${expected} base64 chars${r.truncated ? " (the SDK cut the output stream)" : ""}`,
+            status: 409,
+          };
+        }
+        parts.push(piece);
+      }
+      return { encoding: "base64", content: parts.join(""), size };
+    } catch (err) {
+      if (err instanceof RuntimeReplacedError) return runtimeReplacedErr(err);
+      throw err;
     }
-    return { content: truncated ? r.stdout.slice(0, cap) : r.stdout, truncated };
   }
 
   /** POST /write: content travels via the SDK file API into the thread's
@@ -5652,7 +5700,7 @@ export class ResidentDO extends Sandbox<Env> {
         timedOut: r.timedOut,
       });
       const ok = r.exitCode === 0 && !r.timedOut;
-      const truncated = r.stdout.length > EXEC_OUTPUT_CAP || r.stderr.length > EXEC_OUTPUT_CAP;
+      const truncated = r.stdout.length > EXEC_OUTPUT_CAP || r.stderr.length > EXEC_OUTPUT_CAP || r.truncated === true;
       const notes: string[] = [];
       if (r.timedOut) notes.push(`command timed out after ${OP_EXEC_TIMEOUT_MS}ms`);
       if (truncated) notes.push(`output truncated to ${EXEC_OUTPUT_CAP} chars per stream`);
