@@ -42,7 +42,15 @@ import {
 import { drivePiTask, realTimers, redactPiRun, type PiTaskRun } from "../src/load/piRpc.js";
 import { judgeToolCall } from "../src/core/harness/pi/toolRules.js";
 import { PI_TASK_NAMES, PI_TASKS, piTaskByName, taskBranch, taskPrompt } from "../src/load/piTasks.js";
-import { PI_CODING_TOOLS, checkoutBranch, piKeyEnvFor, spawnPi, writeAgentDir } from "../src/load/piProcess.js";
+import {
+  PI_CODING_TOOLS,
+  PROXIED_MODEL_ENTRY,
+  checkoutBranch,
+  earlyExitNote,
+  piKeyEnvFor,
+  spawnPi,
+  writeAgentDir,
+} from "../src/load/piProcess.js";
 import {
   compoundExamples,
   compoundScore,
@@ -576,13 +584,17 @@ async function pi(f: Flags): Promise<boolean> {
   // pi's config directory lives beside the receipt, not in a temp dir: its
   // session files are the run's own record and stay with the results
   // (settings.json and models.json hold no secret — the key is interpolated
-  // from the environment at request time).
+  // from the environment at request time). Named relative to this cwd; the
+  // child, which runs in the checkout, gets it absolute. Through the proxy
+  // the model's entry carries what pi's catalog says of the model, so the
+  // arm thinks like the direct one; the dry run's scripted model stays bare.
   const agentDir = `${RESULTS_DIR}/pi-${id}-agent`;
   const layout = writeAgentDir(agentDir, {
     provider: providerName,
     model,
     ...(baseUrl ? { baseUrl } : {}),
     ...(api ? { api } : {}),
+    ...(throughProxy ? { modelEntry: PROXIED_MODEL_ENTRY } : {}),
   });
 
   const samples: Sample[] = [];
@@ -697,6 +709,12 @@ async function pi(f: Flags): Promise<boolean> {
       (r) =>
         `| ${r.task} | ${r.terminal} | ${Math.round(r.wallMs / 1000)} s | ${r.turns} | ${r.retries} | ${r.usage.input}/${r.usage.output} | $${r.cost.total.toFixed(4)} | ${r.toolCalls.length} | ${r.toolCalls.filter((c) => c.verdict === "refused").length} | ${r.toolCalls.filter((c) => c.verdict === "outside-profile").length} | ${r.prShaped.reached ? "yes" : `no (${r.prShaped.problems.join("; ")})`} |`,
     ),
+    // A task pi left before its first turn has no stream to explain it; its
+    // stderr is the reason, and belongs on the receipt, not only in the JSON.
+    ...runs.flatMap((r) => {
+      const note = earlyExitNote(r.task, r, stderrs[r.task] ?? "");
+      return note ? [note] : [];
+    }),
     `model: ${runs[0]?.model ? `${runs[0].model.provider}/${runs[0].model.id} thinking ${runs[0].model.thinkingLevel}` : "unknown"}; pi's config and session files under ${agentDir} (kept: the sessions are the run's own record)`,
     `tool calls the policy preview would refuse or that fall outside the coding profile: ${refusedCalls.length === 0 ? "none" : ""}`,
     ...refusedCalls.map((c) => `  - ${c.task} ${c.tool} (${c.verdict}): ${c.reason} — \`${c.summary}\``),
