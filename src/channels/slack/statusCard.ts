@@ -2,6 +2,7 @@
 // (a StatusUpdate as Block Kit), the live-card sets the reconnect sweep asks
 // before closing a card as orphaned, and the closes a boot reclaim paints.
 
+import { ROUTED_CARD_FOOTER } from "../../core/statusCardFrame.js";
 import type { StatusUpdate } from "../../core/types.js";
 import { escapeMrkdwn } from "../slackEscape.js";
 
@@ -51,7 +52,15 @@ export async function refreshForeignLiveCards(warn: (line: string) => void = con
  *  sweep. Best-effort per card; a failure is logged and the rest go on. */
 export async function closeReclaimedCards(
   client: { chat: { update(args: { channel: string; ts: string; text: string; blocks: object[] }): Promise<unknown> } },
-  closures: Iterable<{ status: string; agent?: string; card: { channel: string; ts: string } | null; note?: string }>,
+  closures: Iterable<{
+    status: string;
+    agent?: string;
+    card: { channel: string; ts: string } | null;
+    note?: string;
+    /** The router chose the preset: the close ends with the override footer
+     *  (routing-and-config item 21), as the run's own close would have. */
+    routed?: boolean;
+  }>,
   warn: (line: string) => void = console.warn,
 ): Promise<number> {
   const glyph: Record<string, string> = {
@@ -66,12 +75,16 @@ export async function closeReclaimedCards(
     if (!c.card || !(c.status in glyph)) continue;
     // A run that replied: its record is complete. An interrupted run: the
     // closure's note says what to do next (run-history item 36).
+    const detail =
+      c.status === "interrupted"
+        ? (c.note ?? "The bot restarted while this run was in flight and it could not be resumed.")
+        : "The bot restarted after this run replied; its record is complete.";
     const frame: StatusUpdate = {
       title: `${glyph[c.status]} ${c.agent ?? "run"} · ${c.status.replace("_", " ")}`,
-      detail:
-        c.status === "interrupted"
-          ? (c.note ?? "The bot restarted while this run was in flight and it could not be resumed.")
-          : "The bot restarted after this run replied; its record is complete.",
+      // A routed run's close ends with the override footer wherever it is
+      // written: this is the close a person most needs it on — the run was
+      // cut by a deploy, and `agent:<preset>` in a reply is how to run it again.
+      detail: c.routed ? `${detail}\n${ROUTED_CARD_FOOTER}` : detail,
     };
     try {
       await client.chat.update({ channel: c.card.channel, ts: c.card.ts, ...render(frame) });

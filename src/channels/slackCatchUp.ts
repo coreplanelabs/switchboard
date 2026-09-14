@@ -1,5 +1,5 @@
 import { DEPLOY_RESTART_NOTICE } from "../core/dispatch/run.js";
-import { LIVE_CARD_PREFIXES } from "../core/statusCardFrame.js";
+import { LIVE_CARD_PREFIXES, ROUTED_CARD_FOOTER, ROUTED_LABEL_PREFIX } from "../core/statusCardFrame.js";
 import { MIN_CATCH_UP_WINDOW_MS } from "../core/drain.js";
 import { systemClock } from "../core/trace/clock.js";
 import { mapLimit } from "../core/mapLimit.js";
@@ -281,10 +281,16 @@ export function interruptedCardFrame(cardText: string): StatusUpdate {
     .replaceAll("&gt;", ">")
     .replaceAll("&amp;", "&")
     .trim();
+  const detail =
+    "The bot restarted (a deploy) while this run was in flight, so the run was lost and this card stopped updating. Re-send your request to run it again.";
+  // The card's own label says whether the router chose the preset (`· routed:
+  // <reason>`, routing-and-config item 21) — the sweep has nothing else of the
+  // run — and a routed card's close ends with the override footer wherever it
+  // is written.
+  const routed = label.includes(` · ${ROUTED_LABEL_PREFIX}`);
   return {
     title: `❌ interrupted · ${label}`,
-    detail:
-      "The bot restarted (a deploy) while this run was in flight, so the run was lost and this card stopped updating. Re-send your request to run it again.",
+    detail: routed ? `${detail}\n${ROUTED_CARD_FOOTER}` : detail,
   };
 }
 
