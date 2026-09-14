@@ -146,9 +146,15 @@ import {
   checkoutUpdateCommand,
   classifyRefreshFailure,
   restoreFailureDisposition,
+  isRuntimeUnreachableSignal,
   killStaleBuildProcessesCommand,
   planRefresh,
   RUNTIME_REPLACEMENT_WORDING,
+  RUNTIME_UNREACHABLE_DOWN_AT,
+  runtimeUnreachableReason,
+  runtimeUnreachableRung,
+  SDK_CONNECT_TIMEOUT_MS,
+  SDK_RUNTIME_RECORD_KEY,
   judgeRestoreProgress,
   planWakeDepsBudget,
   RESTORE_MAX_MS,
@@ -509,8 +515,10 @@ const DEGRADED_STREAK_KEY = "resident:degradedStreak";
  *  re-open the parked-degraded hole this fixes. A refresh step killed from
  *  outside (`refresh-interrupted`, `classifyRefreshFailure`) is never recorded
  *  as `degraded` at all: the instance throws it to the engine, whose retry
- *  re-enters the step. */
-const NON_EVIDENCE_REASON = /^(?:stale-mid-flight|restore-interrupted):/;
+ *  re-enters the step. A control port that did not answer
+ *  (`runtime-unreachable: …`, item 64) is the third: no command ran, the
+ *  ladder over its own persisted count owns the recovery. */
+const NON_EVIDENCE_REASON = /^(?:stale-mid-flight|restore-interrupted|runtime-unreachable):/;
 /** When the disk-full recovery last stopped the container (docs/reference/specs/resident-repos.md item 54):
  *  feeds `planDiskFullRecovery`'s cooldown so a working set that refills the
  *  disk is named, not recycled in a loop. */
@@ -549,9 +557,11 @@ const ATTACH_MUTEX_WAIT_MS = 60_000;
  *  an admin would, discarding the unusable snapshots and reprovisioning from
  *  GitHub. Provision-failure downs never auto-rebuild — they would loop
  *  against the same broken build. With the 10-minute cron, N=3 ≈ 30 minutes
- *  down before the automatic escape hatch fires. */
+ *  down before the automatic escape hatch fires. `runtime-unreachable` is the
+ *  ladder's last rung (item 64): a recreated container did not answer either,
+ *  so the rebuild — destroy plus reprovision — is the only exit left. */
 const AUTO_REBUILD_AFTER_STRIKES = 3;
-const REHYDRATION_FAILURE_RE = /^(r2-restore-failed|snapshot-stamp-mismatch|no-snapshot)/;
+const REHYDRATION_FAILURE_RE = /^(r2-restore-failed|snapshot-stamp-mismatch|no-snapshot|runtime-unreachable)/;
 
 /** /exec budget: the shared 5-minute default (`BASH_TIMEOUT_MS`);
  *  a caller may raise it per call via the body's `timeoutMs` up to the shared
@@ -714,6 +724,39 @@ function isRuntimeReplacement(err: unknown): boolean {
  *  recoverable thread states; `reason` is the discriminator). */
 function runtimeReplacedErr(err: RuntimeReplacedError): ThreadErr {
   return { error: err.message, status: 409, reason: "runtime-replaced" };
+}
+
+/** The container's control port never answered: `exec` rejected with the
+ *  DOMException of the SDK's connect abort (`DEFAULT_CONNECT_TIMEOUT_MS`,
+ *  30 s), raised inside its wake path — `RuntimeBootstrapProbe.probe` →
+ *  `ContainerControlConnection.fetchUpgradeAttempt`, the WebSocket upgrade to
+ *  port 3000 — before any process could start. Not a replacement (the runtime
+ *  did not change; it is silent), not a command failure (nothing ran), not
+ *  evidence about the repository. Carries the persisted consecutive count the
+ *  ladder decides on (`runtimeUnreachableRung`, docs/reference/specs/resident-repos.md
+ *  item 64); the message is the named reason, never the SDK's bare
+ *  `The operation was aborted` — which is what the incident this names sat
+ *  behind as `degraded(refresh-failed: The operation was aborted)` for forty
+ *  minutes while nothing escalated. */
+class RuntimeUnreachableError extends Error {
+  constructor(
+    readonly count: number,
+    readonly cause: unknown,
+  ) {
+    super(runtimeUnreachableReason(count));
+    this.name = "RuntimeUnreachableError";
+  }
+}
+
+/** Does this exec rejection mean the control port never answered? The pure
+ *  signal (`isRuntimeUnreachableSignal`: the `AbortError` name, or the
+ *  DOMException's message when a wrapper copied only that) over the error and
+ *  its cause chain. Asked only AFTER `isRuntimeReplacement` — a replaced
+ *  runtime is a different fact — and only of a spawn-phase error: a
+ *  command's own output is a `StepError` with an exit code and never gets here. */
+function isRuntimeUnreachable(err: unknown): boolean {
+  for (const link of selfAndCauses(err)) if (isRuntimeUnreachableSignal(link)) return true;
+  return false;
 }
 /** Trailing slice of one string for an error reason. Command RESULTS are not
  *  described here — `describeStepFailure` owns that, because choosing between
@@ -1273,6 +1316,17 @@ const FACTS_KEY = "resident:facts";
 const SNAPSHOT_KEY = "resident:snapshot";
 const DEADLINE_AT_KEY = "resident:provisionDeadlineAt";
 const REBUILD_STRIKES_KEY = "resident:rebuildStrikes"; // watchdog auto-rebuild counter
+/** Consecutive connects the container's control port did not answer (item 64): the ladder's count. */
+const RUNTIME_UNREACHABLE_KEY = "resident:runtimeUnreachable";
+
+/** The row under RUNTIME_UNREACHABLE_KEY: the count and both instants, so the
+ *  fleet watch sees how long the runtime has been silent. Cleared by any exec
+ *  whose process spawned. */
+interface RuntimeUnreachableRow {
+  count: number;
+  firstAt: string;
+  lastAt: string;
+}
 
 /** Thread bindings live under their own prefix, keyed by threadKey. */
 const THREAD_KEY_PREFIX = "thread:";
@@ -1714,7 +1768,17 @@ export class ResidentDO extends Sandbox<Env> {
     try {
       proc = await createExtensionProcessSandbox(this).exec(argv as unknown as SandboxCommand, launch);
     } catch (err) {
-      if (!isRuntimeReplacement(err)) throw err;
+      if (!isRuntimeReplacement(err)) {
+        // The control port never answered the SDK's connect (its 30 s abort,
+        // raised inside the wake path): no process started and nothing about
+        // the repository is known. Count it in storage — the ladder of item 64
+        // reads the count — and name it, so no reason ever carries the bare
+        // `The operation was aborted`.
+        if (isRuntimeUnreachable(err)) {
+          throw new RuntimeUnreachableError((await this.noteRuntimeUnreachable()).count, err);
+        }
+        throw err;
+      }
       // Forward-looking gate, structurally unreachable today: in the pinned SDK
       // (@cloudflare/sandbox@0.13.0-next.751.1) every `reason:"runtime_replaced"`
       // site hardcodes `retryable:false`, so a replacement currently always
@@ -1729,6 +1793,9 @@ export class ResidentDO extends Sandbox<Env> {
       );
       proc = await createExtensionProcessSandbox(this).exec(argv as unknown as SandboxCommand, launch);
     }
+    // The spawn is the proof the control port answers: a persisted count of
+    // unanswered connects ends here, whatever the command goes on to do.
+    await this.clearRuntimeUnreachable();
     try {
       const out = await proc.output({ encoding: "utf8", timeout: timeout + 30_000 });
       // `truncated` is the SDK saying the process log stream was cut past its
@@ -2405,10 +2472,20 @@ export class ResidentDO extends Sandbox<Env> {
       [DEADLINE_AT_KEY]: systemClock() + provisioningTimeoutMs,
     });
     await this.ctx.storage.delete([FACTS_KEY, SNAPSHOT_KEY]); // defensive: no stale facts from a past life
-    this.deleteSchedules(PROVISIONING_CALLBACK);
-    this.deleteSchedules(PROVISION_RUN_CALLBACK);
-    await this.schedule(Math.max(1, Math.ceil(provisioningTimeoutMs / 1000)), PROVISIONING_CALLBACK, resource);
-    await this.schedule(1, PROVISION_RUN_CALLBACK, resource);
+    try {
+      this.deleteSchedules(PROVISIONING_CALLBACK);
+      this.deleteSchedules(PROVISION_RUN_CALLBACK);
+      await this.schedule(Math.max(1, Math.ceil(provisioningTimeoutMs / 1000)), PROVISIONING_CALLBACK, resource);
+      await this.schedule(1, PROVISION_RUN_CALLBACK, resource);
+    } catch (err) {
+      // Nothing armed, so nothing may say `onboarding`: the row goes back to
+      // what it was, the way the onboard route frees the registry slot. An
+      // `onboarding` with no schedule behind it used to sit until the
+      // watchdog's provision-timeout (seen live after an offboard in the same
+      // isolate).
+      await this.ctx.storage.delete([RESOURCE_KEY, STATE_KEY, REASON_KEY, UPDATED_KEY, DEADLINE_AT_KEY]);
+      throw err;
+    }
     return { state: "onboarding", reason: "" };
   }
 
@@ -3009,6 +3086,15 @@ export class ResidentDO extends Sandbox<Env> {
    *  class: `disk-full: …`, never serviceable, and the one failure the
    *  resident can act on itself (recoverFromDiskFull). */
   private async classifyCycleError(err: unknown): Promise<RefreshFailure> {
+    // The control port never answered (item 64): the count decides, and a disk
+    // probe would only cost another 30 s abort against the same silent port.
+    if (err instanceof RuntimeUnreachableError) {
+      return classifyRefreshFailure({
+        step: "refresh",
+        message: err.message,
+        runtimeUnreachable: { count: err.count },
+      });
+    }
     return err instanceof StepError
       ? await this.classifyFailure(err.step, err.message)
       : await this.classifyFailure("refresh", errMsg(err));
@@ -3028,6 +3114,145 @@ export class ResidentDO extends Sandbox<Env> {
     await this.recordRefreshError(failure.reason);
     await this.setResidentState("degraded", failure.reason); // last snapshot keeps serving
     if (failure.diskFull) await this.recoverFromDiskFull(failure.reason, selfInFlight);
+  }
+
+  // -- the runtime that never answers (docs/reference/specs/resident-repos.md item 64) ------
+  //
+  // Every `sandbox.exec` of the incident this section names rejected after
+  // exactly 30 s with the SDK's connect abort: the WebSocket upgrade to the
+  // container's control port was never answered, for forty minutes, while the
+  // refresh instance recorded `degraded(refresh-failed: The operation was
+  // aborted)` every bucket and nothing escalated — an admin `stop-container`
+  // (a SIGTERM the runtime ignored) did not help either. The recovery is a
+  // ladder over a persisted count of consecutive unanswered connects: re-arm,
+  // stop, destroy and restore from the snapshot, then down with a reason the
+  // watchdog's auto-rebuild strikes apply to. The count lives in storage
+  // because the isolate does not: a Worker deploy or an eviction between
+  // attempts would otherwise restart the ladder at one.
+
+  /** The persisted count of consecutive connects the control port did not
+   *  answer, or null while it answers. */
+  private async runtimeUnreachableRow(): Promise<RuntimeUnreachableRow | null> {
+    return (await this.ctx.storage.get<RuntimeUnreachableRow>(RUNTIME_UNREACHABLE_KEY)) ?? null;
+  }
+
+  /** One more unanswered connect: the count up by one, `firstAt` kept, `lastAt`
+   *  now — and one log line naming the attempt (the SDK's own line is the bare
+   *  AbortError with a stack). */
+  private async noteRuntimeUnreachable(): Promise<RuntimeUnreachableRow> {
+    const prev = await this.runtimeUnreachableRow();
+    const now = new Date(systemClock()).toISOString();
+    const row: RuntimeUnreachableRow = { count: (prev?.count ?? 0) + 1, firstAt: prev?.firstAt ?? now, lastAt: now };
+    await this.ctx.storage.put(RUNTIME_UNREACHABLE_KEY, row);
+    this.runtimeUnreachableSeen = true;
+    console.log(
+      `runtime-unreachable: the control port did not answer within ${SDK_CONNECT_TIMEOUT_MS / 1000} s — attempt ${row.count} of ${RUNTIME_UNREACHABLE_DOWN_AT} (first at ${row.firstAt})`,
+    );
+    return row;
+  }
+
+  /** Whether a row may exist, so the hot path pays one storage read per
+   *  isolate and a delete only for a row that is there. Storage stays the
+   *  truth; this only says whether it is worth asking. */
+  private runtimeUnreachableSeen: boolean | undefined;
+
+  /** A spawned process is the proof the control port answers: the row goes,
+   *  and the log says the silence ended. */
+  private async clearRuntimeUnreachable(): Promise<void> {
+    if (this.runtimeUnreachableSeen === undefined) {
+      this.runtimeUnreachableSeen = (await this.runtimeUnreachableRow()) !== null;
+    }
+    if (!this.runtimeUnreachableSeen) return;
+    const row = await this.runtimeUnreachableRow();
+    await this.ctx.storage.delete(RUNTIME_UNREACHABLE_KEY);
+    this.runtimeUnreachableSeen = false;
+    if (row) {
+      console.log(
+        `runtime-unreachable: cleared — the control port answered again after ${row.count} unanswered attempt(s) since ${row.firstAt}`,
+      );
+    }
+  }
+
+  /** The ladder (`runtimeUnreachableRung`) over the count `run()` persisted,
+   *  applied where a refresh step's exec found the port silent. Every rung
+   *  records its reason (`lastRefreshError` and the state) and logs one line
+   *  naming the rung and the count; the first three then throw the step back
+   *  to the engine, whose retry re-enters the same idempotent method thirty
+   *  seconds on, doubling — within one instance's six attempts the ladder runs
+   *  from the first unanswered connect to `down`, and a count that outlives the
+   *  instance carries into the next bucket's. The state is `degraded` under
+   *  every rung but the last: a `restoring` marker with no restore running
+   *  would hold the cron's instance creation off until the stale bound, so the
+   *  retry's wake path flips `restoring` itself when it starts the restore. */
+  private async escalateRuntimeUnreachable(
+    instance: string,
+    step: string,
+    err: RuntimeUnreachableError,
+  ): Promise<{ status: "failed"; reason: string }> {
+    const rung = runtimeUnreachableRung(err.count);
+    const reason = runtimeUnreachableReason(err.count, rung);
+    console.log(
+      `refresh instance ${instance}: ${step} runtime-unreachable — rung ${rung} at attempt ${err.count} of ${RUNTIME_UNREACHABLE_DOWN_AT}`,
+    );
+    await this.recordRefreshError(reason);
+    switch (rung) {
+      case "re-arm":
+        await this.setResidentState("degraded", reason);
+        throw err;
+      case "stop":
+        // SIGTERM (`stop()` signals and returns; it cannot kill), the
+        // incarnation swapped: a runtime that still honours signals restarts
+        // under the retry's exec on a fresh disk, and the wake path restores.
+        this.swapIncarnation(); // deliberate incarnation swap
+        await this.stop().catch((stopErr) => console.log(`runtime-unreachable: stop failed: ${errMsg(stopErr)}`));
+        await this.setResidentState("degraded", reason);
+        throw err;
+      case "recreate":
+        await this.recreateContainer(reason);
+        throw err;
+      case "down":
+        // A fresh VM did not answer either. Down with a strike-eligible reason
+        // (REHYDRATION_FAILURE_RE) — the watchdog rebuilds after its passes —
+        // and the VM destroyed, so the rebuild's provisioning starts on a new one.
+        this.swapIncarnation(); // deliberate incarnation swap
+        await this.destroy().catch((destroyErr) =>
+          console.log(`runtime-unreachable: destroy failed: ${errMsg(destroyErr)}`),
+        );
+        await this.clearInstanceLease(instance);
+        return { status: "failed", reason: (await this.goDown(reason)).reason };
+    }
+  }
+
+  /** Destroy the VM and keep everything else: the snapshots, the entry
+   *  backups, the registry record, the bindings. `destroy()` is the SDK's
+   *  SIGKILL of the whole container (`ctx.container.destroy()`), where `stop()`
+   *  is a SIGTERM the runtime may ignore — a control server that no longer
+   *  answers its port may not answer signals either, which is what the
+   *  incident's admin `stop-container` showed. The disk goes with the VM; the
+   *  next exec's wake path finds no runtime, flips `restoring` and restores
+   *  mirror, checkout and deps from R2 — the cheap recovery (minutes), where a
+   *  rebuild (destroy plus reprovision from the code host) is the expensive
+   *  one. The state stays `degraded` with the reason naming the pending
+   *  restore, for the reason `escalateRuntimeUnreachable` gives. */
+  private async recreateContainer(reason: string): Promise<void> {
+    console.log(
+      `runtime-unreachable: destroying the container — snapshots kept; the next exec restores from R2 (${reason.slice(0, 200)})`,
+    );
+    this.swapIncarnation(); // deliberate incarnation swap
+    await this.forgetRuntimeIdentity();
+    await this.destroy().catch((err) => console.log(`runtime-unreachable: destroy failed: ${errMsg(err)}`));
+    await this.setResidentState("degraded", reason);
+  }
+
+  /** Forget the SDK's stored runtime identity (`SDK_RUNTIME_RECORD_KEY`)
+   *  before a destroy. The SDK's own `stop()` and `destroy()` delete it
+   *  (`invalidate`) — this is the guard for the path where they do not get
+   *  that far, and it makes the destroy prompt: with no identity stored the
+   *  SDK skips the runtime cleanup it would otherwise attempt against the
+   *  silent port. Never a recovery on its own: the incident's `stop-container`
+   *  had already deleted the record and the next connect aborted the same way. */
+  private async forgetRuntimeIdentity(): Promise<void> {
+    await this.ctx.storage.delete(SDK_RUNTIME_RECORD_KEY);
   }
 
   // -- the refresh cycle as a Workflow instance (item 7) --------------------------
@@ -3225,6 +3450,20 @@ export class ResidentDO extends Sandbox<Env> {
         console.log(`refresh instance ${instance}: ${step} ${err.message}`);
         throw err;
       }
+      if (err instanceof RuntimeUnreachableError) {
+        // The control port never answered (item 64): the ladder decides — the
+        // step is thrown back for the engine's retry under the first three
+        // rungs, or the resident is down under the last.
+        let result: { status: "failed"; reason: string };
+        try {
+          result = await this.escalateRuntimeUnreachable(instance, step, err);
+        } catch (rethrown) {
+          outcome = `runtime-unreachable (attempt ${err.count} of ${RUNTIME_UNREACHABLE_DOWN_AT}, rung ${runtimeUnreachableRung(err.count)}) — the engine retries`;
+          throw rethrown;
+        }
+        outcome = `failed (${result.reason})`;
+        return { ...result, startedAt, trace: trace.steps() };
+      }
       const failure = await this.classifyCycleError(err);
       if (failure.interrupted) {
         outcome = `interrupted (${failure.reason}) — the engine retries`;
@@ -3421,6 +3660,10 @@ export class ResidentDO extends Sandbox<Env> {
   }): Promise<InstanceStepAnswer<{ result: { evicted: string[]; kept: number } | null; error: string | null }>> {
     return this.runInstanceStep(input.instance, "sweep", async (cycle) => {
       cycle.count();
+      // A runtime that does not answer has nothing to sweep, and every probe
+      // would cost the SDK's 30 s abort (item 64); the fetch step already
+      // recorded the verdict this instance.
+      if (await this.runtimeUnreachableRow()) return { status: "stopped", why: "runtime-unreachable" };
       return this.housekeeping("sweep", () => this.sweepWorktrees(input.resource));
     });
   }
@@ -3434,6 +3677,8 @@ export class ResidentDO extends Sandbox<Env> {
   }): Promise<InstanceStepAnswer<{ result: { measured: boolean } | null; error: string | null }>> {
     return this.runInstanceStep(input.instance, "measure", async (cycle) => {
       cycle.count();
+      // Same gate as the sweep: a silent control port cannot answer a `df`.
+      if (await this.runtimeUnreachableRow()) return { status: "stopped", why: "runtime-unreachable" };
       return this.housekeeping("measure", async () => ({ measured: (await this.measureDisk()) !== null }));
     });
   }
@@ -6020,10 +6265,12 @@ export class ResidentDO extends Sandbox<Env> {
       inFlightKey("hydration"),
       LIFECYCLE_KEY,
       REFRESH_INSTANCE_KEY,
+      RUNTIME_UNREACHABLE_KEY,
     ]);
     const facts = map.get(FACTS_KEY) as RepoFacts | undefined;
     const snap = map.get(SNAPSHOT_KEY) as SnapshotRecord | undefined;
     const disk = (map.get(DISK_KEY) as DiskSample | undefined) ?? null;
+    const unreachable = (map.get(RUNTIME_UNREACHABLE_KEY) as RuntimeUnreachableRow | undefined) ?? null;
     const refreshRow = (map.get(REFRESH_INSTANCE_KEY) as RefreshInstanceRow | undefined) ?? {
       instance: null,
       skipped: null,
@@ -6106,6 +6353,9 @@ export class ResidentDO extends Sandbox<Env> {
       // Item 55: the last disk sample (`residentDiskBudget.ts` DiskSample), or
       // null before the first measurement of this incarnation.
       disk,
+      // Item 64: consecutive connects the control port did not answer, with
+      // the rung that count is on; null while the port answers.
+      runtimeUnreachable: unreachable ? { ...unreachable, rung: runtimeUnreachableRung(unreachable.count) } : null,
     };
   }
 
@@ -6142,6 +6392,50 @@ export class ResidentDO extends Sandbox<Env> {
     } catch (err) {
       return { stopped: false, error: errMsg(err) };
     }
+  }
+
+  /** Admin `recreate-container` (item 13; item 64's rung 3 on demand): destroy
+   *  the VM, keep every snapshot, and start the restore now — the operator's
+   *  recovery for a resident whose runtime never answers, minutes where the
+   *  rebuild is half an hour. Refused while the engine owns the state
+   *  (onboarding/refreshing/restoring — two cycles must never race one disk)
+   *  and on a `down` resident, whose one exit is `/rebuild`. The restore runs
+   *  in the background through the ordinary wake path (`ensureHydrated`:
+   *  `restoring`, mirror, checkout, deps, `warm`, `lastRestore`); the caller
+   *  polls `/debug info`. A failure the wake path did not record itself is
+   *  recorded here, so the marker never strands `restoring`. */
+  async debugRecreateContainer(): Promise<
+    { recreated: true; restoreStartedAt: string } | { recreated: false; error: string; status: number }
+  > {
+    const from = await this.getStatus();
+    if (from.state === "onboarding" || from.state === "refreshing" || from.state === "restoring") {
+      return {
+        recreated: false,
+        status: 409,
+        error: `recreate-refused: the engine is mid-flight (state ${from.state}) — retry once it settles (warm/degraded)`,
+      };
+    }
+    if (from.state === "down") {
+      return {
+        recreated: false,
+        status: 409,
+        error: `recreate-refused: the resident is down (${from.reason}) — POST /rebuild is its exit`,
+      };
+    }
+    await this.recreateContainer(
+      "runtime-unreachable: the container was recreated by an operator (recreate-container), snapshots kept — the restore from the snapshot is starting",
+    );
+    const restoreStartedAt = new Date(systemClock()).toISOString();
+    this.ctx.waitUntil(
+      this.ensureHydrated().catch(async (err) => {
+        if (err instanceof ResidentDownError) return; // the wake path recorded it
+        const failure = await this.classifyCycleError(err);
+        console.log(`recreate-container: the restore failed — ${failure.reason.slice(0, 400)}`);
+        await this.recordRefreshError(failure.reason);
+        if ((await this.getStatus()).state === "restoring") await this.setResidentState("degraded", failure.reason);
+      }),
+    );
+    return { recreated: true, restoreStartedAt };
   }
 
   /** Fault injection for the watchdog's auto-rebuild path: persist
@@ -6231,6 +6525,16 @@ export class ResidentDO extends Sandbox<Env> {
       }
     }
     await this.ctx.storage.delete(REBUILD_STRIKES_KEY);
+    // From scratch means a fresh container too: the SDK's runtime identity
+    // forgotten and the VM destroyed (SIGKILL, a fresh disk) before
+    // provisioning clones onto it. A rebuild that reprovisioned onto the
+    // running container inherited its wedged runtime once — every exec of the
+    // new provisioning met the same unanswered control port (item 64).
+    this.swapIncarnation(); // deliberate incarnation swap
+    await this.forgetRuntimeIdentity();
+    await this.destroy().catch((err) =>
+      console.log(`rebuild: destroy failed (provisioning starts anyway): ${errMsg(err)}`),
+    );
     await this.initResident(resource, provisioningTimeoutMs);
     return { ...plan, backupObjectsDeleted, state: "onboarding" as const };
   }
@@ -6302,10 +6606,17 @@ export class ResidentDO extends Sandbox<Env> {
       errors.push(`destroy failed: ${errMsg(err)}`);
     }
     // Retired DO: clear the alarm the Container base may have armed for its
-    // schedules, then wipe storage so nothing ever wakes this object again.
+    // schedules, then delete every stored key — ours and the SDK's (its runtime
+    // identity among them) — so nothing ever wakes this object again. Keys, not
+    // `deleteAll()`: on a SQLite-backed object that also drops the SDK's
+    // `container_schedules` table, which only its constructor creates, and an
+    // onboard served by this same isolate then fails arming with
+    // `no such table` after writing `onboarding` (seen live). The table stays,
+    // empty — its rows are the two schedules cancelled above.
     this.swapIncarnation(); // retired object, retired memos
     await this.ctx.storage.deleteAlarm();
-    await this.ctx.storage.deleteAll();
+    const keys = [...(await this.ctx.storage.list()).keys()];
+    for (let i = 0; i < keys.length; i += 128) await this.ctx.storage.delete(keys.slice(i, i + 128));
     return { schedulesCancelled: true, containerStopped, storageCleared: true, backupObjectsDeleted, errors };
   }
 }
@@ -7437,6 +7748,13 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
       });
     case "stop-container":
       return json(await stub.debugStopContainer());
+    case "recreate-container": {
+      // Item 64's rung 3 on demand: destroy the VM, keep the snapshots, start
+      // the restore now. `in` narrowing, as handleRebuild (the RPC stub's
+      // Disposable intersection defeats the boolean discriminant).
+      const r = await stub.debugRecreateContainer();
+      return "error" in r ? json({ error: r.error }, r.status) : json(r, 202);
+    }
     case "force-onboarding":
       return json(await stub.debugForceOnboarding());
     case "force-down": {
@@ -7482,7 +7800,7 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
     default:
       return json(
         {
-          error: `unknown op ${JSON.stringify(op)} (ops: info, schedules, refresh-now, stop-container, force-onboarding, force-down, mint-token, run-watchdog, set-test-overrides, threads, sweep-now, reclaim-now, measure-disk, purge-bindings, backdate-thread, lifecycle)`,
+          error: `unknown op ${JSON.stringify(op)} (ops: info, schedules, refresh-now, stop-container, recreate-container, force-onboarding, force-down, mint-token, run-watchdog, set-test-overrides, threads, sweep-now, reclaim-now, measure-disk, purge-bindings, backdate-thread, lifecycle)`,
         },
         400,
       );

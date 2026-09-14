@@ -68,6 +68,20 @@ curl -sS -N -X POST -H "x-api-key: $BEARER" -H 'content-type: application/json' 
 
 `401` without the header, `403 revoked` once the run has ended, `403 turn_budget_exhausted` past the run's turn guard (six turns a minute over the preset's wall clock). The OpenAI shape takes the bearer as `authorization: Bearer …`. The bot's log carries `[model-proxy] run=… turn=…` and never a body.
 
+## Recover a resident whose container never answers
+
+Every command against one resident fails after exactly 30 s, `/debug info` says `degraded` with `runtime-unreachable: …` and `runtimeUnreachable.count` climbs: the container's control port is not answering the SDK. The resident escalates on its own ([Resident repo environments](../reference/specs/resident-repos.md) item 64) — two short retries, a stop, a destroy and restore from the snapshot, then `down` and the watchdog's rebuild — about twenty minutes to `down`. To move faster, take rung 3 yourself:
+
+```bash
+H=(-H "authorization: Bearer $RESIDENT_ADMIN_TOKEN" -H 'content-type: application/json')
+curl -sS "${H[@]}" -d '{"op":"info","resource":"repo:acme/api"}' "$RESIDENT_BASE_URL/debug" | jq '{state, reason, runtimeUnreachable, lastRestore}'
+curl -sS "${H[@]}" -d '{"op":"recreate-container","resource":"repo:acme/api"}' "$RESIDENT_BASE_URL/debug"
+# → 202 {"recreated":true,"restoreStartedAt":"…"}: the VM is destroyed, every snapshot kept, the restore starts
+# poll info until state is warm and lastRestore.at is after restoreStartedAt — minutes, not the half-hour rebuild
+```
+
+`409 recreate-refused` names why (mid-flight: wait; `down`: rebuild). If the recreated container does not answer either, `POST /rebuild {"resource":…}` reprovisions from the code host on a fresh container. The reset of last resort is `POST /offboard` then `POST /onboard` with the same body the repository was onboarded with: the only path that destroys the VM and forgets every stored fact, the SDK's included. `stop-container` is not a recovery here — it sends a SIGTERM a wedged runtime ignores.
+
 ## For this installation
 
 The project's own production, not Switchboard:
