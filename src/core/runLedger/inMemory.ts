@@ -65,7 +65,8 @@ export class InMemoryRunLedger implements RunLedger {
   readonly events = new Map<string, AppendableEvent[]>();
   readonly inbox = new Map<string, InboxItem[]>();
   readonly jobs = new Map<string, RunJob[]>();
-  /** The transcript objects of runs claimed before the session log existed. */
+  /** The transcript objects of runs claimed before the session log existed: a
+   *  claim whose meta names no session. A run with a session has none. */
   readonly transcripts = new Map<string, Transcript>();
   readonly sessions = new Map<string, SessionLog>();
   readonly finished = new Map<string, RunRecord>();
@@ -130,7 +131,11 @@ export class InMemoryRunLedger implements RunLedger {
       tools: req.tools,
       state: req.state ?? {},
     });
-    this.transcripts.set(req.runId, { ownerGen: req.gen, rows: [], attachments: [] });
+    // A row with a session owns nothing but its log — the Worker never owns a
+    // per-run transcript object for a new claim, so a write of such a run that
+    // misses the log is refused here as it is live. A claim without a session
+    // models a row from before the log existed: it owns its own object.
+    if (!req.meta.session) this.transcripts.set(req.runId, { ownerGen: req.gen, rows: [], attachments: [] });
     return decision;
   }
 

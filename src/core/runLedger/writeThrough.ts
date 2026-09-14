@@ -522,6 +522,8 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           return;
         }
         this.turnsWritten = messages.length;
+        // The record's write names the log too: a run with a session owns no
+        // object of its own, so a write that names none is refused.
         const recorded = await ledger.step(
           this.runId,
           gen,
@@ -536,6 +538,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
             iteration: 0,
           },
           [],
+          this.session?.key,
         );
         if (!recorded.ok) this.detach(`seed record refused (${recorded.reason})`);
         else this.seeded = true;
