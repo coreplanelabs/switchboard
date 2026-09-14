@@ -11,6 +11,7 @@ import {
   piModelsJson,
   piRunPaths,
   piThinkingLevel,
+  takesAdaptiveThinking,
   type PiLaunchSpec,
 } from "./process.js";
 import { PI_EXTENSION_SOURCE } from "./extensionSource.js";
@@ -118,6 +119,79 @@ describe("piModelsJson", () => {
       baseUrl: "https://bot.example.com/v1",
       api: "openai-completions",
     });
+  });
+  // The proxy's model is not in pi's built-in catalog, so nothing tells pi
+  // which thinking payload the model takes; without the flag pi sends the
+  // legacy budget, and a Claude 5 model answers 400 on the first thinking turn.
+  it("the run's model entry asks a Claude 5 model for adaptive thinking through the proxy, beside every field it had", () => {
+    const models = JSON.parse(piModelsJson(spec)) as {
+      providers: Record<string, { models: Array<Record<string, unknown>> }>;
+    };
+    expect(models.providers[PROXY_PROVIDER].models).toEqual([
+      {
+        id: "claude-fable-5",
+        name: "claude-fable-5",
+        reasoning: true,
+        compat: { forceAdaptiveThinking: true },
+        input: ["text", "image"],
+        contextWindow: 200_000,
+        maxTokens: 64000,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      },
+    ]);
+  });
+  it("a Claude model before 4.6 keeps the budget payload — it refuses adaptive thinking the way a Claude 5 model refuses the budget", () => {
+    const models = JSON.parse(piModelsJson({ ...spec, model: { ...spec.model, id: "claude-sonnet-4-5" } })) as {
+      providers: Record<string, { models: Array<{ compat?: Record<string, unknown> }> }>;
+    };
+    expect(models.providers[PROXY_PROVIDER].models[0].compat).toEqual({ forceAdaptiveThinking: false });
+  });
+  it("an OpenAI-compatible provider's entry carries no Anthropic compat — the thinking payload is the Anthropic shape's business", () => {
+    const models = JSON.parse(
+      piModelsJson({ ...spec, model: { ...spec.model, providerType: "openai-compatible" } }),
+    ) as {
+      providers: Record<string, { models: Array<Record<string, unknown>> }>;
+    };
+    expect(models.providers[PROXY_PROVIDER].models[0]).not.toHaveProperty("compat");
+  });
+});
+
+describe("takesAdaptiveThinking", () => {
+  // pi's built-in Anthropic catalog draws the line at the 4.6 generation, as
+  // Anthropic does: from Opus 4.6 and Sonnet 4.6 on a Claude model takes
+  // adaptive thinking (`thinking.type: "adaptive"` plus `output_config.effort`);
+  // the 4.5 generation and older take the legacy budget and refuse adaptive.
+  it.each([
+    "claude-fable-5",
+    "claude-fable-5-1",
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-sonnet-4-6",
+  ])("%s — the 4.6 generation on, and the whole 5 family — takes adaptive thinking", (id) => {
+    expect(takesAdaptiveThinking(id)).toBe(true);
+  });
+  it.each(["claude-haiku-4-5", "claude-sonnet-4-5", "claude-opus-4-5", "claude-opus-4-1", "claude-3-5-sonnet"])(
+    "%s — the 4.5 generation and older — keeps the budget payload",
+    (id) => {
+      expect(takesAdaptiveThinking(id)).toBe(false);
+    },
+  );
+  it.each([
+    "claude-haiku-4-5-20251001",
+    "claude-sonnet-4-5-20250929",
+    "claude-opus-4-5-20251101",
+    "claude-opus-4-1-20250805",
+    "claude-opus-4-20250514",
+    "claude-3-7-sonnet-20250219",
+  ])("%s — a dated alias is read by its version, never by its date", (id) => {
+    expect(takesAdaptiveThinking(id)).toBe(false);
+  });
+  it("an id with no version number is taken for the current generation — every model Anthropic ships now is adaptive", () => {
+    expect(takesAdaptiveThinking("claude-latest")).toBe(true);
+    expect(takesAdaptiveThinking("my-proxy-alias")).toBe(true);
   });
 });
 

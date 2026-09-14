@@ -16,6 +16,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { redactSecrets } from "../core/redact.js";
 import { publicEnv, type EnvRecord, type Secret } from "../secrets.js";
+import { takesAdaptiveThinking } from "../core/harness/pi/process.js";
 import { jsonlLines, type PiTransport } from "../core/harness/pi/protocol.js";
 
 /** The variable the harness hands a custom provider's key under: the name
@@ -126,8 +127,11 @@ export function piEnv(o: PiSpawnOptions, base: EnvRecord): Record<string, string
 }
 
 /** What a models.json entry tells pi about a model beyond its id — pi's own
- *  fields. A bare entry is a model pi knows nothing about: no reasoning
- *  (thinking forced off), a 128k window, a 16k output ceiling. */
+ *  fields, the ones a caller decides. A bare entry is a model pi knows
+ *  nothing about: no reasoning (thinking forced off), a 128k window, a 16k
+ *  output ceiling. How pi asks the model to think — adaptive or the legacy
+ *  budget — is not a caller's to say: `writeAgentDir` writes it from the
+ *  model and the shape. */
 export interface ModelEntryFields {
   reasoning?: boolean;
   contextWindow?: number;
@@ -166,7 +170,13 @@ export interface AgentDirLayout {
 
 /** pi's config directory for one harness run: a settings file that never
  *  trusts the project, a sessions directory, and — for a custom endpoint —
- *  a models.json whose key is interpolated from the harness's variable. */
+ *  a models.json whose key is interpolated from the harness's variable. On
+ *  the Anthropic shape the model's entry also says which thinking payload
+ *  the model takes (`compat.forceAdaptiveThinking`, from the production
+ *  harness's `takesAdaptiveThinking`): pi's built-in catalog says that per
+ *  Claude model, and a model behind a custom endpoint is not in it — without
+ *  the flag pi sends the legacy budget, which a Claude 5 model refuses with a
+ *  400 on its first thinking turn. The completions shape has no such switch. */
 export function writeAgentDir(dir: string, o: AgentDirOptions): AgentDirLayout {
   mkdirSync(dir, { recursive: true });
   const sessionDir = join(dir, "sessions");
@@ -175,13 +185,16 @@ export function writeAgentDir(dir: string, o: AgentDirOptions): AgentDirLayout {
   writeFileSync(settingsPath, JSON.stringify({ defaultProjectTrust: "never" }, null, 2) + "\n");
   if (o.baseUrl === undefined) return { settingsPath, sessionDir };
   const modelsPath = join(dir, "models.json");
+  const api = o.api ?? "openai-completions";
+  const compat =
+    api === "anthropic-messages" ? { compat: { forceAdaptiveThinking: takesAdaptiveThinking(o.model) } } : {};
   const models = {
     providers: {
       [o.provider]: {
         baseUrl: o.baseUrl,
-        api: o.api ?? "openai-completions",
+        api,
         apiKey: `$${HARNESS_KEY_ENV}`,
-        models: [{ id: o.model, ...o.modelEntry }],
+        models: [{ id: o.model, ...o.modelEntry, ...compat }],
       },
     },
   };

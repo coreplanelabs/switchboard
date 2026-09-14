@@ -161,6 +161,61 @@ describe("writeAgentDir", () => {
       providers: Record<string, { models: Array<Record<string, unknown>> }>;
     };
     expect(models.providers.switchboard.models).toEqual([
+      {
+        id: "claude-fable-5",
+        reasoning: true,
+        contextWindow: 1_000_000,
+        maxTokens: 64_000,
+        compat: { forceAdaptiveThinking: true },
+      },
+    ]);
+  });
+  // Live, the through-proxy arm on claude-fable-5 settled every task in one
+  // turn with no tokens: pi sent the legacy budget (`thinking.type: "enabled"`,
+  // `budget_tokens`) and the model answered 400 — a Claude 5 model takes
+  // adaptive thinking, and only pi's catalog knows that, which the proxy's
+  // model is not in.
+  it("the proxy's model entry asks a Claude 5 model for adaptive thinking — pi's built-in catalog says so per model, and the proxy's model is not in it", () => {
+    dir = mkdtempSync(join(tmpdir(), "load-pi-test-"));
+    const out = writeAgentDir(dir, {
+      provider: "switchboard",
+      model: "claude-fable-5",
+      baseUrl: "https://bot.example.com",
+      api: "anthropic-messages",
+      modelEntry: PROXIED_MODEL_ENTRY,
+    });
+    const models = JSON.parse(readFileSync(out.modelsPath!, "utf8")) as {
+      providers: Record<string, { models: Array<{ compat?: Record<string, unknown> }> }>;
+    };
+    expect(models.providers.switchboard.models[0].compat).toEqual({ forceAdaptiveThinking: true });
+  });
+  it("the proxy's model entry asks a Claude model before 4.6 for the budget payload — that generation refuses adaptive thinking", () => {
+    dir = mkdtempSync(join(tmpdir(), "load-pi-test-"));
+    const out = writeAgentDir(dir, {
+      provider: "switchboard",
+      model: "claude-sonnet-4-5",
+      baseUrl: "https://bot.example.com",
+      api: "anthropic-messages",
+      modelEntry: PROXIED_MODEL_ENTRY,
+    });
+    const models = JSON.parse(readFileSync(out.modelsPath!, "utf8")) as {
+      providers: Record<string, { models: Array<{ compat?: Record<string, unknown> }> }>;
+    };
+    expect(models.providers.switchboard.models[0].compat).toEqual({ forceAdaptiveThinking: false });
+  });
+  it("the completions shape through the proxy carries no Anthropic compat — the thinking payload is the Anthropic shape's business", () => {
+    dir = mkdtempSync(join(tmpdir(), "load-pi-test-"));
+    const out = writeAgentDir(dir, {
+      provider: "switchboard",
+      model: "claude-fable-5",
+      baseUrl: "https://bot.example.com/v1",
+      api: "openai-completions",
+      modelEntry: PROXIED_MODEL_ENTRY,
+    });
+    const models = JSON.parse(readFileSync(out.modelsPath!, "utf8")) as {
+      providers: Record<string, { models: Array<Record<string, unknown>> }>;
+    };
+    expect(models.providers.switchboard.models).toEqual([
       { id: "claude-fable-5", reasoning: true, contextWindow: 1_000_000, maxTokens: 64_000 },
     ]);
   });
