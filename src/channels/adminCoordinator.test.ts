@@ -1100,6 +1100,90 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     ).toBe(false);
   });
 
+  it("read-record answers a finished child's verdict and reviewed head, dispositions and handoff while the registry still holds the row — the record landed in the store inside the registry's window, and the store is what the runner reads", async () => {
+    const HEAD = "a".repeat(40);
+    const h = await planHarness({
+      reviews: [
+        {
+          author: { login: "acme-switchboard[bot]", id: 4242 },
+          state: "COMMENTED",
+          commitId: HEAD,
+          body: "LGTM: clean",
+        },
+      ],
+    });
+    await h.instances.putUnits([
+      unitRow("U10", { threadKey: "slack:C1:2.0", pr: { number: 7, url: "https://github.com/acme/api/pull/7" } }),
+    ]);
+    const meta = {
+      channelId: INSTANCE.channelId,
+      userId: INSTANCE.userId,
+      threadKey: "slack:C1:2.0",
+      parentInstanceId: PLAN_INSTANCE.id,
+    };
+    // Three children finish a second before the runner reads them: each row is
+    // still in the registry (inside its 60 s TTL) and each record has landed.
+    const review = h.registry.create("review", {
+      ...meta,
+      agent: "review",
+      idempotencyKey: "plan-fixture:U10/1/review",
+    });
+    h.registry.publish(review.id, { type: "answer", text: "LGTM: clean" });
+    h.registry.finish(review.id, "completed");
+    await h.store.put(
+      record(review.id, {
+        ...meta,
+        agent: "review",
+        idempotencyKey: "plan-fixture:U10/1/review",
+        verdict: { verdict: "approve", summary: "clean", findings: [] },
+        reviewHead: HEAD,
+        events: [{ type: "answer", text: "LGTM: clean", seq: 1 }],
+      }),
+    );
+    h.registry.markPersisted(review.id);
+    const fix = h.registry.create("fix", { ...meta, agent: "coding", idempotencyKey: "plan-fixture:U10/1/fix" });
+    h.registry.finish(fix.id, "completed");
+    await h.store.put(
+      record(fix.id, {
+        ...meta,
+        idempotencyKey: "plan-fixture:U10/1/fix",
+        dispositions: [{ findingId: "F1", disposition: "fixed", note: "done" }],
+      }),
+    );
+    h.registry.markPersisted(fix.id);
+    const coding = h.registry.create("coding", {
+      ...meta,
+      agent: "coding",
+      idempotencyKey: "plan-fixture:U10/0/coding",
+    });
+    h.registry.finish(coding.id, "completed");
+    await h.store.put(
+      record(coding.id, {
+        ...meta,
+        idempotencyKey: "plan-fixture:U10/0/coding",
+        handoff: { deviations: [], followUps: [], unproven: [] },
+      }),
+    );
+    h.registry.markPersisted(coding.id);
+    for (const id of [review.id, fix.id, coding.id]) expect(h.registry.getById(id)?.finished).toBe(true);
+
+    const read = (runId: string) => call(h, "read-record", { parentInstanceId: PLAN_INSTANCE.id, runId, unit: "U10" });
+    expect((await read(review.id)).body).toMatchObject({
+      run: {
+        id: review.id,
+        finished: true,
+        finalReply: "LGTM: clean",
+        verdict: { verdict: "approve", summary: "clean", findings: [] },
+        reviewHead: HEAD,
+        reviewPosted: true,
+      },
+    });
+    expect((await read(fix.id)).body).toMatchObject({
+      run: { id: fix.id, finished: true, dispositions: [{ findingId: "F1", disposition: "fixed", note: "done" }] },
+    });
+    expect((await read(coding.id)).body).toMatchObject({ run: { id: coding.id, finished: true, handoff: true } });
+  });
+
   it("pr-check for a unit looks up the unit's branch and remembers the pull request on the row", async () => {
     const h = await planHarness({
       pr: { number: 12, htmlUrl: "https://github.com/acme/api/pull/12", headSha: "abc123" },

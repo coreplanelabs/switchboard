@@ -200,6 +200,119 @@ describe("RunsService.getRun", () => {
     expect(withMessages.ok && withMessages.value.events?.length).toBe(4);
   });
 
+  it("a finished run still in the registry carries verdict, reviewHead, dispositions and handoff from the store the moment the store holds its record — identity, status and events stay the registry's, and only the summary row is read", async () => {
+    const inner = new InMemoryRunStore({ now: () => NOW });
+    const store: RunStore = {
+      put: (r) => inner.put(r),
+      get: vi.fn((id: string) => inner.get(id)),
+      getSummary: vi.fn((id: string) => inner.getSummary(id)),
+      list: (o) => inner.list(o),
+      events: (id, o) => inner.events(id, o),
+      delete: (id) => inner.delete(id),
+    };
+    const { reg, tick } = testRegistry();
+    const svc = createRunsService({ registry: reg, store });
+    const run = reg.create("review · acme/api#7", {
+      agent: "review",
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:1",
+    });
+    reg.publish(run.id, { type: "input", text: "review #7" });
+    reg.publish(run.id, { type: "answer", text: "LGTM: clean" });
+    tick(40_000);
+    reg.finish(run.id, "completed");
+    const HEAD = "5f32069f".padEnd(40, "0");
+    const verdict = { verdict: "approve" as const, summary: "clean", findings: [] };
+    const dispositions = [{ findingId: "F1", disposition: "fixed" as const, note: "done" }];
+    const handoff = { deviations: [], followUps: [], unproven: [] };
+    // The finish record lands (and the writer tells the registry) while the row
+    // is inside its 60 s TTL: the next read is the coordinator's, a second later.
+    await store.put(
+      record(run.id, NOW + 40_000, { agent: "review", verdict, reviewHead: HEAD, dispositions, handoff }),
+    );
+    reg.markPersisted(run.id);
+    expect(reg.getById(run.id)?.finished).toBe(true);
+
+    const res = await svc.getRun(run.id, { include: "messages" });
+    expect(res.ok && res.value).toMatchObject({
+      id: run.id,
+      finished: true,
+      persisted: true,
+      status: "completed",
+      finishedAt: NOW + 40_000,
+      agent: "review",
+      verdict,
+      reviewHead: HEAD,
+      dispositions,
+      handoff,
+    });
+    // The events are the registry's two, not the record fixture's four.
+    expect(res.ok && res.value.events?.map((e) => e.type)).toEqual(["input", "answer"]);
+    expectNoToken(res);
+    expect(store.getSummary).toHaveBeenCalledWith(run.id);
+    expect(store.get).not.toHaveBeenCalled();
+    // A read without `include` carries the same four fields.
+    const summary = await svc.getRun(run.id);
+    expect(summary.ok && summary.value).toMatchObject({ verdict, reviewHead: HEAD, dispositions, handoff });
+    expect(summary.ok && summary.value).not.toHaveProperty("events");
+    // The list of the same row says the same.
+    const [row] = (await svc.listRuns({ visibleTo: ALL, status: "finished" })).runs;
+    expect(row).toMatchObject({ id: run.id, verdict, reviewHead: HEAD, dispositions, handoff });
+  });
+
+  it("a finished registry row whose record has not landed carries no artifacts and is not persisted — the start tombstone lends nothing, not even its status; a live row never asks the store; a store that throws is one warning and the registry row", async () => {
+    const inner = new InMemoryRunStore({ now: () => NOW });
+    const store: RunStore = {
+      put: (r) => inner.put(r),
+      get: vi.fn((id: string) => inner.get(id)),
+      getSummary: vi.fn((id: string) => inner.getSummary(id)),
+      list: (o) => inner.list(o),
+      events: (id, o) => inner.events(id, o),
+      delete: (id) => inner.delete(id),
+    };
+    const warn = vi.fn<(message: string) => void>();
+    const { reg, tick } = testRegistry();
+    const svc = createRunsService({ registry: reg, store, warn });
+    const run = reg.create("review · acme/api#7", {
+      agent: "review",
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:1",
+    });
+    // The start tombstone (item 27): `interrupted`, `finishedAt` = `startedAt`, no artifacts.
+    await store.put(record(run.id, NOW, { startedAt: NOW, status: "interrupted", agent: "review" }));
+    const artifacts = ["verdict", "reviewHead", "dispositions", "handoff"];
+
+    const live = await svc.getRun(run.id);
+    expect(live.ok && live.value).toMatchObject({ id: run.id, finished: false });
+    for (const key of artifacts) expect(live.ok && live.value).not.toHaveProperty(key);
+    expect(store.getSummary).not.toHaveBeenCalled();
+
+    tick(5_000);
+    reg.finish(run.id, "completed"); // the finish record is on its way; the store still holds the tombstone
+    const early = await svc.getRun(run.id);
+    expect(early.ok && early.value).toMatchObject({
+      id: run.id,
+      finished: true,
+      status: "completed",
+      finishedAt: NOW + 5_000,
+    });
+    for (const key of artifacts) expect(early.ok && early.value).not.toHaveProperty(key);
+    expect(early.ok && early.value.persisted).not.toBe(true);
+    expect(store.getSummary).toHaveBeenCalledTimes(1);
+    expect(warn).not.toHaveBeenCalled();
+
+    vi.mocked(store.getSummary).mockRejectedValueOnce(new Error("run store /runs/summary returned 503"));
+    const degraded = await svc.getRun(run.id, { include: "messages" });
+    expect(degraded.ok && degraded.value).toMatchObject({ id: run.id, finished: true, status: "completed" });
+    for (const key of artifacts) expect(degraded.ok && degraded.value).not.toHaveProperty(key);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain(run.id);
+    expect(warn.mock.calls[0][0]).toContain("returned 503");
+    expectNoToken(degraded);
+  });
+
   it("is not_found for an unknown id, a malformed id, and an expired record", async () => {
     const { svc, store } = setup();
     await store!.put(record("old", NOW - 31 * DAY)); // outside the 30-day default retention
