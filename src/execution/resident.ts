@@ -78,6 +78,11 @@ export interface ResidentBinding {
    *  every /exec. Advisory (named to the model so it never goes looking for
    *  the repository); undefined if the attach answer lacked it. */
   workspace?: string;
+  /** The pool user the resident runs every /exec of this thread as
+   *  (`worker<N>`). The pi harness files the run under a root of this user's
+   *  own (docs/reference/specs/harness-pi.md item 4); undefined if the attach
+   *  answer lacked it, and the harness then uses the shared root. */
+  user?: string;
   /** The resident's own step trace for the attach (docs/reference/specs/tracing.md item
    *  19), sanitized at the parse; absent from a Worker predating it. */
   trace?: ResidentStep[];
@@ -342,6 +347,7 @@ export class ResidentExecutor implements Executor {
         ref: data.ref,
         sha: data.sha,
         ...(typeof data.workspace === "string" && data.workspace ? { workspace: data.workspace } : {}),
+        ...(typeof data.user === "string" && data.user ? { user: data.user } : {}),
         ...(trace.length > 0 ? { trace } : {}),
         ...(typeof data.attachMs === "number" && Number.isFinite(data.attachMs) ? { attachMs: data.attachMs } : {}),
       };

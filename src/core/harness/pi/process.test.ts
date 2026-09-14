@@ -56,6 +56,30 @@ describe("piRunPaths", () => {
     expect(p.extension).toBe("/tmp/switchboard-pi/run-7/extension.js");
     expect(Object.values(p).every((v) => v.startsWith("/tmp/switchboard-pi/run-7"))).toBe(true);
   });
+  // The resident runs each thread's commands as that thread's pool user, and
+  // `mkdir -p` gives a parent it creates to its caller at 755: one root shared
+  // by every run belongs to whichever user ran first, and every other user's
+  // run then fails at its own mkdir. So each user's root is its own, a sibling
+  // under /tmp (1777) with nothing between them for one user to own.
+  it("a run that knows the OS user its commands run as hangs every path off that user's own root, a sibling of every other user's directly under /tmp", () => {
+    const p = piRunPaths("run-7", "worker2");
+    expect(p.dir).toBe("/tmp/switchboard-pi-worker2/run-7");
+    expect(p.agentDir).toBe("/tmp/switchboard-pi-worker2/run-7/agent");
+    expect(p.sessionDir).toBe("/tmp/switchboard-pi-worker2/run-7/agent/sessions");
+    expect(p.fifo).toBe("/tmp/switchboard-pi-worker2/run-7/rpc.in");
+    expect(p.log).toBe("/tmp/switchboard-pi-worker2/run-7/rpc.log");
+    expect(p.pidFile).toBe("/tmp/switchboard-pi-worker2/run-7/pi.pid");
+    expect(p.extension).toBe("/tmp/switchboard-pi-worker2/run-7/extension.js");
+    expect(Object.values(p).every((v) => v === p.dir || v.startsWith(`${p.dir}/`))).toBe(true);
+    // The root's parent is /tmp itself.
+    expect(p.dir.split("/").slice(0, -2).join("/")).toBe("/tmp");
+    // Another user's root is a sibling, never above or below this one.
+    const other = piRunPaths("run-8", "worker3");
+    expect(other.dir).toBe("/tmp/switchboard-pi-worker3/run-8");
+    expect(other.dir.startsWith("/tmp/switchboard-pi-worker2")).toBe(false);
+    // Without a user (the local host, the sandbox: one user), the shared root as before.
+    expect(piRunPaths("run-7", undefined).dir).toBe("/tmp/switchboard-pi/run-7");
+  });
 });
 
 describe("piLaunchArgs", () => {

@@ -63,6 +63,7 @@ describe("ResidentExecutor.attach over a heartbeat stream (item 59: an attach th
       ref: "master",
       sha: "1220b9c4",
       workspace: ATTACH_OK.workspace,
+      user: "worker2",
       attachMs: 2500,
     });
   });
@@ -530,7 +531,7 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
     expect(sentBody(calls[1])).not.toHaveProperty("sha");
   });
 
-  it("records the attach result's ref@sha as the thread binding (the positive 'resident' marker's source)", async () => {
+  it("records the attach result's ref@sha as the thread binding, with its workspace and pool user: the user is the OS user every /exec runs as, the key the pi harness files the run under", async () => {
     stubFetch({
       body: {
         workspace: "/workspace/threads/t/master",
@@ -545,14 +546,22 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
       ref: "master",
       sha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05",
       workspace: "/workspace/threads/t/master",
+      user: "worker2",
     });
   });
 
   it("a 200 attach answer without a string `workspace` still binds — the path is just unknown (the path is advisory for the prompt)", async () => {
     stubFetch({ body: { ref: "master", sha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05", user: "worker2" } });
     const ex = await ResidentExecutor.open({ ...OPTS, refHint: "master" });
-    expect(ex.binding).toEqual({ ref: "master", sha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05" });
+    expect(ex.binding).toEqual({ ref: "master", sha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05", user: "worker2" });
     expect(ex.binding?.workspace).toBeUndefined();
+  });
+
+  it("a 200 attach answer without a string `user` binds without one: the harness then files the run under the shared root", async () => {
+    stubFetch({ body: { ref: "master", sha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05", user: "" } });
+    const ex = await ResidentExecutor.open({ ...OPTS, refHint: "master" });
+    expect(ex.binding).toEqual({ ref: "master", sha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05" });
+    expect(ex.binding).not.toHaveProperty("user");
   });
 
   it("a 200 attach answer missing ref/sha is a legible error, never a half-bound executor", async () => {

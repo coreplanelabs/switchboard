@@ -554,6 +554,27 @@ describe("the harness seam — pi in place of the native loop when the preset sa
     ]);
   });
 
+  // The resident's attach names the pool user every /exec runs as; the run's
+  // pi files go under that user's own root, never a root another thread's
+  // user created (harness-pi item 4).
+  it("a run on a resident files its pi under the thread's pool user's own root, the user the attach binding carries", async () => {
+    const container = new FakePiContainer();
+    const registry = new HarnessRegistry();
+    scriptedPi(container, registry, "pi says done");
+    const s = setup("", {
+      agent: "coding",
+      yaml: PI_YAML,
+      harness: { registry, harnessUrl: "https://bot.example.com", containerFor: () => container },
+      bearer: "sbr_run-l.s3cret",
+      binding: { ref: "main", sha: "abc", workspace: "/workspace/threads/t/main", user: "worker2" },
+    });
+    const out = await runLoop(s.deps, s.ctx);
+    expect(out.answer).toBe("pi says done");
+    expect(container.starts[0].paths.dir).toBe("/tmp/switchboard-pi-worker2/run-l");
+    expect(container.files.get("/tmp/switchboard-pi-worker2/run-l/agent/SYSTEM.md")).toContain("the system prompt");
+    expect([...container.files.keys()].some((f) => f.startsWith("/tmp/switchboard-pi/"))).toBe(false);
+  });
+
   it("without a harness block the same preset runs the native loop and pi is never started; a preset declared native is untouched by a block naming another", async () => {
     const container = new FakePiContainer();
     const harness: HarnessDeps = {
