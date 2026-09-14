@@ -1,0 +1,131 @@
+import { describe, expect, it } from "vitest";
+import { LOG_READ_BYTES } from "./container.js";
+import { piRunPaths } from "./process.js";
+import { FakePiContainer } from "./testing/fakeContainer.js";
+import { PiRpcTransport } from "./transport.js";
+
+// Feature: docs/reference/specs/harness-pi.md item 4 — the RPC transport over
+// the container: commands land in the FIFO in order, the log is polled from
+// the last byte read and split into whole records however the bytes fall, the
+// stream ends when pi is found dead with nothing more to read, and a write
+// that fails ends the stream with its error.
+
+const paths = piRunPaths("run-7");
+
+/** The sleep yields a macrotask, so a test's own writes get their turn between polls. */
+function transport(container: FakePiContainer, extra: { alivePolls?: number; offset?: number } = {}) {
+  const sleeps: number[] = [];
+  const t = new PiRpcTransport({
+    container,
+    paths,
+    pid: container.pid,
+    pollMs: 250,
+    sleep: (ms) => {
+      if (sleeps.length < 100) sleeps.push(ms);
+      return new Promise((r) => setImmediate(r));
+    },
+    ...extra,
+  });
+  return { t, sleeps };
+}
+
+async function collect(t: PiRpcTransport, max: number): Promise<string[]> {
+  const out: string[] = [];
+  for await (const line of t.lines) {
+    out.push(line);
+    if (out.length >= max) t.close();
+  }
+  return out;
+}
+
+describe("PiRpcTransport", () => {
+  it("sends commands to the FIFO in order, one JSON line each", async () => {
+    const c = new FakePiContainer();
+    await c.start({ paths, args: [], env: {} });
+    const { t } = transport(c);
+    t.send({ id: "s", type: "get_state" });
+    t.send({ type: "prompt", message: "go" });
+    await t.flushed();
+    expect(c.stdin).toEqual(['{"id":"s","type":"get_state"}', '{"type":"prompt","message":"go"}']);
+  });
+
+  it("reads whole records however the log's bytes fall across reads, advancing its offset by exact bytes", async () => {
+    const c = new FakePiContainer();
+    await c.start({ paths, args: [], env: {} });
+    const { t } = transport(c);
+    // A record longer than one read (a big tool result), split across polls; a
+    // multibyte character on the boundary survives because bytes, not text, are buffered.
+    const big = JSON.stringify({
+      type: "tool_execution_end",
+      toolCallId: "c",
+      result: { content: [{ type: "text", text: "é".repeat(LOG_READ_BYTES) }] },
+    });
+    c.emit({ type: "agent_start" }, big, { type: "agent_settled" });
+    const lines = await collect(t, 3);
+    expect(lines.map((l) => (JSON.parse(l) as { type: string }).type)).toEqual([
+      "agent_start",
+      "tool_execution_end",
+      "agent_settled",
+    ]);
+    expect(JSON.parse(lines[1])).toEqual(JSON.parse(big));
+    expect(t.offset).toBe(Buffer.byteLength(`{"type":"agent_start"}\n${big}\n{"type":"agent_settled"}\n`));
+  });
+
+  it("sleeps between empty polls and continues from its offset when more arrives; a partial record waits", async () => {
+    const c = new FakePiContainer();
+    await c.start({ paths, args: [], env: {} });
+    const { t, sleeps } = transport(c);
+    const out: string[] = [];
+    const reading = (async () => {
+      for await (const line of t.lines) {
+        out.push(line);
+        if (out.length === 2) t.close();
+      }
+    })();
+    c.emit('{"type":"agent_start"}');
+    // A record still being written: nothing is yielded until its newline lands.
+    c.emitRaw('{"type":"turn_st');
+    await new Promise((r) => setTimeout(r, 5));
+    c.emitRaw('art"}\n');
+    await reading;
+    expect(out).toEqual(['{"type":"agent_start"}', '{"type":"turn_start"}']);
+    expect(sleeps.length).toBeGreaterThan(0);
+    expect(new Set(sleeps)).toEqual(new Set([250]));
+  });
+
+  it("ends the stream when pi is found dead, after one last read of what it wrote on the way out", async () => {
+    const c = new FakePiContainer();
+    await c.start({ paths, args: [], env: {} });
+    const { t } = transport(c, { alivePolls: 2 });
+    const out: string[] = [];
+    const reading = (async () => {
+      for await (const line of t.lines) out.push(line);
+    })();
+    c.emit({ type: "agent_start" });
+    await new Promise((r) => setTimeout(r, 5));
+    c.die();
+    c.emit({ type: "extension_error", error: "boom" });
+    await reading;
+    expect(out.map((l) => (JSON.parse(l) as { type: string }).type)).toEqual(["agent_start", "extension_error"]);
+    expect(t.exited).toBe(true);
+  });
+
+  it("a write that fails surfaces as the stream's error on the next read", async () => {
+    const c = new FakePiContainer();
+    await c.start({ paths, args: [], env: {} });
+    const { t } = transport(c);
+    c.failNext = { operation: "send", error: new Error("resident /exec: worktree evicted") };
+    t.send({ type: "abort" });
+    await t.flushed();
+    await expect(collect(t, 1)).rejects.toThrow("worktree evicted");
+  });
+
+  it("a re-attach starts reading at the offset it was handed", async () => {
+    const c = new FakePiContainer();
+    await c.start({ paths, args: [], env: {} });
+    c.emit({ type: "agent_start" }, { type: "turn_start" });
+    const skip = Buffer.byteLength('{"type":"agent_start"}\n');
+    const { t } = transport(c, { offset: skip });
+    expect(await collect(t, 1)).toEqual(['{"type":"turn_start"}']);
+  });
+});

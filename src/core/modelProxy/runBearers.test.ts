@@ -127,6 +127,21 @@ describe("RunBearerStore — expiry and revocation", () => {
 });
 
 describe("RunBearerStore — turns and the operator's extra bearer", () => {
+  it("reparent hangs the run's proxied turns under another span from here on — the harness's run.agent — and answers nothing for an unknown or ended run", () => {
+    const h = harness();
+    h.store.mint(h.grant("run-1"));
+    const agentSpan = createTracer({ clock: () => h.clock.now })
+      .start("request", { sinks: [] })
+      .start("run.agent");
+    expect(h.store.reparent("run-1", agentSpan)).toBe(true);
+    const verdict = h.store.verify(h.store.issue("run-1")!.token);
+    expect(verdict.ok && verdict.grant.span.id).toBe(agentSpan.id);
+    expect(h.store.grantOf("run-1")).toMatchObject({ runId: "run-1", modelRef: "anthropic/claude-opus-5" });
+    expect(h.store.reparent("run-9", agentSpan)).toBe(false);
+    h.store.revoke("run-1");
+    expect(h.store.reparent("run-1", agentSpan)).toBe(false);
+  });
+
   it("consumeTurn counts up to maxTurns and refuses the call past it, naming the counts", () => {
     const h = harness();
     h.store.mint(h.grant("run-1", { maxTurns: 2 }));

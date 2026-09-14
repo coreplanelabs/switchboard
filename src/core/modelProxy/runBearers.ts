@@ -130,6 +130,18 @@ export class RunBearerStore {
     return { ok: true, turn: entry.turns };
   }
 
+  /** Hang the run's proxied turns under another span from here on: the
+   *  harness's own `run.agent` in place of the request root the mint named
+   *  (docs/reference/specs/harness-pi.md item 5), so a proxied `model.turn`
+   *  lands where the native loop's would. False for a run this store never
+   *  minted or one that ended. */
+  reparent(runId: string, span: Span): boolean {
+    const entry = this.entries.get(runId);
+    if (!entry || entry.revoked) return false;
+    entry.grant = { ...entry.grant, span };
+    return true;
+  }
+
   /** The run ended: every bearer of it stops buying calls. The entry stays
    *  until its expiry so a late call is answered `revoked`, not `unknown_run`.
    *  True when a live entry was revoked; false for an unknown or already-ended run. */

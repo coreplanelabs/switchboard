@@ -102,4 +102,21 @@ describe("writeAgentDir", () => {
     expect(models.providers.scripted.apiKey).toBe("$SWITCHBOARD_PI_MODEL_KEY");
     expect(models.providers.scripted.models).toEqual([{ id: "any" }]);
   });
+  it("names the Anthropic messages shape for the bot's model proxy when asked — the through-proxy receipt", () => {
+    dir = mkdtempSync(join(tmpdir(), "load-pi-test-"));
+    const out = writeAgentDir(dir, {
+      provider: "switchboard",
+      model: "claude-fable-5",
+      baseUrl: "https://bot.example.com",
+      api: "anthropic-messages",
+    });
+    const models = JSON.parse(readFileSync(out.modelsPath!, "utf8")) as {
+      providers: Record<string, { baseUrl: string; api: string; apiKey: string }>;
+    };
+    expect(models.providers.switchboard).toMatchObject({
+      baseUrl: "https://bot.example.com",
+      api: "anthropic-messages",
+      apiKey: "$SWITCHBOARD_PI_MODEL_KEY",
+    });
+  });
 });

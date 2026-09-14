@@ -1,0 +1,194 @@
+// The container as the pi harness needs it (docs/reference/specs/harness-pi.md
+// item 4): a seam of six operations — write a file, start pi detached, feed
+// its stdin, read its log from an offset, ask whether it lives, end it — with
+// two implementations: `ExecPiContainer`, which turns each into one command
+// over the run's own `Executor` (the resident's `/exec` as the thread's user,
+// the sandbox's, the local host's), and the in-memory fake the tests drive.
+// pi's stdin is a FIFO the wrapper holds open for writing, so it never sees an
+// end of file while pi lives; its stdout is a log the harness polls from the
+// last byte it read, `message_update` deltas filtered at the source because no
+// consumer wants a token at a time. The bearer reaches pi through the exec's
+// env channel and is never part of a command.
+
+import { parseExitPrefix, redactAndCap } from "../../runEvents.js";
+import { shellQuote } from "../../../execution/shellQuote.js";
+import type { Executor } from "../../../execution/executor.js";
+import type { PiRunPaths } from "./process.js";
+
+export interface PiStart {
+  paths: PiRunPaths;
+  args: string[];
+  env: Record<string, string>;
+}
+
+export interface PiContainer {
+  /** Create or replace `path` with `content`, mode 600, parents made. */
+  writeFile(path: string, content: string): Promise<void>;
+  /** Start pi detached in the run's directory; the pid is the wrapper's, the group pi runs in. */
+  start(start: PiStart): Promise<{ pid: number }>;
+  /** One protocol line into pi's stdin. */
+  writeLine(paths: PiRunPaths, line: string): Promise<void>;
+  /** Up to `maxBytes` of the log from `offset` — exact bytes, so the caller's offset arithmetic holds. */
+  readLog(path: string, offset: number, maxBytes: number): Promise<Uint8Array>;
+  alive(pid: number): Promise<boolean>;
+  /** End pi and everything in its group; idempotent. */
+  kill(pid: number): Promise<void>;
+  /** The last `bytes` of a file — pi's stderr for a diagnostic. */
+  tail(path: string, bytes: number): Promise<string>;
+}
+
+/** Thrown when a container command failed as a command (a nonzero exit, an
+ *  executor error): the harness fails the run with it. */
+export class PiContainerError extends Error {
+  constructor(
+    readonly operation: string,
+    detail: string,
+  ) {
+    super(`pi container: ${operation} failed — ${redactAndCap(detail, 400)}`);
+    this.name = "PiContainerError";
+  }
+}
+
+/** The most content one write command carries: under the resident's command
+ *  cap (64,000 chars) with room for the quoting and the path. */
+export const WRITE_CHUNK_CHARS = 40_000;
+/** The most a line fed straight to the FIFO may be; longer lines go through a file. */
+export const INLINE_LINE_CHARS = 40_000;
+/** The most a log read asks for: the base64 of it stays under every executor's output cap. */
+export const LOG_READ_BYTES = 48 * 1024;
+/** The log filter: pi's streaming deltas never reach the log. */
+const LOG_FILTER = `grep --line-buffered -v ${shellQuote('"type":"message_update"')}`;
+
+/** `content` in chunks a shell argument can carry, each `printf '%s'`-ed, the
+ *  first creating the file: exact bytes, no newline added, whatever the content. */
+export function writeFileScripts(path: string, content: string): string[] {
+  const chunks: string[] = [];
+  for (let i = 0; i < Math.max(1, content.length); i += WRITE_CHUNK_CHARS)
+    chunks.push(content.slice(i, i + WRITE_CHUNK_CHARS));
+  const dir = path.slice(0, path.lastIndexOf("/")) || ".";
+  return chunks.map((chunk, i) =>
+    i === 0
+      ? `mkdir -p ${shellQuote(dir)} && umask 077 && printf '%s' ${shellQuote(chunk)} > ${shellQuote(path)}`
+      : `printf '%s' ${shellQuote(chunk)} >> ${shellQuote(path)}`,
+  );
+}
+
+/** The wrapper that starts pi detached: the FIFO opened read-write on a spare
+ *  descriptor so it never runs out of writers, the wrapper's own pid recorded
+ *  (it leads the group pi and the filter run in), pi's stdin the FIFO, its
+ *  stdout through the filter into the log, its stderr into its own file. The
+ *  arguments are quoted one by one; the bearer is in none of them. */
+export function startScript(start: PiStart): string {
+  const { paths, args } = start;
+  const inner = [
+    `exec 3<>${shellQuote(paths.fifo)}`,
+    `echo $$ > ${shellQuote(paths.pidFile)}`,
+    `pi ${args.map(shellQuote).join(" ")} <&3 2>>${shellQuote(paths.errLog)} | ${LOG_FILTER} >> ${shellQuote(paths.log)}`,
+  ].join("; ");
+  return [
+    `mkdir -p ${shellQuote(paths.dir)} ${shellQuote(paths.sessionDir)} ${shellQuote(paths.commandDir)}`,
+    `rm -f ${shellQuote(paths.fifo)}`,
+    `mkfifo -m 600 ${shellQuote(paths.fifo)}`,
+    `: > ${shellQuote(paths.log)}`,
+    `: > ${shellQuote(paths.errLog)}`,
+    `setsid -f sh -c ${shellQuote(inner)}`,
+    `sleep 0.3`,
+    `cat ${shellQuote(paths.pidFile)}`,
+  ].join(" && ");
+}
+
+export function writeLineScript(fifo: string, line: string): string {
+  return `printf '%s\\n' ${shellQuote(line)} >> ${shellQuote(fifo)}`;
+}
+
+/** A line too long for one argument: fed from the file it was written to. */
+export function feedFileScript(fifo: string, file: string): string {
+  return `cat ${shellQuote(file)} >> ${shellQuote(fifo)} && printf '\\n' >> ${shellQuote(fifo)} && rm -f ${shellQuote(file)}`;
+}
+
+/** `maxBytes` of the log from `offset` (0-based), base64 on one line so the
+ *  bytes survive the executor's text channel exactly. */
+export function readLogScript(path: string, offset: number, maxBytes: number): string {
+  return `tail -c +${offset + 1} ${shellQuote(path)} | head -c ${maxBytes} | base64 | tr -d '\\n'`;
+}
+
+export function aliveScript(pid: number): string {
+  return `kill -0 ${pid} 2>/dev/null && echo alive || echo dead`;
+}
+
+/** The group first (the wrapper leads it), then the pid itself; TERM, a second, KILL; never a failure. */
+export function killScript(pid: number): string {
+  return `kill -TERM -- -${pid} 2>/dev/null; kill -TERM ${pid} 2>/dev/null; sleep 1; kill -KILL -- -${pid} 2>/dev/null; kill -KILL ${pid} 2>/dev/null; true`;
+}
+
+export function tailScript(path: string, bytes: number): string {
+  return `tail -c ${bytes} ${shellQuote(path)} 2>/dev/null || true`;
+}
+
+const STDERR_MARK = "\n--- stderr ---\n";
+
+/** The stdout of an executor's answer: the `exit N:` prefix is a failure, the
+ *  stderr the executors append is dropped, the empty marker is empty. */
+export function stdoutOf(operation: string, out: string): string {
+  const exit = parseExitPrefix(out);
+  if (exit.failed) throw new PiContainerError(operation, out);
+  const cut = out.indexOf(STDERR_MARK);
+  const stdout = cut >= 0 ? out.slice(0, cut) : out;
+  return stdout === "(no output)" ? "" : stdout;
+}
+
+/** How long one container command may take: the writes and reads are
+ *  seconds; the start waits for the wrapper; the kill sleeps a second. */
+const OP_TIMEOUT_MS = 60_000;
+
+export class ExecPiContainer implements PiContainer {
+  private commandNo = 0;
+
+  constructor(private readonly executor: Executor) {}
+
+  async writeFile(path: string, content: string): Promise<void> {
+    for (const script of writeFileScripts(path, content)) stdoutOf("write", await this.exec(script));
+  }
+
+  async start(start: PiStart): Promise<{ pid: number }> {
+    const out = stdoutOf("start", await this.exec(startScript(start), start.env)).trim();
+    const pid = Number(out.split("\n").pop());
+    if (!Number.isInteger(pid) || pid <= 0) throw new PiContainerError("start", `no pid came back (${out || "empty"})`);
+    return { pid };
+  }
+
+  async writeLine(paths: PiRunPaths, line: string): Promise<void> {
+    if (line.length <= INLINE_LINE_CHARS) {
+      stdoutOf("send", await this.exec(writeLineScript(paths.fifo, line)));
+      return;
+    }
+    const file = `${paths.commandDir}/${++this.commandNo}.json`;
+    await this.writeFile(file, line);
+    stdoutOf("send", await this.exec(feedFileScript(paths.fifo, file)));
+  }
+
+  async readLog(path: string, offset: number, maxBytes: number): Promise<Uint8Array> {
+    const b64 = stdoutOf("read", await this.exec(readLogScript(path, offset, maxBytes))).trim();
+    return b64 ? new Uint8Array(Buffer.from(b64, "base64")) : new Uint8Array(0);
+  }
+
+  async alive(pid: number): Promise<boolean> {
+    return stdoutOf("alive", await this.exec(aliveScript(pid))).trim() === "alive";
+  }
+
+  async kill(pid: number): Promise<void> {
+    stdoutOf("kill", await this.exec(killScript(pid)));
+  }
+
+  async tail(path: string, bytes: number): Promise<string> {
+    try {
+      return stdoutOf("tail", await this.exec(tailScript(path, bytes)));
+    } catch {
+      return "";
+    }
+  }
+
+  private exec(script: string, env?: Record<string, string>): Promise<string> {
+    return this.executor.exec(script, { timeoutMs: OP_TIMEOUT_MS, ...(env ? { env } : {}) });
+  }
+}
