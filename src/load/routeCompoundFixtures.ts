@@ -5,8 +5,12 @@
 // five decoys: one ask with several steps that reads as compound but is one
 // request on one preset. The router's compound form is scored on this set on
 // every run of the command (the conductor requests in the run history are few,
-// and their parts are not on the record). Written in the house's voice: the
-// repositories and surfaces a team has, the way asks arrive in a prompting channel.
+// and their parts are not on the record). A compound whose parts include a
+// write preset (record 0034: a write ask is never a part, since a part runs as
+// a child that only reads) is expected to route whole to that preset, single,
+// and says so with `collapsesTo`; its parts stay listed as what a person sees
+// in the request. Written in the house's voice: the repositories and surfaces
+// a team has, the way asks arrive in a prompting channel.
 
 /** One example: a compound with the expected parts' presets (two or more,
  *  order free), or a decoy with its one preset. */
@@ -15,6 +19,11 @@ export interface RouteCompoundFixture {
   kind: "compound" | "decoy";
   text: string;
   presets: readonly string[];
+  /** Compounds only: the write preset the whole request routes to, single,
+   *  because one of its parts needs it (the first such part). The router is
+   *  scored on that answer, not on a split; a compound without it is scored on
+   *  detection and its parts. */
+  collapsesTo?: string;
 }
 
 export const ROUTE_COMPOUND_FIXTURES: readonly RouteCompoundFixture[] = [
@@ -30,6 +39,7 @@ export const ROUTE_COMPOUND_FIXTURES: readonly RouteCompoundFixture[] = [
     kind: "compound",
     text: "can you review https://github.com/acme/api/pull/1018 and, separately, fix the flaky admission test in acme/api — the one in src/core/admission.test.ts that times out on CI",
     presets: ["review", "coding"],
+    collapsesTo: "coding",
   },
   {
     id: "c03",
@@ -48,6 +58,7 @@ export const ROUTE_COMPOUND_FIXTURES: readonly RouteCompoundFixture[] = [
     kind: "compound",
     text: "fix the typo in the README of acme/api (it says 'recieve'), and also tell me who last touched src/core/dispatch/route.ts",
     presets: ["coding", "general"],
+    collapsesTo: "coding",
   },
   {
     id: "c06",
@@ -72,6 +83,7 @@ export const ROUTE_COMPOUND_FIXTURES: readonly RouteCompoundFixture[] = [
     kind: "compound",
     text: "need two things before the demo: bump the version string in acme/web's package.json to 1.3.0, and find out whether Slack's Block Kit supports collapsible sections now",
     presets: ["coding", "research"],
+    collapsesTo: "coding",
   },
   {
     id: "c10",
@@ -90,12 +102,14 @@ export const ROUTE_COMPOUND_FIXTURES: readonly RouteCompoundFixture[] = [
     kind: "compound",
     text: "three asks: fix the broken link in docs/how-to/run-a-load-test.md in acme/api, review PR 1050 there, and tell me what pnpm 11 changed about workspace settings in package.json",
     presets: ["coding", "review", "research"],
+    collapsesTo: "coding",
   },
   {
     id: "c13",
     kind: "compound",
     text: "please add a --json flag to `runs list` in acme/api, and also review PR 1055 (someone else's PR, unrelated to the flag)",
     presets: ["coding", "review"],
+    collapsesTo: "coding",
   },
   {
     id: "c14",
@@ -108,6 +122,7 @@ export const ROUTE_COMPOUND_FIXTURES: readonly RouteCompoundFixture[] = [
     kind: "compound",
     text: "profile the cold start of the sandbox path in acme/api end to end in a sandbox with timings, and also fix issue 1060 in acme/web (the null userName crash)",
     presets: ["explore", "coding"],
+    collapsesTo: "coding",
   },
   {
     id: "c16",
@@ -126,6 +141,7 @@ export const ROUTE_COMPOUND_FIXTURES: readonly RouteCompoundFixture[] = [
     kind: "compound",
     text: "unrelated pair: rename `formatLabel` to `formatLine` across acme/api and open the PR, and tell me who the top committers on acme/platform are",
     presets: ["coding", "general"],
+    collapsesTo: "coding",
   },
   {
     id: "c19",

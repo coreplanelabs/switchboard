@@ -11148,6 +11148,58 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
       });
     });
 
+    it("a compound answer with a coding part collapses to one coding run: its request is the message as typed (no brief), the card names the collapse, the route event carries it and no parts, and no child is spawned", async () => {
+      vi.stubEnv("SANDBOX_TOKEN", "tok");
+      vi.stubEnv("GITHUB_APP_ID", "");
+      const { provider, requests } = briefFollowingProvider();
+      const t = treeDeps(`${COMPOUND_YAML}execution:\n  type: cloudflare\n  url: https://sandbox.example\n`, provider);
+      t.deps.routeModel = vi.fn(async () =>
+        JSON.stringify({
+          preset: "conductor",
+          parts: [
+            { text: "review the login PR", preset: "review" },
+            { text: "fix the flaky login test", preset: "coding" },
+          ],
+          reason: "a review and a fix",
+        }),
+      );
+      const fake = { exec: async () => "", readFile: async () => "", writeFile: async () => "" };
+      vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fake });
+      const { parent, children } = treeIO();
+      const text = "review the login PR and fix the flaky login test it touches";
+      await dispatch(t.deps, { ...msg(text, "slack:UADMIN"), userName: "alice" }, parent.io);
+      await t.writer.settled();
+      expect(t.deps.routeModel).toHaveBeenCalledTimes(1);
+      // One coding run on coding's own model; its first turn is the message as typed: no brief, no parts.
+      expect(requests).toHaveLength(1);
+      expect(requests[0].model).toBe("coding-model");
+      expect(firstUserText(requests[0]).startsWith(text)).toBe(true);
+      expect(firstUserText(requests[0])).not.toContain("Routed as a compound request");
+      expect(vi.mocked(makeExecutor).mock.calls.map((c) => c[1].agent.name)).toEqual(["coding"]);
+      expect(children).toHaveLength(0);
+      // The card: the routed line names the collapse; no part lines under it.
+      expect(parent.statuses[0].title).toContain(
+        "*coding* on `anthropic/coding-model` · routed: a review and a fix (compound collapsed: review+coding)",
+      );
+      expect(parent.statuses[0].detail).toBeUndefined();
+      // The record: agentSource route, the route event with the collapse and no parts, the input the message as typed.
+      expect(metaOf(t.registry, "run-parent")?.agentSource).toBe("route");
+      const [event] = routeEvents(t.registry, "run-parent");
+      expect(event).toEqual(
+        expect.objectContaining({
+          type: "route",
+          preset: "coding",
+          reason: "a review and a fix",
+          model: "anthropic/general-model",
+          collapsed: { presets: ["review", "coding"] },
+        }),
+      );
+      expect(event).not.toHaveProperty("parts");
+      expect((await t.store.get("run-parent"))!.events.filter((e) => e.type === "input")).toEqual([
+        expect.objectContaining({ text }),
+      ]);
+    });
+
     it("a decoy — one ask with several steps — the router keeps single: no conductor, no parts, the single route's card and event", async () => {
       const { provider } = briefFollowingProvider();
       const t = treeDeps(COMPOUND_YAML, provider);
