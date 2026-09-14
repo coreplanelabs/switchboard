@@ -45,40 +45,34 @@ const reviewSpec: PiLaunchSpec = {
 };
 
 describe("piRunPaths", () => {
-  it("derives every path from the run id under one directory outside the checkout", () => {
-    const p = piRunPaths("run-7");
-    expect(p.dir).toBe("/tmp/switchboard-pi/run-7");
-    expect(p.agentDir).toBe("/tmp/switchboard-pi/run-7/agent");
-    expect(p.sessionDir).toBe("/tmp/switchboard-pi/run-7/agent/sessions");
-    expect(p.fifo).toBe("/tmp/switchboard-pi/run-7/rpc.in");
-    expect(p.log).toBe("/tmp/switchboard-pi/run-7/rpc.log");
-    expect(p.pidFile).toBe("/tmp/switchboard-pi/run-7/pi.pid");
-    expect(p.extension).toBe("/tmp/switchboard-pi/run-7/extension.js");
-    expect(Object.values(p).every((v) => v.startsWith("/tmp/switchboard-pi/run-7"))).toBe(true);
-  });
   // The resident runs each thread's commands as that thread's pool user, and
-  // `mkdir -p` gives a parent it creates to its caller at 755: one root shared
-  // by every run belongs to whichever user ran first, and every other user's
-  // run then fails at its own mkdir. So each user's root is its own, a sibling
-  // under /tmp (1777) with nothing between them for one user to own.
-  it("a run that knows the OS user its commands run as hangs every path off that user's own root, a sibling of every other user's directly under /tmp", () => {
-    const p = piRunPaths("run-7", "worker2");
-    expect(p.dir).toBe("/tmp/switchboard-pi-worker2/run-7");
-    expect(p.agentDir).toBe("/tmp/switchboard-pi-worker2/run-7/agent");
-    expect(p.sessionDir).toBe("/tmp/switchboard-pi-worker2/run-7/agent/sessions");
-    expect(p.fifo).toBe("/tmp/switchboard-pi-worker2/run-7/rpc.in");
-    expect(p.log).toBe("/tmp/switchboard-pi-worker2/run-7/rpc.log");
-    expect(p.pidFile).toBe("/tmp/switchboard-pi-worker2/run-7/pi.pid");
-    expect(p.extension).toBe("/tmp/switchboard-pi-worker2/run-7/extension.js");
+  // a parent `mkdir -p` creates belongs to whichever user created it: any
+  // directory between /tmp and a run's files would refuse every other user's
+  // run at its own mkdir. So a run's root is its own, directly under /tmp
+  // (sticky, 1777: any user may create a sibling there and only the owner may
+  // remove it), and nothing about it depends on knowing which user runs the
+  // commands.
+  it("derives every path from the run id under one directory of the run's own directly under /tmp, a sibling of every other run's with no shared parent", () => {
+    const p = piRunPaths("run-7");
+    expect(p.dir).toBe("/tmp/switchboard-pi-run-7");
+    expect(p.agentDir).toBe("/tmp/switchboard-pi-run-7/agent");
+    expect(p.sessionDir).toBe("/tmp/switchboard-pi-run-7/agent/sessions");
+    expect(p.extension).toBe("/tmp/switchboard-pi-run-7/extension.js");
+    expect(p.fifo).toBe("/tmp/switchboard-pi-run-7/rpc.in");
+    expect(p.log).toBe("/tmp/switchboard-pi-run-7/rpc.log");
+    expect(p.errLog).toBe("/tmp/switchboard-pi-run-7/rpc.err");
+    expect(p.pidFile).toBe("/tmp/switchboard-pi-run-7/pi.pid");
+    expect(p.commandDir).toBe("/tmp/switchboard-pi-run-7/cmd");
     expect(Object.values(p).every((v) => v === p.dir || v.startsWith(`${p.dir}/`))).toBe(true);
-    // The root's parent is /tmp itself.
-    expect(p.dir.split("/").slice(0, -2).join("/")).toBe("/tmp");
-    // Another user's root is a sibling, never above or below this one.
-    const other = piRunPaths("run-8", "worker3");
-    expect(other.dir).toBe("/tmp/switchboard-pi-worker3/run-8");
-    expect(other.dir.startsWith("/tmp/switchboard-pi-worker2")).toBe(false);
-    // Without a user (the local host, the sandbox: one user), the shared root as before.
-    expect(piRunPaths("run-7", undefined).dir).toBe("/tmp/switchboard-pi/run-7");
+    // The root's parent is /tmp itself: nothing between them for one user to own.
+    expect(p.dir.slice(0, p.dir.lastIndexOf("/"))).toBe("/tmp");
+    // Another run's root is a sibling, never above or below this one.
+    const other = piRunPaths("run-8");
+    expect(other.dir).toBe("/tmp/switchboard-pi-run-8");
+    expect(other.dir.startsWith(`${p.dir}/`)).toBe(false);
+    expect(p.dir.startsWith(`${other.dir}/`)).toBe(false);
+    // The shared root of before is gone in every case: no path is under it.
+    expect(Object.values(p).some((v) => v.startsWith("/tmp/switchboard-pi/"))).toBe(false);
   });
 });
 
@@ -115,8 +109,8 @@ describe("piLaunchArgs", () => {
   });
   it("no effort leaves pi's default thinking level; a resume continues the session file instead of a directory", () => {
     expect(piLaunchArgs({ ...spec, effort: undefined })).toContain("claude-fable-5");
-    const resumed = piLaunchArgs({ ...spec, sessionPath: "/tmp/switchboard-pi/run-7/agent/sessions/s.jsonl" });
-    expect(resumed[resumed.indexOf("--session") + 1]).toBe("/tmp/switchboard-pi/run-7/agent/sessions/s.jsonl");
+    const resumed = piLaunchArgs({ ...spec, sessionPath: "/tmp/switchboard-pi-run-7/agent/sessions/s.jsonl" });
+    expect(resumed[resumed.indexOf("--session") + 1]).toBe("/tmp/switchboard-pi-run-7/agent/sessions/s.jsonl");
     expect(resumed).not.toContain("--session-dir");
   });
   it("the five effort tiers are pi's thinking levels by name", () => {
@@ -131,7 +125,7 @@ describe("piLaunchEnv", () => {
       [RUN_BEARER_ENV]: "sbr_run-7.s3cret",
       [HARNESS_URL_ENV]: "https://bot.example.com/",
       SWITCHBOARD_RUN_ID: "run-7",
-      PI_CODING_AGENT_DIR: "/tmp/switchboard-pi/run-7/agent",
+      PI_CODING_AGENT_DIR: "/tmp/switchboard-pi-run-7/agent",
       PI_SKIP_VERSION_CHECK: "1",
       PI_OFFLINE: "1",
       PI_TELEMETRY: "0",
@@ -250,10 +244,10 @@ describe("piLaunchFiles", () => {
   it("writes settings that never trust the checkout, the models file, the system prompt with the harness note last, and the extension — none a secret", () => {
     const files = piLaunchFiles(spec);
     expect(files.map((f) => f.path)).toEqual([
-      "/tmp/switchboard-pi/run-7/agent/settings.json",
-      "/tmp/switchboard-pi/run-7/agent/models.json",
-      "/tmp/switchboard-pi/run-7/agent/SYSTEM.md",
-      "/tmp/switchboard-pi/run-7/extension.js",
+      "/tmp/switchboard-pi-run-7/agent/settings.json",
+      "/tmp/switchboard-pi-run-7/agent/models.json",
+      "/tmp/switchboard-pi-run-7/agent/SYSTEM.md",
+      "/tmp/switchboard-pi-run-7/extension.js",
     ]);
     expect(JSON.parse(files[0].content)).toEqual({ defaultProjectTrust: "never", checkForUpdates: false });
     expect(files[2].content.startsWith("You are the coding agent.\n\nHARNESS NOTE:")).toBe(true);

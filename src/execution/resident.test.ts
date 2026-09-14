@@ -531,7 +531,7 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
     expect(sentBody(calls[1])).not.toHaveProperty("sha");
   });
 
-  it("records the attach result's ref@sha as the thread binding, with its workspace and pool user: the user is the OS user every /exec runs as, the key the pi harness files the run under", async () => {
+  it("records the attach result's ref@sha as the thread binding, with its workspace and pool user: the user is the OS user every /exec runs as, reported for the record; nothing files by it", async () => {
     stubFetch({
       body: {
         workspace: "/workspace/threads/t/master",
@@ -557,7 +557,7 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
     expect(ex.binding?.workspace).toBeUndefined();
   });
 
-  it("a 200 attach answer without a string `user` binds without one: the harness then files the run under the shared root", async () => {
+  it("a 200 attach answer without a string `user` binds without one: nothing depends on it", async () => {
     stubFetch({ body: { ref: "master", sha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05", user: "" } });
     const ex = await ResidentExecutor.open({ ...OPTS, refHint: "master" });
     expect(ex.binding).toEqual({ ref: "master", sha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05" });

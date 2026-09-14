@@ -552,10 +552,6 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
             ...(ownBranch !== undefined ? { branch: ownBranch } : {}),
             protectedBranches,
           },
-          // The resident runs this thread's commands as its pool user: pi's
-          // files go under that user's own root, never one another thread's
-          // user created (harness-pi.md item 4).
-          ...(binding?.user ? { user: binding.user } : {}),
           ...(round.selection.backend ? { backend: round.selection.backend } : {}),
           span: root,
           control: run.control,

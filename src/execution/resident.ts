@@ -79,9 +79,10 @@ export interface ResidentBinding {
    *  the repository); undefined if the attach answer lacked it. */
   workspace?: string;
   /** The pool user the resident runs every /exec of this thread as
-   *  (`worker<N>`). The pi harness files the run under a root of this user's
-   *  own (docs/reference/specs/harness-pi.md item 4); undefined if the attach
-   *  answer lacked it, and the harness then uses the shared root. */
+   *  (`worker<N>`), reported for the record: nothing files by it — the pi
+   *  harness roots a run's files in a directory of the run's own, whatever
+   *  user runs the commands (docs/reference/specs/harness-pi.md item 4).
+   *  Undefined if the attach answer lacked it. */
   user?: string;
   /** The resident's own step trace for the attach (docs/reference/specs/tracing.md item
    *  19), sanitized at the parse; absent from a Worker predating it. */

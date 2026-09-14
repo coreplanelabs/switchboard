@@ -146,7 +146,7 @@ const finalTurn = (c: FakePiContainer, text: string) => {
   );
 };
 
-function world(opts: { clock?: { now: number }; agent?: Partial<AgentDef>; withSpans?: boolean; user?: string } = {}) {
+function world(opts: { clock?: { now: number }; agent?: Partial<AgentDef>; withSpans?: boolean } = {}) {
   const clock = opts.clock ?? { now: NOW };
   const container = new FakePiContainer();
   const registry = new HarnessRegistry();
@@ -184,7 +184,6 @@ function world(opts: { clock?: { now: number }; agent?: Partial<AgentDef>; withS
     tools: [updateStatus],
     toolContext: { executor },
     rules: { checkout: "/workspace/threads/t/main", protectedBranches: ["main"] },
-    ...(opts.user ? { user: opts.user } : {}),
     backend: "resident",
     span: root,
     control,
@@ -230,21 +229,22 @@ function world(opts: { clock?: { now: number }; agent?: Partial<AgentDef>; withS
 }
 
 describe("runPiHarness — a run on pi from the first file to the answer", () => {
-  // The resident runs the thread's commands as its pool user; the run's files
-  // go under that user's own root, so two threads' users never meet at one
-  // parent (harness-pi item 4).
-  it("a run that names the OS user its commands run as writes every file and starts pi under that user's own root", async () => {
-    const w = world({ user: "worker2" });
+  // The run's files live in one directory of the run's own directly under
+  // /tmp, whatever OS user the executor runs the commands as, and the
+  // directory goes when the run does (harness-pi item 4).
+  it("writes every file and starts pi under the run's own root directly under /tmp, and once the run is over ends pi and removes that root", async () => {
+    const w = world();
     scriptedPi(w.container, (_n, c) => finalTurn(c, "Done."));
     await w.start();
-    const mine = piRunPaths("run-7", "worker2");
-    expect(mine.dir).toBe("/tmp/switchboard-pi-worker2/run-7");
-    expect([...w.container.files.keys()].every((f) => f.startsWith(`${mine.dir}/`))).toBe(true);
-    expect(w.container.files.has(`${mine.agentDir}/SYSTEM.md`)).toBe(true);
+    expect(paths.dir).toBe("/tmp/switchboard-pi-run-7");
+    expect([...w.container.files.keys()].every((f) => f.startsWith(`${paths.dir}/`))).toBe(true);
+    expect(w.container.files.has(`${paths.agentDir}/SYSTEM.md`)).toBe(true);
     const [started] = w.container.starts;
-    expect(started.paths).toEqual(mine);
-    expect(started.env.PI_CODING_AGENT_DIR).toBe(mine.agentDir);
-    expect(started.args[started.args.indexOf("--session-dir") + 1]).toBe(mine.sessionDir);
+    expect(started.paths).toEqual(paths);
+    expect(started.env.PI_CODING_AGENT_DIR).toBe(paths.agentDir);
+    expect(started.args[started.args.indexOf("--session-dir") + 1]).toBe(paths.sessionDir);
+    expect(w.container.killed).toEqual([4242]);
+    expect(w.container.removed).toEqual([paths.dir]);
   });
 
   it("writes pi's files, starts it with the bearer in the env and no key, drives the protocol, bridges the events, mirrors the steps, answers, and ends pi", async () => {
@@ -562,6 +562,8 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     });
     await expect(dead.start()).rejects.toThrow(/pi exited before the run settled: Error: cannot find module 'foo'/);
     expect(dead.container.killed).toEqual([4242]);
+    // A run that failed takes its directory down like one that settled.
+    expect(dead.container.removed).toEqual([paths.dir]);
 
     const refused = world();
     scriptedPi(refused.container, () => {}, { refusePrompt: "no model configured" });

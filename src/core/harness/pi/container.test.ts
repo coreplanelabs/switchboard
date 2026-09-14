@@ -9,6 +9,7 @@ import {
   feedFileScript,
   killScript,
   readLogScript,
+  removeScript,
   startScript,
   stdoutOf,
   writeFileScripts,
@@ -38,10 +39,10 @@ function recordingExecutor(answers: string[] = []) {
 }
 
 describe("the container scripts", () => {
-  it("writes a file with printf in chunks a command can carry: exact bytes, the first creating it under the thread user's own root with umask 077", () => {
-    const [one] = writeFileScripts(`${piRunPaths("run-7", "worker2").agentDir}/SYSTEM.md`, "hello 'quoted'\nline two");
+  it("writes a file with printf in chunks a command can carry: exact bytes, the first creating its directories at 700 (the umask before the mkdir, so the run's root under /tmp is the caller's alone)", () => {
+    const [one] = writeFileScripts(`${paths.agentDir}/SYSTEM.md`, "hello 'quoted'\nline two");
     expect(one).toBe(
-      `mkdir -p '/tmp/switchboard-pi-worker2/run-7/agent' && umask 077 && printf '%s' 'hello '\\''quoted'\\''\nline two' > '/tmp/switchboard-pi-worker2/run-7/agent/SYSTEM.md'`,
+      `umask 077 && mkdir -p '/tmp/switchboard-pi-run-7/agent' && printf '%s' 'hello '\\''quoted'\\''\nline two' > '/tmp/switchboard-pi-run-7/agent/SYSTEM.md'`,
     );
     const big = "x".repeat(WRITE_CHUNK_CHARS * 2 + 5);
     const scripts = writeFileScripts("/tmp/f", big);
@@ -54,6 +55,10 @@ describe("the container scripts", () => {
 
   it("starts pi detached behind a FIFO held open for writing, its pid recorded, its stdout filtered of streaming deltas into the log", () => {
     const script = startScript({ paths, args: ["--mode", "rpc", "-e", paths.extension], env: { X: "1" } });
+    // The directories at 700 in a subshell: the run's root is the caller's alone, and pi's own umask is untouched.
+    expect(
+      script.startsWith(`(umask 077 && mkdir -p '${paths.dir}' '${paths.sessionDir}' '${paths.commandDir}') && `),
+    ).toBe(true);
     expect(script).toContain(`mkfifo -m 600 '${paths.fifo}'`);
     expect(script).toContain("setsid -f sh -c ");
     expect(script).toContain("exec 3<>");
@@ -143,6 +148,13 @@ describe("ExecPiContainer — each operation is one command over the executor", 
     expect(await c.tail(paths.errLog, 2000)).toBe("");
   });
 
+  it("remove takes the run's directory down as one tree, and nothing else", async () => {
+    expect(removeScript(paths.dir)).toBe(`rm -rf '/tmp/switchboard-pi-run-7'`);
+    const { executor, calls } = recordingExecutor();
+    await new ExecPiContainer(executor).remove(paths);
+    expect(calls.map((c) => c.command)).toEqual([`rm -rf '/tmp/switchboard-pi-run-7'`]);
+  });
+
   it("a command the executor reports as failed is a PiContainerError naming the operation", async () => {
     const { executor } = recordingExecutor(["exit 1:\nmkfifo: cannot create fifo"]);
     await expect(new ExecPiContainer(executor).start({ paths, args: [], env: {} })).rejects.toThrow(
@@ -152,11 +164,13 @@ describe("ExecPiContainer — each operation is one command over the executor", 
 });
 
 /** The least of a filesystem the defect needs: directories with an owner and
- *  a mode, and `mkdir -p`'s rule for a component it must create (the parent
- *  is the caller's own, or world-writable). `/tmp` is root's at 1777, as on
- *  the resident; a directory `mkdir -p` creates is its caller's at 755, since
- *  the write script's `umask 077` comes after the mkdir. Every other command
- *  is taken as done and answered with what the test scripted. */
+ *  a mode, `mkdir -p`'s rule for a component it must create (the parent is
+ *  the caller's own, or world-writable), and the sticky bit's rule for
+ *  removal (an entry under `/tmp` goes only for its owner). `/tmp` is root's
+ *  at 1777, as on the resident; a directory `mkdir -p` creates is its
+ *  caller's, at 700 when `umask 077` came earlier in the command and at 755
+ *  otherwise. Every other command is taken as done and answered with what the
+ *  test scripted. */
 class FakeDirectoryTree {
   readonly dirs = new Map<string, { owner: string; mode: number }>([
     ["/", { owner: "root", mode: 0o755 }],
@@ -164,7 +178,7 @@ class FakeDirectoryTree {
   ]);
 
   /** `mkdir -p <path>` as `user`: the line mkdir would print, or nothing on success. */
-  mkdirP(path: string, user: string): string | undefined {
+  mkdirP(path: string, user: string, mode: number): string | undefined {
     let current = "";
     for (const part of path.split("/").filter(Boolean)) {
       const parent = this.dirs.get(current || "/")!;
@@ -172,8 +186,17 @@ class FakeDirectoryTree {
       if (this.dirs.has(current)) continue;
       if (parent.owner !== user && (parent.mode & 0o002) === 0)
         return `mkdir: cannot create directory '${current}': Permission denied`;
-      this.dirs.set(current, { owner: user, mode: 0o755 });
+      this.dirs.set(current, { owner: user, mode });
     }
+    return undefined;
+  }
+
+  /** `rm -rf <path>` as `user`: the line rm would print, or nothing on success (a missing path included). */
+  rmRf(path: string, user: string): string | undefined {
+    const entry = this.dirs.get(path);
+    if (!entry) return undefined;
+    if (entry.owner !== user) return `rm: cannot remove '${path}': Operation not permitted`;
+    for (const dir of [...this.dirs.keys()]) if (dir === path || dir.startsWith(`${path}/`)) this.dirs.delete(dir);
     return undefined;
   }
 
@@ -181,11 +204,17 @@ class FakeDirectoryTree {
   executorAs(user: string, answers: string[] = []): Executor {
     return {
       exec: async (command) => {
-        for (const mkdir of command.matchAll(/mkdir -p ((?:'[^']*' ?)+)/g))
+        for (const mkdir of command.matchAll(/mkdir -p ((?:'[^']*' ?)+)/g)) {
+          const mode = command.slice(0, mkdir.index).includes("umask 077") ? 0o700 : 0o755;
           for (const [, path] of mkdir[1].matchAll(/'([^']*)'/g)) {
-            const refused = this.mkdirP(path, user);
+            const refused = this.mkdirP(path, user, mode);
             if (refused) return `exit 1:\n${refused}`;
           }
+        }
+        for (const [, path] of command.matchAll(/rm -rf '([^']*)'/g)) {
+          const refused = this.rmRf(path, user);
+          if (refused) return `exit 1:\n${refused}`;
+        }
         return answers.shift() ?? "(no output)";
       },
       readFile: async () => "",
@@ -196,34 +225,43 @@ class FakeDirectoryTree {
 
 describe("ExecPiContainer on a resident, two thread users on one container", () => {
   // Production, the first review run on pi: a coding run as one pool user had
-  // created the shared root at 755 two seconds earlier, and the review's
-  // mkdir as another user was refused before any model turn.
-  it("the control: under one shared root the first user's 755 parent refuses the second user's mkdir, the failure the per-user root removes", async () => {
+  // created a parent shared by every run two seconds earlier, and the
+  // review's mkdir as another user was refused under it before any model
+  // turn. The control builds that shape by hand: no path the harness derives
+  // has a shared parent any more.
+  it("the control: under one shared parent the first user's directory refuses the second user's mkdir, the failure a root of the run's own directly under /tmp removes", async () => {
     const tree = new FakeDirectoryTree();
-    await new ExecPiContainer(tree.executorAs("worker2")).writeFile(`${piRunPaths("run-a").agentDir}/SYSTEM.md`, "a");
-    expect(tree.dirs.get("/tmp/switchboard-pi")).toEqual({ owner: "worker2", mode: 0o755 });
+    await new ExecPiContainer(tree.executorAs("worker2")).writeFile("/tmp/switchboard-pi/run-a/agent/SYSTEM.md", "a");
+    expect(tree.dirs.get("/tmp/switchboard-pi")?.owner).toBe("worker2");
     await expect(
-      new ExecPiContainer(tree.executorAs("worker3")).writeFile(`${piRunPaths("run-b").agentDir}/SYSTEM.md`, "b"),
+      new ExecPiContainer(tree.executorAs("worker3")).writeFile("/tmp/switchboard-pi/run-b/agent/SYSTEM.md", "b"),
     ).rejects.toThrow(
       /write failed .* exit 1:\nmkdir: cannot create directory '\/tmp\/switchboard-pi\/run-b': Permission denied/,
     );
   });
 
-  it("two runs as two users both write their files and start their pi: each user's root is its own, so neither mkdir meets a parent the other owns", async () => {
+  it("two runs as two users both write their files, start their pi and remove their root: each run's root is its own directly under /tmp, made 700 by the user running it, so neither mkdir meets a parent the other owns", async () => {
     const tree = new FakeDirectoryTree();
     const runs = [
-      { user: "worker2", paths: piRunPaths("run-a", "worker2") },
-      { user: "worker3", paths: piRunPaths("run-b", "worker3") },
+      { user: "worker2", paths: piRunPaths("run-a") },
+      { user: "worker3", paths: piRunPaths("run-b") },
     ];
     for (const { user, paths: p } of runs) {
       const container = new ExecPiContainer(tree.executorAs(user, ["(no output)", "4242\n"]));
       await container.writeFile(`${p.agentDir}/SYSTEM.md`, "the prompt");
       await expect(container.start({ paths: p, args: [], env: {} })).resolves.toEqual({ pid: 4242 });
     }
-    expect(tree.dirs.get("/tmp/switchboard-pi-worker2")).toEqual({ owner: "worker2", mode: 0o755 });
-    expect(tree.dirs.get("/tmp/switchboard-pi-worker3")).toEqual({ owner: "worker3", mode: 0o755 });
-    expect(tree.dirs.has("/tmp/switchboard-pi-worker2/run-a/agent/sessions")).toBe(true);
-    expect(tree.dirs.has("/tmp/switchboard-pi-worker3/run-b/cmd")).toBe(true);
+    expect(tree.dirs.get("/tmp/switchboard-pi-run-a")).toEqual({ owner: "worker2", mode: 0o700 });
+    expect(tree.dirs.get("/tmp/switchboard-pi-run-b")).toEqual({ owner: "worker3", mode: 0o700 });
+    expect(tree.dirs.has("/tmp/switchboard-pi-run-a/agent/sessions")).toBe(true);
+    expect(tree.dirs.has("/tmp/switchboard-pi-run-b/cmd")).toBe(true);
+    // Nothing between /tmp and a run's root, shared or per user.
+    const made = [...tree.dirs.keys()].filter((d) => d !== "/" && d !== "/tmp");
+    expect(made.every((d) => d.startsWith("/tmp/switchboard-pi-run-"))).toBe(true);
     expect(tree.dirs.has("/tmp/switchboard-pi")).toBe(false);
+    expect(tree.dirs.has("/tmp/switchboard-pi-worker2")).toBe(false);
+    // Each run takes its own root down when it ends, and /tmp is as it was.
+    for (const { user, paths: p } of runs) await new ExecPiContainer(tree.executorAs(user)).remove(p);
+    expect([...tree.dirs.keys()]).toEqual(["/", "/tmp"]);
   });
 });

@@ -93,11 +93,6 @@ export interface PiHarnessRun {
    *  (`agent.identity`) and is folded in here, so the allowlist pi starts
    *  with and the reach the gate judges by read one word (harness-pi item 10). */
   rules: Omit<ToolRuleContext, "identity">;
-  /** The OS user the run's executor runs its commands as: the resident's pool
-   *  user for the thread (`ResidentBinding.user`). The run's files live under
-   *  a root of that user's own (`piRunPaths`); absent on an executor with one
-   *  user, and the files go under the shared root. */
-  user?: string;
   backend?: Backend;
   span?: Span;
   control?: RunControl;
@@ -221,7 +216,7 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
     emit({ type: "run_note", kind, summary, ...(mode ? { mode } : {}) });
   };
   const bridge = new PiBridge({ emit, onProgress: run.onProgress, agentSpan, clock });
-  const paths = piRunPaths(run.runId, run.user);
+  const paths = piRunPaths(run.runId);
   const remainingMs = run.resume?.remainingMs ?? run.agent.maxMinutes * 60_000;
   const deadline = now() + remainingMs;
   const warnAt = deadline - Math.min(3 * 60_000, run.agent.maxMinutes * 15_000);
@@ -524,6 +519,11 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
     save();
     forget();
     if (pid !== undefined) await container.kill(pid).catch(() => {});
+    // The run's directory goes with the run: pi has ended, and nothing reads
+    // its log, session or FIFO again — a later run in the thread seeds from
+    // the record, and a resume that finds pi alive belongs to a generation
+    // that never reached this line. Best-effort, like the kill.
+    await container.remove(paths).catch(() => {});
     agentSpan?.end(hardStopped || bypass ? "error" : "ok");
   }
 }
