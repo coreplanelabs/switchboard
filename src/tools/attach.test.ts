@@ -144,7 +144,7 @@ describe("attach_file through the artifact store", () => {
         store.put(key, new Uint8Array(over.sizeInStore ?? SIZE), url.searchParams.get("content-type") ?? "");
         return "";
       }
-      if (command.startsWith("curl -fsS --data-binary ")) {
+      if (command.startsWith("curl -fsS --upload-file ")) {
         log.push("post");
         return over.post ?? "";
       }
@@ -205,13 +205,13 @@ describe("attach_file through the artifact store", () => {
     expect(h.commands.map((c) => c.command.split(" ").slice(0, 3).join(" "))).toEqual([
       "stat -c %s",
       "curl -fsS -T",
-      "curl -fsS --data-binary",
+      "curl -fsS --upload-file",
     ]);
     expect(h.commands[0]!.command).toBe("stat -c %s -- 'shots/page.png'");
     expect(h.commands[1]!.command).toMatch(PUT_URL);
     expect(h.commands[1]!.command).toContain("runs/r1/out/1-page.png");
     expect(h.commands[2]!.command).toBe(
-      "curl -fsS --data-binary @'shots/page.png' 'https://files.slack.com/upload/v1/ticket-1?x=y'",
+      "curl -fsS --upload-file 'shots/page.png' -X POST 'https://files.slack.com/upload/v1/ticket-1?x=y'",
     );
     expect(h.commands.map((c) => c.timeoutMs)).toEqual([30_000, BASH_TIMEOUT_MAX_MS, BASH_TIMEOUT_MAX_MS]);
     // The event is recorded once the store holds the verified object, BEFORE the share completes.

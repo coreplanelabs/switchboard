@@ -81,9 +81,13 @@ export function putCommandFor(path: string, contentType: string, url: string): s
   return `curl -fsS -T ${shellQuote(path)} -H ${shellQuote(`Content-Type: ${contentType}`)} ${shellQuote(url)}`;
 }
 
-/** The command the container runs to POST the file to the channel's ticket. */
+/** The command the container runs to POST the file to the channel's ticket.
+ *  `--upload-file` streams the file from disk with its Content-Length; `-X POST`
+ *  keeps the method the one-shot URL expects. `--data-binary @file` would read
+ *  the whole file into memory first — a 1 GiB attach died of
+ *  "curl: option --data-binary: out of memory" live. */
 export function postCommandFor(path: string, url: string): string {
-  return `curl -fsS --data-binary @${shellQuote(path)} ${shellQuote(url)}`;
+  return `curl -fsS --upload-file ${shellQuote(path)} -X POST ${shellQuote(url)}`;
 }
 
 /** The store path (record 0033). Returns the tool's result text. */
