@@ -7,7 +7,8 @@ Everything below works identically as a bare mention, a DM, or a thread follow-u
 | Do this | To |
 |---|---|
 | `@switchboard <anything>` | start or continue a conversation (first message in a channel needs the mention; DMs and thread follow-ups never do) |
-| `@switchboard help` | list every command |
+| `@switchboard help` | how to ask, in plain words: describe what you want, force an agent with `agent:<preset>`, change a route by replying `agent:<preset>` — it lists no commands |
+| `@switchboard help commands` | list every command, by group, with the grammar and the per-request directives |
 | `<group> help` | usage for one command group, e.g. `config help` |
 
 ## Directives (inline, per-request only)
@@ -16,7 +17,7 @@ Placed right after the mention, before the request text:
 
 | Directive | Example | Effect |
 |---|---|---|
-| `agent:<name>` | `agent:review` | force this agent for this message; without it a plain message picks its own agent where the router is on (`routing.auto`, [Turn features on and off](../how-to/turn-features-on-and-off.md)) and runs the default otherwise |
+| `agent:<name>` | `agent:review` | force this agent for this message; without it a plain message picks its own agent and the card says why — the router, on by default; `routing: { auto: false }` turns it off ([Turn features on and off](../how-to/turn-features-on-and-off.md)) and a plain message then runs the default. `ship` is never picked for you: name it |
 | `model:<provider>/<model>` | `model:openai/gpt-5` | use this model for this message only |
 | `effort:<low\|medium\|high\|xhigh\|max>` | `effort:low` | how hard the model thinks this turn |
 | `budget:<minutes>` | `budget:30` | cap this run's wall clock, in whole minutes (at least 2); it only ever narrows the agent's own budget or a boundary's, and the card says what it did |
@@ -27,7 +28,7 @@ Combine freely: `agent:ship model:anthropic/claude-opus-5 effort:high in acme/ap
 
 ## Every command you can run in chat
 
-One table per group. "Who can run it" is what the authorization policy decides for a Slack user holding each grant set (the narrowest admitted is named: anyone, `agent:run:coding`, `repo:write`, `config:write`, admins) — see [reference: authorization](authorization.md). A registered command that is deliberately not exposed to chat (`deploy all`, `deploy restart`, `env bootstrap`, `friction analyze`, and the paged `runs get|events|friction` reads) is absent from this table and reachable on the [CLI](cli.md), over HTTP, or as an MCP tool instead.
+`help` in chat prints none of this — it is the plain-language guide; `help commands` prints this list. One table per group. "Who can run it" is what the authorization policy decides for a Slack user holding each grant set (the narrowest admitted is named: anyone, `agent:run:coding`, `repo:write`, `config:write`, admins) — see [reference: authorization](authorization.md). A registered command that is deliberately not exposed to chat (`deploy all`, `deploy restart`, `env bootstrap`, `friction analyze`, and the paged `runs get|events|friction` reads) is absent from this table and reachable on the [CLI](cli.md), over HTTP, or as an MCP tool instead.
 
 <!-- generated:chat-commands · npm run docs:gen — generated from the code, do not edit by hand -->
 
@@ -35,7 +36,8 @@ One table per group. "Who can run it" is what the authorization policy decides f
 
 | Command | What it does | Who can run it |
 |---|---|---|
-| `help show` | What Switchboard can do: agents, per-request directives, and every chat command. | anyone |
+| `help show` | How to ask in plain words: describe what you want, force an agent, change a route in the thread. | anyone |
+| `help commands` | Every chat command by group, the grammar, and the per-request directives. | anyone |
 
 ### `status`
 

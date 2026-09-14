@@ -48,7 +48,7 @@ import type { AuthorizeDeps, GateCard, GateContext } from "./authorize.js";
 import { channelVisibilityOf, type RecordDeps } from "./record.js";
 import { attachmentSuffix, composeRunLabel, humanizeMessageText, isMrkdwnChannel, liveViewLink } from "./reply.js";
 import { contextMessageTexts } from "./messages.js";
-import { routedLabel, routedPartLines, type RouteDecided } from "./route.js";
+import { ROUTED_CARD_FOOTER, routedLabel, routedPartLines, type RouteDecided } from "./route.js";
 
 /** What the provision stage reads off the dispatcher's dependencies. A run's
  *  row is stamped with its channel's visibility (the record slice), reserved on
@@ -173,8 +173,9 @@ export interface AckCardContext {
   root: Span;
   trace: RequestTrace;
   /** The router's decision when it chose the preset (routing-and-config item
-   *  21): the card's label gains ` · routed: <reason>`, and a compound's
-   *  parts lead its detail, one line each. */
+   *  21): the card's label gains ` · routed: <reason>`, a compound's parts
+   *  lead its detail, one line each, and every close ends with how to run the
+   *  request another way. */
   route?: RouteDecided;
 }
 
@@ -189,12 +190,15 @@ export async function openAckCard(deps: ProvisionDeps, ctx: AckCardContext): Pro
   // One builder for every paint of this card (statusCardFrame.ts): the ack,
   // the spinner frames, the closes before the run starts, the done frame. A
   // routed run says so from its first paint: `*review* on `m` · routed: <reason>`;
-  // a routed compound lists its parts under the label, `<preset>: <text>`.
+  // a routed compound lists its parts under the label, `<preset>: <text>`; and
+  // a routed card's every close ends with the override — the one place the
+  // hint is actionable, since a reply into the live thread is a follow-up.
   const shell = createCardShell({
     label: `*${agent.name}* on \`${resolved.modelRef}\`${route ? ` · ${routedLabel(route.reason)}` : ""}`,
     startedAt,
     now: clock,
     ...(route?.parts ? { lead: routedPartLines(route.parts) } : {}),
+    ...(route ? { footer: ROUTED_CARD_FOOTER } : {}),
   });
   // Coalesced: the run below refreshes it on every event, the channel sees at
   // most one edit per STATUS_UPDATE_MIN_MS, always the newest frame.

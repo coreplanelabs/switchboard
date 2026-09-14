@@ -165,16 +165,23 @@ describe("hiding per surface — the catalogue bound with everything on vs nothi
     expect(still).toMatchObject({ ok: false, error: "unavailable", decidedBy: "handler" });
   });
 
-  it("help: the chat catalogue and `<group> help` omit hidden commands; a hidden group's `help` is prose; the bare word `help` still answers", async () => {
+  it("help: the chat catalogue (`help commands`) and `<group> help` omit hidden commands; a hidden group's `help` is prose; the bare word `help` still answers, naming no command either way", async () => {
     const admin = { userId: "slack:UADMIN", channelId: "slack:C1", threadKey: "slack:C1:1" };
     const dir = mkdtempSync(join(tmpdir(), "swb-caps-help-"));
     writeFileSync(join(dir, "config.yaml"), CONFIG_YAML);
     const config = new ConfigStore(join(dir, "config.yaml"), join(dir, "overrides.json"));
-    const helpOf = async (commands: CommandInvoker) => {
-      const parsed = parseChatCommand("help", commands);
+    const helpOf = async (commands: CommandInvoker, text = "help commands") => {
+      const parsed = parseChatCommand(text, commands);
       expect(parsed?.kind).toBe("invoke");
       return handleChatCommand({ commands, parsed: parsed!, msg: admin, config });
     };
+    // The bare word is the plain-language guide on both worlds: it answers, and lists no command.
+    for (const world of [on, off]) {
+      const guide = await helpOf(world, "help");
+      expect(guide).toContain("just describe what you want");
+      expect(guide).not.toContain("`memory list`");
+      expect(guide).not.toContain("`config show`");
+    }
     const onText = await helpOf(on);
     const offText = await helpOf(off);
     expect(onText).toContain("`memory list`");

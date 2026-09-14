@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { AGENTS } from "../../agents/registry.js";
+import { AGENTS, COMPOUND_PRESET, presetDoor } from "../../agents/registry.js";
 import { ConfigStore } from "../../config.js";
 import type { ProviderRegistry } from "../../providers/registry.js";
 import type { CompletionRequest, Provider } from "../../providers/types.js";
@@ -19,6 +19,7 @@ import {
   route,
   ROUTE_PART_LINE_CAP,
   ROUTE_PART_TEXT_CAP,
+  ROUTED_CARD_FOOTER,
   routedLabel,
   routedPartLines,
   routeRequest,
@@ -115,6 +116,14 @@ describe("routablePresets — the table is the registry, never a copy", () => {
     expect(names).not.toContain("conductor");
     expect(AGENTS.ship.routable).toBe(false);
     expect(AGENTS.conductor.routable).toBe(false);
+  });
+
+  it("the table is exactly the presets whose door is `routed`; the compound preset is the conductor, and ship is reached by directive alone", () => {
+    const routed = Object.values(AGENTS).filter((a) => presetDoor(a) === "routed");
+    expect(presets.map((p) => p.name)).toEqual(routed.map((a) => a.name));
+    expect(COMPOUND_PRESET).toBe("conductor");
+    expect(presetDoor(AGENTS[COMPOUND_PRESET])).toBe("compound");
+    expect(presetDoor(AGENTS.ship)).toBe("directive");
   });
 
   it("renders one table row per preset: name, description, machine, credential, budget", () => {
@@ -282,6 +291,11 @@ describe("the card's words", () => {
   it("the label reads as specified", () => {
     expect(routedLabel("a PR URL")).toBe("routed: a PR URL");
   });
+
+  it("the routed card's closing line says how to run the request another way — plain text, no backticks (the Slack card body is literal)", () => {
+    expect(ROUTED_CARD_FOOTER).toBe("reply agent:<preset> to run it another way");
+    expect(ROUTED_CARD_FOOTER).not.toContain("`");
+  });
 });
 
 describe("routeRequest — the stage: when it runs, what always wins", () => {
@@ -300,12 +314,25 @@ describe("routeRequest — the stage: when it runs, what always wins", () => {
     root: root(),
   });
   const ON = YAML + "routing:\n  auto: true\n";
+  const OFF = YAML + "routing:\n  auto: false\n";
 
-  it("routing off: unrouted, the model never called", async () => {
+  it("turned off (`routing: { auto: false }`): unrouted, the model never called", async () => {
     const model = scripted(answer("review"));
-    const out = await routeRequest(deps(YAML, model), ctx("default"));
+    const out = await routeRequest(deps(OFF, model), ctx("default"));
     expect(out).toEqual({ kind: "unrouted" });
     expect(model.prompts).toHaveLength(0);
+  });
+
+  it("on by default: with no `routing` block a plain message routes, on `defaults.models.general`; a block naming only the model routes on that model", async () => {
+    const model = scripted(answer("review"));
+    const out = await routeRequest(deps(YAML, model), ctx("default"));
+    expect(out.kind).toBe("routed");
+    if (out.kind !== "routed") throw new Error("unreachable");
+    expect(out.route).toEqual({ preset: "review", reason: "because", model: "anthropic/general-model" });
+    expect(model.prompts).toHaveLength(1);
+    const named = scripted(answer("review"));
+    const onModel = await routeRequest(deps(YAML + "routing:\n  model: anthropic/fast-model\n", named), ctx("default"));
+    expect(onModel.kind === "routed" && onModel.route.model).toBe("anthropic/fast-model");
   });
 
   it("a reply into a thread with a run in flight is a follow-up, not a request: unrouted, the model never paid", async () => {

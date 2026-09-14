@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { AGENTS } from "../agents/registry.js";
+import { AGENTS, presetDoor } from "../agents/registry.js";
 import { bootstrapOnHost } from "../agentEnv/host.js";
 import type { ConfigStore } from "../config.js";
 import type { AffectedReport } from "../deploy/affected.js";
@@ -241,7 +241,8 @@ export function buildCoreCommands(
   });
   const deps: CoreCommandDeps = {
     help: {
-      agents: () => Object.values(AGENTS).map((a) => ({ name: a.name, description: a.description })),
+      agents: () =>
+        Object.values(AGENTS).map((a) => ({ name: a.name, description: a.description, door: presetDoor(a) })),
       commands: () => registry.list(),
     },
     config: {

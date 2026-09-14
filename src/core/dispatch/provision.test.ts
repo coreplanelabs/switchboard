@@ -294,6 +294,13 @@ describe("openAckCard — the ack card the thread sees while setup runs", () => 
     clearInterval(one.heartbeat);
     expect(single.statuses[0].title).toContain("· routed: a PR URL");
     expect(single.statuses[0].detail).toBeUndefined();
+    // Every close of a routed card — a single route or a compound — ends with how to run it another way.
+    expect(one.shell.close({ kind: "done", icon: "✅", detail: "✓ reviewed" }).detail).toBe(
+      "✓ reviewed\nreply agent:<preset> to run it another way",
+    );
+    expect(ack.shell.close({ kind: "not_started", icon: "📦", reason: "repo access" }).detail).toBe(
+      "reply agent:<preset> to run it another way",
+    );
   });
 
   it("posts the ack frame once, hands back the shell, the coalesced card and a heartbeat the caller owns", async () => {
@@ -308,6 +315,8 @@ describe("openAckCard — the ack card the thread sees while setup runs", () => 
     ack.card.update(ack.shell.live());
     expect(statuses).toHaveLength(2);
     expect(trace.spansSoFar().map((s) => s.name)).toContain("dispatch.ack_card");
+    // Not routed: no override hint on the close — the card is exactly what it was.
+    expect(ack.shell.close({ kind: "done", icon: "✅", detail: "✓ answered" }).detail).toBe("✓ answered");
   });
 });
 

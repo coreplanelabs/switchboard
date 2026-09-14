@@ -74,7 +74,8 @@ exports[`capability surfaces — cloud-full > CLI catalogue 1`] = `
        switchboard help
 
 commands:
-  help show            — What Switchboard can do: agents, per-request directives, and every chat command.
+  help show            — How to ask in plain words: describe what you want, force an agent, change a route in the thread.
+  help commands        — Every chat command by group, the grammar, and the per-request directives.
   status show          — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
   config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted.
   config set           — Set the agent, model, effort or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
@@ -127,6 +128,7 @@ exports[`capability surfaces — cloud-full > HTTP catalogue: the /api/<id> rout
   "deploy.plan",
   "friction.propose",
   "friction.report",
+  "help.commands",
   "help.show",
   "mcp.add",
   "mcp.connect",
@@ -164,6 +166,7 @@ exports[`capability surfaces — cloud-full > MCP tools/list names 1`] = `
   "dispatch",
   "friction_propose",
   "friction_report",
+  "help_commands",
   "help_show",
   "mcp_add",
   "mcp_connect",
@@ -190,22 +193,14 @@ exports[`capability surfaces — cloud-full > MCP tools/list names 1`] = `
 ]
 `;
 
-exports[`capability surfaces — cloud-full > help on chat 1`] = `
-"*Switchboard* — send me a request. Agents:
-• \`general\` — Default assistant on the configured model: answers directly, reads the org's repos and manages their issues over GitHub, reads URLs. No workspace or shell.
-• \`coding\` — Implements changes and ships PRs (git + gh in a workspace).
-• \`review\` — Reviews PRs and produces high-quality findings. Read-only.
-• \`ship\` — Coding → review → fix pipeline to LGTM: opens the PR, loops reviews, reports merge-ready. Never merges.
-• \`research\` — Answers questions with web search, URL reading, and read access to the org's repos and issues over GitHub. No workspace.
-• \`explore\` — Long, read-only investigation of a repository in a cold sandbox: runs builds, suites and pipelines, searches the web, and reports a claim table with commands and numbers. Never opens a PR. Up to two hours.
-• \`conductor\` — Coordinates other runs: spawns child runs as the requester — each in a thread of its own, under their permissions — follows them, and reports. No workspace or shell.
-
-*Per-request directives* (anywhere in the message):
+exports[`capability surfaces — cloud-full > help commands on chat 1`] = `
+"*Per-request directives* (anywhere in the message):
 \`agent:review model:anthropic/claude-opus-5 effort:low budget:20 look at PR 42\` (effort: low | medium | high — lower = faster turns; budget: whole minutes, at least 2 — narrows this run's wall clock, never widens it)
 
 *Commands* (\`<group> <verb> [args…] [--option value…]\`; \`<group> help\` lists a group, \`<group> <verb> --help\` explains one):
 *help*
-• \`help show\` — What Switchboard can do: agents, per-request directives, and every chat command.
+• \`help show\` — How to ask in plain words: describe what you want, force an agent, change a route in the thread.
+• \`help commands\` — Every chat command by group, the grammar, and the per-request directives.
 *status*
 • \`status show\` — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
 *config*
@@ -294,7 +289,8 @@ exports[`capability surfaces — local-full > CLI catalogue 1`] = `
        switchboard help
 
 commands:
-  help show            — What Switchboard can do: agents, per-request directives, and every chat command.
+  help show            — How to ask in plain words: describe what you want, force an agent, change a route in the thread.
+  help commands        — Every chat command by group, the grammar, and the per-request directives.
   status show          — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
   config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted.
   config set           — Set the agent, model, effort or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
@@ -340,6 +336,7 @@ exports[`capability surfaces — local-full > HTTP catalogue: the /api/<id> rout
   "deploy.plan",
   "friction.propose",
   "friction.report",
+  "help.commands",
   "help.show",
   "mcp.add",
   "mcp.connect",
@@ -370,6 +367,7 @@ exports[`capability surfaces — local-full > MCP tools/list names 1`] = `
   "dispatch",
   "friction_propose",
   "friction_report",
+  "help_commands",
   "help_show",
   "mcp_add",
   "mcp_connect",
@@ -389,22 +387,14 @@ exports[`capability surfaces — local-full > MCP tools/list names 1`] = `
 ]
 `;
 
-exports[`capability surfaces — local-full > help on chat 1`] = `
-"*Switchboard* — send me a request. Agents:
-• \`general\` — Default assistant on the configured model: answers directly, reads the org's repos and manages their issues over GitHub, reads URLs. No workspace or shell.
-• \`coding\` — Implements changes and ships PRs (git + gh in a workspace).
-• \`review\` — Reviews PRs and produces high-quality findings. Read-only.
-• \`ship\` — Coding → review → fix pipeline to LGTM: opens the PR, loops reviews, reports merge-ready. Never merges.
-• \`research\` — Answers questions with web search, URL reading, and read access to the org's repos and issues over GitHub. No workspace.
-• \`explore\` — Long, read-only investigation of a repository in a cold sandbox: runs builds, suites and pipelines, searches the web, and reports a claim table with commands and numbers. Never opens a PR. Up to two hours.
-• \`conductor\` — Coordinates other runs: spawns child runs as the requester — each in a thread of its own, under their permissions — follows them, and reports. No workspace or shell.
-
-*Per-request directives* (anywhere in the message):
+exports[`capability surfaces — local-full > help commands on chat 1`] = `
+"*Per-request directives* (anywhere in the message):
 \`agent:review model:anthropic/claude-opus-5 effort:low budget:20 look at PR 42\` (effort: low | medium | high — lower = faster turns; budget: whole minutes, at least 2 — narrows this run's wall clock, never widens it)
 
 *Commands* (\`<group> <verb> [args…] [--option value…]\`; \`<group> help\` lists a group, \`<group> <verb> --help\` explains one):
 *help*
-• \`help show\` — What Switchboard can do: agents, per-request directives, and every chat command.
+• \`help show\` — How to ask in plain words: describe what you want, force an agent, change a route in the thread.
+• \`help commands\` — Every chat command by group, the grammar, and the per-request directives.
 *status*
 • \`status show\` — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
 *config*
@@ -484,7 +474,8 @@ exports[`capability surfaces — minimal > CLI catalogue 1`] = `
        switchboard help
 
 commands:
-  help show            — What Switchboard can do: agents, per-request directives, and every chat command.
+  help show            — How to ask in plain words: describe what you want, force an agent, change a route in the thread.
+  help commands        — Every chat command by group, the grammar, and the per-request directives.
   status show          — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
   config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted.
   config set           — Set the agent, model, effort or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
@@ -517,6 +508,7 @@ exports[`capability surfaces — minimal > HTTP catalogue: the /api/<id> routes 
   "config.set",
   "config.show",
   "deploy.plan",
+  "help.commands",
   "help.show",
   "repo.build",
   "repo.test",
@@ -537,6 +529,7 @@ exports[`capability surfaces — minimal > MCP tools/list names 1`] = `
   "config_show",
   "deploy_plan",
   "dispatch",
+  "help_commands",
   "help_show",
   "repo_build",
   "repo_test",
@@ -549,22 +542,14 @@ exports[`capability surfaces — minimal > MCP tools/list names 1`] = `
 ]
 `;
 
-exports[`capability surfaces — minimal > help on chat 1`] = `
-"*Switchboard* — send me a request. Agents:
-• \`general\` — Default assistant on the configured model: answers directly, reads the org's repos and manages their issues over GitHub, reads URLs. No workspace or shell.
-• \`coding\` — Implements changes and ships PRs (git + gh in a workspace).
-• \`review\` — Reviews PRs and produces high-quality findings. Read-only.
-• \`ship\` — Coding → review → fix pipeline to LGTM: opens the PR, loops reviews, reports merge-ready. Never merges.
-• \`research\` — Answers questions with web search, URL reading, and read access to the org's repos and issues over GitHub. No workspace.
-• \`explore\` — Long, read-only investigation of a repository in a cold sandbox: runs builds, suites and pipelines, searches the web, and reports a claim table with commands and numbers. Never opens a PR. Up to two hours.
-• \`conductor\` — Coordinates other runs: spawns child runs as the requester — each in a thread of its own, under their permissions — follows them, and reports. No workspace or shell.
-
-*Per-request directives* (anywhere in the message):
+exports[`capability surfaces — minimal > help commands on chat 1`] = `
+"*Per-request directives* (anywhere in the message):
 \`agent:review model:anthropic/claude-opus-5 effort:low budget:20 look at PR 42\` (effort: low | medium | high — lower = faster turns; budget: whole minutes, at least 2 — narrows this run's wall clock, never widens it)
 
 *Commands* (\`<group> <verb> [args…] [--option value…]\`; \`<group> help\` lists a group, \`<group> <verb> --help\` explains one):
 *help*
-• \`help show\` — What Switchboard can do: agents, per-request directives, and every chat command.
+• \`help show\` — How to ask in plain words: describe what you want, force an agent, change a route in the thread.
+• \`help commands\` — Every chat command by group, the grammar, and the per-request directives.
 *status*
 • \`status show\` — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
 *config*

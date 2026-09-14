@@ -95,10 +95,21 @@ export interface Scope {
 
 /** The `routing` block (`AppConfig.routing`). */
 export interface RoutingConfig {
-  /** Route a plain message to a preset through the fast model. Default false. */
+  /** Route a plain message to a preset through the fast model. Default true;
+   *  `false` is the one way off (`routingOn`). */
   auto?: boolean;
   /** The router's model, `<provider>/<model>`; default `defaults.models.general`. */
   model?: string;
+}
+
+/** Whether the request router runs (docs/reference/specs/routing-and-config.md
+ *  item 21): `routing.auto` where the block sets it, else on — a deployment
+ *  with no `routing` block, or one naming only `model`, routes a plain
+ *  message from its first day, and `routing: { auto: false }` is the one line
+ *  that keeps every plain message on `defaults.agent`. The one place the
+ *  default lives: the stage asks this, never the field. */
+export function routingOn(config: AppConfig): boolean {
+  return config.routing?.auto ?? true;
 }
 
 export interface AppConfig {
@@ -217,11 +228,12 @@ export interface AppConfig {
   spawn?: SpawnConfig;
   /**
    * The request router (docs/decisions/0026-capability-profiles-and-request-routing.md;
-   * docs/reference/specs/routing-and-config.md item 21): with `auto: true` a
-   * plain message — no directive, no sticky preset, no user or channel
-   * `agent` — asks `model` (default: `defaults.models.general`, the fast
-   * model) to pick its preset from the registry's table. Off by default: a
-   * deployment that sets nothing here behaves exactly as before the router.
+   * docs/reference/specs/routing-and-config.md item 21): a plain message — no
+   * directive, no sticky preset, no user or channel `agent` — asks `model`
+   * (default: `defaults.models.general`, the fast model) to pick its preset
+   * from the registry's table. On by default (`routingOn`): a deployment that
+   * sets nothing here routes; `auto: false` keeps every plain message on
+   * `defaults.agent`, exactly as before the router.
    */
   routing?: RoutingConfig;
   /** Slack adapter behavior that is not pure transport. */

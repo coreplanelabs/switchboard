@@ -62,6 +62,43 @@ describe("createCardShell — every paint comes from one builder", () => {
     expect(shellAt(0).ack()).toEqual({ title: `👀 ${LABEL} · preparing workspace…` });
   });
 
+  it("a footer line (the routed card's override hint) ends every close's detail — after the shape, the queued line and the run's own lines — and never rides the ack or a live frame", () => {
+    let now = 1_000_000;
+    const shell = createCardShell({
+      label: LABEL,
+      startedAt: now,
+      now: () => now,
+      footer: "reply agent:<preset> to run it another way",
+    });
+    expect(shell.ack()).toEqual({ title: `👀 ${LABEL} · preparing workspace…` });
+    now += 5_000;
+    expect(shell.live({ detail: ["○ reading the diff"] })).toEqual({
+      title: `◐ ${LABEL} · 5s`,
+      detail: "○ reading the diff",
+      link: undefined,
+    });
+    expect(
+      shell.close({ kind: "done", icon: "✅", detail: "✓ reading the diff", shape: "4s thinking · 1s in tools" }),
+    ).toEqual({
+      title: `✅ ${LABEL} · 5s`,
+      detail: "4s thinking · 1s in tools\n✓ reading the diff\nreply agent:<preset> to run it another way",
+      link: undefined,
+    });
+    // A close with nothing else to say still carries it; every close kind does.
+    expect(shell.close({ kind: "done", icon: "❌" }).detail).toBe("reply agent:<preset> to run it another way");
+    expect(shell.close({ kind: "not_started", icon: "📦", reason: "repo access" }).detail).toBe(
+      "reply agent:<preset> to run it another way",
+    );
+    expect(shell.close({ kind: "refused", icon: "🚫", reason: "no plan" }).detail).toBe(
+      "reply agent:<preset> to run it another way",
+    );
+    expect(shell.close({ kind: "setup_failed", reason: "attach timed out" }).detail).toBe(
+      "reply agent:<preset> to run it another way",
+    );
+    // No footer: a close's detail is exactly what it was.
+    expect(shellAt(0).close({ kind: "done", icon: "✅" }).detail).toBeUndefined();
+  });
+
   it("the elapsed time floors in clock style like every other duration surface (docs/reference/specs/tracing.md), never a second ahead of the run page", () => {
     expect(shellAt(1_499).live().title).toBe(`◐ ${LABEL} · 1s`);
     expect(shellAt(1_999).live().title).toBe(`◐ ${LABEL} · 1s`);

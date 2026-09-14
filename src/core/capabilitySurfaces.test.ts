@@ -100,9 +100,12 @@ function axesOn(caps: Capabilities): number {
 
 // ---- the surfaces, as one shape sees them --------------------------------------------------------
 
+/** `help commands` on chat — the catalogue as a person sees it, which is
+ *  what the capabilities shape; the bare `help` is the plain-language guide
+ *  and names no command. */
 async function helpOnChat(f: Fixture): Promise<string> {
-  const parsed = parseChatCommand("help", f.commands);
-  if (!parsed) throw new Error("chat did not recognize `help`");
+  const parsed = parseChatCommand("help commands", f.commands);
+  if (!parsed) throw new Error("chat did not recognize `help commands`");
   const res = await invokeChatCommand({
     commands: f.commands,
     parsed,
@@ -236,7 +239,7 @@ describe("capability fixtures — real configurations", () => {
 // ---- 1. every surface under each shape -----------------------------------------------------------
 
 describe.each(CAPABILITY_FIXTURES.map((fx) => ({ name: fx.name, fx })))("capability surfaces — $name", ({ fx }) => {
-  it("help on chat", async () => {
+  it("help commands on chat", async () => {
     expect(await helpOnChat(await under(fx.capabilities))).toMatchSnapshot();
   });
 

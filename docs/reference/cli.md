@@ -10,7 +10,7 @@ npx tsx src/cli.ts <group> <verb> [args…] [--kebab-option value…] [--json]
 
 - Flags are kebab-case on the CLI (`--min-runs 2`), camelCase in the underlying schema, and dotted for nested options (`--models.coding openai/gpt-5`) — the same grammar chat and HTTP use, just a different flag style.
 - `--json` prints the exact result the command produced, with no rendering — useful for scripting or for confirming what a chat/HTTP call would have gotten back.
-- `<group> help` and the bare `help` are derived automatically from the registry; there is no separate help text to maintain.
+- The bare `help` is the plain-language guide — how to ask, how to force an agent, how to change a route — and names no command; `help commands` and `<group> help` list the commands, derived from the registry, so there is no separate catalogue text to maintain.
 
 ## The two built-ins: `ask` and `start`
 
@@ -36,7 +36,8 @@ One table per group, in registration order. "Surfaces" is where that command can
 
 | Command | What it does | Surfaces |
 |---|---|---|
-| `help show` | What Switchboard can do: agents, per-request directives, and every chat command. | every surface |
+| `help show` | How to ask in plain words: describe what you want, force an agent, change a route in the thread. | every surface |
+| `help commands` | Every chat command by group, the grammar, and the per-request directives. | every surface |
 
 ### `status`
 

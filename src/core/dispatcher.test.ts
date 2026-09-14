@@ -177,6 +177,9 @@ grants:
   "slack:UADMIN": { actions: all, channels: all, repos: all }
 restrict:
   agents: [coding]
+# The router is on by default; these tests prove the paths under it, so the
+# scripted provider is never asked to route — the router's own suite turns it on.
+routing: { auto: false }
 workspaceDir: __WORKDIR__
 `;
 
@@ -761,6 +764,7 @@ grants:
 restrict:
   agents: [coding]
   repos: ["acme/api"]
+routing: { auto: false }
 workspaceDir: __WORKDIR__
 `;
 
@@ -7311,6 +7315,7 @@ grants:
 restrict:
   agents: [coding]
   repos: ["acme/api"]
+routing: { auto: false }
 workspaceDir: __WORKDIR__
 `;
 
@@ -9800,6 +9805,7 @@ channels:
       machines: [none]
 grants:
   "slack:UADMIN": { actions: all, channels: all, repos: all }
+routing: { auto: false }
 workspaceDir: __WORKDIR__
 `;
   const inChannel = (channel: string, text: string, user = "slack:UADMIN") => ({
@@ -9976,6 +9982,7 @@ channels:
       maxMinutes: 45
 grants:
   "slack:UADMIN": { actions: all, channels: all, repos: all }
+routing: { auto: false }
 workspaceDir: __WORKDIR__
 `;
   const inChannel = (channel: string, text: string) => ({
@@ -10188,6 +10195,7 @@ grants:
   "slack:UADMIN": { actions: all, channels: all, repos: all }
 restrict:
   agents: [coding]
+routing: { auto: false }
 workspaceDir: __WORKDIR__
 `;
   const PARENT_THREAD = "slack:CX:1.0";
@@ -10641,10 +10649,16 @@ describe("the model proxy's run bearer through dispatch()", () => {
 // Feature: docs/reference/specs/routing-and-config.md item 21 — the request
 // router through dispatch(): off is today; a directive always wins; a plain
 // message runs as the routed preset with the reason on the card and the
-// `route` event on the record; a write preset waits for the requester's go.
+// `route` event on the record; every routed preset dispatches at once.
 describe("the request router (docs/reference/specs/routing-and-config.md item 21)", () => {
-  const ROUTED_YAML = YAML_FIXTURE + "routing:\n  auto: true\n";
-  const ROUTED_REMOTE_YAML = REMOTE_YAML_FIXTURE + "routing:\n  auto: true\n";
+  const ROUTING_OFF = "routing: { auto: false }\n";
+  /** The fixture with the router turned on by name. */
+  const routingOn = (yaml: string) => yaml.replace(ROUTING_OFF, "routing: { auto: true }\n");
+  /** The fixture with no `routing` block at all: the default — on. */
+  const routingUnset = (yaml: string) => yaml.replace(ROUTING_OFF, "");
+  const ROUTED_YAML = routingOn(YAML_FIXTURE);
+  const ROUTED_REMOTE_YAML = routingOn(REMOTE_YAML_FIXTURE);
+  const FOOTER = "reply agent:<preset> to run it another way";
   /** A scripted router: a change to make is coding, a review ask is review, anything else general. */
   const router = () =>
     vi.fn(async (prompt: { user: string }) => {
@@ -10663,7 +10677,7 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
     vi.mocked(makeExecutor).mockClear();
   });
 
-  it("routing off: a plain message runs defaults.agent as today — the router is never called, no route event, no routed line", async () => {
+  it("turned off (`routing: { auto: false }`): a plain message runs defaults.agent as before the router — never called, no route event, no routed line, no override hint", async () => {
     let ids = 0;
     const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
     const provider = capturingProvider();
@@ -10677,6 +10691,32 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
     expect(routeEvents(registry, "r1")).toEqual([]);
     expect(metaOf(registry, "r1")?.agentSource).toBe("default");
     expect(statuses.every((s) => !s.title.includes("routed:"))).toBe(true);
+    expect(statuses.every((s) => !s.detail?.includes(FOOTER))).toBe(true);
+  });
+
+  it("on by default: with no `routing` block a plain message routes — to review on its own model, the routed line on the card, the route event on the record, and the closed card ending with how to override", async () => {
+    let ids = 0;
+    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
+    const provider = capturingProvider();
+    const deps = makeDeps(routingUnset(YAML_FIXTURE), provider);
+    expect(deps.config.config.routing).toBeUndefined();
+    deps.runRegistry = registry;
+    deps.routeModel = router();
+    const { io, statuses, replies } = fakeIO();
+    await dispatch(deps, msg("review it for me"), io);
+    expect(deps.routeModel).toHaveBeenCalledTimes(1);
+    expect(provider.requests[0].model).toBe("review-model");
+    expect(replies).toContain("answer");
+    expect(statuses[0].title).toContain("*review* on `anthropic/review-model` · routed: review fits the request");
+    expect(routeEvents(registry, "r1")).toEqual([
+      expect.objectContaining({ type: "route", preset: "review", model: "anthropic/general-model" }),
+    ]);
+    expect(metaOf(registry, "r1")?.agentSource).toBe("route");
+    // The hint rides the close alone: a reply into the live thread would be a follow-up.
+    const closed = statuses.at(-1)!;
+    expect(closed.title).toContain("✅");
+    expect(closed.detail?.split("\n").at(-1)).toBe(FOOTER);
+    expect(statuses.slice(0, -1).every((s) => !s.detail?.includes(FOOTER))).toBe(true);
   });
 
   it("routing on, a directive on the message: untouched — the router is never called and the run is the directive's", async () => {
@@ -10737,6 +10777,7 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
     expect(statuses[0].title).toContain("*coding* on `anthropic/coding-model` · routed: coding fits the request");
     expect(statuses.every((s) => !/reply go|not started/.test(s.title))).toBe(true);
     expect(statuses.at(-1)!.title).toContain("✅");
+    expect(statuses.at(-1)!.detail?.split("\n").at(-1)).toBe(FOOTER);
     expect(routeEvents(registry, "r1")).toEqual([
       expect.objectContaining({ type: "route", preset: "coding", reason: "coding fits the request" }),
     ]);
@@ -10776,11 +10817,12 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
   // directive of its own, under the requester's permissions and the parent's
   // clock. The card and the record say what was split and why.
   describe("a compound request routes to the conductor", () => {
-    const COMPOUND_YAML =
+    const COMPOUND_YAML = routingOn(
       YAML_FIXTURE.replace(
         "    review: anthropic/review-model\n",
         "    review: anthropic/review-model\n    conductor: anthropic/conductor-model\n    research: anthropic/research-model\n",
-      ) + "routing:\n  auto: true\n";
+      ),
+    );
     const PARTS = [
       { text: "summarize the open issues in acme/api", preset: "general" },
       { text: "find out why the staging resident went down last night", preset: "research" },
