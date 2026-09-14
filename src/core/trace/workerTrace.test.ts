@@ -79,6 +79,13 @@ describe("shimRoute", () => {
     expect(shimRoute("/favicon.ico")).toBeUndefined();
     expect(shimRoute("/whatever/else")).toBe("other");
   });
+
+  it("names the model proxy's two paths as one route word, and no other /v1 path (docs/reference/specs/model-proxy.md)", () => {
+    expect(shimRoute("/v1/messages")).toBe("model-proxy");
+    expect(shimRoute("/v1/chat/completions")).toBe("model-proxy");
+    expect(shimRoute("/v1/complete")).toBe("other");
+    expect(shimRoute("/v1/messages/count_tokens")).toBe("other");
+  });
 });
 
 describe("refusalFilter / workerLogSink", () => {

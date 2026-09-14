@@ -1,12 +1,12 @@
 # Operate production
 
-Deploy outside a release, change the config, or read the span log without breaking a run in flight.
+Deploy outside a release, change the config, read the span log, or probe the model proxy without breaking a run in flight.
 
 **You need:**
 
 - The operator directory `init --cloudflare … --zone …` wrote ([Deploy](deploy.md)), or `SWITCHBOARD_DEPLOY_PROFILE` naming the profile.
 - `CLOUDFLARE_API_TOKEN` for the profile's account; no `CLOUDFLARE_ACCOUNT_ID` in the shell.
-- For `deploy restart` and the span log, an ingress bearer whose subject holds `deploy:write` or `trace:read`.
+- For `deploy restart`, the span log and the model-proxy probe, an ingress bearer whose subject holds `deploy:write` or `trace:read`.
 
 ## Read what is running
 
@@ -50,6 +50,23 @@ curl -sS -H "authorization: Bearer $SWITCHBOARD_INGRESS_TOKEN" \
 curl -sS -H "authorization: Bearer $SWITCHBOARD_INGRESS_TOKEN" \
   "$SWITCHBOARD_BASE_URL/admin/trace/log?traceId=<32 hex>&limit=5000"
 ```
+
+## Probe the model proxy
+
+The bot proxies model calls for its runs ([Model proxy](../reference/specs/model-proxy.md)): a run's bearer, presented as the API key on `POST /v1/messages` (Anthropic-shaped) or `POST /v1/chat/completions` (OpenAI-shaped), buys a call pinned to that run's model and caps, metered on its run page. To prove the path against a real run, mint a probe bearer for one that is live — it spends the run's own turns and dies with it — then make one small call.
+
+```bash
+# a live run's id: the card's Live run link, or `runs list`
+curl -sS -X POST -H "authorization: Bearer $SWITCHBOARD_INGRESS_TOKEN" -H 'content-type: application/json' \
+  -d '{"runId":"<run id>"}' "$SWITCHBOARD_BASE_URL/admin/model-proxy/bearer"
+# → 201 {"ok":true,"bearer":"sbr_<run id>.…","expiresAt":…,"model":"anthropic/…","path":"/v1/messages","turns":{"used":3,"max":60}}
+curl -sS -N -X POST -H "x-api-key: $BEARER" -H 'content-type: application/json' \
+  -d '{"model":"ignored","max_tokens":1,"stream":true,"messages":[{"role":"user","content":"Say OK."}]}' \
+  "$SWITCHBOARD_BASE_URL/v1/messages"
+# → the provider's event stream; the run page shows one more model turn with its token counts
+```
+
+`401` without the header, `403 revoked` once the run has ended, `403 turn_budget_exhausted` past the preset's turns. The OpenAI shape takes the bearer as `authorization: Bearer …`. The bot's log carries `[model-proxy] run=… turn=…` and never a body.
 
 ## For this installation
 

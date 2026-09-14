@@ -205,3 +205,6 @@ packages/switchboard/smoke.test.mts	const account = "0123456789abcdef0123456789a
 # The plan snapshots print the example profile's placeholder account (32 zeros), not an account.
 src/core/__snapshots__/capabilitySurfaces.test.ts.snap	Images: registry (version 1.2.3) — not probed (the example profile) — bot: registry.cloudflare.com/00000000000000000000000000000000/switchboard:1.2.3
 src/core/__snapshots__/capabilitySurfaces.test.ts.snap	Images: registry (version 1.2.3) — not probed (the example profile) — bot: registry.cloudflare.com/00000000000000000000000000000000/switchboard:1.2.3, resident: registry.cloudflare.com/00000000000000000000000000000000/switchboard-resident:1.2.3, sandbox: registry.cloudflare.com/00000000000000000000000000000000/switchboard-sandbox:1.2.3
+
+# The Messages API names its versions by date; this is the SDK's default version string, not an incident.
+src/channels/modelProxy.ts	export const DEFAULT_ANTHROPIC_VERSION = "2023-06-01";

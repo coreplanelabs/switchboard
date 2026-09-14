@@ -68,6 +68,7 @@ import { NO_FLEET } from "./residentFleet.js";
 import { InMemoryCoordinatorInstanceStore } from "./coordinator/instanceStore.js";
 import type { Operations } from "./operations.js";
 import type { ResidentAdminClient } from "./residentAdmin.js";
+import { BEARER_MARGIN_MS, RunBearerStore } from "./modelProxy/runBearers.js";
 
 /** `CoreDeps` plus the two backends the registry's `repo.*` commands reach
  *  through the catalogue wiring (tests inject them here; production resolves
@@ -10577,5 +10578,61 @@ workspaceDir: __WORKDIR__
     expect(t.registry.getById("run-far")).toBeNull();
     expect(t.registry.getById("run-cut")).toBeNull();
     expect((await t.store.get("run-cut"))!.status).toBe("interrupted");
+  });
+});
+
+// Feature: docs/reference/specs/model-proxy.md — the run-scoped bearer's life
+// through a dispatch: minted as the executor is provisioned, valid through the
+// model turn, revoked the moment the run finishes.
+describe("the model proxy's run bearer through dispatch()", () => {
+  it("is minted for the run before its first model turn, pinned to the resolved model and the preset's caps and hung under the request root, and is revoked once the run finishes", async () => {
+    const clock = { now: 1_700_000_000_000 };
+    const store = new RunBearerStore({ clock: () => clock.now });
+    const seen: Array<{ runId: string | undefined; verified: boolean; turns: number | undefined }> = [];
+    let runId: string | undefined;
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        // Mid-turn: the run's entry exists, a bearer issued on it verifies, and no turn has gone through the proxy.
+        const issued = runId ? store.issue(runId) : undefined;
+        const verdict = issued ? store.verify(issued.token) : undefined;
+        seen.push({ runId, verified: verdict?.ok === true, turns: verdict?.ok ? verdict.turns : undefined });
+        return { content: [{ type: "text", text: "answer" }], stopReason: "end_turn" };
+      },
+    };
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runBearers = store;
+    deps.clock = () => clock.now;
+    const base = fakeIO();
+    const io: ChannelIO = { ...base.io, runStarted: ({ id }) => void (runId = id) };
+    await dispatch(deps, msg("hello there"), io);
+    expect(base.replies).toContain("answer");
+    expect(seen).toEqual([{ runId, verified: true, turns: 0 }]);
+    const facts = store.grantOf(runId!);
+    expect(facts).toMatchObject({
+      runId,
+      modelRef: "anthropic/general-model",
+      providerName: "anthropic",
+      providerType: "anthropic",
+      model: "general-model",
+      maxTurns: 8,
+      maxTokens: 16000,
+      turns: 0,
+      revoked: true,
+      expiresAt: clock.now + 5 * 60_000 + BEARER_MARGIN_MS, // the general preset's five minutes, plus the margin
+    });
+    expect(store.issue(runId!)).toBeUndefined(); // nothing buys a call after the run's end
+  });
+
+  it("a dispatch that ends without a run — a refused agent — mints nothing, and a process without a store runs exactly as before", async () => {
+    const store = new RunBearerStore({ clock: () => 1 });
+    const deps = makeDeps(YAML_FIXTURE, capturingProvider());
+    deps.runBearers = store;
+    await dispatch(deps, msg("agent:coding do the thing"), fakeIO().io);
+    expect(store.size()).toBe(0);
+    const bare = makeDeps(YAML_FIXTURE, capturingProvider());
+    const { io, replies } = fakeIO();
+    await dispatch(bare, msg("hello there"), io);
+    expect(replies).toContain("answer");
   });
 });

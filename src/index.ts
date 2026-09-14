@@ -59,6 +59,14 @@ import { systemClock } from "./core/trace/index.js";
 import { resumeSlackIO } from "./channels/slack.js";
 import { closeReclaimedCards, markForeignLiveCards, setForeignLiveCardsSource } from "./channels/slack/statusCard.js";
 import { handleAdminCrash } from "./channels/adminCrash.js";
+import { handleAdminModelProxyBearer, MODEL_PROXY_BEARER_PATH } from "./channels/adminModelProxy.js";
+import {
+  ANTHROPIC_MESSAGES_PATH,
+  createModelProxyHandler,
+  isModelProxyPath,
+  OPENAI_CHAT_COMPLETIONS_PATH,
+} from "./channels/modelProxy.js";
+import { RunBearerStore } from "./core/modelProxy/runBearers.js";
 import { handleAdminTraceLog, TRACE_LOG_PATH } from "./channels/adminTraceLog.js";
 import { createSpanLog } from "./core/trace/spanLog.js";
 import { handleAdminRestartAuthorize } from "./channels/adminRestartAuthorize.js";
@@ -338,10 +346,15 @@ export async function runBot(): Promise<void> {
   });
   fleetWatcher?.start();
   const residentFleet: ResidentFleetFacts = fleetWatcher ?? NO_FLEET;
+  // The run-scoped bearers the model proxy honours (docs/reference/specs/model-proxy.md):
+  // minted by the provision stage as a run's executor attaches, revoked as the
+  // run ends; in-process, so a restart drops them with the runs that held them.
+  const runBearers = new RunBearerStore({ clock: systemClock });
   const deps: CoreDeps = {
     config,
     providers,
     spanLog,
+    runBearers,
     capabilities,
     residentFleet,
     // What this process is, for the About block: the package version and the image's stamp.
@@ -481,6 +494,17 @@ export async function runBot(): Promise<void> {
   if (process.env.PORT) {
     const ingress = createIngressHandler(deps, { auth, publicBaseUrl: process.env.PUBLIC_BASE_URL });
     const mcp = createMcpHandler(deps, { auth, commands, grantsFor: (id) => config.grantsFor(id) });
+    // The model proxy (docs/reference/specs/model-proxy.md): a run's bearer buys
+    // model calls through this process — pinned to its preset's model and caps,
+    // metered as its own `model.turn` spans, forwarded to the real provider with
+    // the real key from this process's secrets. The shim forwards both paths
+    // blind and the Access gate does not cover them: the bearer is the whole door.
+    const modelProxy = createModelProxyHandler({
+      bearers: runBearers,
+      providers: () => config.config.providers,
+      secrets: processSecrets,
+      clock: systemClock,
+    });
     // The bot steps a ship coordinator calls (docs/reference/specs/http-ingress.md
     // item 9): `POST /admin/coordinator/spawn|read-record|pr-check`, and the
     // `authorize` question the shim asks before it creates an instance — for
@@ -676,6 +700,20 @@ export async function runBot(): Promise<void> {
         mcp(req, res);
         return;
       }
+      if (isModelProxyPath(path)) {
+        modelProxy(req, res);
+        return;
+      }
+      // An operator's bearer for a live run (a `deploy:write` ingress bearer, like
+      // the restart and the crash), so the proxy can be probed against a real run.
+      if (path === MODEL_PROXY_BEARER_PATH) {
+        handleAdminModelProxyBearer(req, res, {
+          tokens: processSecrets.get("SWITCHBOARD_INGRESS_TOKENS"),
+          grantsFor: (id) => config.grantsFor(id),
+          bearers: runBearers,
+        });
+        return;
+      }
       // The Worker shim's question before `deploy restart` stops this container
       // (deploy/cloudflare/worker.ts): does the bearer's actor hold `deploy:write`?
       // The Worker holds the token map; the grants are this config's.
@@ -842,7 +880,7 @@ export async function runBot(): Promise<void> {
       // (~seconds) for an external prober to land inside the window itself.
       httpListeningAt = systemClock();
       console.log(
-        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + ${liveViewState} + ${schedulesState} + ${residentsState} + ${costsState} + ${deliveryState} + ${commandHttpState} + /docs → ${PROJECT_DOCS_URL}; ` +
+        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + model proxy (POST ${ANTHROPIC_MESSAGES_PATH}, POST ${OPENAI_CHAT_COMPLETIONS_PATH}) + ${liveViewState} + ${schedulesState} + ${residentsState} + ${costsState} + ${deliveryState} + ${commandHttpState} + /docs → ${PROJECT_DOCS_URL}; ` +
           `${tokenCount > 0 ? `${tokenCount} ingress token(s)` : "ingress + MCP DISABLED — no tokens configured"}; ${accessState})`,
       );
     });

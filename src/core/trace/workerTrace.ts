@@ -52,6 +52,9 @@ export function shimRoute(pathname: string): string | undefined {
   if (pathname === "/costs" || pathname.startsWith("/costs/")) return "costs";
   if (pathname.startsWith("/api/")) return "api";
   if (pathname.startsWith("/admin/")) return "admin";
+  // The model proxy's two routes (docs/reference/specs/model-proxy.md): a bounded
+  // request per model call, forwarded to the container like everything else.
+  if (pathname === "/v1/messages" || pathname === "/v1/chat/completions") return "model-proxy";
   if (pathname === "/docs" || pathname.startsWith("/docs/")) return "docs";
   if (pathname === "/" || pathname === "/index.html") return "page";
   return "other";

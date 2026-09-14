@@ -39,6 +39,7 @@ import {
   attachWorkspace,
   budgetClipLabel,
   composePrompt,
+  mintRunBearer,
   openAckCard,
   registerRun,
   reserveRun,
@@ -224,7 +225,13 @@ export async function dispatch(
   // once. A writer's `failedAfterFinish` flips a run whose loop completed but
   // whose card close or reply threw to `failed` — the thread never saw the
   // answer — while a stop that already ended it keeps its `stopped_*` status.
-  const ending = createRunEnding({ registry: deps.runRegistry ?? defaultRunRegistry });
+  // A run's model-proxy bearer (docs/reference/specs/model-proxy.md) is revoked
+  // the moment the run is reported finished, before the seal: no call after the
+  // run's end buys a model turn.
+  const ending = createRunEnding({
+    registry: deps.runRegistry ?? defaultRunRegistry,
+    onFinished: (id) => void deps.runBearers?.revoke(id),
+  });
   // The ack card while setup is still in progress. Cleared the moment it
   // becomes the run card, so the outer catch closes ONLY a card that setup
   // left open — a run failure is closed (with its checklist) by the run loop.
@@ -587,6 +594,13 @@ export async function dispatch(
       if (executor.release) await executor.release("always").catch(() => {});
       return ended;
     }
+    // The run's model-proxy bearer (dispatch/provision.ts; docs/reference/specs/model-proxy.md):
+    // minted the moment the executor is provisioned, bound to this run, pinned
+    // to its preset's model and caps, expiring at its budget plus the margin.
+    // Revoked by the ending above when the run finishes, and by the outer
+    // finally for a run that never reached its loop. Nothing consumes it yet
+    // but the proxy's own probe; a harness in the workspace will.
+    mintRunBearer(deps, { runId, agent, profile, resolved, registry, root, clock });
 
     // Attach-head check (dispatch/authorize.ts): for a PR review on the resident
     // path, the attached sha against the resolved PR head, before any model turn.
@@ -857,6 +871,10 @@ export async function dispatch(
     // branch that returned early) is sealed with no `replyOk`, and any record
     // still registered is written.
     ending.drain(undefined);
+    // …and a bearer minted for a run that never reached its loop (a head gate
+    // after the attach, a throw in the prompt) is revoked here — the ending's
+    // hook ran only for a run the loop finished.
+    if (registered) deps.runBearers?.revoke(registered.id);
     // A resumed dispatch that ended before its run loop started — an unknown
     // provider, a refusal, a gate — has adopted a row it will never finish
     // (item 38). Close it `interrupted` here, or the sweep would relaunch it

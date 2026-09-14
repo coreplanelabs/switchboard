@@ -168,4 +168,26 @@ describe("createRunEnding — seal after the reply, records after the seal", () 
     expect(() => ending.drain(true)).not.toThrow();
     expect(lines).toEqual(["[ending] seal r1: registry gone"]);
   });
+
+  it("finished(id) runs the onFinished hook at once — before any seal, once per finish — and a throwing hook is logged with the run id and never reaches the caller (docs/reference/specs/model-proxy.md)", () => {
+    const reg = fakeRegistry();
+    const lines: string[] = [];
+    const revoked: string[] = [];
+    const ending = createRunEnding({
+      registry: reg,
+      log: (l) => void lines.push(l),
+      onFinished: (id) => {
+        revoked.push(id);
+        if (id === "boom") throw new Error("store gone");
+      },
+    });
+    ending.finished("r1");
+    expect(revoked).toEqual(["r1"]);
+    expect(reg.calls).toEqual([]); // the hook ran before any seal
+    expect(() => ending.finished("boom")).not.toThrow();
+    expect(revoked).toEqual(["r1", "boom"]);
+    expect(lines).toEqual(["[ending] finished boom: store gone"]);
+    ending.drain(true);
+    expect(revoked).toEqual(["r1", "boom"]); // the drain never re-runs it
+  });
 });

@@ -54,6 +54,10 @@ export interface RunEndingDeps {
   registry: Pick<RunRegistry, "seal">;
   /** Where a writer's failure is reported — the run id and the error's message only, never the record. */
   log?: (line: string) => void;
+  /** Runs the moment a run is reported finished, before its seal — for what must
+   *  stop buying the run anything more: its model-proxy bearer is revoked here
+   *  (docs/reference/specs/model-proxy.md). A throwing hook is logged with the run id only. */
+  onFinished?: (runId: string) => void;
 }
 
 export function createRunEnding(deps: RunEndingDeps): RunEnding {
@@ -91,6 +95,11 @@ export function createRunEnding(deps: RunEndingDeps): RunEnding {
   return {
     finished(runId, hooks) {
       finished.push({ id: runId, ...(hooks?.afterSeal ? { afterSeal: hooks.afterSeal } : {}) });
+      try {
+        deps.onFinished?.(runId);
+      } catch (err) {
+        log(`[ending] finished ${runId}: ${describe(err)}`);
+      }
     },
     register(entry) {
       pending.push({ ...entry, failedAfterFinish: false });
