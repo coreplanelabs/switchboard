@@ -4,7 +4,7 @@ import type { RunRecord } from "../../src/core/runRecord.ts";
 import { FRICTION_CATEGORIES } from "../../src/core/runFriction.ts";
 import { LEASE_MS } from "../../src/core/runLedger/types.ts";
 import type { CoordinatorInstance, CoordinatorUnit } from "../../src/core/coordinator/contract.ts";
-import type { RunHistoryDO } from "./worker.ts";
+import type { RunHistoryDO, SessionLogDO } from "./worker.ts";
 
 // Feature: docs/reference/specs/run-history.md items 28–34 — the live-run ledger on the
 // RunHistoryDO: claim (one live run per thread), the fence on every owner
@@ -763,5 +763,222 @@ describe("run ledger — the coordinator's unit rows (item 50)", () => {
         )
       ).status,
     ).toBe(401);
+  });
+});
+
+// Feature: docs/reference/specs/session-log.md item 7 — the sessions registry
+// on RunHistoryDO and the sweep's drop: a session object goes only when every
+// kept run of the session is gone and no live run holds its thread, owner row
+// first, then the rows.
+describe("the sessions registry and the sweep's drop of a session log", () => {
+  const sql = <T extends Record<string, unknown>>(key: string, query: string, ...params: unknown[]) =>
+    runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_inst, state) =>
+      state.storage.sql.exec<T>(query, ...params).toArray(),
+    );
+  const sessionOf = (threadKey: string, agent: string) => `${threadKey}:${agent}`;
+  const sessionStub = (skey: string) => env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(skey));
+  const withSession = (threadKey: string, agent: string, seedFrom: number) => ({
+    session: { key: sessionOf(threadKey, agent), seedFrom, request: seedFrom, range: { from: seedFrom } },
+  });
+  const seedRows = async (skey: string, gen: string, runId: string, count: number) => {
+    await post("/runs/session/owner", { key: skey, runId, gen });
+    await post("/runs/session/write", {
+      key: skey,
+      gen,
+      rows: Array.from({ length: count }, (_, i) => ({
+        idx: i,
+        part: 0,
+        json: JSON.stringify({ role: "user", part: { type: "text", text: `turn ${i}` } }),
+      })),
+      attachments: [],
+    });
+  };
+
+  it("a claim with a session registers it under its thread and agent; the finish stamps the run's row with the session key, refreshes the registry's finish time and the object's bytes", async () => {
+    const key = storeKey();
+    const thread = "slack:C1:1.0";
+    const skey = sessionOf(thread, "review");
+    expect(
+      (
+        await post(
+          "/runs/claim",
+          claimBody(key, "r1", thread, "g1", {
+            meta: {
+              agent: "review",
+              channelId: "slack:C1",
+              userId: "u",
+              threadKey: thread,
+              ...withSession(thread, "review", 0),
+            },
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(await sql(key, `SELECT key, thread_key, agent, last_finished_at, bytes FROM sessions`)).toEqual([
+      { key: skey, thread_key: thread, agent: "review", last_finished_at: 0, bytes: 0 },
+    ]);
+    await seedRows(skey, "g1", "r1", 3);
+    const rec = { ...record("r1", thread), session: { key: skey, seedFrom: 0, request: 0, range: { from: 0, to: 2 } } };
+    expect((await post("/runs/finish", { storeKey: key, runId: "r1", gen: "g1", record: rec })).status).toBe(200);
+    expect(await sql(key, `SELECT run_id, session_key FROM runs`)).toEqual([{ run_id: "r1", session_key: skey }]);
+    const [row] = await sql<{ last_finished_at: number; bytes: number }>(
+      key,
+      `SELECT last_finished_at, bytes FROM sessions WHERE key = ?`,
+      skey,
+    );
+    expect(row.last_finished_at).toBe(rec.finishedAt);
+    expect(row.bytes).toBeGreaterThan(0);
+    // The finish cleared nothing: the log's rows stay for the next run.
+    expect((await post("/runs/session/tail", { key: skey })).data).toEqual({ next: 3 });
+    // A record without a session leaves the column null.
+    await post("/runs/put", { storeKey: key, record: record("plain", "slack:C1:9.0") });
+    expect(await sql(key, `SELECT session_key FROM runs WHERE run_id = 'plain'`)).toEqual([{ session_key: null }]);
+  });
+
+  it("the sweep drops a session object only once every kept run of it is gone and no live run holds the thread — owner cleared, rows gone, registry row deleted; a session with a kept run or a live thread stays", async () => {
+    const key = storeKey();
+    const now = Date.now();
+    const DAY = 86_400_000;
+    const gone = "slack:C1:1.0";
+    const kept = "slack:C1:2.0";
+    const live = "slack:C1:3.0";
+    const sGone = sessionOf(gone, "review");
+    const sKept = sessionOf(kept, "review");
+    const sLive = sessionOf(live, "review");
+    const sLiveOther = sessionOf(live, "coding");
+    // Three finished sessions: one whose only run is old, one whose run is fresh,
+    // one whose old run finished but whose thread has a live run of another agent.
+    for (const [runId, thread, skey, finishedAt] of [
+      ["r-gone", gone, sGone, now - 40 * DAY],
+      ["r-kept", kept, sKept, now - 1000],
+      ["r-live", live, sLive, now - 40 * DAY],
+    ] as const) {
+      await seedRows(skey, "g1", runId, 2);
+      await post(
+        "/runs/claim",
+        claimBody(key, runId, thread, "g1", {
+          meta: {
+            agent: "review",
+            channelId: "slack:C1",
+            userId: "u",
+            threadKey: thread,
+            ...withSession(thread, "review", 0),
+          },
+        }),
+      );
+      const rec = {
+        ...record(runId, thread),
+        startedAt: finishedAt - 5000,
+        finishedAt,
+        session: { key: skey, seedFrom: 0, request: 0, range: { from: 0, to: 1 } },
+      };
+      await post("/runs/finish", { storeKey: key, runId, gen: "g1", record: rec });
+    }
+    // The live run on the third thread, a coding session with no record yet.
+    await seedRows(sLiveOther, "g1", "r-live-2", 1);
+    await post(
+      "/runs/claim",
+      claimBody(key, "r-live-2", live, "g1", {
+        meta: {
+          agent: "coding",
+          channelId: "slack:C1",
+          userId: "u",
+          threadKey: live,
+          ...withSession(live, "coding", 0),
+        },
+      }),
+    );
+    expect((await sql(key, `SELECT key FROM sessions ORDER BY key`)).map((r) => r.key)).toEqual(
+      [sGone, sKept, sLive, sLiveOther].sort(),
+    );
+    // Retention keeps 30 days: the two old records fall out at the sweep.
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), (inst: RunHistoryDO) => inst.alarm());
+    expect((await sql(key, `SELECT run_id FROM runs ORDER BY run_id`)).map((r) => r.run_id)).toEqual(["r-kept"]);
+    expect((await sql(key, `SELECT key FROM sessions ORDER BY key`)).map((r) => r.key)).toEqual(
+      [sKept, sLive, sLiveOther].sort(),
+    );
+    // The dropped object: owner gone (a late write is unknown-run), rows gone.
+    expect((await post("/runs/session/write", { key: sGone, gen: "g1", rows: [], attachments: [] })).data).toEqual({
+      ok: false,
+      reason: "unknown-run",
+    });
+    expect((await post("/runs/session/tail", { key: sGone })).data).toEqual({ next: 0 });
+    // The kept session and both sessions of the live thread are untouched.
+    expect((await post("/runs/session/tail", { key: sKept })).data).toEqual({ next: 2 });
+    expect((await post("/runs/session/tail", { key: sLive })).data).toEqual({ next: 2 });
+    expect((await post("/runs/session/tail", { key: sLiveOther })).data).toEqual({ next: 1 });
+    expect(await runInDurableObject(sessionStub(sLive), (inst: SessionLogDO) => inst.rowCount())).toBe(2);
+  });
+
+  it("the drop decides on what it re-reads at each drop, not on the candidate list: a run that went live on the thread, or a record that named the session, between the list and the drop keeps the session and its registry row", async () => {
+    const key = storeKey();
+    const now = Date.now();
+    const DAY = 86_400_000;
+    const threadA = "slack:C1:11.0";
+    const threadB = "slack:C1:12.0";
+    const sA = sessionOf(threadA, "review");
+    const sB = sessionOf(threadB, "review");
+    for (const [runId, thread, skey] of [
+      ["r-a", threadA, sA],
+      ["r-b", threadB, sB],
+    ] as const) {
+      await seedRows(skey, "g1", runId, 2);
+      await post(
+        "/runs/claim",
+        claimBody(key, runId, thread, "g1", {
+          meta: {
+            agent: "review",
+            channelId: "slack:C1",
+            userId: "u",
+            threadKey: thread,
+            ...withSession(thread, "review", 0),
+          },
+        }),
+      );
+      await post("/runs/finish", {
+        storeKey: key,
+        runId,
+        gen: "g1",
+        record: {
+          ...record(runId, thread),
+          startedAt: now - 40 * DAY - 5000,
+          finishedAt: now - 40 * DAY,
+          session: { key: skey, seedFrom: 0, request: 0, range: { from: 0, to: 1 } },
+        },
+      });
+    }
+    // The list the sweep's transaction would produce once retention drops both old records.
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (_inst, state) => {
+      state.storage.sql.exec(`DELETE FROM run_events WHERE run_id IN ('r-a', 'r-b')`);
+      state.storage.sql.exec(`DELETE FROM runs WHERE run_id IN ('r-a', 'r-b')`);
+    });
+    const candidates = [
+      { key: sA, threadKey: threadA },
+      { key: sB, threadKey: threadB },
+    ];
+    // Between the list and the drop: a new run goes live on thread A, and a
+    // fresh record names session B.
+    await post(
+      "/runs/claim",
+      claimBody(key, "r-a2", threadA, "g1", {
+        meta: { agent: "coding", channelId: "slack:C1", userId: "u", threadKey: threadA },
+      }),
+    );
+    await post("/runs/put", {
+      storeKey: key,
+      record: { ...record("r-b2", threadB), session: { key: sB, seedFrom: 2, request: 2, range: { from: 2, to: 3 } } },
+    });
+    const dropped = await runInDurableObject(stub, (inst: RunHistoryDO) => inst.sweepSessions(candidates));
+    expect(dropped).toBe(0);
+    expect((await post("/runs/session/tail", { key: sA })).data).toEqual({ next: 2 });
+    expect((await post("/runs/session/tail", { key: sB })).data).toEqual({ next: 2 });
+    expect((await sql(key, `SELECT key FROM sessions ORDER BY key`)).map((r) => r.key)).toEqual([sA, sB].sort());
+    // Once thread A's run finishes with no record and session B's record is gone, the same list drops both.
+    await post("/runs/abandon", { storeKey: key, runId: "r-a2", gen: "g1" });
+    await post("/runs/delete", { storeKey: key, id: "r-b2" });
+    expect(await runInDurableObject(stub, (inst: RunHistoryDO) => inst.sweepSessions(candidates))).toBe(2);
+    expect((await post("/runs/session/tail", { key: sA })).data).toEqual({ next: 0 });
+    expect(await sql(key, `SELECT key FROM sessions`)).toEqual([]);
   });
 });

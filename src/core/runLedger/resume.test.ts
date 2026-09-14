@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../../providers/types.js";
-import { planResume, settlementFor, type KnownTool, type ToolUsePart } from "./resume.js";
+import { planResume, settlementFor, transcriptSource, type KnownTool, type ToolUsePart } from "./resume.js";
 import type { StepRecord } from "./types.js";
 
 // The resume plan (docs/reference/specs/run-history.md item 37): the pure rule for what a
@@ -50,7 +50,12 @@ const step = (over: Partial<StepRecord>): StepRecord => ({
   ...over,
 });
 
-const complete = (messages: ChatMessage[]) => ({ complete: true as const, turns: messages.length, messages });
+const complete = (messages: ChatMessage[]) => ({
+  complete: true as const,
+  turns: messages.length,
+  messages,
+  compactions: [],
+});
 
 describe("settlementFor — D4", () => {
   it("the default is the restart result: bash, GitHub writes and any other mutating tool (a bridged MCP tool) get it; only side-effect-free tools and the rerun-safe list run again; an unknown tool gets the not-available result", () => {
@@ -199,7 +204,7 @@ describe("planResume", () => {
     expect(planResume({ ...base, lastStep: null })).toMatchObject({ kind: "interrupted", why: /no step record/ });
     expect(
       planResume({
-        transcript: { complete: false, turns: 1, messages: [user("go")], gap: "turn 1 is missing" },
+        transcript: { complete: false, turns: 1, messages: [user("go")], compactions: [], gap: "turn 1 is missing" },
         lastStep: step({ turnIndex: 2 }),
         tools: TOOLS,
       }),
@@ -262,5 +267,29 @@ describe("planResume", () => {
       tools: TOOLS,
     });
     expect(plan).toMatchObject({ kind: "resume", remainingMs: 10 * 60_000, settlements: [], step: 0 });
+  });
+
+  // docs/reference/specs/session-log.md item 3: the rows a resume rebuilds come
+  // from the run's session log from `seedFrom`, or — for a row claimed before
+  // the log existed — from the run's own transcript object.
+  it("transcriptSource: a row with a session reads the log from its seedFrom; a row without one reads its own object", () => {
+    const meta = { channelId: "slack:C1", userId: "u", threadKey: "slack:C1:1.0" };
+    expect(
+      transcriptSource({
+        ...meta,
+        session: { key: "slack:C1:1.0:coding", seedFrom: 148, request: 213, range: { from: 213 } },
+      }),
+    ).toEqual({ kind: "session", key: "slack:C1:1.0:coding", from: 148 });
+    expect(transcriptSource(meta)).toEqual({ kind: "run" });
+  });
+
+  it("the plan carries the transcript's compaction rows, so a rebuilt session keeps pi's summary where it sat", () => {
+    const compactions = [{ before: 1, entry: { summary: "so far", tokensBefore: 10 } }];
+    const plan = planResume({
+      transcript: { complete: true, turns: 3, messages: [user("go"), user("results")], compactions },
+      lastStep: step({ step: 1, turnIndex: 3, inFlight: [] }),
+      tools: TOOLS,
+    });
+    expect(plan).toMatchObject({ kind: "resume", compactions });
   });
 });

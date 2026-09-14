@@ -108,7 +108,12 @@ describe("reclaimRuns", () => {
     expect(r.row).toMatchObject({ runId: "r1", ownerGen: "g2", phase: "live" }); // ours now
     expect(r.reclaimedFrom).toBe("live");
     expect(r.lastStep).toMatchObject({ step: 1, inFlight: [{ callId: "c1", tool: "bash" }] });
-    expect(r.transcript).toEqual({ complete: true, turns: 2, messages: [user("go"), assistant("looking")] });
+    expect(r.transcript).toEqual({
+      complete: true,
+      turns: 2,
+      messages: [user("go"), assistant("looking")],
+      compactions: [],
+    });
     expect(r.events.map((e) => e.type)).toEqual(["input", "run_meta", "tool_call"]);
     expect(r.inbox).toEqual([{ seq: 1, message: { text: "also the numbers", userId: "slack:UBOB" } }]); // the resume folds it in
     expect(ledger.live.has("r1")).toBe(true);

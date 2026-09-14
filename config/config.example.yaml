@@ -438,6 +438,8 @@ workspaceDir: ./workspaces
 #   retentionDays: 30    # days a finished run stays readable (1–365; default 30)
 #   maxRuns: 5000        # newest runs kept (1–20000; default 5000)
 #   maxBytes: 2147483648 # total stored bytes kept (16 MiB–8 GiB; default 2 GiB)
+#   sessionLogMaxBytes: 209715200 # the most bytes one thread-and-agent session log holds before its
+#                                 # oldest tool results are replaced by a marker (16 MiB–2 GiB; default 200 MiB)
 #   includeContext: true # include the thread-context turns fed to the model in the
 #                        # run stream — live page and persisted record (default true)
 #   store: worker        # `worker` (default when `worker` is set) or `file` — an

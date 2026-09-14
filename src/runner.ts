@@ -22,6 +22,7 @@ import {
 import type { RunControl } from "./core/runRegistry/runControl.js";
 import { followUpPrompt, followUpSnippet, type FollowUpInbox, type FollowUpInput } from "./core/threadAdmission.js";
 import type { Settlement } from "./core/runLedger/resume.js";
+import type { CompactionEntry } from "./core/runLedger/types.js";
 import { ExecCapacityError, ExecHealthTracker, ExecInfraError } from "./execution/executor.js";
 import { TracingExecutor } from "./execution/tracingExecutor.js";
 import { TOOLSETS, type RunnableTool, type ToolContext } from "./tools/workspace.js";
@@ -133,6 +134,10 @@ export interface StepReport {
   turns: ChatMessage[];
   /** The index of `turns[0]` in the run's conversation (`messages` counts from 0). */
   firstIdx: number;
+  /** pi's compaction entry, when the harness saw one since the previous report
+   *  (docs/reference/specs/session-log.md item 6): the ledger stores it as the row
+   *  after `turns`, and it counts as one turn of the conversation. */
+  compaction?: CompactionEntry;
   /** The tool calls this step is about to dispatch, by call id. */
   inFlight: { callId: string; tool: string }[];
   turn: number;

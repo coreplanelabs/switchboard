@@ -15,8 +15,17 @@
 
 import type { ChatMessage, ContentPart } from "../../providers/types.js";
 import { transcriptCompleteness } from "./decisions.js";
-import type { AssembledTranscript } from "./transcript.js";
-import type { StepRecord } from "./types.js";
+import type { AssembledCompaction, AssembledTranscript } from "./transcript.js";
+import type { LiveRunMeta, StepRecord } from "./types.js";
+
+/** Where a reclaimed run's rows are (docs/reference/specs/session-log.md item 3): its
+ *  session log from the index its seed began at, or — for a row claimed before
+ *  the log existed — the run's own transcript object. */
+export type TranscriptSource = { kind: "session"; key: string; from: number } | { kind: "run" };
+
+export function transcriptSource(meta: LiveRunMeta): TranscriptSource {
+  return meta.session ? { kind: "session", key: meta.session.key, from: meta.session.seedFrom } : { kind: "run" };
+}
 
 /** The tool_use content part, as the runner names it. */
 export type ToolUsePart = Extract<ContentPart, { type: "tool_use" }>;
@@ -36,6 +45,9 @@ export type ResumePlan =
       kind: "resume";
       /** The exact conversation the model had, from the ledger. */
       messages: ChatMessage[];
+      /** pi's compaction entries among those messages (session-log item 6), so
+       *  a rebuilt session file keeps each summary where pi wrote it. */
+      compactions: AssembledCompaction[];
       /** The calls of the last assistant turn, each with how it is settled — empty
        *  when nothing was in flight (killed between steps, or before the first). */
       settlements: Settlement[];
@@ -127,6 +139,7 @@ export function planResume(input: {
       return {
         kind: "resume",
         messages,
+        compactions: transcript.compactions,
         settlements: [],
         stepRecorded: true,
         inboxConsumedSeq: lastStep.inboxConsumedSeq,
@@ -149,6 +162,7 @@ export function planResume(input: {
     return {
       kind: "resume",
       messages,
+      compactions: transcript.compactions,
       settlements: calls.map((c) => settlementFor(c, tools)),
       stepRecorded: true,
       inboxConsumedSeq: lastStep.inboxConsumedSeq,
@@ -169,6 +183,7 @@ export function planResume(input: {
   return {
     kind: "resume",
     messages,
+    compactions: transcript.compactions,
     settlements: calls.map((c) => ({ toolUse: c, action: "rerun" as const })),
     stepRecorded: false,
     inboxConsumedSeq: lastStep.inboxConsumedSeq,

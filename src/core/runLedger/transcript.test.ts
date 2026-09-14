@@ -99,7 +99,7 @@ describe("assembleTranscript — the array the runner had, or the gap", () => {
     const attachments = seed.flatMap((m, i) => turnRows(i, m).attachments);
     const shuffled = [...rows].reverse();
     const out = assembleTranscript(shuffled, attachments);
-    expect(out).toEqual({ complete: true, turns: 2, messages: seed });
+    expect(out).toEqual({ complete: true, turns: 2, messages: seed, compactions: [] });
   });
 
   it("a missing turn or a missing part makes the transcript incomplete and names the gap; the turns before the gap are kept", () => {
@@ -111,6 +111,7 @@ describe("assembleTranscript — the array the runner had, or the gap", () => {
       complete: false,
       turns: 1,
       messages: [{ role: "user", content: [text("a")] }],
+      compactions: [],
       gap: "turn 1 is missing",
     });
     const parts = [
@@ -139,6 +140,73 @@ describe("assembleTranscript — the array the runner had, or the gap", () => {
   });
 
   it("no rows → an empty, complete transcript of zero turns", () => {
-    expect(assembleTranscript([], [])).toEqual({ complete: true, turns: 0, messages: [] });
+    expect(assembleTranscript([], [])).toEqual({ complete: true, turns: 0, messages: [], compactions: [] });
+  });
+});
+
+// docs/reference/specs/session-log.md: a run's rows sit at its log indices, and
+// pi's compaction entry is a row of its own between the turns.
+describe("the session log's rows — a base index, and compaction rows between turns", () => {
+  const user = (t: string): ChatMessage => ({ role: "user", content: [text(t)] });
+  const assistant = (t: string): ChatMessage => ({ role: "assistant", content: [text(t)] });
+
+  it("rows read from a log index re-base to a contiguous conversation from 0, counting every row index", () => {
+    const rows = [...turnRows(148, user("a")).rows, ...turnRows(149, assistant("b")).rows];
+    const out = assembleTranscript(rows, [], 148);
+    expect(out).toEqual({ complete: true, turns: 2, messages: [user("a"), assistant("b")], compactions: [] });
+    // Read without the base, the same rows are a gap at turn 0.
+    expect(assembleTranscript(rows, [])).toMatchObject({ complete: false, turns: 0, gap: "turn 0 is missing" });
+  });
+
+  it("a compaction row is one row with no parts of its own; it occupies an index, joins no message, and names the message it precedes", () => {
+    const entry = {
+      summary: "the user asked for X; the tests failed on Y",
+      tokensBefore: 150_000,
+      firstKeptEntryId: "abc123",
+    };
+    const { rows, attachments } = turnRows(3, { compaction: entry });
+    expect(attachments).toEqual([]);
+    expect(rows).toEqual([{ idx: 3, part: 0, json: JSON.stringify({ compaction: entry }) }]);
+    const all = [
+      ...turnRows(0, user("go")).rows,
+      ...turnRows(1, assistant("working")).rows,
+      ...turnRows(2, user("results")).rows,
+      ...rows,
+      ...turnRows(4, assistant("after")).rows,
+    ];
+    expect(assembleTranscript(all, [])).toEqual({
+      complete: true,
+      turns: 5,
+      messages: [user("go"), assistant("working"), user("results"), assistant("after")],
+      compactions: [{ before: 3, entry }],
+    });
+  });
+
+  it("a compaction row's keptFrom, a log index, becomes the index of the message pi kept first; one outside the read range is dropped", () => {
+    const entry = { summary: "s", keptFrom: 150 };
+    const all = [
+      ...turnRows(148, user("a")).rows,
+      ...turnRows(149, assistant("b")).rows,
+      ...turnRows(150, user("c")).rows,
+      ...turnRows(151, { compaction: entry }).rows,
+      ...turnRows(152, assistant("d")).rows,
+    ];
+    expect(assembleTranscript(all, [], 148).compactions).toEqual([{ before: 3, entry, keptBefore: 2 }]);
+    expect(assembleTranscript(all, [], 148).messages).toHaveLength(4);
+    const outside = [
+      ...turnRows(148, user("a")).rows,
+      ...turnRows(149, { compaction: { summary: "s", keptFrom: 20 } }).rows,
+    ];
+    expect(assembleTranscript(outside, [], 148).compactions).toEqual([
+      { before: 1, entry: { summary: "s", keptFrom: 20 } },
+    ]);
+  });
+
+  it("a compaction row at the end of the rows is a complete transcript whose last message is the turn before it", () => {
+    const all = [...turnRows(0, user("go")).rows, ...turnRows(1, { compaction: { summary: "s" } }).rows];
+    const out = assembleTranscript(all, []);
+    expect(out.complete).toBe(true);
+    expect(out.turns).toBe(2);
+    expect(out.messages).toEqual([user("go")]);
   });
 });

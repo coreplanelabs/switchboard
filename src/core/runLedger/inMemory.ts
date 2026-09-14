@@ -2,7 +2,7 @@
 // against, applying the same pure decisions the Durable Object applies. It
 // also documents the storage shape in the plainest form.
 
-import type { RunRecord } from "../runRecord.js";
+import { utf8ByteLength, type RunRecord } from "../runRecord.js";
 import {
   checkFence,
   decideClaim,
@@ -12,6 +12,14 @@ import {
   selectReclaim,
 } from "./decisions.js";
 import type { FinishResult, HeartbeatResult, RunLedger } from "./ledger.js";
+import {
+  attachmentRefsOf,
+  DEFAULT_SESSION_LOG_MAX_BYTES,
+  droppedToolResultRow,
+  planSessionTrim,
+  rowKind,
+  tailCut,
+} from "./sessionLog.js";
 import { assembleTranscript, turnRows, type AssembledTranscript } from "./transcript.js";
 import type {
   AppendableEvent,
@@ -36,13 +44,30 @@ interface Transcript {
   attachments: TranscriptAttachment[];
 }
 
+/** One session log (docs/reference/specs/session-log.md): the rows of every run
+ *  of a thread-and-agent session, the run whose writes land right now, and the
+ *  byte budget the log is held to. */
+export interface SessionLog {
+  owner?: { runId: string; gen: string };
+  rows: TranscriptRow[];
+  attachments: TranscriptAttachment[];
+  maxBytes: number;
+  /** The `(idx, part)` keys the byte policy already replaced, so a pass never picks them again. */
+  trimmed: Set<string>;
+}
+
+/** A marker's bytes, for the trim plan's first estimate; the pass re-measures. */
+const TRIM_MARKER_BYTES_ESTIMATE = 260;
+
 export class InMemoryRunLedger implements RunLedger {
   readonly live = new Map<string, LiveRunRow>();
   readonly steps = new Map<string, StepRecord[]>();
   readonly events = new Map<string, AppendableEvent[]>();
   readonly inbox = new Map<string, InboxItem[]>();
   readonly jobs = new Map<string, RunJob[]>();
+  /** The transcript objects of runs claimed before the session log existed. */
   readonly transcripts = new Map<string, Transcript>();
+  readonly sessions = new Map<string, SessionLog>();
   readonly finished = new Map<string, RunRecord>();
 
   constructor(private readonly now: () => number = Date.now) {}
@@ -109,24 +134,53 @@ export class InMemoryRunLedger implements RunLedger {
     return decision;
   }
 
-  private writeTurns(runId: string, gen: string, turns: TranscriptTurn[]): FenceResult {
+  /** The rows of `turns`, into `target` under the same `(idx, part)` upsert the objects apply. */
+  private static append(
+    target: { rows: TranscriptRow[]; attachments: TranscriptAttachment[] },
+    turns: TranscriptTurn[],
+  ) {
+    for (const turn of turns) {
+      const { rows, attachments } = turnRows(
+        turn.idx,
+        "message" in turn ? turn.message : { compaction: turn.compaction },
+      );
+      for (const row of rows) {
+        const at = target.rows.findIndex((r) => r.idx === row.idx && r.part === row.part);
+        if (at >= 0) target.rows[at] = row;
+        else target.rows.push(row);
+      }
+      target.attachments.push(...attachments);
+    }
+  }
+
+  private writeTurns(runId: string, gen: string, turns: TranscriptTurn[], session?: string): FenceResult {
+    if (session !== undefined) {
+      const log = this.sessions.get(session);
+      if (!log?.owner) return { ok: false, reason: "unknown-run" };
+      if (log.owner.gen !== gen) return { ok: false, reason: "fenced" };
+      InMemoryRunLedger.append(log, turns);
+      this.enforceBytePolicy(session);
+      return { ok: true };
+    }
     const t = this.transcripts.get(runId);
     if (!t) return { ok: false, reason: "unknown-run" };
     if (t.ownerGen !== gen) return { ok: false, reason: "fenced" };
-    for (const turn of turns) {
-      const { rows, attachments } = turnRows(turn.idx, turn.message);
-      t.rows.push(...rows);
-      t.attachments.push(...attachments);
-    }
+    InMemoryRunLedger.append(t, turns);
     return { ok: true };
   }
 
-  async seed(runId: string, gen: string, turns: TranscriptTurn[]): Promise<FenceResult> {
-    return this.writeTurns(runId, gen, turns);
+  async seed(runId: string, gen: string, turns: TranscriptTurn[], session?: string): Promise<FenceResult> {
+    return this.writeTurns(runId, gen, turns, session);
   }
 
-  async step(runId: string, gen: string, record: StepRecord, turns: TranscriptTurn[]): Promise<FenceResult> {
-    const written = this.writeTurns(runId, gen, turns);
+  async step(
+    runId: string,
+    gen: string,
+    record: StepRecord,
+    turns: TranscriptTurn[],
+    session?: string,
+  ): Promise<FenceResult> {
+    const written = this.writeTurns(runId, gen, turns, session);
     if (!written.ok) return written;
     const fence = this.fence(runId, gen);
     if (!fence.ok) return fence;
@@ -211,7 +265,106 @@ export class InMemoryRunLedger implements RunLedger {
     this.inbox.delete(runId);
     this.jobs.delete(runId);
     this.transcripts.delete(runId);
+    // The session log is kept whole; only the owner is released.
+    if (record.session) await this.releaseSession(record.session.key, runId, gen);
     return { ok: true, stored: true };
+  }
+
+  private session(key: string): SessionLog {
+    let log = this.sessions.get(key);
+    if (!log)
+      this.sessions.set(
+        key,
+        (log = { rows: [], attachments: [], maxBytes: DEFAULT_SESSION_LOG_MAX_BYTES, trimmed: new Set() }),
+      );
+    return log;
+  }
+
+  async sessionTail(key: string): Promise<number> {
+    const rows = this.sessions.get(key)?.rows ?? [];
+    return rows.length === 0 ? 0 : Math.max(...rows.map((r) => r.idx)) + 1;
+  }
+
+  async claimSession(key: string, runId: string, gen: string, maxBytes?: number): Promise<void> {
+    const log = this.session(key);
+    log.owner = { runId, gen };
+    log.maxBytes = maxBytes ?? DEFAULT_SESSION_LOG_MAX_BYTES;
+  }
+
+  /** The log's rows and attachments in UTF-8 bytes — what the byte policy bounds. */
+  sessionBytes(key: string): number {
+    const log = this.sessions.get(key);
+    if (!log) return 0;
+    return (
+      log.rows.reduce((n, r) => n + utf8ByteLength(r.json), 0) +
+      log.attachments.reduce((n, a) => n + utf8ByteLength(a.data), 0)
+    );
+  }
+
+  /** The byte policy (session-log item 5), as the object enforces it: over the
+   *  budget, the oldest un-replaced tool results are replaced by the marker,
+   *  each taking with it the attachments no remaining row references, until
+   *  the log fits or no candidate is left; text rows are never candidates. */
+  private enforceBytePolicy(key: string): void {
+    const log = this.session(key);
+    const rowKey = (r: TranscriptRow) => `${r.idx}:${r.part}`;
+    const soleAttachmentBytes = (row: TranscriptRow): number => {
+      const others = new Set(log.rows.filter((r) => r !== row).flatMap((r) => attachmentRefsOf(r.json)));
+      return attachmentRefsOf(row.json)
+        .filter((ref) => !others.has(ref))
+        .reduce((n, ref) => n + (log.attachments.find((a) => a.ref === ref)?.data.length ?? 0), 0);
+    };
+    for (;;) {
+      const total = this.sessionBytes(key);
+      if (total <= log.maxBytes) return;
+      const candidates = [...log.rows]
+        .filter((r) => rowKind(r.json) === "tool_result" && !log.trimmed.has(rowKey(r)))
+        .sort((a, b) => a.idx - b.idx || a.part - b.part);
+      const byId = new Map(candidates.map((r, i) => [i, r]));
+      const ids = planSessionTrim(
+        candidates.map((r, i) => ({ id: i, bytes: utf8ByteLength(r.json) + soleAttachmentBytes(r) })),
+        total - log.maxBytes,
+        TRIM_MARKER_BYTES_ESTIMATE,
+      );
+      if (ids.length === 0) return;
+      for (const id of ids) {
+        const row = byId.get(id)!;
+        const marker = droppedToolResultRow(row.json);
+        log.trimmed.add(rowKey(row));
+        if (marker === undefined) continue;
+        const refs = attachmentRefsOf(row.json);
+        row.json = marker;
+        const stillReferenced = new Set(log.rows.flatMap((r) => attachmentRefsOf(r.json)));
+        log.attachments = log.attachments.filter((a) => !refs.includes(a.ref) || stillReferenced.has(a.ref));
+      }
+    }
+  }
+
+  async releaseSession(key: string, runId: string, gen: string): Promise<FenceResult> {
+    const log = this.sessions.get(key);
+    if (!log?.owner) return { ok: false, reason: "unknown-run" };
+    if (log.owner.runId !== runId || log.owner.gen !== gen) return { ok: false, reason: "fenced" };
+    delete log.owner;
+    return { ok: true };
+  }
+
+  async readSession(key: string, from: number, to?: number): Promise<AssembledTranscript> {
+    const log = this.sessions.get(key);
+    const rows = (log?.rows ?? []).filter((r) => r.idx >= from && (to === undefined || r.idx <= to));
+    return assembleTranscript(rows, log?.attachments ?? [], from);
+  }
+
+  async readSessionTail(key: string, maxBytes: number): Promise<{ from: number; transcript: AssembledTranscript }> {
+    const rows = [...(this.sessions.get(key)?.rows ?? [])].sort((a, b) => b.idx - a.idx || b.part - a.part);
+    const from = tailCut(
+      rows.map((r) => ({ idx: r.idx, bytes: utf8ByteLength(r.json) })),
+      maxBytes,
+    );
+    if (from === undefined) {
+      const next = await this.sessionTail(key);
+      return { from: next, transcript: assembleTranscript([], [], next) };
+    }
+    return { from, transcript: await this.readSession(key, from) };
   }
 
   async abandon(runId: string, gen: string): Promise<FenceResult> {
@@ -235,6 +388,8 @@ export class InMemoryRunLedger implements RunLedger {
       row.phase = reclaimPhase(reclaimedFrom);
       const t = this.transcripts.get(row.runId);
       if (t) t.ownerGen = gen;
+      // The row's session log changes hands with it, as the transcript object does.
+      if (row.meta.session) this.session(row.meta.session.key).owner = { runId: row.runId, gen };
       const steps = this.steps.get(row.runId) ?? [];
       const lastStep = steps.length ? steps[steps.length - 1] : null;
       const consumed = lastStep?.inboxConsumedSeq ?? 0;

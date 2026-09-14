@@ -220,6 +220,7 @@ async function resumeOf(runId: string, system?: string): Promise<ResumeContext> 
     plan: {
       kind: "resume",
       messages: [],
+      compactions: [],
       settlements: [],
       stepRecorded: true,
       inboxConsumedSeq: 0,

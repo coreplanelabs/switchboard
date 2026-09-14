@@ -45,10 +45,26 @@ export interface RunLedger {
    *  re-runs the owner write, so the caller's convention is: retry the whole
    *  `claim` on failure, never proceed past a claim that did not resolve `ok`. */
   claim(req: ClaimRequest): Promise<ClaimResult>;
-  /** The seed prefix, written once at start (chunked by the implementation). */
-  seed(runId: string, gen: string, turns: TranscriptTurn[]): Promise<FenceResult>;
-  /** The one awaited write per step: `turns` land first, then `record`. */
-  step(runId: string, gen: string, record: StepRecord, turns: TranscriptTurn[]): Promise<FenceResult>;
+  /** The seed prefix, written once at start (chunked by the implementation).
+   *  With `session`, the rows go to that session log at their log indices
+   *  (docs/reference/specs/session-log.md item 2); without, to the run's own
+   *  transcript object — the path a row claimed before the log existed keeps. */
+  seed(runId: string, gen: string, turns: TranscriptTurn[], session?: string): Promise<FenceResult>;
+  /** The one awaited write per step: `turns` land first, then `record`. `session` as for `seed`. */
+  step(runId: string, gen: string, record: StepRecord, turns: TranscriptTurn[], session?: string): Promise<FenceResult>;
+  /** The index a session log's next row lands at: 0 for a log no run has written. */
+  sessionTail(key: string): Promise<number>;
+  /** Own the session log for the run: its writes land, every other generation's are fenced.
+   *  Taken after the history claim, so a refused claim never steals a live run's log.
+   *  `maxBytes` is the log's byte budget (session-log item 5); absent, the implementation's
+   *  configured budget, else the policy default — the object enforces it on every write. */
+  claimSession(key: string, runId: string, gen: string, maxBytes?: number): Promise<void>;
+  /** The owner releases the log at its finish; only the owner may (`fenced` otherwise). */
+  releaseSession(key: string, runId: string, gen: string): Promise<FenceResult>;
+  /** The rows `[from, to]` (the tail when `to` is absent) as a conversation counted from `from`. */
+  readSession(key: string, from: number, to?: number): Promise<AssembledTranscript>;
+  /** The newest whole turns within `maxBytes` and the index they start at (item 4). */
+  readSessionTail(key: string, maxBytes: number): Promise<{ from: number; transcript: AssembledTranscript }>;
   heartbeat(runId: string, gen: string, leaseMs: number): Promise<HeartbeatResult>;
   append(runId: string, gen: string, events: AppendableEvent[]): Promise<FenceResult>;
   setState(runId: string, gen: string, state: RunState): Promise<FenceResult>;

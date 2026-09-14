@@ -407,6 +407,10 @@ export interface RunHistoryConfig {
   maxRuns?: number;
   /** Total stored bytes kept. Default 2 GiB, clamped to [16 MiB, 8 GiB]. */
   maxBytes?: number;
+  /** The most bytes one session log holds before its oldest tool results are
+   *  replaced by a marker (docs/reference/specs/session-log.md item 5). Default
+   *  200 MiB, clamped to [16 MiB, 2 GiB]. */
+  sessionLogMaxBytes?: number;
   /** Include the thread-context turns fed to the model in the run stream — the
    *  live page and the persisted record alike (the dispatcher publishes them as
    *  `context` message events). Default true. */
@@ -423,7 +427,12 @@ export interface RunHistoryConfig {
 }
 
 export function retentionPolicyOf(cfg: RunHistoryConfig): RetentionPolicy {
-  return clampRetentionPolicy({ retentionDays: cfg.retentionDays, maxRuns: cfg.maxRuns, maxBytes: cfg.maxBytes });
+  return clampRetentionPolicy({
+    retentionDays: cfg.retentionDays,
+    maxRuns: cfg.maxRuns,
+    maxBytes: cfg.maxBytes,
+    sessionLogMaxBytes: cfg.sessionLogMaxBytes,
+  });
 }
 
 export interface BuildRunStoreDeps {

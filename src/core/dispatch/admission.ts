@@ -298,6 +298,8 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
       state: resume.row.state,
       lastStep: resume.lastStep.step,
       lastSeq: resume.lastSeq,
+      // The row's place in its session log, so the resumed run appends where it left off.
+      ...(resume.row.meta.session ? { session: resume.row.meta.session } : {}),
     });
     await root.span(
       "dispatch.admission",
@@ -561,6 +563,8 @@ export async function adoptCarriedRun(deps: AdmissionDeps, ctx: AdmissionContext
       state: resume.row.state,
       lastStep: resume.lastStep.step,
       lastSeq: resume.lastSeq,
+      // The row's place in its session log, so the resumed run appends where it left off.
+      ...(resume.row.meta.session ? { session: resume.row.meta.session } : {}),
       ...ctx.hooks.adopt,
     });
   }
