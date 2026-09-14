@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.210.0](https://github.com/coreplanelabs/switchboard/compare/v1.209.0...v1.210.0) (2026-09-14)
+
+
+### Features
+
+* **agents:** a screenshot request with no destination named lands every capture in the Slack thread and on the pull request — one rule in both coding prompts ([#1024](https://github.com/coreplanelabs/switchboard/issues/1024)) ([4c4ca76](https://github.com/coreplanelabs/switchboard/commit/4c4ca763c071e1d71c678afc4b431f30f0a9f79c))
+* **tools:** a coding run posts its screenshots into the Slack thread with attach_file — the workspace file uploaded inline beside the reply instead of a GitHub link ([#1021](https://github.com/coreplanelabs/switchboard/issues/1021)) ([b3c2b4d](https://github.com/coreplanelabs/switchboard/commit/b3c2b4ddc701c19762355506fadfca398afdc5a9))
+
 ## [1.209.0](https://github.com/coreplanelabs/switchboard/compare/v1.208.0...v1.209.0) (2026-09-14)
 
 
