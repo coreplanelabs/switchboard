@@ -1,5 +1,39 @@
 # Changelog
 
+## [1.214.0](https://github.com/coreplanelabs/switchboard/compare/v1.213.0...v1.214.0) (2026-09-14)
+
+
+### Features
+
+* **core:** stuck-loop guard in the run loop — nudge at three identical failures, forced write-up at six ([#1072](https://github.com/coreplanelabs/switchboard/issues/1072)) ([a20b443](https://github.com/coreplanelabs/switchboard/commit/a20b4436345123142313b072e0aa681703283f96))
+* **dispatcher:** a file dropped on the thread reaches the run's workspace by reference — what the inline path cannot carry is staged into attachments/ before the turn that names it, for new runs and steered follow-ups alike, and the bot never holds the bytes ([#1074](https://github.com/coreplanelabs/switchboard/issues/1074)) ([6c824be](https://github.com/coreplanelabs/switchboard/commit/6c824be498b8b0e761137a563b9f0557bd22c300))
+* **dispatcher:** a spawned child reads its parent's conversation — its model starts from the parent's text turns then its prompt, a write preset is refused spawn_identity before any thread opens, and every record says where its conversation started ([#1066](https://github.com/coreplanelabs/switchboard/issues/1066)) ([6cb46ba](https://github.com/coreplanelabs/switchboard/commit/6cb46ba2c580ea588bb2329104433f7d104d6c1c))
+* **harness:** the review preset can run on pi — a read-only allowlist, the registry's review framing, and a relayed verdict that reaches GitHub exactly as the native loop's does, dark behind harness: { review: pi } ([#1076](https://github.com/coreplanelabs/switchboard/issues/1076)) ([92ed929](https://github.com/coreplanelabs/switchboard/commit/92ed929eb2c8d2a72e1b3e656ca1ff278c356646))
+* **tools:** attach_file moves a file by reference — the container PUTs it to the artifact store and POSTs it to Slack's one-shot upload URL, the bot verifies the object, records the artifact event and completes the share; without a store the inline path stands ([#1052](https://github.com/coreplanelabs/switchboard/issues/1052)) ([66c2a71](https://github.com/coreplanelabs/switchboard/commit/66c2a713b1af53906ff62169cfc73ae03a4be4ad))
+* **workers:** the bot Worker copies a Slack file into the artifacts bucket for the bot — POST /artifacts/copy streams url_private into R2 behind the copy bearer, the bucket binds and is created from the deployment profile, and the bot never holds the bytes ([#1062](https://github.com/coreplanelabs/switchboard/issues/1062)) ([da85923](https://github.com/coreplanelabs/switchboard/commit/da8592371f4a5ec788c75693a12689da4953ffea))
+
+
+### Bug fixes
+
+* **agents:** the general and research descriptions divide GitHub from the web, "this PR" in its own thread is a review, and a router answer missing a field shows what came back ([#1073](https://github.com/coreplanelabs/switchboard/issues/1073)) ([1f06b78](https://github.com/coreplanelabs/switchboard/commit/1f06b784eae0aee79d5f908e5b0227634d1e4dd6))
+* **core:** stuck-loop nudge is one-shot per streak and fires past the threshold; spec scopes the guard to the native loop ([#1077](https://github.com/coreplanelabs/switchboard/issues/1077)) ([2568e90](https://github.com/coreplanelabs/switchboard/commit/2568e90c44c3ad47b90d8fa47bbc396f40571d87))
+* derive the runaway turn guard from a run's clipped budget ([#1061](https://github.com/coreplanelabs/switchboard/issues/1061)) ([3805a08](https://github.com/coreplanelabs/switchboard/commit/3805a08c904555ebcd98be185c2079db36299437))
+* **dispatcher:** the router's answer is a forced tool call whose schema is derived from the table — prose cannot occur, a cut answer is named on the record, and the output cap fits the largest legal answer ([#1055](https://github.com/coreplanelabs/switchboard/issues/1055)) ([8a8eb0b](https://github.com/coreplanelabs/switchboard/commit/8a8eb0ba7da849518cbb8abc8edd3a85a1b17c50))
+* **dispatcher:** the router's tool schema carries the rules too — the enum names every preset in least-capable terms, parts says when not to split, and a failure with no pull request named is not a review ([#1070](https://github.com/coreplanelabs/switchboard/issues/1070)) ([6d26cf0](https://github.com/coreplanelabs/switchboard/commit/6d26cf021e35f26ad8e3b9cf94fffdf69acb3a7c))
+* **harness:** pi answers a tool call whose arguments fail its validation before the tool_call hook fires — the spike names such calls as pi's own, never bypasses, and the harness fails a run closed on any call that ran unvetted ([#1067](https://github.com/coreplanelabs/switchboard/issues/1067)) ([4c7152e](https://github.com/coreplanelabs/switchboard/commit/4c7152ef962d212aaaf7353214c3cccb91c4fd77))
+* **harness:** pi asks a Claude 5 model for adaptive thinking through the proxy — the model entry the driver and the harness write carries compat.forceAdaptiveThinking, so a thinking turn is no longer a 400 ([#1068](https://github.com/coreplanelabs/switchboard/issues/1068)) ([a9c80da](https://github.com/coreplanelabs/switchboard/commit/a9c80dad0ca7720d99ab50e62cddb341d1b0ac92))
+* **load:** the pi driver hands pi absolute config and session paths — pi runs in the checkout, not where the operator typed the command — the proxy's model entry lets it think, and a task that exits before its first turn reports pi's own stderr ([#1064](https://github.com/coreplanelabs/switchboard/issues/1064)) ([ecf03f2](https://github.com/coreplanelabs/switchboard/commit/ecf03f24a4216573aba1690f6884e56a5435e6b6))
+* **resident:** a resident's error reaches chat whole — the onboard refusal keeps its admin action and 422 detail past the old 300-char cap, while card notes stay card-sized ([#1063](https://github.com/coreplanelabs/switchboard/issues/1063)) ([974dc0e](https://github.com/coreplanelabs/switchboard/commit/974dc0e2b4f408b54fad81d92156734fd9febf24))
+
+
+### Documentation
+
+* **agents:** the program plan takes record 0034 — one agent per unit of work: children hold no write identity, a compound with a write part is one route, a thread on pi is one session, and three units bind the rollout ([#1060](https://github.com/coreplanelabs/switchboard/issues/1060)) ([b5838c7](https://github.com/coreplanelabs/switchboard/commit/b5838c732e08ca147bddac0f75fa8dd120040225))
+* **docs:** record 0034 proposes one agent per unit of work — a run continues its thread's transcript, a child run is a reader with its parent's context, and only a state machine sits between agents ([#1049](https://github.com/coreplanelabs/switchboard/issues/1049)) ([c2b4b9d](https://github.com/coreplanelabs/switchboard/commit/c2b4b9db6f51ba548909c19eecdc44aaf0169590))
+* **docs:** record 0035 proposes the session log — a run's transcript outlives it in one searchable object per thread and agent, a follow-up seeds from the notepad and the log's tail, and compaction never loses anything ([#1071](https://github.com/coreplanelabs/switchboard/issues/1071)) ([a099b4d](https://github.com/coreplanelabs/switchboard/commit/a099b4d3302f7b3fc368f5c0d6eb0700131209e4))
+* **docs:** records 0034 and 0035 amended on review — a run's range begins with its own seed, a session has a byte policy and a registry the sweep reads, the compaction row is built from pi's event, and 0034 points at 0035 for the store and the growth rule ([#1075](https://github.com/coreplanelabs/switchboard/issues/1075)) ([6fe5bc8](https://github.com/coreplanelabs/switchboard/commit/6fe5bc8bc78f2b372436e5241318c08ad108878c))
+* **docs:** state U29's pi relay seed dependency in the plan ([#1069](https://github.com/coreplanelabs/switchboard/issues/1069)) ([5b80d02](https://github.com/coreplanelabs/switchboard/commit/5b80d025b8e46d515ec94cde72bb756ed80407d5))
+
 ## [1.213.0](https://github.com/coreplanelabs/switchboard/compare/v1.212.0...v1.213.0) (2026-09-14)
 
 
