@@ -2,9 +2,9 @@
 // the machine class its tools execute on, the identity it acts as, and the
 // minutes it may run. A preset declares one; the run's EFFECTIVE profile is
 // what the pipeline hands the factory, the ledger and the runner — never the
-// preset's fields read again downstream. Pure and leaf: type-only imports, so
-// the node-free record contract and the state Worker can name the shape.
-import type { AgentDef, Identity, MachineClass } from "../agents/registry.js";
+// preset's fields read again downstream. Pure and near-leaf: the only value
+// import is the registry's `runawayTurnCap`, itself pure.
+import { runawayTurnCap, type AgentDef, type Identity, type MachineClass } from "../agents/registry.js";
 
 export type { Identity, MachineClass };
 
@@ -63,9 +63,12 @@ export function declaredProfile(preset: Pick<AgentDef, "machine" | "identity" | 
 /** The preset with its budget replaced by the effective profile's — the def
  *  the runner is handed, since its deadline, wrap-up warning and budget label
  *  read `maxMinutes` (the same clipped copy the ship pipeline hands its child
- *  rounds). Always a copy: the shared `AgentDef` is never mutated. */
+ *  rounds). `maxTurns` is re-derived from the clipped minutes with the
+ *  registry's own `runawayTurnCap`, so the six-per-minute runaway guard holds
+ *  for the budget the run actually has, not the preset's declared one.
+ *  Always a copy: the shared `AgentDef` is never mutated. */
 export function budgetedAgent(agent: AgentDef, profile: RunProfile): AgentDef {
-  return { ...agent, maxMinutes: profile.minutes };
+  return { ...agent, maxMinutes: profile.minutes, maxTurns: runawayTurnCap(profile.minutes) };
 }
 
 // ---- boundaries: a scope caps, never grants -----------------------------------
