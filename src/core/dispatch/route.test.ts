@@ -163,6 +163,14 @@ describe("buildRoutePrompt — the request as untrusted data, bounded", () => {
     expect(p.user).toContain(`…[truncated: 500 more characters]`);
   });
 
+  it("says what least capable means in the table's own columns — no machine before one, no credential before one, the shorter budget — and that web search, a shell or a sandbox is only for a request that needs it", () => {
+    const p = buildRoutePrompt({ ...base, text: "who last touched src/x.ts" });
+    expect(p.system).toMatch(/least capable means/i);
+    expect(p.system).toMatch(/no machine before a machine/i);
+    expect(p.system).toMatch(/web search, a shell or a sandbox/i);
+    expect(p.system).toMatch(/answered from GitHub/i);
+  });
+
   it("names the thread's earlier directives, or none, and the table and the fallback preset", () => {
     const withSticky = buildRoutePrompt({
       ...base,
@@ -419,10 +427,55 @@ describe("buildRoutePrompt — the compound form, described apart from the table
     expect(p.system).not.toContain("| `conductor` |");
   });
 
+  it("two subjects are two parts even when both are read-only or land on the same preset, with a compound example beside the decoy; each part picks its preset by the single-request rules", () => {
+    const p = buildRoutePrompt({ ...base, compound: OFFER });
+    expect(p.system).toMatch(/two different subjects .* ARE compound/i);
+    expect(p.system).toMatch(/same preset may appear twice/i);
+    expect(p.system).toMatch(/each part's preset .* same rules as a single request/i);
+  });
+
   it("without the offer the word conductor is absent from the prompt: the requester who may not run it is never shown the form", () => {
     const p = buildRoutePrompt(base);
     expect(p.system).not.toMatch(/conductor/);
     expect(p.system).not.toMatch(/compound/i);
+  });
+});
+
+describe("buildRoutePrompt — the imperative rule, stated for the write preset the table offers", () => {
+  const base = { recentDirectives: {}, presets, fallback: "general", text: "looks like the ci failed, fix it" };
+
+  it("states the rule in the static half: a terse order to change or repair names the preset that implements changes, read off the table; a question or a read-only ask about the same failure does not", () => {
+    const p = buildRoutePrompt(base);
+    expect(p.system).toMatch(/"fix it"/);
+    expect(p.system).toMatch(/"make it pass"/);
+    expect(p.system).toMatch(/"add X"/);
+    expect(p.system).toContain("answer `coding`");
+    expect(p.system).toMatch(/"why did ci fail\?"/i);
+    expect(p.system).toMatch(/pull request/);
+    // The rule rides the system half — the cache-controlled, per-deployment part — never the per-message user turn.
+    expect(p.user).not.toMatch(/make it pass/);
+  });
+
+  it("names every write preset the table offers, and no other: the name is derived, never typed", () => {
+    const two = [...presets, { ...presets.find((x) => x.name === "coding")!, name: "patcher" }];
+    const p = buildRoutePrompt({ ...base, presets: two });
+    expect(p.system).toContain("answer `coding` or `patcher`");
+  });
+
+  it("without a write preset in the table the rule is absent: a requester who may not run coding is never told to pick it", () => {
+    const p = buildRoutePrompt({ ...base, presets: presets.filter((x) => x.identity !== "write") });
+    expect(p.system).not.toMatch(/fix it/);
+    expect(p.system).not.toContain("`coding`");
+    expect(p.system).toContain(renderPresetTable(presets.filter((x) => x.identity !== "write")));
+  });
+
+  it("through route(): coding restricted for the requester means the offered table has no write preset and the prompt carries no rule", async () => {
+    const model = scripted(answer("general"));
+    await route({ ...base, allowed: ["general", "research", "review", "explore"] }, model);
+    expect(model.prompts[0].system).not.toMatch(/fix it/);
+    const admin = scripted(answer("coding"));
+    await route({ ...base, allowed: allNames }, admin);
+    expect(admin.prompts[0].system).toContain("answer `coding`");
   });
 });
 

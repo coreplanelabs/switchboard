@@ -21,7 +21,7 @@ The map at a glance: each area of the product, where it lives, and the spec that
 | The runtime Workers and the project's docs site | `workers` | `deploy/cloudflare*/` | [`release-and-deploy.md`](specs/release-and-deploy.md), [`docs-site.md`](specs/docs-site.md) |
 | Deploy selection, order, and live gate | `deploy` | `src/deploy/` | [`release-and-deploy.md`](specs/release-and-deploy.md) |
 | Human docs and their generated tables | `docs` | `docs/`, `src/docs/` | [`docs-site.md`](specs/docs-site.md) |
-| The load harness: concurrency baselines and the drivers (resident, sandbox, e2e, the pi spike, the request router's replay and its checked-in compound set), a refusal counted by its machine token, the receipt renderer | `load` | `scripts/load.ts`, `src/load/` | [`load-harness.md`](specs/load-harness.md) |
+| The load harness: concurrency baselines and the drivers (resident, sandbox, e2e, the pi spike, the request router's replay and its checked-in compound and imperative sets), a refusal counted by its machine token, the receipt renderer | `load` | `scripts/load.ts`, `src/load/` | [`load-harness.md`](specs/load-harness.md) |
 | The repository's own process: CI, the checks, releases, dependency updates — `deps` and `main` are the bots' scopes (Dependabot's `chore(deps)` and `ci(deps)`, release-please's `chore(main): release …`) | `process`, `release`, `deps`, `main` | `.github/`, `scripts/`, `release-please-config.json`, `CONTRIBUTING.md` | [`release-and-deploy.md`](specs/release-and-deploy.md) |
 
 ## Modules
