@@ -404,15 +404,21 @@ async function runLoop(
   let stuckLoop = false;
   let stuckSig: string | undefined;
   let stuckStreak = 0;
+  // One-shot per streak, like the budget `warned` flag: without it the nudge
+  // would repeat every turn while the streak sits pinned (only a success of
+  // the tracked signature or a different failure moves it).
+  let stuckNudged = false;
   const trackStuck = (tu: ToolUsePart, ok: boolean) => {
     const sig = callSignature(tu.name, redactAndCap(describeToolCall(tu)));
     if (ok) {
       if (sig === stuckSig) {
         stuckSig = undefined;
         stuckStreak = 0;
+        stuckNudged = false;
       }
       return;
     }
+    if (sig !== stuckSig) stuckNudged = false; // a new streak gets its own nudge
     stuckStreak = sig === stuckSig ? stuckStreak + 1 : 1;
     stuckSig = sig;
   };
@@ -788,7 +794,12 @@ async function runLoop(
     // Stuck-loop nudge (docs/reference/specs/run-loop.md item 18): the same call
     // just failed for the STUCK_NUDGE_AT-th identical time — one line, attached
     // to the results, asking the model to change approach or write up.
-    if (stuckStreak === STUCK_NUDGE_AT) results.push({ type: "text", text: stuckLoopNudge() });
+    // `>=` with the one-shot flag: a parallel batch can move the streak past
+    // the threshold within one dispatch, so equality would miss the nudge.
+    if (!stuckNudged && stuckStreak >= STUCK_NUDGE_AT) {
+      stuckNudged = true;
+      results.push({ type: "text", text: stuckLoopNudge() });
+    }
     // One-time wrap-up warning as time runs low, attached to the tool results.
     if (!warned && now() >= warnAt) {
       warned = true;
