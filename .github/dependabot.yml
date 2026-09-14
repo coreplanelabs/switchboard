@@ -82,8 +82,14 @@ updates:
       prefix: "chore(deps)"
     ignore:
       # The bot runtime moves to an LTS line deliberately, together with CI,
-      # .nvmrc and @types/node.
+      # .nvmrc and @types/node (src/deploy/imageNode.test.ts holds the three
+      # images to one tag on .nvmrc's major, so a lone bump fails verify).
+      # Dependabot names the image as the Dockerfile spells it: the bot's
+      # `FROM node:…` is "node", the execution images' `FROM
+      # docker.io/library/node:…` is "library/node" — both need the rule.
       - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "library/node"
         update-types: ["version-update:semver-major"]
       # The sandbox image and the @cloudflare/sandbox SDK are one protocol in
       # two artifacts; they move together, by hand, with a deploy validation
