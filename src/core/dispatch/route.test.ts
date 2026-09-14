@@ -317,6 +317,20 @@ describe("routeTool — the answer's schema, derived from the offered table", ()
     expect(schema.properties.parts.items.properties.preset.enum).not.toContain("conductor");
   });
 
+  it("the schema carries the rules too: the enum's description names every offered preset with its description in least-capable terms, and parts says when NOT to split", () => {
+    const tool = routeTool(presets, OFFER);
+    const schema = tool.inputSchema as {
+      properties: { preset: { description: string }; parts: { description: string } };
+    };
+    expect(schema.properties.preset.description).toMatch(/least capable/i);
+    for (const p of presets) expect(schema.properties.preset.description).toContain(`${p.name}: ${p.description}`);
+    expect(schema.properties.preset.description).toMatch(/conductor: only for a compound/);
+    expect(schema.properties.parts.description).toMatch(/two or more INDEPENDENT asks on different subjects/);
+    expect(schema.properties.parts.description).toMatch(/single ask with several steps .* omit parts/i);
+    const single = routeTool(presets).inputSchema as { properties: { preset: { description: string } } };
+    expect(single.properties.preset.description).not.toMatch(/conductor/);
+  });
+
   it("buildRoutePrompt carries the tool built from the same presets and offer as the table", () => {
     const p = buildRoutePrompt({ recentDirectives: {}, presets, fallback: "general", text: "x", compound: OFFER });
     expect(p.tool).toEqual(routeTool(presets, OFFER));
@@ -608,7 +622,8 @@ describe("buildRoutePrompt — the imperative rule, stated for the write preset 
     expect(p.system).toMatch(/"add X"/);
     expect(p.system).toContain("answer `coding`");
     expect(p.system).toMatch(/"why did ci fail\?"/i);
-    expect(p.system).toMatch(/pull request/);
+    expect(p.system).toMatch(/pull request that is named/);
+    expect(p.system).toMatch(/no pull request named is not a review/);
     // The rule rides the system half — the cache-controlled, per-deployment part — never the per-message user turn.
     expect(p.user).not.toMatch(/make it pass/);
   });
