@@ -229,14 +229,9 @@ describe("parseRouteAnswer — a single JSON object naming an allowed preset, or
   });
 
   it("an object missing a field names the field AND carries what came back, tidied — a forced tool call once answered without its required preset, and the record must show that", () => {
-    const noPreset = parseRouteAnswer(
-      '{"reason": "two asks", "parts": [{"preset": "coding", "text": "fix it"}]}',
-      allNames,
-    );
+    const noPreset = parseRouteAnswer('{"reason": "two asks", "text": "fix it"}', allNames);
     expect(noPreset.preset).toBeUndefined();
-    expect(noPreset.reason).toBe(
-      `missing preset in the router's answer: {"reason": "two asks", "parts": [{"preset": "coding", "text": "fix it"}]}`,
-    );
+    expect(noPreset.reason).toBe(`missing preset in the router's answer: {"reason": "two asks", "text": "fix it"}`);
     const noReason = parseRouteAnswer('{"preset": "review"}', allNames);
     expect(noReason.reason).toBe(`missing reason in the router's answer: {"preset": "review"}`);
     const long = parseRouteAnswer(`{"reason": "${"r".repeat(400)}"}`, allNames);
@@ -827,6 +822,31 @@ describe("parseRouteAnswer — the compound form", () => {
       OFFER,
     );
     expect(d.preset === "conductor" && d.parts?.[0].text).toBe("review #7\nfocus on tests");
+  });
+
+  it("parts without a preset IS the compound form: the forced tool call fills the parts and skips the required field, and parts exist for no other shape", () => {
+    const d = parseRouteAnswer(JSON.stringify({ parts: TWO_PARTS, reason: "two asks" }), allNames, OFFER);
+    expect(d).toEqual({ preset: "conductor", reason: "two asks", parts: TWO_PARTS });
+  });
+
+  it("parts without a preset or a reason: the compound form with a reason that says it was inferred", () => {
+    const d = parseRouteAnswer(JSON.stringify({ parts: TWO_PARTS }), allNames, OFFER);
+    expect(d).toEqual({ preset: "conductor", reason: "compound inferred from parts", parts: TWO_PARTS });
+  });
+
+  it("parts without a preset and without the offer is compound_rejected like any unoffered compound — never a silent single route", () => {
+    const d = parseRouteAnswer(JSON.stringify({ parts: TWO_PARTS, reason: "r" }), allNames);
+    expect(d).toEqual({
+      preset: undefined,
+      reason: "compound_rejected: the compound form was not offered",
+      compoundRejected: true,
+    });
+  });
+
+  it("no preset and no array of parts is still a missing preset, the raw carried", () => {
+    expect(parseRouteAnswer('{"reason": "x", "parts": "two"}', allNames, OFFER).reason).toBe(
+      `missing preset in the router's answer: {"reason": "x", "parts": "two"}`,
+    );
   });
 
   it("a single-route answer that happens to carry parts is that single route — a decoy is one preset, the parts dropped", () => {
