@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import CallCard from "./CallCard.vue";
-import { formatLocalIso } from "../../lib/format";
+import { formatBytes as fmtBytes, formatLocalIso } from "../../lib/format";
 import type { StepItem } from "../../lib/runPageModel";
 
 // The rows inside a step, in arrival order: call cards, quiet bookkeeping
@@ -11,13 +11,6 @@ import type { StepItem } from "../../lib/runPageModel";
 // on their hover title.
 
 defineProps<{ items: StepItem[] }>();
-
-function fmtBytes(n: number): string {
-  if (!(n > 0)) return "0 B";
-  if (n < 1024) return `${n} B`;
-  if (n < 1_048_576) return `${(Math.round(n / 102.4) / 10).toFixed(1)} KB`;
-  return `${(Math.round(n / 104_857.6) / 10).toFixed(1)} MB`;
-}
 </script>
 
 <template>

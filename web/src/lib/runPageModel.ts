@@ -4,6 +4,7 @@ import {
   createRunTimeline,
   type TimelineCall,
   type TimelineChange,
+  type TimelineArtifact,
   type TimelineSkill,
   type TimelineSource,
   type TimelineStep,
@@ -12,6 +13,7 @@ import { runDurationMs } from "@core/core/runDuration.js";
 import { displayNameOf } from "@core/core/trace/displayNames.js";
 import { createLossTracker, foldSpanRecord } from "@core/core/normalizeSpans.js";
 import { isSpanRecord, type RunEvent } from "@core/core/runEvents.js";
+import type { ArtifactsSeed } from "@core/channels/webSeed.js";
 import type { LossInterval } from "@core/core/trace/partition.js";
 import type { SpanRecord } from "@core/core/trace/types.js";
 import { classOf } from "@core/core/trace/streamSpans.js";
@@ -235,6 +237,15 @@ export interface PrOpenedVm {
   created: boolean;
 }
 
+/** One file's URL on this page (live-view.md item 26): the seed's base plus
+ *  the event's key, each segment encoded so a key's slashes stay path and
+ *  everything else survives, plus the live token when the seed carries one.
+ *  The record holds no URL; this is the only place one is made. */
+export function artifactHref(links: ArtifactsSeed, key: string): string {
+  const path = key.split("/").map(encodeURIComponent).join("/");
+  return `${links.urlBase}${path}${links.token ? `?t=${encodeURIComponent(links.token)}` : ""}`;
+}
+
 export interface RunPageModel {
   state: {
     /** The FIRST `input` event — what started the run. Every later `input`
@@ -246,6 +257,10 @@ export interface RunPageModel {
     reply: ReplyVm | null;
     /** The PR the coding post-step opened or edited, once the stream said so. */
     prOpened: PrOpenedVm | null;
+    /** The run's files (`artifact` events, live-view.md item 26), in event
+     *  order — what it received from the thread and what it sent. One block
+     *  on the page, never rows in the log. */
+    artifacts: TimelineArtifact[];
     /** True until the first painted change of any kind. */
     placeholder: boolean;
     allOpen: boolean;
@@ -440,6 +455,7 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
     log: [],
     reply: null,
     prOpened: null,
+    artifacts: [],
     placeholder: true,
     allOpen: false,
     stopMode: null,
@@ -626,6 +642,9 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
         return;
       case "skill":
         stepFor(change.step).items.push({ kind: "skill", skill: change.skill });
+        return;
+      case "artifact":
+        state.artifacts.push(change.artifact);
         return;
       case "context":
         state.context.push({ key: key("ctx"), at: change.at, text: change.text });

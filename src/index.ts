@@ -41,6 +41,7 @@ import { mdToMrkdwn } from "./channels/mrkdwn.js";
 import { buildMemoryStore, NullMemoryStore, pendingReflectionCount } from "./core/memory/index.js";
 import { healthPayload, readBuildInfo } from "./channels/health.js";
 import { buildArtifactStore } from "./artifacts/buildStore.js";
+import { ARTIFACT_DEFAULTS } from "./artifacts/config.js";
 import { startProcessMetrics } from "./channels/processMetrics.js";
 import { selectFrictionLedger } from "./core/frictionLedger.js";
 import { buildRunStore, FileRunStore, NullRunStore, retentionPolicyOf } from "./core/runStore.js";
@@ -674,6 +675,15 @@ export async function runBot(): Promise<void> {
       // off-state from the seed's capabilities; so the panel gets no store when
       // schedules are off, not the null one.
       scheduled: { schedules: SCHEDULES, store: capabilities.schedules ? scheduleStore : undefined },
+      // The run page's files (live-view.md item 26), when a store is configured.
+      ...(artifacts
+        ? {
+            artifacts: {
+              store: artifacts,
+              retentionDays: config.config.artifacts?.retentionDays ?? ARTIFACT_DEFAULTS.retentionDays,
+            },
+          }
+        : {}),
     });
     // ── end live view ────────────────────────────────────────────────────────
     const accessVerify: VerifyDeps = { fetchJwks: httpJwksFetcher, now: () => systemClock(), cache: new JwksCache() };

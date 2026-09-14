@@ -4,6 +4,7 @@ import {
   escapeHtml,
   parseLastEventId,
   parseRunRoute,
+  pipeToResponse,
   retentionSentence,
   serveEvents,
   serveIndexEvents,
@@ -40,6 +41,7 @@ import type { IndexEvent } from "../core/runRegistry/indexFeed.js";
 import type { RunSummary } from "../core/runRegistry/projections.js";
 import { FIXTURE_SCHEDULES } from "./scheduledPanel.test.js";
 import { InMemoryScheduleStore, type ScheduleStore } from "../core/scheduleStore.js";
+import { InMemoryArtifactStore } from "../artifacts/store.js";
 
 // Feature: docs/reference/specs/live-view.md — the external live-view surface. Every HTML
 // route serves the web-app shell with this page's SEED embedded (rendering
@@ -160,7 +162,7 @@ function fakeReqRes(method: string, url: string) {
   };
   let status = 0;
   let outHeaders: Record<string, string> = {};
-  const chunks: string[] = [];
+  const chunks: Array<string | Uint8Array> = [];
   let ended = false;
   let finish!: () => void;
   const finished = new Promise<void>((resolve) => (finish = resolve));
@@ -169,7 +171,15 @@ function fakeReqRes(method: string, url: string) {
       status = s;
       outHeaders = h ?? {};
     },
-    write: (c: string) => void chunks.push(c),
+    // Always "room for more" and never gone: the artifact proxy waits for
+    // `drain`/`close` only on a false return (`pipeToResponse` has its own sink tests).
+    write: (c: string | Uint8Array) => {
+      chunks.push(c);
+      return true;
+    },
+    once: () => res,
+    off: () => res,
+    destroyed: false,
     end: (c?: string) => {
       if (c) chunks.push(c);
       ended = true;
@@ -185,7 +195,9 @@ function fakeReqRes(method: string, url: string) {
     get headers() {
       return outHeaders;
     },
-    body: () => chunks.join(""),
+    body: () => chunks.map((c) => (typeof c === "string" ? c : new TextDecoder().decode(c))).join(""),
+    /** The raw bytes written (the artifact proxy writes Uint8Array chunks). */
+    bytes: () => Buffer.concat(chunks.map((c) => (typeof c === "string" ? Buffer.from(c) : Buffer.from(c)))),
     get ended() {
       return ended;
     },
@@ -212,6 +224,26 @@ describe("parseRunRoute", () => {
     expect(parseRunRoute("/ingress")).toBeNull();
     expect(parseRunRoute("/runs/abc/events/extra")).toBeNull();
     expect(parseRunRoute("/runs/%zz")).toBeNull();
+  });
+  // live-view.md item 26 — the artifact route: the key is the whole tail after
+  // `/artifacts/`, slashes kept, each segment decoded; `artifacts` is a reserved
+  // word like `scheduled`, never a run id.
+  it("matches the artifact route with a greedy, per-segment-decoded key; `/runs/artifacts` is not a run", () => {
+    expect(parseRunRoute("/runs/r1/artifacts/threads/slack-CX-1.0/in/1.0/1-clip.mp4")).toEqual({
+      id: "r1",
+      kind: "artifact",
+      key: "threads/slack-CX-1.0/in/1.0/1-clip.mp4",
+    });
+    expect(parseRunRoute("/runs/r1/artifacts/runs/r1/out/1-a%20b.png")).toEqual({
+      id: "r1",
+      kind: "artifact",
+      key: "runs/r1/out/1-a b.png",
+    });
+    expect(parseRunRoute("/runs/artifacts")).toBeNull();
+    expect(parseRunRoute("/runs/artifacts/runs/r1/out/1-a.png")).toBeNull();
+    expect(parseRunRoute("/runs/r1/artifacts/")).toBeNull();
+    expect(parseRunRoute("/runs/r1/artifacts/a//b")).toBeNull();
+    expect(parseRunRoute("/runs/r1/artifacts/%zz")).toBeNull();
   });
 });
 
@@ -1947,5 +1979,348 @@ describe("IndexRow seed shape", () => {
     };
     expect(live.token).toBe("t");
     expect(stored.token).toBeUndefined();
+  });
+});
+
+// Feature: docs/reference/specs/live-view.md item 26 — the run's files through
+// `/runs/:id/artifacts/<key>`. The decision that opens the run opens its files
+// (the capability token live, the Access actor tokenless); the KEY must be one
+// the run's own `artifact` events name; the bytes come from the store's signed
+// GET with the event's type, sandboxed and never sniffed, inline for the four
+// raster types only; a key whose object is gone is a 410 naming the retention.
+describe("artifact route (item 26)", () => {
+  const NOW = 1_700_000_000_000;
+  type ArtifactEvent = Extract<RunEvent, { type: "artifact" }>;
+  const artifact = (over: Partial<ArtifactEvent> = {}): ArtifactEvent => ({
+    type: "artifact",
+    direction: "out",
+    key: "runs/r1/out/1-dashboard.png",
+    name: "dashboard.png",
+    size: 3,
+    contentType: "image/png",
+    ...over,
+  });
+  const PNG = artifact();
+  const SVG = artifact({ key: "runs/r1/out/2-logo.svg", name: "logo.svg", contentType: "image/svg+xml", size: 4 });
+  const HTML = artifact({ key: "runs/r1/out/3-report.html", name: "report.html", contentType: "text/html", size: 5 });
+  const ZIP = artifact({
+    direction: "in",
+    key: "threads/slack-C1-1.0/in/1.0/0-bundle.zip",
+    name: "bundle.zip",
+    contentType: "application/zip",
+    size: 6,
+  });
+  const PUBLIC = { channelId: "slack:C_PUB", channelVisibility: "public" } as const;
+  const PRIVATE = { channelId: "slack:G_PRIV", channelVisibility: "private" } as const;
+
+  function record(id: string, events: RunEvent[], over: Partial<RunRecord> = {}): RunRecord {
+    const stamped = events.map((e, i) => ({ ...e, seq: i + 1 }));
+    return {
+      id,
+      label: `coding · acme/${id}`,
+      agent: "coding",
+      model: "anthropic/claude",
+      userId: "slack:UA",
+      threadKey: `slack:C1:${id}`,
+      ...PUBLIC,
+      startedAt: NOW - 70_000,
+      finishedAt: NOW - 60_000,
+      status: "completed",
+      eventCount: stamped.length,
+      storedEventCount: stamped.length,
+      truncated: false,
+      events: stamped,
+      diagnosis: analyzeRunFriction(stamped),
+      ...over,
+    };
+  }
+
+  /** Registry + run store + service + an in-memory artifact store behind the handler. */
+  function harness(opts: { store?: boolean; audit?: LiveViewDeps["audit"] } = {}) {
+    let n = 0;
+    const now = () => NOW;
+    const registry = new RunRegistry({ genId: () => `run-${++n}`, genToken: () => `tok-${n}`, now });
+    const runs = new InMemoryRunStore({ now });
+    const service = createRunsService({ registry, store: runs });
+    const artifacts = new InMemoryArtifactStore({ bucket: "test" });
+    const handler = adminByDefault(
+      createLiveViewHandler({
+        shell,
+        service,
+        index: registry,
+        retention: { retentionDays: 30 },
+        now,
+        ...(opts.audit ? { audit: opts.audit } : {}),
+        ...(opts.store === false ? {} : { artifacts: { store: artifacts, retentionDays: 30 } }),
+      }),
+    );
+    return { registry, runs, artifacts, handler };
+  }
+
+  async function get(h: ReturnType<typeof harness>, url: string, ctx?: LiveViewContext) {
+    const t = fakeReqRes("GET", url);
+    expect(h.handler(t.req, t.res, ctx)).toBe(true);
+    await t.finished;
+    return t;
+  }
+
+  /** The events' objects, except the zip: its event stands, its object is gone. */
+  function seedObjects(h: ReturnType<typeof harness>) {
+    h.artifacts.put(PNG.key, new Uint8Array([137, 80, 78]), "image/png");
+    h.artifacts.put(SVG.key, new Uint8Array([60, 115, 118, 103]), "image/svg+xml");
+    h.artifacts.put(HTML.key, new Uint8Array([60, 104, 116, 109, 108]), "text/html");
+  }
+
+  describe("a finished run, tokenless", () => {
+    it("streams a named key with the event's type and length, `nosniff`, a sandbox CSP and no caching — inline for a raster image, an attachment under the recorded basename for SVG and HTML", async () => {
+      const audit = vi.fn();
+      const h = harness({ audit });
+      seedObjects(h);
+      await h.runs.put(record("r1", [PNG, SVG, HTML, ZIP]));
+
+      const png = await get(h, `/runs/r1/artifacts/${PNG.key}`);
+      expect(png.status).toBe(200);
+      expect(png.headers).toEqual({
+        "content-type": "image/png",
+        "content-length": "3",
+        "content-disposition": 'inline; filename="dashboard.png"',
+        "x-content-type-options": "nosniff",
+        "content-security-policy": "sandbox",
+        "cache-control": "private, no-store",
+      });
+      expect([...png.bytes()]).toEqual([137, 80, 78]);
+
+      const svg = await get(h, `/runs/r1/artifacts/${SVG.key}`);
+      expect(svg.status).toBe(200);
+      expect(svg.headers["content-type"]).toBe("image/svg+xml");
+      expect(svg.headers["content-disposition"]).toBe('attachment; filename="logo.svg"');
+      expect(svg.headers["content-security-policy"]).toBe("sandbox");
+
+      const html = await get(h, `/runs/r1/artifacts/${HTML.key}`);
+      expect(html.headers["content-type"]).toBe("text/html");
+      expect(html.headers["content-disposition"]).toBe('attachment; filename="report.html"');
+      expect([...html.bytes()]).toEqual([60, 104, 116, 109, 108]);
+
+      // One audit line per allowed read: the route and the run, never the key.
+      expect(audit.mock.calls.map(([e]) => e)).toEqual([
+        { route: "artifact", runId: "r1", identity: "access:admin" },
+        { route: "artifact", runId: "r1", identity: "access:admin" },
+        { route: "artifact", runId: "r1", identity: "access:admin" },
+      ]);
+    });
+
+    it("the type served is the EVENT's, not the object's, and the filename is the basename made safe", async () => {
+      const h = harness();
+      // The object was stored under a different type; a hostile name carries a path and quotes.
+      const odd = artifact({ key: "runs/r1/out/4-x", name: '../etc/"pass"wd.png', contentType: "image/webp" });
+      h.artifacts.put(odd.key, new Uint8Array([1]), "text/html");
+      await h.runs.put(record("r1", [odd]));
+      const t = await get(h, `/runs/r1/artifacts/${odd.key}`);
+      expect(t.status).toBe(200);
+      expect(t.headers["content-type"]).toBe("image/webp");
+      expect(t.headers["content-disposition"]).toBe('inline; filename="_pass_wd.png"'); // the last segment, one character class
+    });
+
+    it("a key the run's events do not name is 404 — even one the store holds for another run — and audits nothing; an unknown run is the same 404", async () => {
+      const audit = vi.fn();
+      const h = harness({ audit });
+      seedObjects(h);
+      await h.runs.put(record("r1", [PNG]));
+      await h.runs.put(record("r2", [SVG]));
+      expect((await get(h, `/runs/r1/artifacts/${SVG.key}`)).status).toBe(404); // r2's file, through r1
+      expect((await get(h, `/runs/r1/artifacts/runs/r1/out/9-made-up.png`)).status).toBe(404);
+      const unknown = await get(h, `/runs/nope/artifacts/${PNG.key}`);
+      expect([unknown.status, unknown.body()]).toEqual([404, "run not found"]);
+      expect(audit).not.toHaveBeenCalled(); // a key the run never named is not a read of anything
+      expect((await get(h, `/runs/r1/artifacts/${PNG.key}`)).status).toBe(200);
+      expect(audit.mock.calls.map(([e]) => e)).toEqual([{ route: "artifact", runId: "r1", identity: "access:admin" }]);
+    });
+
+    it("a key the events name whose object is gone answers 410 naming the retention window", async () => {
+      const h = harness();
+      seedObjects(h); // no zip object
+      await h.runs.put(record("r1", [PNG, ZIP]));
+      const t = await get(h, `/runs/r1/artifacts/${ZIP.key}`);
+      expect(t.status).toBe(410);
+      expect(t.headers["content-type"]).toContain("text/plain");
+      expect(t.body()).toBe("artifact expired: files are kept for 30 days");
+    });
+
+    it("a viewer the table refuses for the run gets the same 404 as an unknown id, with the reason on the audit line and never in the reply", async () => {
+      const audit = vi.fn();
+      const h = harness({ audit });
+      seedObjects(h);
+      await h.runs.put(record("priv", [PNG], PRIVATE));
+      // alice: an unlisted browser session — every group's read, no channel grants.
+      const SOURCE: GrantsSource = { grants: new Map(), commandGroups: ["runs"] };
+      const alice: LiveViewContext = { actor: accessActor({ sub: "alice" }, (id) => grantsFor(id, SOURCE)) };
+      const denied = await get(h, `/runs/priv/artifacts/${PNG.key}`, alice);
+      expect([denied.status, denied.body()]).toEqual([404, "run not found"]);
+      expect(audit.mock.calls.map(([e]) => e)).toEqual([
+        { route: "artifact", identity: "access:alice", denied: "not-member" },
+      ]);
+      expect((await get(h, `/runs/priv/artifacts/${PNG.key}`)).status).toBe(200); // the admin
+    });
+
+    it("the history seed carries `artifacts` (URL base + retention, no token) when a store is configured, and nothing without one", async () => {
+      const h = harness();
+      await h.runs.put(record("r1", [PNG]));
+      const page = await get(h, "/runs/r1");
+      expect(page.status).toBe(200);
+      expect((runSeedOf(page.body()) as RunHistorySeed).artifacts).toEqual({
+        urlBase: "/runs/r1/artifacts/",
+        retentionDays: 30,
+      });
+      expect(page.body()).not.toContain("?t=");
+
+      const off = harness({ store: false });
+      await off.runs.put(record("r1", [PNG]));
+      const offPage = await get(off, "/runs/r1");
+      expect((runSeedOf(offPage.body()) as RunHistorySeed).artifacts).toBeUndefined();
+      // The route exists but has nothing to serve from: the plain 404.
+      expect((await get(off, `/runs/r1/artifacts/${PNG.key}`)).status).toBe(404);
+    });
+  });
+
+  describe("a live run, by capability token", () => {
+    it("the run's token opens a named key; no token or a wrong one is the 404 the page gives; a key not in the backlog is 404", async () => {
+      const h = harness();
+      seedObjects(h);
+      const { id, token } = h.registry.create("live one", {
+        ...PUBLIC,
+        userId: "slack:UA",
+        threadKey: "slack:C_PUB:1",
+      });
+      h.registry.publish(id, PNG);
+      const ok = await get(h, `/runs/${id}/artifacts/${PNG.key}?t=${token}`);
+      expect(ok.status).toBe(200);
+      expect(ok.headers["content-disposition"]).toBe('inline; filename="dashboard.png"');
+      expect([...ok.bytes()]).toEqual([137, 80, 78]);
+      expect((await get(h, `/runs/${id}/artifacts/${PNG.key}`)).status).toBe(404);
+      expect((await get(h, `/runs/${id}/artifacts/${PNG.key}?t=wrong`)).status).toBe(404);
+      expect((await get(h, `/runs/${id}/artifacts/${SVG.key}?t=${token}`)).status).toBe(404);
+    });
+
+    it("the live seed carries `artifacts` with the token, so the page's file URLs carry the same capability as its stream", async () => {
+      const h = harness();
+      const { id, token } = h.registry.create("live one", {
+        ...PUBLIC,
+        userId: "slack:UA",
+        threadKey: "slack:C_PUB:1",
+      });
+      const page = await get(h, `/runs/${id}?t=${token}`);
+      expect((runSeedOf(page.body()) as RunLiveSeed).artifacts).toEqual({
+        urlBase: `/runs/${id}/artifacts/`,
+        retentionDays: 30,
+        token,
+      });
+    });
+  });
+
+  // The pipe under the route: backpressure honoured, and a client that goes
+  // away mid-download ends the loop and the store's stream — never a promise
+  // parked on a `drain` that will not come.
+  describe("pipeToResponse", () => {
+    /** A byte sink whose `write` answers what the test says and whose events the test fires. */
+    function sink(writeAnswers: boolean[]) {
+      const listeners: Record<string, Array<() => void>> = {};
+      const writes: Uint8Array[] = [];
+      let ended = false;
+      const s = {
+        destroyed: false,
+        write: (c: Uint8Array) => {
+          writes.push(c);
+          return writeAnswers.shift() ?? true;
+        },
+        end: () => void (ended = true),
+        once: (ev: string, cb: () => void) => {
+          (listeners[ev] ??= []).push(cb);
+          return s;
+        },
+        off: (ev: string, cb: () => void) => {
+          listeners[ev] = (listeners[ev] ?? []).filter((x) => x !== cb);
+          return s;
+        },
+      };
+      const fire = (ev: string) => {
+        const cbs = listeners[ev] ?? [];
+        listeners[ev] = [];
+        cbs.forEach((cb) => cb());
+      };
+      return {
+        res: s as unknown as Parameters<typeof pipeToResponse>[1],
+        writes,
+        get ended() {
+          return ended;
+        },
+        fire,
+        listening: (ev: string) => (listeners[ev] ?? []).length,
+        destroy: () => {
+          s.destroyed = true;
+          fire("close");
+        },
+      };
+    }
+    /** A three-chunk source that records whether it was cancelled. */
+    function source() {
+      let cancelled = false;
+      const body = new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(new Uint8Array([1]));
+          c.enqueue(new Uint8Array([2]));
+          c.enqueue(new Uint8Array([3]));
+          c.close();
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+      return {
+        body,
+        get cancelled() {
+          return cancelled;
+        },
+      };
+    }
+    const tick = () => new Promise<void>((r) => setTimeout(r, 0));
+
+    it("a write that answers false waits for `drain`, then continues to the end", async () => {
+      const s = sink([true, false, true]);
+      const src = source();
+      const done = pipeToResponse(src.body, s.res);
+      await tick();
+      expect(s.writes.map((w) => w[0])).toEqual([1, 2]); // parked after the second chunk
+      expect(s.ended).toBe(false);
+      s.fire("drain");
+      await done;
+      expect(s.writes.map((w) => w[0])).toEqual([1, 2, 3]);
+      expect(s.ended).toBe(true);
+      expect(src.cancelled).toBe(false);
+      expect(s.listening("close")).toBe(0); // nothing left on the response
+    });
+
+    it("a client that goes away while the write is parked ends the loop and cancels the source; nothing more is written and the response is not ended", async () => {
+      const s = sink([false]);
+      const src = source();
+      const done = pipeToResponse(src.body, s.res);
+      await tick();
+      expect(s.writes).toHaveLength(1);
+      s.destroy();
+      await done;
+      expect(s.writes).toHaveLength(1);
+      expect(s.ended).toBe(false);
+      expect(src.cancelled).toBe(true);
+      expect(s.listening("drain")).toBe(0);
+    });
+
+    it("a response already destroyed before the first read writes nothing and cancels the source", async () => {
+      const s = sink([]);
+      s.destroy();
+      const src = source();
+      await pipeToResponse(src.body, s.res);
+      expect(s.writes).toHaveLength(0);
+      expect(s.ended).toBe(false);
+      expect(src.cancelled).toBe(true);
+    });
   });
 });

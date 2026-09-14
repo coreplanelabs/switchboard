@@ -136,8 +136,13 @@ function contract(
         expect(u).toContain("600");
       }
       expect(await store.head("runs/r1/out/1-a.png")).toBeNull();
+      expect(await store.get("runs/r1/out/1-a.png")).toBeNull();
       await seed("runs/r1/out/1-a.png", new Uint8Array([1, 2, 3]), "image/png");
       expect(await store.head("runs/r1/out/1-a.png")).toEqual({ size: 3, contentType: "image/png" });
+      // `get` opens the object as a stream with the same head: what the proxy route pipes.
+      const got = await store.get("runs/r1/out/1-a.png");
+      expect(got).toMatchObject({ size: 3, contentType: "image/png" });
+      expect(new Uint8Array(await new Response(got!.body).arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]));
     });
   });
 }
@@ -148,16 +153,22 @@ contract("InMemoryArtifactStore", async () => {
 });
 
 contract("R2ArtifactStore (over a fetch double)", async () => {
-  const objects = new Map<string, { size: number; type: string }>();
+  const objects = new Map<string, { bytes: Uint8Array<ArrayBuffer>; type: string }>();
   const fetchImpl = (async (input: RequestInfo | URL) => {
     const req = input as Request;
     const key = decodeURIComponent(new URL(req.url).pathname.replace("/switchboard-artifacts/", ""));
     const o = objects.get(key);
     if (!o) return new Response(null, { status: 404 });
-    return new Response(null, { status: 200, headers: { "content-length": String(o.size), "content-type": o.type } });
+    // A GET is signed in the Authorization header (no query signature): the URL is the bare object.
+    if (req.method === "GET") expect(req.headers.get("authorization")).toMatch(/^AWS4-HMAC-SHA256 /);
+    const headers = { "content-length": String(o.bytes.byteLength), "content-type": o.type };
+    return new Response(req.method === "HEAD" ? null : o.bytes, { status: 200, headers });
   }) as unknown as typeof fetch;
   const store = r2({ fetch: fetchImpl });
-  return { store, seed: async (key, bytes, type) => void objects.set(key, { size: bytes.byteLength, type }) };
+  return {
+    store,
+    seed: async (key, bytes, type) => void objects.set(key, { bytes: bytes as Uint8Array<ArrayBuffer>, type }),
+  };
 });
 
 describe("InMemoryArtifactStore.copyFromUrl (item 20)", () => {

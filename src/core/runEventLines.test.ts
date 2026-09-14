@@ -143,6 +143,29 @@ describe("parseRunEventLines", () => {
     expect(skipped).toBe(1);
   });
 
+  // docs/reference/specs/run-visibility.md item 1 — the `artifact` event names a
+  // stored file by its KEY; a payload carrying a `url` is refused so a signed
+  // URL can never be written into a record by a producer that got it wrong.
+  it("accepts `artifact` (direction + key + name + numeric size + contentType), refuses a `url` field and a malformed direction", () => {
+    const ok = {
+      type: "artifact",
+      direction: "out",
+      key: "runs/r1/out/1-sheet.png",
+      name: "sheet.png",
+      size: 3_145_728,
+      contentType: "image/png",
+      at: 1,
+    };
+    const withUrl = { ...ok, url: "https://acme.r2.cloudflarestorage.com/b/runs/r1/out/1-sheet.png?X-Amz-Signature=x" };
+    const sideways = { ...ok, direction: "sideways" };
+    const noSize = { type: "artifact", direction: "in", key: "k", name: "n", contentType: "text/plain" };
+    const { events, skipped } = parseRunEventLines(
+      [ok, withUrl, sideways, noSize].map((e) => JSON.stringify(e)).join("\n"),
+    );
+    expect(events).toEqual([ok]);
+    expect(skipped).toBe(3);
+  });
+
   it("accepts `review_artifact` (reading_diff + string diff + known poweredBy), skips it otherwise", () => {
     const ok = {
       type: "review_artifact",
