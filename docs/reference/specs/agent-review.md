@@ -4,7 +4,7 @@ Reviews a PR with the full change in context and reports ranked, evidence-anchor
 
 - **Code**: `src/agents/registry.ts` (`REVIEW_SYSTEM`; resident-path variant `REVIEW_SYSTEM_RESIDENT`); the PR head preflight and the attached-head guard as gates in `src/core/dispatch/authorize.ts` (`authorizePrHead`, `authorizeAttachedHead`; items 10–11); the reviewed-head settle and the post-step in `src/core/dispatch/runLoop.ts` (items 8, 12 and 18; the step itself is `runReviewPostStep` in `src/core/reviewRound.ts`) + `src/core/reviewPost.ts` + `src/core/reviewVerdict.ts` + `src/core/reviewedHead.ts` + `src/core/digestCoverage.ts` (item 15) + `src/core/headMoved.ts` + `src/execution/githubComments.ts`; verdict tool `submit_verdict` and digest tool `diff_digest` in `src/tools/workspace.ts`
 - **Docs**: [The agents and their toolsets](../../explanation/agents-and-toolsets.md)
-- **Budgets**: 30 turns (backstop) / 25 min / 64k tokens · built-in effort `medium` (a floor — every config layer overrides it, [routing-and-config.md](routing-and-config.md) item 2) · toolset `readonly` (bash + read; read-only by convention)
+- **Budgets**: 25 min / 64k tokens (the turn guard is derived: 150, six a minute — [run-loop.md](run-loop.md) item 1) · built-in effort `medium` (a floor — every config layer overrides it, [routing-and-config.md](routing-and-config.md) item 2) · toolset `readonly` (bash + read; read-only by convention)
 
 ## Behavior
 
@@ -44,7 +44,7 @@ Reviews a PR with the full change in context and reports ranked, evidence-anchor
 
 | Criterion | Proof |
 |---|---|
-| Budgets and toolset as specified | `[unit]` `src/agents/registry.test.ts::review: readonly toolset, 30-turn backstop, 25 min`; budget mechanics proven in `src/runner.test.ts`. |
+| Budgets and toolset as specified; the turn guard derived from the wall clock | `[unit]` `src/agents/registry.test.ts::review: readonly toolset, 25 min`, `::the turn cap is a runaway guard derived from the wall clock (docs/reference/specs/run-loop.md item 1)::*`; budget mechanics proven in `src/runner.test.ts`. |
 | Resident variant: ready worktree, git-based gather, no clone/gh instructions; fallback prompt unchanged | `[unit]` `src/agents/registry.test.ts::resident prompt variants`; selection wiring in `src/core/dispatcher.test.ts::repo/ref resolution + resident prompt selection …`. |
 | Real PR review lands within budget with verdict-first output | `[agent]` `@switchboard agent:review <PR URL>` on a real PR (~<2k changed lines). Expect: status checklist, completion well under 25 min, one-line verdict first, findings with file:line + severity + confidence. |
 | Findings are real (spot-check) | `[agent]` For the top finding, open the cited file:line and confirm the described failure scenario is coherent with the code. A fabricated citation is a critical failure. |

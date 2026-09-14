@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { RUNAWAY_TURNS_PER_MINUTE } from "../agents/registry.js";
 import { analyzeRunFriction, type FrictionFinding } from "./runFriction.js";
 import type { RunEvent } from "./runEvents.js";
 import {
@@ -435,6 +436,30 @@ describe("proposeImprovements", () => {
       );
       expect(p.body, kind).toMatch(/## Suggested fix\n\n\S/);
     }
+  });
+
+  it("budget_hit:turns names the runaway guard's pace and asks for batching or the retry loop — never to raise maxTurns", () => {
+    const [p] = proposeImprovements(
+      [
+        {
+          key: "budget_hit:turns",
+          kind: "budget_hit",
+          signature: "turns",
+          runIds: ["a", "b"],
+          occurrences: 2,
+          durationMs: 0,
+          severity: "high",
+          examples: [{ runId: "a", finishedAt: T0, summary: "budget hit (turns): 270 turns used", severity: "high" }],
+        },
+      ],
+      { top: 1, runsAnalyzed: 2 },
+    );
+    const fix = p.body.slice(p.body.indexOf("## Suggested fix"));
+    expect(fix).toContain(`${RUNAWAY_TURNS_PER_MINUTE} turns a minute`);
+    expect(fix).toMatch(/runaway guard/);
+    expect(fix).toMatch(/batch/i);
+    expect(fix).toMatch(/retry loop/i);
+    expect(fix).not.toMatch(/raise `maxTurns`/i);
   });
 
   it("redacts nothing new but never throws on odd summaries", () => {

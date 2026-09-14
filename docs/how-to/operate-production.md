@@ -66,7 +66,7 @@ curl -sS -N -X POST -H "x-api-key: $BEARER" -H 'content-type: application/json' 
 # → the provider's event stream; the run page shows one more model turn with its token counts
 ```
 
-`401` without the header, `403 revoked` once the run has ended, `403 turn_budget_exhausted` past the preset's turns. The OpenAI shape takes the bearer as `authorization: Bearer …`. The bot's log carries `[model-proxy] run=… turn=…` and never a body.
+`401` without the header, `403 revoked` once the run has ended, `403 turn_budget_exhausted` past the run's turn guard (six turns a minute over the preset's wall clock). The OpenAI shape takes the bearer as `authorization: Bearer …`. The bot's log carries `[model-proxy] run=… turn=…` and never a body.
 
 ## For this installation
 

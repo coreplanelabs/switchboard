@@ -19,13 +19,12 @@ docs: {
   toolset: "readonly",
   machine: "repo-resident",   // the repository's resident, else a cold sandbox; "none" for an agent without a workspace
   identity: "read",           // the credential its sandbox holds: a read-scoped token and a read-only worktree
-  maxTurns: 20,               // a backstop; the wall clock is the real budget
   maxTokens: 24000,
-  maxMinutes: 10,
+  ...loopBudget(10),          // the wall clock, and the turn guard derived from it (six turns a minute)
 },
 ```
 
-Every field is documented on `AgentDef` in the same file.
+Every field is documented on `AgentDef` in the same file. The turn cap is never set by hand: `loopBudget(minutes)` gives the preset its `maxMinutes` and a `maxTurns` of six times that, a pace only a looping run sustains ([run loop](../reference/specs/run-loop.md) item 1).
 
 | Field | What it decides |
 |---|---|

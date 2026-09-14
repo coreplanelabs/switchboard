@@ -598,8 +598,8 @@ describe("the meter — one model.turn span per proxied call, the runner's attrs
   });
 });
 
-describe("the turn budget — a refusal is a typed run event", () => {
-  it("the call past maxTurns is 403 turn_budget_exhausted, publishes a `turn_budget_exhausted` note on the run's stream naming the counts, forwards nothing and opens no span", async () => {
+describe("the turn guard — a refusal is a typed run event", () => {
+  it("the call past maxTurns is 403 turn_budget_exhausted, publishes a `turn_budget_exhausted` note on the run's stream naming the guard and the counts, forwards nothing and opens no span", async () => {
     const h = harness();
     const token = h.bearers.mint(h.grant("run-1", { maxTurns: 1 }));
     expect((await handleModelProxyRequest(request({ headers: bearer(token) }).req, h.deps)).status).toBe(200);
@@ -612,14 +612,15 @@ describe("the turn budget — a refusal is a typed run event", () => {
       {
         type: "run_note",
         kind: "turn_budget_exhausted",
-        summary: "model proxy refused a call past the 1-turn budget (1 turn used)",
+        summary: "model proxy refused a call past the run's 1-turn guard (1 turn used)",
         at: h.clock.now,
       },
     ]);
+    expect(refused.body).toContain("past its 1-turn guard (1 turn used)");
   });
 });
 
-describe("the turn budget — a run that ended between the door and the turn", () => {
+describe("the turn guard — a run that ended between the door and the turn", () => {
   it("is 403 revoked with no note and nothing forwarded — never a zero-turn budget", async () => {
     const h = harness();
     const token = h.bearers.mint(h.grant("run-1"));
