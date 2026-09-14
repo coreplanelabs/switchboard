@@ -51,6 +51,48 @@ export async function* jsonlLines(stream: Readable): AsyncIterable<string> {
   if (tail.length > 0) yield tail;
 }
 
+/** pi's loop answers three kinds of tool call by itself, before the
+ *  `tool_call` hook and without running the tool (pi-agent-core
+ *  `prepareToolCall` and `failToolCallsFromTruncatedMessage`: the hook is
+ *  `beforeToolCall`, called after `validateToolArguments`): arguments that
+ *  fail the tool's schema, a tool that is not on pi's list, and every call of
+ *  an assistant message the output token limit cut. Each is announced with
+ *  `tool_execution_start` and ended with an error result in pi's own words —
+ *  so a `tool_execution_end` the hook never preceded is either one of these,
+ *  and nothing ran, or a call that ran unvetted. The reason for the first
+ *  case, `undefined` for a call pi ran however it ended. Pinned to pi's texts
+ *  the way the bridge reads bash's `Command exited with code N` trailer. */
+export function piAnsweredWithoutRunning(event: PiEvent): string | undefined {
+  if (event.type !== "tool_execution_end" || event.isError !== true) return undefined;
+  const tool = typeof event.toolName === "string" ? event.toolName : "";
+  const result = event.result as { content?: unknown } | undefined;
+  const content = Array.isArray(result?.content) ? result.content : [];
+  const text = content
+    .filter(
+      (p): p is { type: "text"; text: string } =>
+        typeof p === "object" &&
+        p !== null &&
+        (p as { type?: unknown }).type === "text" &&
+        typeof (p as { text?: unknown }).text === "string",
+    )
+    .map((p) => p.text)
+    .join("\n");
+  const validation = `Validation failed for tool "${tool}":\n`;
+  if (text.startsWith(validation)) {
+    const problems = text
+      .slice(validation.length)
+      .split("\n\n")[0]
+      .split("\n")
+      .map((line) => line.replace(/^\s*-\s*/, "").trim())
+      .filter((line) => line.length > 0);
+    return `its arguments failed pi's validation (${problems.join("; ")})`;
+  }
+  if (text.startsWith(`Tool call "${tool}" was not executed: the response hit the output token limit`))
+    return "its arguments were cut by the output token limit";
+  if (text === `Tool ${tool} not found`) return "the tool is not on pi's list";
+  return undefined;
+}
+
 /** What a client needs from a pi process: write a command, read its records,
  *  end its stdin (how RPC mode is told to shut down). */
 export interface PiTransport {

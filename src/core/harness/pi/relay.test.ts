@@ -65,6 +65,7 @@ function live(opts: { blocked?: string; withSpan?: boolean } = {}) {
         .start("run.agent")
     : undefined;
   const openSpan = agentSpan?.start("tool.update_status");
+  const seen: string[] = [];
   const harness: LiveHarness = {
     runId: "run-7",
     tools: [echo, throwing, seeing],
@@ -73,9 +74,10 @@ function live(opts: { blocked?: string; withSpan?: boolean } = {}) {
     rules: { checkout: "/work/repo", branch: "feat/x" },
     emit: (e) => void events.push(e),
     toolSpan: (callId) => (callId === "c1" ? openSpan : undefined),
+    gateSaw: (callId) => void seen.push(callId),
     toolsBlocked: () => opts.blocked,
   };
-  return { harness, events, progress, sink, openSpan };
+  return { harness, events, progress, sink, openSpan, seen };
 }
 
 describe("HarnessRegistry", () => {
@@ -143,6 +145,17 @@ describe("authorizeToolCall — the gate", () => {
     });
     expect(authorizeToolCall(harness, { toolCallId: "b", tool: "read", input: { path: "x" } }).allow).toBe(false);
     expect(events).toHaveLength(2);
+  });
+
+  it("tells the harness the gate saw the call — allowed, refused or blocked by the write-up alike — so a call that ends unseen is known to have bypassed it", () => {
+    const open = live();
+    authorizeToolCall(open.harness, { toolCallId: "a", tool: "update_status", input: {} });
+    authorizeToolCall(open.harness, { toolCallId: "b", tool: "bash", input: { command: "git push origin main" } });
+    authorizeToolCall(open.harness, { toolCallId: "c", tool: "submit_verdict", input: {} });
+    expect(open.seen).toEqual(["a", "b", "c"]);
+    const blocked = live({ blocked: "write up" });
+    authorizeToolCall(blocked.harness, { toolCallId: "d", tool: "read", input: { path: "x" } });
+    expect(blocked.seen).toEqual(["d"]);
   });
 });
 

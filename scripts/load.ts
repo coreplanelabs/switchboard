@@ -671,7 +671,17 @@ async function pi(f: Flags): Promise<boolean> {
   const refusedCalls = runs.flatMap((r) =>
     r.toolCalls.filter((c) => c.verdict !== "allowed").map((c) => ({ task: r.task, ...c })),
   );
-  const unpaired = runs.flatMap((r) => r.toolCalls.filter((c) => !c.hookSeen).map((c) => `${r.task}:${c.callId}`));
+  // The gate's coverage: every call pi ran was seen by the hook. A call pi
+  // answered by itself — its arguments failed pi's validation, were cut by the
+  // output limit, or the tool is not on pi's list — never reached the hook
+  // and never ran; it is listed with pi's reason and does not fail the check.
+  const bypassed = runs.flatMap((r) =>
+    r.toolCalls.filter((c) => c.gate === "bypassed").map((c) => `${r.task}:${c.callId} (${c.tool})`),
+  );
+  const rejectedByPi = runs.flatMap((r) =>
+    r.toolCalls.filter((c) => c.gate === "rejected-by-pi").map((c) => ({ task: r.task, ...c })),
+  );
+  const vetted = runs.reduce((n, r) => n + r.toolCalls.filter((c) => c.gate === "vetted").length, 0);
   const unmapped = [...new Set(runs.flatMap((r) => r.unmapped))];
   const checks: SloCheck[] = [
     {
@@ -687,10 +697,13 @@ async function pi(f: Flags): Promise<boolean> {
       limit: `${runs.length}`,
     },
     {
-      name: "every streamed tool call was also seen by the extension's tool_call hook",
-      pass: unpaired.length === 0,
-      actual: unpaired.length === 0 ? "all paired" : unpaired.join(", "),
-      limit: "0 unpaired",
+      name: "every tool call pi ran was seen by the extension's tool_call hook — none bypassed the gate",
+      pass: bypassed.length === 0,
+      actual:
+        bypassed.length === 0
+          ? `${vetted} vetted${rejectedByPi.length === 0 ? "" : `; ${rejectedByPi.length} answered by pi before the hook, never ran`}`
+          : `bypassed: ${bypassed.join(", ")}`,
+      limit: "0 bypassed",
     },
     // pi creates an empty credential store in its config directory; the key
     // it read from the environment must never land in it, because the
@@ -718,6 +731,8 @@ async function pi(f: Flags): Promise<boolean> {
     `model: ${runs[0]?.model ? `${runs[0].model.provider}/${runs[0].model.id} thinking ${runs[0].model.thinkingLevel}` : "unknown"}; pi's config and session files under ${agentDir} (kept: the sessions are the run's own record)`,
     `tool calls the policy preview would refuse or that fall outside the coding profile: ${refusedCalls.length === 0 ? "none" : ""}`,
     ...refusedCalls.map((c) => `  - ${c.task} ${c.tool} (${c.verdict}): ${c.reason} — \`${c.summary}\``),
+    `tool calls pi answered by itself before the hook — nothing ran, so the gate had nothing to vet: ${rejectedByPi.length === 0 ? "none" : ""}`,
+    ...rejectedByPi.map((c) => `  - ${c.task} ${c.tool} ${c.callId}: ${c.piRejection} — \`${c.summary}\``),
     `pi event kinds with no home on the run stream: ${unmapped.length === 0 ? "none" : unmapped.join(", ")}`,
     ...runs.flatMap((r) => r.errors.map((e) => `error (${r.task}): ${e}`)),
   ];

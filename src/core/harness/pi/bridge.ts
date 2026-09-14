@@ -22,7 +22,8 @@ import {
   type RunNoteKind,
 } from "../../runEvents.js";
 import type { Clock, Span } from "../../trace/types.js";
-import type { PiEvent } from "./protocol.js";
+import { BLOCKED_AT_DOOR_PREFIX, BLOCKED_UNAVAILABLE_PREFIX } from "./extensionSource.js";
+import { piAnsweredWithoutRunning, type PiEvent } from "./protocol.js";
 
 /** Where each event type pi's RPC protocol documents lands: `mapped` (a
  *  RunEvent, a span or a progress note), `structure` (the run's own shape,
@@ -84,6 +85,10 @@ export interface BridgeObservation {
   message?: Record<string, unknown>;
   /** An assistant turn that ended in a provider error, with pi's message. */
   providerError?: string;
+  /** A call ended that the gate never saw (`gateSaw` was not called for its
+   *  id) and that pi did not answer by itself: the tool ran unvetted. The
+   *  harness fails the run closed on it. */
+  gateBypassed?: { callId: string; tool: string };
 }
 
 export interface BridgeDeps {
@@ -137,10 +142,26 @@ export class PiBridge {
   /** Text beside a bookkeeping-only call, held until the next message decides (run-loop item 15). */
   private heldAnswer: string | undefined;
   private assistantStartedAt: number | undefined;
-  private readonly openTools = new Map<string, { span: Span | undefined; tool: string }>();
+  /** The calls under way: their span, their tool, and whether their end is
+   *  judged against the gate (harness-pi item 7). */
+  private readonly openTools = new Map<string, { span: Span | undefined; tool: string; judged: boolean }>();
+  /** The calls the gate saw — the extension asked `/harness/authorize` for
+   *  them (`gateSaw`) — not yet ended. */
+  private readonly vetted = new Set<string>();
+  /** Whether a call starting now is judged against the gate when it ends.
+   *  The harness turns it off while catching up on a re-attach: those calls
+   *  were vetted by the bot generation that died, and this one never heard. */
+  judgeGate = true;
   private summarizationRetries = 0;
 
   constructor(private readonly deps: BridgeDeps) {}
+
+  /** The gate saw this call: the extension's `tool_call` hook asked the bot
+   *  for it, whatever the answer. Called from the authorize route, before pi
+   *  runs the tool — so it always precedes the call's `tool_execution_end`. */
+  gateSaw(callId: string): void {
+    this.vetted.add(callId);
+  }
 
   /** The run's answer as it stands: the last text-only assistant message, else a held bookkeeping text. */
   answer(): string | undefined {
@@ -181,7 +202,7 @@ export class PiBridge {
         this.onToolStart(event);
         break;
       case "tool_execution_end":
-        this.onToolEnd(event);
+        this.onToolEnd(event, out);
         break;
       case "compaction_end":
         this.onCompactionEnd(event);
@@ -255,7 +276,7 @@ export class PiBridge {
     const tool = str(event.toolName);
     const callId = str(event.toolCallId);
     const span = this.deps.agentSpan?.start(`tool.${tool}`);
-    this.openTools.set(callId, { span, tool });
+    this.openTools.set(callId, { span, tool, judged: this.judgeGate });
     this.toolCalls++;
     const input = isRecord(event.args) ? event.args : undefined;
     const command =
@@ -272,7 +293,7 @@ export class PiBridge {
     });
   }
 
-  private onToolEnd(event: PiEvent): void {
+  private onToolEnd(event: PiEvent, out: BridgeObservation): void {
     const callId = str(event.toolCallId);
     const open = this.openTools.get(callId);
     this.openTools.delete(callId);
@@ -295,6 +316,27 @@ export class PiBridge {
       ok,
       ...(exit.exitCode !== undefined ? { exitCode: exit.exitCode } : {}),
     });
+    // The gate's coverage (harness-pi item 7): a call that ended without the
+    // gate having seen it either never ran — pi answered it by itself before
+    // the hook, or the extension blocked it without reaching a verdict — or
+    // ran unvetted, which the harness stops the run on.
+    const seen = this.vetted.delete(callId);
+    if (!seen && open?.judged) {
+      const rejection = piAnsweredWithoutRunning(event);
+      if (rejection !== undefined) {
+        this.note(
+          "harness_error",
+          `pi answered the ${tool} call ${callId} itself, before the gate: ${redactAndCap(rejection, 300)}; nothing ran`,
+        );
+      } else if (isError && (text.startsWith(BLOCKED_AT_DOOR_PREFIX) || text.startsWith(BLOCKED_UNAVAILABLE_PREFIX))) {
+        this.note(
+          "harness_error",
+          `the extension blocked the ${tool} call ${callId} without the gate's verdict: ${redactAndCap(text, 300)}; nothing ran`,
+        );
+      } else {
+        out.gateBypassed = { callId, tool };
+      }
+    }
   }
 
   private onCompactionEnd(event: PiEvent): void {
@@ -339,5 +381,6 @@ export class PiBridge {
       this.emit({ type: "tool_result", tool: open.tool, ok: false, callId, summary: redactAndCap(reason) });
     }
     this.openTools.clear();
+    this.vetted.clear();
   }
 }

@@ -29,6 +29,10 @@ export interface LiveHarness {
   emit: (event: RunEvent) => void;
   /** The span the bridge opened for a call still running, so a relayed tool's work hangs under it. */
   toolSpan: (callId: string) => Span | undefined;
+  /** The gate saw this call — the extension asked for it, whatever the
+   *  answer. The bridge keeps the ids, so a call that ends without one is
+   *  known to have run unvetted (or to have been answered by pi itself). */
+  gateSaw: (callId: string) => void;
   /** The reason every tool is refused right now — the write-up — or nothing. */
   toolsBlocked: () => string | undefined;
 }
@@ -77,8 +81,10 @@ export function relayedToolDefinitions(harness: LiveHarness): ToolDef[] {
 /** The gate: a write-up refuses every tool; a relayed tool runs under the
  *  bot's own gates when it runs; pi's own tools are judged by the coding
  *  preset's rules from the call alone. A refusal is a `tool_refused` note and
- *  the reason the model reads. */
+ *  the reason the model reads. Whatever the answer, the harness is told the
+ *  gate saw the call first. */
 export function authorizeToolCall(harness: LiveHarness, ask: ToolCallAsk): AuthorizeAnswer {
+  harness.gateSaw(ask.toolCallId);
   const blocked = harness.toolsBlocked();
   const refuse = (reason: string): AuthorizeAnswer => {
     harness.emit({

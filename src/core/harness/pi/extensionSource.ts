@@ -14,6 +14,14 @@
 // text, the tests import it from a file they write, and `tsc` carries it to
 // `dist/` like any constant.
 
+/** The two reasons the extension blocks a call with by itself, without a
+ *  verdict from the bot: a refusal at the door (a 4xx) and a bot that did not
+ *  answer for the wait. The bridge reads them off pi's `tool_execution_end`
+ *  (harness-pi item 7) to tell such a call — blocked, nothing ran — from one
+ *  that ran without the gate ever seeing it. */
+export const BLOCKED_AT_DOOR_PREFIX = "authorization refused at the door: ";
+export const BLOCKED_UNAVAILABLE_PREFIX = "authorization unavailable: ";
+
 export const PI_EXTENSION_SOURCE = `// Switchboard's pi harness extension. Written into the run's directory by the
 // bot before pi starts; loaded with \`-e\`. Imports nothing.
 
@@ -85,10 +93,10 @@ async function authorize(event) {
       lastError = err instanceof Error ? err.message : String(err);
       const status = err instanceof HarnessAnswerError ? err.status : undefined;
       if (status !== undefined && status >= 400 && status < 500) {
-        return { allow: false, reason: "authorization refused at the door: " + lastError };
+        return { allow: false, reason: "${BLOCKED_AT_DOOR_PREFIX}" + lastError };
       }
       if (Date.now() - started >= AUTHORIZE_WAIT_MS) {
-        return { allow: false, reason: "authorization unavailable: the bot did not answer for 90 s (" + lastError + ")" };
+        return { allow: false, reason: "${BLOCKED_UNAVAILABLE_PREFIX}the bot did not answer for 90 s (" + lastError + ")" };
       }
       await sleep(AUTHORIZE_RETRY_MS);
     }

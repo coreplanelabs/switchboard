@@ -22,7 +22,7 @@ import { buildMessages } from "./messages.js";
 import { resolveRun } from "./resolve.js";
 import type { HarnessDeps, RunDeps } from "./run.js";
 import { runLoop } from "./runLoop.js";
-import { HarnessRegistry, type LiveHarness } from "../harness/pi/relay.js";
+import { HarnessRegistry, authorizeToolCall, type LiveHarness } from "../harness/pi/relay.js";
 import { FakePiContainer } from "../harness/pi/testing/fakeContainer.js";
 import { judgeToolCall, type ToolRuleContext } from "../harness/pi/toolRules.js";
 import type { CoordinatorTag } from "../coordinator/contract.js";
@@ -381,8 +381,9 @@ describe("runLoop — the model turn and everything that rides on it", () => {
 describe("the harness seam — pi in place of the native loop when the preset says so", () => {
   const PI_YAML = YAML + "harness:\n  coding: pi\n";
 
-  /** A pi that answers the harness's first prompt with one bash turn and a final text. */
-  function scriptedPi(container: FakePiContainer, finalText: string) {
+  /** A pi that answers the harness's first prompt with one bash turn and a
+   *  final text — its extension asking the gate for the call, as the real one does. */
+  function scriptedPi(container: FakePiContainer, registry: HarnessRegistry, finalText: string) {
     container.onStdin = (line, c) => {
       const cmd = JSON.parse(line) as Record<string, unknown>;
       if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
@@ -411,12 +412,14 @@ describe("the harness seam — pi in place of the native loop when the preset sa
         { type: "turn_end", message: done, toolResults: [] },
         { type: "agent_settled" },
       );
+      authorizeToolCall(registry.get("run-l")!, { toolCallId: "c1", tool: "bash", input: { command: "npm test" } });
     };
   }
 
   it("a preset the deployment moved to pi runs on the harness: pi's answer is the run's, its tool events are on the stream, the bearer reaches pi and the provider is never called", async () => {
     const container = new FakePiContainer();
-    scriptedPi(container, "pi says done");
+    const registry = new HarnessRegistry();
+    scriptedPi(container, registry, "pi says done");
     let providerCalls = 0;
     const provider: Provider = {
       name: "fake",
@@ -430,7 +433,7 @@ describe("the harness seam — pi in place of the native loop when the preset sa
       provider,
       yaml: PI_YAML,
       harness: {
-        registry: new HarnessRegistry(),
+        registry,
         harnessUrl: "https://bot.example.com",
         containerFor: () => container,
       },
@@ -482,12 +485,13 @@ describe("the harness seam — pi in place of the native loop when the preset sa
       binding?: ResidentBinding;
     }) => {
       const container = new FakePiContainer();
-      scriptedPi(container, "done");
+      const registry = new RecordingRegistry();
+      scriptedPi(container, registry, "done");
       const s = setup("", {
         agent: "coding",
         yaml: PI_YAML,
         harness: {
-          registry: new RecordingRegistry(),
+          registry,
           harnessUrl: "https://bot.example.com",
           containerFor: () => container,
         },
