@@ -8,7 +8,7 @@
 // replay recorded lines.
 
 import { redactSecrets, stripAnsi } from "../core/redact.js";
-import { parsePiLine, type PiEvent, type PiTransport } from "../core/harness/pi/protocol.js";
+import { parsePiLine, piAnsweredWithoutRunning, type PiEvent, type PiTransport } from "../core/harness/pi/protocol.js";
 import type { ToolVerdict } from "../core/harness/pi/toolRules.js";
 import { HOOK_PREFIX, type HookNoticePayload } from "./piExtension.js";
 
@@ -77,6 +77,18 @@ export interface PiToolCallRecord {
   ok?: boolean;
   /** The extension's `tool_call` hook reported this call. */
   hookSeen: boolean;
+  /** pi answered the call itself, before the hook and without running the
+   *  tool — its arguments failed pi's validation, were cut by the output
+   *  limit, or the tool is not on pi's list (`piAnsweredWithoutRunning`):
+   *  pi's reason. Absent for a call pi ran. */
+  piRejection?: string;
+  /** The call against the gate the hook stands for, judged once the stream
+   *  has said what became of it: `vetted` — the hook saw it before it ran;
+   *  `rejected-by-pi` — pi answered it without running it (`piRejection`
+   *  says why), so there was nothing to vet; `bypassed` — the hook never saw
+   *  it and pi did not say it never ran: it ran, or was still open when the
+   *  stream ended. */
+  gate: "vetted" | "rejected-by-pi" | "bypassed";
   verdict: ToolVerdict["verdict"];
   reason?: string;
 }
@@ -165,6 +177,10 @@ export function summarizeToolInput(tool: string, input: unknown): string {
   return oneLine(JSON.stringify(input));
 }
 
+/** The gate's judgment of one call from what the stream has said so far. */
+const gateOf = (call: Pick<PiToolCallRecord, "hookSeen" | "piRejection">): PiToolCallRecord["gate"] =>
+  call.hookSeen ? "vetted" : call.piRejection !== undefined ? "rejected-by-pi" : "bypassed";
+
 const zeroUsage = (): PiUsageTotals => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 });
 const zeroCost = (): PiCostTotals => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 });
 const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
@@ -214,6 +230,7 @@ export class PiTaskAccumulator {
           summary: summarizeToolInput(tool, event.args),
           input: event.args,
           hookSeen: false,
+          gate: "bypassed",
           verdict: verdict.verdict,
           ...(verdict.verdict === "allowed" ? {} : { reason: verdict.reason }),
         });
@@ -221,7 +238,12 @@ export class PiTaskAccumulator {
       }
       case "tool_execution_end": {
         const call = this.callById(String(event.toolCallId));
-        if (call) call.ok = event.isError !== true;
+        if (call) {
+          call.ok = event.isError !== true;
+          const rejection = piAnsweredWithoutRunning(event);
+          if (rejection !== undefined) call.piRejection = rejection;
+          call.gate = gateOf(call);
+        }
         break;
       }
       case "extension_ui_request":
@@ -335,8 +357,10 @@ export class PiTaskAccumulator {
       switch (notice.kind) {
         case "tool_call": {
           const call = this.callById(notice.toolCallId);
-          if (call) call.hookSeen = true;
-          else {
+          if (call) {
+            call.hookSeen = true;
+            call.gate = "vetted";
+          } else {
             // The hook fires after tool_execution_start (docs/extensions.md);
             // a notice for a call the stream never announced is kept, unpaired.
             const verdict = this.opts.preview(notice.toolName, notice.input);
@@ -346,6 +370,7 @@ export class PiTaskAccumulator {
               summary: summarizeToolInput(notice.toolName, notice.input),
               input: notice.input,
               hookSeen: true,
+              gate: "vetted",
               verdict: verdict.verdict,
               ...(verdict.verdict === "allowed" ? {} : { reason: verdict.reason }),
             });

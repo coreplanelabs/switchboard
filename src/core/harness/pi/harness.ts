@@ -136,6 +136,15 @@ class PromptRefused extends Error {
   }
 }
 
+/** A tool call pi ran to its end without the extension ever asking the gate
+ *  for it (harness-pi item 7): the run fails closed on the first one. */
+class GateBypassed extends Error {
+  constructor(tool: string, callId: string) {
+    super(`the gate was bypassed: pi ran ${tool} (call ${callId}) without asking the bot`);
+    this.name = "GateBypassed";
+  }
+}
+
 /** The seed rule (harness-pi item 9). The dispatcher's seed is the thread so
  *  far with the request as its last user turn (`buildMessages` merges the
  *  alternation, so nothing follows it): the last user turn is the prompt pi is
@@ -216,6 +225,7 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
   let writeUp: WriteUp | undefined;
   let writeUpAt: number | undefined;
   let hardStopped = false;
+  let bypass: GateBypassed | undefined;
   const toolsBlocked = (): string | undefined => {
     if (!writeUp) return undefined;
     if (writeUp.kind === "time")
@@ -232,6 +242,7 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
     rules: run.rules,
     emit,
     toolSpan: (callId) => bridge.openSpan(callId),
+    gateSaw: (callId) => bridge.gateSaw(callId),
     toolsBlocked,
   };
   const forget = deps.registry.register(live);
@@ -418,8 +429,18 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
       if (next.done) break;
       const event = parsePiLine(next.value);
       if (!event) continue;
+      // A call that starts while catching up was vetted by the generation that died.
+      bridge.judgeGate = !catchingUp;
       const obs = bridge.observe(event);
       for (const reply of obs.replies) transport.send(reply);
+      if (obs.gateBypassed) {
+        // Fail closed: a tool ran that the gate never saw. Stop pi now; the
+        // run fails naming the call once the loop is left.
+        bypass = new GateBypassed(obs.gateBypassed.tool, obs.gateBypassed.callId);
+        note("harness_error", `${bypass.message} — the run is stopped`);
+        transport.send({ type: "abort" });
+        break;
+      }
       if (obs.response) {
         const r = obs.response;
         if (
@@ -455,6 +476,7 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
       note("stopped", hardStopNote(), "hard");
       return HARD_STOP_MESSAGE;
     }
+    if (bypass) throw bypass;
     if (!settled) {
       const tail = await container.tail(paths.errLog, 2000);
       throw new Error(`pi exited before the run settled${tail.trim() ? `: ${redactAndCap(tail.trim(), 400)}` : ""}`);
@@ -467,10 +489,16 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
     return text || "_(no response)_";
   } finally {
     transport?.close();
-    bridge.closeOpenSpans(hardStopped ? "the run was hard-stopped" : "the run ended");
+    bridge.closeOpenSpans(
+      hardStopped
+        ? "the run was hard-stopped"
+        : bypass
+          ? "the run was stopped: a tool call bypassed the gate"
+          : "the run ended",
+    );
     save();
     forget();
     if (pid !== undefined) await container.kill(pid).catch(() => {});
-    agentSpan?.end(hardStopped ? "error" : "ok");
+    agentSpan?.end(hardStopped || bypass ? "error" : "ok");
   }
 }

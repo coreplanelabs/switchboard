@@ -40,6 +40,7 @@ function world() {
     rules: { checkout: "/work", branch: "feat/x" },
     emit: (e) => void events.push(e),
     toolSpan: () => undefined,
+    gateSaw: () => {},
     toolsBlocked: () => undefined,
   };
   const grant = (runId: string) => ({

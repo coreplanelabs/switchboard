@@ -225,6 +225,83 @@ describe("the bridge's spans — one tool.<name> per call under run.agent, ended
   });
 });
 
+describe("the gate's coverage — every call that ran was vetted", () => {
+  // pi fires the `tool_call` hook after `tool_execution_start` and after its
+  // own argument validation (pi-agent-core `prepareToolCall`), so a call whose
+  // arguments it rejects — or that names no tool, or whose message the output
+  // limit cut — is announced and ended on the stream and never asks the gate,
+  // and never runs. Any other call that ends without the gate having seen it
+  // ran unvetted.
+  const start = (id: string, tool: string, args: Record<string, unknown>): PiEvent => ({
+    type: "tool_execution_start",
+    toolCallId: id,
+    toolName: tool,
+    args,
+  });
+  const end = (id: string, tool: string, text: string, isError = false): PiEvent => ({
+    type: "tool_execution_end",
+    toolCallId: id,
+    toolName: tool,
+    result: { content: [{ type: "text", text }], details: {} },
+    isError,
+  });
+  const validation =
+    'Validation failed for tool "read":\n  - offset: must be number\n\nReceived arguments:\n{\n  "offset": [\n    140,\n    270\n  ]\n}';
+
+  it("a call the gate saw ends quietly; pi's own pre-gate answer is a harness_error note naming the reason; an unvetted call that ran is reported as a gate bypass", () => {
+    const { bridge, events } = harness();
+    bridge.gateSaw("c1");
+    bridge.observe(start("c1", "bash", { command: "npm test" }));
+    expect(bridge.observe(end("c1", "bash", "ok")).gateBypassed).toBeUndefined();
+    // The gate refused it: pi ends the call with the reason; the gate saw it, so nothing is reported.
+    bridge.gateSaw("c2");
+    bridge.observe(start("c2", "bash", { command: "git push origin main" }));
+    expect(bridge.observe(end("c2", "bash", "repo:use — push to `main`", true)).gateBypassed).toBeUndefined();
+    bridge.observe(start("c3", "read", { offset: [140, 270] }));
+    expect(bridge.observe(end("c3", "read", validation, true)).gateBypassed).toBeUndefined();
+    // The extension blocked it by itself — the bot never answered — so the gate saw nothing, and nothing ran.
+    const unavailable = "authorization unavailable: the bot did not answer for 90 s (fetch failed)";
+    bridge.observe(start("c4", "bash", { command: "npm test" }));
+    expect(bridge.observe(end("c4", "bash", unavailable, true)).gateBypassed).toBeUndefined();
+    bridge.observe(start("c5", "bash", { command: "rm -rf /" }));
+    expect(bridge.observe(end("c5", "bash", "")).gateBypassed).toEqual({ callId: "c5", tool: "bash" });
+    expect(events.filter((e) => e.type === "run_note")).toEqual([
+      {
+        type: "run_note",
+        kind: "harness_error",
+        summary:
+          "pi answered the read call c3 itself, before the gate: its arguments failed pi's validation (offset: must be number); nothing ran",
+        at: NOW,
+      },
+      {
+        type: "run_note",
+        kind: "harness_error",
+        summary: `the extension blocked the bash call c4 without the gate's verdict: ${unavailable}; nothing ran`,
+        at: NOW,
+      },
+    ]);
+    // The tool_result events are the loop's, unchanged: the refusals and pi's answer are failures, the bypass is a plain result.
+    expect(events.filter((e) => e.type === "tool_result").map((e) => (e as { ok: boolean }).ok)).toEqual([
+      true,
+      false,
+      false,
+      false,
+      true,
+    ]);
+  });
+
+  it("calls started while the bridge is not judging — the catch-up after a re-attach — are never reported", () => {
+    const { bridge, events } = harness();
+    bridge.judgeGate = false;
+    bridge.observe(start("c1", "bash", { command: "npm test" }));
+    bridge.judgeGate = true;
+    expect(bridge.observe(end("c1", "bash", "ok")).gateBypassed).toBeUndefined();
+    bridge.observe(start("c2", "bash", { command: "npm test" }));
+    expect(bridge.observe(end("c2", "bash", "ok")).gateBypassed).toEqual({ callId: "c2", tool: "bash" });
+    expect(events.filter((e) => e.type === "run_note")).toEqual([]);
+  });
+});
+
 describe("turns, narration and the answer — the loop's rules", () => {
   const assistant = (content: Record<string, unknown>[], stopReason = "toolUse"): PiEvent => ({
     type: "message_end",

@@ -190,7 +190,63 @@ describe("PiTaskAccumulator — one task's stream becomes the measured record", 
     ]);
     expect(run.toolCalls[0].reason).toBe("test rule");
     expect(run.toolCalls[0].summary).toBe("git status --short");
+    expect(run.toolCalls.map((c) => c.gate)).toEqual(["vetted", "vetted"]);
     expect(seen).toEqual(["bash", "submit_pr_description"]);
+  });
+
+  it("judges each call against the gate: vetted when the hook saw it, rejected-by-pi with pi's reason when pi answered it without running it, bypassed when it ran unseen", () => {
+    // The three shapes the spike receipt and pi's own loop
+    // (packages/agent/src/agent-loop.ts `prepareToolCall`) produce: pi
+    // validates the arguments before the `tool_call` hook, so a call its
+    // validation rejects is announced and ended on the stream with no notice
+    // — and never runs.
+    const acc = new PiTaskAccumulator({ task: "t", preview: allowAll, describe: noProblems });
+    const badRead = { path: "src/load/aggregate.test.ts", offset: [140, 270] };
+    const events: PiEvent[] = [
+      { type: "tool_execution_start", toolCallId: "toolu_016K", toolName: "read", args: badRead },
+      {
+        type: "tool_execution_end",
+        toolCallId: "toolu_016K",
+        toolName: "read",
+        result: {
+          content: [
+            {
+              type: "text",
+              text: 'Validation failed for tool "read":\n  - offset: must be number\n\nReceived arguments:\n{\n  "path": "src/load/aggregate.test.ts",\n  "offset": [\n    140,\n    270\n  ]\n}',
+            },
+          ],
+          details: {},
+        },
+        isError: true,
+      },
+      { type: "tool_execution_start", toolCallId: "toolu_ran", toolName: "bash", args: { command: "ls" } },
+      {
+        type: "tool_execution_end",
+        toolCallId: "toolu_ran",
+        toolName: "bash",
+        result: { content: [{ type: "text", text: "a\nb" }], details: {} },
+        isError: false,
+      },
+      { type: "tool_execution_start", toolCallId: "toolu_ok", toolName: "read", args: { path: "README.md" } },
+      notice({ kind: "tool_call", toolCallId: "toolu_ok", toolName: "read", input: { path: "README.md" } }),
+      {
+        type: "tool_execution_end",
+        toolCallId: "toolu_ok",
+        toolName: "read",
+        result: { content: [{ type: "text", text: "# hi" }], details: {} },
+        isError: false,
+      },
+      // Still open when the stream ends: the hook never saw it and pi never said it did not run.
+      { type: "tool_execution_start", toolCallId: "toolu_open", toolName: "bash", args: { command: "sleep 9" } },
+    ];
+    for (const e of events) acc.observe(e);
+    const run = acc.result("exited", 1);
+    expect(run.toolCalls.map((c) => [c.callId, c.ok, c.hookSeen, c.gate, c.piRejection])).toEqual([
+      ["toolu_016K", false, false, "rejected-by-pi", "its arguments failed pi's validation (offset: must be number)"],
+      ["toolu_ran", true, false, "bypassed", undefined],
+      ["toolu_ok", true, true, "vetted", undefined],
+      ["toolu_open", undefined, false, "bypassed", undefined],
+    ]);
   });
 
   it("judges the PR-shaped outcome by the submitted object, through the caller's validator", () => {
