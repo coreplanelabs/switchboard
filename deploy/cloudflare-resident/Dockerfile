@@ -153,6 +153,24 @@ RUN apt-get update \
   && playwright screenshot --viewport-size=640,480 'data:text/html,<h1>ok</h1>' /tmp/ok.png && test -s /tmp/ok.png \
   && rm -f /tmp/proof.mp4 /tmp/proof_*.png /tmp/ok.png
 
+# pi — the coding harness the bot can start INSIDE this container in place of
+# its native turn loop (docs/reference/specs/harness-pi.md): `pi --mode rpc`,
+# one process per run in the thread's worktree, driven by the bot over its
+# JSONL protocol, with the run's model-proxy bearer as its only key (never a
+# model key: the bearer buys calls through the bot, docs/reference/specs/
+# model-proxy.md). Installed globally with this image's Node — pi needs
+# >= 22.19.0 and the image ships 24 — so every user finds it on PATH, at an
+# EXACT pin held by src/deploy/imagePiHarness.test.ts (the pnpm lesson: a
+# floating tag would move the harness's protocol with the build date, and a
+# pi minor changes RPC events and extension hooks). Proven by the layer, so
+# the BUILD fails, not a run: the pi on PATH answers the pin, and its own help
+# names the RPC mode the harness drives. Dark until a deployment sets
+# `harness: { coding: pi }`: nothing here starts pi on its own.
+RUN npm install -g @earendil-works/pi-coding-agent@0.85.1 \
+  && npm cache clean --force \
+  && pi --version | grep -qx '0.85.1' \
+  && pi --help | grep -q -- '--mode <mode>'
+
 # Agent commands never run as root (repo code runs unprivileged, one user per
 # thread — docs/reference/specs/resident-repos.md). The SDK's exec has no user/uid option
 # (verified against 0.13.0-next.751.1), so the container server itself runs as
@@ -175,3 +193,9 @@ RUN set -eux; \
 # browser tree under /opt and launch it, so the BUILD fails if a chmod or the
 # path ever regresses, not a run.
 RUN su -s /bin/bash worker1 -c "playwright screenshot --viewport-size=640,480 'data:text/html,<h1>ok</h1>' /tmp/ok.png && test -s /tmp/ok.png && rm -f /tmp/ok.png"
+
+# pi once more, as worker1: a run's pi is started as the thread's user through
+# the same `su`, so the BUILD proves an unprivileged user finds the pin on PATH
+# and pi answers without a writable home (its config directory is the run's
+# own, named by PI_CODING_AGENT_DIR at start).
+RUN su -s /bin/bash worker1 -c "pi --version | grep -qx '0.85.1'"
