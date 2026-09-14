@@ -21,6 +21,7 @@ import {
   type RunEvent,
   type RunNoteKind,
 } from "../../runEvents.js";
+import type { CompactionEntry } from "../../runLedger/types.js";
 import type { Clock, Span } from "../../trace/types.js";
 import { BLOCKED_AT_DOOR_PREFIX, BLOCKED_UNAVAILABLE_PREFIX } from "./extensionSource.js";
 import { piAnsweredWithoutRunning, type PiEvent } from "./protocol.js";
@@ -89,6 +90,10 @@ export interface BridgeObservation {
    *  id) and that pi did not answer by itself: the tool ran unvetted. The
    *  harness fails the run closed on it. */
   gateBypassed?: { callId: string; tool: string };
+  /** pi compacted its context and said what it wrote: the entry the mirror
+   *  appends to the session log (docs/reference/specs/session-log.md item 6). Absent
+   *  when the compaction failed, was aborted, or carried no summary. */
+  compaction?: CompactionEntry;
 }
 
 export interface BridgeDeps {
@@ -205,7 +210,7 @@ export class PiBridge {
         this.onToolEnd(event, out);
         break;
       case "compaction_end":
-        this.onCompactionEnd(event);
+        this.onCompactionEnd(event, out);
         break;
       case "summarization_retry_scheduled":
         this.summarizationRetries++;
@@ -339,7 +344,7 @@ export class PiBridge {
     }
   }
 
-  private onCompactionEnd(event: PiEvent): void {
+  private onCompactionEnd(event: PiEvent, out: BridgeObservation): void {
     const result = isRecord(event.result) ? event.result : undefined;
     if (event.aborted === true || !result) {
       this.note(
@@ -356,6 +361,16 @@ export class PiBridge {
       "compacted",
       `pi compacted the context (${str(event.reason)}): ${before ?? "?"} → about ${after ?? "?"} tokens; the transcript keeps the originals${retries > 0 ? `; ${retries} summarization retr${retries === 1 ? "y" : "ies"}` : ""}`,
     );
+    // The entry for the session log (session-log item 6): pi's own id for the
+    // first kept entry rides along for forensics; the mirror has no map from
+    // it to a log index, so the row names no `keptFrom`.
+    if (typeof result.summary === "string") {
+      out.compaction = {
+        summary: result.summary,
+        ...(before !== undefined ? { tokensBefore: before } : {}),
+        ...(typeof result.firstKeptEntryId === "string" ? { firstKeptEntryId: result.firstKeptEntryId } : {}),
+      };
+    }
   }
 
   private onUiRequest(event: PiEvent, out: BridgeObservation): void {

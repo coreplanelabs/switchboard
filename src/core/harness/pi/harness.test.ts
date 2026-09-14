@@ -766,6 +766,34 @@ describe("runPiHarness — after a bot restart", () => {
     );
     expect(w.steps.at(-1)?.inboxConsumedSeq).toBe(2);
   });
+
+  // docs/reference/specs/session-log.md item 6: the compaction rows the ledger
+  // kept are rendered where they sat, so the restarted pi's window is the
+  // summary and the turns after it, not the raw turns compacted again.
+  it("restarts pi on a session carrying the transcript's compaction entries where they sat", async () => {
+    const w = world();
+    w.run.resume = {
+      ...resume({ pid: 999, logOffset: 50 }),
+      compactions: [{ before: 1, entry: { summary: "the user asked for the tests", tokensBefore: 120_000 } }],
+    };
+    scriptedPi(w.container, (n, c) => finalTurn(c, "continued"));
+    await w.start();
+    const [started] = w.container.starts;
+    const sessionPath = started.args[started.args.indexOf("--session") + 1];
+    const session = w.container.files
+      .get(sessionPath)!
+      .trimEnd()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(session.slice(1).map((e) => e.type)).toEqual(["message", "compaction", "message", "message"]);
+    expect(session[2]).toMatchObject({
+      type: "compaction",
+      summary: "the user asked for the tests",
+      tokensBefore: 120_000,
+    });
+    expect(session[2].parentId).toBe(session[1].id);
+    expect(session[3].parentId).toBe(session[2].id);
+  });
 });
 
 describe("the small pure pieces", () => {

@@ -35,6 +35,7 @@ import type { RunnableTool, ToolContext } from "../../../tools/workspace.js";
 import type { RunBearerStore } from "../../modelProxy/runBearers.js";
 import { redactAndCap, redactSecrets, type RunEvent, type RunNoteKind, type StopMode } from "../../runEvents.js";
 import type { Settlement } from "../../runLedger/resume.js";
+import type { AssembledCompaction } from "../../runLedger/transcript.js";
 import type { RunControl } from "../../runRegistry/runControl.js";
 import { followUpPrompt, followUpSnippet, type FollowUpInbox, type FollowUpInput } from "../../threadAdmission.js";
 import type { Backend } from "../../trace/attrs.js";
@@ -60,6 +61,10 @@ export interface PiHarnessFacts {
 export interface PiHarnessResume {
   /** The transcript the ledger held, as `planResume` assembled it. */
   messages: ChatMessage[];
+  /** pi's compaction entries among those messages (session-log item 6), rendered
+   *  where they sat so the restarted pi's window is what pi had, not the raw
+   *  turns compacted again. Absent on a plan from before the log kept them. */
+  compactions?: AssembledCompaction[];
   /** The calls in flight at the kill; under pi none is re-run — its effects are the container's. */
   settlements: Settlement[];
   remainingMs: number;
@@ -302,28 +307,38 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
       // transcript. A fresh run: the seed rule — the thread's earlier turns
       // as a session written the same way, and no session at all for a seed
       // of one turn, which starts on the bare session directory.
-      let session: { stem: "resumed" | "seed"; messages: ChatMessage[] } | undefined;
+      let session:
+        { stem: "resumed" | "seed"; messages: ChatMessage[]; compactions: readonly AssembledCompaction[] } | undefined;
       if (run.resume) {
         const settled = settlementResults(run.resume.settlements);
-        session = { stem: "resumed", messages: settled ? [...run.resume.messages, settled] : run.resume.messages };
+        // The settlement turn follows every message, so the compaction positions hold.
+        session = {
+          stem: "resumed",
+          messages: settled ? [...run.resume.messages, settled] : run.resume.messages,
+          compactions: run.resume.compactions ?? [],
+        };
       } else {
         const earlier = splitSeed(run.messages).session;
-        if (earlier.length > 0) session = { stem: "seed", messages: earlier };
+        if (earlier.length > 0) session = { stem: "seed", messages: earlier, compactions: [] };
       }
       let sessionPath: string | undefined;
       if (session) {
         sessionPath = `${paths.sessionDir}/${session.stem}-${now()}.jsonl`;
         await container.writeFile(
           sessionPath,
-          piSessionFile(session.messages, {
-            cwd: run.rules.checkout,
-            model: {
-              provider: run.model.provider,
-              id: run.model.id,
-              api: run.model.providerType === "anthropic" ? "anthropic-messages" : "openai-completions",
+          piSessionFile(
+            session.messages,
+            {
+              cwd: run.rules.checkout,
+              model: {
+                provider: run.model.provider,
+                id: run.model.id,
+                api: run.model.providerType === "anthropic" ? "anthropic-messages" : "openai-completions",
+              },
+              at: now(),
             },
-            at: now(),
-          }),
+            session.compactions,
+          ),
         );
       }
       if (run.resume) {
@@ -464,6 +479,7 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
         }
       }
       if (obs.message) await mirror.onMessage(obs.message, bridge.turns);
+      if (obs.compaction) await mirror.onCompaction(obs.compaction, bridge.turns);
       if (obs.providerError !== undefined) {
         if (catchingUp)
           note("harness_error", `a model call failed while the bot was away (${obs.providerError}); continuing`);

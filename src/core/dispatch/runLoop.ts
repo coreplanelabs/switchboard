@@ -573,6 +573,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
             ? {
                 resume: {
                   messages: resume.plan.messages,
+                  compactions: resume.plan.compactions,
                   settlements: resume.plan.settlements,
                   remainingMs: resume.plan.remainingMs,
                   turn: resume.plan.turn,

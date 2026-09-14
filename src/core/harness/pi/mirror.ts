@@ -12,6 +12,8 @@
 
 import type { StepReport } from "../../../runner.js";
 import type { ChatMessage, ContentPart } from "../../../providers/types.js";
+import type { AssembledCompaction } from "../../runLedger/transcript.js";
+import type { CompactionEntry } from "../../runLedger/types.js";
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 
@@ -125,6 +127,29 @@ export class PiMirror {
     this.idx += turns.length;
     await this.deps.onStep(report);
   }
+
+  /** pi compacted (session-log item 6): the results pending since the last
+   *  assistant turn go as the user turn they would have been, the entry as the
+   *  row after them — its own step with nothing in flight, so the log holds
+   *  the summary where pi wrote it and the index moves past it. */
+  async onCompaction(entry: CompactionEntry, turn: number): Promise<void> {
+    if (!this.deps.onStep) return;
+    const turns: ChatMessage[] = [];
+    if (this.pendingUser.length > 0) turns.push({ role: "user", content: this.pendingUser });
+    this.pendingUser = [];
+    const report: StepReport = {
+      turns,
+      firstIdx: this.idx,
+      compaction: entry,
+      inFlight: [],
+      turn,
+      iteration: this.iteration,
+      remainingMs: Math.max(0, this.deps.remainingMs()),
+      inboxConsumedSeq: this.inboxConsumedSeq,
+    };
+    this.idx += turns.length + 1;
+    await this.deps.onStep(report);
+  }
 }
 
 /** A pi session file (docs/session-format.md, version 3) built from the
@@ -134,10 +159,17 @@ export class PiMirror {
  *  calls, one toolResult per result part — each with an id and its parent's,
  *  so pi's `--session <path>` loads it as a session it wrote. The assistant
  *  entries carry the model the run resolved and no usage: the proxy is the
- *  meter. A document part is named in a text block: the session carries none. */
+ *  meter. A document part is named in a text block: the session carries none.
+ *  The log's compaction rows (docs/reference/specs/session-log.md item 6) become
+ *  pi's `compaction` entries where they sat: pi keeps the entries from
+ *  `firstKeptEntryId` to the compaction and everything after it, so with the
+ *  kept message known that id names its entry, and without it pi's own id —
+ *  which names nothing here — leaves the window the summary and the turns
+ *  after it. */
 export function piSessionFile(
   messages: readonly ChatMessage[],
   opts: { cwd: string; model: { provider: string; id: string; api: string }; at: number },
+  compactions: readonly AssembledCompaction[] = [],
 ): string {
   const lines: string[] = [];
   const stamp = new Date(opts.at).toISOString();
@@ -147,12 +179,36 @@ export function piSessionFile(
   let parentId: string | null = null;
   let n = 0;
   const toolNames = new Map<string, string>();
+  /** The entry id each message's FIRST entry got (a user turn with results is several). */
+  const firstEntryOf: string[] = [];
+  const nextId = () => (n++).toString(16).padStart(8, "0");
   const push = (message: Record<string, unknown>) => {
-    const id = (n++).toString(16).padStart(8, "0");
+    const id = nextId();
     lines.push(JSON.stringify({ type: "message", id, parentId, timestamp: stamp, message }));
     parentId = id;
+    return id;
   };
-  for (const message of messages) {
+  const pushCompaction = (c: AssembledCompaction) => {
+    const id = nextId();
+    const kept = c.keptBefore !== undefined ? firstEntryOf[c.keptBefore] : undefined;
+    lines.push(
+      JSON.stringify({
+        type: "compaction",
+        id,
+        parentId,
+        timestamp: stamp,
+        summary: c.entry.summary,
+        firstKeptEntryId: kept ?? c.entry.firstKeptEntryId ?? "",
+        tokensBefore: c.entry.tokensBefore ?? 0,
+      }),
+    );
+    parentId = id;
+  };
+  const byPosition = new Map<number, AssembledCompaction[]>();
+  for (const c of compactions) byPosition.set(c.before, [...(byPosition.get(c.before) ?? []), c]);
+  messages.forEach((message, i) => {
+    for (const c of byPosition.get(i) ?? []) pushCompaction(c);
+    firstEntryOf[i] = n.toString(16).padStart(8, "0");
     if (message.role === "assistant") {
       const content: Record<string, unknown>[] = [];
       for (const p of message.content) {
@@ -180,7 +236,7 @@ export function piSessionFile(
         stopReason: hasTool ? "toolUse" : "stop",
         timestamp: opts.at,
       });
-      continue;
+      return;
     }
     const results = message.content.filter(
       (p): p is Extract<ContentPart, { type: "tool_result" }> => p.type === "tool_result",
@@ -210,7 +266,9 @@ export function piSessionFile(
         });
     }
     if (rest.length > 0) push({ role: "user", content: rest, timestamp: opts.at });
-  }
+  });
+  // A compaction that closed the span sits after the last message.
+  for (const c of byPosition.get(messages.length) ?? []) pushCompaction(c);
   return lines.join("\n") + "\n";
 }
 
