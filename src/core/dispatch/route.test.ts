@@ -617,6 +617,20 @@ describe("routeRequest — the stage: when it runs, what always wins", () => {
     expect(text.requests[0].tools).toBeUndefined();
   });
 
+  it("a carried decision — a restart re-dispatching a routed row from its request — is re-resolved for the routed preset and returned without a model call, whatever the router's switch says", async () => {
+    const carried = { preset: "review", reason: "carried from the row", model: "anthropic/general-model" };
+    for (const yaml of [YAML, YAML + "routing:\n  auto: false\n"]) {
+      const model = scripted(answer("general"));
+      const out = await routeRequest(deps(yaml, model), { ...ctx("default", "hello there"), carried });
+      expect(model.prompts).toHaveLength(0);
+      expect(out.kind).toBe("routed");
+      if (out.kind !== "routed") throw new Error("unreachable");
+      expect(out.resolved.agentName).toBe("review");
+      expect(out.resolved.modelRef).toBe("anthropic/review-model");
+      expect(out.route).toEqual(carried);
+    }
+  });
+
   it("a router that fails leaves the request unrouted — defaults.agent stays the answer", async () => {
     const out = await routeRequest(
       deps(ON, async () => {

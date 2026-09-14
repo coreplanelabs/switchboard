@@ -61,7 +61,7 @@ import { InMemoryRunLedger } from "./runLedger/inMemory.js";
 import { messageFromInbox } from "./runLedger/inboxMessage.js";
 import { createLedgerWriteThrough, NullLedgerWriteThrough } from "./runLedger/writeThrough.js";
 import { ThreadsElsewhere } from "./runLedger/threadsElsewhere.js";
-import type { StepRecord } from "./runLedger/types.js";
+import type { LiveRunRow, StepRecord } from "./runLedger/types.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./runStoreWorker.js";
 import { buildCoreCommands, defaultOperations } from "./commandCatalogue.js";
 import { capabilitiesFrom } from "./capabilities.js";
@@ -8718,6 +8718,72 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(warnings).toEqual([]);
   });
 
+  it("a restarted routed run (item 42) reuses the row's decision: the card carries the routed line and the footer, the record gets its route event and run_meta says route, and the router is never asked again", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const request = durableInboxMessage({ ...msg("what is this repo") }, "what is this repo", 5_000);
+    await ledger.claim({
+      runId: "run-routed",
+      threadKey: "slack:CX:1.0",
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      phase: "attaching",
+      meta: {
+        channelId: "slack:CX",
+        userId: "slack:UX",
+        threadKey: "slack:CX:1.0",
+        agent: "review",
+        model: "anthropic/review-model",
+        request,
+        route: { preset: "review", reason: "a review ask", model: "anthropic/general-model" },
+      },
+      card: { channel: "CX", ts: "1.2" },
+      system: "",
+      tools: [],
+    });
+    ledger.live.get("run-routed")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+    expect(reclaimed.reclaimedFrom).toBe("attaching");
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        return { content: [{ type: "text", text: "restarted and done" }], stopReason: "end_turn" };
+      },
+    };
+    const { deps, writer } = wired(provider, { ledger });
+    deps.routeModel = vi.fn(async () => JSON.stringify({ preset: "general", reason: "never asked" }));
+    const statuses: StatusUpdate[] = [];
+    const io: ChannelIO = {
+      reply: async () => {},
+      status: async (initial) => {
+        statuses.push(initial);
+        return {
+          handle: { channel: "CX", ts: "1.2" },
+          update: (f: StatusUpdate) => void statuses.push(f),
+          done: async (f: StatusUpdate) => void statuses.push(f),
+        };
+      },
+      history: async () => [],
+    };
+    const restored = messageFromInbox(reclaimed.row.meta.request!, 5_000)!;
+    await dispatch(deps, restored.msg, io, { restart: { row: reclaimed.row, inbox: reclaimed.inbox } });
+    await writer.settled();
+    expect(deps.routeModel).not.toHaveBeenCalled();
+    expect(statuses[0].title).toContain("*review* on `anthropic/review-model` · routed: a review ask");
+    expect(statuses.at(-1)!.detail?.split("\n").at(-1)).toBe("reply agent:<preset> to run it another way");
+    const record = ledger.finished.get("run-routed")!;
+    expect(record.agent).toBe("review");
+    expect(record.events.filter((e) => e.type === "route")).toEqual([
+      expect.objectContaining({
+        type: "route",
+        preset: "review",
+        reason: "a review ask",
+        model: "anthropic/general-model",
+      }),
+    ]);
+    expect((record.events.find((e) => e.type === "run_meta") as { agentSource?: string }).agentSource).toBe("route");
+  });
+
   it("a restart onto a thread that has a newer run in flight closes the reserved row interrupted with no reply and no run (item 42)", async () => {
     const ledger = new InMemoryRunLedger(() => 10_000);
     await ledger.claim({
@@ -8749,6 +8815,134 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(registry.listActive()).toEqual([]);
     expect(ledger.live.has("run-old")).toBe(false);
     expect(ledger.finished.get("run-old")).toMatchObject({ status: "interrupted", startedAt: 5_000 });
+  });
+
+  it("a routed run's row carries the router's decision (item 35), written at the claim, so another generation can repaint the card from the row alone", async () => {
+    let rowAtCall: LiveRunRow | undefined;
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        rowAtCall ??= structuredClone([...ledger.live.values()][0]);
+        return { content: [{ type: "text", text: "answer" }], stopReason: "end_turn" };
+      },
+    };
+    const { deps, writer } = wired(provider, {
+      ledger,
+      yaml: YAML_FIXTURE.replace("routing: { auto: false }\n", "routing: { auto: true }\n"),
+    });
+    deps.routeModel = vi.fn(async () => JSON.stringify({ preset: "review", reason: "a review ask" }));
+    const { io } = ioWithCard();
+    await dispatch(deps, msg("review it for me"), io);
+    await writer.settled();
+    expect(deps.routeModel).toHaveBeenCalledTimes(1);
+    expect(rowAtCall?.meta.agent).toBe("review");
+    expect(rowAtCall?.meta.route).toEqual({
+      preset: "review",
+      reason: "a review ask",
+      model: "anthropic/general-model",
+    });
+  });
+
+  it("a resumed run whose row carries the route repaints the routed line from the first frame and closes with the override footer (items 38 and routing-and-config 21); the router is not asked again and no second route event is published", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const transcript: ChatMessage[] = [
+      { role: "user", content: [{ type: "text", text: "what is this repo" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "looking" },
+          { type: "tool_use", id: "s1", name: "update_status", input: { checklist: "○ resumed" } },
+        ],
+      },
+    ];
+    await ledger.claim({
+      runId: "run-routed",
+      threadKey: "slack:CX:1.0",
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      meta: {
+        channelId: "slack:CX",
+        userId: "slack:UX",
+        threadKey: "slack:CX:1.0",
+        agent: "general",
+        model: "anthropic/general-model",
+        route: { preset: "general", reason: "a plain question", model: "anthropic/general-model" },
+      },
+      card: { channel: "CX", ts: "1.2" },
+      system: "the stored prompt, verbatim",
+      tools: [],
+      state: {},
+    });
+    await ledger.seed("run-routed", "gen-OLD", [{ idx: 0, message: transcript[0] }]);
+    await ledger.step(
+      "run-routed",
+      "gen-OLD",
+      { step: 0, seq: 0, turnIndex: 1, inFlight: [], inboxConsumedSeq: 0, remainingMs: 300_000, turn: 0, iteration: 0 },
+      [],
+    );
+    await ledger.step(
+      "run-routed",
+      "gen-OLD",
+      {
+        step: 1,
+        seq: 3,
+        turnIndex: 2,
+        inFlight: [{ callId: "s1", tool: "update_status" }],
+        inboxConsumedSeq: 0,
+        remainingMs: 240_000,
+        turn: 1,
+        iteration: 0,
+      },
+      [{ idx: 1, message: transcript[1] }],
+    );
+    await ledger.append("run-routed", "gen-OLD", [
+      { type: "input", text: "what is this repo", at: 1, seq: 1 },
+      { type: "run_meta", agent: "general", model: "anthropic/general-model", agentSource: "route", at: 2, seq: 2 },
+      { type: "route", preset: "general", reason: "a plain question", model: "anthropic/general-model", at: 3, seq: 3 },
+    ]);
+    ledger.live.get("run-routed")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        return { content: [{ type: "text", text: "resumed and done" }], stopReason: "end_turn" };
+      },
+    };
+    const { deps, writer } = wired(provider, { ledger });
+    deps.routeModel = vi.fn(async () => JSON.stringify({ preset: "review", reason: "never asked" }));
+    const plan = planResume({
+      transcript: { complete: true, turns: 2, messages: transcript, compactions: [] },
+      lastStep: reclaimed.lastStep!,
+      tools: knownToolsFor(getAgent("general")),
+    });
+    if (plan.kind !== "resume") throw new Error(plan.why);
+    const events = await ledger.readEvents("run-routed");
+    const statuses: StatusUpdate[] = [];
+    const io: ChannelIO = {
+      reply: async () => {},
+      status: async (initial) => {
+        statuses.push(initial);
+        return {
+          handle: { channel: "CX", ts: "1.2" },
+          update: (f: StatusUpdate) => void statuses.push(f),
+          done: async (f: StatusUpdate) => void statuses.push(f),
+        };
+      },
+      history: async () => [],
+    };
+    await dispatch(deps, resumeMessage(reclaimed.row, "what is this repo"), io, {
+      resume: { row: reclaimed.row, lastStep: reclaimed.lastStep!, plan, events, lastSeq: 3, repoCtx: {}, inbox: [] },
+    });
+    await writer.settled();
+    expect(deps.routeModel).not.toHaveBeenCalled();
+    expect(statuses[0].title).toContain("*general* on `anthropic/general-model` · routed: a plain question");
+    const closed = statuses.at(-1)!;
+    expect(closed.title).toContain("✅");
+    expect(closed.detail?.split("\n").at(-1)).toBe("reply agent:<preset> to run it another way");
+    const record = ledger.finished.get("run-routed")!;
+    expect(record.events.filter((e) => e.type === "route")).toHaveLength(1);
   });
 
   it("a reclaimed run resumes under its own id (item 38): the row is adopted at admission, the transcript is the conversation, the calls in flight are settled before the first model call, the earlier events are replayed under their seqs, and the finish closes the same row", async () => {

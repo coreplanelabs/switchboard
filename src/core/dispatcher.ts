@@ -354,13 +354,28 @@ export async function dispatch(
     const threadLive =
       admission.get(msg.threadKey) !== undefined ||
       (!resume && !restart && deps.threadsElsewhere.get(msg.threadKey) !== undefined);
-    const routing = await routeRequest(deps, { msg, directives, sticky, agentSource, threadLive, root });
+    const routing = await routeRequest(deps, {
+      msg,
+      directives,
+      sticky,
+      agentSource,
+      threadLive,
+      root,
+      // A restart is the same run under the same card: the row's decision
+      // (run-history item 35) is the route, re-resolved, never re-asked.
+      ...(restart?.row.meta.route ? { carried: restart.row.meta.route } : {}),
+    });
     if (routing.kind === "routed") {
       resolved = routing.resolved;
       route = routing.route;
       agentSource = "route";
     }
     const routeEvent = routing.kind === "routed" ? routing.route : routing.rejected;
+    // A resume repaints the card as the first generation painted it: the row
+    // carries the router's decision (run-history item 35), the resumed message
+    // pins the preset by directive so the router is rightly never asked again,
+    // and the record already holds the `route` event — the card alone needs it.
+    if (resume?.row.meta.route) route = resume.row.meta.route;
 
     // The agent gate (dispatch/authorize.ts), against the RESOLVED agent and
     // before the thread is claimed.
@@ -658,6 +673,7 @@ export async function dispatch(
       restart,
       card,
       hooks: reservationHooks,
+      route,
       admitted,
       root,
       parentRunId,
@@ -849,6 +865,7 @@ export async function dispatch(
       resume,
       ledgerRun,
       card,
+      route,
       clock,
       root,
       parentRunId,

@@ -88,6 +88,19 @@ export interface LiveRunMeta {
    *  attachments when they fit — so a reclaim of an `attaching` row can
    *  dispatch it again under the same run id and card. */
   request?: Record<string, unknown>;
+  /** The router's decision when it chose the run's preset (routing-and-config
+   *  item 21) — the same fields the record's `route` event carries. On the row
+   *  so a resume repaints the card as it was (` · routed: <reason>`, the
+   *  parts, the override footer on the close) and a reclaim closing the run
+   *  knows it was routed without reading the events. Absent for a preset a
+   *  person, a scope or the default chose. */
+  route?: {
+    preset: string;
+    reason: string;
+    model: string;
+    parts?: { preset: string; text: string }[];
+    collapsed?: { presets: string[] };
+  };
 }
 
 /** Dispatcher-local run state a resume must restore (the `submit_*` callbacks,

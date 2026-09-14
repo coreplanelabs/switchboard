@@ -28,6 +28,7 @@ import {
   type CardHandle,
   type InboxItem,
   type LivePhase,
+  type LiveRunMeta,
   type LiveRunRow,
   type StepRecord,
 } from "./runLedger/types.js";
@@ -112,12 +113,13 @@ export interface RestartRun {
 
 export type ResumableRun = ResumeRun | RestartRun;
 
-/** Whether the router chose the run's preset: the record's `run_meta` says how
- *  the preset was chosen, and `route` is the one answer that earns the card's
- *  override footer. A `route` event alone does not: a rejected compound
- *  leaves one on a run that ran on the default. */
-function routedOf(events: readonly RunEvent[]): boolean {
-  return events.some((e) => e.type === "run_meta" && e.agentSource === "route");
+/** Whether the router chose the run's preset: the row carries the decision
+ *  (run-history item 35); for a row claimed before it did, the record's
+ *  `run_meta` says how the preset was chosen, and `route` is the one answer
+ *  that earns the card's override footer. A `route` event alone does not: a
+ *  rejected compound leaves one on a run that ran on the default. */
+function routedOf(meta: LiveRunMeta, events: readonly RunEvent[]): boolean {
+  return meta.route !== undefined || events.some((e) => e.type === "run_meta" && e.agentSource === "route");
 }
 
 export interface ReclaimOutcome {
@@ -238,7 +240,7 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
         events: events.length,
         ...(row.meta.agent !== undefined ? { agent: row.meta.agent } : {}),
         ...(prUrl !== undefined ? { prUrl } : {}),
-        ...(routedOf(events) ? { routed: true } : {}),
+        ...(routedOf(row.meta, events) ? { routed: true } : {}),
         ...(status === "interrupted" ? { note: closureNote(row.meta.agent, prUrl) } : {}),
       });
       log(
