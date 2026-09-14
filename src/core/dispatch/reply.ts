@@ -49,6 +49,19 @@ export function runPageLink(id: string): string | undefined {
   return `${base.replace(/\/+$/, "")}/runs/${encodeURIComponent(id)}`;
 }
 
+/** One stored file's link: the run page's artifact proxy for `key`
+ *  (`/runs/:id/artifacts/<key>`, live-view.md item 26), each key segment
+ *  encoded so the route decodes them back; `?t=<token>` when the run's
+ *  live token is given, so the link opens while the run is live. What a
+ *  ticketless channel's lead carries (agent-coding.md item 10); undefined
+ *  without PUBLIC_BASE_URL. */
+export function artifactLink(id: string, key: string, token?: string): string | undefined {
+  const page = runPageLink(id);
+  if (!page) return undefined;
+  const path = key.split("/").map(encodeURIComponent).join("/");
+  return `${page}/artifacts/${path}${token ? `?t=${encodeURIComponent(token)}` : ""}`;
+}
+
 // ---- run label (Area 2 / live-view index) -----------------------------------
 
 /** Everything `composeRunLabel` needs to build one human-readable run label.

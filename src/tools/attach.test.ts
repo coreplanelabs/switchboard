@@ -7,6 +7,10 @@ import type { Executor } from "../execution/executor.js";
 import { Secret } from "../secrets.js";
 import { attachFileTool, MAX_ARTIFACT_BYTES, type UploadTicketCapability } from "./attach.js";
 import { TOOLSETS, type ToolContext } from "./workspace.js";
+import { ConsoleIO } from "../cli.js";
+import { HttpIO } from "../channels/http.js";
+import { McpIO } from "../channels/mcp.js";
+import type { ChannelIO } from "../core/types.js";
 
 // Feature: docs/reference/specs/agent-coding.md item 10 — a run's screenshot
 // reaches the person: `attach_file` reads the workspace file as bytes off the
@@ -172,7 +176,13 @@ describe("attach_file through the artifact store", () => {
     return { uploadTicket, minted, completed };
   }
 
-  function harness(over: Parameters<typeof storeExecutor>[1] & { remainingMs?: number; runUrl?: string } = {}) {
+  function harness(
+    over: Parameters<typeof storeExecutor>[1] & {
+      remainingMs?: number;
+      artifactUrl?: (key: string) => string | undefined;
+      reply?: (text: string) => Promise<void>;
+    } = {},
+  ) {
     const store = new InMemoryArtifactStore({ bucket: "test" });
     const { commands, log, executor } = storeExecutor(store, over);
     const tickets = ticketing(log);
@@ -185,8 +195,8 @@ describe("attach_file through the artifact store", () => {
         store,
         runId: "r1",
         nextSeq: () => ++seq,
-        ...(over.runUrl ? { runUrl: over.runUrl } : {}),
-        reply: async (t) => void replies.push(t),
+        ...(over.artifactUrl ? { artifactUrl: over.artifactUrl } : {}),
+        reply: over.reply ?? (async (t) => void replies.push(t)),
       },
       uploadTicket: tickets.uploadTicket,
       publish: (e) => {
@@ -345,17 +355,51 @@ describe("attach_file through the artifact store", () => {
     expect(spent.log).toEqual(["stat"]);
   });
 
-  it("a channel without an upload ticket gets the lead and the run page's link through `reply`; the store copy and event stand", async () => {
-    const h = harness({ runUrl: "https://bot.example.com/runs/r1" });
+  // record 0033: a channel without an upload ticket — the CLI harness, HTTP, MCP —
+  // takes the store-only path. The lead carries the FILE's own link (the run page's artifact
+  // proxy, with the run's live token while the run is live), the result names the key, and
+  // nothing pretends a channel upload happened.
+  it("a channel without an upload ticket gets the lead and the file's proxy link through `reply`; the result names the key; the store copy and event stand", async () => {
+    const h = harness({
+      artifactUrl: (key) => `https://bot.example.com/runs/r1/artifacts/${key}?t=live-token`,
+    });
     delete h.ctx.uploadTicket;
     const out = await attachFileTool.run({ path: "shots/page.png", comment: "the page" }, h.ctx);
     expect(out).toBe(
-      "attached page.png (3145728 bytes) to the run page; this conversation's channel takes no file uploads, so the lead and the page's link were posted instead",
+      "attached page.png (3145728 bytes) to the run page as runs/r1/out/1-page.png; this conversation's channel takes no file uploads, so the lead and the file's link were posted instead",
     );
     expect(h.replies).toEqual([
-      "the page\n📎 page.png (3145728 bytes) is on the run page — https://bot.example.com/runs/r1",
+      "the page\n📎 page.png (3145728 bytes) — https://bot.example.com/runs/r1/artifacts/runs/r1/out/1-page.png?t=live-token",
     ]);
     expect(h.log).toEqual(["stat", "put", "artifact"]);
+  });
+
+  it("without a public URL the lead still names the file and its key on the run page — never a bare 'attached' with nowhere to look", async () => {
+    const h = harness();
+    delete h.ctx.uploadTicket;
+    await attachFileTool.run({ path: "shots/page.png" }, h.ctx);
+    expect(h.replies).toEqual(["page.png\n📎 page.png (3145728 bytes) is on the run page as runs/r1/out/1-page.png"]);
+  });
+
+  it("the three ticketless channel shapes — the CLI harness, HTTP, MCP — carry `reply` and no `uploadTicket`; through the harness the lead with the link lands on its stream", async () => {
+    const chunks: string[] = [];
+    const out = { write: (chunk: string) => (chunks.push(chunk), true) } as unknown as NodeJS.WritableStream;
+    const console = new ConsoleIO(out, "cli:work");
+    for (const io of [console, new HttpIO(), new McpIO()] as ChannelIO[]) {
+      expect(typeof io.reply).toBe("function");
+      expect(io.uploadTicket).toBeUndefined();
+    }
+    const h = harness({
+      artifactUrl: (key) => `https://bot.example.com/runs/r1/artifacts/${key}?t=live-token`,
+      reply: (text) => console.reply(text),
+    });
+    delete h.ctx.uploadTicket;
+    const result = await attachFileTool.run({ path: "shots/page.png", comment: "the page" }, h.ctx);
+    expect(result).toMatch(/^attached page\.png \(3145728 bytes\) to the run page as runs\/r1\/out\/1-page\.png;/);
+    expect(chunks.join("")).toBe(
+      "\nthe page\n📎 page.png (3145728 bytes) — https://bot.example.com/runs/r1/artifacts/runs/r1/out/1-page.png?t=live-token\n",
+    );
+    expect(h.tickets.minted).toEqual([]);
   });
 
   it("with a store the inline path is not taken: no readBytes, no attachFile; without a store it runs exactly as before", async () => {

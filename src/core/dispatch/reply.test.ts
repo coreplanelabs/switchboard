@@ -2,11 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import type { ParsedChatCommand } from "../commandChat.js";
 import {
   afterReply,
+  artifactLink,
   attachmentSuffix,
   composeRunLabel,
   deliverAnswer,
   LONG_COMMAND_REPLY_CHARS,
   replyCommandOutput,
+  runPageLink,
   type ReplyDeps,
 } from "./reply.js";
 import type { ChannelIO } from "../types.js";
@@ -43,6 +45,35 @@ function io(withAttach: boolean) {
   };
   return { io: withAttach ? { ...base, attach } : base, reply, attach };
 }
+
+// agent-coding.md item 10 (record 0033): the link a ticketless channel's lead
+// carries — the run page's artifact proxy for ONE key, tokened while the run is live.
+describe("artifactLink", () => {
+  it("is the run page's artifact proxy for the key, each segment encoded, with `?t=` when a token is given", () => {
+    vi.stubEnv("PUBLIC_BASE_URL", "https://bot.example.com/");
+    try {
+      expect(artifactLink("run-1", "runs/run-1/out/1-page.png", "tok/en")).toBe(
+        "https://bot.example.com/runs/run-1/artifacts/runs/run-1/out/1-page.png?t=tok%2Fen",
+      );
+      expect(artifactLink("run-1", "runs/run-1/out/2-a b#c.png")).toBe(
+        "https://bot.example.com/runs/run-1/artifacts/runs/run-1/out/2-a%20b%23c.png",
+      );
+      expect(runPageLink("run-1")).toBe("https://bot.example.com/runs/run-1");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("is undefined without a public base URL — the lead then names the key instead", () => {
+    vi.stubEnv("PUBLIC_BASE_URL", "");
+    try {
+      expect(artifactLink("run-1", "runs/run-1/out/1-page.png", "tok")).toBeUndefined();
+      expect(runPageLink("run-1")).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
 
 describe("replyCommandOutput", () => {
   const long = `• \`vanta\` (user) ✅ connected — https://mcp.vanta.com/mcp\nTools (100):\n${Array.from({ length: 100 }, (_, i) => `  - \`tool_${i}\` — ${"x".repeat(80)}`).join("\n")}`;
