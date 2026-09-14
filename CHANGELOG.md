@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.209.0](https://github.com/coreplanelabs/switchboard/compare/v1.208.0...v1.209.0) (2026-09-14)
+
+
+### Features
+
+* **agents:** the coding prompt names the title gate before the description is submitted ([#1014](https://github.com/coreplanelabs/switchboard/issues/1014)) ([973522a](https://github.com/coreplanelabs/switchboard/commit/973522a883139456c9187437586421bef7bcf641))
+
+
+### Bug fixes
+
+* **agents:** the turn cap is a runaway guard derived from the wall clock, not a budget a good run hits — coding gets 270 turns in 45 minutes, and the write-up says why it stopped ([#1020](https://github.com/coreplanelabs/switchboard/issues/1020)) ([9ad4bb5](https://github.com/coreplanelabs/switchboard/commit/9ad4bb51c584b38372e34d5cc40d50ce2f679f06))
+
+
+### Documentation
+
+* **agents:** the program plan puts the front door first — a request routes itself to a preset, and the pi series waits behind it ([#1019](https://github.com/coreplanelabs/switchboard/issues/1019)) ([ed08a9f](https://github.com/coreplanelabs/switchboard/commit/ed08a9fc5fc442938174ceb71a66282f9f7583ff))
+
 ## [1.208.0](https://github.com/coreplanelabs/switchboard/compare/v1.207.1...v1.208.0) (2026-09-14)
 
 
