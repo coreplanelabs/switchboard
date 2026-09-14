@@ -1,6 +1,6 @@
 import type { ChannelVisibility } from "../authz/types.js";
 import type { RunEvent } from "../runEvents.js";
-import type { RunStatus } from "../runRecord.js";
+import type { RunSeed, RunStatus } from "../runRecord.js";
 import type { RunControl } from "./runControl.js";
 
 // The row a run occupies in the registry while it is live (`RunState`), the
@@ -47,6 +47,10 @@ export interface RunMeta {
    *  finds its run without the record. */
   parentInstanceId?: string;
   idempotencyKey?: string;
+  /** Where the run's conversation started (run-history item 52): `parent` for
+   *  a spawned child seeded from its parent's turns, `channel` otherwise —
+   *  stamped by the dispatcher, so the summary and the drain's record keep it. */
+  seed?: RunSeed;
 }
 
 /** `seq` is the event's 1-based position in the run's stream (the registry's

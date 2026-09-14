@@ -145,7 +145,17 @@ export interface RunRecord {
    *  item 48), stored at the claim so a retried spawn finds its run. Present
    *  exactly when `parentInstanceId` is — both or neither, never one alone. */
   idempotencyKey?: string;
+  /** Where the run's conversation started (item 52): `channel` — its own
+   *  thread's history, as for every run a person, a schedule or a coordinator
+   *  started — or `parent` — a spawned child seeded from its parent's text
+   *  turns at the spawn (`DispatchOptions.seed`). Absent on records written
+   *  before it existed. */
+  seed?: RunSeed;
 }
+
+/** The two places a run's conversation can start (item 52). */
+export const RUN_SEEDS = ["channel", "parent"] as const;
+export type RunSeed = (typeof RUN_SEEDS)[number];
 
 /** The profile as the record stores it: the run's effective profile plus the preset it came from. */
 export type RunProfileRecord = RunProfile & { preset: string };
@@ -515,6 +525,8 @@ export function isRunRecord(v: unknown): v is RunRecord {
   // A parent is named by a run id (item 46): the same shape as the record's own.
   if (r.parentRunId !== undefined && (typeof r.parentRunId !== "string" || !RUN_ID_PATTERN.test(r.parentRunId)))
     return false;
+  // Where the conversation started (item 52): one of the two words, or absent.
+  if (r.seed !== undefined && !RUN_SEEDS.includes(r.seed as RunSeed)) return false;
   // A coordinator's child (item 48): the instance id in the platform's alphabet
   // and the key `<instance>:<step>` — both or neither; one alone is no tag.
   if ((r.parentInstanceId === undefined) !== (r.idempotencyKey === undefined)) return false;

@@ -45,7 +45,7 @@ import { startReviewDescription } from "../reviewDescription.js";
 import { isSpanRecord, type RunEvent } from "../runEvents.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "../runFriction.js";
 import { markdownOutput } from "../llmOutput/index.js";
-import type { RunStatus } from "../runRecord.js";
+import type { RunSeed, RunStatus } from "../runRecord.js";
 import type { RunHandle, RunRegistry } from "../runRegistry.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
 import type { RunsReadCapability, SteerCapability } from "../../tools/runs.js";
@@ -139,6 +139,9 @@ export interface RunLoopContext {
   parentRunId?: string;
   /** The coordinator's instance and key (item 48), when a coordinator spawned it. */
   coordinator?: CoordinatorTag;
+  /** Where the run's conversation started (run-history item 52), for the finish
+   *  record; `dispatch()` always hands it. */
+  seed?: RunSeed;
   /** This coding run answers a review's findings (a ship fix round dispatched
    *  as a run — agent-ship item 6): `submit_dispositions` records against these
    *  ids and the set rides the record. Absent on every other run, where the
@@ -196,6 +199,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     wait,
     parentRunId,
     coordinator,
+    seed,
     fixRound,
   } = ctx;
   // The def the runner and the post-run turns read: the preset with the
@@ -928,6 +932,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
       ...(reviewPost !== undefined ? { reviewPost } : {}),
       ...(parentRunId !== undefined ? { parentRunId } : {}),
       ...(coordinator !== undefined ? { coordinator } : {}),
+      ...(seed !== undefined ? { seed } : {}),
     });
     // The diagnosis rides the run record (above): the friction ledger the
     // cross-run proposer reads is run history, so nothing is written twice.

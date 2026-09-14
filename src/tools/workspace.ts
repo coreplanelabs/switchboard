@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { ToolDef, ToolResultContent } from "../providers/types.js";
+import type { ChatMessage, ToolDef, ToolResultContent } from "../providers/types.js";
 import { parsePrDescription, type PrDescription } from "../core/prDescription.js";
 import { parseHandoff, type Handoff } from "../core/ship/handoff.js";
 import {
@@ -49,6 +49,13 @@ export interface ToolContext {
    *  command can never outlive the run. Absent → no clipping (a tool used
    *  outside a run). */
   remainingMs?: () => number;
+  /** The run's conversation so far, on the runner's own array — the seed and
+   *  every turn the model has seen, this step's assistant turn included — read
+   *  at the call. `spawn_run` seeds a child from its text turns
+   *  (docs/reference/specs/routing-and-config.md item 20). Absent (a tool used
+   *  outside a run, a loop that holds its transcript elsewhere) → a child
+   *  starts from its own thread's history. */
+  conversation?: () => readonly ChatMessage[];
   /** Replace the user-facing progress checklist on the status card. */
   reportProgress?: (checklist: string) => void;
   /** The requesting thread's file upload behind `attach_file`

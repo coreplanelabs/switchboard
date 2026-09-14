@@ -1,4 +1,4 @@
-import { AGENTS } from "../agents/registry.js";
+import { AGENTS, machineNeedsRepo } from "../agents/registry.js";
 import { MIN_BOUNDARY_MINUTES } from "../config/validate.js";
 import { authorize } from "../core/authz/authorize.js";
 import { predicateFor } from "../core/authz/predicate.js";
@@ -80,7 +80,24 @@ function finalReplyOf(view: { events?: RunEvent[] }): string | undefined {
   return answer && answer.type === "answer" ? wrapUntrusted(answer.text) : undefined;
 }
 
-const PRESETS = () => Object.keys(AGENTS);
+// The tool's words follow the registry, as the conductor's prompt does: a
+// preset that moves across the identity line, or gains a checkout, is listed
+// or withheld the day its def changes.
+/** The presets a child can run: every preset but the spawning conductor whose identity is not `write`. */
+const CHILD_PRESETS = () =>
+  Object.values(AGENTS)
+    .filter((a) => a.name !== "conductor" && a.identity !== "write")
+    .map((a) => a.name);
+/** The presets a child is never: the ones that hold a write credential. */
+const WRITE_PRESETS = () =>
+  Object.values(AGENTS)
+    .filter((a) => a.identity === "write")
+    .map((a) => a.name);
+/** The presets that work in a repository: the ones whose machine carries a checkout. */
+const REPO_PRESETS = () =>
+  Object.values(AGENTS)
+    .filter((a) => machineNeedsRepo(a.machine))
+    .map((a) => a.name);
 
 /** How far `list_runs` pages for a run's children: full pages of the store's
  *  maximum, this many of them — the default retention's `maxRuns` (5000) as
@@ -124,16 +141,25 @@ export const spawnRunTool: RunnableTool = {
   name: "spawn_run",
   description:
     "Start a child run as the person who asked you: an ordinary Switchboard run of the named preset, in a thread of its own in this " +
-    "channel, under their permissions — what they could start by hand with `agent:<preset>`. `prompt` is everything the child needs " +
-    "(it sees none of this thread); `repo` (owner/name) for a preset that works in a repository (coding, review, explore, ship); " +
+    "channel, under their permissions — what they could start by hand with `agent:<preset>`. The child is a reader of this conversation: " +
+    "it starts from this conversation's text so far (every user and assistant turn, never your tool calls or their results) plus " +
+    `\`prompt\`, its one new turn — so say what it should do. Presets a child can run: ${CHILD_PRESETS().join(", ")}; a preset that ` +
+    `writes (${WRITE_PRESETS().join(", ")}) is refused \`spawn_identity\`. \`repo\` (owner/name) for a preset that works in a ` +
+    `repository (${REPO_PRESETS().join(", ")}); ` +
     "`budget` narrows the child's wall clock in whole minutes (at least 2; it is also capped by what is left of yours). Returns the " +
     "child's run id, its thread and a link, or a refusal by name: a preset or repository the requester may not use, a boundary the " +
     "child's profile exceeds, the fan-out cap, or a channel that cannot open a thread. A child cannot spawn children.",
   inputSchema: {
     type: "object",
     properties: {
-      preset: { type: "string", description: `The preset the child runs: one of ${PRESETS().join(", ")}` },
-      prompt: { type: "string", description: "The child's whole request, self-contained" },
+      preset: {
+        type: "string",
+        description: `The preset the child runs: one of ${CHILD_PRESETS().join(", ")} (a preset that writes — ${WRITE_PRESETS().join(", ")} — is refused spawn_identity)`,
+      },
+      prompt: {
+        type: "string",
+        description: "What the child should do — its one new turn after this conversation's text",
+      },
       repo: { type: "string", description: "owner/name of the repository the child works in, for a repository preset" },
       budget: { type: "integer", description: "The child's wall clock in whole minutes, at least 2 (optional)" },
     },
@@ -141,9 +167,10 @@ export const spawnRunTool: RunnableTool = {
   },
   async run(input, ctx) {
     const preset = String(input.preset ?? "");
-    if (!Object.hasOwn(AGENTS, preset)) return `error: unknown preset "${preset}" — one of ${PRESETS().join(", ")}`;
+    if (!Object.hasOwn(AGENTS, preset))
+      return `error: unknown preset "${preset}" — one of ${CHILD_PRESETS().join(", ")}`;
     const prompt = String(input.prompt ?? "").trim();
-    if (!prompt) return "error: prompt is required — the child's whole request, since it sees none of this thread";
+    if (!prompt) return "error: prompt is required — what the child should do, after this conversation's text";
     const request: SpawnRequest = { preset, prompt };
     if (input.repo !== undefined && String(input.repo).trim()) request.repo = String(input.repo).trim();
     if (input.budget !== undefined) {
@@ -153,7 +180,10 @@ export const spawnRunTool: RunnableTool = {
       request.budget = budget;
     }
     const spawn = ctx.spawn ?? nullSpawnCapability;
-    const out = await spawn.spawn(request, ctx.remainingMs?.() ?? Number.POSITIVE_INFINITY);
+    const out = await spawn.spawn(request, {
+      remainingMs: ctx.remainingMs?.() ?? Number.POSITIVE_INFINITY,
+      ...(ctx.conversation ? { conversation: ctx.conversation() } : {}),
+    });
     if (out.kind === "refused") return `spawn refused (${out.reason}): ${out.message}`;
     return (
       `spawned a ${preset} run: ${out.runId} in thread ${out.threadKey}${out.url ? ` (${out.url})` : ""} — it runs on its own; ` +
@@ -475,4 +505,7 @@ export const RUN_TOOLS: readonly RunnableTool[] = [
 
 /** What a tool context carries for these tools — named here so the context's
  *  field docs and the tools that read them sit together. */
-export type RunToolsContext = Pick<ToolContext, "spawn" | "runs" | "steer" | "wait" | "remainingMs" | "signal">;
+export type RunToolsContext = Pick<
+  ToolContext,
+  "spawn" | "runs" | "steer" | "wait" | "remainingMs" | "conversation" | "signal"
+>;

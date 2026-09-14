@@ -146,6 +146,57 @@ describe("runAgent budgets", () => {
     expect(seen).toBe(25 * 60_000);
   });
 
+  // Feature: docs/reference/specs/routing-and-config.md item 20 — a tool that
+  // starts another run seeds it from this run's conversation, read off the
+  // runner's own array at the call: the seed and every turn since, this
+  // step's assistant turn included.
+  it("hands tools the run's conversation so far — the seed and every turn the model has seen, the current assistant turn included — as the runner's own array", async () => {
+    let seen: unknown;
+    let live: readonly unknown[] | undefined;
+    const probe: RunnableTool = {
+      name: "probe",
+      description: "records the conversation it was handed",
+      inputSchema: { type: "object", properties: {} },
+      run: async (_input, ctx) => {
+        live = ctx.conversation?.();
+        seen = live ? [...live] : undefined; // what the call saw, before the loop appends its results turn
+        return "ok";
+      },
+    };
+    const provider = scripted([
+      {
+        content: [
+          { type: "text", text: "Probing." },
+          { type: "tool_use", id: "p1", name: "probe", input: {} },
+        ],
+        stopReason: "tool_use",
+      },
+      text("done"),
+    ]);
+    await runAgent({
+      provider,
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      extraTools: [probe],
+    });
+    expect(seen).toEqual([
+      { role: "user", content: [{ type: "text", text: "go" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Probing." },
+          { type: "tool_use", id: "p1", name: "probe", input: {} },
+        ],
+      },
+    ]);
+    // The same array kept growing after the call: the results turn and the
+    // final turn landed on it — a reference into the loop, never a snapshot.
+    expect(live!.length).toBeGreaterThan(2);
+    expect(live![2]).toMatchObject({ role: "user", content: [{ type: "tool_result", toolUseId: "p1" }] });
+  });
+
   it("caps every tool result the model sees at MAX_TOOL_RESULT_CHARS, visibly — the suite-wide guard behind every tool's own cap (a 1 MB tool result is ~307k tokens)", async () => {
     const huge = "x".repeat(MAX_TOOL_RESULT_CHARS + 50_000);
     const firehose: RunnableTool = {

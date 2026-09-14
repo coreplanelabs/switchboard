@@ -368,6 +368,10 @@ async function runLoop(
   const deadline = now() + (opts.resume ? opts.resume.remainingMs : opts.agent.maxMinutes * 60_000);
   const warnAt = deadline - Math.min(3 * 60_000, opts.agent.maxMinutes * 15_000);
   toolContext.remainingMs = () => deadline - now();
+  // The conversation as the tools may read it (routing-and-config item 20): the
+  // live array, never a copy — a spawn seeds its child from what has been said
+  // up to the very turn that called it.
+  toolContext.conversation = () => messages;
   let warned = false;
   // Set when consecutive exec-infra failures cross the threshold: the loop ends
   // and the finale reports a dead sandbox instead of the ordinary budget notice.

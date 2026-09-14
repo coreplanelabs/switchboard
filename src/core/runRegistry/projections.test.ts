@@ -93,6 +93,26 @@ describe("RunRegistry.snapshot — record inputs", () => {
     expect("parentRunId" in (reg.getById(plain.id) ?? {})).toBe(false);
   });
 
+  // docs/reference/specs/run-history.md item 52: where the run's conversation
+  // started rides the meta onto the summary, so the drain's record keeps it.
+  it("carries seed from the RunMeta onto the summary and the index feed, and omits it when absent", () => {
+    const { reg } = testRegistry();
+    const events: IndexEvent[] = [];
+    reg.subscribeIndex((e) => events.push(e));
+    const child = reg.create("c", {
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:9",
+      seed: "parent",
+    });
+    const plain = reg.create("p", { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:2" });
+    expect(reg.getById(child.id)?.seed).toBe("parent");
+    expect(events.find((e) => e.type === "upsert" && e.run.id === child.id)).toMatchObject({
+      run: { seed: "parent" },
+    });
+    expect("seed" in (reg.getById(plain.id) ?? {})).toBe(false);
+  });
+
   // docs/reference/specs/run-history.md item 48: a coordinator's child names its
   // instance and its spawn's key on the live summary too, so the spawn route
   // reads them from a live run without the record.

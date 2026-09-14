@@ -35,7 +35,8 @@ import {
   authorizeRepo,
   type AuthorizeDeps,
 } from "./dispatch/authorize.js";
-import { buildMessages } from "./dispatch/messages.js";
+import { buildMessages, type TextTurn } from "./dispatch/messages.js";
+import type { RunSeed } from "./runRecord.js";
 import {
   attachWorkspace,
   budgetClipLabel,
@@ -124,6 +125,13 @@ export interface DispatchOptions {
    *  profile takes as one more boundary. Absent for every request a person, a
    *  schedule or a resume started. */
   parent?: ParentRun;
+  /** Set by `spawnChild()` beside `parent`: the conversation this child starts
+   *  from in place of its thread's history — its parent's text turns at the
+   *  spawn (user and assistant text; no tool calls, results or thinking), the
+   *  request being the one new turn after them. Absent → the thread's
+   *  history, as for every request a person, a schedule or a coordinator
+   *  started; the record says which (run-history item 52). */
+  seed?: TextTurn[];
   /** Set by the coordinator's spawn route alone (src/channels/adminCoordinator.ts;
    *  run-history item 48): this request is a coordinator instance's child —
    *  the instance and the idempotency key ride every row the run has, and a
@@ -389,12 +397,13 @@ export async function dispatch(
     const outcome = await admit(deps, admissionCtx);
     // A redispatch (the boot-gap steer that found its row gone) is a request
     // of its own — its own root, no resume or restart — but the same message:
-    // a child stays its parent's child and a coordinator's child its
-    // instance's, so `parent` and `coordinator` ride along, and its outcome is
-    // the one the caller gets.
+    // a child stays its parent's child, starts from the same seed, and a
+    // coordinator's child stays its instance's, so `parent`, `seed` and
+    // `coordinator` ride along, and its outcome is the one the caller gets.
     if (outcome.kind === "redispatch")
       return dispatch(deps, msg, io, {
         ...(opts.parent ? { parent: opts.parent } : {}),
+        ...(opts.seed ? { seed: opts.seed } : {}),
         ...(opts.coordinator ? { coordinator: opts.coordinator } : {}),
       });
     if (outcome.kind !== "proceed") return ended;
@@ -516,7 +525,11 @@ export async function dispatch(
       ? renderContract(opts.contract, { maxChars: DEFAULT_CONTRACT_MAX_CHARS }).text
       : undefined;
     const requestText = route?.parts ? compoundBrief(directives.text, route.parts) : directives.text;
-    const built = buildMessages(history, requestText, msg.images, msg.documents);
+    // A spawned child starts from its parent's text turns (routing-and-config
+    // item 20), every other run from its thread's history; every row and
+    // record the run has says which (run-history item 52).
+    const seed: RunSeed = opts.seed ? "parent" : "channel";
+    const built = buildMessages(opts.seed ?? history, requestText, msg.images, msg.documents);
     const messages = resume
       ? resume.plan.messages
       : contractBlock !== undefined && agent.name !== "review"
@@ -571,6 +584,8 @@ export async function dispatch(
       admitted,
       parentRunId,
       coordinator,
+      seed,
+      ...(opts.seed ? { seedTurns: opts.seed } : {}),
       agentSource,
       ...(routeEvent ? { route: routeEvent } : {}),
     });
@@ -594,6 +609,7 @@ export async function dispatch(
       root,
       parentRunId,
       coordinator,
+      seed,
     });
     if (reservation) {
       reserved = reservation.reserved;
@@ -733,6 +749,7 @@ export async function dispatch(
       resume,
       parentRunId,
       coordinator,
+      seed,
     });
     // The ledger claim (dispatch/run.ts), once the prompt exists: the reserved
     // row promoted, or a resume's adopted row re-subscribed.
@@ -758,6 +775,7 @@ export async function dispatch(
       root,
       parentRunId,
       coordinator,
+      seed,
     });
     // What this run may do to other runs (dispatch/spawn.ts; docs/reference/specs/
     // agent-conductor.md): spawn a child as this run, read the runs its
@@ -818,6 +836,7 @@ export async function dispatch(
       wait,
       parentRunId,
       coordinator,
+      seed,
       ...(opts.fixRound ? { fixRound: opts.fixRound } : {}),
       ...(bearer !== undefined ? { bearer } : {}),
     });

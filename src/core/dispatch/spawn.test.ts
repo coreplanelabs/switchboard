@@ -2,7 +2,9 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { AGENTS } from "../../agents/registry.js";
 import { ConfigStore } from "../../config.js";
+import type { ChatMessage } from "../../providers/types.js";
 import { RunRegistry } from "../runRegistry.js";
 import type { ChannelIO, IncomingMessage, OpenedThread } from "../types.js";
 import type { CoreDeps, DispatchOptions, DispatchOutcome } from "../dispatcher.js";
@@ -287,22 +289,84 @@ describe("spawnChild — the one path a child run is born through", () => {
 
   it("a refusal at a gate before the child registered is relayed by name with the child thread's own reply, and the parent's thread is untouched", async () => {
     const { dispatch } = fakeDispatch(async (_msg, io) => {
-      await io.reply("🚫 You're not on the allowlist for the `coding` agent.");
+      await io.reply("🚫 You're not on the allowlist for the `explore` agent.");
       return { status: "refused", refusal: "agent_allowlist" };
     });
     const ch = channel();
     const out = await spawnChild(deps(dispatch), parent(ch.io), {
-      preset: "coding",
-      prompt: "fix it",
+      preset: "explore",
+      prompt: "time the suite",
       repo: "acme/api",
     });
     expect(out).toEqual({
       kind: "refused",
       reason: "agent_allowlist",
-      message: "🚫 You're not on the allowlist for the `coding` agent.",
+      message: "🚫 You're not on the allowlist for the `explore` agent.",
     });
-    expect(ch.childReplies).toEqual(["🚫 You're not on the allowlist for the `coding` agent."]);
+    expect(ch.childReplies).toEqual(["🚫 You're not on the allowlist for the `explore` agent."]);
     expect(ch.replies).toEqual([]);
+  });
+
+  // docs/reference/specs/agent-conductor.md item 3: a child is a reader. The
+  // line is the registry's identity column, never a list kept here — a preset
+  // that gains or loses `write` crosses it the day its def does.
+  it("a preset whose identity is `write` is refused `spawn_identity` before anything is opened — no thread, no dispatch — and every preset that reads or holds no credential passes the rule", async () => {
+    const { dispatch } = fakeDispatch(registers("run-child"));
+    const ch = channel();
+    const writers = Object.values(AGENTS).filter((a) => a.identity === "write");
+    expect(writers.map((a) => a.name)).toEqual(["coding", "ship"]);
+    for (const { name } of writers) {
+      const out = await spawnChild(deps(dispatch), parent(ch.io), { preset: name, prompt: "fix it", repo: "acme/api" });
+      expect(out, name).toMatchObject({ kind: "refused", reason: "spawn_identity" });
+      expect((out as { message: string }).message).toContain(`\`${name}\``);
+      expect((out as { message: string }).message).toMatch(/write/);
+    }
+    expect(ch.leads).toEqual([]);
+    expect(dispatch).not.toHaveBeenCalled();
+    for (const { name } of Object.values(AGENTS).filter((a) => a.identity !== "write")) {
+      expect(await spawnChild(deps(dispatch), parent(ch.io), { preset: name, prompt: "q" }), name).toMatchObject({
+        kind: "spawned",
+      });
+    }
+  });
+
+  // docs/reference/specs/routing-and-config.md item 20: the child starts from
+  // what its parent's conversation SAID — the text of every turn, never the
+  // tool exchanges or the thinking the text rode beside.
+  it("the child's seed is the parent's conversation reduced to its text turns — user and assistant text in order, a turn's text parts joined, tool calls, tool results and thinking dropped, a turn with no text dropped whole — handed to dispatch() beside `parent`; a parent with no conversation to hand on seeds nothing", async () => {
+    const { dispatch, calls } = fakeDispatch(registers("run-child"));
+    const ch = channel();
+    const conversation: ChatMessage[] = [
+      { role: "user", content: [{ type: "text", text: "look into durable objects" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "two parts", signature: "sig" },
+          { type: "text", text: "Splitting this into two children." },
+          { type: "tool_use", id: "t1", name: "update_status", input: { checklist: "○ storage" } },
+        ],
+      },
+      { role: "user", content: [{ type: "tool_result", toolUseId: "t1", content: "ok" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "First," },
+          { type: "text", text: "the storage question." },
+          { type: "tool_use", id: "t2", name: "spawn_run", input: { preset: "research", prompt: "q" } },
+        ],
+      },
+    ];
+    await spawnChild(deps(dispatch), parent(ch.io, { conversation }), { preset: "research", prompt: "q" });
+    expect(calls[0].opts).toEqual({
+      parent: { runId: "run-p", depth: 1, remainingMs: 30 * 60_000 },
+      seed: [
+        { role: "user", text: "look into durable objects" },
+        { role: "assistant", text: "Splitting this into two children." },
+        { role: "assistant", text: "First,\n\nthe storage question." },
+      ],
+    });
+    await spawnChild(deps(dispatch), parent(ch.io), { preset: "research", prompt: "q" });
+    expect(calls[1].opts).toEqual({ parent: { runId: "run-p", depth: 1, remainingMs: 30 * 60_000 } });
   });
 
   it("a dispatch that fails before any run exists is `spawn_failed` with the error's message; one that threw is too", async () => {
@@ -359,7 +423,7 @@ describe("spawnCapabilityFor — the capability a spawning run's tools hold", ()
       msg: PARENT_MSG,
       io: ch.io,
     });
-    const out = await cap.spawn({ preset: "research", prompt: "q" }, 7 * 60_000);
+    const out = await cap.spawn({ preset: "research", prompt: "q" }, { remainingMs: 7 * 60_000 });
     expect(out).toMatchObject({ kind: "spawned", runId: "run-child" });
     expect(dispatch.mock.calls[0][3]).toEqual({ parent: { runId: "run-p", depth: 1, remainingMs: 7 * 60_000 } });
     expect(cap.childOutcome("run-child")).toBeUndefined(); // still running
@@ -369,6 +433,29 @@ describe("spawnCapabilityFor — the capability a spawning run's tools hold", ()
       expect(cap.childOutcome("run-child")).toEqual({ status: "refused", refusal: "repo_not_onboarded" }),
     );
     expect(cap.childOutcome("someone-else")).toBeUndefined();
+  });
+
+  it("hands the conversation the call offers on as the child's seed, and seeds nothing for a call that offers none", async () => {
+    const { dispatch } = fakeDispatch(registers("run-child"));
+    const ch = channel();
+    const cap = spawnCapabilityFor(deps(dispatch), {
+      runId: "run-p",
+      depth: 0,
+      agentName: "conductor",
+      msg: PARENT_MSG,
+      io: ch.io,
+    });
+    const conversation: ChatMessage[] = [
+      { role: "user", content: [{ type: "text", text: "look into durable objects" }] },
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "spawn_run", input: {} }] },
+    ];
+    await cap.spawn({ preset: "research", prompt: "q" }, { remainingMs: 7 * 60_000, conversation });
+    expect(dispatch.mock.calls[0][3]).toEqual({
+      parent: { runId: "run-p", depth: 1, remainingMs: 7 * 60_000 },
+      seed: [{ role: "user", text: "look into durable objects" }],
+    });
+    await cap.spawn({ preset: "research", prompt: "q" }, { remainingMs: 7 * 60_000 });
+    expect(dispatch.mock.calls[1][3]).toEqual({ parent: { runId: "run-p", depth: 1, remainingMs: 7 * 60_000 } });
   });
 
   // The fan-out check counts the registry's live children, and a child is not in
@@ -400,8 +487,8 @@ describe("spawnCapabilityFor — the capability a spawning run's tools hold", ()
       io: ch.io,
     });
     const [first, second] = await Promise.all([
-      cap.spawn({ preset: "research", prompt: "a" }, 30 * 60_000),
-      cap.spawn({ preset: "research", prompt: "b" }, 30 * 60_000),
+      cap.spawn({ preset: "research", prompt: "a" }, { remainingMs: 30 * 60_000 }),
+      cap.spawn({ preset: "research", prompt: "b" }, { remainingMs: 30 * 60_000 }),
     ]);
     expect(first).toMatchObject({ kind: "spawned", runId: "run-child-1" });
     expect(second).toMatchObject({ kind: "refused", reason: "spawn_fanout" });
@@ -409,10 +496,12 @@ describe("spawnCapabilityFor — the capability a spawning run's tools hold", ()
   });
 
   it("the null capability refuses honestly: no run is spawning here", async () => {
-    expect(await nullSpawnCapability.spawn({ preset: "research", prompt: "q" }, 60_000)).toMatchObject({
-      kind: "refused",
-      reason: "spawn_unavailable",
-    });
+    expect(await nullSpawnCapability.spawn({ preset: "research", prompt: "q" }, { remainingMs: 60_000 })).toMatchObject(
+      {
+        kind: "refused",
+        reason: "spawn_unavailable",
+      },
+    );
     expect(nullSpawnCapability.childOutcome("run-x")).toBeUndefined();
   });
 });

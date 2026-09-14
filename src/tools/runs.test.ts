@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { AGENTS, machineNeedsRepo } from "../agents/registry.js";
 import { NO_GRANTS, type Actor } from "../core/authz/types.js";
 import { ALL_GRANTS } from "../core/authz/grants.js";
 import { RunRegistry } from "../core/runRegistry.js";
@@ -7,6 +8,7 @@ import { createRunsService, LEDGER_LIST_TTL_MS } from "../core/runsService.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunEvent } from "../core/runEvents.js";
 import type { RunRecord } from "../core/runRecord.js";
+import type { ChatMessage } from "../providers/types.js";
 import type { SpawnCapability } from "../core/dispatch/spawn.js";
 import { steerRun, type DispatchFollowUp } from "../core/dispatch/admission.js";
 import { AWAIT_POLL_MS, waitCapabilityFor, type WaitCapability } from "../core/dispatch/awaitChildren.js";
@@ -245,12 +247,65 @@ describe("spawn_run — the capability, called with the run's remaining wall clo
     );
     expect(spawn.spawn).toHaveBeenCalledWith(
       { preset: "research", prompt: "what changed in v2?", budget: 10 },
-      25 * 60_000,
+      { remainingMs: 25 * 60_000 },
     );
     expect(out).toContain("run-child");
     expect(out).toContain("slack:CX:9.0");
     expect(out).toContain("https://acme.slack.com/archives/CX/p90");
     expect(out).toContain("get_run_status");
+  });
+
+  // docs/reference/specs/routing-and-config.md item 20: the child's seed is the
+  // parent's conversation at the call — read off the context the runner
+  // installs, handed to the capability beside the clock.
+  it("hands the capability the conversation the context offers beside the clock, and only the clock when the context keeps none", async () => {
+    const spawn = {
+      spawn: vi.fn(async () => ({ kind: "spawned" as const, runId: "run-child", threadKey: "slack:CX:9.0" })),
+      childOutcome: () => undefined,
+    };
+    const conversation: ChatMessage[] = [{ role: "user", content: [{ type: "text", text: "look into it" }] }];
+    await spawnRunTool.run(
+      { preset: "research", prompt: "q" },
+      { executor, spawn, remainingMs: () => 1_000, conversation: () => conversation },
+    );
+    expect(spawn.spawn).toHaveBeenLastCalledWith(
+      { preset: "research", prompt: "q" },
+      { remainingMs: 1_000, conversation },
+    );
+    await spawnRunTool.run({ preset: "research", prompt: "q" }, { executor, spawn, remainingMs: () => 1_000 });
+    expect(spawn.spawn).toHaveBeenLastCalledWith({ preset: "research", prompt: "q" }, { remainingMs: 1_000 });
+  });
+
+  // docs/reference/specs/agent-conductor.md item 3: a write preset is refused
+  // by the stage, and the tool relays that name like any gate's.
+  it("relays `spawn_identity` — a preset whose identity is `write` — by name, as it relays every other gate", async () => {
+    const spawn: SpawnCapability = {
+      spawn: async () => ({
+        kind: "refused",
+        reason: "spawn_identity",
+        message: "`coding` runs as a `write` identity, and a spawned child never writes.",
+      }),
+      childOutcome: () => undefined,
+    };
+    const out = await spawnRunTool.run({ preset: "coding", prompt: "fix", repo: "acme/api" }, { executor, spawn });
+    expect(out).toContain("spawn refused (spawn_identity)");
+    expect(out).toContain("`coding`");
+  });
+
+  it("its description renders from the registry: the presets a child can run are the siblings whose identity is not `write`, the repository presets are those whose machine carries a checkout, `spawn_identity` is named, and the child starts from this conversation's text plus the prompt rather than seeing none of the thread", () => {
+    const desc = spawnRunTool.description;
+    const siblings = Object.values(AGENTS).filter((a) => a.name !== "conductor");
+    const readers = siblings.filter((a) => a.identity !== "write").map((a) => a.name);
+    const writers = siblings.filter((a) => a.identity === "write").map((a) => a.name);
+    const repoPresets = siblings.filter((a) => machineNeedsRepo(a.machine)).map((a) => a.name);
+    expect(desc).toContain(readers.join(", "));
+    expect(desc).toContain(repoPresets.join(", "));
+    for (const name of writers) expect(desc).toContain(name);
+    expect(desc).toContain("spawn_identity");
+    expect(desc).not.toMatch(/sees none of this thread/);
+    expect(desc).toMatch(/this conversation's text/);
+    const presetSchema = (spawnRunTool.inputSchema.properties as Record<string, { description: string }>).preset;
+    expect(presetSchema.description).toContain(readers.join(", "));
   });
 
   it("relays a refusal by name with the text the child's thread saw", async () => {
