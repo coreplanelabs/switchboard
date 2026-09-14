@@ -96,6 +96,15 @@ import {
 } from "../../src/execution/residentDepCache.js";
 import { parseWorktreeCleanliness, worktreeCleanlinessScript } from "../../src/execution/residentCleanliness.js";
 import {
+  base64ByteLength,
+  MAX_READ_BASE64_CHARS,
+  MAX_READ_BYTES,
+  readCommandFor,
+  readEncodingOf,
+  type Base64ReadAnswer,
+  type ReadEncoding,
+} from "../../src/execution/binaryRead.js";
+import {
   capBytesFor,
   capWrappedCommand,
   execCapFiles,
@@ -5170,36 +5179,53 @@ export class ResidentDO extends Sandbox<Env> {
   }
 
   /** POST /read: cat the file AS THE THREAD USER — the OS layer (not just
-   *  the prefix check) is what confines a symlink pointing outside. */
-  async readThreadFile(threadKey: string, path: string): Promise<{ content: string; truncated: boolean } | ThreadErr> {
-    return this.withThreadBusy(threadKey, () => this.readThreadFileImpl(threadKey, path));
+   *  the prefix check) is what confines a symlink pointing outside. A
+   *  `base64` read (src/execution/binaryRead.ts) runs `base64 -w0` instead,
+   *  under the binary cap; an overflow is the named refusal, never a slice
+   *  of the encoding. */
+  async readThreadFile(
+    threadKey: string,
+    path: string,
+    encoding: ReadEncoding = "utf8",
+  ): Promise<{ content: string; truncated: boolean } | Base64ReadAnswer | ThreadErr> {
+    return this.withThreadBusy(threadKey, () => this.readThreadFileImpl(threadKey, path, encoding));
   }
 
   private async readThreadFileImpl(
     threadKey: string,
     path: string,
-  ): Promise<{ content: string; truncated: boolean } | ThreadErr> {
+    encoding: ReadEncoding,
+  ): Promise<{ content: string; truncated: boolean } | Base64ReadAnswer | ThreadErr> {
     const pre = await this.threadPreflight(threadKey);
     if ("error" in pre) return pre;
     const resolved = confineThreadPath(pre.binding.worktreePath, path);
     if (!resolved)
       return { error: `path-escape: ${JSON.stringify(path)} does not stay inside the thread worktree`, status: 400 };
+    const cap = encoding === "base64" ? MAX_READ_BASE64_CHARS : READ_CONTENT_CAP;
     let r: Awaited<ReturnType<ResidentDO["threadRun"]>>;
     try {
       r = await this.threadRun(
         pre.binding.user,
         pre.binding.worktreePath,
-        `cat -- ${resolved}`,
+        readCommandFor(encoding, resolved),
         DEFAULT_EXEC_TIMEOUT_MS,
-        capBytesFor(READ_CONTENT_CAP),
+        capBytesFor(cap),
       );
     } catch (err) {
       if (err instanceof RuntimeReplacedError) return runtimeReplacedErr(err);
       throw err;
     }
     if (r.exitCode !== 0 || r.timedOut) return { error: `read-failed: ${describeStepFailure(r)}`, status: 404 };
-    const truncated = r.stdout.length > READ_CONTENT_CAP;
-    return { content: truncated ? r.stdout.slice(0, READ_CONTENT_CAP) : r.stdout, truncated };
+    const truncated = r.stdout.length > cap;
+    if (encoding === "base64") {
+      // Padding hides up to two bytes inside the cap's char count, so the
+      // decoded size is checked too — the cap is bytes, not characters.
+      const content = r.stdout.trimEnd();
+      return truncated || base64ByteLength(content) > MAX_READ_BYTES
+        ? { encoding, tooLarge: true }
+        : { encoding, content };
+    }
+    return { content: truncated ? r.stdout.slice(0, cap) : r.stdout, truncated };
   }
 
   /** POST /write: content travels via the SDK file API into the thread's
@@ -7186,7 +7212,9 @@ async function handleRead(env: Env, body: Record<string, unknown>): Promise<Resp
   if (ctx instanceof Response) return ctx;
   if (typeof body.path !== "string")
     return json({ error: "path must be a string relative to the thread worktree" }, 400);
-  const result = await ctx.stub.readThreadFile(ctx.threadKey, body.path);
+  const encoding = readEncodingOf(body);
+  if (typeof encoding !== "string") return json({ error: encoding.error }, 400);
+  const result = await ctx.stub.readThreadFile(ctx.threadKey, body.path, encoding);
   if ("error" in result) return threadErrResponse(result);
   return json(result);
 }

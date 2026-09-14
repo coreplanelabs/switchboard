@@ -16,6 +16,7 @@ import { distillDiffStats, type DigestReport } from "../core/diffDigest.js";
 import { webFetchTool, webSearchTool, type WebCapability } from "./web.js";
 import { GITHUB_ISSUE_WRITE_TOOLS, GITHUB_READ_TOOLS, type GithubCapability } from "./github.js";
 import { listSkillsTool, useSkillTool } from "./skills.js";
+import { attachFileTool, type AttachCapability } from "./attach.js";
 import { RUN_TOOLS, type RunsReadCapability, type SteerCapability } from "./runs.js";
 import type { WaitCapability } from "../core/dispatch/awaitChildren.js";
 import type { SpawnCapability } from "../core/dispatch/spawn.js";
@@ -45,6 +46,11 @@ export interface ToolContext {
   remainingMs?: () => number;
   /** Replace the user-facing progress checklist on the status card. */
   reportProgress?: (checklist: string) => void;
+  /** The requesting thread's file upload behind `attach_file`
+   *  (docs/reference/specs/agent-coding.md item 10): the channel's
+   *  `attachFile`, bound by the dispatcher. Absent (a channel without uploads,
+   *  a unit context) → the tool says the conversation takes no files. */
+  attach?: AttachCapability;
   /** Web fetch + search capability. Injected by the dispatcher;
    *  absent → web tools report themselves unavailable. */
   web?: WebCapability;
@@ -651,11 +657,15 @@ export const updateStatusTool: RunnableTool = {
 // tools (create/update/comment/delete) go where the agent may act on GitHub:
 // `assistant` (general) and `full` (coding); the read-only review agent and
 // the research agent never mutate GitHub.
+// attach_file (docs/reference/specs/agent-coding.md item 10) is full-only: the
+// coding agent is the one that renders screenshots and PDFs worth showing; it
+// posts into the conversation, so it never joins a read-only toolset.
 export const TOOLSETS: Record<string, RunnableTool[]> = {
   full: [
     bashTool,
     readFileTool,
     writeFileTool,
+    attachFileTool,
     updateStatusTool,
     submitPrDescriptionTool,
     submitHandoffTool,

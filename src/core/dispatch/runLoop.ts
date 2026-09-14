@@ -438,9 +438,13 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
   // One tool context for the whole run: the first turn and any re-review
   // turn (settleReviewedHead) share it, so submit_pr_description and the
   // progress checklist keep flowing to the same hooks.
+  // The thread's file upload rides only when the channel has one: a tool that
+  // finds it absent says so, rather than the core inventing a fallback for bytes.
+  const attachFile = io.attachFile?.bind(io);
   const toolContext = {
     executor,
     reportProgress,
+    ...(attachFile ? { attach: attachFile } : {}),
     web: webCapability(),
     skills: deps.skills,
     github: githubCapabilityFor(deps, msg.userId),

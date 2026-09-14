@@ -5,14 +5,15 @@ import type { ExecOptions, Executor, ReleaseMode, ReleaseResult } from "./execut
 // The executor as the run's spans see it (docs/reference/specs/tracing.md): every
 // operation a tool asks of the workspace runs inside a log-only `exec.*` span
 // under the tool call's own span — `exec.exec`, `exec.read_file`,
-// `exec.write_file`, and `exec.release` / `exec.move_to` when the wrapped
-// executor has them — carrying the backend and the per-call budget, never the
+// `exec.write_file`, and `exec.release` / `exec.move_to` / `exec.read_bytes`
+// when the wrapped executor has them — carrying the backend and the per-call budget, never the
 // command, the path, or the output. A Decorator: the inner executor (the health
 // tracker in the runner) does the work; this one only times it.
 
 export class TracingExecutor implements Executor {
   release?: (mode: ReleaseMode) => Promise<ReleaseResult>;
   moveTo?: (sha: string) => Promise<{ sha: string }>;
+  readBytes?: (path: string) => Promise<Uint8Array>;
 
   constructor(
     private readonly inner: Executor,
@@ -23,6 +24,9 @@ export class TracingExecutor implements Executor {
     if (innerRelease) this.release = (mode) => this.timed("exec.release", (s) => innerRelease(mode, { span: s }));
     const innerMoveTo = inner.moveTo?.bind(inner);
     if (innerMoveTo) this.moveTo = (sha) => this.timed("exec.move_to", (s) => innerMoveTo(sha, { span: s }));
+    const innerReadBytes = inner.readBytes?.bind(inner);
+    if (innerReadBytes)
+      this.readBytes = (path) => this.timed("exec.read_bytes", (s) => innerReadBytes(path, { span: s }));
   }
 
   /** Each op under its own `exec.*` span, handed to the inner executor as

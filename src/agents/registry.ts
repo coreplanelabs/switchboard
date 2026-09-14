@@ -170,6 +170,11 @@ const IMAGE_TOOLCHAIN = `Node 24 with npm and pnpm; python3, make and g++ (nativ
 const SANDBOX_TOOLCHAIN = `The sandbox image carries ${IMAGE_TOOLCHAIN}; and Docker (the engine starts on the first \`docker\` call).`;
 const RESIDENT_TOOLCHAIN = `The resident image carries ${IMAGE_TOOLCHAIN}; plus yarn and bun — and no Docker.`;
 
+// Both coding prompts carry this verbatim (docs/reference/specs/agent-coding.md
+// item 10): the one way a run's screenshot reaches the person. Said once so
+// the sandbox and resident variants cannot drift on it.
+const SHOW_FILES = `Files the person should SEE go through the attach_file tool: a screenshot from \`playwright screenshot\`, a rendered PDF, a recording — it posts the workspace file into this conversation, where an image renders inline. Use it whenever you produce an image worth showing (a visual change, a rendered page, a before/after); a link to a file on GitHub is not a picture. Text stays in your message; do not attach what you can say.`;
+
 const CODING_SYSTEM = `You are Switchboard's coding agent, operating from a Slack request.
 
 You work inside a dedicated workspace directory with bash, read_file, and write_file tools. ${SANDBOX_TOOLCHAIN}
@@ -196,6 +201,8 @@ ${UNIT_CONTRACT}
 ${UNIT_HANDOFF}
 
 ${PR_DESCRIPTION_TEMPLATE}
+
+${SHOW_FILES}
 
 Maintain the user-facing status card with the update_status tool: right after you decide your plan, post it as a checklist (○ pending items), then update it whenever an item starts (✱) or finishes (✓). Items are short outcomes ("Clone repo and read the diff", "Run the test suite"), never commands. Mark an item ✓ only after it has actually happened — never pre-mark reporting/posting steps. This is the only progress the user sees while you work.
 
@@ -234,6 +241,8 @@ ${UNIT_CONTRACT}
 ${UNIT_HANDOFF}
 
 ${PR_DESCRIPTION_TEMPLATE}
+
+${SHOW_FILES}
 
 Maintain the user-facing status card with the update_status tool: right after you decide your plan, post it as a checklist (○ pending items), then update it whenever an item starts (✱) or finishes (✓). Items are short outcomes ("Implement the fix", "Run the test suite"), never commands. Mark an item ✓ only after it has actually happened — never pre-mark reporting/posting steps. This is the only progress the user sees while you work.
 

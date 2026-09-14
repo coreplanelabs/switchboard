@@ -457,6 +457,7 @@ function watched(io: ChannelIO, on: { started: (id: string) => void; replied: (t
     },
   };
   if (io.attach) out.attach = (file) => io.attach!(file);
+  if (io.attachFile) out.attachFile = (file) => io.attachFile!(file);
   if (io.runFinished) out.runFinished = (receipt) => io.runFinished!(receipt);
   if (io.openThread) out.openThread = (lead) => io.openThread!(lead);
   return out;

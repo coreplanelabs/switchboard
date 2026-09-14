@@ -1,8 +1,9 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { OperationResult, Operations, OpName } from "../core/operations.js";
 import { BASH_TIMEOUT_MS, bashTimeoutNote, clampBashTimeout } from "./bashTimeout.js";
+import { MAX_READ_BYTES, tooLargeMessage } from "./binaryRead.js";
 import type { Span } from "../core/trace/types.js";
 import { systemClock } from "../core/trace/clock.js";
 
@@ -33,6 +34,12 @@ export interface Executor {
   readFile(path: string, opts?: ExecTraceOptions): Promise<string>;
   /** Write a file (creating parent dirs), path relative to the workspace. */
   writeFile(path: string, content: string, opts?: ExecTraceOptions): Promise<string>;
+  /** Optional: read a file as bytes — a screenshot, a PDF the run produced —
+   *  whole, up to `MAX_READ_BYTES` (src/execution/binaryRead.ts); a larger file
+   *  throws by name, since a binary cannot be truncated the way `readFile`'s
+   *  text is. Absent on an executor whose transport has no byte path: a tool
+   *  that needs it then says so instead of decoding a text view. */
+  readBytes?(path: string, opts?: ExecTraceOptions): Promise<Uint8Array>;
   /** Optional: give back whatever the run held for this thread once it ends
    *  (a resident's pool user + worktree). "always" — nothing to preserve
    *  (read-only agents); "if-clean" — keep the workspace if it has uncommitted
@@ -132,8 +139,14 @@ export class ExecHealthTracker implements Executor {
    *  evidence the runner's abort diagnosis quotes instead of guessing a cause.
    *  Cleared by a successful op along with the count. */
   lastInfraError: string | undefined;
+  /** Present exactly when the inner executor reads bytes — a decorator that
+   *  always offered it would promise what the transport cannot do. */
+  readBytes?: (path: string, opts?: ExecTraceOptions) => Promise<Uint8Array>;
 
-  constructor(private readonly inner: Executor) {}
+  constructor(private readonly inner: Executor) {
+    const innerReadBytes = inner.readBytes?.bind(inner);
+    if (innerReadBytes) this.readBytes = (path, opts) => this.track(() => innerReadBytes(path, opts));
+  }
 
   private async track<T>(op: () => Promise<T>): Promise<T> {
     try {
@@ -200,12 +213,45 @@ export class LocalExecutor implements Executor {
     return truncate(readFileSync(this.confine(path), "utf8"));
   }
 
+  /** The size is checked on the open handle and the bytes read from the same
+   *  handle, so a file that grows between the two calls cannot slip past the cap. */
+  async readBytes(path: string): Promise<Uint8Array> {
+    const fd = openSync(this.confine(path), "r");
+    try {
+      const size = fstatSync(fd).size;
+      if (size > MAX_READ_BYTES) throw new Error(tooLargeMessage(path, size));
+      return new Uint8Array(readFileSync(fd));
+    } finally {
+      closeSync(fd);
+    }
+  }
+
   async writeFile(path: string, content: string): Promise<string> {
     const abs = this.confine(path);
     mkdirSync(dirname(abs), { recursive: true });
     writeFileSync(abs, content);
     return `Wrote ${path}`;
   }
+}
+
+/** The bot side of a remote base64 read (src/execution/binaryRead.ts): the
+ *  Worker's `/read` answer decoded to bytes. An answer without
+ *  `encoding: "base64"` is a Worker that predates binary reads — it ignored
+ *  the request and sent the file as text — named as such (the fix is a
+ *  redeploy), never decoded as if it were base64; a `tooLarge` answer is the
+ *  cap's one message. Both are plain errors: the model's file or the fleet's
+ *  rollout, never a sick Worker. */
+export function decodeBase64Read(
+  answer: { content?: unknown; encoding?: unknown; tooLarge?: unknown },
+  at: { where: string; path: string },
+): Uint8Array {
+  if (answer.encoding !== "base64") {
+    throw new Error(
+      `${at.where}: the Worker answered a text read to a request for bytes — it predates binary reads; redeploy it`,
+    );
+  }
+  if (answer.tooLarge === true) throw new Error(tooLargeMessage(at.path));
+  return new Uint8Array(Buffer.from(typeof answer.content === "string" ? answer.content : "", "base64"));
 }
 
 /** Dev-only deterministic ops against the thread's LOCAL workspace directory

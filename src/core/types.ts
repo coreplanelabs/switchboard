@@ -151,6 +151,15 @@ export interface ChannelIO {
    * `reply(lead + text)` itself, so callers never branch on the outcome.
    */
   attach?(file: { name: string; text: string; lead: string }): Promise<void>;
+  /**
+   * Post `lead` as the message and `bytes` as a file beside it — a screenshot,
+   * a PDF, a recording a run produced in its workspace, for the person to see
+   * inline. The binary sibling of `attach`: bytes have no text fallback, so a
+   * channel that cannot take the file (no upload API, a failed upload) throws
+   * and the caller reports it. Optional; a channel without uploads leaves it
+   * out and the tool behind it says so.
+   */
+  attachFile?(file: { name: string; bytes: Uint8Array; lead: string }): Promise<void>;
   /** Create a progress indicator. Adapters may return a no-op handle. */
   status(initial: StatusUpdate): Promise<StatusHandle>;
   /**

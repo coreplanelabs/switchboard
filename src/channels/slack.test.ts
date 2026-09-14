@@ -374,6 +374,47 @@ describe("SlackIO.attach (docs/reference/specs/slack-channel.md item 10)", () =>
   });
 });
 
+describe("SlackIO.attachFile (docs/reference/specs/slack-channel.md item 10)", () => {
+  const ev = { channel: "C1", user: "UA", text: "hi", ts: "3.0", threadTs: "1.0", botUserId: "UBOT" };
+  const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+  it("uploads the bytes as the file in the thread, titled by name, with the lead (in mrkdwn) as the comment — no chunked messages", async () => {
+    const uploadV2 = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true }));
+    const postMessage = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true }));
+    const client = { files: { uploadV2 }, chat: { postMessage } } as unknown as ConstructorParameters<
+      typeof SlackIO
+    >[0];
+    await new SlackIO(client, ev).attachFile({ name: "verdict-dark.png", bytes, lead: "**PR verdict mock** — dark" });
+    expect(uploadV2).toHaveBeenCalledTimes(1);
+    const call = uploadV2.mock.calls[0]![0];
+    expect(call).toMatchObject({
+      channel_id: "C1",
+      thread_ts: "1.0",
+      filename: "verdict-dark.png",
+      title: "verdict-dark.png",
+    });
+    expect(Buffer.isBuffer(call.file)).toBe(true);
+    expect((call.file as Buffer).equals(Buffer.from(bytes))).toBe(true);
+    expect(call.content).toBeUndefined();
+    expect(String(call.initial_comment)).toBe("*PR verdict mock* — dark");
+    expect(postMessage).not.toHaveBeenCalled();
+  });
+
+  it("a failed upload propagates — bytes have no text fallback, so the caller reports it instead of a silent chunked reply", async () => {
+    const uploadV2 = vi.fn(async (_opts: Record<string, unknown>) => {
+      throw new Error("An API error occurred: missing_scope");
+    });
+    const postMessage = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true }));
+    const client = { files: { uploadV2 }, chat: { postMessage } } as unknown as ConstructorParameters<
+      typeof SlackIO
+    >[0];
+    await expect(new SlackIO(client, ev).attachFile({ name: "a.png", bytes, lead: "a" })).rejects.toThrow(
+      /missing_scope/,
+    );
+    expect(postMessage).not.toHaveBeenCalled();
+  });
+});
+
 // Feature: docs/reference/specs/run-visibility.md item 8 — card edits ride a status client of
 // their own and draw from one process-wide budget; the terminal frame never
 // waits behind a rate limit and never blocks the reply.

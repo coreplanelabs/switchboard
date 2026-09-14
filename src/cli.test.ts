@@ -31,7 +31,7 @@ import {
   USAGE,
   type CliInvocation,
 } from "./cli.js";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ConfigStore } from "./config.js";
@@ -274,6 +274,25 @@ describe("askExitCode — what the `ask` process exits with (the ConsoleIO chann
     } as unknown as NodeJS.WritableStream);
     await io.reply("four");
     expect(chunks.join("")).toBe("\nfour\n");
+  });
+
+  // docs/reference/specs/agent-coding.md item 10: the harness's file upload —
+  // a stream cannot carry bytes, so the file lands in a temp dir the reply
+  // names, and a child thread shares the parent's dir.
+  it("ConsoleIO.attachFile writes the bytes under one temp dir per conversation (children included) and prints the lead with the path", async () => {
+    const chunks: string[] = [];
+    const out = { write: (chunk: string) => (chunks.push(chunk), true) } as unknown as NodeJS.WritableStream;
+    const io = new ConsoleIO(out, "cli:work");
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+    await io.attachFile({ name: "shot.png", bytes, lead: "the rendered page" });
+    const line = chunks.join("");
+    const path = /→ (\S+shot\.png)/.exec(line)![1]!;
+    expect(line).toContain("the rendered page\n📎 shot.png (4 bytes) → ");
+    expect(Buffer.from(readFileSync(path)).equals(Buffer.from(bytes))).toBe(true);
+    const child = (await io.openThread("child lead")).io;
+    await child.attachFile!({ name: "sub/other.pdf", bytes, lead: "a pdf" });
+    const childPath = /→ (\S+other\.pdf)/.exec(chunks.join(""))![1]!;
+    expect(childPath.slice(0, childPath.lastIndexOf("/"))).toBe(path.slice(0, path.lastIndexOf("/")));
   });
 
   // docs/reference/specs/thread-admission.md item 6: the harness opens a child
