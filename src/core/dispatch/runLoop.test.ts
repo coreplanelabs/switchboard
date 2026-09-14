@@ -28,6 +28,7 @@ import { judgeToolCall, type ToolRuleContext } from "../harness/pi/toolRules.js"
 import type { CoordinatorTag } from "../coordinator/contract.js";
 import type { RepoContext } from "../repoContext.js";
 import type { ResidentBinding } from "../../execution/resident.js";
+import { InMemoryArtifactStore, type ArtifactStore } from "../../artifacts/store.js";
 
 // Feature: docs/reference/specs/run-loop.md, docs/reference/specs/run-history.md
 // items 20–22, docs/reference/specs/llm-output.md item 5 — the loop's own
@@ -97,6 +98,8 @@ function setup(
     coordinator?: CoordinatorTag;
     /** The resident binding the round attached at, when the round ran on a resident. */
     binding?: ResidentBinding;
+    /** The artifact store (record 0033), when the deployment configures one. */
+    artifacts?: ArtifactStore;
   } = {},
 ) {
   const config = configStore(opts.yaml);
@@ -110,6 +113,7 @@ function setup(
     runStore: new NullRunStore(),
     githubApi: new InMemoryGithubApi(),
     ...(opts.harness ? { harness: opts.harness } : {}),
+    ...(opts.artifacts ? { artifacts: opts.artifacts } : {}),
   };
   const message = msg("hello there");
   const { resolved } = resolveRun(
@@ -232,6 +236,105 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     const without = setup("", { agent: "coding", provider: scripted(), executor });
     await runLoop(without.deps, without.ctx);
     expect(await toolResults(without)).toMatch(/this conversation's channel takes no file uploads/);
+  });
+
+  // record 0033: with a store in the deps the dispatcher binds the store path
+  // (this run's keys, the channel's upload ticket, its `reply` for the lead) —
+  // the file moves through the executor's commands, never through `readBytes`.
+  it("with an artifact store the run's attach_file moves the file by reference: the executor PUTs and POSTs, the record carries the artifact event, the ticket is completed; without a ticket the lead goes through reply", async () => {
+    const scripted = (): Provider => {
+      let turn = 0;
+      return {
+        name: "fake",
+        async complete() {
+          if (turn++ === 0)
+            return {
+              content: [
+                { type: "tool_use", id: "t1", name: "attach_file", input: { path: "shot.png", comment: "the page" } },
+              ],
+              stopReason: "tool_use",
+            };
+          return { content: [{ type: "text", text: "done" }], stopReason: "end_turn" };
+        },
+      };
+    };
+    const store = new InMemoryArtifactStore({ bucket: "test" });
+    const commands: string[] = [];
+    const executor: Partial<Executor> = {
+      readBytes: async () => {
+        throw new Error("the inline path must not run with a store");
+      },
+      exec: async (command) => {
+        commands.push(command);
+        if (command.startsWith("stat ")) return "3\n";
+        if (command.startsWith("curl -fsS -T ")) {
+          const url = new URL(/'([^']+)'$/.exec(command)![1]);
+          store.put(decodeURIComponent(url.pathname.slice(1)), new Uint8Array([1, 2, 3]), "image/png");
+        }
+        return "";
+      },
+    };
+    const completed: string[] = [];
+    const ticketed = setup("", {
+      agent: "coding",
+      provider: scripted(),
+      executor,
+      artifacts: store,
+      io: {
+        uploadTicket: async () => ({
+          url: "https://files.example/one-shot",
+          complete: async (lead) => void completed.push(lead),
+        }),
+      },
+    });
+    await runLoop(ticketed.deps, ticketed.ctx);
+    ticketed.ending.drain(true);
+    await ticketed.writer.settled();
+    const rec = (await ticketed.store.get("run-l"))!;
+    expect(JSON.stringify(rec.events.filter((e) => e.type === "tool_result"))).toContain(
+      "attached shot.png (3 bytes) to the conversation and the run page",
+    );
+    expect(rec.events.filter((e) => e.type === "artifact")).toMatchObject([
+      {
+        type: "artifact",
+        direction: "out",
+        key: "runs/run-l/out/1-shot.png",
+        name: "shot.png",
+        size: 3,
+        contentType: "image/png",
+      },
+    ]);
+    expect(commands.map((c) => c.split(" ")[0] + " " + c.split(" ").slice(1, 3).join(" "))).toEqual([
+      "stat -c %s",
+      "curl -fsS -T",
+      "curl -fsS --data-binary",
+    ]);
+    expect(completed).toEqual(["the page"]);
+
+    commands.length = 0;
+    const store2 = new InMemoryArtifactStore({ bucket: "test" });
+    const untied = setup("", {
+      agent: "coding",
+      provider: scripted(),
+      executor: {
+        ...executor,
+        exec: async (command) => {
+          commands.push(command);
+          if (command.startsWith("stat ")) return "3\n";
+          if (command.startsWith("curl -fsS -T ")) {
+            const url = new URL(/'([^']+)'$/.exec(command)![1]);
+            store2.put(decodeURIComponent(url.pathname.slice(1)), new Uint8Array([1, 2, 3]), "image/png");
+          }
+          return "";
+        },
+      },
+      artifacts: store2,
+    });
+    await runLoop(untied.deps, untied.ctx);
+    untied.ending.drain(true);
+    await untied.writer.settled();
+    expect(commands).toHaveLength(2); // stat + PUT: no POST without a ticket
+    expect(untied.replies.some((r) => r.startsWith("the page\n📎 shot.png (3 bytes) is on the run page"))).toBe(true);
   });
 
   it("a completed run: the answer comes back through the typed-output boundary and is published, the registry is finished `completed`, the record is registered for the drain, the workspace is NOT released here", async () => {

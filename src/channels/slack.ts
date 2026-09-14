@@ -41,6 +41,7 @@ import type {
   OpenedThread,
   StatusHandle,
   StatusUpdate,
+  UploadTicket,
 } from "../core/types.js";
 
 // Slack channel adapter: pure transport. Wires Bolt (Socket Mode) events into
@@ -501,6 +502,31 @@ export class SlackIO implements ChannelIO {
       file: Buffer.from(file.bytes),
       initial_comment: mdToMrkdwn(file.lead),
     });
+  }
+
+  /** The external-upload flow (docs/reference/specs/slack-channel.md item 10,
+   *  record 0033): `files.getUploadURLExternal` mints a URL for exactly
+   *  `size` bytes under `name`; the run's container POSTs the file there; then
+   *  `complete` shares it into this thread with the lead as the comment
+   *  (`files.completeUploadExternal`). The bot never sees the bytes. A ticket
+   *  Slack answers without a URL or id is refused by name. */
+  async uploadTicket(file: { name: string; size: number }): Promise<UploadTicket> {
+    const minted = await this.client.files.getUploadURLExternal({ filename: file.name, length: file.size });
+    const url = minted.upload_url;
+    const id = minted.file_id;
+    if (!url || !id)
+      throw new Error(`files.getUploadURLExternal answered without an upload_url and file_id for ${file.name}`);
+    return {
+      url,
+      complete: async (lead: string) => {
+        await this.client.files.completeUploadExternal({
+          files: [{ id, title: file.name }],
+          channel_id: this.ev.channel,
+          thread_ts: this.ev.threadTs,
+          initial_comment: mdToMrkdwn(lead),
+        });
+      },
+    };
   }
 
   private async post(mrkdwn: string): Promise<void> {

@@ -186,6 +186,7 @@ function watchedChild(
   };
   if (io.attach) watched.attach = (file) => io.attach!(file);
   if (io.attachFile) watched.attachFile = (file) => io.attachFile!(file);
+  if (io.uploadTicket) watched.uploadTicket = (file) => io.uploadTicket!(file);
   if (io.runFinished) watched.runFinished = (receipt) => io.runFinished!(receipt);
   if (io.openThread) watched.openThread = (lead) => io.openThread!(lead);
   return watched;

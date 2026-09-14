@@ -139,6 +139,16 @@ export interface OpenedThread {
   io: ChannelIO;
 }
 
+/** A minted one-shot upload (`ChannelIO.uploadTicket`): where the container
+ *  POSTs the bytes, and the call that shares the uploaded file into the
+ *  conversation once the POST succeeded. */
+export interface UploadTicket {
+  /** Accepts one POST of exactly the ticketed size; single use, short-lived. */
+  url: string;
+  /** Share the uploaded file into the conversation with `lead` as its message. */
+  complete(lead: string): Promise<void>;
+}
+
 /** What the core needs from a channel to serve one request. */
 export interface ChannelIO {
   /** Post a reply in the conversation. Adapter handles chunking/formatting. */
@@ -160,6 +170,16 @@ export interface ChannelIO {
    * out and the tool behind it says so.
    */
   attachFile?(file: { name: string; bytes: Uint8Array; lead: string }): Promise<void>;
+  /**
+   * A one-shot upload the run's CONTAINER performs (docs/reference/specs/agent-coding.md
+   * item 10, record 0033): the channel mints a URL that accepts exactly
+   * `size` bytes under `name`, the container POSTs the file to it, and
+   * `complete(lead)` shares it into the conversation with the lead. The bot
+   * process never holds the bytes — this is how a 1 GB recording reaches the
+   * thread. Optional; a channel without such an API (the CLI, HTTP) leaves it
+   * out and the tool posts the run-page link through `reply` instead.
+   */
+  uploadTicket?(file: { name: string; size: number }): Promise<UploadTicket>;
   /** Create a progress indicator. Adapters may return a no-op handle. */
   status(initial: StatusUpdate): Promise<StatusHandle>;
   /**
