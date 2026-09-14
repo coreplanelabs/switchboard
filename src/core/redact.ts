@@ -46,6 +46,14 @@ const REDACT: Array<{ re: RegExp; replace: string }> = [
 const SECRET_COMPONENT =
   /^(secret|token|password|passwd|pwd|credential|credentials|key|apikey|auth|session|sessionid|cookie)$/i;
 
+// An identifier component that marks the whole identifier as an ERROR CODE, not
+// a secret name: `github-token-mint-failed: HTTP 422 …` names a failure about a
+// token, and the word after the colon is diagnosis, never a credential. Without
+// this guard the assignment pass redacted `HTTP` out of that message
+// (`github-token-mint-failed: «redacted» 422 …`), garbling the one line that
+// tells an operator what went wrong.
+const ERROR_CODE_COMPONENT = /^(failed|failure|error|err|refused|denied|invalid|missing|expired|unset|mismatch)$/i;
+
 /** Redact the VALUE of any `<name> = value` / `<name>: value` where the name has
  *  a secret-marking component. Handles quoted values (with spaces) and unquoted,
  *  and a quoted NAME (`"password": "…"` in pasted JSON — the closing quote sits
@@ -64,7 +72,9 @@ function redactNamedAssignments(text: string): string {
     // decides whether it names a secret (`_SECRET` → ["", "SECRET"]).
     /(?<![A-Za-z0-9_-])([A-Za-z0-9_-]+)("?)(\s*[=:]\s*)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s]{4,})/g,
     (whole, id: string, close: string, sep: string, val: string) => {
-      if (!id.split(/[_-]/).some((p) => SECRET_COMPONENT.test(p))) return whole;
+      const parts = id.split(/[_-]/);
+      if (!parts.some((p) => SECRET_COMPONENT.test(p))) return whole;
+      if (parts.some((p) => ERROR_CODE_COMPONENT.test(p))) return whole;
       const quote = val[0] === '"' || val[0] === "'" ? val[0] : "";
       return `${id}${close}${sep}${quote}«redacted»${quote}`;
     },
