@@ -7,8 +7,10 @@
 // have picked. The result is a per-preset confusion table with accuracy and
 // the misroutes listed. The compound half (the same item): the router's
 // compound form scored on the checked-in set — detected where a request has
-// independent parts, kept single on a decoy, each part on its preset — and on
-// the history's conductor requests, detection alone, their count printed. The
+// independent read parts, collapsed to its write preset where a part needs
+// one (record 0034: a write ask is never a part), kept single on a decoy,
+// each part on its preset — and on the history's conductor requests,
+// detection alone, their count printed. The
 // imperative half (the same item): the checked-in set of terse imperatives —
 // an order to change code with no detail to route on — scored on reaching the
 // write preset, its read-only look-alikes on never reaching one. Pure over
@@ -190,7 +192,10 @@ const identityOf = (preset: string): string | undefined => AGENTS[preset]?.ident
  *  read-only preset (identity `none` or `read`) must never be routed to a
  *  write preset. The results that break it — none, or the receipt's verdict
  *  fails. A compound (`conductor`, identity `none`) is not a write route: its
- *  parts meet the same clause as children under the requester's allowlist. */
+ *  parts meet the same clause as children under the requester's allowlist.
+ *  Over the labelled singles alone: a checked-in compound that collapses onto
+ *  its write preset is a write label, scored on its own row
+ *  (`CompoundScore.collapsed`) and never here. */
 export function readToWriteRoutes(results: readonly ReplayResult[]): ReplayResult[] {
   return results.filter((r) => {
     const label = identityOf(r.label);
@@ -310,8 +315,13 @@ export interface CompoundResult extends CompoundExample {
   answered: string[];
   /** The router answered the compound form. */
   detected: boolean;
-  /** The expected part presets (0 for a decoy or a history example) and how
-   *  many of them the answer's parts cover, as multisets. */
+  /** The example expects a collapse (`collapsesTo`) and the router answered
+   *  that preset, single: outright, as the prompt asks, or through the parse's
+   *  collapse of a compound answer that named it as a part. */
+  collapsed: boolean;
+  /** The expected part presets (0 for a decoy, a history example or a
+   *  compound that collapses: its parts are never spawned) and how many of
+   *  them the answer's parts cover, as multisets. */
   expectedParts: number;
   matchedParts: number;
   /** Wall time of the router's decision, ms. */
@@ -338,9 +348,11 @@ function multisetOverlap(expected: readonly string[], answered: readonly string[
  * Ask the router about each example, `concurrency` at a time, in order — the
  * same seam `replayRoutes` uses, so the singles and the compounds replay under
  * one prompt. A compound is detected when the answer is the conductor with
- * parts; a decoy expects no detection; the parts are matched as multisets
- * against the expected presets (a compound whose parts are unknown scores
- * detection alone).
+ * parts; a compound with a write part (`collapsesTo`) is collapsed when the
+ * answer is that preset, single; a decoy expects no detection; the parts are
+ * matched as multisets against the expected presets (a compound whose parts
+ * are unknown scores detection alone; one that collapses has no parts to
+ * match).
  */
 export async function replayCompound(
   examples: readonly CompoundExample[],
@@ -351,48 +363,61 @@ export async function replayCompound(
     const parts = decision.preset === COMPOUND_PRESET && "parts" in decision ? (decision.parts ?? []) : [];
     const answered = parts.map((p) => p.preset);
     const detected = decision.preset === COMPOUND_PRESET && parts.length > 0;
-    const expectedParts = example.kind === "compound" ? example.presets.length : 0;
+    const collapsesTo = example.kind === "compound" ? example.collapsesTo : undefined;
+    const expectedParts = example.kind === "compound" && collapsesTo === undefined ? example.presets.length : 0;
     return {
       ...example,
       routed: decision.preset,
       reason: decision.reason,
       answered,
       detected,
+      collapsed: collapsesTo !== undefined && decision.preset === collapsesTo,
       expectedParts,
-      matchedParts: detected ? multisetOverlap(example.kind === "compound" ? example.presets : [], answered) : 0,
+      matchedParts: detected && expectedParts > 0 ? multisetOverlap(example.presets, answered) : 0,
       ms,
     };
   });
 }
 
-/** The compound score over a set of results: detection on the compounds, the
- *  decoys split, the part presets matched — and every miss, in replay order. */
+/** The compound score over a set of results: detection on the compounds to
+ *  split, the collapse on the compounds with a write part, the decoys split,
+ *  the part presets matched — and every miss, in replay order. */
 export interface CompoundScore {
+  /** The compounds the router should split: `kind: "compound"` without `collapsesTo`. */
   compounds: number;
   detected: number;
   /** `detected / compounds`; NaN with no compounds. */
   detectionRate: number;
+  /** The compounds with a write part (`collapsesTo`), and how many the router
+   *  answered as that preset, single. Its own row: a collapse is a write label,
+   *  never a read-to-write route. */
+  collapseExpected: number;
+  collapsed: number;
   decoys: number;
   decoysSplit: number;
   expectedParts: number;
   matchedParts: number;
   /** `matchedParts / expectedParts`; NaN with no expected parts. */
   partAccuracy: number;
-  /** A compound the router kept single, a decoy it split, or a detected
-   *  compound whose parts are not exactly the expected presets. */
+  /** A compound the router kept single, a compound with a write part it did
+   *  not collapse onto that preset, a decoy it split, or a detected compound
+   *  whose parts are not exactly the expected presets. */
   misses: CompoundResult[];
 }
 
-/** Whether a result is a miss: a compound not detected, a decoy detected, or a
- *  detected compound with known parts that are not exactly the expected ones. */
+/** Whether a result is a miss: a decoy detected, a compound with a write part
+ *  not collapsed onto it, a compound to split not detected, or a detected
+ *  compound with known parts that are not exactly the expected ones. */
 function isMiss(r: CompoundResult): boolean {
   if (r.kind === "decoy") return r.detected;
+  if (r.collapsesTo !== undefined) return !r.collapsed;
   if (!r.detected) return true;
   return r.expectedParts > 0 && (r.matchedParts < r.expectedParts || r.answered.length !== r.expectedParts);
 }
 
 export function compoundScore(results: readonly CompoundResult[]): CompoundScore {
-  const compounds = results.filter((r) => r.kind === "compound");
+  const compounds = results.filter((r) => r.kind === "compound" && r.collapsesTo === undefined);
+  const collapsing = results.filter((r) => r.kind === "compound" && r.collapsesTo !== undefined);
   const decoys = results.filter((r) => r.kind === "decoy");
   const detected = compounds.filter((r) => r.detected).length;
   const expectedParts = compounds.reduce((n, r) => n + r.expectedParts, 0);
@@ -401,6 +426,8 @@ export function compoundScore(results: readonly CompoundResult[]): CompoundScore
     compounds: compounds.length,
     detected,
     detectionRate: compounds.length === 0 ? NaN : detected / compounds.length,
+    collapseExpected: collapsing.length,
+    collapsed: collapsing.filter((r) => r.collapsed).length,
     decoys: decoys.length,
     decoysSplit: decoys.filter((r) => r.detected).length,
     expectedParts,
@@ -417,15 +444,20 @@ export function renderCompound(score: CompoundScore, opts: { textCap?: number } 
     const one = text.replace(/\s+/g, " ").trim();
     return one.length > cap ? `${one.slice(0, cap - 1)}…` : one;
   };
-  const presetsOf = (presets: readonly string[]) => (presets.length > 0 ? presets.join("+") : "(unknown)");
+  const expectedOf = (r: CompoundResult) =>
+    r.collapsesTo !== undefined
+      ? `${r.collapsesTo} single (a write part among ${r.presets.join("+")})`
+      : r.presets.length > 0
+        ? r.presets.join("+")
+        : "(unknown)";
   const answeredOf = (r: CompoundResult) => (r.detected ? r.answered.join("+") : (r.routed ?? NO_ROUTE));
   return [
-    `compound: detected ${score.detected}/${score.compounds} (${pct(score.detectionRate)}), decoys split ${score.decoysSplit}/${score.decoys}, part presets ${score.matchedParts}/${score.expectedParts} (${pct(score.partAccuracy)})`,
+    `compound: detected ${score.detected}/${score.compounds} (${pct(score.detectionRate)}), collapsed to its write preset ${score.collapsed}/${score.collapseExpected}, decoys split ${score.decoysSplit}/${score.decoys}, part presets ${score.matchedParts}/${score.expectedParts} (${pct(score.partAccuracy)})`,
     "",
     score.misses.length === 0 ? "misses: none" : `misses (${score.misses.length}):`,
     ...score.misses.map(
       (m) =>
-        `- ${m.id}: ${m.kind}, expected ${presetsOf(m.presets)}, answered ${answeredOf(m)} — ${m.reason} — "${snippet(m.text)}"`,
+        `- ${m.id}: ${m.kind}, expected ${expectedOf(m)}, answered ${answeredOf(m)} — ${m.reason} — "${snippet(m.text)}"`,
     ),
   ];
 }
@@ -535,7 +567,9 @@ export interface RouteCheckInput {
 
 /** The check rows: the accuracy bar, every request answered, record 0026's
  *  read-only-to-write clause (a row of its own, so the verdict fails on it
- *  without anyone reading the table), the compound bars and the imperative
+ *  without anyone reading the table), the three compound rows (detection, the
+ *  collapse of every compound with a write part onto that preset, itself a row
+ *  apart from the read-to-write clause, and no decoy split) and the imperative
  *  bars. */
 export function routeChecks(input: RouteCheckInput): SloCheck[] {
   const { table, answered, readToWrite, compound, compoundBar, imperative, imperativeBar } = input;
@@ -564,6 +598,12 @@ export function routeChecks(input: RouteCheckInput): SloCheck[] {
       pass: compound.detectionRate >= compoundBar.detection,
       actual: `${compound.detected}/${compound.compounds} (${pct(compound.detectionRate)})`,
       limit: `≥ ${Math.round(compoundBar.detection * 100)}%`,
+    },
+    {
+      name: "compound with a write part collapsed to that preset, single: every checked-in one",
+      pass: compound.collapsed === compound.collapseExpected,
+      actual: `${compound.collapsed}/${compound.collapseExpected}`,
+      limit: `${compound.collapseExpected}`,
     },
     {
       name: "no decoy split — one ask with several steps stays one route",

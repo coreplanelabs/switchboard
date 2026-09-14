@@ -17,8 +17,13 @@
 // structurally: it holds the merge grant, so its def opts out of the table and
 // the allowlist. The conductor opts out of the table too, and is reached one
 // way only — the compound form: a request with two or more independent parts
-// answers as `conductor` with the parts, each on a preset from the same table,
-// and runs as one conductor whose brief lists the parts for it to spawn.
+// answers as `conductor` with the parts, each on a read-identity preset of the
+// same table (a part runs as a spawned child, and a child is a reader: record
+// 0034), and runs as one conductor whose brief lists the parts for it to
+// spawn. An ask that needs a write preset is never a part: the prompt says so,
+// the tool's parts enum carries the readers alone, and a compound answer that
+// still names a write part collapses to one route on that preset with the
+// message as typed as its request.
 import { AGENTS, COMPOUND_PRESET, type Identity, type MachineClass } from "../../agents/registry.js";
 import { routingOn, type ConfigStore, type ResolvedRequest } from "../../config.js";
 import type { RouteAnswerMode } from "../../config/validate.js";
@@ -78,6 +83,23 @@ export function routablePresets(): RoutablePreset[] {
       identity,
       maxMinutes,
     }));
+}
+
+/** The rows a compound part may run on (record 0034: a spawned child is a
+ *  reader): every offered preset whose identity is `none` or `read`, read off
+ *  the same registry rows and never listed by hand. A write-identity preset is
+ *  never a part: an ask that needs one routes the whole message to it. */
+export function partPresets(presets: readonly RoutablePreset[]): RoutablePreset[] {
+  return presets.filter((p) => p.identity !== "write");
+}
+
+/** A typed preset's identity as the registry declares it; `write` for a
+ *  preset that pushes. */
+const identityOf = (preset: string): Identity | undefined => AGENTS[preset]?.identity;
+
+/** Names as prose: `a, b or c`. */
+function nameList(names: readonly string[]): string {
+  return names.length <= 1 ? names.join("") : `${names.slice(0, -1).join(", ")} or ${names[names.length - 1]}`;
 }
 
 /** The preset table as the model reads it: one markdown row per preset. */
@@ -147,15 +169,23 @@ export function routeMaxOutputTokens(compound?: CompoundOffer): number {
 /** The answer as a tool the model is forced to call (`CompletionRequest.toolChoice`):
  *  `preset` an enum of exactly the offered names — `conductor` among them only
  *  with the compound offer, `ship` never, since it is no row — `reason` one
- *  line, and with the offer `parts`: two to the cap, each a preset from the
- *  table and a text. Derived from the same presets as the table, so the schema
- *  and the prose can never disagree; the strict parse still reads the input,
- *  so a provider that answers text anyway meets the same contract. */
+ *  line, and with the offer `parts`: two to the cap, each a read-identity
+ *  preset from the table (`partPresets`) and a text, so under a forced call a
+ *  write preset cannot be named as a part at all. Derived from the same
+ *  presets as the table, so the schema and the prose can never disagree; the
+ *  strict parse still reads the input, so a provider that answers text anyway
+ *  meets the same contract. */
 export function routeTool(presets: readonly RoutablePreset[], compound?: CompoundOffer): ToolDef {
   const names = presets.map((p) => p.name);
+  const readers = partPresets(presets).map((p) => p.name);
+  const writers = presets.filter((p) => p.identity === "write").map((p) => p.name);
   // The rules ride the schema too: a forced tool call reads its descriptions
   // as closely as the system prompt, and a bare `parts` field invites a split.
   const table = presets.map((p) => `${p.name}: ${oneLine(p.description)}`).join("; ");
+  const writeAsk =
+    writers.length > 0
+      ? ` An ask that needs ${nameList(writers)} is never a part: when any part would need it, omit parts and answer ${nameList(writers)} for the whole request.`
+      : "";
   const properties: Record<string, unknown> = {
     preset: {
       type: "string",
@@ -169,7 +199,7 @@ export function routeTool(presets: readonly RoutablePreset[], compound?: Compoun
       ? {
           parts: {
             type: "array",
-            description: `only when the request has two or more INDEPENDENT asks on different subjects, each rewritten so it stands alone, with preset "${COMPOUND_PRESET}". A single ask with several steps is one request on one preset: omit parts and name that preset. When one ask is in doubt, omit parts.`,
+            description: `only when the request has two or more INDEPENDENT asks on different subjects, each rewritten so it stands alone and each on a read-only preset (${nameList(readers)}), with preset "${COMPOUND_PRESET}".${writeAsk} A single ask with several steps is one request on one preset: omit parts and name that preset. When one ask is in doubt, omit parts.`,
             minItems: 2,
             maxItems: compound.maxParts,
             items: {
@@ -177,7 +207,7 @@ export function routeTool(presets: readonly RoutablePreset[], compound?: Compoun
               additionalProperties: false,
               required: ["preset", "text"],
               properties: {
-                preset: { type: "string", enum: names, description: "the preset this part runs on" },
+                preset: { type: "string", enum: readers, description: "the read-only preset this part runs on" },
                 text: { type: "string", description: "the part as a request of its own" },
               },
             },
@@ -192,13 +222,23 @@ export function routeTool(presets: readonly RoutablePreset[], compound?: Compoun
   };
 }
 
-/** The router's answer: a preset with a one-line reason — `conductor` with
- *  its `parts` for a compound — or no route with the reason it fell through
- *  (the request then runs on `defaults.agent`). `compoundRejected` marks the
- *  one no-route the record keeps: a compound answer the parse refused. */
+/** The router's answer: a preset with a one-line reason (`conductor` with
+ *  its `parts` for a compound; a write preset with `collapsed` when a
+ *  compound answer carried a write-identity part and became that one route),
+ *  or no route with the reason it fell through (the request then runs on
+ *  `defaults.agent`). `compoundRejected` marks the one no-route the record
+ *  keeps: a compound answer the parse refused. */
 export type RouteDecision =
-  | { preset: string; reason: string; parts?: RoutePart[] }
+  | { preset: string; reason: string; parts?: RoutePart[]; collapsed?: CollapsedCompound }
   | { preset: undefined; reason: string; compoundRejected?: true };
+
+/** A compound answer that carried a write-identity part, collapsed onto that
+ *  preset as one route (record 0034: a write ask is never a part): the preset
+ *  each part named, in answer order, so the record and the card say what the
+ *  router split before the parse made it one run. */
+export interface CollapsedCompound {
+  presets: string[];
+}
 
 /** The one seam to the model: the prompt in, the model's text out. Production
  *  wraps a provider (`providerRouteModel`); tests script one. */
@@ -234,7 +274,7 @@ export function buildRoutePrompt(input: Omit<RouteInput, "allowed">): RoutePromp
     "",
     "Presets you may pick:",
     renderPresetTable(input.presets),
-    ...(input.compound ? ["", ...compoundRules(input.compound)] : []),
+    ...(input.compound ? ["", ...compoundRules(input.compound, input.presets)] : []),
   ].join("\n");
   const user = [
     `Earlier directives in this thread: ${directivesLine(input.recentDirectives)}`,
@@ -248,13 +288,32 @@ export function buildRoutePrompt(input: Omit<RouteInput, "allowed">): RoutePromp
 
 /** The compound form as the model reads it, after the table: the shape, when
  *  it applies — two or more parts that are independent, each standing alone —
- *  what is NOT compound (one ask with several steps), and the cap. */
-function compoundRules(offer: CompoundOffer): string[] {
+ *  what is NOT compound (one ask with several steps), the cap, and the rows a
+ *  part may run on: the read-identity presets alone, named off the table
+ *  (`partPresets`), since a part runs as a spawned child and a child is a
+ *  reader (record 0034). When the table offers a write preset, the write-ask
+ *  rule follows (`writeAskRule`). */
+function compoundRules(offer: CompoundOffer, presets: readonly RoutablePreset[]): string[] {
+  const readers = partPresets(presets).map((p) => p.name);
+  const writers = presets.filter((p) => p.identity === "write").map((p) => `\`${p.name}\``);
   return [
     "Compound requests: when the request has two or more INDEPENDENT parts — neither part needs the other's result, and each would stand alone as a request of its own — answer this form instead, and only then:",
-    `{"preset": "${COMPOUND_PRESET}", "parts": [{"text": "<one part, rewritten so it stands alone>", "preset": "<a name from the table>"}, …], "reason": "<one line: why the parts are independent>"}`,
-    `Independent means neither part needs the other's result. A single ask with several steps ("clone it, run the tests, tell me what fails") is NOT compound: it is one request on one preset, however many steps it takes. Two asks on two different subjects ("summarize what is in the docs folder, and run the lint on main in a sandbox") ARE compound even when both are read-only or would land on the same preset — the same preset may appear twice. When one ask is in doubt, do not split it. At most ${offer.maxParts} parts; each part's preset comes from the table above, chosen for that part alone by the same rules as a single request — least capable first.`,
+    `{"preset": "${COMPOUND_PRESET}", "parts": [{"text": "<one part, rewritten so it stands alone>", "preset": "<one of ${readers.join(", ")}>"}, …], "reason": "<one line: why the parts are independent>"}`,
+    `Independent means neither part needs the other's result. A single ask with several steps ("clone it, run the tests, tell me what fails") is NOT compound: it is one request on one preset, however many steps it takes. Two asks on two different subjects ("summarize what is in the docs folder, and run the lint on main in a sandbox") ARE compound even when both are read-only or would land on the same preset — the same preset may appear twice. When one ask is in doubt, do not split it. At most ${offer.maxParts} parts. Each part runs as a child that only reads, so each part's preset is one of ${readers.map((r) => `\`${r}\``).join(", ")} (the rows above whose credential is none or read), chosen for that part alone by the same rules as a single request — least capable first.`,
+    ...(writers.length > 0 ? [writeAskRule(writers)] : []),
   ];
+}
+
+/** The write-ask rule, stated only when the table offers a preset that
+ *  implements changes (named off the table, never typed): a part runs as a
+ *  child that only reads, so an ask that needs a write preset is never a part.
+ *  When any part of the request would need one, the request is not split: it
+ *  routes whole to that preset as one run, which does its own reading. The
+ *  parse holds the same line (`parseCompound`), so a prompt the model ignores
+ *  still lands the request on that preset and never on the default agent. */
+function writeAskRule(writers: readonly string[]): string {
+  const names = writers.join(" or ");
+  return `An ask that needs ${names} is never a part: a part runs as a child that only reads, and ${names} pushes. When any part of the request would need ${names}, do not split it: answer ${names} alone for the whole request as typed, and it reads what it must before it changes anything ("review PR 7 and fix what it finds" is one ${names} request; "research X and open a PR for Y" is one ${names} request).`;
 }
 
 /** The imperative rule, stated only when the table offers a preset that
@@ -313,7 +372,9 @@ export function parseRouteAnswer(raw: string, allowed: readonly string[], compou
  *  table (never `ship` or `conductor` — neither is a row) with a text that
  *  says something. Anything else is `compound_rejected: <why>` — no route, the
  *  request runs on `defaults.agent`, and the record keeps the why. The parts
- *  come back redacted and capped: each text is a child's whole prompt. */
+ *  come back redacted and capped: each text is a child's whole prompt. A
+ *  compound that passes every rule and still names a write-identity part
+ *  collapses (record 0034): one route on that preset, no parts. */
 function parseCompound(
   parts: unknown,
   reason: string,
@@ -342,6 +403,16 @@ function parseCompound(
     if (tidy.length === 0) return rejected(`part ${n} has no text`);
     out.push({ preset, text: tidy });
   }
+  // A write ask is never a part (record 0034): a compound answer that still
+  // names a write-identity part (the tool's parts enum forbids it under a
+  // forced call; a text answer can carry one) is one run on that preset with
+  // the message as typed as its request: "review X and fix Y" is one coding
+  // run that reads the pull request and fixes it. The first write part is the
+  // route when two disagree; every part is named so the collapse is legible
+  // on the record and the card. Checked after the rules above, so a part the
+  // requester may not run still rejects the compound rather than routing it.
+  const writer = out.find((p) => identityOf(p.preset) === "write");
+  if (writer) return { preset: writer.preset, reason, collapsed: { presets: out.map((p) => p.preset) } };
   return { preset: COMPOUND_PRESET, reason, parts: out };
 }
 
@@ -358,13 +429,18 @@ export async function route(
   model: RouteModel,
   opts: { timeoutMs?: number } = {},
 ): Promise<RouteDecision> {
-  const offered = input.presets.filter((p) => input.allowed.includes(p.name));
+  const { compound: offer, ...rest } = input;
+  const offered = rest.presets.filter((p) => rest.allowed.includes(p.name));
   if (offered.length === 0) return { preset: undefined, reason: "no preset the requester may run" };
-  const prompt = buildRoutePrompt({ ...input, presets: offered });
+  // The form needs a reader for a part to run on: a requester whose presets
+  // are all write-identity is not offered it (an empty parts enum is no
+  // schema), and a compound answer is then refused as not offered.
+  const compound = offer && partPresets(offered).length > 0 ? offer : undefined;
+  const prompt = buildRoutePrompt({ ...rest, presets: offered, ...(compound ? { compound } : {}) });
   let raw: string;
   try {
     raw = await model(prompt, {
-      maxTokens: routeMaxOutputTokens(input.compound),
+      maxTokens: routeMaxOutputTokens(compound),
       signal: AbortSignal.timeout(opts.timeoutMs ?? ROUTE_TIMEOUT_MS),
     });
   } catch (err) {
@@ -376,7 +452,7 @@ export async function route(
   return parseRouteAnswer(
     raw,
     offered.map((p) => p.name),
-    input.compound,
+    compound,
   );
 }
 
@@ -420,14 +496,16 @@ export function providerRouteModel(
 
 /** A routed run as the card and the record name it: the preset, the reason,
  *  the model that decided and — for a compound — the parts the conductor was
- *  handed. The same shape records a rejected compound on the run that fell to
- *  `defaults.agent`: `preset` is that default and `reason` the
- *  `compound_rejected: <why>` the parse gave. */
+ *  handed, or, for a compound answer that carried a write part, the collapse
+ *  onto the write preset it runs as. The same shape records a rejected
+ *  compound on the run that fell to `defaults.agent`: `preset` is that default
+ *  and `reason` the `compound_rejected: <why>` the parse gave. */
 export interface RouteDecided {
   preset: string;
   reason: string;
   model: string;
   parts?: RoutePart[];
+  collapsed?: CollapsedCompound;
 }
 
 /** What the route stage reads off the dispatcher's dependencies. `CoreDeps`
@@ -534,20 +612,30 @@ export async function routeRequest(deps: RouteDeps, ctx: RouteStageContext): Pro
       effort: directives.effort ?? sticky.effort,
     },
   });
-  const parts = decision.parts;
+  const { parts, collapsed } = decision;
   console.log(
-    `[route] ${msg.threadKey} routed to ${decision.preset} on ${modelRef}${parts ? ` (${parts.length} parts)` : ""}: ${decision.reason}`,
+    `[route] ${msg.threadKey} routed to ${decision.preset} on ${modelRef}${parts ? ` (${parts.length} parts)` : ""}${
+      collapsed ? ` (compound collapsed: ${collapsed.presets.join("+")})` : ""
+    }: ${decision.reason}`,
   );
   return {
     kind: "routed",
     resolved,
-    route: { preset: decision.preset, reason: decision.reason, model: modelRef, ...(parts ? { parts } : {}) },
+    route: {
+      preset: decision.preset,
+      reason: decision.reason,
+      model: modelRef,
+      ...(parts ? { parts } : {}),
+      ...(collapsed ? { collapsed } : {}),
+    },
   };
 }
 
-/** The card's route line, appended to its label: `routed: <reason>`. */
-export function routedLabel(reason: string): string {
-  return `routed: ${reason}`;
+/** The card's route line, appended to its label: `routed: <reason>`, and for
+ *  a compound answer the parse collapsed onto one write preset, the collapse
+ *  after it: `routed: <reason> (compound collapsed: review+coding)`. */
+export function routedLabel(reason: string, collapsed?: CollapsedCompound): string {
+  return `routed: ${reason}${collapsed ? ` (compound collapsed: ${collapsed.presets.join("+")})` : ""}`;
 }
 
 /** The routed card's last line, on every close: how to run the request on

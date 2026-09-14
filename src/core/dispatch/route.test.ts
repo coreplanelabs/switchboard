@@ -76,6 +76,10 @@ const msg = (text: string, user = "slack:UX"): IncomingMessage => ({
 
 const allNames = Object.keys(AGENTS);
 const presets = routablePresets();
+/** The table as the compound offer divides it (record 0034): the rows a part
+ *  may run on (identity `none` or `read`) and the rows an ask routes to whole. */
+const readers = presets.filter((p) => p.identity !== "write").map((p) => p.name);
+const writers = presets.filter((p) => p.identity === "write").map((p) => p.name);
 
 /** A model that answers `text` and remembers every prompt it was handed. */
 function scripted(text: string): RouteModel & { prompts: RoutePrompt[] } {
@@ -328,7 +332,7 @@ describe("routeTool — the answer's schema, derived from the offered table", ()
     expect(JSON.stringify(tool)).not.toMatch(/conductor|compound/i);
   });
 
-  it("with the compound offer: conductor joins the enum, and parts is an array of 2 to the cap, each part a preset from the table and a text", () => {
+  it("with the compound offer: conductor joins the enum, and parts is an array of 2 to the cap, each part a read-identity preset from the table and a text: no write preset is in the parts enum", () => {
     const tool = routeTool(presets, OFFER);
     const schema = tool.inputSchema as {
       properties: {
@@ -344,8 +348,27 @@ describe("routeTool — the answer's schema, derived from the offered table", ()
     expect(schema.properties.parts.minItems).toBe(2);
     expect(schema.properties.parts.maxItems).toBe(3);
     expect(schema.properties.parts.items.required).toEqual(["preset", "text"]);
-    expect(schema.properties.parts.items.properties.preset.enum).toEqual(presets.map((p) => p.name));
+    expect(readers).toEqual(["general", "review", "research", "explore"]);
+    expect(writers).toEqual(["coding"]);
+    expect(schema.properties.parts.items.properties.preset.enum).toEqual(readers);
+    for (const w of writers) expect(schema.properties.parts.items.properties.preset.enum).not.toContain(w);
     expect(schema.properties.parts.items.properties.preset.enum).not.toContain("conductor");
+  });
+
+  it("the parts description says a part is a reader and a write ask is never one: the read presets named off the table, the write preset named as the whole request's route", () => {
+    const tool = routeTool(presets, OFFER);
+    const schema = tool.inputSchema as { properties: { parts: { description: string } } };
+    expect(schema.properties.parts.description).toContain(
+      "each on a read-only preset (general, review, research or explore)",
+    );
+    expect(schema.properties.parts.description).toMatch(/an ask that needs coding is never a part/i);
+    expect(schema.properties.parts.description).toMatch(/omit parts and answer coding for the whole request/i);
+    // A table without a write preset says nothing about one.
+    const readOnly = routeTool(
+      presets.filter((p) => p.identity !== "write"),
+      OFFER,
+    ).inputSchema as { properties: { parts: { description: string } } };
+    expect(readOnly.properties.parts.description).not.toMatch(/never a part|coding/);
   });
 
   it("the schema carries the rules too: the enum's description names every offered preset with its description in least-capable terms, and parts says when NOT to split", () => {
@@ -476,6 +499,12 @@ describe("providerRouteModel — the live seam over a provider", () => {
 describe("the card's words", () => {
   it("the label reads as specified", () => {
     expect(routedLabel("a PR URL")).toBe("routed: a PR URL");
+  });
+
+  it("a collapsed compound's line names the collapse after the reason, the part presets joined by +", () => {
+    expect(routedLabel("a review and a fix", { presets: ["review", "coding"] })).toBe(
+      "routed: a review and a fix (compound collapsed: review+coding)",
+    );
   });
 
   it("the routed card's closing line says how to run the request another way — plain text, no backticks (the Slack card body is literal)", () => {
@@ -641,6 +670,28 @@ describe("buildRoutePrompt — the compound form, described apart from the table
     expect(p.system).not.toMatch(/conductor/);
     expect(p.system).not.toMatch(/compound/i);
   });
+
+  it("the offer lists the read-identity presets alone as a part's preset, read off the table, and says an ask that needs a write preset is never a part: the whole request routes to that preset as one run", () => {
+    const p = buildRoutePrompt({ ...base, compound: OFFER });
+    const rules = p.system.slice(p.system.indexOf("Compound requests:"));
+    expect(rules).toContain("each part's preset is one of `general`, `review`, `research`, `explore`");
+    expect(rules).toMatch(/whose credential is none or read/);
+    expect(rules).toMatch(/an ask that needs `coding` is never a part/i);
+    expect(rules).toMatch(/answer `coding` alone for the whole request as typed/);
+    expect(rules).toMatch(/"review PR 7 and fix what it finds" is one `coding` request/);
+    // The form's example names a reader's slot, never "a name from the table".
+    expect(rules).toContain('"preset": "<one of general, review, research, explore>"');
+    expect(rules).not.toContain('"preset": "<a name from the table>"');
+  });
+
+  it("through route(): a requester restricted from coding is offered the readers rule and no write-ask sentence, since the table names no write preset", async () => {
+    const model = scripted(answer("general"));
+    await route({ ...base, allowed: ["general", "review", "research", "explore"], compound: OFFER }, model);
+    const system = model.prompts[0].system;
+    expect(system).toContain("each part's preset is one of `general`, `review`, `research`, `explore`");
+    expect(system).not.toMatch(/never a part/);
+    expect(system).not.toMatch(/coding/);
+  });
 });
 
 describe("buildRoutePrompt — the imperative rule, stated for the write preset the table offers", () => {
@@ -688,6 +739,7 @@ describe("parseRouteAnswer — the compound form", () => {
   it("accepts two or more parts, each on an offered preset: the conductor with the parts and the reason", () => {
     const d = parseRouteAnswer(compound(TWO_PARTS), allowed, OFFER);
     expect(d).toEqual({ preset: "conductor", reason: "two independent asks", parts: TWO_PARTS });
+    expect(d).not.toHaveProperty("collapsed"); // read parts alone: a compound, never a collapse
     const three = parseRouteAnswer(
       compound([...TWO_PARTS, { text: "what is a DO", preset: "general" }]),
       allowed,
@@ -785,6 +837,54 @@ describe("parseRouteAnswer — the compound form", () => {
     );
     expect(d).toEqual({ preset: "coding", reason: "one ask with steps" });
   });
+
+  it("a compound answer carrying a write-identity part collapses: the decision is that write preset, single, with no parts, and the collapse names every part's preset in answer order", () => {
+    const d = parseRouteAnswer(
+      compound([TWO_PARTS[0], { text: "fix the flaky test", preset: "coding" }], "a review and a fix"),
+      allowed,
+      OFFER,
+    );
+    expect(d).toEqual({ preset: "coding", reason: "a review and a fix", collapsed: { presets: ["review", "coding"] } });
+    expect(d).not.toHaveProperty("parts");
+    // Every part is named, readers between the writers included; the reason is tidied as for a single route.
+    const three = parseRouteAnswer(
+      compound([{ text: "fix X", preset: "coding" }, TWO_PARTS[1], { text: "fix Y", preset: "coding" }], "why\nnot"),
+      allowed,
+      OFFER,
+    );
+    expect(three).toEqual({
+      preset: "coding",
+      reason: "why",
+      collapsed: { presets: ["coding", "research", "coding"] },
+    });
+  });
+
+  it("two write parts that disagree: the first is the route and both are named (the offered table carries one write preset today, so the rule is proven on the parse alone)", () => {
+    const d = parseRouteAnswer(
+      compound([
+        { text: "land it", preset: "ship" },
+        { text: "fix X", preset: "coding" },
+      ]),
+      [...allowed, "ship"],
+      OFFER,
+    );
+    expect(d).toEqual({ preset: "ship", reason: "two independent asks", collapsed: { presets: ["ship", "coding"] } });
+  });
+
+  it("the compound_rejected cases stand before the collapse: a write part the requester may not run rejects the compound, as do the form when not offered and a malformed part beside a write part", () => {
+    const parts = [TWO_PARTS[0], { text: "fix the flaky test", preset: "coding" }];
+    expect(parseRouteAnswer(compound(parts), ["general", "review", "research"], OFFER)).toEqual({
+      preset: undefined,
+      reason: 'compound_rejected: part 2 names "coding", which is not in the table',
+      compoundRejected: true,
+    });
+    expect(parseRouteAnswer(compound(parts), allowed).reason).toBe(
+      "compound_rejected: the compound form was not offered",
+    );
+    expect(parseRouteAnswer(compound([{ text: "  ", preset: "coding" }, TWO_PARTS[0]]), allowed, OFFER).reason).toBe(
+      "compound_rejected: part 1 has no text",
+    );
+  });
 });
 
 describe("route — the compound decision over a scripted model", () => {
@@ -811,6 +911,28 @@ describe("route — the compound decision over a scripted model", () => {
       scripted(compound(TWO_PARTS)),
     );
     expect(d.reason).toBe('compound_rejected: part 1 names "review", which is not in the table');
+  });
+
+  it("a compound answer with a coding part through route(): coding, single, the collapse on the decision; the prompt offered the form over the readers and said a write ask is never a part", async () => {
+    const model = scripted(
+      compound([TWO_PARTS[0], { text: "fix the flaky test", preset: "coding" }], "a review and a fix"),
+    );
+    const d = await route({ ...input, allowed: allNames, compound: OFFER }, model);
+    expect(d).toEqual({ preset: "coding", reason: "a review and a fix", collapsed: { presets: ["review", "coding"] } });
+    expect(model.prompts[0].system).toMatch(/an ask that needs `coding` is never a part/i);
+  });
+
+  it("the offer is withdrawn when the requester's presets hold no reader: the form is not described, the tool carries no parts, and a compound answer is compound_rejected", async () => {
+    const model = scripted(
+      compound([
+        { text: "fix X", preset: "coding" },
+        { text: "fix Y", preset: "coding" },
+      ]),
+    );
+    const d = await route({ ...input, allowed: ["coding"], compound: OFFER }, model);
+    expect(d.reason).toBe("compound_rejected: the compound form was not offered");
+    expect(model.prompts[0].system).not.toMatch(/compound|conductor/i);
+    expect(JSON.stringify(model.prompts[0].tool)).not.toMatch(/parts|conductor/);
   });
 });
 
@@ -927,5 +1049,22 @@ describe("routeRequest — a compound route resolves the conductor, a rejected o
   it("a plain no-route (a malformed answer, a failed model) carries no rejection note — only a compound the parse refused does", async () => {
     const out = await routeRequest(deps(COMPOUND_YAML, scripted("nope")), ctx("hello"));
     expect(out).toEqual({ kind: "unrouted" });
+  });
+
+  it("a compound answer with a coding part: the run resolves as coding on coding's own model, the decision carries the collapse and no parts", async () => {
+    const model = scripted(
+      compound([TWO_PARTS[0], { text: "fix the flaky test", preset: "coding" }], "a review and a fix"),
+    );
+    const out = await routeRequest(deps(COMPOUND_YAML, model), ctx("review #7 and fix the flaky test", "slack:UADMIN"));
+    expect(out.kind).toBe("routed");
+    if (out.kind !== "routed") return;
+    expect(out.resolved.agentName).toBe("coding");
+    expect(out.resolved.modelRef).toBe("anthropic/coding-model");
+    expect(out.route).toEqual({
+      preset: "coding",
+      reason: "a review and a fix",
+      model: "anthropic/general-model",
+      collapsed: { presets: ["review", "coding"] },
+    });
   });
 });

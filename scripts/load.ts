@@ -1032,9 +1032,11 @@ async function piReviewSuite(f: Flags): Promise<boolean> {
  *  clause as a row of its own, the misroutes, and the unstamped labels (a
  *  pre-stamp record cannot tell a typed preset from a scope's) replayed and
  *  reported apart. Then the compound half: the
- *  checked-in set (twenty compounds, five decoys) scored on detection, on
- *  decoys kept single and on part presets against the unit's bar, and the
- *  history's `conductor` requests — few — on detection, their count printed.
+ *  checked-in set (twenty compounds, five decoys) scored on detection, on the
+ *  collapse of every compound with a write part onto that preset (its own row,
+ *  apart from the read-to-write clause), on decoys kept single and on part
+ *  presets against the unit's bar, and the history's `conductor` requests —
+ *  few — on detection, their count printed.
  *  Then the imperative half: the checked-in set of terse imperatives (twenty,
  *  five read-only decoys, five review-shaped) scored on reaching coding and on
  *  no look-alike reaching a write preset. Live model spend: one small call per
@@ -1182,7 +1184,7 @@ async function routeReplay(f: Flags): Promise<boolean> {
       ? `unstamped labels: none (every labelled record carries run_meta.agentSource)`
       : `unstamped labels (a record from before the agentSource stamp, on a preset other than ${defaultPreset} — typed, sticky or a channel/user scope's agent; the record cannot say): ${unstamped.length}, router agreed ${unstampedAgreed} (${pct(unstampedAgreed / unstamped.length)}) — excluded from the table and the bar`,
     "",
-    `checked-in compound set (${fixtures.compounds} compounds, ${fixtures.decoys} decoys; cap ${maxParts} parts):`,
+    `checked-in compound set (${fixtures.compounds} compounds to split, ${fixtures.collapseExpected} with a write part to collapse onto it, ${fixtures.decoys} decoys; cap ${maxParts} parts):`,
     ...renderCompound(fixtures),
     "",
     history.compounds === 0
@@ -1203,7 +1205,7 @@ async function routeReplay(f: Flags): Promise<boolean> {
         .map(([k, v]) => `${k}=${v}`)
         .join(" ") || "none"
     }`,
-    "the thread's earlier directives are not on a record, so every request replays with none; the allowlist is every routable preset and the compound form is offered, as production offers it to a requester who may run the conductor",
+    "the thread's earlier directives are not on a record, so every request replays with none; the allowlist is every routable preset and the compound form is offered over the read-identity presets, as production offers it to a requester who may run the conductor",
   ];
   const redacted = <T extends { text: string; reason: string }>(r: T): T => ({
     ...r,

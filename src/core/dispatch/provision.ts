@@ -190,11 +190,13 @@ export async function openAckCard(deps: ProvisionDeps, ctx: AckCardContext): Pro
   // One builder for every paint of this card (statusCardFrame.ts): the ack,
   // the spinner frames, the closes before the run starts, the done frame. A
   // routed run says so from its first paint: `*review* on `m` · routed: <reason>`;
-  // a routed compound lists its parts under the label, `<preset>: <text>`; and
-  // a routed card's every close ends with the override — the one place the
-  // hint is actionable, since a reply into the live thread is a follow-up.
+  // a routed compound lists its parts under the label, `<preset>: <text>`; a
+  // compound answer the parse collapsed onto a write preset names the collapse
+  // on the label; and a routed card's every close ends with the override — the
+  // one place the hint is actionable, since a reply into the live thread is a
+  // follow-up.
   const shell = createCardShell({
-    label: `*${agent.name}* on \`${resolved.modelRef}\`${route ? ` · ${routedLabel(route.reason)}` : ""}`,
+    label: `*${agent.name}* on \`${resolved.modelRef}\`${route ? ` · ${routedLabel(route.reason, route.collapsed)}` : ""}`,
     startedAt,
     now: clock,
     ...(route?.parts ? { lead: routedPartLines(route.parts) } : {}),

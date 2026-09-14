@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { AGENTS } from "../agents/registry.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunRecord } from "../core/runRecord.js";
 import type { RunEvent } from "../core/runEvents.js";
 import { routablePresets, route, type RouteDecision, type RouteModel } from "../core/dispatch/route.js";
-import { ROUTE_COMPOUND_FIXTURES } from "./routeCompoundFixtures.js";
+import { ROUTE_COMPOUND_FIXTURES, type RouteCompoundFixture } from "./routeCompoundFixtures.js";
 import { ROUTE_IMPERATIVE_FIXTURES } from "./routeImperativeFixtures.js";
 import {
   compoundExamples,
@@ -275,6 +276,24 @@ describe("the checked-in compound set (src/load/routeCompoundFixtures.ts)", () =
     expect(ROUTE_COMPOUND_FIXTURES.flatMap((f) => f.presets)).not.toContain("conductor");
   });
 
+  it("the seven compounds whose parts include a write preset expect that preset, single (`collapsesTo`, the first write part, read off the registry); every other compound expects the split and no decoy collapses", () => {
+    const writer = (f: RouteCompoundFixture) => f.presets.find((p) => AGENTS[p]?.identity === "write");
+    const compounds = ROUTE_COMPOUND_FIXTURES.filter((f) => f.kind === "compound");
+    for (const f of compounds) expect(f.collapsesTo, f.id).toBe(writer(f));
+    expect(compounds.filter((f) => f.collapsesTo !== undefined).map((f) => f.id)).toEqual([
+      "c02",
+      "c05",
+      "c09",
+      "c12",
+      "c13",
+      "c15",
+      "c18",
+    ]);
+    expect(compounds.filter((f) => f.collapsesTo !== undefined).every((f) => f.collapsesTo === "coding")).toBe(true);
+    for (const f of ROUTE_COMPOUND_FIXTURES.filter((f) => f.kind === "decoy"))
+      expect(f.collapsesTo, f.id).toBeUndefined();
+  });
+
   it("compoundExamples tags each fixture as the checked-in source; historyCompounds takes the conductor-labelled requests with their parts unknown", () => {
     const examples = compoundExamples(ROUTE_COMPOUND_FIXTURES);
     expect(examples).toHaveLength(25);
@@ -306,6 +325,14 @@ describe("replayCompound + compoundScore + renderCompound — the split scored",
       presets: ["general", "research", "explore"],
       source: "fixture",
     },
+    {
+      id: "c4",
+      kind: "compound",
+      text: "review #9 and fix X",
+      presets: ["review", "coding"],
+      collapsesTo: "coding",
+      source: "fixture",
+    },
     { id: "d1", kind: "decoy", text: "clone, test, report", presets: ["explore"], source: "fixture" },
     { id: "d2", kind: "decoy", text: "fix it: reproduce, patch, prove", presets: ["coding"], source: "fixture" },
   ];
@@ -315,28 +342,38 @@ describe("replayCompound + compoundScore + renderCompound — the split scored",
     parts: presets.map((preset, i) => ({ preset, text: `part ${i + 1}` })),
   });
   const single = (preset: string): RouteDecision => ({ preset, reason: "one ask" });
+  /** The parse's collapse of a compound answer with a write part (route.ts): the write preset, single. */
+  const collapsed = (preset: string, presets: string[]): RouteDecision => ({
+    preset,
+    reason: "a review and a fix",
+    collapsed: { presets },
+  });
 
-  it("a perfect router: every compound detected with its parts, no decoy split, every part preset right", async () => {
+  it("a perfect router: every compound detected with its parts, the one with a write part collapsed to it, no decoy split, every part preset right", async () => {
     const results = await replayCompound(
       examples,
       async (text) => {
         const e = examples.find((x) => x.text === text)!;
+        if (e.collapsesTo) return single(e.collapsesTo);
         return e.kind === "compound" ? split([...e.presets]) : single(e.presets[0]);
       },
       { now: () => 0 },
     );
-    expect(results.map((r) => [r.id, r.detected, r.matchedParts, r.expectedParts])).toEqual([
-      ["c1", true, 2, 2],
-      ["c2", true, 2, 2],
-      ["c3", true, 3, 3],
-      ["d1", false, 0, 0],
-      ["d2", false, 0, 0],
+    expect(results.map((r) => [r.id, r.detected, r.collapsed, r.matchedParts, r.expectedParts])).toEqual([
+      ["c1", true, false, 2, 2],
+      ["c2", true, false, 2, 2],
+      ["c3", true, false, 3, 3],
+      ["c4", false, true, 0, 0],
+      ["d1", false, false, 0, 0],
+      ["d2", false, false, 0, 0],
     ]);
     const score = compoundScore(results);
     expect(score).toMatchObject({
       compounds: 3,
       detected: 3,
       detectionRate: 1,
+      collapseExpected: 1,
+      collapsed: 1,
       decoys: 2,
       decoysSplit: 0,
       expectedParts: 7,
@@ -344,8 +381,48 @@ describe("replayCompound + compoundScore + renderCompound — the split scored",
       partAccuracy: 1,
       misses: [],
     });
-    expect(renderCompound(score)[0]).toBe("compound: detected 3/3 (100%), decoys split 0/2, part presets 7/7 (100%)");
+    expect(renderCompound(score)[0]).toBe(
+      "compound: detected 3/3 (100%), collapsed to its write preset 1/1, decoys split 0/2, part presets 7/7 (100%)",
+    );
     expect(renderCompound(score)).toContain("misses: none");
+  });
+
+  it("a compound with a write part is scored on the collapse alone: the write preset single is the hit, answered outright or through the parse's collapse; the conductor with read parts, another single or no route is a miss; its parts never enter the parts arithmetic", async () => {
+    const c4 = examples.find((e) => e.id === "c4")!;
+    const answers: RouteDecision[] = [
+      single("coding"),
+      collapsed("coding", ["review", "coding"]),
+      split(["review", "research"]),
+      single("review"),
+      { preset: undefined, reason: "router failed: x" },
+    ];
+    const results = await Promise.all(
+      answers.map(async (a) => (await replayCompound([c4], async () => a, { now: () => 0 }))[0]),
+    );
+    expect(results.map((r) => [r.collapsed, r.detected, r.expectedParts, r.matchedParts])).toEqual([
+      [true, false, 0, 0],
+      [true, false, 0, 0],
+      [false, true, 0, 0],
+      [false, false, 0, 0],
+      [false, false, 0, 0],
+    ]);
+    const scores = results.map((r) => compoundScore([r]));
+    expect(scores.map((s) => [s.compounds, s.detected, s.collapseExpected, s.collapsed, s.misses.length])).toEqual([
+      [0, 0, 1, 1, 0],
+      [0, 0, 1, 1, 0],
+      [0, 0, 1, 0, 1],
+      [0, 0, 1, 0, 1],
+      [0, 0, 1, 0, 1],
+    ]);
+    expect(renderCompound(scores[2])).toContain(
+      '- c4: compound, expected coding single (a write part among review+coding), answered review+research — independent — "review #9 and fix X"',
+    );
+    expect(renderCompound(scores[3])).toContain(
+      '- c4: compound, expected coding single (a write part among review+coding), answered review — one ask — "review #9 and fix X"',
+    );
+    expect(renderCompound(scores[4])).toContain(
+      '- c4: compound, expected coding single (a write part among review+coding), answered (none) — router failed: x — "review #9 and fix X"',
+    );
   });
 
   it("a fallible router: a compound left single is a miss, a decoy split is a miss, a part on the wrong preset counts against the parts and lists the miss; order is kept and the decision timed", async () => {
@@ -354,6 +431,7 @@ describe("replayCompound + compoundScore + renderCompound — the split scored",
       c1: single("review"), // not detected
       c2: split(["coding", "research"]), // detected, one part off (review → research)
       c3: split(["general", "research", "explore"]), // right
+      c4: split(["review", "research"]), // the fix dropped: a conductor of readers where coding, single, was due
       d1: split(["explore", "general"]), // a decoy split
       d2: single("coding"),
     };
@@ -361,23 +439,27 @@ describe("replayCompound + compoundScore + renderCompound — the split scored",
       now: () => (t += 5),
       concurrency: 1,
     });
-    expect(results.map((r) => r.id)).toEqual(["c1", "c2", "c3", "d1", "d2"]);
+    expect(results.map((r) => r.id)).toEqual(["c1", "c2", "c3", "c4", "d1", "d2"]);
     expect(results.every((r) => r.ms === 5)).toBe(true);
     const score = compoundScore(results);
     expect(score).toMatchObject({
       compounds: 3,
       detected: 2,
+      collapseExpected: 1,
+      collapsed: 0,
       decoys: 2,
       decoysSplit: 1,
       expectedParts: 7,
-      matchedParts: 4, // c1 undetected contributes none of its two; c2 one of two; c3 three
+      matchedParts: 4, // c1 undetected contributes none of its two; c2 one of two; c3 three; c4 has no parts to match
     });
     expect(score.detectionRate).toBeCloseTo(2 / 3);
     expect(score.partAccuracy).toBeCloseTo(4 / 7);
-    expect(score.misses.map((m) => m.id)).toEqual(["c1", "c2", "d1"]);
+    expect(score.misses.map((m) => m.id)).toEqual(["c1", "c2", "c4", "d1"]);
     const lines = renderCompound(score);
-    expect(lines[0]).toBe("compound: detected 2/3 (66.7%), decoys split 1/2, part presets 4/7 (57.1%)");
-    expect(lines).toContain("misses (3):");
+    expect(lines[0]).toBe(
+      "compound: detected 2/3 (66.7%), collapsed to its write preset 0/1, decoys split 1/2, part presets 4/7 (57.1%)",
+    );
+    expect(lines).toContain("misses (4):");
     expect(lines).toContain(
       '- c1: compound, expected review+research, answered review — one ask — "review #7 and also the outage"',
     );
@@ -400,9 +482,11 @@ describe("replayCompound + compoundScore + renderCompound — the split scored",
       { now: () => 0 },
     );
     const score = compoundScore(results);
-    expect(score).toMatchObject({ compounds: 2, detected: 1, expectedParts: 0, matchedParts: 0 });
+    expect(score).toMatchObject({ compounds: 2, detected: 1, collapseExpected: 0, expectedParts: 0, matchedParts: 0 });
     expect(score.partAccuracy).toBeNaN();
-    expect(renderCompound(score)[0]).toBe("compound: detected 1/2 (50%), decoys split 0/0, part presets 0/0 (—)");
+    expect(renderCompound(score)[0]).toBe(
+      "compound: detected 1/2 (50%), collapsed to its write preset 0/0, decoys split 0/0, part presets 0/0 (—)",
+    );
     expect(score.misses.map((m) => m.id)).toEqual(["h2"]);
   });
 
@@ -418,7 +502,7 @@ describe("replayCompound + compoundScore + renderCompound — the split scored",
     expect(none[0]).toMatchObject({ detected: false, matchedParts: 0 });
     expect(compoundScore([]).detectionRate).toBeNaN();
     expect(renderCompound(compoundScore([]))[0]).toBe(
-      "compound: detected 0/0 (—), decoys split 0/0, part presets 0/0 (—)",
+      "compound: detected 0/0 (—), collapsed to its write preset 0/0, decoys split 0/0, part presets 0/0 (—)",
     );
   });
 });
@@ -437,7 +521,7 @@ describe("the checked-in set through route() over a scripted model", () => {
       route({ text, recentDirectives: {}, presets, allowed, fallback: "general", compound: { maxParts: 3 } }, model);
   const textOf = (prompt: { user: string }) => /<request>\n([\s\S]*)\n<\/request>/.exec(prompt.user)![1];
 
-  it("a router that answers every fixture as labelled: 20/20 detected, 0/5 decoys split, every part preset right — the bar met", async () => {
+  it("a router that answers every fixture as a split of its parts: 13/13 splittable compounds detected, the 7 with a coding part collapsed to coding by the parse, 0/5 decoys split, every part preset right, the bars met", async () => {
     const knowing: RouteModel = async (prompt) => {
       const f = byText.get(textOf(prompt))!;
       return f.kind === "compound"
@@ -451,15 +535,20 @@ describe("the checked-in set through route() over a scripted model", () => {
     const results = await replayCompound(compoundExamples(ROUTE_COMPOUND_FIXTURES), decideWith(knowing), {
       now: () => 0,
     });
+    // The parse collapsed every compound answer that named coding: the decision was coding, single.
+    for (const r of results.filter((r) => r.collapsesTo !== undefined))
+      expect([r.id, r.routed, r.collapsed, r.detected]).toEqual([r.id, "coding", true, false]);
     const score = compoundScore(results);
-    const expectedParts = ROUTE_COMPOUND_FIXTURES.filter((f) => f.kind === "compound").reduce(
+    const expectedParts = ROUTE_COMPOUND_FIXTURES.filter((f) => f.kind === "compound" && !f.collapsesTo).reduce(
       (n, f) => n + f.presets.length,
       0,
     );
     expect(score).toMatchObject({
-      compounds: 20,
-      detected: 20,
+      compounds: 13,
+      detected: 13,
       detectionRate: 1,
+      collapseExpected: 7,
+      collapsed: 7,
       decoys: 5,
       decoysSplit: 0,
       expectedParts,
@@ -468,8 +557,26 @@ describe("the checked-in set through route() over a scripted model", () => {
       misses: [],
     });
     expect(renderCompound(score)[0]).toBe(
-      `compound: detected 20/20 (100%), decoys split 0/5, part presets ${expectedParts}/${expectedParts} (100%)`,
+      `compound: detected 13/13 (100%), collapsed to its write preset 7/7, decoys split 0/5, part presets ${expectedParts}/${expectedParts} (100%)`,
     );
+  });
+
+  it("a router that answers coding outright for a compound with a coding part, as the prompt asks, scores the same collapse: 7/7", async () => {
+    const direct: RouteModel = async (prompt) => {
+      const f = byText.get(textOf(prompt))!;
+      if (f.collapsesTo) return JSON.stringify({ preset: f.collapsesTo, reason: "a write part: one coding run" });
+      return f.kind === "compound"
+        ? JSON.stringify({
+            preset: "conductor",
+            parts: f.presets.map((preset, i) => ({ preset, text: `part ${i + 1} of ${f.id}` })),
+            reason: "independent asks",
+          })
+        : JSON.stringify({ preset: f.presets[0], reason: "one ask with steps" });
+    };
+    const score = compoundScore(
+      await replayCompound(compoundExamples(ROUTE_COMPOUND_FIXTURES), decideWith(direct), { now: () => 0 }),
+    );
+    expect(score).toMatchObject({ compounds: 13, detected: 13, collapseExpected: 7, collapsed: 7, misses: [] });
   });
 
   it("a naive router that splits on every 'and' detects the compounds but splits every decoy — the decoy check is what catches it", async () => {
@@ -707,6 +814,7 @@ describe("readToWriteRoutes + routeChecks — the verdict's rows", () => {
       "every request answered with a preset",
       "read-only labels routed to a write preset: 0 (record 0026's clause)",
       "compound detected on ≥ 90% of the checked-in compound asks",
+      "compound with a write part collapsed to that preset, single: every checked-in one",
       "no decoy split — one ask with several steps stays one route",
       "terse imperatives routed to coding on ≥ 90% of the checked-in imperative asks",
       "read-only look-alikes of an imperative routed to a write preset: 0",
@@ -717,9 +825,54 @@ describe("readToWriteRoutes + routeChecks — the verdict's rows", () => {
       [true, "0", "0"],
       [false, "0/0 (—)", "≥ 90%"],
       [true, "0/0", "0"],
+      [true, "0/0", "0"],
       [false, "0/0 (—)", "≥ 90%"],
       [true, "0/0", "0"],
     ]);
+  });
+
+  it("a compound with a write part collapsed to it is counted on its own row and never as read-to-write; one left uncollapsed fails that row alone while the read-to-write row stays at 0", async () => {
+    const fixture: CompoundExample = {
+      id: "c02",
+      kind: "compound",
+      text: "review #9 and fix X",
+      presets: ["review", "coding"],
+      collapsesTo: "coding",
+      source: "fixture",
+    };
+    const results = [result("review", "review"), result("coding", "coding")];
+    const input = {
+      table: confusionTable(results, ["review", "coding"]),
+      answered: 2,
+      readToWrite: readToWriteRoutes(results).length,
+      compoundBar: { detection: 0.9 },
+      imperative: imperativeScore([]),
+      imperativeBar: { hit: 0.9 },
+    };
+    const rowOf = (checks: ReturnType<typeof routeChecks>, prefix: string) =>
+      checks.find((c) => c.name.startsWith(prefix))!;
+    const collapsed = compoundScore(
+      await replayCompound(
+        [fixture],
+        async () => ({ preset: "coding", reason: "a review and a fix", collapsed: { presets: ["review", "coding"] } }),
+        { now: () => 0 },
+      ),
+    );
+    const green = routeChecks({ ...input, compound: collapsed });
+    expect(rowOf(green, "compound with a write part")).toEqual({
+      name: "compound with a write part collapsed to that preset, single: every checked-in one",
+      pass: true,
+      actual: "1/1",
+      limit: "1",
+    });
+    expect(rowOf(green, "read-only labels routed to a write preset")).toMatchObject({ pass: true, actual: "0" });
+    const kept = compoundScore(
+      await replayCompound([fixture], async () => ({ preset: "review", reason: "a review" }), { now: () => 0 }),
+    );
+    const red = routeChecks({ ...input, compound: kept });
+    expect(rowOf(red, "compound with a write part")).toMatchObject({ pass: false, actual: "0/1", limit: "1" });
+    expect(rowOf(red, "read-only labels routed to a write preset")).toMatchObject({ pass: true, actual: "0" });
+    expect(rowOf(red, "compound detected")).toMatchObject({ actual: "0/0 (—)" }); // a collapsing compound is not a split to detect
   });
 
   it("one read-only label routed to coding fails the read-only-to-write row — and with it the verdict — even when the accuracy bar still passes", () => {

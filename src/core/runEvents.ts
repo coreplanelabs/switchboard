@@ -536,20 +536,24 @@ export type RunEvent =
    *  the router gave (redacted, capped — the same text the card's `routed:`
    *  line carries) and the model that decided. A compound route is `preset:
    *  "conductor"` with `parts` — one per child the conductor was told to
-   *  spawn: its preset and its text, the child's whole prompt. A compound the
-   *  parse refused is recorded too, on the run that fell to the default:
-   *  `preset` is `defaults.agent` and `reason` reads `compound_rejected:
-   *  <why>` (the run's `run_meta.agentSource` stays `default`). Published by
-   *  the dispatcher straight to the registry right after `run_meta`, once per
-   *  run the router answered; absent on every run a directive, a sticky
-   *  preset or a scope chose. Head material, like `run_meta`. Additive:
-   *  unknown → ignored. */
+   *  spawn: its preset and its text, the child's whole prompt. A compound
+   *  answer that carried a write-identity part collapsed onto that preset
+   *  (record 0034: a write ask is never a part): `preset` is the write preset
+   *  the run is, `collapsed.presets` the preset each part named in answer
+   *  order, and no `parts`. A compound the parse refused is recorded too, on
+   *  the run that fell to the default: `preset` is `defaults.agent` and
+   *  `reason` reads `compound_rejected: <why>` (the run's
+   *  `run_meta.agentSource` stays `default`). Published by the dispatcher
+   *  straight to the registry right after `run_meta`, once per run the router
+   *  answered; absent on every run a directive, a sticky preset or a scope
+   *  chose. Head material, like `run_meta`. Additive: unknown → ignored. */
   | {
       type: "route";
       preset: string;
       reason: string;
       model: string;
       parts?: ReadonlyArray<{ preset: string; text: string }>;
+      collapsed?: { presets: ReadonlyArray<string> };
       seq?: number;
       at?: number;
     }
