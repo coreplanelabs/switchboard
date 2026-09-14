@@ -4,6 +4,7 @@ import type { Finding, FindingDisposition } from "../reviewVerdict.js";
 import {
   applyReturn,
   cursorFinished,
+  matchDispositions,
   MERGE_POLL_MS,
   MERGE_WAIT_MAX_MS,
   nextAction,
@@ -390,7 +391,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect(report).toContain("a person's merge");
   });
 
-  it("findings round trip: request_changes → a fix round with the review's run as its brief → re-review with the prior round's ids → approve; the declined disposition rides the report", () => {
+  it("findings round trip: request_changes → the findings step, a coding child briefed with the review's run, never a `fix` round → re-review with the prior review run and the coding run that answered it → approve; the declined disposition rides the report", () => {
     const d = fresh(input({ merge: "person" }));
     throughRoundZero(d);
     runChild(
@@ -404,21 +405,33 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
       }),
       T0 + 20 * MIN,
     );
-    expect(d.action).toMatchObject({
+    // The findings step is a spawn of the coding preset under the review round's index: the bot dispatches the
+    // review's findings into the unit thread as `agent:coding`, so the coding session there continues.
+    expect(d.action).toEqual({
       type: "spawn",
-      step: "U10/1/fix",
+      step: "U10/1/findings",
       preset: "coding",
-      round: { index: 1, kind: "fix" },
-      brief: { kind: "fix", pr: 7, reviewRunId: "run-r1", unit: "U10" },
+      round: { index: 1, kind: "findings" },
+      budgetMinutes: CHILD_MINUTES.coding,
+      brief: { kind: "findings", pr: 7, reviewRunId: "run-r1", unit: "U10" },
     });
+    expect(JSON.stringify(d.action)).not.toContain('"fix"');
     runChild(d, "run-f1", finished({ status: "completed", dispositions: [DECLINED], headSha: HEAD_B }), T0 + 40 * MIN);
-    expect(d.action.type).toBe("pr-check");
+    expect(d.state.findingsRunByRound).toEqual({ 1: "run-f1" });
+    expect(d.state.lastCodingRunId).toBe("run-f1");
+    expect(d.action).toMatchObject({ type: "pr-check", step: "U10/1/findings/pr-check" });
     d.answer({ type: "pr-check", pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B }, at: T0 + 40 * MIN });
     expect(d.action).toMatchObject({
       type: "spawn",
       step: "U10/2/review",
       round: { index: 2, kind: "review" },
-      brief: { kind: "review", pr: 7, headSha: HEAD_B, round: 2, prior: { reviewRunId: "run-r1", fixRunId: "run-f1" } },
+      brief: {
+        kind: "review",
+        pr: 7,
+        headSha: HEAD_B,
+        round: 2,
+        prior: { reviewRunId: "run-r1", codingRunId: "run-f1" },
+      },
     });
     runChild(
       d,
@@ -443,6 +456,121 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
       "2 review approve",
     ]);
     expect(renderUnitReport(d.state)).toContain("Declined findings: F1 — the loop is exclusive");
+  });
+
+  it("the findings step waits out a person's run: a busy answer waits a chunk under the unit's clock and asks the same step again; a busy answer with less than the reserve left ends the unit wall_clock_cap with no coding run started and the finding unaddressed in the report", () => {
+    const d = fresh(input({ merge: "person" }));
+    throughRoundZero(d);
+    runChild(
+      d,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "request_changes", summary: "one nit", findings: [FINDING] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    expect(d.action).toMatchObject({ type: "spawn", step: "U10/1/findings" });
+    // A run live in the unit thread is a person's: the spawn answers busy naming it, and the step waits on it.
+    d.answer({ type: "spawn", outcome: "busy", runId: "run-person", at: T0 + 20 * MIN });
+    expect(d.action).toMatchObject({
+      type: "wait",
+      step: "U10/1/findings/busy/1",
+      runId: "run-person",
+      timeoutMs: WAIT_CHUNK_MS,
+    });
+    d.answer({ type: "wait", outcome: "event" });
+    expect(d.action).toMatchObject({ type: "spawn", step: "U10/1/findings", brief: { kind: "findings" } });
+    expect(d.state.findingsRunByRound).toEqual({});
+    d.answer({ type: "spawn", outcome: "spawned", runId: "run-f1", at: T0 + 25 * MIN });
+    expect(d.action).toMatchObject({ type: "wait", step: "U10/1/findings/wait/1", runId: "run-f1" });
+    expect(d.rounds().at(-1)).toBe("1 coding started");
+
+    // The person's run spends the unit's clock: a busy answer that reaches the reserve ends the unit at the cap.
+    const capped = fresh(input({ caps: { maxRounds: 3, maxMinutes: 60 }, merge: "person" }));
+    throughRoundZero(capped);
+    runChild(
+      capped,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "request_changes", summary: "one nit", findings: [FINDING] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    expect(capped.action).toMatchObject({ type: "spawn", step: "U10/1/findings" });
+    capped.answer({
+      type: "spawn",
+      outcome: "busy",
+      runId: "run-person",
+      at: T0 + 60 * MIN - SHIP_ROUND_RESERVE_MS + 1,
+    });
+    expect(capped.action).toMatchObject({ type: "end", ending: { kind: "wall_clock_cap", reviewRounds: 1 } });
+    expect(capped.state.findingsRunByRound).toEqual({});
+    expect(capped.state.lastCodingRunId).toBe("run-c0");
+    expect(capped.rounds()).not.toContain("1 coding started");
+    const report = renderUnitReport(capped.state);
+    expect(report).toContain("cannot hold another round");
+    expect(report).toContain("Unaddressed (no disposition):\n  - [minor] F1 src/a.ts:3 — off by one");
+  });
+
+  it("the dispositions a coding run recorded are matched to the round's finding ids: an id the review never issued is dropped, so it reaches neither the state nor the report, and `matchDispositions` names it for the re-review's note", () => {
+    const F2: Finding = { id: "F2", severity: "nit", file: "src/b.ts", title: "rename" };
+    const stray: FindingDisposition = { findingId: "F9", disposition: "fixed", note: "no such finding" };
+    expect(matchDispositions([FINDING, F2], [DECLINED, stray, { ...FIXED, findingId: "F2" }, stray])).toEqual({
+      matched: [DECLINED, { ...FIXED, findingId: "F2" }],
+      dropped: ["F9"],
+    });
+    expect(matchDispositions([], [stray])).toEqual({ matched: [], dropped: ["F9"] });
+    expect(matchDispositions([FINDING], [])).toEqual({ matched: [], dropped: [] });
+
+    const wide = fresh(input({ caps: { maxRounds: 2, maxMinutes: 120 }, merge: "person" }));
+    throughRoundZero(wide);
+    runChild(
+      wide,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "request_changes", summary: "one nit", findings: [FINDING, F2] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    runChild(
+      wide,
+      "run-f1",
+      finished({ status: "completed", dispositions: [DECLINED, stray], headSha: HEAD_B }),
+      T0 + 40 * MIN,
+    );
+    expect(wide.state.dispositionsByRound).toEqual({ 1: [DECLINED] });
+    wide.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B },
+      at: T0 + 40 * MIN,
+    });
+    runChild(
+      wide,
+      "run-r2",
+      finished({
+        status: "completed",
+        verdict: { verdict: "request_changes", summary: "still", findings: [FINDING, F2] },
+        reviewPosted: true,
+        reviewHead: HEAD_B,
+      }),
+      T0 + 50 * MIN,
+    );
+    expect(wide.action).toMatchObject({ type: "end", ending: { kind: "round_cap", maxRounds: 2 } });
+    const report = renderUnitReport(wide.state);
+    expect(report).toContain(
+      "Declined (disposition recorded):\n  - [minor] F1 src/a.ts:3 — off by one — the loop is exclusive",
+    );
+    expect(report).toContain("Unaddressed (no disposition):\n  - [nit] F2 src/b.ts — rename");
+    expect(report).not.toContain("F9");
   });
 
   it("the round cap: request_changes at the last allowed round ends the unit with the declined/unaddressed split over the last review's findings", () => {
@@ -482,7 +610,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     });
     d.answer({ type: "pr-check", pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A }, at: T0 + 10 * MIN });
     expect(d.action).toMatchObject({ type: "spawn", preset: "review", budgetMinutes: 20 });
-    // The review asked for changes with less than the reserve left: no fix round starts.
+    // The review asked for changes with less than the reserve left: no findings step starts.
     runChild(
       d,
       "run-r1",
@@ -551,7 +679,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     );
   });
 
-  it("aborts: a round 0 that opened no pull request, a branch that could not be created, a coding child that failed, a fix round that repushed nothing (unless every finding was declined)", () => {
+  it("aborts: a round 0 that opened no pull request, a branch that could not be created, a coding child that failed, a findings step that repushed nothing (unless every finding was declined)", () => {
     const noPr = fresh(input({ merge: "person" }));
     noPr.answer({ type: "branch", ok: true, at: T0 });
     runChild(noPr, "run-c0", finished({ status: "completed", finalReply: "Which login flow?" }), T0 + 5 * MIN);
@@ -596,7 +724,10 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
       pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A },
       at: T0 + 30 * MIN,
     });
-    expect(stale.action).toMatchObject({ type: "end", ending: { kind: "aborted", round: { index: 1, kind: "fix" } } });
+    expect(stale.action).toMatchObject({
+      type: "end",
+      ending: { kind: "aborted", round: { index: 1, kind: "findings" } },
+    });
     expect(renderUnitReport(stale.state)).toContain("produced no new head");
     expect(stale.rounds().at(-1)).toBe("1 coding aborted");
 
@@ -622,7 +753,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect(declinedAll.action).toMatchObject({ type: "spawn", step: "U10/2/review" });
   });
 
-  it("no verdict: a review child that ended without one aborts the unit naming the terminal, and no fix round starts", () => {
+  it("no verdict: a review child that ended without one aborts the unit naming the terminal, and no findings step starts", () => {
     const d = fresh(input({ merge: "person" }));
     throughRoundZero(d);
     runChild(d, "run-r1", finished({ status: "completed", finalReply: "ran out of budget" }), T0 + 20 * MIN);
@@ -935,7 +1066,7 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
     });
   });
 
-  it("a fix round whose pull request was closed out from under it and reopened adopts the open pull request on the branch; one with no open pull request aborts", () => {
+  it("a findings step whose pull request was closed out from under it and reopened adopts the open pull request on the branch; one with no open pull request aborts", () => {
     const adopt = fresh(input({ merge: "person" }));
     throughRoundZero(adopt);
     runChild(
@@ -1055,7 +1186,7 @@ describe("the unit pipeline — a pull request already merged: a re-issued plan,
     expect(open.state.lastReviewHead).toBeUndefined();
   });
 
-  it("a merge that lands during a round — the pr-check after the coding child answers merged — ends the unit merged the same way, the round noted completed and no review spawned; after a fix round the same, with the review rounds counted", () => {
+  it("a merge that lands during a round — the pr-check after the coding child answers merged — ends the unit merged the same way, the round noted completed and no review spawned; after a findings step the same, with the review rounds counted", () => {
     const d = fresh(input());
     d.answer({ type: "branch", ok: true, at: T0 });
     runChild(
@@ -1102,7 +1233,7 @@ describe("the unit pipeline — a pull request already merged: a re-issued plan,
       T0 + 20 * MIN,
     );
     runChild(fix, "run-f1", finished({ status: "completed", dispositions: [FIXED], headSha: HEAD_B }), T0 + 30 * MIN);
-    expect(fix.action).toMatchObject({ type: "pr-check", step: "U10/1/fix/pr-check" });
+    expect(fix.action).toMatchObject({ type: "pr-check", step: "U10/1/findings/pr-check" });
     fix.answer({ type: "pr-check", pr: merged(HEAD_C), at: T0 + 30 * MIN });
     expect(fix.action).toMatchObject({
       type: "end",

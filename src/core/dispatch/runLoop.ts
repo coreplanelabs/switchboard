@@ -147,11 +147,6 @@ export interface RunLoopContext {
   /** Where the run's conversation started (run-history item 52), for the finish
    *  record; `dispatch()` always hands it. */
   seed?: RunSeed;
-  /** This coding run answers a review's findings (a ship fix round dispatched
-   *  as a run — agent-ship item 6): `submit_dispositions` records against these
-   *  ids and the set rides the record. Absent on every other run, where the
-   *  tool answers that nothing was recorded. */
-  fixRound?: { findingIds: string[] };
   /** The run's model-proxy bearer as minted (docs/reference/specs/model-proxy.md):
    *  a run on the pi harness hands it to pi as its provider key. Absent without
    *  a store; a native run never reads it. */
@@ -205,7 +200,6 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     parentRunId,
     coordinator,
     seed,
-    fixRound,
   } = ctx;
   // The def the runner and the post-run turns read: the preset with the
   // EFFECTIVE budget (its deadline, wrap-up warning and budget label read
@@ -392,12 +386,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     handoff = h;
     ledgerRun?.setState({ handoff: h });
   };
-  // A fix round's dispositions (agent-ship item 6), set only through
-  // submit_dispositions against the review's finding ids — the last call
-  // wins — and restored like the handoff; recorded on the finish record.
-  const restoredDispositions = fixRound
-    ? parseDispositionsInput({ dispositions: restored.dispositions })?.dispositions
-    : undefined;
+  // The dispositions a coding run records through submit_dispositions (agent-ship
+  // item 6): whatever it submits, the last call wins, restored like the handoff
+  // and recorded on the finish record. The run holds no list of a review's
+  // finding ids; the plan runner matches the set to its round's findings when
+  // it reads the record.
+  const restoredDispositions = parseDispositionsInput({ dispositions: restored.dispositions })?.dispositions;
   let dispositions: FindingDisposition[] | undefined = restoredDispositions;
   const onDispositions = (d: FindingDisposition[]) => {
     dispositions = d;
@@ -495,7 +489,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     onDigest,
     onPrDescription,
     onHandoff,
-    ...(fixRound ? { knownFindingIds: fixRound.findingIds, onDispositions } : {}),
+    onDispositions,
   };
   // Which loop drives the run (docs/reference/specs/harness-pi.md item 1): the
   // preset's harness, or the deployment's word for it. Everything before this

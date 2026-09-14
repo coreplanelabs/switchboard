@@ -208,7 +208,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       if (t.kind !== "do") continue;
       expect(t.config.retries, t.name).toEqual(STEP_RETRIES);
       expect(t.config.timeout, t.name).toBe(
-        /^U10\/\d+\/(coding|review|fix)$/.test(t.name) ? SPAWN_STEP_CONFIG.timeout : undefined,
+        /^U10\/\d+\/(coding|review|findings)$/.test(t.name) ? SPAWN_STEP_CONFIG.timeout : undefined,
       );
     }
     expect(STEP_RETRIES).toEqual({ limit: 12, delay: 2 * MIN, backoff: "constant" });
@@ -389,6 +389,150 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(end.ending.kind).toBe("refused");
     expect(end.ending.report).toContain("agent_allowlist");
     expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "failed" }]);
+  });
+
+  it("a review that requests changes is followed by the findings step under `<unit>/<round>/findings`: a coding spawn briefed with the review run, its wait and read under that name, its pr-check, then the re-review briefed with the review run and the coding run that answered it; one unit-start per unit, and never a `fix` step", async () => {
+    const s = steps({
+      "U10/0/coding/wait/1": "event",
+      "U10/1/review/wait/1": "event",
+      "U10/1/findings/wait/1": "event",
+      "U10/2/review/wait/1": "event",
+    });
+    const reviewChanged = (runId: string, at: number) =>
+      record(
+        {
+          id: runId,
+          finished: true,
+          status: "completed",
+          verdict: {
+            verdict: "request_changes",
+            summary: "one nit",
+            findings: [{ id: "F1", severity: "minor", file: "src/a.ts", line: 3, title: "off by one" }],
+          },
+          reviewPosted: true,
+          reviewHead: HEAD,
+        },
+        at,
+      );
+    const HEAD_2 = "b".repeat(40);
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [
+        spawned("run-c0"),
+        spawned("run-r1", T0 + 10 * MIN),
+        spawned("run-f1", T0 + 20 * MIN),
+        spawned("run-r2", T0 + 30 * MIN),
+      ],
+      "read-record": [
+        codingDone("run-c0", T0 + 10 * MIN),
+        reviewChanged("run-r1", T0 + 20 * MIN),
+        record(
+          {
+            id: "run-f1",
+            finished: true,
+            status: "completed",
+            headSha: HEAD_2,
+            dispositions: [{ findingId: "F1", disposition: "fixed", note: "counted from zero" }],
+          },
+          T0 + 30 * MIN,
+        ),
+        record(
+          {
+            id: "run-r2",
+            finished: true,
+            status: "completed",
+            verdict: { verdict: "approve", summary: "clean", findings: [] },
+            reviewPosted: true,
+            reviewHead: HEAD_2,
+          },
+          T0 + 40 * MIN,
+        ),
+      ],
+      "pr-check": [
+        prNone(),
+        prOpen(T0 + 10 * MIN),
+        ok({ ok: true, state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_2 }, T0 + 30 * MIN),
+      ],
+      round: [acked(), acked(), acked(), acked(), acked(), acked(), acked(), acked()],
+      merge: [ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 41 * MIN)],
+      "unit-end": [acked(T0 + 41 * MIN)],
+      finish: [acked(T0 + 41 * MIN)],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary.units).toEqual({ U10: "merged" });
+    expect(s.names()).toEqual([
+      "plan",
+      "U10/start",
+      "U10/pr-check",
+      "U10/branch",
+      "U10/0/coding",
+      "U10/note/1",
+      "U10/0/coding/wait/1",
+      "U10/0/coding/read/1",
+      "U10/0/coding/pr-check",
+      "U10/note/2",
+      "U10/1/review",
+      "U10/note/3",
+      "U10/1/review/wait/1",
+      "U10/1/review/read/1",
+      "U10/note/4",
+      "U10/1/findings",
+      "U10/note/5",
+      "U10/1/findings/wait/1",
+      "U10/1/findings/read/1",
+      "U10/1/findings/pr-check",
+      "U10/note/6",
+      "U10/2/review",
+      "U10/note/7",
+      "U10/2/review/wait/1",
+      "U10/2/review/read/1",
+      "U10/note/8",
+      "U10/merge/1",
+      "U10/end",
+      "finish",
+    ]);
+    expect(s.names().some((n) => /\/fix\b/.test(n))).toBe(false);
+    expect(b.of("unit-start")).toEqual([{ parentInstanceId: INSTANCE, unit: "U10" }]);
+    // The budgets are the presets' own clipped to the plan's 45-minute wall clock: 25 left at the findings
+    // step (T0 + 20), 15 at the re-review (T0 + 30).
+    expect(b.of("spawn")[2]).toEqual({
+      parentInstanceId: INSTANCE,
+      unit: "U10",
+      step: "U10/1/findings",
+      preset: "coding",
+      budget: 25,
+      brief: { kind: "findings", unit: "U10", pr: 7, reviewRunId: "run-r1" },
+    });
+    expect(b.of("spawn")[3]).toEqual({
+      parentInstanceId: INSTANCE,
+      unit: "U10",
+      step: "U10/2/review",
+      preset: "review",
+      budget: 15,
+      brief: {
+        kind: "review",
+        unit: "U10",
+        pr: 7,
+        headSha: HEAD_2,
+        round: 2,
+        prior: { reviewRunId: "run-r1", codingRunId: "run-f1" },
+      },
+    });
+    expect(b.of("round").map((r) => `${r.index} ${r.agent} ${r.outcome}`)).toEqual([
+      "0 coding started",
+      "0 coding pr_opened",
+      "1 review started",
+      "1 review request_changes",
+      "1 coding started",
+      "1 coding pr_opened",
+      "2 review started",
+      "2 review approve",
+    ]);
+    const [end] = b.of("unit-end") as Array<{ codingRunId?: string; ending: { kind: string } }>;
+    expect(end.codingRunId).toBe("run-f1");
+    expect(end.ending.kind).toBe("merged");
   });
 
   it("units run in the plan's order, one at a time; a merged unit frees its dependents, which start with the rebase onto the base that now carries it; a unit whose merge GitHub refused blocks its dependents, each told so as its own ending without a thread, and the plan finishes failed; a unit whose branch could not be created ends aborted and blocks its dependents the same way; a unit blocked by a blocked unit the plan lists after it is told so, never an ending that is not there", async () => {

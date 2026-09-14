@@ -142,6 +142,10 @@ export interface CoordinatorUnit {
   /** The unit's thread, once opened; a task's is the requesting thread from the start. */
   threadKey?: string;
   sourceUrl?: string;
+  /** The unit's review thread, opened once beside the unit's thread: every
+   *  review round runs there (record 0034), so the review child's worktree is
+   *  readonly and its own and no round wipes the coding thread's. */
+  reviewThread?: { threadKey: string; sourceUrl?: string };
   /** The unit's board issue in the repository, when one titled by the unit id exists — the handoff's destination. */
   issue?: number;
   pr?: { number: number; url: string };
@@ -173,6 +177,7 @@ const isResume = (v: unknown): boolean =>
   isFinite(v.pr) &&
   (v.headSha === undefined || isText(v.headSha)) &&
   (v.url === undefined || isText(v.url, 2048));
+const isThread = (v: unknown): boolean => isObject(v) && isText(v.threadKey) && isOptionalText(v.sourceUrl);
 
 /** Structural check on a record from outside the process (a Worker response, an HTTP body). */
 export function isCoordinatorInstance(v: unknown): v is CoordinatorInstance {
@@ -202,6 +207,7 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   if (!isText(r.unit, 32) || !isText(r.slug) || !isText(r.branch) || !isOptionalText(r.title)) return false;
   if (!Array.isArray(r.dependsOn) || !r.dependsOn.every((d) => isText(d, 32))) return false;
   if (!isOptionalText(r.threadKey) || !isOptionalText(r.sourceUrl)) return false;
+  if (r.reviewThread !== undefined && !isThread(r.reviewThread)) return false;
   if (r.issue !== undefined && !isFinite(r.issue)) return false;
   if (r.pr !== undefined && !isPr(r.pr)) return false;
   if (r.resume !== undefined && !isResume(r.resume)) return false;

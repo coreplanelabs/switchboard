@@ -358,8 +358,8 @@ describe("submit_verdict tool", () => {
 // per review finding through this tool; the ship orchestrator injects
 // the round's known finding ids and consumes the last valid call.
 describe("submit_dispositions tool", () => {
-  const ctxWith = (onDispositions?: ToolContext["onDispositions"], knownFindingIds?: string[]): ToolContext =>
-    ({ executor: {} as ToolContext["executor"], onDispositions, knownFindingIds }) as ToolContext;
+  const ctxWith = (onDispositions: ToolContext["onDispositions"]): ToolContext =>
+    ({ executor: {} as ToolContext["executor"], onDispositions }) as ToolContext;
 
   const valid = () => ({
     dispositions: [
@@ -396,11 +396,11 @@ describe("submit_dispositions tool", () => {
       ],
     ]);
     expect(String(out)).toContain("2");
-    expect(String(out)).toContain("dispositions recorded"); // the real ack, only where a ship fix round listens
+    expect(String(out)).toContain("dispositions recorded"); // every run has the sink: its record
     expect(String(out)).not.toMatch(/^error:/);
   });
 
-  it("an unknown findingId (with knownFindingIds provided) is a string error naming it — context untouched", async () => {
+  it("records whatever ids the run names: the tool holds no list of the review's findings, so an id the review never issued is recorded like any other and the plan runner drops it when it matches the set to the round", async () => {
     const got: unknown[] = [];
     const out = await tool().run(
       {
@@ -409,21 +409,17 @@ describe("submit_dispositions tool", () => {
           { findingId: "F9", disposition: "declined", note: "n" },
         ],
       },
-      ctxWith((d) => got.push(d), ["F1", "F2"]),
-    );
-    expect(got).toEqual([]);
-    expect(String(out)).toMatch(/^error:/);
-    expect(String(out)).toContain("F9");
-  });
-
-  it("without knownFindingIds the id-existence check is skipped (the ship orchestrator supplies it)", async () => {
-    const got: unknown[] = [];
-    const out = await tool().run(
-      { dispositions: [{ findingId: "F9", disposition: "fixed", note: "n" }] },
       ctxWith((d) => got.push(d)),
     );
-    expect(got).toHaveLength(1);
-    expect(String(out)).not.toMatch(/^error:/);
+    expect(got).toEqual([
+      [
+        { findingId: "F1", disposition: "fixed", note: "n" },
+        { findingId: "F9", disposition: "declined", note: "n" },
+      ],
+    ]);
+    expect(String(out)).toBe("dispositions recorded: 2; a later call replaces this one");
+    expect(tool().description).not.toContain("no-op");
+    expect(tool().description).not.toContain("fix round");
   });
 
   it("last valid call wins at the sink", async () => {
@@ -460,10 +456,9 @@ describe("submit_dispositions tool", () => {
     expect(String(out)).toContain("F2");
   });
 
-  it("no dispositions sink (a plain coding run — no ship fix round) → an honest no-op, never a false 'recorded' ack", async () => {
+  it("a context without the sink (a unit test's, a CLI's; every dispatched run has one) says no run is recording, never a false 'recorded' ack", async () => {
     const out = await tool().run(valid(), ctxWith(undefined));
-    expect(String(out)).toContain("no ship fix round");
-    expect(String(out)).toContain("were not recorded");
+    expect(String(out)).toBe("no run is recording dispositions here");
     expect(String(out)).not.toContain("dispositions recorded");
     expect(String(out)).not.toMatch(/^error:/);
   });

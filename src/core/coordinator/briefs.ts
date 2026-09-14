@@ -7,13 +7,15 @@
 // and the run history it already has. One composer for the three kinds so the
 // coordinator's children are told exactly what a round of the ship pipeline
 // is told: the unit's contract for round 0, the review turn with the prior
-// round's findings and dispositions for a re-review, the fix turn with the
-// findings for a fix round.
+// round's findings and the coding run's dispositions for a re-review, and the
+// findings step's message: the review's findings as the requester would paste
+// them into the unit thread (docs/decisions/0034-one-agent-per-unit-a-run-continues-a-transcript.md),
+// where the coding session continues with them. No composer briefs a fresh
+// coding child from a review: the findings are a message, not a brief.
 
 import { parseDirectives } from "../../directives.js";
-import type { Finding, FindingDisposition } from "../reviewVerdict.js";
-import type { Brief } from "../ship/coordinator.js";
-import { buildShipFixTurn } from "../ship/codingChild.js";
+import { formatFinding, type Finding, type FindingDisposition } from "../reviewVerdict.js";
+import { matchDispositions, type Brief } from "../ship/coordinator.js";
 import {
   contractFromPlan,
   contractFromTask,
@@ -26,7 +28,7 @@ import { shipTaskText } from "../ship/preflight.js";
 import { buildShipReviewTurn } from "../ship/reviewChild.js";
 import type { CoordinatorInstance, CoordinatorUnit } from "./contract.js";
 
-/** What a child run's record tells the next brief: the review's findings, the fix round's dispositions, the child's final words. */
+/** What a child run's record tells the next brief: the review's findings, the coding run's dispositions, the child's final words. */
 export interface ChildRunFacts {
   findings?: Finding[];
   dispositions?: FindingDisposition[];
@@ -42,15 +44,14 @@ export interface BriefReaders {
   readShipRequest(): Promise<string | undefined>;
 }
 
-/** The composed child: the preset's turn, the branch its thread binds to, the
- *  contract both children hold, and the finding ids a fix round answers. */
+/** The composed child: the preset's turn, the branch its thread binds to, and
+ *  the contract both round-0 children hold. */
 export interface ComposedChild {
   preset: "coding" | "review";
   prompt: string;
   /** The branch the coding child's thread binds to (`on branch <ref>`); a review child pins the pull request's head itself. */
   ref?: string;
   contract?: ChildContract;
-  fixRound?: { findingIds: string[] };
 }
 
 const SPECS_DIR = "docs/reference/specs";
@@ -104,6 +105,22 @@ export async function contractFor(
 
 const prUrl = (repo: string, pr: number) => `https://github.com/${repo}/pull/${pr}`;
 
+/** The findings step's message (agent-ship item 7): the review's findings as
+ *  the requester would paste them into the unit thread, with the review's own
+ *  words and the ask: every finding gets a disposition, the description is
+ *  resubmitted, the branch is pushed. The `address-review-findings` skill
+ *  carries the craft. */
+function findingsRequest(input: { where: string; findings: Finding[]; review: string }): string {
+  const findings =
+    input.findings.map(formatFinding).join("\n") || "(the review listed no structured findings, address its prose)";
+  return (
+    `The review of ${input.where} requested changes. Load the \`address-review-findings\` skill and address every finding below, nits included: ` +
+    `record one disposition per finding with submit_dispositions (fixed or declined, with a note), squash to coherent commits, ` +
+    `resubmit the pull request description with submit_pr_description, and push the branch. Never merge and never approve.\n\n` +
+    `Findings:\n${findings}\n\nReview:\n${input.review}`
+  );
+}
+
 /** The child a brief names, composed from what the bot holds. Throws when a
  *  run the brief names is not in the history or the plan cannot be read — the
  *  spawn route answers by name and the coordinator's retry meets the same
@@ -125,16 +142,20 @@ export async function composeChild(
       return { preset: "coding", prompt, ref: unit.branch, contract };
     }
     case "review": {
-      const prior =
-        brief.prior !== undefined
-          ? {
-              findings: (await facts(readers, brief.prior.reviewRunId)).findings ?? [],
-              dispositions:
-                brief.prior.fixRunId !== undefined
-                  ? ((await facts(readers, brief.prior.fixRunId)).dispositions ?? [])
-                  : [],
-            }
-          : undefined;
+      // A re-review reads the prior review's findings and the coding run's
+      // dispositions from their records; the match to the review's ids is the
+      // runner's (agent-ship item 6), and an id the review never issued is
+      // named to the reviewer as dropped.
+      let prior: { findings: Finding[]; dispositions: FindingDisposition[]; dropped: string[] } | undefined;
+      if (brief.prior !== undefined) {
+        const findings = (await facts(readers, brief.prior.reviewRunId)).findings ?? [];
+        const recorded =
+          brief.prior.codingRunId !== undefined
+            ? ((await facts(readers, brief.prior.codingRunId)).dispositions ?? [])
+            : [];
+        const { matched, dropped } = matchDispositions(findings, recorded);
+        prior = { findings, dispositions: matched, dropped };
+      }
       const turn = buildShipReviewTurn({
         where,
         round: brief.round,
@@ -144,15 +165,17 @@ export async function composeChild(
       const contract = await contractFor(instance, unit, readers);
       return { preset: "review", prompt: `${prUrl(instance.repo, brief.pr)}\n\n${turn}`, contract };
     }
-    case "fix": {
+    case "findings": {
       const review = await facts(readers, brief.reviewRunId);
-      const findings = review.findings ?? [];
       return {
         preset: "coding",
-        prompt: buildShipFixTurn({ where, findings, review: review.finalReply ?? "" }),
+        prompt: findingsRequest({ where, findings: review.findings ?? [], review: review.finalReply ?? "" }),
         ref: unit.branch,
-        fixRound: { findingIds: findings.map((f) => f.id) },
       };
+    }
+    default: {
+      const unknown: never = brief;
+      throw new Error(`unknown brief kind ${JSON.stringify((unknown as { kind?: unknown }).kind)}`);
     }
   }
 }

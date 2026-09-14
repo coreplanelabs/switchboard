@@ -1,13 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { GUARDS, renderContract } from "../ship/contract.js";
+import type { Brief } from "../ship/coordinator.js";
 import type { CoordinatorInstance, CoordinatorUnit } from "./contract.js";
 import { composeChild, contractFor, TASK_UNIT, type BriefReaders, type ChildRunFacts } from "./briefs.js";
 
 // Feature: docs/reference/specs/http-ingress.md item 9 — a coordinator's spawn
 // names a brief in ids and the bot composes the child's turn: the unit's
 // contract from the plan at the base ref for round 0, the review turn with the
-// prior round's findings and dispositions, the fix turn with the findings —
-// what a round of the ship pipeline is told, from what the bot holds.
+// prior round's findings and the coding run's dispositions, the findings step's
+// message from the review run's record: what a round of the ship pipeline is
+// told, from what the bot holds. No brief composes a `fix` child (agent-ship
+// item 7): the findings are a message into the unit thread, whose coding
+// session continues.
 
 const PLAN = `# Fixture program - Plan
 
@@ -163,7 +167,6 @@ describe("composeChild — the child a brief names", () => {
     expect(child.ref).toBe(unit.branch);
     expect(child.prompt).toContain("Implement unit U10 — Warm the cache on wake — of docs/plans/fixture.md");
     expect(child.contract?.unit.id).toBe("U10");
-    expect(child.fixRound).toBeUndefined();
     expect(renderContract(child.contract!, {}).text).toContain("### Unit U10 — Warm the cache on wake");
 
     const taskUnit: CoordinatorUnit = { ...unit, unit: TASK_UNIT, branch: "ship/fix-abc" };
@@ -177,11 +180,16 @@ describe("composeChild — the child a brief names", () => {
     expect(task.contract?.unit.id).toBe(TASK_UNIT);
   });
 
-  it("a review brief is a review child on the pull request: round one's turn names the head; a re-review carries the prior review run's findings and the fix run's dispositions from their records, and the same contract", async () => {
+  it("a review brief is a review child on the pull request: round one's turn names the head; a re-review carries the prior review run's findings and the coding run's dispositions from their records, matched to the review's ids with an id it never issued dropped and noted, and the same contract", async () => {
     const { r } = readers({
       runs: {
         "run-r1": { findings: [FINDING], finalReply: "Changes requested: one nit." },
-        "run-f1": { dispositions: [{ findingId: "F1", disposition: "declined", note: "the loop is exclusive" }] },
+        "run-f1": {
+          dispositions: [
+            { findingId: "F1", disposition: "declined", note: "the loop is exclusive" },
+            { findingId: "F9", disposition: "fixed", note: "no such finding" },
+          ],
+        },
       },
     });
     const first = await composeChild(
@@ -202,7 +210,7 @@ describe("composeChild — the child a brief names", () => {
         pr: 7,
         headSha: "b".repeat(40),
         round: 2,
-        prior: { reviewRunId: "run-r1", fixRunId: "run-f1" },
+        prior: { reviewRunId: "run-r1", codingRunId: "run-f1" },
       },
       instance,
       unit,
@@ -211,20 +219,42 @@ describe("composeChild — the child a brief names", () => {
     expect(second.prompt).toContain("Re-review pull request acme/api#7");
     expect(second.prompt).toContain("[minor] F1 src/a.ts:3 — off by one");
     expect(second.prompt).toContain("F1: declined — the loop is exclusive");
+    expect(second.prompt).not.toContain("F9: fixed");
+    expect(second.prompt).toContain("Dispositions naming no finding of the previous round (dropped): F9");
   });
 
-  it("a fix brief is a coding child on the unit's branch with the review run's findings and final words as its turn, answering exactly those finding ids; a review run the history lacks throws by name", async () => {
+  it("a findings brief is the review's findings as a message into the unit thread: a coding child on the unit's branch whose text carries every finding verbatim, the review's final words and the ask (a disposition per finding, the description resubmitted, the branch pushed, never a merge or an approve), with no contract and no finding-id tag; a review run the history lacks throws by name; no `fix` brief composes", async () => {
     const { r } = readers({ runs: { "run-r1": { findings: [FINDING], finalReply: "Changes requested: one nit." } } });
-    const fix = await composeChild({ kind: "fix", unit: "U10", pr: 7, reviewRunId: "run-r1" }, instance, unit, r);
-    expect(fix.preset).toBe("coding");
-    expect(fix.ref).toBe(unit.branch);
-    expect(fix.fixRound).toEqual({ findingIds: ["F1"] });
-    expect(fix.prompt).toContain("The review of acme/api#7 requested changes.");
-    expect(fix.prompt).toContain("[minor] F1 src/a.ts:3 — off by one");
-    expect(fix.prompt).toContain("Review:\nChanges requested: one nit.");
-    expect(fix.contract).toBeUndefined();
+    const findings = await composeChild(
+      { kind: "findings", unit: "U10", pr: 7, reviewRunId: "run-r1" },
+      instance,
+      unit,
+      r,
+    );
+    expect(findings.preset).toBe("coding");
+    expect(findings.ref).toBe(unit.branch);
+    expect(findings.prompt).toContain("The review of acme/api#7 requested changes.");
+    expect(findings.prompt).toContain("[minor] F1 src/a.ts:3 — off by one");
+    expect(findings.prompt).toContain("submit_dispositions");
+    expect(findings.prompt).toContain("submit_pr_description");
+    expect(findings.prompt).toContain("Never merge and never approve.");
+    expect(findings.prompt.endsWith("Review:\nChanges requested: one nit.")).toBe(true);
+    expect(findings.contract).toBeUndefined();
+    expect(Object.keys(findings).sort()).toEqual(["preset", "prompt", "ref"]);
+    // A review that listed no structured findings is addressed by its prose, said so.
+    const prose = readers({ runs: { "run-r1": { findings: [], finalReply: "Please tighten the tests." } } });
+    const byProse = await composeChild(
+      { kind: "findings", unit: "U10", pr: 7, reviewRunId: "run-r1" },
+      instance,
+      unit,
+      prose.r,
+    );
+    expect(byProse.prompt).toContain("Findings:\n(the review listed no structured findings, address its prose)");
     await expect(
-      composeChild({ kind: "fix", unit: "U10", pr: 7, reviewRunId: "run-gone" }, instance, unit, r),
+      composeChild({ kind: "findings", unit: "U10", pr: 7, reviewRunId: "run-gone" }, instance, unit, r),
     ).rejects.toThrow(/run run-gone is not in the run history/);
+    await expect(
+      composeChild({ kind: "fix", unit: "U10", pr: 7, reviewRunId: "run-r1" } as unknown as Brief, instance, unit, r),
+    ).rejects.toThrow(/brief kind/);
   });
 });

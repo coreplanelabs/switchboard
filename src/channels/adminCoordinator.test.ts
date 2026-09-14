@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { Secret } from "../secrets.js";
+import { AGENTS } from "../agents/registry.js";
 import { NO_GRANTS, type Grants } from "../core/authz/types.js";
 import { InMemoryCoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import type { CoordinatorInstance, CoordinatorTag, CoordinatorUnit } from "../core/coordinator/contract.js";
@@ -853,16 +854,19 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect("planId" in body).toBe(false);
   });
 
-  it("unit-start opens a plan unit's thread through the requesting thread's channel, finds the board issue titled by the unit id, and writes the row; a second start answers the same thread; a task unit runs in the requesting thread; an unknown unit is 404", async () => {
-    const opened: string[] = [];
-    const parentIo: ChannelIO = {
+  /** A requesting thread's channel that opens threads: each lead gets the next key, and the leads are kept. */
+  function openingIo(opened: string[]): ChannelIO {
+    return {
       reply: async () => {},
       status: async () => ({ update: () => {}, done: async () => {} }),
       history: async () => [],
       openThread: async (lead) => {
         opened.push(lead);
         return {
-          thread: { threadKey: `slack:C1:${opened.length + 1}.0`, sourceUrl: "https://acme.slack.com/archives/C1/p2" },
+          thread: {
+            threadKey: `slack:C1:${opened.length + 1}.0`,
+            sourceUrl: `https://acme.slack.com/archives/C1/p${opened.length + 1}`,
+          },
           io: {
             reply: async () => {},
             status: async () => ({ update: () => {}, done: async () => {} }),
@@ -871,51 +875,93 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         };
       },
     };
+  }
+
+  it("unit-start opens a plan unit's thread and, beside it, the unit's review thread through the requesting thread's channel, finds the board issue titled by the unit id, and writes both threads on the row; a second start answers the same threads and opens none; a task unit runs in the requesting thread with a review thread of its own; an unknown unit is 404", async () => {
+    const opened: string[] = [];
     const h = await planHarness({
-      ioFor: () => parentIo,
+      ioFor: () => openingIo(opened),
       issues: [issue(7, "Something else"), issue(834, "U10: Warm the cache on wake (unit)")],
     });
     const first = await call(h, "unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" });
     expect(first).toEqual({
       status: 200,
-      body: { ok: true, threadKey: "slack:C1:2.0", branch: "plan/fixture/u10", base: "main", issue: 834, at: NOW },
+      body: {
+        ok: true,
+        threadKey: "slack:C1:2.0",
+        reviewThreadKey: "slack:C1:3.0",
+        branch: "plan/fixture/u10",
+        base: "main",
+        issue: 834,
+        at: NOW,
+      },
     });
-    expect(opened).toHaveLength(1);
+    expect(opened).toHaveLength(2);
     expect(opened[0]).toContain("↳ *ship* unit U10 — Warm the cache on wake for alice");
     expect(opened[0]).toContain("`plan/fixture/u10` in acme/api");
+    expect(opened[1]).toContain("↳ *ship* review of unit U10 — Warm the cache on wake for alice");
+    expect(opened[1]).toContain("`plan/fixture/u10` in acme/api");
     expect(h.threadsAsked[0]).toEqual({ threadKey: INSTANCE.threadKey, userId: INSTANCE.userId });
     const rows = await h.instances.listUnits(PLAN_INSTANCE.id);
     expect(rows[0]).toEqual(
       unitRow("U10", {
         threadKey: "slack:C1:2.0",
         sourceUrl: "https://acme.slack.com/archives/C1/p2",
+        reviewThread: { threadKey: "slack:C1:3.0", sourceUrl: "https://acme.slack.com/archives/C1/p3" },
         issue: 834,
         startedAt: NOW,
       }),
     );
-    // Idempotent: the same thread, no second lead.
+    // Idempotent: the same threads, no further lead.
     expect((await call(h, "unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" })).body).toMatchObject({
       threadKey: "slack:C1:2.0",
+      reviewThreadKey: "slack:C1:3.0",
     });
-    expect(opened).toHaveLength(1);
+    expect(opened).toHaveLength(2);
     expect((await call(h, "unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: "U99" })).status).toBe(404);
 
-    const task = harness();
+    // A row written before the review thread existed: its start opens the review thread alone.
+    const older = await planHarness({ ioFor: () => openingIo(opened) });
+    await older.instances.putUnits([
+      unitRow("U10", { threadKey: "slack:C1:2.0", sourceUrl: "https://acme.slack.com/archives/C1/p2", startedAt: 5 }),
+    ]);
+    const resumed = await call(older, "unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" });
+    expect(resumed.body).toMatchObject({ threadKey: "slack:C1:2.0", reviewThreadKey: "slack:C1:4.0" });
+    expect(opened).toHaveLength(3);
+    expect(opened[2]).toContain("↳ *ship* review of unit U10");
+    expect((await older.instances.listUnits(PLAN_INSTANCE.id))[0]).toMatchObject({
+      threadKey: "slack:C1:2.0",
+      reviewThread: { threadKey: "slack:C1:4.0" },
+      startedAt: 5,
+    });
+
+    const taskOpened: string[] = [];
+    const task = harness({ ioFor: () => openingIo(taskOpened) });
     await task.instances.put(INSTANCE);
     await task.instances.putUnits([
       { instanceId: INSTANCE.id, unit: "task", slug: "task", branch: INSTANCE.branch, dependsOn: [], rounds: [] },
     ]);
     expect(await call(task, "unit-start", { parentInstanceId: INSTANCE.id, unit: "task" })).toEqual({
       status: 200,
-      body: { ok: true, threadKey: INSTANCE.threadKey, branch: INSTANCE.branch, base: "main", at: NOW },
+      body: {
+        ok: true,
+        threadKey: INSTANCE.threadKey,
+        reviewThreadKey: "slack:C1:2.0",
+        branch: INSTANCE.branch,
+        base: "main",
+        at: NOW,
+      },
     });
+    expect(taskOpened).toHaveLength(1);
+    expect(taskOpened[0]).toContain("↳ *ship* review of the task for alice");
     expect((await task.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
       threadKey: INSTANCE.threadKey,
       sourceUrl: INSTANCE.sourceUrl,
+      reviewThread: { threadKey: "slack:C1:2.0", sourceUrl: "https://acme.slack.com/archives/C1/p2" },
     });
   });
 
-  it("unit-start without a channel that can open a thread is 503; a channel whose open fails is 502 and the row is unchanged", async () => {
+  it("unit-start without a channel that can open a thread is 503; a channel whose open fails is 502 and the row is unchanged; a review thread whose open fails leaves the unit thread on the row, so the retry opens the review thread alone", async () => {
     const noThread = await planHarness({ ioFor: () => undefined });
     expect((await call(noThread, "unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" })).status).toBe(503);
     const failing = await planHarness({
@@ -934,6 +980,183 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       body: { ok: false, error: "thread_failed", message: "chat.postMessage answered without a ts", at: NOW },
     });
     expect((await failing.instances.listUnits(PLAN_INSTANCE.id))[0]).toEqual(unitRow("U10"));
+
+    let opens = 0;
+    const secondFails = await planHarness({
+      ioFor: () => ({
+        reply: async () => {},
+        status: async () => ({ update: () => {}, done: async () => {} }),
+        history: async () => [],
+        openThread: async () => {
+          opens++;
+          if (opens === 2) throw new Error("rate limited");
+          return {
+            thread: { threadKey: `slack:C1:${opens + 1}.0` },
+            io: {
+              reply: async () => {},
+              status: async () => ({ update: () => {}, done: async () => {} }),
+              history: async () => [],
+            },
+          };
+        },
+      }),
+    });
+    const half = await call(secondFails, "unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" });
+    expect(half).toEqual({
+      status: 502,
+      body: { ok: false, error: "thread_failed", message: "rate limited", at: NOW },
+    });
+    expect((await secondFails.instances.listUnits(PLAN_INSTANCE.id))[0]).toEqual(
+      unitRow("U10", { threadKey: "slack:C1:2.0" }),
+    );
+    const retried = await call(secondFails, "unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" });
+    expect(retried.body).toMatchObject({ ok: true, threadKey: "slack:C1:2.0", reviewThreadKey: "slack:C1:4.0" });
+    expect(opens).toBe(3);
+  });
+
+  it("spawn with a review brief dispatches the review child into the unit's review thread, never the unit thread: a run live in the unit thread does not make it busy, one live in the review thread does, and the child is the review preset, whose read identity gives it a readonly worktree of its own; a row without a review thread has one opened at the first review spawn and stored", async () => {
+    const review = (step: string) => ({
+      parentInstanceId: PLAN_INSTANCE.id,
+      step,
+      preset: "review",
+      brief: { kind: "review", unit: "U10", pr: 7, headSha: "a".repeat(40), round: 1 },
+    });
+    const h = await planHarness();
+    await h.instances.putUnits([
+      unitRow("U10", {
+        threadKey: "slack:C1:2.0",
+        sourceUrl: "https://acme.slack.com/archives/C1/p2",
+        reviewThread: { threadKey: "slack:C1:3.0", sourceUrl: "https://acme.slack.com/archives/C1/p3" },
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+      }),
+    ]);
+    // A person's run in the unit thread: the review still runs, in its own thread.
+    h.registry.create("coding · person", {
+      agent: "coding",
+      channelId: PLAN_INSTANCE.channelId,
+      userId: PLAN_INSTANCE.userId,
+      threadKey: "slack:C1:2.0",
+    });
+    const res = await call(h, "spawn", review("U10/1/review"));
+    expect(res).toEqual({ status: 200, body: { ok: true, runId: "run-child", threadKey: "slack:C1:3.0", at: NOW } });
+    expect(h.dispatched).toHaveLength(1);
+    const { msg, opts } = h.dispatched[0];
+    expect(msg.threadKey).toBe("slack:C1:3.0");
+    expect(msg.sourceUrl).toBe("https://acme.slack.com/archives/C1/p3");
+    expect(msg.text.startsWith("agent:review in acme/api: https://github.com/acme/api/pull/7\n\n")).toBe(true);
+    expect(msg.text).toContain(`Review pull request acme/api#7 at head \`${"a".repeat(40)}\``);
+    expect(opts.coordinator).toEqual({
+      parentInstanceId: PLAN_INSTANCE.id,
+      idempotencyKey: "plan-fixture:U10/1/review",
+      base: "main",
+    });
+    expect(AGENTS.review.identity).toBe("read");
+    expect(h.threadsAsked.at(-1)).toEqual({ threadKey: "slack:C1:3.0", userId: PLAN_INSTANCE.userId });
+
+    // A run live in the review thread is what makes a review spawn busy.
+    const busy = await planHarness();
+    await busy.instances.putUnits([
+      unitRow("U10", { threadKey: "slack:C1:2.0", reviewThread: { threadKey: "slack:C1:3.0" } }),
+    ]);
+    const other = busy.registry.create("review · person", {
+      agent: "review",
+      channelId: PLAN_INSTANCE.channelId,
+      userId: PLAN_INSTANCE.userId,
+      threadKey: "slack:C1:3.0",
+    });
+    expect(await call(busy, "spawn", review("U10/1/review"))).toEqual({
+      status: 409,
+      body: { ok: false, error: "busy", runId: other.id, agent: "review", at: NOW },
+    });
+    expect(busy.dispatched).toEqual([]);
+
+    // A row written before the review thread existed: the first review spawn opens it and stores it.
+    const opened: string[] = [];
+    const older = await planHarness({ ioFor: () => openingIo(opened) });
+    await older.instances.putUnits([unitRow("U10", { threadKey: "slack:C1:9.0" })]);
+    const late = await call(older, "spawn", review("U10/1/review"));
+    expect(late).toEqual({ status: 200, body: { ok: true, runId: "run-child", threadKey: "slack:C1:2.0", at: NOW } });
+    expect(opened).toHaveLength(1);
+    expect(opened[0]).toContain("↳ *ship* review of unit U10");
+    expect(older.threadsAsked[0]).toEqual({ threadKey: INSTANCE.threadKey, userId: INSTANCE.userId });
+    expect(older.dispatched[0].msg.threadKey).toBe("slack:C1:2.0");
+    expect((await older.instances.listUnits(PLAN_INSTANCE.id))[0]).toMatchObject({
+      threadKey: "slack:C1:9.0",
+      reviewThread: { threadKey: "slack:C1:2.0", sourceUrl: "https://acme.slack.com/archives/C1/p2" },
+    });
+  });
+
+  it("spawn with a findings brief is refused busy while a run is live in the unit thread (a person's, since the runner awaited its own child) and dispatched into it when none is; a run that takes the unit thread between the read and the claim is answered from that run", async () => {
+    const findings = {
+      parentInstanceId: PLAN_INSTANCE.id,
+      step: "U10/1/findings",
+      preset: "coding",
+      brief: { kind: "findings", unit: "U10", pr: 7, reviewRunId: "run-r1" },
+    };
+    const reviewRecord = record("run-r1", {
+      agent: "review",
+      threadKey: "slack:C1:3.0",
+      parentInstanceId: PLAN_INSTANCE.id,
+      idempotencyKey: "plan-fixture:U10/1/review",
+      verdict: {
+        verdict: "request_changes",
+        summary: "one nit",
+        findings: [{ id: "F1", severity: "minor", file: "src/a.ts", line: 3, title: "off by one" }],
+      },
+      reviewHead: "a".repeat(40),
+      events: [{ type: "answer", text: "Changes requested: one nit.", seq: 1 }],
+    });
+    const rows = () => [unitRow("U10", { threadKey: "slack:C1:2.0", reviewThread: { threadKey: "slack:C1:3.0" } })];
+    const live = await planHarness();
+    await live.instances.putUnits(rows());
+    await live.store.put(reviewRecord);
+    const person = live.registry.create("coding · person", {
+      agent: "coding",
+      channelId: PLAN_INSTANCE.channelId,
+      userId: PLAN_INSTANCE.userId,
+      threadKey: "slack:C1:2.0",
+    });
+    expect(await call(live, "spawn", findings)).toEqual({
+      status: 409,
+      body: { ok: false, error: "busy", runId: person.id, agent: "coding", at: NOW },
+    });
+    expect(live.dispatched).toEqual([]);
+
+    const free = await planHarness();
+    await free.instances.putUnits(rows());
+    await free.store.put(reviewRecord);
+    // A run live in the REVIEW thread does not hold the unit thread.
+    free.registry.create("review · child", {
+      agent: "review",
+      channelId: PLAN_INSTANCE.channelId,
+      userId: PLAN_INSTANCE.userId,
+      threadKey: "slack:C1:3.0",
+    });
+    expect(await call(free, "spawn", findings)).toEqual({
+      status: 200,
+      body: { ok: true, runId: "run-child", threadKey: "slack:C1:2.0", at: NOW },
+    });
+    expect(free.dispatched).toHaveLength(1);
+    expect(free.dispatched[0].msg.threadKey).toBe("slack:C1:2.0");
+    expect(free.dispatched[0].msg.text.startsWith("agent:coding in acme/api on branch plan/fixture/u10: ")).toBe(true);
+
+    const raced = await planHarness({
+      script: async (msg) => {
+        raced.registry.create("coding · person", {
+          agent: "coding",
+          channelId: msg.channelId,
+          userId: msg.userId,
+          threadKey: msg.threadKey,
+        });
+        return { status: "refused", refusal: "coordinator_thread_live" };
+      },
+    });
+    await raced.instances.putUnits(rows());
+    await raced.store.put(reviewRecord);
+    expect(await call(raced, "spawn", findings)).toMatchObject({
+      status: 409,
+      body: { ok: false, error: "busy", agent: "coding", at: NOW },
+    });
   });
 
   it("branch creates the unit's branch from the base on origin and answers ok; a create that fails answers ok: false with the reason, never a throw; an instance without a base says so", async () => {
@@ -956,7 +1179,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     });
   });
 
-  it("spawn with a contract brief composes the coding child's turn from the plan at the base ref: the unit's branch in the text, the contract and the tag as its options; a fix brief carries the review run's findings and the finding ids; a brief for a unit without a thread is 409; a brief the bot cannot compose is 502", async () => {
+  it("spawn with a contract brief composes the coding child's turn from the plan at the base ref: the unit's branch in the text, the contract and the tag as its options; a findings brief dispatches the review run's findings into the unit thread as `agent:coding` with the tag as its only option, no finding-id tag; a brief for a unit without a thread is 409; a brief the bot cannot compose is 502", async () => {
     const h = await planHarness();
     await h.instances.putUnits([unitRow("U10", { threadKey: "slack:C1:2.0", issue: 834 })]);
     const res = await call(h, "spawn", {
@@ -983,11 +1206,13 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(contract.agentRules).toEqual({ file: "AGENTS.md", text: "# Rules" });
     expect(contract.rebase).toEqual({ branch: "plan/fixture/u10", onto: "main" });
 
-    // The fix brief: the review run's record carries the findings and the words.
+    // The findings brief: the review run's record carries the findings and the words, and the message goes
+    // into the unit thread as the requester with the directive explicit, so the coding session there continues
+    // whatever the thread's sticky agent says.
     await h.store.put(
       record("run-r1", {
         agent: "review",
-        threadKey: "slack:C1:2.0",
+        threadKey: "slack:C1:3.0",
         parentInstanceId: PLAN_INSTANCE.id,
         idempotencyKey: "plan-fixture:U10/1/review",
         verdict: {
@@ -999,17 +1224,32 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         events: [{ type: "answer", text: "Changes requested: one nit.", seq: 1 }],
       }),
     );
-    const fix = await call(h, "spawn", {
+    const findings = await call(h, "spawn", {
       parentInstanceId: PLAN_INSTANCE.id,
-      step: "U10/1/fix",
+      step: "U10/1/findings",
       preset: "coding",
-      brief: { kind: "fix", unit: "U10", pr: 7, reviewRunId: "run-r1" },
+      brief: { kind: "findings", unit: "U10", pr: 7, reviewRunId: "run-r1" },
     });
-    expect(fix.status).toBe(200);
-    const fixDispatch = h.dispatched[1];
-    expect(fixDispatch.msg.text).toContain("The review of acme/api#7 requested changes.");
-    expect(fixDispatch.msg.text).toContain("[minor] F1 src/a.ts:3 — off by one");
-    expect((fixDispatch.opts as { fixRound?: unknown }).fixRound).toEqual({ findingIds: ["F1"] });
+    expect(findings).toEqual({
+      status: 200,
+      body: { ok: true, runId: "run-child", threadKey: "slack:C1:2.0", at: NOW },
+    });
+    const findingsDispatch = h.dispatched[1];
+    expect(findingsDispatch.msg.threadKey).toBe("slack:C1:2.0");
+    expect(findingsDispatch.msg.userId).toBe(PLAN_INSTANCE.userId);
+    expect(
+      findingsDispatch.msg.text.startsWith(
+        "agent:coding in acme/api on branch plan/fixture/u10: The review of acme/api#7 requested changes.",
+      ),
+    ).toBe(true);
+    expect(findingsDispatch.msg.text).toContain("[minor] F1 src/a.ts:3 — off by one");
+    expect(findingsDispatch.msg.text).toContain("Review:\nChanges requested: one nit.");
+    expect(findingsDispatch.opts).toEqual({
+      coordinator: { parentInstanceId: PLAN_INSTANCE.id, idempotencyKey: "plan-fixture:U10/1/findings", base: "main" },
+    });
+    // No dispatch of this route carries a finding-id tag: the tool records what the run submits and the
+    // runner matches the ids.
+    for (const d of h.dispatched) expect("fixRound" in d.opts).toBe(false);
 
     const noThread = await planHarness();
     expect(
@@ -1045,7 +1285,12 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       await bad({ preset: "review", brief: { kind: "contract", unit: "U10", rebase: { branch: "b", onto: "main" } } }),
     ).toBe(400);
     expect(await bad({ brief: { kind: "review", unit: "U10", pr: "7", round: 1 } })).toBe(400);
-    expect(await bad({ brief: { kind: "fix", unit: "U10", pr: 7 } })).toBe(400);
+    expect(await bad({ brief: { kind: "review", unit: "U10", pr: 7, round: 2, prior: { fixRunId: "run-f1" } } })).toBe(
+      400,
+    );
+    expect(await bad({ brief: { kind: "findings", unit: "U10", pr: 7 } })).toBe(400);
+    // The fix brief kind is gone: a coordinator still sending one is refused like any unknown kind.
+    expect(await bad({ brief: { kind: "fix", unit: "U10", pr: 7, reviewRunId: "run-r1" } })).toBe(400);
     expect(await bad({ brief: { kind: "merge", unit: "U10" } })).toBe(400);
     expect(await bad({ prompt: "x", unit: "has space" })).toBe(400);
     expect(h.dispatched).toEqual([]);
@@ -1092,7 +1337,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     await h.store.put(
       record("run-f1", {
         ...tag,
-        idempotencyKey: "plan-fixture:U10/1/fix",
+        idempotencyKey: "plan-fixture:U10/1/findings",
         threadKey: "slack:C1:2.0",
         dispositions: [{ findingId: "F1", disposition: "fixed", note: "done" }],
       }),
