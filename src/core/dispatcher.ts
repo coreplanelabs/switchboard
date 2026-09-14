@@ -36,6 +36,14 @@ import {
   type AuthorizeDeps,
 } from "./dispatch/authorize.js";
 import { buildMessages, type TextTurn } from "./dispatch/messages.js";
+import {
+  attachmentsLine,
+  copyStaged,
+  noWorkspaceLine,
+  pullStaged,
+  stagingIndex,
+  type StagedOutcome,
+} from "./dispatch/staging.js";
 import type { RunSeed } from "./runRecord.js";
 import {
   attachWorkspace,
@@ -591,6 +599,24 @@ export async function dispatch(
     });
     const { run, runId, channelVisibility, liveUrl, publishText, publishMeta } = registration;
     registered = run;
+    // Staged files (record 0033): the copies into the store START here — after
+    // admission and the run's row, before the workspace attach they overlap
+    // with — for a run whose agent has a workspace to pull them into; the pulls
+    // follow the attach below. A workspace-less agent copies nothing and its
+    // turn says so. A resume re-enters a run whose turn already carried them.
+    const staged = !resume && deps.artifacts && msg.staged && msg.staged.length > 0 ? msg.staged : [];
+    // One counter for every round this run stages (the request here, each
+    // steer in the loop): two files of one name never share a workspace path.
+    const nextStagedIndex = stagingIndex();
+    const stagedCopies: Promise<StagedOutcome[]> | undefined =
+      staged.length > 0 && agent.machine !== "none"
+        ? copyStaged(staged, {
+            store: deps.artifacts!,
+            threadKey: msg.threadKey,
+            nextIndex: nextStagedIndex,
+            publish: (e) => registry.publish(runId, e),
+          })
+        : undefined;
     const reservation = await reserveRun(deps, {
       msg,
       agent,
@@ -643,6 +669,31 @@ export async function dispatch(
       );
       if (executor.release) await executor.release("always").catch(() => {});
       return ended;
+    }
+    // The staged files land now (record 0033): the copies awaited, each pulled
+    // into `attachments/` over this run's executor as the thread user, and the
+    // request turn gains the line that names every file — landed or not — so a
+    // failure carries its reason into the model's first read. A workspace-less
+    // agent gets the line that says where the file can be worked with.
+    if (staged.length > 0) {
+      const line = stagedCopies
+        ? attachmentsLine(
+            await pullStaged(await stagedCopies, {
+              store: deps.artifacts!,
+              executor,
+              resident: resident !== undefined,
+            }),
+          )
+        : noWorkspaceLine(staged);
+      const request = messages[messages.length - 1];
+      if (request && request.role === "user" && line) {
+        request.content = Array.isArray(request.content)
+          ? [...request.content, { type: "text", text: line }]
+          : [
+              { type: "text", text: request.content },
+              { type: "text", text: line },
+            ];
+      }
     }
     // The run's model-proxy bearer (dispatch/provision.ts; docs/reference/specs/model-proxy.md):
     // minted the moment the executor is provisioned, bound to this run, pinned
@@ -803,6 +854,7 @@ export async function dispatch(
       agent,
       profile,
       resolved,
+      stagingIndex: nextStagedIndex,
       provider,
       model,
       messages,

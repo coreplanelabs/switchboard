@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { classifyDocument, fetchDocuments, fetchImages } from "./attachments.js";
+import {
+  classifyDocument,
+  fetchDocuments,
+  fetchImages,
+  MAX_STAGED_FILE_BYTES,
+  MAX_STAGED_PER_MESSAGE,
+  stagedFiles,
+} from "./attachments.js";
 
 // Feature: docs/reference/specs/slack-channel.md — attachment ingestion within budgets.
 
@@ -327,5 +334,79 @@ describe("fetchDocuments (secret files skipped-with-note, never decoded)", () =>
     expect(documents.map((d) => d.name)).toEqual(["notes.txt", "data.csv", "main.ts"]);
     expect(skipped).toEqual(["config.env (text/plain)"]);
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+});
+
+// Feature: docs/reference/specs/execution.md item 20 (record 0033) — the files
+// neither inline pass could carry are staged by reference when the store is
+// on: metadata only, the inline caps untouched, the secret denylist still first.
+describe("stagedFiles (by-reference classification)", () => {
+  const file = (name: string, mimetype: string, size: number, id = name) => ({
+    id,
+    name,
+    mimetype,
+    size,
+    url_private: `https://files.slack.com/files-pri/T1-${id}/${name}`,
+  });
+  const label = (f: { name: string; mimetype: string }) => `${f.name} (${f.mimetype})`;
+  const POLICY = { staging: true, maxBytesPerMessage: 2 * 1024 ** 3, messageId: "1700000000.000200" };
+
+  it("a video, a 6 MiB PNG and a PDF over the document cap are staged with their metadata; a 1 MiB PNG the image pass carried is not; the store off → nothing staged, labels unchanged", () => {
+    const video = file("clip.mp4", "video/mp4", 312_000_000);
+    const bigPng = file("shot.png", "image/png", 6 * 1024 * 1024);
+    const bigPdf = file("spec.pdf", "application/pdf", 12 * 1024 * 1024);
+    const smallPng = file("icon.png", "image/png", 1024 * 1024);
+    // The files BOTH passes rejected, as objects (their `skippedFiles`): icon.png is not among them — the image pass carried it.
+    const unsupported = [video, bigPng, bigPdf];
+    void smallPng;
+    const on = stagedFiles(unsupported, POLICY);
+    expect(on.staged).toEqual([
+      { name: "clip.mp4", size: 312_000_000, type: "video/mp4", url: video.url_private, messageId: POLICY.messageId },
+      {
+        name: "shot.png",
+        size: 6 * 1024 * 1024,
+        type: "image/png",
+        url: bigPng.url_private,
+        messageId: POLICY.messageId,
+      },
+      {
+        name: "spec.pdf",
+        size: 12 * 1024 * 1024,
+        type: "application/pdf",
+        url: bigPdf.url_private,
+        messageId: POLICY.messageId,
+      },
+    ]);
+    expect(on.skipped).toEqual([]);
+    const off = stagedFiles(unsupported, { ...POLICY, staging: false });
+    expect(off).toEqual({ staged: [], skipped: [label(video), label(bigPng), label(bigPdf)] });
+    // Matching is by file, never by label: a second `shot.png (image/png)` the image
+    // pass carried (1 MiB) shares the 6 MiB one's label and is not staged with it.
+    const smallShot = file("shot.png", "image/png", 1024 * 1024, "F-small");
+    void smallShot;
+    expect(stagedFiles([bigPng], POLICY).staged.map((s) => [s.name, s.size])).toEqual([["shot.png", 6 * 1024 * 1024]]);
+  });
+
+  it("a 1.2 GB file, an eleventh file, and the overflow past the per-message budget are skipped with the reason; the secret denylist wins over staging", () => {
+    const huge = file("dump.bin", "application/octet-stream", 1_200_000_000);
+    const key = file("id_rsa", "application/octet-stream", 3_000);
+    const many = Array.from({ length: 11 }, (_, i) => file(`part${i}.zip`, "application/zip", 1_000, `P${i}`));
+    const files = [huge, key, ...many];
+    const { staged, skipped } = stagedFiles(files, POLICY);
+    expect(staged.map((s) => s.name)).toEqual(many.slice(0, 10).map((f) => f.name));
+    expect(skipped).toEqual([
+      `dump.bin (application/octet-stream) — 1200000000 bytes is over the ${MAX_STAGED_FILE_BYTES}-byte per-file ceiling`,
+      "id_rsa (application/octet-stream) — looks like a credential or key file",
+      `part10.zip (application/zip) — more than ${MAX_STAGED_PER_MESSAGE} files on one message`,
+    ]);
+    // The budget: two 900 MB files under a 1.5 GB budget stage the first and skip the second.
+    const a = file("a.mov", "video/quicktime", 900_000_000, "A");
+    const b = file("b.mov", "video/quicktime", 900_000_000, "B");
+    const budget = stagedFiles([a, b], { ...POLICY, maxBytesPerMessage: 1_500_000_000 });
+    expect(budget.staged.map((s) => s.name)).toEqual(["a.mov"]);
+    expect(budget.skipped).toEqual(["b.mov (video/quicktime) — the message's files exceed the 1500000000-byte budget"]);
+    // No URL, name or size → skipped by name.
+    const bare = stagedFiles([{ id: "X", mimetype: "video/mp4" }], POLICY);
+    expect(bare.skipped).toEqual(["X (video/mp4) — Slack gave no download URL, name or size"]);
   });
 });

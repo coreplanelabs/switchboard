@@ -1,4 +1,4 @@
-import type { DocumentAttachment, ImageAttachment } from "./types.js";
+import type { DocumentAttachment, ImageAttachment, StagedFile } from "./types.js";
 import { systemClock } from "./trace/clock.js";
 
 // Thread admission (docs/reference/specs/thread-admission.md): ONE live run per thread.
@@ -37,6 +37,9 @@ export interface FollowUpInput {
   sourceUrl?: string;
   images?: ImageAttachment[];
   documents?: DocumentAttachment[];
+  /** Files left on the platform by reference (record 0033), staged into the
+   *  workspace before the turn that carries them. */
+  staged?: StagedFile[];
   /** When it arrived (ms epoch). */
   at: number;
   /** The run ledger's inbox seq for this follow-up (run-history item 40):
@@ -214,12 +217,14 @@ export function mergeFollowUps(inputs: FollowUpInput[]):
       sourceUrl?: string;
       images?: ImageAttachment[];
       documents?: DocumentAttachment[];
+      staged?: StagedFile[];
     }
   | undefined {
   if (inputs.length === 0) return undefined;
   const last = inputs[inputs.length - 1];
   const images = inputs.flatMap((i) => i.images ?? []);
   const documents = inputs.flatMap((i) => i.documents ?? []);
+  const staged = inputs.flatMap((i) => i.staged ?? []);
   return {
     text: inputs.map((i) => i.text).join("\n\n"),
     userId: last.userId,
@@ -227,5 +232,6 @@ export function mergeFollowUps(inputs: FollowUpInput[]):
     ...(last.sourceUrl !== undefined ? { sourceUrl: last.sourceUrl } : {}),
     ...(images.length > 0 ? { images } : {}),
     ...(documents.length > 0 ? { documents } : {}),
+    ...(staged.length > 0 ? { staged } : {}),
   };
 }

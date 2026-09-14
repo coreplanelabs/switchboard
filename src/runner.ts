@@ -96,6 +96,11 @@ export interface RunOptions {
    *  dispatcher's to run as a fresh turn. Absent (CLI, tests) → the loop is
    *  byte-identical to a run without follow-ups. */
   inbox?: FollowUpInbox;
+  /** Stage the drained follow-ups' files into the workspace before the model
+   *  reads them (record 0033): the dispatcher's copy-and-pull over the run's
+   *  own executor, answering the line the turn ends with (empty when the
+   *  inputs carried no staged file). Absent → no staging (no store, a test). */
+  stageFollowUps?: (inputs: readonly FollowUpInput[]) => Promise<string>;
   /** Awaited BEFORE each step's tools run, with the transcript turns appended
    *  since the previous report and the calls about to be dispatched — what the
    *  run ledger's step write needs (docs/reference/specs/run-history.md item 35). A throw
@@ -440,8 +445,12 @@ async function runLoop(
   // highest ledger seq drained, reported on every step record so a resume
   // folds in only the follow-ups past it. Starts where the last record left it.
   let inboxConsumedSeq = opts.resume?.inboxConsumedSeq ?? 0;
-  const drainFollowUps = (superseded = false): ContentPart[] => {
+  // Staging (record 0033) comes first and is awaited: the files a follow-up
+  // carried by reference are pulled into the workspace over the run's own
+  // executor before the model reads the turn that names them.
+  const drainFollowUps = async (superseded = false): Promise<ContentPart[]> => {
     const inputs: FollowUpInput[] = opts.inbox?.drain() ?? [];
+    const stagedLine = opts.stageFollowUps ? await opts.stageFollowUps(inputs) : "";
     for (const input of inputs) {
       if (input.ledgerSeq !== undefined && input.ledgerSeq > inboxConsumedSeq) inboxConsumedSeq = input.ledgerSeq;
       const source = {
@@ -452,7 +461,8 @@ async function runLoop(
       emit({ type: "input", text: redactSecrets(input.text), ...(Object.keys(source).length > 0 ? { source } : {}) });
       note("follow_up", `follow-up folded in: ${redactSecrets(followUpSnippet(input))}`);
     }
-    const parts: ContentPart[] = [{ type: "text", text: followUpPrompt(inputs, { superseded }) }];
+    const prompt = followUpPrompt(inputs, { superseded });
+    const parts: ContentPart[] = [{ type: "text", text: stagedLine ? `${prompt}\n\n${stagedLine}` : prompt }];
     for (const input of inputs) {
       for (const img of input.images ?? []) parts.push({ type: "image", mediaType: img.mediaType, data: img.data });
       for (const doc of input.documents ?? [])
@@ -751,7 +761,7 @@ async function runLoop(
         turn++;
         if (text) emit({ type: "assistant", text: redactSecrets(text) });
         messages.push({ role: "assistant", content: result.content });
-        messages.push({ role: "user", content: drainFollowUps(true) });
+        messages.push({ role: "user", content: await drainFollowUps(true) });
         continue;
       }
       return text || "_(no response)_";
@@ -812,7 +822,7 @@ async function runLoop(
     // end (budget, stop, dead sandbox) leaves them unconsumed for a fresh turn
     // rather than burying them in a write-up that can no longer act.
     const dead = execTracker.consecutiveInfraFailures >= MAX_CONSECUTIVE_INFRA_FAILURES;
-    if (pendingFollowUps() && !dead && wouldStep(turn, iteration + 1)) results.push(...drainFollowUps());
+    if (pendingFollowUps() && !dead && wouldStep(turn, iteration + 1)) results.push(...(await drainFollowUps()));
     messages.push({ role: "user", content: results });
 
     // Results are appended (every tool_use has its tool_result, so the finale

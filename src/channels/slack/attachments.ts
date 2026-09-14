@@ -3,7 +3,7 @@
 // downloads within the per-message and thread-wide budgets.
 
 import { extname } from "node:path";
-import type { DocumentAttachment, ImageAttachment } from "../../core/types.js";
+import type { DocumentAttachment, ImageAttachment, StagedFile } from "../../core/types.js";
 import { processSecrets } from "../../secrets.js";
 
 // Attachment ingestion. Only image types every provider accepts; Slack file
@@ -169,9 +169,11 @@ export async function fetchImages(
   files: SlackFile[] | undefined,
   maxImages: number,
   maxTotalBytes = Infinity,
-): Promise<{ images: ImageAttachment[]; skipped: string[]; bytes: number }> {
+): Promise<{ images: ImageAttachment[]; skipped: string[]; skippedFiles: SlackFile[]; bytes: number }> {
   const images: ImageAttachment[] = [];
   const skipped: string[] = [];
+  /** The same files as `skipped`, as objects: what staging matches on (a label can collide). */
+  const skippedFiles: SlackFile[] = [];
   let bytes = 0;
   // Pass 1 (sync): decide which files are even candidates — type, declared
   // size, and the per-message count budget. Pass 2: download the candidates
@@ -196,6 +198,7 @@ export async function fetchImages(
       candidates.length >= maxImages
     ) {
       skipped.push(label);
+      skippedFiles.push(f);
       continue;
     }
     candidates.push({ f, label, url, mediaType: f.mimetype });
@@ -210,12 +213,13 @@ export async function fetchImages(
     const buf = downloads[i];
     if (!buf || buf.byteLength > MAX_IMAGE_BYTES || bytes + buf.byteLength > maxTotalBytes) {
       skipped.push(label);
+      skippedFiles.push(f);
       return;
     }
     bytes += buf.byteLength;
     images.push({ mediaType, data: buf.toString("base64"), name: f.name });
   });
-  return { images, skipped, bytes };
+  return { images, skipped, skippedFiles, bytes };
 }
 
 const fileLabel = (f: SlackFile) => `${f.name ?? f.id ?? "file"} (${f.mimetype ?? "unknown type"})`;
@@ -255,9 +259,10 @@ export async function fetchDocuments(
   files: SlackFile[] | undefined,
   maxDocs: number,
   maxTotalBytes = Infinity,
-): Promise<{ documents: DocumentAttachment[]; skipped: string[]; bytes: number }> {
+): Promise<{ documents: DocumentAttachment[]; skipped: string[]; skippedFiles: SlackFile[]; bytes: number }> {
   const documents: DocumentAttachment[] = [];
   const skipped: string[] = [];
+  const skippedFiles: SlackFile[] = [];
   let bytes = 0;
   // Same three passes as fetchImages: candidates → concurrent downloads →
   // budgets applied in the original order.
@@ -268,6 +273,7 @@ export async function fetchDocuments(
     const kind = classifyDocument(f.mimetype, f.name);
     if (!url || !kind || (f.size ?? 0) > MAX_DOCUMENT_BYTES || candidates.length >= maxDocs) {
       skipped.push(label);
+      skippedFiles.push(f);
       continue;
     }
     candidates.push({ f, label, url, kind });
@@ -281,6 +287,7 @@ export async function fetchDocuments(
     const buf = downloads[i];
     if (!buf || buf.byteLength > MAX_DOCUMENT_BYTES || bytes + buf.byteLength > maxTotalBytes) {
       skipped.push(label);
+      skippedFiles.push(f);
       return;
     }
     bytes += buf.byteLength;
@@ -290,5 +297,65 @@ export async function fetchDocuments(
       name: f.name,
     });
   });
-  return { documents, skipped, bytes };
+  return { documents, skipped, skippedFiles, bytes };
+}
+
+// Staging (docs/reference/specs/execution.md item 20, record 0033): the files
+// NEITHER pass could carry — a video, a 6 MiB screenshot, a PDF over the
+// document cap, a zip — are not lost when the artifact store is configured:
+// they stay on Slack by reference and a run with a workspace pulls them into
+// `attachments/` before its turn. The inline caps above do not move: a 1 MiB
+// PNG still inlines, a 5 MiB one still inlines, a 6 MiB one is staged.
+/** Slack's own per-file ceiling; a larger file is skipped with the reason. */
+export const MAX_STAGED_FILE_BYTES = 1_073_741_824;
+/** Files staged per message; the rest are skipped with the reason. */
+export const MAX_STAGED_PER_MESSAGE = 10;
+
+/**
+ * Which of the files the inline passes rejected are staged instead, in message
+ * order, and which stay skipped — each skipped file's label carrying its reason.
+ * `unsupported` is the FILES both passes rejected (their `skippedFiles`,
+ * matched by identity — two files of one name and type on a message are two
+ * files, and the one an inline pass carried is never staged twice). The
+ * secret-file denylist wins over staging exactly as it wins over inlining: a
+ * `.pem` is never copied anywhere. Off (`staging: false`) → nothing is staged
+ * and the labels come back as the note always read them, so a deployment
+ * without a store is unchanged.
+ */
+export function stagedFiles(
+  unsupported: readonly SlackFile[],
+  opts: { staging: boolean; maxBytesPerMessage: number; messageId: string },
+): { staged: StagedFile[]; skipped: string[] } {
+  if (!opts.staging) return { staged: [], skipped: unsupported.map(fileLabel) };
+  const staged: StagedFile[] = [];
+  const skipped: string[] = [];
+  let total = 0;
+  for (const f of unsupported) {
+    const label = fileLabel(f);
+    const url = f.url_private_download ?? f.url_private;
+    const size = f.size ?? 0;
+    if (isSecretFile(f.name)) {
+      skipped.push(`${label} — looks like a credential or key file`);
+      continue;
+    }
+    if (!url || !f.name || size <= 0) {
+      skipped.push(`${label} — Slack gave no download URL, name or size`);
+      continue;
+    }
+    if (size > MAX_STAGED_FILE_BYTES) {
+      skipped.push(`${label} — ${size} bytes is over the ${MAX_STAGED_FILE_BYTES}-byte per-file ceiling`);
+      continue;
+    }
+    if (staged.length >= MAX_STAGED_PER_MESSAGE) {
+      skipped.push(`${label} — more than ${MAX_STAGED_PER_MESSAGE} files on one message`);
+      continue;
+    }
+    if (total + size > opts.maxBytesPerMessage) {
+      skipped.push(`${label} — the message's files exceed the ${opts.maxBytesPerMessage}-byte budget`);
+      continue;
+    }
+    total += size;
+    staged.push({ name: f.name, size, type: f.mimetype ?? "application/octet-stream", url, messageId: opts.messageId });
+  }
+  return { staged, skipped };
 }
