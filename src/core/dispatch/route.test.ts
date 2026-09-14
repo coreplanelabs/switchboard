@@ -130,6 +130,18 @@ describe("routablePresets — the table is the registry, never a copy", () => {
     expect(presetDoor(AGENTS.ship)).toBe("directive");
   });
 
+  it("the two read-only presets without a machine divide the web from GitHub in their own descriptions: general is the preset for a question GitHub answers, research is for one that needs the web", () => {
+    const general = presets.find((p) => p.name === "general")!.description;
+    const research = presets.find((p) => p.name === "research")!.description;
+    expect(general).toMatch(/GitHub/);
+    expect(general).toMatch(/the preset for any question .*GitHub answers/i);
+    expect(research).toMatch(/need the web/i);
+    expect(research).toMatch(/not for a question GitHub alone answers/i);
+    // Neither names the other: registry data must not drift on a rename.
+    expect(general).not.toMatch(/research/);
+    expect(research).not.toMatch(/general/);
+  });
+
   it("renders one table row per preset: name, description, machine, credential, budget", () => {
     const table = renderPresetTable(presets);
     const rows = table.split("\n").filter((l) => l.startsWith("| `"));
@@ -210,6 +222,25 @@ describe("parseRouteAnswer — a single JSON object naming an allowed preset, or
       expect(d.preset, raw).toBeUndefined();
       expect(d.reason).toMatch(/not a single JSON object|missing|router said/);
     }
+  });
+
+  it("an object missing a field names the field AND carries what came back, tidied — a forced tool call once answered without its required preset, and the record must show that", () => {
+    const noPreset = parseRouteAnswer(
+      '{"reason": "two asks", "parts": [{"preset": "coding", "text": "fix it"}]}',
+      allNames,
+    );
+    expect(noPreset.preset).toBeUndefined();
+    expect(noPreset.reason).toBe(
+      `missing preset in the router's answer: {"reason": "two asks", "parts": [{"preset": "coding", "text": "fix it"}]}`,
+    );
+    const noReason = parseRouteAnswer('{"preset": "review"}', allNames);
+    expect(noReason.reason).toBe(`missing reason in the router's answer: {"preset": "review"}`);
+    const long = parseRouteAnswer(`{"reason": "${"r".repeat(400)}"}`, allNames);
+    // The raw is tidied like every reason: one line, cut at the cap with the ellipsis.
+    expect(long.reason.length).toBeLessThanOrEqual(
+      "missing preset in the router's answer: ".length + ROUTE_REASON_CAP + 1,
+    );
+    expect(long.reason).toMatch(/…$/);
   });
 
   it("keeps the reason to one line within the cap and never lets a secret through", () => {
@@ -622,8 +653,8 @@ describe("buildRoutePrompt — the imperative rule, stated for the write preset 
     expect(p.system).toMatch(/"add X"/);
     expect(p.system).toContain("answer `coding`");
     expect(p.system).toMatch(/"why did ci fail\?"/i);
-    expect(p.system).toMatch(/pull request that is named/);
-    expect(p.system).toMatch(/no pull request named is not a review/);
+    expect(p.system).toMatch(/named by a link or a number, or the thread's own/);
+    expect(p.system).toMatch(/no pull request in view is not a review/);
     // The rule rides the system half — the cache-controlled, per-deployment part — never the per-message user turn.
     expect(p.user).not.toMatch(/make it pass/);
   });
