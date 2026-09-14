@@ -1,6 +1,6 @@
 # Your first request in Slack
 
-By the end, you have sent Switchboard a request, followed up without repeating yourself, and handed a real task to a specialist agent.
+By the end, you have asked Switchboard a question, followed up without repeating yourself, and handed it a real task in plain words.
 
 **You need:** a Slack workspace where the bot is installed and a channel it is in (or a direct message with it). Ten minutes.
 
@@ -24,7 +24,7 @@ sequenceDiagram
     Switchboard->>Slack: reply in-thread
 ```
 
-You should see a 👀 reaction (the receipt), one status card edited in place, then the answer in a thread. No 👀 means the bot is not in the channel.
+You should see a 👀 reaction (the receipt), one status card edited in place, then the answer in a thread. The card's first line names the agent it picked and why. No 👀 means the bot is not in the channel.
 
 ## Follow up without the mention
 
@@ -39,10 +39,10 @@ Every reply in a thread the bot has answered in reaches it, and the thread keeps
 ## Hand off something bigger
 
 ```
-@switchboard agent:coding in acme/api: add a retry to the webhook sender
+@switchboard in acme/api, add a retry to the webhook sender and open a PR
 ```
 
-`agent:coding` forces the agent — a plain message picks its own and the card says why, and `routing: { auto: false }` turns that off ([Turn features on and off](../how-to/turn-features-on-and-off.md)); `in acme/api` names the repository. The status card links to a live run page; open it to watch files read, commands run and tests as they happen. The run ends in a pull request.
+You named no agent. The bot read the sentence and routed it to `coding`, and the card's first line says so: `coding · routed: <its reason>`. `in acme/api` names the repository. The card links to a live run page; open it to watch files read, commands run and tests as they happen. The run ends in a pull request.
 
 ## Check what it did
 
@@ -51,17 +51,19 @@ When the card closes, its first line is the run's shape: time getting ready, thi
 ## Try a few more
 
 ```
-@switchboard agent:review model:anthropic/claude-opus-5 review https://github.com/acme/api/pull/123
-@switchboard config show
-@switchboard config set me --models.coding openai/gpt-5
-@switchboard config instructions me "Always reply in bullet points"
-@switchboard help
+@switchboard can you take a look at https://github.com/acme/api/pull/123 and tell me if anything in it worries you?
+@switchboard what is the latest version of undici on npm, and what changed in it?
+@switchboard two things: check https://github.com/acme/api/pull/123 for anything wrong in its wording, and find out whether Node 24 changed the default fetch timeout
 ```
 
-`help` lists every agent, directive and command. A refused request says why and who can grant it.
+The first runs as `review`, the second as `research`, the third as a `conductor` with one child per part; each card says which and why. A refused request says why and who can grant it.
+
+## When you want to choose
+
+Say `agent:coding` in the message and that agent runs, no picking; reply `agent:<name>` in a thread to run it another way; `ship`, which merges, only ever runs when named. Commands exist too, for whoever wants them: [Slack commands](../reference/slack-commands.md). To turn the picking off for a deployment, set `routing: { auto: false }` ([Turn features on and off](../how-to/turn-features-on-and-off.md)); every plain message then runs `general`.
 
 ## Next
 
-- [Configure your defaults](../how-to/configure-your-defaults.md): stop typing `agent:coding model:…` every time.
+- [Configure your defaults](../how-to/configure-your-defaults.md): pick the model and effort once, at the scope that owns them.
 - [Watch a run](../how-to/watch-a-run.md): the run page, stopping a run, reading history.
 - [Slack commands](../reference/slack-commands.md): every directive and command.

@@ -91,16 +91,22 @@ const stories = [
 
 // The thread is drawn, not captured: the fixture's made-up workspace, the
 // bot's mention and its status card, so the page carries no real conversation.
-// Its statement is data like the pictures' — a literal text node after the
-// inked span loses its leading space at hydration; an interpolation keeps it.
+// The mention is a plain sentence with no directive, and the card's title
+// carries the `routed:` line the product's card does — the front door is what
+// the page shows. Its statement is data like the pictures' — a literal text
+// node after the inked span loses its leading space at hydration; an
+// interpolation keeps it.
 const threadStory = {
-  lead: "Ask in the thread.",
-  rest: "The status card fills in as the agent works; the reply lands beneath it.",
+  lead: "Just ask.",
+  rest: "The card names the agent it picked and why, fills in as it works, and the reply lands beneath it.",
   link: "/tutorials/first-request-in-slack",
   cta: "Your first request",
 };
 const thread = {
+  ask: "can you take a look at",
   pr: "acme/web#128",
+  tail: "and tell me if anything in it worries you?",
+  routed: "a pull request to look over",
   steps: ["Cloned acme/web at 3f9c1e2", "Read the diff — 14 files", "Checked the specs the change touches"],
   working: "Writing the review",
   reply: "Review posted: two findings, one minor.",
@@ -127,7 +133,7 @@ async function copy() {
         </p>
         <h1 class="title">Your agents,<br class="break" />one mention away.</h1>
         <p class="lead">
-          Mention it in Slack or call it over the CLI, HTTP or MCP — an agent answers on the model you choose.
+          Say what you want in Slack, the CLI, HTTP or MCP. The right agent picks it up, on the model you choose.
         </p>
         <div class="actions">
           <!-- The primary door is the system's arrow-chip button: the inverted
@@ -214,14 +220,16 @@ async function copy() {
         <div
           class="thread"
           role="img"
-          aria-label="A thread: a person mentions the bot on a pull request, the bot's status card ticks through its steps, and the bot replies with the review posted."
+          aria-label="A thread: a person asks the bot in plain words to look at a pull request, the bot's status card names the agent it picked and ticks through its steps, and the bot replies with the review posted."
         >
           <div class="msg">
             <span class="avatar person" aria-hidden="true">a</span>
             <div class="body">
               <p class="meta"><span class="who">alice</span><span class="when">9:41</span></p>
               <p class="text">
-                <span class="mention">@{{ project.name }}</span> agent:review <span class="pr">{{ thread.pr }}</span>
+                <span class="mention">@{{ project.name }}</span> {{ thread.ask }}
+                <span class="pr">{{ thread.pr }}</span>
+                {{ thread.tail }}
               </p>
             </div>
           </div>
@@ -233,7 +241,7 @@ async function copy() {
                 ><span class="tag">app</span><span class="when">9:41</span>
               </p>
               <div class="card">
-                <p class="card-title">review · {{ thread.pr }}</p>
+                <p class="card-title">review · routed: {{ thread.routed }}</p>
                 <ul class="steps">
                   <li v-for="step in thread.steps" :key="step" class="done">
                     <svg class="tick" viewBox="0 0 16 16" aria-hidden="true">

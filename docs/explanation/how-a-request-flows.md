@@ -1,6 +1,6 @@
 # How a request flows
 
-Every entry point reduces to the same four seams around one dispatcher, in the same order, handled by the same code.
+Every entry point reduces to the same four seams around one dispatcher, in the same order, handled by the same code. A plain message picks its own agent: the dispatcher asks the fast model which preset the words mean and says so on the card; a directive on the message always wins over it.
 
 <!-- generated:four-seams · npm run docs:gen — drawn from docs/.vitepress/theme/seams.mjs and src/deploy/plan.ts, do not edit by hand -->
 
@@ -11,7 +11,7 @@ flowchart LR
         C2["CLI"]
         C3["HTTP · MCP"]
     end
-    D{"Dispatcher<br/>directives · config layers · authorization"}
+    D{"Dispatcher<br/>routing · config layers · authorization"}
     subgraph agent ["Agent — what runs"]
         AG["general · coding · review · ship · research · explore · conductor"]
     end
@@ -33,7 +33,7 @@ The reply travels the same path back, through the dispatcher to the channel that
 
 ## What each seam refuses to know
 
-The seams are Channel, Provider, Executor and Agent. The dispatcher sits between them as the core: directives, the [six config layers](config-layers.md), routing, authorization, history, the agent loop. It never imports a platform SDK; the tree is checked for that.
+The seams are Channel, Provider, Executor and Agent. The dispatcher sits between them as the core: routing (the message's own directive, else the fast model's pick), the [six config layers](config-layers.md), authorization, history, the agent loop. It never imports a platform SDK; the tree is checked for that.
 
 | Seam | Interface | Implementations | Knows nothing about |
 |---|---|---|---|
@@ -54,9 +54,9 @@ sequenceDiagram
     participant P as Provider
     participant E as Executor
 
-    U->>A: "@switchboard agent:coding in acme/api: add retry to webhook sender"
+    U->>A: "@switchboard in acme/api, add a retry to the webhook sender and open a PR"
     A->>D: IncomingMessage
-    D->>D: parse directives → agent:coding
+    D->>D: route: no directive, so the fast model picks coding and the card says why
     D->>D: resolve config (request > thread > user > channel > defaults)
     D->>D: authorize: may this caller run coding? does the scope's boundary allow its profile? against this repo?
     D->>D: assemble history from the thread
@@ -73,7 +73,7 @@ sequenceDiagram
 
 The same sequence runs from the CLI, or on a local backend.
 
-The directive in the example forces `coding`. Without one (no `agent:`, no sticky preset, no channel or user `agent`) — and unless the deployment set `routing: { auto: false }` — the dispatcher first asks the fast model which preset the message means and says so on the card (`routed: <reason>`); the gates then judge the routed preset exactly as they judge a typed one, `ship` is never routed, and a message with several independent parts runs as a `conductor` with one child per part ([routing-and-config item 21](../reference/specs/routing-and-config.md)).
+The example names no agent, so the dispatcher asks the fast model which preset the message means and says so on the card (`routed: <reason>`); `agent:coding` on the message, the thread's sticky preset, or a channel or user `agent` skips the question, and a deployment that set `routing: { auto: false }` never asks it (every plain message then runs `defaults.agent`). The gates then judge the routed preset exactly as they judge a typed one, `ship` is never routed, and a message with several independent parts runs as a `conductor` with one child per part ([routing-and-config item 21](../reference/specs/routing-and-config.md)).
 
 ## Every step is measured
 

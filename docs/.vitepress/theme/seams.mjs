@@ -54,7 +54,7 @@ export const SEAMS = [
 /** The one component that is not a seam: it sits between them and decides. */
 export const DISPATCHER = {
   name: "Dispatcher",
-  does: ["directives", "config layers", "authorization"],
+  does: ["routing", "config layers", "authorization"],
 };
 
 /** `Slack · CLI · HTTP · MCP` — a list as one line, the separator every diagram and card uses. */
