@@ -40,6 +40,7 @@ import { resolveUserEmail } from "./channels/slack/lookups.js";
 import { mdToMrkdwn } from "./channels/mrkdwn.js";
 import { buildMemoryStore, NullMemoryStore, pendingReflectionCount } from "./core/memory/index.js";
 import { healthPayload, readBuildInfo } from "./channels/health.js";
+import { buildArtifactStore } from "./artifacts/buildStore.js";
 import { startProcessMetrics } from "./channels/processMetrics.js";
 import { selectFrictionLedger } from "./core/frictionLedger.js";
 import { buildRunStore, FileRunStore, NullRunStore, retentionPolicyOf } from "./core/runStore.js";
@@ -200,6 +201,14 @@ export async function runBot(): Promise<void> {
   const memory =
     buildMemoryStore(config.config.memory, processSecrets, (m) => console.warn(`[memory] ${m}`)) ??
     new NullMemoryStore();
+  // The artifact store (docs/reference/specs/execution.md item 20): R2 when
+  // `artifacts:` is configured, none otherwise. A configured store with a
+  // missing secret throws here — a store that silently downgraded would leave a
+  // run believing its file was kept.
+  const artifacts = buildArtifactStore(config.config.artifacts, processSecrets, {
+    copyBaseUrl: process.env.PUBLIC_BASE_URL,
+  });
+  console.log(`[artifacts] ${artifacts ? `on — bucket ${artifacts.bucket}` : "off — no artifacts: section"}`);
   // Run history (docs/reference/specs/run-history.md): the durable store every finished run's record lands in.
   // With `runHistory` unconfigured (or misconfigured — buildRunStore warned) it
   // is the NullRunStore → history off, live-only as before. The friction ledger
@@ -362,6 +371,7 @@ export async function runBot(): Promise<void> {
     skills,
     mcp,
     memory,
+    ...(artifacts ? { artifacts } : {}),
     runHistoryWriter,
     // The coordinator's instance records and unit rows (run-history items 49 and 50): what the ship branch writes when it hands an `agent:ship` request to the plan runner.
     coordinatorInstances,
@@ -863,6 +873,7 @@ export async function runBot(): Promise<void> {
               startedAt: PROCESS_STARTED_AT,
               httpListeningAt,
               process: sampleProcessMetrics(),
+              ...(artifacts ? { artifacts: { bucket: artifacts.bucket } } : {}),
             }),
           ),
         );

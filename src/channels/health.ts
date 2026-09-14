@@ -89,6 +89,8 @@ export interface HealthState {
    *  container: under many concurrent runs it is the first thing to fail, and
    *  nothing else shows it off-box (the load harness reads these). */
   process?: ProcessMetrics;
+  /** The artifact store's bucket (docs/reference/specs/execution.md item 20), when `artifacts:` is configured. */
+  artifacts?: { bucket: string };
 }
 
 export interface HealthPayload {
@@ -121,6 +123,8 @@ export interface HealthPayload {
   httpListeningAt?: string;
   /** Present whenever `HealthState.process` is given (always on the live `/healthz`). */
   process?: ProcessMetrics;
+  /** Present when the artifact store is configured: the bucket a run's files move through. Privacy is the operator's `artifacts check`, not a fact here. */
+  artifacts?: { bucket: string };
 }
 
 export function healthPayload(state: HealthState): HealthPayload {
@@ -154,5 +158,6 @@ export function healthPayload(state: HealthState): HealthPayload {
   if (state.startedAt !== undefined) payload.startedAt = new Date(state.startedAt).toISOString();
   if (state.httpListeningAt !== undefined) payload.httpListeningAt = new Date(state.httpListeningAt).toISOString();
   if (state.process) payload.process = { ...state.process };
+  if (state.artifacts) payload.artifacts = { bucket: state.artifacts.bucket };
   return payload;
 }

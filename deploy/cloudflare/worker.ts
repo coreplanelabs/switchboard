@@ -90,6 +90,9 @@ export interface Env {
   MEMORY_TOKEN?: string; // durable memory + friction ledger + schedule firings + MCP registry: bearer for the state Worker
   MCP_CREDENTIAL_KEY?: string; // MCP registry: the bot-only key that seals server credentials before they reach the McpDO
   STATE_WORKER_URL?: string; // var: the state Worker's base URL — where this shim records each scheduled firing
+  ARTIFACTS_R2_ACCESS_KEY_ID?: string; // artifact store: the bucket-scoped S3 token the bot signs presigned URLs with
+  ARTIFACTS_R2_SECRET_ACCESS_KEY?: string; // artifact store: the secret half of that token
+  ARTIFACTS_COPY_TOKEN?: string; // artifact store: the bearer the bot presents to this Worker's /artifacts/copy route
 }
 
 /** Every secret/var the Worker forwards into the container. Optional entries
@@ -115,6 +118,9 @@ const FORWARDED_OPTIONAL = [
   "MEMORY_TOKEN",
   "MCP_CREDENTIAL_KEY",
   "STATE_WORKER_URL",
+  "ARTIFACTS_R2_ACCESS_KEY_ID",
+  "ARTIFACTS_R2_SECRET_ACCESS_KEY",
+  "ARTIFACTS_COPY_TOKEN",
 ] as const satisfies readonly (keyof Env)[];
 
 /** The container's environment, computed from the Worker env AT START TIME.

@@ -212,6 +212,27 @@ execution:
 # Under docker compose this directory is a named volume, so checkouts survive a restart.
 workspaceDir: ./workspaces
 
+# The artifact store (docs/reference/specs/execution.md item 20): one private R2
+# bucket a run's files move through by reference — a screenshot a coding run
+# attaches, a video a person drops on a thread. DEFAULT OFF: absent means no
+# store; attach_file keeps its inline path (10 MiB cap) and an inbound video is
+# skipped with its name, exactly as before. Configured, the bot signs presigned
+# URLs and the container moves the bytes; the bot never holds a file. Needs
+# three bot secrets — ARTIFACTS_R2_ACCESS_KEY_ID and ARTIFACTS_R2_SECRET_ACCESS_KEY
+# (an R2 API token scoped Object Read & Write to this bucket only) and
+# ARTIFACTS_COPY_TOKEN (self-minted, shared with the bot's own Worker) — and
+# PUBLIC_BASE_URL; a configured store with any of them unset fails startup by
+# name. `deploy` creates the bucket; `artifacts lifecycle` applies retention;
+# `artifacts check` reads whether the bucket is private.
+# artifacts:
+#   r2:
+#     accountId: <your Cloudflare account id>     # the S3 endpoint is <accountId>.r2.cloudflarestorage.com
+#     bucket: switchboard-artifacts                 # the bot's Worker binds the same name
+#   retentionDays: 30       # objects expire after this many days (default 30)
+#   inbound:
+#     maxBytesPerMessage: 2147483648   # the most staged bytes one message may carry (default 2 GiB)
+#     copyTimeoutMs: 1200000           # how long the bot waits on one inbound copy (default 20 min)
+
 # Cross-session self-learning memory (docs/reference/specs/memory.md). DEFAULT OFF: absent, or
 # enabled:false, means the dispatcher uses a NullMemoryStore and the model input
 # is byte-identical to memory-off — zero behavior change. When enabled, before
