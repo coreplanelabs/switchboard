@@ -2,7 +2,13 @@
 // safe at the seams: the resident sanitizes at the write and the exit, the bot
 // at the parse, so no card, reply, listing or record shows raw remote output.
 import { describe, expect, it } from "vitest";
-import { RESIDENT_TEXT_CAP, residentState, residentText, sanitizeResidentBody } from "./residentText.js";
+import {
+  RESIDENT_ERROR_CAP,
+  RESIDENT_TEXT_CAP,
+  residentState,
+  residentText,
+  sanitizeResidentBody,
+} from "./residentText.js";
 
 // A reason the way a hostile or merely unlucky resident could build it: a
 // token, an ANSI-laced second line, another thread's key.
@@ -83,6 +89,45 @@ describe("sanitizeResidentBody", () => {
     // walked forever, and nothing throws.
     const deep = { a: { b: { c: { d: { e: { reason: POISON } } } } } };
     expect(() => sanitizeResidentBody(deep)).not.toThrow();
+  });
+});
+
+// The onboard refusal as the resident builds it (resident-repos item 35): the two
+// causes, the admin action and GitHub's own 422 body after them — ~600 chars,
+// twice the card-sized cap. It is a full reply, and every word past the first
+// 300 is the part that tells the admin what to do.
+const ONBOARD_REFUSAL =
+  "not-in-installation: the GitHub App cannot mint a token scoped to repo:acme/polyplane-k8s — " +
+  "the repository is not in the App installation's repository list, or does not exist under that exact name " +
+  "(GitHub's token API answers the same 422 for both). An org admin adds it under the App's installation settings " +
+  "(Settings → GitHub Apps → Configure → Repository access), then retry (github-token-mint-failed: HTTP 422 " +
+  '{"message":"There is at least one repository that does not exist","documentation_url":' +
+  '"https://docs.github.com/rest/apps/apps#create-an-installation-access-token-for-an-app","status":"422"})';
+
+describe("sanitizeResidentBody — an error is a reply, a reason is a card note", () => {
+  it("keeps the onboard refusal whole, admin action and 422 tail included, up to RESIDENT_ERROR_CAP", () => {
+    expect(ONBOARD_REFUSAL.length).toBeGreaterThan(RESIDENT_TEXT_CAP);
+    const out = sanitizeResidentBody({ error: ONBOARD_REFUSAL });
+    expect(out.error).toBe(ONBOARD_REFUSAL);
+    expect(out.error).toContain("Repository access");
+    expect(out.error).toContain("HTTP 422");
+    expect(sanitizeResidentBody({ error: "x".repeat(RESIDENT_ERROR_CAP + 50) }).error).toHaveLength(
+      RESIDENT_ERROR_CAP + 1,
+    );
+  });
+
+  it("still strips, redacts and bounds an error — the wider cap is a size bound, not an exemption", () => {
+    const out = sanitizeResidentBody({ error: POISON });
+    expect(out.error).not.toContain("\x1b");
+    expect(out.error).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz0123456789");
+    expect(out.error).toContain("«redacted");
+  });
+
+  it("caps reason and summary at RESIDENT_TEXT_CAP — they land in card notes and `repo list` rows", () => {
+    const out = sanitizeResidentBody({ reason: ONBOARD_REFUSAL, summary: ONBOARD_REFUSAL });
+    expect(out.reason).toHaveLength(RESIDENT_TEXT_CAP + 1);
+    expect(out.reason.endsWith("…")).toBe(true);
+    expect(out.summary).toHaveLength(RESIDENT_TEXT_CAP + 1);
   });
 });
 
