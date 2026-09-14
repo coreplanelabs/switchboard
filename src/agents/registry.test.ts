@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CONTRACT_HEADING, CONTRACT_SECTION_HEADINGS } from "../core/ship/contract.js";
+import { CONTRACT_HEADING, CONTRACT_SECTION_HEADINGS, PR_TITLE_GUARD } from "../core/ship/contract.js";
 import { AGENTS, getAgent, IDENTITIES } from "./registry.js";
 
 // Features: docs/reference/specs/agent-general.md, docs/reference/specs/agent-review.md,
@@ -790,5 +790,25 @@ describe("explore agent (docs/reference/specs/agent-explore.md)", () => {
     // the credential is read-scoped and the prompt says so
     expect(sys).toMatch(/read-scoped/);
     expect(sys).toContain("update_status");
+  });
+});
+
+// The title gate in the coding prompt: the coding preset tells its runs to judge the PR title with the same gate
+// the child contract names, spelled through the constant the contract module
+// exports so the prompt and the contract cannot drift apart.
+describe("coding prompts: the title gate (check:pr-title before the description)", () => {
+  it("both coding prompts name the gate and its command", () => {
+    for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {
+      expect(sys).toContain(PR_TITLE_GUARD);
+      expect(sys).toContain('npm run check:pr-title -- "<title>"');
+    }
+  });
+
+  it("presets that open no pull request do not carry the gate text", () => {
+    for (const agent of [AGENTS.review, AGENTS.research, AGENTS.explore, AGENTS.general]) {
+      for (const sys of [agent.system, agent.residentSystem].filter(Boolean) as string[]) {
+        expect(sys).not.toContain('npm run check:pr-title -- "<title>"');
+      }
+    }
   });
 });
