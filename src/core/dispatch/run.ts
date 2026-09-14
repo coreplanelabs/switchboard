@@ -8,6 +8,7 @@
 // is record.ts).
 import type { ConfigStore, ResolvedRequest } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
+import type { RouteDecided } from "./route.js";
 import { coordinatorFields, type CoordinatorTag } from "../coordinator/contract.js";
 import type { RunProfile } from "../../config/profile.js";
 import { mergeTools } from "../../runner.js";
@@ -176,6 +177,8 @@ export interface ClaimContext {
   coordinator?: CoordinatorTag;
   /** Where the run's conversation starts (item 52), on the row so a reclaim keeps it. */
   seed?: RunSeed;
+  /** The router's decision when it chose the preset, on the row (run-history item 35). */
+  route?: RouteDecided;
 }
 
 /**
@@ -210,6 +213,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
     parentRunId,
     coordinator,
     seed,
+    route,
   } = ctx;
   const { resident, binding } = selection;
   let ledgerRun = ctx.ledgerRun;
@@ -252,6 +256,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
           ...(parentRunId !== undefined ? { parentRunId } : {}),
           ...coordinatorFields(coordinator),
           ...(seed !== undefined ? { seed } : {}),
+          ...(route !== undefined ? { route } : {}),
           selection: resident === true ? "resident" : "sandbox",
           ...(binding?.workspace !== undefined ? { workspace: binding.workspace } : {}),
           ...(requestRow !== undefined ? { request: requestRow } : {}),

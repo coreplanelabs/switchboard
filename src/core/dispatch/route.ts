@@ -539,6 +539,35 @@ export interface RouteStageContext {
    *  router is not paid for it. */
   threadLive: boolean;
   root: Span;
+  /** A decision an earlier generation already made for this run — a restart
+   *  re-dispatching a routed row from its request (run-history item 42), the
+   *  row carrying the route (item 35). Re-resolved and returned as the route,
+   *  no model call and no regard to the router's switch: the run was routed
+   *  when it started, and a restart is the same run under the same card. */
+  carried?: RouteDecided;
+}
+
+/** The (agent, model, effort) triple re-resolved through the config layers
+ *  with the routed preset as the request's agent — so the run gets that
+ *  preset's own model — the request's or the thread's model and effort
+ *  directives kept. The one resolution a route makes, whether the model just
+ *  decided it or a restart carried it. */
+function resolveRouted(
+  deps: RouteDeps,
+  msg: IncomingMessage,
+  directives: RequestDirectives,
+  sticky: ThreadDirectives,
+  preset: string,
+): ResolvedRequest {
+  return deps.config.resolve({
+    channelId: msg.channelId,
+    userId: msg.userId,
+    request: {
+      agent: preset,
+      model: directives.model ?? sticky.model,
+      effort: directives.effort ?? sticky.effort,
+    },
+  });
 }
 
 /** How the stage ended: the request is untouched — carrying, when a compound
@@ -563,8 +592,12 @@ export type RouteStage =
  * the request unrouted with the rejection for the record. Never throws.
  */
 export async function routeRequest(deps: RouteDeps, ctx: RouteStageContext): Promise<RouteStage> {
-  const { msg, directives, sticky, agentSource, threadLive, root } = ctx;
+  const { msg, directives, sticky, agentSource, threadLive, root, carried } = ctx;
   const cfg = deps.config.config;
+  if (carried) {
+    console.log(`[route] ${msg.threadKey} routed to ${carried.preset} as before the restart: ${carried.reason}`);
+    return { kind: "routed", resolved: resolveRouted(deps, msg, directives, sticky, carried.preset), route: carried };
+  }
   if (!routingOn(cfg) || agentSource !== "default" || threadLive) return { kind: "unrouted" };
   const modelRef = cfg.routing?.model ?? cfg.defaults.models["general"];
   if (!modelRef) {
@@ -611,15 +644,7 @@ export async function routeRequest(deps: RouteDeps, ctx: RouteStageContext): Pro
       ? { kind: "unrouted", rejected: { preset: cfg.defaults.agent, reason: decision.reason, model: modelRef } }
       : { kind: "unrouted" };
   }
-  const resolved = deps.config.resolve({
-    channelId: msg.channelId,
-    userId: msg.userId,
-    request: {
-      agent: decision.preset,
-      model: directives.model ?? sticky.model,
-      effort: directives.effort ?? sticky.effort,
-    },
-  });
+  const resolved = resolveRouted(deps, msg, directives, sticky, decision.preset);
   const { parts, collapsed } = decision;
   console.log(
     `[route] ${msg.threadKey} routed to ${decision.preset} on ${modelRef}${parts ? ` (${parts.length} parts)` : ""}${

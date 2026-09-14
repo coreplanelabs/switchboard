@@ -519,6 +519,8 @@ export interface ReserveContext {
   coordinator?: CoordinatorTag;
   /** Where the run's conversation starts (item 52), on the row so a reclaim keeps it. */
   seed?: RunSeed;
+  /** The router's decision when it chose the preset, on the row (run-history item 35). */
+  route?: RouteDecided;
 }
 
 /**
@@ -548,6 +550,7 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
     parentRunId,
     coordinator,
     seed,
+    route,
   } = ctx;
   if (!resume && !restart) {
     const requestRow = durableInboxMessage(msg, msg.text, receivedAt);
@@ -575,6 +578,7 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
           ...(parentRunId !== undefined ? { parentRunId } : {}),
           ...coordinatorFields(coordinator),
           ...(seed !== undefined ? { seed } : {}),
+          ...(route !== undefined ? { route } : {}),
           request: requestRow,
         },
         card: card.handle ?? null,
