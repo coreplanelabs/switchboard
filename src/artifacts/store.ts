@@ -25,6 +25,13 @@ export interface ArtifactRef {
   size: number;
 }
 
+/** An object opened for reading: its head and a stream of its bytes, for the
+ *  run page's proxy route (live-view.md item 26) to pipe — the one place the
+ *  bot's process touches an artifact's bytes, and only in transit. */
+export interface ArtifactObject extends ArtifactHead {
+  body: ReadableStream<Uint8Array>;
+}
+
 export interface ArtifactStore {
   readonly bucket: string;
   /** A URL a container may PUT `contentType` bytes to for `PRESIGN_TTL_SECONDS`; the type is signed, so the PUT must send it. */
@@ -33,6 +40,8 @@ export interface ArtifactStore {
   presignGet(key: string): Promise<string>;
   /** The object's size and type, or null when there is none. */
   head(key: string): Promise<ArtifactHead | null>;
+  /** The object's bytes as a stream (a signed GET, minted per call), or null when there is none. */
+  get(key: string): Promise<ArtifactObject | null>;
   /** Copy `size` bytes from `url` (a Slack `url_private`) into `key` without the bot holding them. */
   copyFromUrl(input: { url: string; size: number; key: string }): Promise<ArtifactRef>;
 }
@@ -124,6 +133,18 @@ export class R2ArtifactStore implements ArtifactStore {
     return { size, contentType: res.headers.get("content-type") ?? "application/octet-stream" };
   }
 
+  async get(key: string): Promise<ArtifactObject | null> {
+    const signed = await this.client.sign(new Request(this.objectUrl(key), { method: "GET" }), {
+      aws: { datetime: amzDate(this.clock()) },
+    });
+    const res = await this.fetchImpl(signed);
+    if (res.status === 404) return null;
+    if (!res.ok || !res.body) throw new Error(`artifact store: GET ${key} answered HTTP ${res.status}`);
+    const size = Number(res.headers.get("content-length"));
+    if (!Number.isFinite(size) || size < 0) throw new Error(`artifact store: GET ${key} answered without a length`);
+    return { size, contentType: res.headers.get("content-type") ?? "application/octet-stream", body: res.body };
+  }
+
   async copyFromUrl(input: { url: string; size: number; key: string }): Promise<ArtifactRef> {
     const res = await this.fetchImpl(`${this.copy.baseUrl.replace(/\/$/, "")}/artifacts/copy`, {
       method: "POST",
@@ -174,6 +195,18 @@ export class InMemoryArtifactStore implements ArtifactStore {
   async head(key: string): Promise<ArtifactHead | null> {
     const o = this.objects.get(key);
     return o ? { size: o.bytes.byteLength, contentType: o.contentType } : null;
+  }
+
+  async get(key: string): Promise<ArtifactObject | null> {
+    const o = this.objects.get(key);
+    if (!o) return null;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(o.bytes);
+        controller.close();
+      },
+    });
+    return { size: o.bytes.byteLength, contentType: o.contentType, body };
   }
 
   async copyFromUrl(input: { url: string; size: number; key: string }): Promise<ArtifactRef> {

@@ -384,12 +384,14 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
       return;
     }
     // Side facts about the run, not steps: skill_use rides beside a use_skill
-    // call that already produced its own tool pair; review_artifact,
-    // pr_description, pr_opened, review_posted, the ship_round boundaries and
-    // the router's route are published by the dispatcher/pipeline outside the
-    // model loop entirely. Counting any of them would distort the story.
+    // call that already produced its own tool pair, and artifact beside the
+    // attach_file call (or the dispatcher's staging) that moved the file;
+    // review_artifact, pr_description, pr_opened, review_posted, the ship_round
+    // boundaries and the router's route are published by the dispatcher/pipeline
+    // outside the model loop entirely. Counting any of them would distort the story.
     if (
       ev.type === "skill_use" ||
+      ev.type === "artifact" ||
       ev.type === "review_artifact" ||
       ev.type === "pr_description" ||
       ev.type === "pr_opened" ||

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { loadWebAssets } from "../src/channels/webAssets.js";
@@ -293,15 +294,54 @@ const HIST_EVENTS = [
     at: NOW - 760_000,
     seq: 23,
   },
+  // The run sends a screenshot back (docs/reference/specs/live-view.md item 26): the
+  // `attach_file` pair and, between them, the `artifact` event the tool
+  // publishes once the store holds the file — the Files block's `sent` row,
+  // rendered inline because it is a PNG.
+  modelTurn("m4", NOW - 760_000, 4_000, 24, {
+    stopReason: "tool_use",
+    model: "anthropic/claude-fable-5",
+    inputTokens: 31_200,
+    outputTokens: 140,
+    cacheReadTokens: 30_100,
+  }),
+  { type: "assistant", text: "Attaching the metrics screenshot to the thread and the PR.", at: NOW - 756_000, seq: 25 },
+  {
+    type: "tool_call",
+    callId: "c7",
+    tool: "attach_file",
+    summary: "attach_file metrics-dashboard.png",
+    at: NOW - 755_500,
+    seq: 26,
+  },
+  {
+    type: "artifact",
+    direction: "out",
+    key: "runs/hist-1/out/1-metrics-dashboard.png",
+    name: "metrics-dashboard.png",
+    size: 3_145_728,
+    contentType: "image/png",
+    at: NOW - 754_000,
+    seq: 27,
+  },
+  {
+    type: "tool_result",
+    callId: "c7",
+    tool: "attach_file",
+    ok: true,
+    summary: "attached metrics-dashboard.png (3.0 MB) to the thread and the PR",
+    at: NOW - 753_900,
+    seq: 28,
+  },
   // The answer's own turn, on a DIFFERENT model than the run started on — not
   // something a run does today (it is pinned to one model), but the switch
   // treatment (`⇄ claude-opus-5` on the turn's head) has to be seen somewhere.
-  modelTurn("m3", NOW - 760_000, 9_000, 24, { stopReason: "end_turn", model: "anthropic/claude-opus-5" }),
+  modelTurn("m3", NOW - 753_900, 3_000, 29, { stopReason: "end_turn", model: "anthropic/claude-opus-5" }),
   {
     type: "answer",
     text: "Done — `sendWebhook` now retries with exponential backoff (5 attempts, 4xx gives up immediately). PR updated.",
     at: NOW - 750_000,
-    seq: 25,
+    seq: 30,
   },
   // The post-step edited the PR the run was on (docs/reference/specs/pr-description.md
   // item 5): the Reply's caption reads it as the run's PR fact.
@@ -311,7 +351,7 @@ const HIST_EVENTS = [
     number: 42,
     created: false,
     at: NOW - 750_200,
-    seq: 26,
+    seq: 31,
   },
 ];
 
@@ -361,6 +401,17 @@ const HIST_STREAM = normalizeSpans([
     exitCode: 0,
   }),
   spanEnd("compose", "dispatch.compose", RECEIVED_AT + 4_900, RECEIVED_AT + 5_000, "root"),
+  // A file the thread carried, staged into the workspace before the turn
+  // (docs/reference/specs/live-view.md item 26): the Files block's `received` row.
+  {
+    type: "artifact",
+    direction: "in",
+    key: "threads/slack-C1-1700000000.000100/in/1700000000.000100/0-design-brief.pdf",
+    name: "design-brief.pdf",
+    size: 862_412,
+    contentType: "application/pdf",
+    at: RECEIVED_AT + 2_600,
+  },
   { type: "span_start", spanId: "agent", parentSpanId: "root", name: "run.agent", at: NOW - 2_399_000 },
   ...HIST_EVENTS,
   spanEnd("agent", "run.agent", NOW - 2_399_000, NOW - 750_500, "root"),
@@ -1075,6 +1126,8 @@ function page(pathname: string, all: boolean): { title: string; seed: PageSeed; 
         sealedAt: HIST_FINISHED_AT + 2_100,
         replyOk: true,
         durationMs: HIST_FINISHED_AT - RECEIVED_AT,
+        // A store is configured: the Files block links its rows to the proxy route below.
+        artifacts: { urlBase: "/runs/hist-1/artifacts/", retentionDays: 30 },
       },
     };
   if (pathname === "/runs/review-1")
@@ -1151,6 +1204,40 @@ createServer((req, res) => {
     return;
   }
   if (url.pathname === "/runs/live-1/events") return serveLiveStream(res);
+  // The finished run's files (docs/reference/specs/live-view.md item 26), as the bot's
+  // proxy route serves them: the fixture's PNG is a real dashboard picture
+  // (the spend page's own screenshot), inline with the hardening headers; the
+  // PDF is a download. Any other key is the route's 404.
+  if (url.pathname.startsWith("/runs/hist-1/artifacts/")) {
+    const key = decodeURIComponent(url.pathname.slice("/runs/hist-1/artifacts/".length));
+    if (key === "runs/hist-1/out/1-metrics-dashboard.png") {
+      const png = readFileSync(join(process.cwd(), "docs/public/screenshots/costs-light.png"));
+      res.writeHead(200, {
+        "content-type": "image/png",
+        "content-length": String(png.byteLength),
+        "content-disposition": 'inline; filename="metrics-dashboard.png"',
+        "x-content-type-options": "nosniff",
+        "content-security-policy": "sandbox",
+        "cache-control": "private, no-store",
+      });
+      res.end(png);
+      return;
+    }
+    if (key.endsWith("/0-design-brief.pdf")) {
+      res.writeHead(200, {
+        "content-type": "application/pdf",
+        "content-disposition": 'attachment; filename="design-brief.pdf"',
+        "x-content-type-options": "nosniff",
+        "content-security-policy": "sandbox",
+        "cache-control": "private, no-store",
+      });
+      res.end("%PDF-1.4\n%fixture\n");
+      return;
+    }
+    res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+    res.end("run not found");
+    return;
+  }
   if (url.pathname === "/runs" && url.searchParams.get("stream") === "1") {
     // The index feed: open + heartbeats (rows stay as seeded).
     res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache" });

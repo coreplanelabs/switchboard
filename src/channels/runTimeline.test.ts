@@ -621,3 +621,45 @@ describe("createRunTimeline — model turns (item 15)", () => {
     expect(t.steps()).toEqual([]);
   });
 });
+
+// docs/reference/specs/live-view.md item 26 — an `artifact` event becomes an
+// `artifact` change of its own: a file the run received or sent, named by its
+// store key. It opens no step and is never a call.
+describe("createRunTimeline — artifact", () => {
+  it("folds `artifact` into an `artifact` change carrying direction, key, name, size and type; no step opens", () => {
+    const t = createRunTimeline();
+    const changes = t.push({
+      type: "artifact",
+      direction: "out",
+      key: "runs/r1/out/1-dashboard.png",
+      name: "dashboard.png",
+      size: 3_145_728,
+      contentType: "image/png",
+      at: 7,
+    });
+    expect(changes).toEqual([
+      {
+        kind: "artifact",
+        artifact: {
+          direction: "out",
+          key: "runs/r1/out/1-dashboard.png",
+          name: "dashboard.png",
+          size: 3_145_728,
+          contentType: "image/png",
+          at: 7,
+        },
+      },
+    ]);
+    expect(t.steps()).toEqual([]);
+  });
+
+  it("a keyless or nameless artifact event is ignored", () => {
+    const t = createRunTimeline();
+    expect(
+      t.push({ type: "artifact", direction: "in", key: "", name: "x", size: 1, contentType: "text/plain" }),
+    ).toEqual([]);
+    expect(
+      t.push({ type: "artifact", direction: "in", key: "k", name: "", size: 1, contentType: "text/plain" }),
+    ).toEqual([]);
+  });
+});

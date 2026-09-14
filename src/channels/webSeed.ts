@@ -50,6 +50,18 @@ export interface ScheduledSeed {
   firingsUnavailable?: string;
 }
 
+/** Where the run's files are served from (live-view.md item 26), present only
+ *  when an artifact store is configured: the page builds each row's URL as
+ *  `urlBase` + the event's key (percent-encoded per segment) — never a URL
+ *  from the record — and appends `?t=<token>` on a live page, where the token
+ *  is the capability exactly as it is for the stream. `retentionDays` is what
+ *  an expired row says. */
+export interface ArtifactsSeed {
+  urlBase: string;
+  retentionDays: number;
+  token?: string;
+}
+
 /** The live run page: the client follows the token-scoped SSE stream; the two
  *  URLs carry the capability token exactly like the old inline script did. */
 export interface RunLiveSeed {
@@ -58,6 +70,7 @@ export interface RunLiveSeed {
   id: string;
   eventsUrl: string;
   stopUrl: string;
+  artifacts?: ArtifactsSeed;
   /** The server clock when the seed was built: the page projects it forward
    *  arrival-relative (`serverNow` + time since the seed arrived), so a live
    *  stopwatch never subtracts a server stamp from the browser's clock. */
@@ -93,6 +106,8 @@ export interface RunHistorySeed {
   /** The record predates span schema (docs/reference/specs/tracing.md): `events` carries
    *  no span set and the timeline states `no timing data` instead of a shape. */
   untimed?: true;
+  /** Tokenless: a finished run's files are served under the same Access decision as the page. */
+  artifacts?: ArtifactsSeed;
 }
 
 export interface RunNotFoundSeed {

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  artifactHref,
   callSummary,
   createRunPageModel,
   elidedText,
@@ -415,6 +416,61 @@ describe("calls, groups, folding", () => {
       expect(items[1].skill.name).toBe("pdf");
       expect(items[1].skill.source).toBe("https://example.com/x");
     }
+  });
+});
+
+// docs/reference/specs/live-view.md item 26 — the run's files: one block, rows in
+// event order, never a step or a log row; the page builds each URL from the
+// seed's base and the key.
+describe("artifacts", () => {
+  const artifact = (direction: "in" | "out", key: string, name: string, contentType: string, at: number) => ({
+    type: "artifact",
+    direction,
+    key,
+    name,
+    size: 1024,
+    contentType,
+    at,
+  });
+
+  it("two received and one sent file become three rows in event order; nothing lands in the log", () => {
+    const m = model();
+    m.handle(input);
+    m.handle(artifact("in", "threads/slack-C1-1.0/in/1.0/0-brief.pdf", "brief.pdf", "application/pdf", 1001));
+    m.handle(artifact("in", "threads/slack-C1-1.0/in/1.0/1-clip.mp4", "clip.mp4", "video/mp4", 1002));
+    m.handle(call("c1", "attach_file dashboard.png", 2000, "attach_file"));
+    m.handle(artifact("out", "runs/run-1/out/1-dashboard.png", "dashboard.png", "image/png", 2100));
+    expect(m.state.artifacts.map((a) => [a.direction, a.name])).toEqual([
+      ["in", "brief.pdf"],
+      ["in", "clip.mp4"],
+      ["out", "dashboard.png"],
+    ]);
+    expect(m.state.artifacts[2]).toEqual({
+      direction: "out",
+      key: "runs/run-1/out/1-dashboard.png",
+      name: "dashboard.png",
+      size: 1024,
+      contentType: "image/png",
+      at: 2100,
+    });
+    expect(m.state.log.filter((l) => l.kind === "step")).toHaveLength(1);
+    expect(step(m).items).toHaveLength(1); // the attach_file call alone; the artifact is not a row in the step
+  });
+
+  it("a run without artifact events has no rows", () => {
+    const m = model();
+    m.handle(input);
+    m.handle(call("c1", "$ npm test", 2000));
+    expect(m.state.artifacts).toEqual([]);
+  });
+
+  it("artifactHref: the base plus the key encoded per segment, with the live token as `?t=` when the seed has one", () => {
+    const history = { urlBase: "/runs/run-1/artifacts/", retentionDays: 30 };
+    expect(artifactHref(history, "runs/run-1/out/1-a b.png")).toBe("/runs/run-1/artifacts/runs/run-1/out/1-a%20b.png");
+    const live = { ...history, token: "tok/1" };
+    expect(artifactHref(live, "threads/slack-C1-1.0/in/1.0/0-brief.pdf")).toBe(
+      "/runs/run-1/artifacts/threads/slack-C1-1.0/in/1.0/0-brief.pdf?t=tok%2F1",
+    );
   });
 });
 

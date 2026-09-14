@@ -110,6 +110,10 @@ export type TimelineChange =
    *  step whose `use_skill` call it belongs to, as its own row — not a call
    *  card (the call card is the tool's; this is what the tool loaded). */
   | { kind: "skill"; step: TimelineStep; skill: TimelineSkill }
+  /** A file that moved through the artifact store (an `artifact` event,
+   *  live-view.md item 26): what the run received or sent, named by its store
+   *  key. Not tied to a step — the page lists a run's files in one block. */
+  | { kind: "artifact"; artifact: TimelineArtifact }
   /** A streamed span that is neither a model turn nor a tool call
    *  (docs/reference/specs/tracing.md): a `dispatch.*` / `run.*` / `post.*` / `ship.round`
    *  step, rendered as its own row. `open` is a start with no end yet; the end
@@ -134,6 +138,17 @@ export interface TimelineSkill {
   /** Only an http(s) URL is kept — the page turns it into a link with setAttribute. */
   source?: string;
   bodyBytes: number;
+  at?: number;
+}
+
+/** One file of the run, as the `artifact` event recorded it. The page builds
+ *  the proxy URL from the seed's base and the key; the fold carries no URL. */
+export interface TimelineArtifact {
+  direction: "in" | "out";
+  key: string;
+  name: string;
+  size: number;
+  contentType: string;
   at?: number;
 }
 
@@ -424,6 +439,20 @@ export function createRunTimeline(): RunTimeline {
             ...(startedAt !== undefined ? { startedAt } : {}),
           },
         ];
+      }
+      case "artifact": {
+        const key = str(e.key);
+        const name = str(e.name);
+        if (!key || !name || (e.direction !== "in" && e.direction !== "out")) return [];
+        const artifact: TimelineArtifact = {
+          direction: e.direction,
+          key,
+          name,
+          size: num(e.size) ?? 0,
+          contentType: str(e.contentType),
+          at: num(e.at),
+        };
+        return [{ kind: "artifact", artifact }];
       }
       case "skill_use": {
         const name = str(e.skill);

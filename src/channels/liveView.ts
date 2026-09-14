@@ -10,8 +10,11 @@ import {
   type Predicate,
   type Resource,
 } from "../core/authz/index.js";
-import type { StopMode } from "../core/runEvents.js";
+import type { RunEvent, StopMode } from "../core/runEvents.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
+import type { ArtifactStore } from "../artifacts/store.js";
+import { INLINE_IMAGE_TYPES } from "../artifacts/contentType.js";
+import { safeBasename } from "../artifacts/keys.js";
 import type { RunRegistry } from "../core/runRegistry.js";
 import type { IndexSubscriber } from "../core/runRegistry/indexFeed.js";
 import type { RunSummary } from "../core/runRegistry/projections.js";
@@ -84,29 +87,100 @@ export { retentionSentence } from "./webSeed.js";
  *  id (it is Access-gated, not token-gated); the per-run routes do. `stop` is
  *  the one WRITE route (`POST /runs/:id/stop`). */
 export type RunRoute =
-  { kind: "index" } | { kind: "scheduled" } | { id: string; kind: "page" | "events" | "friction" | "stop" };
+  | { kind: "index" }
+  | { kind: "scheduled" }
+  | { id: string; kind: "page" | "events" | "friction" | "stop" }
+  /** `/runs/:id/artifacts/<key>` (item 26): `key` is everything after `/artifacts/`, decoded. */
+  | { id: string; kind: "artifact"; key: string };
+
+/** Path words that are never a run id (ids are UUIDs): the Scheduled tab and
+ *  the artifacts prefix. `/runs/artifacts` and `/runs/artifacts/x` route nowhere. */
+const RESERVED_IDS = new Set(["scheduled", "artifacts"]);
 
 /** Match the bare index (`/runs`, `/runs/`), the Scheduled tab
  *  (`/runs/scheduled`, item 18 — a reserved path word, never a run id: ids are
  *  UUIDs), a per-run page (`/runs/:id`), a per-run SSE stream
- *  (`/runs/:id/events`), a per-run friction diagnosis (`/runs/:id/friction`), or
- *  the per-run stop control (`/runs/:id/stop`). Path only — the token is a query
- *  param, read separately. Returns null for anything else so the server can fall
- *  through to its other routes. */
+ *  (`/runs/:id/events`), a per-run friction diagnosis (`/runs/:id/friction`),
+ *  the per-run stop control (`/runs/:id/stop`), or one of the run's files
+ *  (`/runs/:id/artifacts/<key>`, item 26 — the key is the greedy tail, slashes
+ *  and all, each segment decoded). Path only — the token is a query param, read
+ *  separately. Returns null for anything else so the server can fall through
+ *  to its other routes. */
 export function parseRunRoute(pathname: string): RunRoute | null {
   if (pathname === "/runs" || pathname === "/runs/") return { kind: "index" };
   if (pathname === "/runs/scheduled" || pathname === "/runs/scheduled/") return { kind: "scheduled" };
+  const a = /^\/runs\/([^/]+)\/artifacts\/(.+)$/.exec(pathname);
+  if (a) {
+    const id = decodeSegment(a[1]);
+    const segments = a[2].split("/").map(decodeSegment);
+    if (id === null || id === "" || RESERVED_IDS.has(id) || segments.some((s) => s === null || s === "")) return null;
+    return { id, kind: "artifact", key: segments.join("/") };
+  }
   const m = /^\/runs\/([^/]+)(?:\/(events|friction|stop))?\/?$/.exec(pathname);
   if (!m) return null;
-  let id: string;
-  try {
-    id = decodeURIComponent(m[1]);
-  } catch {
-    return null; // malformed percent-encoding → not a valid run route
-  }
-  if (id === "") return null;
+  const id = decodeSegment(m[1]);
+  if (id === null || id === "" || RESERVED_IDS.has(id)) return null;
   const sub = m[2];
   return { id, kind: sub === "events" || sub === "friction" || sub === "stop" ? sub : "page" };
+}
+
+/** One path segment decoded; null on malformed percent-encoding (→ not a run route). */
+function decodeSegment(raw: string): string | null {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return null;
+  }
+}
+
+type ArtifactEvent = Extract<RunEvent, { type: "artifact" }>;
+
+/** The response end of the artifact proxy (item 26): what a byte sink must offer. */
+export type ByteSink = Pick<ServerResponse, "write" | "end" | "once" | "off" | "destroyed">;
+
+/** Pipe an object's bytes to the response with backpressure, and stop the
+ *  moment the client is gone: a `write` that returns false waits for `drain`
+ *  OR `close`, whichever comes first — a response the client aborted never
+ *  drains, and a loop that waited on `drain` alone would hold the store's
+ *  stream open forever. On abort the source is cancelled so the signed GET
+ *  upstream closes too; nothing is written to a destroyed response. */
+export async function pipeToResponse(body: ReadableStream<Uint8Array>, res: ByteSink): Promise<void> {
+  let closed = false;
+  const onClose = () => void (closed = true);
+  res.once("close", onClose);
+  const reader = body.getReader();
+  try {
+    for (;;) {
+      if (closed || res.destroyed) {
+        await reader.cancel();
+        return;
+      }
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (closed || res.destroyed) {
+        await reader.cancel();
+        return;
+      }
+      if (!res.write(value)) {
+        await new Promise<void>((resolve) => {
+          const drained = () => {
+            res.off("close", gone);
+            resolve();
+          };
+          const gone = () => {
+            res.off("drain", drained);
+            resolve();
+          };
+          res.once("drain", drained);
+          res.once("close", gone);
+        });
+      }
+    }
+    res.end();
+  } finally {
+    res.off("close", onClose);
+    reader.releaseLock();
+  }
 }
 
 /** Parse the `?mode=` of a stop request; anything but the two modes is null
@@ -116,16 +190,17 @@ export function parseStopMode(raw: string | null): StopMode | null {
 }
 
 /** The tokenless routes that read a finished run. */
-export type HistoryReadRoute = "page" | "events" | "friction" | "stop";
+export type HistoryReadRoute = "page" | "events" | "friction" | "stop" | "artifact";
 
 /** One audit line per tokenless read of a finished run. An allowed
- *  page/events read says who read which run on which route — never any
- *  content. A read the table refused says who was refused on which route and
- *  why (`authorize`'s reason: the audit line's, never the reply's) — and
- *  never which run, so the log reveals no more existence than the 404 does
- *  (the same shape `runs.*` logs). */
+ *  page/events/artifact read says who read which run on which route — never
+ *  any content (an artifact read names the run, not the key). A read the
+ *  table refused says who was refused on which route and why (`authorize`'s
+ *  reason: the audit line's, never the reply's) — and never which run, so the
+ *  log reveals no more existence than the 404 does (the same shape `runs.*`
+ *  logs). */
 export type HistoryReadAudit =
-  | { route: "page" | "events"; runId: string; identity: string }
+  | { route: "page" | "events" | "artifact"; runId: string; identity: string }
   | { route: HistoryReadRoute; identity: string; denied: string };
 
 export interface LiveViewDeps {
@@ -156,6 +231,11 @@ export interface LiveViewDeps {
   /** Rows per `?all=1` page. Default `INDEX_PAGE_SIZE` — a full page renders an
    *  "Older runs" link carrying the service's cursor; a cursor page a "Newest runs" link. */
   indexPageSize?: number;
+  /** The artifact store (execution.md item 20) the `/runs/:id/artifacts/<key>`
+   *  route reads from, with the bucket's retention for the 410 an expired key
+   *  answers. Absent → no `artifacts:` section: the route answers 404 and the
+   *  seeds carry no `artifacts`. */
+  artifacts?: { store: ArtifactStore; retentionDays: number };
 }
 
 /** Completed runs per `?all=1` page (item 20): a screen's worth, paged by the
@@ -313,6 +393,57 @@ export function createLiveViewHandler(
 
   const now = deps.now ?? Date.now;
   const pageSize = deps.indexPageSize ?? INDEX_PAGE_SIZE;
+
+  /** The seed's `artifacts` (item 26) when a store is configured: the run's
+   *  URL base, the retention the 410 names, and the live token when there is
+   *  one. Nothing without a store — a page can list nothing it cannot serve. */
+  const artifactsSeed = (id: string, token?: string) =>
+    deps.artifacts
+      ? {
+          artifacts: {
+            urlBase: `/runs/${encodeURIComponent(id)}/artifacts/`,
+            retentionDays: deps.artifacts.retentionDays,
+            ...(token !== undefined ? { token } : {}),
+          },
+        }
+      : {};
+
+  /** Serve one of the run's files (item 26). The caller has already decided
+   *  the viewer may read the RUN; this decides the KEY: only a key one of the
+   *  run's own `artifact` events names is served (404 otherwise — the store
+   *  holds every run's files under one bucket, and a key from another run is
+   *  as unknown here as a made-up one). The bytes are piped from a signed GET
+   *  the store mints for this request; the type is the event's, never sniffed
+   *  (`nosniff`), the response is sandboxed so an HTML or SVG file cannot run
+   *  as this origin, and only the four raster image types render inline —
+   *  everything else downloads under its recorded basename. A key whose object
+   *  is gone answers 410 naming the retention window. The caller looks the key
+   *  up (`artifactNamed`) so it can audit a read of a named key — served or
+   *  expired — before serving, and audit nothing for a key the run never named. */
+  const artifactNamed = (events: readonly RunEvent[], key: string): ArtifactEvent | undefined =>
+    events.find((e): e is ArtifactEvent => e.type === "artifact" && e.key === key);
+  const serveArtifact = async (res: ServerResponse, named: ArtifactEvent | undefined): Promise<void> => {
+    if (!named || !deps.artifacts) {
+      text(res, 404, NOT_FOUND);
+      return;
+    }
+    const object = await deps.artifacts.store.get(named.key);
+    if (!object) {
+      text(res, 410, `artifact expired: files are kept for ${deps.artifacts.retentionDays} days`);
+      return;
+    }
+    const inline = INLINE_IMAGE_TYPES.has(named.contentType);
+    const filename = safeBasename(named.name);
+    res.writeHead(200, {
+      "content-type": named.contentType,
+      "content-length": String(object.size),
+      "content-disposition": `${inline ? "inline" : "attachment"}; filename="${filename}"`,
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "sandbox",
+      "cache-control": "private, no-store",
+    });
+    await pipeToResponse(object.body, res);
+  };
   /** One rendered index page: the rows, the store-degraded flag, the "Older runs" href and whether a cursor got us here. */
   interface IndexPage {
     rows: readonly IndexRow[];
@@ -476,6 +607,8 @@ export function createLiveViewHandler(
             // Stop control: same token, POST-only; `&mode=` is appended client-side.
             eventsUrl: `/runs/${encodeURIComponent(route.id)}/events?t=${encodeURIComponent(token)}`,
             stopUrl: `/runs/${encodeURIComponent(route.id)}/stop?t=${encodeURIComponent(token)}`,
+            // The files' URL base with the same token (item 26): the page appends each key.
+            ...artifactsSeed(route.id, token),
             // The stamps the header's one duration reads (docs/reference/specs/tracing.md).
             serverNow: now(),
             startedAt: snap?.startedAt ?? now(),
@@ -483,6 +616,17 @@ export function createLiveViewHandler(
             ...(snap?.finishedAt !== undefined ? { finishedAt: snap.finishedAt } : {}),
           }),
         );
+        return true;
+      }
+      // One of the run's files (item 26): the token that opens the page opens
+      // its files; the key must be one the run's own events name.
+      if (route.kind === "artifact") {
+        const snap = access.snapshot();
+        if (!snap) {
+          text(res, 404, NOT_FOUND);
+          return true;
+        }
+        run(res, () => serveArtifact(res, artifactNamed(snap.events, route.key)));
         return true;
       }
       // Read-only friction diagnosis of the run's retained backlog: works
@@ -622,6 +766,14 @@ export function createLiveViewHandler(
         return;
       }
       const view = found.value;
+      if (route.kind === "artifact") {
+        // Audited once the KEY is decided too: a 404 for a key the run never
+        // named is not a read of anything, and must not log as one.
+        const named = artifactNamed(view.events ?? [], route.key);
+        if (named) audit({ route: "artifact", runId: route.id, identity: actor.id });
+        await serveArtifact(res, named);
+        return;
+      }
       audit({ route: route.kind === "page" ? "page" : "events", runId: route.id, identity: actor.id });
       if (route.kind === "page") {
         // A STORED record from before span schema carries no timing (docs/reference/specs/tracing.md):
@@ -651,6 +803,8 @@ export function createLiveViewHandler(
             ...(view.replyOk !== undefined ? { replyOk: view.replyOk } : {}),
             ...(runDurationMs(view) !== undefined ? { durationMs: runDurationMs(view) } : {}),
             ...(view.truncated !== undefined ? { truncated: view.truncated } : {}),
+            // Tokenless: the files are read under the same decision as this page (item 26).
+            ...artifactsSeed(route.id),
           }),
         );
         return;

@@ -78,6 +78,17 @@ function isRunEvent(v: unknown): v is RunEvent {
       );
     case "skill_use":
       return typeof o.skill === "string" && typeof o.agent === "string" && typeof o.bodyBytes === "number";
+    case "artifact":
+      // A key, never a URL (run-visibility.md item 1): a payload carrying one is
+      // a producer that stored a signed URL by mistake — skipped, not repaired.
+      return (
+        (o.direction === "in" || o.direction === "out") &&
+        typeof o.key === "string" &&
+        typeof o.name === "string" &&
+        typeof o.size === "number" &&
+        typeof o.contentType === "string" &&
+        o.url === undefined
+      );
     case "review_artifact":
       if (o.artifact === "pr_description") {
         return (

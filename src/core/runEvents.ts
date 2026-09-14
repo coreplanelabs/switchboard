@@ -402,6 +402,27 @@ export type RunEvent =
       seq?: number;
       at?: number;
     }
+  /** A file moved through the artifact store (docs/reference/specs/execution.md item 20,
+   *  record 0033): one the run received from its thread (`in`, staged before
+   *  the turn) or one it sent (`out`, `attach_file`). The record keeps the
+   *  store KEY and the facts a page needs to list the file — never a URL: the
+   *  run page's proxy route (`/runs/:id/artifacts/<key>`, live-view.md item 26)
+   *  mints a signed GET per request, so a stored record never carries a
+   *  credential that expires or leaks, and the parser refuses a payload that
+   *  tries. A side fact beside the tool pair that moved the file (like
+   *  `skill_use`), never a step; the friction analyzer ignores it. */
+  | {
+      type: "artifact";
+      direction: "in" | "out";
+      /** The store key (`src/artifacts/keys.ts`): `runs/<runId>/out/<seq>-<basename>` or `threads/<thread>/in/<ts>/<i>-<basename>`. */
+      key: string;
+      /** The file's name as the person sees it (the Slack filename, the tool's `name`). */
+      name: string;
+      size: number;
+      contentType: string;
+      seq?: number;
+      at?: number;
+    }
   /** A skill was loaded into the model's context (docs/reference/specs/skills.md). Emitted
    *  by the `use_skill` tool on a successful load — alongside, not instead of,
    *  its `tool_call`/`tool_result` pair — so skill use is a first-class fact in

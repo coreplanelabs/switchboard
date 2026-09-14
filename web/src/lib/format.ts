@@ -17,3 +17,14 @@ export function formatClock(at: number): string {
     .find((part) => part.type === "timeZoneName")?.value;
   return `${h % 12 === 0 ? 12 : h % 12}:${p(d.getMinutes())}:${p(d.getSeconds())} ${h < 12 ? "AM" : "PM"}${zone ? ` ${zone}` : ""}`;
 }
+
+/** A byte count as a person reads it: `812 B`, `4.2 KB`, `3.0 MB`, `1.2 GB`
+ *  (decimal-ish: 1024 steps, one decimal). The skill row's "into context" fact
+ *  and the Files block's sizes share it. */
+export function formatBytes(n: number): string {
+  if (!(n > 0)) return "0 B";
+  if (n < 1024) return `${n} B`;
+  if (n < 1_048_576) return `${(Math.round(n / 102.4) / 10).toFixed(1)} KB`;
+  if (n < 1_073_741_824) return `${(Math.round(n / 104_857.6) / 10).toFixed(1)} MB`;
+  return `${(Math.round(n / 107_374_182.4) / 10).toFixed(1)} GB`;
+}

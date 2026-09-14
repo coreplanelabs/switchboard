@@ -9,6 +9,7 @@ import StepBlock from "../components/run/StepBlock.vue";
 import SpanRow from "../components/run/SpanRow.vue";
 import TimelineSection from "../components/run/TimelineSection.vue";
 import ReplyBlock from "../components/run/ReplyBlock.vue";
+import ArtifactsBlock from "../components/run/ArtifactsBlock.vue";
 import { buildTimeline, type TimelinePhase } from "../lib/timelineVm";
 import { runOwnerOf } from "@core/core/runOwner.js";
 import { useSeed } from "../lib/seed";
@@ -54,6 +55,8 @@ const title = isHistory ? "Run" : "Live run";
  *  Request, above the work. A live page keeps the Reply last — it lands there
  *  as it arrives, and nothing on a live page jumps. */
 const replyFirst = isHistory;
+/** Where the run's files are served from (item 26); null → no store, rows are text. */
+const artifactLinks = seed?.artifacts ?? null;
 
 const openParam = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("open") : null;
 const model = createRunPageModel({
@@ -622,6 +625,13 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
         :when="fmtTime(state.reply.at)"
         :when-title="fmtTimeTitle(state.reply.at)"
       />
+      <!-- Files, on a finished run's page: beside the outcome (item 26). -->
+      <ArtifactsBlock
+        v-if="state.artifacts.length > 0 && replyFirst"
+        position="first"
+        :artifacts="state.artifacts"
+        :links="artifactLinks"
+      />
 
       <!-- Earlier in this thread: the turns the model was given as context,
            collapsed by default. The chevron says "this opens" — the same fold
@@ -828,6 +838,14 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
         </li>
         <li ref="logEnd" aria-hidden="true" />
       </ol>
+
+      <!-- Files, on a live page: they land after the work, before the Reply (item 26). -->
+      <ArtifactsBlock
+        v-if="state.artifacts.length > 0 && !replyFirst"
+        position="last"
+        :artifacts="state.artifacts"
+        :links="artifactLinks"
+      />
 
       <!-- Reply, on a live page: it lands last, as it arrives. -->
       <ReplyBlock
