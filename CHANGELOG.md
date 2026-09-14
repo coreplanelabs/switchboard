@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.207.0](https://github.com/coreplanelabs/switchboard/compare/v1.206.1...v1.207.0) (2026-09-14)
+
+
+### Features
+
+* **load:** recognize rate limiting as the named refusal rate-limited ([#995](https://github.com/coreplanelabs/switchboard/issues/995)) ([7ce95e6](https://github.com/coreplanelabs/switchboard/commit/7ce95e6c40eb791eb80ef81c35fe02729263e35c))
+
+
+### Bug fixes
+
+* **runs:** a finished run's verdict, head, dispositions and handoff are read from the store as soon as it holds them — the runner no longer reads a child inside the registry's window and sees nothing ([#998](https://github.com/coreplanelabs/switchboard/issues/998)) ([06c1515](https://github.com/coreplanelabs/switchboard/commit/06c15159d9f18329e8fb591987f6dfc0688540ce))
+
+
+### Documentation
+
+* **docs:** the code map names the load harness as an area, so `load` is a scope the title gate accepts ([#996](https://github.com/coreplanelabs/switchboard/issues/996)) ([5840229](https://github.com/coreplanelabs/switchboard/commit/5840229877febf776cd71ddbae3aa1b6ebb6ff0d))
+
 ## [1.206.1](https://github.com/coreplanelabs/switchboard/compare/v1.206.0...v1.206.1) (2026-09-13)
 
 
