@@ -40,7 +40,7 @@ import {
   startScriptedProvider,
 } from "../src/load/scriptedProvider.js";
 import { drivePiTask, realTimers, redactPiRun, type PiTaskRun } from "../src/load/piRpc.js";
-import { previewToolCall } from "../src/load/piPolicyPreview.js";
+import { judgeToolCall } from "../src/core/harness/pi/toolRules.js";
 import { PI_TASK_NAMES, PI_TASKS, piTaskByName, taskBranch, taskPrompt } from "../src/load/piTasks.js";
 import { PI_CODING_TOOLS, checkoutBranch, piKeyEnvFor, spawnPi, writeAgentDir } from "../src/load/piProcess.js";
 import {
@@ -582,7 +582,7 @@ async function pi(f: Flags): Promise<boolean> {
       budgetMs,
       now: systemClock,
       timers: realTimers,
-      preview: (tool, input) => previewToolCall(tool, input, { checkout, branch }),
+      preview: (tool, input) => judgeToolCall(tool, input, { checkout, branch }),
       describe: (input) => {
         try {
           parsePrDescription(input);

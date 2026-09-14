@@ -1,14 +1,14 @@
-// The refusal preview of `load:pi` (docs/reference/specs/load-harness.md, the
-// pi driver items). Today the policy table gates who may run a preset and
-// which repositories an actor may use; the tool-level gate for agent actors
-// (a coding run's `repo:use` per push target) is the gap the authorization
-// spec still lists. This module previews each call pi's model asked for
-// against the rules that gate would enforce, so the spike can count what a
-// pi child would have been refused. It never executes anything and it is not
-// the policy table: each rule below cites the rule it stands in for.
+// The coding preset's tool rules under pi (docs/reference/specs/harness-pi.md):
+// what a coding run may ask of pi's built-in tools and of the harness's own,
+// judged per call from the call alone — the push target (the run's repository
+// and branch), a merge or an approval, the executor's credential store, an
+// environment dump, a path outside the checkout, a tool outside the preset's
+// reach. Pure: it executes nothing and reads nothing. The load harness previews
+// every call against it for the spike's receipt; the pi harness's gate refuses
+// with it. Each rule cites the rule it stands in for; the policy table's
+// tool-level rows (the authorization spec's open gap) are the follow-up.
 
 import { isAbsolute, relative, resolve } from "node:path";
-import type { PreviewVerdict } from "./piRpc.js";
 
 /** pi's built-in tools (packages/coding-agent/src/core/tools) and the harness
  *  extension's, each on the capability-profile bundle it exercises (the
@@ -38,16 +38,20 @@ export const CODING_REACH: ReadonlySet<string> = new Set([
   "pr",
 ]);
 
-export interface PreviewContext {
+/** One call's verdict: allowed; refused by a rule the reason names; or a tool
+ *  outside the coding preset's reach altogether (`outside-profile`). */
+export type ToolVerdict = { verdict: "allowed" } | { verdict: "refused" | "outside-profile"; reason: string };
+
+export interface ToolRuleContext {
   /** The checkout pi runs in: the files bundles are this tree and nothing outside it. */
   checkout: string;
   /** The run's branch — the one push target a coding child may use. */
   branch: string;
 }
 
-const allowed: PreviewVerdict = { verdict: "allowed" };
-const refused = (reason: string): PreviewVerdict => ({ verdict: "refused", reason });
-const outside = (reason: string): PreviewVerdict => ({ verdict: "outside-profile", reason });
+const allowed: ToolVerdict = { verdict: "allowed" };
+const refused = (reason: string): ToolVerdict => ({ verdict: "refused", reason });
+const outside = (reason: string): ToolVerdict => ({ verdict: "outside-profile", reason });
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 
@@ -74,19 +78,19 @@ const MERGE_OR_APPROVE = /\bgh\s+pr\s+(merge|review)\b|\/pulls\/\d+\/(merge|revi
 /** Each `git push` and what follows it up to the next shell operator. */
 const GIT_PUSH = /\bgit\s+push\b([^;&|]*)/g;
 
-export function previewToolCall(tool: string, input: unknown, ctx: PreviewContext): PreviewVerdict {
+export function judgeToolCall(tool: string, input: unknown, ctx: ToolRuleContext): ToolVerdict {
   const bundle = PI_TOOL_BUNDLES[tool];
   if (bundle === undefined) return outside(`${tool} is not in any bundle the coding preset reaches`);
   if (!CODING_REACH.has(bundle)) {
     return outside(`${tool} is the \`${bundle}\` bundle; the coding preset's reach does not include it`);
   }
   const args = isRecord(input) ? input : {};
-  if (tool === "bash") return previewBash(args.command, ctx);
-  if (bundle === "files" || bundle === "write-files") return previewPath(args.path, ctx);
+  if (tool === "bash") return judgeBash(args.command, ctx);
+  if (bundle === "files" || bundle === "write-files") return judgePath(args.path, ctx);
   return allowed;
 }
 
-function previewBash(command: unknown, ctx: PreviewContext): PreviewVerdict {
+function judgeBash(command: unknown, ctx: ToolRuleContext): ToolVerdict {
   if (typeof command !== "string") return refused("malformed — bash without a string command");
   if (CREDENTIAL_FILE.test(command)) return refused("credential — reads the executor's credential store");
   if (ENV_DUMP.test(command)) return refused("credential — dumps the process environment");
@@ -95,7 +99,7 @@ function previewBash(command: unknown, ctx: PreviewContext): PreviewVerdict {
     return refused("merge/approve — a coding run never merges or approves a pull request");
   }
   for (const match of command.matchAll(GIT_PUSH)) {
-    const verdict = previewPush(match[1], ctx);
+    const verdict = judgePush(match[1], ctx);
     if (verdict.verdict !== "allowed") return verdict;
   }
   return allowed;
@@ -106,7 +110,7 @@ function previewBash(command: unknown, ctx: PreviewContext): PreviewVerdict {
  *  set does not carry. A destination of `HEAD` is the branch the driver
  *  checked out — the run's — so `git push origin HEAD` is the same push as
  *  naming it. */
-function previewPush(tail: string, ctx: PreviewContext): PreviewVerdict {
+function judgePush(tail: string, ctx: ToolRuleContext): ToolVerdict {
   const words = tail.split(/\s+/).filter((w) => w.length > 0 && !w.startsWith("-"));
   const [remote, refspec] = words;
   if (remote !== undefined && remote !== "origin") {
@@ -120,7 +124,7 @@ function previewPush(tail: string, ctx: PreviewContext): PreviewVerdict {
   return allowed;
 }
 
-function previewPath(path: unknown, ctx: PreviewContext): PreviewVerdict {
+function judgePath(path: unknown, ctx: ToolRuleContext): ToolVerdict {
   if (path === undefined) return allowed; // the search tools default to the checkout
   if (typeof path !== "string") return refused("malformed — a path tool without a string path");
   if (CREDENTIAL_FILE.test(path)) return refused("credential — reads the executor's credential store");

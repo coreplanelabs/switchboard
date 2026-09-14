@@ -1,44 +1,16 @@
 // The RPC side of `load:pi` (docs/reference/specs/load-harness.md, the pi
-// driver items): pi's JSONL framing, the events the driver reads off `pi
-// --mode rpc`, the harness extension's notices riding pi's `notify` UI
-// request, the table that says where each pi event would live on a
-// Switchboard run stream, and the accumulator that turns one task's stream
-// into the measured record. Pure over an abstract transport — `piProcess.ts`
-// spawns the real process, the tests replay recorded lines.
+// driver items): the events the driver reads off `pi --mode rpc` (the framing
+// and the transport seam are `src/core/harness/pi/protocol.ts`), the harness
+// extension's notices riding pi's `notify` UI request, the table that says
+// where each pi event would live on a Switchboard run stream, and the
+// accumulator that turns one task's stream into the measured record. Pure over
+// the abstract transport — `piProcess.ts` spawns the real process, the tests
+// replay recorded lines.
 
 import { redactSecrets, stripAnsi } from "../core/redact.js";
+import { parsePiLine, type PiEvent, type PiTransport } from "../core/harness/pi/protocol.js";
+import type { ToolVerdict } from "../core/harness/pi/toolRules.js";
 import { HOOK_PREFIX, type HookNoticePayload } from "./piExtension.js";
-
-/** One record off pi's stdout: every one carries a `type`. */
-export type PiEvent = { type: string } & Record<string, unknown>;
-
-/** pi's framing (docs/rpc.md, Framing): LF is the only record delimiter, a
- *  trailing CR is stripped, and nothing else — not U+2028/2029 — splits a
- *  record, which rules out Node's `readline`. Returns the complete records and
- *  the unterminated tail to prepend to the next chunk. */
-export function splitJsonl(buffer: string): { lines: string[]; rest: string } {
-  const lines: string[] = [];
-  let start = 0;
-  for (let i = buffer.indexOf("\n", start); i >= 0; i = buffer.indexOf("\n", start)) {
-    let line = buffer.slice(start, i);
-    if (line.endsWith("\r")) line = line.slice(0, -1);
-    if (line.length > 0) lines.push(line);
-    start = i + 1;
-  }
-  return { lines, rest: buffer.slice(start) };
-}
-
-export function parsePiLine(line: string): PiEvent | undefined {
-  try {
-    const value: unknown = JSON.parse(line);
-    if (typeof value === "object" && value !== null && typeof (value as { type?: unknown }).type === "string") {
-      return value as PiEvent;
-    }
-  } catch {
-    // not a record — pi never writes one, but the driver must not die on stray output
-  }
-  return undefined;
-}
 
 /** The harness extension's notice inside a `notify` UI request, or nothing
  *  for every other line (an ordinary notify, a dialog, an event). */
@@ -95,8 +67,6 @@ export const PI_EVENT_HOME: Readonly<Record<string, string | null>> = {
     "(harness notice) tool_call provenance and the refusal preview — a run_note kind to add; (dialog) no home, cancelled by the driver",
 };
 
-export type PreviewVerdict = { verdict: "allowed" } | { verdict: "refused" | "outside-profile"; reason: string };
-
 export interface PiToolCallRecord {
   callId: string;
   tool: string;
@@ -107,7 +77,7 @@ export interface PiToolCallRecord {
   ok?: boolean;
   /** The extension's `tool_call` hook reported this call. */
   hookSeen: boolean;
-  verdict: PreviewVerdict["verdict"];
+  verdict: ToolVerdict["verdict"];
   reason?: string;
 }
 
@@ -161,8 +131,8 @@ export interface PiTaskRun {
 
 export interface AccumulatorOptions {
   task: string;
-  /** The policy preview for one call (piPolicyPreview.ts). */
-  preview: (tool: string, input: unknown) => PreviewVerdict;
+  /** The tool rules' verdict for one call (src/core/harness/pi/toolRules.ts). */
+  preview: (tool: string, input: unknown) => ToolVerdict;
   /** Validates a submitted description; the problems, `[]` when it is valid. */
   describe: (input: unknown) => string[];
 }
@@ -398,14 +368,6 @@ export class PiTaskAccumulator {
       out.replies.push({ type: "extension_ui_response", id: event.id, cancelled: true });
     }
   }
-}
-
-/** What the driver needs from a pi process: write a command, read its
- *  records, end its stdin. */
-export interface PiTransport {
-  send(command: Record<string, unknown>): void;
-  lines: AsyncIterable<string>;
-  close(): void;
 }
 
 /** Timers the driver arms: the budget and the post-abort grace. Injected so
