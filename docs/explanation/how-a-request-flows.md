@@ -33,14 +33,14 @@ The reply travels the same path back, through the dispatcher to the channel that
 
 ## What each seam refuses to know
 
-The seams are Channel, Provider, Executor and Agent. The dispatcher sits between them as the core: directives, the [six config layers](config-layers.md), authorization, history, the agent loop. It never imports a platform SDK; the tree is checked for that.
+The seams are Channel, Provider, Executor and Agent. The dispatcher sits between them as the core: directives, the [six config layers](config-layers.md), routing, authorization, history, the agent loop. It never imports a platform SDK; the tree is checked for that.
 
 | Seam | Interface | Implementations | Knows nothing about |
 |---|---|---|---|
 | Channel | `ChannelIO` + `IncomingMessage` (`src/core/types.ts`) | Slack (Socket Mode), the CLI's `ask`, HTTP ingress, MCP | agents, models, where tools run |
 | Provider | `Provider` (`src/providers/types.ts`) | Anthropic; OpenAI-compatible (OpenAI, Groq, Ollama, vLLM) | Slack, authorization, where tools run |
 | Executor | `Executor` (`src/execution/executor.ts`) | the bot host; an E2B or Cloudflare sandbox per thread; a resident | which agent, model or channel asked |
-| Agent | `AgentDef` data (`src/agents/registry.ts`) | `general`, `coding`, `review`, `ship`, `research`, `explore` | the channel, the executor |
+| Agent | `AgentDef` data (`src/agents/registry.ts`) | `general`, `coding`, `review`, `ship`, `research`, `explore`, `conductor` | the channel, the executor |
 
 Every seam has two or more implementations; the second proves the interface ([decision 0001](../decisions/0001-seams-with-two-implementations.md)). Only the dispatcher starts a run ([decision 0002](../decisions/0002-dispatcher-is-the-only-orchestrator.md)). Identifiers are platform-namespaced (`slack:C…`, `slack:U…`, `slack:C…:<ts>`) so scopes, grants and memory key on them.
 
@@ -72,6 +72,8 @@ sequenceDiagram
 ```
 
 The same sequence runs from the CLI, or on a local backend.
+
+The directive in the example forces `coding`. Without one (no `agent:`, no sticky preset, no channel or user `agent`) and with `routing.auto` on, the dispatcher first asks the fast model which preset the message means and says so on the card (`routed: <reason>`); the gates then judge the routed preset exactly as they judge a typed one, `ship` is never routed, and a message with several independent parts runs as a `conductor` with one child per part ([routing-and-config item 21](../reference/specs/routing-and-config.md)).
 
 ## Every step is measured
 

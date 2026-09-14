@@ -14,6 +14,8 @@ flowchart TB
 
 Commands: [Configure your defaults](../how-to/configure-your-defaults.md). Record: [decision 0005](../decisions/0005-layered-config-effort-first-class.md).
 
+When no layer above the installation defaults names the agent and `routing.auto` is on, the request router picks the preset before the defaults do; a directive, the sticky preset, a user `agent` or a channel `agent` each skip it ([routing-and-config item 21](../reference/specs/routing-and-config.md)).
+
 ## The thread layer has no storage
 
 The thread layer is derived, not set. A follow-up with no directive keeps what the last message in the thread used, read from the channel's history.

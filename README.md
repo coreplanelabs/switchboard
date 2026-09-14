@@ -33,7 +33,7 @@ Next: [Get started](docs/tutorials/get-started.md).
 
 ## How it is put together
 
-Four seams: Channel, Provider, Executor, Agent. Each is an interface with more than one implementation. The dispatcher sits between them: directives, config layers, authorization, the agent loop ([How a request flows](docs/explanation/how-a-request-flows.md)).
+Four seams: Channel, Provider, Executor, Agent. Each is an interface with more than one implementation. The dispatcher sits between them: directives, config layers, routing, authorization, the agent loop ([How a request flows](docs/explanation/how-a-request-flows.md)).
 
 <!-- generated:four-seams · npm run docs:gen — drawn from docs/.vitepress/theme/seams.mjs and src/deploy/plan.ts, do not edit by hand -->
 

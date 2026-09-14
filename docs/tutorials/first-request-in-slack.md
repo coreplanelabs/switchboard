@@ -42,7 +42,7 @@ Every reply in a thread the bot has answered in reaches it, and the thread keeps
 @switchboard agent:coding in acme/api: add a retry to the webhook sender
 ```
 
-`agent:coding` picks the agent; `in acme/api` names the repository. The status card links to a live run page; open it to watch files read, commands run and tests as they happen. The run ends in a pull request.
+`agent:coding` forces the agent (with the router on, a plain message picks its own and the card says why: [Turn features on and off](../how-to/turn-features-on-and-off.md)); `in acme/api` names the repository. The status card links to a live run page; open it to watch files read, commands run and tests as they happen. The run ends in a pull request.
 
 ## Check what it did
 
