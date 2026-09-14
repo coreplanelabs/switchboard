@@ -30,7 +30,15 @@
     // binding's bucket below — the SDK signs URLs for this name, the offboard
     // sweep deletes through the binding. Public config, not secrets.
     "CLOUDFLARE_ACCOUNT_ID": "{{account}}",
-    "BACKUP_BUCKET_NAME": "{{script}}-cache"
+    "BACKUP_BUCKET_NAME": "{{script}}-cache",
+    // The wake budget (docs/reference/specs/resident-repos.md item 64): how long
+    // the SDK's physical start waits for the container's control port to accept
+    // a request before the first connect — WAKE_PORT_READY_MS in
+    // src/execution/residentRefresh.ts, 3 min in place of the SDK's 90 s, so a
+    // slow boot (a 2.65 GB image on a cold host) is not read as an unreachable
+    // runtime. The env name and its bounds (10 s to 600 s) are the SDK's; a test
+    // pins this value to the constant.
+    "SANDBOX_PORT_TIMEOUT_MS": "180000"
   },
   "containers": [
     {

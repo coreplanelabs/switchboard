@@ -19,9 +19,21 @@ import {
   planRefresh,
   restoreArchivePath,
   withTimeout,
+  isRuntimeUnreachableReason,
+  isRuntimeUnreachableSignal,
+  RUNTIME_UNREACHABLE_DOWN_AT,
+  RUNTIME_UNREACHABLE_RECREATE_AT,
+  RUNTIME_UNREACHABLE_STOP_AT,
+  runtimeUnreachableReason,
+  runtimeUnreachableRung,
+  SDK_CONNECT_TIMEOUT_MS,
+  SDK_PORT_READY_ENV,
+  SDK_RUNTIME_RECORD_KEY,
+  WAKE_PORT_READY_MS,
   type RefreshDisk,
 } from "./residentRefresh.js";
 import { DISK_FULL_FREE_KIB } from "./residentDisk.js";
+import { degradedIsServiceable } from "./residentState.js";
 
 const require = createRequire(import.meta.url);
 
@@ -250,6 +262,7 @@ describe("classifyRefreshFailure (a build SIGTERM'd by a deploy is an interrupti
     expect(f).toEqual({
       interrupted: false,
       diskFull: false,
+      runtimeUnreachable: false,
       reason: "build-failed: exit 1: src/x.ts(3,1): error TS2304",
     });
   });
@@ -432,6 +445,7 @@ describe("classifyRefreshFailure (a full container disk is `disk-full`, not GitH
     expect(classifyRefreshFailure({ step: "git-setup", message: msg, freeKiB: DISK_FULL_FREE_KIB })).toEqual({
       interrupted: false,
       diskFull: false,
+      runtimeUnreachable: false,
       reason: `git-setup-failed: ${msg}`,
     });
     expect(classifyRefreshFailure({ step: "git-setup", message: msg, freeKiB: null }).diskFull).toBe(false);
@@ -608,5 +622,201 @@ describe("planWakeDepsBudget (item 61 PR B: the wake's deps materialization live
       remainingMs: 0,
     });
     expect(WAKE_DEPS_MIN_MS).toBeGreaterThanOrEqual(60_000);
+  });
+});
+
+/** The installed SDK's dist, as text (its exports map hides package.json). */
+function installedSdkSource(): string {
+  const dist = path.dirname(require.resolve("@cloudflare/sandbox"));
+  return readdirSync(dist)
+    .filter((f) => f.endsWith(".js"))
+    .map((f) => readFileSync(path.join(dist, f), "utf8"))
+    .join("\n");
+}
+
+describe("runtime-unreachable (a container whose control port never answers is named, never a command failure)", () => {
+  // The production failure, verbatim from the resident Worker's log: every
+  // `sandbox.exec` rejected after exactly 30 s with the DOMException the SDK's
+  // connect timeout raises, from inside the wake path.
+  const production = Object.assign(new Error("The operation was aborted"), {
+    name: "AbortError",
+    stack: [
+      "AbortError: The operation was aborted",
+      "    at ContainerControlConnection.fetchUpgradeAttempt",
+      "    at ContainerControlConnection.doConnect",
+      "    at ContainerControlConnection.connect",
+      "    at RuntimeBootstrapProbe.probe",
+      "    at SandboxRuntimeLifecycle.doEstablish",
+      "    at RuntimeOperationRunner.runWaking",
+      "    at ResidentDO.exec",
+    ].join("\n"),
+  });
+
+  it("the production AbortError is the signal — by its name, and by the DOMException's message when a wrapper copied only that", () => {
+    expect(isRuntimeUnreachableSignal(production)).toBe(true);
+    expect(isRuntimeUnreachableSignal({ name: "AbortError", message: "" })).toBe(true);
+    expect(isRuntimeUnreachableSignal(new Error("The operation was aborted"))).toBe(true);
+  });
+
+  it("nothing else is: a command's own abort, a timeout, a replacement, a crash, a non-error", () => {
+    expect(isRuntimeUnreachableSignal(new Error("exit 134: Aborted (core dumped)"))).toBe(false);
+    expect(isRuntimeUnreachableSignal(new Error("exit 143 (timed out): killed"))).toBe(false);
+    expect(isRuntimeUnreachableSignal({ name: "ProcessWaitTimeoutError", message: "Process wait timed out" })).toBe(
+      false,
+    );
+    expect(isRuntimeUnreachableSignal(new Error("Process supervisor is closed"))).toBe(false);
+    expect(isRuntimeUnreachableSignal(new Error("container exited with unexpected exit code 137"))).toBe(false);
+    expect(isRuntimeUnreachableSignal(null)).toBe(false);
+    expect(isRuntimeUnreachableSignal("The operation was aborted")).toBe(false);
+  });
+
+  it("the signal and the replacement family are disjoint — the Worker asks about a replacement first, and a replaced runtime is never counted as unreachable", () => {
+    for (const msg of [
+      "Process supervisor is closed",
+      "Process handle refers to a previous runtime incarnation",
+      "The container is not running, consider calling start()",
+    ]) {
+      expect(RUNTIME_REPLACEMENT_WORDING.test(msg)).toBe(true);
+      expect(isRuntimeUnreachableSignal(new Error(msg))).toBe(false);
+    }
+    expect(RUNTIME_REPLACEMENT_WORDING.test(production.message)).toBe(false);
+  });
+
+  it("the ladder: attempts 1–2 re-arm, 3 stops the container, 4–5 destroy it and restore from the snapshot, 6 and beyond go down", () => {
+    expect(RUNTIME_UNREACHABLE_STOP_AT).toBe(3);
+    expect(RUNTIME_UNREACHABLE_RECREATE_AT).toBe(4);
+    expect(RUNTIME_UNREACHABLE_DOWN_AT).toBe(6);
+    expect(runtimeUnreachableRung(1)).toBe("re-arm");
+    expect(runtimeUnreachableRung(2)).toBe("re-arm");
+    expect(runtimeUnreachableRung(3)).toBe("stop");
+    expect(runtimeUnreachableRung(4)).toBe("recreate");
+    expect(runtimeUnreachableRung(5)).toBe("recreate");
+    expect(runtimeUnreachableRung(6)).toBe("down");
+    expect(runtimeUnreachableRung(7)).toBe("down");
+    expect(runtimeUnreachableRung(100)).toBe("down");
+  });
+
+  it("a rung needs a count of at least one — zero and negative counts are a caller bug, not a rung", () => {
+    expect(() => runtimeUnreachableRung(0)).toThrow(RangeError);
+    expect(() => runtimeUnreachableRung(-1)).toThrow(RangeError);
+    expect(() => runtimeUnreachableRung(Number.NaN)).toThrow(RangeError);
+  });
+
+  it("the reason names the port, the SDK's 30 s and the attempt out of the down threshold — never the bare `The operation was aborted`", () => {
+    const reason = runtimeUnreachableReason(3);
+    expect(reason).toBe(
+      `runtime-unreachable: the container's control port did not answer within ${SDK_CONNECT_TIMEOUT_MS / 1000} s (attempt 3 of ${RUNTIME_UNREACHABLE_DOWN_AT})`,
+    );
+    expect(reason).not.toMatch(/operation was aborted/);
+    expect(isRuntimeUnreachableReason(reason)).toBe(true);
+    expect(isRuntimeUnreachableReason("refresh-failed: The operation was aborted")).toBe(false);
+    expect(isRuntimeUnreachableReason("runtime-unreachable")).toBe(false);
+  });
+
+  it("each rung appends what it did, so the state reason says what happened and what the retry does next", () => {
+    expect(runtimeUnreachableReason(1, "re-arm")).toMatch(/\(attempt 1 of 6\) — the step is retried/);
+    expect(runtimeUnreachableReason(3, "stop")).toMatch(/\(attempt 3 of 6\) — the container was stopped/);
+    expect(runtimeUnreachableReason(4, "recreate")).toMatch(
+      /\(attempt 4 of 6\) — the container was destroyed and the SDK's runtime identity forgotten, snapshots kept; the retry restores the checkout from the snapshot/,
+    );
+    expect(runtimeUnreachableReason(6, "down")).toMatch(
+      /\(attempt 6 of 6\) — a recreated container did not answer either; only a rebuild follows/,
+    );
+    for (const rung of ["re-arm", "stop", "recreate", "down"] as const) {
+      expect(isRuntimeUnreachableReason(runtimeUnreachableReason(2, rung))).toBe(true);
+    }
+  });
+
+  it("is never a serviceable degraded reason — the bot goes cold without attaching to a runtime that cannot answer", () => {
+    expect(degradedIsServiceable(runtimeUnreachableReason(1, "re-arm"))).toBe(false);
+    expect(degradedIsServiceable(runtimeUnreachableReason(4, "recreate"))).toBe(false);
+  });
+
+  it("classifyRefreshFailure with the caller's count → the `runtime-unreachable` outcome with the named reason, whatever the step and message", () => {
+    const f = classifyRefreshFailure({
+      step: "refresh",
+      message: production.message,
+      runtimeUnreachable: { count: 2 },
+    });
+    expect(f).toEqual({
+      interrupted: false,
+      diskFull: false,
+      runtimeUnreachable: true,
+      reason: runtimeUnreachableReason(2),
+    });
+    expect(
+      classifyRefreshFailure({ step: "fetch", message: "anything", runtimeUnreachable: { count: 5 } }).reason,
+    ).toBe(runtimeUnreachableReason(5));
+  });
+
+  it("the caller's count wins over a disk probe: no probe is consulted and the disk is never named", () => {
+    const f = classifyRefreshFailure({
+      step: "refresh",
+      message: production.message,
+      runtimeUnreachable: { count: 1 },
+      freeKiB: DISK_FULL_FREE_KIB - 1,
+    });
+    expect(f.diskFull).toBe(false);
+    expect(f.runtimeUnreachable).toBe(true);
+  });
+
+  it("without the caller's word the classifier does not guess from the wording — the message stays the step's own failure, as it did in production", () => {
+    const f = classifyRefreshFailure({ step: "refresh", message: production.message });
+    expect(f).toEqual({
+      interrupted: false,
+      diskFull: false,
+      runtimeUnreachable: false,
+      reason: "refresh-failed: The operation was aborted",
+    });
+  });
+
+  it("a timeout wording stays the step's own failure and a timed-out restore stays down — the ladder never widens those", () => {
+    const f = classifyRefreshFailure({ step: "build", message: "exit 143 (timed out): killed" });
+    expect(f.runtimeUnreachable).toBe(false);
+    expect(f.reason).toMatch(/^build-failed: /);
+    expect(restoreFailureDisposition("checkout restore (timed out) The operation was aborted").action).toBe("down");
+  });
+
+  it("the 30 s is the INSTALLED SDK's connect timeout (`DEFAULT_CONNECT_TIMEOUT_MS`), not ours — an SDK bump that moves it fails here", () => {
+    const m = /const DEFAULT_CONNECT_TIMEOUT_MS = ([0-9e]+);/.exec(installedSdkSource());
+    expect(m, "the SDK declares DEFAULT_CONNECT_TIMEOUT_MS").not.toBeNull();
+    expect(Number(m![1])).toBe(SDK_CONNECT_TIMEOUT_MS);
+    expect(SDK_CONNECT_TIMEOUT_MS).toBe(30_000);
+  });
+
+  it("the SDK's runtime identity lives under the INSTALLED SDK's RUNTIME_RECORD_KEY, deleted by its own stop and destroy — the resident's explicit forget names the same key", () => {
+    const source = installedSdkSource();
+    const m = /const RUNTIME_RECORD_KEY = "([^"]+)";/.exec(source);
+    expect(m, "the SDK declares RUNTIME_RECORD_KEY").not.toBeNull();
+    expect(m![1]).toBe(SDK_RUNTIME_RECORD_KEY);
+    // The two facts the ladder's rung 3 rests on: destroy forgets the identity
+    // as its first act, and a destroy without a stored identity skips the
+    // runtime cleanup (no wait against a silent port).
+    expect(source).toMatch(/async doDestroy\(\) \{[\s\S]{0,400}?invalidateAndObserveStoredActive\(\)/);
+    expect(source).toMatch(/if \(stored\) await this\.options\.storage\.delete\(RUNTIME_RECORD_KEY\);/);
+    expect(source).toMatch(
+      /async runBoundedDestroyRuntimeCleanup\(cleanupRuntime\) \{\s*if \(!cleanupRuntime\) return await this\.bucketMounts\.cleanupForDestroyWithoutRuntime\(\);/,
+    );
+    // And stop() is a signal the SDK never waits on — the rung the ladder does
+    // not rest on (a wedged runtime ignored it live).
+    expect(source).toMatch(
+      /async performRuntimeStop\(physicalStop\) \{\s*await this\.runtimeLifecycle\.invalidate\(\);/,
+    );
+  });
+
+  it("the wake budget: the first connect after a start waits WAKE_PORT_READY_MS (3 min) for the control port through the SDK's env knob, inside the SDK's bounds and above its default", () => {
+    const source = installedSdkSource();
+    const knob = new RegExp(
+      `getEnvString\\(env\\$1, "${SDK_PORT_READY_ENV}"\\), "portReadyTimeoutMS", ([0-9e]+), ([0-9e]+)\\)`,
+    ).exec(source);
+    expect(knob, `the SDK reads ${SDK_PORT_READY_ENV} for portReadyTimeoutMS`).not.toBeNull();
+    const [, min, max] = knob!;
+    expect(WAKE_PORT_READY_MS).toBe(3 * 60_000);
+    expect(WAKE_PORT_READY_MS).toBeGreaterThanOrEqual(Number(min));
+    expect(WAKE_PORT_READY_MS).toBeLessThanOrEqual(Number(max));
+    const dflt = /portReadyTimeoutMS: ([0-9e]+),/.exec(source);
+    expect(dflt, "the SDK declares a portReadyTimeoutMS default").not.toBeNull();
+    expect(WAKE_PORT_READY_MS).toBeGreaterThan(Number(dflt![1]));
+    expect(WAKE_PORT_READY_MS).toBeGreaterThan(SDK_CONNECT_TIMEOUT_MS);
   });
 });

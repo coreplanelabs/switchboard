@@ -117,6 +117,10 @@ export function checkoutUpdateCommand(sha: string, clean: CleanScope): string {
  *  step at all.) The kill surfaces either as the shell's
  *  own death (SIGTERM, exit 143, "Session terminated") or, past the shell, as
  *  the SDK's replacement errors (stale process handle, closed supervisor).
+ *  `runtimeUnreachable` is the other outcome that says nothing about the
+ *  repository: the container's control port never answered the SDK's connect
+ *  (`runtimeUnreachableReason`), so no command ran at all — the resident
+ *  escalates on its persisted count instead of recording a command failure.
  *  Everything else is the repo's own build failing. */
 export interface RefreshFailure {
   /** The reason. An interruption's is prefixed `refresh-interrupted:` and is
@@ -124,10 +128,13 @@ export interface RefreshFailure {
    *  whose retry re-enters the step, and the row keeps its state (the word
    *  shows on the instance row's `lastStep` and in the log). A full disk is
    *  `disk-full:` (`residentDisk.ts` — the cycle's entry gate and the recycle
-   *  decision key on it); real failures keep `<step>-failed:`. */
+   *  decision key on it); an unanswered control port is `runtime-unreachable:`
+   *  with the attempt count (the ladder below decides what the resident does
+   *  about it); real failures keep `<step>-failed:`. */
   reason: string;
   interrupted: boolean;
   diskFull: boolean;
+  runtimeUnreachable: boolean;
 }
 
 /** Root argv that kills every process the build user still owns and waits
@@ -202,7 +209,16 @@ const INTERRUPTION_SIGNATURE = /\bexit 143\b|Session terminated|SIGTERM/;
 export const RUNTIME_REPLACEMENT_WORDING =
   /previous runtime incarnation|interrupted because the runtime changed|runtime identity is no longer active|sandbox lifetime is no longer current|platform was updating the sandbox runtime|no longer identifies pid|process supervisor is closed|container is not running, consider calling start/i;
 
-/** `freeKiB` is the `df` probe's answer (`parseDfFreeKiB`), taken AFTER the
+/** `runtimeUnreachable` is the caller's word that the failure was the SDK's
+ *  connect abort at the exec choke point (the Worker's typed check over the
+ *  error and its cause chain, `isRuntimeUnreachableSignal`) with the count it
+ *  persisted: the outcome is decided before anything else — no command ran, so
+ *  neither the message nor a disk probe is evidence — and the reason is the
+ *  named one, never the SDK's bare `The operation was aborted`. Without that
+ *  word the classifier does not guess from the wording: an abort message on
+ *  its own stays the step's failure, exactly as it did before the ladder.
+ *
+ *  `freeKiB` is the `df` probe's answer (`parseDfFreeKiB`), taken AFTER the
  *  step failed and only consulted when the message itself carries no errno:
  *  a message saying ENOSPC is disk-full outright (the disk is the actionable
  *  fact, whatever else the message says); a kill signature without it is an
@@ -213,23 +229,153 @@ export function classifyRefreshFailure(input: {
   step: string;
   message: string;
   freeKiB?: number | null;
+  runtimeUnreachable?: { count: number };
 }): RefreshFailure {
   const { step, message } = input;
+  if (input.runtimeUnreachable) {
+    return {
+      interrupted: false,
+      diskFull: false,
+      runtimeUnreachable: true,
+      reason: runtimeUnreachableReason(input.runtimeUnreachable.count),
+    };
+  }
   if (isDiskFullMessage(message)) {
     return {
       interrupted: false,
       diskFull: true,
+      runtimeUnreachable: false,
       reason: diskFullReason({ step, message, freeKiB: input.freeKiB ?? null }),
     };
   }
   const timedOut = /\(timed out\)/.test(message);
   if (!timedOut && (INTERRUPTION_SIGNATURE.test(message) || RUNTIME_REPLACEMENT_WORDING.test(message))) {
-    return { interrupted: true, diskFull: false, reason: `refresh-interrupted: ${step} ${message}` };
+    return {
+      interrupted: true,
+      diskFull: false,
+      runtimeUnreachable: false,
+      reason: `refresh-interrupted: ${step} ${message}`,
+    };
   }
   if (input.freeKiB !== undefined && input.freeKiB !== null && input.freeKiB < DISK_FULL_FREE_KIB) {
-    return { interrupted: false, diskFull: true, reason: diskFullReason({ step, message, freeKiB: input.freeKiB }) };
+    return {
+      interrupted: false,
+      diskFull: true,
+      runtimeUnreachable: false,
+      reason: diskFullReason({ step, message, freeKiB: input.freeKiB }),
+    };
   }
-  return { interrupted: false, diskFull: false, reason: `${step}-failed: ${message}` };
+  return { interrupted: false, diskFull: false, runtimeUnreachable: false, reason: `${step}-failed: ${message}` };
+}
+
+// -- the runtime that never answers --------------------------------------------
+
+/** The Sandbox SDK's connect timeout (`DEFAULT_CONNECT_TIMEOUT_MS` in its
+ *  container-control connection, @cloudflare/sandbox@0.13.0-next.751.1): how
+ *  long ONE WebSocket upgrade to the container's control port 3000 may take
+ *  before the SDK aborts it. A module constant there, not an option — the
+ *  30 s is the SDK's, not ours; pinned by a test that reads the installed
+ *  dist, so an SDK bump that moves it fails the build, not a reason string. */
+export const SDK_CONNECT_TIMEOUT_MS = 30_000;
+
+/** The SDK's env knob for how long the physical start waits for the control
+ *  port to accept a request before the first connect (`portReadyTimeoutMS`,
+ *  read from this var, 10 s to 600 s; its default is 90 s). The wake path's
+ *  first exec after a start is bounded by that wait PLUS one connect timeout:
+ *  a slow boot (a 2.65 GB image on a cold host) spends its time in the port
+ *  wait, so a start given `WAKE_PORT_READY_MS` is not mistaken for an
+ *  unreachable runtime. The value lives in the resident's wrangler template
+ *  (`vars`), pinned to the constant by a test. */
+export const SDK_PORT_READY_ENV = "SANDBOX_PORT_TIMEOUT_MS";
+export const WAKE_PORT_READY_MS = 3 * 60_000;
+
+/** The DO storage key the SDK keeps its runtime identity under
+ *  (`RUNTIME_RECORD_KEY` in its runtime lifecycle; not exported). The
+ *  resident forgets it before it destroys a container: the SDK's `destroy()`
+ *  skips its runtime cleanup when no identity is stored — against a silent
+ *  control port that cleanup would only wait out its bound — and a destroy
+ *  that fails midway leaves no identity behind to be re-adopted. `stop()` and
+ *  `destroy()` delete it themselves (`invalidate`); the explicit delete is the
+ *  guard for the path where they do not get that far. Pinned to the installed
+ *  SDK by a test. */
+export const SDK_RUNTIME_RECORD_KEY = "currentRuntimeIdentity";
+
+/** The DOMException the SDK's connect abort raises: `AbortError`, message
+ *  `The operation was aborted`. Anchored on the whole sentence so a command's
+ *  own `Aborted (core dumped)` never matches. */
+export const RUNTIME_UNREACHABLE_WORDING = /\bThe operation was aborted\b/;
+
+/** Is this one link of an error's cause chain the SDK's connect abort? By
+ *  name first (the DOMException's `AbortError`), by the DOMException's message
+ *  when a wrapper copied only that. Applied by the Worker to the SPAWN-phase
+ *  error alone — after its replacement check, since a replaced runtime is a
+ *  different fact (`RUNTIME_REPLACEMENT_WORDING`, disjoint by construction) —
+ *  never to a command's own output, which is a `StepError` with an exit code. */
+export function isRuntimeUnreachableSignal(link: unknown): boolean {
+  if (link === null || typeof link !== "object") return false;
+  const { name, message } = link as { name?: unknown; message?: unknown };
+  if (name === "AbortError") return true;
+  return typeof message === "string" && RUNTIME_UNREACHABLE_WORDING.test(message);
+}
+
+/** The escalation ladder over the resident's persisted count of consecutive
+ *  unanswered connects (the row is cleared by any exec whose process spawned).
+ *  Each rung is what the refresh instance does when a step's exec finds the
+ *  control port silent AGAIN at that count:
+ *    re-arm   (1–2)  `degraded(runtime-unreachable …)`, the step thrown to the
+ *                    engine whose retry re-enters it thirty seconds on — the
+ *                    short re-arm a `refresh-interrupted` gets;
+ *    stop     (3)    the container is sent SIGTERM (`stop()`), the incarnation
+ *                    swapped, the retry starts it again — cheap, and enough
+ *                    for a runtime that still honours signals;
+ *    recreate (4–5)  the SDK's runtime identity is forgotten
+ *                    (`SDK_RUNTIME_RECORD_KEY`) and the VM destroyed
+ *                    (`destroy()`: SIGKILL, a fresh disk — where `stop()` is a
+ *                    SIGTERM a wedged runtime ignores, as the incident's admin
+ *                    stop showed), every snapshot and entry backup kept, the
+ *                    incarnation swapped; the retry's wake path finds no
+ *                    runtime, flips `restoring` and restores mirror, checkout
+ *                    and deps from R2 — minutes, not the thirty-minute rebuild;
+ *    down     (≥ 6)  a recreated container did not answer either: the resident
+ *                    goes `down(runtime-unreachable …)`, a reason the watchdog's
+ *                    auto-rebuild strikes apply to, so the rebuild — destroy
+ *                    plus reprovision from the code host — is the last resort,
+ *                    not the first. */
+export const RUNTIME_UNREACHABLE_STOP_AT = 3;
+export const RUNTIME_UNREACHABLE_RECREATE_AT = 4;
+export const RUNTIME_UNREACHABLE_DOWN_AT = 6;
+
+export type RuntimeUnreachableRung = "re-arm" | "stop" | "recreate" | "down";
+
+export function runtimeUnreachableRung(count: number): RuntimeUnreachableRung {
+  if (!Number.isFinite(count) || count < 1) {
+    throw new RangeError(`runtime-unreachable rung needs a count of at least 1, got ${count}`);
+  }
+  if (count >= RUNTIME_UNREACHABLE_DOWN_AT) return "down";
+  if (count >= RUNTIME_UNREACHABLE_RECREATE_AT) return "recreate";
+  if (count >= RUNTIME_UNREACHABLE_STOP_AT) return "stop";
+  return "re-arm";
+}
+
+const RUNTIME_UNREACHABLE_ACTION: Readonly<Record<RuntimeUnreachableRung, string>> = {
+  "re-arm": "the step is retried",
+  stop: "the container was stopped (SIGTERM); the retry starts it again",
+  recreate:
+    "the container was destroyed and the SDK's runtime identity forgotten, snapshots kept; the retry restores the checkout from the snapshot",
+  down: "a recreated container did not answer either; only a rebuild follows",
+};
+
+/** The reason a silent control port is recorded under: the port, the SDK's
+ *  connect timeout and the attempt out of the down threshold — and, when a
+ *  rung acted, what it did and what the retry does next. Never the SDK's bare
+ *  `The operation was aborted`. */
+export function runtimeUnreachableReason(count: number, rung?: RuntimeUnreachableRung): string {
+  const base = `runtime-unreachable: the container's control port did not answer within ${SDK_CONNECT_TIMEOUT_MS / 1000} s (attempt ${count} of ${RUNTIME_UNREACHABLE_DOWN_AT})`;
+  return rung ? `${base} — ${RUNTIME_UNREACHABLE_ACTION[rung]}` : base;
+}
+
+export function isRuntimeUnreachableReason(reason: string): boolean {
+  return /^runtime-unreachable: /.test(reason);
 }
 
 /** What the wake path does with a failed restore. `down` is the rule: the
