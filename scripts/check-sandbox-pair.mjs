@@ -7,9 +7,13 @@
 // Worker speaking a protocol its container does not, on the live execution
 // path, with only a typecheck as the gate.
 //
-// This check reads both files for every such Worker and requires the
-// package.json pin to be exact and equal to the Dockerfile tag. Bump them
-// together, then deploy and validate. Dependabot ignores both sides.
+// This check reads committed files only on its failure path: the Dockerfile
+// tag, the package.json pin, and the lockfile's resolution of that pin must
+// all agree, per Worker. The installed node_modules tree is NOT part of the
+// gate — a stale install is a local-state problem `npm ci` fixes, so when an
+// installed copy disagrees with the lockfile the check prints a one-line
+// advisory and still passes. Bump image and SDK together, then deploy and
+// validate. Dependabot ignores both sides.
 
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -42,10 +46,26 @@ export function sdkPin(manifest) {
   return manifest.dependencies?.[SDK] ?? manifest.devDependencies?.[SDK] ?? null;
 }
 
-/** Pure: the problems for a set of `{ label, imageTag, sdkPin }` pairs. */
+/** Pure: the version the lockfile resolves `@cloudflare/sandbox` to for a
+ *  workspace, by npm's own layout: the workspace's nested entry first (npm
+ *  nests a divergent pin), else the root's hoisted entry, else null. Reads the
+ *  parsed lockfile object, never the disk. */
+export function lockfileSdkVersion(lockfile, workspacePath) {
+  const packages = lockfile.packages ?? {};
+  for (const key of [`${workspacePath}/node_modules/${SDK}`, `node_modules/${SDK}`]) {
+    const version = packages[key]?.version;
+    if (version) return version;
+  }
+  return null;
+}
+
+/** Pure: the problems for a set of `{ label, imageTag, sdkPin, locked }`
+ *  pairs — the committed truth. `locked` is the lockfile's resolution of the
+ *  pin (null when the lockfile has no entry, which is a mismatch: the pin was
+ *  bumped without `npm install` updating the lockfile). */
 export function pairMismatches(pairs) {
   const problems = [];
-  for (const { label, imageTag: tag, sdkPin: pin } of pairs) {
+  for (const { label, imageTag: tag, sdkPin: pin, locked } of pairs) {
     if (tag === null) {
       problems.push({ label, reason: "Dockerfile has no `FROM cloudflare/sandbox:<tag>` line" });
       continue;
@@ -60,30 +80,43 @@ export function pairMismatches(pairs) {
     }
     if (pin !== tag) {
       problems.push({ label, reason: `${SDK} is "${pin}" but the Dockerfile builds FROM cloudflare/sandbox:${tag}` });
+      continue;
+    }
+    if (locked === undefined) continue; // caller supplied no lockfile view (unit fixtures)
+    if (locked === null) {
+      problems.push({
+        label,
+        reason: `package-lock.json has no entry for ${SDK}; run \`npm install\` and commit the lockfile`,
+      });
+      continue;
+    }
+    if (locked !== pin) {
+      problems.push({
+        label,
+        reason: `package.json pins ${SDK} ${pin} but package-lock.json resolves it to ${locked}; run \`npm install\` and commit the lockfile`,
+      });
     }
   }
   return problems;
 }
 
-/** Pure: the problems for a set of `{ label, sdkPin, installed }` pairs, where
- *  `installed` is the version of the SDK actually present under the Worker's
- *  node_modules (null when nothing is installed — a fresh clone before
- *  `npm ci`, which is not a mismatch). The pin and the lockfile can agree
- *  while the tree on disk is something else: the main checkout carried a
- *  nested install of another SDK version against the pin, and wrangler bundles
- *  whatever is installed. */
-export function installMismatches(pairs) {
-  const problems = [];
-  for (const { label, sdkPin: pin, installed } of pairs) {
-    if (installed === null || pin === null) continue;
-    if (installed !== pin) {
-      problems.push({
-        label,
-        reason: `${SDK} ${installed} is installed under the Worker but package.json pins ${pin} — run \`npm ci\` before deploying`,
-      });
+/** Pure: advisories (never failures) for a set of `{ label, locked,
+ *  installed }` pairs, where `installed` is the SDK version actually present
+ *  under the Worker's node_modules (null when nothing is installed — a fresh
+ *  clone before `npm ci`, nothing to say). An installed copy that disagrees
+ *  with the lockfile is local-state drift, not a committed mismatch: name it
+ *  in one line and point at `npm ci`. */
+export function installAdvisories(pairs) {
+  const advisories = [];
+  for (const { label, locked, installed } of pairs) {
+    if (installed === null || locked == null) continue;
+    if (installed !== locked) {
+      advisories.push(
+        `${label}: installed ${SDK} ${installed} differs from the lockfile's ${locked} — local drift, run \`npm ci\``,
+      );
     }
   }
-  return problems;
+  return advisories;
 }
 
 /** The repository root, anchored to this script's location — never the
@@ -94,13 +127,14 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 /** The installed `@cloudflare/sandbox` version a Worker would bundle, by
  *  Node's own resolution: its nested node_modules first (npm nests a
  *  workspace's divergent pin there), else the repository root's hoisted copy
- *  (what a Worker whose pin matches the root resolves to), else null. */
-export function installedSdkVersion(manifestPath) {
+ *  (what a Worker whose pin matches the root resolves to), else null. Feeds
+ *  the advisory only — never the failure path. */
+export function installedSdkVersion(manifestPath, repoRoot = REPO_ROOT) {
   if (!existsSync(manifestPath)) return null;
   const dir = dirname(manifestPath);
   for (const candidate of [
     join(dir, "node_modules", SDK, "package.json"),
-    join(REPO_ROOT, "node_modules", SDK, "package.json"),
+    join(repoRoot, "node_modules", SDK, "package.json"),
   ]) {
     if (existsSync(candidate)) return JSON.parse(readFileSync(candidate, "utf8")).version ?? null;
   }
@@ -110,16 +144,19 @@ export function installedSdkVersion(manifestPath) {
 function main() {
   // Every path is repo-root-relative and resolved against REPO_ROOT, so the
   // check reads the same tree whatever the working directory is.
+  const lockfile = JSON.parse(readFileSync(join(REPO_ROOT, "package-lock.json"), "utf8"));
   const observed = PAIRS.map(({ label, dockerfile, manifest }) => ({
     label,
     imageTag: imageTag(readFileSync(join(REPO_ROOT, dockerfile), "utf8")),
     sdkPin: sdkPin(JSON.parse(readFileSync(join(REPO_ROOT, manifest), "utf8"))),
+    locked: lockfileSdkVersion(lockfile, label),
     installed: installedSdkVersion(join(REPO_ROOT, manifest)),
   }));
-  const problems = [...pairMismatches(observed), ...installMismatches(observed)];
+  for (const advisory of installAdvisories(observed)) console.warn(`check:sandbox-pair advisory — ${advisory}`);
+  const problems = pairMismatches(observed);
   if (problems.length === 0) {
     console.log(
-      `check:sandbox-pair ok — ${observed.map((o) => `${o.label} ${o.imageTag}${o.installed ? ` (installed ${o.installed})` : ""}`).join(", ")}: image tag, ${SDK} pin and the installed SDK agree`,
+      `check:sandbox-pair ok — ${observed.map((o) => `${o.label} ${o.imageTag}`).join(", ")}: image tag, ${SDK} pin and the lockfile agree`,
     );
     return;
   }
