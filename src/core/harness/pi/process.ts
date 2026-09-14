@@ -7,6 +7,7 @@
 // bot's model proxy, a settings file that never trusts the checkout, and the
 // extension. Pure: strings and records; the container seam writes and runs them.
 
+import type { Identity } from "../../../agents/registry.js";
 import type { Effort } from "../../../effort.js";
 import type { ProviderConfig } from "../../../providers/types.js";
 import { PI_EXTENSION_SOURCE } from "./extensionSource.js";
@@ -21,6 +22,17 @@ export const PROXY_PROVIDER = "switchboard";
 
 /** pi's own coding tools, the ones that run in the container beside the model. */
 export const PI_BUILTIN_TOOLS: readonly string[] = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+/** pi's own tools a read-identity run holds: the built-ins less `edit` and
+ *  `write`. Off the allowlist, so pi never has them — the gate (toolRules.ts)
+ *  would refuse a call, but a tool pi does not have is never called. */
+export const PI_READ_TOOLS: readonly string[] = ["read", "bash", "grep", "find", "ls"];
+
+/** The built-in tools a run's identity gives its pi (harness-pi item 10): a
+ *  write run holds them all; a read run — and a preset without an identity —
+ *  holds nothing that writes. */
+export function piBuiltinToolsFor(identity: Identity): readonly string[] {
+  return identity === "write" ? PI_BUILTIN_TOOLS : PI_READ_TOOLS;
+}
 
 /** The five effort tiers onto pi's seven thinking levels: the names coincide,
  *  so the map is the identity, and no effort leaves pi's own default for the
@@ -70,6 +82,9 @@ export interface PiLaunchSpec {
   /** The bot's base URL as the container reaches it (through the shim). */
   harnessUrl: string;
   effort?: Effort;
+  /** The preset's identity: it decides which of pi's own tools the allowlist
+   *  carries and what the harness note says of them. */
+  identity: Identity;
   /** The composed system prompt the dispatcher would hand the native loop. */
   system: string;
   /** The harness's own tools the extension registers, so the prompt can name them. */
@@ -80,8 +95,9 @@ export interface PiLaunchSpec {
 
 /** `pi --mode rpc` with discovery off: no `~/.pi/agent/extensions`, no project
  *  `.pi/extensions`, no skills, prompt templates or themes; the harness
- *  extension by explicit path; the tools allowlist (pi's own plus the relayed
- *  ones — pi's `--tools` filters extension tools too); the proxy's provider
+ *  extension by explicit path; the tools allowlist (pi's own for the run's
+ *  identity plus the relayed ones — pi's `--tools` filters extension tools
+ *  too); the proxy's provider
  *  and the run's model, with the thinking level as pi's model suffix; the
  *  session directory, or the session to continue. Never `--api-key`: the key
  *  is in the environment, not on a command line `ps` shows. */
@@ -97,7 +113,7 @@ export function piLaunchArgs(spec: PiLaunchSpec): string[] {
     "-e",
     spec.paths.extension,
     "--tools",
-    [...PI_BUILTIN_TOOLS, ...spec.relayTools].join(","),
+    [...piBuiltinToolsFor(spec.identity), ...spec.relayTools].join(","),
     "--provider",
     PROXY_PROVIDER,
     "--model",
@@ -186,13 +202,20 @@ export function piModelsJson(spec: PiLaunchSpec): string {
 }
 
 /** What the system prompt gains under pi: the workspace tools are pi's own,
- *  under pi's names, and the rest of the run's tools keep theirs. Said once
- *  and last, so a prompt written for the native loop's `read_file` and
- *  `write_file` still lands on a tool that exists. */
-export function harnessPromptNote(relayTools: readonly string[]): string {
+ *  under pi's names — the ones the run's identity holds — and the rest of the
+ *  run's tools keep theirs. Said once and last, so a prompt written for the
+ *  native loop's `read_file` and `write_file` still lands on a tool that
+ *  exists; a read run is told it has no `edit` or `write`, so a prompt that
+ *  names neither is not contradicted and one that did would be. */
+export function harnessPromptNote(relayTools: readonly string[], identity: Identity): string {
+  const write = identity === "write";
   return [
-    "HARNESS NOTE: this run's workspace tools are pi's own — `read`, `bash`, `edit`, `write`, `grep`, `find` and `ls`, all running in the worktree.",
-    "Where these instructions say `read_file` use `read`; where they say `write_file` use `write` (a whole file) or `edit` (a targeted change).",
+    write
+      ? "HARNESS NOTE: this run's workspace tools are pi's own — `read`, `bash`, `edit`, `write`, `grep`, `find` and `ls`, all running in the worktree."
+      : "HARNESS NOTE: this run's workspace tools are pi's own — `read`, `bash`, `grep`, `find` and `ls`, all running in the worktree; it has no `edit` and no `write`: the run is read-only, and a call to either is refused.",
+    write
+      ? "Where these instructions say `read_file` use `read`; where they say `write_file` use `write` (a whole file) or `edit` (a targeted change)."
+      : "Where these instructions say `read_file` use `read`.",
     relayTools.length > 0
       ? `Every other tool named above is available under its own name: ${relayTools.map((t) => `\`${t}\``).join(", ")}.`
       : "No other tools are available in this run.",
@@ -202,7 +225,7 @@ export function harnessPromptNote(relayTools: readonly string[]): string {
 /** The run's system prompt as pi reads it from `SYSTEM.md`: the dispatcher's
  *  composed prompt, then the harness note. */
 export function piSystemPrompt(spec: PiLaunchSpec): string {
-  return `${spec.system.trimEnd()}\n\n${harnessPromptNote(spec.relayTools)}\n`;
+  return `${spec.system.trimEnd()}\n\n${harnessPromptNote(spec.relayTools, spec.identity)}\n`;
 }
 
 /** pi's settings for a run: the checkout is never trusted (its `.pi/` never

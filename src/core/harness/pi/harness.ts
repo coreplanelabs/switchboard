@@ -83,7 +83,11 @@ export interface PiHarnessRun {
   /** The tools pi relays to the bot — the preset's toolset less the workspace tools pi has of its own. */
   tools: RunnableTool[];
   toolContext: ToolContext;
-  rules: ToolRuleContext;
+  /** The thread's facts the gate judges pi's own tools by: the checkout, the
+   *  run's branch, the protected ones. The identity is the preset's
+   *  (`agent.identity`) and is folded in here, so the allowlist pi starts
+   *  with and the reach the gate judges by read one word (harness-pi item 10). */
+  rules: Omit<ToolRuleContext, "identity">;
   backend?: Backend;
   span?: Span;
   control?: RunControl;
@@ -234,12 +238,13 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
       return "the run has hit its turn guard: no more tool calls — write your final answer now";
     return "an operator asked this run to stop: no more tool calls — write your final answer now";
   };
+  const rules: ToolRuleContext = { ...run.rules, identity: run.agent.identity };
   const live: LiveHarness = {
     runId: run.runId,
     tools: run.tools,
     toolContext: run.toolContext,
     ...(run.backend ? { backend: run.backend } : {}),
-    rules: run.rules,
+    rules,
     emit,
     toolSpan: (callId) => bridge.openSpan(callId),
     gateSaw: (callId) => bridge.gateSaw(callId),
@@ -253,6 +258,7 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
     model: { id: run.model.id, providerType: run.model.providerType, maxTokens: run.agent.maxTokens },
     harnessUrl: deps.harnessUrl,
     ...(run.effort ? { effort: run.effort } : {}),
+    identity: run.agent.identity,
     system: run.system,
     relayTools: run.tools.map((t) => t.name),
   };

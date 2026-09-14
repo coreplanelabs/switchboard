@@ -19,6 +19,7 @@ import { FollowUpInbox } from "../../threadAdmission.js";
 import { createTracer } from "../../trace/tracer.js";
 import { HARNESS_URL_ENV, RUN_BEARER_ENV, piRunPaths } from "./process.js";
 import { HarnessRegistry, authorizeToolCall } from "./relay.js";
+import { judgeToolCall, type ToolRuleContext } from "./toolRules.js";
 import { FakePiContainer } from "./testing/fakeContainer.js";
 import {
   promptOf,
@@ -824,5 +825,58 @@ describe("the small pure pieces", () => {
       },
       { type: "tool_result", toolUseId: "b", content: "gone", isError: true },
     ]);
+  });
+});
+
+// docs/reference/specs/harness-pi.md item 10 — a preset of the read identity
+// on the harness: pi's allowlist, the note in its framing and the rules the
+// gate judges by all read the preset's identity, folded in once here.
+describe("runPiHarness — a read-identity preset", () => {
+  it("starts pi with no edit or write on its allowlist, writes the read-only note into SYSTEM.md, and registers rules of the read identity the gate refuses a write by", async () => {
+    const w = world({
+      agent: {
+        name: "review",
+        description: "",
+        system: "You are the review agent.",
+        toolset: "readonly",
+        identity: "read",
+        maxTurns: 150,
+        maxMinutes: 25,
+        effort: "medium",
+      },
+    });
+    let rules: ToolRuleContext | undefined;
+    scriptedPi(w.container, (_n, c) => {
+      rules = w.registry.get("run-7")!.rules;
+      finalTurn(c, "Reviewed.");
+    });
+    await expect(w.start()).resolves.toBe("Reviewed.");
+    const args = w.container.starts[0].args;
+    expect(args[args.indexOf("--tools") + 1]).toBe("read,bash,grep,find,ls,update_status");
+    expect(args[args.indexOf("--model") + 1]).toBe("claude-fable-5:high");
+    const system = w.container.files.get(`${paths.agentDir}/SYSTEM.md`)!;
+    expect(system).toContain("no `edit` and no `write`");
+    expect(system).not.toContain("`write_file` use `write`");
+    expect(rules).toEqual({ identity: "read", checkout: "/workspace/threads/t/main", protectedBranches: ["main"] });
+    expect(judgeToolCall("edit", { path: "src/x.ts" }, rules!)).toEqual({
+      verdict: "outside-profile",
+      reason: "edit is the `write-files` bundle, outside the read identity's reach",
+    });
+    expect(judgeToolCall("bash", { command: "git push origin main" }, rules!)).toEqual({
+      verdict: "refused",
+      reason: "read-only — a read-identity run never pushes",
+    });
+  });
+  it("a write-identity preset's rules carry the write identity, so the coding rules are the ones the gate judges by", async () => {
+    const w = world();
+    let rules: ToolRuleContext | undefined;
+    scriptedPi(w.container, (_n, c) => {
+      rules = w.registry.get("run-7")!.rules;
+      finalTurn(c, "Done.");
+    });
+    await w.start();
+    expect(rules).toEqual({ identity: "write", checkout: "/workspace/threads/t/main", protectedBranches: ["main"] });
+    const args = w.container.starts[0].args;
+    expect(args[args.indexOf("--tools") + 1]).toBe("read,bash,edit,write,grep,find,ls,update_status");
   });
 });

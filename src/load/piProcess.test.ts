@@ -6,11 +6,15 @@ import { afterEach, describe, expect, it } from "vitest";
 import { Secret } from "../secrets.js";
 import {
   PI_CODING_TOOLS,
+  PI_REVIEW_TOOLS,
   PROXIED_MODEL_ENTRY,
   earlyExitNote,
+  parseGithubSlug,
   piArgs,
   piEnv,
   piKeyEnvFor,
+  prHeadCheckoutArgs,
+  prHeadFetchArgs,
   spawnPi,
   writeAgentDir,
 } from "./piProcess.js";
@@ -72,6 +76,41 @@ describe("piArgs", () => {
     expect(PI_CODING_TOOLS).toContain("submit_pr_description");
     expect(PI_CODING_TOOLS).toContain("submit_verdict");
     for (const tool of ["read", "bash", "edit", "write", "grep", "find", "ls"]) expect(PI_CODING_TOOLS).toContain(tool);
+  });
+  it("the review child's allowlist is the read identity's — pi's tools less edit and write — plus the verdict tool alone", () => {
+    expect(PI_REVIEW_TOOLS).toEqual(["read", "bash", "grep", "find", "ls", "submit_verdict"]);
+    expect(piArgs({ ...base, tools: PI_REVIEW_TOOLS })[piArgs(base).indexOf("--tools") + 1]).toBe(
+      "read,bash,grep,find,ls,submit_verdict",
+    );
+  });
+});
+
+describe("parseGithubSlug", () => {
+  it("reads owner/name off the https and ssh forms, with or without .git, and answers undefined for anything else", () => {
+    expect(parseGithubSlug("https://github.com/acme/api")).toBe("acme/api");
+    expect(parseGithubSlug("https://github.com/acme/api.git")).toBe("acme/api");
+    expect(parseGithubSlug("https://github.com/acme/api/")).toBe("acme/api");
+    expect(parseGithubSlug("git@github.com:acme/api.git\n")).toBe("acme/api");
+    expect(parseGithubSlug("https://gitlab.com/acme/api")).toBeUndefined();
+    expect(parseGithubSlug("/srv/mirrors/api.git")).toBeUndefined();
+  });
+});
+
+describe("the review suite's checkout", () => {
+  it("fetches the pull request's head into a ref of the driver's own beside the base branch, then detaches at it", () => {
+    expect(prHeadFetchArgs({ number: 1067, baseRef: "main" })).toEqual([
+      "fetch",
+      "-q",
+      "origin",
+      "main",
+      "+refs/pull/1067/head:refs/remotes/load-pi/pr-1067",
+    ]);
+    expect(prHeadCheckoutArgs({ number: 1067 })).toEqual([
+      "checkout",
+      "-q",
+      "--detach",
+      "refs/remotes/load-pi/pr-1067",
+    ]);
   });
 });
 

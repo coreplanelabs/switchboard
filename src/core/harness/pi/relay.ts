@@ -2,7 +2,7 @@
 // what a run's pi asks over the three harness routes. `tools` — the run's
 // relayed tool definitions, one JSON Schema each, so the extension registers
 // them; `authorize` — the gate before every tool call, pi's own tools judged
-// by the coding preset's rules and every tool refused during the write-up, a
+// by the tool rules for the run's identity and every tool refused during the write-up, a
 // refusal recorded as `tool_refused` on the run; `tool` — a relayed tool run in
 // the bot with the run's own context (the executor, the GitHub gate, the
 // dispatcher's recorders) under the span the bridge opened for the call, its
@@ -79,8 +79,8 @@ export function relayedToolDefinitions(harness: LiveHarness): ToolDef[] {
 }
 
 /** The gate: a write-up refuses every tool; a relayed tool runs under the
- *  bot's own gates when it runs; pi's own tools are judged by the coding
- *  preset's rules from the call alone. A refusal is a `tool_refused` note and
+ *  bot's own gates when it runs; pi's own tools are judged by the tool rules
+ *  for the run's identity from the call alone. A refusal is a `tool_refused` note and
  *  the reason the model reads. Whatever the answer, the harness is told the
  *  gate saw the call first. */
 export function authorizeToolCall(harness: LiveHarness, ask: ToolCallAsk): AuthorizeAnswer {

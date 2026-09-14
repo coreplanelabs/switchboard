@@ -37,7 +37,7 @@ function world() {
     runId: "run-7",
     tools: [echo],
     toolContext: { executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "" } },
-    rules: { checkout: "/work", branch: "feat/x" },
+    rules: { identity: "write", checkout: "/work", branch: "feat/x" },
     emit: (e) => void events.push(e),
     toolSpan: () => undefined,
     gateSaw: () => {},

@@ -1,13 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { CODING_REACH, PI_TOOL_BUNDLES, judgeToolCall } from "./toolRules.js";
+import { CODING_REACH, PI_TOOL_BUNDLES, READ_REACH, judgeToolCall, reachFor } from "./toolRules.js";
 
-// The coding preset's tool rules under pi (docs/reference/specs/harness-pi.md):
-// which calls are refused by name, and which name a reach the coding preset
-// does not have at all. The load harness previews the spike's calls against
-// them; the pi harness's gate refuses with them. The judge never executes
-// anything.
+// A preset's tool rules under pi (docs/reference/specs/harness-pi.md items 7
+// and 10): which calls are refused by name, and which name a reach the run's
+// identity does not have at all — a write run's reach is the coding preset's,
+// a read run's holds no write bundle and never pushes or writes to GitHub. The
+// load harness previews the spike's calls against them; the pi harness's gate
+// refuses with them. The judge never executes anything.
 
-const ctx = { checkout: "/work/repo", branch: "load-pi/test-gap-1" };
+const ctx = { identity: "write" as const, checkout: "/work/repo", branch: "load-pi/test-gap-1" };
 const bash = (command: string) => judgeToolCall("bash", { command }, ctx);
 
 describe("judgeToolCall — bundles", () => {
@@ -23,12 +24,98 @@ describe("judgeToolCall — bundles", () => {
     expect(CODING_REACH.has("verdict")).toBe(false);
     expect(judgeToolCall("submit_verdict", { verdict: "approve" }, ctx)).toEqual({
       verdict: "outside-profile",
-      reason: "submit_verdict is the `verdict` bundle; the coding preset's reach does not include it",
+      reason: "submit_verdict is the `verdict` bundle, outside the write identity's reach",
     });
     expect(judgeToolCall("powershell", { command: "dir" }, ctx)).toEqual({
       verdict: "outside-profile",
-      reason: "powershell is not in any bundle the coding preset reaches",
+      reason: "powershell is not in any bundle the write identity reaches",
     });
+  });
+  it("the reach is the identity's: write is the coding preset's, read and none hold no write bundle", () => {
+    expect(reachFor("write")).toBe(CODING_REACH);
+    expect(reachFor("read")).toBe(READ_REACH);
+    expect(reachFor("none")).toBe(READ_REACH);
+    for (const bundle of ["write-files", "github-write", "pr"]) expect(READ_REACH.has(bundle), bundle).toBe(false);
+    for (const bundle of ["shell", "files", "web", "search", "github-read", "verdict"])
+      expect(READ_REACH.has(bundle), bundle).toBe(true);
+  });
+});
+
+// docs/reference/specs/harness-pi.md item 10 — the review preset on the
+// harness: a read-identity run's pi holds no `edit` or `write`, and its shell
+// never pushes or writes to GitHub — the same read-only rule the resident
+// enforces with a read-only worktree and no write token, said in pi's terms.
+describe("judgeToolCall — a read-identity run", () => {
+  const read = {
+    identity: "read" as const,
+    checkout: "/work/repo",
+    branch: "fix/the-pr-head",
+    protectedBranches: ["main"],
+  };
+  const rbash = (command: string) => judgeToolCall("bash", { command }, read);
+  it("pi's edit and write are outside the reach; a submit_pr_description too; the reads and the verdict are in it", () => {
+    expect(judgeToolCall("edit", { path: "src/x.ts" }, read)).toEqual({
+      verdict: "outside-profile",
+      reason: "edit is the `write-files` bundle, outside the read identity's reach",
+    });
+    expect(judgeToolCall("write", { path: "src/x.ts", content: "" }, read)).toEqual({
+      verdict: "outside-profile",
+      reason: "write is the `write-files` bundle, outside the read identity's reach",
+    });
+    expect(judgeToolCall("submit_pr_description", { title: "x" }, read)).toEqual({
+      verdict: "outside-profile",
+      reason: "submit_pr_description is the `pr` bundle, outside the read identity's reach",
+    });
+    for (const tool of ["read", "grep", "find", "ls"]) {
+      expect(judgeToolCall(tool, { path: "src" }, read), tool).toEqual({ verdict: "allowed" });
+    }
+    expect(judgeToolCall("submit_verdict", { verdict: "approve" }, read)).toEqual({ verdict: "allowed" });
+  });
+  it("never pushes — not even its own branch — and never writes to GitHub by CLI or API; reads of both are allowed", () => {
+    const push = { verdict: "refused", reason: "read-only — a read-identity run never pushes" };
+    expect(rbash("git push origin fix/the-pr-head")).toEqual(push);
+    expect(rbash("git push")).toEqual(push);
+    expect(rbash("git add -A && git commit -m x && git push -u origin HEAD")).toEqual(push);
+    // git's own options between the two words are the same push
+    expect(rbash("git -C /work/repo push origin fix/the-pr-head")).toEqual(push);
+    expect(rbash("git --work-tree=/work/repo --git-dir=/work/repo/.git push")).toEqual(push);
+    expect(rbash("git -c push.default=current --no-pager push")).toEqual(push);
+    expect(rbash("git -C /work/repo log --oneline -3")).toEqual({ verdict: "allowed" });
+    const write = { verdict: "refused", reason: "read-only — a read-identity run never writes to GitHub" };
+    expect(rbash("gh pr comment 12 --body 'LGTM'")).toEqual(write);
+    expect(rbash("gh pr edit 12 --title x")).toEqual(write);
+    expect(rbash("gh issue comment 3 -b done")).toEqual(write);
+    expect(rbash("gh api repos/o/r/issues/12/comments -f body=hi")).toEqual(write);
+    expect(rbash("gh api -X PATCH repos/o/r/pulls/12 -F draft=false")).toEqual(write);
+    expect(rbash("gh api --method DELETE repos/o/r/issues/comments/9")).toEqual(write);
+    expect(rbash('curl -X POST https://api.github.com/repos/o/r/issues/12/comments -d \'{"body":"x"}\'')).toEqual(
+      write,
+    );
+    expect(rbash("curl --request PATCH https://api.github.com/repos/o/r/pulls/12 --data '{}'")).toEqual(write);
+    expect(rbash("curl https://api.github.com/repos/o/r/pulls/12 --json '{}'")).toEqual(write);
+    // merging or approving is refused before the read-only rule says its word
+    expect(rbash("gh pr merge 12 --squash")).toEqual({
+      verdict: "refused",
+      reason: "merge/approve — a coding run never merges or approves a pull request",
+    });
+    for (const cmd of [
+      "git rev-parse HEAD",
+      "git diff origin/main...HEAD",
+      "git log --oneline origin/main..HEAD",
+      "gh pr view 12 --json files",
+      "gh api repos/o/r/pulls/12",
+      "gh api repos/o/r/pulls/12/files --paginate",
+      "curl -s https://api.github.com/repos/o/r/pulls/12",
+      "curl -s -H 'Accept: application/vnd.github+json' https://api.github.com/repos/o/r/pulls/12/files",
+      "npm run --silent specs:coverage -- --changed origin/main...HEAD --test-guard",
+    ]) {
+      expect(rbash(cmd), cmd).toEqual({ verdict: "allowed" });
+    }
+  });
+  it("a write run's pushes and GitHub writes are judged by the coding rules alone — nothing here reaches them", () => {
+    expect(bash("gh pr comment 12 --body 'done'")).toEqual({ verdict: "allowed" });
+    expect(bash("gh api repos/o/r/issues/12/comments -f body=hi")).toEqual({ verdict: "allowed" });
+    expect(bash("git push -u origin load-pi/test-gap-1")).toEqual({ verdict: "allowed" });
   });
 });
 
@@ -53,6 +140,11 @@ describe("judgeToolCall — bash", () => {
       verdict: "refused",
       reason: "repo:use — push to remote `upstream`, not the run's repository (origin)",
     });
+    expect(bash("git -C /work/repo push origin main")).toEqual({
+      verdict: "refused",
+      reason: "repo:use — push to `main`, not the run's branch load-pi/test-gap-1",
+    });
+    expect(bash("git -c user.name=x push -u origin load-pi/test-gap-1")).toEqual({ verdict: "allowed" });
     expect(bash("git push origin main")).toEqual({
       verdict: "refused",
       reason: "repo:use — push to `main`, not the run's branch load-pi/test-gap-1",
@@ -140,7 +232,7 @@ describe("judgeToolCall — bash", () => {
 });
 
 describe("judgeToolCall — a run that names its own branch", () => {
-  const own = { checkout: "/work/repo", protectedBranches: ["main", "release/1.2"] };
+  const own = { identity: "write" as const, checkout: "/work/repo", protectedBranches: ["main", "release/1.2"] };
   it("may push any branch to origin but the protected ones — the base its pull request targets", () => {
     expect(judgeToolCall("bash", { command: "git push -u origin feat/login" }, own)).toEqual({ verdict: "allowed" });
     expect(judgeToolCall("bash", { command: "git push origin HEAD" }, own)).toEqual({ verdict: "allowed" });

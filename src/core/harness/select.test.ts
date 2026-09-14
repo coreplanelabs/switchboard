@@ -21,6 +21,13 @@ describe("effectiveHarness — the preset's harness, unless the deployment names
     expect(effectiveHarness(AGENTS.coding, {})).toBe("native");
   });
 
+  it("`harness: { review: pi }` moves the review preset alone — coding stays native — and `review: native` is the same as no block", () => {
+    expect(effectiveHarness(AGENTS.review, { review: "pi" })).toBe("pi");
+    expect(effectiveHarness(AGENTS.coding, { review: "pi" })).toBe("native");
+    expect(effectiveHarness(AGENTS.review, { review: "native" })).toBe(effectiveHarness(AGENTS.review, undefined));
+    expect(effectiveHarness(AGENTS.review, { coding: "pi", review: "pi" })).toBe("pi");
+  });
+
   it("a preset that declares pi runs pi with no block, and a block can pin it back to native", () => {
     const declared = { ...AGENTS.coding, harness: "pi" as const };
     expect(effectiveHarness(declared, undefined)).toBe("pi");

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Executor } from "../../../execution/executor.js";
-import type { RunnableTool } from "../../../tools/workspace.js";
+import { TOOLSETS, type RunnableTool } from "../../../tools/workspace.js";
+import { buildReviewPostBody, type ReviewVerdict } from "../../reviewVerdict.js";
 import type { RunEvent } from "../../runEvents.js";
 import { recordingSink } from "../../testing/recordingSink.js";
 import { createTracer } from "../../trace/tracer.js";
@@ -15,7 +16,7 @@ import {
 
 // Feature: docs/reference/specs/harness-pi.md item 7 — the bot's side of the
 // extension: the tool definitions served as they are declared, the gate that
-// judges pi's own tools by the coding preset's rules and refuses everything
+// judges pi's own tools by the rules for the run's identity and refuses everything
 // during the write-up (a `tool_refused` note each time), and a relayed tool
 // run in the bot with the run's own context under the call's span.
 
@@ -55,7 +56,7 @@ const executor: Executor = {
   writeFile: async () => "",
 };
 
-function live(opts: { blocked?: string; withSpan?: boolean } = {}) {
+function live(opts: { blocked?: string; withSpan?: boolean; identity?: "read" | "write" } = {}) {
   const events: RunEvent[] = [];
   const progress: string[] = [];
   const sink = recordingSink();
@@ -71,7 +72,7 @@ function live(opts: { blocked?: string; withSpan?: boolean } = {}) {
     tools: [echo, throwing, seeing],
     toolContext: { executor, reportProgress: (c) => void progress.push(c) },
     backend: "resident",
-    rules: { checkout: "/work/repo", branch: "feat/x" },
+    rules: { identity: opts.identity ?? "write", checkout: "/work/repo", branch: "feat/x" },
     emit: (e) => void events.push(e),
     toolSpan: (callId) => (callId === "c1" ? openSpan : undefined),
     gateSaw: (callId) => void seen.push(callId),
@@ -120,7 +121,7 @@ describe("authorizeToolCall — the gate", () => {
     });
     expect(authorizeToolCall(harness, { toolCallId: "d", tool: "submit_verdict", input: {} })).toEqual({
       allow: false,
-      reason: "submit_verdict is the `verdict` bundle; the coding preset's reach does not include it",
+      reason: "submit_verdict is the `verdict` bundle, outside the write identity's reach",
     });
     expect(events).toEqual([
       {
@@ -131,8 +132,7 @@ describe("authorizeToolCall — the gate", () => {
       {
         type: "run_note",
         kind: "tool_refused",
-        summary:
-          "submit_verdict refused: submit_verdict is the `verdict` bundle; the coding preset's reach does not include it",
+        summary: "submit_verdict refused: submit_verdict is the `verdict` bundle, outside the write identity's reach",
       },
     ]);
   });
@@ -156,6 +156,89 @@ describe("authorizeToolCall — the gate", () => {
     const blocked = live({ blocked: "write up" });
     authorizeToolCall(blocked.harness, { toolCallId: "d", tool: "read", input: { path: "x" } });
     expect(blocked.seen).toEqual(["d"]);
+  });
+});
+
+// docs/reference/specs/harness-pi.md item 10 — the review preset on the
+// harness: the gate under a read identity, and the verdict path — a relayed
+// `submit_verdict` is the native tool's own call, so what reaches the run's
+// `onVerdict` and the post-step is what the native loop's call yields.
+describe("authorizeToolCall — a read-identity run", () => {
+  const verdictTool: RunnableTool = {
+    name: "submit_verdict",
+    description: "the verdict",
+    inputSchema: { type: "object", properties: {} },
+    async run() {
+      return "verdict recorded: approve";
+    },
+  };
+  it("refuses pi's edit and write as outside the reach and a push as read-only, each a tool_refused note; allows read, an ordinary command and the relayed verdict", () => {
+    const { harness, events } = live({ identity: "read" });
+    harness.tools = [verdictTool];
+    expect(authorizeToolCall(harness, { toolCallId: "a", tool: "read", input: { path: "src/x.ts" } })).toEqual({
+      allow: true,
+    });
+    expect(
+      authorizeToolCall(harness, { toolCallId: "b", tool: "bash", input: { command: "git diff origin/main...HEAD" } }),
+    ).toEqual({ allow: true });
+    expect(authorizeToolCall(harness, { toolCallId: "c", tool: "submit_verdict", input: {} })).toEqual({ allow: true });
+    expect(authorizeToolCall(harness, { toolCallId: "d", tool: "edit", input: { path: "src/x.ts" } })).toEqual({
+      allow: false,
+      reason: "edit is the `write-files` bundle, outside the read identity's reach",
+    });
+    expect(authorizeToolCall(harness, { toolCallId: "e", tool: "write", input: { path: "src/x.ts" } })).toEqual({
+      allow: false,
+      reason: "write is the `write-files` bundle, outside the read identity's reach",
+    });
+    expect(
+      authorizeToolCall(harness, { toolCallId: "f", tool: "bash", input: { command: "git push origin feat/x" } }),
+    ).toEqual({ allow: false, reason: "read-only — a read-identity run never pushes" });
+    expect(events.map((e) => (e.type === "run_note" ? e.summary : e.type))).toEqual([
+      "edit refused: edit is the `write-files` bundle, outside the read identity's reach",
+      "write refused: write is the `write-files` bundle, outside the read identity's reach",
+      "bash refused: read-only — a read-identity run never pushes",
+    ]);
+  });
+});
+
+describe("runRelayedTool — the verdict path", () => {
+  const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+  const input = {
+    verdict: "approve",
+    summary: "looks correct",
+    head: HEAD,
+    findings: [{ id: "F1", severity: "nit", file: "src/x.ts", line: 3, title: "a name" }],
+  };
+  it("a relayed submit_verdict is the native tool's own call: the run's onVerdict receives the verdict the native loop's call yields, the model reads the same acknowledgement, and the post-step's body is the same — `LGTM:` first, the findings under it", async () => {
+    const submitVerdict = TOOLSETS.readonly.find((t) => t.name === "submit_verdict")!;
+    const relayed: ReviewVerdict[] = [];
+    const native: ReviewVerdict[] = [];
+    const { harness } = live({ identity: "read" });
+    harness.tools = [submitVerdict];
+    harness.toolContext = { executor, onVerdict: (v) => void relayed.push(v) };
+    const answer = await runRelayedTool(harness, { toolCallId: "c3", tool: "submit_verdict", input });
+    // The native loop's call is `tool.run(input, ctx)` (src/runner.ts).
+    const nativeText = await submitVerdict.run(input, { executor, onVerdict: (v) => void native.push(v) });
+    expect(native).toHaveLength(1);
+    expect(relayed).toEqual(native);
+    expect(nativeText).toBe("verdict recorded: approve (1 finding)");
+    expect(answer).toEqual({ content: [{ type: "text", text: nativeText }], isError: false });
+    const body = buildReviewPostBody("The review.", relayed[0]);
+    expect(body).toBe(buildReviewPostBody("The review.", native[0]));
+    expect(body).toBe("LGTM: looks correct\n- [nit] F1 src/x.ts:3 — a name\n\nThe review.");
+  });
+  it("a relayed verdict the parser rejects is the same error the native call answers, and no verdict reaches the run", async () => {
+    const submitVerdict = TOOLSETS.readonly.find((t) => t.name === "submit_verdict")!;
+    const relayed: ReviewVerdict[] = [];
+    const { harness } = live({ identity: "read" });
+    harness.tools = [submitVerdict];
+    harness.toolContext = { executor, onVerdict: (v) => void relayed.push(v) };
+    const bad = { verdict: "ship it", summary: "x", head: HEAD };
+    const answer = await runRelayedTool(harness, { toolCallId: "c4", tool: "submit_verdict", input: bad });
+    const nativeText = await submitVerdict.run(bad, { executor });
+    expect(answer).toEqual({ content: [{ type: "text", text: nativeText }], isError: false });
+    expect(nativeText).toMatch(/^error: verdict must be exactly/);
+    expect(relayed).toEqual([]);
   });
 });
 

@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { parsePrDescription } from "../core/prDescription.js";
+import { parseVerdictInput } from "../core/reviewVerdict.js";
 import {
+  REVIEW_HEAD_PLACEHOLDER,
   chatCompletion,
   chatCompletionChunks,
   codingProfileScript,
   nextStep,
   piCodingProfileScript,
+  piReviewProfileScript,
   reviewProfileScript,
   startScriptedProvider,
   type Script,
@@ -200,6 +203,43 @@ describe("the pi coding profile", () => {
     expect(submit.kind === "tool" && parsePrDescription(submit.input).title).toBe("Load harness note");
     const write = s[3];
     expect(write.kind === "tool" && String(write.input.path)).toMatch(/^\.load-harness\//);
+  });
+});
+
+describe("the pi review profile", () => {
+  it("reads the head and the diff with pi's bash, submits a house-shaped verdict whose head is the placeholder the request resolves, and ends with text", () => {
+    const s = piReviewProfileScript({ cpuSeconds: 3 });
+    const names = s.map((step) => (step.kind === "tool" ? step.name : "text"));
+    expect(names).toEqual(["bash", "bash", "submit_verdict", "text"]);
+    const verdict = s[2];
+    expect(verdict.kind === "tool" && verdict.input.verdict).toBe("approve");
+    expect(verdict.kind === "tool" && verdict.input.head).toBe(REVIEW_HEAD_PLACEHOLDER);
+    expect(verdict.kind === "tool" && parseVerdictInput(verdict.input)?.findings).toHaveLength(1);
+  });
+  it("the verdict's head is read off the REVIEW TARGET block in the request the way a model would read it; a request without one leaves the placeholder, which the parser drops", () => {
+    const script = piReviewProfileScript({ cpuSeconds: 1 });
+    const head = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+    const target = {
+      role: "system",
+      content: `You review.\n\nREVIEW TARGET\n- Head commit: ${head}\n- Base branch: main`,
+    };
+    const afterTwo = [
+      target,
+      { role: "user", content: "review it" },
+      { role: "assistant", content: null },
+      { role: "tool", tool_call_id: "call_0", content: "x" },
+      { role: "tool", tool_call_id: "call_1", content: "y" },
+    ];
+    const resolved = chatCompletion({ messages: afterTwo }, script);
+    const args = JSON.parse(resolved.choices[0].message.tool_calls![0].function.arguments) as { head: string };
+    expect(args.head).toBe(head);
+    const streamed = chatCompletionChunks({ messages: afterTwo, stream: true }, script);
+    const delta = streamed[0].choices[0].delta.tool_calls![0].function.arguments;
+    expect((JSON.parse(delta) as { head: string }).head).toBe(head);
+    const blind = chatCompletion({ messages: afterTwo.slice(1) }, script);
+    const blindArgs = JSON.parse(blind.choices[0].message.tool_calls![0].function.arguments) as Record<string, unknown>;
+    expect(blindArgs.head).toBe(REVIEW_HEAD_PLACEHOLDER);
+    expect(parseVerdictInput(blindArgs)?.head).toBeUndefined();
   });
 });
 

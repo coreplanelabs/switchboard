@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   HARNESS_URL_ENV,
   PI_BUILTIN_TOOLS,
+  PI_READ_TOOLS,
   PROXY_PROVIDER,
   RUN_BEARER_ENV,
   harnessPromptNote,
+  piBuiltinToolsFor,
   piLaunchArgs,
   piLaunchEnv,
   piLaunchFiles,
@@ -28,8 +30,18 @@ const spec: PiLaunchSpec = {
   model: { id: "claude-fable-5", providerType: "anthropic", maxTokens: 64000 },
   harnessUrl: "https://bot.example.com/",
   effort: "high",
+  identity: "write",
   system: "You are the coding agent.\n",
   relayTools: ["update_status", "submit_pr_description"],
+};
+
+/** The review preset's launch: a read identity, the readonly toolset's relays. */
+const reviewSpec: PiLaunchSpec = {
+  ...spec,
+  identity: "read",
+  effort: "medium",
+  system: "You are the review agent.\n",
+  relayTools: ["update_status", "submit_verdict", "diff_digest"],
 };
 
 describe("piRunPaths", () => {
@@ -61,6 +73,21 @@ describe("piLaunchArgs", () => {
     expect(args[args.indexOf("--session-dir") + 1]).toBe(spec.paths.sessionDir);
     expect(args).not.toContain("--api-key");
     expect(args).not.toContain("--session");
+  });
+  // docs/reference/specs/harness-pi.md item 10 — a read-identity run's allowlist
+  // holds no `edit` or `write`: pi never has the tools, before the gate ever
+  // sees a call.
+  it("a read-identity run's allowlist is pi's tools less edit and write, then the relayed ones — a write run's is unchanged", () => {
+    expect(PI_READ_TOOLS).toEqual(["read", "bash", "grep", "find", "ls"]);
+    expect(piBuiltinToolsFor("write")).toBe(PI_BUILTIN_TOOLS);
+    expect(piBuiltinToolsFor("read")).toBe(PI_READ_TOOLS);
+    expect(piBuiltinToolsFor("none")).toBe(PI_READ_TOOLS);
+    const args = piLaunchArgs(reviewSpec);
+    const tools = args[args.indexOf("--tools") + 1].split(",");
+    expect(tools).toEqual(["read", "bash", "grep", "find", "ls", "update_status", "submit_verdict", "diff_digest"]);
+    expect(tools).not.toContain("edit");
+    expect(tools).not.toContain("write");
+    expect(args[args.indexOf("--model") + 1]).toBe("claude-fable-5:medium");
   });
   it("no effort leaves pi's default thinking level; a resume continues the session file instead of a directory", () => {
     expect(piLaunchArgs({ ...spec, effort: undefined })).toContain("claude-fable-5");
@@ -211,8 +238,22 @@ describe("piLaunchFiles", () => {
     for (const f of files) expect(f.content).not.toContain("s3cret");
   });
   it("the harness note maps the native tool names onto pi's and names the relayed tools", () => {
-    expect(harnessPromptNote(["update_status"])).toContain("`read_file` use `read`");
-    expect(harnessPromptNote(["update_status"])).toContain("`write_file` use `write`");
-    expect(harnessPromptNote([])).toContain("No other tools are available in this run.");
+    expect(harnessPromptNote(["update_status"], "write")).toContain("`read_file` use `read`");
+    expect(harnessPromptNote(["update_status"], "write")).toContain("`write_file` use `write`");
+    expect(harnessPromptNote([], "write")).toContain("No other tools are available in this run.");
+  });
+  it("a read-identity run's note names the five read tools, says the run has no edit or write, and never maps write_file onto one", () => {
+    const note = harnessPromptNote(["update_status", "submit_verdict"], "read");
+    expect(note).toContain("`read`, `bash`, `grep`, `find` and `ls`");
+    expect(note).toContain("no `edit` and no `write`");
+    expect(note).toContain("read-only");
+    expect(note).toContain("`read_file` use `read`");
+    expect(note).not.toContain("`write_file` use `write`");
+    expect(note).toContain("`update_status`, `submit_verdict`");
+    const files = piLaunchFiles(reviewSpec);
+    const system = files.find((f) => f.path.endsWith("SYSTEM.md"))!.content;
+    expect(system.startsWith("You are the review agent.\n\nHARNESS NOTE:")).toBe(true);
+    expect(system).toContain("no `edit` and no `write`");
+    expect(system).not.toContain("`write_file` use `write`");
   });
 });

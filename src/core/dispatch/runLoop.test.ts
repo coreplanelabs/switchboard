@@ -22,13 +22,15 @@ import { buildMessages } from "./messages.js";
 import { resolveRun } from "./resolve.js";
 import type { HarnessDeps, RunDeps } from "./run.js";
 import { runLoop } from "./runLoop.js";
-import { HarnessRegistry, authorizeToolCall, type LiveHarness } from "../harness/pi/relay.js";
+import { HarnessRegistry, authorizeToolCall, runRelayedTool, type LiveHarness } from "../harness/pi/relay.js";
 import { FakePiContainer } from "../harness/pi/testing/fakeContainer.js";
 import { judgeToolCall, type ToolRuleContext } from "../harness/pi/toolRules.js";
 import type { CoordinatorTag } from "../coordinator/contract.js";
 import type { RepoContext } from "../repoContext.js";
 import type { ResidentBinding } from "../../execution/resident.js";
 import { InMemoryArtifactStore, type ArtifactStore } from "../../artifacts/store.js";
+import type { ReviewCommentTarget } from "../../execution/githubComments.js";
+import type { RunEvent } from "../runEvents.js";
 
 // Feature: docs/reference/specs/run-loop.md, docs/reference/specs/run-history.md
 // items 20–22, docs/reference/specs/llm-output.md item 5 — the loop's own
@@ -100,6 +102,11 @@ function setup(
     binding?: ResidentBinding;
     /** The artifact store (record 0033), when the deployment configures one. */
     artifacts?: ArtifactStore;
+    /** A pull-request review round: the head the dispatcher pinned and the seams the settle and the post-step call. */
+    review?: {
+      head: string;
+      post: (target: ReviewCommentTarget, body: string) => Promise<void>;
+    };
   } = {},
 ) {
   const config = configStore(opts.yaml);
@@ -114,6 +121,13 @@ function setup(
     githubApi: new InMemoryGithubApi(),
     ...(opts.harness ? { harness: opts.harness } : {}),
     ...(opts.artifacts ? { artifacts: opts.artifacts } : {}),
+    ...(opts.review
+      ? {
+          postReviewComment: opts.review.post,
+          fetchPrHead: async () => opts.review!.head,
+          fetchPrCommits: async () => undefined,
+        }
+      : {}),
   };
   const message = msg("hello there");
   const { resolved } = resolveRun(
@@ -170,9 +184,9 @@ function setup(
     ledgerRun: undefined,
     resume: undefined,
     repoCtx: opts.repoCtx ?? {},
-    isPrReview: false,
+    isPrReview: opts.review !== undefined,
     isCodingPrRun: false,
-    reviewHead: undefined,
+    reviewHead: opts.review?.head,
     requestText: "",
     card: { update: (f: StatusUpdate) => void frames.push(f), done: async (f: StatusUpdate) => void closes.push(f) },
     shell,
@@ -509,7 +523,12 @@ describe("the harness seam — pi in place of the native loop when the preset sa
       repoCtx: { repo: "o/r", ref: "fix/the-pr-head", refFromPr: true, baseRef: "main" },
       binding: { ref: "fix/the-pr-head", sha: "abc", workspace: "/srv/wt/the-pr" },
     });
-    expect(fixRound).toEqual({ checkout: "/srv/wt/the-pr", branch: "fix/the-pr-head", protectedBranches: ["main"] });
+    expect(fixRound).toEqual({
+      identity: "write",
+      checkout: "/srv/wt/the-pr",
+      branch: "fix/the-pr-head",
+      protectedBranches: ["main"],
+    });
     expect(push(fixRound, "fix/the-pr-head")).toBe("allowed");
     expect(push(fixRound, "main")).toBe("refused");
     // A coordinator's unit child: dispatched at its unit branch, the tag naming the base.
@@ -517,12 +536,17 @@ describe("the harness seam — pi in place of the native loop when the preset sa
       repoCtx: { repo: "o/r", ref: "unit/u26" },
       coordinator: { parentInstanceId: "coord-1", idempotencyKey: "k-1", base: "feat/trunk" },
     });
-    expect(child).toEqual({ checkout: "/workspace", branch: "unit/u26", protectedBranches: ["feat/trunk"] });
+    expect(child).toEqual({
+      identity: "write",
+      checkout: "/workspace",
+      branch: "unit/u26",
+      protectedBranches: ["feat/trunk"],
+    });
     expect(push(child, "unit/u26")).toBe("allowed");
     expect(push(child, "feat/trunk")).toBe("refused");
     // A plain thread bound at the repository's base: the run pushes a branch of its own making.
     const plain = await rulesOf({ repoCtx: { repo: "o/r", ref: "main" }, binding: { ref: "main", sha: "def" } });
-    expect(plain).toEqual({ checkout: "/workspace", protectedBranches: ["main"] });
+    expect(plain).toEqual({ identity: "write", checkout: "/workspace", protectedBranches: ["main"] });
     expect(push(plain, "feat/anything")).toBe("allowed");
     expect(push(plain, "main")).toBe("refused");
   });
@@ -543,5 +567,256 @@ describe("the harness seam — pi in place of the native loop when the preset sa
       harness: { registry: new HarnessRegistry(), harnessUrl: "https://b" },
     });
     await expect(runLoop(noBearer.deps, noBearer.ctx)).rejects.toThrow(/model-proxy bearer/);
+  });
+});
+
+// Feature: docs/reference/specs/harness-pi.md item 10 — the review preset on
+// the harness: `harness: { review: pi }` runs a review on pi under the read
+// identity — pi's `--tools` holds no `edit` or `write`, the relayed tools are
+// the readonly toolset's less the workspace tools, the framing is the
+// dispatcher's composed review prompt with the read-only note, the gate
+// refuses a write, and the verdict pi submits through the relay reaches the
+// review post-step exactly as the native loop's does: the reviewed-head guard,
+// the `LGTM:` line, a comment and never an approval. Without the block, or
+// with `review: native`, a review is the native loop byte for byte.
+describe("the harness seam — the review preset on pi", () => {
+  const REVIEW_PI_YAML = YAML + "harness:\n  review: pi\n";
+  const REVIEW_NATIVE_YAML = YAML + "harness:\n  review: native\n";
+  const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+  const VERDICT = {
+    verdict: "approve",
+    summary: "looks correct",
+    head: HEAD,
+    findings: [{ id: "F1", severity: "nit", file: "src/x.ts", line: 3, title: "a name" }],
+  };
+  const prThread = {
+    repoCtx: { repo: "o/r", pr: 42, ref: "fix/the-pr-head", refFromPr: true, baseRef: "main" } as RepoContext,
+    binding: { ref: "fix/the-pr-head", sha: HEAD, workspace: "/srv/wt/pr-42" } as ResidentBinding,
+    executor: { exec: async (command: string) => (command.includes("rev-parse") ? `${HEAD}\n` : "") },
+  };
+  const assistant = (content: Record<string, unknown>[], stopReason = "toolUse") => ({
+    role: "assistant",
+    content,
+    stopReason,
+  });
+
+  /** A review's pi: reads the head, tries an `edit` the gate refuses (the
+   *  extension blocks it and pi ends it as an error — nothing ran), submits
+   *  the verdict through the relay as the real extension does (`POST
+   *  /harness/tool`), then answers. */
+  function scriptedReviewPi(container: FakePiContainer, registry: HarnessRegistry, finalText: string) {
+    container.onStdin = (line, c) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
+        c.emit({ id: cmd.id, type: "response", command: cmd.type, success: true, data: { sessionFile: "s.jsonl" } });
+      if (cmd.type !== "prompt") return;
+      const live = registry.get("run-l")!;
+      c.emit({ id: cmd.id, type: "response", command: "prompt", success: true }, { type: "agent_start" });
+      const probe = { command: "git rev-parse HEAD" };
+      const t1 = assistant([{ type: "toolCall", id: "c1", name: "bash", arguments: probe }]);
+      c.emit(
+        { type: "message_end", message: t1 },
+        { type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: probe },
+      );
+      authorizeToolCall(live, { toolCallId: "c1", tool: "bash", input: probe });
+      c.emit(
+        {
+          type: "tool_execution_end",
+          toolCallId: "c1",
+          toolName: "bash",
+          result: { content: [{ type: "text", text: HEAD }] },
+          isError: false,
+        },
+        { type: "turn_end", message: t1, toolResults: [] },
+      );
+      const edit = { path: "src/x.ts", oldText: "a", newText: "b" };
+      const t2 = assistant([{ type: "toolCall", id: "c2", name: "edit", arguments: edit }]);
+      c.emit(
+        { type: "message_end", message: t2 },
+        { type: "tool_execution_start", toolCallId: "c2", toolName: "edit", args: edit },
+      );
+      const gate = authorizeToolCall(live, { toolCallId: "c2", tool: "edit", input: edit });
+      c.emit(
+        {
+          type: "tool_execution_end",
+          toolCallId: "c2",
+          toolName: "edit",
+          result: { content: [{ type: "text", text: `Tool execution blocked: ${gate.allow ? "" : gate.reason}` }] },
+          isError: true,
+        },
+        { type: "turn_end", message: t2, toolResults: [] },
+      );
+      const t3 = assistant([{ type: "toolCall", id: "c3", name: "submit_verdict", arguments: VERDICT }]);
+      c.emit(
+        { type: "message_end", message: t3 },
+        { type: "tool_execution_start", toolCallId: "c3", toolName: "submit_verdict", args: VERDICT },
+      );
+      authorizeToolCall(live, { toolCallId: "c3", tool: "submit_verdict", input: VERDICT });
+      void runRelayedTool(live, { toolCallId: "c3", tool: "submit_verdict", input: VERDICT }).then((answer) => {
+        c.emit(
+          {
+            type: "tool_execution_end",
+            toolCallId: "c3",
+            toolName: "submit_verdict",
+            result: { content: answer.content },
+            isError: answer.isError,
+          },
+          { type: "turn_end", message: t3, toolResults: [] },
+        );
+        const done = assistant([{ type: "text", text: finalText }], "stop");
+        c.emit(
+          { type: "message_end", message: done },
+          { type: "turn_end", message: done, toolResults: [] },
+          {
+            type: "agent_settled",
+          },
+        );
+      });
+    };
+  }
+
+  /** The native loop's review: one `submit_verdict` turn, then the text. */
+  function nativeReviewProvider(finalText: string): Provider {
+    let calls = 0;
+    return {
+      name: "fake",
+      async complete() {
+        calls++;
+        return calls === 1
+          ? {
+              content: [{ type: "tool_use", id: "t1", name: "submit_verdict", input: VERDICT }],
+              stopReason: "tool_use",
+            }
+          : { content: [{ type: "text", text: finalText }], stopReason: "end_turn" };
+      },
+    };
+  }
+
+  it("`harness: { review: pi }` runs the review on pi under the read identity: no edit or write on pi's allowlist, the readonly toolset relayed, the read-only note in the framing, a write refused by the gate with a tool_refused note, and the relayed verdict posted to the pull request as `LGTM:` behind the reviewed-head guard", async () => {
+    const container = new FakePiContainer();
+    const registry = new HarnessRegistry();
+    scriptedReviewPi(container, registry, "The review: one nit, F1.");
+    let providerCalls = 0;
+    const provider: Provider = {
+      name: "fake",
+      async complete() {
+        providerCalls++;
+        return { content: [{ type: "text", text: "native answer" }], stopReason: "end_turn" };
+      },
+    };
+    const posts: Array<{ target: ReviewCommentTarget; body: string }> = [];
+    const s = setup("", {
+      agent: "review",
+      provider,
+      yaml: REVIEW_PI_YAML,
+      harness: { registry, harnessUrl: "https://bot.example.com", containerFor: () => container },
+      bearer: "sbr_run-l.s3cret",
+      ...prThread,
+      review: { head: HEAD, post: async (target, body) => void posts.push({ target, body }) },
+    });
+    const out = await runLoop(s.deps, s.ctx);
+    expect(out.answer).toBe("The review: one nit, F1.");
+    expect(providerCalls).toBe(0);
+    // The process: pi's allowlist for a read identity, the readonly toolset's relays, the bearer, the framing.
+    expect(container.starts).toHaveLength(1);
+    const args = container.starts[0].args;
+    const tools = args[args.indexOf("--tools") + 1].split(",");
+    expect(tools.slice(0, 5)).toEqual(["read", "bash", "grep", "find", "ls"]);
+    expect(tools).not.toContain("edit");
+    expect(tools).not.toContain("write");
+    expect(tools).toEqual(expect.arrayContaining(["update_status", "submit_verdict", "diff_digest", "web_fetch"]));
+    expect(tools).not.toContain("submit_pr_description");
+    expect(tools).not.toContain("write_file");
+    expect(container.starts[0].env.SWITCHBOARD_RUN_BEARER).toBe("sbr_run-l.s3cret");
+    const system = container.files.get("/tmp/switchboard-pi/run-l/agent/SYSTEM.md")!;
+    expect(system.startsWith("the system prompt\n\nHARNESS NOTE:")).toBe(true);
+    expect(system).toContain("no `edit` and no `write`");
+    expect(system).not.toContain("`write_file` use `write`");
+    // The gate's rules read the preset's identity.
+    // The verdict path: the same post-step, the same guard, the same first line — a comment, never an approval.
+    expect(posts).toEqual([
+      {
+        target: { repo: "o/r", number: 42, commitId: HEAD },
+        body: `LGTM: looks correct\n- [nit] F1 src/x.ts:3 — a name\n\nThe review: one nit, F1.`,
+      },
+    ]);
+    expect(container.killed).toEqual([4242]);
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+    s.ending.drain(true);
+    await s.writer.settled();
+    const rec = (await s.store.get("run-l"))!;
+    expect(rec.events.filter((e) => e.type === "tool_call").map((e) => (e as { tool: string }).tool)).toEqual([
+      "bash",
+      "edit",
+      "submit_verdict",
+    ]);
+    expect(rec.events.filter((e) => e.type === "run_note" && (e as { kind: string }).kind === "tool_refused")).toEqual([
+      expect.objectContaining({
+        kind: "tool_refused",
+        summary: "edit refused: edit is the `write-files` bundle, outside the read identity's reach",
+      }),
+    ]);
+    expect(rec.events.filter((e) => e.type === "review_posted")).toEqual([
+      expect.objectContaining({ type: "review_posted", repo: "o/r", number: 42, head: HEAD, verdict: "approve" }),
+    ]);
+    expect(rec.reviewPost).toEqual({
+      posted: true,
+      target: { repo: "o/r", number: 42 },
+      head: HEAD,
+      verdict: "approve",
+    });
+  });
+
+  it("`harness: { review: native }` and no block are the same review byte for byte — the native loop, pi never started, the same events, replies and post", async () => {
+    const container = new FakePiContainer();
+    const harness: HarnessDeps = {
+      registry: new HarnessRegistry(),
+      harnessUrl: "https://bot.example.com",
+      containerFor: () => container,
+    };
+    const runNative = async (yaml: string) => {
+      const posts: Array<{ target: ReviewCommentTarget; body: string }> = [];
+      const s = setup("", {
+        agent: "review",
+        provider: nativeReviewProvider("The native review."),
+        yaml,
+        harness,
+        bearer: "sbr_run-l.s3cret",
+        ...prThread,
+        review: { head: HEAD, post: async (target, body) => void posts.push({ target, body }) },
+      });
+      const out = await runLoop(s.deps, s.ctx);
+      s.ending.drain(true);
+      await s.writer.settled();
+      const rec = (await s.store.get("run-l"))!;
+      // The substance of the record: every event less the wall-clock stamp
+      // and the span id, which differ between any two runs of anything.
+      const events = rec.events.map((e) => {
+        const { at: _at, spanId: _spanId, ...rest } = e as RunEvent & { at?: number; spanId?: string };
+        return rest;
+      });
+      return {
+        answer: out.answer,
+        posts,
+        replies: s.replies,
+        published: s.published,
+        events,
+        reviewPost: rec.reviewPost,
+      };
+    };
+    const absent = await runNative(YAML);
+    const pinned = await runNative(REVIEW_NATIVE_YAML);
+    expect(absent.answer).toBe("The native review.");
+    expect(absent.posts).toEqual([
+      {
+        target: { repo: "o/r", number: 42, commitId: HEAD },
+        body: `LGTM: looks correct\n- [nit] F1 src/x.ts:3 — a name\n\nThe native review.`,
+      },
+    ]);
+    expect(pinned).toEqual(absent);
+    expect(container.starts).toEqual([]);
+    expect(absent.events.some((e) => e.type === "tool_call" && (e as { tool: string }).tool === "submit_verdict")).toBe(
+      true,
+    );
   });
 });
