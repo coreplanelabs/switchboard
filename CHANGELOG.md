@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.215.0](https://github.com/coreplanelabs/switchboard/compare/v1.214.0...v1.215.0) (2026-09-14)
+
+
+### Features
+
+* **dispatcher:** the router's compound form offers read-only parts alone, and a request with a write part runs whole as one coding run whose card and record name the collapse ([#1085](https://github.com/coreplanelabs/switchboard/issues/1085)) ([a31659b](https://github.com/coreplanelabs/switchboard/commit/a31659bdb8904d04ba7bf1dd106c47536603e5a3))
+* **runs:** a run's transcript lives in its session's log — one object per thread and agent keeps every run's rows, a run is a range of it, finish clears nothing, the sweep drops a session with its last kept run, and pi's compaction lands as a row ([#1082](https://github.com/coreplanelabs/switchboard/issues/1082)) ([d4f18e0](https://github.com/coreplanelabs/switchboard/commit/d4f18e0bca254f7529143c7490fbbaf12fba1907))
+* **ship:** a review's findings are a message into the unit thread and the review runs in a thread of its own, so the coding session answers its own review and the fix child is gone ([#1088](https://github.com/coreplanelabs/switchboard/issues/1088)) ([ce8bd95](https://github.com/coreplanelabs/switchboard/commit/ce8bd9597f9b5ef6536f5f405e9aae72d985e553))
+
+
+### Bug fixes
+
+* check:sandbox-pair gates on committed pins, advises npm ci on installed drift ([#1083](https://github.com/coreplanelabs/switchboard/issues/1083)) ([b08d157](https://github.com/coreplanelabs/switchboard/commit/b08d15746b482aa86514a69f07d974a46e346e6a))
+* **load:** the review suite's pi was served a submit_verdict without head, so every verdict named none — the driver's extension registers the native definitions field for field, and the relay neither refuses nor stamps a head ([#1080](https://github.com/coreplanelabs/switchboard/issues/1080)) ([7425823](https://github.com/coreplanelabs/switchboard/commit/742582378dcba0cd1d6208cf95bfe21b8a4b2a12))
+* **resident:** the cron holds only a warm row to the idle cadence, so a watchdog-stamped degraded resident is due at the next bucket ([#1086](https://github.com/coreplanelabs/switchboard/issues/1086)) ([991daaa](https://github.com/coreplanelabs/switchboard/commit/991daaae91acb500563de010172b92268d4a201a))
+
+
+### Documentation
+
+* **agents:** the program plan takes record 0035 — the session log is the transcript store, U34 lands it in two PRs, the unit page searches it, and R50 names the pi-parent carve-out ([#1078](https://github.com/coreplanelabs/switchboard/issues/1078)) ([bd161a6](https://github.com/coreplanelabs/switchboard/commit/bd161a65b85b63845e7f05595254b4dc2b26571b))
+* **docs:** the program plan's status lines record U26's and U27's receipts, U33 complete and U34a merged ([#1089](https://github.com/coreplanelabs/switchboard/issues/1089)) ([3d01a90](https://github.com/coreplanelabs/switchboard/commit/3d01a9045fa543251beb57acb48f5b19efb8aa5f))
+
 ## [1.214.0](https://github.com/coreplanelabs/switchboard/compare/v1.213.0...v1.214.0) (2026-09-14)
 
 
