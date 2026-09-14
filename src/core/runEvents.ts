@@ -144,6 +144,13 @@ type _EveryKindListed = [RunNoteKind] extends [(typeof RUN_NOTE_KINDS)[number]] 
 const _everyKindListed: _EveryKindListed = true;
 void _everyKindListed;
 
+/** How a run's preset was chosen (docs/reference/specs/routing-and-config.md
+ *  items 1–3 and 21), as `run_meta.agentSource` records it: a directive on
+ *  the message, the thread's sticky preset, the user or the channel scope's
+ *  `agent`, `defaults.agent`, or the request router. The replay harness
+ *  (`load route`) reads it to tell a requester's own choice from a fallback. */
+export type AgentSource = "directive" | "sticky" | "user" | "channel" | "default" | "route";
+
 /** How an operator asked a run to stop: `soft` — take no new steps and
  *  wrap up through the normal finale; `hard` — abort the in-flight call now, no
  *  finale, tear the workspace down. */
@@ -204,13 +211,14 @@ export function isSpanRecord(e: { type: string }): e is SpanStartEvent | SpanEnd
 }
 
 /** The protected head (docs/reference/specs/tracing.md; live-view item 2) — is this event head material? The root's start, `slack.receive` and the
- *  `dispatch.*` span pairs, `input`, `context`, `run_meta`, and the
+ *  `dispatch.*` span pairs, `input`, `context`, `run_meta`, `route`, and the
  *  `mcp_unavailable` / `spans_dropped` notes. */
 export function isHeadMaterial(event: RunEvent): boolean {
   switch (event.type) {
     case "input":
     case "context":
     case "run_meta":
+    case "route":
       return true;
     case "run_note":
       return event.kind === "mcp_unavailable" || event.kind === "spans_dropped" || event.kind === "cold_sandbox";
@@ -361,6 +369,8 @@ export type RunEvent =
   | {
       type: "run_meta";
       agent: string;
+      /** How `agent` was chosen (`AgentSource`); absent on a command run and on records written before it existed. */
+      agentSource?: AgentSource;
       /** Absent on a command run, which resolves no model. */
       model?: string;
       /** The request's trace id (docs/reference/specs/tracing.md), once the root exists. */
@@ -476,6 +486,14 @@ export type RunEvent =
    *  straight to the registry (like `pr_opened`), never through the runner.
    *  Additive: unknown → ignored. */
   | { type: "ship_round"; index: number; agent: string; outcome: ShipRoundOutcome; seq?: number; at?: number }
+  /** The request router's decision (docs/reference/specs/routing-and-config.md
+   *  item 21): the preset a plain message was routed to, the one-line reason
+   *  the router gave (redacted, capped — the same text the card's `routed:`
+   *  line carries) and the model that decided. Published by the dispatcher
+   *  straight to the registry right after `run_meta`, once per routed run;
+   *  absent on every run a directive, a sticky preset or a scope chose. Head
+   *  material, like `run_meta`. Additive: unknown → ignored. */
+  | { type: "route"; preset: string; reason: string; model: string; seq?: number; at?: number }
   /** The span records (docs/reference/specs/tracing.md): published, counted and stored like
    *  every other event, read as timing and never as content. */
   | SpanStartEvent

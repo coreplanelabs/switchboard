@@ -61,6 +61,17 @@ export function lastThreadDirectives(history: Array<{ role: string; text: string
   return out;
 }
 
+/**
+ * The text with every directive token removed and nothing else judged —
+ * lenient like `lastThreadDirectives`, for text that is data rather than a
+ * command: the replay harness hides the `agent:` a requester typed before it
+ * asks the router, whatever else the token said. Whitespace collapses as in
+ * `parseDirectives`, so the two agree on a message with no directives.
+ */
+export function stripDirectiveTokens(input: string): string {
+  return input.replace(DIRECTIVE_RE, " ").replace(/\s+/g, " ").trim();
+}
+
 export function parseDirectives(input: string): RequestDirectives {
   const out: RequestDirectives = { text: input };
   const found: Array<{ key: string; value: string; match: string }> = [];

@@ -21,7 +21,7 @@ import {
   MCP_SERVER_NAME_RE,
   MCP_SERVERS_PER_SCOPE_MAX,
 } from "../mcp/registry.js";
-import type { AppConfig, Scope, TracingConfig } from "../config.js";
+import type { AppConfig, RoutingConfig, Scope, TracingConfig } from "../config.js";
 
 /** Upper bound on one scope's `instructions` text (prepended to every turn). */
 export const MAX_INSTRUCTIONS_LENGTH = 2000;
@@ -49,6 +49,7 @@ const CONFIG_KEYS: Record<keyof AppConfig, true> = {
   review: true,
   ship: true,
   spawn: true,
+  routing: true,
   slack: true,
   runHistory: true,
   runtimeOverrides: true,
@@ -281,7 +282,32 @@ export function validateConfig(cfg: AppConfig): void {
   validateRuntimeOverrides(cfg.runtimeOverrides);
   if (cfg.ship !== undefined) validateShip(cfg.ship);
   if (cfg.spawn !== undefined) validateSpawn(cfg.spawn);
+  if (cfg.routing !== undefined) validateRouting(cfg.routing, cfg.providers);
   validateDashboardConfig(cfg.dashboard);
+}
+
+/** The `routing` block's keys, held equal to `RoutingConfig` the way the top-level keys are. */
+const ROUTING_KEYS: Record<keyof RoutingConfig, true> = { auto: true, model: true };
+
+/** `routing` (docs/reference/specs/routing-and-config.md item 21): `auto` is a
+ *  boolean and nothing else — a `"yes"` or a `1` is refused by name, never read
+ *  as on or as off — and `model` is a `<provider>/<model>` ref whose provider
+ *  the config declares, so a router that cannot be built fails the load rather
+ *  than silently never routing. Any other key is refused by name. */
+function validateRouting(routing: RoutingConfig, providers: Record<string, unknown> | undefined): void {
+  if (typeof routing !== "object" || routing === null || Array.isArray(routing))
+    throw new Error("config.yaml: routing must be a mapping");
+  for (const key of unknownKeys(routing, ROUTING_KEYS))
+    throw new Error(`config.yaml: routing.${key} is not a known key`);
+  if (routing.auto !== undefined && typeof routing.auto !== "boolean")
+    throw new Error("config.yaml: routing.auto must be true or false");
+  if (routing.model !== undefined) {
+    if (typeof routing.model !== "string" || !routing.model.includes("/"))
+      throw new Error("config.yaml: routing.model must be a <provider>/<model> ref");
+    const provider = routing.model.slice(0, routing.model.indexOf("/"));
+    if (!providers || !Object.hasOwn(providers, provider))
+      throw new Error(`config.yaml: routing.model names provider "${provider}", which providers does not define`);
+  }
 }
 
 /** `grants`: every finding names the actor id and axis it is about —

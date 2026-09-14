@@ -26,6 +26,7 @@ import {
 } from "./dispatch/admission.js";
 import { answerChatCommand, answerOperation, type FastPathDeps } from "./dispatch/fastPath.js";
 import { readRequest, resolveProfile, resolveRun, resolveTarget, type ResolveDeps } from "./dispatch/resolve.js";
+import { routeRequest, type RouteDecided, type RouteDeps } from "./dispatch/route.js";
 import {
   authorizeAgent,
   authorizeAttachedHead,
@@ -74,6 +75,7 @@ export interface CoreDeps
     AdmissionDeps,
     FastPathDeps,
     ResolveDeps,
+    RouteDeps,
     AuthorizeDeps,
     ProvisionDeps,
     RunDeps,
@@ -297,7 +299,26 @@ export async function dispatch(
 
     // The (agent, model, effort) this request resolves to (dispatch/resolve.ts):
     // a directive, else the thread's sticky one, else the config scopes.
-    const { sticky, resolved } = resolveRun(deps, { msg, directives, history });
+    const settled = resolveRun(deps, { msg, directives, history });
+    const { sticky } = settled;
+    let { resolved, agentSource } = settled;
+
+    // The route stage (dispatch/route.ts; record 0026): a plain message — no
+    // directive, no sticky preset, no user or channel agent — picks its preset
+    // through the fast model when `routing.auto` is on. Whatever it picks
+    // meets the gates below like a typed directive; a router that is off,
+    // fails or answers outside the requester's allowlist leaves the request
+    // on `defaults.agent` exactly as before.
+    let route: RouteDecided | undefined;
+    const threadLive =
+      admission.get(msg.threadKey) !== undefined ||
+      (!resume && !restart && deps.threadsElsewhere.get(msg.threadKey) !== undefined);
+    const routing = await routeRequest(deps, { msg, directives, sticky, agentSource, threadLive, root });
+    if (routing.kind === "routed") {
+      resolved = routing.resolved;
+      route = routing.route;
+      agentSource = "route";
+    }
 
     // The agent gate (dispatch/authorize.ts), against the RESOLVED agent and
     // before the thread is claimed.
@@ -408,7 +429,7 @@ export async function dispatch(
     // card's elapsed time spans the whole run, not the resume.
     // The card's clock is the request's: it ticks from receipt (docs/reference/specs/tracing.md).
     const startedAt = carriedRow?.startedAt ?? receivedAt;
-    const ack = await openAckCard(deps, { io, agent, resolved, startedAt, clock, root, trace });
+    const ack = await openAckCard(deps, { io, agent, resolved, startedAt, clock, root, trace, route });
     const { shell, card } = ack;
     setupCard = card;
     setupShell = shell;
@@ -472,6 +493,8 @@ export async function dispatch(
         closeLines,
         refuse,
         doneLines,
+        agentSource,
+        ...(route ? { route } : {}),
       });
       return ended;
     }
@@ -539,6 +562,8 @@ export async function dispatch(
       admitted,
       parentRunId,
       coordinator,
+      agentSource,
+      ...(route ? { route } : {}),
     });
     const { run, runId, channelVisibility, liveUrl, publishText, publishMeta } = registration;
     registered = run;

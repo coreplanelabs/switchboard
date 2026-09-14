@@ -7,6 +7,7 @@
 //   npm run load -- cards    -- --cards 50 --hold 600 --channels 5
 //   npm run load -- provider --port 8089 --profile coding --cpu-seconds 60
 //   npm run load -- pi --checkout ../repo --task all --provider anthropic --model <id> --key-env ANTHROPIC_API_KEY
+//   npm run load -- route --since <date> --limit 200 --provider anthropic --model <id>
 //
 // Every command writes `load-results/<command>-<runId>.json` (the samples and
 // the summary) and `.md` (the receipt) and exits non-zero when a configured
@@ -42,6 +43,10 @@ import { drivePiTask, realTimers, redactPiRun, type PiTaskRun } from "../src/loa
 import { previewToolCall } from "../src/load/piPolicyPreview.js";
 import { PI_TASK_NAMES, PI_TASKS, piTaskByName, taskBranch, taskPrompt } from "../src/load/piTasks.js";
 import { PI_CODING_TOOLS, checkoutBranch, piKeyEnvFor, spawnPi, writeAgentDir } from "../src/load/piProcess.js";
+import { confusionTable, labelledRequests, renderConfusion, replayRoutes } from "../src/load/routeReplay.js";
+import { providerRouteModel, routablePresets, route, ROUTE_TIMEOUT_MS } from "../src/core/dispatch/route.js";
+import { WorkerRunStore } from "../src/core/runStoreWorker.js";
+import { ProviderRegistry } from "../src/providers/registry.js";
 import { parsePrDescription } from "../src/core/prDescription.js";
 import { CloudflareSandboxExecutor } from "../src/execution/cloudflareSandbox.js";
 import { ResidentExecutor } from "../src/execution/resident.js";
@@ -74,6 +79,10 @@ commands
              the model key is read from the environment variable --key-env names (default: the variable pi reads
              for --provider, e.g. ANTHROPIC_API_KEY); never from a file, never printed
              --print-prompt --task <name>: print the task's prompt and exit (for the same task on today's coding agent)
+  route      the request router replayed against finished runs whose requester typed the preset (the label)
+             --provider NAME  --model ID  [--key-env VAR  --base-url URL  --since DATE  --limit N  --default-agent NAME
+             --concurrency N]
+             env: SWITCHBOARD_STATE_WORKER_URL, MEMORY_TOKEN (or --state-url / --token-env); the model key as for pi
 `;
 
 type Flags = Record<string, string | boolean | undefined>;
@@ -116,6 +125,10 @@ function flags(argv: string[]): Flags {
       "budget-minutes": { type: "string" },
       "base-url": { type: "string" },
       "print-prompt": { type: "boolean" },
+      since: { type: "string" },
+      limit: { type: "string" },
+      "default-agent": { type: "string" },
+      concurrency: { type: "string" },
       help: { type: "boolean" },
     },
   });
@@ -661,6 +674,140 @@ async function pi(f: Flags): Promise<boolean> {
   );
 }
 
+/** `load:route` (docs/reference/specs/load-harness.md item 17): the request
+ *  router scored against the requests people already typed. Finished runs are
+ *  read newest-first from the run store; a run whose requester chose its
+ *  preset (`labelledRequests`) is one labelled example, the directive hidden
+ *  from its text; the router — the dispatcher's own `route` over the same
+ *  `RouteModel` seam, bound to the provider `--provider`/`--model` name — is
+ *  asked what it would have picked; the receipt is the per-preset confusion
+ *  table, the accuracy against record 0026's bar, and the misroutes. Live
+ *  model spend: one small call per request, the key from the environment. */
+async function routeReplay(f: Flags): Promise<boolean> {
+  const id = runId();
+  const startedAt = new Date(systemClock()).toISOString();
+  const providerName = str(f, "provider", "anthropic");
+  const keyEnv = str(f, "key-env", piKeyEnvFor(providerName));
+  if (!processSecrets.named(keyEnv)) {
+    process.stderr.write(
+      `load route: the model key must be in the environment variable ${keyEnv} (name another with --key-env); refusing to start\n`,
+    );
+    return false;
+  }
+  const modelId = str(f, "model");
+  const baseUrl = typeof f["base-url"] === "string" ? f["base-url"] : undefined;
+  const providers = new ProviderRegistry({
+    [providerName]: {
+      type: providerName === "anthropic" ? "anthropic" : "openai-compatible",
+      apiKeyEnv: keyEnv,
+      ...(baseUrl ? { baseUrl } : {}),
+    },
+  });
+  const model = providerRouteModel(providers.get(providerName), modelId);
+  const modelRef = `${providerName}/${modelId}`;
+  const base = str(f, "state-url", process.env.SWITCHBOARD_STATE_WORKER_URL).replace(/\/$/, "");
+  const store = new WorkerRunStore({
+    baseUrl: base,
+    token: bearer(str(f, "token-env", "MEMORY_TOKEN")),
+    storeKey: "runs:default",
+  });
+  const since = typeof f.since === "string" ? Date.parse(f.since) : undefined;
+  if (since !== undefined && Number.isNaN(since)) throw new Error(`--since must be a date (got ${String(f.since)})`);
+  const limit = num(f, "limit", 200);
+  const defaultPreset = str(f, "default-agent", "general");
+  const concurrency = num(f, "concurrency", 4);
+
+  // Newest first, one record at a time, until `limit` labelled requests or
+  // the store runs out: a record is a few KB, and most rows are labelled.
+  const items = await pageAll(
+    async (cursor) => store.list({ limit: 200, ...(since !== undefined ? { sinceMs: since } : {}), ...(cursor ?? {}) }),
+    { pageSize: 200, maxPages: 50 },
+  );
+  const rows = realRuns(items);
+  let scanned = 0;
+  const skipped: Record<string, number> = {};
+  const requests = [];
+  for (const row of rows) {
+    if (requests.length >= limit) break;
+    const record = await store.get(row.id);
+    scanned++;
+    if (!record) continue;
+    const labelled = labelledRequests([record], { defaultPreset });
+    for (const [reason, n] of Object.entries(labelled.skipped)) if (n > 0) skipped[reason] = (skipped[reason] ?? 0) + n;
+    requests.push(...labelled.requests);
+  }
+  process.stdout.write(
+    `route: ${requests.length} labelled request(s) from ${scanned} record(s) scanned; model ${modelRef}\n`,
+  );
+
+  const presets = routablePresets();
+  const allowed = presets.map((p) => p.name);
+  const results = await replayRoutes(
+    requests,
+    (text) =>
+      route({ text, recentDirectives: {}, presets, allowed, fallback: defaultPreset }, model, {
+        timeoutMs: ROUTE_TIMEOUT_MS,
+      }),
+    { concurrency, now: systemClock },
+  );
+  const table = confusionTable(results, allowed);
+  const samples: Sample[] = results.map((r) => ({
+    op: "route",
+    startedAt: systemClock(),
+    ms: r.ms,
+    ok: r.routed !== undefined,
+    status: r.routed ?? "none",
+    ...(r.routed === undefined ? { reason: "no-route" } : {}),
+  }));
+  const summary = summarize(samples);
+  const answered = results.filter((r) => r.routed !== undefined).length;
+  const checks: SloCheck[] = [
+    {
+      name: "routing accuracy ≥ 95% against the presets people typed (record 0026's bar)",
+      pass: table.accuracy >= 0.95,
+      actual: Number.isFinite(table.accuracy) ? `${Math.round(table.accuracy * 1000) / 10}%` : "no labelled requests",
+      limit: "≥ 95%",
+    },
+    {
+      name: "every request answered with a preset",
+      pass: results.length > 0 && answered === results.length,
+      actual: `${answered}/${results.length}`,
+      limit: `${results.length}`,
+    },
+  ];
+  const bySource: Record<string, number> = {};
+  for (const r of requests) bySource[r.labelSource] = (bySource[r.labelSource] ?? 0) + 1;
+  const notes = [
+    ...renderConfusion(table),
+    "",
+    `labels: ${Object.entries(bySource)
+      .map(([k, v]) => `${k}=${v}`)
+      .join(
+        " ",
+      )} (directive/sticky: the record's run_meta.agentSource; heuristic: a record from before the stamp, on a preset other than ${defaultPreset})`,
+    `records skipped: ${
+      Object.entries(skipped)
+        .map(([k, v]) => `${k}=${v}`)
+        .join(" ") || "none"
+    }`,
+    "the thread's earlier directives are not on a record, so every request replays with none; the allowlist is every routable preset",
+  ];
+  return writeResults(
+    "route",
+    id,
+    startedAt,
+    { stateUrl: base, model: modelRef, since: f.since, limit, defaultPreset, concurrency, keyEnv },
+    summary,
+    checks,
+    {
+      table,
+      results: results.map((r) => ({ ...r, text: redactSecrets(r.text), reason: redactSecrets(r.reason) })),
+      skipped,
+    },
+    notes,
+  );
+}
+
 async function main(): Promise<number> {
   const [command, ...rest] = process.argv.slice(2);
   const f = flags(rest);
@@ -676,6 +823,7 @@ async function main(): Promise<number> {
     cards,
     provider,
     pi,
+    route: routeReplay,
   };
   const run = commands[command];
   if (!run) {

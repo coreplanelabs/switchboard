@@ -249,6 +249,8 @@ export function activityLine(e: RunEvent): string {
       return "review posted"; // published straight to the registry — never arrives here
     case "ship_round":
       return `round ${e.index} (${e.agent}): ${e.outcome}`; // published straight to the registry — never arrives here
+    case "route":
+      return `routed to ${e.preset}`; // published straight to the registry — never arrives here
     case "span_start":
     case "span_end":
       return ""; // timing, not activity (docs/reference/specs/tracing.md): the card's activity line never shows a span

@@ -96,6 +96,14 @@ export interface AgentDef {
    *  worktree flag and the token the sandbox env and the `repo-cold` vet mint
    *  read this, through the run's effective profile. */
   identity: Identity;
+  /** Whether the request router (docs/reference/specs/routing-and-config.md
+   *  item 21) may pick this preset for a plain message. Absent means yes: the
+   *  router's table is rendered from this registry. `false` keeps a preset
+   *  for a typed directive alone — structurally: it is absent from the table
+   *  the model is shown and refused by the allowlist even if the model names
+   *  it. `ship` (it holds the merge grant) and `conductor` (it starts other
+   *  runs) opt out. */
+  routable?: false;
   /** System prompt variant for resident-repo runs (docs/reference/specs/resident-repos.md):
    *  the workspace is a ready worktree — no cloning, no installs, no repo
    *  discovery, no gh CLI. Selected by the dispatcher AFTER executor
@@ -488,6 +496,10 @@ export const AGENTS: Record<string, AgentDef> = {
     toolset: "full",
     machine: "repo-resident",
     identity: "write",
+    // Never routed: ship is the plan runner and holds the merge grant, so a
+    // wrong route into it is code landing on main, not a stray pull request.
+    // A request that wants it names it — `agent:ship`.
+    routable: false,
     maxTurns: 1,
     maxTokens: 16000,
     maxMinutes: 120,
@@ -531,6 +543,10 @@ export const AGENTS: Record<string, AgentDef> = {
     // dispatcher, the GitHub reads are REST in the bot process.
     machine: "none",
     identity: "none",
+    // Never offered to the router: its children are runs under the requester's
+    // permissions with a directive of their own, so a routed conductor could
+    // fan a plain message out into runs nobody named — a person names it.
+    routable: false,
     maxTokens: 32000,
     ...loopBudget(120), // long enough to outlast a coding child; every child is capped by what remains of it
     // No built-in effort: the deployment decides, as for coding.

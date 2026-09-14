@@ -26,8 +26,9 @@ import { NullCoordinatorInstanceStore, type CoordinatorInstanceStore } from "../
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "../coordinator/instancesRoute.js";
 import { resolveShipCaps } from "../shipPipeline.js";
 import { shipPreflight } from "../ship/preflight.js";
-import { redactSecrets } from "../runEvents.js";
+import { redactSecrets, type AgentSource } from "../runEvents.js";
 import type { LiveThread } from "../threadAdmission.js";
+import type { RouteDecided } from "./route.js";
 import { utf8ByteLength, type RunStatus } from "../runRecord.js";
 import { assembleRunRecord, channelVisibilityOf, profileRecordOf } from "./record.js";
 import { attachmentSuffix, composeRunLabel, humanizeMessageText, isMrkdwnChannel, liveViewLink } from "./reply.js";
@@ -120,6 +121,11 @@ export interface ShipContext {
   refuse: <T>(outcome: string, fn: () => Promise<T>) => Promise<T>;
   /** The done card's shape and queued lines, from the finish-site diagnosis. */
   doneLines: (diagnosis: FrictionDiagnosis | undefined) => { shape?: string; queued?: string };
+  /** How the ship preset was chosen (`run_meta.agentSource`). */
+  agentSource: AgentSource;
+  /** The router's decision when it chose ship (routing-and-config item 21):
+   *  the record's `route` event, published like the main path's. */
+  route?: RouteDecided;
 }
 
 /**
@@ -223,12 +229,14 @@ export async function runShipBranch(
   registry.publish(run.id, {
     type: "run_meta",
     agent: agent.name,
+    agentSource: ctx.agentSource,
     model: ctx.modelRef,
     traceId: root.traceId,
     ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
     ...(entry.resume !== undefined ? { pr: entry.resume.pr } : {}),
     at: clock(),
   });
+  if (ctx.route) registry.publish(run.id, { type: "route", ...ctx.route, at: clock() });
   if (deps.config.config.runHistory?.includeContext !== false) {
     for (const text of contextMessageTexts(history, humanize)) publishText("context", text);
   }

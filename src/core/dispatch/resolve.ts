@@ -24,6 +24,7 @@ import {
 } from "../../execution/factory.js";
 import { githubRepoProbe } from "../../execution/githubRepoProbe.js";
 import { resolveRepoContext, type RepoContext, type RepoProbe, type ResidentSlugs } from "../repoContext.js";
+import type { AgentSource } from "../runEvents.js";
 import type { Span } from "../trace/types.js";
 import type { ChannelIO, HistoryItem, IncomingMessage } from "../types.js";
 import type { ResumeContext } from "./admission.js";
@@ -63,11 +64,14 @@ export async function readRequest(
   return { directives, history };
 }
 
-/** The run this request resolves to: the thread's sticky directives and the
- *  (agent, model, effort) triple the config layers settled on. */
+/** The run this request resolves to: the thread's sticky directives, the
+ *  (agent, model, effort) triple the config layers settled on, and how the
+ *  agent was chosen — the route stage runs only for `default`, and the record's
+ *  `run_meta` carries it. */
 export interface ResolvedRun {
   sticky: ThreadDirectives;
   resolved: ResolvedRequest;
+  agentSource: AgentSource;
 }
 
 /**
@@ -96,7 +100,12 @@ export function resolveRun(
       effort: directives.effort ?? sticky.effort,
     },
   });
-  return { sticky, resolved };
+  // The layer that set the agent, told apart at the request layer: the
+  // message's own directive or the thread's sticky one — both the requester's
+  // typing, which the replay harness reads as a label.
+  const agentSource: AgentSource =
+    resolved.agentLayer === "request" ? (directives.agent !== undefined ? "directive" : "sticky") : resolved.agentLayer;
+  return { sticky, resolved, agentSource };
 }
 
 /**

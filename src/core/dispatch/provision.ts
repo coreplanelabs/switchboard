@@ -30,7 +30,7 @@ import { customInstructionsBlock } from "../customInstructions.js";
 import type { ResidentFleetFacts } from "../residentFleet.js";
 import { attachRoundWorkspace, makeSystemComposer, type RoundWorkspace } from "../reviewRound.js";
 import type { RepoContext } from "../repoContext.js";
-import { redactSecrets } from "../runEvents.js";
+import { redactSecrets, type AgentSource } from "../runEvents.js";
 import { MAX_EVENT_BYTES, utf8ByteLength } from "../runRecord.js";
 import type { RunHandle, RunRegistry } from "../runRegistry.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
@@ -48,6 +48,7 @@ import type { AuthorizeDeps, GateCard, GateContext } from "./authorize.js";
 import { channelVisibilityOf, type RecordDeps } from "./record.js";
 import { attachmentSuffix, composeRunLabel, humanizeMessageText, isMrkdwnChannel, liveViewLink } from "./reply.js";
 import { contextMessageTexts } from "./messages.js";
+import { routedLabel, type RouteDecided } from "./route.js";
 
 /** What the provision stage reads off the dispatcher's dependencies. A run's
  *  row is stamped with its channel's visibility (the record slice), reserved on
@@ -171,6 +172,9 @@ export interface AckCardContext {
   clock: Clock;
   root: Span;
   trace: RequestTrace;
+  /** The router's decision when it chose the preset (routing-and-config item
+   *  21): the card's label gains ` · routed: <reason>`. */
+  route?: RouteDecided;
 }
 
 /**
@@ -180,11 +184,12 @@ export interface AckCardContext {
  * finally clears the heartbeat.
  */
 export async function openAckCard(deps: ProvisionDeps, ctx: AckCardContext): Promise<AckCard> {
-  const { io, agent, resolved, startedAt, clock, root, trace } = ctx;
+  const { io, agent, resolved, startedAt, clock, root, trace, route } = ctx;
   // One builder for every paint of this card (statusCardFrame.ts): the ack,
-  // the spinner frames, the closes before the run starts, the done frame.
+  // the spinner frames, the closes before the run starts, the done frame. A
+  // routed run says so from its first paint: `*review* on `m` · routed: <reason>`.
   const shell = createCardShell({
-    label: `*${agent.name}* on \`${resolved.modelRef}\``,
+    label: `*${agent.name}* on \`${resolved.modelRef}\`${route ? ` · ${routedLabel(route.reason)}` : ""}`,
     startedAt,
     now: clock,
   });
@@ -266,6 +271,10 @@ export interface RegisterRunContext {
   parentRunId?: string;
   /** The coordinator's instance and key (item 48), when a coordinator spawned it. */
   coordinator?: CoordinatorTag;
+  /** How the preset was chosen (`run_meta.agentSource`). */
+  agentSource: AgentSource;
+  /** The router's decision when it chose the preset: the record's `route` event. */
+  route?: RouteDecided;
 }
 
 /**
@@ -296,6 +305,8 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
     admitted,
     parentRunId,
     coordinator,
+    agentSource,
+    route,
   } = ctx;
   // The reservation (item 42): the run's row BEFORE the workspace attach —
   // identity, request, card, no prompt — so a kill during a slow attach (a
@@ -426,6 +437,7 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
     registry.publish(run.id, {
       type: "run_meta",
       agent: agent.name,
+      agentSource,
       model: resolved.modelRef,
       traceId: root.traceId,
       ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
@@ -436,6 +448,9 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
       at: clock(),
     });
   if (!resume) publishMeta(repoCtx);
+  // The router's decision (routing-and-config item 21), right after the meta
+  // it explains: the preset, the reason the card carries, the model that decided.
+  if (!resume && route) registry.publish(run.id, { type: "route", ...route, at: clock() });
   // The thread context fed to the model follows the request as `context`
   // events — text only, attachments as metadata lines, bounded to
   // the newest CONTEXT_MAX_ITEMS turns within CONTEXT_MAX_BYTES.
