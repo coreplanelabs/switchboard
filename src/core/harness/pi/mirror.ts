@@ -6,6 +6,9 @@
 // reads a native one. The way back: a pi that died with its container is
 // restarted on a session file rebuilt from that transcript, one linear branch
 // of pi's own entries, so the model continues from the last finished turn.
+// The same file is how a fresh run hands pi the thread's earlier turns (the
+// seed rule, item 9): the turns before the request become the session, the
+// request alone is the prompt.
 
 import type { StepReport } from "../../../runner.js";
 import type { ChatMessage, ContentPart } from "../../../providers/types.js";
@@ -124,12 +127,14 @@ export class PiMirror {
   }
 }
 
-/** A pi session file (docs/session-format.md, version 3) rebuilt from the
- *  runner's transcript: the header, then one linear branch of entries — user
- *  turns, assistant turns with their tool calls, one toolResult per result
- *  part — each with an id and its parent's, so pi's `--session <path>` loads
- *  it as a session it wrote. The assistant entries carry the model the run
- *  resolved and no usage: the proxy is the meter. */
+/** A pi session file (docs/session-format.md, version 3) built from the
+ *  runner's transcript — the thread's earlier turns a fresh run starts on, or
+ *  the mirrored transcript a restarted pi continues from: the header, then one
+ *  linear branch of entries — user turns, assistant turns with their tool
+ *  calls, one toolResult per result part — each with an id and its parent's,
+ *  so pi's `--session <path>` loads it as a session it wrote. The assistant
+ *  entries carry the model the run resolved and no usage: the proxy is the
+ *  meter. A document part is named in a text block: the session carries none. */
 export function piSessionFile(
   messages: readonly ChatMessage[],
   opts: { cwd: string; model: { provider: string; id: string; api: string }; at: number },
@@ -201,7 +206,7 @@ export function piSessionFile(
       else if (p.type === "document")
         rest.push({
           type: "text",
-          text: `[document ${p.name ?? "document"} (${p.mediaType}) — not carried into the resumed session]`,
+          text: `[document ${p.name ?? "document"} (${p.mediaType}) — not carried into this session]`,
         });
     }
     if (rest.length > 0) push({ role: "user", content: rest, timestamp: opts.at });

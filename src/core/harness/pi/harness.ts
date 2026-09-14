@@ -1,7 +1,8 @@
 // The pi harness (docs/reference/specs/harness-pi.md): what drives a run whose
 // preset is on pi, in place of `runAgent`. It writes pi's files into the run's
-// container, starts pi detached with the run bearer as its only key, sends the
-// first turn the dispatcher composed, and then does what the native loop does
+// container, starts pi detached with the run bearer as its only key on a
+// session holding the thread's earlier turns, sends the request as the prompt
+// (the seed rule, item 9), and then does what the native loop does
 // around a model that pi now drives: it counts turns for the guard, warns at
 // the wrap-up, forces the write-up at the deadline or the guard with every
 // tool refused, honours a soft stop with a write-up and a hard stop with an
@@ -75,7 +76,9 @@ export interface PiHarnessRun {
   effort?: Effort;
   model: { id: string; provider: string; providerType: ProviderConfig["type"] };
   system: string;
-  /** The seed conversation: the first user turn becomes pi's prompt. */
+  /** The seed conversation as the dispatcher composed it — the thread's earlier
+   *  turns, then the request as the last user turn. The earlier turns become
+   *  pi's session, the request its prompt (`splitSeed`). */
   messages: ChatMessage[];
   /** The tools pi relays to the bot — the preset's toolset less the workspace tools pi has of its own. */
   tools: RunnableTool[];
@@ -133,17 +136,30 @@ class PromptRefused extends Error {
   }
 }
 
-/** The first user turn as pi's `prompt`: its text parts joined, its images as
- *  pi's image blocks; a document is named in the text — pi's prompt carries none. */
-export function promptOf(seed: ChatMessage[]): {
+/** The seed rule (harness-pi item 9). The dispatcher's seed is the thread so
+ *  far with the request as its last user turn (`buildMessages` merges the
+ *  alternation, so nothing follows it): the last user turn is the prompt pi is
+ *  sent and every turn before it is the session pi starts on. A seed of one
+ *  turn has no session; an empty seed has neither. */
+export function splitSeed(seed: readonly ChatMessage[]): { session: ChatMessage[]; prompt?: ChatMessage } {
+  for (let i = seed.length - 1; i >= 0; i--) {
+    if (seed[i].role === "user") return { session: seed.slice(0, i), prompt: seed[i] };
+  }
+  return { session: [] };
+}
+
+/** The request — the seed's last user turn — as pi's `prompt`: its text parts
+ *  joined, its images as pi's image blocks; a document is named in the text —
+ *  pi's prompt carries none. */
+export function promptOf(seed: readonly ChatMessage[]): {
   message: string;
   images?: Array<{ type: "image"; data: string; mimeType: string }>;
 } {
-  const first = seed.find((m) => m.role === "user");
-  if (!first) return { message: "" };
+  const { prompt } = splitSeed(seed);
+  if (!prompt) return { message: "" };
   const texts: string[] = [];
   const images: Array<{ type: "image"; data: string; mimeType: string }> = [];
-  for (const part of first.content) {
+  for (const part of prompt.content) {
     if (part.type === "text") texts.push(part.text);
     else if (part.type === "image") images.push({ type: "image", data: part.data, mimeType: part.mediaType });
     else if (part.type === "document")
@@ -264,15 +280,25 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
         `resumed after a restart: pi still runs in the container (pid ${pid}); continuing its session with ${Math.round(remainingMs / 60_000)} min of budget left`,
       );
     } else {
-      let sessionPath: string | undefined;
+      // What pi starts on. After a restart where pi died with its container
+      // (or its facts never landed): a session rebuilt from the mirrored
+      // transcript. A fresh run: the seed rule — the thread's earlier turns
+      // as a session written the same way, and no session at all for a seed
+      // of one turn, which starts on the bare session directory.
+      let session: { stem: "resumed" | "seed"; messages: ChatMessage[] } | undefined;
       if (run.resume) {
-        // pi died with its container (or its facts never landed): a session rebuilt from the mirrored transcript.
         const settled = settlementResults(run.resume.settlements);
-        const transcript = settled ? [...run.resume.messages, settled] : run.resume.messages;
-        sessionPath = `${paths.sessionDir}/resumed-${now()}.jsonl`;
+        session = { stem: "resumed", messages: settled ? [...run.resume.messages, settled] : run.resume.messages };
+      } else {
+        const earlier = splitSeed(run.messages).session;
+        if (earlier.length > 0) session = { stem: "seed", messages: earlier };
+      }
+      let sessionPath: string | undefined;
+      if (session) {
+        sessionPath = `${paths.sessionDir}/${session.stem}-${now()}.jsonl`;
         await container.writeFile(
           sessionPath,
-          piSessionFile(transcript, {
+          piSessionFile(session.messages, {
             cwd: run.rules.checkout,
             model: {
               provider: run.model.provider,
@@ -282,6 +308,8 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
             at: now(),
           }),
         );
+      }
+      if (run.resume) {
         const lost = run.resume.settlements.length;
         note(
           "resumed",
