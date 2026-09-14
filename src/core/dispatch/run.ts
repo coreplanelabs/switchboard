@@ -179,6 +179,10 @@ export interface ClaimContext {
   seed?: RunSeed;
   /** The router's decision when it chose the preset, on the row (run-history item 35). */
   route?: RouteDecided;
+  /** For a seed read from the session's log (session-log item 9): the rows of
+   *  the log the first messages of `messages` are, so the write-through
+   *  appends only what follows them. */
+  seedLog?: { from: number; turns: number };
 }
 
 /**
@@ -214,6 +218,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
     coordinator,
     seed,
     route,
+    seedLog,
   } = ctx;
   const { resident, binding } = selection;
   let ledgerRun = ctx.ledgerRun;
@@ -270,8 +275,9 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
           ({ name, description, inputSchema }) => ({ name, description, inputSchema }),
         ),
         // The seed carries the EFFECTIVE budget, so a resume runs on what
-        // this run was admitted with, not on the preset's own number.
-        seed: { messages, budgetMs: profile.minutes * 60_000 },
+        // this run was admitted with, not on the preset's own number — and,
+        // for a seed read from the log, the rows it reuses (session-log item 9).
+        seed: { messages, budgetMs: profile.minutes * 60_000, ...(seedLog ? { log: seedLog } : {}) },
         // A stop asked of another container (`/runs/stop` there) reaches this
         // run through its heartbeat and is honored like a local one; a fence
         // (another generation took the run) is a hard stop — nothing more may

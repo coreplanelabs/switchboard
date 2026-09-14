@@ -495,7 +495,7 @@ describe("derived naming across surfaces", () => {
     expect(byId["runs.friction"]).toBe("runs friction <id>");
     expect(byId["runs.stop"]).toBe("runs stop <id> --mode <soft|hard>");
     expect(byId["runs.list"]).toBe(
-      "runs list [--status <active|finished|all>] [--agent <string>] [--channel <string>] [--since-ms <integer>] [--limit <integer>] [--before <integer>] [--before-id <string>]",
+      "runs list [--status <active|finished|all>] [--agent <string>] [--channel <string>] [--thread <string>] [--since-ms <integer>] [--limit <integer>] [--before <integer>] [--before-id <string>]",
     );
     expect(byId["friction.report"]).toBe(
       "friction report [--since-ms <integer>] [--limit <integer>] [--min-runs <integer>]",

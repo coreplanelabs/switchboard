@@ -99,6 +99,10 @@ export interface IncomingMessage {
 export interface HistoryItem {
   role: "user" | "assistant";
   text: string;
+  /** When the platform stamps its messages: the turn's time in epoch ms, so a
+   *  follow-up can tell the lines written after a run ended from the ones that
+   *  run already saw (docs/reference/specs/session-log.md item 9). */
+  at?: number;
   /** Images attached to this turn, if any (user turns only in practice). */
   images?: ImageAttachment[];
   /** Non-image files attached to this turn, if any (user turns only in practice). */

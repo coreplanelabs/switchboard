@@ -888,6 +888,80 @@ describe("the session log — a run is a range of it", () => {
     });
   });
 
+  // docs/reference/specs/session-log.md item 9: a seed that reuses the log's
+  // tail names the rows it reuses; the run's local index i is log index
+  // seedFrom + i throughout, and only what follows the tail is written.
+  it("a seed that reuses the log's tail appends only what is new: seedFrom names the cut, range.from the tail, the reused rows are not written twice, and a step and the record count from the cut", async () => {
+    const { ledger, wt, warnings } = harness();
+    const first = (await wt.open(openReq()))!; // rows 0..2: earlier, sure, go
+    await first.step(step()); // row 3: looking
+    await first.sink.put(record("r1"));
+    // The seed reuses rows 2..3 (go, looking), then a line since and the request.
+    const second = (await wt.open(
+      openReq({
+        runId: "r2",
+        seed: {
+          messages: [user("go"), assistant("looking"), user("since"), user("follow up")],
+          budgetMs: 600_000,
+          log: { from: 2, turns: 2 },
+        },
+      }),
+    ))!;
+    expect(ledger.live.get("r2")!.meta.session).toEqual({ key: KEY, seedFrom: 2, request: 5, range: { from: 4 } });
+    expect(ledger.steps.get("r2")![0]).toMatchObject({ step: 0, turnIndex: 4 });
+    // Rows 2 and 3 were not written again; 4 and 5 are the new ones.
+    const log = await ledger.readSession(KEY, 0);
+    expect(log.turns).toBe(6);
+    expect(log.messages).toEqual([
+      user("earlier"),
+      assistant("sure"),
+      user("go"),
+      assistant("looking"),
+      user("since"),
+      user("follow up"),
+    ]);
+    // The resume read from seedFrom is the conversation the model saw — the log's own rows; a seed
+    // drops the tail's thinking blocks on the way to the model, and the log keeps them.
+    expect((await ledger.readSession(KEY, 2)).messages).toEqual([
+      user("go"),
+      assistant("looking"),
+      user("since"),
+      user("follow up"),
+    ]);
+    await second.step(step({ turns: [assistant("on it")], firstIdx: 4 }));
+    expect((await ledger.readSession(KEY, 6)).messages).toEqual([assistant("on it")]);
+    await second.sink.put(record("r2"));
+    expect(ledger.finished.get("r2")!.session).toEqual({
+      key: KEY,
+      seedFrom: 2,
+      request: 5,
+      range: { from: 4, to: 6 },
+    });
+    expect(second.resumable).toBe(true);
+    expect(warnings).toEqual([]);
+  });
+
+  it("a seed whose named rows do not end at the log's tail is written whole as new rows, with one warning — the log moved under the seed, and the conversation stays coherent", async () => {
+    const { ledger, wt, warnings } = harness();
+    const first = (await wt.open(openReq()))!; // rows 0..2
+    await first.sink.put(record("r1"));
+    const second = (await wt.open(
+      openReq({
+        runId: "r2",
+        seed: {
+          messages: [user("go"), user("follow up")],
+          budgetMs: 600_000,
+          log: { from: 2, turns: 2 }, // claims rows 2..3, but the tail is 3
+        },
+      }),
+    ))!;
+    expect(ledger.live.get("r2")!.meta.session).toEqual({ key: KEY, seedFrom: 3, request: 4, range: { from: 3 } });
+    expect((await ledger.readSession(KEY, 0)).turns).toBe(5);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("log rows 2..3");
+    expect(second.resumable).toBe(true);
+  });
+
   it("two agents in one thread keep two logs; a run without a conversation of its own (a ship pipeline) has no session", async () => {
     const { ledger, wt } = harness();
     await wt.open(openReq());

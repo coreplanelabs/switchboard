@@ -4,6 +4,10 @@ What an operator changes when a release breaks something: one section per such r
 
 A section says, in this order: what no longer works as it did, what replaces it, and the smallest edit that gets an installation from one to the other — a config key to rename, a command to re-run, a secret to add. Nothing else: history and reasons live in the changelog and the [decision records](../explanation/design-decisions.md).
 
+## 1.217.0
+
+- A follow-up in a thread whose newest run is on the pi harness continues that run's agent and its conversation ([session-log](specs/session-log.md) item 9): the agent is sticky by transcript, the router is not asked, and the model starts from the session log's newest turns, the lines written since and the reply instead of the thread's Slack history; the record says `seed: session`. A thread on the native loop behaves as before. Nothing for an operator to change; a deployment with no pi preset (`harness:` unset) sees no difference.
+
 ## 1.215.0
 
 - The plan runner's `fix` round is gone: after a review that requests changes the runner dispatches the findings into the unit thread as `agent:coding` (the `findings` step, [agent-ship](specs/agent-ship.md) item 7) and every review round runs in a review thread of its own (item 5). A plan running across this deploy meets the change mid-flight: a unit sitting in a fix round replays against step names it does not know (`<unit>/<n>/findings` in place of `<unit>/<n>/fix`), its `fix` brief is refused `400` by the bot, and a re-review's `prior.fixRunId` is ignored, so that unit ends `aborted` or `interrupted` and its dependents block. Before deploying, let live plans finish or stop them; afterwards re-issue any plan that ended that way (`agent:ship plan <path>.md units …` reruns the units not merged, [agent-ship](specs/agent-ship.md) item 16), and resume a task's review loop with `agent:ship <pull request url>` in its thread (item 10). Nothing stored changes shape: unit rows written before this release gain their review thread at the unit's next start or first review spawn.

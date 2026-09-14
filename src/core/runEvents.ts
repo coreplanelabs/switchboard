@@ -92,6 +92,12 @@ export type RunNoteKind =
    *  (docs/reference/specs/run-history.md item 37); the summary says how many calls were
    *  in flight at the kill and how each was settled. Published by the runner. */
   | "resumed"
+  /** What the run's session seed could not do (docs/reference/specs/session-log.md
+   *  item 9): the log could not be read so the run seeds from the channel, the
+   *  newest turn alone was over the seed budget, the previous run's end was
+   *  unknown so no line since could be told apart. One note per reason,
+   *  published by the dispatcher before the first turn. */
+  | "seed"
   /** A coding run pushed onto a branch that already heads an open PR without
    *  resubmitting the PR description, and the same run is being given one
    *  bounded extra model turn to submit it (docs/reference/specs/pr-description.md
@@ -155,6 +161,7 @@ export const RUN_NOTE_KINDS = [
   "mcp_unavailable",
   "follow_up",
   "resumed",
+  "seed",
   "description_turn",
   "cold_sandbox",
   "pr_not_opened",

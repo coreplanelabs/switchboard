@@ -1,4 +1,4 @@
-import { getAgent } from "../agents/registry.js";
+import { AGENTS, getAgent } from "../agents/registry.js";
 import type { LedgerRun } from "./runLedger/writeThrough.js";
 import { systemClock } from "./trace/index.js";
 import type { SpanSink, Tracer } from "./trace/types.js";
@@ -35,7 +35,7 @@ import {
   authorizeRepo,
   type AuthorizeDeps,
 } from "./dispatch/authorize.js";
-import { buildMessages, type TextTurn } from "./dispatch/messages.js";
+import { buildMessages, textTurnsOf, type TextTurn } from "./dispatch/messages.js";
 import {
   attachmentsLine,
   copyStaged,
@@ -66,7 +66,10 @@ import { shipPresetFor } from "./shipPipeline.js";
 import { DEFAULT_CONTRACT_MAX_CHARS, renderContract, type ChildContract } from "./ship/contract.js";
 import { withContractInFirstUserTurn } from "./ship/codingChild.js";
 import { prepareFreshTurn, settleThread, tellDropped } from "./dispatch/settle.js";
-import { lineageParent, tellParent, threadLineage, type LineageHeard } from "./dispatch/lineage.js";
+import { lineageOf, lineageParent, tellParent, type LineageHeard } from "./dispatch/lineage.js";
+import { sessionSeedFor } from "./dispatch/seed.js";
+import { readThread, stickyAgentOf } from "./dispatch/thread.js";
+import { effectiveHarness } from "./harness/select.js";
 import { runToolCapabilities, type ParentRun } from "./dispatch/spawn.js";
 import { createRunsService } from "./runsService.js";
 import type { CoordinatorTag } from "./coordinator/contract.js";
@@ -312,17 +315,22 @@ export async function dispatch(
     // through to the agent.
     if (await answerOperation(deps, { msg, io, ending, trace, directives, history })) return ended;
 
-    // The thread's lineage (dispatch/lineage.ts; agent-conductor item 10): a
-    // person's request in a thread a run spawned is a run of that child — the
-    // spawning run's id on its record at the child's depth, no clock inherited
-    // — and the parent, while it lives, hears the reply as a follow-up from
-    // that child. A spawn, a coordinator's child, a resume and a restart know
-    // their parent (or that they have none) already, so nothing is read.
+    // The thread's runs, read once (dispatch/thread.ts) for a reply in an
+    // existing thread — a message that starts a thread has none, and a spawn,
+    // a coordinator's child, a resume and a restart know their parent (or that
+    // they have none) already. The one page yields the lineage (dispatch/
+    // lineage.ts; agent-conductor item 10: a person's request in a thread a run
+    // spawned is a run of that child — the spawning run's id on its record at
+    // the child's depth, no clock inherited — and the parent, while it lives,
+    // hears the reply as a follow-up from that child), the thread's sticky
+    // agent by transcript (routing-and-config item 3) and, once the agent is
+    // resolved, the previous run its seed continues from (session-log item 9).
     const runsService = deps.runs ?? createRunsService({ registry, store: deps.runStore });
-    const lineage =
-      opts.parent || opts.coordinator || resume || restart
+    const thread =
+      opts.parent || opts.coordinator || resume || restart || history.length === 0
         ? undefined
-        : await threadLineage(runsService, msg.threadKey);
+        : await readThread(runsService, msg.threadKey);
+    const lineage = lineageOf(thread?.[0]);
     const parent: ParentRun | undefined = opts.parent ?? (lineage ? lineageParent(lineage) : undefined);
     const tellLineage = async (heard: LineageHeard) => {
       if (!lineage) return;
@@ -335,8 +343,21 @@ export async function dispatch(
     };
 
     // The (agent, model, effort) this request resolves to (dispatch/resolve.ts):
-    // a directive, else the thread's sticky one, else the config scopes.
-    const settled = resolveRun(deps, { msg, directives, history });
+    // a directive, else the thread's sticky one — by transcript when the
+    // thread's newest run is on the pi harness, by the user turns' directives
+    // otherwise — else the config scopes.
+    const harnessBlock = deps.config.config.harness;
+    const onPi = (name: string): boolean => {
+      const def = AGENTS[name];
+      return def !== undefined && effectiveHarness(def, harnessBlock) === "pi";
+    };
+    const stickyAgent = thread ? stickyAgentOf(thread, onPi) : undefined;
+    const settled = resolveRun(deps, {
+      msg,
+      directives,
+      history,
+      ...(stickyAgent !== undefined ? { stickyAgent } : {}),
+    });
     const { sticky } = settled;
     let { resolved, agentSource } = settled;
 
@@ -571,11 +592,37 @@ export async function dispatch(
       ? renderContract(opts.contract, { maxChars: DEFAULT_CONTRACT_MAX_CHARS }).text
       : undefined;
     const requestText = route?.parts ? compoundBrief(directives.text, route.parts) : directives.text;
-    // A spawned child starts from its parent's text turns (routing-and-config
-    // item 20), every other run from its thread's history; every row and
-    // record the run has says which (run-history item 52).
-    const seed: RunSeed = opts.seed ? "parent" : "channel";
-    const built = buildMessages(opts.seed ?? history, requestText, msg.images, msg.documents);
+    // Where the conversation starts (run-history item 52), and every row and
+    // record the run has says which: a spawned child from its parent's text
+    // turns (routing-and-config item 20); a follow-up whose agent runs on the
+    // pi harness from the log of its thread and agent when the thread has one
+    // (session-log item 9: the log's tail within the seed budget, the lines
+    // since the previous run ended, the request — the tail's rows reused, not
+    // rewritten); every other run from its thread's history. A log that could
+    // not be read is the channel, and a note on the record says why.
+    const fromSession =
+      !resume && !opts.seed && thread && effectiveHarness(agent, harnessBlock) === "pi"
+        ? await sessionSeedFor({
+            ledger: deps.runLedger,
+            threadKey: msg.threadKey,
+            agent: agent.name,
+            thread,
+            history,
+            request: {
+              text: requestText,
+              ...(msg.images ? { images: msg.images } : {}),
+              ...(msg.documents ? { documents: msg.documents } : {}),
+            },
+          })
+        : undefined;
+    const session = fromSession?.seed;
+    const seedNotes = fromSession?.notes ?? [];
+    const seed: RunSeed = opts.seed ? "parent" : session ? "session" : "channel";
+    const seedTurns: TextTurn[] | undefined =
+      opts.seed ?? (session ? textTurnsOf(session.messages.slice(0, -1)) : undefined);
+    const built = session
+      ? session.messages
+      : buildMessages(opts.seed ?? history, requestText, msg.images, msg.documents);
     const messages = resume
       ? resume.plan.messages
       : contractBlock !== undefined && agent.name !== "review"
@@ -632,12 +679,16 @@ export async function dispatch(
       parentRunId,
       coordinator,
       seed,
-      ...(opts.seed ? { seedTurns: opts.seed } : {}),
+      ...(seedTurns ? { seedTurns } : {}),
       agentSource,
       ...(routeEvent ? { route: routeEvent } : {}),
     });
     const { run, runId, channelVisibility, liveUrl, publishText, publishMeta } = registration;
     registered = run;
+    // What the session seed could not do (session-log item 9), on the record
+    // before the first turn — the run is not changed by it.
+    for (const summary of seedNotes)
+      registry.publish(run.id, { type: "run_note", kind: "seed", summary: oneLine(summary), at: clock() });
     // A new run of a spawned thread's child has its row: its parent hears the
     // reply now, with the run that answers it named.
     await tellLineage({ kind: "started", runId });
@@ -871,6 +922,7 @@ export async function dispatch(
       parentRunId,
       coordinator,
       seed,
+      ...(session ? { seedLog: session.log } : {}),
     });
     // What this run may do to other runs (dispatch/spawn.ts; docs/reference/specs/
     // agent-conductor.md): spawn a child as this run, read the runs its

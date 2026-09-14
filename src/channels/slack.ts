@@ -716,7 +716,7 @@ export class SlackIO implements ChannelIO {
           })
         ).messages ??
         [];
-      const kept: { role: "user" | "assistant"; text: string; files?: SlackFile[] }[] = [];
+      const kept: { role: "user" | "assistant"; text: string; at?: number; files?: SlackFile[] }[] = [];
       for (const m of thread) {
         const mm = m as { bot_id?: string; text?: string; ts?: string; files?: SlackFile[] };
         // Skip the triggering message itself; the dispatcher appends it
@@ -727,7 +727,10 @@ export class SlackIO implements ChannelIO {
         if (STATUS_PREFIXES.some((p) => text.startsWith(p))) continue;
         const files = mm.bot_id ? undefined : mm.files; // only user attachments go to the model
         if (!text && !files?.length) continue;
-        kept.push({ role: mm.bot_id ? "assistant" : "user", text, files });
+        // Slack's `ts` is seconds with a fractional part; the turn's time rides
+        // the item so a follow-up can cut the thread at a run's end.
+        const at = mm.ts !== undefined && Number.isFinite(Number(mm.ts)) ? Math.round(Number(mm.ts) * 1000) : undefined;
+        kept.push({ role: mm.bot_id ? "assistant" : "user", text, ...(at !== undefined ? { at } : {}), files });
       }
       // Download attachments newest-first so each thread-wide budget favors the
       // most recent files when a long thread overflows it. Images and documents
@@ -765,12 +768,12 @@ export class SlackIO implements ChannelIO {
         }
       }
       for (let i = 0; i < kept.length; i++) {
-        const { role, text } = kept[i];
+        const { role, text, at } = kept[i];
         const images = imagesByIndex[i];
         const documents = documentsByIndex[i];
         // attachment-only turn whose downloads all failed
         if (!text && !images && !documents) continue;
-        items.push({ role, text, images, documents });
+        items.push({ role, text, ...(at !== undefined ? { at } : {}), images, documents });
       }
     } catch {
       // best-effort; the dispatcher still has the current message

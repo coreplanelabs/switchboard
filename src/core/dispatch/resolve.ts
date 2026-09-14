@@ -81,16 +81,29 @@ export interface ResolvedRun {
  */
 export function resolveRun(
   deps: ResolveDeps,
-  ctx: { msg: IncomingMessage; directives: RequestDirectives; history: HistoryItem[] },
+  ctx: {
+    msg: IncomingMessage;
+    directives: RequestDirectives;
+    history: HistoryItem[];
+    /** The thread's sticky agent by transcript (item 3; dispatch/thread.ts):
+     *  the agent of the thread's newest continuable run when it runs on the pi
+     *  harness. It stands in for the agent the user turns would derive; the
+     *  model and the effort are the turns' either way. */
+    stickyAgent?: string;
+  },
 ): ResolvedRun {
   const { msg, directives, history } = ctx;
-  // Thread stickiness: a follow-up without explicit directives runs on the
-  // agent/model this thread already established (last directive in the
-  // thread's history), not the channel/global default — otherwise "continue"
-  // in an agent:coding thread silently lands on the toolless default agent.
-  // Derived from history on every message, never stored: restart-safe, and
-  // consistent with how the Slack adapter re-derives thread participation.
-  const sticky = lastThreadDirectives(history);
+  // Thread stickiness (item 3): a follow-up without explicit directives runs
+  // on the agent/model this thread already established, not the channel or
+  // global default — otherwise "continue" in an agent:coding thread silently
+  // lands on the toolless default agent. The agent comes from the thread's
+  // transcript when the newest run is on the pi harness (the caller read it),
+  // else from the last directive in the thread's user turns; the model and
+  // the effort always from the turns. Derived on every message, never stored:
+  // restart-safe, and consistent with how the Slack adapter re-derives thread
+  // participation.
+  const fromTurns = lastThreadDirectives(history);
+  const sticky = ctx.stickyAgent !== undefined ? { ...fromTurns, agent: ctx.stickyAgent } : fromTurns;
   const resolved = deps.config.resolve({
     channelId: msg.channelId,
     userId: msg.userId,
