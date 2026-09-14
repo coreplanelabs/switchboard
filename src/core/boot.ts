@@ -16,6 +16,7 @@
 // THEIR cards alone (`liveElsewhere`).
 
 import type { RunRecord, RunStatus } from "./runRecord.js";
+import type { RunEvent } from "./runEvents.js";
 import { RouteMissingError } from "./runStoreWorker.js";
 import type { RunLedger } from "./runLedger/ledger.js";
 import { transcriptCompleteness } from "./runLedger/decisions.js";
@@ -47,6 +48,11 @@ export interface ReclaimedClosure {
   agent?: string;
   /** The PR the run's events say it opened (a `pr_opened` event), if any. */
   prUrl?: string;
+  /** The router chose the run's preset (`run_meta.agentSource: route`), so
+   *  the closed card ends with the override footer like every close of a
+   *  routed card (routing-and-config item 21). Absent for a preset a person,
+   *  a scope or the default chose. */
+  routed?: true;
   /** What the closed card — and, for a pipeline, the thread — says next: an
    *  interrupted run's guidance (`closureNote`); absent for a run that replied. */
   note?: string;
@@ -105,6 +111,14 @@ export interface RestartRun {
 }
 
 export type ResumableRun = ResumeRun | RestartRun;
+
+/** Whether the router chose the run's preset: the record's `run_meta` says how
+ *  the preset was chosen, and `route` is the one answer that earns the card's
+ *  override footer. A `route` event alone does not: a rejected compound
+ *  leaves one on a run that ran on the default. */
+function routedOf(events: readonly RunEvent[]): boolean {
+  return events.some((e) => e.type === "run_meta" && e.agentSource === "route");
+}
 
 export interface ReclaimOutcome {
   closed: ReclaimedClosure[];
@@ -224,6 +238,7 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
         events: events.length,
         ...(row.meta.agent !== undefined ? { agent: row.meta.agent } : {}),
         ...(prUrl !== undefined ? { prUrl } : {}),
+        ...(routedOf(events) ? { routed: true } : {}),
         ...(status === "interrupted" ? { note: closureNote(row.meta.agent, prUrl) } : {}),
       });
       log(

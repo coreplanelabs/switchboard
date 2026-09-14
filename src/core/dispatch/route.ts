@@ -31,6 +31,7 @@ import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
 import type { ProviderRegistry } from "../../providers/registry.js";
 import { parseModelRef, type Provider, type ToolDef } from "../../providers/types.js";
 import { oneLine, redactAndCap } from "../redact.js";
+import { ROUTED_LABEL_PREFIX } from "../statusCardFrame.js";
 import type { AgentSource } from "../runEvents.js";
 import type { Span } from "../trace/types.js";
 import type { IncomingMessage } from "../types.js";
@@ -642,17 +643,13 @@ export async function routeRequest(deps: RouteDeps, ctx: RouteStageContext): Pro
  *  a compound answer the parse collapsed onto one write preset, the collapse
  *  after it: `routed: <reason> (compound collapsed: review+coding)`. */
 export function routedLabel(reason: string, collapsed?: CollapsedCompound): string {
-  return `routed: ${reason}${collapsed ? ` (compound collapsed: ${collapsed.presets.join("+")})` : ""}`;
+  return `${ROUTED_LABEL_PREFIX} ${reason}${collapsed ? ` (compound collapsed: ${collapsed.presets.join("+")})` : ""}`;
 }
 
-/** The routed card's last line, on every close: how to run the request on
- *  another preset. A reply into the finished thread with a directive runs on
- *  the named preset with the thread's history, the original request in it
- *  (routing-and-config item 2) — no new path, only the pointer. A close and
- *  never a live frame: while the run is live the same reply is refused as a
- *  rival (thread-admission item 1). Plain text, no backticks: the Slack card's
- *  body is literal rich text. */
-export const ROUTED_CARD_FOOTER = "reply agent:<preset> to run it another way";
+/** The routed card's last line on every close lives with the card frame
+ *  (`src/core/statusCardFrame.ts`), where every writer of a close — this
+ *  stage's card shell, the boot reclaim, the reconnect sweep — reads it. */
+export { ROUTED_CARD_FOOTER } from "../statusCardFrame.js";
 
 /** The card's part lines under a routed conductor's label: one per part,
  *  `<preset>: <text>`, the text on one line and cut at `ROUTE_PART_LINE_CAP`. */

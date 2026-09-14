@@ -19,6 +19,22 @@ export const SPINNER_GLYPHS = ["◐", "◓", "◑", "◒"];
  *  two cannot drift apart. */
 export const LIVE_CARD_PREFIXES = [...SPINNER_GLYPHS, "👀"];
 
+/** The word that opens a routed card's route line — `· routed: <reason>` on
+ *  the label (routing-and-config item 21). The label is the one thing every
+ *  writer of a card's close has: the reconnect sweep, which closes an orphaned
+ *  card from its text alone, reads the route off it. */
+export const ROUTED_LABEL_PREFIX = "routed:";
+
+/** The routed card's last line, on every close — the run's own, the boot
+ *  reclaim's for a run it could not resume, the reconnect sweep's for an
+ *  orphaned card: how to run the request on another preset. A reply into the
+ *  finished thread with a directive runs on the named preset with the thread's
+ *  history, the original request in it (routing-and-config item 2) — no new
+ *  path, only the pointer. A close and never a live frame: while the run is
+ *  live the same reply is refused as a rival (thread-admission item 1). Plain
+ *  text, no backticks: the Slack card's body is literal rich text. */
+export const ROUTED_CARD_FOOTER = "reply agent:<preset> to run it another way";
+
 /** How a card closes. `done` is a run that ran (any outcome; the icon says
  *  which) and carries the run's duration, checklist and link. The other three
  *  close a card whose run never started, so they carry no duration and no

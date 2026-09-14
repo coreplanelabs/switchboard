@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { ROUTED_CARD_FOOTER } from "../../core/dispatch/route.js";
 import {
   closeReclaimedCards,
   isLiveCard,
@@ -86,6 +87,26 @@ describe("live cards", () => {
       ["c.1", "❌ ship · interrupted"],
     ]);
     expect(warnings).toEqual(["[slack] reclaimed card C1:fail.1 not closed: message_not_found"]);
+  });
+
+  it("a routed run's reclaimed close — interrupted or replied — ends its detail with the override footer, exactly as the run's own close would (routing-and-config item 21); an unrouted one does not", async () => {
+    const blocks: Record<string, string> = {};
+    const client = {
+      chat: {
+        update: async (args: { channel: string; ts: string; text: string; blocks: object[] }) => {
+          blocks[args.ts] = JSON.stringify(args.blocks);
+          return {};
+        },
+      },
+    };
+    await closeReclaimedCards(client, [
+      { status: "interrupted", agent: "coding", card: { channel: "C1", ts: "r.1" }, routed: true },
+      { status: "completed", agent: "review", card: { channel: "C1", ts: "r.2" }, routed: true },
+      { status: "interrupted", agent: "coding", card: { channel: "C1", ts: "u.1" } },
+    ]);
+    expect(blocks["r.1"]).toContain(`could not be resumed.\\n${ROUTED_CARD_FOOTER}`);
+    expect(blocks["r.2"]).toContain(`its record is complete.\\n${ROUTED_CARD_FOOTER}`);
+    expect(blocks["u.1"]).not.toContain(ROUTED_CARD_FOOTER);
   });
 });
 

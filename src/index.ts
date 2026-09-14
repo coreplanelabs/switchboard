@@ -961,6 +961,7 @@ export async function runBot(): Promise<void> {
         agent: c.agent,
         card: c.card,
         ...(c.note ? { note: c.note } : {}),
+        ...(c.routed ? { routed: true } : {}),
       })),
       (w) => console.warn(w),
     );
