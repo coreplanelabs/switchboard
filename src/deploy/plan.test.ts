@@ -526,6 +526,17 @@ describe("capabilityProblem", () => {
     const p = plan();
     expect(p.steps.find((s) => s.name === "resident")!.capabilities).toEqual(byName.resident.capabilities);
     expect(p.steps.find((s) => s.name === "memory")!.capabilities).toEqual([]);
+    // The bot asks for R2 only when the profile names an artifacts bucket (execution.md item 20):
+    // its `npm run deploy` creates the bucket first, so the credential must be able to.
+    expect(p.steps.find((s) => s.name === "bot")!.capabilities).toEqual([containers]);
+    const withBucket = plan({}, installed, {
+      ...LOADED,
+      profile: { ...LOADED.profile, artifacts: { bucket: "switchboard-artifacts" } },
+    });
+    expect(withBucket.steps.find((s) => s.name === "bot")!.capabilities).toEqual([
+      containers,
+      { command: ["wrangler", "r2", "bucket", "list"], needs: "Workers R2 Storage: Edit" },
+    ]);
     expect(formatPlan(p)).toContain(
       "credential must pass `wrangler containers list --json` (Containers: Edit) and `wrangler r2 bucket list` (Workers R2 Storage: Edit)",
     );

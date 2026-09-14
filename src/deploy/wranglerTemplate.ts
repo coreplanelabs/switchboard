@@ -61,6 +61,9 @@ export interface TemplateView {
   };
   /** The Cloudflare Access application in front of the bot, when the installation has one. */
   access: { teamDomain: string; aud: string } | undefined;
+  /** The artifacts bucket the bot Worker binds (`{{#if artifacts}}` around its `r2_buckets`
+   *  block and the `ARTIFACTS_BUCKET_NAME` var), when the profile names one. */
+  artifacts: { bucket: string } | undefined;
   /** The bot Worker — every profile has one — as another Worker's template names it: the
    *  state Worker binds the bot's `ShipCoordinator` Workflow across scripts by the bot's
    *  script name (`{{bot.script}}`), and a Workflow's name carries its script's. */
@@ -88,6 +91,7 @@ export function templateView(
     ...(hasImage(kind) ? { image: containerImage(kind, profile, published) } : {}),
     urls: { publicBaseUrl: urls.publicBaseUrl, stateWorkerUrl: urls.stateWorkerUrl },
     access: profile.access,
+    artifacts: profile.artifacts,
     bot: { script: profile.workers.bot.script },
   };
 }

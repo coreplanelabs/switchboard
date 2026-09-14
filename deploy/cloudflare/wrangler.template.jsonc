@@ -34,6 +34,10 @@
     // The state Worker (deploy/cloudflare-memory/): where worker.ts records each
     // scheduled firing for the /runs Scheduled panel, with MEMORY_TOKEN.
     // A profile without a memory Worker renders no var: firings go unrecorded.
+    // The artifacts bucket's name, beside its binding below (rendered together).
+    // {{#if artifacts}}
+    "ARTIFACTS_BUCKET_NAME": "{{artifacts.bucket}}",
+    // {{/if}}
     // {{#if urls.stateWorkerUrl}}
     "STATE_WORKER_URL": "{{urls.stateWorkerUrl}}"
     // {{/if}}
@@ -54,6 +58,17 @@
   "durable_objects": {
     "bindings": [{ "name": "SWITCHBOARD", "class_name": "SwitchboardServer" }]
   },
+  // The artifacts bucket (docs/reference/specs/execution.md item 20, record
+  // 0033): where a run's files live by reference. Rendered only when the
+  // deployment profile names a bucket (`artifacts.bucket`) — the bot's
+  // config `artifacts.r2.bucket` must say the same name, and `artifacts
+  // check` holds the two against each other through `GET /artifacts/copy`.
+  // `npm run deploy` creates the bucket first (ensure-bucket.mjs); wrangler
+  // validates the binding on deploy. `ARTIFACTS_BUCKET_NAME` above is the
+  // same name as a var, so the Worker can say which bucket it binds.
+  // {{#if artifacts}}
+  "r2_buckets": [{ "binding": "ARTIFACTS", "bucket_name": "{{artifacts.bucket}}" }],
+  // {{/if}}
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SwitchboardServer"] }],
   // The ship coordinator as a Workflow (coordinator.ts, re-exported by
   // worker.ts; docs/reference/specs/http-ingress.md item 9): `POST

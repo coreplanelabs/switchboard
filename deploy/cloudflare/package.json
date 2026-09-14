@@ -7,7 +7,7 @@
   },
   "scripts": {
     "check:image": "docker build ../..",
-    "deploy": "node preflight.mjs && node write-build.mjs && wrangler deploy",
+    "deploy": "node preflight.mjs && node ensure-bucket.mjs && node write-build.mjs && wrangler deploy",
     "preflight": "node preflight.mjs",
     "test": "vitest run",
     "verify": "npm --prefix ../.. run --silent deploy:gen && npm run typecheck && npm test",
