@@ -191,9 +191,20 @@ describe("the workspace prompts name the image toolchain", () => {
       expect(sys, name).toMatch(/a link to a file on GitHub is not a picture/);
       expect(sys, name).toMatch(/do not attach what you can say/);
     }
-    const [a, b] = [cold.coding, resident.coding].map((s) => s.match(/Files the person should SEE[^\n]*/)![0]);
+    const paragraph = /Files the person should SEE[\s\S]*?do not attach what you can say\./;
+    const [a, b] = [cold.coding, resident.coding].map((s) => s.match(paragraph)![0]);
     expect(a).toBe(b);
     for (const sys of [cold.review, resident.review]) expect(sys).not.toContain("attach_file");
+  });
+
+  it("a screenshot request with no destination named means both the thread and the pull request, every capture — an assets branch, never the PR's diff", () => {
+    for (const [name, sys] of Object.entries({ coding: cold.coding, "coding resident": resident.coding })) {
+      expect(sys, name).toMatch(/SCREENSHOTS GO TO BOTH PLACES, ALL OF THEM/);
+      expect(sys, name).toMatch(/every capture is attached here with attach_file AND published on the pull request/);
+      expect(sys, name).toMatch(/assets branch \(never the PR's own diff\)/);
+      expect(sys, name).toMatch(/unless the request names one destination/);
+      expect(sys, name).toMatch(/Never attach a subset and link the rest/);
+    }
   });
 
   it("the cold prompts offer Docker; the resident prompts say there is none — the resident image has no engine", () => {

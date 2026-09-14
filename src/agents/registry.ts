@@ -173,7 +173,9 @@ const RESIDENT_TOOLCHAIN = `The resident image carries ${IMAGE_TOOLCHAIN}; plus 
 // Both coding prompts carry this verbatim (docs/reference/specs/agent-coding.md
 // item 10): the one way a run's screenshot reaches the person. Said once so
 // the sandbox and resident variants cannot drift on it.
-const SHOW_FILES = `Files the person should SEE go through the attach_file tool: a screenshot from \`playwright screenshot\`, a rendered PDF, a recording — it posts the workspace file into this conversation, where an image renders inline. Use it whenever you produce an image worth showing (a visual change, a rendered page, a before/after); a link to a file on GitHub is not a picture. Text stays in your message; do not attach what you can say.`;
+const SHOW_FILES = `Files the person should SEE go through the attach_file tool: a screenshot from \`playwright screenshot\`, a rendered PDF, a recording — it posts the workspace file into this conversation, where an image renders inline. Use it whenever you produce an image worth showing (a visual change, a rendered page, a before/after); a link to a file on GitHub is not a picture.
+SCREENSHOTS GO TO BOTH PLACES, ALL OF THEM: when the request asks for screenshots, or the change is visual, every capture is attached here with attach_file AND published on the pull request — commit the images to an assets branch (never the PR's own diff) and reference them from the description's validation section or a PR comment so they render inline there too — unless the request names one destination. Never attach a subset and link the rest.
+Text stays in your message; do not attach what you can say.`;
 
 const CODING_SYSTEM = `You are Switchboard's coding agent, operating from a Slack request.
 
