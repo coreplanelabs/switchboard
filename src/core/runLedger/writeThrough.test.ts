@@ -821,8 +821,8 @@ describe("finishing and finish", () => {
 describe("the session log — a run is a range of it", () => {
   const KEY = "slack:C1:1.0:review";
 
-  it("a thread's first run of an agent starts the log at 0: the seed is rows 0..n-1, the row's session names the key, seedFrom 0, the request's index and range.from 0; the finish closes the range and clears nothing", async () => {
-    const { ledger, wt } = harness();
+  it("a thread's first run of an agent starts the log at 0: the seed is rows 0..n-1, the row's session names the key, seedFrom 0, the request's index and range.from 0; the seed record lands under the same key so the run is tracked and resumable; the finish closes the range and clears nothing", async () => {
+    const { ledger, wt, warnings } = harness();
     const run = (await wt.open(openReq()))!;
     expect(ledger.live.get("r1")!.meta.session).toEqual({
       key: KEY,
@@ -834,8 +834,13 @@ describe("the session log — a run is a range of it", () => {
     const seeded = await ledger.readSession(KEY, 0);
     expect(seeded.complete).toBe(true);
     expect(seeded.messages).toEqual([user("earlier"), assistant("sure"), user("go")]);
-    // The run's own transcript object is never written.
-    expect((await ledger.readTranscript("r1")).turns).toBe(0);
+    // The run's own transcript object is never written — nor owned: every write
+    // of the run, the seed record's included, names its log, so none is refused.
+    expect(ledger.transcripts.has("r1")).toBe(false);
+    expect(ledger.steps.get("r1")).toHaveLength(1);
+    expect(run.tracked()).toBe(true);
+    expect(run.resumable).toBe(true);
+    expect(warnings).toEqual([]);
 
     await run.step(step());
     await run.step(
