@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.212.0](https://github.com/coreplanelabs/switchboard/compare/v1.211.0...v1.212.0) (2026-09-14)
+
+
+### Features
+
+* **dispatcher:** a compound request routes to the conductor — the fast model splits independent parts, each becomes a child on its own preset, and the replay scores the split on twenty hand-written asks ([#1030](https://github.com/coreplanelabs/switchboard/issues/1030)) ([abc0796](https://github.com/coreplanelabs/switchboard/commit/abc0796b11824968503ebeed79c226728ba2558d))
+
+
+### Bug fixes
+
+* **resident:** a binary read above about 1.7 MB is no longer cut and reported as attached — the file is sized first, read in chunks as the thread user, and refused unless the bytes match the size ([#1027](https://github.com/coreplanelabs/switchboard/issues/1027)) ([340d923](https://github.com/coreplanelabs/switchboard/commit/340d9236827dc382a0207f562f92ef7a4b634523))
+
+
+### Documentation
+
+* align plan R46 with routing spec — routed threads are not sticky in this slice ([#1028](https://github.com/coreplanelabs/switchboard/issues/1028)) ([7011ca3](https://github.com/coreplanelabs/switchboard/commit/7011ca3863ee858354fbd5929fa9b81c3be59335))
+
 ## [1.211.0](https://github.com/coreplanelabs/switchboard/compare/v1.210.0...v1.211.0) (2026-09-14)
 
 
