@@ -3,7 +3,7 @@
 // was admitted for in its row's `meta.request`. One writer, one reader, so a
 // row written by one generation is read the same way by the next.
 
-import type { IncomingMessage } from "../types.js";
+import type { IncomingMessage, StagedFile } from "../types.js";
 
 /** The most a durable inbox row may weigh, serialized: the state Worker caps
  *  `/runs/inbox` bodies at 512 KiB (`MAX_BODY_BYTES`), and the row travels
@@ -36,6 +36,10 @@ export function durableInboxMessage(
     ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
     ...(msg.channelName !== undefined ? { channelName: msg.channelName } : {}),
     ...(from !== undefined ? { fromRunId: from.runId } : {}),
+    // Staged references are metadata (record 0033) — a few hundred bytes each —
+    // so they ride the base row and survive the restart whatever the
+    // attachments below do.
+    ...(msg.staged && msg.staged.length > 0 ? { staged: msg.staged.map(stagedRow) } : {}),
   };
   const images = msg.images ?? [];
   const documents = msg.documents ?? [];
@@ -57,6 +61,27 @@ const attachmentRow = (a: Attachment) => ({
   data: a.data,
   ...(a.name !== undefined ? { name: a.name } : {}),
 });
+
+const stagedRow = (s: StagedFile) => ({ name: s.name, size: s.size, type: s.type, url: s.url, messageId: s.messageId });
+
+/** A stored staged list back as references; an entry missing a field is dropped, never fatal. */
+function stagedFromInbox(v: unknown): StagedFile[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out = v.flatMap((e): StagedFile[] => {
+    if (typeof e !== "object" || e === null) return [];
+    const r = e as Record<string, unknown>;
+    if (
+      typeof r.name !== "string" ||
+      typeof r.size !== "number" ||
+      typeof r.type !== "string" ||
+      typeof r.url !== "string" ||
+      typeof r.messageId !== "string"
+    )
+      return [];
+    return [{ name: r.name, size: r.size, type: r.type, url: r.url, messageId: r.messageId }];
+  });
+  return out.length > 0 ? out : undefined;
+}
 
 /** A durable row back as the message it was: text (with the dropped-attachments
  *  note appended when the row says it lost some), sender, link, thread,
@@ -82,6 +107,7 @@ export function messageFromInbox(
   const at = typeof m.at === "number" && Number.isFinite(m.at) ? m.at : fallbackAt;
   const images = attachmentsFromInbox(m.images);
   const documents = attachmentsFromInbox(m.documents);
+  const staged = stagedFromInbox(m.staged);
   const note = droppedNote(m.attachmentsDropped);
   const msg: IncomingMessage = {
     channelId,
@@ -93,6 +119,7 @@ export function messageFromInbox(
     ...(channelName !== undefined ? { channelName } : {}),
     ...(images ? { images } : {}),
     ...(documents ? { documents } : {}),
+    ...(staged ? { staged } : {}),
   };
   return { msg, at, ...(fromRunId !== undefined ? { from: { runId: fromRunId } } : {}) };
 }

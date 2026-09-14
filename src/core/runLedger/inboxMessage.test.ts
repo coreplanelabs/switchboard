@@ -1,0 +1,51 @@
+import { describe, expect, it } from "vitest";
+import type { IncomingMessage, StagedFile } from "../types.js";
+import { DURABLE_INBOX_MAX_BYTES, durableInboxMessage, messageFromInbox } from "./inboxMessage.js";
+
+// Feature: docs/reference/specs/execution.md item 20 (record 0033) / run-history.md
+// item 40 — a steer that carries a staged reference survives the durable inbox:
+// the reference is metadata, so it rides the base row whatever the inline
+// attachments do, and reads back as the same reference.
+
+const clip: StagedFile = {
+  name: "clip.mp4",
+  size: 312_000_000,
+  type: "video/mp4",
+  url: "https://files.slack.com/files-pri/T1-F1/clip.mp4",
+  messageId: "1700000000.000200",
+};
+const base: IncomingMessage = {
+  channelId: "slack:C1",
+  userId: "slack:UA",
+  threadKey: "slack:C1:1.0",
+  text: "and this video",
+  userName: "alice",
+};
+
+describe("durable inbox — staged references (record 0033)", () => {
+  it("a steer with a staged reference writes it on the row and reads it back as the same reference", () => {
+    const row = durableInboxMessage({ ...base, staged: [clip] }, "and this video", 1_700_000_000_000);
+    expect(row.staged).toEqual([clip]);
+    const back = messageFromInbox(row, 0);
+    expect(back?.msg.staged).toEqual([clip]);
+    expect(back?.msg.text).toBe("and this video");
+  });
+
+  it("the reference survives even when the inline attachments do not fit the row", () => {
+    const huge = { mediaType: "image/png", data: "A".repeat(DURABLE_INBOX_MAX_BYTES), name: "shot.png" };
+    const row = durableInboxMessage({ ...base, images: [huge], staged: [clip] }, base.text, 1);
+    expect(row.images).toBeUndefined();
+    expect(row.attachmentsDropped).toEqual({ images: 1, documents: 0 });
+    expect(row.staged).toEqual([clip]);
+    const back = messageFromInbox(row, 0);
+    expect(back?.msg.staged).toEqual([clip]);
+    expect(back?.msg.text).toContain("could not be carried across the bot's restart");
+  });
+
+  it("a row without staged files reads back without the key; a malformed entry is dropped, never fatal", () => {
+    expect(durableInboxMessage(base, base.text, 1).staged).toBeUndefined();
+    expect(messageFromInbox(durableInboxMessage(base, base.text, 1), 0)?.msg.staged).toBeUndefined();
+    const row = { ...durableInboxMessage(base, base.text, 1), staged: [{ name: "x" }, 7, clip] };
+    expect(messageFromInbox(row, 0)?.msg.staged).toEqual([clip]);
+  });
+});

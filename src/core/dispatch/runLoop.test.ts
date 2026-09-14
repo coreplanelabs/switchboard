@@ -337,6 +337,89 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(untied.replies.some((r) => r.startsWith("the page\n📎 shot.png (3 bytes) is on the run page"))).toBe(true);
   });
 
+  // record 0033: a follow-up steered into the live run that carries a staged
+  // file — the file is copied into the store and pulled into the workspace over
+  // the run's executor BEFORE the model reads the turn, whose text ends with the
+  // line; the record carries the `in` event.
+  it("a steered follow-up's staged file is copied and pulled before the model reads it; the turn ends with the attachments line", async () => {
+    const clip = {
+      name: "clip.mp4",
+      size: 3_120,
+      type: "video/mp4",
+      url: "https://files.slack.com/files-pri/T1-F1/clip.mp4",
+      messageId: "1700000000.000300",
+    };
+    const store = new InMemoryArtifactStore({
+      bucket: "test",
+      fetch: (async () =>
+        new Response(new Uint8Array(clip.size), {
+          status: 200,
+          headers: { "content-type": "video/mp4" },
+        })) as unknown as typeof fetch,
+    });
+    const commands: string[] = [];
+    const seen: string[] = [];
+    let turn = 0;
+    const provider: Provider = {
+      name: "fake",
+      async complete(req) {
+        const last = req.messages.at(-1)!;
+        seen.push(
+          typeof last.content === "string"
+            ? last.content
+            : last.content.map((p) => (p.type === "text" ? p.text : `[${p.type}]`)).join("\n"),
+        );
+        if (turn++ === 0)
+          return {
+            content: [{ type: "tool_use", id: "t1", name: "bash", input: { command: "echo hi" } }],
+            stopReason: "tool_use",
+          };
+        return { content: [{ type: "text", text: "done" }], stopReason: "end_turn" };
+      },
+    };
+    const s = setup("", {
+      agent: "coding",
+      provider,
+      executor: {
+        exec: async (command) => {
+          commands.push(command);
+          return "";
+        },
+      },
+      artifacts: store,
+    });
+    // The steer lands while the run is live (before its first step reads the inbox).
+    s.ctx.admitted.inbox.push({
+      text: "and cut a contact sheet from this",
+      userId: "slack:UX",
+      at: NOW + 1,
+      staged: [clip],
+      msg: { channelId: "slack:CX", userId: "slack:UX", threadKey: THREAD, text: "and cut a contact sheet from this" },
+    });
+    await runLoop(s.deps, s.ctx);
+    s.ending.drain(true);
+    await s.writer.settled();
+    // The copy under the thread's key, the pull over the executor, both before the second model read.
+    expect(store.copies.map((c) => c.key)).toEqual(["threads/slack-CX-1.0/in/1700000000.000300/1-clip.mp4"]);
+    expect(commands).toEqual([
+      "echo hi",
+      expect.stringMatching(/^mkdir -p attachments && curl -fsS -o 'attachments\/1-clip\.mp4' 'memory:\/\/test\//),
+    ]);
+    expect(seen[1]).toMatch(
+      /and cut a contact sheet from this[\s\S]*Attached files are in \.\/attachments\/: 1-clip\.mp4 \(3 KB, video\/mp4\)$/,
+    );
+    const rec = (await s.store.get("run-l"))!;
+    expect(rec.events.filter((e) => e.type === "artifact")).toMatchObject([
+      {
+        type: "artifact",
+        direction: "in",
+        key: "threads/slack-CX-1.0/in/1700000000.000300/1-clip.mp4",
+        name: "clip.mp4",
+        size: 3_120,
+      },
+    ]);
+  });
+
   it("a completed run: the answer comes back through the typed-output boundary and is published, the registry is finished `completed`, the record is registered for the drain, the workspace is NOT released here", async () => {
     const s = setup("the answer");
     const out = await runLoop(s.deps, s.ctx);

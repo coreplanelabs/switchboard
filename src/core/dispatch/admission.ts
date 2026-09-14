@@ -91,6 +91,7 @@ function followUpOf(
     ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
     ...(msg.images !== undefined ? { images: msg.images } : {}),
     ...(msg.documents !== undefined ? { documents: msg.documents } : {}),
+    ...(msg.staged !== undefined ? { staged: msg.staged } : {}),
     at,
     ...(opts.ledgerSeq !== undefined ? { ledgerSeq: opts.ledgerSeq } : {}),
     ...(opts.from !== undefined ? { from: opts.from } : {}),

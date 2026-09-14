@@ -203,11 +203,25 @@ describe("mergeFollowUps — unconsumed inputs become ONE fresh request", () => 
     expect(mergeFollowUps([])).toBeUndefined();
   });
 
-  it("texts join in order; attachments concatenate; identity comes from the most recent input", () => {
+  it("texts join in order; attachments and staged references concatenate; identity comes from the most recent input", () => {
     const img = { mediaType: "image/png", data: "AAA" };
     const doc = { mediaType: "application/pdf", data: "BBB", name: "spec.pdf" };
+    // A staged reference (record 0033) rides the fresh turn like an attachment: the new run stages it.
+    const clip = {
+      name: "clip.mp4",
+      size: 312_000_000,
+      type: "video/mp4",
+      url: "https://files.slack.com/x/clip.mp4",
+      messageId: "1.0",
+    };
     const merged = mergeFollowUps([
-      input("first", { userId: "slack:UALICE", userName: "ann", sourceUrl: "https://s/1", images: [img] }),
+      input("first", {
+        userId: "slack:UALICE",
+        userName: "ann",
+        sourceUrl: "https://s/1",
+        images: [img],
+        staged: [clip],
+      }),
       input("second", { userId: "slack:UBOB", userName: "bob", sourceUrl: "https://s/2", documents: [doc] }),
     ]);
     expect(merged).toEqual({
@@ -217,6 +231,7 @@ describe("mergeFollowUps — unconsumed inputs become ONE fresh request", () => 
       sourceUrl: "https://s/2",
       images: [img],
       documents: [doc],
+      staged: [clip],
     });
   });
 

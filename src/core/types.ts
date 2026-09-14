@@ -27,6 +27,19 @@ export interface DocumentAttachment {
   name?: string;
 }
 
+/** A file left on the platform by reference (record 0033): what the store's
+ *  copy needs and what the turn's line says — metadata only, never bytes. */
+export interface StagedFile {
+  name: string;
+  size: number;
+  /** The platform's media type, as the object's content type and the line's word. */
+  type: string;
+  /** The platform's private download URL (Slack: `url_private`); the bot's Worker reads it, the bot never does. */
+  url: string;
+  /** The platform's id of the message that carried the file — the per-message segment of its key. */
+  messageId: string;
+}
+
 export interface IncomingMessage {
   /**
    * Scope key for channel-level config. Must be globally unique across
@@ -64,6 +77,11 @@ export interface IncomingMessage {
   images?: ImageAttachment[];
   /** Non-image files (PDFs, text/code/CSV/logs) on the triggering message, if any. */
   documents?: DocumentAttachment[];
+  /** Files the inline path cannot carry — too large, or a type the model does
+   *  not read — left on the platform by reference (record 0033): a run with a
+   *  workspace stages them into `attachments/` before its turn; the bytes never
+   *  enter the bot. Present only when the artifact store is configured. */
+  staged?: StagedFile[];
   /**
    * When OUR process saw the message (ms epoch, from the adapter's clock at its
    * entry — never from a body or a platform stamp): the run's window opens

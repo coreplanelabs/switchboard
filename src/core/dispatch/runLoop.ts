@@ -58,11 +58,12 @@ import type { LiveThread } from "../threadAdmission.js";
 import type { ChannelVisibility } from "../authz/types.js";
 import type { Clock, Span } from "../trace/types.js";
 import { publicEnv } from "../../secrets.js";
-import type { ChannelIO, IncomingMessage, StatusHandle } from "../types.js";
+import type { ChannelIO, IncomingMessage, StagedFile, StatusHandle } from "../types.js";
 import type { DispatchFollowUp, ResumeContext } from "./admission.js";
 import type { RegisteredRun } from "./provision.js";
 import { registerFinishRecord } from "./record.js";
 import { activityLine, runPageLink } from "./reply.js";
+import { stageIntoWorkspace, stagingIndex } from "./staging.js";
 import { githubCapabilityFor, shutdownNotice, webCapability, type RunDeps } from "./run.js";
 
 /** What the loop hands back once the run has finished: the answer as
@@ -135,6 +136,10 @@ export interface RunLoopContext {
   runs?: RunsReadCapability;
   steer?: SteerCapability;
   wait?: WaitCapability;
+  /** The run's staging counter (record 0033), shared with the request's
+   *  staging in the dispatcher so a steer's files never reuse a workspace
+   *  path. Absent (a loop driven outside `dispatch()`) → a counter of its own. */
+  stagingIndex?: () => number;
   /** The run that spawned this one (run-history item 46), when it is a child. */
   parentRunId?: string;
   /** The coordinator's instance and key (item 48), when a coordinator spawned it. */
@@ -458,6 +463,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
   // the file by reference under this run's keys; the channel's upload ticket
   // rides beside it when the channel has one, else the lead goes through `reply`.
   const uploadTicket = io.uploadTicket?.bind(io);
+  // The run's staging counter: the dispatcher's when it handed one over (the
+  // request's files took 1..n there), else this loop's own.
+  const nextStagedIndex = ctx.stagingIndex ?? stagingIndex();
   let artifactSeq = 0;
   const runUrl = runPageLink(run.id);
   const artifacts = deps.artifacts
@@ -591,6 +599,25 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
         ...(round.selection.backend ? { backend: round.selection.backend } : {}),
         control: run.control, // operator stop from /runs
         inbox: admitted.inbox, // thread follow-ups steered into this run (thread-admission item 2)
+        // A steered follow-up's staged files (record 0033): copied into the
+        // store and pulled into this workspace before the model reads the turn.
+        ...(deps.artifacts
+          ? {
+              stageFollowUps: async (inputs: readonly { staged?: readonly StagedFile[] }[]) => {
+                const files = inputs.flatMap((i) => i.staged ?? []);
+                if (files.length === 0) return "";
+                const staged = await stageIntoWorkspace(files, {
+                  store: deps.artifacts!,
+                  threadKey: msg.threadKey,
+                  publish: (e) => registry.publish(run.id, e),
+                  nextIndex: nextStagedIndex,
+                  executor,
+                  resident: round.selection.resident !== undefined,
+                });
+                return staged.line;
+              },
+            }
+          : {}),
         // The step record before each step's tools (run-history item 35).
         ...(ledgerRun ? { onStep: ledgerRun.step.bind(ledgerRun) } : {}),
         // A resume re-enters the loop from the plan (run-history item 37).

@@ -17,6 +17,7 @@ import { planResume } from "./runLedger/resume.js";
 import { knownToolsFor, resumeMessage } from "./resumeLaunch.js";
 import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
 import { makeExecutor } from "../execution/factory.js";
+import { InMemoryArtifactStore } from "../artifacts/store.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
 import type { ChannelIO, HistoryItem, RunReceipt, StatusUpdate } from "./types.js";
 import { activeRunCount, dispatch, type CoreDeps, type DispatchOutcome } from "./dispatcher.js";
@@ -11147,5 +11148,112 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
       expect(parent.statuses[0].detail).toBeUndefined();
       expect(routeEvents(t.registry, "run-parent")[0]).not.toHaveProperty("parts");
     });
+  });
+});
+
+// Feature: docs/reference/specs/execution.md item 20 (record 0033) — inbound staging
+// through the dispatcher: a file the message carries by reference is copied
+// into the store after admission (overlapping the workspace attach) and pulled
+// into `attachments/` over the run's executor before the model's first read,
+// whose turn ends with the line naming it; a workspace-less agent copies
+// nothing and is told where the file can be worked with; a refused steer
+// copies nothing; without a store nothing is staged.
+describe("inbound staging (record 0033)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.mocked(makeExecutor).mockClear();
+  });
+  const clip = {
+    name: "clip.mp4",
+    size: 3_120,
+    type: "video/mp4",
+    url: "https://files.slack.com/files-pri/T1-F1/clip.mp4",
+    messageId: "1700000000.000200",
+  };
+  /** A store whose copies are served by a fake Slack answering exactly the declared size. */
+  const storeWithSlack = () =>
+    new InMemoryArtifactStore({
+      bucket: "test",
+      fetch: (async () =>
+        new Response(new Uint8Array(clip.size), {
+          status: 200,
+          headers: { "content-type": "video/mp4" },
+        })) as unknown as typeof fetch,
+    });
+  const recordingExecutor = () => {
+    const commands: string[] = [];
+    const executor = {
+      exec: async (command: string) => {
+        commands.push(command);
+        return "";
+      },
+      readFile: async () => "",
+      writeFile: async () => "",
+      release: async () => ({ released: true }),
+    };
+    return { commands, executor };
+  };
+  const lastUserText = (provider: ReturnType<typeof capturingProvider>) => {
+    const user = provider.requests[0]!.messages.filter((m) => m.role === "user").at(-1)!;
+    return typeof user.content === "string"
+      ? user.content
+      : user.content.map((p) => (p.type === "text" ? p.text : `[${p.type}]`)).join("\n");
+  };
+
+  it("a coding run: the copy starts after admission and before the attach, the pull runs over the run's executor, the first user turn ends with the line, and the record carries the `in` event", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const provider = capturingProvider();
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    const store = storeWithSlack();
+    deps.artifacts = store;
+    let copiesAtAttach = -1;
+    const { commands, executor } = recordingExecutor();
+    vi.mocked(makeExecutor).mockImplementationOnce(async () => {
+      copiesAtAttach = store.copies.length; // the copy was asked for before the workspace attach
+      return { executor };
+    });
+    const { io } = fakeIO();
+    await dispatch(deps, { ...msg("agent:coding cut a contact sheet from this", "slack:UADMIN"), staged: [clip] }, io);
+    expect(copiesAtAttach).toBe(1);
+    expect(store.copies).toEqual([
+      { url: clip.url, size: clip.size, key: "threads/slack-CX-1.0/in/1700000000.000200/1-clip.mp4" },
+    ]);
+    expect(await store.head("threads/slack-CX-1.0/in/1700000000.000200/1-clip.mp4")).toEqual({
+      size: clip.size,
+      contentType: "video/mp4",
+    });
+    // The pull, over the run's executor, into attachments/ — before the model's first read.
+    const pull = commands.find((c) => c.includes("'attachments/1-clip.mp4'"));
+    expect(pull).toMatch(/^mkdir -p attachments && curl -fsS -o 'attachments\/1-clip\.mp4' 'memory:\/\/test\/threads/);
+    expect(lastUserText(provider)).toMatch(
+      /Attached files are in \.\/attachments\/: 1-clip\.mp4 \(3 KB, video\/mp4\)$/,
+    );
+  });
+
+  it("a general run copies nothing and its turn says the agent has no workspace for the file", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    const store = storeWithSlack();
+    deps.artifacts = store;
+    const { io } = fakeIO();
+    await dispatch(deps, { ...msg("what is in this video?"), staged: [clip] }, io);
+    expect(store.copies).toEqual([]);
+    expect(lastUserText(provider)).toContain(
+      "this agent has no workspace for clip.mp4 (3 KB, video/mp4); ask `agent:coding` to work with it",
+    );
+  });
+
+  it("without a store nothing is staged: no pull, and the turn carries no line", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const provider = capturingProvider();
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    const { commands, executor } = recordingExecutor();
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor });
+    const { io } = fakeIO();
+    await dispatch(deps, { ...msg("agent:coding fix it", "slack:UADMIN"), staged: [clip] }, io);
+    expect(commands.some((c) => c.includes("attachments/"))).toBe(false);
+    expect(lastUserText(provider)).not.toContain("attachments/");
   });
 });

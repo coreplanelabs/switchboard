@@ -16,6 +16,7 @@ import { classifyMessage, threadIncludesBot } from "./slackTriggers.js";
 import {
   fetchDocuments,
   fetchImages,
+  stagedFiles,
   MAX_DOCS_PER_MESSAGE,
   MAX_HISTORY_DOCS,
   MAX_HISTORY_DOCUMENT_BYTES,
@@ -29,6 +30,7 @@ import { resolveChannelName, resolveTeamUrl, resolveUserName, slackPermalink } f
 import { isLiveCard, liveCardKey, liveCards, refreshForeignLiveCards, render } from "./slack/statusCard.js";
 import { ACK_EMOJI, catchUpMissedMentions, tsMs } from "./slackCatchUp.js";
 import { processSecrets, type Secret } from "../secrets.js";
+import { ARTIFACT_DEFAULTS } from "../artifacts/config.js";
 import { missingBotScopes, recordCatchUpOutcome, recordMissingScopes } from "./slackCatchUpStatus.js";
 import { recordSocketConnected, recordSocketDisconnected } from "./slackSocketStatus.js";
 export { classifyMessage, threadIncludesBot, type MessageDecision } from "./slackTriggers.js";
@@ -336,7 +338,13 @@ async function handle(deps: CoreDeps, { client, statusClient }: SlackClients, ev
   // `request` span_start carries `queuedBeforeMs` (the page's queued caption).
   const trace = startRequestRoot(deps, { channel: "slack", receivedAt, originAt: tsMs(ev.ts) });
   try {
-    const received = await trace.root.span("slack.receive", (span) => receiveSlackMessage(client, ev, span));
+    const received = await trace.root.span("slack.receive", (span) =>
+      receiveSlackMessage(client, ev, span, {
+        staging: deps.artifacts !== undefined,
+        maxBytesPerMessage:
+          deps.config.config.artifacts?.inbound?.maxBytesPerMessage ?? ARTIFACT_DEFAULTS.maxBytesPerMessage,
+      }),
+    );
     if (!received) {
       trace.root.end("ok", { status: "refused" });
       return;
@@ -358,10 +366,19 @@ async function handle(deps: CoreDeps, { client, statusClient }: SlackClients, ev
  *  guard, the 👀 ack, the catch-up note, the file downloads and the display
  *  names — the `slack.receive` span's body. `undefined` when the event is a
  *  redelivery that already ran (the span says `dedupe: duplicate`). */
+/** Whether files the inline path cannot carry are staged by reference
+ *  (record 0033) — on exactly when the artifact store is configured — and the
+ *  per-message byte budget they share (`artifacts.inbound.maxBytesPerMessage`). */
+export interface StagingPolicy {
+  staging: boolean;
+  maxBytesPerMessage: number;
+}
+
 async function receiveSlackMessage(
   client: SlackClient,
   ev: SlackEvent,
   span: Span,
+  policy: StagingPolicy,
 ): Promise<Omit<IncomingMessage, "receivedAt" | "originAt"> | undefined> {
   // Redelivery guard: claim (channel, ts) and drop the event when it
   // demonstrably ran already — in this process, or (for a stale delivery)
@@ -390,16 +407,21 @@ async function receiveSlackMessage(
       })
     : Promise.resolve();
   // Independent budgets, independent downloads — the two passes overlap.
-  const [{ images, skipped: skippedImages }, { documents, skipped: skippedDocs }] = await Promise.all([
-    fetchImages(ev.files, MAX_IMAGES_PER_MESSAGE),
-    fetchDocuments(ev.files, MAX_DOCS_PER_MESSAGE),
-    delayNote,
-  ]);
+  const [{ images, skippedFiles: imagePassSkipped }, { documents, skippedFiles: documentPassSkipped }] =
+    await Promise.all([
+      fetchImages(ev.files, MAX_IMAGES_PER_MESSAGE),
+      fetchDocuments(ev.files, MAX_DOCS_PER_MESSAGE),
+      delayNote,
+    ]);
   // A file is genuinely unsupported only when BOTH passes rejected it — the
   // image pass skips every non-image (PDFs, text) and the document pass skips
   // every non-document (images), so their intersection is exactly the files
   // that are neither a usable image nor a usable document.
-  const skipped = skippedImages.filter((s) => skippedDocs.includes(s));
+  const unsupported = imagePassSkipped.filter((f) => documentPassSkipped.includes(f));
+  // With a store configured (record 0033) the files neither pass could carry
+  // stay on Slack by reference for a run with a workspace to stage; the rest
+  // are the ones the note below names, each with its reason.
+  const { staged, skipped } = stagedFiles(unsupported, { ...policy, messageId: ev.ts });
   // Human display names for the run label — best-effort and cached: a failed
   // lookup leaves the field undefined (the label falls back to the raw id) and
   // never fails the dispatch. Resolved in parallel so the two lookups don't add
@@ -425,6 +447,7 @@ async function receiveSlackMessage(
     sourceUrl: team ? slackPermalink(team, ev.channel, ev.ts, ev.threadTs) : undefined,
     images: images.length > 0 ? images : undefined,
     documents: documents.length > 0 ? documents : undefined,
+    ...(staged.length > 0 ? { staged } : {}),
   };
 }
 
