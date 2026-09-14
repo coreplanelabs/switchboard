@@ -214,11 +214,19 @@ describe("boundedByParent — the parent's remaining wall clock as one more boun
 });
 
 describe("declaredProfile and budgetedAgent", () => {
-  it("the declared profile is the preset's three axes; the budgeted agent is a copy with the profile's minutes and nothing else changed", () => {
+  it("the declared profile is the preset's three axes; the budgeted agent is a copy with the profile's minutes and the turn cap re-derived from them", () => {
     expect(declaredProfile(AGENTS.review)).toEqual({ machine: "repo-resident", identity: "read", minutes: 25 });
     const budgeted = budgetedAgent(AGENTS.coding, { machine: "repo-resident", identity: "write", minutes: 12 });
-    expect(budgeted).toEqual({ ...AGENTS.coding, maxMinutes: 12 });
+    expect(budgeted).toEqual({ ...AGENTS.coding, maxMinutes: 12, maxTurns: 72 });
     expect(budgeted).not.toBe(AGENTS.coding);
     expect(AGENTS.coding.maxMinutes).toBe(45);
+  });
+
+  it("a 45-minute preset clipped to 10 minutes gets 60 turns — the runaway guard follows the clipped budget (docs/reference/specs/run-loop.md item 1)", () => {
+    expect(AGENTS.coding.maxMinutes).toBe(45);
+    expect(AGENTS.coding.maxTurns).toBe(270);
+    const budgeted = budgetedAgent(AGENTS.coding, { machine: "repo-resident", identity: "write", minutes: 10 });
+    expect(budgeted.maxMinutes).toBe(10);
+    expect(budgeted.maxTurns).toBe(60);
   });
 });
