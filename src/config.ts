@@ -5,6 +5,7 @@ import type { Effort } from "./effort.js";
 import YAML from "yaml";
 import type { ProviderConfig } from "./providers/types.js";
 import type { MemoryConfig } from "./core/memory/types.js";
+import type { ArtifactsConfig } from "./artifacts/config.js";
 import type { SelfImprovementConfig } from "./core/selfImprovement.js";
 import type { SchedulesConfig } from "./core/scheduleStore.js";
 import type { RunHistoryConfig } from "./core/runStore.js";
@@ -167,6 +168,12 @@ export interface AppConfig {
    * input is byte-identical to memory-off. See docs/reference/specs/memory.md.
    */
   memory?: MemoryConfig;
+  /**
+   * The artifact store (docs/reference/specs/execution.md item 20): one private
+   * R2 bucket a run's files move through by reference. Absent (the default) →
+   * no store, and every surface behaves as before it existed.
+   */
+  artifacts?: ArtifactsConfig;
   /**
    * Self-improvement proposals: where `friction propose` files
    * issues and how it clusters. Absent → every run's diagnosis still lands in

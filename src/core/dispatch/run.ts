@@ -15,6 +15,7 @@ import { TOOLSETS } from "../../tools/workspace.js";
 import { makeWebCapability } from "../../tools/web.js";
 import { RestGithubApi, type GithubApi } from "../../execution/githubApi.js";
 import type { GithubCapability } from "../../tools/github.js";
+import type { ArtifactStore } from "../../artifacts/store.js";
 import type { OpenedPullRequest, OpenPrRef, PullRequestTarget, RepoShipInfo } from "../../execution/githubPulls.js";
 import type { ReviewCommentTarget } from "../../execution/githubComments.js";
 import type { ExecutorSelection } from "../../execution/factory.js";
@@ -64,6 +65,12 @@ export interface RunDeps
    * without a ledger's foreign rows.
    */
   runs?: RunsService;
+  /**
+   * The artifact store (docs/reference/specs/execution.md item 20): where a
+   * run's files move by reference when `artifacts:` is configured. Absent →
+   * `attach_file` keeps its inline path and no inbound file is copied.
+   */
+  artifacts?: ArtifactStore;
   /**
    * The GitHub API behind the `github_*` tools (docs/reference/specs/github-tools.md).
    * Absent → the production REST client on the App credential; tests inject an

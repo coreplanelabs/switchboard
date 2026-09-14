@@ -50,6 +50,7 @@
 import "./loadEnv.js";
 import { Console } from "node:console";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { buildArtifactStore } from "./artifacts/buildStore.js";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { OPERATOR_ROOT } from "./deploy/host.js";
@@ -637,11 +638,17 @@ async function main(): Promise<void> {
   const residentFleet: ResidentFleetFacts = fleetWatcher ?? NO_FLEET;
   // The chat fast path (`runs list`, `friction report`, …) answers from the same
   // catalogue the bot binds — without it those messages would go to the model.
+  // The artifact store, exactly as the bot builds it: a configured store with a
+  // missing secret fails the harness by name too.
+  const artifacts = buildArtifactStore(config.config.artifacts, processSecrets, {
+    copyBaseUrl: process.env.PUBLIC_BASE_URL,
+  });
   const deps: CoreDeps = {
     config,
     providers,
     capabilities,
     residentFleet,
+    ...(artifacts ? { artifacts } : {}),
     // The CLI's own identity for the About block: its package version, no stamp.
     build: (({ version, commit }) => ({ version, commit }))(unstampedStatus()),
     skills,

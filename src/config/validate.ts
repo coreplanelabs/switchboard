@@ -9,6 +9,7 @@ import type { RunHistoryConfig } from "../core/runStore.js";
 import type { ShipConfig } from "../core/shipPipeline.js";
 import type { SpawnConfig } from "../core/dispatch/spawn.js";
 import { validateDashboardConfig } from "../core/dashboardAuthConfig.js";
+import { validateArtifacts } from "../artifacts/config.js";
 import { parseGrantsConfig, parseRestrictConfig, type Restriction } from "../core/authz/grants.js";
 import type { Grants } from "../core/authz/types.js";
 import { AGENTS, IDENTITIES, MACHINE_CLASSES, type Identity, type MachineClass } from "../agents/registry.js";
@@ -41,6 +42,7 @@ const CONFIG_KEYS: Record<keyof AppConfig, true> = {
   execution: true,
   workspaceDir: true,
   memory: true,
+  artifacts: true,
   selfImprovement: true,
   schedules: true,
   costs: true,
@@ -283,6 +285,7 @@ export function validateConfig(cfg: AppConfig): void {
   if (cfg.ship !== undefined) validateShip(cfg.ship);
   if (cfg.spawn !== undefined) validateSpawn(cfg.spawn);
   if (cfg.routing !== undefined) validateRouting(cfg.routing, cfg.providers);
+  if (cfg.artifacts !== undefined) validateArtifacts(cfg.artifacts);
   validateDashboardConfig(cfg.dashboard);
 }
 

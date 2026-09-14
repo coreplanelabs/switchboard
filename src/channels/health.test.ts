@@ -25,6 +25,17 @@ describe("build identity on /healthz", () => {
     expect(UNKNOWN_BUILD).toEqual({ commit: "unknown" });
   });
 
+  // docs/reference/specs/execution.md item 20: the artifact store's bucket is a
+  // fact on /healthz when configured, and no key at all when not.
+  it("healthPayload carries `artifacts: { bucket }` when the store is configured and no key when not", () => {
+    expect(
+      healthPayload({ inFlight: 0, draining: false, artifacts: { bucket: "switchboard-artifacts" } }).artifacts,
+    ).toEqual({
+      bucket: "switchboard-artifacts",
+    });
+    expect(healthPayload({ inFlight: 0, draining: false })).not.toHaveProperty("artifacts");
+  });
+
   it("healthPayload carries `build` when given (builtAt omitted when absent) and no key when not", () => {
     expect(
       healthPayload({ inFlight: 0, draining: false, build: { commit: "abc1234", builtAt: "2026-08-30T05:00:00.000Z" } })
