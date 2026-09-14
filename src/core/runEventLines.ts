@@ -100,6 +100,8 @@ function isRunEvent(v: unknown): v is RunEvent {
       return typeof o.repo === "string" && typeof o.number === "number" && typeof o.head === "string";
     case "ship_round":
       return typeof o.index === "number" && typeof o.agent === "string" && typeof o.outcome === "string";
+    case "route":
+      return typeof o.preset === "string" && typeof o.reason === "string" && typeof o.model === "string";
     default:
       return false;
   }

@@ -278,6 +278,7 @@ describe("registerRun — the run's row on every surface before the attach", () 
     const registry = new RunRegistry({ genId: () => "run-p", genToken: () => "tok" });
     const { io, started } = fakeIO(history);
     const out = await registerRun(d, {
+      agentSource: "directive",
       msg: { ...r.message, userName: "alice", images: [{ mediaType: "image/png", data: "QUJD" }] },
       io,
       agent: r.agent,
@@ -334,6 +335,7 @@ describe("registerRun — the run's row on every surface before the attach", () 
     const r = request(d, "review it", "review");
     const registry = new RunRegistry({ genId: () => "run-p", genToken: () => "tok" });
     const out = await registerRun(d, {
+      agentSource: "directive",
       msg: r.message,
       io: fakeIO().io,
       agent: r.agent,
@@ -363,6 +365,7 @@ describe("registerRun — the run's row on every surface before the attach", () 
     const resume = await resumeOf("run-old");
     const registry = new RunRegistry({ genId: () => "run-fresh", genToken: () => "tok" });
     const out = await registerRun(d, {
+      agentSource: "directive",
       msg: r.message,
       io: fakeIO().io,
       agent: r.agent,

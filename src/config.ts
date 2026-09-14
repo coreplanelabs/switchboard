@@ -93,6 +93,14 @@ export interface Scope {
   mcpServers?: Record<string, McpServerEntry>;
 }
 
+/** The `routing` block (`AppConfig.routing`). */
+export interface RoutingConfig {
+  /** Route a plain message to a preset through the fast model. Default false. */
+  auto?: boolean;
+  /** The router's model, `<provider>/<model>`; default `defaults.models.general`. */
+  model?: string;
+}
+
 export interface AppConfig {
   /**
    * The GitHub organization (or user) this installation serves — the account
@@ -207,6 +215,15 @@ export interface AppConfig {
    * `ship`; validated at load.
    */
   spawn?: SpawnConfig;
+  /**
+   * The request router (docs/decisions/0026-capability-profiles-and-request-routing.md;
+   * docs/reference/specs/routing-and-config.md item 21): with `auto: true` a
+   * plain message — no directive, no sticky preset, no user or channel
+   * `agent` — asks `model` (default: `defaults.models.general`, the fast
+   * model) to pick its preset from the registry's table. Off by default: a
+   * deployment that sets nothing here behaves exactly as before the router.
+   */
+  routing?: RoutingConfig;
   /** Slack adapter behavior that is not pure transport. */
   slack?: SlackConfig;
   /**
@@ -436,8 +453,16 @@ export interface ResolvedMcpServer {
   shadowedBy?: string;
 }
 
+/** The config layer that set a request's agent (`resolve()`'s ladder): the
+ *  request itself — a directive or the thread's sticky preset — the user scope,
+ *  the channel scope, or `defaults.agent`. The route stage runs only for
+ *  `default` (docs/reference/specs/routing-and-config.md item 21). */
+export type AgentLayer = "request" | "user" | "channel" | "default";
+
 export interface ResolvedRequest {
   agentName: string;
+  /** Which layer set `agentName`. */
+  agentLayer: AgentLayer;
   modelRef: string; // provider/model
   /** Resolved through the config layers only; undefined = no layer set it (the
    *  agent definition, then the provider default, decide downstream). */
@@ -731,7 +756,14 @@ export class ConfigStore {
     const ch = this.channelScope(opts.channelId);
     const us = this.userScope(opts.userId);
 
-    const agentName = opts.request.agent ?? us.agent ?? ch.agent ?? this.config.defaults.agent;
+    const [agentName, agentLayer]: [string, AgentLayer] =
+      opts.request.agent !== undefined
+        ? [opts.request.agent, "request"]
+        : us.agent !== undefined
+          ? [us.agent, "user"]
+          : ch.agent !== undefined
+            ? [ch.agent, "channel"]
+            : [this.config.defaults.agent, "default"];
     const boundary = intersectBoundaries(this.boundaryLayers(ch, us));
 
     const modelRef =
@@ -757,6 +789,7 @@ export class ConfigStore {
 
     return {
       agentName,
+      agentLayer,
       modelRef,
       ...(effort !== undefined ? { effort } : {}),
       ...(boundary !== undefined ? { boundary } : {}),

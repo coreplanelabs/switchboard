@@ -4073,6 +4073,7 @@ describe("live run-view wiring (Area 2)", () => {
     expect(meta).toEqual({
       type: "run_meta",
       agent: "general",
+      agentSource: "directive",
       model: expect.stringContaining("/"),
       traceId: expect.any(String),
       at: expect.any(Number),
@@ -10634,5 +10635,137 @@ describe("the model proxy's run bearer through dispatch()", () => {
     const { io, replies } = fakeIO();
     await dispatch(bare, msg("hello there"), io);
     expect(replies).toContain("answer");
+  });
+});
+
+// Feature: docs/reference/specs/routing-and-config.md item 21 — the request
+// router through dispatch(): off is today; a directive always wins; a plain
+// message runs as the routed preset with the reason on the card and the
+// `route` event on the record; a write preset waits for the requester's go.
+describe("the request router (docs/reference/specs/routing-and-config.md item 21)", () => {
+  const ROUTED_YAML = YAML_FIXTURE + "routing:\n  auto: true\n";
+  const ROUTED_REMOTE_YAML = REMOTE_YAML_FIXTURE + "routing:\n  auto: true\n";
+  /** A scripted router: a change to make is coding, a review ask is review, anything else general. */
+  const router = () =>
+    vi.fn(async (prompt: { user: string }) => {
+      const text = prompt.user;
+      const preset = /fix|implement/i.test(text) ? "coding" : /review/i.test(text) ? "review" : "general";
+      return JSON.stringify({ preset, reason: `${preset} fits the request` });
+    });
+  const routeEvents = (registry: RunRegistry, id: string) =>
+    (registry.snapshotById(id)?.events ?? []).filter((e) => e.type === "route");
+  const metaOf = (registry: RunRegistry, id: string) =>
+    (registry.snapshotById(id)?.events ?? []).find((e) => e.type === "run_meta") as
+      { agentSource?: string } | undefined;
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.mocked(makeExecutor).mockClear();
+  });
+
+  it("routing off: a plain message runs defaults.agent as today — the router is never called, no route event, no routed line", async () => {
+    let ids = 0;
+    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.routeModel = router();
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, msg("review it for me"), io);
+    expect(deps.routeModel).not.toHaveBeenCalled();
+    expect(provider.requests[0].model).toBe("general-model");
+    expect(routeEvents(registry, "r1")).toEqual([]);
+    expect(metaOf(registry, "r1")?.agentSource).toBe("default");
+    expect(statuses.every((s) => !s.title.includes("routed:"))).toBe(true);
+  });
+
+  it("routing on, a directive on the message: untouched — the router is never called and the run is the directive's", async () => {
+    let ids = 0;
+    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
+    const provider = capturingProvider();
+    const deps = makeDeps(ROUTED_YAML, provider);
+    deps.runRegistry = registry;
+    deps.routeModel = router();
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:general review it for me"), io);
+    expect(deps.routeModel).not.toHaveBeenCalled();
+    expect(provider.requests[0].model).toBe("general-model");
+    expect(metaOf(registry, "r1")?.agentSource).toBe("directive");
+    expect(routeEvents(registry, "r1")).toEqual([]);
+  });
+
+  it("routing on, a bare message: routed to review — its own model, the card's `routed:` line from the first paint, the record's route event, and it runs at once", async () => {
+    let ids = 0;
+    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
+    const provider = capturingProvider();
+    const deps = makeDeps(ROUTED_YAML, provider);
+    deps.runRegistry = registry;
+    deps.routeModel = router();
+    const { io, statuses, replies } = fakeIO();
+    await dispatch(deps, msg("review it for me"), io);
+    expect(deps.routeModel).toHaveBeenCalledTimes(1);
+    expect(provider.requests[0].model).toBe("review-model");
+    expect(replies).toContain("answer");
+    expect(statuses[0].title).toContain("*review* on `anthropic/review-model` · routed: review fits the request");
+    expect(routeEvents(registry, "r1")).toEqual([
+      expect.objectContaining({
+        type: "route",
+        preset: "review",
+        reason: "review fits the request",
+        model: "anthropic/general-model",
+      }),
+    ]);
+    expect(metaOf(registry, "r1")?.agentSource).toBe("route");
+  });
+
+  it("a route to coding dispatches at once like any other preset — no ask, no pause; the card carries the routed line and the record the event", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    let ids = 0;
+    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
+    const provider = capturingProvider();
+    const deps = makeDeps(ROUTED_REMOTE_YAML, provider);
+    deps.runRegistry = registry;
+    deps.routeModel = router();
+    const fake = { exec: async () => "", readFile: async () => "", writeFile: async () => "" };
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fake });
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, msg("fix the flaky login test", "slack:UADMIN"), io);
+    expect(deps.routeModel).toHaveBeenCalledTimes(1);
+    expect(provider.requests[0].model).toBe("coding-model");
+    expect(vi.mocked(makeExecutor).mock.calls.map((c) => c[1].agent.name)).toEqual(["coding"]);
+    expect(statuses[0].title).toContain("*coding* on `anthropic/coding-model` · routed: coding fits the request");
+    expect(statuses.every((s) => !/reply go|not started/.test(s.title))).toBe(true);
+    expect(statuses.at(-1)!.title).toContain("✅");
+    expect(routeEvents(registry, "r1")).toEqual([
+      expect.objectContaining({ type: "route", preset: "coding", reason: "coding fits the request" }),
+    ]);
+    expect(metaOf(registry, "r1")?.agentSource).toBe("route");
+  });
+
+  it("ship is never routed: a router answering ship leaves an admin's plain message on defaults.agent, with no route event", async () => {
+    let ids = 0;
+    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
+    const provider = capturingProvider();
+    const deps = makeDeps(ROUTED_YAML, provider);
+    deps.runRegistry = registry;
+    deps.routeModel = vi.fn(async () => JSON.stringify({ preset: "ship", reason: "land it" }));
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, msg("land the login fix", "slack:UADMIN"), io);
+    expect(deps.routeModel).toHaveBeenCalledTimes(1);
+    expect(provider.requests[0].model).toBe("general-model");
+    expect(routeEvents(registry, "r1")).toEqual([]);
+    expect(metaOf(registry, "r1")?.agentSource).toBe("default");
+    expect(statuses.every((s) => !s.title.includes("routed:"))).toBe(true);
+  });
+
+  it("a route the requester may not run is no route: the plain user's change request runs defaults.agent, not coding", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(ROUTED_YAML, provider);
+    deps.routeModel = router();
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, msg("fix the flaky login test"), io); // slack:UX may not run the restricted coding preset
+    expect(provider.requests[0].model).toBe("general-model");
+    expect(statuses.every((s) => !s.title.includes("routed:"))).toBe(true);
   });
 });

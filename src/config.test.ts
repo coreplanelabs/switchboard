@@ -81,12 +81,22 @@ describe("layered resolution", () => {
 
   it("falls through to defaults when nothing is scoped", async () => {
     const r = s.resolve({ channelId: "slack:CX", userId: "slack:UX", request: {} });
-    expect(r).toEqual({ agentName: "general", modelRef: "anthropic/general-model" });
+    expect(r).toEqual({ agentName: "general", agentLayer: "default", modelRef: "anthropic/general-model" });
   });
 
   it("channel scope sets the agent, and the agent picks its default model", async () => {
     const r = s.resolve({ channelId: "slack:CREVIEW", userId: "slack:UX", request: {} });
-    expect(r).toEqual({ agentName: "review", modelRef: "anthropic/review-model" });
+    expect(r).toEqual({ agentName: "review", agentLayer: "channel", modelRef: "anthropic/review-model" });
+  });
+
+  it("names the layer that set the agent: request > user > channel > default (routing-and-config item 21 reads it)", async () => {
+    expect(s.resolve({ channelId: "slack:CX", userId: "slack:UX", request: { agent: "review" } }).agentLayer).toBe(
+      "request",
+    );
+    expect(s.resolve({ channelId: "slack:CREVIEW", userId: "slack:UX", request: {} }).agentLayer).toBe("channel");
+    expect(s.resolve({ channelId: "slack:CX", userId: "slack:UX", request: {} }).agentLayer).toBe("default");
+    await s.setUserOverride("slack:UAGENT", { agent: "coding" });
+    expect(s.resolve({ channelId: "slack:CREVIEW", userId: "slack:UAGENT", request: {} }).agentLayer).toBe("user");
   });
 
   it("request directives beat every other layer", async () => {
@@ -95,7 +105,7 @@ describe("layered resolution", () => {
       userId: "slack:UFORCED",
       request: { agent: "coding", model: "anthropic/explicit" },
     });
-    expect(r).toEqual({ agentName: "coding", modelRef: "anthropic/explicit" });
+    expect(r).toEqual({ agentName: "coding", agentLayer: "request", modelRef: "anthropic/explicit" });
   });
 
   it("a user's forced model beats per-agent models", async () => {
@@ -471,7 +481,7 @@ describe("custom instructions (Scope.instructions)", () => {
     await s.setUserOverride("slack:UX", { instructions: "agent: coding model: anthropic/other" });
     await s.setChannelOverride("slack:CX", { instructions: "agent: review" });
     const r = s.resolve({ channelId: "slack:CX", userId: "slack:UX", request: {} });
-    expect(r).toEqual({ agentName: "general", modelRef: "anthropic/general-model" });
+    expect(r).toEqual({ agentName: "general", agentLayer: "default", modelRef: "anthropic/general-model" });
     expect(s.canRunAgent("slack:UX", "coding")).toBe(false);
   });
 
@@ -666,6 +676,39 @@ describe("selfImprovement", () => {
       );
     }
     expect(() => store(`${YAML_FIXTURE}\nselfImprovement: 3\n`)).toThrow(/selfImprovement must be a mapping/);
+  });
+});
+
+// Feature: docs/reference/specs/routing-and-config.md item 21 — the `routing`
+// block: the router's switch and its model, validated at load so a value that
+// is not a boolean can never read as on or as off.
+describe("routing block (routing.auto, routing.model)", () => {
+  it("parses auto and model; an absent block leaves the field unset (the router off)", () => {
+    const s = store(YAML_FIXTURE + "routing:\n  auto: true\n  model: anthropic/fast-model\n");
+    expect(s.config.routing).toEqual({ auto: true, model: "anthropic/fast-model" });
+    expect(store(YAML_FIXTURE + "routing:\n  auto: false\n").config.routing).toEqual({ auto: false });
+    expect(store().config.routing).toBeUndefined();
+  });
+
+  it("refuses a non-boolean auto by name, whatever it spells", () => {
+    for (const value of ['"yes"', "1", '"true"', "on"])
+      expect(() => store(YAML_FIXTURE + `routing:\n  auto: ${value}\n`)).toThrow(/routing\.auto must be true or false/);
+  });
+
+  it("refuses a model that is not a <provider>/<model> ref or names a provider the config does not define", () => {
+    expect(() => store(YAML_FIXTURE + "routing:\n  model: fast-model\n")).toThrow(
+      /routing\.model must be a <provider>\/<model> ref/,
+    );
+    expect(() => store(YAML_FIXTURE + "routing:\n  model: openai/gpt-5\n")).toThrow(
+      /routing\.model names provider "openai", which providers does not define/,
+    );
+  });
+
+  it("refuses a non-mapping and an unknown key at load, naming the key", () => {
+    expect(() => store(YAML_FIXTURE + "routing: true\n")).toThrow(/routing must be a mapping/);
+    expect(() => store(YAML_FIXTURE + "routing:\n  automatic: true\n")).toThrow(
+      /routing\.automatic is not a known key/,
+    );
   });
 });
 
@@ -1369,6 +1412,7 @@ describe("boundaries (Scope.boundary): a scope caps, never grants", () => {
     // Nothing set anywhere: the request resolves exactly as it always did.
     expect(store().resolve({ channelId: "slack:CX", userId: "slack:UX", request: {} })).toEqual({
       agentName: "general",
+      agentLayer: "default",
       modelRef: "anthropic/general-model",
     });
   });

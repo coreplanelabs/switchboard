@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { lastThreadDirectives, parseDirectives } from "./directives.js";
+import { lastThreadDirectives, parseDirectives, stripDirectiveTokens } from "./directives.js";
 
 // Feature: docs/reference/specs/routing-and-config.md — per-request directives & thread stickiness.
 
@@ -124,5 +124,21 @@ describe("lastThreadDirectives (thread stickiness)", () => {
     const sticky = lastThreadDirectives([{ role: "user", text: "hello" }]);
     expect(sticky.agent).toBeUndefined();
     expect(sticky.model).toBeUndefined();
+  });
+});
+
+// routing-and-config item 21: the replay harness hides the directive a
+// requester typed before it asks the router what they meant.
+describe("stripDirectiveTokens (lenient: text as data)", () => {
+  it("removes every directive token — an unknown agent and a bad budget included — and collapses the whitespace", () => {
+    expect(stripDirectiveTokens("agent:coding fix the  bug model:x/y")).toBe("fix the bug");
+    expect(stripDirectiveTokens("agent:nonesuch budget:0 effort=max hi")).toBe("hi");
+    expect(stripDirectiveTokens("hello there")).toBe("hello there");
+    expect(stripDirectiveTokens("agent:review")).toBe("");
+  });
+
+  it("agrees with parseDirectives on a message that parses", () => {
+    const text = "agent:review effort:low look at this";
+    expect(stripDirectiveTokens(text)).toBe(parseDirectives(text).text);
   });
 });

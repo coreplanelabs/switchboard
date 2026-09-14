@@ -112,6 +112,7 @@ function setup(userId: string, over: { text?: string; repoCtx?: Record<string, u
     // declared 120 clipped to 45 by a channel boundary.
     profile: { ...declaredProfile(getAgent("ship")), minutes: 45, boundedBy: "channel" as const },
     modelRef: "anthropic/general-model",
+    agentSource: "directive" as const,
     label: "*ship* · acme/api",
     startedAt: NOW,
     card: {
