@@ -277,3 +277,33 @@ describe("artifacts copy — the copy itself", () => {
     expect(stored).toEqual([]);
   });
 });
+
+// worker.ts rebuilds every request for tracing (`withTraceContext`: `new Request(inbound, { headers })`),
+// and a rebuilt Request takes the body stream with it. The route must be handed the rebuilt request —
+// live, handed the original, it read an empty body and answered 400 "body is not JSON" for a 300 MB
+// video dropped on a thread. worker.ts itself is never loaded in tests
+// (Cloudflare bindings), so the wiring is held by its source text, and the mechanism by the route.
+describe("artifacts copy — the wiring hands the route the request that still has its body", () => {
+  it("a request rebuilt for tracing carries the body; the original it was built from answers 400 not JSON", async () => {
+    const up = upstream(() => new Response(null, { status: 500 }));
+    const { d, puts } = deps({ fetch: up.fetch });
+    const inbound = post({ url: URL_PRIVATE, size: 4, key: KEY });
+    const forwarded = new Request(inbound, { headers: new Headers(inbound.headers) });
+    const fromOriginal = await handleArtifactsCopy(inbound, d);
+    expect(fromOriginal.status).toBe(400);
+    expect(await fromOriginal.json()).toEqual({ ok: false, error: "artifacts copy: body is not JSON" });
+    expect(up.calls).toEqual([]);
+    const fromForwarded = await handleArtifactsCopy(forwarded, d);
+    expect(fromForwarded.status).toBe(502); // parsed and past the request checks: the upstream's 500 is Slack's word
+    expect(up.calls.map((c) => c.url)).toEqual([URL_PRIVATE]);
+    expect(puts).toEqual([]);
+  });
+
+  it("worker.ts hands handleArtifactsCopy the traced request, never the inbound one", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const source = readFileSync(fileURLToPath(new URL("./worker.ts", import.meta.url)), "utf8");
+    expect(source).toMatch(/handleArtifactsCopy\(forwarded,/);
+    expect(source).not.toMatch(/handleArtifactsCopy\(inbound,/);
+  });
+});

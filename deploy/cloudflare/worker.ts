@@ -439,7 +439,10 @@ export default {
               : pathname === COPY_PATH
                 ? // The artifact copy (artifactsCopy.ts): the R2 binding and the Slack
                   // token are this Worker's; the bot only asks, with its copy bearer.
-                  await handleArtifactsCopy(inbound, {
+                  // `forwarded`, never `inbound`: `withTraceContext` rebuilt the request
+                  // with `new Request(inbound, …)`, which takes the body stream with it —
+                  // `inbound.text()` is empty afterwards and the route read "not JSON" live.
+                  await handleArtifactsCopy(forwarded, {
                     bucket: env.ARTIFACTS,
                     bucketName: env.ARTIFACTS_BUCKET_NAME,
                     copyToken: env.ARTIFACTS_COPY_TOKEN,
