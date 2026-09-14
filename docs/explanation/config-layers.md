@@ -5,7 +5,7 @@ Agent, model and effort each resolve independently through six layers, the most 
 ```mermaid
 flowchart TB
     RQ["Request — this message's directives"] -->|"unset?"| TH
-    TH["Thread — sticky, derived from history"] -->|"unset?"| US
+    TH["Thread — sticky: the transcript on pi, else derived from history"] -->|"unset?"| US
     US["User — your own config set me"] -->|"unset?"| CH
     CH["Channel — config set channel"] -->|"unset?"| DF
     DF["Installation defaults — config.yaml"] -->|"unset?"| AG

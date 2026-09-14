@@ -24,7 +24,7 @@ Placed right after the mention, before the request text:
 
 Combine freely: `agent:ship model:anthropic/claude-opus-5 effort:high in acme/api: fix #42`.
 
-`agent:`, `model:` and `effort:` are sticky in a thread — a follow-up without them keeps the last ones used. `budget:` is not: it bounds the one run it rides on; a lower budget on every turn is a boundary (`config set me --boundary.maxMinutes <n>`).
+`agent:`, `model:` and `effort:` are sticky in a thread — a follow-up without them keeps the last ones used; on the pi harness the agent is the one whose conversation the thread holds, and the follow-up continues it ([session-log.md](specs/session-log.md) item 9). `budget:` is not: it bounds the one run it rides on; a lower budget on every turn is a boundary (`config set me --boundary.maxMinutes <n>`).
 
 ## Every command you can run in chat
 
@@ -58,7 +58,7 @@ Combine freely: `agent:ship model:anthropic/claude-opus-5 effort:high in acme/ap
 
 | Command | What it does | Who can run it |
 |---|---|---|
-| `runs list [--status <active\|finished\|all>] [--agent <string>] [--channel <string>] [--since-ms <integer>] [--limit <integer>] [--before <integer>] [--before-id <string>]` | List runs (live and persisted, newest first) — metadata only, never message text. | admins |
+| `runs list [--status <active\|finished\|all>] [--agent <string>] [--channel <string>] [--thread <string>] [--since-ms <integer>] [--limit <integer>] [--before <integer>] [--before-id <string>]` | List runs (live and persisted, newest first) — metadata only, never message text. | admins |
 | `runs stop <id> --mode <soft\|hard>` | Request a live run to stop (`--mode soft` = finish the current step; `hard` = abort now). Records the caller as the actor. | admins |
 
 ### `review`

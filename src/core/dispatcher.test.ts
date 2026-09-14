@@ -60,6 +60,8 @@ import { createRunHistoryWriter, NullRunHistoryWriter } from "./runHistoryWriter
 import { InMemoryRunLedger } from "./runLedger/inMemory.js";
 import { messageFromInbox } from "./runLedger/inboxMessage.js";
 import { createLedgerWriteThrough, NullLedgerWriteThrough } from "./runLedger/writeThrough.js";
+import { runPiHarness } from "./harness/pi/harness.js";
+import { HarnessRegistry } from "./harness/pi/relay.js";
 import { ThreadsElsewhere } from "./runLedger/threadsElsewhere.js";
 import type { LiveRunRow, StepRecord } from "./runLedger/types.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./runStoreWorker.js";
@@ -134,6 +136,14 @@ vi.mock("../execution/factory.js", async (importOriginal) => {
 vi.mock("../runner.js", async (importOriginal) => {
   const mod = await importOriginal<typeof import("../runner.js")>();
   return { ...mod, runAgent: vi.fn(mod.runAgent) };
+});
+
+// Pass-through spy on the pi harness's entry: the session-seed suite scripts
+// one run's answer and reads the seed the dispatcher handed over; behavior
+// everywhere else is the real harness's.
+vi.mock("./harness/pi/harness.js", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("./harness/pi/harness.js")>();
+  return { ...mod, runPiHarness: vi.fn(mod.runPiHarness) };
 });
 
 function makeDeps(fixtureYaml: string, provider: Provider): TestDeps {
@@ -10481,10 +10491,14 @@ workspaceDir: __WORKDIR__
   /** A parent channel whose `openThread` hands out one recording child channel on `CHILD_THREAD`. */
   function treeIO() {
     const parent = fakeIO();
-    const child = fakeIO();
+    // The child's thread as a person later finds it: the lead the spawn posted
+    // is its first message, so a reply there is a reply in an existing thread.
+    const childHistory: HistoryItem[] = [];
+    const child = fakeIO(childHistory);
     const leads: string[] = [];
     parent.io.openThread = async (lead) => {
       leads.push(lead);
+      childHistory.push({ role: "assistant", text: lead });
       return { thread: { threadKey: CHILD_THREAD, sourceUrl: "https://acme.slack.com/archives/CX/p90" }, io: child.io };
     };
     return { parent, child, leads };
@@ -10947,10 +10961,14 @@ workspaceDir: __WORKDIR__
   /** A parent channel whose `openThread` hands out one recording child channel per thread named, in order. */
   function forestIO(threads: ReadonlyArray<{ key: string; url: string }>) {
     const parent = fakeIO();
-    const children = threads.map((th) => ({ ...th, ...fakeIO() }));
+    const children = threads.map((th) => {
+      const history: HistoryItem[] = [];
+      return { ...th, ...fakeIO(history), history };
+    });
     let n = 0;
-    parent.io.openThread = async () => {
+    parent.io.openThread = async (lead) => {
       const c = children[n++]!;
+      c.history.push({ role: "assistant", text: lead }); // the lead is the thread's first message
       return { thread: { threadKey: c.key, sourceUrl: c.url }, io: c.io };
     };
     return { parent, children };
@@ -11736,5 +11754,177 @@ describe("inbound staging (record 0033)", () => {
     await dispatch(deps, { ...msg("agent:coding fix it", "slack:UADMIN"), staged: [clip] }, io);
     expect(commands.some((c) => c.includes("attachments/"))).toBe(false);
     expect(lastUserText(provider)).not.toContain("attachments/");
+  });
+});
+
+// docs/reference/specs/session-log.md item 9 (records 0034 and 0035): a
+// follow-up in a thread whose newest run is on the pi harness continues that
+// run's agent by transcript and starts from the session log — its tail, the
+// lines written since, the request — instead of the thread's Slack history.
+describe("a follow-up seeds from its session (docs/reference/specs/session-log.md item 9)", () => {
+  const THREAD = "slack:CX:1.0";
+  const KEY = `${THREAD}:coding`;
+  const PI_YAML = REMOTE_YAML_FIXTURE + "harness:\n  coding: pi\n";
+  const NOW = Date.now();
+  const PREVIOUS_END = NOW - 10_000;
+  const user = (text: string): ChatMessage => ({ role: "user", content: [{ type: "text", text }] });
+  const assistant = (text: string): ChatMessage => ({ role: "assistant", content: [{ type: "text", text }] });
+  /** The previous coding run's conversation, rows 0..3 of the session log. */
+  const tail: ChatMessage[] = [
+    user("fix the flaky test"),
+    { role: "assistant", content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "npm test" } }] },
+    { role: "user", content: [{ type: "tool_result", toolUseId: "c1", content: "1 failed" }] },
+    assistant("fixed it"),
+  ];
+  /** The thread as Slack shows it: the earlier ask and answer, then a line a person wrote after the run ended. */
+  const history: HistoryItem[] = [
+    { role: "user", text: "fix the flaky test", at: NOW - 20_000 },
+    { role: "assistant", text: "fixed it", at: NOW - 11_000 },
+    { role: "user", text: "also check the lockfile", at: NOW - 5_000 },
+  ];
+  const followUp = { channelId: "slack:CX", userId: "slack:UADMIN", threadKey: THREAD, text: "and bump the version" };
+  /** The coding run's workspace: a fake executor that answers every command with nothing. */
+  const fakeExecutor = () => ({
+    exec: async () => "",
+    readFile: async () => "",
+    writeFile: async () => "",
+    release: async () => ({ released: true }),
+  });
+
+  /** A thread whose newest run is a finished coding run: its record in the store, its rows in the session log. */
+  async function threadWithSession(yaml: string) {
+    const registry = new RunRegistry({ genId: () => "run-next", genToken: () => "tok" });
+    const store = new InMemoryRunStore();
+    const ledger = new InMemoryRunLedger();
+    const warnings: string[] = [];
+    const writer = createRunHistoryWriter({
+      store,
+      warn: () => {},
+      onPersisted: (id) => registry.markPersisted(id),
+      sleep: async () => {},
+    });
+    const provider = capturingProvider();
+    const deps = makeDeps(yaml, provider);
+    deps.runRegistry = registry;
+    deps.runHistoryWriter = writer;
+    deps.runStore = store;
+    deps.runs = createRunsService({ registry, store });
+    deps.runLedger = createLedgerWriteThrough({
+      ledger,
+      gen: "gen-S",
+      fallback: { put: async () => {} },
+      warn: (m) => warnings.push(m),
+    });
+    deps.harness = { registry: new HarnessRegistry(), harnessUrl: "https://bot.test" };
+    deps.runBearers = new RunBearerStore({ clock: () => NOW });
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
+    await ledger.claimSession(KEY, "run-prev", "gen-R");
+    await ledger.seed(
+      "run-prev",
+      "gen-R",
+      tail.map((message, idx) => ({ idx, message })),
+      KEY,
+    );
+    await ledger.releaseSession(KEY, "run-prev", "gen-R");
+    await store.put({
+      id: "run-prev",
+      label: "coding · acme/api",
+      agent: "coding",
+      model: "anthropic/coding-model",
+      channelId: "slack:CX",
+      userId: "slack:UADMIN",
+      threadKey: THREAD,
+      channelVisibility: "public",
+      startedAt: NOW - 20_000,
+      finishedAt: PREVIOUS_END,
+      status: "completed",
+      eventCount: 0,
+      storedEventCount: 0,
+      truncated: false,
+      events: [],
+      diagnosis: analyzeRunFriction([]),
+      seed: "channel",
+      session: { key: KEY, seedFrom: 0, request: 0, range: { from: 0, to: 3 } },
+    });
+    return { deps, registry, store, ledger, writer, warnings, provider };
+  }
+
+  // The pass-through spy keeps the real harness as its default; a test scripts
+  // one call with `mockImplementationOnce`, which the call consumes.
+  beforeEach(() => {
+    vi.mocked(runPiHarness).mockClear();
+    vi.mocked(makeExecutor).mockClear();
+  });
+
+  it("a follow-up in a thread whose newest run is a coding run on pi continues coding without a directive and seeds from the session log: the pi harness is handed the log's tail, the line written since and the request; the record says seed: session with seedFrom inside the earlier run's range and range.from at the tail, and its context events are the tail's text turns", async () => {
+    const t = await threadWithSession(PI_YAML);
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
+    let handed: ChatMessage[] | undefined;
+    let agentOnPi: string | undefined;
+    vi.mocked(runPiHarness).mockImplementationOnce(async (_deps, run) => {
+      handed = run.messages;
+      agentOnPi = run.agent.name;
+      return "bumped";
+    });
+    const { io, replies } = fakeIO(history);
+    await dispatch(t.deps, followUp, io);
+    await t.writer.settled();
+    expect(agentOnPi).toBe("coding");
+    expect(handed).toEqual([...tail, user("also check the lockfile"), user("and bump the version")]);
+    expect(replies.at(-1)).toBe("bumped");
+    // The router was never asked and the scripted provider never called: the agent came from the thread's transcript.
+    expect(t.provider.requests).toHaveLength(0);
+    // The finish lands on the ledger (the history store in production); the plain store keeps the tombstone.
+    const record = t.ledger.finished.get("run-next")!;
+    expect(record).toMatchObject({ agent: "coding", seed: "session", status: "completed", threadKey: THREAD });
+    expect(record.session).toEqual({ key: KEY, seedFrom: 0, request: 5, range: { from: 4, to: 5 } });
+    const meta = record.events.find((e) => e.type === "run_meta") as { agentSource?: string } | undefined;
+    expect(meta?.agentSource).toBe("sticky");
+    expect(record.events.filter((e) => e.type === "context").map((e) => (e as { text: string }).text)).toEqual([
+      "user: fix the flaky test",
+      "assistant: fixed it",
+      "user: also check the lockfile",
+    ]);
+    // The log: the tail's rows once, then the line since and the request as the run's own first rows.
+    const log = await t.ledger.readSession(KEY, 0);
+    expect(log.messages).toEqual([...tail, user("also check the lockfile"), user("and bump the version")]);
+    expect(t.warnings).toEqual([]);
+  });
+
+  it("the same thread with coding on the native loop resolves by the user turns and seeds from the channel, as before", async () => {
+    const t = await threadWithSession(REMOTE_YAML_FIXTURE);
+    const { io } = fakeIO(history);
+    await dispatch(t.deps, followUp, io);
+    await t.writer.settled();
+    expect(vi.mocked(runPiHarness)).not.toHaveBeenCalled();
+    // The finish lands on the ledger (the history store in production); the plain store keeps the tombstone.
+    const record = t.ledger.finished.get("run-next")!;
+    expect(record).toMatchObject({ agent: "general", seed: "channel", status: "completed" });
+    // The channel seed: the thread's history merged into three turns, the request the last; the final answer has no
+    // tools, so no step report carries it and the range closes at the request row.
+    expect(record.session).toEqual({ key: `${THREAD}:general`, seedFrom: 0, request: 2, range: { from: 0, to: 2 } });
+  });
+
+  it("a log that cannot be read seeds from the channel with a seed note naming it, and the agent is still the thread's", async () => {
+    const t = await threadWithSession(PI_YAML);
+    t.deps.runLedger.readSessionTail = async () => {
+      throw new Error("no such route");
+    };
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
+    let handed: ChatMessage[] | undefined;
+    vi.mocked(runPiHarness).mockImplementationOnce(async (_deps, run) => {
+      handed = run.messages;
+      return "done anyway";
+    });
+    const { io } = fakeIO(history);
+    await dispatch(t.deps, followUp, io);
+    await t.writer.settled();
+    // The finish lands on the ledger (the history store in production); the plain store keeps the tombstone.
+    const record = t.ledger.finished.get("run-next")!;
+    expect(record).toMatchObject({ agent: "coding", seed: "channel", status: "completed" });
+    expect(handed?.map((m) => m.role)).toEqual(["user", "assistant", "user"]); // the channel's history, merged, then the request
+    const notes = record.events.filter((e) => e.type === "run_note") as Array<{ kind: string; summary: string }>;
+    expect(notes.map((n) => n.kind)).toContain("seed");
+    expect(notes.find((n) => n.kind === "seed")!.summary).toContain(`the log ${KEY} could not be read (no such route)`);
   });
 });

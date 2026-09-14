@@ -225,6 +225,25 @@ describe("runs.list", () => {
     ).toHaveLength(5);
   });
 
+  // session-log.md item 9: a thread's story is its runs, newest first.
+  it("`--thread` lists one thread's runs, live and finished, newest first, and nothing from another thread", async () => {
+    const { reg, store, registry, deps } = await setup();
+    const live = reg.create("coding · acme/live", {
+      agent: "coding",
+      channelId: "mcp:X",
+      userId: "slack:UALICE",
+      threadKey: "mcp:X:t1",
+    });
+    await store.put(
+      record("fin-t1", NOW - 500, { channelId: "mcp:X", channelVisibility: "machine", threadKey: "mcp:X:t1" }),
+    );
+    const out = value<{ runs: { id: string; threadKey?: string }[] }>(
+      await registry.invoke("runs.list", { options: { status: "all", thread: "mcp:X:t1" } }, reader, deps),
+    );
+    expect(out.runs.map((r) => r.id)).toEqual([live.id, "fin-t1"]);
+    expect(out.runs.every((r) => r.threadKey === "mcp:X:t1")).toBe(true);
+  });
+
   it("limit:'10' (string) and limit:10 yield the same result", async () => {
     const { registry, deps } = await setup();
     const a = await registry.invoke(

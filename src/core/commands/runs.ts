@@ -128,6 +128,13 @@ export const runsList = defineCommand({
       .min(1)
       .optional()
       .describe("only runs in this platform-namespaced channel (`slack:C0123`, `http:ops`)"),
+    thread: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "only runs in this thread, newest first (`slack:C0123:1712.34` — a thread's story, its sessions' runs)",
+      ),
     sinceMs: z.coerce.number().int().nonnegative().optional().describe("only runs started at or after this epoch ms"),
     limit: positiveInt.max(RUN_LIST_MAX_LIMIT).optional().describe(`page size (max ${RUN_LIST_MAX_LIMIT})`),
     before: z.coerce
@@ -145,7 +152,12 @@ export const runsList = defineCommand({
     // The policy, compiled for this actor, is the store's filter; the
     // `channel` option is a plain filter the caller asked for on top of it.
     const visibleTo = predicateFor(caller.actor, "runs:read", "run");
-    return asJson(await (await deps.runs()).listRuns({ ...options, visibleTo }));
+    const { thread, ...rest } = options;
+    return asJson(
+      await (
+        await deps.runs()
+      ).listRuns({ ...rest, ...(thread !== undefined ? { threadKey: thread } : {}), visibleTo }),
+    );
   },
 });
 

@@ -1190,6 +1190,11 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
       {
+        "name": "thread",
+        "required": false,
+        "type": "string",
+      },
+      {
         "name": "sinceMs",
         "required": false,
         "type": "integer",

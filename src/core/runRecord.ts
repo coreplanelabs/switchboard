@@ -160,8 +160,10 @@ export interface RunRecord {
   session?: RunSession;
 }
 
-/** The two places a run's conversation can start (item 52). */
-export const RUN_SEEDS = ["channel", "parent"] as const;
+/** The three places a run's conversation can start (item 52): the thread's
+ *  channel history, a spawning parent's text turns, or the tail of its own
+ *  session's log (docs/reference/specs/session-log.md item 9). */
+export const RUN_SEEDS = ["channel", "parent", "session"] as const;
 export type RunSeed = (typeof RUN_SEEDS)[number];
 
 /** A session log's name: `<threadKey>:<agent>` (docs/reference/specs/session-log.md item 1). */

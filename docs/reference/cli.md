@@ -58,7 +58,7 @@ One table per group, in registration order. "Surfaces" is where that command can
 
 | Command | What it does | Surfaces |
 |---|---|---|
-| `runs list [--status <active\|finished\|all>] [--agent <string>] [--channel <string>] [--since-ms <integer>] [--limit <integer>] [--before <integer>] [--before-id <string>]` | List runs (live and persisted, newest first) — metadata only, never message text. | every surface |
+| `runs list [--status <active\|finished\|all>] [--agent <string>] [--channel <string>] [--thread <string>] [--since-ms <integer>] [--limit <integer>] [--before <integer>] [--before-id <string>]` | List runs (live and persisted, newest first) — metadata only, never message text. | every surface |
 | `runs get <id> [--include <messages>]` | One run's record; `--include messages` adds its events with free text wrapped as untrusted content. | CLI · HTTP · MCP |
 | `runs events <id> [--after-seq <integer>] [--limit <integer>]` | A page of one run's events after `--after-seq` (server-capped); free text wrapped as untrusted content. | CLI · HTTP · MCP |
 | `runs friction <id>` | One run's friction diagnosis (live: computed now; persisted: as stored). | CLI · HTTP · MCP |

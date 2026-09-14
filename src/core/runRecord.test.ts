@@ -685,6 +685,7 @@ describe("isRunRecord — the seed field", () => {
   it("accepts `channel` and `parent` — also after a JSON round-trip — and a record without one carries no key", () => {
     expect(isRunRecord(record({ seed: "channel" }))).toBe(true);
     expect(isRunRecord(record({ seed: "parent" }))).toBe(true);
+    expect(isRunRecord(record({ seed: "session" }))).toBe(true);
     expect(isRunRecord(JSON.parse(JSON.stringify(record({ seed: "parent" }))))).toBe(true);
     expect("seed" in record()).toBe(false);
     expect(isRunRecord(record())).toBe(true);

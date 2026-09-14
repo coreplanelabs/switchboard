@@ -167,6 +167,21 @@ describe("SlackIO.history — thread reuse and concurrent attachment downloads",
       ["user", "first ask"],
       ["assistant", "an answer"],
     ]);
+    // Each turn carries its time in epoch ms off Slack's `ts` (session-log
+    // item 9: a follow-up cuts the thread at the previous run's end by it).
+    expect(items.map((i) => i.at)).toEqual([1_000, 2_000]);
+  });
+
+  it("a message whose ts does not parse carries no time; the item is kept", async () => {
+    const client = { conversations: { replies: vi.fn() } } as unknown as ConstructorParameters<typeof SlackIO>[0];
+    const thread = [
+      { user: "UA", text: "no clock", ts: "not-a-ts" },
+      { user: "UA", text: "hi", ts: "3.0" },
+    ];
+    const items = await new SlackIO(client, { ...ev, thread }).history();
+    expect(items).toHaveLength(1);
+    expect(items[0].text).toBe("no clock");
+    expect("at" in items[0]).toBe(false);
   });
 
   it("fetches the thread itself when no prefetched page is given (mention path)", async () => {

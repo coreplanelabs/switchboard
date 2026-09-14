@@ -11,14 +11,14 @@
 // dispatch proceeds as any request, and the parent reads the child's end
 // through `await_runs`, whose rows follow the thread's newest run.
 //
-// One read decides the lineage: the thread's newest run, live or finished,
-// through the one runs service (`listRuns` by thread key, `limit: 1`) under no
-// visibility predicate — a thread's lineage is a fact about the thread, not a
-// view the requester holds. A thread with no run, or whose newest run names
-// no parent, has none, and the request runs as it always did.
+// The thread's newest run decides the lineage — the first of the one page the
+// dispatcher reads of the thread's runs (dispatch/thread.ts: the same read
+// yields the sticky agent and the previous run a seed continues from). A
+// thread with no run, or whose newest run names no parent, has none, and the
+// request runs as it always did.
 import type { ConfigStore } from "../../config.js";
 import type { LedgerWriteThrough } from "../runLedger/writeThrough.js";
-import type { RunsService } from "../runsService.js";
+import type { RunsService, RunView } from "../runsService.js";
 import type { ThreadAdmission } from "../threadAdmission.js";
 import type { Clock } from "../trace/types.js";
 import type { IncomingMessage } from "../types.js";
@@ -45,20 +45,10 @@ export interface ThreadLineage {
  *  child, or a new run of the child started for it (its id, once registered). */
 export type LineageHeard = { kind: "steered" } | { kind: "started"; runId: string };
 
-/** The thread's lineage, when it has one: one read of its newest run. A read
- *  that fails is no lineage — the request runs as before, and the log says so. */
-export async function threadLineage(
-  service: Pick<RunsService, "listRuns">,
-  threadKey: string,
-): Promise<ThreadLineage | undefined> {
-  let newest;
-  try {
-    const page = await service.listRuns({ status: "all", visibleTo: { kind: "all" }, threadKey, limit: 1 });
-    newest = page.runs[0];
-  } catch (err) {
-    console.warn(`[lineage] ${threadKey}: thread read failed — ${err instanceof Error ? err.message : String(err)}`);
-    return undefined;
-  }
+/** The thread's lineage, when it has one, off the thread's newest run (the
+ *  first of the page `readThread` brings back, dispatch/thread.ts): a newest
+ *  run that names no parent, or a thread with no run, has none. */
+export function lineageOf(newest: RunView | undefined): ThreadLineage | undefined {
   if (newest === undefined || newest.parentRunId === undefined) return undefined;
   return {
     parentRunId: newest.parentRunId,

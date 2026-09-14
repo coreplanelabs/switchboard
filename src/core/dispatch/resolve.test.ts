@@ -146,6 +146,31 @@ describe("resolveRun — the (agent, model, effort) triple", () => {
     expect(resolved.modelRef).toBe("anthropic/coding-model");
   });
 
+  // routing-and-config item 3, the store-read clause: the agent of the thread's
+  // newest continuable run on the pi harness is sticky by transcript.
+  it("the thread's sticky agent by transcript wins over the user turns' derivation; a directive still wins over both; model and effort stay the turns'", () => {
+    const history: HistoryItem[] = [{ role: "user", text: "agent:review effort:low look at it" }];
+    const byTranscript = resolveRun(deps(), {
+      msg: msg("continue"),
+      directives: { text: "continue" },
+      history,
+      stickyAgent: "coding",
+    });
+    expect(byTranscript.sticky).toEqual({ agent: "coding", effort: "low" });
+    expect(byTranscript.resolved.agentName).toBe("coding");
+    expect(byTranscript.resolved.modelRef).toBe("anthropic/coding-model");
+    expect(byTranscript.resolved.effort).toBe("low");
+    expect(byTranscript.agentSource).toBe("sticky");
+    const directed = resolveRun(deps(), {
+      msg: msg("agent:general summarize"),
+      directives: { agent: "general", text: "summarize" },
+      history,
+      stickyAgent: "coding",
+    });
+    expect(directed.resolved.agentName).toBe("general");
+    expect(directed.agentSource).toBe("directive");
+  });
+
   it("with no directive anywhere the defaults apply, and the effort is unset", () => {
     const { sticky, resolved } = resolveRun(deps(), { msg: msg("hello"), directives: { text: "hello" }, history: [] });
     expect(sticky).toEqual({});

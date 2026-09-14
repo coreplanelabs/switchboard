@@ -12,6 +12,7 @@ import {
   utf8ByteLength,
   type RunListItem,
   type RunRecord,
+  type RunSession,
 } from "./runRecord.js";
 import type { RunRegistry, StopRequestResult, SubscribeOptions, Subscribed } from "./runRegistry.js";
 import type { RunSnapshot, RunStopStatus, RunSummary } from "./runRegistry/projections.js";
@@ -105,6 +106,10 @@ export interface RunView {
   /** The run that spawned this one (`RunMeta.parentRunId` / `RunRecord.parentRunId`,
    *  run-history item 46); absent on a run a person or a schedule started. */
   parentRunId?: string;
+  /** A finished run's place in its session's log (`RunRecord.session`,
+   *  session-log item 2): the key, where its seed began, its request row and
+   *  its range — `broken` when it detached. A live row carries none here. */
+  session?: RunSession;
   /** The coordinator instance a child belongs to and the key its spawn carried
    *  (`RunMeta` / `LiveRunMeta` / `RunRecord`, run-history item 48) — live here,
    *  live on another generation, or persisted; absent on every other run. */

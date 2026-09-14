@@ -17,6 +17,7 @@ import type { StepReport } from "../../runner.js";
 import type { ChatMessage, ToolDef } from "../../providers/types.js";
 import type { RunEvent } from "../runEvents.js";
 import type { RunRecord, RunSession } from "../runRecord.js";
+import type { AssembledTranscript } from "./transcript.js";
 import { PermanentStoreError, RouteMissingError } from "../runStoreWorker.js";
 import { createAppendFlusher } from "./flusher.js";
 import type { RunLedger } from "./ledger.js";
@@ -97,6 +98,12 @@ export interface OpenRunRequest {
      *  seed record's `remainingMs` — paired with the messages so a seed can
      *  never be written without it. */
     budgetMs: number;
+    /** A seed read from the session's own log (session-log item 9): the first
+     *  `turns` messages are the log's rows from `from`, one row each, and are
+     *  not written again — the row's `seedFrom` is `from` and its range begins
+     *  at the log's tail. Named rows that do not end at the tail (the log moved
+     *  under the seed) are written whole as new rows, with one warning. */
+    log?: { from: number; turns: number };
   };
   /** A stop another generation requested (`/runs/stop` on a different
    *  container), relayed by the heartbeat — once per mode. */
@@ -211,6 +218,11 @@ export interface LedgerWriteThrough {
    *  resume's re-read at adopt time. Empty, with a warning, when the ledger
    *  cannot be asked (a state Worker without the route included). */
   readInbox(runId: string, afterSeq: number): Promise<InboxItem[]>;
+  /** A session log's newest whole turns within `maxBytes` (session-log item 4),
+   *  oldest first, with the log index they start at — what a follow-up's seed
+   *  is cut from (item 9). A log with no rows answers `from` 0 and no turns.
+   *  Throws as the ledger does; the caller decides what a failed read means. */
+  readSessionTail(key: string, maxBytes: number): Promise<{ from: number; transcript: AssembledTranscript }>;
   /** SIGTERM (plan D8): mark every resumable live run `handoff` on the ledger so
    *  the next generation takes it at once, whatever its lease. The runs keep
    *  running here until the process exits; their writes are fenced the moment
@@ -246,6 +258,9 @@ export class NullLedgerWriteThrough implements LedgerWriteThrough {
   }
   async readInbox(_runId: string, _afterSeq: number): Promise<InboxItem[]> {
     return [];
+  }
+  async readSessionTail(_key: string, _maxBytes: number): Promise<{ from: number; transcript: AssembledTranscript }> {
+    return { from: 0, transcript: { complete: true, turns: 0, messages: [], compactions: [] } };
   }
   async handoff(): Promise<{ marked: string[]; failed?: string }> {
     return { marked: [] };
@@ -323,7 +338,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
    *  run's log. The three requests are one claim: any failure retries them all. */
   async function claim(
     req: Omit<OpenRunRequest, "seed" | "reservation">,
-    opts: { phase?: "attaching"; seed?: readonly ChatMessage[] } = {},
+    opts: { phase?: "attaching"; seed?: readonly ChatMessage[]; log?: { from: number; turns: number } } = {},
   ): Promise<Claimed> {
     for (let attempt = 1; ; attempt++) {
       try {
@@ -331,7 +346,18 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         if (opts.seed) {
           const key = sessionKey(req.threadKey, req.meta.agent);
           const next = await ledger.sessionTail(key);
-          session = { key, seedFrom: next, request: next + requestIndex(opts.seed), range: { from: next } };
+          // A seed read from the log (session-log item 9) begins at its cut when
+          // the rows it names end exactly at the tail; otherwise the log moved
+          // under it and the whole seed is written as new rows from the tail.
+          let seedFrom = next;
+          if (opts.log) {
+            if (opts.log.from + opts.log.turns === next) seedFrom = opts.log.from;
+            else
+              warn(
+                `[ledger] ${req.threadKey} run ${req.runId}: the seed names log rows ${opts.log.from}..${opts.log.from + opts.log.turns - 1} but the log's tail is ${next} — the whole seed is written as new rows`,
+              );
+          }
+          session = { key, seedFrom, request: seedFrom + requestIndex(opts.seed), range: { from: next } };
         }
         const result = await ledger.claim({
           runId: req.runId,
@@ -511,10 +537,14 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
      *  no record at all was killed before its conversation was stored and
      *  closes `interrupted`. */
     async seed(messages: ChatMessage[], budgetMs: number): Promise<void> {
-      // The seed's rows land at the session log's tail (session-log item 2), the
-      // first at `seedFrom`; a run without a session writes its own object from 0.
+      // Every row at its log index: local index i is `seedFrom + i` (session-log
+      // item 2); a run without a session writes its own object from 0. The
+      // messages the seed reused from the log (item 9) — the rows between
+      // `seedFrom` and the range's start — are there already and are skipped.
       const base = this.session?.seedFrom ?? 0;
-      const turns: TranscriptTurn[] = messages.map((message, i) => ({ idx: base + i, message }));
+      const reused =
+        this.session && this.session.range !== "broken" ? this.session.range.from - this.session.seedFrom : 0;
+      const turns: TranscriptTurn[] = messages.slice(reused).map((message, i) => ({ idx: base + reused + i, message }));
       try {
         const seeded = await ledger.seed(this.runId, gen, turns, this.session?.key);
         if (!seeded.ok) {
@@ -715,7 +745,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         // the thread's row is someone else's (a stale reservation) — the run
         // goes on untracked, as an open without a reservation would.
         if (!reserved.tracked()) return undefined;
-        const claimed = await claim(req, seed ? { seed } : {});
+        const claimed = await claim(req, seed ? { seed, ...(req.seed?.log ? { log: req.seed.log } : {}) } : {});
         if (claimed.outcome === "fenced") {
           reserved.detach("promotion refused (fenced)");
           return undefined;
@@ -729,7 +759,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         if (req.seed) await reserved.seed(req.seed.messages, req.seed.budgetMs);
         return reserved;
       }
-      const claimed = await claim(req, seed ? { seed } : {});
+      const claimed = await claim(req, seed ? { seed, ...(req.seed?.log ? { log: req.seed.log } : {}) } : {});
       if (claimed.outcome === "fenced") {
         warn(`[ledger] ${req.threadKey} not tracked: run ${req.runId} is live under another generation`);
         return undefined;
@@ -781,6 +811,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         return [];
       }
     },
+    readSessionTail: (key, maxBytes) => ledger.readSessionTail(key, maxBytes),
 
     async handoff() {
       const candidates = [...live].filter((r) => r.resumable && r.tracked() && !r.handedOff);
