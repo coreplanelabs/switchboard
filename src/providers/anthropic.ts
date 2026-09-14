@@ -185,6 +185,7 @@ export function buildAnthropicParams(req: CompletionRequest): Anthropic.MessageC
     messages,
     ...(effort ? { output_config: { effort } } : {}),
     ...(tools.length > 0 ? { tools } : {}),
+    ...(req.toolChoice ? { tool_choice: { type: "tool", name: req.toolChoice.name } } : {}),
   } as Anthropic.MessageCreateParamsStreaming;
 }
 

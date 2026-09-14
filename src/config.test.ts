@@ -712,6 +712,15 @@ describe("routing block (routing.auto, routing.model)", () => {
     );
   });
 
+  it("routing.answer is `tool` or `text` — the escape hatch for a provider without forced tool calls; anything else is refused by name", () => {
+    expect(store(YAML_FIXTURE + "routing:\n  answer: text\n").config.routing).toEqual({ answer: "text" });
+    expect(store(YAML_FIXTURE + "routing:\n  answer: tool\n").config.routing).toEqual({ answer: "tool" });
+    for (const value of ['"json"', "true", '"Text"'])
+      expect(() => store(YAML_FIXTURE + `routing:\n  answer: ${value}\n`)).toThrow(
+        /routing\.answer must be tool or text/,
+      );
+  });
+
   it("refuses a non-mapping and an unknown key at load, naming the key", () => {
     expect(() => store(YAML_FIXTURE + "routing: true\n")).toThrow(/routing must be a mapping/);
     expect(() => store(YAML_FIXTURE + "routing:\n  automatic: true\n")).toThrow(

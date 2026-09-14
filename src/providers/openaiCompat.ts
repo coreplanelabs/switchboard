@@ -29,6 +29,30 @@ interface OAIMessage {
   tool_call_id?: string;
 }
 
+/** The Chat Completions request body for one completion: the system prompt as
+ *  the first message, the tools as functions, and a forced tool choice — the
+ *  request router's shape (routing-and-config item 21) — as
+ *  `tool_choice: {type: "function", function: {name}}`. Pure, so the wire
+ *  shape is tested without a server. */
+export function buildOpenAIBody(req: CompletionRequest): Record<string, unknown> {
+  const messages: OAIMessage[] = [];
+  if (req.system) messages.push({ role: "system", content: req.system });
+  for (const m of req.messages) messages.push(...toOAIMessages(m));
+  const body: Record<string, unknown> = {
+    model: req.model,
+    max_tokens: req.maxTokens,
+    messages,
+  };
+  if (req.tools && req.tools.length > 0) {
+    body.tools = req.tools.map((t) => ({
+      type: "function",
+      function: { name: t.name, description: t.description, parameters: t.inputSchema },
+    }));
+    if (req.toolChoice) body.tool_choice = { type: "function", function: { name: req.toolChoice.name } };
+  }
+  return body;
+}
+
 export class OpenAICompatProvider implements Provider {
   readonly name: string;
   private baseUrl: string;
@@ -45,21 +69,7 @@ export class OpenAICompatProvider implements Provider {
   }
 
   async complete(req: CompletionRequest): Promise<CompletionResult> {
-    const messages: OAIMessage[] = [];
-    if (req.system) messages.push({ role: "system", content: req.system });
-    for (const m of req.messages) messages.push(...toOAIMessages(m));
-
-    const body: Record<string, unknown> = {
-      model: req.model,
-      max_tokens: req.maxTokens,
-      messages,
-    };
-    if (req.tools && req.tools.length > 0) {
-      body.tools = req.tools.map((t) => ({
-        type: "function",
-        function: { name: t.name, description: t.description, parameters: t.inputSchema },
-      }));
-    }
+    const body = buildOpenAIBody(req);
 
     const res = await fetch(`${this.baseUrl}/chat/completions`, {
       method: "POST",

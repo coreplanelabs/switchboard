@@ -21,9 +21,10 @@
 // and runs as one conductor whose brief lists the parts for it to spawn.
 import { AGENTS, COMPOUND_PRESET, type Identity, type MachineClass } from "../../agents/registry.js";
 import { routingOn, type ConfigStore, type ResolvedRequest } from "../../config.js";
+import type { RouteAnswerMode } from "../../config/validate.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
 import type { ProviderRegistry } from "../../providers/registry.js";
-import { parseModelRef, type Provider } from "../../providers/types.js";
+import { parseModelRef, type Provider, type ToolDef } from "../../providers/types.js";
 import { oneLine, redactAndCap } from "../redact.js";
 import type { AgentSource } from "../runEvents.js";
 import type { Span } from "../trace/types.js";
@@ -34,8 +35,10 @@ import { maxChildrenOf } from "./spawn.js";
 export const ROUTE_TEXT_CAP = 2000;
 /** The most a routed run's reason may say — it rides the card's title line. */
 export const ROUTE_REASON_CAP = 120;
-/** The router's answer is one small JSON object; this bounds the spend. */
-export const ROUTE_MAX_OUTPUT_TOKENS = 200;
+/** The output cap's floor: a single route is one small JSON object. */
+export const ROUTE_MIN_OUTPUT_TOKENS = 200;
+/** The tool the model is forced to call: its input is the answer. */
+export const ROUTE_TOOL_NAME = "route";
 /** How long the router may take before the request falls to `defaults.agent`. */
 export const ROUTE_TIMEOUT_MS = 8_000;
 /** The most a compound part's text may carry: it is the child's whole prompt,
@@ -117,10 +120,73 @@ export interface RoutePart {
 }
 
 /** The prompt as two parts: the rules and the table (stable per deployment,
- *  cacheable) and the request (per message). */
+ *  cacheable) and the request (per message) — and the tool whose input is the
+ *  answer, built from the same presets and offer as the table (`routeTool`). */
 export interface RoutePrompt {
   system: string;
   user: string;
+  tool: ToolDef;
+}
+
+/** The output cap for one answer: the largest answer the parse accepts — every
+ *  part at `ROUTE_PART_TEXT_CAP` under the offer's cap, the reason at its cap,
+ *  the JSON around them — at a conservative three characters per token, never
+ *  below `ROUTE_MIN_OUTPUT_TOKENS`. Only what the model generates is billed, so
+ *  a cap above the shape costs nothing; a cap below it would cut legal answers
+ *  (the compound form's parts once could not fit under the single-route cap). */
+export function routeMaxOutputTokens(compound?: CompoundOffer): number {
+  const PART_JSON_OVERHEAD = 40; // `{"preset": "…", "text": "…"}, ` around a part
+  const ANSWER_JSON_OVERHEAD = 80; // the object, the keys, the preset name
+  const chars =
+    ANSWER_JSON_OVERHEAD +
+    ROUTE_REASON_CAP +
+    (compound ? compound.maxParts * (ROUTE_PART_TEXT_CAP + PART_JSON_OVERHEAD) : 0);
+  return Math.max(ROUTE_MIN_OUTPUT_TOKENS, Math.ceil(chars / 3));
+}
+
+/** The answer as a tool the model is forced to call (`CompletionRequest.toolChoice`):
+ *  `preset` an enum of exactly the offered names — `conductor` among them only
+ *  with the compound offer, `ship` never, since it is no row — `reason` one
+ *  line, and with the offer `parts`: two to the cap, each a preset from the
+ *  table and a text. Derived from the same presets as the table, so the schema
+ *  and the prose can never disagree; the strict parse still reads the input,
+ *  so a provider that answers text anyway meets the same contract. */
+export function routeTool(presets: readonly RoutablePreset[], compound?: CompoundOffer): ToolDef {
+  const names = presets.map((p) => p.name);
+  const properties: Record<string, unknown> = {
+    preset: {
+      type: "string",
+      enum: compound ? [...names, COMPOUND_PRESET] : names,
+      description: compound
+        ? `the preset for the request; "${COMPOUND_PRESET}" only for a compound, with parts`
+        : "the preset for the request",
+    },
+    reason: { type: "string", description: "one line, under 100 characters: why this preset" },
+    ...(compound
+      ? {
+          parts: {
+            type: "array",
+            description: `the independent parts of a compound request, each rewritten so it stands alone; only with preset "${COMPOUND_PRESET}"`,
+            minItems: 2,
+            maxItems: compound.maxParts,
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["preset", "text"],
+              properties: {
+                preset: { type: "string", enum: names, description: "the preset this part runs on" },
+                text: { type: "string", description: "the part as a request of its own" },
+              },
+            },
+          },
+        }
+      : {}),
+  };
+  return {
+    name: ROUTE_TOOL_NAME,
+    description: "Route the request: name the preset it runs on and why.",
+    inputSchema: { type: "object", additionalProperties: false, required: ["preset", "reason"], properties },
+  };
 }
 
 /** The router's answer: a preset with a one-line reason — `conductor` with
@@ -174,7 +240,7 @@ export function buildRoutePrompt(input: Omit<RouteInput, "allowed">): RoutePromp
     quoteRequest(input.text),
     "</request>",
   ].join("\n");
-  return { system, user };
+  return { system, user, tool: routeTool(input.presets, input.compound) };
 }
 
 /** The compound form as the model reads it, after the table: the shape, when
@@ -290,7 +356,7 @@ export async function route(
   let raw: string;
   try {
     raw = await model(prompt, {
-      maxTokens: ROUTE_MAX_OUTPUT_TOKENS,
+      maxTokens: routeMaxOutputTokens(input.compound),
       signal: AbortSignal.timeout(opts.timeoutMs ?? ROUTE_TIMEOUT_MS),
     });
   } catch (err) {
@@ -306,17 +372,37 @@ export async function route(
   );
 }
 
-/** The production seam: one text completion on the router's model, no tools,
- *  the prompt's two parts as system and the one user turn. */
-export function providerRouteModel(provider: Provider, model: string): RouteModel {
-  return async (prompt, opts) => {
+/** The production seam: one completion on the router's model, the prompt's two
+ *  parts as system and the one user turn. By default (`answer: "tool"`) the
+ *  prompt's tool is the one tool offered and the model is forced to call it,
+ *  so the call's input — handed on as JSON text — is what the strict parse
+ *  reads and prose cannot occur; a provider that answers in text anyway hands
+ *  its text to the same parse. `answer: "text"` (`routing.answer`) sends no
+ *  tool at all — the escape hatch for a provider that cannot take a forced
+ *  tool call. An answer the output cap cut (`stopReason: max_tokens`) is
+ *  refused by name whatever came back: a partial answer is not an answer, and
+ *  the record then says why the request fell to `defaults.agent`. */
+export function providerRouteModel(
+  provider: Provider,
+  model: string,
+  opts: { answer?: RouteAnswerMode } = {},
+): RouteModel {
+  const forced = (opts.answer ?? "tool") === "tool";
+  return async (prompt, call) => {
     const result = await provider.complete({
       model,
       system: prompt.system,
       messages: [{ role: "user", content: [{ type: "text", text: prompt.user }] }],
-      maxTokens: opts.maxTokens,
-      signal: opts.signal,
+      maxTokens: call.maxTokens,
+      signal: call.signal,
+      ...(forced ? { tools: [prompt.tool], toolChoice: { type: "tool", name: prompt.tool.name } } : {}),
     });
+    if (result.stopReason === "max_tokens") throw new Error(`answer cut at the output cap (${call.maxTokens} tokens)`);
+    const answer = result.content.find(
+      (p): p is { type: "tool_use"; id: string; name: string; input: unknown } =>
+        p.type === "tool_use" && p.name === prompt.tool.name,
+    );
+    if (answer) return JSON.stringify(answer.input);
     return result.content
       .filter((p): p is { type: "text"; text: string } => p.type === "text")
       .map((p) => p.text)
@@ -396,7 +482,9 @@ export async function routeRequest(deps: RouteDeps, ctx: RouteStageContext): Pro
     if (deps.routeModel) model = deps.routeModel;
     else {
       const ref = parseModelRef(modelRef);
-      model = providerRouteModel(deps.providers.get(ref.provider), ref.model);
+      model = providerRouteModel(deps.providers.get(ref.provider), ref.model, {
+        ...(cfg.routing?.answer ? { answer: cfg.routing.answer } : {}),
+      });
     }
   } catch (err) {
     console.log(`[route] ${msg.threadKey} not routed: ${err instanceof Error ? err.message : String(err)}`);

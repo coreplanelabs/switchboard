@@ -79,6 +79,14 @@ describe("buildAnthropicParams (prompt-cache layout)", () => {
     expect(last[1].cache_control).toEqual({ type: "ephemeral" });
   });
 
+  it("a forced tool choice is sent as Anthropic's tool_choice naming the tool; absent, no tool_choice is sent (routing-and-config item 21's seam)", () => {
+    const forced = buildAnthropicParams({ ...base, toolChoice: { type: "tool", name: "read_file" } }) as unknown as {
+      tool_choice?: unknown;
+    };
+    expect(forced.tool_choice).toEqual({ type: "tool", name: "read_file" });
+    expect((buildAnthropicParams(base) as unknown as { tool_choice?: unknown }).tool_choice).toBeUndefined();
+  });
+
   it("omits system and tools when absent, never mutates the request's own messages, and gates effort by model", () => {
     const req: CompletionRequest = { ...base, system: "", tools: [], effort: "high" };
     const p = buildAnthropicParams(req) as unknown as Record<string, any>;

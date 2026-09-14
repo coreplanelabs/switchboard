@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { AGENTS, COMPOUND_PRESET, presetDoor } from "../../agents/registry.js";
 import { ConfigStore } from "../../config.js";
 import type { ProviderRegistry } from "../../providers/registry.js";
-import type { CompletionRequest, Provider } from "../../providers/types.js";
+import type { CompletionRequest, CompletionResult, Provider } from "../../providers/types.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import type { IncomingMessage } from "../types.js";
 import {
@@ -23,8 +23,12 @@ import {
   routedLabel,
   routedPartLines,
   routeRequest,
+  ROUTE_MIN_OUTPUT_TOKENS,
   ROUTE_REASON_CAP,
   ROUTE_TEXT_CAP,
+  ROUTE_TOOL_NAME,
+  routeMaxOutputTokens,
+  routeTool,
   type RouteDecision,
   type RouteModel,
   type RoutePrompt,
@@ -274,8 +278,134 @@ describe("route — the decision over a scripted model", () => {
   });
 });
 
+describe("routeTool — the answer's schema, derived from the offered table", () => {
+  it("names the tool, lists exactly the offered presets as the enum, requires preset and reason, and carries no parts without the offer", () => {
+    const tool = routeTool(presets);
+    expect(tool.name).toBe(ROUTE_TOOL_NAME);
+    const schema = tool.inputSchema as {
+      required: string[];
+      additionalProperties: boolean;
+      properties: Record<string, { enum?: string[]; description?: string }>;
+    };
+    expect(schema.required).toEqual(["preset", "reason"]);
+    expect(schema.additionalProperties).toBe(false);
+    expect(schema.properties.preset.enum).toEqual(presets.map((p) => p.name));
+    expect(schema.properties.preset.enum).not.toContain("ship");
+    expect(schema.properties.preset.enum).not.toContain("conductor");
+    expect(schema.properties.reason.description).toMatch(/under 100 characters/);
+    expect(schema.properties.parts).toBeUndefined();
+    expect(JSON.stringify(tool)).not.toMatch(/conductor|compound/i);
+  });
+
+  it("with the compound offer: conductor joins the enum, and parts is an array of 2 to the cap, each part a preset from the table and a text", () => {
+    const tool = routeTool(presets, OFFER);
+    const schema = tool.inputSchema as {
+      properties: {
+        preset: { enum: string[] };
+        parts: {
+          minItems: number;
+          maxItems: number;
+          items: { required: string[]; properties: { preset: { enum: string[] }; text: { type: string } } };
+        };
+      };
+    };
+    expect(schema.properties.preset.enum).toEqual([...presets.map((p) => p.name), "conductor"]);
+    expect(schema.properties.parts.minItems).toBe(2);
+    expect(schema.properties.parts.maxItems).toBe(3);
+    expect(schema.properties.parts.items.required).toEqual(["preset", "text"]);
+    expect(schema.properties.parts.items.properties.preset.enum).toEqual(presets.map((p) => p.name));
+    expect(schema.properties.parts.items.properties.preset.enum).not.toContain("conductor");
+  });
+
+  it("buildRoutePrompt carries the tool built from the same presets and offer as the table", () => {
+    const p = buildRoutePrompt({ recentDirectives: {}, presets, fallback: "general", text: "x", compound: OFFER });
+    expect(p.tool).toEqual(routeTool(presets, OFFER));
+  });
+});
+
+describe("routeMaxOutputTokens — the cap fits the largest legal answer", () => {
+  it("never below the single-route floor; grows with the offer's cap; the largest legal compound answer fits at three characters per token", () => {
+    expect(routeMaxOutputTokens()).toBe(ROUTE_MIN_OUTPUT_TOKENS);
+    expect(routeMaxOutputTokens({ maxParts: 3 })).toBeGreaterThan(routeMaxOutputTokens({ maxParts: 2 }));
+    for (const maxParts of [2, 3, 5]) {
+      const largest = JSON.stringify({
+        preset: "conductor",
+        reason: "r".repeat(ROUTE_REASON_CAP),
+        parts: Array.from({ length: maxParts }, () => ({ preset: "research", text: "t".repeat(ROUTE_PART_TEXT_CAP) })),
+      });
+      expect(routeMaxOutputTokens({ maxParts }) * 3, `${maxParts} parts`).toBeGreaterThanOrEqual(largest.length);
+    }
+  });
+
+  it("route() asks the model for the derived cap: the floor without the offer, the shape's size with it", async () => {
+    const seen: number[] = [];
+    const model: RouteModel = async (_prompt, opts) => {
+      seen.push(opts.maxTokens);
+      return answer("general");
+    };
+    const input = { text: "x", recentDirectives: {}, presets, allowed: allNames, fallback: "general" };
+    await route(input, model);
+    await route({ ...input, compound: OFFER }, model);
+    expect(seen).toEqual([ROUTE_MIN_OUTPUT_TOKENS, routeMaxOutputTokens(OFFER)]);
+  });
+});
+
 describe("providerRouteModel — the live seam over a provider", () => {
-  it("asks the provider for one completion on the router's model with the prompt as system + user, and returns its text", async () => {
+  const prompt = buildRoutePrompt({ recentDirectives: {}, presets, fallback: "general", text: "x", compound: OFFER });
+  const opts = () => ({ maxTokens: 50, signal: new AbortController().signal });
+  const fake = (result: CompletionResult) => {
+    const requests: CompletionRequest[] = [];
+    const provider: Provider = {
+      name: "fake",
+      async complete(req) {
+        requests.push(req);
+        return result;
+      },
+    };
+    return { provider, requests };
+  };
+
+  it("forces the route tool: the prompt's tool is the one tool offered, the choice names it, and the tool_use input comes back as the JSON the parse reads", async () => {
+    const { provider, requests } = fake({
+      content: [{ type: "tool_use", id: "t1", name: ROUTE_TOOL_NAME, input: { preset: "research", reason: "why" } }],
+      stopReason: "tool_use",
+    });
+    const text = await providerRouteModel(provider, "fast-model")(prompt, opts());
+    expect(JSON.parse(text)).toEqual({ preset: "research", reason: "why" });
+    expect(requests[0].tools).toEqual([prompt.tool]);
+    expect(requests[0].toolChoice).toEqual({ type: "tool", name: ROUTE_TOOL_NAME });
+    expect(parseRouteAnswer(text, ["research"])).toEqual({ preset: "research", reason: "why" });
+  });
+
+  it("a provider that answers in text anyway hands the text to the same parse — the automatic fallback", async () => {
+    const { provider } = fake({ content: [{ type: "text", text: answer("research") }], stopReason: "end_turn" });
+    expect(await providerRouteModel(provider, "fast-model")(prompt, opts())).toBe(answer("research"));
+  });
+
+  it("answer: text is the explicit fallback for a provider without forced tool calls: no tool, no choice, the text contract alone", async () => {
+    const { provider, requests } = fake({
+      content: [{ type: "text", text: answer("review") }],
+      stopReason: "end_turn",
+    });
+    const text = await providerRouteModel(provider, "fast-model", { answer: "text" })(prompt, opts());
+    expect(text).toBe(answer("review"));
+    expect(requests[0].tools).toBeUndefined();
+    expect(requests[0].toolChoice).toBeUndefined();
+  });
+
+  it("an answer the output cap cut is named, whatever came back: through route() it is no route saying so", async () => {
+    const { provider } = fake({
+      content: [{ type: "tool_use", id: "t1", name: ROUTE_TOOL_NAME, input: { preset: "general" } }],
+      stopReason: "max_tokens",
+    });
+    const model = providerRouteModel(provider, "fast-model");
+    await expect(model(prompt, opts())).rejects.toThrow(/answer cut at the output cap \(50 tokens\)/);
+    const d = await route({ text: "x", recentDirectives: {}, presets, allowed: allNames, fallback: "general" }, model);
+    expect(d.preset).toBeUndefined();
+    expect(d.reason).toMatch(/^router failed: answer cut at the output cap \(\d+ tokens\)/);
+  });
+
+  it("asks the provider for one completion on the router's model with the prompt as system + user and the route tool as the only tool, and returns its text", async () => {
     const requests: CompletionRequest[] = [];
     const provider: Provider = {
       name: "fake",
@@ -285,13 +415,16 @@ describe("providerRouteModel — the live seam over a provider", () => {
       },
     };
     const model = providerRouteModel(provider, "fast-model");
-    const text = await model({ system: "S", user: "U" }, { maxTokens: 50, signal: new AbortController().signal });
+    const text = await model(
+      { system: "S", user: "U", tool: prompt.tool },
+      { maxTokens: 50, signal: new AbortController().signal },
+    );
     expect(text).toBe(answer("research"));
     expect(requests[0].model).toBe("fast-model");
     expect(requests[0].system).toBe("S");
     expect(requests[0].maxTokens).toBe(50);
     expect(requests[0].messages).toEqual([{ role: "user", content: [{ type: "text", text: "U" }] }]);
-    expect(requests[0].tools).toBeUndefined();
+    expect(requests[0].tools?.map((t) => t.name)).toEqual([ROUTE_TOOL_NAME]);
   });
 });
 
@@ -389,6 +522,30 @@ describe("routeRequest — the stage: when it runs, what always wins", () => {
     const model = scripted(answer("research"));
     const out = await routeRequest(deps(ON + "  model: anthropic/fast-model\n", model), ctx("default"));
     expect(out.kind === "routed" && out.route.model).toBe("anthropic/fast-model");
+  });
+
+  it("without a scripted model the stage builds the live seam: the route tool forced by default, no tool under routing.answer: text", async () => {
+    const seam = (yaml: string) => {
+      const requests: CompletionRequest[] = [];
+      const provider: Provider = {
+        name: "anthropic",
+        async complete(req) {
+          requests.push(req);
+          return { content: [{ type: "text", text: answer("review") }], stopReason: "end_turn" };
+        },
+      };
+      const providers = { get: () => provider } as unknown as ProviderRegistry;
+      return { deps: { config: configStore(yaml), providers }, requests };
+    };
+    const forced = seam(YAML);
+    const routed = await routeRequest(forced.deps, ctx("default"));
+    expect(routed.kind).toBe("routed");
+    expect(forced.requests[0].toolChoice).toEqual({ type: "tool", name: ROUTE_TOOL_NAME });
+    expect(forced.requests[0].tools?.map((t) => t.name)).toEqual([ROUTE_TOOL_NAME]);
+    const text = seam(YAML + "routing:\n  answer: text\n");
+    expect((await routeRequest(text.deps, ctx("default"))).kind).toBe("routed");
+    expect(text.requests[0].toolChoice).toBeUndefined();
+    expect(text.requests[0].tools).toBeUndefined();
   });
 
   it("a router that fails leaves the request unrouted — defaults.agent stays the answer", async () => {
