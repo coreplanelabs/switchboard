@@ -77,6 +77,21 @@ describe("redactSecrets", () => {
     for (const s of safe) expect(redactSecrets(s), s).toBe(s);
   });
 
+  // #onboard-403 legibility: `github-token-mint-failed: HTTP 422 …` used to lose
+  // the word `HTTP` to the assignment pass (the id contains `token`), garbling
+  // the one line that tells an operator why an onboard was refused. An id that
+  // also carries a failure-flavored component names an error code, not a secret.
+  it("does not redact the diagnosis after an error code that mentions a credential word", () => {
+    const msg =
+      'not-in-installation: the GitHub App cannot mint a token scoped to repo:acme/api (github-token-mint-failed: HTTP 422 {"message":"There is at least one repository that does not exist"})';
+    expect(redactSecrets(msg)).toBe(msg);
+    expect(redactSecrets("token-expired: refresh the credential and retry")).toBe(
+      "token-expired: refresh the credential and retry",
+    );
+    // The guard never weakens real secret names: no failure component, still redacted.
+    expect(redactSecrets("GITHUB_TOKEN=ghx_plainvalue1234")).toBe("GITHUB_TOKEN=«redacted»");
+  });
+
   // Message events carry pasted user text, where a secret most often
   // arrives as a JSON member — the name is quoted, so the assignment pass must
   // see through the closing quote.

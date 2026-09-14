@@ -7055,7 +7055,10 @@ async function handleOnboard(env: Env, body: Record<string, unknown>): Promise<R
         {
           error:
             `not-in-installation: the GitHub App cannot mint a token scoped to ${resource.resource} — ` +
-            `install the App on the repository first (${errMsg(err)})`,
+            `the repository is not in the App installation's repository list, or does not exist under that ` +
+            `exact name (GitHub's token API answers the same 422 for both). An org admin adds it under the ` +
+            `App's installation settings (Settings → GitHub Apps → Configure → Repository access), ` +
+            `then retry (${errMsg(err)})`,
         },
         403,
       );
