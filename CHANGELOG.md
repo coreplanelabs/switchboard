@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.211.0](https://github.com/coreplanelabs/switchboard/compare/v1.210.0...v1.211.0) (2026-09-14)
+
+
+### Features
+
+* **dispatcher:** a plain message routes itself to a preset — the fast model picks from the preset table with a reason on the card, a directive always wins, ship is never routed, and a replay harness scores the router against the requests people already typed ([#1022](https://github.com/coreplanelabs/switchboard/issues/1022)) ([5e1f3b1](https://github.com/coreplanelabs/switchboard/commit/5e1f3b1902de1d277423c811a75e7ff2a4edcb56))
+
 ## [1.210.0](https://github.com/coreplanelabs/switchboard/compare/v1.209.0...v1.210.0) (2026-09-14)
 
 
