@@ -30,6 +30,7 @@ import { ALL_GRANTS } from "../authz/grants.js";
 import { callerWith } from "./callers.js";
 import type { DeployPlan } from "../../deploy/plan.js";
 import type { RestartPlan } from "../../deploy/restart.js";
+import { lifecycleRulesFor } from "../../deploy/artifactsBucket.js";
 import { TEST_PROFILE, TEST_PUBLISHED_IMAGES } from "../../deploy/testing/profile.js";
 import type { ImageCopy } from "../../deploy/images.js";
 import {
@@ -765,6 +766,21 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
         if (path.includes(join("docs", "reference", "specs")))
           return path.endsWith("agent-ship.md") ? CONTRACT_SPEC : undefined;
         return CONTRACT_PLAN;
+      },
+    },
+    // `artifacts lifecycle` / `artifacts check`: a configured store and a Cloudflare double whose
+    // one write (the lifecycle put) is the command's effect; the reads are probes, not recorded.
+    artifacts: {
+      config: async () => ({ r2: { accountId: "acct-fixture", bucket: "fixture-artifacts" }, retentionDays: 30 }),
+      bucket: {
+        putLifecycle: async (account, bucket, rules) =>
+          exec(`artifacts.putLifecycle ${account}/${bucket} ${rules.map((r) => r.id).join(",")}`, {
+            ok: true,
+            value: undefined,
+          }),
+        getLifecycle: async () => ({ ok: true, value: { rules: lifecycleRulesFor(30) } }),
+        managedDomain: async () => ({ ok: true, value: { domain: "pub-fixture.r2.dev", enabled: false } }),
+        customDomains: async () => ({ ok: true, value: [] }),
       },
     },
     env: {

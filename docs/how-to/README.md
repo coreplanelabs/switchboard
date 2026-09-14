@@ -28,4 +28,5 @@
 - [Rotate a secret](rotate-a-secret.md): a put and a restart.
 - [Ship a release](ship-a-release.md): read the release PR's plan, merge, confirm it is live.
 - [Configure the repository](configure-the-repository.md): the GitHub settings a fork reproduces.
+- [Store run artifacts](store-run-artifacts.md): the R2 bucket runs move files through — the token, the secrets, the config, retention, the privacy check.
 - [Run a load test](run-a-load-test.md): a number for many runs at once.

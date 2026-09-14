@@ -231,6 +231,7 @@ export default defineConfig({
           { text: "Deploy", link: "/how-to/deploy" },
           { text: "Ship a release", link: "/how-to/ship-a-release" },
           { text: "Rotate a secret", link: "/how-to/rotate-a-secret" },
+          { text: "Store run artifacts", link: "/how-to/store-run-artifacts" },
           { text: "Operate production", link: "/how-to/operate-production" },
           { text: "Configure the repository", link: "/how-to/configure-the-repository" },
           { text: "Run a load test", link: "/how-to/run-a-load-test" },

@@ -149,6 +149,13 @@ One table per group, in registration order. "Surfaces" is where that command can
 |---|---|---|
 | `delivery report [--repo <string>] [--since <string>] [--weeks <integer>] [--fresh]` | Delivery indicators per week and per unit — issue-to-merge time, first-pass CI, review rounds, findings and the share resolved with no human edit — from the repository's snapshot of GitHub's facts (--fresh reads GitHub now) and the run history; nothing written. | every surface |
 
+### `artifacts`
+
+| Command | What it does | Surfaces |
+|---|---|---|
+| `artifacts lifecycle [--dry-run]` | Apply the artifacts bucket's lifecycle rules from config.yaml — objects expire after `artifacts.retentionDays` (default 30), incomplete multipart uploads abort after one day — and read them back; `--dry-run` prints the rules and touches nothing. Operator-side: CLOUDFLARE_API_TOKEN with Workers R2 Storage: Edit, never the bot's token. | CLI only |
+| `artifacts check` | Report whether the artifacts bucket is private: its managed r2.dev domain must be disabled and no custom domain enabled — the two ways R2 serves a bucket without a signature. Operator-side: CLOUDFLARE_API_TOKEN with Workers R2 Storage: Read, never the bot's token. | CLI only |
+
 <!-- /generated:cli-commands -->
 
 ## Which commands need bot config
