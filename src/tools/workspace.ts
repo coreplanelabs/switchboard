@@ -16,7 +16,12 @@ import { distillDiffStats, type DigestReport } from "../core/diffDigest.js";
 import { webFetchTool, webSearchTool, type WebCapability } from "./web.js";
 import { GITHUB_ISSUE_WRITE_TOOLS, GITHUB_READ_TOOLS, type GithubCapability } from "./github.js";
 import { listSkillsTool, useSkillTool } from "./skills.js";
-import { attachFileTool, type AttachCapability } from "./attach.js";
+import {
+  attachFileTool,
+  type ArtifactsCapability,
+  type AttachCapability,
+  type UploadTicketCapability,
+} from "./attach.js";
 import { RUN_TOOLS, type RunsReadCapability, type SteerCapability } from "./runs.js";
 import type { WaitCapability } from "../core/dispatch/awaitChildren.js";
 import type { SpawnCapability } from "../core/dispatch/spawn.js";
@@ -51,6 +56,16 @@ export interface ToolContext {
    *  `attachFile`, bound by the dispatcher. Absent (a channel without uploads,
    *  a unit context) → the tool says the conversation takes no files. */
   attach?: AttachCapability;
+  /** The artifact store as this run may use it (execution.md item 20, record
+   *  0033): the store, the run's id for its keys, the per-run sequence, the
+   *  run page's URL and the channel's `reply` for the store-only lead. Bound by
+   *  the dispatcher when `artifacts:` is configured; absent → `attach_file`
+   *  takes the inline path through `readBytes`, exactly as before the store. */
+  artifacts?: ArtifactsCapability;
+  /** The channel's one-shot upload ticket (`ChannelIO.uploadTicket`), bound by
+   *  the dispatcher when the channel has one. With a store and no ticket, the
+   *  tool keeps the file on the run page and posts its link. */
+  uploadTicket?: UploadTicketCapability;
   /** Web fetch + search capability. Injected by the dispatcher;
    *  absent → web tools report themselves unavailable. */
   web?: WebCapability;

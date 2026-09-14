@@ -415,6 +415,51 @@ describe("SlackIO.attachFile (docs/reference/specs/slack-channel.md item 10)", (
   });
 });
 
+// Feature: docs/reference/specs/slack-channel.md item 10 (record 0033) — the external
+// upload: the bot mints a one-shot URL for exactly the ticketed size, the run's
+// container POSTs the file, and `complete` shares it into the thread. The bot
+// never touches the bytes.
+describe("SlackIO.uploadTicket", () => {
+  const ev = { channel: "C1", user: "UA", text: "hi", ts: "3.0", threadTs: "1.0", botUserId: "UBOT" };
+  type Client = ConstructorParameters<typeof SlackIO>[0];
+
+  it("mints through files.getUploadURLExternal with the name and size, and `complete` shares the file id into the thread with the lead in mrkdwn", async () => {
+    const getUploadURLExternal = vi.fn(async (_o: Record<string, unknown>) => ({
+      ok: true,
+      upload_url: "https://files.slack.com/upload/v1/CwABAAAAB?x=y",
+      file_id: "F0AAA",
+    }));
+    const completeUploadExternal = vi.fn(async (_o: Record<string, unknown>) => ({ ok: true }));
+    const client = { files: { getUploadURLExternal, completeUploadExternal } } as unknown as Client;
+    const ticket = await new SlackIO(client, ev).uploadTicket({ name: "clip.mp4", size: 314_572_800 });
+    expect(getUploadURLExternal).toHaveBeenCalledWith({ filename: "clip.mp4", length: 314_572_800 });
+    expect(ticket.url).toBe("https://files.slack.com/upload/v1/CwABAAAAB?x=y");
+    expect(completeUploadExternal).not.toHaveBeenCalled(); // nothing is shared until the POST succeeded
+    await ticket.complete("**the clip** — 5 minutes");
+    expect(completeUploadExternal).toHaveBeenCalledWith({
+      files: [{ id: "F0AAA", title: "clip.mp4" }],
+      channel_id: "C1",
+      thread_ts: "1.0",
+      initial_comment: "*the clip* — 5 minutes",
+    });
+  });
+
+  it("a ticket Slack answers without a URL or an id is refused by name; a refused mint propagates the platform's words", async () => {
+    const bare = { files: { getUploadURLExternal: vi.fn(async () => ({ ok: true })) } } as unknown as Client;
+    await expect(new SlackIO(bare, ev).uploadTicket({ name: "a.png", size: 1 })).rejects.toThrow(
+      /files\.getUploadURLExternal answered without an upload_url and file_id for a\.png/,
+    );
+    const refused = {
+      files: {
+        getUploadURLExternal: vi.fn(async () => {
+          throw new Error("An API error occurred: missing_scope");
+        }),
+      },
+    } as unknown as Client;
+    await expect(new SlackIO(refused, ev).uploadTicket({ name: "a.png", size: 1 })).rejects.toThrow(/missing_scope/);
+  });
+});
+
 // Feature: docs/reference/specs/run-visibility.md item 8 — card edits ride a status client of
 // their own and draw from one process-wide budget; the terminal frame never
 // waits behind a rate limit and never blocks the reply.

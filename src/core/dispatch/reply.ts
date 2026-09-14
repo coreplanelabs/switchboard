@@ -40,6 +40,15 @@ export function liveViewLink(id: string, token: string): string | undefined {
   return `${base.replace(/\/+$/, "")}/runs/${encodeURIComponent(id)}?t=${encodeURIComponent(token)}`;
 }
 
+/** The run's tokenless page (the finished run's history view, Access-gated) —
+ *  what a stored file's lead points at on a channel without uploads
+ *  (agent-coding.md item 10); undefined without PUBLIC_BASE_URL. */
+export function runPageLink(id: string): string | undefined {
+  const base = process.env.PUBLIC_BASE_URL?.trim();
+  if (!base) return undefined;
+  return `${base.replace(/\/+$/, "")}/runs/${encodeURIComponent(id)}`;
+}
+
 // ---- run label (Area 2 / live-view index) -----------------------------------
 
 /** Everything `composeRunLabel` needs to build one human-readable run label.

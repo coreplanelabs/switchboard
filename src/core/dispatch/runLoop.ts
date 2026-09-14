@@ -62,7 +62,7 @@ import type { ChannelIO, IncomingMessage, StatusHandle } from "../types.js";
 import type { DispatchFollowUp, ResumeContext } from "./admission.js";
 import type { RegisteredRun } from "./provision.js";
 import { registerFinishRecord } from "./record.js";
-import { activityLine } from "./reply.js";
+import { activityLine, runPageLink } from "./reply.js";
 import { githubCapabilityFor, shutdownNotice, webCapability, type RunDeps } from "./run.js";
 
 /** What the loop hands back once the run has finished: the answer as
@@ -450,10 +450,27 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
   // The thread's file upload rides only when the channel has one: a tool that
   // finds it absent says so, rather than the core inventing a fallback for bytes.
   const attachFile = io.attachFile?.bind(io);
+  // The store path (record 0033): with `artifacts:` configured the tool moves
+  // the file by reference under this run's keys; the channel's upload ticket
+  // rides beside it when the channel has one, else the lead goes through `reply`.
+  const uploadTicket = io.uploadTicket?.bind(io);
+  let artifactSeq = 0;
+  const runUrl = runPageLink(run.id);
+  const artifacts = deps.artifacts
+    ? {
+        store: deps.artifacts,
+        runId: run.id,
+        nextSeq: () => ++artifactSeq,
+        ...(runUrl ? { runUrl } : {}),
+        reply: (text: string) => io.reply(text),
+      }
+    : undefined;
   const toolContext = {
     executor,
     reportProgress,
     ...(attachFile ? { attach: attachFile } : {}),
+    ...(artifacts ? { artifacts } : {}),
+    ...(uploadTicket ? { uploadTicket } : {}),
     web: webCapability(),
     skills: deps.skills,
     github: githubCapabilityFor(deps, msg.userId),

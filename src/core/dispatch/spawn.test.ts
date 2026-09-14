@@ -68,6 +68,13 @@ function channel(opts: { openThread?: false } = {}) {
     status: async () => ({ update: () => {}, done: async () => {} }),
     history: async () => [],
     attachFile: async (file) => void childFiles.push(`${file.name}:${file.bytes.byteLength}:${file.lead}`),
+    uploadTicket: async (file) => {
+      childFiles.push(`ticket:${file.name}:${file.size}`);
+      return {
+        url: "https://files.example/one-shot",
+        complete: async (lead) => void childFiles.push(`complete:${lead}`),
+      };
+    },
   };
   const leads: string[] = [];
   const io: ChannelIO = {
@@ -189,6 +196,25 @@ describe("spawnChild — the one path a child run is born through", () => {
     await spawnChild(deps(dispatch), parent(ch.io), { preset: "research", prompt: "q" });
     expect(ch.childFiles).toEqual(["shot.png:3:the page"]);
     delete ch.childIo.attachFile;
+    await spawnChild(deps(dispatch), parent(ch.io), { preset: "research", prompt: "q" });
+    expect(seen).toEqual([true, false]);
+  });
+
+  // record 0033: the child's one-shot upload ticket is the opened thread's too —
+  // forwarded by method, absent when the thread has none, so a store-backed
+  // `attach_file` in a child shares into the child's own thread.
+  it("the child's channel forwards uploadTicket to the opened thread when it has one, and offers none when it does not", async () => {
+    const seen: Array<boolean> = [];
+    const { dispatch } = fakeDispatch(async (_msg, io) => {
+      seen.push(io.uploadTicket !== undefined);
+      const ticket = await io.uploadTicket?.({ name: "clip.mp4", size: 5 });
+      await ticket?.complete("the clip");
+      return { status: "completed" };
+    });
+    const ch = channel();
+    await spawnChild(deps(dispatch), parent(ch.io), { preset: "research", prompt: "q" });
+    expect(ch.childFiles).toEqual(["ticket:clip.mp4:5", "complete:the clip"]);
+    delete ch.childIo.uploadTicket;
     await spawnChild(deps(dispatch), parent(ch.io), { preset: "research", prompt: "q" });
     expect(seen).toEqual([true, false]);
   });
