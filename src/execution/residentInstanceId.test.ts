@@ -106,8 +106,8 @@ describe("shouldCreateRefreshInstance — the cron's decision per resident", () 
       why: "running",
     });
   });
-  it("an idle resident gets an instance only at the idle cadence the row records, counted in whole buckets since the last instance", () => {
-    const idle = row({ idleSince: NOW - 2 * 60 * 60_000 });
+  it("an idle-marked warm resident gets an instance only at the idle cadence the row records, counted in whole buckets since the last instance", () => {
+    const idle = row({ state: "warm", idleSince: NOW - 2 * 60 * 60_000 });
     const idleBuckets = Math.ceil((CADENCE.idleIntervalS * 1000) / REFRESH_BUCKET_MS);
     expect(shouldCreateRefreshInstance({ ...idle, lastInstanceAt: NOW - REFRESH_BUCKET_MS }, NOW, CADENCE)).toEqual({
       create: false,
@@ -128,6 +128,28 @@ describe("shouldCreateRefreshInstance — the cron's decision per resident", () 
       create: true,
       why: "due",
     });
+  });
+  it("an idle-marked row that is degraded (the watchdog's stamp on a wake that died before its cycle could clear idleSince) or restoring is due at the awake cadence: one bucket after the last instance, never the idle interval", () => {
+    const parkedThenStamped = row({ state: "degraded", idleSince: NOW - 2 * 60 * 60_000, updatedAt: NOW - 60_000 });
+    // One bucket since the last instance: due now, as any awake row is.
+    expect(shouldCreateRefreshInstance(parkedThenStamped, NOW, CADENCE)).toEqual({ create: true, why: "due" });
+    // Inside the last instance's bucket: not due, the awake rule, not the idle interval.
+    expect(shouldCreateRefreshInstance({ ...parkedThenStamped, lastInstanceAt: NOW - 1 }, NOW, CADENCE)).toEqual({
+      create: false,
+      why: "not-due",
+    });
+    // The wake itself, still marked restoring with the park's idleSince on it: the awake cadence too.
+    expect(shouldCreateRefreshInstance({ ...parkedThenStamped, state: "restoring" }, NOW, CADENCE)).toEqual({
+      create: true,
+      why: "due",
+    });
+  });
+  it("an idle-marked refreshing row younger than the stale bound is still mid-cycle, the live-cycle gate deciding before the cadence; older, it is the orphan the next bucket normalizes", () => {
+    const idleSince = NOW - 2 * 60 * 60_000;
+    const young = row({ state: "refreshing", updatedAt: NOW - STALE_MIDFLIGHT_MS + 1, idleSince });
+    expect(shouldCreateRefreshInstance(young, NOW, CADENCE)).toEqual({ create: false, why: "mid-cycle" });
+    const old = row({ state: "refreshing", updatedAt: NOW - STALE_MIDFLIGHT_MS - 1, idleSince });
+    expect(shouldCreateRefreshInstance(old, NOW, CADENCE)).toEqual({ create: true, why: "due" });
   });
   it("an awake resident is due every bucket: a second firing inside the same bucket is not (the id would be a duplicate anyway)", () => {
     expect(shouldCreateRefreshInstance(row({ lastInstanceAt: NOW - 1 }), NOW, CADENCE)).toEqual({

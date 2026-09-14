@@ -136,13 +136,21 @@ export type InstanceDecision =
 /** Create an instance only for a row no live cycle blocks (`refreshCycleBlocked`)
  *  whose cadence has elapsed since the last instance — counted in whole
  *  buckets so cron jitter never skips a due bucket: the awake cadence is one
- *  bucket, the idle cadence the row records (`idleSince` set) is the idle
- *  interval in buckets. */
+ *  bucket, the idle cadence is the idle interval in buckets. The idle cadence
+ *  is for a `warm` row with `idleSince` set and no other: only a cycle's gate
+ *  clears `idleSince`, so a wake that dies before its cycle (a deploy rolling
+ *  the container mid-restore) leaves the marker on a `restoring` row, and on
+ *  the `degraded(stale-mid-flight…)` the watchdog stamps it with; both must
+ *  run at the next bucket, or the resident sits degraded for the idle
+ *  interval. A streak-parked `degraded` row (item 16b) runs every bucket
+ *  too: its gate parks it again without a fetch, and the first rehydrate
+ *  flips it `warm`. */
 export function shouldCreateRefreshInstance(row: RefreshRow, nowMs: number, cadence: RefreshCadence): InstanceDecision {
   const blocked = refreshCycleBlocked(row, nowMs);
   if (blocked) return { create: false, why: blocked };
   if (row.lastInstanceAt !== null) {
-    const delayS = row.idleSince !== null ? cadence.idleIntervalS : cadence.intervalS;
+    const parked = row.state === "warm" && row.idleSince !== null;
+    const delayS = parked ? cadence.idleIntervalS : cadence.intervalS;
     const dueBuckets = Math.max(1, Math.ceil((delayS * 1000) / REFRESH_BUCKET_MS));
     if (refreshBucket(nowMs) - refreshBucket(row.lastInstanceAt) < dueBuckets) return { create: false, why: "not-due" };
   }
