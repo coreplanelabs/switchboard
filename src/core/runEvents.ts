@@ -134,7 +134,11 @@ export type RunNoteKind =
   /** The harness's gate refused a tool call the model asked for (harness-pi.md
    *  item 7): the summary names the tool and the rule; the model read the same
    *  reason as the tool's result. Published by the bot's authorize route. */
-  | "tool_refused";
+  | "tool_refused"
+  /** The stuck-loop guard fired (docs/reference/specs/run-loop.md item 18):
+   *  the same tool call failed identically six times in a row, so the run is
+   *  forced into its write-up instead of looping to the wall clock. */
+  | "stuck_loop";
 
 /** Every `RunNoteKind`, as a value (a reader that filters notes by kind uses
  *  this; adding a kind to the union without adding it here is a type error). */
@@ -158,6 +162,7 @@ export const RUN_NOTE_KINDS = [
   "compacted",
   "harness_error",
   "tool_refused",
+  "stuck_loop",
 ] as const satisfies readonly RunNoteKind[];
 type _EveryKindListed = [RunNoteKind] extends [(typeof RUN_NOTE_KINDS)[number]] ? true : never;
 const _everyKindListed: _EveryKindListed = true;
