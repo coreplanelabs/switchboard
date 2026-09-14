@@ -48,7 +48,7 @@ import type { AuthorizeDeps, GateCard, GateContext } from "./authorize.js";
 import { channelVisibilityOf, type RecordDeps } from "./record.js";
 import { attachmentSuffix, composeRunLabel, humanizeMessageText, isMrkdwnChannel, liveViewLink } from "./reply.js";
 import { contextMessageTexts } from "./messages.js";
-import { routedLabel, type RouteDecided } from "./route.js";
+import { routedLabel, routedPartLines, type RouteDecided } from "./route.js";
 
 /** What the provision stage reads off the dispatcher's dependencies. A run's
  *  row is stamped with its channel's visibility (the record slice), reserved on
@@ -173,7 +173,8 @@ export interface AckCardContext {
   root: Span;
   trace: RequestTrace;
   /** The router's decision when it chose the preset (routing-and-config item
-   *  21): the card's label gains ` · routed: <reason>`. */
+   *  21): the card's label gains ` · routed: <reason>`, and a compound's
+   *  parts lead its detail, one line each. */
   route?: RouteDecided;
 }
 
@@ -187,11 +188,13 @@ export async function openAckCard(deps: ProvisionDeps, ctx: AckCardContext): Pro
   const { io, agent, resolved, startedAt, clock, root, trace, route } = ctx;
   // One builder for every paint of this card (statusCardFrame.ts): the ack,
   // the spinner frames, the closes before the run starts, the done frame. A
-  // routed run says so from its first paint: `*review* on `m` · routed: <reason>`.
+  // routed run says so from its first paint: `*review* on `m` · routed: <reason>`;
+  // a routed compound lists its parts under the label, `<preset>: <text>`.
   const shell = createCardShell({
     label: `*${agent.name}* on \`${resolved.modelRef}\`${route ? ` · ${routedLabel(route.reason)}` : ""}`,
     startedAt,
     now: clock,
+    ...(route?.parts ? { lead: routedPartLines(route.parts) } : {}),
   });
   // Coalesced: the run below refreshes it on every event, the channel sees at
   // most one edit per STATUS_UPDATE_MIN_MS, always the newest frame.
@@ -273,7 +276,9 @@ export interface RegisterRunContext {
   coordinator?: CoordinatorTag;
   /** How the preset was chosen (`run_meta.agentSource`). */
   agentSource: AgentSource;
-  /** The router's decision when it chose the preset: the record's `route` event. */
+  /** The router's answer, when it gave one, as the record's `route` event: the
+   *  preset it chose (with a compound's parts), or the default the run fell
+   *  to after a rejected compound with the `compound_rejected` reason. */
   route?: RouteDecided;
 }
 
@@ -449,7 +454,8 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
     });
   if (!resume) publishMeta(repoCtx);
   // The router's decision (routing-and-config item 21), right after the meta
-  // it explains: the preset, the reason the card carries, the model that decided.
+  // it explains: the preset, the reason the card carries, the model that
+  // decided, a compound's parts — or the rejection that left the run on the default.
   if (!resume && route) registry.publish(run.id, { type: "route", ...route, at: clock() });
   // The thread context fed to the model follows the request as `context`
   // events — text only, attachments as metadata lines, bounded to

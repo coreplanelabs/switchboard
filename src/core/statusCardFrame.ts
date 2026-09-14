@@ -74,6 +74,11 @@ export interface CardShellOptions {
   startedAt: number;
   now: () => number;
   link?: StatusUpdate["link"];
+  /** Lines the ack and every live frame open their detail with, ahead of the
+   *  run's own lines — a routed conductor's parts (routing-and-config item 21),
+   *  so the thread reads what was asked from the first paint. A close carries
+   *  none: its detail is the run's checklist as left. */
+  lead?: readonly string[];
 }
 
 export function createCardShell(opts: CardShellOptions): CardShell {
@@ -82,6 +87,7 @@ export function createCardShell(opts: CardShellOptions): CardShell {
   let frame = 0;
   let finishedAt: number | undefined;
   let setupLabel: string | undefined;
+  const lead = opts.lead ?? [];
   // The one duration formatter, clock style: floored like every other surface
   // (docs/reference/specs/tracing.md item 5), so the card never reads a second more than
   // the run page and the index for the same window.
@@ -107,11 +113,12 @@ export function createCardShell(opts: CardShellOptions): CardShell {
       setupLabel = next;
     },
     ack() {
-      return { title: `👀 ${label} · preparing workspace…` };
+      const detail = lead.join("\n");
+      return { title: `👀 ${label} · preparing workspace…`, ...(detail ? { detail } : {}) };
     },
     live(parts = {}) {
       const glyph = SPINNER_GLYPHS[frame++ % SPINNER_GLYPHS.length]!;
-      const detail = (parts.detail ?? []).filter(Boolean).join("\n");
+      const detail = [...lead, ...(parts.detail ?? [])].filter(Boolean).join("\n");
       return {
         title:
           headline(glyph) +

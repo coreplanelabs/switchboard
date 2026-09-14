@@ -99,10 +99,11 @@ export interface AgentDef {
   /** Whether the request router (docs/reference/specs/routing-and-config.md
    *  item 21) may pick this preset for a plain message. Absent means yes: the
    *  router's table is rendered from this registry. `false` keeps a preset
-   *  for a typed directive alone — structurally: it is absent from the table
-   *  the model is shown and refused by the allowlist even if the model names
-   *  it. `ship` (it holds the merge grant) and `conductor` (it starts other
-   *  runs) opt out. */
+   *  out of the table — structurally: it is absent from the table the model
+   *  is shown and refused as a single route even if the model names it.
+   *  `ship` (it holds the merge grant) opts out for good; `conductor` (it
+   *  starts other runs) opts out of the table and is reached through the
+   *  router's compound form alone, with its parts named. */
   routable?: false;
   /** System prompt variant for resident-repo runs (docs/reference/specs/resident-repos.md):
    *  the workspace is a ready worktree — no cloning, no installs, no repo
@@ -426,6 +427,8 @@ WHAT A CHILD IS. A child is an ordinary Switchboard run started as the person wh
 
 THE PRESETS a child can run: \`research\` (a question the web or our repositories answer), \`coding\` (implement a change and open a pull request; needs the repository), \`review\` (review a pull request; needs its URL), \`explore\` (a long, read-only investigation with a shell; needs the repository), \`general\` (a quick answer with the GitHub tools), \`ship\` (coding, review and fixes until a pull request is merge-ready; needs the repository).
 
+ROUTED COMPOUNDS. A request may arrive already split: the router found independent parts, and the message ends with the line "Routed as a compound request: N independent parts" followed by a numbered list, one part per line as \`<preset>\`: <text>. Spawn exactly those children — one \`spawn_run\` per line, the preset as listed, the line's text as the child's prompt (it already stands alone; add the repository where the preset needs one) — then \`await_runs\` them all and compile. Never merge, drop or add a part; a part whose spawn is refused is reported as refused, by the gate's name.
+
 HOW TO WORK. Fan out, await, compile. Read the request and split it into children only where the parts are independent; a request one preset answers is one child. Spawn each child with a self-contained prompt — everything it needs, since it sees none of this thread — and the repository where the preset needs one. Then call \`await_runs\` once with every child's id: it returns when all of them have ended, or earlier — at the edge of your own budget, at a stop, or when a follow-up lands in this thread — and \`ended\` says which; a child still running at the cut keeps running (name it in your answer, or await again after a follow-up). Steer a child with \`send_to_run\` when the request changes or a child is heading the wrong way. A child that ended — finished, failed, interrupted by a restart — is reported as it ended and never restarted; spawn a new child if the work still matters. Then compile: one answer from the write-ups \`await_runs\` returned. Never do a child's job yourself, and never claim a child finished or found something you did not read from \`await_runs\` or \`get_run_status\`.
 
 Maintain the user-facing status card with the update_status tool: one item per child (○ pending, ✱ running, ✓ finished — only once await_runs or get_run_status said so).
@@ -543,9 +546,12 @@ export const AGENTS: Record<string, AgentDef> = {
     // dispatcher, the GitHub reads are REST in the bot process.
     machine: "none",
     identity: "none",
-    // Never offered to the router: its children are runs under the requester's
-    // permissions with a directive of their own, so a routed conductor could
-    // fan a plain message out into runs nobody named — a person names it.
+    // Never a row of the router's table: a plain message is never routed to a
+    // conductor that decides the split itself. The compound form is its one
+    // door (docs/reference/specs/routing-and-config.md item 21): the router
+    // names the parts and their presets, each checked against the same table
+    // and the requester's allowlist, and the brief tells the conductor to
+    // spawn exactly those — so no child runs that the record did not name.
     routable: false,
     maxTokens: 32000,
     ...loopBudget(120), // long enough to outlast a coding child; every child is capped by what remains of it

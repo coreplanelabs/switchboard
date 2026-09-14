@@ -489,11 +489,25 @@ export type RunEvent =
   /** The request router's decision (docs/reference/specs/routing-and-config.md
    *  item 21): the preset a plain message was routed to, the one-line reason
    *  the router gave (redacted, capped — the same text the card's `routed:`
-   *  line carries) and the model that decided. Published by the dispatcher
-   *  straight to the registry right after `run_meta`, once per routed run;
-   *  absent on every run a directive, a sticky preset or a scope chose. Head
-   *  material, like `run_meta`. Additive: unknown → ignored. */
-  | { type: "route"; preset: string; reason: string; model: string; seq?: number; at?: number }
+   *  line carries) and the model that decided. A compound route is `preset:
+   *  "conductor"` with `parts` — one per child the conductor was told to
+   *  spawn: its preset and its text, the child's whole prompt. A compound the
+   *  parse refused is recorded too, on the run that fell to the default:
+   *  `preset` is `defaults.agent` and `reason` reads `compound_rejected:
+   *  <why>` (the run's `run_meta.agentSource` stays `default`). Published by
+   *  the dispatcher straight to the registry right after `run_meta`, once per
+   *  run the router answered; absent on every run a directive, a sticky
+   *  preset or a scope chose. Head material, like `run_meta`. Additive:
+   *  unknown → ignored. */
+  | {
+      type: "route";
+      preset: string;
+      reason: string;
+      model: string;
+      parts?: ReadonlyArray<{ preset: string; text: string }>;
+      seq?: number;
+      at?: number;
+    }
   /** The span records (docs/reference/specs/tracing.md): published, counted and stored like
    *  every other event, read as timing and never as content. */
   | SpanStartEvent

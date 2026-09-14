@@ -2,13 +2,24 @@ import { describe, expect, it } from "vitest";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunRecord } from "../core/runRecord.js";
 import type { RunEvent } from "../core/runEvents.js";
+import { routablePresets, route, type RouteDecision, type RouteModel } from "../core/dispatch/route.js";
+import { ROUTE_COMPOUND_FIXTURES } from "./routeCompoundFixtures.js";
 import {
+  compoundExamples,
+  compoundScore,
   confusionTable,
+  historyCompounds,
   labelledRequests,
   NO_ROUTE,
+  readToWriteRoutes,
+  renderCompound,
   renderConfusion,
+  replayCompound,
   replayRoutes,
+  routeChecks,
+  type CompoundExample,
   type ReplayRequest,
+  type ReplayResult,
 } from "./routeReplay.js";
 
 // `load:route` (docs/reference/specs/load-harness.md item 17): the router
@@ -61,13 +72,13 @@ describe("labelledRequests — which finished runs are labelled examples, and th
     expect(Object.values(skipped).every((n) => n === 0)).toBe(true);
   });
 
-  it("a record without the stamp is labelled by the heuristic — a preset other than the default was a typed choice; the default is unlabelled", () => {
+  it("a record without the stamp on a preset other than the default is labelled `unstamped` — typed, sticky or a scope's agent, the record cannot say; the default is unlabelled", () => {
     const { requests, skipped } = labelledRequests(
       [record("a", "research", "what is the latest on X"), record("b", "general", "hello")],
       { defaultPreset: "general" },
     );
     expect(requests).toEqual([
-      { id: "a", label: "research", text: "what is the latest on X", labelSource: "heuristic" },
+      { id: "a", label: "research", text: "what is the latest on X", labelSource: "unstamped" },
     ]);
     expect(skipped["legacy-default"]).toBe(1);
   });
@@ -104,7 +115,7 @@ describe("replayRoutes — the router asked about each request, in order", () =>
   const requests: ReplayRequest[] = [
     { id: "1", label: "coding", text: "fix it", labelSource: "directive" },
     { id: "2", label: "review", text: "review it", labelSource: "directive" },
-    { id: "3", label: "research", text: "what is X", labelSource: "heuristic" },
+    { id: "3", label: "research", text: "what is X", labelSource: "unstamped" },
   ];
 
   it("marks each answer correct or not, keeps the order, and times the decision", async () => {
@@ -194,7 +205,7 @@ describe("confusionTable + renderConfusion — the arithmetic and the misroutes"
       id: "5",
       label: "research",
       text: "what is X",
-      labelSource: "heuristic" as const,
+      labelSource: "unstamped" as const,
       routed: "research",
       reason: "d",
       correct: true,
@@ -234,5 +245,336 @@ describe("confusionTable + renderConfusion — the arithmetic and the misroutes"
     expect(lines).toContain(`- 4: label review, routed ${NO_ROUTE} — router failed: down — "look"`);
     expect(renderConfusion(confusionTable([], ["coding"]))[0]).toBe("accuracy: 0/0 (—)");
     expect(renderConfusion(confusionTable([], ["coding"]))).toContain("misroutes: none");
+  });
+});
+
+// The compound half of `load:route` (load-harness item 17): the checked-in set
+// scored on detection, on decoys kept single and on per-part presets; the
+// history's conductor requests scored on detection alone, their count printed.
+describe("the checked-in compound set (src/load/routeCompoundFixtures.ts)", () => {
+  const table = routablePresets().map((p) => p.name);
+
+  it("is twenty compounds of two or more parts and five decoys of one, every preset a row of the router's table, every id unique", () => {
+    const compounds = ROUTE_COMPOUND_FIXTURES.filter((f) => f.kind === "compound");
+    const decoys = ROUTE_COMPOUND_FIXTURES.filter((f) => f.kind === "decoy");
+    expect(compounds).toHaveLength(20);
+    expect(decoys).toHaveLength(5);
+    for (const f of compounds) expect(f.presets.length, f.id).toBeGreaterThanOrEqual(2);
+    for (const f of decoys) expect(f.presets, f.id).toHaveLength(1);
+    for (const f of ROUTE_COMPOUND_FIXTURES) {
+      expect(f.text.trim().length, f.id).toBeGreaterThan(20);
+      for (const preset of f.presets) expect(table, `${f.id}: ${preset}`).toContain(preset);
+    }
+    expect(new Set(ROUTE_COMPOUND_FIXTURES.map((f) => f.id)).size).toBe(ROUTE_COMPOUND_FIXTURES.length);
+    // Every part preset is a row of the table — ship and conductor never.
+    expect(ROUTE_COMPOUND_FIXTURES.flatMap((f) => f.presets)).not.toContain("ship");
+    expect(ROUTE_COMPOUND_FIXTURES.flatMap((f) => f.presets)).not.toContain("conductor");
+  });
+
+  it("compoundExamples tags each fixture as the checked-in source; historyCompounds takes the conductor-labelled requests with their parts unknown", () => {
+    const examples = compoundExamples(ROUTE_COMPOUND_FIXTURES);
+    expect(examples).toHaveLength(25);
+    expect(examples[0]).toEqual({ ...ROUTE_COMPOUND_FIXTURES[0], source: "fixture" });
+    const requests: ReplayRequest[] = [
+      { id: "h1", label: "conductor", text: "review #7 and also the outage", labelSource: "directive" },
+      { id: "h2", label: "review", text: "review #8", labelSource: "directive" },
+    ];
+    expect(historyCompounds(requests)).toEqual([
+      { id: "h1", kind: "compound", text: "review #7 and also the outage", presets: [], source: "history" },
+    ]);
+  });
+});
+
+describe("replayCompound + compoundScore + renderCompound — the split scored", () => {
+  const examples: CompoundExample[] = [
+    {
+      id: "c1",
+      kind: "compound",
+      text: "review #7 and also the outage",
+      presets: ["review", "research"],
+      source: "fixture",
+    },
+    { id: "c2", kind: "compound", text: "fix X and review #9", presets: ["coding", "review"], source: "fixture" },
+    {
+      id: "c3",
+      kind: "compound",
+      text: "A and B and C",
+      presets: ["general", "research", "explore"],
+      source: "fixture",
+    },
+    { id: "d1", kind: "decoy", text: "clone, test, report", presets: ["explore"], source: "fixture" },
+    { id: "d2", kind: "decoy", text: "fix it: reproduce, patch, prove", presets: ["coding"], source: "fixture" },
+  ];
+  const split = (presets: string[], reason = "independent"): RouteDecision => ({
+    preset: "conductor",
+    reason,
+    parts: presets.map((preset, i) => ({ preset, text: `part ${i + 1}` })),
+  });
+  const single = (preset: string): RouteDecision => ({ preset, reason: "one ask" });
+
+  it("a perfect router: every compound detected with its parts, no decoy split, every part preset right", async () => {
+    const results = await replayCompound(
+      examples,
+      async (text) => {
+        const e = examples.find((x) => x.text === text)!;
+        return e.kind === "compound" ? split([...e.presets]) : single(e.presets[0]);
+      },
+      { now: () => 0 },
+    );
+    expect(results.map((r) => [r.id, r.detected, r.matchedParts, r.expectedParts])).toEqual([
+      ["c1", true, 2, 2],
+      ["c2", true, 2, 2],
+      ["c3", true, 3, 3],
+      ["d1", false, 0, 0],
+      ["d2", false, 0, 0],
+    ]);
+    const score = compoundScore(results);
+    expect(score).toMatchObject({
+      compounds: 3,
+      detected: 3,
+      detectionRate: 1,
+      decoys: 2,
+      decoysSplit: 0,
+      expectedParts: 7,
+      matchedParts: 7,
+      partAccuracy: 1,
+      misses: [],
+    });
+    expect(renderCompound(score)[0]).toBe("compound: detected 3/3 (100%), decoys split 0/2, part presets 7/7 (100%)");
+    expect(renderCompound(score)).toContain("misses: none");
+  });
+
+  it("a fallible router: a compound left single is a miss, a decoy split is a miss, a part on the wrong preset counts against the parts and lists the miss; order is kept and the decision timed", async () => {
+    let t = 0;
+    const answers: Record<string, RouteDecision> = {
+      c1: single("review"), // not detected
+      c2: split(["coding", "research"]), // detected, one part off (review → research)
+      c3: split(["general", "research", "explore"]), // right
+      d1: split(["explore", "general"]), // a decoy split
+      d2: single("coding"),
+    };
+    const results = await replayCompound(examples, async (text) => answers[examples.find((x) => x.text === text)!.id], {
+      now: () => (t += 5),
+      concurrency: 1,
+    });
+    expect(results.map((r) => r.id)).toEqual(["c1", "c2", "c3", "d1", "d2"]);
+    expect(results.every((r) => r.ms === 5)).toBe(true);
+    const score = compoundScore(results);
+    expect(score).toMatchObject({
+      compounds: 3,
+      detected: 2,
+      decoys: 2,
+      decoysSplit: 1,
+      expectedParts: 7,
+      matchedParts: 4, // c1 undetected contributes none of its two; c2 one of two; c3 three
+    });
+    expect(score.detectionRate).toBeCloseTo(2 / 3);
+    expect(score.partAccuracy).toBeCloseTo(4 / 7);
+    expect(score.misses.map((m) => m.id)).toEqual(["c1", "c2", "d1"]);
+    const lines = renderCompound(score);
+    expect(lines[0]).toBe("compound: detected 2/3 (66.7%), decoys split 1/2, part presets 4/7 (57.1%)");
+    expect(lines).toContain("misses (3):");
+    expect(lines).toContain(
+      '- c1: compound, expected review+research, answered review — one ask — "review #7 and also the outage"',
+    );
+    expect(lines).toContain(
+      '- c2: compound, expected coding+review, answered coding+research — independent — "fix X and review #9"',
+    );
+    expect(lines).toContain(
+      '- d1: decoy, expected explore, answered explore+general — independent — "clone, test, report"',
+    );
+  });
+
+  it("a history conductor request is scored on detection alone — its parts are not on the record — and the parts arithmetic ignores it", async () => {
+    const history: CompoundExample[] = [
+      { id: "h1", kind: "compound", text: "two things", presets: [], source: "history" },
+      { id: "h2", kind: "compound", text: "two other things", presets: [], source: "history" },
+    ];
+    const results = await replayCompound(
+      history,
+      async (text) => (text === "two things" ? split(["review", "research"]) : single("general")),
+      { now: () => 0 },
+    );
+    const score = compoundScore(results);
+    expect(score).toMatchObject({ compounds: 2, detected: 1, expectedParts: 0, matchedParts: 0 });
+    expect(score.partAccuracy).toBeNaN();
+    expect(renderCompound(score)[0]).toBe("compound: detected 1/2 (50%), decoys split 0/0, part presets 0/0 (—)");
+    expect(score.misses.map((m) => m.id)).toEqual(["h2"]);
+  });
+
+  it("no route on a compound is not detected; an answer with more parts than expected matches only the expected count and is a miss", async () => {
+    const results = await replayCompound([examples[0]], async () => split(["review", "research", "general"]), {
+      now: () => 0,
+    });
+    expect(results[0]).toMatchObject({ detected: true, expectedParts: 2, matchedParts: 2 });
+    expect(compoundScore(results).misses.map((m) => m.id)).toEqual(["c1"]);
+    const none = await replayCompound([examples[0]], async () => ({ preset: undefined, reason: "router failed: x" }), {
+      now: () => 0,
+    });
+    expect(none[0]).toMatchObject({ detected: false, matchedParts: 0 });
+    expect(compoundScore([]).detectionRate).toBeNaN();
+    expect(renderCompound(compoundScore([]))[0]).toBe(
+      "compound: detected 0/0 (—), decoys split 0/0, part presets 0/0 (—)",
+    );
+  });
+});
+
+// The whole checked-in set through the dispatcher's own `route` — the real
+// prompt and parse, the model scripted — the way `load -- route` runs it: the
+// receipt's fixture scores under a router that answers right, and under a
+// naive one that splits on every "and", which the decoy check must catch.
+describe("the checked-in set through route() over a scripted model", () => {
+  const presets = routablePresets();
+  const allowed = presets.map((p) => p.name);
+  const byText = new Map(ROUTE_COMPOUND_FIXTURES.map((f) => [f.text, f]));
+  const decideWith =
+    (model: RouteModel) =>
+    (text: string): Promise<RouteDecision> =>
+      route({ text, recentDirectives: {}, presets, allowed, fallback: "general", compound: { maxParts: 3 } }, model);
+  const textOf = (prompt: { user: string }) => /<request>\n([\s\S]*)\n<\/request>/.exec(prompt.user)![1];
+
+  it("a router that answers every fixture as labelled: 20/20 detected, 0/5 decoys split, every part preset right — the bar met", async () => {
+    const knowing: RouteModel = async (prompt) => {
+      const f = byText.get(textOf(prompt))!;
+      return f.kind === "compound"
+        ? JSON.stringify({
+            preset: "conductor",
+            parts: f.presets.map((preset, i) => ({ preset, text: `part ${i + 1} of ${f.id}` })),
+            reason: "independent asks",
+          })
+        : JSON.stringify({ preset: f.presets[0], reason: "one ask with steps" });
+    };
+    const results = await replayCompound(compoundExamples(ROUTE_COMPOUND_FIXTURES), decideWith(knowing), {
+      now: () => 0,
+    });
+    const score = compoundScore(results);
+    const expectedParts = ROUTE_COMPOUND_FIXTURES.filter((f) => f.kind === "compound").reduce(
+      (n, f) => n + f.presets.length,
+      0,
+    );
+    expect(score).toMatchObject({
+      compounds: 20,
+      detected: 20,
+      detectionRate: 1,
+      decoys: 5,
+      decoysSplit: 0,
+      expectedParts,
+      matchedParts: expectedParts,
+      partAccuracy: 1,
+      misses: [],
+    });
+    expect(renderCompound(score)[0]).toBe(
+      `compound: detected 20/20 (100%), decoys split 0/5, part presets ${expectedParts}/${expectedParts} (100%)`,
+    );
+  });
+
+  it("a naive router that splits on every 'and' detects the compounds but splits every decoy — the decoy check is what catches it", async () => {
+    const naive: RouteModel = async (prompt) => {
+      const text = textOf(prompt);
+      const pieces = text
+        .split(/\band\b|;/)
+        .map((t) => t.trim())
+        .filter(Boolean)
+        .slice(0, 3);
+      return JSON.stringify({
+        preset: "conductor",
+        parts: pieces.map((t) => ({
+          preset: /review/i.test(t) ? "review" : /fix|add|rename|bump/i.test(t) ? "coding" : "general",
+          text: t,
+        })),
+        reason: "split on and",
+      });
+    };
+    const results = await replayCompound(compoundExamples(ROUTE_COMPOUND_FIXTURES), decideWith(naive), {
+      now: () => 0,
+    });
+    const score = compoundScore(results);
+    expect(score.detectionRate).toBeGreaterThanOrEqual(0.9);
+    // Four of the five decoys carry an "and"; the fifth (steps joined by "then") stays single even here.
+    expect(score.decoysSplit).toBe(4);
+    expect(score.partAccuracy).toBeLessThan(1);
+    expect(score.misses.filter((m) => m.kind === "decoy")).toHaveLength(4);
+  });
+});
+
+// The checks the receipt's verdict is made of (load-harness item 17): the
+// accuracy bar, every request answered, record 0026's read-only-to-write
+// clause as a row of its own, and the compound bars.
+describe("readToWriteRoutes + routeChecks — the verdict's rows", () => {
+  const result = (
+    label: string,
+    routed: string | undefined,
+    source: ReplayResult["labelSource"] = "directive",
+  ): ReplayResult => ({
+    id: `${label}->${routed ?? "none"}`,
+    label,
+    text: "t",
+    labelSource: source,
+    routed,
+    reason: "r",
+    correct: routed === label,
+    ms: 1,
+  });
+
+  it("readToWriteRoutes: a read-only label (identity none or read) routed to a write preset counts; a write label to write, a read label to read or to the conductor, and no route do not", () => {
+    const hits = readToWriteRoutes([
+      result("review", "coding"),
+      result("general", "coding"),
+      result("research", "ship"),
+      result("explore", "explore"),
+      result("coding", "coding"),
+      result("review", "conductor"),
+      result("general", undefined),
+    ]);
+    expect(hits.map((r) => r.id)).toEqual(["review->coding", "general->coding", "research->ship"]);
+  });
+
+  it("a clean run: every row passes and the verdict is green", () => {
+    const results = [result("review", "review"), result("coding", "coding"), result("research", "research")];
+    const checks = routeChecks({
+      table: confusionTable(results, ["review", "coding", "research"]),
+      answered: 3,
+      readToWrite: readToWriteRoutes(results).length,
+      compound: compoundScore([]),
+      compoundBar: { detection: 0.9 },
+    });
+    expect(checks.map((c) => c.name)).toEqual([
+      "routing accuracy ≥ 95% against the presets people typed (record 0026's bar)",
+      "every request answered with a preset",
+      "read-only labels routed to a write preset: 0 (record 0026's clause)",
+      "compound detected on ≥ 90% of the checked-in compound asks",
+      "no decoy split — one ask with several steps stays one route",
+    ]);
+    expect(checks.map((c) => [c.pass, c.actual, c.limit])).toEqual([
+      [true, "100%", "≥ 95%"],
+      [true, "3/3", "3"],
+      [true, "0", "0"],
+      [false, "0/0 (—)", "≥ 90%"],
+      [true, "0/0", "0"],
+    ]);
+  });
+
+  it("one read-only label routed to coding fails the read-only-to-write row — and with it the verdict — even when the accuracy bar still passes", () => {
+    const results: ReplayResult[] = [
+      ...Array.from({ length: 30 }, (_, i) => ({ ...result("review", "review"), id: `ok${i}` })),
+      result("general", "coding"),
+    ];
+    const table = confusionTable(results, ["general", "review", "coding"]);
+    expect(table.accuracy).toBeGreaterThanOrEqual(0.95);
+    const checks = routeChecks({
+      table,
+      answered: 31,
+      readToWrite: readToWriteRoutes(results).length,
+      compound: compoundScore([]),
+      compoundBar: { detection: 0.9 },
+    });
+    const row = checks.find((c) => c.name.startsWith("read-only labels routed to a write preset"))!;
+    expect(row).toEqual({
+      name: "read-only labels routed to a write preset: 0 (record 0026's clause)",
+      pass: false,
+      actual: "1 (general->coding)",
+      limit: "0",
+    });
+    expect(checks.every((c) => c.pass)).toBe(false);
   });
 });

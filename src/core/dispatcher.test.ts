@@ -10768,4 +10768,250 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
     expect(provider.requests[0].model).toBe("general-model");
     expect(statuses.every((s) => !s.title.includes("routed:"))).toBe(true);
   });
+
+  // The compound form (routing-and-config item 21, "Compound requests";
+  // agent-conductor item 9): a plain message with two independent parts runs
+  // as one conductor whose brief lists the parts; the conductor spawns one
+  // child per part through `dispatch()`, each on its part's preset with a
+  // directive of its own, under the requester's permissions and the parent's
+  // clock. The card and the record say what was split and why.
+  describe("a compound request routes to the conductor", () => {
+    const COMPOUND_YAML =
+      YAML_FIXTURE.replace(
+        "    review: anthropic/review-model\n",
+        "    review: anthropic/review-model\n    conductor: anthropic/conductor-model\n    research: anthropic/research-model\n",
+      ) + "routing:\n  auto: true\n";
+    const PARTS = [
+      { text: "summarize the open issues in acme/api", preset: "general" },
+      { text: "find out why the staging resident went down last night", preset: "research" },
+    ];
+    /** A router that splits a message carrying "and also" into the two parts above, else routes general. */
+    const splitter = () =>
+      vi.fn(async (prompt: { user: string }) =>
+        /and also/.test(prompt.user)
+          ? JSON.stringify({ preset: "conductor", parts: PARTS, reason: "two independent asks" })
+          : JSON.stringify({ preset: "general", reason: "general fits" }),
+      );
+    /** The texts of a request's tool results. */
+    const toolResultTexts = (req: CompletionRequest): string[] => {
+      const last = req.messages.at(-1);
+      if (!last || typeof last.content === "string") return [];
+      return last.content
+        .filter((p) => p.type === "tool_result")
+        .map((p) => (typeof p.content === "string" ? p.content : JSON.stringify(p.content)));
+    };
+    const firstUserText = (req: CompletionRequest): string => {
+      const first = req.messages[0];
+      if (!first) return "";
+      return typeof first.content === "string"
+        ? first.content
+        : first.content.map((p) => (p.type === "text" ? p.text : "")).join("");
+    };
+    /**
+     * A conductor that does what its brief says: the first turn reads the
+     * numbered `<preset>`: <text> lines under the compound heading and spawns
+     * exactly those; the next turn echoes the tool results. A child (no
+     * spawn_run tool) answers with one line.
+     */
+    function briefFollowingProvider() {
+      const requests: CompletionRequest[] = [];
+      const provider: Provider = {
+        name: "fake",
+        async complete(req): Promise<CompletionResult> {
+          requests.push(req);
+          const conducts = req.tools?.some((t) => t.name === "spawn_run") ?? false;
+          if (conducts && toolResultTexts(req).length === 0) {
+            const lines = [...firstUserText(req).matchAll(/^\d+\. `(\w+)`: (.+)$/gm)];
+            return {
+              content: lines.map((m, i) => ({
+                type: "tool_use" as const,
+                id: `t${i + 1}`,
+                name: "spawn_run",
+                input: { preset: m[1], prompt: m[2] },
+              })),
+              stopReason: "tool_use",
+            };
+          }
+          if (conducts)
+            return { content: [{ type: "text", text: toolResultTexts(req).join("\n") }], stopReason: "end_turn" };
+          return { content: [{ type: "text", text: "child done" }], stopReason: "end_turn" };
+        },
+      };
+      return { provider, requests };
+    }
+    /** A parent channel whose `openThread` hands out one recording child channel per call. */
+    function treeIO() {
+      const parent = fakeIO();
+      const children: Array<ReturnType<typeof fakeIO> & { threadKey: string }> = [];
+      const leads: string[] = [];
+      parent.io.openThread = async (lead) => {
+        leads.push(lead);
+        const child = { ...fakeIO(), threadKey: `slack:CX:9.${children.length + 1}` };
+        children.push(child);
+        return { thread: { threadKey: child.threadKey }, io: child.io };
+      };
+      return { parent, children, leads };
+    }
+    function treeDeps(yaml: string, provider: Provider) {
+      const ids = ["run-parent", "run-child-1", "run-child-2", "run-child-3"];
+      const registry = new RunRegistry({ genId: () => ids.shift() ?? "run-more", genToken: () => "tok" });
+      const store = new InMemoryRunStore();
+      const writer = createRunHistoryWriter({
+        store,
+        warn: () => {},
+        onPersisted: (id) => registry.markPersisted(id),
+        sleep: async () => {},
+      });
+      const deps = makeDeps(yaml, provider);
+      deps.runRegistry = registry;
+      deps.runHistoryWriter = writer;
+      deps.admission = new ThreadAdmission<DispatchFollowUp>();
+      deps.runStore = store;
+      deps.runs = createRunsService({ registry, store });
+      return { deps, registry, store, writer };
+    }
+    const compoundMsg = (user = "slack:UADMIN") => ({
+      ...msg(
+        "summarize the open issues in acme/api and also look into why the staging resident went down last night",
+        user,
+      ),
+      userName: "alice",
+    });
+
+    it("two independent parts: one conductor run with the routed line and the parts on its card, the route event with the parts, and two children spawned through dispatch() — each on its part's preset with a directive of its own, parentRunId set, the router never asked again", async () => {
+      const { provider, requests } = briefFollowingProvider();
+      const t = treeDeps(COMPOUND_YAML, provider);
+      t.deps.routeModel = splitter();
+      const { parent, children, leads } = treeIO();
+      await dispatch(t.deps, compoundMsg(), parent.io);
+      for (const id of ["run-child-1", "run-child-2"])
+        await vi.waitFor(() => expect(t.registry.getById(id)?.finished).toBe(true));
+      await t.writer.settled();
+
+      // One router call — the parent's; a child carries its directive and is never routed.
+      expect(t.deps.routeModel).toHaveBeenCalledTimes(1);
+      // The parent ran as the conductor on its own model; its brief is the message then the parts.
+      const parentRequest = requests.find((r) => r.tools?.some((tool) => tool.name === "spawn_run"))!;
+      expect(parentRequest.model).toBe("conductor-model");
+      const brief = firstUserText(parentRequest);
+      expect(
+        brief.startsWith(
+          "summarize the open issues in acme/api and also look into why the staging resident went down last night\n",
+        ),
+      ).toBe(true);
+      expect(brief).toContain("Routed as a compound request: 2 independent parts");
+      expect(brief).toContain("1. `general`: summarize the open issues in acme/api");
+      expect(brief).toContain("2. `research`: find out why the staging resident went down last night");
+      // The card: the routed line in the label, one line per part under it, from the first paint.
+      expect(parent.statuses[0].title).toContain(
+        "*conductor* on `anthropic/conductor-model` · routed: two independent asks",
+      );
+      expect(parent.statuses[0].detail).toBe(
+        "general: summarize the open issues in acme/api\nresearch: find out why the staging resident went down last night",
+      );
+      // The record: run_meta says route, the route event carries the parts.
+      expect(metaOf(t.registry, "run-parent")?.agentSource).toBe("route");
+      expect(routeEvents(t.registry, "run-parent")).toEqual([
+        expect.objectContaining({
+          type: "route",
+          preset: "conductor",
+          reason: "two independent asks",
+          model: "anthropic/general-model",
+          parts: PARTS,
+        }),
+      ]);
+      expect((await t.store.get("run-parent"))!.events.filter((e) => e.type === "input")).toEqual([
+        expect.objectContaining({
+          text: "summarize the open issues in acme/api and also look into why the staging resident went down last night",
+        }),
+      ]);
+      // Two children, one per part, each on its part's preset with its directive, as the requester, under the parent.
+      expect(leads).toHaveLength(2);
+      expect(leads[0]).toContain("*general*");
+      expect(leads[1]).toContain("*research*");
+      const kids = await Promise.all([t.store.get("run-child-1"), t.store.get("run-child-2")]);
+      expect(kids.map((k) => k!.agent).sort()).toEqual(["general", "research"]);
+      for (const kid of kids) {
+        expect(kid).toMatchObject({ userId: "slack:UADMIN", parentRunId: "run-parent", status: "completed" });
+        // The parent's remaining clock is one more boundary on the child; these
+        // presets' own budgets (5 and 8 min) are the tighter ones under a fresh conductor.
+        expect(kid!.profile).toMatchObject({ preset: kid!.agent, minutes: AGENTS[kid!.agent!].maxMinutes });
+        // The child's message carried `agent:<preset>` (the record's input is
+        // directive-stripped, so it is the part's text alone) and resolved as
+        // a directive: the router was never asked and no route event exists.
+        const part = PARTS.find((p) => p.preset === kid!.agent)!;
+        expect(kid!.events.find((e) => e.type === "input")).toMatchObject({ text: part.text });
+        expect(kid!.events.find((e) => e.type === "run_meta")).toMatchObject({ agentSource: "directive" });
+        expect(kid!.events.some((e) => e.type === "route")).toBe(false);
+      }
+      expect(children.map((c) => c.replies)).toEqual([["child done"], ["child done"]]);
+      expect(
+        vi
+          .mocked(makeExecutor)
+          .mock.calls.map((c) => c[1].agent.name)
+          .sort(),
+      ).toEqual(["conductor", "general", "research"]);
+      // The parent's answer echoes both spawns.
+      expect(parent.replies[0]).toContain("spawned a general run: run-child-1");
+      expect(parent.replies[0]).toContain("spawned a research run: run-child-2");
+    });
+
+    it("a requester who may not run the conductor is never offered the form: the message runs defaults.agent, no child is spawned, and the record's route event keeps the rejection", async () => {
+      const { provider, requests } = briefFollowingProvider();
+      const t = treeDeps(COMPOUND_YAML.replace("agents: [coding]", "agents: [coding, conductor]"), provider);
+      t.deps.routeModel = splitter();
+      const { parent, children } = treeIO();
+      await dispatch(t.deps, compoundMsg("slack:UX"), parent.io);
+      expect(t.deps.routeModel).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(t.deps.routeModel).mock.calls[0][0].system).not.toMatch(/conductor|compound/i);
+      expect(requests[0].model).toBe("general-model");
+      expect(children).toHaveLength(0);
+      expect(parent.statuses.every((s) => !s.title.includes("routed:"))).toBe(true);
+      expect(metaOf(t.registry, "run-parent")?.agentSource).toBe("default");
+      expect(routeEvents(t.registry, "run-parent")).toEqual([
+        expect.objectContaining({
+          type: "route",
+          preset: "general",
+          reason: "compound_rejected: the compound form was not offered",
+          model: "anthropic/general-model",
+        }),
+      ]);
+    });
+
+    it("a part on a preset the requester may not run rejects the whole compound: the plain user's message runs defaults.agent with the rejection recorded", async () => {
+      const { provider, requests } = briefFollowingProvider();
+      const t = treeDeps(COMPOUND_YAML, provider);
+      t.deps.routeModel = vi.fn(async () =>
+        JSON.stringify({
+          preset: "conductor",
+          parts: [PARTS[0], { text: "fix the flaky login test", preset: "coding" }],
+          reason: "a review and a fix",
+        }),
+      );
+      const { parent, children } = treeIO();
+      await dispatch(t.deps, compoundMsg("slack:UX"), parent.io);
+      expect(requests[0].model).toBe("general-model");
+      expect(children).toHaveLength(0);
+      expect(routeEvents(t.registry, "run-parent")[0]).toMatchObject({
+        preset: "general",
+        reason: 'compound_rejected: part 2 names "coding", which is not in the table',
+      });
+    });
+
+    it("a decoy — one ask with several steps — the router keeps single: no conductor, no parts, the single route's card and event", async () => {
+      const { provider } = briefFollowingProvider();
+      const t = treeDeps(COMPOUND_YAML, provider);
+      t.deps.routeModel = splitter();
+      const { parent, children } = treeIO();
+      await dispatch(
+        t.deps,
+        { ...msg("clone acme/api, run the suite, then tell me what fails", "slack:UADMIN") },
+        parent.io,
+      );
+      expect(children).toHaveLength(0);
+      expect(parent.statuses[0].title).toContain("*general* on `anthropic/general-model` · routed: general fits");
+      expect(parent.statuses[0].detail).toBeUndefined();
+      expect(routeEvents(t.registry, "run-parent")[0]).not.toHaveProperty("parts");
+    });
+  });
 });
