@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.208.0](https://github.com/coreplanelabs/switchboard/compare/v1.207.1...v1.208.0) (2026-09-14)
+
+
+### Features
+
+* **http:** a per-run model-credential proxy — a run's bearer buys model calls through the bot, pinned to its preset's model and metered as its own turns, and no container ever holds a key ([#1012](https://github.com/coreplanelabs/switchboard/issues/1012)) ([524118d](https://github.com/coreplanelabs/switchboard/commit/524118d99f9c4cfc7296ec5b664923a497ae4073))
+* **ship:** one ship implementation — every agent:ship request runs on the plan runner, the in-process round loop is deleted and ship.coordinator is gone ([#1011](https://github.com/coreplanelabs/switchboard/issues/1011)) ([f79e88b](https://github.com/coreplanelabs/switchboard/commit/f79e88b528896c5a9e2c8836ca4ca40ac9f65fe0))
+* **ship:** the child contract names the title gate among its guards ([#1004](https://github.com/coreplanelabs/switchboard/issues/1004)) ([505561c](https://github.com/coreplanelabs/switchboard/commit/505561c266e86b182b9df9301a99971dfbb1d858))
+
+
+### Bug fixes
+
+* **ship:** the runner trusts the review child's own record of its post — a review posted a second ago no longer reads as unposted, and GitHub is asked patiently only when the record is silent ([#1013](https://github.com/coreplanelabs/switchboard/issues/1013)) ([2d26e08](https://github.com/coreplanelabs/switchboard/commit/2d26e0854206d9a0515fe35e91791ca8436eef70))
+
+
+### Documentation
+
+* **agents:** the program plan absorbs record 0032 — five units retire the native loop behind pi, one preset at a time ([#1005](https://github.com/coreplanelabs/switchboard/issues/1005)) ([52576d1](https://github.com/coreplanelabs/switchboard/commit/52576d158c368350bebd6c8bf550c76251e24aff))
+* **load:** the load-harness spec states how a refusal's token is recovered from a client error ([#1002](https://github.com/coreplanelabs/switchboard/issues/1002)) ([69e6477](https://github.com/coreplanelabs/switchboard/commit/69e6477dd1727c888056d8102de174a6bc26235a))
+
 ## [1.207.1](https://github.com/coreplanelabs/switchboard/compare/v1.207.0...v1.207.1) (2026-09-14)
 
 
