@@ -40,8 +40,9 @@ export interface ArtifactsCapability {
   runId: string;
   /** The next per-run sequence: two files of one name never share a key. */
   nextSeq(): number;
-  /** The run's page — where a stored file can be seen — when the deployment has a public URL. */
-  runUrl?: string;
+  /** One stored file's link — the run page's artifact proxy for the key, tokened
+   *  while the run is live — when the deployment has a public URL; undefined otherwise. */
+  artifactUrl?(key: string): string | undefined;
   /** Post a line into the conversation: the lead for a channel that takes no upload ticket. */
   reply(text: string): Promise<void>;
 }
@@ -144,11 +145,14 @@ async function attachThroughStore(
   }
   ctx.publish?.({ type: "artifact", direction: "out", key, name, size, contentType });
   // 4. Into the conversation. A channel with an upload ticket gets the same
-  // file from the container; one without gets the lead and the run page's link.
+  // file from the container; one without (the CLI harness, HTTP, MCP) gets the
+  // lead and the file's own link — the run page's artifact proxy, tokened while
+  // the run is live — or, with no public URL, the key it sits under.
   if (!ctx.uploadTicket) {
-    const where = artifacts.runUrl ? ` — ${artifacts.runUrl}` : "";
-    await artifacts.reply(`${lead}\n📎 ${name} (${size} bytes) is on the run page${where}`);
-    return `attached ${name} (${size} bytes) to the run page; this conversation's channel takes no file uploads, so the lead and the page's link were posted instead`;
+    const link = artifacts.artifactUrl?.(key);
+    const where = link ? ` — ${link}` : ` is on the run page as ${key}`;
+    await artifacts.reply(`${lead}\n📎 ${name} (${size} bytes)${where}`);
+    return `attached ${name} (${size} bytes) to the run page as ${key}; this conversation's channel takes no file uploads, so the lead and the file's link were posted instead`;
   }
   const kept = "the file is kept on the run page";
   let ticket: UploadTicket;

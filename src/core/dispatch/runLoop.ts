@@ -62,7 +62,7 @@ import type { ChannelIO, IncomingMessage, StagedFile, StatusHandle } from "../ty
 import type { DispatchFollowUp, ResumeContext } from "./admission.js";
 import type { RegisteredRun } from "./provision.js";
 import { registerFinishRecord } from "./record.js";
-import { activityLine, runPageLink } from "./reply.js";
+import { activityLine, artifactLink } from "./reply.js";
 import { stageIntoWorkspace, stagingIndex } from "./staging.js";
 import { githubCapabilityFor, shutdownNotice, webCapability, type RunDeps } from "./run.js";
 
@@ -461,13 +461,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
   // request's files took 1..n there), else this loop's own.
   const nextStagedIndex = ctx.stagingIndex ?? stagingIndex();
   let artifactSeq = 0;
-  const runUrl = runPageLink(run.id);
+  // A ticketless channel's lead links the file itself: this run's artifact proxy
+  // under its live token (the same capability the status card's link carries).
   const artifacts = deps.artifacts
     ? {
         store: deps.artifacts,
         runId: run.id,
         nextSeq: () => ++artifactSeq,
-        ...(runUrl ? { runUrl } : {}),
+        artifactUrl: (key: string) => artifactLink(run.id, key, run.token),
         reply: (text: string) => io.reply(text),
       }
     : undefined;

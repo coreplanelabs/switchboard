@@ -1,7 +1,7 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ConfigStore } from "../../config.js";
 import { getAgent } from "../../agents/registry.js";
 import { declaredProfile } from "../../config/profile.js";
@@ -344,11 +344,19 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       },
       artifacts: store2,
     });
-    await runLoop(untied.deps, untied.ctx);
+    vi.stubEnv("PUBLIC_BASE_URL", "https://bot.example.com");
+    try {
+      await runLoop(untied.deps, untied.ctx);
+    } finally {
+      vi.unstubAllEnvs();
+    }
     untied.ending.drain(true);
     await untied.writer.settled();
     expect(commands).toHaveLength(2); // stat + PUT: no POST without a ticket
-    expect(untied.replies.some((r) => r.startsWith("the page\n📎 shot.png (3 bytes) is on the run page"))).toBe(true);
+    // The lead carries the file's own proxy link, tokened with THIS run's live token.
+    expect(untied.replies).toContain(
+      `the page\n📎 shot.png (3 bytes) — https://bot.example.com/runs/run-l/artifacts/runs/run-l/out/1-shot.png?t=${encodeURIComponent(untied.run.token)}`,
+    );
   });
 
   // record 0033: a follow-up steered into the live run that carries a staged
