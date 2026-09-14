@@ -321,7 +321,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(commands.map((c) => c.split(" ")[0] + " " + c.split(" ").slice(1, 3).join(" "))).toEqual([
       "stat -c %s",
       "curl -fsS -T",
-      "curl -fsS --data-binary",
+      "curl -fsS --upload-file",
     ]);
     expect(completed).toEqual(["the page"]);
 
