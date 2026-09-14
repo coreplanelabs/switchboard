@@ -439,10 +439,10 @@ export async function dispatch(
     if (clip) shell.setLabel(`${shell.label} · ${clip}`);
 
     // agent:ship fork (docs/reference/specs/agent-ship.md): after agent resolution and the
-    // repo gates above, BEFORE the top-level attach — ship names its own
-    // pipeline branch and each child round attaches its own workspace
-    // (shipPipeline.ts). The branch owns everything from here: the preflight
-    // refusals, the one run record, the round loop, the final report. An
+    // repo gates above, BEFORE the top-level attach — ship attaches nothing
+    // here; the plan runner's children each attach their own workspace as
+    // runs of their own. The branch owns everything from here: the preflight
+    // refusals, the one run record, the hand-off to the runner, the reply. An
     // unexpected throw propagates to the outer catch after the branch closed
     // its own card and persisted its failed record.
     if (agent.name === "ship") {
@@ -459,7 +459,6 @@ export async function dispatch(
         sticky,
         history,
         repoCtx,
-        memoryBlockP,
         live: admitted,
         ending,
         trace,

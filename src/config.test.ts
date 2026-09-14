@@ -22,12 +22,7 @@ import { AGENTS } from "./agents/registry.js";
 import { hasAction } from "./core/authz/authorize.js";
 import { ALL_GRANTS } from "./core/authz/grants.js";
 import { NO_GRANTS } from "./core/authz/types.js";
-import {
-  resolveShipCaps,
-  SHIP_DEFAULT_MAX_MINUTES,
-  SHIP_DEFAULT_MAX_ROUNDS,
-  shipPresetFor,
-} from "./core/shipPipeline.js";
+import { resolveShipCaps, SHIP_DEFAULT_MAX_MINUTES, shipPresetFor } from "./core/shipPipeline.js";
 import { DEFAULT_MAX_CHILDREN, maxChildrenOf } from "./core/dispatch/spawn.js";
 import { OpenAICompatProvider } from "./providers/openaiCompat.js";
 import { ProviderRegistry } from "./providers/registry.js";
@@ -716,35 +711,21 @@ describe("ship caps block (agent:ship pipeline)", () => {
     expect(() => store(YAML_FIXTURE + 'ship: "nope"\n')).toThrow(/ship must be a mapping/);
   });
 
-  // docs/reference/specs/agent-ship.md item 16: the plan runner is a switch,
-  // off unless the block says `true`; a non-boolean is refused at load so a
-  // typo cannot read as "on".
-  it("ship.coordinator: absent is off, `true` and `false` parse, anything else is refused by name", async () => {
-    expect(store().config.ship?.coordinator).toBeUndefined();
-    expect(store(YAML_FIXTURE + "ship:\n  coordinator: true\n").config.ship).toEqual({ coordinator: true });
-    expect(store(YAML_FIXTURE + "ship:\n  coordinator: false\n  maxRounds: 2\n").config.ship).toEqual({
-      coordinator: false,
-      maxRounds: 2,
-    });
-    expect(() => store(YAML_FIXTURE + 'ship:\n  coordinator: "yes"\n')).toThrow(
-      /ship\.coordinator must be true or false/,
+  // docs/reference/specs/agent-ship.md item 16: the plan runner is the one ship
+  // implementation, so the switch that once chose it is refused at load by
+  // name — a config still carrying `ship.coordinator` is told to drop it rather
+  // than left believing it chose anything; any other unknown key is refused too.
+  it("ship.coordinator is refused at load by name, whatever its value; any other unknown ship key is refused by name", async () => {
+    for (const value of ["true", "false", '"yes"'])
+      expect(() => store(YAML_FIXTURE + `ship:\n  coordinator: ${value}\n`)).toThrow(
+        /ship\.coordinator is no longer a key — every agent:ship request runs on the plan runner; remove it \(docs\/reference\/migrations\.md\)/,
+      );
+    expect(() => store(YAML_FIXTURE + "ship:\n  maxRounds: 2\n  coordinator: true\n")).toThrow(
+      /ship\.coordinator is no longer a key/,
     );
+    expect(() => store(YAML_FIXTURE + "ship:\n  maxRunds: 2\n")).toThrow(/ship\.maxRunds is not a known key/);
   });
 
-  it("resolveShipCaps: defaults 3 rounds / 120 minutes; configured values win", async () => {
-    expect(resolveShipCaps(undefined)).toEqual({
-      maxRounds: SHIP_DEFAULT_MAX_ROUNDS,
-      maxMinutes: SHIP_DEFAULT_MAX_MINUTES,
-    });
-    expect(resolveShipCaps({})).toEqual({ maxRounds: 3, maxMinutes: 120 });
-    expect(resolveShipCaps({ maxRounds: 1 })).toEqual({ maxRounds: 1, maxMinutes: 120 });
-    expect(resolveShipCaps({ maxRounds: 5, maxMinutes: 45 })).toEqual({ maxRounds: 5, maxMinutes: 45 });
-  });
-
-  // docs/reference/specs/agent-ship.md item 8: the pipeline's wall clock is the
-  // ship preset's declared budget — ONE number. The registry's def carries the
-  // default; a deployment's `ship.maxMinutes` knob replaces it in the preset
-  // the profile is resolved from, and nothing else reads the knob.
   it("shipPresetFor: the ship preset as this deployment declares it — the registry's def with `ship.maxMinutes` as its budget, the default being the def's own; always a copy", () => {
     expect(SHIP_DEFAULT_MAX_MINUTES).toBe(AGENTS.ship.maxMinutes);
     expect(shipPresetFor(undefined)).toEqual(AGENTS.ship);

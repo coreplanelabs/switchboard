@@ -411,6 +411,10 @@ async function runUnit(
   const start = readUnitStart(
     answerOf("unit-start", await step.do(`${unit}/start`, STEP_CONFIG, () => call(bot, "unit-start", tag))),
   );
+  // A resume at review (agent-ship item 10) rides the unit's row: the pull
+  // request of ship's own the requester named opens the pipeline at its first
+  // review round, with no pre-check, no branch and no round 0.
+  const resume = plan.units.find((u) => u.unit === unit)?.resume;
   let state: UnitPipelineState = openUnitPipeline(
     {
       unit: { id: unit, branch: node.branch },
@@ -423,6 +427,7 @@ async function runUnit(
       // approved at its head and the checks are green; any other branch — a
       // task string's ship branch — waits for a person.
       merge: parsePlanBranch(node.branch) !== undefined ? "runner" : "person",
+      ...(resume !== undefined ? { resume } : {}),
     },
     start.at,
   );
@@ -437,10 +442,14 @@ async function runUnit(
         const body = { ...tag, index: note.index, agent: note.agent, outcome: note.outcome };
         await step.do(`${unit}/note/${++notes}`, STEP_CONFIG, () => call(bot, "round", body));
       } else {
+        // The last coding child's run is named so the bot can put its handoff
+        // — the deviations it recorded — on the unit's board issue beside the
+        // ending (agent-ship item 14).
         const body = {
           ...tag,
           ending: { kind: note.ending.kind, report: renderUnitReport(state) },
           ...(state.pr !== undefined ? { pr: state.pr } : {}),
+          ...(state.lastCodingRunId !== undefined ? { codingRunId: state.lastCodingRunId } : {}),
         };
         await step.do(`${unit}/end`, STEP_CONFIG, () => call(bot, "unit-end", body));
       }

@@ -145,6 +145,11 @@ export interface CoordinatorUnit {
   /** The unit's board issue in the repository, when one titled by the unit id exists — the handoff's destination. */
   issue?: number;
   pr?: { number: number; url: string };
+  /** Resume at review (agent-ship item 10): the open pull request of ship's own
+   *  the requester named, so the unit's pipeline opens at its first review round
+   *  — no pre-check, no branch, no round 0. A task string's row only; written by
+   *  the hand-off, read by the driver into the machine's input. */
+  resume?: { pr: number; headSha?: string; url?: string };
   /** The round boundaries the coordinator reported, oldest first (the `ship_round` vocabulary). */
   rounds: Array<{ index: number; agent: string; outcome: string; at: number }>;
   /** How the unit ended: the ending's kind and the thread's report, when it has. */
@@ -163,6 +168,11 @@ const isOptionalText = (v: unknown): boolean => v === undefined || isText(v);
 const isFinite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 const isPr = (v: unknown): boolean => isObject(v) && isFinite(v.number) && isText(v.url, 2048);
+const isResume = (v: unknown): boolean =>
+  isObject(v) &&
+  isFinite(v.pr) &&
+  (v.headSha === undefined || isText(v.headSha)) &&
+  (v.url === undefined || isText(v.url, 2048));
 
 /** Structural check on a record from outside the process (a Worker response, an HTTP body). */
 export function isCoordinatorInstance(v: unknown): v is CoordinatorInstance {
@@ -194,6 +204,7 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   if (!isOptionalText(r.threadKey) || !isOptionalText(r.sourceUrl)) return false;
   if (r.issue !== undefined && !isFinite(r.issue)) return false;
   if (r.pr !== undefined && !isPr(r.pr)) return false;
+  if (r.resume !== undefined && !isResume(r.resume)) return false;
   if (
     !Array.isArray(r.rounds) ||
     r.rounds.length > MAX_ROUNDS ||

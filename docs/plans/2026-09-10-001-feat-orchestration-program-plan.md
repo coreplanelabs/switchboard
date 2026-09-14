@@ -518,6 +518,7 @@ Eight phases, in dependency order; the harness track runs in parallel with the r
 
 ### U15. Retire the in-process round loop and settle the inherited follow-ups
 
+- **Status**: built. The loop is deleted and every `agent:ship` request hands to the runner; two decisions the unit left open were taken at build time: the `ship.coordinator` key is removed and refused at load by name (a deployment without the runner's prerequisites is refused naming what is missing, never served some other way), and the resume at review — `agent:ship` with a ship pull request's URL — runs on the runner too, as a one-unit instance whose row carries the pull request so the machine opens at its review round (the machine already had the input; the driver and the row gained the field). The runner's `unit-end` now renders the last coding child's handoff into the board comment, since the loop's coding round was the only path that posted it. The ledger below has no row without a disposition; the ship-restart plan is `superseded` by this plan.
 - **Goal**: One ship implementation, and every follow-up this plan inherited has a disposition.
 - **Requirements**: R16, R23
 - **Dependencies**: U13 receipted live — a plan run under `ship.coordinator: true` has carried two units through review to a merge the runner made (the same trigger U14's status names); U14 stays deferred with its own trigger and is not a dependency.

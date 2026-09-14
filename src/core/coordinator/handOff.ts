@@ -1,17 +1,19 @@
 // The ship request handed to the plan runner (docs/reference/specs/agent-ship.md
 // item 16; docs/decisions/0031-the-coordinator-runs-a-plan-not-a-pull-request.md):
-// what the bot does under `ship.coordinator: true` in place of the in-process
-// round loop. The request names a plan (`plan <path>.md [units …]`) or a task;
+// what the ship branch does with every `agent:ship` request once the preflight
+// admitted it. The request names a plan (`plan <path>.md [units …]`) or a task;
 // the bot reads the plan at the base ref and builds the runner's input — the
 // instance record (the requester, channel, thread, card, caps and run id every
 // step reads back; run-history item 49) and one unit row per selected unit
 // (item 50; a task is a plan of one unit, `task`, on the ship branch in the
-// requesting thread) — writes both to the state Worker, then asks its shim for
-// the Workflow instance under the plan's id and, from the second re-issue, its
-// attempt (a re-issue reruns the units the earlier attempts did not merge; a
-// live attempt refuses it). The reply says where the plan runs; every refusal
-// is a reply, and nothing is created on one. Pure over its seams: the file
-// read, the instance store, the create and the status read.
+// requesting thread; a resume at review — the requester named an open pull
+// request of ship's own — is that one unit with the pull request on its row, so
+// the runner opens it at the review round) — writes both to the state Worker,
+// then asks its shim for the Workflow instance under the plan's id and, from
+// the second re-issue, its attempt (a re-issue reruns the units the earlier
+// attempts did not merge; a live attempt refuses it). The reply says where the
+// plan runs; every refusal is a reply, and nothing is created on one. Pure over
+// its seams: the file read, the instance store, the create and the status read.
 
 import type { ShipEntry } from "../ship/preflight.js";
 import { shipTaskText } from "../ship/preflight.js";
@@ -123,13 +125,29 @@ async function plan(
   const request = parseShipPlanRequest(shipTaskText(input.requestText, entry.repo));
   if (request === undefined) {
     const id = `ship-${input.runId}`;
+    const resume = entry.resume;
+    const prUrl =
+      resume?.url ?? (resume !== undefined ? `https://github.com/${entry.repo}/pull/${resume.pr}` : undefined);
     return {
       ok: true,
       planned: {
         kind: "task",
         instance: { id, ...identity, branch: entry.branch },
-        units: [{ instanceId: id, unit: TASK_UNIT, slug: TASK_UNIT, branch: entry.branch, dependsOn: [], rounds: [] }],
-        where: `the task runs on \`${entry.branch}\` in this thread under your grants; this card follows it and the report lands here.`,
+        units: [
+          {
+            instanceId: id,
+            unit: TASK_UNIT,
+            slug: TASK_UNIT,
+            branch: entry.branch,
+            dependsOn: [],
+            rounds: [],
+            ...(resume !== undefined ? { resume } : {}),
+          },
+        ],
+        where:
+          resume !== undefined
+            ? `the review loop of ${prUrl} resumes at its next review round on \`${entry.branch}\` in this thread under your grants — no new coding round first; this card follows it and the report lands here.`
+            : `the task runs on \`${entry.branch}\` in this thread under your grants; this card follows it and the report lands here.`,
       },
     };
   }

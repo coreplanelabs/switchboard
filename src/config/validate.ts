@@ -301,19 +301,29 @@ export function validateRestrict(raw: unknown): Restriction {
   return parsed.restrict;
 }
 
+/** The `ship` block's keys, held equal to `ShipConfig` the way the top-level keys are. */
+const SHIP_KEYS: Record<keyof ShipConfig, true> = { maxRounds: true, maxMinutes: true };
+
 /** `ship` caps (docs/reference/specs/agent-ship.md item 8): both bounds enforced at load
- *  so a typo cannot silently become "no cap" (mirrors validateRunHistory). */
+ *  so a typo cannot silently become "no cap" (mirrors validateRunHistory). Any
+ *  other key is refused by name — `coordinator` above all, the switch that once
+ *  chose between the plan runner and an in-process loop: the runner is the one
+ *  ship implementation now, so a config still carrying the key is told to drop
+ *  it rather than left believing it chose anything (docs/reference/migrations.md). */
 function validateShip(ship: ShipConfig): void {
   if (typeof ship !== "object" || ship === null) throw new Error("config.yaml: ship must be a mapping");
+  for (const key of unknownKeys(ship, SHIP_KEYS)) {
+    if (key === "coordinator")
+      throw new Error(
+        "config.yaml: ship.coordinator is no longer a key — every agent:ship request runs on the plan runner; remove it (docs/reference/migrations.md)",
+      );
+    throw new Error(`config.yaml: ship.${key} is not a known key`);
+  }
   for (const key of ["maxRounds", "maxMinutes"] as const) {
     const v = ship[key];
     if (v !== undefined && (!Number.isInteger(v) || v < 1))
       throw new Error(`config.yaml: ship.${key} must be an integer >= 1`);
   }
-  // The plan runner is a switch, not a knob: anything but a boolean is a typo
-  // that must not read as "on".
-  if (ship.coordinator !== undefined && typeof ship.coordinator !== "boolean")
-    throw new Error("config.yaml: ship.coordinator must be true or false");
 }
 
 /** The `spawn` block's keys, held equal to `SpawnConfig` the way the top-level keys are. */

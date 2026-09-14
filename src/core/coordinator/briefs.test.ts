@@ -7,7 +7,7 @@ import { composeChild, contractFor, TASK_UNIT, type BriefReaders, type ChildRunF
 // names a brief in ids and the bot composes the child's turn: the unit's
 // contract from the plan at the base ref for round 0, the review turn with the
 // prior round's findings and dispositions, the fix turn with the findings —
-// what the in-process pipeline's rounds are told, from what the bot holds.
+// what a round of the ship pipeline is told, from what the bot holds.
 
 const PLAN = `# Fixture program - Plan
 

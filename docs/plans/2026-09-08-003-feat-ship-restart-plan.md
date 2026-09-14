@@ -2,7 +2,8 @@
 title: Ship pipeline after a bot death - Plan
 type: feat
 date: 2026-09-08
-status: proposed
+status: superseded
+superseded_by: 2026-09-10-001-feat-orchestration-program-plan.md
 extends: 2026-09-08-001-feat-durable-runs-plan.md
 artifact_contract: ce-unified-plan/v1
 artifact_readiness: review-ready

@@ -71,6 +71,7 @@ import type { RunHistoryWriter } from "../core/runHistoryWriter.js";
 import { RUN_ID_PATTERN, RUN_LIST_MAX_LIMIT, type RunRecord } from "../core/runRecord.js";
 import type { RunsService, RunView } from "../core/runsService.js";
 import { parsePlanBranch, type Brief } from "../core/ship/coordinator.js";
+import { isHandoffShape, renderHandoffComment, type Handoff } from "../core/ship/handoff.js";
 import { normalizeHead, sameCommit } from "../core/reviewedHead.js";
 import { resolveShipCaps, shipRoundHeader } from "../core/shipPipeline.js";
 import { createCardShell } from "../core/statusCardFrame.js";
@@ -1053,12 +1054,20 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       );
     }
   }
-  // The unit's ending is its handoff to the board (agent-ship item 14's
-  // destination): when the row names an issue, the report lands there too —
-  // a merge GitHub refused, a cap, a stop — so the board says how the unit
-  // ended without a person copying it over. Best effort, like the thread's.
+  // The unit's ending reaches the board (agent-ship item 14's destination):
+  // when the row names an issue, the report lands there too — a merge GitHub
+  // refused, a cap, a stop — and under it the last coding child's typed handoff
+  // as the parent renders it, so a deviation the child recorded reaches the
+  // board without a person copying it over. Best effort, like the thread's.
   if (row.issue !== undefined) {
-    const comment = `**Plan runner — ${row.unit} ended \`${ending.kind}\`**${updated.pr ? ` · ${updated.pr.url}` : ""}\n\n${ending.report}`;
+    const handoff = await codingHandoffOf(deps, instance, body.codingRunId);
+    const rendered =
+      handoff !== undefined
+        ? renderHandoffComment(handoff, { unitId: row.unit, ...(updated.pr !== undefined ? { pr: updated.pr } : {}) })
+        : undefined;
+    const comment =
+      `**Plan runner — ${row.unit} ended \`${ending.kind}\`**${updated.pr ? ` · ${updated.pr.url}` : ""}\n\n${ending.report}` +
+      (rendered !== undefined ? `\n\n${rendered}` : "");
     await deps.github
       .commentIssue(instance.repo, row.issue, comment)
       .catch((err) =>
@@ -1074,6 +1083,22 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   ).catch(() => {});
   (deps.log ?? console.log)(`[coordinator] ${instance.id} ${row.unit}: ended ${ending.kind}`);
   return json(200, { ok: true, told, at });
+}
+
+/** The typed handoff the unit's last coding child submitted (agent-ship item
+ *  14), read from its record — a run of this instance and no other, as
+ *  `read-record` reads; none for a run the history lacks, a run outside the
+ *  instance, a record without one, or an id that is not a run id. Never a
+ *  refusal: the ending is recorded whatever became of the handoff. */
+async function codingHandoffOf(
+  deps: AdminCoordinatorDeps,
+  instance: CoordinatorInstance,
+  runId: unknown,
+): Promise<Handoff | undefined> {
+  if (typeof runId !== "string" || !RUN_ID_PATTERN.test(runId)) return undefined;
+  const res = await deps.runs.getRun(runId).catch(() => undefined);
+  if (res === undefined || !res.ok || res.value.parentInstanceId !== instance.id) return undefined;
+  return isHandoffShape(res.value.handoff) ? res.value.handoff : undefined;
 }
 
 // ---- the merge (docs/reference/specs/http-ingress.md item 9; record 0031's merge grant) ------------
