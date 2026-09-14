@@ -51,7 +51,7 @@ export function reviewSystemPrompt(task: PiReviewTask, site: ReviewSite): string
     prTarget: { repo, pr: task.number, ref: task.headRef, baseRef: task.baseRef },
     blocks: { memory: undefined, config: undefined, instructions: undefined, skills: undefined },
   });
-  const driverNote = `DRIVER NOTE: this is a harness measurement without a bot behind it, so ${ABSENT_RELAYS.map((t) => `\`${t}\``).join(", ")} are not available in this run — read the change with git (\`git diff origin/${task.baseRef}...HEAD\`, \`git diff --stat\`) and skip the status card. \`submit_verdict\` records your verdict for the receipt; nothing is posted anywhere.`;
+  const driverNote = `DRIVER NOTE: this is a harness measurement without a bot behind it, so ${ABSENT_RELAYS.map((t) => `\`${t}\``).join(", ")} are not available in this run — read the change with git (\`git diff origin/${task.baseRef}...HEAD\`, \`git diff --stat\`) and skip the status card. \`submit_verdict\` records your verdict for the receipt — its \`head\` is held against the reviewed head exactly as the post-step's guard holds it; nothing is posted anywhere.`;
   return [compose({ sha: task.head, verified: true }), harnessPromptNote(REVIEW_RELAY_TOOLS, "read"), driverNote].join(
     "\n\n",
   );

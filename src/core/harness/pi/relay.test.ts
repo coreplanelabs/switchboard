@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { Executor } from "../../../execution/executor.js";
-import { TOOLSETS, type RunnableTool } from "../../../tools/workspace.js";
+import { TOOLSETS, submitVerdictTool, type RunnableTool } from "../../../tools/workspace.js";
 import { buildReviewPostBody, type ReviewVerdict } from "../../reviewVerdict.js";
+import { checkReviewedHead } from "../../reviewedHead.js";
 import type { RunEvent } from "../../runEvents.js";
 import { recordingSink } from "../../testing/recordingSink.js";
 import { createTracer } from "../../trace/tracer.js";
@@ -13,6 +14,7 @@ import {
   runRelayedTool,
   type LiveHarness,
 } from "./relay.js";
+import { relayedTools } from "./harness.js";
 
 // Feature: docs/reference/specs/harness-pi.md item 7 — the bot's side of the
 // extension: the tool definitions served as they are declared, the gate that
@@ -103,6 +105,23 @@ describe("relayedToolDefinitions", () => {
       { name: "submit_pr_description", description: "the PR", inputSchema: throwing.inputSchema },
       { name: "github_file", description: "a file", inputSchema: seeing.inputSchema },
     ]);
+  });
+  it("a review run's pi is served the readonly toolset's submit_verdict as the native tool declares it — the description that says to run `git rev-parse HEAD`, and a schema requiring `head` beside the verdict and the summary (harness-pi item 11)", () => {
+    const { harness } = live({ identity: "read" });
+    harness.tools = relayedTools(TOOLSETS.readonly);
+    const served = relayedToolDefinitions(harness).find((d) => d.name === "submit_verdict")!;
+    expect(served).toEqual({
+      name: "submit_verdict",
+      description: submitVerdictTool.description,
+      inputSchema: submitVerdictTool.inputSchema,
+    });
+    expect(served.description).toContain("run `git rev-parse HEAD` in the checkout you read");
+    const schema = served.inputSchema as { properties: Record<string, unknown>; required: string[] };
+    expect(schema.required).toEqual(["verdict", "summary", "head"]);
+    expect(schema.properties.head).toEqual({
+      type: "string",
+      description: "Output of `git rev-parse HEAD` in the checkout you reviewed (the commit the review is about)",
+    });
   });
 });
 
@@ -239,6 +258,36 @@ describe("runRelayedTool — the verdict path", () => {
     expect(answer).toEqual({ content: [{ type: "text", text: nativeText }], isError: false });
     expect(nativeText).toMatch(/^error: verdict must be exactly/);
     expect(relayed).toEqual([]);
+  });
+  it("a relayed verdict naming no head is neither refused nor stamped: the run's onVerdict receives what the native call yields — no head — and the reviewed-head guard then fails closed on it unless the worktree's own HEAD was observed", async () => {
+    const submitVerdict = TOOLSETS.readonly.find((t) => t.name === "submit_verdict")!;
+    const relayed: ReviewVerdict[] = [];
+    const native: ReviewVerdict[] = [];
+    const { harness } = live({ identity: "read" });
+    harness.tools = [submitVerdict];
+    harness.toolContext = { executor, onVerdict: (v) => void relayed.push(v) };
+    const headless = { verdict: "approve", summary: "looks correct" };
+    const answer = await runRelayedTool(harness, { toolCallId: "c5", tool: "submit_verdict", input: headless });
+    const nativeText = await submitVerdict.run(headless, { executor, onVerdict: (v) => void native.push(v) });
+    expect(answer).toEqual({ content: [{ type: "text", text: nativeText }], isError: false });
+    expect(nativeText).toBe("verdict recorded: approve");
+    expect(relayed).toEqual(native);
+    expect(relayed).toEqual([{ verdict: "approve", summary: "looks correct" }]);
+    expect(relayed[0].head).toBeUndefined();
+    // The guard's two sources: the model's head is the fallback for a
+    // workspace whose HEAD could not be read — a head the relay wrote from the
+    // run's expectation would pass exactly the check that exists to catch a
+    // review of another commit — and the observed HEAD rescues nothing but
+    // the case where the model said nothing.
+    expect(checkReviewedHead({ expected: HEAD, reported: relayed[0].head })).toEqual({
+      ok: false,
+      reason: "reviewed head unknown — the workspace HEAD could not be read and no head was reported with the verdict",
+    });
+    expect(checkReviewedHead({ expected: HEAD, observed: HEAD, reported: relayed[0].head })).toEqual({
+      ok: true,
+      head: HEAD,
+      source: "observed",
+    });
   });
 });
 
