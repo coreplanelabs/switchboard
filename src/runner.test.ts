@@ -770,6 +770,70 @@ describe("stuck-loop guard (docs/reference/specs/run-loop.md item 18)", () => {
     expect(JSON.stringify(finale.messages[finale.messages.length - 1].content)).toMatch(/failed 6 times identically/);
   });
 
+  it("the nudge is one-shot: it does not repeat while the streak sits pinned and other tools succeed", async () => {
+    const picky: Executor = {
+      ...fakeExecutor,
+      exec: async (cmd) => (cmd.includes("make build") ? "exit 1: boom" : "ok"),
+    };
+    const same = (id: string) => bashCmd(id, "make build");
+    // Three identical failures pin the streak at 3, then successful calls to a
+    // different tool for several turns: the nudge must ride once, not every turn.
+    const provider = scripted([
+      same("t1"),
+      same("t2"),
+      same("t3"),
+      bashCmd("t4", "echo ok"),
+      bashCmd("t5", "echo ok"),
+      bashCmd("t6", "echo ok"),
+      text("done"),
+    ]);
+    const answer = await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 20 }),
+      messages: [go],
+      toolContext: { executor: picky },
+      now: () => 0,
+    });
+    expect(answer).toBe("done");
+    expect(nudgeTexts(provider).length / provider.requests.length).toBeLessThanOrEqual(1);
+    // Count distinct nudge injections: the last request's transcript holds them all.
+    const lastReq = provider.requests[provider.requests.length - 1];
+    const injected = lastReq.messages
+      .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
+      .filter((p) => p.type === "text" && p.text.includes("failed 3 times identically"));
+    expect(injected).toHaveLength(1);
+  });
+
+  it("a batch jumping the streak past 3 still gets exactly one nudge", async () => {
+    const same = (id: string) => bashCmd(id, "make build");
+    const batch = (a: string, b: string): CompletionResult => ({
+      content: [
+        { type: "tool_use", id: a, name: "bash", input: { command: "make build" } },
+        { type: "tool_use", id: b, name: "bash", input: { command: "make build" } },
+      ],
+      stopReason: "tool_use",
+    });
+    // Two single failures (streak 2), then a batch of two identical failures
+    // lands the streak on 3 and 4 within one dispatch: the post-dispatch check
+    // never sees exactly 3, but the nudge still rides that turn — once.
+    const provider = scripted([same("t1"), same("t2"), batch("t3", "t4"), text("done")]);
+    const answer = await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 20 }),
+      messages: [go],
+      toolContext: { executor: failing },
+      now: () => 0,
+    });
+    expect(answer).toBe("done");
+    const lastReq = provider.requests[provider.requests.length - 1];
+    const injected = lastReq.messages
+      .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
+      .filter((p) => p.type === "text" && p.text.includes("failed 3 times identically"));
+    expect(injected).toHaveLength(1);
+  });
+
   it("a different argument resets the streak — no nudge", async () => {
     const provider = scripted([
       bashCmd("t1", "make build"),
