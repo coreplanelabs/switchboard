@@ -15,7 +15,7 @@ In ten minutes it will be answering you in your terminal and in a Slack channel,
 | | |
 |---|---|
 | **One process** | The bot. It talks to your terminal, and to Slack over Socket Mode: no public URL, no Docker, no hosted service in between. |
-| **Three agents** | `general` answers and reads links. `review` reviews a pull request. `coding` makes a change and opens the PR. Say `agent:review` or `agent:coding` in a message to pick one; the default is `general`. |
+| **Three agents** | `general` answers and reads links. `review` reviews a pull request. `coding` makes a change and opens the PR. Say `agent:review` or `agent:coding` in a message to force one; the default is `general`, and with the router on (`routing.auto`, [Turn features on and off](../how-to/turn-features-on-and-off.md)) a plain message picks its own agent and the card says why. |
 | **Your keys, at home** | Keys live in `~/.switchboard/.env`, readable only by you. Every later command finds them from any directory. |
 
 ## Part 1: an answer in your terminal

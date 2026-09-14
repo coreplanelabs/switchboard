@@ -16,7 +16,7 @@ Placed right after the mention, before the request text:
 
 | Directive | Example | Effect |
 |---|---|---|
-| `agent:<name>` | `agent:review` | run this agent for this message only |
+| `agent:<name>` | `agent:review` | force this agent for this message; without it a plain message picks its own agent where the router is on (`routing.auto`, [Turn features on and off](../how-to/turn-features-on-and-off.md)) and runs the default otherwise |
 | `model:<provider>/<model>` | `model:openai/gpt-5` | use this model for this message only |
 | `effort:<low\|medium\|high\|xhigh\|max>` | `effort:low` | how hard the model thinks this turn |
 | `budget:<minutes>` | `budget:30` | cap this run's wall clock, in whole minutes (at least 2); it only ever narrows the agent's own budget or a boundary's, and the card says what it did |
