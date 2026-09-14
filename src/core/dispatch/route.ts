@@ -153,20 +153,23 @@ export function routeMaxOutputTokens(compound?: CompoundOffer): number {
  *  so a provider that answers text anyway meets the same contract. */
 export function routeTool(presets: readonly RoutablePreset[], compound?: CompoundOffer): ToolDef {
   const names = presets.map((p) => p.name);
+  // The rules ride the schema too: a forced tool call reads its descriptions
+  // as closely as the system prompt, and a bare `parts` field invites a split.
+  const table = presets.map((p) => `${p.name}: ${oneLine(p.description)}`).join("; ");
   const properties: Record<string, unknown> = {
     preset: {
       type: "string",
       enum: compound ? [...names, COMPOUND_PRESET] : names,
-      description: compound
-        ? `the preset for the request; "${COMPOUND_PRESET}" only for a compound, with parts`
-        : "the preset for the request",
+      description: `the least capable preset whose description covers the request — ${table}${
+        compound ? `; ${COMPOUND_PRESET}: only for a compound request, with parts` : ""
+      }`,
     },
     reason: { type: "string", description: "one line, under 100 characters: why this preset" },
     ...(compound
       ? {
           parts: {
             type: "array",
-            description: `the independent parts of a compound request, each rewritten so it stands alone; only with preset "${COMPOUND_PRESET}"`,
+            description: `only when the request has two or more INDEPENDENT asks on different subjects, each rewritten so it stands alone, with preset "${COMPOUND_PRESET}". A single ask with several steps is one request on one preset: omit parts and name that preset. When one ask is in doubt, omit parts.`,
             minItems: 2,
             maxItems: compound.maxParts,
             items: {
@@ -264,7 +267,7 @@ function compoundRules(offer: CompoundOffer): string[] {
  *  the allowlist are untouched by it. */
 function imperativeRule(writers: readonly string[]): string {
   const names = writers.map((w) => `\`${w}\``).join(" or ");
-  return `Short imperatives: one terse order to change something or to make a failure go away — "fix it", "make it pass", "make the tests green", "add X", "rename Y", "bump Z" — is a request to change code even when it names no file, repository or cause: the channel or thread it arrives in is bound to a repository, and the preset that implements changes finds the failure itself. For it, answer ${names}. A question or a read-only ask about the same failure — "why did ci fail?", "check whether ci is red", "tell me why the build failed", "list the failing tests" — changes nothing: answer a read-only preset that covers it, never ${names}. An ask to look at, check or judge a pull request is a review, not an order to change it.`;
+  return `Short imperatives: one terse order to change something or to make a failure go away — "fix it", "make it pass", "make the tests green", "add X", "rename Y", "bump Z" — is a request to change code even when it names no file, repository or cause: the channel or thread it arrives in is bound to a repository, and the preset that implements changes finds the failure itself. For it, answer ${names}. A question or a read-only ask about the same failure — "why did ci fail?", "check whether ci is red", "tell me why the build failed", "list the failing tests" — changes nothing: answer a read-only preset that covers it, never ${names}. An ask to look at, check or judge a pull request that is named (a link or a number) is a review, not an order to change it; a question about a failure with no pull request named is not a review.`;
 }
 
 /** A reason as the card and the record carry it: one line, redacted, capped. */
