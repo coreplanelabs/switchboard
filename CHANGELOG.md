@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.216.0](https://github.com/coreplanelabs/switchboard/compare/v1.215.2...v1.216.0) (2026-09-14)
+
+
+### Features
+
+* **conductor:** a child is its thread — a reply in a spawned thread is a run of the same child, the live parent hears it as a follow-up from that child, and the child's rows follow the thread's newest run ([#1098](https://github.com/coreplanelabs/switchboard/issues/1098)) ([206d207](https://github.com/coreplanelabs/switchboard/commit/206d207c4153886cb474551f9855d7b264931956))
+
+
+### Bug fixes
+
+* **runs:** the seed record names the run's session log, so a run is tracked and resumable again — every run since the log shipped detached on its first step ([#1096](https://github.com/coreplanelabs/switchboard/issues/1096)) ([af20537](https://github.com/coreplanelabs/switchboard/commit/af205375994a10f955bda1bc2087741a2e0b456a))
+
 ## [1.215.2](https://github.com/coreplanelabs/switchboard/compare/v1.215.1...v1.215.2) (2026-09-14)
 
 
