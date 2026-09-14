@@ -28,6 +28,7 @@ import { TOOLSETS, type RunnableTool, type ToolContext } from "./tools/workspace
 import type { Backend } from "./core/trace/attrs.js";
 import type { Span } from "./core/trace/types.js";
 import { formatDuration } from "./core/time/formatDuration.js";
+import { callSignature } from "./core/runFriction.js";
 
 // The runner is the provider-neutral agent loop: send messages, execute any
 // requested tools, feed results back, repeat until the model stops, the wall
@@ -205,6 +206,25 @@ export const turnGuardAnswer = (text: string, pace: string): string =>
   text
     ? `⚠️ _Stopped after ${pace} — that pace looks like a loop; findings so far:_\n\n${text}`
     : `Stopped after ${pace} — that pace looks like a loop — without finishing. Partial work may exist in the workspace — look for a retry loop in the run's events before trying again.`;
+/** The stuck-loop guard (docs/reference/specs/run-loop.md item 18): consecutive
+ *  identical failures of one call signature (callSignature — the tool plus its
+ *  argument-carrying summary). At the nudge threshold the model gets one line
+ *  asking it to change approach; at the write-up threshold the run takes the
+ *  forced write-up path, labeled like the budget write-ups. */
+export const STUCK_NUDGE_AT = 3;
+export const STUCK_WRITE_UP_AT = 6;
+export const stuckLoopNudge = (): string =>
+  `⚠️ That exact tool call has now failed ${STUCK_NUDGE_AT} times identically. Change approach — different arguments, a different tool, a smaller step — or write up what you have.`;
+export const stuckLoopNote = (): string =>
+  `stuck loop: the same call failed ${STUCK_WRITE_UP_AT} times identically — writing up findings so far`;
+export const stuckLoopInstruction = (): string =>
+  `The same tool call has failed ${STUCK_WRITE_UP_AT} times identically; the run is stuck and can make no more tool calls. ${WRITE_UP_REQUEST}`;
+/** The thread's answer when the stuck-loop guard fired. */
+export const stuckLoopAnswer = (text: string): string =>
+  text
+    ? `⚠️ _Stopped after the same call failed ${STUCK_WRITE_UP_AT} times identically — findings so far:_\n\n${text}`
+    : `Stopped after the same call failed ${STUCK_WRITE_UP_AT} times identically, without finishing. Partial work may exist in the workspace — look at the failing call in the run's events before trying again.`;
+
 /** The thread's answer after a soft stop. */
 export const softStopAnswer = (text: string): string =>
   text
@@ -376,6 +396,26 @@ async function runLoop(
   // Set when consecutive exec-infra failures cross the threshold: the loop ends
   // and the finale reports a dead sandbox instead of the ordinary budget notice.
   let sandboxDead = false;
+  // The stuck-loop guard's streak (docs/reference/specs/run-loop.md item 18):
+  // consecutive identical failures of one call signature. Any other failed
+  // signature moves the streak to it; a success of the tracked signature ends
+  // it. Set when the streak reaches the write-up threshold: the loop ends and
+  // the finale reports a stuck loop instead of the budget notice.
+  let stuckLoop = false;
+  let stuckSig: string | undefined;
+  let stuckStreak = 0;
+  const trackStuck = (tu: ToolUsePart, ok: boolean) => {
+    const sig = callSignature(tu.name, redactAndCap(describeToolCall(tu)));
+    if (ok) {
+      if (sig === stuckSig) {
+        stuckSig = undefined;
+        stuckStreak = 0;
+      }
+      return;
+    }
+    stuckStreak = sig === stuckSig ? stuckStreak + 1 : 1;
+    stuckSig = sig;
+  };
 
   // update_status-only turns don't count against the turn guard (bookkeeping,
   // not work); the absolute iteration cap still bounds the loop.
@@ -430,13 +470,15 @@ async function runLoop(
     const body = async (callSpan: Span | undefined): Promise<ContentPart> => {
       if (announceIt) announce(tu, callSpan?.id);
       const spanId = callSpan ? { spanId: callSpan.id } : {};
-      const settle = (ok: boolean, extra: { exitCode?: number; infra?: true } = {}) =>
+      const settle = (ok: boolean, extra: { exitCode?: number; infra?: true } = {}) => {
+        trackStuck(tu, ok); // the stuck-loop guard sees every settled outcome (item 18)
         callSpan?.end(ok ? "ok" : "error", {
           callId: tu.id,
           ok,
           ...(extra.exitCode !== undefined ? { exitCode: extra.exitCode } : {}),
           ...(extra.infra ? { infra: true } : {}),
         });
+      };
       const tool = toolsByName.get(tu.name);
       if (!tool) {
         emit({
@@ -743,6 +785,10 @@ async function runLoop(
       reportedUpTo = messages.length;
     }
     const results = await dispatchToolUses(toolUses);
+    // Stuck-loop nudge (docs/reference/specs/run-loop.md item 18): the same call
+    // just failed for the STUCK_NUDGE_AT-th identical time — one line, attached
+    // to the results, asking the model to change approach or write up.
+    if (stuckStreak === STUCK_NUDGE_AT) results.push({ type: "text", text: stuckLoopNudge() });
     // One-time wrap-up warning as time runs low, attached to the tool results.
     if (!warned && now() >= warnAt) {
       warned = true;
@@ -765,6 +811,12 @@ async function runLoop(
       sandboxDead = true;
       break;
     }
+    // Stuck-loop write-up threshold (item 18): the nudge did not change the
+    // call — end the loop; the finale below says why.
+    if (stuckStreak >= STUCK_WRITE_UP_AT) {
+      stuckLoop = true;
+      break;
+    }
   }
 
   // The loop ended for one of three reasons; all end through this one
@@ -782,6 +834,14 @@ async function runLoop(
     const diagnosis = sandboxDeadDiagnosis(execTracker.lastInfraError);
     note("sandbox_dead", `${diagnosis} — aborting instead of retrying into a dead sandbox`);
     return await finishSandboxDead(complete, opts, messages, system, diagnosis);
+  }
+
+  // The stuck-loop guard fired (item 18): the forced write-up, labeled like the
+  // budget write-ups but naming the stuck call streak as the reason.
+  if (stuckLoop) {
+    note("stuck_loop", stuckLoopNote());
+    const text = await runFinale(complete, opts, messages, system, stuckLoopInstruction());
+    return stuckLoopAnswer(text);
   }
 
   // The wall clock ran out, or the turn guard caught a run pacing like a loop:

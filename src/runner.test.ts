@@ -705,6 +705,115 @@ describe("fleet-busy capacity errors do not trip fail-fast", () => {
   });
 });
 
+describe("stuck-loop guard (docs/reference/specs/run-loop.md item 18)", () => {
+  const go = { role: "user" as const, content: [{ type: "text" as const, text: "go" }] };
+  const bashCmd = (id: string, command: string): CompletionResult => ({
+    content: [{ type: "tool_use", id, name: "bash", input: { command } }],
+    stopReason: "tool_use",
+  });
+  /** Every command exits nonzero, identically. */
+  const failing: Executor = { ...fakeExecutor, exec: async () => "exit 1: boom" };
+  const nudgeTexts = (provider: { requests: CompletionRequest[] }) =>
+    provider.requests
+      .flatMap((r) => r.messages)
+      .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
+      .filter((p) => p.type === "text" && p.text.includes("failed 3 times identically"));
+
+  it("injects a one-line nudge after the same call has failed 3 times identically", async () => {
+    const same = (id: string) => bashCmd(id, "make build");
+    const provider = scripted([same("t1"), same("t2"), same("t3"), text("done")]);
+    const answer = await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 20 }),
+      messages: [go],
+      toolContext: { executor: failing },
+      now: () => 0,
+    });
+    expect(answer).toBe("done");
+    // The nudge rides the third failure's results turn — the 4th request sees it, the 3rd does not.
+    expect(JSON.stringify(provider.requests[2].messages)).not.toContain("failed 3 times identically");
+    const last = provider.requests[3].messages[provider.requests[3].messages.length - 1];
+    expect(JSON.stringify(last.content)).toMatch(/failed 3 times identically.*(change|different|write up)/i);
+    expect(nudgeTexts(provider).length).toBeGreaterThan(0);
+  });
+
+  it("forces a stuck_loop write-up after 6 identical failures — labeled like the budget write-ups, with a typed note", async () => {
+    const same = (id: string) => bashCmd(id, "make build");
+    const provider = scripted([
+      same("t1"),
+      same("t2"),
+      same("t3"),
+      same("t4"),
+      same("t5"),
+      same("t6"),
+      text("stuck findings"),
+    ]);
+    const events: RunEvent[] = [];
+    const answer = await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 40 }),
+      messages: [go],
+      toolContext: { executor: failing },
+      onEvent: (e) => events.push(e),
+      now: () => 0,
+    });
+    expect(answer).toContain("⚠️ _Stopped after the same call failed 6 times identically — findings so far:_");
+    expect(answer).toContain("stuck findings");
+    expect(answer).not.toContain("budget");
+    const notes = events.filter((e) => e.type === "run_note" && e.kind === "stuck_loop");
+    expect(notes).toHaveLength(1);
+    // The finale is the forced tool-less write-up, told why.
+    const finale = provider.requests[provider.requests.length - 1];
+    expect(finale.tools).toBeUndefined();
+    expect(JSON.stringify(finale.messages[finale.messages.length - 1].content)).toMatch(/failed 6 times identically/);
+  });
+
+  it("a different argument resets the streak — no nudge", async () => {
+    const provider = scripted([
+      bashCmd("t1", "make build"),
+      bashCmd("t2", "make build"),
+      bashCmd("t3", "make test"), // different argument: the streak starts over
+      bashCmd("t4", "make build"),
+      text("done"),
+    ]);
+    const answer = await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 20 }),
+      messages: [go],
+      toolContext: { executor: failing },
+      now: () => 0,
+    });
+    expect(answer).toBe("done");
+    expect(nudgeTexts(provider)).toHaveLength(0);
+  });
+
+  it("a success of the same call resets the streak — no nudge", async () => {
+    let calls = 0;
+    const flaky: Executor = {
+      ...fakeExecutor,
+      exec: async () => {
+        calls++;
+        return calls === 3 ? "ok" : "exit 1: boom"; // fail, fail, succeed, fail
+      },
+    };
+    const same = (id: string) => bashCmd(id, "make build");
+    const provider = scripted([same("t1"), same("t2"), same("t3"), same("t4"), text("done")]);
+    const answer = await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 20 }),
+      messages: [go],
+      toolContext: { executor: flaky },
+      now: () => 0,
+    });
+    expect(answer).toBe("done");
+    expect(nudgeTexts(provider)).toHaveLength(0);
+  });
+});
+
 describe("run-visibility events", () => {
   it("emits tool_call then tool_result for each tool use", async () => {
     const events: RunEvent[] = [];

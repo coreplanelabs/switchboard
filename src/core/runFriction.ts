@@ -254,6 +254,13 @@ function unionMs(intervals: ReadonlyArray<{ start: number; end: number }>): numb
   return total;
 }
 
+/** One tool call's identity for retry/streak accounting: the tool name plus
+ *  the call's one-line summary (which carries the arguments — a bash command,
+ *  a path, a url). Shared with the runner's stuck-loop guard
+ *  (docs/reference/specs/run-loop.md item 18), so both count "the same call"
+ *  identically. */
+export const callSignature = (tool: string, summary: string): string => `${tool} ${summary}`;
+
 /** Analyze a run's event stream. Pure and deterministic; never mutates `events`. */
 export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOptions = {}): FrictionDiagnosis {
   const slowToolMs = opts.slowToolMs ?? DEFAULT_SLOW_TOOL_MS;
@@ -405,7 +412,7 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
 
     if (ev.type === "tool_call") {
       toolCalls++;
-      if (failedCalls.has(`${ev.tool} ${ev.summary}`)) {
+      if (failedCalls.has(callSignature(ev.tool, ev.summary))) {
         findings.push({
           category: "retry",
           severity: "low",
@@ -432,7 +439,7 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
           ? { interval: { start: span.startedAt, end: span.startedAt + durationMs } }
           : {};
 
-      if (!ev.ok) failedCalls.add(`${ev.tool} ${callSummary}`);
+      if (!ev.ok) failedCalls.add(callSignature(ev.tool, callSummary));
 
       if (ev.infra) {
         // An infra-level failure is the sandbox, not the command: classify once,
