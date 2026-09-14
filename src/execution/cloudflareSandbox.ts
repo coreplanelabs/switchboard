@@ -2,6 +2,7 @@ import { BASH_TIMEOUT_MS, EXEC_CALL_MARGIN_MS, clampBashTimeout } from "./bashTi
 import {
   ExecCapacityError,
   ExecInfraError,
+  decodeBase64Read,
   execDeadline,
   truncate,
   type ExecOptions,
@@ -274,6 +275,14 @@ export class CloudflareSandboxExecutor implements Executor {
   async readFile(path: string, opts?: ExecTraceOptions): Promise<string> {
     const r = await this.call("/read", { path }, undefined, undefined, opts?.span);
     return truncate(String(r.content ?? ""));
+  }
+
+  /** The same `/read` route asked for `encoding: "base64"` (src/execution/binaryRead.ts);
+   *  the Worker refuses an over-cap file by name, and one that predates
+   *  binary reads answers text, which `decodeBase64Read` names instead of decoding. */
+  async readBytes(path: string, opts?: ExecTraceOptions): Promise<Uint8Array> {
+    const r = await this.call("/read", { path, encoding: "base64" }, undefined, undefined, opts?.span);
+    return decodeBase64Read(r, { where: "sandbox worker /read", path });
   }
 
   async writeFile(path: string, content: string, opts?: ExecTraceOptions): Promise<string> {

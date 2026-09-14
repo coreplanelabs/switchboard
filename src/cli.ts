@@ -49,8 +49,9 @@
 
 import "./loadEnv.js";
 import { Console } from "node:console";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
 import { OPERATOR_ROOT } from "./deploy/host.js";
 import { installationPath } from "./deploy/operatorRoot.js";
 import { loadAppConfig, openConfigStore, type AppConfig, type ConfigStore } from "./config.js";
@@ -340,9 +341,21 @@ export class ConsoleIO implements ChannelIO {
     private readonly threadKey: string = "cli",
     /** Prefixed to every line a child writes, so two runs on one stream stay legible. */
     private readonly prefix: string = "",
+    /** Where `attachFile` lands a run's files — a stream cannot carry bytes.
+     *  One holder for the conversation and its child threads; the temp dir
+     *  inside it is made on the first attachment, whichever thread's it is. */
+    private readonly attachments: { dir?: string } = {},
   ) {}
   async reply(text: string): Promise<void> {
     this.out.write("\n" + this.prefix + text + "\n");
+  }
+  /** The harness's file upload: the bytes written under the attachments dir,
+   *  the lead printed like a reply with the path a person can open. */
+  async attachFile(file: { name: string; bytes: Uint8Array; lead: string }): Promise<void> {
+    this.attachments.dir ??= mkdtempSync(join(tmpdir(), "switchboard-attachments-"));
+    const path = join(this.attachments.dir, basename(file.name));
+    writeFileSync(path, file.bytes);
+    await this.reply(`${file.lead}\n📎 ${file.name} (${file.bytes.byteLength} bytes) → ${path}`);
   }
   runFinished(receipt: RunReceipt): void {
     this.finished = receipt;
@@ -367,7 +380,10 @@ export class ConsoleIO implements ChannelIO {
     const n = ++this.children;
     await this.reply(lead);
     const threadKey = `${this.threadKey}/child-${n}`;
-    return { thread: { threadKey }, io: new ConsoleIO(this.out, threadKey, `${this.prefix}[child-${n}] `) };
+    return {
+      thread: { threadKey },
+      io: new ConsoleIO(this.out, threadKey, `${this.prefix}[child-${n}] `, this.attachments),
+    };
   }
 }
 

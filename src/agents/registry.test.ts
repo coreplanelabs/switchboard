@@ -182,6 +182,20 @@ describe("the workspace prompts name the image toolchain", () => {
     }
   });
 
+  // docs/reference/specs/agent-coding.md item 10: the one way a run's
+  // screenshot reaches the person, said identically in both coding prompts.
+  it("both coding prompts route files the person should see through attach_file — screenshots named, a link called not a picture; the review prompts do not", () => {
+    for (const [name, sys] of Object.entries({ coding: cold.coding, "coding resident": resident.coding })) {
+      expect(sys, name).toContain("attach_file");
+      expect(sys, name).toMatch(/screenshot from `playwright screenshot`/);
+      expect(sys, name).toMatch(/a link to a file on GitHub is not a picture/);
+      expect(sys, name).toMatch(/do not attach what you can say/);
+    }
+    const [a, b] = [cold.coding, resident.coding].map((s) => s.match(/Files the person should SEE[^\n]*/)![0]);
+    expect(a).toBe(b);
+    for (const sys of [cold.review, resident.review]) expect(sys).not.toContain("attach_file");
+  });
+
   it("the cold prompts offer Docker; the resident prompts say there is none — the resident image has no engine", () => {
     for (const [name, sys] of Object.entries(cold)) {
       expect(sys, name).toContain("and Docker (the engine starts on the first `docker` call)");

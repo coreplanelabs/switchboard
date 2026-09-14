@@ -11,6 +11,7 @@ import { EXEC_CALL_MARGIN_MS, clampBashTimeout } from "./bashTimeout.js";
 import {
   BASH_TIMEOUT_MS,
   ExecInfraError,
+  decodeBase64Read,
   execDeadline,
   truncate,
   type ExecOptions,
@@ -521,6 +522,27 @@ export class ResidentExecutor implements Executor {
       });
     }
     return truncate(String(data.content ?? ""));
+  }
+
+  /** The same `/read` route asked for `encoding: "base64"` (src/execution/binaryRead.ts),
+   *  with the same re-attach on an evicted worktree; a missing file is the
+   *  route's 404 as for `readFile`, an over-cap file and a Worker that predates
+   *  binary reads are `decodeBase64Read`'s plain errors. */
+  async readBytes(path: string, opts?: ExecTraceOptions): Promise<Uint8Array> {
+    const { status, data } = await this.opWithReattach(
+      "/read",
+      { path, encoding: "base64" },
+      undefined,
+      undefined,
+      opts?.span,
+    );
+    if (status !== 200) {
+      throw classifyError(new ExecInfraError(`resident /read: ${String(data.error ?? `HTTP ${status}`)}`), {
+        kind: "http",
+        code: String(status),
+      });
+    }
+    return decodeBase64Read(data, { where: "resident /read", path });
   }
 
   async writeFile(path: string, content: string, opts?: ExecTraceOptions): Promise<string> {

@@ -19,6 +19,12 @@
 import { getSandbox, Sandbox, type ExecOptions, type ExecResult } from "@cloudflare/sandbox";
 import { BASH_TIMEOUT_MAX_MS, clampBashTimeout } from "../../src/execution/bashTimeout.js";
 import {
+  base64ByteLength,
+  MAX_READ_BYTES,
+  readEncodingOf,
+  type Base64ReadAnswer,
+} from "../../src/execution/binaryRead.js";
+import {
   EXEC_KEEPALIVE_INTERVAL_MS,
   SANDBOX_SLEEP_AFTER,
   isRecycleError,
@@ -265,7 +271,22 @@ export default {
           );
         }
         case "/read": {
-          const file = await withSessionRecovery(sandbox, () => sandbox.readFile(abs(String(body.path ?? ""))));
+          // `encoding: "base64"` is a binary read (src/execution/binaryRead.ts):
+          // the SDK encodes the bytes, and a file over the cap is refused by
+          // name inside a 200 — the client counts a non-2xx as a sick Worker.
+          const encoding = readEncodingOf(body);
+          if (typeof encoding !== "string") return json({ error: encoding.error }, 400);
+          const path = abs(String(body.path ?? ""));
+          if (encoding === "base64") {
+            const file = await withSessionRecovery(sandbox, () => sandbox.readFile(path, { encoding: "base64" }));
+            const content = typeof file === "string" ? file : (file?.content ?? "");
+            const answer: Base64ReadAnswer =
+              base64ByteLength(content) > MAX_READ_BYTES
+                ? { encoding: "base64", tooLarge: true }
+                : { encoding: "base64", content };
+            return json(answer);
+          }
+          const file = await withSessionRecovery(sandbox, () => sandbox.readFile(path));
           return json({ content: typeof file === "string" ? file : (file?.content ?? "") });
         }
         case "/write": {

@@ -488,6 +488,21 @@ export class SlackIO implements ChannelIO {
     }
   }
 
+  /** A run's binary artifact in the thread — a screenshot renders inline, a
+   *  PDF as a preview — through the same `files.uploadV2` with the bytes as
+   *  the file. No fallback: a text reply cannot carry bytes, so a failed upload
+   *  propagates for the caller to report. */
+  async attachFile(file: { name: string; bytes: Uint8Array; lead: string }): Promise<void> {
+    await this.client.files.uploadV2({
+      channel_id: this.ev.channel,
+      thread_ts: this.ev.threadTs,
+      filename: file.name,
+      title: file.name,
+      file: Buffer.from(file.bytes),
+      initial_comment: mdToMrkdwn(file.lead),
+    });
+  }
+
   private async post(mrkdwn: string): Promise<void> {
     for (const chunk of chunkText(mrkdwn, SLACK_MSG_LIMIT)) {
       await this.client.chat.postMessage({

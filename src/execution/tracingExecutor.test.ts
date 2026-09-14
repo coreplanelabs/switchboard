@@ -55,6 +55,7 @@ describe("TracingExecutor", () => {
     expect(log.ended("exec.read_file")!.attrs).toEqual({ backend: "resident" });
     expect(ex.release).toBeUndefined(); // the inner has none, so neither does the wrapper
     expect(ex.moveTo).toBeUndefined();
+    expect(ex.readBytes).toBeUndefined();
   });
 
   it("wraps release and moveTo only when the inner executor has them; a throw ends the span `error` and propagates", async () => {
@@ -66,17 +67,21 @@ describe("TracingExecutor", () => {
       writeFile: async () => "x",
       release: async (mode) => ({ released: true, mode }) as never,
       moveTo: async (sha) => ({ sha }),
+      readBytes: async () => new Uint8Array([9]),
     };
     const { log, call } = traced();
     const ex = new TracingExecutor(inner, call);
     expect(await ex.moveTo!("abc123")).toEqual({ sha: "abc123" });
     await ex.release!("always");
+    expect(Array.from(await ex.readBytes!("shot.png"))).toEqual([9]);
     await expect(ex.exec("boom")).rejects.toBeInstanceOf(ExecInfraError);
     expect(log.ends.map((e) => [e.name, e.status])).toEqual([
       ["exec.move_to", "ok"],
       ["exec.release", "ok"],
+      ["exec.read_bytes", "ok"],
       ["exec.exec", "error"],
     ]);
+    expect(JSON.stringify(log.ended("exec.read_bytes"))).not.toMatch(/shot\.png/); // never the path
     expect(log.ended("exec.exec")!.attrs).toEqual({}); // no backend given, none recorded
   });
 });

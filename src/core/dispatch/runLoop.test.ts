@@ -7,6 +7,7 @@ import { getAgent } from "../../agents/registry.js";
 import { declaredProfile } from "../../config/profile.js";
 import { InMemoryGithubApi } from "../../execution/githubApi.js";
 import type { Provider } from "../../providers/types.js";
+import type { Executor } from "../../execution/executor.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import { createRunEnding } from "../runEnding.js";
 import { createRunHistoryWriter } from "../runHistoryWriter.js";
@@ -68,9 +69,15 @@ function provider(answer: string | Error): Provider {
 const msg = (text: string): IncomingMessage => ({ channelId: "slack:CX", userId: "slack:UX", threadKey: THREAD, text });
 
 /** Everything the loop is handed for one general-agent run, with a recording
- *  channel, card and registry, and a real writer over an in-memory store. */
-function setup(answer: string | Error) {
+ *  channel, card and registry, and a real writer over an in-memory store.
+ *  `opts.agent` runs another preset with `opts.provider` scripting its turns,
+ *  `opts.io` adds channel methods, `opts.executor` is the round's workspace. */
+function setup(
+  answer: string | Error,
+  opts: { agent?: string; provider?: Provider; io?: Partial<ChannelIO>; executor?: Partial<Executor> } = {},
+) {
   const config = configStore();
+  const agentName = opts.agent ?? "general";
   const store = new InMemoryRunStore();
   const writer = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
   const deps: RunDeps = {
@@ -83,12 +90,12 @@ function setup(answer: string | Error) {
   const message = msg("hello there");
   const { resolved } = resolveRun(
     { config, providers: { get: () => ({}) as never } as never },
-    { msg: message, directives: { text: "hello there" }, history: [] },
+    { msg: message, directives: { text: "hello there", ...(opts.agent ? { agent: opts.agent } : {}) }, history: [] },
   );
   const agent = getAgent(resolved.agentName);
   const registry = new RunRegistry({ genId: () => "run-l", genToken: () => "tok" });
-  const run = registry.create("general · #CX · UX", {
-    agent: "general",
+  const run = registry.create(`${agentName} · #CX · UX`, {
+    agent: agentName,
     model: resolved.modelRef,
     channelId: "slack:CX",
     userId: "slack:UX",
@@ -101,6 +108,7 @@ function setup(answer: string | Error) {
     reply: async (t) => void replies.push(t),
     status: async () => ({ update: () => {}, done: async () => {} }),
     history: async () => [],
+    ...opts.io,
   };
   const frames: StatusUpdate[] = [];
   const closes: StatusUpdate[] = [];
@@ -114,7 +122,7 @@ function setup(answer: string | Error) {
     agent,
     profile: declaredProfile(agent),
     resolved,
-    provider: provider(answer),
+    provider: opts.provider ?? provider(answer),
     model: "general-model",
     messages: buildMessages([], "hello there"),
     system: "the system prompt",
@@ -123,10 +131,10 @@ function setup(answer: string | Error) {
     run,
     registry,
     round: {
-      selection: { executor: {} as never, backend: "local" as const },
+      selection: { executor: (opts.executor ?? {}) as never, backend: "local" as const },
       release: async (opts: { hardStopped: boolean }) => void releases.push(opts.hardStopped ? "hard" : "paired"),
     },
-    admitted: new ThreadAdmission<DispatchFollowUp>().claim(THREAD, { agent: "general" }).live,
+    admitted: new ThreadAdmission<DispatchFollowUp>().claim(THREAD, { agent: agentName }).live,
     ledgerRun: undefined,
     resume: undefined,
     repoCtx: {},
@@ -152,6 +160,50 @@ function setup(answer: string | Error) {
 }
 
 describe("runLoop — the model turn and everything that rides on it", () => {
+  // docs/reference/specs/agent-coding.md item 10: the thread's file upload
+  // rides the tool context only when the channel has one — a coding run's
+  // `attach_file` posts through the requesting thread's `attachFile`.
+  it("a coding run's attach_file posts the workspace file through the channel's attachFile; without one the tool says the channel takes no files", async () => {
+    const scripted = (): Provider => {
+      let turn = 0;
+      return {
+        name: "fake",
+        async complete() {
+          if (turn++ === 0)
+            return {
+              content: [
+                { type: "tool_use", id: "t1", name: "attach_file", input: { path: "shot.png", comment: "the page" } },
+              ],
+              stopReason: "tool_use",
+            };
+          return { content: [{ type: "text", text: "done" }], stopReason: "end_turn" };
+        },
+      };
+    };
+    const executor: Partial<Executor> = { readBytes: async () => new Uint8Array([1, 2, 3]) };
+    const files: string[] = [];
+    const withUpload = setup("", {
+      agent: "coding",
+      provider: scripted(),
+      executor,
+      io: { attachFile: async (f) => void files.push(`${f.name}:${f.bytes.byteLength}:${f.lead}`) },
+    });
+    const toolResults = async (s: ReturnType<typeof setup>) => {
+      s.ending.drain(true);
+      await s.writer.settled();
+      const rec = (await s.store.get("run-l"))!;
+      return JSON.stringify(rec.events.filter((e) => e.type === "tool_result"));
+    };
+    const out = await runLoop(withUpload.deps, withUpload.ctx);
+    expect(out.toolCalls).toBe(1);
+    expect(files).toEqual(["shot.png:3:the page"]);
+    expect(await toolResults(withUpload)).toContain("attached shot.png (3 bytes) to the conversation");
+
+    const without = setup("", { agent: "coding", provider: scripted(), executor });
+    await runLoop(without.deps, without.ctx);
+    expect(await toolResults(without)).toMatch(/this conversation's channel takes no file uploads/);
+  });
+
   it("a completed run: the answer comes back through the typed-output boundary and is published, the registry is finished `completed`, the record is registered for the drain, the workspace is NOT released here", async () => {
     const s = setup("the answer");
     const out = await runLoop(s.deps, s.ctx);

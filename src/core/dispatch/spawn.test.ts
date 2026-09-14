@@ -62,10 +62,12 @@ const PARENT_MSG: IncomingMessage = {
 function channel(opts: { openThread?: false } = {}) {
   const replies: string[] = [];
   const childReplies: string[] = [];
+  const childFiles: string[] = [];
   const childIo: ChannelIO = {
     reply: async (t) => void childReplies.push(t),
     status: async () => ({ update: () => {}, done: async () => {} }),
     history: async () => [],
+    attachFile: async (file) => void childFiles.push(`${file.name}:${file.bytes.byteLength}:${file.lead}`),
   };
   const leads: string[] = [];
   const io: ChannelIO = {
@@ -84,7 +86,7 @@ function channel(opts: { openThread?: false } = {}) {
           },
         }),
   };
-  return { io, childIo, replies, childReplies, leads };
+  return { io, childIo, replies, childReplies, childFiles, leads };
 }
 
 /** A `dispatch()` double: records its calls and plays the script the test hands it. */
@@ -171,6 +173,24 @@ describe("spawnChild — the one path a child run is born through", () => {
     await spawnChild(deps(dispatch), parent(ch.io), { preset: "research", prompt: "q" });
     expect(ch.childReplies).toEqual(["hello from the child"]);
     expect(ch.replies).toEqual([]);
+  });
+
+  // docs/reference/specs/agent-coding.md item 10: the child's file upload is
+  // the opened thread's too — forwarded by method when the thread has one,
+  // absent when it does not, so `attach_file` in a child says the truth.
+  it("the child's channel forwards attachFile to the opened thread when it has one, and offers none when it does not", async () => {
+    const seen: Array<boolean> = [];
+    const { dispatch } = fakeDispatch(async (_msg, io) => {
+      seen.push(io.attachFile !== undefined);
+      await io.attachFile?.({ name: "shot.png", bytes: new Uint8Array([1, 2, 3]), lead: "the page" });
+      return { status: "completed" };
+    });
+    const ch = channel();
+    await spawnChild(deps(dispatch), parent(ch.io), { preset: "research", prompt: "q" });
+    expect(ch.childFiles).toEqual(["shot.png:3:the page"]);
+    delete ch.childIo.attachFile;
+    await spawnChild(deps(dispatch), parent(ch.io), { preset: "research", prompt: "q" });
+    expect(seen).toEqual([true, false]);
   });
 
   it("a spawn from a run at depth 1 is refused `spawn_depth` before anything else: no thread opened, no dispatch", async () => {
