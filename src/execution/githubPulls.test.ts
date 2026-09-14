@@ -5,6 +5,7 @@ import {
   fetchCommitChecks,
   fetchPullRequestReviews,
   fetchRepoShipInfo,
+  findMergedPrByHead,
   findOpenPrByHead,
   mergePullRequest,
   openPullRequest,
@@ -125,12 +126,66 @@ describe("githubPulls", () => {
     expect(await findOpenPrByHead("acme/api", "feat/x")).toBeNull();
   });
 
+  it("findMergedPrByHead asks for the closed pull requests heading the branch, newest first, and answers the latest merged one — its number, url, merge commit and when — skipping a closed-unmerged row whose test merge commit GitHub still reports; null when none merged or none at all; a lookup that fails throws with the status and detail", async () => {
+    stubToken();
+    const rows = [
+      {
+        number: 13,
+        html_url: "https://github.com/acme/api/pull/13",
+        merged_at: null,
+        merge_commit_sha: "c".repeat(40),
+      },
+      {
+        number: 11,
+        html_url: "https://github.com/acme/api/pull/11",
+        merged_at: "2026-09-10T00:00:00Z",
+        merge_commit_sha: "a".repeat(40),
+      },
+      {
+        number: 12,
+        html_url: "https://github.com/acme/api/pull/12",
+        merged_at: "2026-09-13T23:55:59Z",
+        merge_commit_sha: "9".repeat(40),
+      },
+    ];
+    const calls = stubFetch(() => new Response(JSON.stringify(rows), { status: 200 }));
+    expect(await findMergedPrByHead("acme/api", "feat/x")).toEqual({
+      number: 12,
+      htmlUrl: "https://github.com/acme/api/pull/12",
+      sha: "9".repeat(40),
+      mergedAt: "2026-09-13T23:55:59Z",
+    });
+    expect(calls[0].url).toBe(
+      "https://api.github.com/repos/acme/api/pulls?state=closed&head=acme%3Afeat%2Fx&sort=updated&direction=desc",
+    );
+    expect((calls[0].init.headers as Record<string, string>).authorization).toBe("Bearer ghtok");
+
+    stubFetch(() => new Response(JSON.stringify([rows[0]]), { status: 200 }));
+    expect(await findMergedPrByHead("acme/api", "feat/x")).toBeNull();
+    stubFetch(() => new Response("[]", { status: 200 }));
+    expect(await findMergedPrByHead("acme/api", "feat/x")).toBeNull();
+    // A merged row without a well-formed merge commit is not an answer the runner can act on.
+    stubFetch(
+      () =>
+        new Response(
+          JSON.stringify([
+            { number: 14, html_url: "https://github.com/acme/api/pull/14", merged_at: "2026-09-13T00:00:00Z" },
+          ]),
+          { status: 200 },
+        ),
+    );
+    expect(await findMergedPrByHead("acme/api", "feat/x")).toBeNull();
+    stubFetch(() => new Response("boom", { status: 500 }));
+    await expect(findMergedPrByHead("acme/api", "feat/x")).rejects.toThrow(/PR lookup failed: HTTP 500.*boom/s);
+  });
+
   it("throws when no credential is available, before any fetch", async () => {
     vi.stubEnv("GH_TOKEN", "");
     vi.stubEnv("GITHUB_APP_ID", "");
     const calls = stubFetch(() => new Response("[]", { status: 200 }));
     await expect(openPullRequest(target)).rejects.toThrow(/no GitHub credential/);
     await expect(findOpenPrByHead("acme/api", "feat/x")).rejects.toThrow(/no GitHub credential/);
+    await expect(findMergedPrByHead("acme/api", "feat/x")).rejects.toThrow(/no GitHub credential/);
     await expect(updatePullRequest("acme/api", 5, { title: "t", body: "b" })).rejects.toThrow(/no GitHub credential/);
     expect(calls).toHaveLength(0);
   });

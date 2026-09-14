@@ -94,6 +94,9 @@ const reviewApproved = (runId: string, at: number) =>
     at,
   );
 const prOpen = (at = T0): BotReply => ok({ ok: true, state: "open", prNumber: 7, url: PR_URL, headSha: HEAD }, at);
+const prNone = (at = T0): BotReply => ok({ ok: true, state: "none" }, at);
+const prMerged = (at = T0, mergedAt = "2026-09-13T23:55:59Z"): BotReply =>
+  ok({ ok: true, state: "merged", prNumber: 7, url: PR_URL, sha: MERGED, mergedAt }, at);
 const acked = (at = T0): BotReply => ok({ ok: true }, at);
 
 type Taken =
@@ -165,7 +168,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       branch: [branched("U10")],
       spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
       "read-record": [codingDone("run-c0", T0 + 10 * MIN), reviewApproved("run-r1", T0 + 20 * MIN)],
-      "pr-check": [prOpen(T0 + 10 * MIN)],
+      "pr-check": [prNone(), prOpen(T0 + 10 * MIN)],
       round: [acked(), acked(), acked(), acked()],
       merge: [ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 21 * MIN)],
       "unit-end": [ok({ ok: true, told: true }, T0 + 21 * MIN)],
@@ -181,6 +184,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(s.names()).toEqual([
       "plan",
       "U10/start",
+      "U10/pr-check",
       "U10/branch",
       "U10/0/coding",
       "U10/note/1",
@@ -241,7 +245,11 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       { parentInstanceId: INSTANCE, unit: "U10", runId: "run-c0" },
       { parentInstanceId: INSTANCE, unit: "U10", runId: "run-r1" },
     ]);
-    expect(b.of("pr-check")).toEqual([{ parentInstanceId: INSTANCE, unit: "U10" }]);
+    // Twice: once before the branch (what already heads it), once after the coding child.
+    expect(b.of("pr-check")).toEqual([
+      { parentInstanceId: INSTANCE, unit: "U10" },
+      { parentInstanceId: INSTANCE, unit: "U10" },
+    ]);
     expect(b.of("round")).toEqual([
       { parentInstanceId: INSTANCE, unit: "U10", index: 0, agent: "coding", outcome: "started" },
       { parentInstanceId: INSTANCE, unit: "U10", index: 0, agent: "coding", outcome: "pr_opened" },
@@ -265,7 +273,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       branch: [branched("U10")],
       spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
       "read-record": [codingDone("run-c0", T0 + 10 * MIN), reviewApproved("run-r1", T0 + 20 * MIN)],
-      "pr-check": [prOpen(T0 + 10 * MIN)],
+      "pr-check": [prNone(), prOpen(T0 + 10 * MIN)],
       round: [acked(), acked(), acked(), acked()],
       merge: [
         ok({ ok: true, outcome: "pending", reason: "2 check(s) still running" }, T0 + 21 * MIN),
@@ -299,7 +307,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       branch: [ok({ ok: true, branch: "ship/warm-the-cache-abc123", base: "main" })],
       spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
       "read-record": [codingDone("run-c0", T0 + 10 * MIN), reviewApproved("run-r1", T0 + 20 * MIN)],
-      "pr-check": [prOpen(T0 + 10 * MIN)],
+      "pr-check": [prNone(), prOpen(T0 + 10 * MIN)],
       round: [acked(), acked(), acked(), acked()],
       "unit-end": [acked()],
       finish: [acked()],
@@ -328,7 +336,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
         record({ id: "run-c0", finished: false, status: "running" }, T0 + 5 * MIN),
         codingDone("run-c0", T0 + 10 * MIN),
       ],
-      "pr-check": [prOpen(T0 + 11 * MIN)],
+      "pr-check": [prNone(), prOpen(T0 + 11 * MIN)],
       round: [acked(), acked()],
       "unit-end": [ok({ ok: true, told: true }, T0 + 12 * MIN)],
       finish: [ok({ ok: true }, T0 + 12 * MIN)],
@@ -339,6 +347,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(s.names()).toEqual([
       "plan",
       "U10/start",
+      "U10/pr-check",
       "U10/branch",
       "U10/0/coding",
       "U10/0/coding/busy/1",
@@ -413,7 +422,8 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
         codingDone("run-c1", T0 + 35 * MIN),
         reviewApproved("run-r2", T0 + 40 * MIN),
       ],
-      "pr-check": [prOpen(T0 + 10 * MIN), prOpen(T0 + 35 * MIN)],
+      // U10's pre-check and round 0; U20's pre-check (its branch then fails); U11's pre-check and round 0.
+      "pr-check": [prNone(), prOpen(T0 + 10 * MIN), prNone(), prNone(), prOpen(T0 + 35 * MIN)],
       round: [acked(), acked(), acked(), acked(), acked(), acked(), acked(), acked()],
       merge: [
         ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 21 * MIN),
@@ -467,6 +477,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     const b = bot({
       plan: [new Error("connection reset"), new Error("connection reset"), planAnswer([row("U10")])],
       "unit-start": [started("U10")],
+      "pr-check": [prNone()],
       branch: [branched("U10")],
       spawn: Array.from({ length: 13 }, () => new Error("the bot is deploying")),
       finish: [acked()],
@@ -547,5 +558,122 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(transientRefusal(answer({ ok: false, error: "spawn_failed", message: "x" }, T0, 502))).toBeUndefined();
     expect(transientRefusal(answer({ ok: false, reason: "HTTP 422" }))).toBeUndefined();
     expect(transientRefusal(answer({ ok: true, state: "none" }))).toBeUndefined();
+  });
+});
+
+describe("the plan runner's driver — a unit whose pull request already merged (item 9)", () => {
+  it("a unit merged before the attempt — a person's merge, or an earlier attempt's — ends merged at its start: the pr-check under `<unit>/pr-check` answers merged, no branch is created and no child spawned, the ending is told with the pull request and says it was already merged and when, its dependent starts and the plan completes", async () => {
+    const s = steps({ "U11/0/coding/wait/1": "event", "U11/1/review/wait/1": "event" });
+    const b = bot({
+      plan: [planAnswer([row("U10"), row("U11", { dependsOn: ["U10"] })])],
+      "unit-start": [started("U10"), started("U11", T0 + MIN)],
+      "pr-check": [prMerged(T0, "2026-09-13T23:55:59Z"), prNone(T0 + MIN), prOpen(T0 + 10 * MIN)],
+      branch: [branched("U11", T0 + MIN)],
+      spawn: [spawned("run-c1", T0 + MIN), spawned("run-r1", T0 + 10 * MIN)],
+      "read-record": [codingDone("run-c1", T0 + 10 * MIN), reviewApproved("run-r1", T0 + 20 * MIN)],
+      round: [acked(), acked(), acked(), acked()],
+      merge: [ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 21 * MIN)],
+      "unit-end": [acked(), acked()],
+      finish: [acked()],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary).toEqual({
+      instance: INSTANCE,
+      planId: "fixture",
+      units: { U10: "merged", U11: "merged" },
+      outcome: "completed",
+    });
+    expect(s.names().slice(0, 7)).toEqual([
+      "plan",
+      "U10/start",
+      "U10/pr-check",
+      "U10/end",
+      "U11/start",
+      "U11/pr-check",
+      "U11/branch",
+    ]);
+    expect(s.names()).not.toContain("U10/branch");
+    expect(b.of("branch")).toEqual([{ parentInstanceId: INSTANCE, unit: "U11" }]);
+    expect(b.of("spawn").map((c) => c.unit)).toEqual(["U11", "U11"]);
+    expect(b.of("pr-check")).toEqual([
+      { parentInstanceId: INSTANCE, unit: "U10" },
+      { parentInstanceId: INSTANCE, unit: "U11" },
+      { parentInstanceId: INSTANCE, unit: "U11" },
+    ]);
+    // No round boundary is drawn for a unit that ran nothing.
+    expect(b.of("round").every((r) => r.unit === "U11")).toBe(true);
+    const ends = b.of("unit-end") as Array<{ unit: string; ending: { kind: string; report: string }; pr: unknown }>;
+    expect(ends[0]).toMatchObject({ unit: "U10", pr: { number: 7, url: PR_URL } });
+    expect(ends[0]!.ending.kind).toBe("merged");
+    expect(ends[0]!.ending.report).toContain(`✅ Already merged: ${PR_URL} (merge commit \`${MERGED.slice(0, 7)}\``);
+    expect(ends[0]!.ending.report).toContain("merged 2026-09-13T23:55:59Z");
+    expect(ends[0]!.ending.report).not.toContain("plan:merge");
+    expect(ends[1]!.ending.kind).toBe("merged");
+    expect(ends[1]!.ending.report).toContain("plan:merge");
+    expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "completed" }]);
+  });
+
+  it("a merge that lands during round 0 — the coding child finds nothing to ship and the round's pr-check answers merged — ends the unit merged with round 0 noted completed and no review child; a merged answer without its merge commit is one the runner cannot read and fails the instance at once", async () => {
+    const s = steps({ "U10/0/coding/wait/1": "event" });
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [started("U10")],
+      "pr-check": [prNone(), prMerged(T0 + 10 * MIN)],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0")],
+      "read-record": [
+        record(
+          {
+            id: "run-c0",
+            finished: true,
+            status: "completed",
+            finalReply: "Unit U10 is already done — nothing to ship this run.",
+            handoff: true,
+          },
+          T0 + 10 * MIN,
+        ),
+      ],
+      round: [acked(), acked()],
+      "unit-end": [acked()],
+      finish: [acked()],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary.units).toEqual({ U10: "merged" });
+    expect(summary.outcome).toBe("completed");
+    expect(s.names()).toEqual([
+      "plan",
+      "U10/start",
+      "U10/pr-check",
+      "U10/branch",
+      "U10/0/coding",
+      "U10/note/1",
+      "U10/0/coding/wait/1",
+      "U10/0/coding/read/1",
+      "U10/0/coding/pr-check",
+      "U10/note/2",
+      "U10/end",
+      "finish",
+    ]);
+    expect(b.of("round")).toEqual([
+      { parentInstanceId: INSTANCE, unit: "U10", index: 0, agent: "coding", outcome: "started" },
+      { parentInstanceId: INSTANCE, unit: "U10", index: 0, agent: "coding", outcome: "completed" },
+    ]);
+    expect(b.of("spawn")).toHaveLength(1);
+    const [end] = b.of("unit-end") as Array<{ ending: { kind: string; report: string }; pr: unknown }>;
+    expect(end.pr).toEqual({ number: 7, url: PR_URL });
+    expect(end.ending.kind).toBe("merged");
+    expect(end.ending.report).toContain("✅ Already merged");
+
+    const bad = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [started("U10")],
+      "pr-check": [ok({ ok: true, state: "merged", prNumber: 7, url: PR_URL })],
+      finish: [acked()],
+    });
+    const s2 = steps();
+    await expect(runPlan(s2.runner, bad.client, INSTANCE)).rejects.toThrow(/pr-check answer could not be read/);
+    expect(s2.attempts["U10/pr-check"]).toBe(1);
+    expect(bad.of("branch")).toEqual([]);
+    expect(bad.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "failed" }]);
   });
 });

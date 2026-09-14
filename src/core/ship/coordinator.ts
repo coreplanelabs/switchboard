@@ -16,7 +16,12 @@
 // approve and the merge: one thread and one head branch per unit
 // (`plan/<plan-id>/<unit-slug>`), every child a `dispatch()` run the bot
 // starts as the requesting user, every step retry-safe under the key
-// `<instance>:<unit>/<round>/<kind>`. Nothing here reads a clock: the bot
+// `<instance>:<unit>/<round>/<kind>`. Its first step asks what already heads
+// the branch: a pull request merged before the attempt reached the unit — a
+// person's merge, or an earlier attempt's — ends the unit `merged` with no
+// branch and no child, so a re-issued plan walks past its done units instead
+// of aborting them; the same answer after a round ends it the same way, since
+// a merge can land while a child runs. Nothing here reads a clock: the bot
 // answers every step with its own `at`, and that is the machine's time. Nothing
 // here carries a task's text or a thread's contents: a spawn's brief names the
 // unit and the runs whose records the bot reads to compose the child's turn.
@@ -348,7 +353,12 @@ export type ChildFacts =
       handoff?: boolean;
     };
 
-export type PrCheck = { state: "none" } | { state: "open"; prNumber: number; url: string; headSha?: string };
+/** What heads the unit's branch on GitHub: nothing, an open pull request, or —
+ *  with no open one — a merged one, `sha` the merge commit on the base. */
+export type PrCheck =
+  | { state: "none" }
+  | { state: "open"; prNumber: number; url: string; headSha?: string }
+  | { state: "merged"; prNumber: number; url: string; sha: string; mergedAt: string };
 
 /** What a step answered. Every bot answer carries `at`, the bot's clock — the machine's time. */
 export type StepReturn =
@@ -366,11 +376,14 @@ export type StepReturn =
   | { type: "sleep"; step: string };
 
 /** How one unit's pipeline ended — the truthful vocabulary the in-process loop
- *  has, plus the merge's own: `merged` by the runner, `merge_ready` for a
- *  person, `merge_refused` by the guards; `interrupted` a child the ledger
- *  closed; `refused` a child the authorize stage never started. */
+ *  has, plus the merge's own: `merged` by the runner, or found merged (`by:
+ *  other` — a person's merge, or an earlier attempt's that died after it, so
+ *  the runner merged nothing), `merge_ready` for a person, `merge_refused` by
+ *  the guards; `interrupted` a child the ledger closed; `refused` a child the
+ *  authorize stage never started. */
 export type UnitEnding =
-  | { kind: "merged"; pr: PrRef; sha: string; reviewRounds: number }
+  | { kind: "merged"; by: "runner"; pr: PrRef; sha: string; reviewRounds: number }
+  | { kind: "merged"; by: "other"; pr: PrRef; sha: string; mergedAt: string; reviewRounds: number }
   | { kind: "merge_ready"; pr: PrRef; reviewRounds: number }
   | { kind: "merge_refused"; pr: PrRef; reason: string; reviewRounds: number }
   | { kind: "round_cap"; maxRounds: number; reviewRounds: number }
@@ -411,6 +424,8 @@ export interface UnitPipelineInput {
 }
 
 type Phase =
+  /** Before anything is created: what already heads the branch — a merged pull request ends the unit here. */
+  | { at: "pre-check" }
   | { at: "branch" }
   | { at: "spawn"; round: RoundRef; busy: number }
   | { at: "busy-wait"; round: RoundRef; runId?: string; n: number }
@@ -467,7 +482,7 @@ export function openUnitPipeline(input: UnitPipelineInput, at: number): UnitPipe
     input,
     startedAt: at,
     clock: at,
-    phase: { at: "branch" },
+    phase: { at: "pre-check" },
     reviewRounds: 0,
     findingsByRound: {},
     dispositionsByRound: {},
@@ -531,6 +546,8 @@ export function nextAction(s: UnitPipelineState): CoordinatorAction {
   const unit = s.input.unit.id;
   const p = s.phase;
   switch (p.at) {
+    case "pre-check":
+      return { type: "pr-check", step: `${unit}/pr-check` };
     case "branch":
       return { type: "branch", step: `${unit}/branch`, branch: s.input.unit.branch, from: s.input.base };
     case "spawn": {
@@ -753,9 +770,30 @@ function settleReview(
   return enterRound(next, { index: round.index, kind: "fix" }, notes);
 }
 
+/** The unit's ending when its pull request is found merged — by a person, or
+ *  by an earlier attempt of the plan that died after its merge: the unit is
+ *  done and its dependents run on a base that carries it, and the runner
+ *  merged nothing, so the ending says so (`by: other`). */
+function foundMerged(
+  s: UnitPipelineState,
+  pr: Extract<PrCheck, { state: "merged" }>,
+  notes: CoordinatorNote[] = [],
+): Transition {
+  const ref: PrRef = { number: pr.prNumber, url: pr.url };
+  return end(
+    { ...s, pr: ref },
+    { kind: "merged", by: "other", pr: ref, sha: pr.sha, mergedAt: pr.mergedAt, reviewRounds: s.reviewRounds },
+    notes,
+  );
+}
+
 /** The pull request heading the branch after a coding or fix round. */
 function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-check" }>, pr: PrCheck): Transition {
   const { round } = phase;
+  // The merge landed during the round: the child found nothing left to ship
+  // (or shipped into a pull request a person merged under it). The round
+  // completed without a pull request of its own, and the unit is done.
+  if (pr.state === "merged") return foundMerged(s, pr, [roundNote(round, "completed")]);
   if (pr.state === "none") {
     const reason =
       round.index === 0
@@ -817,6 +855,16 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
   const clocked: UnitPipelineState = "at" in ret ? { ...s, clock: ret.at } : s;
   const p = s.phase;
   switch (p.at) {
+    case "pre-check": {
+      // A pull request merged before this attempt reached the unit — a
+      // person's merge, or an earlier attempt's that died after it — makes the
+      // unit done before a branch or a child: nothing to run. Anything else is
+      // round 0's to work on: an open pull request is rebased and re-described
+      // by the coding child and adopted at the round's own pr-check.
+      const r = ret as Extract<StepReturn, { type: "pr-check" }>;
+      if (r.pr.state === "merged") return foundMerged(clocked, r.pr);
+      return { state: { ...clocked, phase: { at: "branch" } }, notes: [] };
+    }
     case "branch": {
       const r = ret as Extract<StepReturn, { type: "branch" }>;
       if (r.ok) return enterRound(clocked, { index: 0, kind: "coding" });
@@ -914,7 +962,7 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
     case "merge": {
       const r = ret as Extract<StepReturn, { type: "merge" }>;
       if (r.outcome === "merged")
-        return end(clocked, { kind: "merged", pr: p.pr, sha: r.sha, reviewRounds: s.reviewRounds });
+        return end(clocked, { kind: "merged", by: "runner", pr: p.pr, sha: r.sha, reviewRounds: s.reviewRounds });
       if (r.outcome === "refused")
         return end(clocked, { kind: "merge_refused", pr: p.pr, reason: r.reason, reviewRounds: s.reviewRounds });
       const waited = r.at - p.since;
@@ -1000,6 +1048,8 @@ export function renderUnitReport(s: UnitPipelineState): string {
   const join = (parts: Array<string | undefined>) => parts.filter(Boolean).join("\n\n");
   switch (e.kind) {
     case "merged":
+      if (e.by === "other")
+        return `✅ Already merged: ${e.pr.url} (merge commit \`${e.sha.slice(0, 7)}\`, merged ${e.mergedAt}) — the pull request heading \`${s.input.unit.branch}\` was merged before this attempt reached it, by a person or by an earlier attempt of this plan; the runner merged nothing. The unit is done and its dependents start on a base that carries it.`;
       return [
         `✅ Merged after ${rounds}: ${e.pr.url} (squash \`${e.sha.slice(0, 7)}\`) — merged by the plan runner under \`plan:merge\`: the review approved at this head and the guards were green.`,
         verdictLine,
