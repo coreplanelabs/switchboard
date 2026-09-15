@@ -710,6 +710,12 @@ describe("McpService — OAuth (item 18)", () => {
     expect(await tokenFor(h)).toMatchObject({ name: "vanta", unavailable: expect.stringMatching(/invalid_grant/) });
   });
 
+  // Forces the raced interleaving: a run reads the still-sealed stale credential, then reaches
+  // the refresh path only after the first refresh has stored its result — where an entry dropped
+  // on settle would leave nothing to join, so the raced run would present the old refresh token
+  // and start a second refresh (rotating the token a second time). The settled single-flight
+  // entry must therefore outlive its refresh: a run holding a credential no newer than the
+  // entry's seed joins the finished refresh and gets the refreshed token, never a second refresh.
   it("a run whose credential read raced the refresh (stale set in hand, refresh already stored) gets the refreshed token, never a second refresh", async () => {
     const h = harness({ oauth: { server: VANTA } });
     await h.service.add(alice, ME(alice), { name: "vanta", url: VANTA });
