@@ -99,6 +99,11 @@ export class PiMirror {
     if (!this.deps.onStep) return;
     const chat = chatMessageOf(message);
     if (!chat) return;
+    // A message with no parts is not a turn (session-log item 2, one index per
+    // row): it would write no row and still spend a log index, and the next
+    // reclaim would read the hole as an incomplete transcript. Nothing is
+    // reported for it and the index stays; results pending ride the next turn.
+    if (chat.content.length === 0) return;
     if (chat.role === "user") {
       // pi echoes the prompt it was sent as its first user message: that is the seed, already on the ledger.
       if (!this.seedEchoed && !chat.content.some((p) => p.type === "tool_result")) {

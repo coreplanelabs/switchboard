@@ -204,8 +204,17 @@ export class PiBridge {
         break;
       case "message_end":
         if (isRecord(event.message)) {
-          out.message = event.message;
-          if (event.message.role === "assistant") this.onAssistant(event.message as unknown as PiAssistantMessage, out);
+          if (event.message.role === "assistant") {
+            const assistant = event.message as unknown as PiAssistantMessage;
+            this.onAssistant(assistant, out);
+            // The message pi settles a failed model call with is the failure,
+            // not a turn (session-log item 2): it is the provider error above
+            // and reaches the mirror as nothing — a turn with no parts would
+            // write no row and still take a log index.
+            if (assistant.stopReason !== "error") out.message = event.message;
+          } else {
+            out.message = event.message;
+          }
         }
         break;
       case "tool_execution_start":

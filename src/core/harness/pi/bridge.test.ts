@@ -364,6 +364,27 @@ describe("turns, narration and the answer — the loop's rules", () => {
       { type: "toolCall", id: "s", name: "update_status", arguments: { checklist: "○ plan" } },
     ]);
 
+  // The message pi settles a failed model call with is the failure, not a turn
+  // (session-log item 2): the mirror never sees it, so no step spends an index
+  // on a turn without parts.
+  it("a model call that failed is a provider error and no message: the mirror never sees the errored assistant", () => {
+    const { bridge } = harness();
+    const failed = bridge.observe({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [],
+        stopReason: "error",
+        errorMessage: "stream ended before message_stop",
+      },
+    });
+    expect(failed.providerError).toBe("stream ended before message_stop");
+    expect(failed.message).toBeUndefined();
+    const fine = bridge.observe(assistant([{ type: "text", text: "ok" }], "stop"));
+    expect(fine.message).toBeDefined();
+    expect(fine.providerError).toBeUndefined();
+  });
+
   it("a bookkeeping-only turn does not count against the guard and its text is the answer when the next turn is empty", () => {
     const { bridge, events } = harness();
     bridge.observe(status("All done, really."));

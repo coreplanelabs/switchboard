@@ -99,6 +99,25 @@ describe("PiMirror — step records as the runner writes them", () => {
     ]);
   });
 
+  // session-log item 2, one index per row: a message that carries no parts would
+  // write no row and still spend an index, and the next reclaim would read the
+  // hole as an incomplete transcript — so it is not a turn at all.
+  it("an assistant message with no parts is not a turn: no step, no index taken, the results pending ride the next turn", async () => {
+    const { m, reports } = mirror();
+    await m.onMessage({ role: "user", content: "go" }, 0);
+    await m.onMessage(bashCall, 1);
+    await m.onMessage(bashResult, 1);
+    await m.onMessage({ role: "assistant", content: [], stopReason: "error", errorMessage: "stream ended" }, 1);
+    expect(reports).toHaveLength(1);
+    await m.onMessage(final, 2);
+    expect(reports).toHaveLength(2);
+    expect(reports[1]).toMatchObject({ firstIdx: 2, inFlight: [] });
+    expect(reports[1].turns).toEqual([
+      { role: "user", content: [{ type: "tool_result", toolUseId: "call_0", content: " M README.md" }] },
+      { role: "assistant", content: [{ type: "text", text: "Done." }] },
+    ]);
+  });
+
   it("without a step hook nothing is mirrored and nothing throws", async () => {
     const m = new PiMirror({ seedLength: 1, remainingMs: () => 1 });
     expect(m.wired).toBe(false);
