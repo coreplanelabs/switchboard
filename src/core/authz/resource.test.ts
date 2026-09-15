@@ -54,9 +54,16 @@ describe("attributesOf", () => {
   });
   it("repo, config-scope, agent, command", () => {
     expect(attributesOf({ type: "repo", owner: "o", name: "r" })).toEqual({ repo: "o/r", visibility: "unknown" });
+    // A channel's scope carries the channel's own visibility for `member-of`'s public half; absent → never public.
     expect(attributesOf({ type: "config-scope", kind: "channel", id: "slack:C1" })).toEqual({
       channelId: "slack:C1",
       visibility: "unknown",
+      channelVisibility: "unknown",
+    });
+    expect(attributesOf({ type: "config-scope", kind: "channel", id: "slack:C1", visibility: "public" })).toEqual({
+      channelId: "slack:C1",
+      visibility: "unknown",
+      channelVisibility: "public",
     });
     expect(attributesOf({ type: "config-scope", kind: "user", id: "slack:UALICE" })).toEqual({
       userId: "slack:UALICE",

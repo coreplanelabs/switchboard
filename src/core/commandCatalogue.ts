@@ -57,6 +57,8 @@ import { createRunsService, type RunsService } from "./runsService.js";
 import { SCHEDULES } from "./schedules.js";
 import { githubRepoInspector, type RepoInspector } from "../execution/githubRepoInspect.js";
 import type { ScheduleStore } from "./scheduleStore.js";
+import type { ChannelDirectory } from "./authz/types.js";
+import { channelVisibilityOf } from "./dispatch/record.js";
 
 // THE one catalogue every in-process binding shares — src/index.ts (bot) and
 // src/cli.ts (the derived CLI): `registerCoreCommands` bound over the run store
@@ -123,6 +125,12 @@ export interface CoreCommandWiring {
    *  `/delivery` page reads); default: GitHub over the App's read token with the
    *  `delivery:` config, or the Null Object when the process has no GitHub credential. */
   delivery?: () => DeliveryService;
+  /** The channel directory behind `config show --channel` (authorization.md item
+   *  4, the channelConfig read half): the target channel's visibility, read
+   *  through the run stamp's bound (`channelVisibilityOf`). A getter, because the
+   *  bot wires the Slack directory after the catalogue is built; absent → the
+   *  static directory, which answers `unknown` for a Slack channel. */
+  channelDirectory?: () => ChannelDirectory | undefined;
 }
 
 /** The snapshot of a process nobody stamped: a checkout's CLI, a test. */
@@ -254,6 +262,10 @@ export function buildCoreCommands(
       clearChannelOverride: async (c) => (await cfg()).clearChannelOverride(c),
       clearUserOverride: async (u) => (await cfg()).clearUserOverride(u),
       agentNames: () => Object.keys(AGENTS),
+    },
+    channelVisibility: (channelId) => {
+      const channelDirectory = wiring.channelDirectory?.();
+      return channelVisibilityOf(channelDirectory ? { channelDirectory } : {}, channelId);
     },
     runs,
     review: { abridger, runs },

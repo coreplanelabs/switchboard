@@ -449,6 +449,8 @@ export async function runBot(): Promise<void> {
     frictionLedger,
     tracker: deps.issueTracker,
     memory: () => memory,
+    // `config show --channel`: the same directory the run stamp reads, wired below once the Slack adapter is up.
+    channelDirectory: () => deps.channelDirectory,
     // `status show`: the same facts /healthz serves, read when asked (inFlight and
     // draining are defined below and change over the process's life).
     status: () => ({
