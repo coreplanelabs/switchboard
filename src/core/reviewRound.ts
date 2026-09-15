@@ -31,6 +31,7 @@ import type { RunnableTool, ToolContext } from "../tools/runnableTool.js";
 import type { Span } from "../core/trace/types.js";
 import type { Backend } from "../core/trace/attrs.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
+import type { PiFollowUpTurn } from "./harness/pi/harness.js";
 import {
   carriedFooter,
   classifyHeadMove,
@@ -332,7 +333,10 @@ export function makeSystemComposer(input: {
 /** Everything one more model turn needs, grouped: the round's agent and model
  *  coordinates plus the run wiring the first turn already used. The settle
  *  reuses `toolContext` for its re-review turn with its own verdict capture
- *  (the voided verdict must not leak back through the first turn's hook). */
+ *  (the voided verdict must not leak back through the first turn's hook).
+ *  Which loop runs the turn is the run's harness (harness-pi item 14): the
+ *  native loop, or — with `followUp` handed over by the run stage — one more
+ *  `prompt` on the run's own pi session. */
 export interface ReviewTurnSpec {
   /** Where the re-review's commands execute (docs/reference/specs/tracing.md). */
   backend?: Backend;
@@ -347,6 +351,9 @@ export interface ReviewTurnSpec {
   onProgress: (note: string) => void;
   onEvent: (event: RunEvent) => void;
   control: RunControl;
+  /** One more turn on the run's own pi session (harness-pi item 14), when the
+   *  run is on pi; absent, the re-review is the native loop's. */
+  followUp?: PiFollowUpTurn;
 }
 
 /** What the settle decided the round actually reviewed — the values the post
@@ -478,47 +485,52 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
         }
         verdict = undefined; // the earlier verdict is void; the re-review must submit its own
         reviewHead = current;
-        const system = input.composeSystem({ sha: current, verified: worktreeMoved });
+        const followUpText = rereviewFollowUp({
+          where,
+          reviewed: expected,
+          current,
+          move,
+          before: classified.before,
+          after: classified.after,
+          worktreeMoved,
+        });
         input.messages.push(
           { role: "assistant", content: [{ type: "text", text: answer }] },
-          {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: rereviewFollowUp({
-                  where,
-                  reviewed: expected,
-                  current,
-                  move,
-                  before: classified.before,
-                  after: classified.after,
-                  worktreeMoved,
-                }),
-              },
-            ],
-          },
+          { role: "user", content: [{ type: "text", text: followUpText }] },
         );
-        answer = await runAgent({
-          provider: turn.provider,
-          model: turn.model,
-          agent: turn.agent,
-          messages: input.messages,
-          system,
-          effort: turn.effort,
-          ...(span ? { span } : {}),
-          ...(turn.backend ? { backend: turn.backend } : {}),
-          toolContext: {
-            ...turn.toolContext,
-            onVerdict: (v) => {
-              verdict = v;
-            },
+        const toolContext: ToolContext = {
+          ...turn.toolContext,
+          onVerdict: (v) => {
+            verdict = v;
           },
-          ...(turn.extraTools && turn.extraTools.length > 0 ? { extraTools: turn.extraTools } : {}),
-          onProgress: turn.onProgress,
-          onEvent: turn.onEvent,
-          control: turn.control,
-        });
+        };
+        // One more turn, on the loop the run is on. On pi the follow-up alone
+        // carries the new head: pi reads its system prompt once, at load, so
+        // the REVIEW TARGET block stays the session's (harness-pi item 14).
+        answer = turn.followUp
+          ? await turn.followUp({
+              text: followUpText,
+              maxTurns: turn.agent.maxTurns,
+              maxMinutes: turn.agent.maxMinutes,
+              toolContext,
+              ...(span ? { span } : {}),
+            })
+          : await runAgent({
+              provider: turn.provider,
+              model: turn.model,
+              agent: turn.agent,
+              messages: input.messages,
+              // Recomposed at the new head, so the prompt does not contradict the follow-up.
+              system: input.composeSystem({ sha: current, verified: worktreeMoved }),
+              effort: turn.effort,
+              ...(span ? { span } : {}),
+              ...(turn.backend ? { backend: turn.backend } : {}),
+              toolContext,
+              ...(turn.extraTools && turn.extraTools.length > 0 ? { extraTools: turn.extraTools } : {}),
+              onProgress: turn.onProgress,
+              onEvent: turn.onEvent,
+              control: turn.control,
+            });
         // Re-read, not narrowed: the stop may have been requested during the turn.
         if (!turn.control.hardSignal.aborted) observedHead = await probeHead();
       }

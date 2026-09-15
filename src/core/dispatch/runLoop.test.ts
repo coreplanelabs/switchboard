@@ -41,6 +41,8 @@ import type { RepoContext } from "../repoContext.js";
 import type { ResidentBinding } from "../../execution/resident.js";
 import { InMemoryArtifactStore, type ArtifactStore } from "../../artifacts/store.js";
 import type { ReviewCommentTarget } from "../../execution/githubComments.js";
+import type { PrCommitList } from "../headMoved.js";
+import type { PrDescription } from "../prDescription.js";
 import type { RunEvent } from "../runEvents.js";
 import type { ChatMessage } from "../chatMessage.js";
 import type { ResumeContext } from "./admission.js";
@@ -116,11 +118,17 @@ function setup(
     binding?: ResidentBinding;
     /** The artifact store (record 0033), when the deployment configures one. */
     artifacts?: ArtifactStore;
-    /** A pull-request review round: the head the dispatcher pinned and the seams the settle and the post-step call. */
+    /** A pull-request review round: the head the dispatcher pinned and the seams the settle and the post-step call.
+     *  `currentHead` is what GitHub answers for the PR's head during the run (the pinned head unless a test moves
+     *  it); `commits` answers the compare lists the settle classifies a move by (unclassifiable unless given). */
     review?: {
       head: string;
       post: (target: ReviewCommentTarget, body: string) => Promise<void>;
+      currentHead?: string;
+      commits?: (sha: string) => PrCommitList | undefined;
     };
+    /** A writable coding run against a repository: the post-step observes the workspace and opens-or-edits the PR. */
+    coding?: boolean;
     /** The run's spawn capability, as the dispatcher hands it to a conductor. */
     spawn?: SpawnCapability;
     /** The run's reach into its session log, as the dispatcher hands it to a run with a session. */
@@ -142,8 +150,8 @@ function setup(
     ...(opts.review
       ? {
           postReviewComment: opts.review.post,
-          fetchPrHead: async () => opts.review!.head,
-          fetchPrCommits: async () => undefined,
+          fetchPrHead: async () => opts.review!.currentHead ?? opts.review!.head,
+          fetchPrCommits: async ({ sha }: { sha: string }) => opts.review!.commits?.(sha),
         }
       : {}),
   };
@@ -203,7 +211,7 @@ function setup(
     resume: undefined,
     repoCtx: opts.repoCtx ?? {},
     isPrReview: opts.review !== undefined,
-    isCodingPrRun: false,
+    isCodingPrRun: opts.coding ?? false,
     reviewHead: opts.review?.head,
     requestText: "",
     card: { update: (f: StatusUpdate) => void frames.push(f), done: async (f: StatusUpdate) => void closes.push(f) },
@@ -708,6 +716,147 @@ describe("the harness seam — pi in place of the native loop when the preset sa
     ]);
   });
 
+  // harness-pi item 14, pr-description item 5: a coding run on pi whose loop
+  // pushed onto a branch that heads an open PR and submitted no description
+  // gets its description turn as a `prompt` on the same pi session — the
+  // relayed `submit_pr_description` runs in the bot under the turn's own hook,
+  // the post-step edits the PR from it, and pi is ended after the turn.
+  it("a coding run on pi whose push landed on an open PR without a description gets its description turn as a prompt on the same session: the relayed submit_pr_description lands, the PR is edited, the note and the description are on the record, pi is ended once after the turn", async () => {
+    const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+    const BRANCH = "dependabot/github_actions/actions-4c45254bbe";
+    const DESCRIPTION: PrDescription = {
+      title: "ci(deps): bump the action, refresh its hygiene allowlist",
+      tldr: "Bumps the action and refreshes the allowlist lines its pin moved. CI is green again.",
+      whatWhy: "Dependabot moved the pin; the allowlist matches lines by content.",
+      tour: [
+        {
+          title: "The allowlist",
+          description: "Three entries at the new pin.",
+          anchor: { path: "scripts/a", from: 1, to: 3 },
+        },
+      ],
+      remaining: [],
+      decisions: [{ title: "Keep dependabot's notes", rationale: "They are still true; they moved into whatWhy." }],
+      risks: "none",
+      validation: { criteria: [{ criterion: "hygiene:check", proof: "ok — 201 files" }] },
+    };
+    const container = new FakePiContainer();
+    const registry = new HarnessRegistry();
+    // The workspace as the post-step observes it: on the pushed branch, its tip on the remote.
+    const executor = {
+      exec: async (cmd: string) => {
+        if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
+        if (/rev-parse HEAD/.test(cmd)) return `${HEAD}\n`;
+        if (/rev-parse @\{u\}/.test(cmd)) return `${HEAD}\n`;
+        if (/ls-remote --exit-code origin/.test(cmd)) return `${HEAD}\trefs/heads/${BRANCH}\n`;
+        return "";
+      },
+    };
+    const killedWhenPrompted: number[][] = [];
+    // A coding pi answering TWO prompts on one session: the request with a bare
+    // answer (no description), then the description turn's follow-up with the
+    // relayed submit_pr_description and a line back.
+    let prompts = 0;
+    container.onStdin = (line, c) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
+        c.emit({ id: cmd.id, type: "response", command: cmd.type, success: true, data: { sessionFile: "s.jsonl" } });
+      if (cmd.type !== "prompt") return;
+      const n = prompts++;
+      killedWhenPrompted.push([...container.killed]);
+      c.emit({ id: cmd.id, type: "response", command: "prompt", success: true }, { type: "agent_start" });
+      const settle = (text: string) => {
+        const done = { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" };
+        c.emit(
+          { type: "message_end", message: done },
+          { type: "turn_end", message: done, toolResults: [] },
+          { type: "agent_settled" },
+        );
+      };
+      if (n === 0) {
+        settle("Refreshed the allowlist.");
+        return;
+      }
+      const live = registry.get("run-l")!;
+      const call = {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "d1", name: "submit_pr_description", arguments: DESCRIPTION }],
+        stopReason: "toolUse",
+      };
+      c.emit(
+        { type: "message_end", message: call },
+        { type: "tool_execution_start", toolCallId: "d1", toolName: "submit_pr_description", args: DESCRIPTION },
+      );
+      authorizeToolCall(live, { toolCallId: "d1", tool: "submit_pr_description", input: DESCRIPTION });
+      void runRelayedTool(live, { toolCallId: "d1", tool: "submit_pr_description", input: DESCRIPTION }).then(
+        (answer) => {
+          c.emit(
+            {
+              type: "tool_execution_end",
+              toolCallId: "d1",
+              toolName: "submit_pr_description",
+              result: { content: answer.content },
+              isError: answer.isError,
+            },
+            { type: "turn_end", message: call, toolResults: [] },
+          );
+          settle("Description resubmitted.");
+        },
+      );
+    };
+    const s = setup("", {
+      agent: "coding",
+      provider: provider("unused"),
+      yaml: PI_YAML,
+      harness: { registry, harnessUrl: "https://bot.example.com", containerFor: () => container },
+      bearer: "sbr_run-l.s3cret",
+      repoCtx: { repo: "acme/api", ref: "main" } as RepoContext,
+      binding: { ref: "main", sha: HEAD, workspace: "/srv/wt/t", user: "worker2" },
+      executor,
+      coding: true,
+    });
+    const opened: Array<Record<string, unknown>> = [];
+    s.deps.findOpenPrByHead = vi.fn(async () => ({ number: 700, htmlUrl: "https://github.com/acme/api/pull/700" }));
+    s.deps.openPullRequest = async (target) => {
+      opened.push({ ...target });
+      return { number: 700, htmlUrl: "https://github.com/acme/api/pull/700", created: false };
+    };
+    s.deps.fetchRepoShipInfo = async () => ({ defaultBranch: "main" });
+    const out = await runLoop(s.deps, s.ctx);
+    // one pi, two prompts on it — alive at the second — the follow-up naming the PR and the pushed head
+    expect(container.starts).toHaveLength(1);
+    expect(prompts).toBe(2);
+    expect(killedWhenPrompted).toEqual([[], []]);
+    const followUp = container.stdin
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((c) => c.type === "prompt")[1];
+    expect(String(followUp.message)).toContain("https://github.com/acme/api/pull/700");
+    expect(String(followUp.message)).toContain("submit_pr_description");
+    expect(s.deps.findOpenPrByHead).toHaveBeenCalledWith("acme/api", BRANCH);
+    // the run's answer is the loop's; the turn's description opened-or-edited the PR at the observed head
+    expect(out.answer).toBe("Refreshed the allowlist.");
+    expect(opened).toHaveLength(1);
+    expect(opened[0]).toMatchObject({ repo: "acme/api", headBranch: BRANCH, base: "main", title: DESCRIPTION.title });
+    expect(String(opened[0].body)).toContain(`blob/${HEAD}/`);
+    expect(out.prNote).toContain("PR updated:");
+    expect(out.prNote).toContain("body re-rendered");
+    expect(out.prNote).not.toContain("not resubmitted");
+    // pi ended once, after the turn
+    expect(container.killed).toEqual([4242]);
+    expect(container.removed).toEqual(["/tmp/switchboard-pi-run-l"]);
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+    s.ending.drain(true);
+    await s.writer.settled();
+    const rec = (await s.store.get("run-l"))!;
+    const notes = rec.events.filter((e) => e.type === "run_note").map((e) => (e as { kind: string }).kind);
+    expect(notes).toContain("description_turn");
+    expect(rec.events.some((e) => e.type === "pr_description")).toBe(true);
+    expect(rec.events.find((e) => e.type === "pr_opened")).toMatchObject({ number: 700, created: false });
+    expect(rec.events.filter((e) => e.type === "tool_call").map((e) => (e as { tool: string }).tool)).toEqual([
+      "submit_pr_description",
+    ]);
+  });
+
   // The resident's attach names the pool user every /exec runs as, and the
   // run's pi files go under the run's own root all the same: the root never
   // depends on knowing that user, present or not (harness-pi item 4).
@@ -1025,6 +1174,132 @@ describe("the harness seam — the review preset on pi", () => {
       head: HEAD,
       verdict: "approve",
     });
+  });
+
+  // harness-pi item 14, agent-review item 12: the PR's head moves substantively
+  // while pi reviews it. The settle's one more turn is a `prompt` on the same
+  // pi session — the process that reviewed, still alive on its transcript —
+  // never a second pi and never the native loop; the second verdict, relayed
+  // through the same registry entry under the turn's own capture, is the one
+  // posted, pinned to the new head; pi is ended once the settle is done.
+  it("a substantive head move mid-review on pi re-reviews as a prompt on the same pi session: one pi process, two prompts, the worktree moved first, the second verdict posted pinned to the new head, the second answer the run's, pi ended after the settle", async () => {
+    const NEW = "d75b5a51aba97d43c64a42c96e580dd9abbfd78e";
+    const container = new FakePiContainer();
+    const registry = new HarnessRegistry();
+    let worktreeHead = HEAD;
+    const moves: string[] = [];
+    const executor = {
+      exec: async (command: string) => (command.includes("rev-parse") ? `${worktreeHead}\n` : ""),
+      moveTo: async (sha: string) => {
+        moves.push(sha);
+        worktreeHead = sha;
+        return { sha };
+      },
+    };
+    const killedWhenPrompted: number[][] = [];
+    // A review's pi answering TWO prompts on one session: the request with a
+    // verdict at the pinned head, then the re-review's follow-up with a verdict
+    // at the new head — each through the relay as the real extension submits it.
+    let prompts = 0;
+    container.onStdin = (line, c) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
+        c.emit({ id: cmd.id, type: "response", command: cmd.type, success: true, data: { sessionFile: "s.jsonl" } });
+      if (cmd.type !== "prompt") return;
+      const n = prompts++;
+      killedWhenPrompted.push([...container.killed]);
+      const live = registry.get("run-l")!;
+      c.emit({ id: cmd.id, type: "response", command: "prompt", success: true }, { type: "agent_start" });
+      const verdict =
+        n === 0 ? VERDICT : { verdict: "request_changes", summary: "the new test is wrong", head: NEW, findings: [] };
+      const id = `v${n}`;
+      const t = assistant([{ type: "toolCall", id, name: "submit_verdict", arguments: verdict }]);
+      c.emit(
+        { type: "message_end", message: t },
+        { type: "tool_execution_start", toolCallId: id, toolName: "submit_verdict", args: verdict },
+      );
+      authorizeToolCall(live, { toolCallId: id, tool: "submit_verdict", input: verdict });
+      void runRelayedTool(live, { toolCallId: id, tool: "submit_verdict", input: verdict }).then((answer) => {
+        c.emit(
+          {
+            type: "tool_execution_end",
+            toolCallId: id,
+            toolName: "submit_verdict",
+            result: { content: answer.content },
+            isError: answer.isError,
+          },
+          { type: "turn_end", message: t, toolResults: [] },
+        );
+        const done = assistant(
+          [{ type: "text", text: n === 0 ? "First review: approve." : "Second review: the new test is wrong." }],
+          "stop",
+        );
+        c.emit(
+          { type: "message_end", message: done },
+          { type: "turn_end", message: done, toolResults: [] },
+          { type: "agent_settled" },
+        );
+      });
+    };
+    const list = (subjects: string[]): PrCommitList => ({
+      commits: subjects.map((message, i) => ({ sha: `${i + 1}`.repeat(40), message })),
+      files: ["src/x.ts"],
+      filesTruncated: false,
+    });
+    const posts: Array<{ target: ReviewCommentTarget; body: string }> = [];
+    const s = setup("", {
+      agent: "review",
+      provider: provider("unused"),
+      yaml: REVIEW_PI_YAML,
+      harness: { registry, harnessUrl: "https://bot.example.com", containerFor: () => container },
+      bearer: "sbr_run-l.s3cret",
+      repoCtx: prThread.repoCtx,
+      binding: prThread.binding,
+      executor,
+      review: {
+        head: HEAD,
+        post: async (target, body) => void posts.push({ target, body }),
+        currentHead: NEW,
+        commits: (sha) => (sha === HEAD ? list(["feat: the change"]) : list(["feat: the change", "fix: review nits"])),
+      },
+    });
+    const out = await runLoop(s.deps, s.ctx);
+    // one pi, two prompts on it — pi still alive at the second — and the worktree moved before it
+    expect(container.starts).toHaveLength(1);
+    expect(prompts).toBe(2);
+    expect(killedWhenPrompted).toEqual([[], []]);
+    expect(moves).toEqual([NEW]);
+    const followUp = container.stdin
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((c) => c.type === "prompt")[1];
+    expect(String(followUp.message)).toContain("moved from a1b2c3d to d75b5a5");
+    expect(String(followUp.message)).toContain("Switchboard has already moved your worktree to d75b5a5");
+    // the second verdict and answer are the run's; posted once, pinned to the new head
+    expect(out.answer).toBe("Second review: the new test is wrong.");
+    expect(out.reviewHead).toBe(NEW);
+    expect(posts).toEqual([
+      {
+        target: { repo: "o/r", number: 42, commitId: NEW },
+        body: "Changes requested: the new test is wrong\n\nSecond review: the new test is wrong.",
+      },
+    ]);
+    expect(s.published).toEqual(["answer:Second review: the new test is wrong."]);
+    expect(s.replies.some((r) => r.startsWith("🔀 o/r#42 moved during the run"))).toBe(true);
+    // pi ended once, after the settle
+    expect(container.killed).toEqual([4242]);
+    expect(container.removed).toEqual(["/tmp/switchboard-pi-run-l"]);
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+    s.ending.drain(true);
+    await s.writer.settled();
+    const rec = (await s.store.get("run-l"))!;
+    expect(rec.events.filter((e) => e.type === "tool_call").map((e) => (e as { tool: string }).tool)).toEqual([
+      "submit_verdict",
+      "submit_verdict",
+    ]);
+    expect(rec.events.some((e) => e.type === "run_note" && (e as { kind: string }).kind === "head_moved")).toBe(true);
+    expect(rec.events.filter((e) => e.type === "review_posted")).toEqual([
+      expect.objectContaining({ type: "review_posted", head: NEW, verdict: "request_changes" }),
+    ]);
   });
 
   it("`harness: { review: native }` and no block are the same review byte for byte — the native loop, pi never started, the same events, replies and post", async () => {

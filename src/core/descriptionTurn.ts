@@ -18,7 +18,11 @@
 // description, a push the remote proves, a branch that is not the base, an
 // open PR heading it (the same lookup open-or-edit starts with; a failed
 // lookup means no turn, never a throw) — and `runDescriptionTurn` runs the
-// turn and reports what it submitted.
+// turn and reports what it submitted. Which loop runs it is the run's
+// harness (docs/reference/specs/harness-pi.md item 14): on the native loop
+// one more `runAgent`; on pi one more `prompt` on the run's own pi session,
+// through the seam the run stage hands over — the same text, hook, note,
+// budget and failure handling either way.
 
 import type { AgentDef } from "../agents/registry.js";
 import type { Effort } from "../effort.js";
@@ -28,6 +32,7 @@ import type { Provider } from "./provider.js";
 import { runAgent } from "../runner.js";
 import type { RunnableTool, ToolContext } from "../tools/runnableTool.js";
 import type { CodingPrTarget, WorkspaceObservation } from "./codingPrPostStep.js";
+import type { PiFollowUpTurn } from "./harness/pi/harness.js";
 import type { PrDescription } from "./prDescription.js";
 import { normalizeHead, sameCommit } from "./reviewedHead.js";
 import type { RunControl } from "./runRegistry/runControl.js";
@@ -119,17 +124,22 @@ export interface CodingTurnSpec {
   onProgress: (note: string) => void;
   onEvent: (event: RunEvent) => void;
   control: RunControl;
+  /** One more turn on the run's own pi session (harness-pi item 14), when the
+   *  run is on pi; absent, the turn is the native loop's. */
+  followUp?: PiFollowUpTurn;
 }
 
 /**
  * Run the description turn: publish the `description_turn` run note, append
  * the run's answer and the follow-up to its messages IN PLACE, and run the
- * agent once more on a clipped COPY of its def (never the shared AgentDef).
- * The description arrives through the tool context's `onPrDescription` hook
- * — the same one the first turn fed — and is ALSO returned, so the caller can
- * tell "submitted" from "the turn ran and still submitted nothing" without
- * reaching into its own state. Never throws past a runner failure: a turn
- * that fails is logged and reported as having submitted nothing.
+ * agent once more on a clipped COPY of its def (never the shared AgentDef) —
+ * through `runAgent`, or as a `prompt` on the run's pi session when the run
+ * stage handed one over (`followUp`), under the same clip. The description
+ * arrives through the tool context's `onPrDescription` hook — the same one the
+ * first turn fed — and is ALSO returned, so the caller can tell "submitted"
+ * from "the turn ran and still submitted nothing" without reaching into its
+ * own state. Never throws past a loop failure: a turn that fails is logged
+ * and reported as having submitted nothing.
  */
 export async function runDescriptionTurn(input: {
   span?: Span;
@@ -148,41 +158,53 @@ export async function runDescriptionTurn(input: {
   turn.onEvent({ type: "run_note", kind: "description_turn", summary, at: systemClock() });
   turn.onProgress(`re-evaluating the description of ${t.repo}#${t.pr.number} at ${t.headSha.slice(0, 7)}`);
   let submitted: PrDescription | undefined;
+  const followUpText = descriptionFollowUp(t);
   input.messages.push(
     { role: "assistant", content: [{ type: "text", text: input.answer }] },
-    { role: "user", content: [{ type: "text", text: descriptionFollowUp(t) }] },
+    { role: "user", content: [{ type: "text", text: followUpText }] },
   );
   const agent: AgentDef = {
     ...turn.agent,
     maxTurns: Math.min(turn.agent.maxTurns, DESCRIPTION_TURN_MAX_TURNS),
     maxMinutes: Math.min(turn.agent.maxMinutes, DESCRIPTION_TURN_MAX_MINUTES),
   };
+  const toolContext: ToolContext = {
+    ...turn.toolContext,
+    onPrDescription: (d) => {
+      submitted = d;
+      turn.toolContext.onPrDescription?.(d);
+    },
+  };
   try {
     // The turn's own one-line reply is deliberately dropped: the run's answer
     // stays the first loop's, and the post-step's "PR updated: … body
     // re-rendered at <sha>" note is what tells the reader the outcome. The
     // description — the turn's only deliverable — arrives through the hook.
-    await runAgent({
-      provider: turn.provider,
-      model: turn.model,
-      agent,
-      messages: input.messages,
-      ...(input.system !== undefined ? { system: input.system } : {}),
-      ...(turn.effort !== undefined ? { effort: turn.effort } : {}),
-      ...(input.span ? { span: input.span } : {}),
-      ...(turn.backend ? { backend: turn.backend } : {}),
-      toolContext: {
-        ...turn.toolContext,
-        onPrDescription: (d) => {
-          submitted = d;
-          turn.toolContext.onPrDescription?.(d);
-        },
-      },
-      ...(turn.extraTools && turn.extraTools.length > 0 ? { extraTools: turn.extraTools } : {}),
-      onProgress: turn.onProgress,
-      onEvent: turn.onEvent,
-      control: turn.control,
-    });
+    if (turn.followUp) {
+      await turn.followUp({
+        text: followUpText,
+        maxTurns: agent.maxTurns,
+        maxMinutes: agent.maxMinutes,
+        toolContext,
+        ...(input.span ? { span: input.span } : {}),
+      });
+    } else {
+      await runAgent({
+        provider: turn.provider,
+        model: turn.model,
+        agent,
+        messages: input.messages,
+        ...(input.system !== undefined ? { system: input.system } : {}),
+        ...(turn.effort !== undefined ? { effort: turn.effort } : {}),
+        ...(input.span ? { span: input.span } : {}),
+        ...(turn.backend ? { backend: turn.backend } : {}),
+        toolContext,
+        ...(turn.extraTools && turn.extraTools.length > 0 ? { extraTools: turn.extraTools } : {}),
+        onProgress: turn.onProgress,
+        onEvent: turn.onEvent,
+        control: turn.control,
+      });
+    }
   } catch (err) {
     console.error(`[description-turn] ${logKey} turn failed: ${err instanceof Error ? err.message : String(err)}`);
   }

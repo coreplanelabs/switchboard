@@ -161,8 +161,30 @@ export class PiBridge {
    *  were vetted by the bot generation that died, and this one never heard. */
   judgeGate = true;
   private summarizationRetries = 0;
+  /** The span a starting call's `tool.<name>` opens under: the run's
+   *  `run.agent` for the loop, a follow-up turn's own for its duration
+   *  (`under`; harness-pi item 14). */
+  private agentSpan: Span | undefined;
 
-  constructor(private readonly deps: BridgeDeps) {}
+  constructor(private readonly deps: BridgeDeps) {
+    this.agentSpan = deps.agentSpan;
+  }
+
+  /** From here on, new tool spans hang under `span` — a follow-up turn's
+   *  `run.agent`, opened under the caller's span the way the native loop's
+   *  would be (tracing.md item 17); `undefined` opens none. */
+  under(span: Span | undefined): void {
+    this.agentSpan = span;
+  }
+
+  /** A new prompt is about to be sent on the session (harness-pi item 14): the
+   *  reply pi settled the last loop on is not this turn's answer, so the
+   *  answer state starts over — what pi settles on next is the turn's. */
+  newPrompt(): void {
+    this.answerText = undefined;
+    this.heldAnswer = undefined;
+    this.assistantStartedAt = undefined;
+  }
 
   /** The gate saw this call: the extension's `tool_call` hook asked the bot
    *  for it, whatever the answer. Called from the authorize route, before pi
@@ -289,7 +311,7 @@ export class PiBridge {
   private onToolStart(event: PiEvent): void {
     const tool = str(event.toolName);
     const callId = str(event.toolCallId);
-    const span = this.deps.agentSpan?.start(`tool.${tool}`);
+    const span = this.agentSpan?.start(`tool.${tool}`);
     this.openTools.set(callId, { span, tool, judged: this.judgeGate });
     this.toolCalls++;
     const input = isRecord(event.args) ? event.args : undefined;

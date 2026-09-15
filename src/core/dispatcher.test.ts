@@ -61,7 +61,7 @@ import { createRunHistoryWriter, NullRunHistoryWriter } from "./runHistoryWriter
 import { InMemoryRunLedger } from "./runLedger/inMemory.js";
 import { messageFromInbox } from "./runLedger/inboxMessage.js";
 import { createLedgerWriteThrough, NullLedgerWriteThrough } from "./runLedger/writeThrough.js";
-import { runPiHarness } from "./harness/pi/harness.js";
+import { runPiHarnessOpen, type OpenPiSession } from "./harness/pi/harness.js";
 import { HarnessRegistry, authorizeToolCall, relayToolCall, type ToolCallAsk } from "./harness/pi/relay.js";
 import { FakePiContainer } from "./harness/pi/testing/fakeContainer.js";
 import { ThreadsElsewhere } from "./runLedger/threadsElsewhere.js";
@@ -140,13 +140,17 @@ vi.mock("../runner.js", async (importOriginal) => {
   return { ...mod, runAgent: vi.fn(mod.runAgent) };
 });
 
-// Pass-through spy on the pi harness's entry: the session-seed suite scripts
+// Pass-through spy on the pi harness's open form, the entry the run loop takes
+// (harness-pi item 14): the session-seed suite scripts
 // one run's answer and reads the seed the dispatcher handed over; behavior
 // everywhere else is the real harness's.
 vi.mock("./harness/pi/harness.js", async (importOriginal) => {
   const mod = await importOriginal<typeof import("./harness/pi/harness.js")>();
-  return { ...mod, runPiHarness: vi.fn(mod.runPiHarness) };
+  return { ...mod, runPiHarnessOpen: vi.fn(mod.runPiHarnessOpen) };
 });
+
+/** What a scripted pi run answers: the loop's answer with a session that takes no follow-up and ends at once. */
+const piAnswered = (answer: string): OpenPiSession => ({ answer, followUp: async () => answer, end: async () => {} });
 
 function makeDeps(fixtureYaml: string, provider: Provider): TestDeps {
   const dir = mkdtempSync(join(tmpdir(), "swb-dispatch-"));
@@ -12504,7 +12508,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
   // The pass-through spy keeps the real harness as its default; a test scripts
   // one call with `mockImplementationOnce`, which the call consumes.
   beforeEach(() => {
-    vi.mocked(runPiHarness).mockClear();
+    vi.mocked(runPiHarnessOpen).mockClear();
     vi.mocked(makeExecutor).mockClear();
   });
 
@@ -12516,13 +12520,13 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     let systemOnPi: string | undefined;
     let notepadOnPi: string | undefined;
     let sessionTools: string[] = [];
-    vi.mocked(runPiHarness).mockImplementationOnce(async (_deps, run) => {
+    vi.mocked(runPiHarnessOpen).mockImplementationOnce(async (_deps, run) => {
       handed = run.messages;
       agentOnPi = run.agent.name;
       systemOnPi = run.system;
       notepadOnPi = (await run.notepad?.())?.text;
       sessionTools = run.tools.map((tool) => tool.name).filter((name) => name === "recall" || name === "notes");
-      return "bumped";
+      return piAnswered("bumped");
     });
     const { io, replies } = fakeIO(history);
     await dispatch(t.deps, followUp, io);
@@ -12560,7 +12564,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     const { io } = fakeIO(history);
     await dispatch(t.deps, followUp, io);
     await t.writer.settled();
-    expect(vi.mocked(runPiHarness)).not.toHaveBeenCalled();
+    expect(vi.mocked(runPiHarnessOpen)).not.toHaveBeenCalled();
     // The finish lands on the ledger (the history store in production); the plain store keeps the tombstone.
     const record = t.ledger.finished.get("run-next")!;
     expect(record).toMatchObject({ agent: "general", seed: "channel", status: "completed" });
@@ -12576,9 +12580,9 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     };
     vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
     let handed: ChatMessage[] | undefined;
-    vi.mocked(runPiHarness).mockImplementationOnce(async (_deps, run) => {
+    vi.mocked(runPiHarnessOpen).mockImplementationOnce(async (_deps, run) => {
       handed = run.messages;
-      return "done anyway";
+      return piAnswered("done anyway");
     });
     const { io } = fakeIO(history);
     await dispatch(t.deps, followUp, io);
@@ -12600,7 +12604,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       return { repo: "acme/api", ref: "fix/x", refFromPr: true, pr: 7, headSha: "a".repeat(40), baseRef: "main" };
     };
     vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
-    vi.mocked(runPiHarness).mockImplementationOnce(async () => "done");
+    vi.mocked(runPiHarnessOpen).mockImplementationOnce(async () => piAnswered("done"));
     const { io } = fakeIO(history);
     await dispatch(t.deps, followUp, io);
     await t.writer.settled();
@@ -12612,9 +12616,9 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     const t = await threadWithSession(PI_YAML + "pi:\n  compaction:\n    reserveTokens: 150000\n");
     vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
     let compaction: unknown = "unset";
-    vi.mocked(runPiHarness).mockImplementationOnce(async (deps) => {
+    vi.mocked(runPiHarnessOpen).mockImplementationOnce(async (deps) => {
       compaction = deps.compaction;
-      return "done";
+      return piAnswered("done");
     });
     const { io } = fakeIO(history);
     await dispatch(t.deps, followUp, io);
@@ -12624,9 +12628,9 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     const plain = await threadWithSession(PI_YAML);
     vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
     let none: unknown = "unset";
-    vi.mocked(runPiHarness).mockImplementationOnce(async (deps) => {
+    vi.mocked(runPiHarnessOpen).mockImplementationOnce(async (deps) => {
       none = deps.compaction;
-      return "done";
+      return piAnswered("done");
     });
     await dispatch(plain.deps, followUp, fakeIO(history).io);
     await plain.writer.settled();
