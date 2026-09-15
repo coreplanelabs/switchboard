@@ -2200,6 +2200,7 @@ describe("review post-step", () => {
         list: (o) => inner.list(o),
         events: (id, o) => inner.events(id, o),
         delete: (id) => inner.delete(id),
+        usageByUser: (q) => inner.usageByUser(q),
       };
       deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), fakeIO().io);

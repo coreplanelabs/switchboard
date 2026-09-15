@@ -57,6 +57,14 @@ import {
 } from "../../src/core/runLedger/sessionLog.ts";
 import type { RunEvent } from "../../src/core/runEvents.ts";
 import {
+  aggregateUsageByUser,
+  isRunUsage,
+  usageOfEvents,
+  type RunUsage,
+  type RunUsageReport,
+  type UsageRun,
+} from "../../src/core/runUsage.ts";
+import {
   checkFence,
   decideClaim,
   decideClaimWrite,
@@ -1160,6 +1168,10 @@ export class RunHistoryDO extends DurableObject<Env> {
     // The session a run was a range of (session-log item 7), so the sweep can
     // tell which sessions still have a kept run; null for a record without one.
     if (!columns.has("session_key")) this.sql.exec(`ALTER TABLE runs ADD COLUMN session_key TEXT`);
+    // What the run cost in tokens (costs.md, cost by user): the record's `usage`
+    // as JSON; NULL for a record written before the field existed, until the
+    // by-user aggregate fills it in from the run's stored events.
+    if (!columns.has("usage_json")) this.sql.exec(`ALTER TABLE runs ADD COLUMN usage_json TEXT`);
     this.sql.exec(`
       CREATE INDEX IF NOT EXISTS runs_channel_finished ON runs(channel_id, finished_at DESC, run_id DESC);
       CREATE INDEX IF NOT EXISTS runs_visibility_finished ON runs(channel_visibility, finished_at DESC, run_id DESC);
@@ -1820,8 +1832,8 @@ export class RunHistoryDO extends DurableObject<Env> {
         );
       this.sql.exec(
         `INSERT INTO runs (run_id, label, agent, model, channel_id, user_id, thread_key, channel_visibility, repo, started_at, finished_at, stored_at, status,
-                           event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json, session_key)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json, session_key, usage_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(run_id) DO UPDATE SET
            label = excluded.label, agent = excluded.agent, model = excluded.model, channel_id = excluded.channel_id,
            user_id = excluded.user_id, thread_key = excluded.thread_key, channel_visibility = excluded.channel_visibility,
@@ -1829,7 +1841,8 @@ export class RunHistoryDO extends DurableObject<Env> {
            finished_at = excluded.finished_at, stored_at = excluded.stored_at, status = excluded.status,
            event_count = excluded.event_count, stored_event_count = excluded.stored_event_count, truncated = excluded.truncated,
            bytes = excluded.bytes, diagnosis_json = excluded.diagnosis_json, summary_json = excluded.summary_json,
-           session_key = excluded.session_key`,
+           session_key = excluded.session_key,
+           usage_json = COALESCE(excluded.usage_json, runs.usage_json)`,
         stored.id,
         stored.label ?? null,
         stored.agent ?? null,
@@ -1850,6 +1863,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         JSON.stringify(stored.diagnosis),
         JSON.stringify(summary),
         stored.session?.key ?? null,
+        stored.usage ? JSON.stringify(stored.usage) : null,
       );
       // The session's registry row learns its newest finish (session-log item
       // 7); a record that reaches the store without a claim (the plain put
@@ -2054,6 +2068,83 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   /**
+   * Who spent what, per UTC day (costs.md, cost by user), over the runs that
+   * finished in [sinceMs, untilMs) and are inside the retention window. A row
+   * written before `usage_json` existed is filled in here from its stored
+   * `model.turn` events — up to USAGE_BACKFILL_PER_CALL a call, the rest
+   * reported as `pending` — so the history heals as it is read, with no
+   * operator step; a run without turns is written back as the zero usage so it
+   * is not re-read. A child is billed to its parent's requester; a parent
+   * outside the range is looked up by id.
+   */
+  usageByUser(sinceMs: number, untilMs: number): RunUsageReport {
+    const now = systemClock();
+    const { policy } = this.policyState();
+    const cutoff = now - policy.retentionDays * 86_400_000;
+    const rows = this.sql
+      .exec<UsageRow>(
+        `SELECT run_id, user_id, started_at, finished_at, usage_json, summary_json FROM runs
+          WHERE finished_at >= ? AND finished_at < ? ORDER BY finished_at ASC, run_id ASC`,
+        Math.max(sinceMs, cutoff),
+        untilMs,
+      )
+      .toArray();
+    let backfilled = 0;
+    const runs: UsageRun[] = rows.map((row) => {
+      let usage = parseUsageJson(row.usage_json);
+      if (usage === undefined && backfilled < USAGE_BACKFILL_PER_CALL) {
+        usage = usageOfEvents(this.modelTurnEvents(row.run_id));
+        this.sql.exec(`UPDATE runs SET usage_json = ? WHERE run_id = ?`, JSON.stringify(usage), row.run_id);
+        backfilled += 1;
+      }
+      const who = identityOfSummary(row.summary_json);
+      return {
+        id: row.run_id,
+        userId: row.user_id,
+        ...(who.userName ? { userName: who.userName } : {}),
+        ...(who.parentRunId ? { parentRunId: who.parentRunId } : {}),
+        startedAt: row.started_at,
+        finishedAt: row.finished_at,
+        ...(usage ? { usage } : {}),
+      };
+    });
+    const lookupParent = (id: string) => {
+      const p = this.sql
+        .exec<{ user_id: string; summary_json: string }>(`SELECT user_id, summary_json FROM runs WHERE run_id = ?`, id)
+        .toArray()[0];
+      if (!p) return undefined;
+      const who = identityOfSummary(p.summary_json);
+      return { userId: p.user_id, ...(who.userName ? { userName: who.userName } : {}) };
+    };
+    const { rows: out, pending } = aggregateUsageByUser(runs, lookupParent);
+    const earliest = this.sql
+      .exec<{ m: number | null }>(`SELECT MIN(finished_at) AS m FROM runs WHERE finished_at >= ?`, cutoff)
+      .one().m;
+    return {
+      rows: out,
+      pending,
+      ...(earliest !== null ? { earliestFinishedAt: earliest } : {}),
+      retentionDays: policy.retentionDays,
+    };
+  }
+
+  /** The stored `model.turn` span ends of one run — the rows a backfill prices. */
+  private modelTurnEvents(runId: string): RunEvent[] {
+    const out: RunEvent[] = [];
+    for (const r of this.sql
+      .exec<{ json: string }>(`SELECT json FROM run_events WHERE run_id = ? AND json LIKE '%"model.turn"%'`, runId)
+      .toArray()) {
+      try {
+        const e = JSON.parse(r.json) as RunEvent;
+        if (e && e.type === "span_end") out.push(e);
+      } catch {
+        // an unparsable event row prices nothing
+      }
+    }
+    return out;
+  }
+
+  /**
    * Newest first (finished_at desc, run_id desc) among the rows the policy
    * keeps, filtered, capped at RUN_LIST_MAX_LIMIT. The `before`/`beforeId`
    * cursor is the previous page's last row: rows strictly after it in the list
@@ -2181,6 +2272,43 @@ function parseEventRows(rows: readonly EventRow[]): StoredRunEvent[] {
 }
 
 /** The stored summary (record minus events); null when the row is unreadable. */
+/** How many usage-less rows one by-user read prices from their events before
+ *  reporting the rest as pending: a page load stays quick while the history heals. */
+const USAGE_BACKFILL_PER_CALL = 200;
+
+type UsageRow = {
+  run_id: string;
+  user_id: string;
+  started_at: number;
+  finished_at: number;
+  usage_json: string | null;
+  summary_json: string;
+};
+
+/** A stored `usage_json`, or undefined when absent or unreadable (then it is recomputed). */
+function parseUsageJson(raw: string | null): RunUsage | undefined {
+  if (raw === null) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return isRunUsage(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The two identity fields the by-user aggregate needs off a summary, read leniently. */
+function identityOfSummary(raw: string): { userName?: string; parentRunId?: string } {
+  try {
+    const s = JSON.parse(raw) as Record<string, unknown>;
+    return {
+      ...(typeof s.userName === "string" && s.userName ? { userName: s.userName } : {}),
+      ...(typeof s.parentRunId === "string" && s.parentRunId ? { parentRunId: s.parentRunId } : {}),
+    };
+  } catch {
+    return {};
+  }
+}
+
 function parseSummary(row: RunRow): Omit<RunRecord, "events"> | null {
   try {
     const parsed: unknown = JSON.parse(row.summary_json);
@@ -2237,6 +2365,23 @@ function parseRunPut(body: unknown): Validated<{ storeKey: string; record: RunRe
 }
 
 /** `{storeKey, id}` — the body of /runs/get, /runs/summary and /runs/delete, and the base of /runs/events. */
+/** At most a year of runs a call — the page asks for 90 days at most. */
+const USAGE_QUERY_MAX_SPAN_MS = 366 * 86_400_000;
+
+function parseRunUsageQuery(body: unknown): Validated<{ storeKey: string; sinceMs: number; untilMs: number }> {
+  if (typeof body !== "object" || body === null) return invalid("body must be a JSON object");
+  const b = body as Record<string, unknown>;
+  const key = parseStoreKey(b);
+  if (!key.ok) return key;
+  const { sinceMs, untilMs } = b;
+  if (typeof sinceMs !== "number" || !Number.isFinite(sinceMs) || sinceMs < 0)
+    return invalid("sinceMs must be a non-negative number");
+  if (typeof untilMs !== "number" || !Number.isFinite(untilMs) || untilMs <= sinceMs)
+    return invalid("untilMs must be a number after sinceMs");
+  if (untilMs - sinceMs > USAGE_QUERY_MAX_SPAN_MS) return invalid("the range may span at most 366 days");
+  return { ok: true, value: { storeKey: key.value, sinceMs, untilMs } };
+}
+
 function parseRunTarget(body: unknown): Validated<{ storeKey: string; id: string }> {
   if (typeof body !== "object" || body === null) return invalid("body must be a JSON object");
   const b = body as Record<string, unknown>;
@@ -3504,6 +3649,14 @@ async function handleRuns(pathname: string, body: unknown, env: Env): Promise<Re
     );
     return json(result ?? { events: null });
   }
+  if (pathname === "/runs/usage-by-user") {
+    const parsed = parseRunUsageQuery(body);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+    const { storeKey, sinceMs, untilMs } = parsed.value;
+    const report = await stub(storeKey).usageByUser(sinceMs, untilMs);
+    console.log(`[runs/usage-by-user] ${storeKey} -> ${report.rows.length} rows, ${report.pending} pending`);
+    return json(report);
+  }
   // /runs/delete
   const parsed = parseRunTarget(body);
   if (!parsed.ok) return json({ error: parsed.error }, 400);
@@ -3526,6 +3679,7 @@ const ROUTES = new Set([
   "/runs/summary",
   "/runs/list",
   "/runs/events",
+  "/runs/usage-by-user",
   "/runs/delete",
   ...LEDGER_ROUTES,
 ]);

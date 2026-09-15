@@ -190,6 +190,7 @@ describe("RunStoreFrictionLedger", () => {
       },
       events: async () => null,
       delete: async () => {},
+      usageByUser: async () => ({ rows: [], pending: 0, retentionDays: 0 }),
     };
     await expect(new RunStoreFrictionLedger(brokenStore).recent()).rejects.toThrow("store down");
   });
@@ -232,6 +233,7 @@ describe("RunStoreFrictionLedger", () => {
       },
       events: (id, o) => inner.events(id, o),
       delete: (id) => inner.delete(id),
+      usageByUser: (q) => inner.usageByUser(q),
     };
     await new RunStoreFrictionLedger(spy).recent();
     await new RunStoreFrictionLedger(spy).recent({ limit: 2 });

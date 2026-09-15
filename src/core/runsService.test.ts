@@ -209,6 +209,7 @@ describe("RunsService.getRun", () => {
       list: (o) => inner.list(o),
       events: (id, o) => inner.events(id, o),
       delete: (id) => inner.delete(id),
+      usageByUser: (q) => inner.usageByUser(q),
     };
     const { reg, tick } = testRegistry();
     const svc = createRunsService({ registry: reg, store });
@@ -277,6 +278,7 @@ describe("RunsService.getRun", () => {
       list: (o) => inner.list(o),
       events: (id, o) => inner.events(id, o),
       delete: (id) => inner.delete(id),
+      usageByUser: (q) => inner.usageByUser(q),
     };
     const warn = vi.fn<(message: string) => void>();
     const { reg, tick } = testRegistry();
@@ -650,6 +652,7 @@ describe("RunsService.listRuns — read merge", () => {
       list: vi.fn(async (opts) => rows.slice(0, Math.min(200, opts.limit ?? 50))),
       events: vi.fn(async () => ({ events: [] })),
       delete: vi.fn(),
+      usageByUser: vi.fn(async () => ({ rows: [], pending: 0, retentionDays: 0 })),
     };
     const { reg } = testRegistry();
     const bounded = createRunsService({ registry: reg, store });
@@ -676,6 +679,7 @@ describe("RunsService.listRuns — read merge", () => {
         throw new Error("boom");
       }),
       delete: vi.fn(),
+      usageByUser: vi.fn(async () => ({ rows: [], pending: 0, retentionDays: 0 })),
     };
     const warn = vi.fn<(m: string) => void>();
     const { reg } = testRegistry();
@@ -1042,6 +1046,7 @@ describe("RunsService — summary-only persisted reads", () => {
       list: (o) => inner.list(o),
       events: (id, o) => inner.events(id, o),
       delete: (id) => inner.delete(id),
+      usageByUser: (q) => inner.usageByUser(q),
     };
     const { reg } = testRegistry();
     const svc = createRunsService({ registry: reg, store });

@@ -9,6 +9,7 @@ import { STATIC_CHANNEL_DIRECTORY } from "../authz/channelDirectory.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "../runFriction.js";
 import { SPAN_SCHEMA } from "../normalizeSpans.js";
 import { isSpanRecord, type RunEvent } from "../runEvents.js";
+import { usageOfEvents } from "../runUsage.js";
 import {
   fitRecordToBudget,
   type RunProfileRecord,
@@ -371,6 +372,9 @@ export function assembleRunRecord(input: {
     ...(input.seed !== undefined ? { seed: input.seed } : {}),
     ...(input.session !== undefined ? { session: input.session } : {}),
     ...(pr !== undefined ? { pr } : {}),
+    // What the run cost (cost by user): summed here, before the budget can cut
+    // a middle event, from every model.turn span the run published.
+    usage: usageOfEvents(events),
   });
   return fitted.eventCount !== fitted.storedEventCount ? { ...fitted, truncated: true } : fitted;
 }

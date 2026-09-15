@@ -2,6 +2,7 @@ import type { ChannelVisibility, Predicate } from "./authz/types.js";
 import type { BoundaryScope, Identity, MachineClass, RunProfile } from "../config/profile.js";
 import type { RunEvent } from "./runEvents.js";
 import { isHeadMaterial, isSpanRecord } from "./runEvents.js";
+import { isRunUsage, type RunUsage } from "./runUsage.js";
 import { isHandoffShape, type Handoff } from "./ship/handoff.js";
 import {
   type FindingDisposition,
@@ -188,6 +189,11 @@ export interface RunRecord {
    *  (docs/reference/specs/resident-repos.md item 29) — read off the record,
    *  never off the reply's text. */
   pr?: RunPullRequest;
+  /** What the run cost in tokens, per model, summed from its `model.turn`
+   *  spans at finish (`usageOfEvents`; docs/reference/specs/costs.md, cost by user).
+   *  Every record written since carries it (zero turns included); one written
+   *  before lacks it until the store backfills it from the stored events. */
+  usage?: RunUsage;
 }
 
 /** A pull request as the record names it (item 2): its number and its GitHub
@@ -692,6 +698,7 @@ export function isRunRecord(v: unknown): v is RunRecord {
   if (r.seed !== undefined && !RUN_SEEDS.includes(r.seed as RunSeed)) return false;
   // The run's place in its session's log (item 53), or absent.
   if (r.session !== undefined && !isRunSession(r.session)) return false;
+  if (r.usage !== undefined && !isRunUsage(r.usage)) return false;
   // A coordinator's child (item 48): the instance id in the platform's alphabet
   // and the key `<instance>:<step>` — both or neither; one alone is no tag.
   if ((r.parentInstanceId === undefined) !== (r.idempotencyKey === undefined)) return false;

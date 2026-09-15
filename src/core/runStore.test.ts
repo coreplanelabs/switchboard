@@ -287,6 +287,40 @@ function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION
       expect(await store.get("old")).toBeNull();
     });
 
+    // docs/reference/specs/costs.md (cost by user): a local store aggregates over its
+    // records, pricing a record without usage from its events (they are at hand).
+    it("usageByUser sums per requester and UTC day within the range, bills a child to its parent's requester, and prices a usage-less record from its events", async () => {
+      const { store } = make();
+      const turn = (seq: number, inputTokens: number) =>
+        ({
+          type: "span_end",
+          spanId: `m${seq}`,
+          name: "model.turn",
+          startedAt: 0,
+          durationMs: 1,
+          status: "ok",
+          attrs: { model: "anthropic/m", inputTokens, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+          seq,
+        }) as unknown as RunRecord["events"][number];
+      await store.put(record("alice-1", NOW - 3_600_000, { userName: "alice", events: [turn(1, 100)] }));
+      await store.put(
+        record("child", NOW - 3_500_000, { userId: "http:coordinator", parentRunId: "alice-1", events: [turn(1, 5)] }),
+      );
+      await store.put(record("bob-1", NOW - 3_000_000, { userId: "slack:UBOB", events: [turn(1, 7)] }));
+      await store.put(record("out-of-range", NOW - 10 * 86_400_000, { events: [turn(1, 999)] }));
+      const report = await store.usageByUser({ sinceMs: NOW - 86_400_000, untilMs: NOW });
+      expect(report.pending).toBe(0);
+      expect(report.retentionDays).toBeGreaterThan(0);
+      expect(report.earliestFinishedAt).toBe(NOW - 10 * 86_400_000);
+      expect(report.rows.map((r) => `${r.userId} runs=${r.runs}`)).toEqual([
+        "slack:UALICE runs=2",
+        "slack:UBOB runs=1",
+      ]);
+      expect(report.rows[0].userName).toBe("alice");
+      expect(report.rows[0].usage.byModel["anthropic/m"].inputTokens).toBe(105);
+      expect(report.rows[0].wallMs).toBe(10_000);
+    });
+
     it("rewritten is true only when an existing record changed", async () => {
       const { store } = make();
       await store.put(record("a", NOW));
