@@ -60,6 +60,7 @@ export const RESIDENT_STEP_LABELS = {
   "ops-dir": "preparing a directory",
   "stage-dir": "preparing a directory",
   stat: "checking a file",
+  "boot-id": "reading the container's identity",
   touch: "touching a marker",
   nproc: "counting CPUs",
   mutex_wait: "waiting for the workspace",

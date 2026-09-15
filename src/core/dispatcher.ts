@@ -67,6 +67,8 @@ import { shipPresetFor } from "./shipPipeline.js";
 import { DEFAULT_CONTRACT_MAX_CHARS, renderContract, type ChildContract } from "./ship/contract.js";
 import { withContractInFirstUserTurn } from "./ship/codingChild.js";
 import { prepareFreshTurn, settleThread, tellDropped } from "./dispatch/settle.js";
+import { abandonLostWorkspace, carriedWorkspaceBinding, prepareRestartTurn } from "./dispatch/reattach.js";
+import { workspaceBindingFor } from "../execution/factory.js";
 import { lineageOf, lineageParent, tellParent, type LineageHeard } from "./dispatch/lineage.js";
 import { sessionSeedFor } from "./dispatch/seed.js";
 import { sessionCapabilityFor } from "../tools/session.js";
@@ -297,6 +299,11 @@ export async function dispatch(
   let reserved: LedgerRun | undefined;
   let requestRow: Record<string, unknown> | undefined;
   let fencedWhileAttaching = false;
+  // A resumed run whose workspace could not be re-attached (run-history item
+  // 54): its row was closed with the note that says why, and its request runs
+  // again as a new run once this dispatch has freed the thread.
+  let resumeRowClosed = false;
+  let restartRequest: IncomingMessage | undefined;
   const reservationHooks = {
     onStop: (mode: StopMode) => void registered?.control.requestStop(mode),
     onFenced: () => {
@@ -763,6 +770,10 @@ export async function dispatch(
 
     // The workspace attach (dispatch/provision.ts): the setup step that takes
     // minutes on a cold clone, and the ask-once refusal when no branch is bound.
+    // A resume re-attaches where its row says the run ran (dispatch/reattach.ts;
+    // run-history item 54), never provisioning again; a fresh run attaches as
+    // it always did.
+    const reattach = resume ? carriedWorkspaceBinding(resume.row) : undefined;
     const attach = await attachWorkspace(deps, {
       msg,
       io,
@@ -775,9 +786,39 @@ export async function dispatch(
       profile,
       repoCtx,
       root,
+      ...(reattach !== undefined ? { reattach } : {}),
     });
     if (attach.kind === "refused") return ended;
+    if (attach.kind === "reattach_refused") {
+      // The run's work was on that backend or nowhere: the resumed run closes
+      // saying why, and its request runs again as a new run in the thread,
+      // provisioned as a fresh run is, after the outer finally frees the thread.
+      if (resume) {
+        restartRequest = await abandonLostWorkspace({
+          msg,
+          io,
+          refuse,
+          card,
+          shell,
+          closeLines,
+          clock,
+          run,
+          registry,
+          resume,
+          ledgerRun,
+          why: attach.why,
+        });
+        resumeRowClosed = true;
+      }
+      return ended;
+    }
     const { round } = attach;
+    // A resumed row learns the binding it re-attached on, complete: a row
+    // written before the binding was recorded carried only its meta's word.
+    if (resume && ledgerRun) {
+      const rebound = workspaceBindingFor(round.selection, profile.machine);
+      if (rebound !== undefined) ledgerRun.setState({ binding: rebound });
+    }
     const { executor, note, resident } = round.selection;
     if (fencedWhileAttaching) {
       // The reservation's lease lapsed during the attach and another generation
@@ -1128,7 +1169,7 @@ export async function dispatch(
     // provider, a refusal, a gate — has adopted a row it will never finish
     // (item 38). Close it `interrupted` here, or the sweep would relaunch it
     // every lease interval forever.
-    if (resume && ledgerRun && !runLoopStarted) {
+    if (resume && ledgerRun && !runLoopStarted && !resumeRowClosed) {
       const adopted = ledgerRun;
       await root.span("post.history_write", () =>
         closeResumedRow(adopted, resume, "the resumed dispatch ended before the run started"),
@@ -1151,7 +1192,18 @@ export async function dispatch(
     // The same status is the caller's outcome.
     ended.status = caught ? "failed" : refused ? "refused" : stopMode ? "stopped" : "completed";
     root.end(caught ? "error" : "ok", { status: ended.status });
-    if (settled.kind === "handed-on") {
+    if (restartRequest) {
+      // The resumed run's request, dispatched again as a new run now that the
+      // thread is free (item 54), with the follow-ups the resumed run never
+      // consumed appended, as a fresh turn would carry them.
+      const pending = settled.kind === "handed-on" ? settled.pending : [];
+      const restart = prepareRestartTurn(deps, { request: restartRequest, pending, clock });
+      await dispatch(deps, restart.msg, io, restart.opts).catch((err: unknown) =>
+        console.error(
+          `[dispatch] ${msg.threadKey} restart after a lost workspace failed: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
+    } else if (settled.kind === "handed-on") {
       const fresh = prepareFreshTurn(deps, { agent: settled.agent, pending: settled.pending, clock });
       await dispatch(deps, fresh.msg, fresh.io, fresh.opts).catch((err: unknown) =>
         console.error(

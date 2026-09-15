@@ -551,11 +551,22 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
       });
       if (harness === "pi" && piFacts) {
         // pi's loop had ended too, but the process that would have ended pi
-        // died first: end it at the pid and root the row recorded, best-effort.
+        // died first: end it at the pid and root the row recorded, best-effort,
+        // and only in the container the row names (harness-pi item 8): in
+        // another container that pid is a stranger's, so it is named, not ended.
         const container =
           deps.harness?.containerFor?.(executor, profile.machine) ?? piContainerFor(executor, profile.machine);
-        await container.kill(piFacts.pid).catch(() => {});
-        if (piFacts.root !== undefined) await container.remove(piRunPathsAt(piFacts.root)).catch(() => {});
+        const here = await container.identity();
+        if (piFacts.container === undefined || here === undefined || piFacts.container === here) {
+          await container.kill(piFacts.pid).catch(() => {});
+          if (piFacts.root !== undefined) await container.remove(piRunPathsAt(piFacts.root)).catch(() => {});
+        } else {
+          onEvent({
+            type: "run_note",
+            kind: "resumed",
+            summary: `the run's pi (pid ${piFacts.pid}) ran in container ${piFacts.container}, not the one this run was handed (${here}): it was not ended here`,
+          });
+        }
       }
       answer = answerUnderEnding(finish.answer, loopEnding, agent.maxMinutes);
     } else if (harness === "pi") {

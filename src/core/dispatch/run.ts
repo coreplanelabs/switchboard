@@ -19,7 +19,7 @@ import type { GithubCapability } from "../../tools/github.js";
 import type { ArtifactStore } from "../../artifacts/store.js";
 import type { OpenedPullRequest, OpenPrRef, PullRequestTarget, RepoShipInfo } from "../../execution/githubPulls.js";
 import type { ReviewCommentTarget } from "../../execution/githubComments.js";
-import type { ExecutorSelection } from "../../execution/factory.js";
+import { workspaceBindingFor, type ExecutorSelection } from "../../execution/factory.js";
 import type { ChatMessage } from "../../providers/types.js";
 import type { McpToolsForRun } from "../../mcp/source.js";
 import type { RepoContext } from "../repoContext.js";
@@ -231,6 +231,10 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
   } = ctx;
   const { resident, binding } = selection;
   let ledgerRun = ctx.ledgerRun;
+  // Where the run's workspace is (run-history item 54), on the row's state
+  // beside the harness facts: the generation that resumes the run re-attaches
+  // there instead of provisioning as for a new run.
+  const workspaceBinding = workspaceBindingFor(selection, profile.machine);
   // The ledger claim (docs/reference/specs/run-history.md item 35): the run's row on the
   // state Worker, with everything a resume must hand the model again — the
   // composed system prompt and the tool definitions verbatim, the card, the
@@ -276,6 +280,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
           ...(requestRow !== undefined ? { request: requestRow } : {}),
         },
         card: card.handle ?? null,
+        ...(workspaceBinding !== undefined ? { state: { binding: workspaceBinding } } : {}),
         // The row reserved before the attach (item 42), promoted in place;
         // its hooks (a stop, a fence) were wired at the reservation and stay.
         reservation: reserved,

@@ -1491,4 +1491,34 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     expect(container.removed).toEqual(["/tmp/switchboard-pi-old-build-run-l"]);
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
   });
+
+  it("on the pi harness a leftover pi whose facts name another container than this run was handed is not ended here: the pid is a stranger's in this container, and a note names the orphan (harness-pi item 8)", async () => {
+    const container = new FakePiContainer();
+    const s = setup("", {
+      agent: "coding",
+      provider: neverCalled(),
+      yaml: YAML + "harness:\n  coding: pi\n",
+      harness: {
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        containerFor: () => container,
+      },
+    });
+    const resume = finishing("Done: pushed the fix.", {
+      agent: "coding",
+      state: { harness: { pid: 777, logOffset: 10, root: "/tmp/switchboard-pi-run-l", container: "vm-old" } },
+    });
+    const out = await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages });
+    expect(out.answer).toBe("Done: pushed the fix.");
+    expect(container.killed).toEqual([]);
+    expect(container.removed).toEqual([]);
+    const notes = s.registry
+      .snapshotById("run-l")!
+      .events.filter((e) => e.type === "run_note")
+      .map((e) => (e as { summary: string }).summary);
+    expect(notes).toContainEqual(
+      "the run's pi (pid 777) ran in container vm-old, not the one this run was handed (vm-fake): it was not ended here",
+    );
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+  });
 });

@@ -15,7 +15,11 @@ import { coordinatorFields, type CoordinatorTag } from "../coordinator/contract.
 import { AGENTS, type AgentDef } from "../../agents/registry.js";
 import { clipSourceLabel, type RunProfile } from "../../config/profile.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
-import type { ExecutorSelection } from "../../execution/factory.js";
+import {
+  WorkspaceReattachRefusedError,
+  type ExecutorSelection,
+  type WorkspaceBinding,
+} from "../../execution/factory.js";
 import type { ResidentStep } from "../../execution/residentStepTrace.js";
 import { graftResidentSteps, residentTraceOf } from "../../execution/residentTrace.js";
 import { ResidentNeedsRefError } from "../../execution/resident.js";
@@ -597,9 +601,15 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
   return undefined;
 }
 
-/** How the attach ended: the round's workspace (executor, selection, release),
- *  or the ask-once refusal — no branch is bound and none was named. */
-export type WorkspaceAttach = { kind: "attached"; round: RoundWorkspace } | { kind: "refused"; reason: "which_branch" };
+/** How the attach ended: the round's workspace (executor, selection, release);
+ *  the ask-once refusal (no branch is bound and none was named); or a resumed
+ *  run's workspace that could not be re-attached where its row says it ran
+ *  (run-history item 54): nothing else was provisioned, and the caller
+ *  restarts the run from its request, saying why. */
+export type WorkspaceAttach =
+  | { kind: "attached"; round: RoundWorkspace }
+  | { kind: "refused"; reason: "which_branch" }
+  | { kind: "reattach_refused"; why: string };
 
 /**
  * The workspace attach — the setup step that takes minutes on a cold clone —
@@ -610,9 +620,19 @@ export type WorkspaceAttach = { kind: "attached"; round: RoundWorkspace } | { ki
  */
 export async function attachWorkspace(
   deps: ProvisionDeps,
-  ctx: GateContext & GateCard & { agent: AgentDef; profile: RunProfile; repoCtx: RepoContext; root: Span },
+  ctx: GateContext &
+    GateCard & {
+      agent: AgentDef;
+      profile: RunProfile;
+      repoCtx: RepoContext;
+      root: Span;
+      /** A resumed run's recorded binding (run-history item 54): the attach
+       *  reuses that workspace and never provisions again. Absent for a fresh
+       *  run, and for a resumed row that recorded none. */
+      reattach?: WorkspaceBinding;
+    },
 ): Promise<WorkspaceAttach> {
-  const { msg, io, refuse, card, shell, closeLines, clock, agent, profile, repoCtx, root } = ctx;
+  const { msg, io, refuse, card, shell, closeLines, clock, agent, profile, repoCtx, root, reattach } = ctx;
   // The workspace attach is paired with its release on the round's profile
   // (reviewRound.ts): a `read` identity → readonly worktree +
   // release("always"); any other → release("if-clean"). The factory is handed
@@ -649,6 +669,7 @@ export async function attachWorkspace(
             repo: repoCtx.repo,
             ref: repoCtx.ref,
             headSha: repoCtx.headSha,
+            ...(reattach !== undefined ? { reattach } : {}),
           },
           logKey: msg.threadKey,
           span,
@@ -684,6 +705,10 @@ export async function attachWorkspace(
       });
       return { kind: "refused", reason: "which_branch" };
     }
+    // A resumed run's workspace is where its row says or nowhere (item 54):
+    // the factory tried that backend alone and refused by name. The caller
+    // closes this run saying why and dispatches its request again.
+    if (err instanceof WorkspaceReattachRefusedError) return { kind: "reattach_refused", why: err.why };
     throw err;
   }
   return { kind: "attached", round };

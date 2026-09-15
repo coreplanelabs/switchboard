@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ExecHealthTracker, ExecInfraError, ExecSandboxRestartedError } from "./executor.js";
-import { ResidentExecutor, ResidentNeedsRefError, ResidentOperations } from "./resident.js";
+import { ResidentExecutor, ResidentNeedsRefError, ResidentOperations, ResidentReuseRefusedError } from "./resident.js";
 import { residentTraceOf } from "./residentTrace.js";
 import { createTracer } from "../core/trace/tracer.js";
 import { recordingSink } from "../core/testing/recordingSink.js";
@@ -529,6 +529,41 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
     expect(sentBody(calls[0])).toMatchObject({ refHint: "master", sha: "47c4230692cbc5961682532afb822e9c2f1f40b7" });
     await ResidentExecutor.open({ ...OPTS, refHint: "master" });
     expect(sentBody(calls[1])).not.toHaveProperty("sha");
+  });
+
+  // docs/reference/specs/resident-repos.md item 66: a resumed run re-attaches in
+  // reuse-only mode: the resident keeps the tree as it stands. Sent only when
+  // true so an older resident, and every fresh attach, sees the body it always did.
+  it("sends reuse:true in the attach body when the run re-attaches its recorded worktree, and omits the field otherwise", async () => {
+    const { calls } = stubFetch({ body: ATTACH_OK }, { body: ATTACH_OK });
+    await ResidentExecutor.open({ ...OPTS, refHint: "master", reuse: true });
+    expect(sentBody(calls[0])).toMatchObject({ reuse: true });
+    await ResidentExecutor.open({ ...OPTS, refHint: "master" });
+    expect(sentBody(calls[1])).not.toHaveProperty("reuse");
+  });
+
+  it('a 409 needs:"recreate" (the tree cannot be reused) is a typed ResidentReuseRefusedError carrying the resident\'s own words, never a retry', async () => {
+    const { calls } = stubFetch({
+      status: 409,
+      body: { error: "reuse-refused: no worktree at /workspace/threads/t/master", needs: "recreate" },
+    });
+    const err = await ResidentExecutor.open({ ...OPTS, refHint: "master", reuse: true }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ResidentReuseRefusedError);
+    expect((err as Error).message).toBe(
+      "resident attach: repo:jshttp/vary cannot reuse this thread's worktree (reuse-refused: no worktree at /workspace/threads/t/master)",
+    );
+    expect(calls).toHaveLength(1);
+  });
+
+  it("records the container identity the attach answered beside the workspace and user; an answer without one binds without it", async () => {
+    stubFetch(
+      { body: { ...ATTACH_OK, container: "3f1c2a6e-9b0d-4d2e-8a1f-0c9e7b6a5d43" } },
+      { body: { ...ATTACH_OK, container: "" } },
+    );
+    const ex = await ResidentExecutor.open({ ...OPTS, refHint: "master" });
+    expect(ex.binding?.container).toBe("3f1c2a6e-9b0d-4d2e-8a1f-0c9e7b6a5d43");
+    const bare = await ResidentExecutor.open({ ...OPTS, refHint: "master" });
+    expect(bare.binding).not.toHaveProperty("container");
   });
 
   it("records the attach result's ref@sha as the thread binding, with its workspace and pool user: the user is the OS user every /exec runs as, reported for the record; nothing files by it", async () => {

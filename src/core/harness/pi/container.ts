@@ -49,6 +49,13 @@ export interface PiContainer {
   /** Up to `maxBytes` of the log from `offset` — exact bytes, so the caller's offset arithmetic holds. */
   readLog(path: string, offset: number, maxBytes: number): Promise<Uint8Array>;
   alive(pid: number): Promise<boolean>;
+  /** Which container this is (harness-pi item 8): a word that changes when the
+   *  container is replaced and stays while it runs (the kernel's boot id for
+   *  a container over an executor), recorded on the row's facts beside the
+   *  pid, so the generation that comes back can tell "pi is elsewhere" from
+   *  "pi is dead" before it probes a pid. Undefined when the container cannot
+   *  name itself: then nothing is judged by it, and the pid decides as before. */
+  identity(): Promise<string | undefined>;
   /** End pi and everything in its group; idempotent. */
   kill(pid: number): Promise<void>;
   /** The last `bytes` of a file — pi's stderr for a diagnostic. */
@@ -143,6 +150,16 @@ export function aliveScript(pid: number): string {
   return `kill -0 ${pid} 2>/dev/null && echo alive || echo dead`;
 }
 
+/** The container's identity: the kernel's boot id, one per VM boot and
+ *  world-readable, so a run's pool user and the resident's root read the same
+ *  word; a kernel without it answers nothing, never a failure. */
+export function identityScript(): string {
+  return "cat /proc/sys/kernel/random/boot_id 2>/dev/null || true";
+}
+
+/** What an identity may look like: one word of the boot id's alphabet. */
+const IDENTITY_WORD = /^[A-Za-z0-9-]{1,64}$/;
+
 /** The group first (the wrapper leads it), then the pid itself; TERM, a second, KILL; never a failure. */
 export function killScript(pid: number): string {
   return `kill -TERM -- -${pid} 2>/dev/null; kill -TERM ${pid} 2>/dev/null; sleep 1; kill -KILL -- -${pid} 2>/dev/null; kill -KILL ${pid} 2>/dev/null; true`;
@@ -219,6 +236,17 @@ export class ExecPiContainer implements PiContainer {
 
   async alive(pid: number): Promise<boolean> {
     return stdoutOf("alive", await this.exec(aliveScript(pid))).trim() === "alive";
+  }
+
+  /** One word or nothing: an empty answer, a malformed one or a command the
+   *  executor could not run is no identity: a judgement never rests on a guess. */
+  async identity(): Promise<string | undefined> {
+    try {
+      const word = stdoutOf("identity", await this.exec(identityScript())).trim();
+      return IDENTITY_WORD.test(word) ? word : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   async kill(pid: number): Promise<void> {

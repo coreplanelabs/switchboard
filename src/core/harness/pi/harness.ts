@@ -78,6 +78,12 @@ export interface PiHarnessFacts {
    *  written before it was recorded: that pi's calls no proxy here can honour,
    *  so it is ended and a fresh one started with this generation's bearer. */
   bearerHash?: string;
+  /** The identity of the container pi runs in (`PiContainer.identity`), so a
+   *  generation handed another container reads "pi is elsewhere", never "pi
+   *  is dead", and probes or ends nothing at that pid there. Absent on a row
+   *  written before it was recorded, or on a container that cannot name
+   *  itself: the pid alone is then judged, as before. */
+  container?: string;
 }
 
 /** The harness facts a previous generation wrote on the row (`state.harness`),
@@ -92,6 +98,7 @@ export function piHarnessFactsOf(value: unknown): PiHarnessFacts | undefined {
     ...(typeof v.sessionFile === "string" ? { sessionFile: v.sessionFile } : {}),
     ...(typeof v.bearerHash === "string" ? { bearerHash: v.bearerHash } : {}),
     ...(typeof v.root === "string" ? { root: v.root } : {}),
+    ...(typeof v.container === "string" ? { container: v.container } : {}),
   };
 }
 
@@ -360,6 +367,13 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
     /** Why a live pi was ended here for the fresh start: the row named no
      *  root for it, or carried no bearer this generation could honour. */
     let ended: string | undefined;
+    /** The row's pi runs in another container than this run was handed: it
+     *  is named by pid and container, and neither probed nor ended here: a
+     *  pid in this container is a stranger's. */
+    let elsewhere: string | undefined;
+    // Which container this is, asked once: compared with the row's word on a
+    // resume, recorded on the facts of every pi started here.
+    const here = await container.identity();
     /** The bearer pi holds is the one the generation that started it revealed
      *  (model-proxy item 2): this generation's proxy honours it only once the
      *  hash the row carries joins the run's entry — the entry this generation
@@ -368,21 +382,26 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
     const honoured = (hash: string | undefined): boolean =>
       hash !== undefined && (deps.bearers === undefined || deps.bearers.adopt(run.runId, hash));
     if (recorded !== undefined) {
-      const alive = await container.alive(recorded.pid);
-      if (alive && recorded.root !== undefined && honoured(recorded.bearerHash)) {
-        reattached = true;
-        paths = piRunPathsAt(recorded.root);
-      } else if (alive) {
-        ended =
-          recorded.root === undefined
-            ? "named no directory for its pi"
-            : "carried no bearer this generation could honour for its pi";
-        await container.kill(recorded.pid).catch(() => {});
+      if (recorded.container !== undefined && here !== undefined && recorded.container !== here) {
+        elsewhere = `pi is elsewhere: the row's pi (pid ${recorded.pid}) ran in container ${recorded.container}, not the one this run was handed (${here}), so it was neither probed nor ended here`;
+      } else {
+        const alive = await container.alive(recorded.pid);
+        if (alive && recorded.root !== undefined && honoured(recorded.bearerHash)) {
+          reattached = true;
+          paths = piRunPathsAt(recorded.root);
+        } else if (alive) {
+          ended =
+            recorded.root === undefined
+              ? "named no directory for its pi"
+              : "carried no bearer this generation could honour for its pi";
+          await container.kill(recorded.pid).catch(() => {});
+        }
       }
     }
     if (reattached && recorded && paths !== undefined) {
       pid = recorded.pid;
-      facts = { ...recorded };
+      // The row learns the container it was found in, when it did not say.
+      facts = { ...recorded, ...(recorded.container === undefined && here !== undefined ? { container: here } : {}) };
       transport = new PiRpcTransport({
         container,
         paths,
@@ -400,7 +419,9 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
       // The fresh start's root is the container's to make; a dead pi's
       // recorded root, when it is another, goes with it.
       paths = await container.makeRoot(run.runId);
-      if (recorded?.root !== undefined && recorded.root !== paths.dir)
+      // A dead pi's root elsewhere on THIS container goes; a pi in another
+      // container left nothing here to remove.
+      if (recorded?.root !== undefined && recorded.root !== paths.dir && elsewhere === undefined)
         await container.remove(piRunPathsAt(recorded.root)).catch(() => {});
       const spec: PiLaunchSpec = {
         runId: run.runId,
@@ -458,9 +479,11 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
       if (run.resume) {
         const lost = run.resume.settlements.length;
         const how =
-          ended !== undefined && recorded !== undefined
-            ? `the row ${ended} (pid ${recorded.pid}), so it was ended and pi restarted`
-            : "pi restarted";
+          elsewhere !== undefined
+            ? `${elsewhere}, and pi restarted`
+            : ended !== undefined && recorded !== undefined
+              ? `the row ${ended} (pid ${recorded.pid}), so it was ended and pi restarted`
+              : "pi restarted";
         note(
           "resumed",
           `resumed after a restart: ${how} on the mirrored transcript — ${lost} call(s) were in flight, each answered with a restart note; ${Math.round(remainingMs / 60_000)} min of budget left`,
@@ -474,7 +497,13 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
       // the bearer's hash rides beside it, so that build's proxy can honour
       // the bearer this pi keeps presenting (model-proxy item 2).
       const bearerHash = bearerHashOf(deps.bearer);
-      facts = { pid, logOffset: 0, root: paths.dir, ...(bearerHash !== undefined ? { bearerHash } : {}) };
+      facts = {
+        pid,
+        logOffset: 0,
+        root: paths.dir,
+        ...(bearerHash !== undefined ? { bearerHash } : {}),
+        ...(here !== undefined ? { container: here } : {}),
+      };
       save();
       transport = new PiRpcTransport({ container, paths, pid, pollMs: deps.pollMs ?? 750, sleep: deps.sleep });
     }

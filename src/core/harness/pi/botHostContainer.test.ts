@@ -221,6 +221,10 @@ describe("BotHostPiContainer: pi as a child of the bot", () => {
     await container.kill(999_999_999);
   });
 
+  it("names no container: a bot-host pi never outlives the bot, so a resume judges it by its pid alone", async () => {
+    expect(await new BotHostPiContainer().identity()).toBeUndefined();
+  });
+
   it("alive answers no for a pid this container did not start: a previous bot generation's pi is out of reach, so a resume restarts pi on the mirrored transcript", async () => {
     const container = new BotHostPiContainer();
     expect(await container.alive(process.pid)).toBe(false);

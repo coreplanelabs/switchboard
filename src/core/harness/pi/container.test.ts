@@ -6,6 +6,7 @@ import {
   PiContainerError,
   WRITE_CHUNK_CHARS,
   aliveScript,
+  identityScript,
   feedFileScript,
   killScript,
   readLogScript,
@@ -86,6 +87,8 @@ describe("the container scripts", () => {
       `tail -c +1025 '${paths.log}' | head -c 4096 | base64 | tr -d '\\n'`,
     );
     expect(aliveScript(4242)).toBe("kill -0 4242 2>/dev/null && echo alive || echo dead");
+    // The container's identity is the kernel's boot id: one per VM boot, world-readable, never a failure.
+    expect(identityScript()).toBe("cat /proc/sys/kernel/random/boot_id 2>/dev/null || true");
     expect(killScript(4242)).toBe(
       "kill -TERM -- -4242 2>/dev/null; kill -TERM 4242 2>/dev/null; sleep 1; kill -KILL -- -4242 2>/dev/null; kill -KILL 4242 2>/dev/null; true",
     );
@@ -136,6 +139,21 @@ describe("ExecPiContainer — each operation is one command over the executor", 
     const c = new ExecPiContainer(executor);
     expect(Buffer.from(await c.readLog(paths.log, 0, 4096)).toString("utf8")).toBe('{"type":"agent_start"}\n');
     expect(await c.readLog(paths.log, 23, 4096)).toHaveLength(0);
+  });
+
+  it("identity reads the boot id, and answers none for an empty or malformed word or a failed command", async () => {
+    const { executor, calls } = recordingExecutor([
+      "3f1c2a6e-9b0d-4d2e-8a1f-0c9e7b6a5d43\n",
+      "(no output)",
+      "not an id at all, with spaces\n",
+      "exit 1:\nno shell",
+    ]);
+    const c = new ExecPiContainer(executor);
+    expect(await c.identity()).toBe("3f1c2a6e-9b0d-4d2e-8a1f-0c9e7b6a5d43");
+    expect(calls[0].command).toBe(identityScript());
+    expect(await c.identity()).toBeUndefined();
+    expect(await c.identity()).toBeUndefined();
+    expect(await c.identity()).toBeUndefined();
   });
 
   it("alive reads the word, kill runs the script, tail never throws", async () => {

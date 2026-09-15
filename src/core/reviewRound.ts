@@ -19,7 +19,12 @@ import type { RunProfile } from "../config/profile.js";
 import type { Effort } from "../effort.js";
 import type { ChatMessage, Provider } from "../providers/types.js";
 import { runAgent } from "../runner.js";
-import { makeExecutor, type ExecutorFactoryOptions, type ExecutorSelection } from "../execution/factory.js";
+import {
+  makeExecutor,
+  type ExecutorFactoryOptions,
+  type ExecutorSelection,
+  type WorkspaceBinding,
+} from "../execution/factory.js";
 import type { Executor, ReleaseMode } from "../execution/executor.js";
 import type { RunnableTool, ToolContext } from "../tools/workspace.js";
 import type { Span } from "../core/trace/types.js";
@@ -97,6 +102,9 @@ export async function attachRoundWorkspace(input: {
     repo?: string;
     ref?: string;
     headSha?: string;
+    /** A resumed run's recorded binding (run-history item 54): the factory
+     *  re-attaches there and never provisions again. */
+    reattach?: WorkspaceBinding;
   };
   logKey: string;
   /** The caller's `dispatch.workspace.attach` span: the probe and the attach
@@ -113,6 +121,7 @@ export async function attachRoundWorkspace(input: {
       repo: input.round.repo,
       ref: input.round.ref,
       headSha: input.round.headSha,
+      ...(input.round.reattach !== undefined ? { reattach: input.round.reattach } : {}),
     },
     input.span,
   );
