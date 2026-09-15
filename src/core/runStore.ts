@@ -1,6 +1,13 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { RunEvent } from "./runEvents.js";
+import {
+  aggregateUsageByUser,
+  usageOfEvents,
+  type RunUsageQuery,
+  type RunUsageReport,
+  type UsageRun,
+} from "./runUsage.js";
 import type { TraceOptions } from "./trace/types.js";
 import type { Secrets } from "../secrets.js";
 import {
@@ -84,6 +91,38 @@ export interface RunStore {
   events(id: string, opts: RunEventsOptions): Promise<RunEventsPage | null>;
   /** Remove a run and its events (the incident lever for a redaction miss). Unknown id is a no-op. */
   delete(id: string): Promise<void>;
+  /** Who spent what, per UTC day, over the runs that finished in the range
+   *  (docs/reference/specs/costs.md, cost by user): a child billed to its parent's
+   *  requester; a record written before usage existed counted as `pending`
+   *  (the Worker store fills those in from stored events as it answers). */
+  usageByUser(query: RunUsageQuery): Promise<RunUsageReport>;
+}
+
+/** The aggregate over records a local store holds: a record without usage is
+ *  priced from its events here (the events are at hand), so a local store
+ *  never reports pending. */
+export function usageReportOfRecords(
+  records: readonly RunRecord[],
+  query: RunUsageQuery,
+  lookupParent: (id: string) => Pick<UsageRun, "userId" | "userName"> | undefined,
+  retentionDays: number,
+): RunUsageReport {
+  const inRange = records.filter((r) => r.finishedAt >= query.sinceMs && r.finishedAt < query.untilMs);
+  const runs: UsageRun[] = inRange.map((r) => ({
+    id: r.id,
+    userId: r.userId,
+    ...(r.userName ? { userName: r.userName } : {}),
+    ...(r.parentRunId ? { parentRunId: r.parentRunId } : {}),
+    startedAt: r.startedAt,
+    finishedAt: r.finishedAt,
+    usage: r.usage ?? usageOfEvents(r.events),
+  }));
+  const { rows, pending } = aggregateUsageByUser(runs, lookupParent);
+  const earliest = records.reduce<number | undefined>(
+    (m, r) => (m === undefined || r.finishedAt < m ? r.finishedAt : m),
+    undefined,
+  );
+  return { rows, pending, ...(earliest !== undefined ? { earliestFinishedAt: earliest } : {}), retentionDays };
 }
 
 /** The store of a process without run history (docs/reference/specs/routing-and-config.md
@@ -108,6 +147,9 @@ export class NullRunStore implements RunStore {
   }
   async delete(_id: string): Promise<void> {
     // nothing is held
+  }
+  async usageByUser(_query: RunUsageQuery): Promise<RunUsageReport> {
+    return { rows: [], pending: 0, retentionDays: 0 };
   }
 }
 
@@ -229,6 +271,16 @@ export class InMemoryRunStore implements RunStore {
   async delete(id: string): Promise<void> {
     if (!isValidRunId(id)) return;
     this.records.delete(id);
+  }
+
+  async usageByUser(query: RunUsageQuery): Promise<RunUsageReport> {
+    const kept = new Set(this.retained().map((r) => r.id));
+    const records = [...this.records.values()].map((e) => e.record).filter((r) => kept.has(r.id));
+    const parent = (id: string) => {
+      const p = this.records.get(id)?.record;
+      return p ? { userId: p.userId, ...(p.userName ? { userName: p.userName } : {}) } : undefined;
+    };
+    return usageReportOfRecords(records, query, parent, this.policy.retentionDays);
   }
 }
 
@@ -377,6 +429,28 @@ export class FileRunStore implements RunStore {
   async events(id: string, opts: RunEventsOptions): Promise<RunEventsPage | null> {
     const record = await this.get(id);
     return record ? pageEvents(record.events, opts) : null;
+  }
+
+  async usageByUser(query: RunUsageQuery): Promise<RunUsageReport> {
+    // Opens the record files in range (a dev store; the Worker store answers
+    // this from its own table) — and the parent of a child outside it.
+    const items = this.retainedIntact();
+    const records: RunRecord[] = [];
+    for (const item of items) {
+      if (item.finishedAt < query.sinceMs || item.finishedAt >= query.untilMs) continue;
+      const record = await this.get(item.id);
+      if (record) records.push(record);
+    }
+    const parent = (id: string) => {
+      const p = items.find((i) => i.id === id);
+      return p ? { userId: p.userId, ...(p.userName ? { userName: p.userName } : {}) } : undefined;
+    };
+    const earliest = items.reduce<number | undefined>(
+      (m, r) => (m === undefined || r.finishedAt < m ? r.finishedAt : m),
+      undefined,
+    );
+    const report = usageReportOfRecords(records, query, parent, this.policy.retentionDays);
+    return { ...report, ...(earliest !== undefined ? { earliestFinishedAt: earliest } : {}) };
   }
 
   async delete(id: string): Promise<void> {

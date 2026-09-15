@@ -13,6 +13,7 @@ import {
   type StoredRunEvent,
 } from "./runRecord.js";
 import type { PutResult, RunEventsOptions, RunEventsPage, RunStore } from "./runStore.js";
+import { isRunUsageReport, type RunUsageQuery, type RunUsageReport } from "./runUsage.js";
 
 // The DURABLE RunStore (docs/decisions/0006-runs-have-two-lives.md): an HTTPS client to the RunHistoryDO on the
 // state Worker (deploy/cloudflare-memory/ — one SQLite Durable Object per store
@@ -86,7 +87,8 @@ export interface WorkerRunStoreOptions {
 }
 
 /** The Worker's routes, as a span names them. */
-type RunStoreRoute = "/runs/put" | "/runs/get" | "/runs/summary" | "/runs/list" | "/runs/events" | "/runs/delete";
+type RunStoreRoute =
+  "/runs/put" | "/runs/get" | "/runs/summary" | "/runs/list" | "/runs/events" | "/runs/delete" | "/runs/usage-by-user";
 
 export class WorkerRunStore implements RunStore {
   private readonly baseUrl: string;
@@ -161,6 +163,17 @@ export class WorkerRunStore implements RunStore {
   async delete(id: string): Promise<void> {
     if (!RUN_ID_PATTERN.test(id)) return;
     await this.post("/runs/delete", { storeKey: this.opts.storeKey, id });
+  }
+
+  async usageByUser(query: RunUsageQuery): Promise<RunUsageReport> {
+    const data = await this.post("/runs/usage-by-user", {
+      storeKey: this.opts.storeKey,
+      sinceMs: query.sinceMs,
+      untilMs: query.untilMs,
+    });
+    if (!isRunUsageReport(data))
+      throw new PermanentStoreError("run store /runs/usage-by-user returned a malformed report");
+    return data;
   }
 
   /** POST a JSON body and classify the outcome. The body is a STRING; the

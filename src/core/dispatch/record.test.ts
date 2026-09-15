@@ -218,6 +218,54 @@ describe("assembleRunRecord — the handoff on the record", () => {
     for (const key of ["verdict", "reviewHead", "dispositions"]) expect(key in record).toBe(false);
   });
 
+  // docs/reference/specs/costs.md (cost by user): the run's token usage is summed
+  // at the one assembly from its model.turn spans, per model, and rides the
+  // record — every record carries it, zero turns included.
+  it("carries the run's usage summed from its model.turn spans, per model; a run without turns carries the zero usage", () => {
+    const turn = (seq: number, model: string, inputTokens: number, outputTokens: number) => ({
+      type: "span_end" as const,
+      spanId: `m${seq}`,
+      parentSpanId: "agent",
+      name: "model.turn",
+      startedAt: seq,
+      durationMs: 1,
+      status: "ok" as const,
+      attrs: { model, inputTokens, outputTokens, cacheReadTokens: 10, cacheWriteTokens: 0 },
+      seq,
+    });
+    const events = [
+      { type: "input" as const, text: "go", seq: 1 },
+      turn(2, "anthropic/claude-fable-5", 100, 20),
+      turn(3, "anthropic/claude-fable-5", 50, 5),
+      turn(4, "anthropic/claude-haiku-4-5", 7, 1),
+    ];
+    const record = assembleRunRecord({
+      ...base(),
+      snap: { events, startedAt: 1, eventCount: 4, stepCount: 1 } as never,
+    });
+    expect(record.usage).toEqual({
+      turns: 3,
+      byModel: {
+        "anthropic/claude-fable-5": {
+          turns: 2,
+          inputTokens: 150,
+          outputTokens: 25,
+          cacheReadTokens: 20,
+          cacheWriteTokens: 0,
+        },
+        "anthropic/claude-haiku-4-5": {
+          turns: 1,
+          inputTokens: 7,
+          outputTokens: 1,
+          cacheReadTokens: 10,
+          cacheWriteTokens: 0,
+        },
+      },
+    });
+    expect(isRunRecord(record)).toBe(true);
+    expect(assembleRunRecord(base()).usage).toEqual({ turns: 0, byModel: {} });
+  });
+
   // docs/reference/specs/run-history.md item 2: the review's verdict and reviewed
   // head and the fix round's dispositions ride the record, every string leaf
   // redacted here, in the one assembly.

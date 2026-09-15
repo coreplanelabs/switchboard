@@ -791,7 +791,7 @@ export function workflowStepsFromEvents(
   const byKey = new Map<string, WorkflowUsageRow>();
   for (const r of rows) {
     if (!WORKFLOW_STEP_EVENTS.has(r.eventType) || !r.workflowName) continue;
-    const key = `${r.date} ${r.workflowName}`;
+    const key = `${r.date} ${r.workflowName}`;
     const row = byKey.get(key) ?? { date: r.date, workflowName: r.workflowName, steps: 0, stateBytes: 0 };
     row.steps += r.count;
     byKey.set(key, row);

@@ -6,6 +6,7 @@ import { parseTraceparent } from "./trace/traceparent.js";
 import { createTracer } from "./trace/tracer.js";
 import type { RunEvent } from "./runEvents.js";
 import { DEFAULT_RETENTION_POLICY, type RunRecord } from "./runRecord.js";
+import { dayOf } from "./runUsage.js";
 import {
   describeError,
   PermanentStoreError,
@@ -176,6 +177,37 @@ describe("WorkerRunStore", () => {
     expect(got!.events.map((e) => e.seq)).toEqual([100, 101]);
     const [item] = await store.list({});
     expect(item.diagnosis.byCategory.slow_tool).toEqual({ count: 0, durationMs: 0 });
+  });
+
+  it("usageByUser posts /runs/usage-by-user with the range and re-validates the report; a malformed report is a PermanentStoreError", async () => {
+    const report = {
+      rows: [
+        {
+          userId: "slack:UALICE",
+          userName: "alice",
+          day: dayOf(0),
+          runs: 2,
+          wallMs: 10_000,
+          usage: {
+            turns: 2,
+            byModel: {
+              "anthropic/m": { turns: 2, inputTokens: 3, outputTokens: 4, cacheReadTokens: 0, cacheWriteTokens: 0 },
+            },
+          },
+        },
+      ],
+      pending: 1,
+      earliestFinishedAt: 5,
+      retentionDays: 30,
+    };
+    const { fetch, calls } = fakeFetch(() => ({ status: 200, body: report }));
+    const store = new WorkerRunStore({ ...OPTS, fetch });
+    expect(await store.usageByUser({ sinceMs: 1, untilMs: 100 })).toEqual(report);
+    expect(calls[0].url).toBe("https://state.example/runs/usage-by-user");
+    expect(calls[0].body).toEqual({ storeKey: "runs:default", sinceMs: 1, untilMs: 100 });
+    expect(calls[0].body.policy).toBeUndefined();
+    const bad = new WorkerRunStore({ ...OPTS, fetch: fakeFetch(() => ({ status: 200, body: { rows: "no" } })).fetch });
+    await expect(bad.usageByUser({ sinceMs: 1, untilMs: 100 })).rejects.toBeInstanceOf(PermanentStoreError);
   });
 
   it("rejects a bad id locally without a request", async () => {
