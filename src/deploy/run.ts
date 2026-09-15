@@ -62,6 +62,7 @@ import {
   PROBE_COMMAND,
   PROBE_TIMEOUT_MS,
   probeThreadKey,
+  rolloutAdvanced,
   rolloutTargetFromDeployOutput,
   shortImage,
   type AppState,
@@ -94,7 +95,7 @@ import {
 // still draining runs). The sandbox step is likewise done only when its
 // Worker, its container rollout and an `echo ok` probe agree (a thread placed
 // during the image rollout lands on the previous image and every exec fails
-// with an empty error). Only this file
+// with the SDK skew until the rollout replaces the instance). Only this file
 // touches processes; the plan and the live decisions are pure and unit-tested,
 // and the command (src/core/commands/deploy.ts) maps this result onto the
 // registry's error vocabulary.
@@ -742,11 +743,14 @@ export interface SandboxRollout {
  * printed a container change), every running instance is on the application's
  * version, and an `echo ok` through the gate's probe thread answers from an
  * instance on that version — logging every poll's first unmet signal. The
- * rollout and the probe are read only once the Worker is live (they mean
- * nothing before), and the probe is sent BEFORE the instance list is read so
- * the list includes the probe's own instance. One thread key per deployed
- * commit: the probe holds one fleet slot for the 5-min idle window, not one
- * per poll.
+ * application is read only once the Worker is live (it means nothing before);
+ * the probe is sent and the instances read only once the application has left
+ * its pre-deploy version (`rolloutAdvanced`) — a thread placed before then
+ * lands on the previous image, the gate's own included, and answers with the
+ * SDK skew until the rollout's wave replaces it — and the probe goes BEFORE
+ * the instance list so the list includes the probe's own instance. One thread
+ * key per deployed commit: the probe holds one fleet slot for the 5-min idle
+ * window, not one per poll.
  */
 export async function waitUntilSandboxLive(
   step: Pick<DeployStep, "name" | "dir">,
@@ -768,13 +772,18 @@ export async function waitUntilSandboxLive(
   for (;;) {
     const elapsed = deps.now() - started;
     const health = await deps.readHealth(gate.healthUrl, bearer);
-    const rest = decideWorker(health, expectedCommit).ok
+    const app = decideWorker(health, expectedCommit).ok ? await deps.readAppState(step.dir, gate.containerApp) : null;
+    const registered =
+      app !== null &&
+      "value" in app &&
+      (rollout.target === null || rolloutAdvanced(app.value, rollout.before, rollout.target).ok);
+    const rest = registered
       ? {
+          app,
           probe: await deps.probeExec(execUrl, bearer, threadKey),
-          app: await deps.readAppState(step.dir, gate.containerApp),
           instances: await deps.readInstances(step.dir, gate.containerApp),
         }
-      : { probe: null, app: null, instances: null };
+      : { app, probe: null, instances: null };
     const d = decideSandboxLive({
       health,
       ...rest,

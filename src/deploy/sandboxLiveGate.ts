@@ -5,10 +5,13 @@ import { decideLive, LIVE_GATE_DEADLINE_MS, type HealthzBody } from "./liveGate.
 // artifacts: the Worker version `wrangler deploy` uploads at once, and the
 // container image Cloudflare rolls out afterwards, instance by instance. In
 // between, the new Worker code can be handed a container still running the
-// previous image, and a Durable Object created then stays on it: a thread
-// placed a minute or two after the upload runs its whole life on the old
-// image, and every exec fails with an EMPTY error. "Deployed" therefore means
-// nothing here until three independent
+// previous image, and a Durable Object created then runs on it until the
+// rollout's wave replaces that instance: a thread placed a minute or two after
+// the upload fails every exec meanwhile — with an EMPTY error under the 0.12
+// SDK, with the container server's own `'utils.getRuntimeMetadata' is not a
+// function.` under the 0.13 one, whose bootstrap probe calls an RPC the old
+// server lacks (the 1.228.0 deploy) — and whatever it was running dies with
+// the instance. "Deployed" therefore means nothing here until three independent
 // signals agree — the Worker serves the deployed commit, every RUNNING
 // instance of the container application is on the application's version, and
 // a real `echo ok` through a probe thread answers from an instance on that
@@ -20,9 +23,12 @@ import { decideLive, LIVE_GATE_DEADLINE_MS, type HealthzBody } from "./liveGate.
 // trivially matches it and a probe runs on the old image; a gate judging
 // "all instances on the app version" alone passes at once. So the runner
 // reads the application before the upload and takes the target from
-// wrangler's own container diff; the rollout
-// counts only once the application has left the pre-deploy version. No node:*
-// imports; src/deploy/run.ts does the fetching, the wrangler calls and the clock.
+// wrangler's own container diff; the rollout counts only once the application
+// has left the pre-deploy version, and the probe is not even sent before then:
+// the gate's own thread, placed while the new version is not registered, would
+// land on the previous image like any other and answer with the skew above
+// until the wave reached it. No node:* imports; src/deploy/run.ts does the
+// fetching, the wrangler calls and the clock.
 
 /** One read of a bearer-gated `/healthz`: the HTTP status with the parsed body, or why the request itself failed. */
 export type HealthRead = { status: number; body: HealthzBody | undefined } | { error: string };
@@ -67,8 +73,10 @@ export type ProbeResult = { body: ExecBody } | { error: string };
 
 export interface SandboxLiveInput {
   health: HealthRead;
-  /** `null` when not read this poll (the runner reads the rollout and probes only once the Worker is live). */
+  /** `null` when not read this poll (the runner reads the application only once the Worker is live). */
   app: Read<AppState> | null;
+  /** `null` when not read this poll (the runner reads the instances and sends the probe only once
+   *  `rolloutAdvanced` holds — a thread placed before then lands on the previous image). */
   instances: Read<ContainerInstance[]> | null;
   probe: ProbeResult | null;
   /** The probe's thread key — the instance `name` the probe must be found under. */
@@ -135,9 +143,10 @@ export function shortImage(ref: string): string {
  * (the primary signal — Cloudflare bumps it for every modification it rolls
  * out), or the application reports the very image wrangler's diff added. With
  * the pre-deploy read failed AND no image in the diff there is no evidence to
- * wait for, and the reason says so until the deadline.
+ * wait for, and the reason says so until the deadline. Exported because the
+ * runner sends the probe and reads the instances only once this holds.
  */
-function rolloutAdvanced(
+export function rolloutAdvanced(
   app: AppState,
   before: Read<AppState>,
   target: RolloutTarget,
@@ -168,22 +177,27 @@ function judge(input: SandboxLiveInput): SandboxLiveDecision {
 
   // The rollout, first its target: when wrangler printed a container change the
   // application must have LEFT the version read before the upload — instances
-  // "all on the app version" mean nothing while that version is the old one.
+  // "all on the app version" mean nothing while that version is the old one,
+  // which is why the runner reads no instances and sends no probe until it has.
   // A Worker-only deploy (no change printed) rolls no container: the
   // current version is the one to be on.
-  if (input.app === null || input.instances === null) return waiting("rollout: not read yet");
+  if (input.app === null) return waiting("rollout: not read yet");
   if ("error" in input.app) return waiting(`rollout: ${input.app.error}`);
-  if ("error" in input.instances) return waiting(`rollout: ${input.instances.error}`);
   const app = input.app.value;
   const appVersion = app.version;
-  const running = input.instances.value.filter((i) => i.state === "running");
-  let rolloutSummary: string;
+  let advancedFrom: string | null = null;
   if (input.target) {
     const advanced = rolloutAdvanced(app, input.before, input.target);
     if (!advanced.ok) return waiting(advanced.reason);
-    rolloutSummary = `rollout complete (${running.length} running instance(s) on version ${appVersion}, ${advanced.from})`;
-  } else
-    rolloutSummary = `Worker-only deploy — no container change (${running.length} running instance(s) on version ${appVersion})`;
+    advancedFrom = advanced.from;
+  }
+  if (input.instances === null) return waiting("rollout: instances not read yet");
+  if ("error" in input.instances) return waiting(`rollout: ${input.instances.error}`);
+  const running = input.instances.value.filter((i) => i.state === "running");
+  const rolloutSummary =
+    advancedFrom === null
+      ? `Worker-only deploy — no container change (${running.length} running instance(s) on version ${appVersion})`
+      : `rollout complete (${running.length} running instance(s) on version ${appVersion}, ${advancedFrom})`;
 
   // Then the instances: every RUNNING one is on the application's version. Other
   // states are ignored — a stopping old instance is on its way out, a stopped or
@@ -198,9 +212,12 @@ function judge(input: SandboxLiveInput): SandboxLiveDecision {
 
   // The probe: `echo ok` through the gate's own thread. Everything the rollout
   // can cause is `waiting`: a full fleet (capacity, execution.md item 14), a
-  // booting container, ANY in-body error — an EMPTY one included, which is
-  // what a newer SDK gets from a previous-image container — and a
-  // nonzero exit. Only the deadline turns these into a failure.
+  // booting container, ANY in-body error and a nonzero exit. An in-body error
+  // is what a newer SDK gets from a previous-image container — EMPTY from a
+  // 0.12 SDK, the container server's `'utils.getRuntimeMetadata' is not a
+  // function.` from a 0.13 one — so every one is named with that cause, the
+  // SDK's words kept as the evidence. Only the deadline turns these into a
+  // failure.
   if (input.probe === null) return waiting("probe: not sent yet");
   if ("error" in input.probe) return waiting(`probe: ${input.probe.error}`);
   const body = input.probe.body;
@@ -208,12 +225,13 @@ function judge(input: SandboxLiveInput): SandboxLiveDecision {
     return waiting("probe: fleet busy — no free instance for the probe thread (max_instances reached)");
   if (typeof body.error === "string" && CONTAINER_STARTING.test(body.error))
     return waiting("probe: container starting");
-  if ("error" in body)
-    return waiting(
+  if ("error" in body) {
+    const failed =
       body.error === ""
-        ? "probe: /exec failed with an EMPTY error — the probe's container may still run the previous image"
-        : `probe: /exec failed — ${typeof body.error === "string" ? body.error : JSON.stringify(body.error)}`,
-    );
+        ? "/exec failed with an EMPTY error"
+        : `/exec failed — ${typeof body.error === "string" ? body.error : JSON.stringify(body.error)}`;
+    return waiting(`probe: ${failed} — the probe's container may still run the previous image`);
+  }
   if (body.exitCode !== 0) {
     const stderr = typeof body.stderr === "string" ? body.stderr.trim() : "";
     return waiting(`probe: \`${PROBE_COMMAND}\` exited ${String(body.exitCode)}${stderr ? `: ${stderr}` : ""}`);
