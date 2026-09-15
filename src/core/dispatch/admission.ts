@@ -112,7 +112,8 @@ export const defaultAdmission = new ThreadAdmission<DispatchFollowUp>();
 export interface ResumeContext {
   row: LiveRunRow;
   lastStep: StepRecord;
-  plan: Extract<ResumePlan, { kind: "resume" }>;
+  /** The plan the launcher made: `resume` re-enters the model loop, `finish` skips it (run-history item 37). */
+  plan: Exclude<ResumePlan, { kind: "interrupted" }>;
   events: AppendableEvent[];
   /** The highest event seq on the ledger; appends continue past it. */
   lastSeq: number;

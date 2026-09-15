@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../../providers/types.js";
-import { planResume, settlementFor, transcriptSource, type KnownTool, type ToolUsePart } from "./resume.js";
+import {
+  loopEndingOf,
+  planResume,
+  reviewPostedBefore,
+  settlementFor,
+  transcriptSource,
+  type KnownTool,
+  type ToolUsePart,
+} from "./resume.js";
 import type { StepRecord } from "./types.js";
 
 // The resume plan (docs/reference/specs/run-history.md item 37): the pure rule for what a
@@ -199,7 +207,52 @@ describe("planResume", () => {
     expect(plan).toMatchObject({ kind: "resume", turn: 1, iteration: 1, step: 2 });
   });
 
-  it("interrupted: no step record; an incomplete transcript; a partial step write; in-flight calls that do not match the last turn; an assistant turn with nothing recorded in flight; a fresh step without tool calls", () => {
+  // The model's loop is over when its last turn is text alone: nothing was
+  // dispatched, nothing is owed but the post-steps and the reply. The row the
+  // pi mirror writes (harness-pi item 8) and the row the native loop would
+  // write are one shape, so one rule reads both.
+  it("finish: a transcript ending on the model's final answer (a text-only assistant turn) with nothing in flight is a loop that ended: the plan carries that turn's text as the answer and the record's counters, whether the final turn's step record landed or only its turns did", () => {
+    const messages = [
+      user("go"),
+      assistantCalling(call("a", "read_file")),
+      results("a"),
+      { role: "assistant" as const, content: [text("The change is sound."), text("LGTM.")] },
+    ];
+    // The record landed (the mirror writes a text-only turn as a step with nothing in flight).
+    const recorded = planResume({
+      transcript: complete(messages),
+      lastStep: step({ step: 2, turnIndex: 4, inFlight: [], turn: 2, iteration: 1, remainingMs: 300_000 }),
+      tools: TOOLS,
+    });
+    expect(recorded).toEqual({
+      kind: "finish",
+      messages,
+      answer: "The change is sound.\nLGTM.",
+      inboxConsumedSeq: 7,
+      step: 2,
+      turn: 2,
+      remainingMs: 300_000,
+    });
+    // The final turn's rows landed but its record did not (a run-step-fresh
+    // shape with no calls): the same answer, the counters advanced as for any
+    // unrecorded step.
+    const fresh = planResume({
+      transcript: complete(messages),
+      lastStep: step({ step: 1, turnIndex: 2, inFlight: [{ callId: "a", tool: "read_file" }], turn: 1, iteration: 0 }),
+      tools: TOOLS,
+    });
+    expect(fresh).toMatchObject({ kind: "finish", answer: "The change is sound.\nLGTM.", step: 2, turn: 2 });
+    // The seed alone is not an answer: a text-only USER turn still continues (the case below).
+    expect(
+      planResume({
+        transcript: complete([user("go")]),
+        lastStep: step({ step: 0, turnIndex: 1, turn: 0 }),
+        tools: TOOLS,
+      }),
+    ).toMatchObject({ kind: "resume", settlements: [] });
+  });
+
+  it("interrupted: no step record; an incomplete transcript; a partial step write; in-flight calls that do not match the last turn; an assistant turn carrying tool calls the record does not know", () => {
     const base = { transcript: complete([user("go")]), tools: TOOLS };
     expect(planResume({ ...base, lastStep: null })).toMatchObject({ kind: "interrupted", why: /no step record/ });
     expect(
@@ -237,25 +290,80 @@ describe("planResume", () => {
         tools: TOOLS,
       }),
     ).toMatchObject({ kind: "interrupted", why: /do not match/ });
+    // An assistant turn WITH tool calls whose record says nothing was in
+    // flight is not an answer and not a settled step: corruption.
     expect(
       planResume({
-        transcript: complete([user("go"), { role: "assistant", content: [text("done?")] }]),
+        transcript: complete([user("go"), assistantCalling(call("a", "bash"))]),
         lastStep: step({ turnIndex: 2, inFlight: [] }),
         tools: TOOLS,
       }),
-    ).toMatchObject({ kind: "interrupted", why: /nothing in flight/ });
+    ).toMatchObject({ kind: "interrupted", why: /tool calls.*nothing in flight/ });
+  });
+
+  // The new generation's RunControl knows no stop and no budget: how the loop
+  // ended is read back from the notes the previous one published, so the
+  // finish carries the status and the label the thread would have seen.
+  it("loopEndingOf reads how the model's loop ended from the run's notes: a soft `stopped` note is a soft stop, the budget, guard, stuck-loop and dead-sandbox notes are a write-up with the note's summary, the last such note wins, and no note (or only a hard stop, which leaves no answer) is a plain answer", () => {
+    const note = (kind: string, summary: string, mode?: "soft" | "hard") => ({
+      type: "run_note" as const,
+      kind: kind as "stopped",
+      summary,
+      ...(mode ? { mode } : {}),
+      seq: 1,
+    });
+    expect(loopEndingOf([])).toEqual({ kind: "answered" });
+    expect(loopEndingOf([{ type: "input", text: "go", seq: 1 }, note("wrap_up", "3 min left")])).toEqual({
+      kind: "answered",
+    });
     expect(
-      planResume({
-        transcript: complete([
-          user("go"),
-          assistantCalling(call("a", "bash")),
-          results("a"),
-          { role: "assistant", content: [text("hm")] },
-        ]),
-        lastStep: step({ turnIndex: 2, inFlight: [{ callId: "a", tool: "bash" }] }),
-        tools: TOOLS,
-      }),
-    ).toMatchObject({ kind: "interrupted", why: /no tool calls/ });
+      loopEndingOf([note("stop_requested", "soft stop requested", "soft"), note("stopped", "soft stop", "soft")]),
+    ).toEqual({
+      kind: "soft_stop",
+    });
+    expect(loopEndingOf([note("stopped", "hard stop", "hard")])).toEqual({ kind: "answered" });
+    expect(loopEndingOf([note("time_budget_exhausted", "time budget exhausted")])).toEqual({
+      kind: "written_up",
+      note: "time_budget_exhausted",
+      summary: "time budget exhausted",
+    });
+    expect(loopEndingOf([note("turn_budget_exhausted", "turn guard fired: 30 model turns in 5 min")])).toEqual({
+      kind: "written_up",
+      note: "turn_budget_exhausted",
+      summary: "turn guard fired: 30 model turns in 5 min",
+    });
+    expect(loopEndingOf([note("stuck_loop", "stuck loop")])).toMatchObject({ kind: "written_up", note: "stuck_loop" });
+    expect(loopEndingOf([note("sandbox_dead", "3 exec failures")])).toMatchObject({
+      kind: "written_up",
+      note: "sandbox_dead",
+      summary: "3 exec failures",
+    });
+    // The last ending note wins: a budget note after a stop is the loop's actual end.
+    expect(
+      loopEndingOf([note("stopped", "soft stop", "soft"), note("time_budget_exhausted", "time budget exhausted")]),
+    ).toMatchObject({ kind: "written_up", note: "time_budget_exhausted" });
+  });
+
+  // agent-review.md item 18: the post is a fact on the record. A resumed review
+  // that already posted must not post twice, and the record's outcome is the
+  // event's, not a fresh post-step's.
+  it("reviewPostedBefore: the last `review_posted` event on the replayed events is the outcome a resumed review already has, verdict included when the event carries one; without one there is nothing", () => {
+    expect(reviewPostedBefore([])).toBeUndefined();
+    expect(
+      reviewPostedBefore([{ type: "run_note", kind: "review_not_posted", summary: "no PR", seq: 1 }]),
+    ).toBeUndefined();
+    expect(
+      reviewPostedBefore([
+        { type: "input", text: "review it", seq: 1 },
+        { type: "review_posted", repo: "acme/api", number: 12, head: "a".repeat(40), verdict: "approve", seq: 9 },
+      ]),
+    ).toEqual({ posted: true, target: { repo: "acme/api", number: 12 }, head: "a".repeat(40), verdict: "approve" });
+    expect(
+      reviewPostedBefore([
+        { type: "review_posted", repo: "acme/api", number: 12, head: "a".repeat(40), verdict: "approve", seq: 9 },
+        { type: "review_posted", repo: "acme/api", number: 12, head: "b".repeat(40), seq: 12 },
+      ]),
+    ).toEqual({ posted: true, target: { repo: "acme/api", number: 12 }, head: "b".repeat(40) });
   });
 
   it("the budget a resume runs on is the step record's remainingMs — the seed carries the run's EFFECTIVE budget (a clipped one included), so nothing is ever re-derived from a preset", () => {

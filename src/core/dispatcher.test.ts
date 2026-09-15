@@ -8927,7 +8927,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       lastStep: reclaimed.lastStep!,
       tools: knownToolsFor(getAgent("general")),
     });
-    if (plan.kind !== "resume") throw new Error(plan.why);
+    if (plan.kind !== "resume") throw new Error(plan.kind === "interrupted" ? plan.why : plan.kind);
     const events = await ledger.readEvents("run-routed");
     const statuses: StatusUpdate[] = [];
     const io: ChannelIO = {
@@ -9039,7 +9039,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       lastStep: reclaimed.lastStep!,
       tools: knownToolsFor(getAgent("general")),
     });
-    if (plan.kind !== "resume") throw new Error(plan.why);
+    if (plan.kind !== "resume") throw new Error(plan.kind === "interrupted" ? plan.why : plan.kind);
     const events = await ledger.readEvents("run-old");
     const { io, replies } = ioWithCard();
     await dispatch(deps, resumeMessage(reclaimed.row, "hello there"), io, {
@@ -9091,6 +9091,122 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(warnings).toEqual([]);
   });
 
+  // run-history item 37, the `finish` plan: the previous generation died after
+  // the model's final answer and before the reply. The reclaimed run is not
+  // closed interrupted; it finishes with that answer, under the status and the
+  // label its own notes say, and the model is never asked again.
+  it("a reclaimed run whose transcript ends on the model's final answer finishes instead of closing interrupted: no model call, the answer reaches the thread under the soft stop's label its notes record, the record says stopped_soft, and the row is closed", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const transcript: ChatMessage[] = [
+      { role: "user", content: [{ type: "text", text: "hello there" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "on it" },
+          { type: "tool_use", id: "s1", name: "update_status", input: { checklist: "○ looking" } },
+        ],
+      },
+      { role: "user", content: [{ type: "tool_result", toolUseId: "s1", content: "ok" }] },
+      { role: "assistant", content: [{ type: "text", text: "What I found before the stop." }] },
+    ];
+    await ledger.claim({
+      runId: "run-old",
+      threadKey: "slack:CX:1.0",
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      meta: {
+        channelId: "slack:CX",
+        userId: "slack:UX",
+        threadKey: "slack:CX:1.0",
+        agent: "general",
+        model: "anthropic/general-model",
+      },
+      card: { channel: "CX", ts: "1.2" },
+      system: "the stored prompt, verbatim",
+      tools: [],
+      state: { checklist: "○ looking" },
+    });
+    await ledger.seed("run-old", "gen-OLD", [{ idx: 0, message: transcript[0] }]);
+    await ledger.step(
+      "run-old",
+      "gen-OLD",
+      {
+        step: 1,
+        seq: 3,
+        turnIndex: 2,
+        inFlight: [{ callId: "s1", tool: "update_status" }],
+        inboxConsumedSeq: 0,
+        remainingMs: 240_000,
+        turn: 1,
+        iteration: 0,
+      },
+      [{ idx: 1, message: transcript[1] }],
+    );
+    // The final, text-only turn as its own step with nothing in flight (the
+    // shape the pi mirror writes for pi's answer).
+    await ledger.step(
+      "run-old",
+      "gen-OLD",
+      { step: 2, seq: 6, turnIndex: 4, inFlight: [], inboxConsumedSeq: 0, remainingMs: 200_000, turn: 2, iteration: 1 },
+      [
+        { idx: 2, message: transcript[2] },
+        { idx: 3, message: transcript[3] },
+      ],
+    );
+    await ledger.append("run-old", "gen-OLD", [
+      { type: "input", text: "hello there", at: 1, seq: 1 },
+      { type: "run_meta", agent: "general", model: "anthropic/general-model", at: 2, seq: 2 },
+      { type: "tool_call", tool: "update_status", summary: "s", at: 3, seq: 3 },
+      { type: "run_note", kind: "stop_requested", summary: "soft stop requested", mode: "soft", at: 4, seq: 4 },
+      { type: "run_note", kind: "stopped", summary: "soft stop", mode: "soft", at: 5, seq: 5 },
+      { type: "tool_result", tool: "update_status", ok: true, summary: "ok", at: 6, seq: 6 },
+    ]);
+    ledger.live.get("run-old")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+
+    let providerCalls = 0;
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        providerCalls++;
+        return { content: [{ type: "text", text: "never" }], stopReason: "end_turn" };
+      },
+    };
+    const { deps, registry, writer, fallbackPuts, warnings } = wired(provider, { ledger });
+    const plan = planResume({
+      transcript: { complete: true, turns: 4, messages: transcript, compactions: [] },
+      lastStep: reclaimed.lastStep!,
+      tools: knownToolsFor(getAgent("general")),
+    });
+    expect(plan).toMatchObject({ kind: "finish", answer: "What I found before the stop.", step: 2 });
+    if (plan.kind !== "finish") throw new Error(plan.kind);
+    const events = await ledger.readEvents("run-old");
+    const { io, replies } = ioWithCard();
+    await dispatch(deps, resumeMessage(reclaimed.row, "hello there"), io, {
+      resume: { row: reclaimed.row, lastStep: reclaimed.lastStep!, plan, events, lastSeq: 6, repoCtx: {}, inbox: [] },
+    });
+    await writer.settled();
+
+    expect(providerCalls).toBe(0);
+    expect(replies.at(-1)).toMatch(/^⏹ _Stopped early by an operator \(soft stop\)/);
+    expect(replies.at(-1)).toContain("What I found before the stop.");
+    expect(registry.listActive().map((r) => r.id)).toEqual(["run-old"]);
+    expect(ledger.live.has("run-old")).toBe(false);
+    const record = ledger.finished.get("run-old")!;
+    expect(record.status).toBe("stopped_soft");
+    expect(record.startedAt).toBe(5_000);
+    expect(record.events.filter((e) => e.type === "input")).toHaveLength(1);
+    expect(record.events.filter((e) => e.type === "answer")).toEqual([
+      expect.objectContaining({ type: "answer", text: expect.stringContaining("What I found before the stop.") }),
+    ]);
+    expect(record.events.filter((e) => e.type === "run_note" && e.kind === "resumed")).toEqual([
+      expect.objectContaining({ kind: "resumed", summary: expect.stringMatching(/had already answered/) }),
+    ]);
+    expect(fallbackPuts).toEqual([]);
+    expect(warnings).toEqual([]);
+  });
+
   it("a resume onto a thread that has a newer run in flight is never steered or refused as a follow-up: the reclaimed row is closed interrupted with no reply and no run", async () => {
     const ledger = new InMemoryRunLedger(() => 10_000);
     await ledger.claim({
@@ -9134,7 +9250,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       lastStep: reclaimed.lastStep!,
       tools: knownToolsFor(getAgent("general")),
     });
-    if (plan.kind !== "resume") throw new Error(plan.why);
+    if (plan.kind !== "resume") throw new Error(plan.kind === "interrupted" ? plan.why : plan.kind);
     const { io, replies } = ioWithCard();
     await dispatch(deps, resumeMessage(reclaimed.row, "hello there"), io, {
       resume: {
@@ -9197,7 +9313,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       lastStep: reclaimed.lastStep!,
       tools: knownToolsFor(getAgent("coding")),
     });
-    if (plan.kind !== "resume") throw new Error(plan.why);
+    if (plan.kind !== "resume") throw new Error(plan.kind === "interrupted" ? plan.why : plan.kind);
     const { io, replies } = ioWithCard();
     await dispatch(deps, resumeMessage(reclaimed.row, "fix it"), io, {
       resume: {
@@ -9444,7 +9560,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       lastStep: reclaimed.lastStep!,
       tools: knownToolsFor(getAgent("general")),
     });
-    if (plan.kind !== "resume") throw new Error(plan.why);
+    if (plan.kind !== "resume") throw new Error(plan.kind === "interrupted" ? plan.why : plan.kind);
     const { io, replies } = ioWithCard();
     await dispatch(deps, resumeMessage(reclaimed.row, "hello there"), io, {
       resume: {
@@ -9636,7 +9752,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
               lastStep: reclaimed.lastStep!,
               tools: knownToolsFor(getAgent("general")),
             });
-            if (plan.kind !== "resume") throw new Error(plan.why);
+            if (plan.kind !== "resume") throw new Error(plan.kind === "interrupted" ? plan.why : plan.kind);
             resumeRun = dispatch(deps, resumeMessage(reclaimed.row, "hello there"), resumeIo.io, {
               resume: {
                 row: reclaimed.row,

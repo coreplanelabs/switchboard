@@ -11,12 +11,14 @@ import type { ResolvedRequest } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
 import type { CoordinatorTag } from "../coordinator/contract.js";
 import { budgetedAgent, type RunProfile } from "../../config/profile.js";
-import { mergeTools, runAgent } from "../../runner.js";
+import { mergeTools, runAgent, softStopAnswer, stuckLoopAnswer, timeBudgetAnswer } from "../../runner.js";
 import { parseModelRef } from "../../providers/types.js";
 import { TOOLSETS } from "../../tools/workspace.js";
 import { effectiveHarness } from "../harness/select.js";
 import { piContainerFor } from "../harness/pi/botHostContainer.js";
 import { piHarnessFactsOf, relayedTools, runPiHarness, type PiHarnessFacts } from "../harness/pi/harness.js";
+import { piRunPathsAt } from "../harness/pi/process.js";
+import { loopEndingOf, reviewPostedBefore, type LoopEnding } from "../runLedger/resume.js";
 import { fetchRepoShipInfo, findOpenPrByHead, openPullRequest } from "../../execution/githubPulls.js";
 import type { ChatMessage, Provider } from "../../providers/types.js";
 import type { McpToolsForRun } from "../../mcp/source.js";
@@ -521,8 +523,42 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
   // preset's harness, or the deployment's word for it. Everything before this
   // point and everything after it is the same for both.
   const harness = effectiveHarness(agent, deps.config.config.harness);
+  // A resume whose plan is `finish` (run-history item 37): the model had
+  // already answered when the previous generation died, so no loop runs here
+  // and only the post-steps and the reply are owed, with that answer in hand.
+  // How its loop ended is read back from the notes it published: this
+  // generation's RunControl knows no stop, so an operator's soft stop is
+  // restored onto it, which makes the status, the card and the label the
+  // stop's, exactly as if this process had taken it.
+  const finish = resume?.plan.kind === "finish" ? resume.plan : undefined;
+  const reentry = resume?.plan.kind === "resume" ? resume.plan : undefined;
+  const loopEnding: LoopEnding = finish && resume ? loopEndingOf(resume.events) : { kind: "answered" };
+  if (loopEnding.kind === "soft_stop") run.control.requestStop("soft");
+  // A verdict a previous generation already posted (agent-review item 18): the
+  // replayed `review_posted` event is the post-step's outcome, so neither the
+  // settle nor the post runs again, and the reviewed head is the event's.
+  const postedBefore = resume ? reviewPostedBefore(resume.events) : undefined;
+  if (postedBefore) reviewHead = postedBefore.head;
+  // The row's pi facts (harness-pi item 8), for the harness's re-attach or,
+  // on a finish, for ending the pi the previous generation left behind.
+  const piFacts = resume ? piHarnessFactsOf(resume.row.state.harness) : undefined;
   try {
-    if (harness === "pi") {
+    if (finish) {
+      onEvent({
+        type: "run_note",
+        kind: "resumed",
+        summary: `resumed after a restart: the model had already answered (${describeEnding(loopEnding)}); running the post-steps with its answer`,
+      });
+      if (harness === "pi" && piFacts) {
+        // pi's loop had ended too, but the process that would have ended pi
+        // died first: end it at the pid and root the row recorded, best-effort.
+        const container =
+          deps.harness?.containerFor?.(executor, profile.machine) ?? piContainerFor(executor, profile.machine);
+        await container.kill(piFacts.pid).catch(() => {});
+        if (piFacts.root !== undefined) await container.remove(piRunPathsAt(piFacts.root)).catch(() => {});
+      }
+      answer = answerUnderEnding(finish.answer, loopEnding, agent.maxMinutes);
+    } else if (harness === "pi") {
       // The pi harness (harness-pi.md): pi in the run's own container, the
       // bearer as its key, the bridge putting its events on this same stream,
       // the relayed tools running here under this same tool context.
@@ -563,7 +599,6 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
           ),
         ),
       ];
-      const facts = resume ? piHarnessFactsOf(resume.row.state.harness) : undefined;
       answer = await runPiHarness(
         {
           container:
@@ -603,16 +638,16 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
                 saveFacts: (h: PiHarnessFacts) => ledgerRun.setState({ harness: h }),
               }
             : {}),
-          ...(resume
+          ...(reentry
             ? {
                 resume: {
-                  messages: resume.plan.messages,
-                  compactions: resume.plan.compactions,
-                  settlements: resume.plan.settlements,
-                  remainingMs: resume.plan.remainingMs,
-                  turn: resume.plan.turn,
-                  inboxConsumedSeq: resume.plan.inboxConsumedSeq,
-                  ...(facts ? { facts } : {}),
+                  messages: reentry.messages,
+                  compactions: reentry.compactions,
+                  settlements: reentry.settlements,
+                  remainingMs: reentry.remainingMs,
+                  turn: reentry.turn,
+                  inboxConsumedSeq: reentry.inboxConsumedSeq,
+                  ...(piFacts ? { facts: piFacts } : {}),
                 },
               }
             : {}),
@@ -638,15 +673,15 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
         // The step record before each step's tools (run-history item 35).
         ...(ledgerRun ? { onStep: ledgerRun.step.bind(ledgerRun) } : {}),
         // A resume re-enters the loop from the plan (run-history item 37).
-        ...(resume
+        ...(reentry
           ? {
               resume: {
-                settlements: resume.plan.settlements,
-                stepRecorded: resume.plan.stepRecorded,
-                inboxConsumedSeq: resume.plan.inboxConsumedSeq,
-                turn: resume.plan.turn,
-                iteration: resume.plan.iteration,
-                remainingMs: resume.plan.remainingMs,
+                settlements: reentry.settlements,
+                stepRecorded: reentry.stepRecorded,
+                inboxConsumedSeq: reentry.inboxConsumedSeq,
+                turn: reentry.turn,
+                iteration: reentry.iteration,
+                remainingMs: reentry.remainingMs,
               },
             }
           : {}),
@@ -660,8 +695,15 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     // carry the review across a rebase of the same commits, or void the
     // verdict and re-review ONCE at the new head (worktree moved, prompt
     // recomposed, one more model turn). A hard stop observes nothing and
-    // settles nothing.
-    if (isPrReview && repoCtx.repo && repoCtx.pr !== undefined && run.control.requested !== "hard") {
+    // settles nothing; a verdict already posted before a restart is settled
+    // (it landed at its head) and is not re-reviewed.
+    if (
+      isPrReview &&
+      repoCtx.repo &&
+      repoCtx.pr !== undefined &&
+      run.control.requested !== "hard" &&
+      postedBefore === undefined
+    ) {
       const settled = await settleReviewedHead({
         span: root,
         pr: { repo: repoCtx.repo, number: repoCtx.pr },
@@ -885,8 +927,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     // A HARD-stopped review has no findings — only the abort line — so
     // nothing is posted and nothing is recorded. The step reads the canonical
     // answer above: the GitHub body and the `answer` event are one dialect.
-    // Only a review run reaches it: every other run's stream is as before.
-    if (agent.name === "review" && run.control.requested !== "hard")
+    // Only a review run reaches it: every other run's stream is as before. A
+    // verdict a previous generation posted before the restart is the outcome
+    // already (`postedBefore`): the record carries it, GitHub is not asked twice.
+    if (postedBefore) reviewPost = postedBefore;
+    else if (agent.name === "review" && run.control.requested !== "hard")
       reviewPost = await root.span("run.review_post_step", () =>
         runReviewPostStep({
           agent,
@@ -999,4 +1044,34 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     checklistCheckedOff,
     releaseWorkspace,
   };
+}
+
+/** The `resumed` note's word for how the loop had ended. */
+function describeEnding(ending: LoopEnding): string {
+  switch (ending.kind) {
+    case "answered":
+      return "it ended its loop";
+    case "soft_stop":
+      return "after an operator's soft stop";
+    case "written_up":
+      return `a write-up: ${ending.summary}`;
+  }
+}
+
+/** The answer the thread would have seen had the previous generation lived to
+ *  reply: the runner's own label for the ending (the ⏹ of a soft stop, the ⚠️
+ *  of a budget or a stuck loop) over the write-up, or the text as it stands.
+ *  The turn guard's and a dead sandbox's labels carry their note's summary,
+ *  which names the pace or the diagnosis the runner would have put there. */
+function answerUnderEnding(text: string, ending: LoopEnding, maxMinutes: number): string {
+  if (ending.kind === "answered") return text || "_(no response)_";
+  if (ending.kind === "soft_stop") return softStopAnswer(text);
+  switch (ending.note) {
+    case "time_budget_exhausted":
+      return timeBudgetAnswer(text, maxMinutes);
+    case "stuck_loop":
+      return stuckLoopAnswer(text);
+    default:
+      return text ? `⚠️ _${ending.summary}_\n\n${text}` : `⚠️ ${ending.summary}`;
+  }
 }

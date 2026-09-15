@@ -916,7 +916,9 @@ export async function dispatch(
     runLoopStarted = true;
     if (resume) {
       console.log(
-        `[resume] ${msg.threadKey} run ${run.id} continues under ${deps.runLedger.gen}: from step ${resume.plan.step}, ${resume.plan.settlements.length} call(s) to settle, ${resume.events.length} event(s) replayed`,
+        resume.plan.kind === "finish"
+          ? `[resume] ${msg.threadKey} run ${run.id} finishes under ${deps.runLedger.gen}: the model had answered at step ${resume.plan.step}, ${resume.events.length} event(s) replayed`
+          : `[resume] ${msg.threadKey} run ${run.id} continues under ${deps.runLedger.gen}: from step ${resume.plan.step}, ${resume.plan.settlements.length} call(s) to settle, ${resume.events.length} event(s) replayed`,
       );
     }
     // Tombstone-first (dispatch/record.ts): a provisional interrupted record
