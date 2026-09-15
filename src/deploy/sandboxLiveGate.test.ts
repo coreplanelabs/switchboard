@@ -21,7 +21,10 @@ import {
 // the rollout and a probe agree. A sandbox deploy is two artifacts: the Worker
 // upload is instant, the image rollout is not, so a thread created in between
 // lands on a container still running the previous image and every exec fails
-// with an EMPTY error while the deploy has said "deployed" and exited 0. And
+// (an EMPTY error under the 0.12 SDK, the container server's "'utils.
+// getRuntimeMetadata' is not a function." under the 0.13 one) until the
+// rollout's wave replaces that instance — while the deploy has said
+// "deployed" and exited 0. And
 // seconds after the upload the application can still report the PRE-deploy
 // version — the deploy's version has not registered yet, so every running
 // instance trivially matches it — which is why the rollout has a target: what
@@ -139,6 +142,20 @@ describe("decideSandboxLive", () => {
       kind: "waiting",
       reason: expect.stringContaining("still at pre-deploy version 11"),
     });
+    // The runner sends no probe and reads no instances before the version registers (the gate's own
+    // thread would land on the previous image): the rollout's reason stands without them.
+    expect(decideSandboxLive({ ...stillBefore, instances: null, probe: null })).toEqual(decideSandboxLive(stillBefore));
+    // The application read failed: wrangler's words, before anything else is consulted.
+    expect(
+      decideSandboxLive(
+        input({ app: { error: "wrangler containers info abc failed: exit 1" }, instances: null, probe: null }),
+      ),
+    ).toEqual({ kind: "waiting", reason: "rollout: wrangler containers info abc failed: exit 1" });
+    // Registered, but the instances not read: named as such, never live.
+    expect(decideSandboxLive(input({ instances: null, probe: null }))).toEqual({
+      kind: "waiting",
+      reason: "rollout: instances not read yet",
+    });
     // Never "complete" against the pre-deploy version when a target exists — even at the deadline it is a failure.
     expect(decideSandboxLive({ ...stillBefore, elapsedMs: LIVE_GATE_DEADLINE_MS })).toMatchObject({
       kind: "failed",
@@ -254,9 +271,19 @@ describe("decideSandboxLive", () => {
       kind: "waiting",
       reason: "probe: /exec failed with an EMPTY error — the probe's container may still run the previous image",
     });
+    // The 0.13 SDK on a 0.12-image container: its bootstrap probe calls an RPC the old container
+    // server lacks, and the server's own TypeError comes back as the body's error (a real 1.228.0
+    // deploy's line). Any other in-body error is read the same way — the previous image is the one
+    // cause a rollout has for a failing probe.
+    expect(probe({ error: "'utils.getRuntimeMetadata' is not a function.", exitCode: 127 })).toEqual({
+      kind: "waiting",
+      reason:
+        "probe: /exec failed — 'utils.getRuntimeMetadata' is not a function. — the probe's container may still run the previous image",
+    });
     expect(probe({ error: "sandbox recycled mid-command after 61s — …", exitCode: 127 })).toEqual({
       kind: "waiting",
-      reason: "probe: /exec failed — sandbox recycled mid-command after 61s — …",
+      reason:
+        "probe: /exec failed — sandbox recycled mid-command after 61s — … — the probe's container may still run the previous image",
     });
     expect(probe({ stdout: "", stderr: "bash: echo: not found", exitCode: 127 })).toEqual({
       kind: "waiting",

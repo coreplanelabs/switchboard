@@ -15,12 +15,14 @@ import { TEST_PROFILE } from "./testing/profile.js";
 
 // The sandbox live gate's LOOP (src/deploy/run.ts `waitUntilSandboxLive`,
 // docs/reference/specs/release-and-deploy.md item 16): read the Worker's /healthz with the
-// bearer; once it serves the deployed commit, probe `echo ok` through the gate's
-// thread and read the container application's state and instances; live only
-// when all three agree — the application having LEFT the version read before
-// the upload when wrangler printed a container change — waiting through
-// everything a rollout can cause, failing at the shared deadline with the last
-// reason. Every I/O is injected: nothing here reaches the network, wrangler or
+// bearer; once it serves the deployed commit, read the container application's
+// state; once the application has LEFT the version read before the upload
+// (when wrangler printed a container change), probe `echo ok` through the
+// gate's thread and read the instances — never before: a thread placed while
+// the deploy's version is not registered lands on the previous image, and the
+// gate's own probe thread is no exception. Live only when all three agree,
+// waiting through everything a rollout can cause, failing at the shared
+// deadline with the last reason. Every I/O is injected: nothing here reaches the network, wrangler or
 // the clock. `deployStep` is driven with the step's command injected too, so
 // the order "read the application, THEN upload" is a fact this file pins.
 
@@ -120,11 +122,11 @@ describe("waitUntilSandboxLive", () => {
     expect(gate.bearerEnv).toBe(SANDBOX_BEARER_ENV);
   });
 
-  it("live once every signal agrees: the Worker is read with the bearer, then the probe goes to /exec on the gate's thread BEFORE the application and its instances are read, and the summary names all three", async () => {
+  it("live once every signal agrees: the Worker is read with the bearer, then the application; its new version registered, the probe goes to /exec on the gate's thread BEFORE the instances are read, and the summary names all three", async () => {
     const h = harness({ health: [serving(HEAD)] });
     const r = await waitUntilSandboxLive(step, gate, HEAD, rollout, h.io, h.deps);
     expect(r).toEqual({ live: true, waitedMs: 0, detail: LIVE_DETAIL });
-    expect(h.calls.map((c) => c.dep)).toEqual(["readHealth", "probeExec", "readAppState", "readInstances"]);
+    expect(h.calls.map((c) => c.dep)).toEqual(["readHealth", "readAppState", "probeExec", "readInstances"]);
     expect(h.calls[0].args).toEqual([SANDBOX_HEALTH_URL, "tok-sandbox"]);
     expect(gate).toEqual({
       kind: "sandbox",
@@ -132,8 +134,8 @@ describe("waitUntilSandboxLive", () => {
       bearerEnv: SANDBOX_BEARER_ENV,
       containerApp: SANDBOX_CONTAINER_APP,
     });
-    expect(h.calls[1].args).toEqual(["https://switchboard-sandbox.example.test/exec", "tok-sandbox", KEY]);
-    expect(h.calls[2].args).toEqual(["deploy/cloudflare-sandbox", SANDBOX_CONTAINER_APP]);
+    expect(h.calls[1].args).toEqual(["deploy/cloudflare-sandbox", SANDBOX_CONTAINER_APP]);
+    expect(h.calls[2].args).toEqual(["https://switchboard-sandbox.example.test/exec", "tok-sandbox", KEY]);
     expect(h.calls[3].args).toEqual(["deploy/cloudflare-sandbox", SANDBOX_CONTAINER_APP]);
     expect(h.lines).toEqual([]);
   });
@@ -151,19 +153,67 @@ describe("waitUntilSandboxLive", () => {
     ]);
   });
 
-  it("the application still at the pre-deploy version for two polls — instances all on it, probe ok — is waiting both times; live on the third poll, once it advanced and the instances followed", async () => {
+  it("the application still at the pre-deploy version for two polls is waiting both times WITHOUT a probe or an instance list — the gate's own thread is not placed on the previous image; live on the third poll, once it advanced, from the first probe", async () => {
     const h = harness({
       health: [serving(HEAD)],
       appState: [before, before, after],
-      instances: [preDeployFleet, preDeployFleet, settled()],
+      instances: [settled()],
     });
     const r = await waitUntilSandboxLive(step, gate, HEAD, rollout, h.io, h.deps);
     expect(r).toEqual({ live: true, waitedMs: 2 * LIVE_GATE_POLL_MS, detail: LIVE_DETAIL });
     expect(h.count("readAppState")).toBe(3);
-    expect(h.count("probeExec")).toBe(3);
+    expect(h.count("probeExec")).toBe(1);
+    expect(h.count("readInstances")).toBe(1);
+    expect(h.calls.map((c) => c.dep)).toEqual([
+      "readHealth",
+      "readAppState",
+      "readHealth",
+      "readAppState",
+      "readHealth",
+      "readAppState",
+      "probeExec",
+      "readInstances",
+    ]);
     expect(h.lines).toEqual([
       "[deploy:all] sandbox: deployed, not live yet — rollout: application still at pre-deploy version 11 / image sha256:23e69f9e — the deploy's new version is not registered yet (0m 0s)",
       "[deploy:all] sandbox: deployed, not live yet — rollout: application still at pre-deploy version 11 / image sha256:23e69f9e — the deploy's new version is not registered yet (0m 15s)",
+    ]);
+  });
+
+  it("an unreadable application is waiting with wrangler's words — no probe, no instance list — until it reads", async () => {
+    const h = harness({
+      health: [serving(HEAD)],
+      appState: [{ error: "wrangler containers info abc: no JSON in the output" }, after],
+    });
+    const r = await waitUntilSandboxLive(step, gate, HEAD, rollout, h.io, h.deps);
+    expect(r).toEqual({ live: true, waitedMs: LIVE_GATE_POLL_MS, detail: LIVE_DETAIL });
+    expect(h.calls.map((c) => c.dep)).toEqual([
+      "readHealth",
+      "readAppState",
+      "readHealth",
+      "readAppState",
+      "probeExec",
+      "readInstances",
+    ]);
+    expect(h.lines).toEqual([
+      "[deploy:all] sandbox: deployed, not live yet — rollout: wrangler containers info abc: no JSON in the output (0m 0s)",
+    ]);
+  });
+
+  it("the deploy's version registered but the probe's container still answers from the previous image — the 0.13 SDK gets the container server's `'utils.getRuntimeMetadata' is not a function.` from a 0.12 image — is waiting with the previous image named; live once the rollout replaced it", async () => {
+    const skewed: ProbeResult = {
+      body: {
+        error: "'utils.getRuntimeMetadata' is not a function.",
+        stdout: "",
+        stderr: "'utils.getRuntimeMetadata' is not a function.",
+        exitCode: 127,
+      },
+    };
+    const h = harness({ health: [serving(HEAD)], probe: [skewed, ok] });
+    const r = await waitUntilSandboxLive(step, gate, HEAD, rollout, h.io, h.deps);
+    expect(r).toEqual({ live: true, waitedMs: LIVE_GATE_POLL_MS, detail: LIVE_DETAIL });
+    expect(h.lines).toEqual([
+      "[deploy:all] sandbox: deployed, not live yet — probe: /exec failed — 'utils.getRuntimeMetadata' is not a function. — the probe's container may still run the previous image (0m 0s)",
     ]);
   });
 
@@ -253,20 +303,24 @@ describe("deployStep (sandbox)", () => {
       return { code: 0, output };
     };
 
-  it("reads the application BEFORE the deploy command runs, takes the rollout target from what the command printed, and gates against both — polls name the pre-deploy version until it advanced", async () => {
+  it("reads the application BEFORE the deploy command runs, takes the rollout target from what the command printed, and gates against both — polls name the pre-deploy version until it advanced, and probe nothing meanwhile", async () => {
     const h = harness({
       health: [serving(HEAD)],
       appState: [before, before, before, after],
-      instances: [preDeployFleet, preDeployFleet, settled()],
+      instances: [settled()],
     });
     const r = await deployStep(sandboxStep, plan, HEAD, h.io, h.deps, exec(h, diff));
     expect(r).toEqual({ ok: true, versionId: "0c48b341-f216-4262-81c0-bc62ecb5669a", live: "live" });
-    expect(h.calls.map((c) => c.dep).slice(0, 6)).toEqual([
+    expect(h.calls.map((c) => c.dep)).toEqual([
       "readAppState",
       "exec",
       "readHealth",
-      "probeExec",
       "readAppState",
+      "readHealth",
+      "readAppState",
+      "readHealth",
+      "readAppState",
+      "probeExec",
       "readInstances",
     ]);
     expect(h.calls[0].args).toEqual(["deploy/cloudflare-sandbox", SANDBOX_CONTAINER_APP]);
@@ -290,7 +344,7 @@ describe("deployStep (sandbox)", () => {
     const h = harness({
       health: [serving(HEAD)],
       appState: [before, before, before, after],
-      instances: [preDeployFleet, preDeployFleet, settled()],
+      instances: [settled()],
     });
     await deployStep(sandboxStep, plan, HEAD, h.io, h.deps, exec(h, diff));
     const spans = h.spans();
@@ -315,8 +369,8 @@ describe("deployStep (sandbox)", () => {
       "readAppState",
       "exec",
       "readHealth",
-      "probeExec",
       "readAppState",
+      "probeExec",
       "readInstances",
     ]);
     expect(h.lines).toContain(
