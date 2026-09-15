@@ -1,4 +1,4 @@
-import { contractFromTask, DEFAULT_CONTRACT_MAX_CHARS, renderContract } from "./ship/contract.js";
+import { contractFromPlan, DEFAULT_CONTRACT_MAX_CHARS, renderContract } from "./ship/contract.js";
 import { NO_VERDICT_LINE } from "./reviewVerdict.js";
 import { reviewTargetBlock } from "./reviewTarget.js";
 import { SELF_DESCRIPTION_HEADER, selfDescriptionBlock } from "./selfDescription.js";
@@ -43,7 +43,8 @@ import { REFERENCE_REFUSAL } from "./dispatch/references.js";
 import type { ContentPart } from "./chatMessage.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import type { OpenedPullRequest, PullRequestFacts, PullRequestTarget } from "../execution/githubPulls.js";
-import { shipBranchName, shipTaskText } from "./ship/preflight.js";
+import { shipTaskText } from "./ship/preflight.js";
+import { generatedPlanId, unitBranch } from "./ship/coordinator.js";
 import type { GithubIdentity } from "../execution/githubApp.js";
 import { InMemoryMemoryStore, NullMemoryStore, type MemoryRecord } from "./memory/index.js";
 import { drainReflections, pendingReflectionCount, REFLECT_MIN_TURNS, REFLECTION_SYSTEM } from "./memory/reflection.js";
@@ -76,6 +77,7 @@ import { buildCoreCommands, defaultOperations } from "./commandCatalogue.js";
 import { capabilitiesFrom } from "./capabilities.js";
 import { NO_FLEET } from "./residentFleet.js";
 import { InMemoryCoordinatorInstanceStore } from "./coordinator/instanceStore.js";
+import type { CoordinatorInstance } from "./coordinator/contract.js";
 import type { Operations } from "./operations.js";
 import type { ResidentAdminClient } from "./residentAdmin.js";
 import { BEARER_MARGIN_MS, RunBearerStore } from "./modelProxy/runBearers.js";
@@ -2396,7 +2398,12 @@ describe("review post-step", () => {
     // block enters the system prompt right after the REVIEW TARGET block, and
     // the review's user turn is unchanged.
     it("a review run dispatched with a contract carries the rendered block in its system prompt after the REVIEW TARGET block, its user turn unchanged", async () => {
-      const contract = contractFromTask({ task: "do the unit", rebase: { branch: "plan/p/u10", onto: "main" } });
+      const contract = contractFromPlan({
+        planMarkdown: "### U1. do the unit\n\ndo the unit\n",
+        unitId: "U1",
+        readSpec: () => undefined,
+        rebase: { branch: "plan/p/u10", onto: "main" },
+      });
       const block = renderContract(contract, { maxChars: DEFAULT_CONTRACT_MAX_CHARS }).text;
       const { deps } = reviewDeps(async () => PR_HEAD);
       const provider = deps.completions.get("anthropic") as Provider & { requests: CompletionRequest[] };
@@ -4040,7 +4047,12 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
   // rendered block is the first user turn's last text part, the request's
   // text first, exactly as the ship pipeline's coding round places it.
   it("a coding run dispatched with a contract carries the rendered block as its first user turn's last text part; without one the turn is the request alone", async () => {
-    const contract = contractFromTask({ task: "do the unit", rebase: { branch: "plan/p/u10", onto: "main" } });
+    const contract = contractFromPlan({
+      planMarkdown: "### U1. do the unit\n\ndo the unit\n",
+      unitId: "U1",
+      readSpec: () => undefined,
+      rebase: { branch: "plan/p/u10", onto: "main" },
+    });
     const block = renderContract(contract, { maxChars: DEFAULT_CONTRACT_MAX_CHARS }).text;
     /** The description-then-answer provider with its requests recorded (a snapshot of each message list). */
     const recording = () => {
@@ -7790,7 +7802,8 @@ describe("agent:ship (the hand-off to the plan runner)", () => {
   const HEAD_A = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
   const PR_URL = "https://github.com/acme/api/pull/7";
   const TASK_MSG = "agent:ship in acme/api: fix the login redirect";
-  const SHIP_BRANCH = shipBranchName(shipTaskText("in acme/api: fix the login redirect", "acme/api"), "slack:CX:1.0");
+  const SHIP_PLAN_ID = generatedPlanId(shipTaskText("in acme/api: fix the login redirect", "acme/api"), "slack:CX:1.0");
+  const SHIP_BRANCH = unitBranch(SHIP_PLAN_ID, "u1");
 
   const SHIP_YAML = `
 organization: acme
@@ -7850,11 +7863,16 @@ workspaceDir: __WORKDIR__
     return { deps, provider, instances, created };
   }
 
-  /** The one task instance a request became, with its row — what the runner is handed. */
+  /** The one generated plan instance a request became, with its U1 row — what
+   *  the runner is handed. The instance's id is content-derived (`plan-<id>`),
+   *  so it is found by the run id stamped on it. */
   async function handed(instances: InMemoryCoordinatorInstanceStore, runId: string) {
-    const instance = await instances.get(`ship-${runId}`);
-    const [unit] = await instances.listUnits(`ship-${runId}`);
-    return { instance, unit };
+    const rows = (instances as unknown as { rows: Map<string, string> }).rows;
+    for (const text of rows.values()) {
+      const instance = JSON.parse(text) as CoordinatorInstance;
+      if (instance.runId === runId) return { instance, unit: (await instances.listUnits(instance.id))[0] };
+    }
+    return { instance: null, unit: undefined };
   }
 
   // Every scenario runs under a fetch guard: the branch's GitHub reads go ONLY
@@ -7937,13 +7955,13 @@ workspaceDir: __WORKDIR__
     expect(created).toEqual([]);
   });
 
-  it("a task the preflight admits is handed to the runner as a one-unit instance named by the run: the row carries the deterministic ship branch off the default branch and no resume, the reply says where it runs, the card closes ✅, no workspace is attached and no model turn runs here", async () => {
+  it("a task the preflight admits is handed to the runner as a generated one-unit plan instance named by the task and the thread: the U1 row carries the deterministic plan branch off the default branch and no resume, the reply says where it runs, the card closes ✅, no workspace is attached and no model turn runs here", async () => {
     const { deps, provider, instances, created } = shipDeps();
     const registry = new RunRegistry({ genId: () => "run-ship1", genToken: () => "tok" });
     deps.runRegistry = registry;
     const { io, replies, statuses } = fakeIO();
     await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    expect(created).toEqual(["ship-run-ship1"]);
+    expect(created).toEqual([`plan-${SHIP_PLAN_ID}`]);
     const { instance, unit } = await handed(instances, "run-ship1");
     expect(instance).toMatchObject({
       kind: "ship",
@@ -7956,16 +7974,43 @@ workspaceDir: __WORKDIR__
       caps: { maxRounds: 3, maxMinutes: 120 },
       runId: "run-ship1",
     });
-    expect(unit).toMatchObject({ unit: "task", branch: SHIP_BRANCH, dependsOn: [], rounds: [] });
+    expect(unit).toMatchObject({ unit: "U1", slug: "u1", branch: SHIP_BRANCH, dependsOn: [], rounds: [] });
     expect("resume" in unit!).toBe(false);
     expect(replies).toHaveLength(1);
     expect(replies[0]).toBe(
-      `🧭 Handed to the plan runner \`ship-run-ship1\`: the task runs on \`${SHIP_BRANCH}\` in this thread under your grants; this card follows it and the report lands here.`,
+      `🧭 Handed to the plan runner \`plan-${SHIP_PLAN_ID}\`: plan \`${SHIP_PLAN_ID}\`, 1 unit in dependency order — U1. ` +
+        `the unit runs on \`${SHIP_BRANCH}\` in this thread under your grants; this card follows it and the report lands here.`,
     );
+    // The instance is marked as a generated plan — an id, no path — and no
+    // `ship/…` branch appears anywhere in the hand-off.
+    expect(instance?.plan).toEqual({ id: SHIP_PLAN_ID });
+    expect(SHIP_BRANCH.startsWith("plan/")).toBe(true);
+    for (const r of replies) expect(r).not.toContain("`ship/");
     expect(statuses[statuses.length - 1]!.title).toContain("✅");
     expect(registry.getById("run-ship1")).toMatchObject({ finished: true, status: "completed", agent: "ship" });
     expect(provider.requests).toHaveLength(0);
     expect(fetchGuard).not.toHaveBeenCalled();
+  });
+
+  // docs/reference/specs/agent-ship.md item 16 — a task request is a generated
+  // one-unit plan: no `ship/…` branch exists anywhere any more.
+  it("a task request hands off a `plan-…` instance and no `ship/` branch appears in the reply, the card or the record", async () => {
+    const { deps, instances, created } = shipDeps();
+    const registry = new RunRegistry({ genId: () => "run-shiprate", genToken: () => "tok" });
+    deps.runRegistry = registry;
+    const { io, replies, statuses } = fakeIO();
+    await dispatch(deps, msg("agent:ship in acme/api: add a rate limit", "slack:UADMIN"), io);
+    expect(created).toHaveLength(1);
+    expect(created[0]).toMatch(/^plan-add-a-rate-limit-[0-9a-f]{6}$/);
+    const { instance, unit } = await handed(instances, "run-shiprate");
+    expect(instance?.plan).toEqual({ id: created[0]!.slice("plan-".length) });
+    expect(unit?.branch).toBe(`plan/${instance!.plan!.id}/u1`);
+    const surfaces = [
+      ...replies,
+      ...statuses.map((s) => JSON.stringify(s)),
+      JSON.stringify(registry.getById("run-shiprate")),
+    ];
+    for (const text of surfaces) expect(text).not.toContain("ship/");
   });
 
   it("a channel boundary clips the pipeline's wall clock: the preset's 120 becomes the channel's 10 in the caps handed to the runner, the card names the clip and the record carries the ship profile", async () => {
@@ -8025,7 +8070,7 @@ workspaceDir: __WORKDIR__
     deps.runRegistry = registry;
     const { io, replies } = fakeIO();
     await dispatch(deps, msg(`agent:ship ${PR_URL}`, "slack:UADMIN"), io);
-    expect(created).toEqual(["ship-run-shipres"]);
+    expect(created[0]).toMatch(/^plan-implement-the-task-this-[0-9a-f]{6}$/);
     const { instance, unit } = await handed(instances, "run-shipres");
     expect(instance).toMatchObject({ branch: SHIP_BRANCH, base: "main" });
     expect(unit?.resume).toEqual({ pr: 7, headSha: HEAD_A, url: PR_URL });
@@ -8097,7 +8142,7 @@ workspaceDir: __WORKDIR__
       baseRef: "main",
     });
     deps.fetchPrFacts = vi.fn(async () => openBotPr({ author: { login: "alice", id: 42 } }));
-    const branch = shipBranchName(shipTaskText(TASK, "acme/api"), "slack:CX:1.0");
+    const branch = unitBranch(generatedPlanId(shipTaskText(TASK, "acme/api"), "slack:CX:1.0"), "u1");
     const registry = new RunRegistry({ genId: () => "run-shipcite", genToken: () => "tok" });
     deps.runRegistry = registry;
     const { io, replies } = fakeIO();
@@ -8129,7 +8174,7 @@ workspaceDir: __WORKDIR__
       baseRef: "main",
     });
     deps.fetchPrFacts = vi.fn(async () => undefined); // transient fetch failure
-    const branch = shipBranchName(shipTaskText(TASK, "acme/api"), "slack:CX:1.0");
+    const branch = unitBranch(generatedPlanId(shipTaskText(TASK, "acme/api"), "slack:CX:1.0"), "u1");
     const registry = new RunRegistry({ genId: () => "run-shipfail", genToken: () => "tok" });
     deps.runRegistry = registry;
     const { io, replies } = fakeIO();

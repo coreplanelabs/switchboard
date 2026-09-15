@@ -117,20 +117,23 @@ export interface CoordinatorInstance {
   userName?: string;
   channelId: string;
   channelName?: string;
-  /** The requesting thread: where the card lives and where a task-string
-   *  instance's one unit runs; a plan's units each open a thread of their own. */
+  /** The requesting thread: where the card lives and where a generated plan's
+   *  one unit runs; a seeded plan's units each open a thread of their own. */
   threadKey: string;
   sourceUrl?: string;
-  /** `owner/name`, and the head branch the pipeline works on (a task string's
-   *  deterministic ship branch; for a plan, the first unit's — each unit row names its own). */
+  /** `owner/name`, and the head branch the pipeline works on (the first unit's
+   *  — each unit row names its own). */
   repo: string;
   branch: string;
   /** The pull request's base branch, when the creator knew it. */
   base?: string;
   /** Epoch ms. */
   createdAt: number;
-  /** The plan the instance runs, when it runs one: its id (the file's name) and its path in the repository. */
-  plan?: { id: string; path: string };
+  /** The plan the instance runs: its id and, for a seeded plan, its path in
+   *  the repository. A `plan` without a `path` is the generated one-unit plan a
+   *  task request becomes — the mark that keeps its unit in the requesting
+   *  thread (agent-ship item 16). */
+  plan?: { id: string; path?: string };
   /** Who merges the units' pull requests: `runner` for a seeded plan (the
    *  `merge` step under `plan:merge`), `person` for a task. Written by the
    *  hand-off, answered by the plan route, checked at the merge door; absent
@@ -150,20 +153,21 @@ export interface CoordinatorInstance {
   attempt?: number;
 }
 
-/** One unit of the plan an instance runs (a task string is a plan of one unit,
- *  `task`): its branch, the units it waits on, and — as the runner reaches it —
- *  its thread, its pull request, the round boundaries the card drew and how it
- *  ended. One row a person can read for "what happened to this unit". */
+/** One unit of the plan an instance runs (a task string is a generated plan of
+ *  one unit, `U1`): its branch, the units it waits on, and — as the runner
+ *  reaches it — its thread, its pull request, the round boundaries the card
+ *  drew and how it ended. One row a person can read for "what happened to this
+ *  unit". */
 export interface CoordinatorUnit {
   instanceId: string;
-  /** `U<n>` as the plan spells it, or `task`. */
+  /** `U<n>` as the plan spells it. */
   unit: string;
   slug: string;
   title?: string;
-  /** `plan/<plan-id>/<unit-slug>`, or the task string's ship branch. */
+  /** `plan/<plan-id>/<unit-slug>` (a resume's is the pull request's own head branch). */
   branch: string;
   dependsOn: string[];
-  /** The unit's thread, once opened; a task's is the requesting thread from the start. */
+  /** The unit's thread, once opened; a generated plan's is the requesting thread from the start. */
   threadKey?: string;
   sourceUrl?: string;
   /** The unit's review thread, opened once beside the unit's thread: every
@@ -214,7 +218,11 @@ export function isCoordinatorInstance(v: unknown): v is CoordinatorInstance {
   if (typeof r.repo !== "string" || !REPO_SLUG.test(r.repo)) return false;
   if (!isText(r.branch) || !isOptionalText(r.base)) return false;
   if (!isFinite(r.createdAt)) return false;
-  if (r.plan !== undefined && !(isObject(r.plan) && isText(r.plan.id) && isText(r.plan.path, 1024))) return false;
+  if (
+    r.plan !== undefined &&
+    !(isObject(r.plan) && isText(r.plan.id) && (r.plan.path === undefined || isText(r.plan.path, 1024)))
+  )
+    return false;
   if (r.merge !== undefined && r.merge !== "runner" && r.merge !== "person") return false;
   if (r.caps !== undefined && !(isObject(r.caps) && isFinite(r.caps.maxRounds) && isFinite(r.caps.maxMinutes)))
     return false;

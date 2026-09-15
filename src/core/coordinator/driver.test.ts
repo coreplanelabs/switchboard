@@ -326,6 +326,55 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(t.names().filter((n) => n.includes("merge"))).toEqual([]);
   });
 
+  it("the plan answer's `generated` mark reaches the machine: a generated unit's ending is re-issued with the request's text, a plan answer without the mark is a seeded plan re-issued by its plan", async () => {
+    const script = (generated: boolean | undefined) => {
+      const units = [row("U10", { slug: "u10", branch: "plan/warm-the-cache-abc123/u10" })];
+      const base = {
+        ok: true,
+        planId: "warm-the-cache-abc123",
+        merge: "person",
+        repo: "acme/api",
+        base: "main",
+        caps: { maxRounds: 2, maxMinutes: 45 },
+        childMinutes: { coding: 45, review: 25 },
+        units,
+      };
+      return bot({
+        plan: [ok(generated === undefined ? base : { ...base, generated })],
+        "unit-start": [started("U10")],
+        branch: [ok({ ok: true, branch: "plan/warm-the-cache-abc123/u10", base: "main" })],
+        spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
+        "read-record": [
+          codingDone("run-c0", T0 + 10 * MIN),
+          record(
+            {
+              id: "run-r1",
+              finished: true,
+              status: "completed",
+              verdict: { verdict: "approve", summary: "x", findings: [] },
+              reviewPosted: false,
+              reviewHead: HEAD,
+            },
+            T0 + 20 * MIN,
+          ),
+        ],
+        "pr-check": [prNone(), prOpen(T0 + 10 * MIN)],
+        round: [acked(), acked(), acked(), acked()],
+        "unit-end": [acked()],
+        finish: [acked()],
+      });
+    };
+    const waits = { "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" } as const;
+    const report = async (generated: boolean | undefined) => {
+      const b = script(generated);
+      expect((await runPlan(steps(waits).runner, b.client, INSTANCE)).units).toEqual({ U10: "aborted" });
+      const [end] = b.of("unit-end") as Array<{ ending: { report: string } }>;
+      return end!.ending.report;
+    };
+    expect(await report(true)).toContain("re-issue `agent:ship` in this thread with the same text");
+    expect(await report(undefined)).toContain("the unit runs again when the plan is re-issued");
+  });
+
   it("the instance's field decides, never the branch's name: a plan branch whose route answers merge: person ends merge_ready with no merge step asked, and a plan answer without the field is a person's merge the same way", async () => {
     const script = (merge?: "runner" | "person") => {
       const units = [row("U10")];

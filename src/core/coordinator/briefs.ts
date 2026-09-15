@@ -18,11 +18,12 @@ import { formatFinding, type Finding, type FindingDisposition } from "../reviewV
 import { matchDispositions, type Brief } from "../ship/coordinator.js";
 import {
   contractFromPlan,
-  contractFromTask,
+  generatedUnit,
   parsePlanUnit,
   specItemRefs,
   type AgentRules,
   type ChildContract,
+  type ContractUnit,
 } from "../ship/contract.js";
 import { shipTaskText } from "../ship/preflight.js";
 import { buildShipReviewTurn } from "../ship/reviewChild.js";
@@ -40,7 +41,8 @@ export interface BriefReaders {
   readRepoFile(path: string): Promise<string | undefined>;
   /** A child run's typed facts by run id, or undefined for a run the history does not hold. */
   readRunFacts(runId: string): Promise<ChildRunFacts | undefined>;
-  /** A task-string unit's task: the ship request as the requesting thread carried it, or undefined when it cannot be read back. */
+  /** A generated plan's request text: the ship run's own record (`instance.runId`,
+   *  its `input` event), or undefined when it cannot be read back. */
   readShipRequest(): Promise<string | undefined>;
 }
 
@@ -56,11 +58,32 @@ export interface ComposedChild {
 
 const SPECS_DIR = "docs/reference/specs";
 const RULES_FILES = ["AGENTS.md", "CLAUDE.md"] as const;
-/** The unit id a task-string instance's one unit carries. */
-export const TASK_UNIT = "task";
 
-/** The unit's contract: from the plan at the base ref for a plan unit, from the
- *  ship request's task for a task-string unit — the same object for the coding
+/** A generated plan's instance: `plan` without a `path` — the mark the hand-off
+ *  writes for a task request (agent-ship item 16). */
+const isGenerated = (instance: CoordinatorInstance): boolean => instance.plan?.path === undefined;
+
+/** A generated instance's one unit, from the ship run's record: the request
+ *  text is the unit's whole section (a resume's names the pull request), built
+ *  as a unit and never parsed back, so `contractFromPlan` is the one contract
+ *  builder and a heading line in the request stays the request's own. */
+async function generatedUnitOf(
+  instance: CoordinatorInstance,
+  unit: CoordinatorUnit,
+  readers: BriefReaders,
+): Promise<ContractUnit> {
+  const resume = unit.resume;
+  if (resume !== undefined) {
+    const url = resume.url ?? `https://github.com/${instance.repo}/pull/${resume.pr}`;
+    return generatedUnit(unit.unit, `Resume the review loop of ${url}`);
+  }
+  const request = await readers.readShipRequest();
+  const task = request !== undefined ? shipTaskText(parseDirectives(request).text, instance.repo) : "";
+  return generatedUnit(unit.unit, task || "Implement the task this thread's ship request describes.");
+}
+
+/** The unit's contract: from the plan at the base ref for a seeded unit, from
+ *  the ship run's record for a generated one — the same object for the coding
  *  and the review child. */
 export async function contractFor(
   instance: CoordinatorInstance,
@@ -69,19 +92,16 @@ export async function contractFor(
 ): Promise<ChildContract> {
   const rebase = { branch: unit.branch, onto: instance.base ?? "main" };
   const issue = unit.issue !== undefined ? { repo: instance.repo, number: unit.issue } : undefined;
-  if (unit.unit === TASK_UNIT || instance.plan === undefined) {
-    const request = await readers.readShipRequest();
-    const task = request !== undefined ? shipTaskText(parseDirectives(request).text, instance.repo) : "";
-    return contractFromTask({
-      task: task || "Implement the task this thread's ship request describes.",
-      rebase,
-      ...(issue ? { issue } : {}),
-    });
+  let source: { unit: ContractUnit } | { planMarkdown: string; unitId: string };
+  if (isGenerated(instance)) {
+    source = { unit: await generatedUnitOf(instance, unit, readers) };
+  } else {
+    const planMarkdown = await readers.readRepoFile(instance.plan!.path!);
+    if (planMarkdown === undefined)
+      throw new Error(`the plan ${instance.plan!.path} is not readable at ${rebase.onto} in ${instance.repo}`);
+    source = { planMarkdown, unitId: unit.unit };
   }
-  const planMarkdown = await readers.readRepoFile(instance.plan.path);
-  if (planMarkdown === undefined)
-    throw new Error(`the plan ${instance.plan.path} is not readable at ${rebase.onto} in ${instance.repo}`);
-  const section = parsePlanUnit(planMarkdown, unit.unit)?.section ?? "";
+  const section = ("unit" in source ? source.unit : parsePlanUnit(source.planMarkdown, unit.unit))?.section ?? "";
   const specs = new Map<string, string | undefined>();
   for (const spec of new Set(specItemRefs(section).map((r) => r.spec)))
     specs.set(spec, await readers.readRepoFile(`${SPECS_DIR}/${spec}`));
@@ -94,8 +114,7 @@ export async function contractFor(
     }
   }
   return contractFromPlan({
-    planMarkdown,
-    unitId: unit.unit,
+    ...source,
     readSpec: (spec) => specs.get(spec),
     ...(agentRules ? { agentRules } : {}),
     rebase,
@@ -135,10 +154,11 @@ export async function composeChild(
   switch (brief.kind) {
     case "contract": {
       const contract = await contractFor(instance, unit, readers);
-      const prompt =
-        contract.unit.id === TASK_UNIT
-          ? contract.unit.section
-          : `Implement unit ${contract.unit.id} — ${contract.unit.title} — of ${instance.plan?.path ?? "the plan"}: the contract below is the unit. Do its first instruction first, then add every test scenario it lists, update every spec row it names and weaken no guard.`;
+      // A generated unit's prompt is the request text itself — the section
+      // minus the one-unit heading the markdown rendering added.
+      const prompt = isGenerated(instance)
+        ? contract.unit.section.split("\n").slice(1).join("\n").trim()
+        : `Implement unit ${contract.unit.id} — ${contract.unit.title} — of ${instance.plan?.path ?? "the plan"}: the contract below is the unit. Do its first instruction first, then add every test scenario it lists, update every spec row it names and weaken no guard.`;
       return { preset: "coding", prompt, ref: unit.branch, contract };
     }
     case "review": {

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { GUARDS, renderContract } from "../ship/contract.js";
+import { GUARDS, parsePlanUnit, renderContract } from "../ship/contract.js";
 import type { Brief } from "../ship/coordinator.js";
 import type { CoordinatorInstance, CoordinatorUnit } from "./contract.js";
-import { composeChild, contractFor, TASK_UNIT, type BriefReaders, type ChildRunFacts } from "./briefs.js";
+import { composeChild, contractFor, type BriefReaders, type ChildRunFacts } from "./briefs.js";
 
 // Feature: docs/reference/specs/http-ingress.md item 9 — a coordinator's spawn
 // names a brief in ids and the bot composes the child's turn: the unit's
@@ -130,27 +130,60 @@ describe("contractFor — the unit's contract from the repository at the base re
     );
   });
 
-  it("a task-string unit: the task is the ship request's text with the directive and the repository stripped, as a plan of one unit; an unreadable request falls back to naming the thread", async () => {
-    const taskUnit: CoordinatorUnit = {
+  it("a generated instance (a `plan` with no `path`): the section is the request text read from the ship run's record with the directive and the repository stripped, no spec rows and every guard — no `agent:ship` turn in the thread needed; an unreadable record falls back to naming the thread", async () => {
+    const genUnit: CoordinatorUnit = {
       ...unit,
-      unit: TASK_UNIT,
-      slug: TASK_UNIT,
-      branch: "ship/fix-the-login-abc123",
+      unit: "U1",
+      slug: "u1",
+      branch: "plan/fix-the-login-abc123/u1",
     };
-    const taskInstance: CoordinatorInstance = { ...instance, plan: undefined, branch: taskUnit.branch };
+    const genInstance: CoordinatorInstance = {
+      ...instance,
+      plan: { id: "fix-the-login-abc123" },
+      branch: genUnit.branch,
+      runId: "run-ship",
+    };
     const { r, reads } = readers();
-    const contract = await contractFor(taskInstance, taskUnit, r);
-    expect(reads).toEqual([]);
-    expect(contract.unit).toEqual({
-      id: TASK_UNIT,
-      title: "fix the login redirect",
-      section: "fix the login redirect",
-      bullets: {},
-    });
+    const contract = await contractFor(genInstance, genUnit, r);
+    // The request text comes from the run record's reader, never a thread scan;
+    // the rules file is still read at the base ref.
+    expect(reads).toEqual(["AGENTS.md"]);
+    expect(contract.unit).toMatchObject({ id: "U1", title: "fix the login redirect" });
+    expect(contract.unit.section).toBe("### U1. fix the login redirect\n\nfix the login redirect");
     expect(contract.specRows).toEqual([]);
-    expect(contract.rebase).toEqual({ branch: taskUnit.branch, onto: "main" });
-    const blind = await contractFor(taskInstance, taskUnit, { ...r, readShipRequest: async () => undefined });
-    expect(blind.unit.section).toBe("Implement the task this thread's ship request describes.");
+    expect(contract.guards).toBe(GUARDS);
+    expect(contract.rebase).toEqual({ branch: genUnit.branch, onto: "main" });
+    const blind = await contractFor(genInstance, genUnit, { ...r, readShipRequest: async () => undefined });
+    expect(blind.unit.section).toContain("Implement the task this thread's ship request describes.");
+    // A request that reads as a markdown heading (shipTaskText leaves the text
+    // on one line, so a leading `##` is the case) is the request's own text:
+    // the unit is built, never parsed back, so the section keeps it whole where
+    // the plan parser would end the section at that line.
+    const headed = await contractFor(genInstance, genUnit, {
+      ...r,
+      readShipRequest: async () => "agent:ship in acme/api: ## Acceptance: the redirect lands on /home",
+    });
+    expect(headed.unit.title).toBe("## Acceptance: the redirect lands on /home");
+    expect(headed.unit.section).toBe(
+      `### ${genUnit.unit}. ## Acceptance: the redirect lands on /home\n\n## Acceptance: the redirect lands on /home`,
+    );
+    expect(parsePlanUnit(headed.unit.section, genUnit.unit)!.section).not.toContain("\n\n## Acceptance");
+    expect(headed.specRows).toEqual([]);
+  });
+
+  it("a resume's section names the pull request, not the request text", async () => {
+    const resumeUnit: CoordinatorUnit = {
+      ...unit,
+      unit: "U1",
+      slug: "u1",
+      branch: "feat/wake-cache",
+      resume: { pr: 7, url: "https://github.com/acme/api/pull/7" },
+    };
+    const genInstance: CoordinatorInstance = { ...instance, plan: { id: "x-abc123" }, branch: resumeUnit.branch };
+    const { r } = readers();
+    const contract = await contractFor(genInstance, resumeUnit, r);
+    expect(contract.unit.section).toContain("Resume the review loop of https://github.com/acme/api/pull/7");
+    expect(contract.unit.section).not.toContain("fix the login redirect");
   });
 });
 
@@ -169,15 +202,17 @@ describe("composeChild — the child a brief names", () => {
     expect(child.contract?.unit.id).toBe("U10");
     expect(renderContract(child.contract!, {}).text).toContain("### Unit U10 — Warm the cache on wake");
 
-    const taskUnit: CoordinatorUnit = { ...unit, unit: TASK_UNIT, branch: "ship/fix-abc" };
+    // A generated unit's prompt is the request text itself — keyed on the
+    // instance's mark (`plan` without a `path`), not on a unit name.
+    const genUnit: CoordinatorUnit = { ...unit, unit: "U1", slug: "u1", branch: "plan/fix-abc123/u1" };
     const task = await composeChild(
-      { kind: "contract", unit: TASK_UNIT, rebase: { branch: "ship/fix-abc", onto: "main" } },
-      { ...instance, plan: undefined },
-      taskUnit,
+      { kind: "contract", unit: "U1", rebase: { branch: genUnit.branch, onto: "main" } },
+      { ...instance, plan: { id: "fix-abc123" } },
+      genUnit,
       r,
     );
     expect(task.prompt).toBe("fix the login redirect");
-    expect(task.contract?.unit.id).toBe(TASK_UNIT);
+    expect(task.contract?.unit.id).toBe("U1");
   });
 
   it("a review brief is a review child on the pull request: round one's turn names the head; a re-review carries the prior review run's findings and the coding run's dispositions from their records, matched to the review's ids with an id it never issued dropped and noted, and the same contract", async () => {
