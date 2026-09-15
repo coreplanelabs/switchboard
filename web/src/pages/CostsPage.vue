@@ -3,7 +3,19 @@ import { computed } from "vue";
 import AppShell from "../components/AppShell.vue";
 import CostChart from "../components/costs/CostChart.vue";
 import { useSeed } from "../lib/seed";
-import { resourceSplitOf, seriesOf, SERIES_SWATCH, tilesOf, usd, valueOf } from "../lib/costs";
+import {
+  accountLabelOf,
+  DO_LABEL,
+  linksOf,
+  LLM_LABEL,
+  PLATFORM_LABEL,
+  resourceSplitOf,
+  seriesOf,
+  SERIES_SWATCH,
+  tilesOf,
+  usd,
+  valueOf,
+} from "../lib/costs";
 
 // The spend dashboard: what a group of deployed pieces costs per day, read
 // live from both billing sources per request. Same shell and tokens as every
@@ -15,6 +27,52 @@ const groups = computed(() => seed?.groups ?? []);
 const series = computed(() => (report.value ? seriesOf(report.value) : []));
 const tiles = computed(() => (report.value ? tilesOf(report.value) : null));
 const split = computed(() => (report.value ? resourceSplitOf(report.value) : []));
+const links = computed(() => (report.value ? linksOf(report.value) : null));
+const accountLabel = computed(() => (report.value ? accountLabelOf(report.value) : ""));
+
+/** Where a split row's meter is billed and can be dug into on the dashboard. */
+function splitLink(label: string): string | undefined {
+  const l = links.value;
+  if (!l) return undefined;
+  if (/^(Memory|vCPU|Disk)/.test(label)) return l.containers;
+  if (label.startsWith("Durable Object")) return l.durableObjects;
+  if (label.startsWith("Workers")) return l.workers;
+  if (label.startsWith("R2")) return l.r2;
+  if (label.startsWith("Workflow")) return l.workflows;
+  return undefined;
+}
+
+/** Where a chart series is billed: containers for a container app, the DO or
+ *  platform pages, Anthropic's cost page for the LLM line. */
+function seriesLink(name: string): string | undefined {
+  const l = links.value;
+  if (!l) return undefined;
+  if (name === LLM_LABEL) return l.anthropic;
+  if (name === DO_LABEL) return l.durableObjects;
+  if (name === PLATFORM_LABEL) return l.workers;
+  return l.containers;
+}
+
+/** The projection tile's second line: the two run-rates and what each stands on. */
+const projectionLine = computed(() => {
+  const r = report.value;
+  const t = tiles.value;
+  if (!r || !t) return "";
+  const p = t.projection;
+  const cloud = `cloud ${usd(p.cloudRate)}/day`;
+  const cloudBasis = p.cloudBasis === "today" ? "cloud from today so far" : "cloud from the last 7 full days";
+  if (!r.llmAvailable) return `${cloud} × 30.4 · ${cloudBasis} · before plan fees and included allowances`;
+  const llm = `LLM ${usd(p.llmRate)}/day`;
+  const llmBasis =
+    p.llmBasis === "closed-days"
+      ? `LLM from ${p.llmClosedDays} closed day${p.llmClosedDays === 1 ? "" : "s"}`
+      : p.llmBasis === "today"
+        ? "LLM from today so far"
+        : "no LLM spend in range";
+  const basis =
+    p.cloudBasis === "today" && p.llmBasis === "today" ? "both from today so far" : `${cloudBasis} · ${llmBasis}`;
+  return `${cloud} + ${llm} · × 30.4 · ${basis}`;
+});
 /** Newest first: the open day on top, where the eye lands. */
 const daysNewestFirst = computed(() => (report.value ? [...report.value.days].reverse() : []));
 /** The range presets. Both billing sources bucket by UTC day (the cost report
@@ -109,15 +167,22 @@ function monthDay(date: string): string {
       </div>
       <div class="grid gap-0.5 rounded-lg border border-default bg-elevated px-4 py-3.5">
         <span class="font-mono text-[0.6875rem] font-medium uppercase tracking-widest text-dimmed">7-day average</span>
-        <span class="font-mono text-2xl font-medium tabular-nums">{{ usd(tiles.avg7) }}</span>
-        <span class="text-xs text-muted">per day, full days only</span>
+        <span class="font-mono text-2xl font-medium tabular-nums">{{
+          tiles.avg7 !== undefined ? usd(tiles.avg7) : "—"
+        }}</span>
+        <span class="text-xs text-muted">{{
+          tiles.avg7 !== undefined ? "per day, full days only" : "no full day yet in this range"
+        }}</span>
       </div>
+      <!-- Cloud and LLM projected as separate run-rates and added: on a young
+           workspace the LLM line has no full day yet, and a single 7-day rate
+           over the totals would read an order of magnitude low. -->
       <div class="grid gap-0.5 rounded-lg border border-default bg-elevated px-4 py-3.5">
         <span class="font-mono text-[0.6875rem] font-medium uppercase tracking-widest text-dimmed"
           >Projected month</span
         >
-        <span class="font-mono text-2xl font-medium tabular-nums">{{ usd(tiles.projectedMonth, 0) }}</span>
-        <span class="text-xs text-muted">7-day rate × 30.4, before plan fees and included allowances</span>
+        <span class="font-mono text-2xl font-medium tabular-nums">{{ usd(tiles.projection.monthUsd, 0) }}</span>
+        <span class="text-xs text-muted">{{ projectionLine }}</span>
       </div>
       <!-- Dollars, not a share: model spend runs an order of magnitude above the
            Cloudflare spend, so its share of the total says nothing. -->
@@ -134,7 +199,25 @@ function monthDay(date: string): string {
         >
         <span class="font-mono text-2xl font-medium tabular-nums">{{ tiles.accountShare }}%</span>
         <span class="text-xs text-muted"
-          >{{ usd(report.totals.cloudUsd) }} of {{ usd(report.account.cloudUsd) }} Cloudflare spend in range</span
+          >{{ usd(report.totals.cloudUsd) }} of {{ usd(report.account.cloudUsd) }} on
+          <a
+            v-if="links"
+            class="text-primary hover:underline"
+            :href="links.account"
+            target="_blank"
+            rel="noopener noreferrer"
+            :title="`Cloudflare account ${report.account.id}`"
+            >{{ accountLabel }}</a
+          >
+          · Cloudflare spend in range ·
+          <a
+            v-if="links"
+            class="text-primary hover:underline"
+            :href="links.billing"
+            target="_blank"
+            rel="noopener noreferrer"
+            >billing</a
+          ></span
         >
       </div>
     </section>
@@ -146,9 +229,17 @@ function monthDay(date: string): string {
           <p class="text-sm text-muted">Stacked by component · USD list price</p>
         </div>
         <div class="legend flex flex-wrap gap-x-4 gap-y-1.5 text-xs text-muted">
-          <span v-for="(s, i) in series" :key="s" class="inline-flex items-center gap-1.5">
+          <a
+            v-for="(s, i) in series"
+            :key="s"
+            class="inline-flex items-center gap-1.5 no-underline hover:text-highlighted hover:underline"
+            :href="seriesLink(s)"
+            target="_blank"
+            rel="noopener noreferrer"
+            :title="`Open where ${s} is billed`"
+          >
             <i class="inline-block size-2.5 rounded-xs" :class="SERIES_SWATCH[i % SERIES_SWATCH.length]" />{{ s }}
-          </span>
+          </a>
         </div>
       </div>
       <CostChart :report="report" :series="series" />
@@ -175,7 +266,18 @@ function monthDay(date: string): string {
       <table class="w-full border-collapse font-mono text-[0.8125rem] tabular-nums">
         <tbody>
           <tr v-for="row in split" :key="row.label" class="border-b border-muted">
-            <td class="px-2.5 py-1.5">{{ row.label }}</td>
+            <td class="px-2.5 py-1.5">
+              <a
+                v-if="splitLink(row.label)"
+                class="no-underline hover:text-highlighted hover:underline"
+                :href="splitLink(row.label)"
+                target="_blank"
+                rel="noopener noreferrer"
+                :title="`Open where this is billed on Cloudflare`"
+                >{{ row.label }}</a
+              >
+              <template v-else>{{ row.label }}</template>
+            </td>
             <td class="px-2.5 py-1.5 text-right">{{ usd(row.usd) }}</td>
             <td class="px-2.5 py-1.5 text-right">{{ Math.round(row.percent) }}%</td>
             <td class="w-2/5 px-2.5 py-1.5">
@@ -272,14 +374,45 @@ function monthDay(date: string): string {
             analytics dataset and is not priced.
           </div>
           <div>
-            <b>Scope.</b> Attributed to this group: the Workers <code>{{ report.attribution.workers.join(", ") }}</code
+            <b>Scope.</b> Attributed to this group: the Workers
+            <template v-for="(w, i) in report.attribution.workers" :key="w"
+              ><template v-if="i > 0">, </template
+              ><a
+                v-if="links"
+                class="font-mono hover:underline"
+                :href="links.worker(w)"
+                target="_blank"
+                rel="noopener noreferrer"
+                >{{ w }}</a
+              ><code v-else>{{ w }}</code></template
             >, every Durable Object namespace they host ({{
               Object.keys(report.attribution.durableObjectNamespaces).length
-            }}), the R2 buckets named after them ({{ Object.keys(report.attribution.r2Buckets).length }}), and the
-            container apps mapped in <code>costs.groups.{{ report.group }}</code> ({{
+            }}), the R2 buckets named after them (<template
+              v-for="(b, i) in Object.keys(report.attribution.r2Buckets)"
+              :key="b"
+              ><template v-if="i > 0">, </template
+              ><a
+                v-if="links"
+                class="font-mono hover:underline"
+                :href="links.bucket(b)"
+                target="_blank"
+                rel="noopener noreferrer"
+                >{{ b }}</a
+              ><code v-else>{{ b }}</code></template
+            ><template v-if="Object.keys(report.attribution.r2Buckets).length === 0">none</template>), and the container
+            apps mapped in <code>costs.groups.{{ report.group }}</code> ({{
               Object.keys(report.attribution.containerApps).length
             }}). Everything else in the account is priced the same way into the account total, which is what "share of
-            account" divides by.
+            account" divides by. Every figure above links to where it is billed: the
+            <a v-if="links" class="hover:underline" :href="links.account" target="_blank" rel="noopener noreferrer"
+              >Cloudflare dashboard</a
+            >
+            for the account <code>{{ report.account.id }}</code
+            >{{ report.account.name ? ` (${report.account.name})` : "" }}, and
+            <a v-if="links" class="hover:underline" :href="links.anthropic" target="_blank" rel="noopener noreferrer"
+              >Anthropic's cost page</a
+            >
+            for the LLM line.
           </div>
         </div>
       </details>

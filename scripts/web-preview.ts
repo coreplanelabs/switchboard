@@ -800,13 +800,13 @@ const RESIDENTS = {
       live: {
         state: "warm",
         reason: "",
-        sha: "0123456789abcdef0123456789abcdef01234567",
+        sha: "acct-example01234567",
         lockfileHash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e46",
         provisionedAt: "2026-08-26T01:05:00.000Z",
         lastRefreshAt: "2026-08-30T19:30:00.000Z",
         snapshot: {
           ref: "main",
-          sha: "0123456789abcdef0123456789abcdef01234567",
+          sha: "acct-example01234567",
           createdAt: "2026-08-30T19:31:00.000Z",
           mirrorBackupId: "bk_1",
           checkoutBackupId: "bk_2",
@@ -916,7 +916,8 @@ const COSTS: CostReport = {
     },
   },
   // Three other tenants' worth on the same account: the "share of account" tile reads 25%.
-  account: { cloudUsd: COSTS_CLOUD_USD * 4 },
+  generatedAt: NOW,
+  account: { id: "acct-example", name: "acme-infra", cloudUsd: COSTS_CLOUD_USD * 4 },
   attribution: {
     workers: ["switchboard", "switchboard-resident"],
     containerApps: { "app-bot": "switchboard bot", "app-sandbox": "thread sandboxes" },

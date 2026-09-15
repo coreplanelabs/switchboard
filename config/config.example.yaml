@@ -369,6 +369,7 @@ workspaceDir: ./workspaces
 # Spend reporting: GET /costs (Access-gated). Optional. See docs/reference/specs/costs.md.
 # costs:
 #   cloudflareAccountId: <32-hex account id>
+#   cloudflareAccountName: acme-infra              # optional: how the page names the account beside its share (else the id's first hex)
 #   cloudflareTokenEnv: CF_ANALYTICS_TOKEN     # token with Account Analytics:Read
 #   anthropicAdminKeyEnv: ANTHROPIC_ADMIN_KEY  # optional: sk-ant-admin… for LLM spend
 #   groups:

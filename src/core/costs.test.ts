@@ -154,6 +154,9 @@ const LLM: LlmCostRow[] = [
   { date: AUG_29, workspaceId: null, amountUsd: 3 },
 ];
 
+/** The account behind the rows — required: the page links to it. */
+const META = { accountId: "acct-example" };
+
 // ---- pricing math -----------------------------------------------------------
 
 describe("containerCostUsd", () => {
@@ -238,7 +241,7 @@ describe("the other meters Cloudflare bills a Workers deployment on", () => {
 
 describe("buildCostReport", () => {
   const range = { from: AUG_28, to: AUG_29, days: 2, partialLastDay: true };
-  const report = buildCostReport("switchboard", GROUP, USAGE, LLM, range);
+  const report = buildCostReport("switchboard", GROUP, USAGE, LLM, range, META);
 
   it("keeps only the group's container apps, DO namespaces and workers; a namespace is attributed through the Worker that hosts it, labelled from config when given, else by its Worker", () => {
     const d = report.days.find((x) => x.date === AUG_28)!;
@@ -267,6 +270,7 @@ describe("buildCostReport", () => {
       USAGE,
       LLM,
       range,
+      META,
     );
     expect(explicit.attribution.r2Buckets).toEqual({
       "switchboard-2-tfstate": "state",
@@ -335,7 +339,7 @@ describe("buildCostReport", () => {
       { date: AUG_29, workspaceId: "wrkspc_switchboard", amountUsd: 4.25, estimated: true, unpricedTokens: 500 },
       { date: AUG_29, workspaceId: "wrkspc_other", amountUsd: 1, estimated: true, unpricedTokens: 9000 },
     ];
-    const r = buildCostReport("switchboard", GROUP, USAGE, rows, range);
+    const r = buildCostReport("switchboard", GROUP, USAGE, rows, range, META);
     const closed = r.days.find((x) => x.date === AUG_28)!;
     const open = r.days.find((x) => x.date === AUG_29)!;
     expect(closed.llmEstimated).toBe(false);
@@ -353,12 +357,14 @@ describe("buildCostReport", () => {
   });
 
   it("emits one row per day in range, oldest first, with zero-filled gaps", () => {
-    const r = buildCostReport("switchboard", GROUP, EMPTY_USAGE, [], {
-      from: AUG_27,
-      to: AUG_29,
-      days: 3,
-      partialLastDay: false,
-    });
+    const r = buildCostReport(
+      "switchboard",
+      GROUP,
+      EMPTY_USAGE,
+      [],
+      { from: AUG_27, to: AUG_29, days: 3, partialLastDay: false },
+      META,
+    );
     expect(r.days.map((d) => d.date)).toEqual([AUG_27, AUG_28, AUG_29]);
     expect(r.days.every((d) => d.total === 0)).toBe(true);
     expect(r.totals.total).toBe(0);
@@ -401,9 +407,24 @@ describe("buildCostReport", () => {
   });
 
   it("reports llm as unavailable (not zero) when there is no LLM source", () => {
-    const r = buildCostReport("switchboard", GROUP, USAGE, null, range);
+    const r = buildCostReport("switchboard", GROUP, USAGE, null, range, META);
     expect(r.llmAvailable).toBe(false);
     expect(r.days.every((d) => d.llmUsd === 0)).toBe(true);
+  });
+
+  it("names the account it priced (id, optional name) and when it was generated, so the page can link out and scale the open day", () => {
+    const r = buildCostReport("switchboard", GROUP, USAGE, LLM, range, {
+      accountId: "acct-example",
+      accountName: "acme-infra",
+      generatedAt: Date.parse(`${AUG_29}T12:00:00Z`),
+    });
+    expect(r.account.id).toBe("acct-example");
+    expect(r.account.name).toBe("acme-infra");
+    expect(r.generatedAt).toBe(Date.parse(`${AUG_29}T12:00:00Z`));
+    // No name configured → absent, never an empty string the page would print.
+    const bare = buildCostReport("switchboard", GROUP, USAGE, LLM, range, { accountId: "acc", generatedAt: 1 });
+    expect(bare.account.name).toBeUndefined();
+    expect(JSON.stringify(bare.account)).not.toContain('"name"');
   });
 });
 
@@ -442,6 +463,18 @@ describe("parseCostsConfig", () => {
     expect(c?.groups.switchboard.r2Buckets).toEqual({}); // optional: buckets are attributed by name
     expect(c?.anthropicAdminKeyEnv).toBe("ANTHROPIC_ADMIN_KEY");
     expect(c?.groups.switchboard.workers).toEqual(["switchboard"]);
+    expect(c?.cloudflareAccountName).toBeUndefined();
+  });
+  it("carries an optional account name for the page to print beside the account's share", () => {
+    const c = parseCostsConfig({
+      cloudflareAccountId: "3c7b",
+      cloudflareAccountName: "acme-infra",
+      groups: { g: { workers: ["w"] } },
+    });
+    expect(c?.cloudflareAccountName).toBe("acme-infra");
+    expect(() =>
+      parseCostsConfig({ cloudflareAccountId: "3c7b", cloudflareAccountName: 7, groups: { g: { workers: ["w"] } } }),
+    ).toThrow(/cloudflareAccountName/);
   });
   it("accepts a group with only workers — namespaces and buckets are attributed through them", () => {
     const c = parseCostsConfig({ cloudflareAccountId: "3c7b", groups: { g: { workers: ["w"] } } });
