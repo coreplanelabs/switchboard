@@ -38,6 +38,7 @@ import { createAlsContext, createTickingClock, timedFakes, type Tick } from "./t
 import { ThreadAdmission } from "./threadAdmission.js";
 import { isHeadMaterial, isSpanRecord, type RunEvent } from "./runEvents.js";
 import type { ConversationReader } from "./references/types.js";
+import { REFERENCE_REFUSAL } from "./dispatch/references.js";
 import type { ContentPart } from "./chatMessage.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import type { OpenedPullRequest, PullRequestFacts, PullRequestTarget } from "../execution/githubPulls.js";
@@ -13123,5 +13124,38 @@ describe("the references step in dispatch (record 0037)", () => {
         text: "…",
       }),
     ).toBe(true);
+  });
+
+  it("a refused reference posts the one refusal line after the run's card opened, once, and the model still runs", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE + "references: { enabled: true }\n", provider);
+    const { reader, calls } = fakeReader();
+    reader.classifyConversation = async () => {
+      calls.classify++;
+      return { visibility: "never", botIsMember: false };
+    };
+    deps.conversationReaders = [reader];
+    // The channel's calls in the order they were made: the card is `status`,
+    // a reply is `reply:<text>`. The refusal must not be the thread's first post.
+    const order: string[] = [];
+    const { io: inner, replies } = fakeIO();
+    const io: ChannelIO = {
+      ...inner,
+      reply: async (t) => {
+        order.push(`reply:${t}`);
+        await inner.reply(t);
+      },
+      status: async (initial) => {
+        order.push("status");
+        return inner.status(initial);
+      },
+    };
+    await dispatch(deps, msg(`what did we conclude? ${PERMALINK}`), io);
+    expect(calls).toEqual({ classify: 1, read: 0, member: 1 });
+    expect(replies.filter((r) => r === REFERENCE_REFUSAL)).toHaveLength(1);
+    expect(order.indexOf("status")).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf(`reply:${REFERENCE_REFUSAL}`)).toBeGreaterThan(order.indexOf("status"));
+    expect(provider.requests).toHaveLength(1);
+    expect(lastUserTexts(provider.requests[0])).toEqual([`what did we conclude? ${PERMALINK}`]);
   });
 });
