@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { createLossTracker, lossesFromStream, normalizeSpans, spansFromEvents } from "./normalizeSpans.js";
 import type { RunEvent } from "./runEvents.js";
 
-const input = (at: number): RunEvent => ({ type: "input", text: "go", at });
+const input = (at: number): RunEvent => ({ type: "input", messageId: "m1", text: "go", at });
 const call = (id: string, at: number, tool = "bash"): RunEvent => ({
   type: "tool_call",
   tool,

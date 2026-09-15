@@ -232,6 +232,8 @@ export async function runRelayedTool(
     ...(readConversation && harness.callSeen
       ? { conversation: () => harness.callSeen!(ask.toolCallId).then(() => readConversation()) }
       : {}),
+    // After the spreads, so the call's own id can never be shadowed by one on the base context.
+    callId: ask.toolCallId,
   };
   try {
     const input = typeof ask.input === "object" && ask.input !== null ? (ask.input as Record<string, unknown>) : {};

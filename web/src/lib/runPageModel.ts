@@ -209,10 +209,13 @@ export function phaseHeadText(group: Pick<PhaseGroupVm, "rows" | "phase">): stri
 
 export interface RequestVm {
   text: string;
+  /** The message's id as the `input` event names it: the key a received
+   *  `artifact` event carries to say which message it arrived with. */
+  messageId: string;
   at?: number;
   source?: TimelineSource;
   /** The files that arrived with this message (`artifact` events with
-   *  `direction: "in"` that follow its `input`, live-view.md item 26): shown
+   *  `direction: "in"` naming this `messageId`, live-view.md item 26): shown
    *  nested in its card, where Slack showed them. */
   files: TimelineArtifact[];
 }
@@ -609,32 +612,27 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
     pendingTurn = null;
   }
 
-  /** The message the next received file belongs to: the latest `input`. */
-  let lastInput: RequestVm | null = null;
-  /** Received files recorded before any input — held for the first message. */
-  const receivedBeforeInput: TimelineArtifact[] = [];
+  /** The messages of the run by id — the Request and every Follow-up — for
+   *  the received files that name them. */
+  const inputsById = new Map<string, RequestVm>();
   /** Every file the run sent, in event order — the Reply's list (the same array
    *  the reply holds once it lands, so a late file still reaches it). */
   const sent: TimelineArtifact[] = reactive([]);
 
-  /** A file lands where it was received or sent (live-view.md item 26): a
-   *  received file on the latest input's card (the Request or a Follow-up), a
-   *  sent file on the Reply and, until the Reply lands, on the `attach_file`
-   *  call that posted it — the call whose headline names the file, else the
-   *  newest such call (two files posted in one turn each find their own). */
+  /** A file lands where it was received or sent, by the id the event carries
+   *  (live-view.md item 26): a received file on the card of the message its
+   *  `messageId` names (the Request or a Follow-up), a sent file on the Reply
+   *  and on the `attach_file` call its `callId` names — so two files of one
+   *  name from two calls each find their own card. A file naming a message or
+   *  call this record has not shown is dropped: the record is the only witness,
+   *  and the page never guesses from order or from names. */
   function placeArtifact(artifact: TimelineArtifact): void {
     if (artifact.direction === "in") {
-      if (lastInput) lastInput.files.push(artifact);
-      else receivedBeforeInput.push(artifact);
+      inputsById.get(artifact.messageId)?.files.push(artifact);
       return;
     }
     sent.push(artifact);
-    const attaches = [...callVms.values()].filter((c) => c.tool === "attach_file");
-    const call =
-      attaches
-        .reverse()
-        .find((c) => c.headline.endsWith(`/${artifact.name}`) || c.headline.endsWith(` ${artifact.name}`)) ??
-      attaches[0];
+    const call = callVms.get(artifact.callId);
     if (call) {
       (call.files ??= []).push(artifact);
       call.open = true; // a posted file is worth the card's body: the picture shows where it was sent
@@ -647,11 +645,10 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
       case "input": {
         const vm: RequestVm = {
           text: change.text,
+          messageId: change.messageId,
           at: change.at,
           ...(change.source ? { source: change.source } : {}),
-          // A file recorded before any input (never today — the copy follows the
-          // message it came on) belongs to the first message that arrives.
-          files: receivedBeforeInput.splice(0),
+          files: [],
         };
         // The first input is the request; a later one is a steered follow-up
         // and must never replace it, or the header would show the follow-up
@@ -659,7 +656,7 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
         // the runner emits it at the step boundary that read it.
         if (state.request) state.log.push({ kind: "followup", key: key("followup"), input: vm });
         else state.request = vm;
-        lastInput = vm;
+        inputsById.set(vm.messageId, vm);
         return;
       }
       case "step":

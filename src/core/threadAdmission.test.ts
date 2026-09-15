@@ -5,6 +5,7 @@ import {
   decideFollowUp,
   followUpPrompt,
   followUpSnippet,
+  followUpMessageId,
   mergeFollowUps,
   refusalReply,
   steerAck,
@@ -67,6 +68,17 @@ describe("ThreadAdmission — claim and release", () => {
     const adm = new ThreadAdmission();
     const orphan: LiveThread = { agent: "coding", inbox: new FollowUpInbox(), startedAt: 0 };
     expect(adm.release("slack:C:none", orphan)).toEqual([]);
+  });
+});
+
+// live-view.md item 26: the follow-up's `input` event names its message so the
+// files that came with it can find it — the platform's id when there is one,
+// else something both loops derive the same way from the follow-up alone.
+describe("followUpMessageId", () => {
+  it("is the platform's message id when the follow-up has one, else the inbox seq, else the arrival time", () => {
+    expect(followUpMessageId({ messageId: "1700000000.000300", ledgerSeq: 4, at: 9 })).toBe("1700000000.000300");
+    expect(followUpMessageId({ ledgerSeq: 4, at: 9 })).toBe("inbox-4");
+    expect(followUpMessageId({ at: 9 })).toBe("at-9");
   });
 });
 

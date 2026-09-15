@@ -33,7 +33,7 @@ const GH_DIFF = GIT_DIFF + "diff --git a/g b/g\n--- a/g\n+++ b/g\n@@ -1 +1 @@\n-
 
 function reviewRecord(id: string, over: Partial<RunRecord> = {}, artifact: Partial<RunEvent> = {}): RunRecord {
   const events: RunEvent[] = over.events ?? [
-    { type: "input", text: "agent:review https://github.com/acme/api/pull/42", seq: 1 },
+    { type: "input", messageId: "m1", text: "agent:review https://github.com/acme/api/pull/42", seq: 1 },
     { type: "run_meta", agent: "review", repo: "acme/api", ref: "patch-1", pr: 42, headSha: HEAD, seq: 2 },
     {
       type: "review_artifact",
@@ -221,7 +221,7 @@ describe("ReviewAbridger.abridge — the one path", () => {
       reviewRecord("coding", {
         agent: "coding",
         events: [
-          { type: "input", text: "fix it", seq: 1 },
+          { type: "input", messageId: "m1", text: "fix it", seq: 1 },
           { type: "run_meta", agent: "coding", repo: "acme/api", seq: 2 },
           { type: "answer", text: "done", seq: 3 },
         ],
@@ -407,7 +407,9 @@ describe("autoAbridgeOnPersist — provider: meat is the same path, after the re
   it("meat → abridge({ runId }) on persist; git or off → nothing; refusals (a coding run) are silent, failures are warned", async () => {
     const h = harness();
     await h.store.put(reviewRecord("r1"));
-    await h.store.put(reviewRecord("c1", { agent: "coding", events: [{ type: "input", text: "x", seq: 1 }] }));
+    await h.store.put(
+      reviewRecord("c1", { agent: "coding", events: [{ type: "input", messageId: "m1", text: "x", seq: 1 }] }),
+    );
     const spy = vi.spyOn(h.abridger, "abridge");
     const hook = autoAbridgeOnPersist(
       () => h.abridger,

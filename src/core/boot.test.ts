@@ -95,7 +95,7 @@ describe("reclaimRuns", () => {
       { idx: 1, message: assistant("looking") },
     ]);
     await ledger.append("r1", "g1", [
-      { type: "input", text: "go", at: 1_000, seq: 1 },
+      { type: "input", messageId: "m1", text: "go", at: 1_000, seq: 1 },
       { type: "run_meta", agent: "review", model: "p/m", at: 1_001, seq: 2 },
       { type: "tool_call", tool: "bash", summary: "ls", at: 1_002, seq: 3 },
     ]);
@@ -135,7 +135,7 @@ describe("reclaimRuns", () => {
       await ledger.step(id, "g1", seedRecord(1), []);
       await ledger.seed(id, "g1", [{ idx: 1, message: assistant("half") }]);
       await ledger.append(id, "g1", [
-        { type: "input", text: "go", at: 1_000, seq: 1 },
+        { type: "input", messageId: "m1", text: "go", at: 1_000, seq: 1 },
         { type: "run_meta", agent: "coding", model: "p/m", agentSource, at: 1_001, seq: 2 },
       ]);
     }
@@ -167,7 +167,7 @@ describe("reclaimRuns", () => {
     await ledger.step("r1", "g1", seedRecord(1), []);
     await ledger.seed("r1", "g1", [{ idx: 1, message: assistant("half") }]); // one turn past the record, no record
     await ledger.append("r1", "g1", [
-      { type: "input", text: "go", at: 1_000, seq: 1 },
+      { type: "input", messageId: "m1", text: "go", at: 1_000, seq: 1 },
       { type: "run_meta", agent: "review", model: "p/m", at: 1_001, seq: 2 },
       { type: "tool_call", tool: "bash", summary: "ls", at: 1_002, seq: 3 },
     ]);
@@ -287,7 +287,7 @@ describe("reclaimRuns", () => {
     const { ledger, run } = harness();
     await ledger.claim(claim("ship-pr", "slack:C1:1.0", "g1", { meta: { ...claim("x", "t").meta, agent: "ship" } }));
     await ledger.append("ship-pr", "g1", [
-      { type: "input", text: "in acme/api: fix it", at: 1, seq: 1 },
+      { type: "input", messageId: "m1", text: "in acme/api: fix it", at: 1, seq: 1 },
       { type: "pr_opened", url: "https://github.com/acme/api/pull/12", number: 12, created: true, at: 2, seq: 2 },
     ]);
     await ledger.claim(claim("ship-bare", "slack:C1:2.0", "g1", { meta: { ...claim("x", "t").meta, agent: "ship" } }));

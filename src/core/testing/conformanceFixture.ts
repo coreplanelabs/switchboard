@@ -278,7 +278,7 @@ export const RESIDENTS = {
 
 export function record(id: string, finishedAt: number): RunRecord {
   const events: RunEvent[] = [
-    { type: "input", text: `please do the thing ${PLANTED_TEXT}`, seq: 1 },
+    { type: "input", messageId: "1700000000.000100", text: `please do the thing ${PLANTED_TEXT}`, seq: 1 },
     { type: "tool_call", tool: "bash", summary: "$ pnpm install --frozen-lockfile", seq: 2, at: 10 },
     { type: "tool_result", tool: "bash", ok: false, summary: "ERR_PNPM_OUTDATED_LOCKFILE", seq: 3, at: 45_010 },
     { type: "answer", text: `all done ${PLANTED_TEXT}`, seq: 4 },
@@ -314,7 +314,12 @@ export const REVIEW_DIFF = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-
  *  one happy input (a coding run has no such artifact and is refused by name). */
 export function reviewRecord(id: string, finishedAt: number): RunRecord {
   const events: RunEvent[] = [
-    { type: "input", text: `agent:review https://github.com/${FIXTURE.repo}/pull/42 ${PLANTED_TEXT}`, seq: 1 },
+    {
+      type: "input",
+      messageId: "1700000000.000200",
+      text: `agent:review https://github.com/${FIXTURE.repo}/pull/42 ${PLANTED_TEXT}`,
+      seq: 1,
+    },
     { type: "run_meta", agent: "review", repo: FIXTURE.repo, ref: "patch-1", pr: 42, headSha: REVIEW_HEAD, seq: 2 },
     {
       type: "review_artifact",
@@ -823,7 +828,7 @@ export async function fixture(
     channelVisibility: "public",
   });
   expect(live.id).toBe(FIXTURE.liveRun);
-  reg.publish(live.id, { type: "input", text: `live request ${PLANTED_TEXT}` });
+  reg.publish(live.id, { type: "input", messageId: "1700000000.000300", text: `live request ${PLANTED_TEXT}` });
   reg.publish(live.id, { type: "tool_call", tool: "bash", summary: "$ pwd" });
   const store = new InMemoryRunStore({ now: () => NOW });
   await store.put(record(FIXTURE.persistedRun, NOW - 1000));

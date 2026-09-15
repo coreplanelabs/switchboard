@@ -58,7 +58,7 @@ async function fixture() {
     threadKey: "slack:C1:t",
   });
   const store = new InMemoryRunStore({ now: () => NOW });
-  const events: RunEvent[] = [{ type: "input", text: "please", seq: 1 }];
+  const events: RunEvent[] = [{ type: "input", messageId: "m1", text: "please", seq: 1 }];
   await store.put({
     id: "fin-1",
     agent: "coding",

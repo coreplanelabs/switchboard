@@ -34,7 +34,7 @@ import { customInstructionsBlock } from "../customInstructions.js";
 import type { ResidentFleetFacts } from "../residentFleet.js";
 import { attachRoundWorkspace, makeSystemComposer, type RoundWorkspace } from "../reviewRound.js";
 import type { RepoContext } from "../repoContext.js";
-import { redactSecrets, type AgentSource } from "../runEvents.js";
+import { redactSecrets, type AgentSource, type RunEvent } from "../runEvents.js";
 import { MAX_EVENT_BYTES, utf8ByteLength, type RunSeed } from "../runRecord.js";
 import type { RunHandle, RunRegistry } from "../runRegistry.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
@@ -46,7 +46,7 @@ import { createCardShell, type CardShell } from "../statusCardFrame.js";
 import { coalesceStatus } from "../statusCoalescer.js";
 import type { LiveThread } from "../threadAdmission.js";
 import type { ChannelVisibility } from "../authz/types.js";
-import type { ChannelIO, HistoryItem, IncomingMessage, StatusHandle } from "../types.js";
+import { messageIdOf, type ChannelIO, type HistoryItem, type IncomingMessage, type StatusHandle } from "../types.js";
 import type { AdmissionDeps, DispatchFollowUp, RestartContext, ResumeContext, RunHooks } from "./admission.js";
 import type { AuthorizeDeps, GateCard, GateContext } from "./authorize.js";
 import { channelVisibilityOf, type RecordDeps } from "./record.js";
@@ -426,7 +426,11 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
     raw?: string,
   ) => {
     const redacted = redactSecrets(text);
-    const event = { type, text: redacted, ...(source ? { source } : {}), at: clock() };
+    // The request names its message (live-view.md item 26): the id the files
+    // received with it also carry, so the page joins them by data.
+    const body = { text: redacted, ...(source ? { source } : {}), at: clock() };
+    const event: RunEvent =
+      type === "input" ? { type, messageId: messageIdOf(msg, run.id), ...body } : { type, ...body };
     // The model's raw answer rides on the event only when normalization
     // changed it AND the event still fits the per-event byte budget — the
     // budget already truncates `text` and must not be starved by a second

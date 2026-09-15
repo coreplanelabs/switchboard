@@ -145,6 +145,7 @@ export async function copyStaged(files: readonly StagedFile[], deps: CopyDeps): 
           name: file.name,
           size: file.size,
           contentType: file.type,
+          messageId: file.messageId,
         });
         return { file, basename, key };
       } catch (err) {
@@ -202,6 +203,10 @@ export interface ThreadArtifact {
 export interface ThreadStageDeps {
   /** The run's staging counter — the same one the message's own files take, so basenames never collide. */
   nextIndex: () => number;
+  /** The request's message id: a re-pulled file is recorded as received with
+   *  THIS run's request (the message it was pulled for), so the page shows it
+   *  on the Request card (live-view.md item 26). */
+  messageId: string;
   /** Where this run's own `artifact` event for a re-pulled file goes: the run page serves only keys the run names. */
   publish?: (event: RunEvent) => void;
 }
@@ -246,6 +251,7 @@ export function stageThreadArtifacts(artifacts: readonly ThreadArtifact[], deps:
       name: a.name,
       size: a.size,
       contentType: a.contentType,
+      messageId: deps.messageId,
     });
     outcomes.push({ file, basename, key: a.key, earlier: true });
   }

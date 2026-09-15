@@ -22,15 +22,12 @@ const run = (over: Partial<RunView> & { id: string }): RunView => ({
 });
 
 describe("readThreadAssets — the thread's files from its runs' records, held or not", () => {
-  const artifact = (direction: "in" | "out", key: string, name: string, seq?: number): RunEvent => ({
-    type: "artifact",
-    direction,
-    key,
-    name,
-    size: 10,
-    contentType: direction === "in" ? "video/mp4" : "image/png",
-    ...(seq !== undefined ? { seq } : {}),
-  });
+  const artifact = (direction: "in" | "out", key: string, name: string, seq?: number): RunEvent => {
+    const common = { type: "artifact" as const, key, name, size: 10, ...(seq !== undefined ? { seq } : {}) };
+    return direction === "in"
+      ? { ...common, direction, contentType: "video/mp4", messageId: "m1" }
+      : { ...common, direction, contentType: "image/png", callId: "c1" };
+  };
   const filler = (n: number): RunEvent[] =>
     Array.from({ length: n }, (_, i) => ({ type: "assistant", text: `step ${i}` }) as RunEvent);
   /** A runs service over `byRun` (oldest first): runs listed newest first in pages of `runsPerPage`

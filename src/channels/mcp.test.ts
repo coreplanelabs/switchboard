@@ -411,10 +411,10 @@ async function commandFixture() {
     threadKey: "slack:C1:t",
     channelVisibility: "public",
   });
-  reg.publish(live.id, { type: "input", text: "live request" });
+  reg.publish(live.id, { type: "input", messageId: "m1", text: "live request" });
   const store = new InMemoryRunStore({ now: () => NOW });
   const events: RunEvent[] = [
-    { type: "input", text: "please do the thing", seq: 1 },
+    { type: "input", messageId: "m1", text: "please do the thing", seq: 1 },
     { type: "answer", text: "all done", seq: 2 },
   ];
   const persisted = (

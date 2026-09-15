@@ -29,7 +29,7 @@ import {
 import { cliWords } from "../commandSurface.js";
 import { defaultRunRegistry, type RunRegistry } from "../runRegistry.js";
 import type { RunEnding } from "../runEnding.js";
-import type { ChannelIO, HistoryItem, IncomingMessage } from "../types.js";
+import { messageIdOf, type ChannelIO, type HistoryItem, type IncomingMessage } from "../types.js";
 import { assembleRunRecord, channelVisibilityOf, type RecordDeps } from "./record.js";
 import { composeRunLabel, errorReply, replyCommandOutput } from "./reply.js";
 
@@ -270,7 +270,12 @@ async function runInlineCommandRun<T extends { text: string; ok: boolean; trace?
   // natural-language fall-through rebinds the same root to the agent run next.
   trace.bindRun(run.id, (e) => registry.publish(run.id, e));
   io.runStarted?.({ id: run.id });
-  registry.publish(run.id, { type: "input", text: redactSecrets(msg.text), at: clock() });
+  registry.publish(run.id, {
+    type: "input",
+    text: redactSecrets(msg.text),
+    messageId: messageIdOf(msg, run.id),
+    at: clock(),
+  });
   // A command run's meta names no model (docs/reference/specs/tracing.md): the agent and the trace.
   registry.publish(run.id, { type: "run_meta", agent: COMMAND_RUN_AGENT, traceId: root.traceId, at: clock() });
   let result: T | undefined;

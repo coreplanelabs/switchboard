@@ -27,7 +27,7 @@ const NOW = 1_700_000_000_000;
 
 function record(id: string, finishedAt: number, over: Partial<RunRecord> = {}): RunRecord {
   const events: RunEvent[] = over.events ?? [
-    { type: "input", text: "please do the thing", seq: 1 },
+    { type: "input", messageId: "m1", text: "please do the thing", seq: 1 },
     { type: "tool_call", tool: "bash", summary: "$ ls", seq: 2 },
     { type: "tool_result", tool: "bash", ok: true, summary: "a b c", seq: 3 },
     { type: "answer", text: "all done", seq: 4 },
@@ -196,7 +196,7 @@ describe("runs.list", () => {
       userId: "slack:UALICE",
       threadKey: "slack:C1:t",
     });
-    reg.publish(id, { type: "input", text: "live secret request" });
+    reg.publish(id, { type: "input", messageId: "m1", text: "live secret request" });
     const out = value<{ runs: { id: string }[] }>(
       await registry.invoke("runs.list", { options: { status: "all" } }, reader, deps),
     );

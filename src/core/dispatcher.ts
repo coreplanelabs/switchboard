@@ -84,7 +84,7 @@ import type { IssueTracker } from "../execution/githubIssues.js";
 import { defaultRunRegistry, type RunHandle } from "./runRegistry.js";
 import type { CardShell } from "./statusCardFrame.js";
 import { createRunEnding } from "./runEnding.js";
-import type { ChannelIO, IncomingMessage, StatusHandle } from "./types.js";
+import { messageIdOf, type ChannelIO, type IncomingMessage, type StatusHandle } from "./types.js";
 
 // The dispatcher is the channel-agnostic core: config commands, directive
 // parsing, layered resolution, permission gates, history assembly, executor
@@ -756,7 +756,11 @@ export async function dispatch(
         ? threadAssets.then((assets) =>
             stageThreadArtifacts(
               assets.filter((a) => a.direction === "in"),
-              { nextIndex: nextStagedIndex, publish: (e) => registry.publish(runId, e) },
+              {
+                nextIndex: nextStagedIndex,
+                messageId: messageIdOf(msg, runId),
+                publish: (e) => registry.publish(runId, e),
+              },
             ),
           )
         : undefined;

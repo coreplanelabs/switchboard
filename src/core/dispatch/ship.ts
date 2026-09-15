@@ -40,7 +40,7 @@ import { githubCapabilityFor, shutdownNotice, type RunDeps } from "./run.js";
 import { defaultRunRegistry, REPLAY_EVERYTHING } from "../runRegistry.js";
 import { createCardShell } from "../statusCardFrame.js";
 import type { RunEnding } from "../runEnding.js";
-import type { ChannelIO, HistoryItem, IncomingMessage, StatusHandle } from "../types.js";
+import { messageIdOf, type ChannelIO, type HistoryItem, type IncomingMessage, type StatusHandle } from "../types.js";
 
 /** What the ship branch reads: the run slice (the config, the registry and
  *  history writers, the GitHub client the hand-off reads the plan with), the
@@ -210,7 +210,11 @@ export async function runShipBranch(
     source?: { url?: string; channel?: string; user?: string },
   ) => {
     const redacted = redactSecrets(text);
-    registry.publish(run.id, { type, text: redacted, ...(source ? { source } : {}), at: clock() });
+    const body = { text: redacted, ...(source ? { source } : {}), at: clock() };
+    registry.publish(
+      run.id,
+      type === "input" ? { type, messageId: messageIdOf(msg, run.id), ...body } : { type, ...body },
+    );
     console.log(`[event] ${msg.threadKey} type=${type} bytes=${utf8ByteLength(redacted)}`);
   };
   const humanize = isMrkdwnChannel(msg.channelId);

@@ -146,24 +146,35 @@ describe("parseRunEventLines", () => {
   // docs/reference/specs/run-visibility.md item 1 — the `artifact` event names a
   // stored file by its KEY; a payload carrying a `url` is refused so a signed
   // URL can never be written into a record by a producer that got it wrong.
-  it("accepts `artifact` (direction + key + name + numeric size + contentType), refuses a `url` field and a malformed direction", () => {
+  it("accepts `artifact` (direction + its join key + key + name + numeric size + contentType), refuses a `url` field, a malformed direction and a file naming no call or message", () => {
     const ok = {
       type: "artifact",
       direction: "out",
+      callId: "toolu_1",
       key: "runs/r1/out/1-sheet.png",
       name: "sheet.png",
       size: 3_145_728,
       contentType: "image/png",
       at: 1,
     };
+    const received = { ...ok, direction: "in", callId: undefined, messageId: "1700000000.000100" };
     const withUrl = { ...ok, url: "https://acme.r2.cloudflarestorage.com/b/runs/r1/out/1-sheet.png?X-Amz-Signature=x" };
     const sideways = { ...ok, direction: "sideways" };
-    const noSize = { type: "artifact", direction: "in", key: "k", name: "n", contentType: "text/plain" };
+    const noCall = { ...ok, callId: undefined };
+    const noMessage = { ...received, messageId: undefined };
+    const noSize = {
+      type: "artifact",
+      direction: "in",
+      messageId: "1.0",
+      key: "k",
+      name: "n",
+      contentType: "text/plain",
+    };
     const { events, skipped } = parseRunEventLines(
-      [ok, withUrl, sideways, noSize].map((e) => JSON.stringify(e)).join("\n"),
+      [ok, received, withUrl, sideways, noCall, noMessage, noSize].map((e) => JSON.stringify(e)).join("\n"),
     );
-    expect(events).toEqual([ok]);
-    expect(skipped).toBe(3);
+    expect(events).toEqual([ok, JSON.parse(JSON.stringify(received))]);
+    expect(skipped).toBe(5);
   });
 
   it("accepts `review_artifact` (reading_diff + string diff + known poweredBy), skips it otherwise", () => {

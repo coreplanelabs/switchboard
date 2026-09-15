@@ -293,6 +293,28 @@ describe("runRelayedTool — the verdict path", () => {
     expect(body).toBe(buildReviewPostBody("The review.", native[0]));
     expect(body).toBe("LGTM: looks correct\n- [nit] F1 src/x.ts:3 — a name\n\nThe review.");
   });
+  // live-view.md item 26: a relayed tool sees the call it runs under, the same id
+  // the call's tool_call/tool_result events carry — attach_file records its file under it.
+  it("a relayed tool's context carries the call's id, with or without a span", async () => {
+    const seen: (string | undefined)[] = [];
+    const probe: RunnableTool = {
+      name: "probe",
+      description: "records its call id",
+      inputSchema: { type: "object", properties: {} },
+      async run(_input, ctx) {
+        seen.push(ctx.callId);
+        return "seen";
+      },
+    };
+    const { harness } = live();
+    harness.tools = [probe];
+    await runRelayedTool(harness, { toolCallId: "c9", tool: "probe", input: {} });
+    const spanned = live({ withSpan: true });
+    spanned.harness.tools = [probe];
+    await runRelayedTool(spanned.harness, { toolCallId: "c10", tool: "probe", input: {} });
+    expect(seen).toEqual(["c9", "c10"]);
+  });
+
   it("a relayed verdict the parser rejects is the same error the native call answers, and no verdict reaches the run", async () => {
     const submitVerdict = TOOLSETS.readonly.find((t) => t.name === "submit_verdict")!;
     const relayed: ReviewVerdict[] = [];

@@ -35,7 +35,7 @@ function testRegistry(over: Partial<RunRegistryOptions> = {}) {
 
 function record(id: string, finishedAt: number, over: Partial<RunRecord> = {}): RunRecord {
   const events: RunEvent[] = over.events ?? [
-    { type: "input", text: "do the thing", seq: 1 },
+    { type: "input", messageId: "m1", text: "do the thing", seq: 1 },
     { ...call("$ ls"), seq: 2 },
     { ...result("a b c"), seq: 3 },
     { type: "answer", text: "done", seq: 4 },
@@ -79,7 +79,7 @@ describe("RunsService.getRun", () => {
   it("returns a live run as finished:false with no token and no events unless asked", async () => {
     const { reg, svc } = setup();
     const { id } = reg.create("coding · acme/x");
-    reg.publish(id, { type: "input", text: "hi" });
+    reg.publish(id, { type: "input", messageId: "m1", text: "hi" });
     reg.publish(id, call("$ ls"));
 
     const res = await svc.getRun(id);
@@ -218,7 +218,7 @@ describe("RunsService.getRun", () => {
       userId: "slack:UALICE",
       threadKey: "slack:C1:1",
     });
-    reg.publish(run.id, { type: "input", text: "review #7" });
+    reg.publish(run.id, { type: "input", messageId: "m1", text: "review #7" });
     reg.publish(run.id, { type: "answer", text: "LGTM: clean" });
     tick(40_000);
     reg.finish(run.id, "completed");
@@ -397,13 +397,13 @@ describe("RunsService.listRuns — read merge", () => {
       userId: "slack:UALICE",
       threadKey: "slack:C1:x",
     });
-    reg.publish(id, { type: "input", text: "go" });
+    reg.publish(id, { type: "input", messageId: "m1", text: "go" });
     // The start-of-run tombstone: terminal in the store while the run is live.
     await store!.put(
       record(id, NOW, {
         status: "interrupted",
         startedAt: NOW,
-        events: [{ type: "input", text: "go", seq: 1 }],
+        events: [{ type: "input", messageId: "m1", text: "go", seq: 1 }],
         eventCount: 1,
         storedEventCount: 1,
       }),
@@ -546,7 +546,7 @@ describe("RunsService.listRuns — read merge", () => {
       repo: "acme/x",
     };
     const { id } = reg.create("coding · acme/x", meta);
-    reg.publish(id, { type: "input", text: "go" });
+    reg.publish(id, { type: "input", messageId: "m1", text: "go" });
     reg.finish(id);
     reg.seal(id, { replyOk: true });
     await store!.put(
@@ -556,7 +556,7 @@ describe("RunsService.listRuns — read merge", () => {
         startedAt: NOW,
         stepCount: 1,
         schema: 2, // as the record writer stamps it; the live row carries the same
-        events: [{ type: "input", text: "go", seq: 1 }],
+        events: [{ type: "input", messageId: "m1", text: "go", seq: 1 }],
       }),
     );
     reg.markPersisted(id);
@@ -860,7 +860,7 @@ describe("RunsService with the run ledger — one registry across generations (r
       tools: [],
     });
     await ledger.append(id, "g-OTHER", [
-      { type: "input", text: "do the far thing", at: NOW - 5_000, seq: 1 },
+      { type: "input", messageId: "m1", text: "do the far thing", at: NOW - 5_000, seq: 1 },
       { type: "tool_call", tool: "bash", summary: "$ make", at: NOW - 4_000, seq: 2 },
     ]);
   }
@@ -1030,7 +1030,7 @@ describe("RunsService — summary-only persisted reads", () => {
     await inner.put(
       record("p1", NOW - DAY, {
         events: [
-          { type: "input", text: "x", seq: 1 },
+          { type: "input", messageId: "m1", text: "x", seq: 1 },
           ...Array.from({ length: 50 }, (_, i) => ({ ...call(`$ ${i}`), seq: i + 2 })),
         ],
       }),

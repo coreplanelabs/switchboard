@@ -8,7 +8,7 @@ import { analyzeRunFriction } from "./runFriction.js";
 describe("analyzeRunFriction — skill_use is invisible to friction", () => {
   const T0 = 1_700_000_000_000;
   const base: RunEvent[] = [
-    { type: "input", text: "review it", at: T0 },
+    { type: "input", messageId: "m1", text: "review it", at: T0 },
     { type: "tool_call", tool: "use_skill", summary: "use_skill code-review-and-quality", callId: "c1", at: T0 + 1000 },
     {
       type: "tool_result",

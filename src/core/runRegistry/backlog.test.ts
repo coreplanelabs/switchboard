@@ -193,7 +193,7 @@ describe("RunRegistry — backlog bounds", () => {
     it("head material published before any other event survives the count bound and the byte bound; the trim drops the oldest event after the head and always keeps the newest", () => {
       const { reg } = testRegistry({ backlogLimit: 6 });
       const { id, token } = reg.create();
-      reg.publish(id, { type: "input", text: "go" });
+      reg.publish(id, { type: "input", messageId: "m1", text: "go" });
       reg.publish(id, { type: "run_meta", agent: "coding", model: "m" });
       reg.publish(id, ctx(10));
       for (let i = 1; i <= 10; i++) reg.publish(id, call(`$ step ${i}`));
@@ -201,7 +201,7 @@ describe("RunRegistry — backlog bounds", () => {
       expect(seqs).toEqual([1, 2, 3, 11, 12, 13]); // the head, then the newest three
       const byBytes = testRegistry({ backlogBytes: 400 });
       const r = byBytes.reg.create();
-      byBytes.reg.publish(r.id, { type: "input", text: "go" });
+      byBytes.reg.publish(r.id, { type: "input", messageId: "m1", text: "go" });
       byBytes.reg.publish(r.id, big(300));
       byBytes.reg.publish(r.id, big(300));
       expect(byBytes.reg.snapshot(r.id, r.token)!.events.map((e) => e.seq)).toEqual([1, 3]); // head + newest, over budget by design
@@ -210,7 +210,7 @@ describe("RunRegistry — backlog bounds", () => {
     it("the head closes at the first non-head event and at HEAD_BUDGET_BYTES; later head material is ordinary", () => {
       const { reg } = testRegistry({ backlogLimit: 3 });
       const { id, token } = reg.create();
-      reg.publish(id, { type: "input", text: "go" });
+      reg.publish(id, { type: "input", messageId: "m1", text: "go" });
       reg.publish(id, call("$ first"));
       reg.publish(id, ctx(5)); // head material, but the head closed at the call
       for (let i = 1; i <= 5; i++) reg.publish(id, call(`$ step ${i}`));
@@ -239,7 +239,7 @@ describe("RunRegistry — backlog bounds", () => {
     it("a fresh subscribe replays the head first, then the newest within the budget, and elides the range between; a resume re-sends nothing from the head", () => {
       const { reg } = testRegistry();
       const { id, token } = reg.create();
-      reg.publish(id, { type: "input", text: "go" });
+      reg.publish(id, { type: "input", messageId: "m1", text: "go" });
       reg.publish(id, ctx(5));
       for (let i = 1; i <= 10; i++) reg.publish(id, call(`$ step ${i}`));
       const seen: number[] = [];

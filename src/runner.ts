@@ -14,7 +14,13 @@ import {
   type StopMode,
 } from "./core/runEvents.js";
 import type { RunControl } from "./core/runRegistry/runControl.js";
-import { followUpPrompt, followUpSnippet, type FollowUpInbox, type FollowUpInput } from "./core/threadAdmission.js";
+import {
+  followUpMessageId,
+  followUpPrompt,
+  followUpSnippet,
+  type FollowUpInbox,
+  type FollowUpInput,
+} from "./core/threadAdmission.js";
 import type { Settlement } from "./core/runLedger/resume.js";
 import type { CompactionEntry } from "./core/runLedger/types.js";
 import {
@@ -463,7 +469,12 @@ async function runLoop(
         ...(input.userName ? { user: input.userName } : {}),
         ...(input.from ? { run: input.from.runId } : {}),
       };
-      emit({ type: "input", text: redactSecrets(input.text), ...(Object.keys(source).length > 0 ? { source } : {}) });
+      emit({
+        type: "input",
+        text: redactSecrets(input.text),
+        messageId: followUpMessageId(input),
+        ...(Object.keys(source).length > 0 ? { source } : {}),
+      });
       note("follow_up", `follow-up folded in: ${redactSecrets(followUpSnippet(input))}`);
     }
     const prompt = followUpPrompt(inputs, { superseded });
@@ -516,6 +527,7 @@ async function runLoop(
       const ctx: ToolContext = callSpan
         ? {
             ...toolContext,
+            callId: tu.id,
             span: callSpan,
             executor: new TracingExecutor(execTracker, callSpan, opts.backend),
             publish: (e) => emit(withSpanId(e, callSpan.id)),
@@ -525,7 +537,7 @@ async function runLoop(
               ? { github: { ...toolContext.github, api: toolContext.github.api.withSpan(callSpan) } }
               : {}),
           }
-        : toolContext;
+        : { ...toolContext, callId: tu.id };
       try {
         const output = await untilHardStop(tool.run((tu.input ?? {}) as Record<string, unknown>, ctx));
         const text = toolResultText(output);

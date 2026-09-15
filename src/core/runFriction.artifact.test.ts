@@ -9,7 +9,7 @@ import { analyzeRunFriction } from "./runFriction.js";
 describe("analyzeRunFriction — artifact is invisible to friction", () => {
   const T0 = 1_700_000_000_000;
   const base: RunEvent[] = [
-    { type: "input", text: "screenshot the dashboard", at: T0 },
+    { type: "input", messageId: "m1", text: "screenshot the dashboard", at: T0 },
     { type: "tool_call", tool: "attach_file", summary: "attach_file dashboard.png", callId: "c1", at: T0 + 1000 },
     {
       type: "tool_result",
@@ -29,6 +29,7 @@ describe("analyzeRunFriction — artifact is invisible to friction", () => {
       name: "brief.pdf",
       size: 12_000,
       contentType: "application/pdf",
+      messageId: "1.0",
       at: T0, // staged before the turn, stamped with the receipt
     },
     ...base.slice(0, 2),
@@ -39,6 +40,7 @@ describe("analyzeRunFriction — artifact is invisible to friction", () => {
       name: "dashboard.png",
       size: 3_145_728,
       contentType: "image/png",
+      callId: "c1",
       at: T0 + 1050,
     },
     ...base.slice(2),

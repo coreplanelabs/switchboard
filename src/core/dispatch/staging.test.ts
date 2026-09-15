@@ -124,6 +124,7 @@ describe("staging — copy then pull", () => {
       ["2-brief.pdf", "threads/slack-C1-1700000000.000100/in/1700000000.000200/2-brief.pdf", undefined],
     ]);
     expect(store.copies.map((c) => c.key)).toEqual(outcomes.map((o) => o.key));
+    // Each event names the message its file arrived with (the page's join key, live-view.md item 26).
     expect(events).toEqual([
       {
         type: "artifact",
@@ -132,6 +133,7 @@ describe("staging — copy then pull", () => {
         name: "clip.mp4",
         size: clip.size,
         contentType: "video/mp4",
+        messageId: clip.messageId,
       },
       {
         type: "artifact",
@@ -140,6 +142,7 @@ describe("staging — copy then pull", () => {
         name: "brief.pdf",
         size: brief.size,
         contentType: "application/pdf",
+        messageId: brief.messageId,
       },
     ]);
     expect(rec.commands.map((c) => c.command.split(" ").slice(0, 2).join(" "))).toEqual([
@@ -233,6 +236,7 @@ describe("staging — the thread's earlier files", () => {
     name,
     size,
     contentType: "video/mp4",
+    messageId: "1700000000.000100",
   });
   const K1 = "threads/slack-C1-1700000000.000100/in/1700000000.000100/1-first.mp4";
   const K2 = "threads/slack-C1-1700000000.000100/in/1700000000.000300/1-second.mp4";
@@ -247,7 +251,7 @@ describe("staging — the thread's earlier files", () => {
         { key: K2, name: "second.mp4", size: 20, contentType: "video/mp4", held: false },
         { key: "threads/t/in/3/1-third.mp4", name: "third.mp4", size: 30, contentType: "video/mp4" },
       ],
-      { nextIndex, publish: (e) => void events.push(e) },
+      { nextIndex, messageId: "1700000000.000900", publish: (e) => void events.push(e) },
     );
     expect(outcomes).toEqual([
       { file: { name: "first.mp4", size: 10, type: "video/mp4" }, basename: "2-first.mp4", key: K1, earlier: true },
@@ -266,7 +270,8 @@ describe("staging — the thread's earlier files", () => {
         error: "the store could not be asked whether it still holds it",
       },
     ]);
-    expect(events).toEqual([inEvent(K1, "first.mp4", 10)]);
+    // Re-pulled for THIS run's request: the event names the request's message, not the one the file first came on.
+    expect(events).toEqual([{ ...inEvent(K1, "first.mp4", 10), messageId: "1700000000.000900" }]);
     expect(attachmentsLine(outcomes)).toBe(
       "Attached files are in ./attachments/: 2-first.mp4 (10 B, video/mp4, from earlier in the thread). second.mp4 could not be staged: the store no longer holds it (its retention passed). third.mp4 could not be staged: the store could not be asked whether it still holds it",
     );

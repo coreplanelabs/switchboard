@@ -62,7 +62,7 @@ const resumable = (over: Partial<ResumeRun> = {}): ResumeRun => ({
   lastStep: step(),
   transcript: { complete: true, turns: 2, messages: [user("go"), calling("c1", "read_file")], compactions: [] },
   events: [
-    { type: "input", text: "please review", at: 1, seq: 1 },
+    { type: "input", messageId: "m1", text: "please review", at: 1, seq: 1 },
     { type: "tool_call", tool: "read_file", summary: "x", at: 2, seq: 2 },
   ],
   inbox: [{ seq: 1, message: { text: "also the numbers", userId: "slack:UBOB" } }],

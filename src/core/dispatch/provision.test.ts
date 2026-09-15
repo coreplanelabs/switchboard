@@ -368,7 +368,12 @@ describe("registerRun — the run's row on every surface before the attach", () 
     });
     const events = registry.snapshotById("run-p")!.events;
     expect(events).toContainEqual(
-      expect.objectContaining({ type: "input", text: "fix the login bug [+1 image]", source: { user: "alice" } }),
+      expect.objectContaining({
+        type: "input",
+        messageId: "run-p", // the fake channel gives no message id: the request is named by the run
+        text: "fix the login bug [+1 image]",
+        source: { user: "alice" },
+      }),
     );
     expect(events).toContainEqual(
       expect.objectContaining({

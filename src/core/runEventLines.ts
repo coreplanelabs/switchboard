@@ -82,8 +82,11 @@ function isRunEvent(v: unknown): v is RunEvent {
     case "artifact":
       // A key, never a URL (run-visibility.md item 1): a payload carrying one is
       // a producer that stored a signed URL by mistake — skipped, not repaired.
+      // And the join the page binds by (live-view.md item 26): a received
+      // file names its message, a sent one the call that posted it.
       return (
-        (o.direction === "in" || o.direction === "out") &&
+        ((o.direction === "in" && typeof o.messageId === "string") ||
+          (o.direction === "out" && typeof o.callId === "string")) &&
         typeof o.key === "string" &&
         typeof o.name === "string" &&
         typeof o.size === "number" &&

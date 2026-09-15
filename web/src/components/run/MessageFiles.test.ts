@@ -17,6 +17,7 @@ import type { ArtifactsSeed } from "@core/channels/webSeed.js";
 
 const png: TimelineArtifact = {
   direction: "out",
+  callId: "c1",
   key: "runs/run-1/out/1-dashboard.png",
   name: "dashboard.png",
   size: 3_145_728,
@@ -25,6 +26,7 @@ const png: TimelineArtifact = {
 };
 const zip: TimelineArtifact = {
   direction: "in",
+  messageId: "1.0",
   key: "threads/slack-C1-1.0/in/1.0/0-bundle.zip",
   name: "bundle.zip",
   size: 12_582_912,
@@ -38,6 +40,7 @@ const svg: TimelineArtifact = {
 };
 const mp4: TimelineArtifact = {
   direction: "out",
+  callId: "c1",
   key: "runs/run-1/out/3-clip.mp4",
   name: "clip.mp4",
   size: 24_854_792,
@@ -47,6 +50,7 @@ const mp4: TimelineArtifact = {
 const wav: TimelineArtifact = { ...mp4, key: "runs/run-1/out/4-take.wav", name: "take.wav", contentType: "audio/wav" };
 const log: TimelineArtifact = {
   direction: "in",
+  messageId: "1.0",
   key: "threads/slack-C1-1.0/in/1.0/1-build.log",
   name: "build.log",
   size: 4_812,

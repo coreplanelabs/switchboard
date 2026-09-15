@@ -96,7 +96,7 @@ describe("analyzeRunFriction — empty / untimed input", () => {
 
   it("ignores the timeline events (`input`, `assistant`): they are narrative, not friction or steps", () => {
     const withText: RunEvent[] = [
-      { type: "input", text: "please look at the failing test", at: T0 },
+      { type: "input", messageId: "m1", text: "please look at the failing test", at: T0 },
       { type: "assistant", text: "Let me run it.", at: T0 + 500 },
       ...bash("npm test", T0 + 1_000, 200),
       { type: "assistant", text: "One failure; fixing.", at: T0 + 1_300 },
@@ -326,7 +326,7 @@ describe("analyzeRunFriction — slow_model_turn (the model.turn spans)", () => 
   // for 2–4 min between one-line greps. The analyzer must see it: model time is
   // the `model.turn` spans the runner records, one per completion, each ending
   // right before what the completion produced.
-  const input: RunEvent = { type: "input", text: "fix the thing", at: T0 };
+  const input: RunEvent = { type: "input", messageId: "m1", text: "fix the thing", at: T0 };
 
   it("flags a model turn at or past the threshold; under it is not flagged; each turn names what it produced", () => {
     const d = analyzeRunFriction([
@@ -498,6 +498,7 @@ describe("analyzeRunFriction — unkept_promise (the reply names an attachment t
     name: "sheet.png",
     size: 3,
     contentType: "image/png",
+    callId: "c1",
   };
   const promised = (text: string): RunEvent[] => [
     ...bash("ffmpeg -i clip.mp4 sheet.png", T0, 5_000),
@@ -609,7 +610,7 @@ describe("analyzeRunFriction — narrative events are not steps; `context` is in
   it("eventCount excludes every narrative event; steps, categories and findings are unchanged", () => {
     const steps: RunEvent[] = [...bash("npm test", T0 + 1000, 2000), note("wrap_up", "wrapping up", T0 + 5000)];
     const withMessages: RunEvent[] = [
-      { type: "input", text: "please run the tests", at: T0, seq: 1 },
+      { type: "input", messageId: "m1", text: "please run the tests", at: T0, seq: 1 },
       { type: "context", text: "earlier thread turn", at: T0 - 60_000, seq: 2 },
       ...steps,
       { type: "assistant", text: "one more check", at: T0 + 4000, seq: 6 },
@@ -629,7 +630,7 @@ describe("analyzeRunFriction — narrative events are not steps; `context` is in
 
   it("`context` timestamps never move firstAt/lastAt: runMs spans the request → the answer, not the replayed history", () => {
     const events: RunEvent[] = [
-      { type: "input", text: "please run the tests", at: T0 },
+      { type: "input", messageId: "m1", text: "please run the tests", at: T0 },
       { type: "context", text: "user: an hour-old turn", at: T0 - 3_600_000 },
       { type: "context", text: "assistant: its reply", at: T0 - 3_500_000 },
       ...bash("npm test", T0 + 1000, 2000),
@@ -643,7 +644,7 @@ describe("analyzeRunFriction — narrative events are not steps; `context` is in
 
   it("a `model.turn` span is not a step: excluded from eventCount, and — timing, not content — its stamp never moves the stream's clock", () => {
     const events: RunEvent[] = [
-      { type: "input", text: "please run the tests", at: T0 },
+      { type: "input", messageId: "m1", text: "please run the tests", at: T0 },
       turnSpan("m1", T0, 900),
       ...bash("npm test", T0 + 1000, 2000),
       turnSpan("m2", T0 + 3000, 6000, "end_turn"),
@@ -686,7 +687,7 @@ describe("analyzeRunFriction — truncated input (the registry backlog dropped e
 // count as an event, a tool call, or a model-turn boundary.
 describe("analyzeRunFriction — ship_round is a side fact, invisible to friction", () => {
   const base: RunEvent[] = [
-    { type: "input", text: "agent:ship in acme/api: fix it", at: T0 },
+    { type: "input", messageId: "m1", text: "agent:ship in acme/api: fix it", at: T0 },
     ...bash("npm test", T0 + 1000, 2000),
     { type: "answer", text: "Merge-ready", at: T0 + 9000 },
   ];
@@ -748,7 +749,7 @@ describe("analyzeRunFriction — span records are invisible to counts and to the
         at: startedAt + durationMs,
       }) as unknown as RunEvent;
     const events: RunEvent[] = [
-      { type: "input", text: "fix the thing", at: T0 },
+      { type: "input", messageId: "m1", text: "fix the thing", at: T0 },
       turn("m1", T0, 4_000), // the runner measured 4 s; the gap to the call below is 5 s
       ...bash("ls", T0 + 5_000, 1_000),
       turn("m2", T0 + 6_000, 61_000), // flagged
@@ -802,7 +803,7 @@ describe("analyzeRunFriction — the window, the shape and the span set (docs/re
   const traced = (): RunEvent[] => [
     { type: "span_start", spanId: "root", name: "request", at: T0 } as unknown as RunEvent,
     ...span("s1", "dispatch.workspace.attach", T0, 30_000),
-    { type: "input", text: "fix it", at: T0 + 30_000 },
+    { type: "input", messageId: "m1", text: "fix it", at: T0 + 30_000 },
     {
       type: "span_start",
       spanId: "a",
@@ -887,7 +888,7 @@ describe("analyzeRunFriction — the window, the shape and the span set (docs/re
   it("a command run's window: `run.command` is its tools", () => {
     const events: RunEvent[] = [
       { type: "span_start", spanId: "root", name: "request", at: T0 } as unknown as RunEvent,
-      { type: "input", text: "friction report", at: T0 + 1_000 },
+      { type: "input", messageId: "m1", text: "friction report", at: T0 + 1_000 },
       ...span("c", "run.command", T0 + 1_000, 20_000, { command: "friction.report" }),
       { type: "answer", text: "…", at: T0 + 21_000 },
     ];
@@ -905,7 +906,7 @@ describe("analyzeRunFriction — the window, the shape and the span set (docs/re
   it("run-denominated categories take the UNION of their findings' intervals: three calls of one batch dying together are one interval, and the share never exceeds 100 %", () => {
     // Three concurrent reads under one turn; the sandbox died under all three at once.
     const events: RunEvent[] = [
-      { type: "input", text: "go", at: T0 },
+      { type: "input", messageId: "m1", text: "go", at: T0 },
       call("read_file", "a.ts", T0 + 1_000),
       call("read_file", "b.ts", T0 + 1_000),
       call("read_file", "c.ts", T0 + 1_000),
@@ -924,7 +925,7 @@ describe("analyzeRunFriction — the window, the shape and the span set (docs/re
 
   it("wrap-up runs from the warning to the window's end; a budget hit or a dead sandbox has no extent and prints `-`", () => {
     const events: RunEvent[] = [
-      { type: "input", text: "go", at: T0 },
+      { type: "input", messageId: "m1", text: "go", at: T0 },
       ...bash("ls", T0 + 1_000, 1_000),
       note("wrap_up", "3 min left", T0 + 10_000),
       note("time_budget_exhausted", "25 min", T0 + 30_000),
@@ -955,7 +956,7 @@ describe("analyzeRunFriction — the window, the shape and the span set (docs/re
     const command = formatFrictionReport(
       analyzeRunFriction(
         [
-          { type: "input", text: "friction report", at: T0 },
+          { type: "input", messageId: "m1", text: "friction report", at: T0 },
           ...span("c", "run.command", T0, 2_000, { command: "friction.report" }),
           { type: "answer", text: "…", at: T0 + 2_000 },
         ],

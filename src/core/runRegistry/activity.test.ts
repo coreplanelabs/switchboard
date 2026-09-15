@@ -10,7 +10,7 @@ describe("RunRegistry — `activity` on the summary (live-view item 20)", () => 
     const reg = new RunRegistry({ genId: () => "a1", genToken: () => "t" });
     const { id } = reg.create("x");
     expect("activity" in reg.listActive()[0]).toBe(false);
-    reg.publish(id, { type: "input", text: "hello" }); // not an activity
+    reg.publish(id, { type: "input", messageId: "m1", text: "hello" }); // not an activity
     expect("activity" in reg.listActive()[0]).toBe(false);
     reg.publish(id, { type: "assistant", text: "Checking the\n  remaining   touchpoints." });
     expect(reg.listActive()[0].activity).toBe("Checking the remaining touchpoints.");

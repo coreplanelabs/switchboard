@@ -487,7 +487,12 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(steer).toBeDefined();
     expect(String(steer!.message)).toContain("also bump the version");
     expect(w.events.filter((e) => e.type === "input")).toEqual([
-      expect.objectContaining({ type: "input", text: "also bump the version", source: { user: "ann" } }),
+      expect.objectContaining({
+        type: "input",
+        messageId: "inbox-3", // no platform id on the steer: the durable inbox seq names it
+        text: "also bump the version",
+        source: { user: "ann" },
+      }),
     ]);
     expect(w.events.filter((e) => e.type === "run_note" && e.kind === "follow_up")).toHaveLength(1);
     expect(w.steps.at(-1)!.inboxConsumedSeq).toBe(3);

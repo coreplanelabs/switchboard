@@ -5832,7 +5832,8 @@ describe("inline command runs + run receipts", () => {
       "+post.reply",
       "-post.reply",
     ]);
-    expect(contentOf(snap.events)[0]).toMatchObject({ type: "input", text: "friction report" });
+    // A channel with no message id (the test's fake) names the request by the run id.
+    expect(contentOf(snap.events)[0]).toMatchObject({ type: "input", messageId: "fr-1", text: "friction report" });
     expect(answerOf(snap.events)).toMatchObject({ type: "answer", text: replies[0] });
     expect(deps.runRegistry.listActive()[0].label).toBe('friction \u00b7 #cron \u00b7 cron \u00b7 "friction report"');
     expect(receipts).toEqual([{ id: "fr-1", status: "completed" }]);
@@ -5849,7 +5850,7 @@ describe("inline command runs + run receipts", () => {
     const snap = deps.runRegistry.snapshot("fr-1", "tok")!;
     expect(snap.finished).toBe(true);
     expect(contentOf(snap.events)).toEqual([
-      expect.objectContaining({ type: "input", text: "friction report --min-runs 2" }),
+      expect.objectContaining({ type: "input", messageId: "fr-1", text: "friction report --min-runs 2" }),
       expect.objectContaining({ type: "run_meta", agent: "command" }),
       expect.objectContaining({ type: "answer", text: replies[0] }),
     ]);
@@ -6552,7 +6553,7 @@ describe("run history write path", () => {
     });
     expect(rec!.label).toBe('friction · #cron · cron · "friction report"');
     expect(contentOf(rec!.events).map((e) => e.type)).toEqual(["input", "run_meta", "answer"]);
-    expect(contentOf(rec!.events)[0]).toMatchObject({ type: "input", text: "friction report" });
+    expect(contentOf(rec!.events)[0]).toMatchObject({ type: "input", messageId: "cmd-1", text: "friction report" });
     expect(answerOf(rec!.events)).toMatchObject({ type: "answer", text: ok.replies[0] });
     expect(registry.getById("cmd-1")).toMatchObject({
       agent: "command",
@@ -8966,7 +8967,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       [{ idx: 1, message: transcript[1] }],
     );
     await ledger.append("run-routed", "gen-OLD", [
-      { type: "input", text: "what is this repo", at: 1, seq: 1 },
+      { type: "input", messageId: "m1", text: "what is this repo", at: 1, seq: 1 },
       { type: "run_meta", agent: "general", model: "anthropic/general-model", agentSource: "route", at: 2, seq: 2 },
       { type: "route", preset: "general", reason: "a plain question", model: "anthropic/general-model", at: 3, seq: 3 },
     ]);
@@ -9072,7 +9073,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       [{ idx: 1, message: transcript[1] }],
     );
     await ledger.append("run-old", "gen-OLD", [
-      { type: "input", text: "hello there", at: 1, seq: 1 },
+      { type: "input", messageId: "m1", text: "hello there", at: 1, seq: 1 },
       { type: "run_meta", agent: "general", model: "anthropic/general-model", at: 2, seq: 2 },
       { type: "tool_call", tool: "update_status", summary: "s", at: 3, seq: 3 },
       { type: "tool_call", tool: "bash", summary: "make", at: 4, seq: 4 },
@@ -9213,7 +9214,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       ],
     );
     await ledger.append("run-old", "gen-OLD", [
-      { type: "input", text: "hello there", at: 1, seq: 1 },
+      { type: "input", messageId: "m1", text: "hello there", at: 1, seq: 1 },
       { type: "run_meta", agent: "general", model: "anthropic/general-model", at: 2, seq: 2 },
       { type: "tool_call", tool: "update_status", summary: "s", at: 3, seq: 3 },
       { type: "run_note", kind: "stop_requested", summary: "soft stop requested", mode: "soft", at: 4, seq: 4 },
@@ -9292,7 +9293,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       { step: 0, seq: 0, turnIndex: 1, inFlight: [], inboxConsumedSeq: 0, remainingMs: 300_000, turn: 0, iteration: 0 },
       [],
     );
-    await ledger.append("run-old", "gen-OLD", [{ type: "input", text: "hello there", at: 1, seq: 1 }]);
+    await ledger.append("run-old", "gen-OLD", [{ type: "input", messageId: "m1", text: "hello there", at: 1, seq: 1 }]);
     ledger.live.get("run-old")!.leaseUntil = 0;
     const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
     const { deps, registry, writer } = wired(capturingProvider("must not run"), { ledger });
@@ -9578,7 +9579,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       { step: 0, seq: 0, turnIndex: 1, inFlight: [], inboxConsumedSeq: 0, remainingMs: 300_000, turn: 0, iteration: 0 },
       [],
     );
-    await ledger.append("run-old", "gen-OLD", [{ type: "input", text: "fix it", at: 1, seq: 1 }]);
+    await ledger.append("run-old", "gen-OLD", [{ type: "input", messageId: "m1", text: "fix it", at: 1, seq: 1 }]);
     ledger.live.get("run-old")!.leaseUntil = 0;
     const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
     const provider = capturingProvider("started over and done");
@@ -9818,7 +9819,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       { step: 0, seq: 0, turnIndex: 1, inFlight: [], inboxConsumedSeq: 0, remainingMs: 300_000, turn: 0, iteration: 0 },
       [],
     );
-    await ledger.append("run-old", "gen-OLD", [{ type: "input", text: "hello there", at: 1, seq: 1 }]);
+    await ledger.append("run-old", "gen-OLD", [{ type: "input", messageId: "m1", text: "hello there", at: 1, seq: 1 }]);
     await ledger.pushInbox("run-old", {
       channelId: "slack:CX",
       userId: "slack:UY",
@@ -9992,7 +9993,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       { step: 0, seq: 0, turnIndex: 1, inFlight: [], inboxConsumedSeq: 0, remainingMs: 300_000, turn: 0, iteration: 0 },
       [],
     );
-    await inner.append("run-far", "gen-OLD", [{ type: "input", text: "hello there", at: 1, seq: 1 }]);
+    await inner.append("run-far", "gen-OLD", [{ type: "input", messageId: "m1", text: "hello there", at: 1, seq: 1 }]);
     inner.live.get("run-far")!.leaseUntil = 0;
     const [reclaimed] = await inner.reclaim("gen-T", 10_000, 30_000);
     const admission = new ThreadAdmission<DispatchFollowUp>();
@@ -12347,6 +12348,7 @@ describe("inbound staging (record 0033)", () => {
         name: "earlier.mp4",
         size: 4_096,
         contentType: "video/mp4",
+        messageId: "1700000000.000100",
         at: 1,
         seq: 1,
       },
@@ -12357,6 +12359,7 @@ describe("inbound staging (record 0033)", () => {
         name: "gone.mp4",
         size: 8_192,
         contentType: "video/mp4",
+        messageId: "1700000000.000100",
         at: 2,
         seq: 2,
       },

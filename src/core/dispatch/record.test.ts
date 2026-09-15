@@ -38,7 +38,7 @@ describe("the drain deadline's records", () => {
       sourceUrl: "https://acme.slack.com/archives/C1/p1",
       userName: "alice",
     });
-    registry.publish(run.id, { type: "input", text: "go", at: 1 });
+    registry.publish(run.id, { type: "input", messageId: "m1", text: "go", at: 1 });
     for (let i = 1; i <= 3; i++) registry.publish(run.id, { type: "tool_call", tool: "bash", summary: `$ step ${i}` });
     const summary = registry.getById(run.id)!;
     const snap = registry.snapshotById(run.id)!;
@@ -74,7 +74,7 @@ describe("the drain deadline's records", () => {
       userId: "slack:UALICE",
       threadKey: "slack:C1:t",
     });
-    registry.publish(live.id, { type: "input", text: "go", at: 1 });
+    registry.publish(live.id, { type: "input", messageId: "m1", text: "go", at: 1 });
     registry.publish(live.id, { type: "tool_call", tool: "bash", summary: "$ npm test" });
     const done = registry.create("review · acme/y", {
       agent: "review",
@@ -121,7 +121,7 @@ describe("writeTombstone — the provisional interrupted record at the loop's st
       userId: "slack:UX",
       threadKey: "slack:CX:1.0",
     });
-    registry.publish(run.id, { type: "input", text: "hello", at: 1 });
+    registry.publish(run.id, { type: "input", messageId: "m1", text: "hello", at: 1 });
     const writes: Array<{ record: RunRecord; opts: { provisional?: boolean } | undefined }> = [];
     const deps: RecordDeps = {
       runHistoryWriter: {
@@ -533,7 +533,7 @@ describe("assembleRunRecord — the pull request on the record (docs/reference/s
 
   it("folds the last pr_opened event into `pr` — the PR the post-step opened or edited — and the record still validates; without one, no key", () => {
     const events = [
-      { type: "input" as const, text: "fix it", seq: 1 },
+      { type: "input" as const, messageId: "m1", text: "fix it", seq: 1 },
       { type: "pr_opened" as const, url: "https://github.com/acme/api/pull/6", number: 6, created: true, seq: 2 },
       { type: "pr_opened" as const, url: "https://github.com/acme/api/pull/7", number: 7, created: false, seq: 3 },
     ];

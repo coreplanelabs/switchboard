@@ -39,7 +39,7 @@ const record = (
 ): RunRecord => {
   const { agentSource, routed, ...rest } = over;
   const events: RunEvent[] = [];
-  if (text !== undefined) events.push({ type: "input", text });
+  if (text !== undefined) events.push({ type: "input", messageId: "m1", text });
   if (agent !== undefined) events.push({ type: "run_meta", agent, ...(agentSource ? { agentSource } : {}) });
   if (routed) events.push({ type: "route", preset: agent ?? "?", reason: "r", model: "m" });
   return {

@@ -442,6 +442,7 @@ async function receiveSlackMessage(
     userId: `${PLATFORM}:${ev.user}`,
     threadKey: `${PLATFORM}:${ev.channel}:${ev.threadTs}`,
     text: ev.text + note,
+    messageId: ev.ts,
     channelName,
     userName,
     sourceUrl: team ? slackPermalink(team, ev.channel, ev.ts, ev.threadTs) : undefined,
