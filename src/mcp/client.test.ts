@@ -162,3 +162,18 @@ describe("sseDataFrames", () => {
     expect(sseDataFrames(text)).toEqual(['{"a":\n1}', "solo"]);
   });
 });
+
+describe("StreamableHttpMcpClient — server instructions (initialize)", () => {
+  it("keeps the `instructions` the server returns from initialize and answers them from instructions(); a server without any answers undefined", async () => {
+    const withHint = fakeMcpServerFetch({
+      tools: TOOLS,
+      instructions: "Use search, then execute. Lake questions: r2sql/execute.",
+    });
+    const c = client(withHint);
+    expect(await c.instructions()).toBe("Use search, then execute. Lake questions: r2sql/execute.");
+    await c.listTools();
+    expect(withHint.requests.filter((r) => r.body.method === "initialize").length).toBe(1); // one handshake, not one per read
+    const bare = fakeMcpServerFetch({ tools: TOOLS });
+    expect(await client(bare).instructions()).toBeUndefined();
+  });
+});

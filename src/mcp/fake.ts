@@ -17,7 +17,14 @@ export class InMemoryMcpClient implements McpClient {
   /** When set, `listTools` throws with this message (a server down for discovery). */
   failListWith: string | undefined;
 
-  constructor(private readonly tools: InMemoryTool[]) {}
+  constructor(
+    private readonly tools: InMemoryTool[],
+    private readonly opts: { instructions?: string } = {},
+  ) {}
+
+  async instructions(): Promise<string | undefined> {
+    return this.opts.instructions;
+  }
 
   async listTools(): Promise<McpToolInfo[]> {
     this.listCalls++;
@@ -42,6 +49,8 @@ export interface FakeServerOptions {
   sse?: boolean;
   /** Session id to assign on initialize; requests without it (after init) get 404. */
   sessionId?: string;
+  /** `instructions` the server returns from initialize (its hint to the model); absent → none. */
+  instructions?: string;
   /** Page `tools/list` in chunks of this size. */
   pageSize?: number;
   /** HTTP status to answer with for every request (error injection). */
@@ -133,6 +142,7 @@ export function fakeMcpServerFetch(opts: FakeServerOptions = {}): FakeServer {
             protocolVersion: MCP_PROTOCOL_VERSION,
             capabilities: { tools: {} },
             serverInfo: { name: "fake", version: "0" },
+            ...(opts.instructions !== undefined ? { instructions: opts.instructions } : {}),
           },
         },
         { headers: opts.sessionId ? { "mcp-session-id": opts.sessionId } : {} },
