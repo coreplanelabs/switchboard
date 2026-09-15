@@ -33,7 +33,7 @@ The seed is then built in a fixed order, within a fixed budget:
 | Part | Where it comes from | Why |
 |---|---|---|
 | the notepad | the session's notes, as the agent last wrote them | decisions and names survive every compaction and every run boundary |
-| the tail | the log's newest turns that fit the budget, cut after the newest compaction and to a whole user turn | the model resumes mid-conversation, not from a retelling |
+| the tail | the log's newest turns that fit the budget, cut after the newest compaction and to a whole user turn; results answering calls made before the cut are dropped from that first turn, and the run's notes say so | the model resumes mid-conversation, not from a retelling |
 | the lines since | what people wrote in the thread after the previous run ended | the conversation the agent missed while it was not running |
 | the request | the message that started this run | as the last user turn |
 
