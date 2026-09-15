@@ -16,6 +16,9 @@ describe("WEB_HTML_HEADERS", () => {
     expect(csp).not.toContain("script-src 'unsafe-inline'");
     expect(csp).toContain("style-src 'self' 'unsafe-inline'");
     expect(csp).toContain("connect-src 'self'");
+    // A run's video or audio file plays from the same-origin artifact route (live-view.md item 26).
+    expect(csp).toContain("media-src 'self'");
+    expect(csp).toContain("img-src 'self' data:");
     expect(csp).toContain("frame-ancestors 'none'");
     expect(csp).toContain("base-uri 'none'");
     expect(csp).toContain("form-action 'none'");

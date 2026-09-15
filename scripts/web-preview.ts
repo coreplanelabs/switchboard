@@ -334,6 +334,17 @@ const HIST_EVENTS = [
     at: NOW - 754_000,
     seq: 27,
   },
+  // A recording sent beside the picture: its row starts closed (a video loads
+  // nothing until its name is opened), so the Reply shows a collapsed player row.
+  {
+    type: "artifact",
+    direction: "out",
+    key: "runs/hist-1/out/2-webhook-retry-demo.mp4",
+    name: "webhook-retry-demo.mp4",
+    size: 24_854_792,
+    contentType: "video/mp4",
+    at: NOW - 753_950,
+  },
   {
     type: "tool_result",
     callId: "c7",

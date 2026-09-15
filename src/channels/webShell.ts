@@ -14,9 +14,11 @@ import type { Capabilities } from "../core/capabilities.js";
  *  seed island is `type="application/json"`, a non-executing data block CSP
  *  does not govern), styles are the built stylesheet plus inline style
  *  attributes (Reka UI positions floating elements that way), same-origin
- *  connections only (the SSE streams), and no framing. */
+ *  connections only (the SSE streams), same-origin media only (a run's video
+ *  or audio file plays from the artifact route, live-view.md item 26), and no
+ *  framing. */
 export const PAGE_CSP =
-  "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+  "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self'; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 /** The same policy for a page that carries a same-origin form (the MCP connect
  *  page): `form-action 'self'` — a post anywhere else is still blocked. */

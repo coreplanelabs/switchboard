@@ -258,7 +258,10 @@ describe("steps and turns", () => {
     expect(flushed.kind).toBe("turn");
     if (flushed.kind === "turn") {
       expect(flushed.turn.chip).toBe("1m 01s");
-      expect(flushed.note).toBe("wrote the reply below");
+      // Direction-neutral: the Reply sits first on a finished page and last on a live one, so the
+      // note names it and points at its card instead of saying where it is.
+      expect(flushed.note).toBe("wrote the reply");
+      expect(flushed.noteHref).toBe("#reply");
     }
   });
 
