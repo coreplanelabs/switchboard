@@ -89,17 +89,26 @@ describe("createRunTimeline — grouping", () => {
 
   it("passes input / answer / run_note through, and ignores unknown or malformed events", () => {
     const t = createRunTimeline();
-    expect(t.push({ type: "input", text: "review #1", at: 1 })).toEqual([{ kind: "input", text: "review #1", at: 1 }]);
+    expect(t.push({ type: "input", messageId: "m1", text: "review #1", at: 1 })).toEqual([
+      { kind: "input", text: "review #1", messageId: "m1", at: 1 },
+    ]);
     // An input's origin: the link, the channel, the user — and the run that sent it, when a run did.
     expect(
       t.push({
         type: "input",
+        messageId: "1700000000.000200",
         text: "narrow it",
         at: 2,
         source: { user: "alice", run: "run-parent", url: "https://s/1" },
       }),
     ).toEqual([
-      { kind: "input", text: "narrow it", at: 2, source: { user: "alice", run: "run-parent", url: "https://s/1" } },
+      {
+        kind: "input",
+        text: "narrow it",
+        messageId: "1700000000.000200",
+        at: 2,
+        source: { user: "alice", run: "run-parent", url: "https://s/1" },
+      },
     ]);
     expect(t.push({ type: "answer", text: "LGTM", at: 9 })).toEqual([{ kind: "answer", text: "LGTM", at: 9 }]);
     // The coding post-step's PR: url + a positive integer number, `created` only when literally true.
@@ -626,11 +635,12 @@ describe("createRunTimeline — model turns (item 15)", () => {
 // `artifact` change of its own: a file the run received or sent, named by its
 // store key. It opens no step and is never a call.
 describe("createRunTimeline — artifact", () => {
-  it("folds `artifact` into an `artifact` change carrying direction, key, name, size and type; no step opens", () => {
+  it("folds `artifact` into an `artifact` change carrying direction, key, name, size, type and its join key — the call for a sent file, the message for a received one; no step opens", () => {
     const t = createRunTimeline();
     const changes = t.push({
       type: "artifact",
       direction: "out",
+      callId: "toolu_1",
       key: "runs/r1/out/1-dashboard.png",
       name: "dashboard.png",
       size: 3_145_728,
@@ -642,6 +652,7 @@ describe("createRunTimeline — artifact", () => {
         kind: "artifact",
         artifact: {
           direction: "out",
+          callId: "toolu_1",
           key: "runs/r1/out/1-dashboard.png",
           name: "dashboard.png",
           size: 3_145_728,
@@ -650,7 +661,39 @@ describe("createRunTimeline — artifact", () => {
         },
       },
     ]);
+    expect(
+      t.push({
+        type: "artifact",
+        direction: "in",
+        messageId: "1700000000.000100",
+        key: "threads/slack-C1-1.0/in/1700000000.000100/1-brief.pdf",
+        name: "brief.pdf",
+        size: 12,
+        contentType: "application/pdf",
+      }),
+    ).toEqual([
+      {
+        kind: "artifact",
+        artifact: {
+          direction: "in",
+          messageId: "1700000000.000100",
+          key: "threads/slack-C1-1.0/in/1700000000.000100/1-brief.pdf",
+          name: "brief.pdf",
+          size: 12,
+          contentType: "application/pdf",
+          at: undefined,
+        },
+      },
+    ]);
     expect(t.steps()).toEqual([]);
+  });
+
+  it("an artifact event without its join key — a received file naming no message, a sent one naming no call — is ignored like a keyless one", () => {
+    const t = createRunTimeline();
+    const common = { type: "artifact", key: "runs/r1/out/1-x.png", name: "x.png", size: 1, contentType: "image/png" };
+    expect(t.push({ ...common, direction: "in" })).toEqual([]);
+    expect(t.push({ ...common, direction: "out" })).toEqual([]);
+    expect(t.push({ ...common, direction: "out", callId: "" })).toEqual([]);
   });
 
   it("a keyless or nameless artifact event is ignored", () => {

@@ -24,6 +24,7 @@ import {
 
 const input = {
   type: "input",
+  messageId: "1700000000.000100",
   text: "fix the build",
   at: 1000,
   source: { channel: "dev", user: "alice", url: "https://acme.slack.com/x" },
@@ -92,7 +93,7 @@ describe("request / context / reply / placeholder", () => {
       source: { user: "bob", url: "https://acme.slack.com/y" },
     });
     m.handle({ type: "run_note", kind: "follow_up", summary: "follow-up folded in: also the numbers", at: 2000 });
-    m.handle({ type: "input", text: "and a chart", at: 3000 });
+    m.handle({ type: "input", messageId: "m1", text: "and a chart", at: 3000 });
     m.handle({ type: "run_note", kind: "follow_up", summary: "follow-up folded in: and a chart", at: 3000 });
     expect(m.state.request?.text).toBe("fix the build");
     // the step first, then the two follow-ups in arrival order; the snippet
@@ -422,33 +423,61 @@ describe("calls, groups, folding", () => {
   });
 });
 
-// docs/reference/specs/live-view.md item 26 — the run's files: one block, rows in
-// event order, never a step or a log row; the page builds each URL from the
-// seed's base and the key.
+// docs/reference/specs/live-view.md item 26 — the run's files sit on the card of
+// the message or call the event NAMES: a received file carries the `messageId`
+// of the input it arrived with, a sent file the `callId` of the attach_file
+// call that posted it. The page joins by those ids alone — never by the order
+// the events were recorded in, never by matching a file's name to a headline.
 describe("artifacts", () => {
-  const artifact = (direction: "in" | "out", key: string, name: string, contentType: string, at: number) => ({
+  const REQUEST = "1700000000.000100";
+  const FOLLOW_UP = "1700000000.000250";
+  const received = (messageId: string, key: string, name: string, contentType: string, at: number) => ({
     type: "artifact",
-    direction,
+    direction: "in",
+    messageId,
     key,
     name,
     size: 1024,
     contentType,
     at,
   });
+  const sentBy = (callId: string, key: string, name: string, contentType: string, at: number) => ({
+    type: "artifact",
+    direction: "out",
+    callId,
+    key,
+    name,
+    size: 1024,
+    contentType,
+    at,
+  });
+  const followUp = (messageId: string, text: string, at: number) => ({
+    type: "input",
+    messageId,
+    text,
+    at,
+    source: { user: "alice" },
+  });
 
   const names = (files: readonly { name: string }[] | undefined) => (files ?? []).map((f) => f.name);
 
-  it("files received with the request sit on the request; files received with a follow-up sit on that follow-up; neither is a row in the log", () => {
+  it("a received file sits on the message its messageId names — the request's on the request, a follow-up's on that follow-up — whatever else was recorded between; neither is a row in the log", () => {
     const m = model();
     m.handle(input);
-    m.handle(artifact("in", "threads/slack-C1-1.0/in/1.0/0-brief.pdf", "brief.pdf", "application/pdf", 1001));
-    m.handle(artifact("in", "threads/slack-C1-1.0/in/1.0/1-clip.mp4", "clip.mp4", "video/mp4", 1002));
+    m.handle(received(REQUEST, "threads/slack-C1-1.0/in/1.0/0-brief.pdf", "brief.pdf", "application/pdf", 1001));
     m.handle(call("c1", "$ sleep 20", 2000));
-    m.handle({ type: "input", text: "here is one more", at: 2500, source: { user: "alice" } });
-    m.handle(artifact("in", "threads/slack-C1-1.0/in/2.5/2-notes.bin", "notes.bin", "application/octet-stream", 2501));
+    m.handle(followUp(FOLLOW_UP, "here is one more", 2500));
+    m.handle(followUp("1700000000.000260", "and a word", 2600));
+    // Recorded after a later message, yet it names the first follow-up: it lands there.
+    m.handle(
+      received(FOLLOW_UP, "threads/slack-C1-1.0/in/2.5/2-notes.bin", "notes.bin", "application/octet-stream", 2701),
+    );
+    // Recorded last, yet it names the request (a file re-pulled from an earlier thread message is recorded so).
+    m.handle(received(REQUEST, "threads/slack-C1-1.0/in/1.0/1-clip.mp4", "clip.mp4", "video/mp4", 2702));
     expect(names(m.state.request!.files)).toEqual(["brief.pdf", "clip.mp4"]);
     expect(m.state.request!.files[0]).toEqual({
       direction: "in",
+      messageId: REQUEST,
       key: "threads/slack-C1-1.0/in/1.0/0-brief.pdf",
       name: "brief.pdf",
       size: 1024,
@@ -456,38 +485,43 @@ describe("artifacts", () => {
       at: 1001,
     });
     const followUps = m.state.log.filter((l) => l.kind === "followup");
-    expect(followUps).toHaveLength(1);
-    expect(names(followUps[0]!.input.files)).toEqual(["notes.bin"]);
+    expect(followUps.map((f) => names(f.input.files))).toEqual([["notes.bin"], []]);
     expect(m.state.log.filter((l) => l.kind === "step")).toHaveLength(1);
     expect(step(m).items).toHaveLength(1); // the sleep call alone; a file is never a row in the step
   });
 
-  it("a received file recorded before any input lands on the first message that arrives", () => {
+  it("a received file naming a message this record has not shown is dropped, never guessed onto the latest input", () => {
     const m = model();
-    m.handle(artifact("in", "threads/slack-C1-1.0/in/1.0/0-brief.pdf", "brief.pdf", "application/pdf", 999));
+    m.handle(received(REQUEST, "threads/slack-C1-1.0/in/1.0/0-brief.pdf", "brief.pdf", "application/pdf", 999));
     m.handle(input);
-    expect(names(m.state.request!.files)).toEqual(["brief.pdf"]);
+    m.handle(received("1700000000.000999", "threads/slack-C1-1.0/in/9/1-x.pdf", "x.pdf", "application/pdf", 1001));
+    expect(names(m.state.request!.files)).toEqual([]);
   });
 
-  it("sent files sit on the attach_file call that posted them while the run is live, each on its own call by name, and the card opens; when the reply lands it carries them all", () => {
+  it("a sent file sits on the call its callId names and the card opens — two files of one name from two calls each on their own — and when the reply lands it carries them all", () => {
     const m = model();
     m.handle(input);
-    m.handle(call("c1", "attach_file out/dashboard.png", 2000, "attach_file"));
-    m.handle(call("c2", "attach_file out/clip.mp4", 2001, "attach_file"));
-    m.handle(artifact("out", "runs/run-1/out/2-dashboard.png", "dashboard.png", "image/png", 2100));
-    m.handle(artifact("out", "runs/run-1/out/1-clip.mp4", "clip.mp4", "video/mp4", 2101));
+    m.handle(call("c1", "attach_file out/a/sheet.png", 2000, "attach_file"));
+    m.handle(call("c2", "attach_file out/b/sheet.png", 2001, "attach_file"));
+    // Recorded in the opposite order to the calls, with one name: the ids decide, not the order or the headline.
+    m.handle(sentBy("c2", "runs/run-1/out/2-sheet.png", "sheet.png", "image/png", 2100));
+    m.handle(sentBy("c1", "runs/run-1/out/1-sheet.png", "sheet.png", "image/png", 2101));
     const calls = step(m).items.flatMap((i) => (i.kind === "call" ? [i.call] : []));
-    expect(calls.map((c) => [c.id, names(c.files), c.open])).toEqual([
-      ["c1", ["dashboard.png"], true],
-      ["c2", ["clip.mp4"], true],
+    expect(calls.map((c) => [c.id, (c.files ?? []).map((f) => f.key), c.open])).toEqual([
+      ["c1", ["runs/run-1/out/1-sheet.png"], true],
+      ["c2", ["runs/run-1/out/2-sheet.png"], true],
     ]);
     expect(m.state.reply).toBeNull();
     m.handle({ type: "answer", text: "done", at: 3000 });
-    expect(names(m.state.reply!.files)).toEqual(["dashboard.png", "clip.mp4"]);
+    expect(m.state.reply!.files.map((f) => f.key)).toEqual([
+      "runs/run-1/out/2-sheet.png",
+      "runs/run-1/out/1-sheet.png",
+    ]);
     expect(m.state.reply!.files[0]).toEqual({
       direction: "out",
-      key: "runs/run-1/out/2-dashboard.png",
-      name: "dashboard.png",
+      callId: "c2",
+      key: "runs/run-1/out/2-sheet.png",
+      name: "sheet.png",
       size: 1024,
       contentType: "image/png",
       at: 2100,
@@ -495,20 +529,14 @@ describe("artifacts", () => {
     expect(names(m.state.request!.files)).toEqual([]);
   });
 
-  it("a sent file whose name no attach_file headline carries falls to the newest attach_file call; with no such call it waits for the reply alone", () => {
-    const m = model();
-    m.handle(input);
-    m.handle(call("c1", "attach_file", 2000, "attach_file"));
-    m.handle(artifact("out", "runs/run-1/out/1-sheet.png", "sheet.png", "image/png", 2100));
-    const calls = step(m).items.flatMap((i) => (i.kind === "call" ? [i.call] : []));
-    expect(names(calls[0]!.files)).toEqual(["sheet.png"]);
-
+  it("a sent file naming a call this record has not shown sits on no card and still reaches the reply", () => {
     const n = model();
     n.handle(input);
-    n.handle(call("c1", "$ npm test", 2000));
-    n.handle(artifact("out", "runs/run-1/out/1-sheet.png", "sheet.png", "image/png", 2100));
+    n.handle(call("c1", "attach_file out/sheet.png", 2000, "attach_file"));
+    n.handle(sentBy("c-elsewhere", "runs/run-1/out/1-sheet.png", "sheet.png", "image/png", 2100));
     const plain = step(n).items.flatMap((i) => (i.kind === "call" ? [i.call] : []));
     expect(plain[0]!.files).toBeUndefined();
+    expect(plain[0]!.open).toBe(false);
     n.handle({ type: "answer", text: "done", at: 3000 });
     expect(names(n.state.reply!.files)).toEqual(["sheet.png"]);
   });

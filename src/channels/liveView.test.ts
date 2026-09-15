@@ -1552,7 +1552,7 @@ describe("live view on RunsService: history pages + index toggle", () => {
         tools: [],
       });
       await ledger.append("far-1", "g-OTHER", [
-        { type: "input", text: "far away", at: NOW - 5_000, seq: 1 },
+        { type: "input", messageId: "m1", text: "far away", at: NOW - 5_000, seq: 1 },
         { type: "tool_call", tool: "bash", summary: "$ ls", at: NOW - 4_000, seq: 2 },
       ]);
       const page = fakeReqRes("GET", "/runs/far-1");
@@ -1599,7 +1599,9 @@ describe("live view on RunsService: history pages + index toggle", () => {
         system: "sys",
         tools: [],
       });
-      await ledger.append("far-1", "g-OTHER", [{ type: "input", text: "far", at: NOW - 5_000, seq: 1 }]);
+      await ledger.append("far-1", "g-OTHER", [
+        { type: "input", messageId: "m1", text: "far", at: NOW - 5_000, seq: 1 },
+      ]);
       const list = vi.spyOn(h.store!, "list");
       const t = fakeReqRes("GET", "/runs");
       h.handler(t.req, t.res);
@@ -1991,15 +1993,17 @@ describe("IndexRow seed shape", () => {
 describe("artifact route (item 26)", () => {
   const NOW = 1_700_000_000_000;
   type ArtifactEvent = Extract<RunEvent, { type: "artifact" }>;
-  const artifact = (over: Partial<ArtifactEvent> = {}): ArtifactEvent => ({
-    type: "artifact",
-    direction: "out",
-    key: "runs/r1/out/1-dashboard.png",
-    name: "dashboard.png",
-    size: 3,
-    contentType: "image/png",
-    ...over,
-  });
+  const artifact = (over: Partial<ArtifactEvent> = {}): ArtifactEvent =>
+    ({
+      type: "artifact",
+      direction: "out",
+      callId: "c1",
+      key: "runs/r1/out/1-dashboard.png",
+      name: "dashboard.png",
+      size: 3,
+      contentType: "image/png",
+      ...over,
+    }) as ArtifactEvent;
   const PNG = artifact();
   const SVG = artifact({ key: "runs/r1/out/2-logo.svg", name: "logo.svg", contentType: "image/svg+xml", size: 4 });
   const HTML = artifact({ key: "runs/r1/out/3-report.html", name: "report.html", contentType: "text/html", size: 5 });

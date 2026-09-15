@@ -40,6 +40,9 @@ export interface FollowUpInput {
   /** Files left on the platform by reference (record 0033), staged into the
    *  workspace before the turn that carries them. */
   staged?: StagedFile[];
+  /** The platform's id of the message (Slack's `ts`), when it has one; the
+   *  `input` event names it — see `followUpMessageId`. */
+  messageId?: string;
   /** When it arrived (ms epoch). */
   at: number;
   /** The run ledger's inbox seq for this follow-up (run-history item 40):
@@ -62,6 +65,14 @@ export interface FollowUpInput {
  * `ChannelIO`, for the fresh turn an unconsumed input becomes) on the same
  * record; the runner reads only the `FollowUpInput` fields.
  */
+/** The follow-up's message id as its `input` event records it: the platform's
+ *  when the message had one, else the durable inbox seq, else its arrival time
+ *  — deterministic from the follow-up alone, so both loops write the same id
+ *  and a steer from a parent run (no platform message) still has one. */
+export function followUpMessageId(input: Pick<FollowUpInput, "messageId" | "ledgerSeq" | "at">): string {
+  return input.messageId ?? (input.ledgerSeq !== undefined ? `inbox-${input.ledgerSeq}` : `at-${input.at}`);
+}
+
 export class FollowUpInbox<T extends FollowUpInput = FollowUpInput> {
   private pending: T[] = [];
   /** The ledger seqs ever pushed (item 5): a durable follow-up can reach the

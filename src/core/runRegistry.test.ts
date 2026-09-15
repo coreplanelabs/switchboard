@@ -44,7 +44,7 @@ describe("RunRegistry.create", () => {
       startedAt: 4_242, // the original start, from the ledger row
       replay: [
         { type: "tool_call", tool: "bash", summary: "ls", at: 2, seq: 2 },
-        { type: "input", text: "go", at: 1, seq: 1 }, // out of order on purpose: replay sorts by seq
+        { type: "input", messageId: "m1", text: "go", at: 1, seq: 1 }, // out of order on purpose: replay sorts by seq
       ],
     });
     expect(run.id).toBe("ledger-run-1");
@@ -646,7 +646,8 @@ describe("RunRegistry.requestStop — run control", () => {
 // and the label is redacted at create() so a secret in the request snippet never
 // reaches the index.
 describe("RunRegistry — text events, seq, label redaction", () => {
-  const text = (type: "input" | "context" | "answer", text: string): RunEvent => ({ type, text });
+  const text = (type: "input" | "context" | "answer", text: string): RunEvent =>
+    type === "input" ? { type, messageId: "m1", text } : { type, text };
 
   it("stamps every published event with a monotonic per-run seq (1, 2, 3…)", () => {
     const { reg } = testRegistry();

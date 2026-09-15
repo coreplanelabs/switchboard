@@ -378,6 +378,13 @@ export type RunEvent =
   | {
       type: "input";
       text: string;
+      /** The message this turn is: the platform's id of the message (Slack's
+       *  `ts`), the run id for a request from a channel with none (CLI, HTTP,
+       *  MCP), the inbox seq or arrival time for a follow-up with none (a
+       *  parent's steer). A received `artifact` names the same id, so the page
+       *  puts a file on the card of the message it arrived with by data, never
+       *  by the order the events happened to be recorded in (live-view.md item 26). */
+      messageId: string;
       /** Where the request came from, for the Request block: the channel and
        *  user display names and a link back to the triggering message —
        *  whatever the adapter supplied (all optional) — and, for a follow-up a
@@ -435,9 +442,8 @@ export type RunEvent =
    *  credential that expires or leaks, and the parser refuses a payload that
    *  tries. A side fact beside the tool pair that moved the file (like
    *  `skill_use`), never a step; the friction analyzer ignores it. */
-  | {
+  | ({
       type: "artifact";
-      direction: "in" | "out";
       /** The store key (`src/artifacts/keys.ts`): `runs/<runId>/out/<seq>-<basename>` or `threads/<thread>/in/<ts>/<i>-<basename>`. */
       key: string;
       /** The file's name as the person sees it (the Slack filename, the tool's `name`). */
@@ -446,7 +452,20 @@ export type RunEvent =
       contentType: string;
       seq?: number;
       at?: number;
-    }
+    } & (
+      | {
+          direction: "in";
+          /** The `input` event this file arrived with — the same `messageId`
+           *  (live-view.md item 26); a file re-pulled from an earlier message
+           *  of the thread names the request it was pulled for. */
+          messageId: string;
+        }
+      | {
+          direction: "out";
+          /** The `tool_call` (`attach_file`) that posted it — its `callId`. */
+          callId: string;
+        }
+    ))
   /** A skill was loaded into the model's context (docs/reference/specs/skills.md). Emitted
    *  by the `use_skill` tool on a successful load — alongside, not instead of,
    *  its `tool_call`/`tool_result` pair — so skill use is a first-class fact in

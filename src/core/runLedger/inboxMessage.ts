@@ -35,6 +35,7 @@ export function durableInboxMessage(
     ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
     ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
     ...(msg.channelName !== undefined ? { channelName: msg.channelName } : {}),
+    ...(msg.messageId !== undefined ? { messageId: msg.messageId } : {}),
     ...(from !== undefined ? { fromRunId: from.runId } : {}),
     // Staged references are metadata (record 0033) — a few hundred bytes each —
     // so they ride the base row and survive the restart whatever the
@@ -103,6 +104,7 @@ export function messageFromInbox(
   const userName = str("userName");
   const sourceUrl = str("sourceUrl");
   const channelName = str("channelName");
+  const messageId = str("messageId");
   const fromRunId = str("fromRunId");
   const at = typeof m.at === "number" && Number.isFinite(m.at) ? m.at : fallbackAt;
   const images = attachmentsFromInbox(m.images);
@@ -117,6 +119,7 @@ export function messageFromInbox(
     ...(userName !== undefined ? { userName } : {}),
     ...(sourceUrl !== undefined ? { sourceUrl } : {}),
     ...(channelName !== undefined ? { channelName } : {}),
+    ...(messageId !== undefined ? { messageId } : {}),
     ...(images ? { images } : {}),
     ...(documents ? { documents } : {}),
     ...(staged ? { staged } : {}),

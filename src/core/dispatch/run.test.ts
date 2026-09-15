@@ -170,7 +170,7 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
     });
     expect(req.tools.map((t) => t.name)).toContain("bash");
     expect(req.onStop).toBeTypeOf("function");
-    registry.publish(run.id, { type: "input", text: "fix it", at: NOW });
+    registry.publish(run.id, { type: "input", messageId: "m1", text: "fix it", at: NOW });
     expect(ledger.handle!.events.map((e) => e.event.type)).toEqual(["input"]);
   });
 
@@ -189,7 +189,7 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
     const out = await claimRun(deps, { ...base, reserved: undefined, resume, ledgerRun: adopted });
     expect(out).toBe(adopted);
     expect(ledger.opened).toEqual([]);
-    registry.publish(run.id, { type: "input", text: "fix it", at: NOW });
+    registry.publish(run.id, { type: "input", messageId: "m1", text: "fix it", at: NOW });
     expect(adopted.events.map((e) => e.event.type)).toEqual(["input"]);
   });
 });

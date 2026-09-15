@@ -313,7 +313,9 @@ describe("planResume", () => {
       seq: 1,
     });
     expect(loopEndingOf([])).toEqual({ kind: "answered" });
-    expect(loopEndingOf([{ type: "input", text: "go", seq: 1 }, note("wrap_up", "3 min left")])).toEqual({
+    expect(
+      loopEndingOf([{ type: "input", messageId: "m1", text: "go", seq: 1 }, note("wrap_up", "3 min left")]),
+    ).toEqual({
       kind: "answered",
     });
     expect(
@@ -354,7 +356,7 @@ describe("planResume", () => {
     ).toBeUndefined();
     expect(
       reviewPostedBefore([
-        { type: "input", text: "review it", seq: 1 },
+        { type: "input", messageId: "m1", text: "review it", seq: 1 },
         { type: "review_posted", repo: "acme/api", number: 12, head: "a".repeat(40), verdict: "approve", seq: 9 },
       ]),
     ).toEqual({ posted: true, target: { repo: "acme/api", number: 12 }, head: "a".repeat(40), verdict: "approve" });

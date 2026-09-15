@@ -2208,6 +2208,47 @@ describe("extra tools (MCP — docs/reference/specs/mcp-tools.md item 12)", () =
 // recorded as an `input` event + a `follow_up` note, and a follow-up that lands
 // while the model was writing its final answer turns that answer into narration
 // and the follow-up into the next user turn instead of ending the run.
+// live-view.md item 26: every tool call runs under its own id — the provider's
+// tool_use id, the one the call's tool_call/tool_result events carry — so what a
+// tool records about its work (attach_file's artifact event) names the call by data.
+describe("tool context — the call's id", () => {
+  it("hands every tool its call id, with a tracer and without one", async () => {
+    const seen: (string | undefined)[] = [];
+    const probe: RunnableTool = {
+      name: "probe",
+      description: "records its call id",
+      inputSchema: { type: "object", properties: {} },
+      run: async (_input, ctx) => {
+        seen.push(ctx.callId);
+        return "seen";
+      },
+    };
+    const script = [
+      { content: [{ type: "tool_use", id: "toolu_a", name: "probe", input: {} }], stopReason: "tool_use" },
+      { content: [{ type: "text", text: "done" }], stopReason: "end_turn" },
+    ] as CompletionResult[];
+    await runAgent({
+      provider: scripted(script),
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      extraTools: [probe],
+    });
+    const sink = recordingSink();
+    await runAgent({
+      provider: scripted(script.map((r) => ({ ...r, content: r.content.map((c) => ({ ...c, id: "toolu_b" })) }))),
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      extraTools: [probe],
+      span: createTracer({ clock: () => 1 }).start("request", { sinks: [sink] }),
+    });
+    expect(seen).toEqual(["toolu_a", "toolu_b"]);
+  });
+});
+
 describe("follow-up inbox (docs/reference/specs/thread-admission.md)", () => {
   const followUp = (text: string, over: Partial<FollowUpInput> = {}): FollowUpInput => ({
     text,
@@ -2250,6 +2291,7 @@ describe("follow-up inbox (docs/reference/specs/thread-admission.md)", () => {
     expect(events.find((e) => e.type === "input")).toMatchObject({
       type: "input",
       text: "also remove the anon flow",
+      messageId: "at-5", // no platform id and no inbox seq on this one: its arrival time names it
       source: { user: "bob", url: "https://s/2" },
     });
     expect(events.find((e) => e.type === "run_note" && e.kind === "follow_up")).toMatchObject({

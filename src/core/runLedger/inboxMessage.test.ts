@@ -31,6 +31,16 @@ describe("durable inbox — staged references (record 0033)", () => {
     expect(back?.msg.text).toBe("and this video");
   });
 
+  it("the message's own id rides the row and reads back, so a steer folded in after a restart still names the message its files came with", () => {
+    const row = durableInboxMessage({ ...base, messageId: "1700000000.000200" }, base.text, 1);
+    expect(row.messageId).toBe("1700000000.000200");
+    expect(messageFromInbox(row, 0)?.msg.messageId).toBe("1700000000.000200");
+    // A row from a channel without message ids carries none, and reads back without one.
+    const bare = durableInboxMessage(base, base.text, 1);
+    expect("messageId" in bare).toBe(false);
+    expect(messageFromInbox(bare, 0)?.msg.messageId).toBeUndefined();
+  });
+
   it("the reference survives even when the inline attachments do not fit the row", () => {
     const huge = { mediaType: "image/png", data: "A".repeat(DURABLE_INBOX_MAX_BYTES), name: "shot.png" };
     const row = durableInboxMessage({ ...base, images: [huge], staged: [clip] }, base.text, 1);

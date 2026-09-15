@@ -75,7 +75,7 @@ grants:
 
 function record(id: string, finishedAt: number): RunRecord {
   const events: RunEvent[] = [
-    { type: "input", text: "please do the thing", seq: 1 },
+    { type: "input", messageId: "m1", text: "please do the thing", seq: 1 },
     { type: "tool_call", tool: "bash", summary: "$ pnpm install --frozen-lockfile", seq: 2, at: 10 },
     { type: "tool_result", tool: "bash", ok: false, summary: "ERR_PNPM_OUTDATED_LOCKFILE", seq: 3, at: 45_010 },
     { type: "answer", text: "all done", seq: 4 },
@@ -111,7 +111,7 @@ async function fixture() {
     threadKey: "slack:C1:t",
     channelVisibility: "public",
   });
-  reg.publish(live.id, { type: "input", text: "live request" });
+  reg.publish(live.id, { type: "input", messageId: "m1", text: "live request" });
   reg.publish(live.id, { type: "tool_call", tool: "bash", summary: "$ pwd" });
   const store = new InMemoryRunStore({ now: () => NOW });
   await store.put(record("fin-1", NOW - 1000));

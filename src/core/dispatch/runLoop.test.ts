@@ -216,7 +216,7 @@ function setup(
     channelVisibility: "unknown" as const,
     publishText: (type: "input" | "context" | "answer", text: string) => {
       published.push(`${type}:${text}`);
-      registry.publish(run.id, { type, text, at: NOW });
+      registry.publish(run.id, type === "input" ? { type, messageId: "m1", text, at: NOW } : { type, text, at: NOW });
     },
     ending,
     ...(opts.bearer ? { bearer: opts.bearer } : {}),
@@ -1621,7 +1621,9 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     opts: { agent?: string; events?: AppendableEvent[]; state?: Record<string, unknown>; repoCtx?: RepoContext } = {},
   ): ResumeContext {
     const messages = transcriptEndingOn(answer);
-    const events: AppendableEvent[] = opts.events ?? [{ type: "input", text: "hello there", at: 1, seq: 1 }];
+    const events: AppendableEvent[] = opts.events ?? [
+      { type: "input", messageId: "m1", text: "hello there", at: 1, seq: 1 },
+    ];
     const row: LiveRunRow = {
       runId: "run-l",
       threadKey: THREAD,
@@ -1685,7 +1687,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     const stopped = setup("", { provider: neverCalled() });
     const softStop = finishing("What I found before the stop.", {
       events: [
-        { type: "input", text: "hello there", at: 1, seq: 1 },
+        { type: "input", messageId: "m1", text: "hello there", at: 1, seq: 1 },
         note("stop_requested", "soft stop requested", 2, "soft"),
         note("stopped", "soft stop", 3, "soft"),
       ],
@@ -1703,7 +1705,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     const budget = setup("", { provider: neverCalled() });
     const timeBudget = finishing("What I found before the budget ran out.", {
       events: [
-        { type: "input", text: "hello there", at: 1, seq: 1 },
+        { type: "input", messageId: "m1", text: "hello there", at: 1, seq: 1 },
         note("time_budget_exhausted", "time budget exhausted", 2),
       ],
     });
@@ -1772,7 +1774,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       state: { verdict: VERDICT },
       repoCtx: prThread.repoCtx,
       events: [
-        { type: "input", text: "hello there", at: 1, seq: 1 },
+        { type: "input", messageId: "m1", text: "hello there", at: 1, seq: 1 },
         { type: "review_posted", repo: "o/r", number: 42, head: HEAD, verdict: "approve", at: 2, seq: 2 },
       ],
     });

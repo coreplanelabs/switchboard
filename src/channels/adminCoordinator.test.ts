@@ -80,7 +80,7 @@ const answer = (text: string): RunEvent => ({ type: "answer", text });
 
 function record(id: string, over: Partial<RunRecord> = {}): RunRecord {
   const events: RunEvent[] = [
-    { type: "input", text: "do the unit", seq: 1 },
+    { type: "input", messageId: "m1", text: "do the unit", seq: 1 },
     { ...answer("the handoff"), seq: 2 },
   ];
   return {

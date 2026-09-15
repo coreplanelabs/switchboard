@@ -155,6 +155,7 @@ const modelTurn = (
 const HIST_EVENTS = [
   {
     type: "input",
+    messageId: "1700000000.000100",
     text: "Add **retry logic** to the webhook sender:\n\n- exponential backoff\n- max 5 attempts\n- give up on 4xx\n\nAcceptance: a 5xx from the receiver retries with growing delays and gives up after the fifth attempt with one `warn` log naming the status; a 4xx never retries; the existing callers in `src/jobs/` keep their signature. Add tests for both paths before the implementation, and keep the change to `src/webhooks.ts` and its test file.",
     at: NOW - 2_400_000,
     seq: 1,
@@ -213,6 +214,7 @@ const HIST_EVENTS = [
   // drains the inbox at a step boundary.
   {
     type: "input",
+    messageId: "1700000000.000200",
     text: "additional constraints for this change, please fold them in: (1) the `sendWebhook` signature stays as-is — callers in `src/jobs/` must not change; (2) jitter the backoff (±20%) so a burst of failures doesn't retry in lockstep; (3) log each give-up with the status code at `warn`.",
     at: NOW - 2_345_000,
     seq: 10,
@@ -226,10 +228,12 @@ const HIST_EVENTS = [
     seq: 11,
   },
   // The file dropped with the follow-up, staged before the turn read it
-  // (docs/reference/specs/live-view.md item 26): the Follow-up card's received row.
+  // (docs/reference/specs/live-view.md item 26): the Follow-up card's received
+  // row — it names the follow-up's message, which is how the page places it.
   {
     type: "artifact",
     direction: "in",
+    messageId: "1700000000.000200",
     key: "threads/slack-C1-1700000000.000100/in/1700000000.000200/1-retry-cases.csv",
     name: "retry-cases.csv",
     size: 4_812,
@@ -327,6 +331,7 @@ const HIST_EVENTS = [
   {
     type: "artifact",
     direction: "out",
+    callId: "c7",
     key: "runs/hist-1/out/1-metrics-dashboard.png",
     name: "metrics-dashboard.png",
     size: 3_145_728,
@@ -339,6 +344,7 @@ const HIST_EVENTS = [
   {
     type: "artifact",
     direction: "out",
+    callId: "c7",
     key: "runs/hist-1/out/2-webhook-retry-demo.mp4",
     name: "webhook-retry-demo.mp4",
     size: 24_854_792,
@@ -427,6 +433,7 @@ const HIST_STREAM = normalizeSpans([
   {
     type: "artifact",
     direction: "in",
+    messageId: "1700000000.000100",
     key: "threads/slack-C1-1700000000.000100/in/1700000000.000100/0-design-brief.pdf",
     name: "design-brief.pdf",
     size: 862_412,
@@ -456,6 +463,7 @@ const REVIEW_STREAM = normalizeSpans([
   spanEnd("hist", "dispatch.history", REVIEW_RECEIVED_AT + 900, REVIEW_RECEIVED_AT + 1_000, "root"),
   {
     type: "input",
+    messageId: "1700000000.000300",
     text: "review https://github.com/acme/api/pull/57",
     at: REVIEW_RECEIVED_AT,
     seq: 1,
@@ -644,6 +652,7 @@ const VERDICT_HEAD = "9f2c1a7e4b0d5c6f8a1b2c3d4e5f60718293a4b5";
 const VERDICT_EVENTS = [
   {
     type: "input",
+    messageId: "1700000000.000400",
     text: "please review https://github.com/acme/api/pull/42 — the retry-queue change; the backoff cap is the part I'm least sure about",
     at: V(1_500),
     seq: 1,

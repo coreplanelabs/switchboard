@@ -450,7 +450,7 @@ describe("step — turns first, then the record", () => {
   it("writes the step's turns after the seed and a record numbered from 1 carrying the registry seq, the turn index after the write and the calls in flight", async () => {
     const { ledger, wt } = harness();
     const run = (await wt.open(openReq()))!;
-    run.event({ type: "input", text: "go", at: 1 }, 1);
+    run.event({ type: "input", messageId: "m1", text: "go", at: 1 }, 1);
     run.event({ type: "run_meta", agent: "review", model: "p/m", at: 2 }, 2);
     await run.step(step());
     await run.step(
@@ -557,10 +557,10 @@ describe("events, state, heartbeat", () => {
   it("events are appended in batches with the registry seq, on the flush timer or at the batch size; nothing after the finish", async () => {
     const { ledger, wt, t } = harness();
     const run = (await wt.open(openReq()))!;
-    run.event({ type: "input", text: "go", at: 1 }, 1);
+    run.event({ type: "input", messageId: "m1", text: "go", at: 1 }, 1);
     expect(ledger.events.get("r1")).toBeUndefined(); // not yet: the timer is armed
     await t.flushTimers();
-    expect(ledger.events.get("r1")).toEqual([{ type: "input", text: "go", at: 1, seq: 1 }]);
+    expect(ledger.events.get("r1")).toEqual([{ type: "input", messageId: "m1", text: "go", at: 1, seq: 1 }]);
     for (let i = 2; i <= 33; i++) run.event({ type: "assistant", text: `t${i}`, at: i }, i);
     await new Promise((r) => setImmediate(r));
     expect(ledger.events.get("r1")).toHaveLength(33); // 32 sent at the batch size without the timer
@@ -648,7 +648,7 @@ describe("finishing and finish", () => {
   it("finishing moves the row to `finishing`; the sink's finish replaces the live rows with the record and never touches the fallback", async () => {
     const { ledger, wt, fallbackPuts, t } = harness();
     const run = (await wt.open(openReq()))!;
-    run.event({ type: "input", text: "go", at: 1 }, 1);
+    run.event({ type: "input", messageId: "m1", text: "go", at: 1 }, 1);
     expect(await run.finishing()).toBe("ok");
     expect(ledger.live.get("r1")!.phase).toBe("finishing");
     await run.sink.put(record("r1"));

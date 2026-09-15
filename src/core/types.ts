@@ -82,6 +82,11 @@ export interface IncomingMessage {
    *  workspace stages them into `attachments/` before its turn; the bytes never
    *  enter the bot. Present only when the artifact store is configured. */
   staged?: StagedFile[];
+  /** The platform's id of this message (Slack's `ts`, the value `staged[].messageId`
+   *  carries): the `input` event and the files received with it name it, so the
+   *  run page joins them by data. Absent for a channel with no message id
+   *  (CLI, HTTP, MCP) → `messageIdOf` uses the run id. */
+  messageId?: string;
   /**
    * When OUR process saw the message (ms epoch, from the adapter's clock at its
    * entry — never from a body or a platform stamp): the run's window opens
@@ -94,6 +99,13 @@ export interface IncomingMessage {
    * `queued … before we saw it` caption; a caption, never part of a duration.
    */
   originAt?: number;
+}
+
+/** The request's message id as its `input` event and its received files record it:
+ *  the platform's when the adapter gave one, else the run id — one deterministic
+ *  value both writers reach for, so a channel without message ids still joins. */
+export function messageIdOf(msg: Pick<IncomingMessage, "messageId">, runId: string): string {
+  return msg.messageId ?? runId;
 }
 
 export interface HistoryItem {

@@ -194,6 +194,7 @@ describe("attach_file through the artifact store", () => {
     let seq = 0;
     const ctx: ToolContext = {
       executor,
+      callId: "toolu_attach_1",
       artifacts: {
         store,
         runId: "r1",
@@ -237,6 +238,7 @@ describe("attach_file through the artifact store", () => {
         name: "page.png",
         size: SIZE,
         contentType: "image/png",
+        callId: "toolu_attach_1", // the call that posted it: the page's join key (live-view.md item 26)
       },
     ]);
     expect(h.tickets.minted).toEqual([{ name: "page.png", size: SIZE }]);
@@ -306,6 +308,7 @@ describe("attach_file through the artifact store", () => {
     const events: RunEvent[] = [];
     const ctx: ToolContext = {
       executor,
+      callId: "toolu_attach_1",
       artifacts: { store, runId: "r1", nextSeq: () => 1, reply: async () => {} },
       uploadTicket: tickets.uploadTicket,
       publish: (e) => void events.push(e),
@@ -323,6 +326,7 @@ describe("attach_file through the artifact store", () => {
     const tickets = ticketing(log, { mint: new Error("An API error occurred: missing_scope") });
     const ctx: ToolContext = {
       executor,
+      callId: "toolu_attach_1",
       artifacts: { store, runId: "r1", nextSeq: () => 1, reply: async () => {} },
       uploadTicket: tickets.uploadTicket,
     };
@@ -456,6 +460,7 @@ describe("attach_file through the artifact store", () => {
     const { uploadTicket } = ticketing([]);
     const ctx: ToolContext = {
       executor: { exec, readFile: async () => "", writeFile: async () => "" },
+      callId: "toolu_attach_1",
       artifacts: { store, runId: "r1", nextSeq: () => 1, reply: async () => {} },
       uploadTicket,
     };

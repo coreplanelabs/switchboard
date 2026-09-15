@@ -45,7 +45,7 @@ const NOW = 1_700_000_000_000;
 /** A persisted run in a PUBLIC Slack channel (so every Access identity may read it) unless overridden. */
 function record(id: string, finishedAt: number, over: Partial<RunRecord> = {}): RunRecord {
   const events: RunEvent[] = [
-    { type: "input", text: "please do the thing", seq: 1 },
+    { type: "input", messageId: "m1", text: "please do the thing", seq: 1 },
     { type: "answer", text: "all done", seq: 2 },
   ];
   return {
@@ -79,7 +79,7 @@ async function fixture(over: Partial<CommandHttpOptions> = {}) {
     threadKey: "slack:C1:t",
     channelVisibility: "public",
   });
-  reg.publish(live.id, { type: "input", text: "live request" });
+  reg.publish(live.id, { type: "input", messageId: "m1", text: "live request" });
   const store = new InMemoryRunStore({ now: () => NOW });
   await store.put(record("fin-1", NOW - 1000));
   // A finished run from a private Slack group: visible to all-channels holders and its own user only.

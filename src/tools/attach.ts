@@ -115,6 +115,10 @@ async function attachThroughStore(
     const opts: ExecOptions = { timeoutMs, ...(ctx.signal ? { signal: ctx.signal } : {}) };
     return ctx.executor.exec(command, opts);
   };
+  // The file is recorded under the call that posts it; both loops hand every
+  // call its id, so a missing one is a wiring fault, named rather than papered over.
+  const callId = ctx.callId;
+  if (callId === undefined) return "error: attach_file was run without its call id — the file cannot be recorded";
   // 1. Measure. `stat` runs in the workspace as the thread user; its words are the error's.
   const statOut = await exec(statCommandFor(shellQuote(path)), STAT_TIMEOUT_MS);
   if (parseExitPrefix(statOut).failed) return `error: could not read ${path}: ${statOut.trim()}`;
@@ -160,7 +164,9 @@ async function attachThroughStore(
   if (head.size !== size) {
     return `error: the artifact store holds ${head.size} bytes for ${name}, not the ${size} measured${curlSaid} — nothing was posted`;
   }
-  ctx.publish?.({ type: "artifact", direction: "out", key, name, size, contentType });
+  // Recorded under the call that posted it (live-view.md item 26): the page
+  // puts the file on this call's card by that id, never by matching names.
+  ctx.publish?.({ type: "artifact", direction: "out", key, name, size, contentType, callId });
   // 4. Into the conversation. A channel with an upload ticket gets the same
   // file from the container; one without (the CLI harness, HTTP, MCP) gets the
   // lead and the file's own link — the run page's artifact proxy, tokened while

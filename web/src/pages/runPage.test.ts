@@ -48,6 +48,7 @@ const historySeed = (events: LiveFrame[], over: Partial<RunHistorySeed> = {}): R
 
 const input = {
   type: "input",
+  messageId: "1700000000.000100",
   text: "fix the **build**",
   at: 1000,
   source: { channel: "dev", user: "alice", url: "https://acme.slack.com/archives/C1/p1" },
@@ -323,6 +324,7 @@ describe("RunPage — history mode", () => {
           call("c1", "$ npm test", 3000),
           {
             type: "input",
+            messageId: "1700000000.000350",
             text: "also the **numbers**",
             at: 3500,
             source: { user: "bob", url: "https://acme.slack.com/archives/C1/p2" },
@@ -409,7 +411,12 @@ describe("RunPage — history mode", () => {
   it("renders hostile model text as data, never markup", () => {
     const w = mountApp(RunPage, {
       seed: historySeed([
-        { type: "input", text: "<img src=x onerror=alert(1)> and <script>alert(1)</script>", at: 1 } as LiveFrame,
+        {
+          type: "input",
+          messageId: "m1",
+          text: "<img src=x onerror=alert(1)> and <script>alert(1)</script>",
+          at: 1,
+        } as LiveFrame,
       ]),
     });
     expect(w.find("#request img").exists()).toBe(false);

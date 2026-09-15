@@ -129,7 +129,7 @@ describe("abandonLostWorkspace: the resumed run closes saying why, and hands its
     row: r,
     lastStep,
     plan: { kind: "finish", step: 1, answer: "x", stepRecorded: true } as unknown as ResumeContext["plan"],
-    events: [{ type: "input", text: "fix the resolver", at: 1, seq: 1 }],
+    events: [{ type: "input", messageId: "m1", text: "fix the resolver", at: 1, seq: 1 }],
     lastSeq: 4,
     repoCtx: { repo: "acme/api" },
     inbox: [],

@@ -92,6 +92,7 @@ function followUpOf(
     ...(msg.images !== undefined ? { images: msg.images } : {}),
     ...(msg.documents !== undefined ? { documents: msg.documents } : {}),
     ...(msg.staged !== undefined ? { staged: msg.staged } : {}),
+    ...(msg.messageId !== undefined ? { messageId: msg.messageId } : {}),
     at,
     ...(opts.ledgerSeq !== undefined ? { ledgerSeq: opts.ledgerSeq } : {}),
     ...(opts.from !== undefined ? { from: opts.from } : {}),

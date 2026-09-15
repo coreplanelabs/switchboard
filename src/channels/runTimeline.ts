@@ -75,7 +75,7 @@ export interface TimelineStep {
 }
 
 export type TimelineChange =
-  | { kind: "input"; text: string; source?: TimelineSource; at?: number }
+  | { kind: "input"; text: string; messageId: string; source?: TimelineSource; at?: number }
   | { kind: "step"; step: TimelineStep }
   | { kind: "call"; step: TimelineStep; call: TimelineCall }
   | { kind: "result"; step: TimelineStep; call: TimelineCall }
@@ -143,14 +143,24 @@ export interface TimelineSkill {
 
 /** One file of the run, as the `artifact` event recorded it. The page builds
  *  the proxy URL from the seed's base and the key; the fold carries no URL. */
-export interface TimelineArtifact {
-  direction: "in" | "out";
+export type TimelineArtifact = {
   key: string;
   name: string;
   size: number;
   contentType: string;
   at?: number;
-}
+} & (
+  | {
+      direction: "in";
+      /** The `input` (request or follow-up) this file arrived with — the page's join key. */
+      messageId: string;
+    }
+  | {
+      direction: "out";
+      /** The `attach_file` call that posted it — the page's join key. */
+      callId: string;
+    }
+);
 
 export interface RunTimeline {
   /** Fold one stream event; returns the changes the view must apply (possibly
@@ -318,7 +328,7 @@ export function createRunTimeline(): RunTimeline {
     const e = event as Record<string, unknown>;
     switch (e.type) {
       case "input": {
-        const change: TimelineChange = { kind: "input", text: str(e.text), at: num(e.at) };
+        const change: TimelineChange = { kind: "input", text: str(e.text), messageId: str(e.messageId), at: num(e.at) };
         const src = e.source;
         if (src && typeof src === "object") {
           const o = src as Record<string, unknown>;
@@ -447,16 +457,23 @@ export function createRunTimeline(): RunTimeline {
       case "artifact": {
         const key = str(e.key);
         const name = str(e.name);
-        if (!key || !name || (e.direction !== "in" && e.direction !== "out")) return [];
-        const artifact: TimelineArtifact = {
-          direction: e.direction,
-          key,
-          name,
-          size: num(e.size) ?? 0,
-          contentType: str(e.contentType),
-          at: num(e.at),
-        };
-        return [{ kind: "artifact", artifact }];
+        if (!key || !name) return [];
+        // The join key is part of the file's identity here (live-view.md item 26):
+        // a received file names its message, a sent one its call; one naming
+        // neither has no card to sit on and is ignored like a keyless event.
+        // That includes a record written before the ids existed: its files
+        // show on no card while it lives (30 days), by decision — no fallback
+        // to order or names, nothing to remove later.
+        const common = { key, name, size: num(e.size) ?? 0, contentType: str(e.contentType), at: num(e.at) };
+        const messageId = str(e.messageId);
+        const callId = str(e.callId);
+        const artifact: TimelineArtifact | undefined =
+          e.direction === "in" && messageId
+            ? { ...common, direction: "in", messageId }
+            : e.direction === "out" && callId
+              ? { ...common, direction: "out", callId }
+              : undefined;
+        return artifact ? [{ kind: "artifact", artifact }] : [];
       }
       case "skill_use": {
         const name = str(e.skill);

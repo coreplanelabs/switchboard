@@ -105,7 +105,7 @@ describe("fitRecordToBudget", () => {
   // Feature: docs/reference/specs/tracing.md — spans displace no content.
   it("over budget, span records go first — pair by pair from the middle outward, never from the protected head — and the content greedy runs only if that was not enough", () => {
     const head: RunEvent[] = [
-      { type: "input", text: "go", seq: 1, at: 0 },
+      { type: "input", messageId: "m1", text: "go", seq: 1, at: 0 },
       { type: "span_start", spanId: "d1", name: "dispatch.compose", seq: 2, at: 1 },
       {
         type: "span_end",
@@ -342,6 +342,7 @@ describe("isRunRecord", () => {
     const events: RunEvent[] = [
       {
         type: "input",
+        messageId: "1700000000.000100",
         text: "please review",
         source: { url: "https://x.slack.com/archives/C1/p1", channel: "general", user: "alice" },
         seq: 1,
@@ -822,9 +823,9 @@ describe("the pull request on the record (docs/reference/specs/run-history.md it
 
   it("prOfEvents reads the last pr_opened event — the PR the post-step opened or edited — and nothing without one", () => {
     expect(prOfEvents([])).toBeUndefined();
-    expect(prOfEvents([{ type: "input", text: "x" }])).toBeUndefined();
+    expect(prOfEvents([{ type: "input", messageId: "m1", text: "x" }])).toBeUndefined();
     const events: RunEvent[] = [
-      { type: "input", text: "x" },
+      { type: "input", messageId: "m1", text: "x" },
       { type: "pr_opened", url: "https://github.com/acme/api/pull/1", number: 1, created: true },
       { type: "pr_opened", url: "https://github.com/acme/api/pull/2", number: 2, created: false },
     ];

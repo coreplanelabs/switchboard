@@ -499,7 +499,7 @@ describe("handleChatCommand", () => {
 describe("runs list on chat", () => {
   function record(id: string, finishedAt: number, over: Partial<RunRecord> = {}): RunRecord {
     const events = [
-      { type: "input" as const, text: "please do the thing", seq: 1 },
+      { type: "input" as const, messageId: "m1", text: "please do the thing", seq: 1 },
       { type: "answer" as const, text: "all done", seq: 2 },
     ];
     return {

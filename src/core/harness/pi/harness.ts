@@ -42,7 +42,13 @@ import type { Settlement } from "../../runLedger/resume.js";
 import type { AssembledCompaction } from "../../runLedger/transcript.js";
 import type { Notepad } from "../../runLedger/types.js";
 import type { RunControl } from "../../runRegistry/runControl.js";
-import { followUpPrompt, followUpSnippet, type FollowUpInbox, type FollowUpInput } from "../../threadAdmission.js";
+import {
+  followUpMessageId,
+  followUpPrompt,
+  followUpSnippet,
+  type FollowUpInbox,
+  type FollowUpInput,
+} from "../../threadAdmission.js";
 import type { Backend } from "../../trace/attrs.js";
 import type { Clock, Span } from "../../trace/types.js";
 import { PiBridge } from "./bridge.js";
@@ -665,7 +671,12 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
           ...(input.userName ? { user: input.userName } : {}),
           ...(input.from ? { run: input.from.runId } : {}),
         };
-        emit({ type: "input", text: redactSecrets(input.text), ...(Object.keys(source).length > 0 ? { source } : {}) });
+        emit({
+          type: "input",
+          text: redactSecrets(input.text),
+          messageId: followUpMessageId(input),
+          ...(Object.keys(source).length > 0 ? { source } : {}),
+        });
         note("follow_up", `follow-up folded in: ${redactSecrets(followUpSnippet(input))}`);
       }
       const images = inputs.flatMap((i) =>

@@ -67,7 +67,7 @@ function ctxFor(
 
 function persisted(id: string, over: Partial<RunRecord> = {}): RunRecord {
   const events: RunEvent[] = [
-    { type: "input", text: "what is a Durable Object?", seq: 1 },
+    { type: "input", messageId: "m1", text: "what is a Durable Object?", seq: 1 },
     { type: "answer", text: "A Durable Object is a single-instance coordination point.", seq: 2 },
   ];
   return {

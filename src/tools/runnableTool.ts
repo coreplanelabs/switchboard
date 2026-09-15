@@ -33,6 +33,12 @@ import type { WebCapability } from "./web.js";
 
 export interface ToolContext {
   executor: Executor;
+  /** The tool call's id (the provider's `tool_use` id; pi's `toolCallId`),
+   *  the same id the call's `tool_call`/`tool_result` events carry: what a tool
+   *  records about its own work (`attach_file`'s `artifact` event) names it,
+   *  so the run page puts the record on this call's card by data (live-view.md
+   *  item 26). Both loops set it for every call; absent only in unit tests. */
+  callId?: string;
   /** The tool call's own span (docs/reference/specs/tracing.md): what a tool measures
    *  itself (an MCP round trip, an executor op) is a child of it. Absent (CLI,
    *  most unit tests) → the tool measures nothing. */
