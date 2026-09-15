@@ -61,6 +61,15 @@ export interface R2ArtifactStoreOptions {
   clock?: Clock;
 }
 
+/** The one request header the store's reads carry beside the signature.
+ *  Node's fetch advertises `br, gzip, deflate, zstd` on any https request that
+ *  names no encoding; the edge then compresses a compressible object's answer
+ *  (text/plain from 48 bytes) and omits Content-Length, and a HEAD carries the
+ *  compressed GET's headers — so the size the bot verifies by was gone. Asking
+ *  for identity keeps the object's own length on the wire; signed, so R2
+ *  accepts it. */
+const IDENTITY = { "accept-encoding": "identity" } as const;
+
 /** The AWS SigV4 timestamp for a clock reading: `YYYYMMDDTHHMMSSZ`. */
 function amzDate(now: number): string {
   return new Date(now).toISOString().replace(/[:-]|\.\d{3}/g, "");
@@ -122,7 +131,7 @@ export class R2ArtifactStore implements ArtifactStore {
   }
 
   async head(key: string): Promise<ArtifactHead | null> {
-    const signed = await this.client.sign(new Request(this.objectUrl(key), { method: "HEAD" }), {
+    const signed = await this.client.sign(new Request(this.objectUrl(key), { method: "HEAD", headers: IDENTITY }), {
       aws: { datetime: amzDate(this.clock()) },
     });
     const res = await this.fetchImpl(signed);
@@ -139,7 +148,7 @@ export class R2ArtifactStore implements ArtifactStore {
   }
 
   async get(key: string): Promise<ArtifactObject | null> {
-    const signed = await this.client.sign(new Request(this.objectUrl(key), { method: "GET" }), {
+    const signed = await this.client.sign(new Request(this.objectUrl(key), { method: "GET", headers: IDENTITY }), {
       aws: { datetime: amzDate(this.clock()) },
     });
     const res = await this.fetchImpl(signed);

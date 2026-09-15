@@ -76,6 +76,11 @@ describe("R2ArtifactStore.head (item 20)", () => {
     expect(await store.head("runs/r1/out/1-sheet.png")).toEqual({ size: 3_145_728, contentType: "image/png" });
     expect(calls[0]!.method).toBe("HEAD");
     expect(calls[0]!.headers.get("authorization")).toMatch(/^AWS4-HMAC-SHA256 Credential=example-access-key\//);
+    // Without this, Node's fetch advertises br/gzip/deflate/zstd, the edge compresses a text object's
+    // answer and omits Content-Length — a text/plain file of 48 bytes or more then has no size to read.
+    expect(calls[0]!.headers.get("accept-encoding")).toBe("identity");
+    expect(calls[0]!.headers.get("x-amz-content-sha256")).toBeTruthy(); // the header rides inside the signature
+    expect(calls[0]!.headers.get("authorization")).toMatch(/SignedHeaders=[^,]*accept-encoding/);
     expect(await store.head("runs/r1/out/gone.png")).toBeNull();
     await expect(store.head("runs/r1/out/broken.png")).rejects.toThrow(
       /HEAD runs\/r1\/out\/broken\.png answered HTTP 503/,
@@ -167,6 +172,8 @@ contract("R2ArtifactStore (over a fetch double)", async () => {
     if (!o) return new Response(null, { status: 404 });
     // A GET is signed in the Authorization header (no query signature): the URL is the bare object.
     if (req.method === "GET") expect(req.headers.get("authorization")).toMatch(/^AWS4-HMAC-SHA256 /);
+    // Every read asks for the object's own bytes: no edge compression, so the length is on the wire.
+    expect(req.headers.get("accept-encoding"), `${req.method} ${key}`).toBe("identity");
     const headers = { "content-length": String(o.bytes.byteLength), "content-type": o.type };
     return new Response(req.method === "HEAD" ? null : o.bytes, { status: 200, headers });
   }) as unknown as typeof fetch;
