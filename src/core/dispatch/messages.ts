@@ -21,13 +21,30 @@ export function buildMessages(
   currentText: string,
   currentImages?: ImageAttachment[],
   currentDocuments?: DocumentAttachment[],
+  references?: readonly string[],
 ): ChatMessage[] {
   const messages: ChatMessage[] = history.map((h) => ({
     role: h.role,
     content: turnContent(h.text, h.images, h.documents),
   }));
-  messages.push({ role: "user", content: turnContent(currentText, currentImages, currentDocuments) });
+  messages.push({ role: "user", content: requestContent(currentText, currentImages, currentDocuments, references) });
   return normalizeAlternation(messages);
+}
+
+/** The request turn's parts: its attachments and text (`turnContent`), then
+ *  one text part per referenced conversation's quoted block (record 0037) —
+ *  on the request turn, after the request's own words, never a turn of its
+ *  own, so pi's `promptOf` carries the blocks with the ask and no parser that
+ *  reads history meets them. Exported for the seed. */
+export function requestContent(
+  text: string,
+  images?: ImageAttachment[],
+  documents?: DocumentAttachment[],
+  references?: readonly string[],
+): ContentPart[] {
+  const parts = turnContent(text, images, documents);
+  for (const block of references ?? []) parts.push({ type: "text", text: block });
+  return parts;
 }
 
 // The seed's shape and its reduction live in ./textTurns.ts, a module with no

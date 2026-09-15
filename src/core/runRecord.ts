@@ -46,6 +46,16 @@ const REVIEW_HEAD_PATTERN = /^[0-9a-f]{7,40}$/;
 
 /** One finished run as the store keeps it. Events are already redacted and
  *  capped upstream (`runEvents.ts`); this layer adds no data. */
+/** One conversation a run quoted (record 0037), as the record keeps it. */
+export interface RunReference {
+  /** The permalink as it appeared in the request. */
+  url: string;
+  /** Platform-namespaced channel id the conversation lives in. */
+  channelId: string;
+  /** How many messages the quoted block carried after the caps. */
+  messages: number;
+}
+
 export interface RunRecord {
   /** The run registry id (unguessable; safe to print — it is not the view token). */
   id: string;
@@ -66,6 +76,11 @@ export interface RunRecord {
   channelVisibility: ChannelVisibility;
   /** `owner/name` for repo runs. */
   repo?: string;
+  /** The conversations the request pointed at and the run quoted (record
+   *  0037), from its `reference` events: the permalink, the channel and how
+   *  many messages — so a pull request a steered run opened traces back to
+   *  the text that steered it. Absent when the run quoted nothing. */
+  references?: RunReference[];
   /** Epoch ms. */
   startedAt: number;
   finishedAt: number;

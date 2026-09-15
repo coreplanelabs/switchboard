@@ -121,6 +121,34 @@ describe("request / context / reply / placeholder", () => {
     expect(m.state.log).toHaveLength(0);
   });
 
+  it("collects referenced conversations outside the log, in publish order, with the channel name and permalink (record 0037)", () => {
+    const m = model();
+    m.handle({
+      type: "reference",
+      url: "https://team.example/archives/C_ONE/p1",
+      channelId: "slack:C_ONE",
+      channelName: "one",
+      messages: 12,
+      text: "Referenced thread · #one · 12 messages · https://team.example/archives/C_ONE/p1\n…",
+      at: 5,
+    });
+    m.handle({
+      type: "reference",
+      url: "https://team.example/archives/C_TWO/p2",
+      channelId: "slack:C_TWO",
+      channelName: "two",
+      messages: 3,
+      text: "…",
+      at: 6,
+    });
+    expect(m.state.references.map((r) => [r.channelName, r.messages, r.url])).toEqual([
+      ["one", 12, "https://team.example/archives/C_ONE/p1"],
+      ["two", 3, "https://team.example/archives/C_TWO/p2"],
+    ]);
+    expect(m.state.context).toHaveLength(0);
+    expect(m.state.log).toHaveLength(0);
+  });
+
   it("the reply (the answer event) lands below the log; the step's group stays open (the tally bars are the narrative)", () => {
     const m = model();
     m.handle(assistant("running tests", 1));

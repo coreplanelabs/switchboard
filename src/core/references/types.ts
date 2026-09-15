@@ -51,6 +51,9 @@ export interface ReferencedConversation {
  * text fetch, and the requester's standing on its own platform.
  */
 export interface ConversationReader {
+  /** The id prefix the reader's platform namespaces channels with (`slack`), so
+   *  the step can ask the requester's OWN platform about the requester. */
+  readonly platform: string;
   /** The adapter's URL grammar; `undefined` for a URL that is not one of its conversations. */
   parseConversationUrl(url: string): ConversationRef | undefined;
   /** One fresh lookup per call (cached briefly by the adapter), never a guess. */

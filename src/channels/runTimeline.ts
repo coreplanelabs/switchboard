@@ -99,6 +99,10 @@ export type TimelineChange =
   /** One thread turn the model was given (a `context` event) — the page's
    *  collapsed Context block, never a step. */
   | { kind: "context"; text: string; at?: number }
+  /** One conversation the request pointed at and the run quoted (a
+   *  `reference` event, record 0037) — the page's Referenced thread block,
+   *  beside the Context block, never a step. */
+  | { kind: "reference"; url: string; channelName: string; messages: number; text: string; at?: number }
   /** A notice from the transport itself (the SSE replay was capped) — rendered
    *  like a note; it is not a run event and never reaches the run record. */
   | { kind: "replay_note"; text: string }
@@ -363,6 +367,23 @@ export function createRunTimeline(): RunTimeline {
       }
       case "context":
         return [{ kind: "context", text: str(e.text), at: num(e.at) }];
+      case "reference": {
+        // A quoted conversation (record 0037): the block the model saw, with
+        // the classifier's channel name and the permalink. A frame missing its
+        // source is dropped — the page never shows a quotation it cannot attribute.
+        const messages = num(e.messages);
+        if (!str(e.url) || !str(e.channelName) || messages === undefined) return [];
+        return [
+          {
+            kind: "reference",
+            url: str(e.url),
+            channelName: str(e.channelName),
+            messages,
+            text: str(e.text),
+            at: num(e.at),
+          },
+        ];
+      }
       // The notepad as the `notes` tool last wrote it (session-log item 10):
       // a note row on the page, its kind the tool's name.
       case "notes":

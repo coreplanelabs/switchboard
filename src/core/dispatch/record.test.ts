@@ -546,4 +546,42 @@ describe("assembleRunRecord — the pull request on the record (docs/reference/s
     expect(isRunRecord(JSON.parse(JSON.stringify(record)))).toBe(true);
     expect("pr" in assembleRunRecord(base())).toBe(false);
   });
+
+  // Record 0037: the conversations a run quoted ride the record as `references`,
+  // derived from its `reference` events the way `pr` is from `pr_opened`, so a
+  // pull request a steered run opened traces back to the text that steered it.
+  it("folds every reference event into `references` in publish order, and the record still validates; without one, no key", () => {
+    const events = [
+      { type: "input" as const, messageId: "m1", text: "what did we conclude?", seq: 1 },
+      {
+        type: "reference" as const,
+        url: "https://team.example/archives/C_ONE/p1",
+        channelId: "slack:C_ONE",
+        channelName: "one",
+        messages: 12,
+        text: "Referenced thread · #one · 12 messages · https://team.example/archives/C_ONE/p1\n…",
+        seq: 2,
+      },
+      {
+        type: "reference" as const,
+        url: "https://team.example/archives/C_TWO/p2",
+        channelId: "slack:C_TWO",
+        channelName: "two",
+        messages: 3,
+        text: "…",
+        seq: 3,
+      },
+    ];
+    const record = assembleRunRecord({
+      ...base(),
+      snap: { events, finished: true, startedAt: 1, finishedAt: 10, eventCount: 3, stepCount: 3, truncated: false },
+    });
+    expect(record.references).toEqual([
+      { url: "https://team.example/archives/C_ONE/p1", channelId: "slack:C_ONE", messages: 12 },
+      { url: "https://team.example/archives/C_TWO/p2", channelId: "slack:C_TWO", messages: 3 },
+    ]);
+    expect(isRunRecord(record)).toBe(true);
+    expect(isRunRecord(JSON.parse(JSON.stringify(record)))).toBe(true);
+    expect("references" in assembleRunRecord(base())).toBe(false);
+  });
 });

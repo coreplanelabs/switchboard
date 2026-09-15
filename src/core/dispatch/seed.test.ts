@@ -260,3 +260,34 @@ describe("sessionSeedFor — the seed read from the ledger, with the notepad", (
     expect(none).toEqual({ notes: [] });
   });
 });
+
+// Record 0037: on the pi harness the quoted blocks ride the request turn the
+// seed ends on, as text parts after the request's text, so `promptOf` (which
+// joins every text part of the last user turn) hands them to pi with the ask.
+describe("sessionSeed — referenced conversations on the request turn", () => {
+  it("the request turn carries the request text then each block; the tail and the lines since are untouched", () => {
+    const withRefs = sessionSeed({
+      tail: complete(tail4, 0),
+      previous,
+      history,
+      request: { ...request, references: ["BLOCK ONE", "BLOCK TWO"] },
+    });
+    const without = sessionSeed({ tail: complete(tail4, 0), previous, history, request });
+    expect(withRefs).toBeDefined();
+    expect(without).toBeDefined();
+    const last = withRefs!.messages.at(-1)!;
+    expect(last.role).toBe("user");
+    expect(last.content).toEqual([
+      { type: "text", text: request.text },
+      { type: "text", text: "BLOCK ONE" },
+      { type: "text", text: "BLOCK TWO" },
+    ]);
+    expect(withRefs!.messages.slice(0, -1)).toEqual(without!.messages.slice(0, -1));
+  });
+
+  it("no references leaves the seed byte-identical", () => {
+    const a = sessionSeed({ tail: complete(tail4, 0), previous, history, request: { ...request, references: [] } });
+    const b = sessionSeed({ tail: complete(tail4, 0), previous, history, request });
+    expect(a).toEqual(b);
+  });
+});

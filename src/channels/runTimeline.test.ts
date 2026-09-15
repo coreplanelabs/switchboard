@@ -715,3 +715,44 @@ describe("createRunTimeline — artifact", () => {
     ]);
   });
 });
+
+// Record 0037: a `reference` event is its own change, beside `context` — never
+// a step — and a frame that cannot say where its quotation came from is dropped.
+describe("createRunTimeline — reference frames", () => {
+  it("a reference event becomes one reference change carrying the channel name, the count, the permalink and the block", () => {
+    const t = createRunTimeline();
+    const changes = t.push({
+      type: "reference",
+      url: "https://team.example/archives/C_ONE/p1",
+      channelId: "slack:C_ONE",
+      channelName: "one",
+      messages: 12,
+      text: "Referenced thread · #one · 12 messages · https://team.example/archives/C_ONE/p1\n…",
+      at: 7,
+    });
+    expect(changes).toEqual([
+      {
+        kind: "reference",
+        url: "https://team.example/archives/C_ONE/p1",
+        channelName: "one",
+        messages: 12,
+        text: "Referenced thread · #one · 12 messages · https://team.example/archives/C_ONE/p1\n…",
+        at: 7,
+      },
+    ]);
+    expect(t.steps()).toHaveLength(0);
+  });
+
+  it("a reference frame without its url, channel name or count is dropped", () => {
+    const t = createRunTimeline();
+    expect(
+      t.push({ type: "reference", url: "", channelId: "slack:C", channelName: "one", messages: 1, text: "x" }),
+    ).toEqual([]);
+    expect(
+      t.push({ type: "reference", url: "https://x", channelId: "slack:C", channelName: "", messages: 1, text: "x" }),
+    ).toEqual([]);
+    expect(
+      t.push({ type: "reference", url: "https://x", channelId: "slack:C", channelName: "one", text: "x" } as never),
+    ).toEqual([]);
+  });
+});
