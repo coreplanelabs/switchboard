@@ -710,6 +710,23 @@ describe("McpService — OAuth (item 18)", () => {
     expect(await tokenFor(h)).toMatchObject({ name: "vanta", unavailable: expect.stringMatching(/invalid_grant/) });
   });
 
+  it("a run whose credential read raced the refresh (stale set in hand, refresh already stored) gets the refreshed token, never a second refresh", async () => {
+    const h = harness({ oauth: { server: VANTA } });
+    await h.service.add(alice, ME(alice), { name: "vanta", url: VANTA });
+    const { state, code: c } = await startFlow(h);
+    expect((await h.service.completeOAuth(ada, { state, code: c })).ok).toBe(true);
+    expect(await tokenFor(h)).toBe("at-1");
+    h.tick(3600_000 - 30_000); // inside the 60 s skew
+    const stale = (await h.secrets.getCredential("user:slack:UALICE/vanta"))!; // the pre-refresh sealed set
+    expect(await tokenFor(h)).toBe("at-2"); // the refresh lands and is stored
+    // A concurrent run read the sealed set before the store write but reaches the
+    // refresh path only now — hand it the stale set to force that interleaving.
+    const real = h.secrets.getCredential.bind(h.secrets);
+    h.secrets.getCredential = async (id) => (id === "user:slack:UALICE/vanta" ? stale : real(id));
+    expect(await tokenFor(h)).toBe("at-2");
+    expect(h.as.tokenRequests.filter((r) => r.grant_type === "refresh_token")).toHaveLength(1);
+  });
+
   it("a static `auth: oauth` server in config.yaml is connected the same way: `connect --scope channel` mints the link, the callback seals the channel's credential, runs in that channel get the token; a static bearer without tokenEnv cannot be connected (it is not a stored credential)", async () => {
     const h = harness({ oauth: { server: "https://mcp.vanta.com/mcp" } });
     const link = await h.service.connect(alice, CH("slack:CSTATIC"), "compliance");
