@@ -30,7 +30,15 @@ import {
   MCP_SERVER_NAME_RE,
   MCP_SERVERS_PER_SCOPE_MAX,
 } from "../mcp/registry.js";
-import type { AppConfig, PiCompactionConfig, PiConfig, RoutingConfig, Scope, TracingConfig } from "../config.js";
+import type {
+  AppConfig,
+  PiCompactionConfig,
+  PiConfig,
+  ReferencesConfig,
+  RoutingConfig,
+  Scope,
+  TracingConfig,
+} from "../config.js";
 
 /** Upper bound on one scope's `instructions` text (prepended to every turn). */
 export const MAX_INSTRUCTIONS_LENGTH = 2000;
@@ -60,6 +68,7 @@ const CONFIG_KEYS: Record<keyof AppConfig, true> = {
   ship: true,
   spawn: true,
   routing: true,
+  references: true,
   harness: true,
   pi: true,
   slack: true,
@@ -305,6 +314,7 @@ export function validateConfig(cfg: AppConfig): void {
   if (cfg.ship !== undefined) validateShip(cfg.ship);
   if (cfg.spawn !== undefined) validateSpawn(cfg.spawn);
   if (cfg.routing !== undefined) validateRouting(cfg.routing, cfg.providers);
+  if (cfg.references !== undefined) validateReferences(cfg.references);
   if (cfg.artifacts !== undefined) validateArtifacts(cfg.artifacts);
   if (cfg.harness !== undefined) validateHarness(cfg.harness);
   if (cfg.pi !== undefined) validatePi(cfg.pi);
@@ -359,6 +369,21 @@ function validateHarness(harness: unknown): void {
  *  cannot take a forced tool call. */
 export const ROUTE_ANSWER_MODES = ["tool", "text"] as const;
 export type RouteAnswerMode = (typeof ROUTE_ANSWER_MODES)[number];
+
+/** The `references` block's keys, held equal to `ReferencesConfig` the way the top-level keys are. */
+const REFERENCES_KEYS: Record<keyof ReferencesConfig, true> = { enabled: true };
+
+/** `references` (record 0037): `enabled` is a boolean and nothing else — a
+ *  `"yes"` or a `1` is refused by name, never read as on or as off. Any other
+ *  key is refused by name. */
+function validateReferences(references: ReferencesConfig): void {
+  if (typeof references !== "object" || references === null || Array.isArray(references))
+    throw new Error("config.yaml: references must be a mapping");
+  for (const key of unknownKeys(references, REFERENCES_KEYS))
+    throw new Error(`config.yaml: references.${key} is not a known key`);
+  if (references.enabled !== undefined && typeof references.enabled !== "boolean")
+    throw new Error("config.yaml: references.enabled must be true or false");
+}
 
 /** The `routing` block's keys, held equal to `RoutingConfig` the way the top-level keys are. */
 const ROUTING_KEYS: Record<keyof RoutingConfig, true> = { auto: true, model: true, answer: true };

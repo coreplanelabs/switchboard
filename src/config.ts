@@ -138,6 +138,19 @@ export function routingOn(config: AppConfig): boolean {
   return config.routing?.auto ?? true;
 }
 
+/** The `references` block (`AppConfig.references`; record 0037): the
+ *  linked-thread resolver's switch. Off until a deployment turns it on, so
+ *  the flag-off state is byte-identical to a deployment without the block. */
+export interface ReferencesConfig {
+  enabled?: boolean;
+}
+
+/** Whether the references dispatch step runs: `references.enabled`, default off.
+ *  The one place the default lives: the stage asks this, never the field. */
+export function referencesOn(config: AppConfig): boolean {
+  return config.references?.enabled ?? false;
+}
+
 export interface AppConfig {
   /**
    * The GitHub organization (or user) this installation serves — the account
@@ -268,6 +281,13 @@ export interface AppConfig {
    * `defaults.agent`, exactly as before the router.
    */
   routing?: RoutingConfig;
+  /**
+   * The linked-thread resolver (docs/decisions/0037-a-linked-thread-is-quoted-not-joined.md):
+   * a permalink to another thread the bot is in becomes a quoted, untrusted
+   * block on the request turn. Off by default (`referencesOn`); a deployment
+   * that sets nothing here behaves exactly as before the resolver.
+   */
+  references?: ReferencesConfig;
   /**
    * Which loop drives each preset's runs (docs/reference/specs/harness-pi.md
    * item 1): `<preset>: native | pi`, a deployment decision over the preset's
