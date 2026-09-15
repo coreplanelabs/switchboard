@@ -21,5 +21,6 @@ What is deliberately off, narrow on purpose, or not yet proven, so an absence is
 - **Per-PR docs previews**: CI builds the site on every PR and publishes nothing.
 - **Resident `[gap]` rows**: cross-repository token scope; a push from a resident thread.
 - **Run history `[gap]` rows**: a summary-only friction read; a full-scan listing.
+- **A ship unit's page is not built yet**: its runs are read from one route (the `runs unit` command); the page waits on a design check-in.
 
 Complete list: the specs' [`[gap]` rows](../reference/specs/README.md); switches: [Turn features on and off](../how-to/turn-features-on-and-off.md).
