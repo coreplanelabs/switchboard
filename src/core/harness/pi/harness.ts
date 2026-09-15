@@ -283,7 +283,13 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
     run.onProgress?.(summary);
     emit({ type: "run_note", kind, summary, ...(mode ? { mode } : {}) });
   };
-  const bridge = new PiBridge({ emit, onProgress: run.onProgress, agentSpan, clock });
+  const bridge = new PiBridge({
+    emit,
+    onProgress: run.onProgress,
+    agentSpan,
+    clock,
+    textFailing: new Set(run.tools.filter((t) => t.failsInText).map((t) => t.name)),
+  });
   // Where pi's files are: the root the row recorded for a pi another build
   // started (the re-attach below), else the root the container makes for a
   // fresh start (`makeRoot`: the exec container's predictable one, the bot

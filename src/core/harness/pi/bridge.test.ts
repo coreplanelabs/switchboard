@@ -20,7 +20,7 @@ import type { PiEvent } from "./protocol.js";
 
 const NOW = 1_700_000_000_000;
 
-function harness(opts: { withSpans?: boolean; clock?: () => number } = {}) {
+function harness(opts: { withSpans?: boolean; clock?: () => number; textFailing?: ReadonlySet<string> } = {}) {
   const events: RunEvent[] = [];
   const notes: string[] = [];
   const sink = recordingSink();
@@ -32,6 +32,7 @@ function harness(opts: { withSpans?: boolean; clock?: () => number } = {}) {
     onProgress: (n) => void notes.push(n),
     agentSpan,
     clock,
+    ...(opts.textFailing ? { textFailing: opts.textFailing } : {}),
   });
   return { bridge, events, notes, sink, agentSpan };
 }
@@ -252,7 +253,11 @@ describe("the gate's coverage — every call that ran was vetted", () => {
   // "holds 0 bytes", the GitHub writes' refusals) failed as far as the model is concerned; pi's
   // isError is false for it, so the bridge reads the text the way the native loop does.
   it("a relayed tool whose text opens error: is recorded ok:false without pi's isError; ordinary text stays ok:true", () => {
-    const { bridge, events } = harness();
+    // The harness hands the bridge the relayed tools that declare `failsInText`; read_file is not one.
+    const { bridge, events } = harness({ textFailing: new Set(["attach_file"]) });
+    bridge.gateSaw("a0");
+    bridge.observe(start("a0", "read_file", { path: "build.log" }));
+    bridge.observe(end("a0", "read_file", "error: ENOENT at step 1 (retried)\nstep 2 ok"));
     bridge.gateSaw("a1");
     bridge.observe(start("a1", "attach_file", { path: "out/received.txt" }));
     bridge.observe(
@@ -267,6 +272,7 @@ describe("the gate's coverage — every call that ran was vetted", () => {
     bridge.observe(end("a2", "attach_file", "attached probe-a.txt (8 bytes) to the conversation and the run page"));
     const results = events.filter((e) => e.type === "tool_result");
     expect(results.map((r) => [r.tool, r.ok])).toEqual([
+      ["read_file", true],
       ["attach_file", false],
       ["attach_file", true],
     ]);

@@ -171,6 +171,7 @@ async function listChildren(
 
 export const spawnRunTool: RunnableTool = {
   name: "spawn_run",
+  failsInText: true,
   description:
     "Start a child run as the person who asked you: an ordinary Switchboard run of the named preset, in a thread of its own in this " +
     "channel, under their permissions — what they could start by hand with `agent:<preset>`. The child is a reader of this conversation: " +
@@ -226,6 +227,7 @@ export const spawnRunTool: RunnableTool = {
 
 export const sendToRunTool: RunnableTool = {
   name: "send_to_run",
+  failsInText: true,
   description:
     "Steer one of your live children: `text` reaches it as a follow-up at its next step, the way a reply in its thread would — " +
     "sent as the person who asked you, and recorded on the child's run page as coming from this run. Use it when the request " +
@@ -396,6 +398,7 @@ async function nextTick(wait: WaitCapability, ids: ReadonlySet<string>, ms: numb
 
 export const awaitRunsTool: RunnableTool = {
   name: "await_runs",
+  failsInText: true,
   description:
     "Wait for runs — normally your children — to end, and get each one's end as data: its terminal status (completed, failed, " +
     "refused, stopped_soft, stopped_hard, interrupted) with its final reply wrapped as untrusted content; `running` for one still " +

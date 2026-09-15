@@ -192,6 +192,7 @@ async function attachThroughStore(
 
 export const attachFileTool: RunnableTool = {
   name: "attach_file",
+  failsInText: true,
   description:
     "Post a file from the workspace into the conversation so the person sees it inline — a screenshot " +
     "(e.g. from `playwright screenshot`), a rendered PDF, a recording, a log. Use it whenever you produce an " +

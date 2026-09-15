@@ -162,6 +162,13 @@ export interface RunnableTool extends ToolDef {
    *  `submit_verdict`, `submit_pr_description`, `submit_handoff`,
    *  `submit_dispositions`) leaves this unset and runs strictly in order. */
   sideEffectFree?: true;
+  /** True for a tool that reports its own failure to the model as a text
+   *  opening `error:` instead of throwing (`attach_file`, the `submit_*`
+   *  tools, the run tools): the record marks such a result `ok:false`
+   *  (`toolTextFailed`, run-visibility.md item 5). A tool that relays content
+   *  it did not write (`read_file`, `web_fetch`, `use_skill`) leaves this
+   *  unset — a file whose first line happens to say `error:` was still read. */
+  failsInText?: true;
 }
 
 export const bashTool: RunnableTool = {
@@ -349,6 +356,7 @@ export const diffDigestTool: RunnableTool = {
 
 export const submitVerdictTool: RunnableTool = {
   name: "submit_verdict",
+  failsInText: true,
   description:
     "Record your review verdict. REQUIRED before your final message when reviewing a PR: " +
     "`approve` when there are no blocking issues (nits alone are not blocking), `request_changes` otherwise. " +
@@ -421,6 +429,7 @@ export const submitVerdictTool: RunnableTool = {
 // other and the runner drops it, with a note to the re-review.
 export const submitDispositionsTool: RunnableTool = {
   name: "submit_dispositions",
+  failsInText: true,
   description:
     "Record one disposition per review finding after addressing them: `fixed` (the finding is addressed in your " +
     "pushed code) or `declined` (deliberately not doing it — the note says why). `findingId` is the finding's " +
@@ -468,6 +477,7 @@ export const submitDispositionsTool: RunnableTool = {
 // model can fix the object and call again within its own budget.
 export const submitPrDescriptionTool: RunnableTool = {
   name: "submit_pr_description",
+  failsInText: true,
   description:
     "Submit the PR description as a typed object. REQUIRED after pushing your branch: Switchboard renders the " +
     "GitHub PR body from this object at the pushed head and opens (or updates) the pull request itself — never " +
@@ -581,6 +591,7 @@ const handoffEntry = (fields: Record<string, string>): Record<string, unknown> =
 
 export const submitHandoffTool: RunnableTool = {
   name: "submit_handoff",
+  failsInText: true,
   description:
     "Submit the unit handoff as a typed object — REQUIRED when your first user turn carries a `## Contract` block: once, " +
     "after submit_pr_description and before your final message. `deviations`: where you departed from the unit as written " +
