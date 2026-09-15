@@ -58,6 +58,14 @@ export const POLICY: readonly Rule[] = [
   { action: "runs:read", resource: "command", when: [grant("runs:read")] },
   { action: "runs:write", resource: "command", when: [grant("runs:write")] },
 
+  // ── conversations ────────────────────────────────────────────────────────
+  // Who may point the bot at another thread (record 0037). Asked for a
+  // pointing actor (`pointingActor`: one membership, the origin channel, no
+  // grants), so `member-of` reads: a public channel from anywhere, a private
+  // channel only from inside it, an admin's `all` not consulted. The row has
+  // no caller until the references dispatch step lands behind its flag.
+  { action: "conversation:read", resource: "channel", when: [MEMBER_OF] },
+
   // ── review ───────────────────────────────────────────────────────────────
   // `review abridge` spends one Opus-class call and rewrites a stored record:
   // the grant admits the command (admins through `all`, operators by name;

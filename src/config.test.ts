@@ -11,6 +11,7 @@ import {
   openConfigStore,
   OverridesConflictError,
   overridesBackingFor,
+  referencesOn,
   routingOn,
   WorkerOverridesBacking,
   type AppConfig,
@@ -1683,6 +1684,30 @@ describe("pi block (pi.compaction.reserveTokens, pi.compaction.keepRecentTokens)
     expect(() => store(YAML_FIXTURE + "pi:\n  reserveTokens: 16384\n")).toThrow(/pi\.reserveTokens is not a known key/);
     expect(() => store(YAML_FIXTURE + "pi:\n  compaction:\n    enabled: false\n")).toThrow(
       /pi\.compaction\.enabled is not a known key/,
+    );
+  });
+});
+
+// `references` block (record 0037): the linked-thread resolver's switch, off
+// until a deployment turns it on, validated at load like `routing.auto`.
+describe("references block (references.enabled)", () => {
+  it("parses enabled; an absent block leaves the field unset and the resolver off", () => {
+    expect(store(YAML_FIXTURE + "references:\n  enabled: true\n").config.references).toEqual({ enabled: true });
+    expect(store().config.references).toBeUndefined();
+    expect(referencesOn(store().config)).toBe(false);
+    expect(referencesOn(store(YAML_FIXTURE + "references:\n  enabled: true\n").config)).toBe(true);
+    expect(referencesOn(store(YAML_FIXTURE + "references:\n  enabled: false\n").config)).toBe(false);
+  });
+
+  it("refuses a non-boolean enabled and an unknown key by name", () => {
+    expect(() => store(YAML_FIXTURE + 'references:\n  enabled: "yes"\n')).toThrow(
+      /references\.enabled must be true or false/,
+    );
+    expect(() => store(YAML_FIXTURE + "references:\n  enabled: 1\n")).toThrow(
+      /references\.enabled must be true or false/,
+    );
+    expect(() => store(YAML_FIXTURE + "references:\n  enable: true\n")).toThrow(
+      /references\.enable is not a known key/,
     );
   });
 });
