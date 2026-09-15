@@ -381,6 +381,7 @@ describe("submit_dispositions tool", () => {
 
   it("mutates run state, so it is never side-effect-free (must run strictly in order)", () => {
     expect(tool().sideEffectFree).toBeUndefined();
+    expect(tool().failsInText).toBe(true);
   });
 
   it("forwards a valid set to the context and acknowledges the count", async () => {
@@ -495,6 +496,7 @@ describe("submit_handoff tool", () => {
 
   it("mutates run state, so it is never side-effect-free (must run strictly in order)", () => {
     expect(submitHandoffTool.sideEffectFree).toBeUndefined();
+    expect(submitHandoffTool.failsInText).toBe(true);
   });
 
   it("forwards a valid handoff to the sink, trimmed, and acknowledges it with the counts", async () => {
@@ -581,6 +583,7 @@ describe("submit_pr_description tool", () => {
 
   it("mutates run state, so it is never side-effect-free (must run strictly in order)", () => {
     expect(submitPrDescriptionTool.sideEffectFree).toBeUndefined();
+    expect(submitPrDescriptionTool.failsInText).toBe(true);
   });
 
   it("forwards a valid description to the context, parsed and normalized, and acknowledges it", async () => {

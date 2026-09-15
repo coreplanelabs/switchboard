@@ -50,6 +50,7 @@ describe("attach_file toolset wiring", () => {
       expect(names(key), key).not.toContain("attach_file");
     }
     expect(attachFileTool.sideEffectFree).toBeUndefined(); // it posts: strictly in order
+    expect(attachFileTool.failsInText).toBe(true); // its `error:` answers are recorded ok:false (run-visibility item 5)
     expect(attachFileTool.description).toContain(String(MAX_READ_BYTES));
   });
 });

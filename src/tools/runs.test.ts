@@ -349,6 +349,11 @@ describe("spawn_run — the capability, called with the run's remaining wall clo
       "get_run_status",
     ]);
     for (const t of RUN_TOOLS) expect(t.sideEffectFree, t.name).toBe(t.name === "await_runs" ? true : undefined);
+    // The three that answer `error:` for a bad ask declare it, so the record marks those answers ok:false.
+    for (const t of RUN_TOOLS)
+      expect(t.failsInText, t.name).toBe(
+        ["spawn_run", "send_to_run", "await_runs"].includes(t.name) ? true : undefined,
+      );
   });
 });
 

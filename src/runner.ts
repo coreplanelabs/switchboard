@@ -537,8 +537,11 @@ async function runLoop(
         const text = toolResultText(output);
         // A bash command that exited nonzero did not succeed, whatever the tool
         // returned — the executors say so with an `exit N:` prefix (runEvents);
-        // any other tool says so with an `error:` opening (toolTextFailed).
-        const exit = tu.name === "bash" ? parseExitPrefix(text) : { failed: toolTextFailed(text) };
+        // a tool that declares `failsInText` says so with an `error:` opening
+        // (toolTextFailed); a tool relaying content it did not write is judged
+        // by neither.
+        const exit =
+          tu.name === "bash" ? parseExitPrefix(text) : { failed: tool.failsInText === true && toolTextFailed(text) };
         emit({
           type: "tool_result",
           tool: tu.name,

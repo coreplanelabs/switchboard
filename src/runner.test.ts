@@ -985,31 +985,39 @@ describe("run-visibility events", () => {
   // convention) failed as far as the model is concerned, and the record says so; text that only
   // mentions an error later is a success.
   it("marks a tool that answers error: … with ok:false, and one that merely mentions an error with ok:true", async () => {
-    const readUse = (id: string, path: string): CompletionResult => ({
-      content: [{ type: "tool_use", id, name: "read_file", input: { path } }],
+    // submit_pr_description declares `failsInText` and refuses an empty description with `error: …`;
+    // read_file relays a file's content and declares nothing — a log whose first line says `error:`
+    // was still read, and so was one that mentions an error later.
+    const use = (id: string, name: string, input: Record<string, unknown>): CompletionResult => ({
+      content: [{ type: "tool_use", id, name, input }],
       stopReason: "tool_use",
     });
-    // read_file hands back the executor's words: one path answers the tools' error opening, the other a log
-    // that mentions an error and then succeeds.
-    const answers: Record<string, string> = {
-      "out/missing.txt": "error: could not read out/missing.txt: No such file or directory",
-      "build.log": "step 1 logged: error: ENOENT (retried)\nstep 2 ok",
+    const files: Record<string, string> = {
+      "build.log": "error: ENOENT at step 1 (retried)\nstep 2 ok",
+      "notes.txt": "step 1 logged: error: ENOENT (retried)\nstep 2 ok",
     };
     const events: RunEvent[] = [];
     await runAgent({
-      provider: scripted([readUse("r1", "out/missing.txt"), readUse("r2", "build.log"), text("done")]),
+      provider: scripted([
+        use("d1", "submit_pr_description", {}),
+        use("r1", "read_file", { path: "build.log" }),
+        use("r2", "read_file", { path: "notes.txt" }),
+        text("done"),
+      ]),
       model: "m",
-      agent: agent({ maxTurns: 5 }),
+      agent: agent({ maxTurns: 6 }),
       messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
-      toolContext: { executor: { ...fakeExecutor, readFile: async (path) => answers[path] ?? "" } },
+      toolContext: { executor: { ...fakeExecutor, readFile: async (path) => files[path] ?? "" } },
       onEvent: (e) => events.push(e),
     });
     const results = events.filter((e) => e.type === "tool_result");
     expect(results.map((r) => [r.callId, r.ok])).toEqual([
-      ["r1", false],
+      ["d1", false],
+      ["r1", true],
       ["r2", true],
     ]);
-    expect(results[0]!.summary).toMatch(/^error: could not read/);
+    expect(results[0]!.summary).toMatch(/^error: invalid PR description/);
+    expect(results[1]!.summary).toMatch(/^error: ENOENT/); // relayed content, recorded as read
   });
 
   it("pairs each tool_result to its tool_call by callId (the provider's tool_use id)", async () => {

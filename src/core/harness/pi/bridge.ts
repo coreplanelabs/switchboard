@@ -103,6 +103,10 @@ export interface BridgeDeps {
   /** The run's `run.agent` span the tool spans hang under; absent, no spans. */
   agentSpan?: Span;
   clock: Clock;
+  /** The relayed tools that declare `failsInText` (`RunnableTool`): their
+   *  `error:`-opening results are recorded `ok:false`. Absent, only pi's
+   *  `isError` decides for a non-bash tool. */
+  textFailing?: ReadonlySet<string>;
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
@@ -306,9 +310,13 @@ export class PiBridge {
     const tool = open?.tool ?? str(event.toolName);
     const isError = event.isError === true;
     const text = piResultText(event.result);
-    // A relayed tool answers `error: …` in text instead of raising pi's isError:
-    // the record calls that a failure too, as the native loop does (toolTextFailed).
-    const exit = tool === "bash" ? piBashExit(text, isError) : { failed: isError || toolTextFailed(text) };
+    // A relayed tool that declares `failsInText` answers `error: …` in text
+    // instead of raising pi's isError: the record calls that a failure too, as
+    // the native loop does (toolTextFailed).
+    const exit =
+      tool === "bash"
+        ? piBashExit(text, isError)
+        : { failed: isError || (this.deps.textFailing?.has(tool) === true && toolTextFailed(text)) };
     const ok = !exit.failed;
     this.emit({
       type: "tool_result",
