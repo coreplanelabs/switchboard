@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { authorize, evaluateRule } from "./authorize.js";
 import { POLICY, grantPlaceholders, resolveGrant, validatePolicy } from "./policy.js";
-import { ACTORS, REPOS, run, scope } from "./testing.js";
-import type { Actor, Condition, Resource, Rule } from "./types.js";
+import { pointingActor } from "./pointingActor.js";
+import { ACTORS, CHANNELS, REPOS, run, scope } from "./testing.js";
+import type { Actor, ChannelVisibility, Condition, Resource, Rule } from "./types.js";
 
 // Every row of the POLICY table has at least one allow and one deny
 // case, keyed by the row's shape — a new row without cases fails `coverage`,
@@ -33,8 +34,17 @@ const channelConfig = (id: string): Resource => ({ type: "config-scope", kind: "
 const userConfig = (id: string): Resource => ({ type: "config-scope", kind: "user", id });
 const orgConfig: Resource = { type: "config-scope", kind: "org" };
 
+const channel = (c: { id: string; visibility: ChannelVisibility }): Resource => ({
+  type: "channel",
+  id: c.id,
+  visibility: c.visibility,
+});
+
 const A = ACTORS;
 const foreignPrivRun = run({ channel: "priv", userId: "slack:UERIN" });
+/** The actor the `conversation:read` row is asked for: `principal` pointing from `origin`. */
+const pointing = (principal: Actor, origin: keyof typeof CHANNELS): Actor =>
+  pointingActor(principal, CHANNELS[origin].id);
 
 /** The `<action> command [has-grant(<action>)]` shape every command row has. */
 const commandRow = (action: string, commandId: string, allow: readonly Actor[], deny: readonly Actor[]) => ({
@@ -45,6 +55,23 @@ const commandRow = (action: string, commandId: string, allow: readonly Actor[], 
 });
 
 const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> = {
+  // Record 0037: who may point the bot at a channel's thread. Asked for a
+  // pointing actor (one membership, the origin, no grants): public from
+  // anywhere, private only from inside, denied elsewhere for an admin too;
+  // `unknown` is never public.
+  "conversation:read channel [member-of]": {
+    allow: [
+      [pointing(A.noGrants, "pub2"), channel(CHANNELS.pub1)],
+      [pointing(A.noGrants, "dm"), channel(CHANNELS.pub1)],
+      [pointing(A.noGrants, "priv"), channel(CHANNELS.priv)],
+    ],
+    deny: [
+      [pointing(A.noGrants, "pub1"), channel(CHANNELS.priv)],
+      [pointing(A.admin, "pub1"), channel(CHANNELS.priv)],
+      [pointing(A.member, "pub1"), channel(CHANNELS.priv)],
+      [pointing(A.noGrants, "pub1"), channel({ id: CHANNELS.pub2.id, visibility: "unknown" })],
+    ],
+  },
   "runs:read run [member-of]": {
     allow: [
       [A.member, run({ channel: "pub1", userId: "slack:UERIN" })],
