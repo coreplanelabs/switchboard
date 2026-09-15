@@ -326,9 +326,30 @@ export function resolveSpecRow(ref: SpecItemRef, specMarkdown: string | undefine
 
 // ---- the builders ----------------------------------------------------------------------------------
 
-export interface ContractFromPlanInput {
-  planMarkdown: string;
-  unitId: string;
+const TITLE_MAX = 80;
+
+/** A unit's title from free text: its first non-blank line, cut to 80
+ *  characters with an ellipsis — the one rule the hand-off's unit row and the
+ *  generated contract share. */
+export function unitTitleOf(text: string): string {
+  const firstLine =
+    text
+      .split("\n")
+      .find((l) => l.trim() !== "")
+      ?.trim() ?? "";
+  return firstLine.length > TITLE_MAX ? `${firstLine.slice(0, TITLE_MAX - 1).trimEnd()}…` : firstLine;
+}
+
+/** A generated plan's one unit (agent-ship item 16): the text is the whole
+ *  section under a `### <id>.` heading titled by its first line. Built, never
+ *  parsed back out of markdown — a heading line inside the text is the text's
+ *  own, not the end of the section. */
+export function generatedUnit(id: string, text: string): ContractUnit {
+  const title = unitTitleOf(text);
+  return { id, title, section: `### ${id}. ${title}\n\n${text}`, bullets: {} };
+}
+
+interface ContractInputCommon {
   /** The spec's text by file name (`resident-repos.md`); undefined when it is not there. */
   readSpec: (spec: string) => string | undefined;
   agentRules?: AgentRules;
@@ -337,8 +358,15 @@ export interface ContractFromPlanInput {
   issue?: { repo: string; number: number };
 }
 
+/** The unit: parsed out of the plan's markdown by id (a seeded plan), or the
+ *  unit itself when the caller already holds it (a generated plan's one unit,
+ *  `generatedUnit`). */
+export type ContractFromPlanInput = ContractInputCommon &
+  ({ planMarkdown: string; unitId: string } | { unit: ContractUnit });
+
 /** The contract for one unit of a plan. Throws when the plan has no such unit. */
 export function contractFromPlan(input: ContractFromPlanInput): ChildContract {
+  if ("unit" in input) return contractOf(input.unit, input);
   const unit = parsePlanUnit(input.planMarkdown, input.unitId);
   if (!unit) {
     const ids = planUnitIds(input.planMarkdown);
@@ -346,35 +374,13 @@ export function contractFromPlan(input: ContractFromPlanInput): ChildContract {
       `the plan has no unit ${input.unitId} (its units: ${ids.length > 0 ? ids.join(", ") : "none — no `### U<n>.` heading"})`,
     );
   }
+  return contractOf(unit, input);
+}
+
+function contractOf(unit: ContractUnit, input: ContractInputCommon): ChildContract {
   return {
     unit,
     specRows: specItemRefs(unit.section).map((ref) => resolveSpecRow(ref, input.readSpec(ref.spec))),
-    agentRules: input.agentRules,
-    guards: GUARDS,
-    rebase: { branch: input.rebase?.branch, onto: input.rebase?.onto },
-    issue: input.issue,
-  };
-}
-
-const TITLE_MAX = 80;
-
-/** The compatibility path record 0031 names: a task string is a plan of one
- *  unit with no spec rows. The task is the unit's whole section. */
-export function contractFromTask(input: {
-  task: string;
-  agentRules?: AgentRules;
-  rebase?: { branch?: string; onto?: string };
-  issue?: { repo: string; number: number };
-}): ChildContract {
-  const firstLine =
-    input.task
-      .split("\n")
-      .find((l) => l.trim() !== "")
-      ?.trim() ?? "";
-  const title = firstLine.length > TITLE_MAX ? `${firstLine.slice(0, TITLE_MAX - 1).trimEnd()}…` : firstLine;
-  return {
-    unit: { id: "task", title, section: input.task, bullets: {} },
-    specRows: [],
     agentRules: input.agentRules,
     guards: GUARDS,
     rebase: { branch: input.rebase?.branch, onto: input.rebase?.onto },

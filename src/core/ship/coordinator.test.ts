@@ -4,6 +4,7 @@ import type { Finding, FindingDisposition } from "../reviewVerdict.js";
 import {
   applyReturn,
   cursorFinished,
+  generatedPlanId,
   matchDispositions,
   MERGE_POLL_MS,
   MERGE_WAIT_MAX_MS,
@@ -12,6 +13,7 @@ import {
   openUnitPipeline,
   parsePlanBranch,
   parsePlanGraph,
+  PLAN_ID_PATTERN,
   parseShipPlanRequest,
   planIdOf,
   planInstanceId,
@@ -118,6 +120,7 @@ function input(over: Partial<UnitPipelineInput> = {}): UnitPipelineInput {
     caps: { maxRounds: 3, maxMinutes: 120 },
     childMinutes: CHILD_MINUTES,
     merge: "runner",
+    generated: false,
     ...over,
   };
 }
@@ -222,6 +225,22 @@ describe("the plan graph — units, their dependencies, their branches", () => {
     expect(planInstanceId("x".repeat(200))).toHaveLength(100);
     expect(planInstanceId("x".repeat(200), 3)).toHaveLength(100);
     expect(planInstanceId("x".repeat(200), 3).endsWith("-3")).toBe(true);
+  });
+
+  it("generatedPlanId is deterministic per (thread, text): the same for identical text and thread, different across threads, different for two texts sharing a 24-character prefix, and a plan id for a long or punctuated request", () => {
+    const text = "warm the cache on wake";
+    expect(generatedPlanId(text, "slack:C1:1.0")).toBe(generatedPlanId(text, "slack:C1:1.0"));
+    expect(generatedPlanId(text, "slack:C1:1.0")).not.toBe(generatedPlanId(text, "slack:C2:9.9"));
+    // Two requests sharing their first 24 normalised characters: the slug is
+    // the same, the hash of the text tells them apart.
+    const a = generatedPlanId("warm the cache on wake, then trim the log", "slack:C1:1.0");
+    const b = generatedPlanId("warm the cache on wake, then retire the alarm", "slack:C1:1.0");
+    expect(a).not.toBe(b);
+    expect(a.slice(0, 24)).toBe(b.slice(0, 24));
+    const long = generatedPlanId(`please ${"really ".repeat(40)}fix it`, "slack:C1:1.0");
+    expect(long).toMatch(PLAN_ID_PATTERN);
+    expect(generatedPlanId("🚀!!! — ??", "slack:C1:1.0")).toMatch(PLAN_ID_PATTERN);
+    expect(planInstanceId(generatedPlanId(text, "slack:C1:1.0")).length).toBeLessThanOrEqual(100);
   });
 
   it("parseShipPlanRequest reads `plan <path> [units U<n>, U<m>]` and nothing else", () => {
@@ -370,7 +389,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
   });
 
   it("merge-ready under `merge: person` waits for a person: the machine ends merge_ready, never asks for a merge, and the remaining-gate line names the instance's field, not the branch's shape", () => {
-    const d = fresh(input({ unit: { id: "task", branch: "ship/fix-abc123" }, merge: "person" }));
+    const d = fresh(input({ merge: "person", generated: true }));
     throughRoundZero(d);
     runChild(
       d,
@@ -793,8 +812,8 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect(report).not.toMatch(/Re-run ship/);
   });
 
-  it("an approve GitHub shows no post for — with no recorded reason — aborts naming the pull request's silence, and a task unit is told to re-issue ship with the PR URL", () => {
-    const d = fresh(input({ unit: { id: "task", branch: "ship/fix-abc123" }, merge: "person" }));
+  it("an approve GitHub shows no post for — with no recorded reason — aborts naming the pull request's silence, and a generated unit is told to re-issue ship with the PR URL", () => {
+    const d = fresh(input({ merge: "person", generated: true }));
     throughRoundZero(d);
     runChild(
       d,
@@ -810,7 +829,35 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect(d.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
     const report = renderUnitReport(d.state);
     expect(report).toContain("the pull request carries no approving review");
-    expect(report).toContain("re-issue `agent:ship` in this thread and include the PR URL");
+    expect(report).toContain("re-issue `agent:ship` in this thread with the same text and include the PR URL");
+    // The re-issue line for a generated instance names the same text, never a plan path.
+    expect(report).not.toContain(".md");
+  });
+
+  it("the re-issue line keys on the instance's mark, not on who merges: a seeded plan under `merge: person` is told the plan is re-issued, the same ending on a generated unit names the request's text", () => {
+    const silent = (generated: boolean) => {
+      const d = fresh(input({ merge: "person", generated }));
+      throughRoundZero(d);
+      runChild(
+        d,
+        "run-r1",
+        finished({
+          status: "completed",
+          verdict: { verdict: "approve", summary: "x", findings: [] },
+          reviewPosted: false,
+          reviewHead: HEAD_A,
+        }),
+        T0 + 20 * MIN,
+      );
+      expect(d.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
+      return renderUnitReport(d.state);
+    };
+    const seeded = silent(false);
+    expect(seeded).toContain("the unit runs again when the plan is re-issued");
+    expect(seeded).not.toContain("with the same text");
+    const generated = silent(true);
+    expect(generated).toContain("re-issue `agent:ship` in this thread with the same text");
+    expect(generated).not.toContain("when the plan is re-issued");
   });
 
   it("a resume at review (an open pull request of ship's own named by the requester) skips the branch and round 0", () => {

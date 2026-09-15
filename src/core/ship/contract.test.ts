@@ -6,7 +6,7 @@ import {
   GUARDS,
   PR_TITLE_GUARD,
   contractFromPlan,
-  contractFromTask,
+  generatedUnit,
   itemNumbersNamed,
   parsePlanUnit,
   parseSpecItem,
@@ -14,6 +14,7 @@ import {
   renderContract,
   resolveSpecRow,
   specItemRefs,
+  unitTitleOf,
   type ChildContract,
 } from "./contract.js";
 
@@ -306,24 +307,44 @@ describe("contractFromPlan — the typed contract for one unit", () => {
   });
 });
 
-describe("contractFromTask — a task string is a plan of one unit with no rows", () => {
-  it("the task is the unit's whole section, titled by its first line; no spec rows, no rules unless given", () => {
-    const c = contractFromTask({ task: "fix the login redirect\n\nthe cookie is dropped after the redirect" });
+describe("one contract builder — a generated plan's unit is built, never parsed back (agent-ship item 16)", () => {
+  it("the task contract builder is no longer exported: a generated plan's contract comes from contractFromPlan over its one built unit", async () => {
+    const mod: Record<string, unknown> = await import("./contract.js");
+    // The name is spelled in halves so the repo-wide grep for the removed
+    // symbol stays empty — this asserts the export itself is gone.
+    expect(mod["contractFrom" + "Task"]).toBeUndefined();
+    const c = contractFromPlan({ unit: generatedUnit("U10", "fix the login redirect"), readSpec: () => undefined });
     expect(c.unit).toEqual({
-      id: "task",
+      id: "U10",
       title: "fix the login redirect",
-      section: "fix the login redirect\n\nthe cookie is dropped after the redirect",
+      section: "### U10. fix the login redirect\n\nfix the login redirect",
       bullets: {},
     });
     expect(c.specRows).toEqual([]);
-    expect(c.agentRules).toBeUndefined();
     expect(c.guards).toBe(GUARDS);
+    expect(c.rebase).toEqual({ branch: undefined, onto: undefined });
   });
 
-  it("a long first line is cut to a title", () => {
-    const c = contractFromTask({ task: `${"word ".repeat(40).trim()}\nmore` });
-    expect(c.unit.title.length).toBeLessThanOrEqual(80);
-    expect(c.unit.title.endsWith("…")).toBe(true);
+  it("unitTitleOf: the first non-blank line, cut to 80 characters with an ellipsis — the one rule the hand-off's row and the contract share", () => {
+    expect(unitTitleOf("\n\n  fix the login redirect  \nand the logout")).toBe("fix the login redirect");
+    const long = `${"fix the login redirect ".repeat(6)}please`;
+    const title = unitTitleOf(long);
+    expect(title.length).toBeLessThanOrEqual(80);
+    expect(title.endsWith("…")).toBe(true);
+    expect(title.startsWith("fix the login redirect")).toBe(true);
+    expect(generatedUnit("U10", long).title).toBe(title);
+    expect(unitTitleOf("   ")).toBe("");
+  });
+
+  it("a heading line inside the request text stays the text's own: the section is whole and the title is still the first line — the markdown parser never sees it", () => {
+    const text =
+      "fix the login redirect\n\n## Acceptance\n\n- the redirect lands on /home\n\n### Notes\n\nkeep the cookie";
+    const c = contractFromPlan({ unit: generatedUnit("U10", text), readSpec: () => undefined });
+    expect(c.unit.title).toBe("fix the login redirect");
+    expect(c.unit.section).toBe(`### U10. fix the login redirect\n\n${text}`);
+    expect(c.unit.section).toContain("keep the cookie");
+    // The same text through the markdown path would be cut at its first heading.
+    expect(parsePlanUnit(c.unit.section, "U10")!.section).not.toContain("keep the cookie");
   });
 });
 
@@ -440,11 +461,16 @@ describe("renderContract — one block under `## Contract`, fixed sub-headings i
     expect(tiny.overBudget).toBe(true);
   });
 
-  it("the default budget is the one the children render with, and a task contract renders within it", () => {
+  it("the default budget is the one the children render with, and a generated one-unit contract renders within it", () => {
     expect(DEFAULT_CONTRACT_MAX_CHARS).toBeGreaterThan(20_000);
-    const r = renderContract(contractFromTask({ task: "fix the login redirect" }), {});
+    const generated = contractFromPlan({
+      planMarkdown: "### U1. fix the login redirect\n\nfix the login redirect\n",
+      unitId: "U1",
+      readSpec: () => undefined,
+    });
+    const r = renderContract(generated, {});
     expect(r.overBudget).toBe(false);
-    expect(r.text).toContain(`${CONTRACT_SECTION_HEADINGS.unit} task — fix the login redirect`);
+    expect(r.text).toContain(`${CONTRACT_SECTION_HEADINGS.unit} U1 — fix the login redirect`);
     expect(r.text).toContain("fix the login redirect");
   });
 

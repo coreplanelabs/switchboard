@@ -48,7 +48,7 @@ import { AGENTS } from "../agents/registry.js";
 import { authorize } from "../core/authz/authorize.js";
 import { resolveActor, type GrantsLookup } from "../core/authz/actor.js";
 import type { ChannelVisibility } from "../core/authz/types.js";
-import { composeChild, TASK_UNIT, type BriefReaders } from "../core/coordinator/briefs.js";
+import { composeChild, type BriefReaders } from "../core/coordinator/briefs.js";
 import {
   COORDINATOR_STEP_ACTION,
   COORDINATOR_STEP_PATH_PREFIX,
@@ -350,11 +350,16 @@ async function unitRowOf(
   return { ok: true, row };
 }
 
+/** A generated plan's instance: `plan` without a `path` — the mark the hand-off
+ *  writes for a task request, which keeps its one unit in the requesting
+ *  thread (agent-ship item 16). */
+const isGenerated = (instance: CoordinatorInstance): boolean => instance.plan?.path === undefined;
+
 /** The thread a unit's coding children run in, and where its findings are
  *  dispatched: the unit's own once opened, the requesting thread for a
- *  task-string unit. The review child's thread is `ensureReviewThread`. */
+ *  generated plan's unit. The review child's thread is `ensureReviewThread`. */
 function unitThread(instance: CoordinatorInstance, row: CoordinatorUnit | undefined) {
-  const threadKey = row?.threadKey ?? (row === undefined || row.unit === TASK_UNIT ? instance.threadKey : undefined);
+  const threadKey = row?.threadKey ?? (row === undefined || isGenerated(instance) ? instance.threadKey : undefined);
   const sourceUrl = row?.sourceUrl ?? (threadKey === instance.threadKey ? instance.sourceUrl : undefined);
   return { threadKey, sourceUrl };
 }
@@ -561,7 +566,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   if (req.brief !== undefined) {
     if (row === undefined) return json(400, { ok: false, error: "a brief needs the unit it runs for" });
     try {
-      turn = await composeChild(req.brief, instance, row, briefReaders(deps, instance, io));
+      turn = await composeChild(req.brief, instance, row, briefReaders(deps, instance));
     } catch (err) {
       // A brief the bot cannot compose — the plan missing at the base, a run
       // the history lacks — is a failed spawn: the machine ends the unit as an
@@ -891,6 +896,8 @@ async function plan(body: Record<string, unknown>, deps: AdminCoordinatorDeps): 
     ...(instance.plan !== undefined ? { planId: instance.plan.id } : {}),
     // Who merges: the instance's field; a record written before it existed is a person's merge.
     merge: instance.merge ?? "person",
+    // The mark (item 16): the machine's report keys its re-issue line on it.
+    generated: isGenerated(instance),
     repo: instance.repo,
     base: instance.base ?? "main",
     caps: instance.caps ?? resolveShipCaps(undefined),
@@ -928,7 +935,7 @@ async function unitStart(body: Record<string, unknown>, deps: AdminCoordinatorDe
   if (!unit.ok) return unit.response;
   let row = unit.row!;
   if (row.threadKey === undefined) {
-    if (row.unit === TASK_UNIT) {
+    if (isGenerated(instance)) {
       row = {
         ...row,
         threadKey: instance.threadKey,
@@ -949,7 +956,7 @@ async function unitStart(body: Record<string, unknown>, deps: AdminCoordinatorDe
     }
     row = review.row;
   }
-  if (row.issue === undefined && row.unit !== TASK_UNIT) {
+  if (row.issue === undefined && !isGenerated(instance)) {
     const issue = await unitIssueOf(deps, instance.repo, row.unit);
     if (issue !== undefined) row = { ...row, issue };
   }
@@ -980,7 +987,7 @@ function unitLead(instance: CoordinatorInstance, row: CoordinatorUnit): string {
 function reviewLead(instance: CoordinatorInstance, row: CoordinatorUnit): string {
   const who = instance.userName ?? instance.userId;
   const from = instance.sourceUrl !== undefined ? `[the *ship* run](${instance.sourceUrl})` : "the *ship* run";
-  const what = row.unit === TASK_UNIT ? "the task" : `unit ${row.unit}${row.title ? ` — ${row.title}` : ""}`;
+  const what = isGenerated(instance) ? "the task" : `unit ${row.unit}${row.title ? ` — ${row.title}` : ""}`;
   return `↳ *ship* review of ${what} for ${who}, from ${from}: \`${row.branch}\` in ${instance.repo}`;
 }
 
@@ -1018,8 +1025,9 @@ const ROUND_OUTCOMES: readonly ShipRoundOutcome[] = [
   "stopped",
 ];
 
-/** One line per unit on the parent's card: the round in flight or how the unit ended. */
-function unitLines(units: readonly CoordinatorUnit[]): string[] {
+/** One line per unit on the parent's card: the round in flight or how the unit
+ *  ended — the task wording (no unit id) for a generated plan's one unit. */
+function unitLines(units: readonly CoordinatorUnit[], generated: boolean): string[] {
   return units.map((u) => {
     const last = u.rounds.at(-1);
     const state = u.ending
@@ -1029,7 +1037,7 @@ function unitLines(units: readonly CoordinatorUnit[]): string[] {
         : u.threadKey
           ? "starting"
           : "waiting";
-    return u.unit === TASK_UNIT ? state : `${u.unit} · ${state}`;
+    return generated ? state : `${u.unit} · ${state}`;
   });
 }
 
@@ -1047,7 +1055,7 @@ async function drawCard(
   if (!io) return;
   const clock = deps.clock ?? systemClock;
   const shell = createCardShell({ label: instance.label ?? "*ship*", startedAt: instance.createdAt, now: clock });
-  const detail = unitLines(units);
+  const detail = unitLines(units, isGenerated(instance));
   if (!close) {
     await io.status(shell.live({ detail }));
     return;
@@ -1335,7 +1343,7 @@ export function parentRunRecord(
         at: r.at,
       })),
     ),
-    { type: "answer", text: planSummary(units), at: finishedAt },
+    { type: "answer", text: planSummary(units, isGenerated(instance)), at: finishedAt },
   ];
   events.forEach((e, i) => {
     e.seq = i + 1;
@@ -1362,14 +1370,13 @@ export function parentRunRecord(
   };
 }
 
-/** The plan's summary — one line per unit with how it ended and its pull request. */
-export function planSummary(units: readonly CoordinatorUnit[]): string {
+/** The plan's summary — one line per unit with how it ended and its pull
+ *  request; the task wording (no unit id) for a generated plan's one unit. */
+export function planSummary(units: readonly CoordinatorUnit[], generated = false): string {
   const lines = units.map((u) => {
     const how = u.ending ? u.ending.kind : u.threadKey ? "unfinished" : "not started";
     const pr = u.pr ? ` — ${u.pr.url}` : "";
-    return u.unit === TASK_UNIT
-      ? `${ENDING_ICON[how] ?? "•"} ${how}${pr}`
-      : `${ENDING_ICON[how] ?? "•"} ${u.unit} — ${how}${pr}`;
+    return generated ? `${ENDING_ICON[how] ?? "•"} ${how}${pr}` : `${ENDING_ICON[how] ?? "•"} ${u.unit} — ${how}${pr}`;
   });
   return lines.join("\n");
 }
@@ -1390,8 +1397,9 @@ async function finish(body: Record<string, unknown>, deps: AdminCoordinatorDeps)
   const record = parentRunRecord(instance, units, body.outcome, visibility, at);
   deps.runHistoryWriter.write(record);
   await drawCard(deps, instance, units, { icon: body.outcome === "completed" ? "✅" : "⚠️" }).catch(() => {});
-  const isPlan = units.some((u) => u.unit !== TASK_UNIT);
-  if (isPlan) {
+  // A generated plan's one unit ran in the requesting thread, so its report is
+  // already there — only a seeded plan's summary is posted back.
+  if (!isGenerated(instance)) {
     const io = deps.ioFor({ threadKey: instance.threadKey, userId: instance.userId });
     await io?.reply(`Plan ${instance.plan?.id ?? ""} ended (${body.outcome}):\n${planSummary(units)}`).catch(() => {});
   }
@@ -1400,8 +1408,8 @@ async function finish(body: Record<string, unknown>, deps: AdminCoordinatorDeps)
 }
 
 /** What the brief composer reads through the bot: the target repository at the
- *  base ref, a child's record, and the ship request the thread carried. */
-function briefReaders(deps: AdminCoordinatorDeps, instance: CoordinatorInstance, io: ChannelIO): BriefReaders {
+ *  base ref, a child's record, and the ship request the run's record carried. */
+function briefReaders(deps: AdminCoordinatorDeps, instance: CoordinatorInstance): BriefReaders {
   const ref = instance.base ?? "main";
   return {
     readRepoFile: async (path) => {
@@ -1421,9 +1429,16 @@ function briefReaders(deps: AdminCoordinatorDeps, instance: CoordinatorInstance,
         ...(finalReplyOf(r.events) !== undefined ? { finalReply: finalReplyOf(r.events) } : {}),
       };
     },
+    // The generated plan's request text: the ship run's own record
+    // (`instance.runId`, its `input` event) — never a scan of the thread, so a
+    // routed request with no `agent:ship` turn anywhere still reads back the
+    // words the person typed (agent-ship item 13).
     readShipRequest: async () => {
-      const history = await io.history().catch(() => []);
-      return [...history].reverse().find((h) => h.role === "user" && /\bagent:ship\b/.test(h.text))?.text;
+      if (instance.runId === undefined) return undefined;
+      const res = await deps.runs.getRun(instance.runId, { include: "messages" }).catch(() => undefined);
+      if (res === undefined || !res.ok) return undefined;
+      const input = (res.value.events ?? []).find((e) => e.type === "input");
+      return input?.type === "input" ? input.text : undefined;
     },
   };
 }

@@ -15,18 +15,20 @@
 // plan runs; every refusal is a reply, and nothing is created on one. Pure over
 // its seams: the file read, the instance store, the create and the status read.
 
+import { unitTitleOf } from "../ship/contract.js";
 import type { ShipEntry } from "../ship/preflight.js";
 import { shipTaskText } from "../ship/preflight.js";
 import {
+  generatedPlanId,
   openPlanCursor,
   parsePlanGraph,
   parseShipPlanRequest,
   planIdOf,
   planInstanceId,
+  unitBranch,
   type PlanGraph,
   type ShipCaps,
 } from "../ship/coordinator.js";
-import { TASK_UNIT } from "./briefs.js";
 import type { CoordinatorInstance, CoordinatorUnit } from "./contract.js";
 import type { CoordinatorInstanceStore } from "./instanceStore.js";
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "./instancesRoute.js";
@@ -73,20 +75,24 @@ export interface HandOffOutcome {
 /** Everything an instance record carries but its id, branch, plan and attempt — the same for every attempt of a plan. */
 type Identity = Omit<CoordinatorInstance, "id" | "branch" | "plan" | "attempt">;
 
-/** The runner's input from the request, before the id is decided: a task
- *  string is one unit under an instance named by the run; a plan is its graph
- *  and the selected units, named by the plan and the attempt. */
-type Planned =
-  | { kind: "task"; instance: CoordinatorInstance; units: CoordinatorUnit[]; where: string }
-  | {
-      kind: "plan";
-      planId: string;
-      path: string;
-      base: string;
-      graph: PlanGraph;
-      selected: string[];
-      identity: Identity;
-    };
+/** The runner's input from the request, before the attempt is decided: always
+ *  a plan — seeded (a file read at the base ref, with a `path`) or generated (a
+ *  one-unit graph from the request text, no `path`: the instance's mark). */
+type Planned = {
+  planId: string;
+  /** The plan file's path — a seeded plan only. */
+  path?: string;
+  base: string;
+  graph: PlanGraph;
+  selected: string[];
+  identity: Identity;
+  /** Who merges: `runner` for a seeded plan, `person` for a generated one. */
+  merge: "runner" | "person";
+  /** A resume at review rides the generated unit's row, on the pull request's own head branch. */
+  resume?: { pr: number; headSha?: string; url?: string };
+  /** The entry's branch (a resume's pull request head) overrides the graph's on the one generated unit. */
+  entryBranch?: string;
+};
 
 const refused = (reply: string): HandOffOutcome => ({ status: "aborted", reply });
 const describe = (err: unknown) => (err instanceof Error ? err.message : String(err));
@@ -122,33 +128,31 @@ async function plan(
     runId: input.runId,
     label: input.label,
   };
-  const request = parseShipPlanRequest(shipTaskText(input.requestText, entry.repo));
+  const taskText = shipTaskText(input.requestText, entry.repo);
+  const request = parseShipPlanRequest(taskText);
   if (request === undefined) {
-    const id = `ship-${input.runId}`;
-    const resume = entry.resume;
-    const prUrl =
-      resume?.url ?? (resume !== undefined ? `https://github.com/${entry.repo}/pull/${resume.pr}` : undefined);
+    // A generated plan of one unit (agent-ship item 16): the request text is
+    // the unit, the id is deterministic per (thread, text), the branch the
+    // graph's `plan/<id>/u1` — the instance's absent `plan.path` is the mark
+    // that keeps its unit in the requesting thread. Its merge is a person's,
+    // whatever the request's words say.
+    const text = taskText || "Implement the task this thread's ship request describes.";
+    const planId = generatedPlanId(text, msg.threadKey);
+    const graph: PlanGraph = {
+      planId,
+      units: [{ id: "U1", title: unitTitleOf(text), slug: "u1", branch: unitBranch(planId, "u1"), dependsOn: [] }],
+    };
     return {
       ok: true,
       planned: {
-        kind: "task",
-        // A task's merge is a person's, whatever the request's words say.
-        instance: { id, ...identity, branch: entry.branch, merge: "person" },
-        units: [
-          {
-            instanceId: id,
-            unit: TASK_UNIT,
-            slug: TASK_UNIT,
-            branch: entry.branch,
-            dependsOn: [],
-            rounds: [],
-            ...(resume !== undefined ? { resume } : {}),
-          },
-        ],
-        where:
-          resume !== undefined
-            ? `the review loop of ${prUrl} resumes at its next review round on \`${entry.branch}\` in this thread under your grants — no new coding round first; this card follows it and the report lands here.`
-            : `the task runs on \`${entry.branch}\` in this thread under your grants; this card follows it and the report lands here.`,
+        planId,
+        base,
+        graph,
+        selected: ["U1"],
+        identity,
+        merge: "person",
+        ...(entry.resume !== undefined ? { resume: entry.resume } : {}),
+        ...(entry.branch !== undefined ? { entryBranch: entry.branch } : {}),
       },
     };
   }
@@ -179,34 +183,49 @@ async function plan(
   } catch (err) {
     return { ok: false, reply: `🚫 ${describe(err)}` };
   }
-  return { ok: true, planned: { kind: "plan", planId, path: request.planPath, base, graph, selected, identity } };
+  return {
+    ok: true,
+    planned: { planId, path: request.planPath, base, graph, selected, identity, merge: "runner" },
+  };
 }
 
-/** The rows of a plan's selected units under an instance, as the plan states them. */
-function rowsFor(graph: PlanGraph, selected: readonly string[], instanceId: string): CoordinatorUnit[] {
-  return graph.units
+/** The rows of a plan's selected units under an instance, as the plan states
+ *  them; a generated plan's one unit takes the entry's branch when the entry
+ *  resumed, and the resume rides its row. */
+function rowsFor(p: Planned, selected: readonly string[], instanceId: string): CoordinatorUnit[] {
+  return p.graph.units
     .filter((u) => selected.includes(u.id))
     .map((u) => ({
       instanceId,
       unit: u.id,
       slug: u.slug,
       title: u.title,
-      branch: u.branch,
+      branch: p.entryBranch ?? u.branch,
       dependsOn: u.dependsOn,
       rounds: [],
+      ...(p.resume !== undefined ? { resume: p.resume } : {}),
     }));
 }
 
-/** The reply's account of where a plan runs. */
-function planWhere(
-  p: Extract<Planned, { kind: "plan" }>,
-  units: readonly CoordinatorUnit[],
-  mergedBefore: readonly string[],
-): string {
+/** The reply's account of where a plan runs: the plan id, the units, and where
+ *  each runs — this thread for a generated plan, a thread of its own for a
+ *  seeded one. */
+function planWhere(p: Planned, units: readonly CoordinatorUnit[], mergedBefore: readonly string[]): string {
+  const at = p.path !== undefined ? ` (\`${p.path}\` at \`${p.base}\`)` : "";
   const count = `${units.length} unit${units.length === 1 ? "" : "s"}`;
   const left = mergedBefore.length > 0 ? ` left` : "";
   const merged = mergedBefore.length > 0 ? `; merged before: ${mergedBefore.join(", ")}` : "";
-  return `plan \`${p.planId}\` (\`${p.path}\` at \`${p.base}\`), ${count}${left} in dependency order — ${units.map((u) => u.unit).join(", ")}${merged}. Each unit runs in a thread of its own in this channel under your grants; this card follows the plan and its summary lands in this thread.`;
+  const head = `plan \`${p.planId}\`${at}, ${count}${left} in dependency order — ${units.map((u) => u.unit).join(", ")}${merged}.`;
+  if (p.path !== undefined)
+    return `${head} Each unit runs in a thread of its own in this channel under your grants; this card follows the plan and its summary lands in this thread.`;
+  const branch = units[0]?.branch ?? "";
+  const prUrl =
+    p.resume?.url ?? (p.resume !== undefined ? `https://github.com/${p.identity.repo}/pull/${p.resume.pr}` : undefined);
+  const runs =
+    p.resume !== undefined
+      ? `the review loop of ${prUrl} resumes at its next review round on \`${branch}\` in this thread under your grants — no new coding round first`
+      : `the unit runs on \`${branch}\` in this thread under your grants`;
+  return `${head} ${runs}; this card follows it and the report lands here.`;
 }
 
 /**
@@ -225,18 +244,23 @@ export async function handOffToCoordinator(deps: HandOffDeps, input: HandOffInpu
   const planned = await plan(deps, input);
   if (!planned.ok) return refused(planned.reply);
   const p = planned.planned;
-  if (p.kind === "task") return start(deps, input, p.instance, p.units, p.where, "put");
+  // The instance's plan: a seeded one names its path; a generated one carries
+  // only the id — the mark every reader keys on. A seeded plan's units are the
+  // runner's to merge (record 0031's merge grant); a generated one's a person's.
+  const planOf = (): CoordinatorInstance["plan"] => ({
+    id: p.planId,
+    ...(p.path !== undefined ? { path: p.path } : {}),
+  });
   const firstId = planInstanceId(p.planId);
   const first = await deps.instances.get(firstId);
   if (first === null) {
-    const units = rowsFor(p.graph, p.selected, firstId);
+    const units = rowsFor(p, p.selected, firstId);
     const instance: CoordinatorInstance = {
       id: firstId,
       ...p.identity,
       branch: units[0]!.branch,
-      plan: { id: p.planId, path: p.path },
-      // A seeded plan's units are the runner's to merge (record 0031's merge grant).
-      merge: "runner",
+      plan: planOf(),
+      merge: p.merge,
     };
     return start(deps, input, instance, units, planWhere(p, units, []), "put");
   }
@@ -279,13 +303,13 @@ export async function handOffToCoordinator(deps: HandOffDeps, input: HandOffInpu
   if (status.kind === "absent") {
     // The latest attempt's create failed after its records were written: the
     // records are this request's to replace, under the same id and attempt.
-    const units = rowsFor(p.graph, remaining, latest.id);
+    const units = rowsFor(p, remaining, latest.id);
     const instance: CoordinatorInstance = {
       id: latest.id,
       ...p.identity,
       branch: units[0]!.branch,
-      plan: { id: p.planId, path: p.path },
-      merge: "runner",
+      plan: planOf(),
+      merge: p.merge,
       ...(attempt > 1 ? { attempt } : {}),
     };
     log(`[ship] ${input.msg.threadKey}: ${latest.id} has records but no instance — replacing the earlier attempt's`);
@@ -294,13 +318,13 @@ export async function handOffToCoordinator(deps: HandOffDeps, input: HandOffInpu
   }
   // Ended: the next attempt reruns what the earlier attempts did not merge.
   const nextId = planInstanceId(p.planId, attempt + 1);
-  const units = rowsFor(p.graph, remaining, nextId);
+  const units = rowsFor(p, remaining, nextId);
   const instance: CoordinatorInstance = {
     id: nextId,
     ...p.identity,
     branch: units[0]!.branch,
-    plan: { id: p.planId, path: p.path },
-    merge: "runner",
+    plan: planOf(),
+    merge: p.merge,
     attempt: attempt + 1,
   };
   return start(deps, input, instance, units, `attempt ${attempt + 1} of ${planWhere(p, units, mergedBefore)}`, "put");

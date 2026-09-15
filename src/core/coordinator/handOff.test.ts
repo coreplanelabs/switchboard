@@ -178,47 +178,90 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     expect(await missing.instances.get("plan-fixture")).toBeNull();
   });
 
-  it("a task request is a plan of one unit, `task`, on the entry's ship branch in the requesting thread, under an instance named by the run, with `merge: person` — a task whose text contains the word runner included", async () => {
+  it("a task request is a generated plan of one unit: the instance under `plan-<slug>-<hash>` carries `plan: { id }` with no `path` and `merge: person`, its one `U1` row is on `plan/<id>/u1`, and the reply says the unit runs in this thread — a task whose text contains the word runner included", async () => {
     const h = harness();
-    const out = await handOffToCoordinator(h.deps, input({ requestText: "in acme/api: warm the cache on wake" }));
+    const id = "plan-warm-the-cache-on-wake-dfa06c";
+    const out = await handOffToCoordinator(
+      h.deps,
+      input({ entry: { repo: "acme/api", base: "main" }, requestText: "in acme/api: warm the cache on wake" }),
+    );
     expect(out.status).toBe("completed");
     expect(out.reply).toBe(
-      "🧭 Handed to the plan runner `ship-run-s`: the task runs on `ship/warm-the-cache-abc123` in this thread under your grants; this card follows it and the report lands here.",
+      `🧭 Handed to the plan runner \`${id}\`: plan \`warm-the-cache-on-wake-dfa06c\`, 1 unit in dependency order — U1. the unit runs on \`plan/warm-the-cache-on-wake-dfa06c/u1\` in this thread under your grants; this card follows it and the report lands here.`,
     );
     expect(h.reads).toEqual([]);
-    expect(h.created).toEqual(["ship-run-s"]);
-    expect(await h.instances.get("ship-run-s")).toMatchObject({
-      id: "ship-run-s",
-      branch: "ship/warm-the-cache-abc123",
+    expect(h.created).toEqual([id]);
+    const instance = (await h.instances.get(id))!;
+    expect(instance).toMatchObject({
+      id,
+      branch: "plan/warm-the-cache-on-wake-dfa06c/u1",
       base: "main",
       runId: "run-s",
       merge: "person",
+      plan: { id: "warm-the-cache-on-wake-dfa06c" },
     });
-    expect("plan" in (await h.instances.get("ship-run-s"))!).toBe(false);
-    expect(await h.instances.listUnits("ship-run-s")).toEqual([
+    expect("path" in instance.plan!).toBe(false);
+    expect(await h.instances.listUnits(id)).toEqual([
       {
-        instanceId: "ship-run-s",
-        unit: "task",
-        slug: "task",
-        branch: "ship/warm-the-cache-abc123",
+        instanceId: id,
+        unit: "U1",
+        slug: "u1",
+        title: "warm the cache on wake",
+        branch: "plan/warm-the-cache-on-wake-dfa06c/u1",
         dependsOn: [],
         rounds: [],
       },
     ]);
     // The field comes from the request's kind, never its words: "runner" in the text stays a person's merge.
     const wordy = harness();
-    await handOffToCoordinator(wordy.deps, input({ requestText: "in acme/api: make the runner warm the cache" }));
-    expect(await wordy.instances.get("ship-run-s")).toMatchObject({ merge: "person" });
+    await handOffToCoordinator(
+      wordy.deps,
+      input({ entry: { repo: "acme/api", base: "main" }, requestText: "in acme/api: make the runner warm the cache" }),
+    );
+    expect(await wordy.instances.get("plan-make-the-runner-warm-the-eaaa45")).toMatchObject({ merge: "person" });
   });
 
-  it("a resume at review (agent-ship item 10) is the one task unit with the pull request on its row, so the runner opens it at the review round; the reply names the pull request and that no coding round runs first", async () => {
+  it("a generated plan is re-issued by its id: the same text after `U1` merged is refused as merged already; after `U1` ended `merge_ready` it is attempt 2 under `plan-<id>-2` with `U1` selected on the same branch", async () => {
+    const id = "plan-warm-the-cache-on-wake-dfa06c";
+    const req = input({
+      entry: { repo: "acme/api", base: "main" },
+      requestText: "in acme/api: warm the cache on wake",
+    });
+    const merged = harness({ status: { [id]: { kind: "status", status: "complete" } } });
+    await handOffToCoordinator(merged.deps, req);
+    const rows = await merged.instances.listUnits(id);
+    await merged.instances.putUnits([
+      { ...rows[0]!, ending: { kind: "merged", at: NOW } as unknown as CoordinatorUnit["ending"] },
+    ]);
+    const again = await handOffToCoordinator(merged.deps, req);
+    expect(again.status).toBe("aborted");
+    expect(again.reply).toContain("merged already");
+    expect(merged.created).toEqual([id]);
+
+    const ready = harness({ status: { [id]: { kind: "status", status: "complete" } } });
+    await handOffToCoordinator(ready.deps, req);
+    const readyRows = await ready.instances.listUnits(id);
+    await ready.instances.putUnits([
+      { ...readyRows[0]!, ending: { kind: "merge_ready", at: NOW } as unknown as CoordinatorUnit["ending"] },
+    ]);
+    const attempt2 = await handOffToCoordinator(ready.deps, req);
+    expect(attempt2.status).toBe("completed");
+    expect(attempt2.reply).toContain(`\`${id}-2\``);
+    expect(await ready.instances.get(`${id}-2`)).toMatchObject({ attempt: 2, merge: "person" });
+    expect(await ready.instances.listUnits(`${id}-2`)).toMatchObject([
+      { unit: "U1", branch: "plan/warm-the-cache-on-wake-dfa06c/u1" },
+    ]);
+  });
+
+  it("a resume at review (agent-ship item 10) is the one generated unit with the pull request on its row and the entry's branch — the pull request's own head — so the runner opens it at the review round; the reply names the pull request and that no coding round runs first", async () => {
     const h = harness();
+    const id = "plan-implement-the-task-this-f502bc";
     const out = await handOffToCoordinator(
       h.deps,
       input({
         entry: {
           repo: "acme/api",
-          branch: "ship/warm-the-cache-abc123",
+          branch: "feat/wake-cache",
           base: "main",
           resume: { pr: 7, headSha: "a".repeat(40), url: "https://github.com/acme/api/pull/7" },
         },
@@ -226,16 +269,17 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
       }),
     );
     expect(out.status).toBe("completed");
-    expect(out.reply).toBe(
-      "🧭 Handed to the plan runner `ship-run-s`: the review loop of https://github.com/acme/api/pull/7 resumes at its next review round on `ship/warm-the-cache-abc123` in this thread under your grants — no new coding round first; this card follows it and the report lands here.",
+    expect(out.reply).toContain(`Handed to the plan runner \`${id}\``);
+    expect(out.reply).toContain(
+      "the review loop of https://github.com/acme/api/pull/7 resumes at its next review round on `feat/wake-cache` in this thread under your grants — no new coding round first",
     );
-    expect(h.created).toEqual(["ship-run-s"]);
-    expect(await h.instances.listUnits("ship-run-s")).toEqual([
+    expect(h.created).toEqual([id]);
+    expect(await h.instances.listUnits(id)).toMatchObject([
       {
-        instanceId: "ship-run-s",
-        unit: "task",
-        slug: "task",
-        branch: "ship/warm-the-cache-abc123",
+        instanceId: id,
+        unit: "U1",
+        slug: "u1",
+        branch: "feat/wake-cache",
         dependsOn: [],
         rounds: [],
         resume: { pr: 7, headSha: "a".repeat(40), url: "https://github.com/acme/api/pull/7" },
@@ -246,12 +290,12 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     const again = await handOffToCoordinator(
       bare.deps,
       input({
-        entry: { repo: "acme/api", branch: "ship/warm-the-cache-abc123", base: "main", resume: { pr: 9 } },
+        entry: { repo: "acme/api", branch: "feat/wake-cache", base: "main", resume: { pr: 9 } },
         requestText: "acme/api#9",
       }),
     );
     expect(again.reply).toContain("the review loop of https://github.com/acme/api/pull/9 resumes");
-    expect((await bare.instances.listUnits("ship-run-s"))[0]!.resume).toEqual({ pr: 9 });
+    expect((await bare.instances.listUnits(id))[0]!.resume).toEqual({ pr: 9 });
   });
 
   it("refusals before anything is written: a plan file the repository does not have at the base, a plan whose name is not a plan id, no base branch, a plan without units; each names the reason and creates nothing", async () => {

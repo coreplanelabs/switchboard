@@ -145,7 +145,10 @@ describe("isCoordinatorInstance — the parent ship record", () => {
     };
     expect(isCoordinatorInstance(full)).toBe(true);
     expect(isCoordinatorInstance(JSON.parse(JSON.stringify(full)))).toBe(true);
-    expect(isCoordinatorInstance({ ...full, plan: { id: "p" } })).toBe(false);
+    // A `plan` without a `path` is the generated one-unit plan's mark (agent-ship item 16).
+    expect(isCoordinatorInstance({ ...full, plan: { id: "p" } })).toBe(true);
+    expect(isCoordinatorInstance({ ...full, plan: { id: "p", path: 7 } })).toBe(false);
+    expect(isCoordinatorInstance({ ...full, plan: { path: "docs/p.md" } })).toBe(false);
     expect(isCoordinatorInstance({ ...full, caps: { maxRounds: "3", maxMinutes: 45 } })).toBe(false);
     expect(isCoordinatorInstance({ ...full, card: { channel: "C1" } })).toBe(false);
     expect(isCoordinatorInstance({ ...full, runId: 7 })).toBe(false);

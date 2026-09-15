@@ -839,6 +839,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         ok: true,
         planId: "fixture",
         merge: "runner",
+        generated: false,
         repo: "acme/api",
         base: "main",
         caps: { maxRounds: 2, maxMinutes: 45 },
@@ -857,6 +858,8 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       base: "main",
       // The record carries no `merge` field — written before it existed — so a person merges.
       merge: "person",
+      // No `plan.path` on the record: the mark of a generated plan, answered for the machine's report.
+      generated: true,
       caps: { maxRounds: 3, maxMinutes: 120 },
       units: [],
     });
@@ -944,30 +947,44 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       startedAt: 5,
     });
 
+    // A generated plan's unit (the instance's `plan` has no `path`) runs in the
+    // requesting thread: no unit thread is opened, no board issue is looked up,
+    // and the review lead carries the task wording.
     const taskOpened: string[] = [];
-    const task = harness({ ioFor: () => openingIo(taskOpened) });
-    await task.instances.put(INSTANCE);
+    const task = harness({
+      ioFor: () => openingIo(taskOpened),
+      // An open issue titled by the unit id: a generated unit must NOT pick it up.
+      issues: [issue(834, "U1: anything (unit)")],
+    });
+    const generated: CoordinatorInstance = {
+      ...INSTANCE,
+      plan: { id: "warm-the-cache-abc123" },
+      branch: "plan/warm-the-cache-abc123/u1",
+    };
+    await task.instances.put(generated);
     await task.instances.putUnits([
-      { instanceId: INSTANCE.id, unit: "task", slug: "task", branch: INSTANCE.branch, dependsOn: [], rounds: [] },
+      { instanceId: INSTANCE.id, unit: "U1", slug: "u1", branch: generated.branch, dependsOn: [], rounds: [] },
     ]);
-    expect(await call(task, "unit-start", { parentInstanceId: INSTANCE.id, unit: "task" })).toEqual({
+    expect(await call(task, "unit-start", { parentInstanceId: INSTANCE.id, unit: "U1" })).toEqual({
       status: 200,
       body: {
         ok: true,
         threadKey: INSTANCE.threadKey,
         reviewThreadKey: "slack:C1:2.0",
-        branch: INSTANCE.branch,
+        branch: generated.branch,
         base: "main",
         at: NOW,
       },
     });
     expect(taskOpened).toHaveLength(1);
     expect(taskOpened[0]).toContain("↳ *ship* review of the task for alice");
-    expect((await task.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
+    const genRow = (await task.instances.listUnits(INSTANCE.id))[0]!;
+    expect(genRow).toMatchObject({
       threadKey: INSTANCE.threadKey,
       sourceUrl: INSTANCE.sourceUrl,
       reviewThread: { threadKey: "slack:C1:2.0", sourceUrl: "https://acme.slack.com/archives/C1/p2" },
     });
+    expect(genRow.issue).toBeUndefined();
   });
 
   it("unit-start without a channel that can open a thread is 503; a channel whose open fails is 502 and the row is unchanged; a review thread whose open fails leaves the unit thread on the row, so the retry opens the review thread alone", async () => {
@@ -1860,6 +1877,50 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       text: "Plan fixture ended (completed):\n✅ U10 — merge_ready — https://github.com/acme/api/pull/7\n• U11 — not started",
     });
     expect((await call(h, "finish", { parentInstanceId: PLAN_INSTANCE.id, outcome: "won" })).status).toBe(400);
+  });
+
+  it("a generated instance (a `plan` with no `path`) carries the task wording: the card line and the record's summary name no unit id, and finish posts no summary reply — the unit's report already landed in the requesting thread", async () => {
+    const replies: Array<{ threadKey: string; text: string }> = [];
+    const closes: StatusUpdate[] = [];
+    const h = harness({
+      ioFor: (thread) => ({
+        reply: async (text) => void replies.push({ threadKey: thread.threadKey, text }),
+        status: async () => ({ update: () => {}, done: async (frame) => void closes.push(frame) }),
+        history: async () => [],
+      }),
+    });
+    const generated: CoordinatorInstance = {
+      ...PLAN_INSTANCE,
+      id: "plan-warm-abc123",
+      plan: { id: "warm-abc123" },
+      merge: "person",
+      branch: "plan/warm-abc123/u1",
+    };
+    await h.instances.put(generated);
+    await h.instances.putUnits([
+      {
+        instanceId: generated.id,
+        unit: "U1",
+        slug: "u1",
+        branch: generated.branch,
+        dependsOn: [],
+        rounds: [],
+        threadKey: generated.threadKey,
+        ending: { kind: "merge_ready", report: "ready", at: NOW },
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+      },
+    ]);
+    expect(await call(h, "finish", { parentInstanceId: generated.id, outcome: "completed" })).toEqual({
+      status: 200,
+      body: { ok: true, runId: "run-parent", at: NOW },
+    });
+    const summary = h.written[0]!.events.at(-1)!;
+    expect(summary.type === "answer" ? summary.text : "").toBe("✅ merge_ready — https://github.com/acme/api/pull/7");
+    // The card closes with the task wording — no `U1 ·` prefix on the line.
+    expect(closes).toHaveLength(1);
+    expect(JSON.stringify(closes[0])).not.toContain("U1 ·");
+    // No summary reply: the unit ran in the requesting thread, its report is there.
+    expect(replies).toEqual([]);
   });
 });
 

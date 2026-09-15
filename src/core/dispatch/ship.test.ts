@@ -164,13 +164,14 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
     expect(await s.instances.listUnits("ship-run-s")).toEqual([]);
   });
 
-  it("a task: the request becomes a one-unit instance named by the run — the record carries the requester, thread, card, caps (the profile's minutes, the block's rounds) and run id, the shim is asked, the answer is published and replied, the run ends completed with the ship profile on its record, the card closes ✅", async () => {
+  it("a task: the request becomes a generated one-unit plan instance named by the task and the thread — the record carries the requester, thread, card, caps (the profile's minutes, the block's rounds) and run id, the shim is asked, the answer is published and replied, the run ends completed with the ship profile on its record, the card closes ✅", async () => {
     const s = setup("slack:UADMIN");
     await runShipBranch(s.deps, s.msg, s.io, s.ctx);
     expect(s.refusals).toEqual([]);
-    expect(s.created).toEqual(["ship-run-s"]);
-    expect(await s.instances.get("ship-run-s")).toMatchObject({
-      id: "ship-run-s",
+    expect(s.created).toEqual(["plan-fix-the-login-redirect-6435ec"]);
+    expect(await s.instances.get("plan-fix-the-login-redirect-6435ec")).toMatchObject({
+      id: "plan-fix-the-login-redirect-6435ec",
+      plan: { id: "fix-the-login-redirect-6435ec" },
       kind: "ship",
       userId: "slack:UADMIN",
       channelId: "slack:CX",
@@ -182,12 +183,14 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
       runId: "run-s",
       label: "*ship* · acme/api",
     });
-    const [unit] = await s.instances.listUnits("ship-run-s");
-    expect(unit).toMatchObject({ unit: "task", dependsOn: [], rounds: [] });
-    expect(unit!.branch).toMatch(/^ship\//);
+    const [unit] = await s.instances.listUnits("plan-fix-the-login-redirect-6435ec");
+    expect(unit).toMatchObject({ unit: "U1", slug: "u1", dependsOn: [], rounds: [] });
+    expect(unit!.branch).toBe("plan/fix-the-login-redirect-6435ec/u1");
     expect("resume" in unit!).toBe(false);
     expect(s.replies).toHaveLength(1);
-    expect(s.replies[0]).toMatch(/^🧭 Handed to the plan runner `ship-run-s`: the task runs on `ship\//);
+    expect(s.replies[0]).toMatch(
+      /^🧭 Handed to the plan runner `plan-fix-the-login-redirect-6435ec`: plan `fix-the-login-redirect-6435ec`, 1 unit in dependency order — U1\. the unit runs on `plan\//,
+    );
     expect(s.registry.getById("run-s")).toMatchObject({ finished: true, status: "completed", agent: "ship" });
     expect(s.registry.snapshot("run-s", "tok")?.events.map((e) => e.type)).toContain("answer");
     expect(s.closes).toHaveLength(1);
@@ -209,30 +212,34 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
   it("the caps handed to the runner: `maxMinutes` is the profile's minutes (the channel's 45, not the block's 60), `maxRounds` the config block's", async () => {
     const s = setup("slack:UADMIN", { configExtra: "ship:\n  maxRounds: 2\n  maxMinutes: 60\n" });
     await runShipBranch(s.deps, s.msg, s.io, s.ctx);
-    expect((await s.instances.get("ship-run-s"))?.caps).toEqual({ maxRounds: 2, maxMinutes: 45 });
+    expect((await s.instances.get("plan-fix-the-login-redirect-6435ec"))?.caps).toEqual({
+      maxRounds: 2,
+      maxMinutes: 45,
+    });
   });
 
   // agent-ship.md item 10: a resume at review — the requester named an open pull
   // request of ship's own with no new task text — is handed to the runner as
   // the one task unit with the pull request on its row, so the runner opens the
   // pipeline at its review round. Nothing runs in this process either way.
-  it("a resume at review: the bot-authored open pull request the requester named rides the task row as `resume` with its head, the branch is the pull request's own, and the reply says the review resumes", async () => {
+  it("a resume at review: the bot-authored open pull request the requester named rides the generated `U1` row as `resume` with its head, the branch is the pull request's own, and the reply says the review resumes", async () => {
     const s = setup("slack:UADMIN", {
       text: `agent:ship ${PR_URL}`,
       repoCtx: { pr: 7, headSha: HEAD_A, baseRef: "main", ref: "ship/fix-the-login-redirect-abc123" },
     });
     s.deps.fetchPrFacts = async () => openBotPr();
     await runShipBranch(s.deps, s.msg, s.io, s.ctx);
-    expect(s.created).toEqual(["ship-run-s"]);
-    expect(await s.instances.get("ship-run-s")).toMatchObject({
+    expect(s.created).toEqual(["plan-implement-the-task-this-ab4360"]);
+    expect(await s.instances.get("plan-implement-the-task-this-ab4360")).toMatchObject({
       branch: "ship/fix-the-login-redirect-abc123",
       base: "main",
     });
-    expect(await s.instances.listUnits("ship-run-s")).toEqual([
+    expect(await s.instances.listUnits("plan-implement-the-task-this-ab4360")).toEqual([
       {
-        instanceId: "ship-run-s",
-        unit: "task",
-        slug: "task",
+        instanceId: "plan-implement-the-task-this-ab4360",
+        unit: "U1",
+        slug: "u1",
+        title: "Implement the task this thread's ship request describes.",
         branch: "ship/fix-the-login-redirect-abc123",
         dependsOn: [],
         rounds: [],

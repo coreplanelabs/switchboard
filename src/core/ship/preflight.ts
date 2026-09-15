@@ -4,7 +4,6 @@
 // resumes at review on an open PR of ship's own. Pure decisions over injected
 // lookups; the hand-off (coordinator/handOff.ts) carries what this decides.
 
-import { createHash } from "node:crypto";
 import { resolveBaseRef, type PullRequestFacts, type RepoShipInfo } from "../../execution/githubPulls.js";
 import type { GithubIdentity } from "../../execution/githubApp.js";
 import type { RepoContext } from "../repoContext.js";
@@ -45,34 +44,15 @@ export function shipTaskText(requestText: string, repo: string): string {
     .trim();
 }
 
-/**
- * The pipeline branch ship names and binds the thread to at round 0's attach:
- * `ship/<task-slug>-<thread-hash>`. Deterministic per (task, thread)
- * — a re-issued task in the same thread lands on the same branch, so the
- * resident's one-ref-per-thread binding and the PR open-or-edit idempotency
- * both hold across restarts (recreatability, AGENTS.md invariant 6).
- */
-export function shipBranchName(task: string, threadKey: string): string {
-  const slug =
-    task
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 24)
-      .replace(/-+$/, "") || "task";
-  // sha256 prefix — a stable short discriminator, not a secret.
-  const hash = createHash("sha256").update(threadKey).digest("hex").slice(0, 6);
-  return `ship/${slug}-${hash}`;
-}
-
 // ---- preflight (spec items 1, 2, 9, 10) --------------------------------------
 
 /** What the preflight decided the pipeline starts FROM. */
 export interface ShipEntry {
   repo: string;
-  /** The pipeline branch (ship-named on round 0; the PR's own head branch on
-   *  a resume). Round 0 binds the thread to it at attach (refHint). */
-  branch: string;
+  /** The pipeline branch, set only when the entry resumes (the PR's own head
+   *  branch). A fresh entry names none: the hand-off is the one branch namer
+   *  — the generated plan's `plan/<id>/u1` (agent-ship item 3). */
+  branch?: string;
   /** The PR base branch: the dispatch-resolved ref, else the repo's default
    *  branch. Undefined → the PR post-step reports "no base" honestly. */
   base: string | undefined;
@@ -290,6 +270,6 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
     repoCtx.ref && !repoCtx.refFromPr && repoCtx.ref.toLowerCase() !== repo.toLowerCase() ? repoCtx.ref : undefined;
   return {
     ok: true,
-    entry: { repo, branch: shipBranchName(task, input.threadKey), base: resolveBaseRef([ref], info.defaultBranch) },
+    entry: { repo, base: resolveBaseRef([ref], info.defaultBranch) },
   };
 }

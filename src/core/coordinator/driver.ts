@@ -158,6 +158,8 @@ interface PlanFacts {
   planId?: string;
   /** Who merges, as the instance's field has it: the plan route answers it, `person` when absent. */
   merge: "runner" | "person";
+  /** The instance's mark as the plan route answers it: a generated one-unit plan (a `plan` with no `path`). */
+  generated: boolean;
   repo: string;
   base: string;
   caps: ShipCaps;
@@ -186,6 +188,7 @@ function readPlan(a: BotAnswer): PlanFacts {
   return {
     ...(typeof b.planId === "string" ? { planId: b.planId } : {}),
     merge: b.merge === "runner" ? "runner" : "person",
+    generated: b.generated === true,
     repo: b.repo,
     base: b.base,
     caps: { maxRounds: b.caps.maxRounds, maxMinutes: b.caps.maxMinutes },
@@ -429,6 +432,7 @@ async function runUnit(
       // seeded plan and `person` on a task, and the door re-checks it — the
       // branch's name never decides.
       merge: plan.merge,
+      generated: plan.generated,
       ...(resume !== undefined ? { resume } : {}),
     },
     start.at,
