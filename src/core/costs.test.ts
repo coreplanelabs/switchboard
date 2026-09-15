@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  ANTHROPIC_PRICES,
   AnthropicCostReportSource,
+  anthropicPriceOf,
+  anthropicTokensCostUsd,
   CLOUDFLARE_PRICES,
   CloudflareGraphqlUsageSource,
   NullLlmCostSource,
@@ -13,6 +16,7 @@ import {
   doRequestsCostUsd,
   doRowsCostUsd,
   EMPTY_USAGE,
+  MAX_ESTIMATED_DAYS,
   parseCostsConfig,
   r2OperationClass,
   r2OperationsCostUsd,
@@ -325,6 +329,23 @@ describe("buildCostReport", () => {
     expect(report.account.cloudUsd).toBeGreaterThan(d.cloudUsd);
   });
 
+  it("flags a day whose LLM figure is an estimate from the usage report, and carries the tokens the estimate could not price", () => {
+    const rows: LlmCostRow[] = [
+      ...LLM,
+      { date: AUG_29, workspaceId: "wrkspc_switchboard", amountUsd: 4.25, estimated: true, unpricedTokens: 500 },
+      { date: AUG_29, workspaceId: "wrkspc_other", amountUsd: 1, estimated: true, unpricedTokens: 9000 },
+    ];
+    const r = buildCostReport("switchboard", GROUP, USAGE, rows, range);
+    const closed = r.days.find((x) => x.date === AUG_28)!;
+    const open = r.days.find((x) => x.date === AUG_29)!;
+    expect(closed.llmEstimated).toBe(false);
+    expect(closed.llmUnpricedTokens).toBe(0);
+    expect(open.llmUsd).toBe(4.25);
+    expect(open.llmEstimated).toBe(true);
+    expect(open.llmUnpricedTokens).toBe(500); // the other workspace's unpriced tokens are not ours
+    expect(r.totals.llmUsd).toBe(12.5 + 4.25);
+  });
+
   it("keeps only the group's Anthropic workspace for LLM spend", () => {
     expect(report.days.find((x) => x.date === AUG_28)!.llmUsd).toBe(12.5);
     // null workspace = the org default workspace, which is NOT this group's
@@ -600,7 +621,254 @@ describe("CloudflareGraphqlUsageSource", () => {
 
 const RANGE = { from: AUG_1, to: AUG_28, days: 28, partialLastDay: true };
 
+describe("Anthropic list prices", () => {
+  it("resolves a model id to its family's prices, a dated id included, the longest family winning", () => {
+    expect(anthropicPriceOf("claude-haiku-4-5-20251001")).toBe(ANTHROPIC_PRICES["claude-haiku-4-5"]);
+    expect(anthropicPriceOf("claude-fable-5")).toBe(ANTHROPIC_PRICES["claude-fable-5"]);
+    // 5.1 is not "5 with a suffix": a dated suffix is eight digits, nothing else.
+    expect(anthropicPriceOf("claude-fable-5-1")).toBe(ANTHROPIC_PRICES["claude-fable-5-1"]);
+    expect(anthropicPriceOf("claude-fable-5-1-20260901")).toBe(ANTHROPIC_PRICES["claude-fable-5-1"]);
+    expect(ANTHROPIC_PRICES["claude-fable-5-1"].cacheRead).not.toBe(ANTHROPIC_PRICES["claude-fable-5"].cacheRead);
+    expect(anthropicPriceOf("claude-fable-5-turbo")).toBeUndefined();
+    expect(anthropicPriceOf("gpt-9")).toBeUndefined();
+  });
+
+  it("prices a million of each token kind at the family's per-MTok rates; an unknown model prices to undefined, never 0", () => {
+    const million = 1_000_000;
+    expect(
+      anthropicTokensCostUsd("claude-fable-5", {
+        uncachedInput: million,
+        output: million,
+        cacheRead: million,
+        cacheWrite5m: million,
+        cacheWrite1h: million,
+      }),
+    ).toBeCloseTo(10 + 50 + 1 + 12.5 + 20, 9);
+    expect(
+      anthropicTokensCostUsd("claude-haiku-4-5-20251001", {
+        uncachedInput: 32_975,
+        output: 4_056,
+        cacheRead: 173_049,
+        cacheWrite5m: 192_754,
+        cacheWrite1h: 0,
+      }),
+    ).toBeCloseTo((32_975 * 1 + 4_056 * 5 + 173_049 * 0.1 + 192_754 * 1.25) / million, 9);
+    expect(
+      anthropicTokensCostUsd("claude-future-9", {
+        uncachedInput: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite5m: 0,
+        cacheWrite1h: 0,
+      }),
+    ).toBeUndefined();
+  });
+});
+
 describe("AnthropicCostReportSource", () => {
+  /** One hourly usage bucket of the Admin usage report, as the API spells it. */
+  const usageBucket = (
+    startIso: string,
+    results: Array<{
+      workspace_id: string | null;
+      model: string;
+      uncached_input_tokens: number;
+      output_tokens: number;
+      cache_read_input_tokens: number;
+      c5?: number;
+      c1?: number;
+    }>,
+  ) => ({
+    starting_at: startIso,
+    ending_at: startIso,
+    results: results.map((r) => ({
+      workspace_id: r.workspace_id,
+      model: r.model,
+      uncached_input_tokens: r.uncached_input_tokens,
+      output_tokens: r.output_tokens,
+      cache_read_input_tokens: r.cache_read_input_tokens,
+      cache_creation: { ephemeral_5m_input_tokens: r.c5 ?? 0, ephemeral_1h_input_tokens: r.c1 ?? 0 },
+      service_tier: null,
+    })),
+  });
+
+  it("prices the open day from the hourly usage report at list when the cost report has no bucket for it yet, one estimated row per workspace", async () => {
+    const range = { from: AUG_28, to: AUG_29, days: 2, partialLastDay: true };
+    const costReport = {
+      data: [
+        {
+          starting_at: midnight(AUG_28),
+          ending_at: midnight(AUG_29),
+          results: [{ amount: "1250", currency: "USD", workspace_id: "wrkspc_a" }],
+        },
+      ],
+      has_more: false,
+      next_page: null,
+    };
+    const usagePages: Record<string, unknown> = {
+      first: {
+        data: [
+          usageBucket(`${AUG_29}T05:00:00Z`, [
+            {
+              workspace_id: "wrkspc_a",
+              model: "claude-fable-5",
+              uncached_input_tokens: 1000,
+              output_tokens: 2000,
+              cache_read_input_tokens: 3000,
+              c5: 4000,
+            },
+            {
+              workspace_id: null,
+              model: "claude-haiku-4-5-20251001",
+              uncached_input_tokens: 1_000_000,
+              output_tokens: 0,
+              cache_read_input_tokens: 0,
+            },
+          ]),
+        ],
+        has_more: true,
+        next_page: "u2",
+      },
+      u2: {
+        data: [
+          usageBucket(`${AUG_29}T06:00:00Z`, [
+            {
+              workspace_id: "wrkspc_a",
+              model: "claude-fable-5",
+              uncached_input_tokens: 1000,
+              output_tokens: 0,
+              cache_read_input_tokens: 0,
+            },
+          ]),
+        ],
+        has_more: false,
+        next_page: null,
+      },
+    };
+    const f = fakeFetch((url) => {
+      const u = new URL(url);
+      if (u.pathname === "/v1/organizations/cost_report") return { status: 200, body: costReport };
+      return { status: 200, body: usagePages[u.searchParams.get("page") ?? "first"] };
+    });
+    const rows = await new AnthropicCostReportSource({
+      adminKey: "sk-ant-admin",
+      fetchImpl: f.fetchImpl,
+    }).fetchDailyCost(range);
+    // fable-5 over both hours: 2000 in × $10 + 2000 out × $50 + 3000 reads × $1 + 4000 5m-writes × $12.50, per MTok.
+    const fableUsd = (2000 * 10 + 2000 * 50 + 3000 * 1 + 4000 * 12.5) / 1_000_000;
+    expect(rows).toEqual([
+      { date: AUG_28, workspaceId: "wrkspc_a", amountUsd: 12.5 },
+      { date: AUG_29, workspaceId: "wrkspc_a", amountUsd: fableUsd, estimated: true, unpricedTokens: 0 },
+      { date: AUG_29, workspaceId: null, amountUsd: 1, estimated: true, unpricedTokens: 0 },
+    ]);
+    const usageCalls = f.calls.filter((c) => new URL(c.url).pathname === "/v1/organizations/usage_report/messages");
+    expect(usageCalls.length).toBe(2);
+    const u = new URL(usageCalls[0].url);
+    expect(u.searchParams.get("starting_at")).toBe(midnight(AUG_29));
+    expect(u.searchParams.get("ending_at")).toBe(midnight(AUG_30));
+    expect(u.searchParams.get("bucket_width")).toBe("1h");
+    expect(u.searchParams.getAll("group_by[]")).toEqual(["workspace_id", "model"]);
+    expect(u.searchParams.get("limit")).toBe("24");
+    expect((usageCalls[0].init.headers as Record<string, string>)["x-api-key"]).toBe("sk-ant-admin");
+    expect(new URL(usageCalls[1].url).searchParams.get("page")).toBe("u2");
+  });
+
+  it("estimates every trailing day the cost report has not closed, and none it has", async () => {
+    // The cost report answers only the first of three days: the two after it are open.
+    const range = { from: AUG_27, to: AUG_29, days: 3, partialLastDay: true };
+    const f = fakeFetch((url) => {
+      const u = new URL(url);
+      if (u.pathname === "/v1/organizations/cost_report")
+        return {
+          status: 200,
+          body: {
+            data: [{ starting_at: midnight(AUG_27), ending_at: midnight(AUG_28), results: [] }],
+            has_more: false,
+            next_page: null,
+          },
+        };
+      return { status: 200, body: { data: [], has_more: false, next_page: null } };
+    });
+    await new AnthropicCostReportSource({ adminKey: "k", fetchImpl: f.fetchImpl }).fetchDailyCost(range);
+    const starts = f.calls
+      .filter((c) => new URL(c.url).pathname === "/v1/organizations/usage_report/messages")
+      .map((c) => new URL(c.url).searchParams.get("starting_at"))
+      .sort(); // the open days are read concurrently; order is not the contract
+    expect(starts).toEqual([midnight(AUG_28), midnight(AUG_29)]);
+  });
+
+  it("estimates at most the trailing three days when the cost report has closed nothing — never one live read per day of a long range", async () => {
+    const range = { from: AUG_1, to: AUG_29, days: 29, partialLastDay: true };
+    const f = fakeFetch((url) => {
+      const u = new URL(url);
+      if (u.pathname === "/v1/organizations/cost_report")
+        return { status: 200, body: { data: [], has_more: false, next_page: null } };
+      return { status: 200, body: { data: [], has_more: false, next_page: null } };
+    });
+    await new AnthropicCostReportSource({ adminKey: "k", fetchImpl: f.fetchImpl }).fetchDailyCost(range);
+    const starts = f.calls
+      .filter((c) => new URL(c.url).pathname === "/v1/organizations/usage_report/messages")
+      .map((c) => new URL(c.url).searchParams.get("starting_at"))
+      .sort();
+    expect(starts).toEqual([midnight(AUG_27), midnight(AUG_28), midnight(AUG_29)]);
+    expect(MAX_ESTIMATED_DAYS).toBe(3);
+  });
+
+  it("reports the tokens of a model it has no price for as unpriced on the workspace's row, rather than pricing them at $0 in silence or failing the page", async () => {
+    const range = { from: AUG_29, to: AUG_29, days: 1, partialLastDay: true };
+    const f = fakeFetch((url) => {
+      const u = new URL(url);
+      if (u.pathname === "/v1/organizations/cost_report")
+        return { status: 200, body: { data: [], has_more: false, next_page: null } };
+      return {
+        status: 200,
+        body: {
+          data: [
+            usageBucket(`${AUG_29}T01:00:00Z`, [
+              {
+                workspace_id: "wrkspc_a",
+                model: "claude-future-9",
+                uncached_input_tokens: 100,
+                output_tokens: 20,
+                cache_read_input_tokens: 30,
+                c5: 5,
+                c1: 1,
+              },
+              {
+                workspace_id: "wrkspc_a",
+                model: "claude-haiku-4-5-20251001",
+                uncached_input_tokens: 1_000_000,
+                output_tokens: 0,
+                cache_read_input_tokens: 0,
+              },
+            ]),
+          ],
+          has_more: false,
+          next_page: null,
+        },
+      };
+    });
+    const rows = await new AnthropicCostReportSource({ adminKey: "k", fetchImpl: f.fetchImpl }).fetchDailyCost(range);
+    expect(rows).toEqual([
+      { date: AUG_29, workspaceId: "wrkspc_a", amountUsd: 1, estimated: true, unpricedTokens: 156 },
+    ]);
+  });
+
+  it("a failing usage report fails the read by status, without the key", async () => {
+    const range = { from: AUG_29, to: AUG_29, days: 1, partialLastDay: true };
+    const f = fakeFetch((url) => {
+      const u = new URL(url);
+      if (u.pathname === "/v1/organizations/cost_report")
+        return { status: 200, body: { data: [], has_more: false, next_page: null } };
+      return { status: 429, body: { error: { message: "rate limited" } } };
+    });
+    const err = await new AnthropicCostReportSource({ adminKey: "sk-ant-admin-SECRET", fetchImpl: f.fetchImpl })
+      .fetchDailyCost(range)
+      .catch((e: Error) => e);
+    expect(String(err)).toMatch(/usage_report 429/);
+    expect(String(err)).not.toContain("SECRET");
+  });
+
   it("walks every page of the Admin cost report grouped by workspace and converts cents to dollars", async () => {
     const pages: Record<string, unknown> = {
       first: {

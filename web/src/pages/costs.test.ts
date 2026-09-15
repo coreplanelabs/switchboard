@@ -8,7 +8,7 @@ import type { CostsSeed } from "@core/channels/webSeed.js";
 // behaviors, against the mounted Vue page.
 
 function report(over: Partial<CostReport> = {}): CostReport {
-  const day = (date: string, bot: number, llm: number) => ({
+  const day = (date: string, bot: number, llm: number, llmEstimated = false) => ({
     date,
     containers: { bot: { cpu: bot * 0.1, memory: bot * 0.8, disk: bot * 0.1, total: bot } },
     durableObjects: { "bot DO": 0.2 },
@@ -20,9 +20,12 @@ function report(over: Partial<CostReport> = {}): CostReport {
     workflowsUsd: 0,
     cloudUsd: bot + 0.3,
     llmUsd: llm,
+    llmEstimated,
+    llmUnpricedTokens: 0,
     total: bot + 0.3 + llm,
   });
-  const days = [day("2026-08-27", 0.3, 4), day("2026-08-28", 1.3, 12.5), day("2026-08-29", 0.9, 3)];
+  // The open day's LLM figure is the usage report at list, flagged as such.
+  const days = [day("2026-08-27", 0.3, 4), day("2026-08-28", 1.3, 12.5), day("2026-08-29", 0.9, 3, true)];
   const cloudUsd = days.reduce((s, d) => s + d.cloudUsd, 0);
   return {
     group: "switchboard",
@@ -71,14 +74,48 @@ describe("CostsPage", () => {
     expect(w.find("h1 b").exists()).toBe(false);
   });
 
-  it("leads with the summary tiles: yesterday (last FULL day), 7-day average, projected month, LLM share", () => {
+  it("leads with the summary tiles: yesterday (last FULL day), 7-day average, projected month, LLM spend in dollars", () => {
     const w = mountApp(CostsPage, { seed: seed() });
     const t = w.text();
     expect(t).toContain("Yesterday");
     expect(t).toContain("$14.10"); // 2026-08-28: 1.3 + 0.3 + 12.5 — not the partial day
     expect(t).toContain("2026-08-28 · last full day");
     expect(t).toContain("Projected month");
-    expect(t).toContain("LLM share");
+    // LLM spend will dwarf the Cloudflare spend, so a share of the total says
+    // nothing: the tile is the dollars, with yesterday and the open day beneath.
+    expect(t).toContain("LLM spend");
+    expect(t).toContain("$19.50");
+    expect(t).toContain("yesterday $12.50 · today $3.00 (estimate)");
+    expect(t).not.toContain("LLM share");
+  });
+
+  it("with a one-day range the first tile is today so far, not an empty yesterday", () => {
+    const r = report();
+    const today = r.days[2];
+    const w = mountApp(CostsPage, {
+      seed: seed({
+        ...r,
+        range: { from: today.date, to: today.date, days: 1, partialLastDay: true },
+        days: [today],
+        totals: { ...r.totals, llmUsd: 3, total: today.total },
+      }),
+    });
+    const t = w.text();
+    expect(t).toContain("Today so far");
+    expect(t).toContain("$4.20"); // 0.9 + 0.3 + 3
+    expect(t).not.toContain("no full day in range");
+  });
+
+  it("lists the daily table newest first, the open day on top", () => {
+    const w = mountApp(CostsPage, { seed: seed() });
+    const dates = w.findAll("table.data tbody td[title]").map((td) => td.attributes("title"));
+    expect(dates).toEqual([...report().days].reverse().map((d) => d.date));
+  });
+
+  it("says which day's LLM figure is an estimate from the usage report", () => {
+    const w = mountApp(CostsPage, { seed: seed() });
+    expect(w.find("table.data").text()).toContain("LLM estimated");
+    expect(w.text()).toContain("usage report");
   });
 
   it("says what share of the account's whole Cloudflare spend this group is, and what was attributed to it", () => {
@@ -95,8 +132,12 @@ describe("CostsPage", () => {
   it("stacks the small platform meters (Workers, SQLite rows and storage, R2) as one series and lists each in the split", () => {
     const w = mountApp(CostsPage, { seed: seed() });
     expect(w.find(".legend").text()).toContain("Workers · storage · R2");
-    const titles = w.findAll("rect.seg title").map((n) => n.text());
-    expect(titles).toContain("2026-08-28 · Workers · storage · R2 · $0.05");
+    const fullDay = report().days[1].date;
+    const dayTitle = w
+      .findAll("rect.day title")
+      .map((n) => n.text())
+      .find((t) => t.startsWith(fullDay));
+    expect(dayTitle).toContain("Workers · storage · R2 $0.05");
     const t = w.text();
     for (const row of [
       "Workers requests + CPU",
@@ -108,13 +149,26 @@ describe("CostsPage", () => {
       expect(t).toContain(row);
   });
 
-  it("draws one stacked bar per day as inline SVG with a title per segment (hover without JS)", () => {
+  it("draws one stacked bar per day as inline SVG, one rect per day × component, with no per-segment tooltip competing with the day's", () => {
     const w = mountApp(CostsPage, { seed: seed() });
     const segs = w.findAll("rect.seg");
     expect(segs.length).toBeGreaterThanOrEqual(6); // 3 days × (bot + DO + LLM)
-    const titles = w.findAll("rect.seg title").map((n) => n.text());
-    expect(titles).toContain("2026-08-28 · bot · $1.30");
-    expect(titles).toContain("2026-08-28 · LLM (Anthropic) · $12.50");
+    expect(w.findAll("rect.seg title").length).toBe(0);
+  });
+
+  it("one hover target per day carries the whole day's breakdown — every series and the total", () => {
+    const w = mountApp(CostsPage, { seed: seed() });
+    const days = w.findAll("rect.day");
+    expect(days.length).toBe(3);
+    const titles = w.findAll("rect.day title").map((n) => n.text());
+    const [, fullDay, openDay] = report().days;
+    const aug28 = titles.find((t) => t.startsWith(fullDay.date));
+    expect(aug28).toBeDefined();
+    expect(aug28).toContain("total $14.10");
+    expect(aug28).toContain("bot $1.30");
+    expect(aug28).toContain("Durable Objects $0.25");
+    expect(aug28).toContain("LLM (Anthropic) $12.50");
+    expect(titles.find((t) => t.startsWith(openDay.date))).toContain("estimate");
   });
 
   it("includes a legend and a table view so identity is never color-alone; dates read human with the ISO on hover", () => {
@@ -140,9 +194,15 @@ describe("CostsPage", () => {
   it("offers the range switch with the current range as text, the others as links", () => {
     const w = mountApp(CostsPage, { seed: seed() });
     const hrefs = w.findAll("a").map((a) => a.attributes("href"));
+    expect(hrefs).toContain("/costs/switchboard?days=1");
     expect(hrefs).toContain("/costs/switchboard?days=7");
     expect(hrefs).toContain("/costs/switchboard?days=90");
     expect(hrefs).not.toContain("/costs/switchboard?days=3");
+    // A visible switcher beside the group pills, not header small print; the
+    // short preset is today (UTC), never a rolling window the sources lack.
+    expect(w.find('nav[aria-label="Range"]').exists()).toBe(true);
+    expect(w.find('nav[aria-label="Range"]').text()).toContain("today");
+    expect(w.find('nav[aria-label="Range"]').text()).not.toContain("24h");
   });
 
   it("links sibling groups when more than one is configured", () => {

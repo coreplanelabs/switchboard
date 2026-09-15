@@ -853,7 +853,7 @@ const RESIDENTS = {
 
 // Typed as the report the page renders, so the fixture cannot drift from the
 // shape again (a missing `account` once left the preview's costs page blank).
-const day = (date: string, bot: number, llm: number): DailyCost => ({
+const day = (date: string, bot: number, llm: number, llmEstimated = false): DailyCost => ({
   date,
   containers: {
     "switchboard bot": { cpu: bot * 0.1, memory: bot * 0.8, disk: bot * 0.1, total: bot },
@@ -868,14 +868,18 @@ const day = (date: string, bot: number, llm: number): DailyCost => ({
   workflowsUsd: 0,
   cloudUsd: bot + 0.56,
   llmUsd: llm,
+  llmEstimated,
+  llmUnpricedTokens: 0,
   total: bot + 0.56 + llm,
 });
+// The open day's LLM figure is the usage-report estimate, as in production.
 const COSTS_DAYS = Array.from({ length: 30 }, (_, i) => {
   const d = new Date(NOW - (29 - i) * 86_400_000);
   return day(
     d.toISOString().slice(0, 10),
     0.6 + Math.sin(i / 3) * 0.3 + i * 0.01,
     6 + Math.cos(i / 2) * 4 + (i % 7 === 3 ? 9 : 0),
+    i === 29,
   );
 });
 const COSTS_CLOUD_USD = COSTS_DAYS.reduce((s, d) => s + d.cloudUsd, 0);

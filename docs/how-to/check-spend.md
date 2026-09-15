@@ -12,7 +12,7 @@ Without the block, **Costs** is not in the header and `/costs` answers 503.
 
 ## Open the dashboard
 
-Open `/costs`: daily spend for every configured group. Each load prices live from Cloudflare's billing data and, with the admin key, Anthropic's; nothing is estimated or cached.
+Open `/costs`: daily spend for every configured group, newest day first, with `today · 7d · 30d · 90d` ranges (UTC days; the cost sources have nothing finer). Each load prices live from Cloudflare's billing data and, with the admin key, Anthropic's; nothing is cached. One figure is an estimate and says so: the day Anthropic's cost report has not closed yet (today, and yesterday until a few hours after midnight UTC) is the hourly usage report priced at list.
 
 ## Narrow to one group
 

@@ -244,6 +244,14 @@ export interface LlmCostRow {
   /** null = the organization's default workspace. */
   workspaceId: string | null;
   amountUsd: number;
+  /** true = the cost report had no bucket for this day yet (it closes a day
+   *  some hours after midnight UTC and never has one for the open day), so the
+   *  amount is the hourly usage report priced at `ANTHROPIC_PRICES`. Absent =
+   *  the invoice-grade cost report. */
+  estimated?: boolean;
+  /** Tokens an estimate met under a model id `ANTHROPIC_PRICES` has no entry
+   *  for — reported, never priced at $0 in silence. Absent on a cost-report row. */
+  unpricedTokens?: number;
 }
 
 export interface DateRange {
@@ -403,6 +411,11 @@ export interface DailyCost {
   workflowsUsd: number;
   cloudUsd: number;
   llmUsd: number;
+  /** true = `llmUsd` is the usage report priced at list, because the cost
+   *  report has not closed this day (`LlmCostRow.estimated`). */
+  llmEstimated: boolean;
+  /** Tokens of the group's workspace the estimate could not price (unknown model id). */
+  llmUnpricedTokens: number;
   total: number;
 }
 
@@ -562,12 +575,13 @@ export function buildCostReport(
       if (row.workflowName in workflowNames) workflowsUsd += usd;
     }
     byResource.workflows += workflowsUsd;
-    const llmUsd =
+    const llmRows =
       llm && cfg.anthropicWorkspaceId
-        ? llm
-            .filter((r) => r.date === date && r.workspaceId === cfg.anthropicWorkspaceId)
-            .reduce((s, r) => s + r.amountUsd, 0)
-        : 0;
+        ? llm.filter((r) => r.date === date && r.workspaceId === cfg.anthropicWorkspaceId)
+        : [];
+    const llmUsd = llmRows.reduce((s, r) => s + r.amountUsd, 0);
+    const llmEstimated = llmRows.some((r) => r.estimated === true);
+    const llmUnpricedTokens = llmRows.reduce((s, r) => s + (r.unpricedTokens ?? 0), 0);
     const cloudUsd =
       Object.values(containers).reduce((s, c) => s + c.total, 0) +
       Object.values(durableObjects).reduce((s, v) => s + v, 0) +
@@ -589,6 +603,8 @@ export function buildCostReport(
       workflowsUsd,
       cloudUsd,
       llmUsd,
+      llmEstimated,
+      llmUnpricedTokens,
       total: cloudUsd + llmUsd,
     };
   });
@@ -604,6 +620,82 @@ export function buildCostReport(
     account: { cloudUsd: accountCloudUsd },
     attribution,
   };
+}
+
+// ---- Anthropic list prices ----------------------------------------------------------------
+
+/** USD per million tokens of one kind, one model family. */
+export interface AnthropicModelPrice {
+  input: number;
+  output: number;
+  cacheWrite5m: number;
+  cacheWrite1h: number;
+  cacheRead: number;
+}
+
+/** Anthropic list prices per model family (platform.claude.com/docs/en/about-claude/pricing;
+ *  re-check when it moves). Keyed by the family id the usage report spells — a dated
+ *  release (`claude-haiku-4-5-20251001`) resolves to its family through
+ *  `anthropicPriceOf`. Only what the estimate needs: the open day priced at
+ *  the rate it will bill at; the cost report remains the invoice. */
+export const ANTHROPIC_PRICES: Record<string, AnthropicModelPrice> = {
+  "claude-fable-5-1": { input: 10, output: 50, cacheWrite5m: 12.5, cacheWrite1h: 20, cacheRead: 0.25 },
+  "claude-mythos-5-1": { input: 10, output: 50, cacheWrite5m: 12.5, cacheWrite1h: 20, cacheRead: 0.25 },
+  "claude-fable-5": { input: 10, output: 50, cacheWrite5m: 12.5, cacheWrite1h: 20, cacheRead: 1 },
+  "claude-mythos-5": { input: 10, output: 50, cacheWrite5m: 12.5, cacheWrite1h: 20, cacheRead: 1 },
+  "claude-opus-5": { input: 5, output: 25, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5 },
+  "claude-opus-4-8": { input: 5, output: 25, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5 },
+  "claude-opus-4-7": { input: 5, output: 25, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5 },
+  "claude-opus-4-6": { input: 5, output: 25, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5 },
+  "claude-opus-4-5": { input: 5, output: 25, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5 },
+  "claude-opus-4-1": { input: 15, output: 75, cacheWrite5m: 18.75, cacheWrite1h: 30, cacheRead: 1.5 },
+  "claude-opus-4": { input: 15, output: 75, cacheWrite5m: 18.75, cacheWrite1h: 30, cacheRead: 1.5 },
+  "claude-sonnet-5": { input: 2, output: 10, cacheWrite5m: 2.5, cacheWrite1h: 4, cacheRead: 0.2 },
+  "claude-sonnet-4-6": { input: 3, output: 15, cacheWrite5m: 3.75, cacheWrite1h: 6, cacheRead: 0.3 },
+  "claude-sonnet-4-5": { input: 3, output: 15, cacheWrite5m: 3.75, cacheWrite1h: 6, cacheRead: 0.3 },
+  "claude-sonnet-4": { input: 3, output: 15, cacheWrite5m: 3.75, cacheWrite1h: 6, cacheRead: 0.3 },
+  "claude-haiku-4-5": { input: 1, output: 5, cacheWrite5m: 1.25, cacheWrite1h: 2, cacheRead: 0.1 },
+  "claude-haiku-3-5": { input: 0.8, output: 4, cacheWrite5m: 1, cacheWrite1h: 1.6, cacheRead: 0.08 },
+};
+
+const DATED_RELEASE_SUFFIX = /^-\d{8}$/;
+
+/** The family prices of a model id: the id itself, or the id less a dated
+ *  release suffix (`-YYYYMMDD`). Nothing else counts as "the same family" —
+ *  `claude-fable-5-1` is not `claude-fable-5` with a suffix, and its cache
+ *  reads bill differently. Unknown → undefined, never a guess. */
+export function anthropicPriceOf(modelId: string): AnthropicModelPrice | undefined {
+  const exact = ANTHROPIC_PRICES[modelId];
+  if (exact) return exact;
+  for (const family of Object.keys(ANTHROPIC_PRICES)) {
+    if (modelId.startsWith(family) && DATED_RELEASE_SUFFIX.test(modelId.slice(family.length)))
+      return ANTHROPIC_PRICES[family];
+  }
+  return undefined;
+}
+
+/** Token counts of one usage-report row, in the report's own kinds. */
+export interface AnthropicTokens {
+  uncachedInput: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite5m: number;
+  cacheWrite1h: number;
+}
+
+/** What those tokens cost at the family's list prices; undefined for a model
+ *  the table does not know (the caller reports the tokens, never $0). */
+export function anthropicTokensCostUsd(modelId: string, t: AnthropicTokens): number | undefined {
+  const p = anthropicPriceOf(modelId);
+  if (!p) return undefined;
+  return (
+    (t.uncachedInput * p.input +
+      t.output * p.output +
+      t.cacheRead * p.cacheRead +
+      t.cacheWrite5m * p.cacheWrite5m +
+      t.cacheWrite1h * p.cacheWrite1h) /
+    1_000_000
+  );
 }
 
 // ---- range ----------------------------------------------------------------------------
@@ -784,12 +876,39 @@ export class CloudflareGraphqlUsageSource implements CloudflareUsageSource {
 }
 
 const ANTHROPIC_COST_REPORT = "https://api.anthropic.com/v1/organizations/cost_report";
+const ANTHROPIC_USAGE_REPORT = "https://api.anthropic.com/v1/organizations/usage_report/messages";
 const ANTHROPIC_VERSION = "2023-06-01";
 const MAX_COST_PAGES = 20;
+/** The open day plus two days of cost-report lag; older days without a bucket are not estimated. */
+export const MAX_ESTIMATED_DAYS = 3;
+
+type UsageReportBody = {
+  data?: {
+    starting_at?: string;
+    results?: {
+      workspace_id?: string | null;
+      model?: string;
+      uncached_input_tokens?: number;
+      output_tokens?: number;
+      cache_read_input_tokens?: number;
+      cache_creation?: { ephemeral_5m_input_tokens?: number; ephemeral_1h_input_tokens?: number };
+    }[];
+  }[];
+  has_more?: boolean;
+  next_page?: string | null;
+};
 
 /** Anthropic Admin API cost report, grouped by workspace, all pages. Amounts
  *  arrive as decimal strings in cents; we return dollars. Requires an Admin API
- *  key — a regular API key is rejected upstream (401). */
+ *  key — a regular API key is rejected upstream (401).
+ *
+ *  The cost report is the invoice, and the invoice closes late: a day gets its
+ *  bucket some hours after midnight UTC and the open day never has one (nor
+ *  does the usage report at `1d`). So the days after the report's last bucket
+ *  are priced from the HOURLY usage report at `ANTHROPIC_PRICES` and flagged
+ *  `estimated` — the page can then show today, and a 1-day range means
+ *  something. Read live when this was written: fourteen hourly buckets for the
+ *  open day, none at `1d`; the cost report's last bucket was the day before. */
 export class AnthropicCostReportSource implements LlmCostSource {
   private readonly adminKey: string;
   private readonly fetchImpl: typeof fetch;
@@ -799,7 +918,88 @@ export class AnthropicCostReportSource implements LlmCostSource {
   }
 
   async fetchDailyCost(range: DateRange): Promise<LlmCostRow[]> {
+    const report = await this.fetchCostReport(range);
+    // A bucket with no results is still a closed day: track buckets, not rows.
+    // Only the trailing MAX_ESTIMATED_DAYS are ever estimated: the report lags
+    // a day at most, so an older day with no bucket had no spend (a new
+    // workspace, a new organization) — and a page load must not turn into
+    // ninety live usage reads because the report answered nothing.
+    const open = eachDay(range).filter((date) => report.closedThrough === null || date > report.closedThrough);
+    const estimated = await Promise.all(open.slice(-MAX_ESTIMATED_DAYS).map((date) => this.estimateDay(date)));
+    return [...report.rows, ...estimated.flat()];
+  }
+
+  /** The hourly usage report for one day, summed per workspace × model and
+   *  priced at list; one row per workspace, `estimated`, with the tokens of
+   *  any model the price table does not know reported as `unpricedTokens`. */
+  private async estimateDay(date: string): Promise<LlmCostRow[]> {
+    const perWorkspace = new Map<string | null, Map<string, AnthropicTokens>>();
+    let page: string | null = null;
+    for (let i = 0; ; i++) {
+      // ≤24 hourly buckets a day at limit=24: a second page is the API's
+      // pagination quirk at most, twenty is the API having changed.
+      if (i >= MAX_COST_PAGES)
+        throw new Error(
+          `anthropic usage_report: more than ${MAX_COST_PAGES} pages for ${date}; refusing a truncated estimate`,
+        );
+      const url = new URL(ANTHROPIC_USAGE_REPORT);
+      url.searchParams.set("starting_at", `${date}T00:00:00Z`);
+      url.searchParams.set("ending_at", `${addDays(date, 1)}T00:00:00Z`);
+      url.searchParams.set("bucket_width", "1h");
+      url.searchParams.append("group_by[]", "workspace_id");
+      url.searchParams.append("group_by[]", "model");
+      url.searchParams.set("limit", "24");
+      if (page) url.searchParams.set("page", page);
+      const res = await this.fetchImpl(url.toString(), {
+        headers: { "x-api-key": this.adminKey, "anthropic-version": ANTHROPIC_VERSION },
+      });
+      if (res.status !== 200)
+        throw new Error(`anthropic usage_report ${res.status}: ${(await res.text()).slice(0, 300)}`);
+      const body = (await res.json()) as UsageReportBody;
+      for (const bucket of body.data ?? []) {
+        for (const r of bucket.results ?? []) {
+          const ws = r.workspace_id ?? null;
+          const byModel = perWorkspace.get(ws) ?? new Map<string, AnthropicTokens>();
+          const model = str(r.model);
+          const t = byModel.get(model) ?? {
+            uncachedInput: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite5m: 0,
+            cacheWrite1h: 0,
+          };
+          t.uncachedInput += num(r.uncached_input_tokens);
+          t.output += num(r.output_tokens);
+          t.cacheRead += num(r.cache_read_input_tokens);
+          t.cacheWrite5m += num(r.cache_creation?.ephemeral_5m_input_tokens);
+          t.cacheWrite1h += num(r.cache_creation?.ephemeral_1h_input_tokens);
+          byModel.set(model, t);
+          perWorkspace.set(ws, byModel);
+        }
+      }
+      if (!body.has_more || !body.next_page) break;
+      page = body.next_page;
+    }
+    const out: LlmCostRow[] = [];
+    for (const [workspaceId, byModel] of perWorkspace) {
+      let amountUsd = 0;
+      let unpricedTokens = 0;
+      for (const [model, t] of byModel) {
+        const usd = anthropicTokensCostUsd(model, t);
+        if (usd === undefined)
+          unpricedTokens += t.uncachedInput + t.output + t.cacheRead + t.cacheWrite5m + t.cacheWrite1h;
+        else amountUsd += usd;
+      }
+      out.push({ date, workspaceId, amountUsd, estimated: true, unpricedTokens });
+    }
+    return out;
+  }
+
+  /** Every page of the cost report for the range, plus the last day it has a
+   *  bucket for (null when it has none in the range). */
+  private async fetchCostReport(range: DateRange): Promise<{ rows: LlmCostRow[]; closedThrough: string | null }> {
     const rows: LlmCostRow[] = [];
+    let closedThrough: string | null = null;
     let page: string | null = null;
     for (let i = 0; ; i++) {
       // Like the non-USD check: refuse rather than mis-sum. A ≤90-day range at
@@ -830,6 +1030,7 @@ export class AnthropicCostReportSource implements LlmCostSource {
       };
       for (const bucket of body.data ?? []) {
         const date = str(bucket.starting_at).slice(0, 10);
+        if (closedThrough === null || date > closedThrough) closedThrough = date;
         for (const r of bucket.results ?? []) {
           if (r.currency !== "USD") throw new Error(`anthropic cost_report: unexpected currency ${r.currency ?? "?"}`);
           const cents = Number(r.amount);
@@ -840,7 +1041,7 @@ export class AnthropicCostReportSource implements LlmCostSource {
       if (!body.has_more || !body.next_page) break;
       page = body.next_page;
     }
-    return rows;
+    return { rows, closedThrough };
   }
 }
 

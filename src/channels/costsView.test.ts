@@ -24,6 +24,8 @@ function report(over: Partial<CostReport> = {}): CostReport {
     workflowsUsd: 0,
     cloudUsd: bot + 0.25,
     llmUsd: llm,
+    llmEstimated: false,
+    llmUnpricedTokens: 0,
     total: bot + 0.25 + llm,
   });
   const days = [day("2026-08-27", 0.3, 4), day("2026-08-28", 1.3, 12.5), day("2026-08-29", 0.9, 3)];
