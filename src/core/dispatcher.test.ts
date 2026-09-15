@@ -998,6 +998,8 @@ function residentFetchStub(
   handlers: {
     status?: () => Response;
     attach?: (body: Record<string, unknown>) => Response;
+    /** GitHub's REST API, for a resolution that fetches a pull request. */
+    github?: (path: string) => Response;
   } = {},
 ) {
   const calls: Array<{ path: string; host: string; body?: Record<string, unknown> }> = [];
@@ -1005,6 +1007,7 @@ function residentFetchStub(
     const { pathname: path, host } = new URL(String(url));
     const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined;
     calls.push({ path, host, body });
+    if (host === "api.github.com" && handlers.github) return handlers.github(path);
     if (path === "/status") {
       return handlers.status?.() ?? new Response(JSON.stringify({ state: "warm", reason: "" }), { status: 200 });
     }
@@ -1518,6 +1521,143 @@ describe("repo/ref resolution + resident prompt selection", () => {
     expect(provider.requests).toHaveLength(1); // sticky agent:coding thread ran
     expect(provider.requests[0].model).toBe("coding-model");
     expect(replies).toContain("answer");
+  });
+
+  // docs/reference/specs/resident-repos.md items 16 and 29: a follow-up in a thread
+  // whose own run opened a pull request runs on that PR's head branch — the
+  // record's PR binds the ref, and rides the attach as the reason for the hint,
+  // so the resident may move a default-bound thread onto it; the card says so.
+  it("a follow-up in a thread whose newest finished run opened a pull request attaches with that PR as ownPr beside its head branch, and the card says the resident rebound the thread", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const SHA = "f".repeat(40);
+    const { calls } = residentFetchStub({
+      attach: (body) =>
+        new Response(
+          JSON.stringify({
+            workspace: "/workspace/threads/t/main",
+            ref: body.refHint,
+            sha: SHA,
+            user: "worker2",
+            ...(body.ownPr ? { rebound: { from: "main", to: "fix/x", pr: 7, at: "2026-01-01T00:00:00.000Z" } } : {}),
+          }),
+          { status: 200 },
+        ),
+      github: (path) =>
+        path === "/repos/acme/api/pulls/7"
+          ? new Response(
+              JSON.stringify({
+                state: "open",
+                head: { ref: "fix/x", sha: SHA, repo: { full_name: "acme/api" } },
+                base: { ref: "main" },
+              }),
+              { status: 200 },
+            )
+          : new Response("{}", { status: 404 }),
+    });
+    const provider = capturingProvider();
+    const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
+    const registry = new RunRegistry({ genId: () => "run-follow", genToken: () => "tok" });
+    const store = new InMemoryRunStore();
+    deps.runRegistry = registry;
+    deps.runStore = store;
+    deps.runs = createRunsService({ registry, store });
+    // The thread's newest finished run: a coding run on acme/api whose post-step
+    // opened PR 7 (timestamps near now: the store retains rows by age).
+    const nowMs = Date.now();
+    await store.put({
+      id: "run-prev",
+      label: "coding · acme/api",
+      agent: "coding",
+      model: "anthropic/coding-model",
+      channelId: "slack:CX",
+      userId: "slack:UADMIN",
+      threadKey: "slack:CX:1.0",
+      channelVisibility: "public",
+      startedAt: nowMs - 20_000,
+      finishedAt: nowMs - 10_000,
+      status: "completed",
+      eventCount: 0,
+      storedEventCount: 0,
+      truncated: false,
+      events: [],
+      diagnosis: analyzeRunFriction([]),
+      repo: "acme/api",
+      pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+    });
+    const history: HistoryItem[] = [
+      { role: "user", text: "agent:coding fix the login bug in acme/api", at: nowMs - 30_000 },
+      { role: "assistant", text: "PR opened: https://github.com/acme/api/pull/7", at: nowMs - 10_000 },
+    ];
+    const { io, replies, statuses } = fakeIO(history);
+    await dispatch(deps, msg("add the tests' names to the PR description", "slack:UADMIN"), io);
+    expect(replies).toContain("answer");
+    const attach = calls.find((c) => c.path === "/attach");
+    expect(attach?.body).toEqual({
+      resource: "repo:acme/api",
+      threadKey: "slack:CX:1.0",
+      refHint: "fix/x",
+      sha: SHA,
+      ownPr: { number: 7, ref: "fix/x" },
+    });
+    expect(
+      statuses.some((s) =>
+        s.title.includes("resident · acme/api · fix/x@fffffff · rebound to fix/x (this thread's PR #7)"),
+      ),
+    ).toBe(true);
+  });
+
+  it("a rebind the resident refused is said on the card and on the run's stream as a rebind_refused note, and the run goes on where the binding is", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const SHA = "f".repeat(40);
+    const why =
+      "the worktree has uncommitted changes on the bound branch; the binding stands until they are committed or discarded";
+    residentFetchStub({
+      attach: () =>
+        new Response(
+          JSON.stringify({
+            workspace: "/workspace/threads/t/main",
+            ref: "main",
+            sha: "abc1234def",
+            user: "worker2",
+            rebindRefused: { to: "fix/x", pr: 7, reason: "dirty", why },
+          }),
+          { status: 200 },
+        ),
+    });
+    const provider = capturingProvider();
+    const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
+    const registry = new RunRegistry({ genId: () => "run-kept", genToken: () => "tok" });
+    deps.runRegistry = registry;
+    deps.resolveRepoContext = () => ({
+      repo: "acme/api",
+      ref: "fix/x",
+      refFromPr: true,
+      pr: 7,
+      prFromRecord: true,
+      headSha: SHA,
+    });
+    const { io, replies, statuses } = fakeIO();
+    await dispatch(deps, msg("agent:coding add the tests' names to the PR description", "slack:UADMIN"), io);
+    expect(replies).toContain("answer");
+    expect(
+      statuses.some((s) =>
+        s.title.includes("resident · acme/api · main@abc1234 · rebind to fix/x (this thread's PR #7) refused: dirty"),
+      ),
+    ).toBe(true);
+    // …and on the run's stream, head material like the cold-sandbox note: the
+    // run page says why this follow-up runs on main and not on the thread's PR.
+    const events = registry.snapshotById("run-kept")!.events;
+    const noteAt = events.findIndex((e) => e.type === "run_note" && e.kind === "rebind_refused");
+    const loopAt = events.findIndex((e) => e.type === "span_start" && e.name === "run.agent");
+    expect(events[noteAt]).toMatchObject({
+      summary: `kept on main — rebind to fix/x (this thread's PR #7) refused: dirty — ${why}`,
+    });
+    expect(noteAt).toBeLessThan(loopAt);
+    expect(events.slice(0, loopAt).every(isHeadMaterial)).toBe(true);
   });
 
   it("a resident run gets the agent's resident system variant naming the repo", async () => {

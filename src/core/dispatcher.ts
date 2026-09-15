@@ -975,6 +975,18 @@ export async function dispatch(
     // fallback. Head material, like every setup event ahead of the loop.
     if (note && !resident)
       registry.publish(run.id, { type: "run_note", kind: "cold_sandbox", summary: oneLine(note), at: clock() });
+    // A follow-up the resident kept off its thread's own PR branch says so on
+    // its stream too (resident-repos item 16): the run page explains a run on
+    // the default where the thread's pull request was expected, with the
+    // resident's own reason. Head material, like the cold-sandbox note.
+    const bound = round.selection.binding;
+    const kept = bound?.rebindRefused;
+    if (bound && kept) {
+      const summary =
+        `kept on ${bound.ref} — rebind to ${kept.to} (this thread's PR #${kept.pr}) ` +
+        `refused: ${kept.reason}${kept.why ? ` — ${kept.why}` : ""}`;
+      registry.publish(run.id, { type: "run_note", kind: "rebind_refused", summary: oneLine(summary), at: clock() });
+    }
     console.log(`[run] ${msg.threadKey} user=${msg.userId} agent=${agent.name} model=${resolved.modelRef}`);
     setupCard = undefined; // from here the run loop owns the card's close
     clearInterval(setupHeartbeat);

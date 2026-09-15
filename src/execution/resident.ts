@@ -97,8 +97,22 @@ export interface ResidentExecutorOptions {
   /** Resource id, e.g. "repo:jshttp/vary". */
   resource: string;
   threadKey: string;
-  /** Ref for a first attach; an existing thread binding always wins over it. */
+  /** Ref for a first attach. An existing thread binding wins over it, with one
+   *  exception: a thread bound to the repo default for want of a named branch
+   *  moves onto the head branch of the pull request its own run opened when
+   *  `ownPr` names that PR (docs/reference/specs/resident-repos.md item 16). */
   refHint?: string;
+  /** The pull request the thread's OWN run opened, and its head branch — the
+   *  reason `refHint` is that branch (`ownPrOf`, resident-repos item 29). The
+   *  resident may move a default-bound thread onto it, once, when the branch is
+   *  a local branch of the thread's worktree and the tree is clean; a PR a
+   *  person named is never sent here. Sent only when set, so an older resident
+   *  sees the body it always did. */
+  ownPr?: { number: number; ref: string };
+  /** `refHint` is the resident's own default branch, bound because the message
+   *  named none (item 30): the resident records the binding as made by
+   *  default — the one kind that may later move. Sent only when true. */
+  refByDefault?: boolean;
   /** Read-only run (docs/reference/specs/resident-repos.md item 50): the resident builds
    *  the worktree with no credential file and an unfetchable origin. Sent only
    *  when true, so an older resident sees the body it always did. */
@@ -142,6 +156,35 @@ export interface ResidentBinding {
   trace?: ResidentStep[];
   /** The resident's total for the attach (`attachMs`), for the clock-skew attr. */
   attachMs?: number;
+  /** This attach moved the thread's binding onto the branch its own run opened
+   *  a pull request on (docs/reference/specs/resident-repos.md item 16): from
+   *  where, to where, which PR. Absent when the binding stood. */
+  rebound?: { from: string; to: string; pr: number };
+  /** The attach asked for that move and the resident kept the binding: the
+   *  branch, the PR, the reason (`dirty`, `branch-absent`, `named-ref`,
+   *  `already-rebound`, `checkout-failed`) and the resident's sentence. The
+   *  run goes on where the binding is; the card and the run's stream say so. */
+  rebindRefused?: { to: string; pr: number; reason: string; why: string };
+}
+
+/** The attach answer's `rebound` (item 16), when well-formed; anything else
+ *  reads as no move, so a resident answering an unexpected shape binds as
+ *  before. Strings were sanitized at the parse. */
+function reboundOf(value: unknown): ResidentBinding["rebound"] {
+  if (typeof value !== "object" || value === null) return undefined;
+  const v = value as Record<string, unknown>;
+  if (typeof v.from !== "string" || typeof v.to !== "string" || typeof v.pr !== "number") return undefined;
+  if (!v.from || !v.to || !Number.isSafeInteger(v.pr) || v.pr <= 0) return undefined;
+  return { from: v.from, to: v.to, pr: v.pr };
+}
+
+/** The attach answer's `rebindRefused` (item 16), when well-formed; else none. */
+function rebindRefusedOf(value: unknown): ResidentBinding["rebindRefused"] {
+  if (typeof value !== "object" || value === null) return undefined;
+  const v = value as Record<string, unknown>;
+  if (typeof v.to !== "string" || typeof v.pr !== "number" || typeof v.reason !== "string") return undefined;
+  if (!v.to || !v.reason || !Number.isSafeInteger(v.pr) || v.pr <= 0) return undefined;
+  return { to: v.to, pr: v.pr, reason: v.reason, why: typeof v.why === "string" ? v.why : "" };
 }
 
 /** What one `/attach` answered: the binding, or the refusal as the service
@@ -395,10 +438,12 @@ export class ResidentExecutor implements Executor {
 
   /** Bind/reuse this thread's worktree. Legible errors for every named
    *  refusal the service can answer with. Answers the binding the resident
-   *  reported: the bound ref (authoritative — a differing refHint is ignored)
-   *  and the sha the worktree is at. A 200 without both fields is a
-   *  malformed resident (the attach contract always carries them) and is an
-   *  error, never a half-bound executor. */
+   *  reported: the bound ref — the resident's word, not the hint's: a differing
+   *  refHint is ignored unless `ownPr` names it as the thread's own pull
+   *  request and the resident moves a default-bound thread onto it (item 16;
+   *  `rebound` / `rebindRefused` say which) — and the sha the worktree is at. A
+   *  200 without both fields is a malformed resident (the attach contract
+   *  always carries them) and is an error, never a half-bound executor. */
   async attach(span?: Span): Promise<ResidentBinding> {
     const answer = await this.attachOnce(span);
     if (answer.ok) return answer.binding;
@@ -416,6 +461,8 @@ export class ResidentExecutor implements Executor {
     if (this.opts.readonly) body.readonly = true;
     if (this.opts.sha) body.sha = this.opts.sha;
     if (this.opts.reuse) body.reuse = true;
+    if (this.opts.ownPr) body.ownPr = this.opts.ownPr;
+    if (this.opts.refByDefault) body.refByDefault = true;
     const answered = await this.call("/attach", body, timeoutMs, undefined, span);
     const data = answered.data;
     // Post-validation answers stream like /exec (heartbeat whitespace then one
@@ -431,6 +478,8 @@ export class ResidentExecutor implements Executor {
       throw new Error(`resident attach: malformed answer for ${this.opts.resource} (missing ref/sha)`);
     }
     const trace = sanitizeGraftedSteps(data.trace);
+    const rebound = reboundOf(data.rebound);
+    const rebindRefused = rebindRefusedOf(data.rebindRefused);
     this.lastBinding = {
       ref: data.ref,
       sha: data.sha,
@@ -439,6 +488,8 @@ export class ResidentExecutor implements Executor {
       ...(typeof data.container === "string" && data.container ? { container: data.container } : {}),
       ...(trace.length > 0 ? { trace } : {}),
       ...(typeof data.attachMs === "number" && Number.isFinite(data.attachMs) ? { attachMs: data.attachMs } : {}),
+      ...(rebound !== undefined ? { rebound } : {}),
+      ...(rebindRefused !== undefined ? { rebindRefused } : {}),
     };
     return { ok: true, binding: this.lastBinding };
   }

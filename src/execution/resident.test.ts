@@ -542,6 +542,58 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
     expect(sentBody(calls[1])).not.toHaveProperty("reuse");
   });
 
+  // docs/reference/specs/resident-repos.md item 16: the reason for the hint rides
+  // the body only when there is one — the thread's own pull request and its head
+  // branch, and the bound-by-default flag — so an older resident, and every
+  // attach without a reason, see the body they always did.
+  it("sends ownPr and refByDefault in the attach body only when set", async () => {
+    const { calls } = stubFetch({ body: ATTACH_OK }, { body: ATTACH_OK }, { body: ATTACH_OK });
+    await ResidentExecutor.open({ ...OPTS, refHint: "fix/x", ownPr: { number: 7, ref: "fix/x" } });
+    expect(sentBody(calls[0])).toMatchObject({ refHint: "fix/x", ownPr: { number: 7, ref: "fix/x" } });
+    expect(sentBody(calls[0])).not.toHaveProperty("refByDefault");
+    await ResidentExecutor.open({ ...OPTS, refHint: "master", refByDefault: true });
+    expect(sentBody(calls[1])).toMatchObject({ refHint: "master", refByDefault: true });
+    expect(sentBody(calls[1])).not.toHaveProperty("ownPr");
+    await ResidentExecutor.open({ ...OPTS, refHint: "master" });
+    expect(sentBody(calls[2])).not.toHaveProperty("ownPr");
+    expect(sentBody(calls[2])).not.toHaveProperty("refByDefault");
+  });
+
+  it("records the answer's rebound or rebindRefused on the binding, only when well-formed; an answer without them binds without them", async () => {
+    stubFetch(
+      {
+        body: {
+          ...ATTACH_OK,
+          ref: "fix/x",
+          rebound: { from: "master", to: "fix/x", pr: 7, at: "2026-01-01T00:00:00.000Z" },
+        },
+      },
+      {
+        body: {
+          ...ATTACH_OK,
+          rebindRefused: { to: "fix/x", pr: 7, reason: "dirty", why: "the worktree has uncommitted changes" },
+        },
+      },
+      { body: { ...ATTACH_OK, rebound: { from: "master" }, rebindRefused: "no" } },
+      { body: ATTACH_OK },
+    );
+    const moved = await ResidentExecutor.open({ ...OPTS, refHint: "fix/x", ownPr: { number: 7, ref: "fix/x" } });
+    expect(moved.binding).toMatchObject({ ref: "fix/x", rebound: { from: "master", to: "fix/x", pr: 7 } });
+    expect(moved.binding).not.toHaveProperty("rebindRefused");
+    const kept = await ResidentExecutor.open({ ...OPTS, refHint: "fix/x", ownPr: { number: 7, ref: "fix/x" } });
+    expect(kept.binding).toMatchObject({
+      ref: "master",
+      rebindRefused: { to: "fix/x", pr: 7, reason: "dirty", why: "the worktree has uncommitted changes" },
+    });
+    expect(kept.binding).not.toHaveProperty("rebound");
+    const malformed = await ResidentExecutor.open({ ...OPTS, refHint: "master" });
+    expect(malformed.binding).not.toHaveProperty("rebound");
+    expect(malformed.binding).not.toHaveProperty("rebindRefused");
+    const bare = await ResidentExecutor.open({ ...OPTS, refHint: "master" });
+    expect(bare.binding).not.toHaveProperty("rebound");
+    expect(bare.binding).not.toHaveProperty("rebindRefused");
+  });
+
   it('a 409 needs:"recreate" (the tree cannot be reused) is a typed ResidentReuseRefusedError carrying the resident\'s own words, never a retry', async () => {
     const { calls } = stubFetch({
       status: 409,

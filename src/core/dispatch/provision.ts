@@ -33,7 +33,7 @@ import { selfDescriptionBlock, type BuildFacts } from "../selfDescription.js";
 import { customInstructionsBlock } from "../customInstructions.js";
 import type { ResidentFleetFacts } from "../residentFleet.js";
 import { attachRoundWorkspace, makeSystemComposer, type RoundWorkspace } from "../reviewRound.js";
-import type { RepoContext } from "../repoContext.js";
+import { ownPrOf, type RepoContext } from "../repoContext.js";
 import { redactSecrets, type AgentSource, type RunEvent } from "../runEvents.js";
 import { MAX_EVENT_BYTES, utf8ByteLength, type RunSeed } from "../runRecord.js";
 import type { RunHandle, RunRegistry } from "../runRegistry.js";
@@ -637,6 +637,7 @@ export async function attachWorkspace(
     },
 ): Promise<WorkspaceAttach> {
   const { msg, io, refuse, card, shell, closeLines, clock, agent, profile, repoCtx, root, reattach } = ctx;
+  const ownPr = ownPrOf(repoCtx);
   // The workspace attach is paired with its release on the round's profile
   // (reviewRound.ts): a `read` identity → readonly worktree +
   // release("always"); any other → release("if-clean"). The factory is handed
@@ -673,6 +674,9 @@ export async function attachWorkspace(
             repo: repoCtx.repo,
             ref: repoCtx.ref,
             headSha: repoCtx.headSha,
+            // The thread's own pull request, when the ref is its head (resident-
+            // repos item 16): the one reason the resident may move a binding.
+            ...(ownPr !== undefined ? { ownPr } : {}),
             ...(reattach !== undefined ? { reattach } : {}),
           },
           logKey: msg.threadKey,

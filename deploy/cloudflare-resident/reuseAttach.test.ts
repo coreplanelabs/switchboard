@@ -35,17 +35,17 @@ describe("the `reuse` body field reaches the worktree decision", () => {
     expect(handler).toMatch(/const reuse = parseReuse\(body\.reuse\);/);
     expect(handler).toMatch(/if \("error" in reuse\) return json\(\{ error: reuse\.error \}, 400\);/);
     expect(handler).toMatch(
-      /attachThread\(ctx\.threadKey, refHint, readonly\.readonly, want\.sha, reuse\.reuse, ctx\.record, traceparent\)/,
+      /attachThread\(\s*ctx\.threadKey,\s*refHint,\s*readonly\.readonly,\s*want\.sha,\s*reuse\.reuse,\s*ctx\.record,\s*traceparent,\s*reason,?\s*\)/,
     );
   });
 
   it("attachThread carries `reuse` through the traced body to the create step", () => {
     expect(method("attachThread")).toMatch(/reuse = false,/);
     expect(method("attachThread")).toMatch(
-      /attachThreadTraced\(threadKey, refHint, readonly, wantSha, reuse, record, t0\)/,
+      /attachThreadTraced\(threadKey, refHint, readonly, wantSha, reuse, record, t0, reason\)/,
     );
     expect(method("attachThreadTraced")).toMatch(
-      /attachThreadBody\(threadKey, refHint, readonly, wantSha, reuse, resourceId, t0, record\)/,
+      /attachThreadBody\(\s*threadKey,\s*refHint,\s*readonly,\s*wantSha,\s*reuse,\s*resourceId,\s*t0,\s*record,\s*reason,?\s*\)/,
     );
     expect(method("attachThreadBody")).toMatch(/reuse: boolean,/);
     expect(method("attachThreadBody")).toMatch(/attachThreadCreate\(\{[\s\S]*?\breuse,[\s\S]*?\}\)/);
