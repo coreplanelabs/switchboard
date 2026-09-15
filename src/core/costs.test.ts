@@ -773,6 +773,31 @@ describe("AnthropicCostReportSource", () => {
     expect(new URL(usageCalls[1].url).searchParams.get("page")).toBe("u2");
   });
 
+  it("never asks the cost report for the open day: a partial range ends the cost query at that day's start, and a one-day range skips it entirely — the API rejects a range that starts today", async () => {
+    // The live failure: `?days=1` → cost_report 400 "ending date must be after starting date".
+    const today = { from: AUG_29, to: AUG_29, days: 1, partialLastDay: true };
+    const f = fakeFetch(() => ({ status: 200, body: { data: [], has_more: false, next_page: null } }));
+    const rows = await new AnthropicCostReportSource({ adminKey: "k", fetchImpl: f.fetchImpl }).fetchDailyCost(today);
+    const paths = f.calls.map((c) => new URL(c.url).pathname);
+    expect(paths).toEqual(["/v1/organizations/usage_report/messages"]);
+    expect(rows).toEqual([]);
+
+    const week = { from: AUG_23, to: AUG_29, days: 7, partialLastDay: true };
+    const g = fakeFetch(() => ({ status: 200, body: { data: [], has_more: false, next_page: null } }));
+    await new AnthropicCostReportSource({ adminKey: "k", fetchImpl: g.fetchImpl }).fetchDailyCost(week);
+    const cost = g.calls.find((c) => new URL(c.url).pathname === "/v1/organizations/cost_report");
+    expect(cost).toBeDefined();
+    expect(new URL(cost!.url).searchParams.get("starting_at")).toBe(midnight(AUG_23));
+    expect(new URL(cost!.url).searchParams.get("ending_at")).toBe(midnight(AUG_29)); // exclusive: the open day is not asked for
+
+    // A closed range (no partial day) still asks through the end of `to`.
+    const closed = { from: AUG_27, to: AUG_28, days: 2, partialLastDay: false };
+    const h = fakeFetch(() => ({ status: 200, body: { data: [], has_more: false, next_page: null } }));
+    await new AnthropicCostReportSource({ adminKey: "k", fetchImpl: h.fetchImpl }).fetchDailyCost(closed);
+    const closedCost = h.calls.find((c) => new URL(c.url).pathname === "/v1/organizations/cost_report");
+    expect(new URL(closedCost!.url).searchParams.get("ending_at")).toBe(midnight(AUG_29));
+  });
+
   it("estimates every trailing day the cost report has not closed, and none it has", async () => {
     // The cost report answers only the first of three days: the two after it are open.
     const range = { from: AUG_27, to: AUG_29, days: 3, partialLastDay: true };
