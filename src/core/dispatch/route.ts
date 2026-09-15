@@ -368,10 +368,17 @@ function imperativeRule(writers: readonly string[]): string {
 /** The rule for a posted file: only the presets whose toolset carries `attach_file`
  *  can put a file into the thread, so an ask for one goes there whatever else it
  *  says. Three asks that named the tool routed to `explore` because "no code
- *  changes" read as read-only work; the tool's name outweighs that. */
+ *  changes" read as read-only work; the tool's name outweighs that. A fourth,
+ *  a probe of the tool on a missing path, routed to `general` because "no file
+ *  posting needed" outweighed the name when both triggers shared one sentence —
+ *  so the name has a sentence of its own, with nothing to weigh it against. */
 function attachRule(attachers: readonly string[]): string {
   const names = attachers.map((a) => `\`${a}\``).join(" or ");
-  return `Only ${names} can attach or post a file into the thread (the \`attach_file\` tool). A request that asks for a file, a screenshot, a recording or an attachment to be posted, attached or sent back — or that names attach_file — routes there, however read-only the rest of it sounds; a read-only preset can describe a file but never post one.`;
+  return [
+    `Only ${names} can attach or post a file into the thread (the \`attach_file\` tool).`,
+    `A request that names attach_file routes to ${names}, whatever it asks the tool to do — a probe, a test or a diagnostic of the tool is still a call to it.`,
+    "A request that asks for a file, a screenshot, a recording or an attachment to be posted, attached or sent back routes there too, however read-only the rest of it sounds; a read-only preset can describe a file but never post one.",
+  ].join(" ");
 }
 
 /** A reason as the card and the record carry it: one line, redacted, capped. */
