@@ -518,3 +518,32 @@ describe("registerFinishRecord — the finish record, written by the drain after
     expect(writes[0].record).toMatchObject({ status: "failed", replyOk: false });
   });
 });
+
+describe("assembleRunRecord — the pull request on the record (docs/reference/specs/run-history.md item 2)", () => {
+  const msg = { channelId: "slack:CX", userId: "slack:UX", threadKey: "slack:CX:1.0" };
+  const base = () => ({
+    run: { id: "run-pr" },
+    snap: null,
+    msg,
+    channelVisibility: "unknown" as const,
+    finishedAt: 10,
+    status: "completed" as const,
+    diagnosis: analyzeRunFriction([], { finished: true, truncated: false }),
+  });
+
+  it("folds the last pr_opened event into `pr` — the PR the post-step opened or edited — and the record still validates; without one, no key", () => {
+    const events = [
+      { type: "input" as const, text: "fix it", seq: 1 },
+      { type: "pr_opened" as const, url: "https://github.com/acme/api/pull/6", number: 6, created: true, seq: 2 },
+      { type: "pr_opened" as const, url: "https://github.com/acme/api/pull/7", number: 7, created: false, seq: 3 },
+    ];
+    const record = assembleRunRecord({
+      ...base(),
+      snap: { events, finished: true, startedAt: 1, finishedAt: 10, eventCount: 3, stepCount: 3, truncated: false },
+    });
+    expect(record.pr).toEqual({ number: 7, url: "https://github.com/acme/api/pull/7" });
+    expect(isRunRecord(record)).toBe(true);
+    expect(isRunRecord(JSON.parse(JSON.stringify(record)))).toBe(true);
+    expect("pr" in assembleRunRecord(base())).toBe(false);
+  });
+});

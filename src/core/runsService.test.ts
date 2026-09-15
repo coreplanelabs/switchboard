@@ -289,7 +289,7 @@ describe("RunsService.getRun", () => {
     });
     // The start tombstone (item 27): `interrupted`, `finishedAt` = `startedAt`, no artifacts.
     await store.put(record(run.id, NOW, { startedAt: NOW, status: "interrupted", agent: "review" }));
-    const artifacts = ["verdict", "reviewHead", "dispositions", "handoff"];
+    const artifacts = ["verdict", "reviewHead", "dispositions", "handoff", "pr"];
 
     const live = await svc.getRun(run.id);
     expect(live.ok && live.value).toMatchObject({ id: run.id, finished: false });
@@ -1260,3 +1260,30 @@ describe("RunsService — no output carries the capability token", () => {
 // Type-level: the service is the public contract other units build on.
 const _typecheck: (svc: RunsService) => void = () => {};
 void _typecheck;
+
+describe("RunsService — the pull request on the record (run-history item 2)", () => {
+  const pr = { number: 7, url: "https://github.com/acme/api/pull/7" };
+
+  it("a persisted row carries the PR its record names, and a finished row still in the registry gets it from the store the moment the record lands", async () => {
+    const inner = new InMemoryRunStore({ now: () => NOW });
+    const { reg, tick } = testRegistry();
+    const svc = createRunsService({ registry: reg, store: inner });
+    await inner.put(record("p1", NOW - DAY, { agent: "coding", repo: "acme/api", pr }));
+    const persisted = await svc.getRun("p1");
+    expect(persisted.ok && persisted.value.pr).toEqual(pr);
+    const listed = await svc.listRuns({ status: "all", visibleTo: { kind: "all" }, limit: 50 });
+    expect(listed.runs.find((r) => r.id === "p1")?.pr).toEqual(pr);
+
+    const run = reg.create("coding · acme/api", {
+      agent: "coding",
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:1",
+    });
+    tick(5_000);
+    reg.finish(run.id, "completed");
+    await inner.put(record(run.id, NOW + 5_000, { startedAt: NOW, status: "completed", agent: "coding", pr }));
+    const finished = await svc.getRun(run.id);
+    expect(finished.ok && finished.value).toMatchObject({ id: run.id, finished: true, pr });
+  });
+});

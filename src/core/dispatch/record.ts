@@ -16,6 +16,7 @@ import {
   type RunSeed,
   type RunSession,
   type RunStatus,
+  prOfEvents,
 } from "../runRecord.js";
 import type { RunProfile } from "../../config/profile.js";
 import { redactHandoff, type Handoff } from "../ship/handoff.js";
@@ -312,6 +313,9 @@ export function assembleRunRecord(input: {
   const { run, snap, msg, seal } = input;
   const atFinish = snap?.events ?? [];
   const events = seal && seal.events.length > 0 ? [...atFinish, ...seal.events] : atFinish;
+  // The pull request the run reached (run-history item 2): the post-step's
+  // `pr_opened`, published before the stream finished, so it is in the events.
+  const pr = prOfEvents(events);
   const fitted = fitRecordToBudget({
     id: run.id,
     ...(run.label !== undefined ? { label: run.label } : {}),
@@ -352,6 +356,7 @@ export function assembleRunRecord(input: {
     ...coordinatorFields(input.coordinator),
     ...(input.seed !== undefined ? { seed: input.seed } : {}),
     ...(input.session !== undefined ? { session: input.session } : {}),
+    ...(pr !== undefined ? { pr } : {}),
   });
   return fitted.eventCount !== fitted.storedEventCount ? { ...fitted, truncated: true } : fitted;
 }

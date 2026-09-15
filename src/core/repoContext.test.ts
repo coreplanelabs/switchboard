@@ -1163,3 +1163,117 @@ describe("prCommitsSince (compare base...sha for the head-moved classifier)", ()
     expect(fn).not.toHaveBeenCalled();
   });
 });
+
+describe("resolveRepoContext: the pull request the thread's own run opened binds the follow-up (resident-repos item 29)", () => {
+  const SHA = "d".repeat(40);
+  /** The thread as Slack shows it: the ask, then the bot's own answer naming the PR it opened — an assistant turn, which binds nothing by itself. */
+  const history = [
+    { role: "user" as const, text: "in acme/api: fix the exact-match bug", at: 1_000 },
+    { role: "assistant" as const, text: "PR opened: https://github.com/acme/api/pull/40", at: 2_000 },
+  ];
+  /** What the thread's newest run's record says: it opened acme/api#40 and ended at 2_000. */
+  const records = { pr: { repo: "acme/api", number: 40, at: 2_000 } };
+  const openAt = (ref: string) =>
+    stubFetch({
+      body: { state: "open", head: { ref, sha: SHA, repo: { full_name: "acme/api" } }, base: { ref: "main" } },
+    });
+
+  it("a follow-up naming no ref runs on the PR's head branch: the ref from the PR, the PR inherited, its head pinned and its base known", async () => {
+    openAt("fix/exact-match");
+    await expect(
+      resolveRepoContext(
+        msg("add the tests' names to the PR's validation section"),
+        history,
+        undefined,
+        undefined,
+        records,
+      ),
+    ).resolves.toEqual({
+      repo: "acme/api",
+      ref: "fix/exact-match",
+      refFromPr: true,
+      pr: 40,
+      headSha: SHA,
+      baseRef: "main",
+    });
+  });
+
+  it("a ref the message names wins over the PR's head; the PR is still the thread's", async () => {
+    openAt("fix/exact-match");
+    const ctx = await resolveRepoContext(
+      msg("on branch hotfix/x: do it there"),
+      history,
+      undefined,
+      undefined,
+      records,
+    );
+    expect(ctx).toMatchObject({ repo: "acme/api", ref: "hotfix/x", pr: 40, headSha: SHA, baseRef: "main" });
+    expect(ctx.refFromPr).toBeUndefined();
+  });
+
+  it("fails closed like every inherited PR: a closed or unreachable PR binds no ref and no pr, and the context says why", async () => {
+    stubFetch({
+      body: { state: "closed", head: { ref: "fix/exact-match", sha: SHA, repo: { full_name: "acme/api" } } },
+    });
+    await expect(resolveRepoContext(msg("continue"), history, undefined, undefined, records)).resolves.toEqual({
+      repo: "acme/api",
+      prUnpostable: { number: 40, reason: "closed" },
+    });
+    stubFetch({ reject: "fetch failed" });
+    await expect(resolveRepoContext(msg("continue"), history, undefined, undefined, records)).resolves.toEqual({
+      repo: "acme/api",
+      prUnpostable: { number: 40, reason: "unreachable" },
+    });
+  });
+
+  it("a record's PR of another repository is not the thread's", async () => {
+    await expect(
+      resolveRepoContext(msg("continue"), history, undefined, undefined, {
+        pr: { repo: "acme/web", number: 3, at: 2_000 },
+      }),
+    ).resolves.toEqual({ repo: "acme/api" });
+  });
+
+  it("the newer of a person's PR and the run's is the thread's: one a person named after the run wins (and, as before, binds no ref); one named before the run loses to it", async () => {
+    stubFetch({ body: { state: "open", head: { ref: "p41", sha: SHA, repo: { full_name: "acme/api" } } } });
+    const later = [...history, { role: "user" as const, text: "look at acme/api#41 too", at: 3_000 }];
+    await expect(resolveRepoContext(msg("continue"), later, undefined, undefined, records)).resolves.toEqual({
+      repo: "acme/api",
+      pr: 41,
+      headSha: SHA,
+    });
+    openAt("fix/exact-match");
+    const earlier = [
+      { role: "user" as const, text: "agent:review https://github.com/acme/api/pull/39", at: 500 },
+      ...history,
+    ];
+    await expect(resolveRepoContext(msg("continue"), earlier, undefined, undefined, records)).resolves.toMatchObject({
+      pr: 40,
+      ref: "fix/exact-match",
+      refFromPr: true,
+    });
+  });
+
+  it("without timestamps on either side the run's PR wins: it is the thread's own work", async () => {
+    openAt("fix/exact-match");
+    const undated = [{ role: "user" as const, text: "agent:review https://github.com/acme/api/pull/39" }];
+    await expect(
+      resolveRepoContext(msg("continue"), undated, undefined, undefined, { pr: { repo: "acme/api", number: 40 } }),
+    ).resolves.toMatchObject({ pr: 40, ref: "fix/exact-match", refFromPr: true });
+  });
+
+  it("a message naming its own PR beats both, exactly as before", async () => {
+    openAt("p9");
+    await expect(
+      resolveRepoContext(msg("now review acme/api#9"), history, undefined, undefined, records),
+    ).resolves.toEqual({
+      repo: "acme/api",
+      ref: "p9",
+      refFromPr: true,
+      pr: 9,
+      prFromMessage: true,
+      headSha: SHA,
+      baseRef: "main",
+    });
+  });
+});

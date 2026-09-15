@@ -11927,8 +11927,12 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       truncated: false,
       events: [],
       diagnosis: analyzeRunFriction([]),
+      repo: "acme/api",
       seed: "channel",
       session: { key: KEY, seedFrom: 0, request: 0, range: { from: 0, to: 3 } },
+      // The run's post-step opened a pull request (run-history item 2): the
+      // fact a follow-up's target resolution reads (resident-repos item 29).
+      pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
     });
     return { deps, registry, store, ledger, writer, warnings, provider };
   }
@@ -12022,5 +12026,20 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     const notes = record.events.filter((e) => e.type === "run_note") as Array<{ kind: string; summary: string }>;
     expect(notes.map((n) => n.kind)).toContain("seed");
     expect(notes.find((n) => n.kind === "seed")!.summary).toContain(`the log ${KEY} could not be read (no such route)`);
+  });
+
+  it("the thread's pull request rides the target resolution (docs/reference/specs/resident-repos.md item 29): the newest run's record names the PR it opened, and the resolver is handed it beside the message and the history", async () => {
+    const t = await threadWithSession(PI_YAML);
+    const handedRecords: unknown[] = [];
+    t.deps.resolveRepoContext = (_msg, _history, records) => {
+      handedRecords.push(records);
+      return { repo: "acme/api", ref: "fix/x", refFromPr: true, pr: 7, headSha: "a".repeat(40), baseRef: "main" };
+    };
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
+    vi.mocked(runPiHarness).mockImplementationOnce(async () => "done");
+    const { io } = fakeIO(history);
+    await dispatch(t.deps, followUp, io);
+    await t.writer.settled();
+    expect(handedRecords).toEqual([{ pr: { repo: "acme/api", number: 7, at: PREVIOUS_END } }]);
   });
 });

@@ -70,7 +70,7 @@ import { prepareFreshTurn, settleThread, tellDropped } from "./dispatch/settle.j
 import { lineageOf, lineageParent, tellParent, type LineageHeard } from "./dispatch/lineage.js";
 import { sessionSeedFor } from "./dispatch/seed.js";
 import { sessionCapabilityFor } from "../tools/session.js";
-import { readThread, readThreadArtifacts, stickyAgentOf } from "./dispatch/thread.js";
+import { readThread, readThreadArtifacts, stickyAgentOf, threadPrOf } from "./dispatch/thread.js";
 import { effectiveHarness } from "./harness/select.js";
 import { runToolCapabilities, type ParentRun } from "./dispatch/spawn.js";
 import { createRunsService } from "./runsService.js";
@@ -354,6 +354,10 @@ export async function dispatch(
       return def !== undefined && effectiveHarness(def, harnessBlock) === "pi";
     };
     const stickyAgent = thread ? stickyAgentOf(thread, onPi) : undefined;
+    // The same page names the pull request the thread's work lives on
+    // (resident-repos item 29): the one its newest finished run opened, for
+    // the target resolution below.
+    const threadPr = thread ? threadPrOf(thread) : undefined;
     const settled = resolveRun(deps, {
       msg,
       directives,
@@ -494,6 +498,7 @@ export async function dispatch(
       resolved,
       resume,
       root,
+      ...(threadPr ? { records: { pr: threadPr } } : {}),
     });
 
     // Cross-session memory — READ path, started here (dispatch/provision.ts) so

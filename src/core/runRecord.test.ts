@@ -17,6 +17,7 @@ import {
   matchesVisibility,
   normalizeDiagnosis,
   normalizeStored,
+  prOfEvents,
   storedEventSeqs,
   toVisibilityFilter,
   utf8ByteLength,
@@ -801,5 +802,32 @@ describe("clampRetentionPolicy — the session log's byte policy", () => {
     expect(clampRetentionPolicy({ sessionLogMaxBytes: 1e12 }).sessionLogMaxBytes).toBe(2 * 1024 ** 3);
     expect(clampRetentionPolicy({ sessionLogMaxBytes: 64 * 1024 ** 2 }).sessionLogMaxBytes).toBe(64 * 1024 ** 2);
     expect(clampRetentionPolicy({}).sessionLogMaxBytes).toBe(200 * 1024 ** 2);
+  });
+});
+
+describe("the pull request on the record (docs/reference/specs/run-history.md item 2)", () => {
+  it("isRunRecord accepts the run's pull request as { number, url } and rejects any other shape", () => {
+    expect(isRunRecord({ ...record(), pr: { number: 7, url: "https://github.com/acme/api/pull/7" } })).toBe(true);
+    const bad: unknown[] = [
+      { number: "7", url: "https://github.com/acme/api/pull/7" },
+      { number: 7 },
+      { number: 0, url: "https://github.com/acme/api/pull/0" },
+      { number: 7.5, url: "https://github.com/acme/api/pull/7" },
+      { number: 7, url: "" },
+      "acme/api#7",
+      null,
+    ];
+    for (const pr of bad) expect(isRunRecord({ ...record(), pr })).toBe(false);
+  });
+
+  it("prOfEvents reads the last pr_opened event — the PR the post-step opened or edited — and nothing without one", () => {
+    expect(prOfEvents([])).toBeUndefined();
+    expect(prOfEvents([{ type: "input", text: "x" }])).toBeUndefined();
+    const events: RunEvent[] = [
+      { type: "input", text: "x" },
+      { type: "pr_opened", url: "https://github.com/acme/api/pull/1", number: 1, created: true },
+      { type: "pr_opened", url: "https://github.com/acme/api/pull/2", number: 2, created: false },
+    ];
+    expect(prOfEvents(events)).toEqual({ number: 2, url: "https://github.com/acme/api/pull/2" });
   });
 });

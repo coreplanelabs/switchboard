@@ -2,7 +2,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RunSession } from "../runRecord.js";
 import type { RunView } from "../runsService.js";
 import type { RunEvent } from "../runEvents.js";
-import { previousRunOf, readThread, readThreadArtifacts, stickyAgentOf, THREAD_READ_LIMIT } from "./thread.js";
+import {
+  previousRunOf,
+  readThread,
+  readThreadArtifacts,
+  stickyAgentOf,
+  THREAD_READ_LIMIT,
+  threadPrOf,
+} from "./thread.js";
 
 // docs/reference/specs/routing-and-config.md item 3 and session-log.md item 9:
 // one read of the thread's newest runs, and what the dispatcher derives from it.
@@ -150,5 +157,34 @@ describe("previousRunOf — the agent's previous finished run", () => {
         "coding",
       ),
     ).toBeUndefined();
+  });
+});
+
+describe("threadPrOf — the pull request the thread's work lives on (docs/reference/specs/resident-repos.md item 29)", () => {
+  const pr = (number: number) => ({ number, url: `https://github.com/acme/api/pull/${number}` });
+
+  it("the newest finished run that recorded an opened pull request — its repo, its number and when it ended — past a live run and a run that opened none", () => {
+    const runs = [
+      run({ id: "live", agent: "coding", finished: false, repo: "acme/api" }),
+      run({ id: "r3", agent: "review", finishedAt: 3_000, repo: "acme/api", session: closed }),
+      run({ id: "r2", agent: "coding", finishedAt: 2_000, repo: "acme/api", pr: pr(7) }),
+      run({ id: "r1", agent: "coding", finishedAt: 1_000, repo: "acme/api", pr: pr(6) }),
+    ];
+    expect(threadPrOf(runs)).toEqual({
+      repo: "acme/api",
+      number: 7,
+      at: 2_000,
+    });
+  });
+
+  it("nothing when no finished run in the page recorded one, when the run's record names no repository, or the thread has no run", () => {
+    expect(
+      threadPrOf([run({ id: "r1", agent: "coding", finishedAt: 1_000, repo: "acme/api", session: closed })]),
+    ).toBeUndefined();
+    expect(threadPrOf([run({ id: "r1", agent: "coding", finishedAt: 1_000, pr: pr(7) })])).toBeUndefined();
+    expect(
+      threadPrOf([run({ id: "live", agent: "coding", finished: false, repo: "acme/api", pr: pr(7) })]),
+    ).toBeUndefined();
+    expect(threadPrOf([])).toBeUndefined();
   });
 });

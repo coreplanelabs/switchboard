@@ -125,6 +125,10 @@ export interface RunView {
   reviewPost?: RunRecord["reviewPost"];
   dispositions?: RunRecord["dispositions"];
   handoff?: RunRecord["handoff"];
+  /** The pull request the run's post-step opened or edited (run-history item
+   *  2), the fact a follow-up in the thread continues from
+   *  (resident-repos item 29); as the artifacts above, from the store. */
+  pr?: RunRecord["pr"];
   /** True once the durable store holds this run (registry flag or store row). */
   persisted?: boolean;
   /** The generation driving this run when it is not this process (run-history
@@ -451,7 +455,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
    *  nothing; a store that throws is one warning and nothing. */
   const storedArtifacts = async (
     id: string,
-  ): Promise<Pick<RunView, "verdict" | "reviewHead" | "reviewPost" | "dispositions" | "handoff">> => {
+  ): Promise<Pick<RunView, "verdict" | "reviewHead" | "reviewPost" | "dispositions" | "handoff" | "pr">> => {
     let row: RunListItem | null;
     try {
       row = await storeSummary(id);
@@ -468,6 +472,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       ...(row.reviewPost !== undefined ? { reviewPost: row.reviewPost } : {}),
       ...(row.dispositions !== undefined ? { dispositions: row.dispositions } : {}),
       ...(row.handoff !== undefined ? { handoff: row.handoff } : {}),
+      ...(row.pr !== undefined ? { pr: row.pr } : {}),
     };
   };
 

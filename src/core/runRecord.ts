@@ -158,6 +158,39 @@ export interface RunRecord {
    *  on records written before the session log existed and on runs without
    *  a conversation of their own. */
   session?: RunSession;
+  /** The pull request the run's post-step opened or edited (item 2): the last
+   *  `pr_opened` event, folded at the assembly. Present only on a run that
+   *  reached one. A follow-up in the thread continues on its head branch
+   *  (docs/reference/specs/resident-repos.md item 29) — read off the record,
+   *  never off the reply's text. */
+  pr?: RunPullRequest;
+}
+
+/** A pull request as the record names it (item 2): its number and its GitHub
+ *  URL, both from the `pr_opened` event the coding post-step published. */
+export interface RunPullRequest {
+  number: number;
+  url: string;
+}
+
+/** The pull request a run's events say it opened or edited — the last
+ *  `pr_opened` wins, as an edit after an open names the same PR — or nothing. */
+export function prOfEvents(events: readonly RunEvent[]): RunPullRequest | undefined {
+  let pr: RunPullRequest | undefined;
+  for (const e of events) if (e.type === "pr_opened") pr = { number: e.number, url: e.url };
+  return pr;
+}
+
+function isRunPullRequestShape(v: unknown): v is RunPullRequest {
+  if (typeof v !== "object" || v === null) return false;
+  const p = v as Record<string, unknown>;
+  return (
+    typeof p.number === "number" &&
+    Number.isInteger(p.number) &&
+    p.number > 0 &&
+    typeof p.url === "string" &&
+    p.url.length > 0
+  );
 }
 
 /** The three places a run's conversation can start (item 52): the thread's
@@ -574,6 +607,8 @@ export function isRunRecord(v: unknown): v is RunRecord {
   if (r.dispositions !== undefined && !isFindingDispositionsShape(r.dispositions)) return false;
   if (r.reviewPost !== undefined && !isReviewPostShape(r.reviewPost)) return false;
   if (r.profile !== undefined && !isRunProfileRecord(r.profile)) return false;
+  // The pull request the run reached (item 2): a positive integer and a URL, or absent.
+  if (r.pr !== undefined && !isRunPullRequestShape(r.pr)) return false;
   // A parent is named by a run id (item 46): the same shape as the record's own.
   if (r.parentRunId !== undefined && (typeof r.parentRunId !== "string" || !RUN_ID_PATTERN.test(r.parentRunId)))
     return false;

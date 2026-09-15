@@ -9,6 +9,7 @@
 // agent runs on the pi harness) and the previous run of the agent the request
 // resolved to (when it ended, and whether its log ends short). Read only for a
 // reply in an existing thread: a message that starts a thread has no runs.
+import type { RunPullRequest } from "../runRecord.js";
 import type { RunView, RunsService } from "../runsService.js";
 import type { RunEvent } from "../runEvents.js";
 import type { PreviousRun } from "./seed.js";
@@ -103,4 +104,28 @@ export function previousRunOf(runs: readonly RunView[], agent: string): Previous
     ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),
     broken: run.session!.range === "broken",
   };
+}
+
+/** The pull request the thread's work lives on (docs/reference/specs/
+ *  resident-repos.md item 29): the one the thread's newest finished run
+ *  opened or edited, as its record says (`RunRecord.pr`), with the repo the
+ *  record names and when the run ended — so the resolver can weigh it against
+ *  a pull request a person named later in the thread. */
+export interface ThreadPullRequest {
+  repo: string;
+  number: number;
+  /** When the run that opened it ended (its start when the record has no end). */
+  at: number;
+}
+
+/** The newest finished run in the page whose record carries a pull request
+ *  and names its repository. A live run has no record yet; a run that opened
+ *  none lends nothing, whatever it did otherwise. */
+export function threadPrOf(runs: readonly RunView[]): ThreadPullRequest | undefined {
+  const run = runs.find(
+    (r): r is RunView & { repo: string; pr: RunPullRequest } =>
+      r.finished && r.pr !== undefined && r.repo !== undefined,
+  );
+  if (run === undefined) return undefined;
+  return { repo: run.repo, number: run.pr.number, at: run.finishedAt ?? run.startedAt };
 }
