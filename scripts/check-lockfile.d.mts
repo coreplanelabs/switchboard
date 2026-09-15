@@ -20,3 +20,17 @@ export function recordsToMirror(
   lock: { packages?: Record<string, PackageRecord> },
   readManifest: (dir: string) => PackageRecord | undefined,
 ): { path: string; manifest: PackageRecord | undefined; record: PackageRecord | undefined }[];
+
+/** The record path a dependant's edge resolves to, nested before hoisted, a workspace link followed. */
+export function resolveDependency(
+  packages: Record<string, PackageRecord>,
+  from: string,
+  name: string,
+): { path: string; record: PackageRecord } | undefined;
+
+export type ResolutionProblem =
+  | { kind: "unsatisfied"; from: string; field: string; name: string; spec: string; at: string; version: unknown }
+  | { kind: "missing"; from: string; field: string; name: string; spec: string }
+  | { kind: "unpinned"; at: string; version: unknown };
+/** Edges the lock declares that npm cannot honour, and fetched records it cannot pin — in lock order. */
+export function resolutionProblems(lock: { packages?: Record<string, PackageRecord> }): ResolutionProblem[];

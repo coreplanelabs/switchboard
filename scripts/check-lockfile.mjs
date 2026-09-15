@@ -27,9 +27,28 @@
 // picks the moment. Fix: `npm install --package-lock-only`, which rewrites the
 // records without reading node_modules (so the platform trap above cannot
 // fire).
+//
+// And every edge the lockfile declares must be satisfied by the record npm
+// resolves for it, and every fetched record must be pinned. npm resolves a
+// dependant's edge nested-before-hoisted — `<dependant>/node_modules/<name>`,
+// then its parent's, up to the root's `node_modules/<name>` — and an edge whose
+// resolved record does not satisfy the declared range is one npm treats as
+// invalid: it re-resolves the range against the registry on EVERY install,
+// which holds only until the registry has a newer version inside the range;
+// then a cold `npm ci` refuses the lock ("does not satisfy") on every branch at
+// once. That is how the first such break happened: `web/node_modules/@types/node`
+// at 26.5.0 against `web`'s `^24.0.0`, carried since the scaffold, invisible to
+// `npm ls --omit=dev` because it was a workspace's devDependency. A fetched
+// record without `resolved` is the other half of the same defect — npm
+// fetches it by version alone, nothing says which tarball — so it fails here
+// too (`integrity` is not demanded: npm itself omits it for a git checkout and
+// for a nested duplicate of a package it already fetched). Fix: delete the
+// named nested record(s) from package-lock.json and run
+// `npm install --package-lock-only`; npm re-adds what is needed, pinned.
 
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import semver from "semver";
 
 /** Native packages → the platform variants that must be recorded whenever
  *  any variant of that package is in the lockfile. Linux x64 is what CI and
@@ -120,6 +139,92 @@ export function recordsToMirror(rootManifest, lock, readManifest) {
   return pairs;
 }
 
+/** The record path a dependant's edge resolves to, the way npm looks a package
+ *  up: `<from>/node_modules/<name>`, then the parent's `node_modules`, up to
+ *  the root's. A workspace link (`{ link: true, resolved: "<dir>" }`) resolves
+ *  to the workspace's own record. `undefined` when nothing in the lock answers. */
+export function resolveDependency(packages, from, name) {
+  let dir = from;
+  for (;;) {
+    const candidate = dir === "" ? `node_modules/${name}` : `${dir}/node_modules/${name}`;
+    const record = packages[candidate];
+    if (record) {
+      if (record.link && typeof record.resolved === "string" && packages[record.resolved])
+        return { path: record.resolved, record: packages[record.resolved] };
+      return { path: candidate, record };
+    }
+    if (dir === "") return undefined;
+    const cut = dir.lastIndexOf("/node_modules/");
+    dir = cut >= 0 ? dir.slice(0, cut) : "";
+  }
+}
+
+/** The range an edge's spec asks for, or `undefined` for a spec semver cannot
+ *  judge (a git URL, a file path, a tag): `npm:<name>@<range>` aliases carry
+ *  their range after the `@`. */
+function rangeOf(spec) {
+  const alias = /^npm:(?:@[^/@]+\/)?[^@/]+@(.+)$/.exec(spec);
+  const range = alias ? alias[1] : spec;
+  return semver.validRange(range, { includePrerelease: true }) ?? undefined;
+}
+
+/** Pure: the lock's edges npm cannot honour and the records it cannot pin —
+ *  `{ kind: "unsatisfied", from, field, name, spec, at, version }` when the
+ *  resolved record misses the declared range, `{ kind: "missing", … }` when a
+ *  required dependency resolves to nothing (optional and peer edges may be
+ *  absent; a bundled one travels inside its dependant's tarball), and
+ *  `{ kind: "unpinned", at, version }` for a fetched record without `resolved`
+ *  (the root, a workspace, a link and a bundled copy are not fetched). In lock
+ *  order, a record's edges before its own pin. */
+export function resolutionProblems(lock) {
+  const packages = lock.packages ?? {};
+  const problems = [];
+  for (const [from, record] of Object.entries(packages)) {
+    if (record.link) continue;
+    const top = !from.includes("node_modules/");
+    const bundled = bundledNames(record);
+    const fields = ["dependencies", "optionalDependencies", "peerDependencies"];
+    if (top) fields.push("devDependencies");
+    for (const field of fields) {
+      for (const [name, spec] of Object.entries(record[field] ?? {})) {
+        if (bundled.has(name)) continue;
+        const hit = resolveDependency(packages, from, name);
+        if (!hit) {
+          const optional = field === "optionalDependencies" || record.optionalDependencies?.[name] !== undefined;
+          if (!optional && field !== "peerDependencies") problems.push({ kind: "missing", from, field, name, spec });
+          continue;
+        }
+        const range = rangeOf(spec);
+        if (range === undefined) continue;
+        const version = hit.record.version;
+        if (typeof version !== "string" || !semver.satisfies(version, range, { includePrerelease: true }))
+          problems.push({ kind: "unsatisfied", from, field, name, spec, at: hit.path, version });
+      }
+    }
+    if (!top && !record.inBundle && !pinned(record))
+      problems.push({ kind: "unpinned", at: from, version: record.version });
+  }
+  return problems;
+}
+
+/** The dependency names a record bundles inside its own tarball: the listed
+ *  ones, or every dependency when the manifest shorthand `true` was mirrored. */
+function bundledNames(record) {
+  const declared = record.bundleDependencies ?? record.bundledDependencies;
+  if (declared === true) return new Set(Object.keys(record.dependencies ?? {}));
+  return new Set(Array.isArray(declared) ? declared : []);
+}
+
+/** A fetched record is pinned when it says where it came from: `resolved`, the
+ *  exact tarball URL or git commit npm will fetch. `integrity` is npm's to
+ *  write beside it and is not demanded here — npm itself omits it for a git
+ *  checkout and, reproducibly, for a nested duplicate of a package it already
+ *  fetched — so a record with a URL and no integrity is npm's own shape, while
+ *  a record with neither is one npm fetches by version alone. */
+function pinned(record) {
+  return typeof record.resolved === "string";
+}
+
 function readJson(path) {
   try {
     return JSON.parse(readFileSync(path, "utf8"));
@@ -155,8 +260,29 @@ function main() {
     console.error("Refresh the records without touching node_modules: npm install --package-lock-only");
     process.exit(1);
   }
+  const problems = resolutionProblems(lock);
+  if (problems.length > 0) {
+    console.error(
+      `check:lockfile FAILED — ${problems.length} lockfile edge(s) npm cannot honour or record(s) it cannot pin:`,
+    );
+    for (const p of problems) {
+      if (p.kind === "unsatisfied")
+        console.error(
+          `  ${p.from || "(root)"} ${p.field} ${p.name}@${p.spec} resolves to ${p.at}, which is ${p.version}`,
+        );
+      else if (p.kind === "missing")
+        console.error(`  ${p.from || "(root)"} ${p.field} ${p.name}@${p.spec} resolves to nothing`);
+      else
+        console.error(`  ${p.at} (${p.version ?? "no version"}) has no resolved URL — npm fetches it by version alone`);
+    }
+    console.error(
+      "npm treats such an edge as invalid and re-resolves the range against the registry on every install; the next publish inside the range breaks `npm ci` on every branch.",
+    );
+    console.error("Delete the named nested record(s) from package-lock.json, then: npm install --package-lock-only");
+    process.exit(1);
+  }
   console.log(
-    "check:lockfile ok — every native package records its Linux x64 and macOS arm64 variants, and every record mirrors its manifest",
+    "check:lockfile ok — every native package records its Linux x64 and macOS arm64 variants, every record mirrors its manifest, every edge resolves inside its range and every fetched record is pinned",
   );
 }
 
