@@ -6,6 +6,7 @@ import type { RunEvent } from "../core/runEvents.js";
 import { routablePresets, route, type RouteDecision, type RouteModel } from "../core/dispatch/route.js";
 import { ROUTE_COMPOUND_FIXTURES, type RouteCompoundFixture } from "./routeCompoundFixtures.js";
 import { ROUTE_IMPERATIVE_FIXTURES } from "./routeImperativeFixtures.js";
+import { ROUTE_ATTACH_FIXTURES } from "./routeAttachFixtures.js";
 import {
   compoundExamples,
   compoundScore,
@@ -632,6 +633,53 @@ describe("the checked-in imperative set (src/load/routeImperativeFixtures.ts)", 
     expect(new Set(ROUTE_IMPERATIVE_FIXTURES.map((f) => f.id)).size).toBe(ROUTE_IMPERATIVE_FIXTURES.length);
     // The one real misroute the replay at the flip found is on the set, verbatim.
     expect(imperatives.map((f) => f.text)).toContain("looks like the ci failed, fix it");
+  });
+});
+
+// The attach set: the production requests that named `attach_file` and were
+// routed to a preset without it. `route()` settles them in code, before the
+// model — so a router that is never asked scores them all; the control that
+// names no tool is the model's as before.
+describe("the checked-in attach set (src/load/routeAttachFixtures.ts)", () => {
+  it("is four asks that name attach_file expecting the holder, one control that does not, every id unique, every text on a neutral repository", () => {
+    const naming = ROUTE_ATTACH_FIXTURES.filter((f) => f.kind === "imperative");
+    const controls = ROUTE_ATTACH_FIXTURES.filter((f) => f.kind === "decoy");
+    expect(naming).toHaveLength(4);
+    expect(controls).toHaveLength(1);
+    for (const f of naming) expect(f.text, f.id).toMatch(/(?<![\w-])attach_file(?![\w-])/);
+    for (const f of controls) expect(f.text, f.id).not.toContain("attach_file");
+    const holder = routablePresets()
+      .filter((p) => p.attaches)
+      .map((p) => p.name);
+    for (const f of naming) expect([...f.presets]).toEqual(holder);
+    expect(new Set(ROUTE_ATTACH_FIXTURES.map((f) => f.id)).size).toBe(ROUTE_ATTACH_FIXTURES.length);
+    for (const f of ROUTE_ATTACH_FIXTURES) expect(f.text).toMatch(/^in acme\//);
+  });
+
+  it("through route(): every ask that names the tool reaches the holder with no model call, the control reaches whatever the model says — scored as routes, never skips", async () => {
+    const presets = routablePresets();
+    const allowed = presets.map((p) => p.name);
+    let asked = 0;
+    const model: RouteModel = async () => {
+      asked += 1;
+      return JSON.stringify({ preset: "explore", reason: "a polling loop, read-only" });
+    };
+    const results = await replayImperative(
+      ROUTE_ATTACH_FIXTURES,
+      (text) => route({ text, recentDirectives: {}, presets, allowed, fallback: "general" }, model),
+      { now: () => 0 },
+    );
+    expect(asked).toBe(1);
+    expect(results.map((r) => [r.id, r.routed, r.hit])).toEqual([
+      ["a01", "coding", true],
+      ["a02", "coding", true],
+      ["a03", "coding", true],
+      ["a04", "coding", true],
+      ["a05", "explore", true],
+    ]);
+    for (const r of results.slice(0, 4)) expect(r.reason).toBe("names attach_file, which only coding holds");
+    const score = imperativeScore(results);
+    expect(score).toMatchObject({ imperatives: 4, imperativesHit: 4, hitRate: 1, decoys: 1, decoysHit: 1, misses: [] });
   });
 });
 
