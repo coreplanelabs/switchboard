@@ -724,6 +724,63 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     await expect(errored.start()).rejects.toThrow("the model call failed: 403 revoked");
   });
 
+  // Feature: docs/reference/specs/harness-pi.md item 6 — a transient provider
+  // failure (a stream cut mid-message) gets ONE retry after a backoff; a
+  // second failure fails the run naming the retry in plain words.
+  it("a transient provider failure is retried once after a backoff — pi is re-prompted and the retry's answer is the run's", async () => {
+    const w = world();
+    const streamError = {
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [],
+        stopReason: "error",
+        errorMessage: "Anthropic stream ended before message_stop",
+      },
+    };
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0) c.emit(streamError, { type: "agent_settled" });
+      else finalTurn(c, "recovered");
+    });
+    const answer = await w.start();
+    expect(answer).toBe("recovered");
+    expect(w.notes.some((n) => n.includes("retrying once"))).toBe(true);
+    const prompts = w.container.commands().filter((c) => c.type === "prompt");
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toMatchObject({ message: expect.stringContaining("failed mid-stream") });
+  });
+
+  it("a retry that also fails ends the run saying it is retryable in plain words; a non-transient error is never retried", async () => {
+    const streamError = {
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [],
+        stopReason: "error",
+        errorMessage: "Anthropic stream ended before message_stop",
+      },
+    };
+    const twice = world();
+    scriptedPi(twice.container, (_n, c) => c.emit(streamError, { type: "agent_settled" }));
+    await expect(twice.start()).rejects.toThrow(
+      /the model call failed after a retry: .*stream ended.*re-ask in the thread/,
+    );
+    expect(twice.container.commands().filter((c) => c.type === "prompt").length).toBe(2);
+
+    const auth = world();
+    scriptedPi(auth.container, (_n, c) =>
+      c.emit(
+        {
+          type: "message_end",
+          message: { role: "assistant", content: [], stopReason: "error", errorMessage: "403 revoked" },
+        },
+        { type: "agent_settled" },
+      ),
+    );
+    await expect(auth.start()).rejects.toThrow("the model call failed: 403 revoked");
+    expect(auth.container.commands().filter((c) => c.type === "prompt")).toHaveLength(1);
+  });
+
   it("a dialog pi raises is cancelled and noted; an unknown event kind is noted", async () => {
     const w = world();
     scriptedPi(w.container, (n, c) => {

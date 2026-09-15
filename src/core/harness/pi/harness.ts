@@ -252,6 +252,27 @@ const CALL_SEEN_WAIT_MS = 3_000;
 const CALL_SEEN_TICK_MS = 50;
 const CONTINUE_PROMPT =
   "Continue where you left off: the bot restarted mid-run, so re-check the effects of your last command before relying on them.";
+/** The prompt that re-drives pi after a transient provider failure: the failed
+ *  call produced nothing, so the model simply picks up where it stood. */
+const PROVIDER_RETRY_PROMPT =
+  "The previous model call failed mid-stream and is being retried; continue where you left off.";
+/** One backoff before the single retry — long enough to ride out a provider
+ *  blip, short next to the run's minutes. */
+const PROVIDER_RETRY_BACKOFF_MS = 5_000;
+
+/** A provider failure worth one retry: a stream cut mid-message, a dropped
+ *  connection, an overload or a 5xx/429 — never an auth or request error
+ *  ("403 revoked" must fail the run at once, as before). */
+export function isTransientProviderError(message: string): boolean {
+  return (
+    /stream ended before message_stop|ended before completion/i.test(message) ||
+    /ECONNRESET|ETIMEDOUT|EPIPE|socket hang up|fetch failed|other side closed|terminated|network|timed? ?out/i.test(
+      message,
+    ) ||
+    /overloaded/i.test(message) ||
+    /\b(429|500|502|503|504|529)\b/.test(message)
+  );
+}
 
 type WriteUp = { kind: "time" } | { kind: "turns"; pace: string } | { kind: "soft" };
 
@@ -832,6 +853,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): 
     const iterator = transport.lines[Symbol.asyncIterator]();
     let pending: Promise<IteratorResult<string>> | undefined;
     let providerError: string | undefined;
+    /** The one transient failure this run already spent its retry on. */
+    let retriedProviderError: string | undefined;
+    let retryPromptSent = false;
     check();
     for (;;) {
       pending ??= iterator.next();
@@ -906,9 +930,30 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): 
       if (obs.providerError !== undefined) {
         if (catchingUp)
           note("harness_error", `a model call failed while the bot was away (${obs.providerError}); continuing`);
-        else providerError = obs.providerError;
+        else if (retriedProviderError === undefined && !writeUp && isTransientProviderError(obs.providerError)) {
+          // A truncated stream or a dropped connection is transient: the run
+          // gets ONE retry — the failed call produced nothing, so pi is
+          // re-prompted after a short backoff when it settles below. A second
+          // failure, or a non-transient one, fails the run as before.
+          retriedProviderError = obs.providerError;
+          note(
+            "harness_error",
+            `the model call failed (${obs.providerError}) — that looks transient; retrying once after ${PROVIDER_RETRY_BACKOFF_MS / 1000}s`,
+          );
+        } else providerError = obs.providerError;
       }
       if (obs.settled && !catchingUp) {
+        if (retriedProviderError !== undefined && providerError === undefined && !retryPromptSent && !hardStopped) {
+          // pi settled on the failed call: back off, then re-drive it. The
+          // retry's prompt id is fresh, so nothing mistakes its response for
+          // the seed's.
+          retryPromptSent = true;
+          await deps.sleep(PROVIDER_RETRY_BACKOFF_MS);
+          transport.send({ type: "prompt", message: PROVIDER_RETRY_PROMPT });
+          check();
+          if (hardStopped) break;
+          continue;
+        }
         settled = true;
         break;
       }
@@ -926,7 +971,12 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): 
         const tail = await container.tail(paths.errLog, 2000);
         throw new Error(`pi exited before the run settled${tail.trim() ? `: ${redactAndCap(tail.trim(), 400)}` : ""}`);
       }
-      if (providerError !== undefined) throw new Error(`the model call failed: ${providerError}`);
+      if (providerError !== undefined)
+        throw new Error(
+          retriedProviderError !== undefined
+            ? `the model call failed after a retry: ${providerError} — this is usually transient; re-ask in the thread to run it again`
+            : `the model call failed: ${providerError}`,
+        );
       const text = bridge.answer() ?? "";
       answer =
         writeUp?.kind === "time"
