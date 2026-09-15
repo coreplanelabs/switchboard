@@ -2,7 +2,8 @@
 import { computed, inject } from "vue";
 import { durationTone, heatStyle } from "../../lib/durationTone";
 import { formatDuration, formatLocalIso } from "../../lib/format";
-import { RunnerClockKey, type CallVm } from "../../lib/runPageModel";
+import { ReplyLandedKey, RunnerClockKey, type CallVm } from "../../lib/runPageModel";
+import MessageFiles from "./MessageFiles.vue";
 
 // A call card: <details> — header row is the summary (status glyph, $ or tool
 // chip, the command with a one-line collapsed headline, right-hand facts,
@@ -24,6 +25,9 @@ import { RunnerClockKey, type CallVm } from "../../lib/runPageModel";
 
 const props = defineProps<{ call: CallVm }>();
 const clock = inject(RunnerClockKey, null);
+// The files an `attach_file` call posted show here with their picture until
+// the Reply lands and carries them; then the card keeps the rows alone.
+const replyLanded = inject(ReplyLandedKey, null);
 const elapsed = computed(() => {
   const now = clock?.value;
   if (props.call.status !== "running" || typeof now !== "number" || props.call.startedAt === undefined) return "";
@@ -128,6 +132,12 @@ function toggle(): void {
            card (the tail names the wait and times it); the body only says
            what it holds. -->
       <div v-else class="none px-3 py-1.5 text-xs italic text-dimmed">no output yet</div>
+      <MessageFiles
+        v-if="call.files && call.files.length > 0"
+        class="mx-3.5 mb-2.5"
+        :files="call.files"
+        :preview="!replyLanded"
+      />
     </div>
   </details>
 </template>

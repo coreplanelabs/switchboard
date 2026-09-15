@@ -13,7 +13,6 @@ declare module 'vue' {
   export interface GlobalComponents {
     AppNav: typeof import('./src/components/AppNav.vue')['default']
     AppShell: typeof import('./src/components/AppShell.vue')['default']
-    ArtifactsBlock: typeof import('./src/components/run/ArtifactsBlock.vue')['default']
     BrandMark: typeof import('./src/components/BrandMark.vue')['default']
     CallCard: typeof import('./src/components/run/CallCard.vue')['default']
     CostChart: typeof import('./src/components/costs/CostChart.vue')['default']
@@ -21,6 +20,7 @@ declare module 'vue' {
     ExpandableText: typeof import('./src/components/ExpandableText.vue')['default']
     GithubMark: typeof import('./src/components/GithubMark.vue')['default']
     MarkdownText: typeof import('./src/components/MarkdownText.vue')['default']
+    MessageFiles: typeof import('./src/components/run/MessageFiles.vue')['default']
     ReplyBlock: typeof import('./src/components/run/ReplyBlock.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']

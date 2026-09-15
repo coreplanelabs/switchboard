@@ -9,7 +9,7 @@ import StepBlock from "../components/run/StepBlock.vue";
 import SpanRow from "../components/run/SpanRow.vue";
 import TimelineSection from "../components/run/TimelineSection.vue";
 import ReplyBlock from "../components/run/ReplyBlock.vue";
-import ArtifactsBlock from "../components/run/ArtifactsBlock.vue";
+import MessageFiles from "../components/run/MessageFiles.vue";
 import { buildTimeline, type TimelinePhase } from "../lib/timelineVm";
 import { runOwnerOf } from "@core/core/runOwner.js";
 import { useSeed } from "../lib/seed";
@@ -29,6 +29,8 @@ import {
   replyCaption,
   runnerNow,
   RunnerClockKey,
+  ArtifactLinksKey,
+  ReplyLandedKey,
 } from "../lib/runPageModel";
 import { createPrReviewCollector } from "../lib/prReviewCollector";
 import { createReviewAbridge } from "../lib/reviewAbridge";
@@ -262,6 +264,13 @@ const live = computed(
 );
 const runnerClock = computed(() => (live.value ? runnerNow(state, nowWall.value) : null));
 provide(RunnerClockKey, runnerClock);
+// The files' links and whether the Reply has landed, for every card that lists
+// files (live-view.md item 26): the Request, a Follow-up, the Reply, an attach call.
+provide(ArtifactLinksKey, artifactLinks);
+provide(
+  ReplyLandedKey,
+  computed(() => state.reply !== null),
+);
 const waiting = computed(() => (live.value ? liveWait(state, model.pendingCall(), nowWall.value) : null));
 // The tail names the deepest open counted span when the timeline knows one —
 // `a model turn…`, the same span the lede's `currently thinking …` drills into
@@ -614,6 +623,8 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
         <ExpandableText :lines="3">
           <MarkdownText :text="state.request.text" />
         </ExpandableText>
+        <!-- The files that came with the request (item 26), outside the fold so they stay in view. -->
+        <MessageFiles v-if="state.request.files.length > 0" :files="state.request.files" />
       </section>
 
       <!-- Reply, on a finished run's page: the outcome before the work. -->
@@ -624,13 +635,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
         :caption="reply"
         :when="fmtTime(state.reply.at)"
         :when-title="fmtTimeTitle(state.reply.at)"
-      />
-      <!-- Files, on a finished run's page: beside the outcome (item 26). -->
-      <ArtifactsBlock
-        v-if="state.artifacts.length > 0 && replyFirst"
-        position="first"
-        :artifacts="state.artifacts"
-        :links="artifactLinks"
+        :files="state.reply.files"
       />
 
       <!-- Earlier in this thread: the turns the model was given as context,
@@ -795,6 +800,8 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
               >
             </h2>
             <MarkdownText :text="item.input.text" />
+            <!-- The files dropped with this follow-up (item 26). -->
+            <MessageFiles v-if="item.input.files.length > 0" :files="item.input.files" />
           </li>
           <li
             v-else
@@ -839,14 +846,6 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
         <li ref="logEnd" aria-hidden="true" />
       </ol>
 
-      <!-- Files, on a live page: they land after the work, before the Reply (item 26). -->
-      <ArtifactsBlock
-        v-if="state.artifacts.length > 0 && !replyFirst"
-        position="last"
-        :artifacts="state.artifacts"
-        :links="artifactLinks"
-      />
-
       <!-- Reply, on a live page: it lands last, as it arrives. -->
       <ReplyBlock
         v-if="state.reply && !replyFirst"
@@ -855,6 +854,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
         :caption="reply"
         :when="fmtTime(state.reply.at)"
         :when-title="fmtTimeTitle(state.reply.at)"
+        :files="state.reply.files"
       />
     </div>
 
