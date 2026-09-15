@@ -150,8 +150,8 @@ export type RoutedCandidate = MemoryCandidate & { audience: MemoryAudience };
 export type ParsedReflection = { ok: true; candidates: RoutedCandidate[] } | { ok: false; error: string };
 
 /** The reflection reply's envelope as a typed LLM output (docs/reference/specs/llm-output.md
- *  item 6): the JSON type owns the format (fence-strip, parse, shape); the
- *  fact-level leniency below owns the meaning. */
+ *  item 6): the JSON type owns the format (the value out of its surroundings,
+ *  parse, shape); the fact-level leniency below owns the meaning. */
 const REFLECTION_ENVELOPE = jsonOutput(z.object({ facts: z.array(z.unknown()), summary: z.unknown().optional() }), {
   name: "reflection-envelope",
 });
@@ -270,7 +270,11 @@ export interface ReflectDeps extends ReflectionProvenance {
   history: HistoryItem[];
   request: string;
   answer: string;
+  /** Rejections, policy narrowings and failures — what went wrong. */
   onWarn?: (message: string) => void;
+  /** The outcome of a pass that went through: what was written, or that there
+   *  was nothing to write — so successes are as observable as rejections. */
+  onInfo?: (message: string) => void;
 }
 
 /** One of the run's scopes, by kind and key. */
@@ -348,9 +352,15 @@ function placeCandidate(
 
 /** One extractor call → validate → `store.write` per scope. Never throws and
  *  never retries: reflection is best-effort background work, and a failed pass
- *  simply writes nothing (the thread history still holds the raw material). */
+ *  simply writes nothing (the thread history still holds the raw material).
+ *  Every pass ends in exactly one outcome line: what was written or that
+ *  there was nothing to write (`onInfo`), else why nothing was (`onWarn`) —
+ *  and when the model did not stop of its own accord, the line says how it
+ *  did: a reply the output cap cut is reported as truncated at the cap, the
+ *  cause, rather than by the parser's complaint about the piece that arrived. */
 export async function reflect(deps: ReflectDeps): Promise<void> {
   const warn = deps.onWarn ?? (() => {});
+  const info = deps.onInfo ?? (() => {});
   try {
     const query = `${deps.request} ${deps.answer}`.slice(0, MAX_RETRIEVE_QUERY_CHARS);
     const existing = (
@@ -373,11 +383,19 @@ export async function reflect(deps: ReflectDeps): Promise<void> {
       .join("");
     const prov: ReflectionProvenance = { sourceThreadKey: deps.sourceThreadKey, sourceRunId: deps.sourceRunId };
     const parsed = parseReflection(reply, prov, new Set(existing.map((r) => r.id)));
+    const truncated =
+      result.stopReason === "max_tokens" ? `truncated at ${REFLECTION_MAX_TOKENS} max tokens` : undefined;
+    const stopNote = truncated ?? (result.stopReason === "end_turn" ? undefined : `stop: ${result.stopReason}`);
     if (!parsed.ok) {
-      warn(`reflection output rejected (${parsed.error}); nothing written`);
+      const why = truncated ?? (stopNote ? `${parsed.error}; ${stopNote}` : parsed.error);
+      warn(`reflection output rejected (${why}); nothing written`);
       return;
     }
-    if (parsed.candidates.length === 0) return;
+    const outcomeTail = stopNote ? ` (${stopNote})` : "";
+    if (parsed.candidates.length === 0) {
+      info(`reflection: nothing to write${outcomeTail}`);
+      return;
+    }
     const scopeOf = new Map(existing.map((r) => [r.id, r.scopeKey]));
     const origin = deps.originChannelVisibility ?? "unknown";
     const byScope = new Map<string, MemoryCandidate[]>();
@@ -410,6 +428,12 @@ export async function reflect(deps: ReflectDeps): Promise<void> {
     if (dropped.length > 0)
       warn(`write denied by policy, ${dropped.length} candidate(s) dropped: ${dropped.join(", ")}`);
     for (const [scopeKey, records] of byScope) await deps.store.write(scopeKey, records);
+    // What reached the store — after the write gate, so a pass the policy
+    // emptied says `0 fact(s)` beside its denial line, never "nothing to write".
+    const written = [...byScope.values()].flat();
+    const facts = written.filter((r) => r.kind === "fact").length;
+    const summary = written.some((r) => r.kind === "summary") ? ", summary" : "";
+    info(`reflection wrote ${facts} fact(s)${summary}${outcomeTail}`);
   } catch (err) {
     warn(`reflection failed: ${err instanceof Error ? err.message : String(err)}`);
   }

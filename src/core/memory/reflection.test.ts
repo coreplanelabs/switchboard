@@ -23,15 +23,20 @@ import {
 // The reflection pass distills a finished run into MemoryCandidates via one
 // cheap model call. Everything here is pure or fake-provider-driven.
 
-function fakeProvider(reply: string | (() => string)): Provider & { requests: CompletionRequest[] } {
+/** A provider answering every request with one text reply — in one text part,
+ *  or split across several as pi's content can arrive — and the given stop. */
+function fakeProvider(
+  reply: string | string[] | (() => string),
+  stopReason: CompletionResult["stopReason"] = "end_turn",
+): Provider & { requests: CompletionRequest[] } {
   const requests: CompletionRequest[] = [];
   return {
     name: "fake",
     requests,
     async complete(req): Promise<CompletionResult> {
       requests.push(req);
-      const text = typeof reply === "function" ? reply() : reply;
-      return { content: [{ type: "text", text }], stopReason: "end_turn" };
+      const parts = typeof reply === "function" ? [reply()] : typeof reply === "string" ? [reply] : reply;
+      return { content: parts.map((text) => ({ type: "text", text })), stopReason };
     },
   };
 }
@@ -188,6 +193,22 @@ describe("parseReflection", () => {
   it("tolerates a ```json fence around the object", () => {
     const out = parseReflection('```json\n{"facts":[],"summary":"s"}\n```', PROVENANCE, knownIds);
     expect(out.ok).toBe(true);
+  });
+
+  it("tolerates an opening ```json fence with no closing one — the cap cut the reply after the object closed", () => {
+    const out = parseReflection('```json\n{"facts":[],"summary":"s"}', PROVENANCE, knownIds);
+    expect(out.ok).toBe(true);
+    if (out.ok) expect(out.candidates.map((c) => c.kind)).toEqual(["summary"]);
+  });
+
+  it("tolerates leading whitespace, a short lead-in line before the fence, and a remark after it", () => {
+    const out = parseReflection(
+      '\n\nHere is the distilled memory:\n```json\n{"facts":[],"summary":"s"}\n```\nLet me know.',
+      PROVENANCE,
+      knownIds,
+    );
+    expect(out.ok).toBe(true);
+    if (out.ok) expect(out.candidates.map((c) => c.kind)).toEqual(["summary"]);
   });
 
   it("rejects non-JSON and non-object replies with an error, never throwing", () => {
@@ -368,6 +389,109 @@ describe("reflect (one extractor call → store.write)", () => {
     const store = new InMemoryMemoryStore();
     await reflect({ ...base, provider, store });
     expect(await store.retrieve({ scopeKey: SCOPE, query: "deploy ship", limit: 10 })).toEqual([]);
+  });
+
+  it("a reply whose text arrives split across two text parts — pi's content — is read as one reply", async () => {
+    const provider = fakeProvider([
+      '```json\n{"facts":[{"text":"the deploy command is now npm run ship",',
+      '"confidence":0.9}],"summary":"Deploy command changed."}\n```',
+    ]);
+    const store = new InMemoryMemoryStore();
+    const warnings: string[] = [];
+    await reflect({ ...base, provider, store, onWarn: (m) => warnings.push(m) });
+    expect(warnings).toEqual([]);
+    const written = await store.retrieve({ scopeKey: SCOPE, query: "deploy command ship", limit: 10 });
+    expect(written.map((r) => r.kind).sort()).toEqual(["fact", "summary"]);
+  });
+
+  it("a reply the output cap cut inside the object is rejected as truncated at the cap — never as a JSON syntax error", async () => {
+    const provider = fakeProvider(
+      '```json\n{"facts":[{"text":"the deploy command is now npm run ship","conf',
+      "max_tokens",
+    );
+    const store = new InMemoryMemoryStore();
+    const warnings: string[] = [];
+    const infos: string[] = [];
+    await reflect({ ...base, provider, store, onWarn: (m) => warnings.push(m), onInfo: (m) => infos.push(m) });
+    expect(warnings).toEqual(["reflection output rejected (truncated at 1024 max tokens); nothing written"]);
+    expect(infos).toEqual([]);
+    expect(await store.retrieve({ scopeKey: SCOPE, query: "deploy ship", limit: 10 })).toEqual([]);
+  });
+
+  it("every reflection reports its outcome on one info line: what was written, or that there was nothing to write", async () => {
+    const wrote: string[] = [];
+    await reflect({
+      ...base,
+      provider: fakeProvider(goodReply),
+      store: new InMemoryMemoryStore(),
+      onInfo: (m) => wrote.push(m),
+    });
+    expect(wrote).toEqual(["reflection wrote 1 fact(s), summary"]);
+
+    const factsOnly: string[] = [];
+    const twoFacts = JSON.stringify({
+      facts: [
+        { text: "the deploy command is now npm run ship", confidence: 0.9 },
+        { text: "CI runs typecheck and tests on every PR", confidence: 0.8 },
+      ],
+      summary: "",
+    });
+    await reflect({
+      ...base,
+      provider: fakeProvider(twoFacts),
+      store: new InMemoryMemoryStore(),
+      onInfo: (m) => factsOnly.push(m),
+    });
+    expect(factsOnly).toEqual(["reflection wrote 2 fact(s)"]);
+
+    const nothing: string[] = [];
+    const empty = fakeProvider(JSON.stringify({ facts: [], summary: "" }));
+    await reflect({ ...base, provider: empty, store: new InMemoryMemoryStore(), onInfo: (m) => nothing.push(m) });
+    expect(nothing).toEqual(["reflection: nothing to write"]);
+
+    // A rejected reply is the warn line alone — one outcome line per reflection.
+    const rejectedInfo: string[] = [];
+    const rejectedWarn: string[] = [];
+    await reflect({
+      ...base,
+      provider: fakeProvider("I could not do that."),
+      store: new InMemoryMemoryStore(),
+      onInfo: (m) => rejectedInfo.push(m),
+      onWarn: (m) => rejectedWarn.push(m),
+    });
+    expect(rejectedInfo).toEqual([]);
+    expect(rejectedWarn).toHaveLength(1);
+  });
+
+  it("the outcome line names how the model stopped when that was not a normal end — a cap the object survived, an unexpected reason", async () => {
+    const cut: string[] = [];
+    await reflect({
+      ...base,
+      provider: fakeProvider("```json\n" + goodReply, "max_tokens"),
+      store: new InMemoryMemoryStore(),
+      onInfo: (m) => cut.push(m),
+    });
+    expect(cut).toEqual(["reflection wrote 1 fact(s), summary (truncated at 1024 max tokens)"]);
+
+    const odd: string[] = [];
+    await reflect({
+      ...base,
+      provider: fakeProvider(JSON.stringify({ facts: [], summary: "" }), "other"),
+      store: new InMemoryMemoryStore(),
+      onInfo: (m) => odd.push(m),
+    });
+    expect(odd).toEqual(["reflection: nothing to write (stop: other)"]);
+
+    const oddRejected: string[] = [];
+    await reflect({
+      ...base,
+      provider: fakeProvider("I could not do that.", "refusal"),
+      store: new InMemoryMemoryStore(),
+      onWarn: (m) => oddRejected.push(m),
+    });
+    expect(oddRejected).toEqual([
+      expect.stringMatching(/^reflection output rejected \(not valid JSON: .*; stop: refusal\); nothing written$/),
+    ]);
   });
 
   it("bounds the existing-records lookup query so a long answer can never overrun the Worker's query cap", async () => {

@@ -103,6 +103,7 @@ export function scheduleReflection(input: {
 }): void {
   if (!input.cfg?.enabled || !shouldReflect(input.gate)) return;
   const warn = (m: string) => console.warn(`[memory] ${input.threadKey} ${m}`);
+  const info = (m: string) => console.log(`[memory] ${input.threadKey} ${m}`);
   let provider: Provider;
   let model: string;
   try {
@@ -127,6 +128,7 @@ export function scheduleReflection(input: {
       sourceThreadKey: input.threadKey,
       sourceRunId: input.runId,
       onWarn: warn,
+      onInfo: info,
     }),
   );
 }

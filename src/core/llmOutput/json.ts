@@ -7,13 +7,34 @@ import type { OutputFailure, OutputType, ParseOutcome } from "./types.js";
 // provider-native JSON output modes (the type module stays; only the request
 // side changes).
 
-/** Tolerate a model that wraps JSON in a ```json … ``` fence despite being told
- *  not to — strip a single leading/trailing fence before parsing. Accepting the
- *  fence is normalization, not failure. */
-export function stripJsonFence(text: string): string {
-  const trimmed = text.trim();
-  const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(trimmed);
-  return fenced ? fenced[1] : trimmed;
+/** The JSON value in a reply from a model that was told to send raw JSON and
+ *  did not quite: the text from the first `{` or `[` to its matching closer,
+ *  whatever surrounds it — a ```json fence, closed or not, a lead-in line, a
+ *  trailing remark — ignored. Accepting those is normalization, not failure.
+ *  Braces inside strings never close the value. A value with no closer is one
+ *  the output cap cut: it runs to the end of the text, so `JSON.parse` names
+ *  the cut rather than the fence. No brace at all → the trimmed text, so the
+ *  parser's own message names what was seen. */
+export function extractJson(text: string): string {
+  const start = text.search(/[[{]/);
+  if (start === -1) return text.trim();
+  let depth = 0;
+  let inString = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (ch === "\\") i++;
+      else if (ch === '"') inString = false;
+    } else if (ch === '"') {
+      inString = true;
+    } else if (ch === "{" || ch === "[") {
+      depth++;
+    } else if (ch === "}" || ch === "]") {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return text.slice(start);
 }
 
 /** Default re-ask budget for JSON shapes — fixed small correction count,
@@ -34,7 +55,7 @@ function jsonValueEquals(a: unknown, b: unknown): boolean {
   return ka.every((k) => jsonValueEquals((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]));
 }
 
-/** A JSON OutputType for one zod schema: fence-strip → `JSON.parse` (throw →
+/** A JSON OutputType for one zod schema: `extractJson` → `JSON.parse` (throw →
  *  `syntax` failure carrying the parser message) → `schema.safeParse` (fail →
  *  `schema` failure carrying the issue list). Canonical form is the
  *  re-serialized parsed value. */
@@ -46,7 +67,7 @@ export function jsonOutput<T>(schema: z.ZodType<T>, opts: { name?: string; reque
     parse(raw): ParseOutcome<T> {
       let value: unknown;
       try {
-        value = JSON.parse(stripJsonFence(raw));
+        value = JSON.parse(extractJson(raw));
       } catch (err) {
         const observed = `not valid JSON: ${err instanceof Error ? err.message : String(err)}`;
         return { ok: false, failure: { kind: "syntax", observed } };
@@ -59,7 +80,7 @@ export function jsonOutput<T>(schema: z.ZodType<T>, opts: { name?: string; reque
         return { ok: false, failure: { kind: "schema", observed } };
       }
       // `changed` is semantic, never cosmetic: canonicalization re-serializes
-      // (whitespace, key order) and strips a fence by design, so a byte diff
+      // (whitespace, key order) and drops a fence by design, so a byte diff
       // against the raw text would always fire. It reports true only when the
       // schema transformed or stripped something the model actually sent.
       return {
