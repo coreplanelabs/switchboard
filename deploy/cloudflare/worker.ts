@@ -90,6 +90,8 @@ export interface Env {
   ANTHROPIC_ADMIN_KEY?: string; // costs dash (optional): Anthropic Admin API key for the LLM cost report
   MEMORY_TOKEN?: string; // durable memory + friction ledger + schedule firings + MCP registry: bearer for the state Worker
   MCP_CREDENTIAL_KEY?: string; // MCP registry: the bot-only key that seals server credentials before they reach the McpDO
+  MCP_ACCESS_CLIENT_ID?: string; // MCP servers behind Cloudflare Access: the service token's client id, named by a server's `headersEnv`
+  MCP_ACCESS_CLIENT_SECRET?: string; // MCP servers behind Cloudflare Access: the service token's client secret, named by a server's `headersEnv`
   STATE_WORKER_URL?: string; // var: the state Worker's base URL — where this shim records each scheduled firing
   ARTIFACTS_R2_ACCESS_KEY_ID?: string; // artifact store: the bucket-scoped S3 token the bot signs presigned URLs with
   ARTIFACTS_R2_SECRET_ACCESS_KEY?: string; // artifact store: the secret half of that token
@@ -124,6 +126,8 @@ const FORWARDED_OPTIONAL = [
   "BRAVE_SEARCH_API_KEY",
   "MEMORY_TOKEN",
   "MCP_CREDENTIAL_KEY",
+  "MCP_ACCESS_CLIENT_ID",
+  "MCP_ACCESS_CLIENT_SECRET",
   "STATE_WORKER_URL",
   "ARTIFACTS_R2_ACCESS_KEY_ID",
   "ARTIFACTS_R2_SECRET_ACCESS_KEY",

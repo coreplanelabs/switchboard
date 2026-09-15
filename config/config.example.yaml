@@ -473,6 +473,12 @@ workspaceDir: ./workspaces
 #       auth: bearer
 #       tokenEnv: MCP_GITHUB_TOKEN          # static bearer from the bot env (startup fails if unset)
 #       agents: [general, research, coding] # default [general, research]
+#     lake:                                  # a server behind Cloudflare Access: the gate wants a service token,
+#       url: https://vega.example.com/mcp    # not an Authorization header — name the two headers and the bot
+#       auth: none                           # env vars holding them (manifest secrets on Cloudflare); an unset
+#       headersEnv:                          # one makes the server `unavailable` for that run, naming it
+#         CF-Access-Client-Id: MCP_ACCESS_CLIENT_ID
+#         CF-Access-Client-Secret: MCP_ACCESS_CLIENT_SECRET
 # channels:
 #   "slack:C0123":
 #     mcpServers:

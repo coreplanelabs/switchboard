@@ -46,6 +46,24 @@ Then ask for something that needs the tool; the run page lists the `mcp__linear_
 - A name set at more than one scope resolves org first, then channel, then you.
 - Naming `coding`, `review` or `ship` on a `me` or `channel` server is refused ([why](../explanation/execution-and-trust.md#why-only-an-org-wide-mcp-server-reaches-the-writing-agents)).
 
+## A server behind Cloudflare Access
+
+Access admits a machine by two headers, `CF-Access-Client-Id` and `CF-Access-Client-Secret`, not by the server's own auth, so such a server is pinned in `config.yaml` with `headersEnv` — header name → the bot env var holding the value:
+
+```yaml
+defaults:
+  mcpServers:
+    lake:
+      url: https://vega.example.com/mcp
+      auth: none
+      headersEnv:
+        CF-Access-Client-Id: MCP_ACCESS_CLIENT_ID
+        CF-Access-Client-Secret: MCP_ACCESS_CLIENT_SECRET
+      agents: [general, research]
+```
+
+Mint the service token in the guarding account (Zero Trust → Access → Service Auth), enroll its id on that Access application's policy, then on Cloudflare put both values (`deploy secrets bot --only MCP_ACCESS_CLIENT_ID`, again for the secret) and `deploy restart`. `mcp list` shows it as `static`; an unset variable makes the server `unavailable` for the run, naming the variable. `headersEnv` composes with `auth: bearer` + `tokenEnv` when the server behind the gate wants a token of its own; the Authorization header itself is refused there.
+
 ## Remove it
 
 ```

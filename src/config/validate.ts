@@ -24,6 +24,7 @@ import type { Boundary } from "./profile.js";
 import { assertUrlAllowed } from "../tools/web.js";
 import {
   isMcpServerEntry,
+  MCP_HEADER_NAME_RE,
   MCP_SELF_SERVE_AGENTS,
   MCP_SERVER_NAME_MAX,
   MCP_SERVER_NAME_RE,
@@ -220,7 +221,9 @@ export function validateMcpServers(
           `${source}: ${path}.${name}: server names are slugs (lowercase letters, digits, dashes; ≤ ${MCP_SERVER_NAME_MAX} chars)`,
         );
       if (!isMcpServerEntry(raw))
-        throw new Error(`${source}: ${path}.${name} must be { url, auth: none|bearer|oauth, agents?, tokenEnv? }`);
+        throw new Error(
+          `${source}: ${path}.${name} must be { url, auth: none|bearer|oauth, agents?, tokenEnv?, headersEnv? }`,
+        );
       try {
         assertUrlAllowed(raw.url);
       } catch (err) {
@@ -241,6 +244,14 @@ export function validateMcpServers(
       }
       if (raw.tokenEnv !== undefined && raw.auth !== "bearer")
         throw new Error(`${source}: ${path}.${name}.tokenEnv only applies to auth: bearer`);
+      for (const header of Object.keys(raw.headersEnv ?? {})) {
+        if (!MCP_HEADER_NAME_RE.test(header))
+          throw new Error(`${source}: ${path}.${name}.headersEnv: "${header}" is not an HTTP header name`);
+        if (header.toLowerCase() === "authorization")
+          throw new Error(
+            `${source}: ${path}.${name}.headersEnv: the Authorization header is \`auth\`'s — use auth: bearer with tokenEnv`,
+          );
+      }
     }
   };
   check("defaults.mcpServers", "org", layer.defaults?.mcpServers as Record<string, unknown> | undefined);
