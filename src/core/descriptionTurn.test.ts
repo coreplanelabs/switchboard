@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { AGENTS } from "../agents/registry.js";
 import type { Executor } from "../execution/executor.js";
 import type { OpenPrRef } from "../execution/githubPulls.js";
-import type { ChatMessage, Provider } from "../providers/types.js";
+import type { ChatMessage } from "./chatMessage.js";
+import type { Provider } from "./provider.js";
 import type { RunOptions } from "../runner.js";
 import type { CodingPrTarget, WorkspaceObservation } from "./codingPrPostStep.js";
 import {

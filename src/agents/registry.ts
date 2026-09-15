@@ -1,6 +1,6 @@
 // Agent definitions. An agent is a system prompt + toolset + machine class + wall-clock budget.
 import type { Effort } from "../effort.js";
-import type { CacheTtl } from "../providers/types.js";
+import type { CacheTtl } from "../core/provider.js";
 import { BASH_TIMEOUT_MAX_MS } from "../execution/bashTimeout.js";
 import { CONTRACT_HEADING, CONTRACT_SECTION_HEADINGS, PR_TITLE_GUARD } from "../core/ship/contract.js";
 // Which model runs it is resolved separately by the config layers, so any

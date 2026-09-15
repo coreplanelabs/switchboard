@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildOpenAIBody, toOAIMessages, usageFromOpenAI } from "./openaiCompat.js";
-import type { ChatMessage, CompletionRequest } from "./types.js";
+import type { ChatMessage } from "../core/chatMessage.js";
+import type { CompletionRequest } from "../core/provider.js";
 
 // Feature: docs/reference/specs/routing-and-config.md item 21 — the seam's forced
 // tool choice, in the Chat Completions dialect.

@@ -28,7 +28,7 @@
 import { AGENTS } from "../../agents/registry.js";
 import type { ConfigStore } from "../../config.js";
 import { MIN_BOUNDARY_MINUTES } from "../../config/validate.js";
-import type { ChatMessage } from "../../providers/types.js";
+import type { ChatMessage } from "../chatMessage.js";
 import type { RunsReadCapability, SteerCapability } from "../../tools/runs.js";
 import { resolveChatActor } from "../authz/actor.js";
 import type { LedgerWriteThrough } from "../runLedger/writeThrough.js";

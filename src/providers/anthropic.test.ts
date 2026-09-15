@@ -7,7 +7,8 @@ import {
   toAnthropicMessage,
   usageFromAnthropic,
 } from "./anthropic.js";
-import type { ChatMessage, CompletionRequest } from "./types.js";
+import type { ChatMessage } from "../core/chatMessage.js";
+import type { CompletionRequest } from "../core/provider.js";
 import { secretsFrom } from "../secrets.js";
 
 // Feature: docs/reference/specs/run-loop.md — prompt caching: the static prefix (tools +

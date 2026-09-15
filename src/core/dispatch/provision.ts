@@ -25,7 +25,7 @@ import { graftResidentSteps, residentTraceOf } from "../../execution/residentTra
 import { ResidentNeedsRefError } from "../../execution/resident.js";
 import { memoryContextBlock, type MemoryStore } from "../memory/index.js";
 import { BEARER_MARGIN_MS, type RunBearerStore } from "../modelProxy/runBearers.js";
-import { parseModelRef } from "../../providers/types.js";
+import { parseModelRef } from "../provider.js";
 import { skillGuidanceBlock, type SkillStore } from "../../skills/index.js";
 import { mcpGuidanceBlock, type McpToolSource, type McpToolsForRun } from "../../mcp/source.js";
 import { configAwarenessBlock } from "../configAwareness.js";

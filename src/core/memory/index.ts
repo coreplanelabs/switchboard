@@ -1,4 +1,4 @@
-import { parseModelRef, type Provider } from "../../providers/types.js";
+import { parseModelRef, type Provider } from "../provider.js";
 import type { Actor, ChannelVisibility } from "../authz/types.js";
 import type { HistoryItem } from "../types.js";
 import type { MemoryConfig, MemoryStore } from "./types.js";

@@ -13,7 +13,7 @@
 // and its notepad write under this generation; without one — an untracked run,
 // a ship pipeline, a process with no ledger — the tools say they are not
 // available.
-import type { ChatMessage } from "../providers/types.js";
+import type { ChatMessage } from "../core/chatMessage.js";
 import { safeBasename } from "../artifacts/keys.js";
 import { authorize } from "../core/authz/authorize.js";
 import { whereIs, type ThreadAsset } from "../core/dispatch/threadAssets.js";
@@ -24,7 +24,7 @@ import type { LedgerRun, LedgerWriteThrough } from "../core/runLedger/writeThrou
 import type { RunSession } from "../core/runRecord.js";
 import { utf8ByteLength } from "../core/runRecord.js";
 import { runResource } from "../core/runsService.js";
-import type { RunnableTool, ToolContext } from "./workspace.js";
+import type { RunnableTool, ToolContext } from "./runnableTool.js";
 
 /** A run's reach into its own session log, as the dispatcher builds it. */
 export interface SessionCapability {

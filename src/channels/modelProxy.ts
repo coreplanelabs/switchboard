@@ -21,7 +21,7 @@ import type { SpanAttrs } from "../core/trace/attrs.js";
 import type { Clock } from "../core/trace/types.js";
 import { usageFromAnthropic } from "../providers/anthropic.js";
 import { usageFromOpenAI } from "../providers/openaiCompat.js";
-import { ANTHROPIC_API_KEY_ENV, type ProviderConfig, type TokenUsage } from "../providers/types.js";
+import { ANTHROPIC_API_KEY_ENV, type ProviderConfig, type TokenUsage } from "../core/provider.js";
 import type { Secrets } from "../secrets.js";
 import { readBody } from "./http.js";
 

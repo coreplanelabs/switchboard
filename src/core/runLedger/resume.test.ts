@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ChatMessage } from "../../providers/types.js";
+import type { ChatMessage } from "../chatMessage.js";
 import {
   loopEndingOf,
   planResume,

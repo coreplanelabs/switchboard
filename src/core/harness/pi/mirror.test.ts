@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { StepReport } from "../../../runner.js";
-import type { ChatMessage } from "../../../providers/types.js";
+import type { ChatMessage } from "../../chatMessage.js";
 import { PiMirror, chatMessageOf, piSessionFile } from "./mirror.js";
 
 // Feature: docs/reference/specs/harness-pi.md item 8 — the transcript mirror:

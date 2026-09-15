@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { CompletionRequest, CompletionResult, Provider } from "../../providers/types.js";
+import type { CompletionRequest, CompletionResult, Provider } from "../provider.js";
 import { actor } from "../authz/testing.js";
 import type { ChannelVisibility } from "../authz/types.js";
 import type { HistoryItem } from "../types.js";

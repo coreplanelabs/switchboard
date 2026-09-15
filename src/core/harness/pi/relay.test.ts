@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Executor } from "../../../execution/executor.js";
-import type { ChatMessage } from "../../../providers/types.js";
+import type { ChatMessage } from "../../chatMessage.js";
 import { awaitRunsTool, sendToRunTool, spawnRunTool } from "../../../tools/runs.js";
-import { TOOLSETS, submitVerdictTool, type RunnableTool } from "../../../tools/workspace.js";
+import { TOOLSETS } from "../../../tools/workspace.js";
+import { submitVerdictTool } from "../../../tools/submit.js";
+import type { RunnableTool } from "../../../tools/runnableTool.js";
 import { ALL_GRANTS } from "../../authz/grants.js";
 import type { Actor } from "../../authz/types.js";
 import { sleepUnlessAborted, type WaitCapability } from "../../dispatch/awaitChildren.js";

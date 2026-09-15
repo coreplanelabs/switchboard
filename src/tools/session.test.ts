@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ChatMessage } from "../providers/types.js";
+import type { ChatMessage } from "../core/chatMessage.js";
 import type { RunEvent } from "../core/runEvents.js";
 import { NOTEPAD_MAX_BYTES } from "../core/runLedger/sessionLog.js";
 import type { FenceResult, Notepad, SessionHit } from "../core/runLedger/types.js";
 import type { RunsService, RunView } from "../core/runsService.js";
 import type { ThreadAsset } from "../core/dispatch/threadAssets.js";
 import type { Actor } from "../core/authz/types.js";
-import type { ToolContext } from "./workspace.js";
+import type { ToolContext } from "./runnableTool.js";
 import { notesTool, recallTool, SESSION_TOOLS, sessionCapabilityFor, type SessionCapability } from "./session.js";
 
 // docs/reference/specs/session-log.md item 10 (record 0035, "Recall" and "The

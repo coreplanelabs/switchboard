@@ -14,7 +14,7 @@ import {
   type RequestDirectives,
   type ThreadDirectives,
 } from "../../directives.js";
-import { parseModelRef, type Provider } from "../../providers/types.js";
+import { parseModelRef, type Provider } from "../provider.js";
 import type { ProviderRegistry } from "../../providers/registry.js";
 import {
   githubTokenScopeFor,

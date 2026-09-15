@@ -31,7 +31,7 @@ import { TOOLSETS } from "../../tools/workspace.js";
 import { routingOn, type ConfigStore, type ResolvedRequest } from "../../config.js";
 import type { RouteAnswerMode } from "../../config/validate.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
-import { parseModelRef, type Provider, type ToolDef } from "../../providers/types.js";
+import { parseModelRef, type Provider, type ToolDef } from "../provider.js";
 import type { ProviderTable } from "../harness/piAi.js";
 import { oneLine, redactAndCap } from "../redact.js";
 import { ROUTED_LABEL_PREFIX } from "../statusCardFrame.js";

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentDef } from "../agents/registry.js";
-import type { ChatMessage } from "../providers/types.js";
+import type { ChatMessage } from "./chatMessage.js";
 import type { ResumableRun, ResumeRun } from "./boot.js";
 import type { CoreDeps, DispatchOptions } from "./dispatcher.js";
 import { inputTextOf, knownToolsFor, launchResumes, repoContextOf, resumeMessage } from "./resumeLaunch.js";

@@ -1,19 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { AgentDef } from "./agents/registry.js";
-import {
-  MAX_TOOL_RESULT_CHARS,
-  type ChatMessage,
-  type CompletionRequest,
-  type CompletionResult,
-  type ContentPart,
-  type Provider,
-} from "./providers/types.js";
+import { MAX_TOOL_RESULT_CHARS, type ChatMessage, type ContentPart } from "./core/chatMessage.js";
+import type { CompletionRequest, CompletionResult, Provider } from "./core/provider.js";
 import { RunControl } from "./core/runRegistry/runControl.js";
 import type { Executor } from "./execution/executor.js";
 import { ExecCapacityError, ExecInfraError, ExecSandboxRestartedError } from "./execution/executor.js";
 import type { RunEvent } from "./core/runEvents.js";
 import { runAgent, type StepReport } from "./runner.js";
-import type { RunnableTool } from "./tools/workspace.js";
+import type { RunnableTool } from "./tools/runnableTool.js";
 import { InMemorySkillStore } from "./skills/index.js";
 import { FollowUpInbox, type FollowUpInput } from "./core/threadAdmission.js";
 import { ALL_GRANTS } from "./core/authz/grants.js";

@@ -3,14 +3,13 @@ import type { Effort } from "../effort.js";
 import { processSecrets, type Secret, type Secrets } from "../secrets.js";
 import {
   ANTHROPIC_API_KEY_ENV,
-  type ChatMessage,
   type CompletionRequest,
   type CompletionResult,
-  type ContentPart,
   type Provider,
   type ProviderConfig,
   type TokenUsage,
-} from "./types.js";
+} from "../core/provider.js";
+import type { ChatMessage, ContentPart } from "../core/chatMessage.js";
 
 /** The slice of the SDK client the provider uses — injectable for tests. */
 export type AnthropicClientLike = Pick<Anthropic, "messages">;

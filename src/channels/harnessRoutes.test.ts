@@ -5,7 +5,7 @@ import { HarnessRegistry, type LiveHarness } from "../core/harness/pi/relay.js";
 import { RunBearerStore } from "../core/modelProxy/runBearers.js";
 import type { RunEvent } from "../core/runEvents.js";
 import { createTracer } from "../core/trace/tracer.js";
-import type { RunnableTool } from "../tools/workspace.js";
+import type { RunnableTool } from "../tools/runnableTool.js";
 import {
   HARNESS_AUTHORIZE_PATH,
   HARNESS_TOOLS_PATH,

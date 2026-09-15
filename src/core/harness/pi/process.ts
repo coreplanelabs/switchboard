@@ -9,7 +9,7 @@
 
 import type { Identity } from "../../../agents/registry.js";
 import type { Effort } from "../../../effort.js";
-import type { ProviderConfig } from "../../../providers/types.js";
+import type { ProviderConfig } from "../../provider.js";
 import type { PiCompactionConfig } from "../../../config.js";
 import { PI_EXTENSION_SOURCE } from "./extensionSource.js";
 

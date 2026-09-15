@@ -14,7 +14,8 @@ import {
   githubTreeTool,
   githubIssueCommentTool,
 } from "./github.js";
-import { TOOLSETS, type ToolContext } from "./workspace.js";
+import { TOOLSETS } from "./workspace.js";
+import type { ToolContext } from "./runnableTool.js";
 import type { Executor } from "../execution/executor.js";
 
 // Feature: features/github-tools.md — the github_* tools over the GithubApi

@@ -14,8 +14,9 @@
 // not driving a pi answers nothing.
 
 import { TracingExecutor } from "../../../execution/tracingExecutor.js";
-import { capToolResultContent, type ToolDef, type ToolResultContent } from "../../../providers/types.js";
-import type { RunnableTool, ToolContext } from "../../../tools/workspace.js";
+import { capToolResultContent, type ToolResultContent } from "../../chatMessage.js";
+import type { ToolDef } from "../../provider.js";
+import type { RunnableTool, ToolContext } from "../../../tools/runnableTool.js";
 import { sleepUnlessAborted } from "../../dispatch/awaitChildren.js";
 import type { Backend } from "../../trace/attrs.js";
 import { redactAndCap, type RunEvent } from "../../runEvents.js";

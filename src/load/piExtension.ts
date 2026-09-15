@@ -7,7 +7,7 @@
 // pi validates without TypeBox (packages/ai/src/utils/validation.ts,
 // `validateToolArguments`). Because pi holds the model to the schema it is
 // served, the two definitions are the bot's own — the native table's
-// description and schema (src/tools/workspace.ts), transcribed since nothing
+// description and schema (src/tools/submit.ts), transcribed since nothing
 // can be imported here and held equal by piExtension.test.ts — so the model
 // is asked for exactly what the production relay asks it for: a verdict whose
 // `head` is required, a description whose every field is named. Its one
@@ -83,7 +83,7 @@ interface PiToolDeclaration {
 }
 
 /** `submit_pr_description` as `submitPrDescriptionTool` declares it in
- *  src/tools/workspace.ts — the same description and schema, so the model
+ *  src/tools/submit.ts — the same description and schema, so the model
  *  writes the same object a native coding run would. The driver validates the
  *  object with Switchboard's own parser; this declaration only shapes the call. */
 const SUBMIT_PR_DESCRIPTION: PiToolDeclaration = {
@@ -161,7 +161,7 @@ const SUBMIT_PR_DESCRIPTION: PiToolDeclaration = {
   },
 };
 
-/** `submit_verdict` as `submitVerdictTool` declares it in src/tools/workspace.ts
+/** `submit_verdict` as `submitVerdictTool` declares it in src/tools/submit.ts
  *  — the description that says to run `git rev-parse HEAD` in the checkout
  *  reviewed, and the schema that requires `head` beside the verdict and the
  *  summary. The reviewed-head guard's fallback reads that head; served without

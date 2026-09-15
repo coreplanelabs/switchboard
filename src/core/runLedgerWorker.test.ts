@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { secretsFrom } from "../secrets.js";
-import type { ChatMessage } from "../providers/types.js";
+import type { ChatMessage } from "./chatMessage.js";
 import { buildRunLedger, WorkerRunLedger } from "./runLedgerWorker.js";
 import { ATTACHMENT_REF_BYTES, LEASE_MS, type ClaimRequest } from "./runLedger/types.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./runStoreWorker.js";

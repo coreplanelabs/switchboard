@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { AGENTS } from "../../agents/registry.js";
 import { ConfigStore } from "../../config.js";
-import type { ChatMessage } from "../../providers/types.js";
+import type { ChatMessage } from "../chatMessage.js";
 import { RunRegistry } from "../runRegistry.js";
 import type { ChannelIO, IncomingMessage, OpenedThread } from "../types.js";
 import type { CoreDeps, DispatchOptions, DispatchOutcome } from "../dispatcher.js";

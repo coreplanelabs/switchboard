@@ -1,6 +1,6 @@
 import { mapLimit } from "../core/mapLimit.js";
 import { redactAndCap } from "../core/runEvents.js";
-import type { RunnableTool } from "../tools/workspace.js";
+import type { RunnableTool } from "../tools/runnableTool.js";
 import { bridgeMcpTools, newRunBudget } from "./bridge.js";
 import type { McpClient, McpClientFactory, McpServerSpec, McpToolInfo } from "./types.js";
 

@@ -3,7 +3,7 @@ import type { TracingLogLevel } from "./core/trace/sinks.js";
 import { dirname, resolve } from "node:path";
 import type { Effort } from "./effort.js";
 import YAML from "yaml";
-import type { ProviderConfig } from "./providers/types.js";
+import type { ProviderConfig } from "./core/provider.js";
 import type { MemoryConfig } from "./core/memory/types.js";
 import type { ArtifactsConfig } from "./artifacts/config.js";
 import type { SelfImprovementConfig } from "./core/selfImprovement.js";

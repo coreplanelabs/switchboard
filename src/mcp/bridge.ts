@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { wrapUntrusted } from "../core/commandRegistry.js";
-import type { RunnableTool } from "../tools/workspace.js";
+import type { RunnableTool } from "../tools/runnableTool.js";
 import { McpError, type McpCallResult, type McpClient, type McpServerSpec, type McpToolInfo } from "./types.js";
 import { classifyError } from "../core/trace/classify.js";
 import type { Span } from "../core/trace/types.js";

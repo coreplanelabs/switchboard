@@ -13,7 +13,7 @@
 // pi's compaction entries never ride the seed as rows: the tail begins after
 // the newest one, and that entry's summary is handed back for the system
 // prompt, where the record keeps it a pointer to the log and never a loss.
-import type { ChatMessage, ContentPart } from "../../providers/types.js";
+import type { ChatMessage, ContentPart } from "../chatMessage.js";
 import { GAP_MARKER, sessionKey } from "../runLedger/sessionLog.js";
 import type { AssembledTranscript } from "../runLedger/transcript.js";
 import type { LedgerWriteThrough } from "../runLedger/writeThrough.js";

@@ -1,4 +1,4 @@
-import type { RunnableTool } from "./workspace.js";
+import type { RunnableTool } from "./runnableTool.js";
 
 // Skill-loading tools. Both are READ-only (they add methodology text to
 // the model's context; they never touch the workspace), so they live in BOTH

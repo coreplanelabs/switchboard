@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { InMemorySkillStore } from "../skills/index.js";
 import type { Skill } from "../skills/index.js";
 import { listSkillsTool, useSkillTool } from "./skills.js";
-import { TOOLSETS, type ToolContext } from "./workspace.js";
+import { TOOLSETS } from "./workspace.js";
+import type { ToolContext } from "./runnableTool.js";
 
 // Feature: docs/reference/specs/skills.md — the read-only list_skills/use_skill tools:
 // scoped to the calling agent, present in BOTH the readonly (review) and full

@@ -8,7 +8,7 @@ import { declaredProfile } from "../../config/profile.js";
 import { resetResidentProbeCache } from "../../execution/factory.js";
 import { resolveGithubToken } from "../../execution/githubApp.js";
 import type { ProviderRegistry } from "../../providers/registry.js";
-import type { Provider } from "../../providers/types.js";
+import type { Provider } from "../provider.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import type { RepoContext } from "../repoContext.js";
 import type { ChannelIO, HistoryItem, IncomingMessage } from "../types.js";

@@ -1,5 +1,5 @@
 import { GithubApiError, type GithubApi, type IssueSummary } from "../execution/githubApi.js";
-import type { RunnableTool } from "./workspace.js";
+import type { RunnableTool } from "./runnableTool.js";
 
 // The `github_*` tools (docs/reference/specs/github-tools.md): every agent with a tool
 // loop can read the org's repositories and read/write their issues through the

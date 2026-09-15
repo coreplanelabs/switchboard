@@ -1,4 +1,4 @@
-import type { Provider, ProviderConfig } from "./types.js";
+import type { Provider, ProviderConfig } from "../core/provider.js";
 import { AnthropicProvider } from "./anthropic.js";
 import { OpenAICompatProvider } from "./openaiCompat.js";
 

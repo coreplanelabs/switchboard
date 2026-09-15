@@ -17,7 +17,8 @@
 import type { AgentDef, Identity } from "../agents/registry.js";
 import type { RunProfile } from "../config/profile.js";
 import type { Effort } from "../effort.js";
-import type { ChatMessage, Provider } from "../providers/types.js";
+import type { ChatMessage } from "./chatMessage.js";
+import type { Provider } from "./provider.js";
 import { runAgent } from "../runner.js";
 import {
   makeExecutor,
@@ -26,7 +27,7 @@ import {
   type WorkspaceBinding,
 } from "../execution/factory.js";
 import type { Executor, ReleaseMode } from "../execution/executor.js";
-import type { RunnableTool, ToolContext } from "../tools/workspace.js";
+import type { RunnableTool, ToolContext } from "../tools/runnableTool.js";
 import type { Span } from "../core/trace/types.js";
 import type { Backend } from "../core/trace/attrs.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";

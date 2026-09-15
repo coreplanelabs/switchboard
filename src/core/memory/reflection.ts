@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Provider } from "../../providers/types.js";
+import type { Provider } from "../provider.js";
 import { authorize } from "../authz/index.js";
 import type { Actor, ChannelVisibility, Resource } from "../authz/types.js";
 import { redactSecrets } from "../runEvents.js";

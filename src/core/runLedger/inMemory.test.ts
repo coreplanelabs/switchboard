@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ChatMessage } from "../../providers/types.js";
+import type { ChatMessage } from "../chatMessage.js";
 import type { RunRecord } from "../runRecord.js";
 import { InMemoryRunLedger } from "./inMemory.js";
 import { DEFAULT_SESSION_LOG_MAX_BYTES, GAP_MARKER } from "./sessionLog.js";
