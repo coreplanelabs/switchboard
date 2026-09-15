@@ -12,6 +12,7 @@ The contract is elsewhere: [`docs/reference/specs/`](../reference/specs/README.m
 - [Worker topology](worker-topology.md) — the bot plus three Workers.
 - [One definition, every surface](one-command-many-surfaces.md) — one command becomes chat, CLI, HTTP and MCP.
 - [Runs: live, then remembered](runs-live-and-history.md) — a run's two lives.
+- [A thread's conversation outlives its runs](a-thread-continues.md) — one agent per unit, a follow-up continues the transcript, compaction is a pointer.
 - [Why config is layered](config-layers.md) — six layers, effort included.
 
 ## Trust
