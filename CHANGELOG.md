@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.223.0](https://github.com/coreplanelabs/switchboard/compare/v1.222.0...v1.223.0) (2026-09-15)
+
+
+### Features
+
+* **harness:** pi's compaction thresholds are a deployment setting — the config's pi.compaction block rides into pi's settings for every run on pi, so a receipt or a test can make a short run compact while production leaves it unset ([#1187](https://github.com/coreplanelabs/switchboard/issues/1187)) ([06dabb0](https://github.com/coreplanelabs/switchboard/commit/06dabb0406edb05ddc08a5add7cef0d669f4bc02))
+
+
+### Bug fixes
+
+* **costs:** the cost report is never asked for the open day, so the today preset answers instead of a 400 from Anthropic ([#1185](https://github.com/coreplanelabs/switchboard/issues/1185)) ([361c5b8](https://github.com/coreplanelabs/switchboard/commit/361c5b8b0a35662bff922607b8b7248591df6ef8))
+* **harness:** a re-attach continues a pi inside a tool call with a prompt queued as a steer, never the plain prompt it refuses, and settles the calls in flight on the relay so the extension's re-ask never runs the tool again ([#1188](https://github.com/coreplanelabs/switchboard/issues/1188)) ([873f777](https://github.com/coreplanelabs/switchboard/commit/873f777769a4dd487a603c5036b5e05895511814))
+
+
+### Documentation
+
+* **docs:** a thread's conversation outlives its runs — one agent per unit, what a follow-up's seed is made of, compaction as a pointer with recall and notes, the branch that follows the transcript, and a pi run across a bot restart, with the two open gaps named in known limits ([#1183](https://github.com/coreplanelabs/switchboard/issues/1183)) ([ef4dfd0](https://github.com/coreplanelabs/switchboard/commit/ef4dfd09912df4ebcfb090805a9f4769ff1cd297))
+
 ## [1.222.0](https://github.com/coreplanelabs/switchboard/compare/v1.221.1...v1.222.0) (2026-09-15)
 
 
