@@ -634,6 +634,13 @@ export async function runBot(): Promise<void> {
             anthropicAdminKey
               ? new AnthropicCostReportSource({ adminKey: anthropicAdminKey.reveal() })
               : new NullLlmCostSource(),
+            undefined,
+            {
+              // Cost by user (costs.md item 10): the run history's per-user usage,
+              // and the Slack email lookup that matches the viewer to their runs.
+              runStore,
+              emailOfSlackUser: (userId) => (slackEmailLookup ? slackEmailLookup(userId) : Promise.resolve(undefined)),
+            },
           )
         : new NullCostsService();
     const costsView = createCostsViewHandler(costsService, shell);
@@ -863,7 +870,7 @@ export async function runBot(): Promise<void> {
             // --- /mcp/connect/<nonce>: the credential page, identity-bound. ---
             if (mcpConnectView(req, res, gate.identity)) return;
             if (residentsView(req, res)) return;
-            if (costsView(req, res)) return;
+            if (costsView(req, res, { identity: gate.identity })) return;
             if (deliveryView(req, res, { actor })) return;
             res.writeHead(200, { "content-type": "text/plain" });
             res.end("ok");

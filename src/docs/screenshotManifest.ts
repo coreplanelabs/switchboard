@@ -22,6 +22,7 @@ export const SURFACES = [
   { name: "run-page", path: "/runs/hist-1", what: "a finished coding run's page and timeline" },
   { name: "residents", path: "/residents", what: "the residents index" },
   { name: "costs", path: "/costs", what: "the spend page" },
+  { name: "costs-users", path: "/costs?view=users", what: "the spend page's By user tab" },
   { name: "scheduled", path: "/runs/scheduled", what: "the scheduled runs tab" },
 ] as const;
 

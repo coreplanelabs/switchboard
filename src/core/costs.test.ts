@@ -27,7 +27,9 @@ import {
   type CloudflareUsage,
   type CostGroupConfig,
   type LlmCostRow,
+  createCostsService,
 } from "./costs.js";
+import { NullRunStore, type RunStore } from "./runStore.js";
 
 // ---- fixtures ---------------------------------------------------------------
 
@@ -40,6 +42,7 @@ const AUG_27 = iso(2026, 8, 27);
 const AUG_28 = iso(2026, 8, 28);
 const AUG_29 = iso(2026, 8, 29);
 const AUG_30 = iso(2026, 8, 30);
+const AUG_31 = iso(2026, 8, 31);
 const JUL_31 = iso(2026, 7, 31);
 const midnight = (day: string) => `${day}T00:00:00Z`;
 
@@ -1026,6 +1029,109 @@ describe("NullCostsService — the service of a process without cost reporting",
     const service = new NullCostsService();
     expect(service.groups()).toEqual([]);
     await expect(service.report("switchboard", null)).rejects.toThrow(COSTS_OFF_MESSAGE);
+    await expect(service.usersReport("switchboard", null, undefined)).rejects.toThrow(COSTS_OFF_MESSAGE);
     expect(COSTS_OFF_MESSAGE).toContain("CF_ANALYTICS_TOKEN");
+  });
+});
+
+// costs.md item 10 — the service side of cost by user: the run history is
+// asked for the daily report's exact range, the viewer is matched to their run
+// ids by email, and a process without run history gets an empty report that
+// says so.
+describe("createCostsService.usersReport", () => {
+  const cfg = parseCostsConfig({
+    cloudflareAccountId: "acct-example",
+    groups: { switchboard: { workers: ["switchboard"], containerApps: { "app-bot": "bot" } } },
+  })!;
+  const cloudflare = { fetchUsage: async () => USAGE };
+  const llm = { fetchDailyCost: async () => LLM };
+  const now = () => new Date(midnight(AUG_30));
+  const usageReport = {
+    rows: [
+      {
+        userId: "slack:UALICE",
+        userName: "alice",
+        day: AUG_28,
+        runs: 2,
+        wallMs: 3_600_000,
+        usage: {
+          turns: 1,
+          byModel: {
+            "anthropic/claude-haiku-4-5": {
+              turns: 1,
+              inputTokens: 1_000_000,
+              outputTokens: 0,
+              cacheReadTokens: 0,
+              cacheWriteTokens: 0,
+            },
+          },
+        },
+      },
+      {
+        userId: "slack:UBOB",
+        userName: "bob",
+        day: AUG_28,
+        runs: 1,
+        wallMs: 3_600_000,
+        usage: { turns: 0, byModel: {} },
+      },
+      { userId: "http:ops", day: AUG_29, runs: 1, wallMs: 1_000, usage: { turns: 0, byModel: {} } },
+    ],
+    pending: 1,
+    earliestFinishedAt: Date.parse(midnight(AUG_1)),
+    retentionDays: 30,
+  };
+
+  it("asks the history for the daily range, prices and allocates over it, and matches the viewer to their run ids by email (one lookup per distinct Slack user, cached)", async () => {
+    const asked: unknown[] = [];
+    const store = { usageByUser: async (q: unknown) => (asked.push(q), usageReport) } as unknown as RunStore;
+    const looked: string[] = [];
+    // Bob's email is unknown on the first read (a lookup that failed quietly) and known on the next.
+    const emails: Record<string, string | undefined> = { UALICE: "Alice@Example.com", UBOB: undefined };
+    const service = createCostsService(cfg, cloudflare, llm, now, {
+      runStore: store,
+      emailOfSlackUser: async (id) => (looked.push(id), emails[id]),
+    });
+    const r = await service.usersReport("switchboard", "3", { sub: "s1", email: "alice@example.com" });
+    expect(asked).toEqual([{ sinceMs: Date.parse(midnight(AUG_28)), untilMs: Date.parse(midnight(AUG_31)) }]);
+    expect(r.range).toEqual({ from: AUG_28, to: AUG_30, days: 3, partialLastDay: true });
+    expect(r.coverage).toMatchObject({ from: AUG_28, historyOn: true, retentionDays: 30, clamped: false });
+    expect(r.users.map((u) => u.userId)).toEqual(["slack:UALICE", "slack:UBOB", "http:ops"]);
+    expect(r.users[0].llmUsd).toBeCloseTo(1, 9); // 1M haiku input at $1/MTok
+    expect(r.pending).toBe(1);
+    expect(r.viewer).toEqual({ userIds: ["slack:UALICE"], matchedByEmail: true });
+    expect(looked.sort()).toEqual(["UALICE", "UBOB"]); // the HTTP subject is never looked up
+    // A second read looks up only the user whose email was unknown: a known
+    // email is cached for the process, an unknown one is never pinned.
+    emails.UBOB = "bob@example.com";
+    const again = await service.usersReport("switchboard", "3", { sub: "s2", email: "bob@example.com" });
+    expect(looked.sort()).toEqual(["UALICE", "UBOB", "UBOB"]);
+    expect(again.viewer).toEqual({ userIds: ["slack:UBOB"], matchedByEmail: true });
+  });
+
+  it("with no viewer email, or no lookup wired, nothing is matched and the report says so; with the null store the report is empty and says history is off", async () => {
+    const store = { usageByUser: async () => usageReport } as unknown as RunStore;
+    const noLookup = createCostsService(cfg, cloudflare, llm, now, { runStore: store });
+    expect((await noLookup.usersReport("switchboard", null, { sub: "s1", email: "alice@example.com" })).viewer).toEqual(
+      {
+        userIds: [],
+        matchedByEmail: false,
+      },
+    );
+    const withLookup = createCostsService(cfg, cloudflare, llm, now, {
+      runStore: store,
+      emailOfSlackUser: async () => "x@y",
+    });
+    expect((await withLookup.usersReport("switchboard", null, { sub: "svc" })).viewer).toEqual({
+      userIds: [],
+      matchedByEmail: false,
+    });
+    const off = createCostsService(cfg, cloudflare, llm, now, { runStore: new NullRunStore() });
+    const r = await off.usersReport("switchboard", null, undefined);
+    expect(r.users).toEqual([]);
+    expect(r.coverage.historyOn).toBe(false);
+    await expect(createCostsService(cfg, cloudflare, llm, now).usersReport("nope", null, undefined)).rejects.toThrow(
+      /unknown cost group/,
+    );
   });
 });

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import CostsPage from "./CostsPage.vue";
 import { mountApp } from "../testing/mount";
 import type { CostReport } from "@core/core/costs.js";
+import type { UserCostReport } from "@core/core/costsByUser.js";
 import type { CostsSeed } from "@core/channels/webSeed.js";
 
 // Ported from the string-renderer suite (costsView.test.ts): the same page
@@ -67,6 +68,60 @@ const seed = (r: CostReport = report(), groups: string[] = ["switchboard", "othe
   page: "costs",
   report: r,
   groups,
+  view: "daily",
+});
+
+/** The by-user report for the same three days: two Slack users, one of them the
+ *  signed-in viewer; a day's cloud split by wall-clock, the LLM at list. */
+function usersReport(over: Partial<UserCostReport> = {}): UserCostReport {
+  const r = report();
+  const alice = {
+    userId: "slack:U0AL1CE",
+    userName: "alice",
+    runs: 7,
+    wallMs: 3_600_000,
+    llmUsd: 12.25,
+    cloudUsd: 1.5,
+    totalUsd: 13.75,
+    unpricedTokens: 0,
+    byModel: {},
+  };
+  const bob = {
+    userId: "slack:U0B0B",
+    userName: "bob",
+    runs: 2,
+    wallMs: 1_200_000,
+    llmUsd: 3.5,
+    cloudUsd: 0.5,
+    totalUsd: 4.0,
+    unpricedTokens: 1200,
+    byModel: {},
+  };
+  return {
+    group: r.group,
+    range: r.range,
+    coverage: { from: r.range.from, retentionDays: 30, clamped: false, historyOn: true },
+    users: [alice, bob],
+    days: [],
+    pending: 0,
+    reconciliation: {
+      attributedLlmUsd: 15.75,
+      workspaceLlmUsd: 19.5,
+      unattributedLlmUsd: 3.75,
+      cloudAllocatedUsd: 2.0,
+      cloudUnallocatedUsd: 1.4,
+    },
+    viewer: { userIds: ["slack:U0B0B"], matchedByEmail: true },
+    generatedAt: r.generatedAt,
+    ...over,
+  };
+}
+
+/** `null`: the page was served without its by-user report. */
+const usersSeed = (users: UserCostReport | null = usersReport()): CostsSeed => ({
+  ...seed(),
+  view: "users",
+  ...(users ? { users } : {}),
 });
 
 describe("CostsPage", () => {
@@ -323,9 +378,10 @@ describe("CostsPage", () => {
 
   it("links sibling groups when more than one is configured", () => {
     const w = mountApp(CostsPage, { seed: seed() });
-    expect(w.findAll("a").map((a) => a.attributes("href"))).toContain("/costs/other");
+    // A sibling opens on the same range (and, below, the same tab).
+    expect(w.findAll("a").map((a) => a.attributes("href"))).toContain("/costs/other?days=3");
     const single = mountApp(CostsPage, { seed: seed(report(), ["switchboard"]) });
-    expect(single.findAll("a").map((a) => a.attributes("href"))).not.toContain("/costs/other");
+    expect(single.findAll("a").some((a) => (a.attributes("href") ?? "").startsWith("/costs/other"))).toBe(false);
   });
 
   it("says LLM spend is not configured instead of showing $0 when there is no source", () => {
@@ -337,5 +393,132 @@ describe("CostsPage", () => {
   it("names the JSON twin", () => {
     const w = mountApp(CostsPage, { seed: seed() });
     expect(w.text()).toContain("GET /costs/switchboard.json");
+  });
+
+  it("offers Daily and By user as tabs above the tables; the daily tab shows the daily tables and no user table", () => {
+    const w = mountApp(CostsPage, { seed: seed() });
+    const tabs = w.find('nav[aria-label="View"]');
+    expect(tabs.exists()).toBe(true);
+    expect(tabs.find('[aria-current="page"]').text()).toBe("Daily");
+    expect(tabs.find("a").attributes("href")).toBe("/costs/switchboard?days=3&view=users");
+    expect(w.find("table.data").exists()).toBe(true);
+    expect(w.find("table.users").exists()).toBe(false);
+  });
+});
+
+describe("CostsPage · By user", () => {
+  it("lists one row per user largest first — name, runs, LLM, allocated cloud, total, share of what was attributed — and marks the viewer's row", () => {
+    const w = mountApp(CostsPage, { seed: usersSeed() });
+    expect(w.find('nav[aria-label="View"] [aria-current="page"]').text()).toBe("By user");
+    // The daily tables step aside; the tiles and the chart stay as the group's context.
+    expect(w.find("table.data").exists()).toBe(false);
+    expect(w.find("rect.day").exists()).toBe(true);
+    const rows = w.findAll("table.users tbody tr.user-row");
+    expect(rows.length).toBe(2);
+    expect(rows[0].text()).toContain("alice");
+    expect(rows[0].findAll("td").map((td) => td.text())).toEqual(
+      expect.arrayContaining(["7", "$12.25", "$1.50", "$13.75", "77%"]),
+    );
+    expect(rows[1].text()).toContain("bob");
+    expect(rows[1].classes()).toContain("is-me");
+    expect(rows[1].text()).toContain("me");
+    expect(rows[0].classes()).not.toContain("is-me");
+    // The id stays reachable on hover; the platform prefix is not the name.
+    expect(rows[0].find("td[title]").attributes("title")).toBe("slack:U0AL1CE");
+    expect(w.find("table.users thead").text()).toContain("allocated");
+    // Tokens under a model with no list price are said, not $0 in silence.
+    expect(rows[1].text()).toContain("unpriced tokens");
+    expect(rows[0].text()).not.toContain("unpriced tokens");
+  });
+
+  it("filters by name or id, and the me toggle keeps only the signed-in viewer's rows; the shown subtotal appears when rows are hidden", async () => {
+    const w = mountApp(CostsPage, { seed: usersSeed() });
+    await w.find("input.user-filter").setValue("ali");
+    let rows = w.findAll("table.users tbody tr.user-row");
+    expect(rows.map((r) => r.find("td").text())).toEqual([expect.stringContaining("alice")]);
+    expect(w.find("table.users tfoot").text()).toContain("shown");
+    expect(w.find("table.users tfoot").text()).toContain("$13.75");
+    await w.find("input.user-filter").setValue("U0B0B");
+    rows = w.findAll("table.users tbody tr.user-row");
+    expect(rows.map((r) => r.find("td").text())).toEqual([expect.stringContaining("bob")]);
+    await w.find("input.user-filter").setValue("nobody");
+    expect(w.find("table.users td.empty").text()).toBe("no user matches");
+    await w.find("input.user-filter").setValue("");
+    expect(w.find("table.users tfoot").exists()).toBe(false);
+    const me = w.find(".me-toggle input");
+    expect(me.attributes("disabled")).toBeUndefined();
+    await me.setValue(true);
+    rows = w.findAll("table.users tbody tr.user-row");
+    expect(rows.length).toBe(1);
+    expect(rows[0].text()).toContain("bob");
+  });
+
+  it("disables the me toggle, and says why in visible text the input describes, when the viewer matched no run user", () => {
+    const w = mountApp(CostsPage, { seed: usersSeed(usersReport({ viewer: { userIds: [], matchedByEmail: false } })) });
+    const input = w.find(".me-toggle input");
+    expect(input.attributes("disabled")).toBeDefined();
+    // The reason is on the page, not in a hover-only title, and the input points at it.
+    const hint = w.find(".me-toggle .me-hint");
+    expect(hint.text()).toContain("matched no Slack user");
+    expect(input.attributes("aria-describedby")).toBe(hint.attributes("id"));
+    expect(w.find(".me-toggle").attributes("title")).toBeUndefined();
+    expect(w.findAll("tr.is-me").length).toBe(0);
+    // With a match the hint is gone and the toggle is live.
+    const on = mountApp(CostsPage, { seed: usersSeed() });
+    expect(on.find(".me-toggle .me-hint").exists()).toBe(false);
+    expect(on.find(".me-toggle input").attributes("aria-describedby")).toBeUndefined();
+  });
+
+  it("states the coverage plainly: where the data begins, a clamped range, runs still being priced; and with history off, that there is nothing to attribute", () => {
+    const w = mountApp(CostsPage, { seed: usersSeed() });
+    expect(w.find(".coverage").text()).toBe("runs from Aug 27 to Aug 29");
+    const clamped = mountApp(CostsPage, {
+      seed: usersSeed(
+        usersReport({
+          coverage: { from: report().days[1].date, retentionDays: 30, clamped: true, historyOn: true },
+          pending: 3,
+        }),
+      ),
+    });
+    const t = clamped.find(".coverage").text();
+    expect(t).toContain("runs from Aug 28 to Aug 29");
+    expect(t).toContain("past the history's 30-day window");
+    expect(t).toContain("3 runs still being priced");
+    const off = mountApp(CostsPage, {
+      seed: usersSeed(
+        usersReport({
+          coverage: { from: report().days[2].date, retentionDays: 0, clamped: true, historyOn: false },
+          users: [],
+          viewer: { userIds: [], matchedByEmail: false },
+        }),
+      ),
+    });
+    expect(off.find(".coverage").text()).toContain("run history is off");
+    expect(off.find("table.users td.empty").text()).toBe("no runs in this range");
+  });
+
+  it("carries one reconciliation line: attributed LLM against the workspace figure, the unattributed remainder, cloud allocated and unallocated", () => {
+    const w = mountApp(CostsPage, { seed: usersSeed() });
+    const line = w.find(".reconciliation").text().replace(/\s+/g, " ");
+    expect(line).toContain("LLM attributed $15.75 of $19.50 on the workspace");
+    expect(line).toContain("$3.75 unattributed");
+    expect(line).toContain("cloud allocated $2.00");
+    expect(line).toContain("$1.40 on days with no runs");
+    const tidy = mountApp(CostsPage, {
+      seed: usersSeed(usersReport({ reconciliation: { ...usersReport().reconciliation, cloudUnallocatedUsd: 0 } })),
+    });
+    expect(tidy.find(".reconciliation").text()).not.toContain("days with no runs");
+  });
+
+  it("keeps the tab on the range and group pills, names the by-user JSON twin, and says so when the by-user report did not come with the page", () => {
+    const w = mountApp(CostsPage, { seed: usersSeed() });
+    const hrefs = w.findAll("a").map((a) => a.attributes("href"));
+    expect(hrefs).toContain("/costs/switchboard?days=7&view=users");
+    expect(hrefs).toContain("/costs/other?days=3&view=users");
+    expect(hrefs).toContain("/costs/switchboard?days=3"); // the Daily tab
+    expect(w.text()).toContain("GET /costs/switchboard/users.json");
+    const missing = mountApp(CostsPage, { seed: usersSeed(null) });
+    expect(missing.text()).toContain("by-user report did not load");
+    expect(missing.find("table.users").exists()).toBe(false);
   });
 });

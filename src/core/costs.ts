@@ -1,4 +1,7 @@
 import { systemClock } from "./trace/clock.js";
+import { buildUserCostReport, type UserCostReport } from "./costsByUser.js";
+import { NullRunStore, type RunStore } from "./runStore.js";
+import type { RunUsageReport } from "./runUsage.js";
 // Spend report: what a group of deployed pieces ("switchboard" = the bot
 // Worker + its containers, the resident/sandbox/memory Workers) costs per day,
 // assembled from the providers' own billing datasets and priced at list — and
@@ -1086,6 +1089,26 @@ export interface CostsService {
   groups(): string[];
   /** Live read of both sources for one group; throws on upstream failure. */
   report(group: string, daysParam: string | null): Promise<CostReport>;
+  /** Cost by user (costs.md item 10): the group's daily report plus the run
+   *  history's per-user usage for the same range, and the signed-in viewer's
+   *  run ids for the **me** toggle (matched by email through the Slack lookup
+   *  when one is wired). Throws on upstream failure like `report`. */
+  usersReport(group: string, daysParam: string | null, viewer: CostsViewer | undefined): Promise<UserCostReport>;
+}
+
+/** Who is looking: the Access identity's fields the viewer match needs. */
+export interface CostsViewer {
+  sub: string;
+  email?: string;
+}
+
+/** What the by-user report reads beyond the two billing sources. */
+export interface CostsServiceDeps {
+  /** The run history; absent (or the null store) → the by-user report is empty and says history is off. */
+  runStore?: RunStore;
+  /** A Slack user id (`U…`) → its email, when the app can read it — how the
+   *  viewer's Access email is matched to the run ids the history bills. */
+  emailOfSlackUser?: (userId: string) => Promise<string | undefined>;
 }
 
 /** Why there is no spend report, when the config has no `costs` block or the
@@ -1103,6 +1126,37 @@ export class NullCostsService implements CostsService {
   report(_group: string, _daysParam: string | null): Promise<CostReport> {
     return Promise.reject(new Error(COSTS_OFF_MESSAGE));
   }
+  usersReport(_group: string, _daysParam: string | null, _viewer: CostsViewer | undefined): Promise<UserCostReport> {
+    return Promise.reject(new Error(COSTS_OFF_MESSAGE));
+  }
+}
+
+/** The run ids the history bills that belong to the viewer: every `slack:U…`
+ *  user in the report whose Slack email equals the viewer's Access email. One
+ *  lookup per distinct user, cached for the process (an email does not move). */
+export async function viewerRunUserIds(
+  userIds: readonly string[],
+  viewer: CostsViewer | undefined,
+  emailOfSlackUser: ((userId: string) => Promise<string | undefined>) | undefined,
+  cache: Map<string, string | undefined>,
+): Promise<{ userIds: string[]; matchedByEmail: boolean }> {
+  const email = viewer?.email?.toLowerCase();
+  if (!email || !emailOfSlackUser) return { userIds: [], matchedByEmail: false };
+  const out: string[] = [];
+  for (const id of new Set(userIds)) {
+    if (!id.startsWith("slack:")) continue;
+    const slackId = id.slice("slack:".length);
+    // A known email is cached for the process; an unknown one is asked again
+    // next time, since a lookup that failed quietly must not pin the user as
+    // unmatchable for as long as the bot runs.
+    let known = cache.get(slackId);
+    if (known === undefined) {
+      known = (await emailOfSlackUser(slackId))?.toLowerCase();
+      if (known !== undefined) cache.set(slackId, known);
+    }
+    if (known === email) out.push(id);
+  }
+  return { userIds: out, matchedByEmail: true };
 }
 
 export function createCostsService(
@@ -1110,18 +1164,47 @@ export function createCostsService(
   cloudflare: CloudflareUsageSource,
   llm: LlmCostSource,
   now: () => Date = () => new Date(systemClock()),
+  deps: CostsServiceDeps = {},
 ): CostsService {
+  const emailCache = new Map<string, string | undefined>();
+  const report = async (group: string, daysParam: string | null, at: Date): Promise<CostReport> => {
+    const g = cfg.groups[group];
+    if (!g) throw new Error(`unknown cost group ${group}`);
+    const range = resolveRange(daysParam, at);
+    const [usage, llmRows] = await Promise.all([cloudflare.fetchUsage(range), llm.fetchDailyCost(range)]);
+    return buildCostReport(group, g, usage, llmRows, range, {
+      accountId: cfg.cloudflareAccountId,
+      accountName: cfg.cloudflareAccountName,
+      generatedAt: at.getTime(),
+    });
+  };
   return {
     groups: () => Object.keys(cfg.groups),
-    async report(group, daysParam) {
-      const g = cfg.groups[group];
-      if (!g) throw new Error(`unknown cost group ${group}`);
+    report: (group, daysParam) => report(group, daysParam, now()),
+    async usersReport(group, daysParam, viewer) {
       const at = now();
-      const range = resolveRange(daysParam, at);
-      const [usage, llmRows] = await Promise.all([cloudflare.fetchUsage(range), llm.fetchDailyCost(range)]);
-      return buildCostReport(group, g, usage, llmRows, range, {
-        accountId: cfg.cloudflareAccountId,
-        accountName: cfg.cloudflareAccountName,
+      const store = deps.runStore instanceof NullRunStore ? undefined : deps.runStore;
+      const daily = await report(group, daysParam, at);
+      const usage: RunUsageReport = store
+        ? await store.usageByUser({
+            sinceMs: Date.parse(`${daily.range.from}T00:00:00Z`),
+            untilMs: Date.parse(`${daily.range.to}T00:00:00Z`) + 86_400_000,
+          })
+        : { rows: [], pending: 0, retentionDays: 0 };
+      const viewerIds = await viewerRunUserIds(
+        usage.rows.map((r) => r.userId),
+        viewer,
+        deps.emailOfSlackUser,
+        emailCache,
+      );
+      return buildUserCostReport({
+        group,
+        range: daily.range,
+        usage,
+        days: daily.days,
+        historyOn: store !== undefined,
+        viewerUserIds: viewerIds.userIds,
+        matchedByEmail: viewerIds.matchedByEmail,
         generatedAt: at.getTime(),
       });
     },

@@ -16,6 +16,7 @@ declare module 'vue' {
     BrandMark: typeof import('./src/components/BrandMark.vue')['default']
     CallCard: typeof import('./src/components/run/CallCard.vue')['default']
     CostChart: typeof import('./src/components/costs/CostChart.vue')['default']
+    CostsByUser: typeof import('./src/components/costs/CostsByUser.vue')['default']
     DocsLink: typeof import('./src/components/DocsLink.vue')['default']
     ExpandableText: typeof import('./src/components/ExpandableText.vue')['default']
     GithubMark: typeof import('./src/components/GithubMark.vue')['default']
