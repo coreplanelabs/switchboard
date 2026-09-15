@@ -13,10 +13,21 @@
 // for that one command — in the body, never in headers, because Workers Logs
 // record request headers (docs/reference/specs/execution.md item 5).
 //
-// The Sandbox SDK only runs inside Workers — that's why this proxy exists.
-// Verify method names against https://developers.cloudflare.com/sandbox/ on
-// first deploy; the SDK is young and its surface may shift.
-import { getSandbox, Sandbox, type ExecOptions, type ExecResult } from "@cloudflare/sandbox";
+// The Sandbox SDK only runs inside Workers — that's why this proxy exists. The
+// Durable Object below does the work (one supervised process per command, the
+// file reads and writes) and answers the fetch handler over RPC with plain
+// data; the handler authenticates, streams, and names what came back.
+import {
+  OperationInterruptedError,
+  ProcessWaitTimeoutError,
+  RPCTransportError,
+  RuntimeIdentityInactiveError,
+  Sandbox,
+  StaleProcessHandleError,
+  getSandbox,
+  type SandboxCommand,
+} from "@cloudflare/sandbox";
+import { createExtensionProcessSandbox } from "@cloudflare/sandbox/extensions";
 import { BASH_TIMEOUT_MAX_MS, clampBashTimeout } from "../../src/execution/bashTimeout.js";
 import {
   base64ByteLength,
@@ -27,20 +38,16 @@ import {
   type Base64ReadAnswer,
 } from "../../src/execution/binaryRead.js";
 import {
-  EXEC_KEEPALIVE_INTERVAL_MS,
   SANDBOX_SLEEP_AFTER,
   isRecycleError,
   recycledMidCommandMessage,
-  withActivityKeepalive,
-} from "../../src/execution/sandboxKeepalive.js";
+} from "../../src/execution/sandboxLifecycle.js";
 import { envFromRequest } from "../../src/execution/sandboxEnv.js";
-import { shellQuote } from "../../src/execution/shellQuote.js";
+import { RUNTIME_REPLACEMENT_WORDING, isRuntimeUnreachableSignal } from "../../src/execution/residentRefresh.js";
 import {
   fleetBusyAnswer,
   fleetBusyExecAnswer,
-  isContainerStarting,
   isFleetBusyError,
-  isRuntimeProxyFailure,
   isRuntimeUnreachableError,
   runtimeUnreachableAnswer,
   runtimeUnreachableExecAnswer,
@@ -57,143 +64,8 @@ import sandboxPkg from "./package.json" with { type: "json" };
 
 /** The `@cloudflare/sandbox` version this Worker is built against — the pin
  *  `check:sandbox-pair` holds equal to the Dockerfile's image tag, so it is
- *  also the version a container on the CURRENT image reports. */
+ *  also the version a container on the CURRENT image runs. */
 const SDK_PIN: string = sandboxPkg.dependencies["@cloudflare/sandbox"];
-
-export class SwitchboardSandbox extends Sandbox {
-  // Idle lifetime of a thread's container (the SDK's own default is 10 min on
-  // 0.12.x, 20 on 0.3.x). On the 0.0.28 containers base the activity clock was
-  // renewed once per proxied fetch and the alarm loop SIGTERMed the container
-  // the moment it expired, in-flight request or not — so a review's first
-  // command (a 20-minute budget under a 20-minute default) was once
-  // killed at 20:00 exactly, surfaced as "Command execution failed", and
-  // the next command found a fresh container with an empty /workspace. `exec`
-  // below renews the clock every minute while a command runs, which makes
-  // this a true idle timeout (docs/reference/specs/execution.md item 2). The 0.3.x
-  // containers base tracks in-flight requests itself, so the keepalive is now
-  // belt-and-braces — kept until a live long-command receipt retires it. 5
-  // minutes of idle frees the slot sooner while a prompt follow-up still
-  // reuses the warm workspace.
-  sleepAfter = SANDBOX_SLEEP_AFTER;
-
-  // A Worker and its image deploy as two artifacts; until the rollout finishes
-  // this Worker can be handed a container still on the PREVIOUS image
-  // (docs/reference/specs/execution.md item 6; seen live: a 0.3.7 container under the
-  // 0.12.9 SDK, every command a message-less 400 for 90 s). The SDK's own
-  // check logs `container=unknown` at info and does nothing else; this one
-  // names the skew at warn so the rollout is visible in the logs.
-  //
-  // LOG ONLY — never `destroy()` here: onStart runs inside
-  // `blockConcurrencyWhile`, `destroy()` is unbounded and coalesced callers
-  // hang until eviction, a fresh placement during a gradual wave can land on
-  // the old image again (the incident's DO was brand new), and the
-  // healthy-but-not-running state after a destroy takes the SDK's stale-state
-  // path, which can `ctx.abort()` the DO. A command that fails on a skewed
-  // instance is named by `thrownText` with the rollout hint; the one-wave
-  // rollout (`rollout_step_percentage: 100`) keeps the window to seconds.
-  override async onStart(): Promise<void> {
-    await super.onStart();
-    const v = await this.client.utils.getVersion().catch(() => "unknown");
-    if (v !== SDK_PIN) {
-      console.warn(
-        `sandbox.version-skew container=${v} sdk=${SDK_PIN} — this instance may be on a previous image (Worker/image rollout in progress)`,
-      );
-    }
-  }
-
-  // A proxied fetch that nothing answered (docs/reference/specs/execution.md
-  // item 9): the `@cloudflare/containers` base class turns a failed fetch to
-  // the container's port into a plain-text HTTP 500 — `Error proxying request
-  // to container: …` when nothing listens (the SDK's server exited, or the
-  // image's PID 1 has not started it again yet), `Container suddenly
-  // disconnected` when the connection dropped mid-request — and the SDK's
-  // client, expecting JSON, throws the bare `HTTP error! status: 500`. Read
-  // the body here, before the client does, and throw the named error with the
-  // facts a card and a log search need: this container's id (the Durable
-  // Object's id is the container id in the `containers` dataset), the SDK
-  // pin, and whether the platform still calls the container running. Every
-  // other answer passes through untouched — a 500 body that is not the proxy's
-  // is re-wrapped unread by the client.
-  override async containerFetch(
-    requestOrUrl: Request | string | URL,
-    portOrInit?: number | RequestInit,
-    portParam?: number,
-  ): Promise<Response> {
-    const res = await super.containerFetch(requestOrUrl, portOrInit, portParam);
-    if (res.status !== 500) return res;
-    const body = await res.text();
-    if (isRuntimeProxyFailure(res.status, body)) {
-      throw new SandboxRuntimeUnreachableError({
-        containerId: this.ctx.id.toString(),
-        running: this.ctx.container?.running,
-        sdkVersion: SDK_PIN,
-        cause: body,
-      });
-    }
-    return new Response(body, { status: res.status, statusText: res.statusText, headers: res.headers });
-  }
-
-  override async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
-    return withActivityKeepalive(
-      () => this.renewActivityTimeout(),
-      () => super.exec(command, options),
-      EXEC_KEEPALIVE_INTERVAL_MS,
-    );
-  }
-
-  // A fence from the 0.3.x days, kept until a live container-restart receipt
-  // retires it: 0.3.x cached its default ExecutionSession in Durable
-  // Object memory while the session lived in the container, so a container
-  // restart under a live DO (image rollout, crash, sleep/wake) made every later
-  // call fail with "Session '<id>' not found" forever. 0.12.x persists the
-  // session id in DO storage, clears it itself in `onStop`, and its container
-  // recreates a missing session on the next exec — so this should never run;
-  // if it does, nulling the cached id only makes the SDK recreate the session,
-  // which is what it would have done anyway. The workspace disk is gone either
-  // way; repos re-clone — the same graceful degradation as an expired E2B
-  // sandbox.
-  resetDefaultSession(): void {
-    (this as unknown as { defaultSession: unknown }).defaultSession = null;
-  }
-}
-
-/** The 0.3.x stale-session text; see `resetDefaultSession`. */
-const STALE_SESSION = /session '[^']*' not found/i;
-
-/** Run a sandbox call and retry it ONCE when the failure says nothing ran: a
- *  stale session (0.3.x; reset the cached id first) or a container still
- *  booting (0.12.x's "Container is starting. Please retry in a moment.", after
- *  a short pause). Both fail before the command or file op executes, so the
- *  re-send is safe by construction. Anything else propagates: a failure whose
- *  command MAY have run (a session shell that exited mid-command, a container
- *  that stopped under the call) is never re-run here — /exec names it a
- *  recycle instead (docs/reference/specs/execution.md item 9). */
-const CONTAINER_STARTING_RETRY_DELAY_MS = 3_000;
-
-async function withSessionRecovery<T>(
-  sandbox: { resetDefaultSession(): void | Promise<void> },
-  fn: () => Promise<T>,
-): Promise<T> {
-  try {
-    return await fn();
-  } catch (err) {
-    const { message } = thrownShape(err);
-    if (message && STALE_SESSION.test(message)) {
-      await sandbox.resetDefaultSession();
-      return await fn();
-    }
-    if (isContainerStarting(err)) {
-      await new Promise((r) => setTimeout(r, CONTAINER_STARTING_RETRY_DELAY_MS));
-      return await fn();
-    }
-    throw err;
-  }
-}
-
-interface Env {
-  Sandbox: DurableObjectNamespace<SwitchboardSandbox>;
-  SANDBOX_TOKEN: string;
-}
 
 const WORKDIR = "/workspace";
 
@@ -201,25 +73,268 @@ const WORKDIR = "/workspace";
 // sandbox. The tuned 280s applies when the body carries no timeoutMs (an older
 // bot); a caller-supplied timeoutMs is clamped server-side to the shared
 // [1s, 20 min] bounds (clampBashTimeout — never trust the client's number).
-// Whatever the effective limit, it must stay BELOW the SDK backstop
-// (COMMAND_TIMEOUT_MS in the Dockerfile, sized above the 20-min ceiling) so
-// the real exit 124 wins. undici's 300s no-headers ceiling stopped mattering
-// once /exec streamed heartbeats — headers go out immediately.
+// Whatever the effective limit, it must stay BELOW the SDK's own backstops so
+// the real exit 124 wins: the per-process `timeout` this Worker launches with
+// (the limit plus SDK_BACKSTOP_MARGIN_MS) and the container's
+// COMMAND_TIMEOUT_MS (Dockerfile, above the 20-min ceiling).
 const EXEC_TIMEOUT_SECS = 280;
+
+/** How far above coreutils `timeout`'s deadline the SDK's own per-process
+ *  limit sits: room for `-k 10`'s SIGKILL follow-up and the exit to land, so
+ *  the shell-level 124 is always the deadline a command meets first. */
+const SDK_BACKSTOP_MARGIN_MS = 40_000;
+
+/** How long the Durable Object waits for the process's exit past the SDK's
+ *  own limit before it kills the process itself and reports the timeout: the
+ *  runtime should have ended it at the limit; a starved container ends it late. */
+const OUTPUT_WAIT_MARGIN_MS = 30_000;
+
+/** The interruption reasons that mean the container's runtime is not the one
+ *  the command started on: the process, if it started, is gone with its
+ *  output. `transport_disposed` is the Durable Object's own connection going
+ *  away and is not one of them. */
+const RUNTIME_REPLACED_REASONS = new Set([
+  "runtime_replaced",
+  "container_stopped",
+  "sandbox_destroyed",
+  "sandbox_lifetime_changed",
+]);
+
+/** The transport losses that mean the same: the control connection's peer
+ *  closed (a runtime crash or stop), the socket failed, the upgrade failed. */
+const RPC_TRANSPORT_LOSS_KINDS = new Set(["peer_closed", "connection_failed", "upgrade_failed", "session_disposed"]);
+
+/** `err` and its `cause` chain, bounded like the SDK's own walk. */
+function* selfAndCauses(err: unknown): Generator<unknown> {
+  let link: unknown = err;
+  for (let depth = 0; link !== null && link !== undefined && depth < 8; depth++) {
+    yield link;
+    link = typeof link === "object" ? (link as { cause?: unknown }).cause : undefined;
+  }
+}
+
+/** Did the container's runtime change under the command? Typed first (the
+ *  Durable Object sees the SDK's own classes, so `instanceof` holds here), the
+ *  SDK's replacement wording second — the same list the resident Worker
+ *  classifies its own execs with. */
+function isRuntimeReplacement(err: unknown): boolean {
+  if (err instanceof StaleProcessHandleError) return true;
+  if (err instanceof RuntimeIdentityInactiveError) return true;
+  if (err instanceof OperationInterruptedError && RUNTIME_REPLACED_REASONS.has(err.reason)) return true;
+  if (err instanceof RPCTransportError && RPC_TRANSPORT_LOSS_KINDS.has(err.kind)) return true;
+  for (const link of selfAndCauses(err)) {
+    if (RUNTIME_REPLACEMENT_WORDING.test(thrownShape(link).message ?? "")) return true;
+  }
+  return false;
+}
+
+/** Did the container's control port never answer? The SDK's connect abort
+ *  (30 s), anywhere in the cause chain. Asked only after `isRuntimeReplacement`. */
+function isRuntimeUnreachable(err: unknown): boolean {
+  for (const link of selfAndCauses(err)) if (isRuntimeUnreachableSignal(link)) return true;
+  return false;
+}
+
+/** A finished command, as `/exec` answers it. `durationMs` is the command's
+ *  wall time in the sandbox (docs/reference/specs/tracing.md item 19). */
+export interface ExecAnswer {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  durationMs: number;
+}
+
+/** A command the sandbox never answered for, in the dual in-body shape
+ *  (docs/reference/specs/execution.md item 3): a new executor throws on `error`, an
+ *  older one still renders `exit 127: <stderr>`. `reason` names the machine
+ *  token when there is one (`fleet-busy`, `runtime-unreachable`). */
+export interface ExecFailure {
+  error: string;
+  reason?: string;
+  stdout: "";
+  stderr: string;
+  exitCode: 127;
+}
+
+/** A file route's refusal, with the HTTP status the fetch handler answers. */
+interface FileRefusal {
+  error: string;
+  status: number;
+}
+
+export class SwitchboardSandbox extends Sandbox<Env> {
+  // Idle lifetime of a thread's container (the SDK's own default is 10 min).
+  // Idle means idle: the SDK renews the activity timeout every second while a
+  // command's stream is open (its control connection's busy poll), so a
+  // running command never counts toward it and the shell-level `timeout` is
+  // the one deadline a command can hit (docs/reference/specs/execution.md item 2).
+  // 5 minutes frees the slot sooner while a prompt follow-up still reuses the
+  // warm workspace.
+  sleepAfter = SANDBOX_SLEEP_AFTER;
+
+  /** One command as one supervised process (docs/reference/specs/execution.md
+   *  item 4): `timeout -k 10 <secs> bash -c 'mkdir -p /workspace && cd
+   *  /workspace && <command>'`, the caller's env on the process alone (item 5),
+   *  the SDK's own per-process limit a margin above the shell's. The process
+   *  is started and collected here, inside the Durable Object, where the
+   *  SDK's error classes are still themselves — so a full fleet, a silent
+   *  control port and a runtime replaced under the command are named by type
+   *  and answered as data; anything else propagates to the fetch handler. */
+  async runCommand(
+    command: string,
+    execTimeoutSecs: number,
+    envVars: Record<string, string>,
+  ): Promise<ExecAnswer | ExecFailure> {
+    const startedAt = systemClock();
+    const full = `mkdir -p ${WORKDIR} && cd ${WORKDIR} && ${command}`;
+    const argv: SandboxCommand = ["timeout", "-k", "10", String(execTimeoutSecs), "bash", "-c", full];
+    const backstopMs = execTimeoutSecs * 1000 + SDK_BACKSTOP_MARGIN_MS;
+    let proc: Awaited<ReturnType<ReturnType<typeof createExtensionProcessSandbox>["exec"]>>;
+    try {
+      proc = await createExtensionProcessSandbox(this).exec(argv, { env: envVars, timeout: backstopMs });
+    } catch (err) {
+      return this.execFailure(err, startedAt);
+    }
+    try {
+      const out = await proc.output({ encoding: "utf8", timeout: backstopMs + OUTPUT_WAIT_MARGIN_MS });
+      // coreutils `timeout` exits 124 when the deadline killed the command
+      // (137 when the follow-up SIGKILL had to); the SDK's own limit, if it
+      // ever wins, reports `timedOut`. All three are the one story.
+      const timedOut = out.timedOut || out.exitCode === 124 || out.exitCode === 137;
+      const notes: string[] = [];
+      if (timedOut) notes.push(timeoutNote(execTimeoutSecs));
+      // The SDK cut the process's log past its own retention: the output
+      // here is a prefix, whatever the executor's caps say.
+      if (out.truncated) notes.push("output truncated by the sandbox runtime — the streams above are a prefix");
+      return {
+        stdout: out.stdout,
+        stderr: [out.stderr, ...notes].filter(Boolean).join("\n"),
+        exitCode: timedOut ? 124 : out.exitCode,
+        durationMs: systemClock() - startedAt,
+      };
+    } catch (err) {
+      if (err instanceof ProcessWaitTimeoutError) {
+        // The runtime should have ended the process at the SDK's limit and
+        // did not; abandoning a live process would leave it running in the
+        // workspace. End it, then report the shell-level timeout it exceeded.
+        await proc.kill(9).catch(() => {});
+        return {
+          stdout: "",
+          stderr: `${timeoutNote(execTimeoutSecs)}\n(the process outlived the sandbox's own limit and was killed)`,
+          exitCode: 124,
+          durationMs: systemClock() - startedAt,
+        };
+      }
+      return this.execFailure(err, startedAt);
+    }
+  }
+
+  /** The named failures, as `/exec` data; anything else is thrown as it came. */
+  private execFailure(err: unknown, startedAt: number): ExecFailure {
+    const raw = thrownText(thrownShape(err));
+    // A full fleet (docs/reference/specs/execution.md item 14): no container
+    // instance for this thread, so nothing started — the executor waits.
+    if (isFleetBusyError(err)) return fleetBusyExecAnswer(raw);
+    // The runtime changed under the command (item 9): the process, if it
+    // started, is gone with its output. Certain — the SDK said so by type.
+    if (isRuntimeReplacement(err)) {
+      const msg = recycledMidCommandMessage(systemClock() - startedAt, raw, true);
+      return { error: msg, stdout: "", stderr: msg, exitCode: 127 };
+    }
+    // The control port never answered (item 9): nothing ran.
+    if (isRuntimeUnreachable(err)) return runtimeUnreachableExecAnswer(this.runtimeUnreachable(raw).message);
+    throw err;
+  }
+
+  /** The typed, named error for a silent control port, with this container's
+   *  facts — thrown across the RPC boundary to the fetch handler on the file
+   *  routes, where it is matched by name. */
+  private runtimeUnreachable(cause: string): SandboxRuntimeUnreachableError {
+    return new SandboxRuntimeUnreachableError({
+      containerId: this.ctx.id.toString(),
+      running: this.ctx.container?.running,
+      sdkVersion: SDK_PIN,
+      cause,
+    });
+  }
+
+  /** A file operation with its runtime failures named for the fetch handler:
+   *  a silent control port becomes the typed error (item 9); a missing file
+   *  is the refusal the route answers 404. The SDK's other errors propagate. */
+  private async fileOp<T>(op: () => Promise<T>): Promise<T | FileRefusal> {
+    try {
+      return await op();
+    } catch (err) {
+      const shape = thrownShape(err);
+      if (shape.name === "FileNotFoundError") return { error: `read-failed: ${thrownText(shape)}`, status: 404 };
+      if (!isRuntimeReplacement(err) && isRuntimeUnreachable(err)) throw this.runtimeUnreachable(thrownText(shape));
+      throw err;
+    }
+  }
+
+  async readText(path: string): Promise<{ content: string } | FileRefusal> {
+    return this.fileOp(async () => ({ content: (await this.readFile(path, { encoding: "utf-8" })).content }));
+  }
+
+  /** `encoding: "base64"` (src/execution/binaryRead.ts): the size first, from
+   *  `stat`, so the cap is judged before any read and the client can hold the
+   *  decoded bytes to it — an SDK read that came back short would otherwise
+   *  pass as the file. A file over the cap is refused by name inside a 200. */
+  async readBase64(path: string): Promise<Base64ReadAnswer | FileRefusal> {
+    const stat = await this.runCommand(statCommandFor(path), 60, {});
+    if ("error" in stat) return { error: stat.error, status: stat.reason ? 503 : 500 };
+    if (stat.exitCode !== 0) return { error: `read-failed: ${(stat.stderr || stat.stdout).trim()}`, status: 404 };
+    const size = parseByteSize(stat.stdout);
+    if (size === null) return { error: `read-failed: stat answered ${JSON.stringify(stat.stdout)}`, status: 500 };
+    if (size > MAX_READ_BYTES) return { encoding: "base64", tooLarge: true } satisfies Base64ReadAnswer;
+    return this.fileOp(async () => {
+      const content = (await this.readFile(path, { encoding: "base64" })).content;
+      const got = base64ByteLength(content);
+      // 409, not 5xx: the client retries a 5xx over 30 s, and a short read is
+      // answered by the caller re-reading, not by waiting.
+      if (got !== size) {
+        return { error: `read-inconsistent: ${path} is ${size} bytes but the read returned ${got}`, status: 409 };
+      }
+      return { encoding: "base64", content, size } satisfies Base64ReadAnswer;
+    });
+  }
+
+  async write(path: string, content: string): Promise<{ ok: true } | FileRefusal> {
+    return this.fileOp(async () => {
+      await this.writeFile(path, content);
+      return { ok: true as const };
+    });
+  }
+}
+
+/** The stderr line an exit 124 carries: the limit, the knob, and the way to
+ *  outlive a command (`setsid -f`: every /exec runs under `timeout … bash -c`,
+ *  whose process group is reaped when the command returns, so a plain
+ *  background job dies with it). */
+function timeoutNote(execTimeoutSecs: number): string {
+  return (
+    `command timed out in the sandbox after ${execTimeoutSecs}s (pass the bash tool's timeoutMs for longer commands, max ${BASH_TIMEOUT_MAX_MS} ms); ` +
+    "re-run as smaller/faster steps, or start it detached with `setsid -f sh -c '<command> > /tmp/job.log 2>&1'` and poll the log on later calls"
+  );
+}
+
+interface Env {
+  Sandbox: DurableObjectNamespace<SwitchboardSandbox>;
+  SANDBOX_TOKEN: string;
+}
 
 /** The commit this bundle was built from, injected by the deploy
  *  (`deploy/bin/build-stamp.mjs`) and answered on GET /healthz as `build`. */
 const BUILD = injectedBuildStamp();
 
 // The Worker's own spans (docs/reference/specs/tracing.md item 22): one `sandbox.exec`
-// root per command, started at the attempt that produced the answer, joining
-// the bot's trace (the bearer checked out before the header is read).
+// root per command, joining the bot's trace (the bearer checked out before the
+// header is read).
 const tracer = createTracer({ clock: systemClock });
 const traceSinks = [workerLogSink((line) => console.log(line))];
 
-/** One command's root, started at the attempt that answered, joining the bot's trace. */
-function execRoot(attemptStartedAt: number, traceparent: string | undefined) {
-  return startAdoptedRoot(tracer, "sandbox.exec", { sinks: traceSinks, startedAt: attemptStartedAt, traceparent });
+function execRoot(startedAt: number, traceparent: string | undefined) {
+  return startAdoptedRoot(tracer, "sandbox.exec", { sinks: traceSinks, startedAt, traceparent });
 }
 
 export default {
@@ -240,57 +355,26 @@ export default {
     const threadKey = request.headers.get("x-thread-key");
     if (!threadKey) return json({ error: "missing X-Thread-Key" }, 400);
 
-    // One sandbox per thread; the DO name is the thread key. getSandbox is
-    // generic over the namespace's class since 0.12, so the subclass's
-    // resetDefaultSession is callable over RPC without a cast.
+    // One sandbox per thread; the DO name is the thread key. The stub's own
+    // methods (`runCommand`, `readText`, …) are what the routes call — the
+    // work happens in the Durable Object, the data comes back over RPC.
     const sandbox = getSandbox(env.Sandbox, threadKey);
 
     const url = new URL(request.url);
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
 
     // Optional env passthrough (e.g. GH_TOKEN), read from the BODY's `env`
-    // (docs/reference/specs/execution.md item 5). It then rides in the SDK's per-exec
-    // `env` option, which the container applies to that one command and
-    // restores afterwards (0.12.x; 0.3.7 ignored it, so the value used to be
-    // an inline base64 `export` prefix — which put the live GH_TOKEN into every
-    // "Command executed" line the SDK logs). Nothing persists in the
-    // sandbox beyond the command's lifetime, and the command text the SDK
-    // logs never carries a credential.
-    //
-    // Body, never headers: Workers Logs record this invocation's request
-    // headers and redact them by a name heuristic only — a receipt probe's
-    // per-variable env header was once logged in clear. Bodies are not
-    // recorded. The one-release per-variable-header fallback that carried a
-    // body-only bot against a header-only Worker during that rollout is
-    // gone now that the body reader is live everywhere, so the
-    // credential rides only in the body and no request header is read as env.
+    // (docs/reference/specs/execution.md item 5). It then rides in the SDK's per-process
+    // `env` option, which the runtime applies to that one command and
+    // nothing else. Body, never headers: Workers Logs record this
+    // invocation's request headers and redact them by a name heuristic only —
+    // a receipt probe's per-variable env header was once logged in clear.
+    // Bodies are not recorded.
     const envVars = envFromRequest({ body });
 
     try {
       switch (url.pathname) {
         case "/exec": {
-          // Streamed with a whitespace heartbeat. A long command otherwise
-          // holds a byteless HTTP request open for minutes, and some hop
-          // between the bot and this Worker silently drops idle connections —
-          // measured live: the container answered a 290s command at its 280s
-          // timeout, but the bot's fetch died without ever seeing the
-          // response (undici gives up 300s after sending a request that has
-          // received no headers). Headers go out immediately and a heartbeat
-          // byte flows every 15s, so no intermediary ever sees an idle
-          // connection. Heartbeats are pure whitespace, which is legal around
-          // a JSON document — the executor's res.json() on the full body
-          // parses unchanged.
-          //
-          // The time limit is enforced with coreutils `timeout` INSIDE the
-          // sandbox, not by the SDK: the SDK's COMMAND_TIMEOUT_MS rejection is
-          // useless to callers — its exec handler wraps every failure as a
-          // generic "Command execution failed" and buries the real message in
-          // a field its client discards (measured live). Shell-level timeout
-          // produces a real exit 124 through the normal result path, no error
-          // classification needed. SIGKILL follows 10s after TERM for
-          // stragglers. COMMAND_TIMEOUT_MS (Dockerfile) sits above this as a
-          // pure backstop.
-          //
           // Per-call budget (docs/reference/specs/execution.md item 11): a numeric
           // timeoutMs in the body is clamped server-side to the shared
           // [1s, 20 min] bounds; absent (an older bot) → the tuned 280s
@@ -300,69 +384,37 @@ export default {
             typeof requested === "number" && Number.isFinite(requested)
               ? Math.ceil(clampBashTimeout(requested) / 1000)
               : EXEC_TIMEOUT_SECS;
-          const full = `mkdir -p ${WORKDIR} && cd ${WORKDIR} && ${String(body.command ?? "")}`;
           return streamExec(
-            sandbox,
-            `timeout -k 10 ${execTimeoutSecs} bash -c ${shellQuote(full)}`,
-            { env: envVars },
-            execTimeoutSecs,
+            () => sandbox.runCommand(String(body.command ?? ""), execTimeoutSecs, envVars),
             request.headers.get("traceparent") ?? undefined,
           );
         }
         case "/read": {
-          // `encoding: "base64"` is a binary read (src/execution/binaryRead.ts):
-          // the SDK encodes the bytes, and a file over the cap is refused by
-          // name inside a 200 — the client counts a non-2xx as a sick Worker.
           const encoding = readEncodingOf(body);
           if (typeof encoding !== "string") return json({ error: encoding.error }, 400);
           const path = abs(String(body.path ?? ""));
-          if (encoding === "base64") {
-            // The size first, from `stat`, so the cap is judged before any
-            // read and the client can hold the decoded bytes to it — an SDK
-            // read that came back short would otherwise pass as the file.
-            const stat = await withSessionRecovery(sandbox, () => sandbox.exec(statCommandFor(path)));
-            if ((stat.exitCode ?? 0) !== 0) {
-              return json({ error: `read-failed: ${String(stat.stderr ?? stat.stdout ?? "").trim()}` }, 404);
-            }
-            const size = parseByteSize(String(stat.stdout ?? ""));
-            if (size === null) return json({ error: `read-failed: stat answered ${JSON.stringify(stat.stdout)}` }, 500);
-            if (size > MAX_READ_BYTES) return json({ encoding: "base64", tooLarge: true } satisfies Base64ReadAnswer);
-            const file = await withSessionRecovery(sandbox, () => sandbox.readFile(path, { encoding: "base64" }));
-            const content = typeof file === "string" ? file : (file?.content ?? "");
-            const got = base64ByteLength(content);
-            if (got !== size) {
-              // 409, not 5xx: the client retries a 5xx twice over 30 s, and a
-              // short read is answered by the caller re-reading, not by waiting.
-              return json({ error: `read-inconsistent: ${path} is ${size} bytes but the read returned ${got}` }, 409);
-            }
-            return json({ encoding: "base64", content, size } satisfies Base64ReadAnswer);
-          }
-          const file = await withSessionRecovery(sandbox, () => sandbox.readFile(path));
-          return json({ content: typeof file === "string" ? file : (file?.content ?? "") });
+          const answer = encoding === "base64" ? await sandbox.readBase64(path) : await sandbox.readText(path);
+          return "status" in answer ? json({ error: answer.error }, answer.status) : json(answer);
         }
         case "/write": {
-          await withSessionRecovery(sandbox, () =>
-            sandbox.writeFile(abs(String(body.path ?? "")), String(body.content ?? "")),
-          );
-          return json({ ok: true });
+          const answer = await sandbox.write(abs(String(body.path ?? "")), String(body.content ?? ""));
+          return "status" in answer ? json({ error: answer.error }, answer.status) : json(answer);
         }
         default:
           return json({ error: "unknown route" }, 404);
       }
     } catch (err) {
-      // Never an empty text (item 3): a message-less SDK error is named as
-      // such, with the rollout hint.
+      // Never an empty text (item 3): a message-less SDK error is named as such.
       const msg = thrownText(thrownShape(err));
-      // Nothing answered at the container's port (item 9): the file op never
-      // reached a server, so a 503 the executor's transport retry re-sends —
-      // by then the image's PID 1 has the server back — with the named reason
-      // and the container in the text.
+      // Nothing answered at the container's control port (item 9): the file
+      // op never reached a runtime, so a 503 the executor's transport retry
+      // re-sends, with the named reason and the container in the text.
       if (isRuntimeUnreachableError(err)) return json(runtimeUnreachableAnswer(msg), 503);
-      // A full fleet (docs/reference/specs/execution.md item 14): the SDK could not get a
-      // container instance for this thread's Durable Object, so no session
-      // exists and the file op never started — re-sending is safe by
-      // construction. Named so the executor waits instead of reading it as a
-      // dead sandbox; 503 because that is what it is.
+      // A full fleet (docs/reference/specs/execution.md item 14): no container
+      // instance for this thread's Durable Object, so the file op never
+      // started — re-sending is safe by construction. Named so the executor
+      // waits instead of reading it as a dead sandbox; 503 because that is
+      // what it is.
       if (isFleetBusyError(err)) return json(fleetBusyAnswer(msg), 503);
       return json({ error: msg }, 500);
     }
@@ -370,32 +422,26 @@ export default {
 } satisfies ExportedHandler<Env>;
 
 /** Execute a command and stream the response: immediate headers, a whitespace
- *  heartbeat every 15s while the command runs, then one JSON document. All
- *  outcomes arrive in-body with HTTP 200 (headers are long gone by the time
- *  the result is known): a completed command as {stdout, stderr, exitCode},
- *  a sandbox-enforced timeout as exit 124, and any other failure as {error}. */
-function streamExec(
-  sandbox: {
-    resetDefaultSession(): void | Promise<void>;
-    exec(command: string, options?: ExecOptions): Promise<{ stdout?: string; stderr?: string; exitCode?: number }>;
-  },
-  command: string,
-  options: ExecOptions,
-  execTimeoutSecs: number,
-  traceparent: string | undefined,
-): Response {
+ *  heartbeat every 15s while the command runs, then one JSON document. A long
+ *  command otherwise holds a byteless HTTP request open for minutes, and some
+ *  hop between the bot and this Worker silently drops idle connections
+ *  (measured live: undici gives up 300s after sending a request that has
+ *  received no headers). Heartbeats are pure whitespace, which is legal
+ *  around a JSON document — the executor's res.json() on the full body parses
+ *  unchanged. All outcomes arrive in-body with HTTP 200 (headers are long
+ *  gone by the time the result is known): a completed command as {stdout,
+ *  stderr, exitCode}, a sandbox-enforced timeout as exit 124, and any other
+ *  failure as {error} (docs/reference/specs/execution.md item 3). */
+function streamExec(run: () => Promise<ExecAnswer | ExecFailure>, traceparent: string | undefined): Response {
   const encoder = new TextEncoder();
-  // Per ATTEMPT, not per request: withSessionRecovery may run the command a
-  // second time after a stale-session reset, and a retry's own failure must be
-  // judged on its own clock, not the first attempt's.
-  let attemptStartedAt = systemClock();
+  const startedAt = systemClock();
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       const beat = setInterval(() => {
         try {
           controller.enqueue(encoder.encode("\n"));
         } catch {
-          clearInterval(beat); // client went away; the exec promise still settles
+          clearInterval(beat); // client went away; the promise still settles
         }
       }, 15_000);
       const finish = (payload: object) => {
@@ -407,75 +453,46 @@ function streamExec(
           // stream already errored/cancelled — nothing left to deliver to
         }
       };
-      withSessionRecovery(sandbox, () => {
-        attemptStartedAt = systemClock();
-        return sandbox.exec(command, options);
-      })
-        .then((result) => {
-          const exitCode = result.exitCode ?? 0;
-          // coreutils `timeout` exits 124 when the deadline killed the
-          // command (137 when the follow-up SIGKILL had to) — annotate so the
-          // agent knows what happened and how to adapt.
-          const timedOut = exitCode === 124 || exitCode === 137;
-          // A job past the ceiling is detached with `setsid -f`: every /exec
-          // runs under `timeout … bash -c`, whose process group is reaped when
-          // the command returns, so a plain background job dies with it.
-          const note = timedOut
-            ? `command timed out in the sandbox after ${execTimeoutSecs}s (pass the bash tool's timeoutMs for longer commands, max ${BASH_TIMEOUT_MAX_MS} ms); ` +
-              "re-run as smaller/faster steps, or start it detached with `setsid -f sh -c '<command> > /tmp/job.log 2>&1'` and poll the log on later calls"
-            : "";
+      run()
+        .then((answer) => {
+          if ("error" in answer) {
+            // A command the sandbox never answered for, named by the Durable
+            // Object: an infra failure, classified, no message on the span.
+            const root = execRoot(startedAt, traceparent);
+            root.fail(classifyError(new Error("sandbox exec failed"), { kind: "infra" }));
+            root.end("error");
+            finish(answer);
+            return;
+          }
           // The command as the Worker's own root (docs/reference/specs/tracing.md item 22).
-          execRoot(attemptStartedAt, traceparent).end(exitCode === 0 ? "ok" : "error", {
-            exitCode: timedOut ? 124 : exitCode,
-            ...(timedOut ? { timedOut: true } : {}),
+          execRoot(startedAt, traceparent).end(answer.exitCode === 0 ? "ok" : "error", {
+            exitCode: answer.exitCode,
+            ...(answer.exitCode === 124 ? { timedOut: true } : {}),
           });
-          finish({
-            stdout: result.stdout ?? "",
-            stderr: [result.stderr ?? "", note].filter(Boolean).join("\n"),
-            exitCode: timedOut ? 124 : exitCode,
-            // The command's wall time in the sandbox, for the bot's `exec.exec`
-            // span (docs/reference/specs/tracing.md item 19); an older client ignores it.
-            durationMs: systemClock() - attemptStartedAt,
-          });
+          finish(answer);
         })
         .catch((err: unknown) => {
-          // A command the sandbox never answered for: an infra failure, classified, no message.
-          const root = execRoot(attemptStartedAt, traceparent);
+          // The Durable Object threw: a failure its own classification did
+          // not name, seen here after the RPC boundary (name and message kept,
+          // prototype dropped), so the shared classifiers read the shape.
+          const root = execRoot(startedAt, traceparent);
           root.fail(classifyError(new Error("sandbox exec failed"), { kind: "infra" }));
           root.end("error");
           const shape = thrownShape(err);
-          // The text that leaves the Worker is never empty (item 3): a
-          // message-less SDK error is named, with the rollout hint. The
-          // classifiers below still read the raw `shape`.
           const raw = thrownText(shape);
-          // Nothing answered at the container's port (item 9): named, with the
-          // container, in the dual shape — and never re-sent by anyone, since a
-          // command in flight when the server died may have run.
           if (isRuntimeUnreachableError(err)) {
             finish(runtimeUnreachableExecAnswer(raw));
             return;
           }
-          // A full fleet (docs/reference/specs/execution.md item 14): session creation
-          // failed because no container instance was free, so the command
-          // never started — re-sending it is safe by construction. The named
-          // `reason` is what the executor waits on; the dual shape below is
-          // kept so an older executor still renders it as exit 127.
           if (isFleetBusyError(err)) {
             finish(fleetBusyExecAnswer(raw));
             return;
           }
-          // The container was replaced under the command (docs/reference/specs/execution.md
-          // item 2): certain when the SDK says so with a typed error, inferred
-          // when a recycle-shaped text arrives minutes into this attempt. Say
-          // so, and that /workspace is gone. Still exit 127: the workspace
-          // really is gone.
+          // A recycle the Durable Object did not catch by type: by name, or
+          // a recycle-shaped text minutes into the attempt (item 9).
           const certain = shape.name !== undefined && isRecycleError({ name: shape.name });
-          const msg = recycledMidCommandMessage(systemClock() - attemptStartedAt, raw, certain);
-          // Carry the failure in BOTH shapes so rollout order can't create
-          // a silent-success window: a new executor throws on `error`, and
-          // an executor that predates in-body errors (only checks exitCode)
-          // still renders "exit 127: <message>" instead of "(no output)".
-          finish({ error: msg, stdout: "", stderr: msg, exitCode: 127 });
+          const msg = recycledMidCommandMessage(systemClock() - startedAt, raw, certain);
+          finish({ error: msg, stdout: "", stderr: msg, exitCode: 127 } satisfies ExecFailure);
         });
     },
   });

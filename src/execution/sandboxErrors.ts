@@ -90,16 +90,6 @@ export function isFleetBusyError(err: unknown): boolean {
   );
 }
 
-/** The 0.12.x Durable Object's answer while its container is still booting:
- *  no session exists yet and nothing ran, so the SAME request can be re-sent
- *  after a short pause — the one retry the Worker still does itself. */
-export const CONTAINER_STARTING_PATTERN = /^Container is starting\. Please retry in a moment\.?$/i;
-
-export function isContainerStarting(err: unknown): boolean {
-  const { message } = thrownShape(err);
-  return !!message && CONTAINER_STARTING_PATTERN.test(message.trim());
-}
-
 /** The Worker's answer on /read and /write (sent as HTTP 503): the named
  *  reason plus an `error` that keeps the SDK's own message as the cause, so
  *  the logs and the model can still see what the platform actually said. */
@@ -160,34 +150,20 @@ export function thrownText(shape: ThrownShape): string {
 
 // ---- A runtime that did not answer (docs/reference/specs/execution.md item 9) ----
 //
-// The SDK proxies every command to the container's port through the
-// `@cloudflare/containers` base class. When nothing answers there — the SDK's
-// server exited (an uncaught exception ends it), or is being started again by
-// the image's PID 1 — that class answers HTTP 500 with a plain-text body, not
-// the JSON the SDK client expects, and the client renders it as the bare
-// `HTTP error! status: 500`: no container, no cause, nothing a card can act
-// on. The Worker reads the body first and names the condition instead.
+// Every command and file operation reaches the container through the SDK's
+// control connection to the container's port. When nothing answers there —
+// the SDK's server exited, or the image's PID 1 is starting it again — the
+// SDK's connect aborts after 30 s with a bare `The operation was aborted`:
+// no container, no cause, nothing a card can act on. The Durable Object
+// names the condition instead, with the facts a reader needs.
 
 /** The named reason the Worker answers with, like `fleet-busy`: a machine
- *  token the executor and the harness match on, never the SDK's text. */
+ *  token the executor matches on, never the SDK's text. */
 export const RUNTIME_UNREACHABLE_REASON = "runtime-unreachable" as const;
 
 /** The name the Worker's typed error carries across the Durable Object RPC
  *  boundary (which keeps `name`/`message` and drops the prototype). */
 export const RUNTIME_UNREACHABLE_ERROR_NAME = "SandboxRuntimeUnreachableError";
-
-/** The base class's two plain-text 500 bodies for a failed proxy to the
- *  container's port: the fetch itself failed (nothing listening — the server
- *  exited, or has not come back yet), and a connection lost mid-request. A
- *  JSON 500 from the server itself is neither: that server was alive. */
-const PROXY_FAILURE_BODIES: readonly RegExp[] = [
-  /^Error proxying request to container\b/,
-  /^Container suddenly disconnected\b/,
-];
-
-export function isRuntimeProxyFailure(status: number, body: string): boolean {
-  return status === 500 && PROXY_FAILURE_BODIES.some((re) => re.test(body.trim()));
-}
 
 export interface RuntimeUnreachableFacts {
   /** The Durable Object's id — the same word the `containers` log dataset carries as the container id. */
@@ -196,7 +172,7 @@ export interface RuntimeUnreachableFacts {
   running: boolean | undefined;
   /** The Worker's `@cloudflare/sandbox` pin, which is also the image tag. */
   sdkVersion: string;
-  /** The base class's body, verbatim: what the platform said. */
+  /** The SDK's own text, verbatim: what it saw. */
   cause: string;
 }
 
@@ -209,13 +185,13 @@ export function runtimeUnreachableMessage(f: RuntimeUnreachableFacts): string {
   return (
     `${RUNTIME_UNREACHABLE_REASON}: the sandbox container's runtime did not answer ` +
     `(container ${f.containerId}, sandbox SDK ${f.sdkVersion}; the platform reports the container ${platform}) — ` +
-    "its server exited and the image's PID 1 starts it again within seconds; this command may not have run and " +
-    `/workspace is intact: wait a moment, check, then retry (${f.cause.trim() || "no detail from the platform"})`
+    "nothing ran; if the container still runs, /workspace is intact and its runtime is being started again: " +
+    `wait a moment, then retry (${f.cause.trim() || "no detail from the SDK"})`
   );
 }
 
-/** The Worker's typed error for a failed proxy: thrown from `containerFetch`
- *  inside the Durable Object, caught by the Worker's routes on the other side
+/** The Worker's typed error for a silent control port: built inside the
+ *  Durable Object with its facts, read by the fetch handler on the other side
  *  of the RPC boundary, so it is matched by name and by its message token,
  *  never by `instanceof`. */
 export class SandboxRuntimeUnreachableError extends Error {
@@ -245,8 +221,8 @@ export function runtimeUnreachableAnswer(message: string): {
 
 /** The `/exec` answer, in-body under the streamed HTTP 200 like every other exec
  *  failure: the dual `error` + exit-127/stderr shape (item 3) plus the reason.
- *  Never re-sent by anyone: a command in flight when the server died may have
- *  run; the text tells the model to check before it retries. */
+ *  Never re-sent by anyone: the executor re-sends nothing in-body, and the
+ *  text tells the model to wait, then retry. */
 export function runtimeUnreachableExecAnswer(message: string): {
   error: string;
   reason: typeof RUNTIME_UNREACHABLE_REASON;

@@ -13,19 +13,21 @@
 FROM --platform=linux/amd64 docker.io/library/node:24.21.0-slim AS node
 
 # The tag MUST match the @cloudflare/sandbox version in package.json exactly
-# (no 'latest' tag exists) — bump both together.
-FROM docker.io/cloudflare/sandbox:0.12.9
+# (no 'latest' tag exists on the @next line) — bump both together. The same
+# base as the resident image: its container server is compiled with a Bun
+# whose directory watcher no longer dies on an entry removed under it, which
+# ended the 0.12.9 line's server mid-command (docs/reference/specs/execution.md
+# item 21).
+FROM docker.io/cloudflare/sandbox:0.13.0-next.751.1
 USER root
-# The SDK's container server kills any command after COMMAND_TIMEOUT_MS. On
-# 0.12.x the default is unlimited (unset → no limit; 0.3.x defaulted to 30s),
-# a per-exec `timeout` option wins over it, and a kill by it lands as a normal
-# result with a synthetic exit code (143/137), not a rejection. worker.ts
-# passes no per-call timeout, so this env var is the container-level lever.
-# Pure BACKSTOP: the real per-command limit is coreutils `timeout` in
-# worker.ts (280s default, raisable per call via the bash tool's timeoutMs up
-# to the 20-min ceiling BASH_TIMEOUT_MAX_MS), which yields a genuine exit 124
-# through the normal result path. This sits 40s above the 20-min ceiling so it
-# never wins the race. Bump alongside BASH_TIMEOUT_MAX_MS
+# The SDK's container server kills any command after COMMAND_TIMEOUT_MS
+# (unset → no limit). Pure BACKSTOP behind two closer ones: the real
+# per-command limit is coreutils `timeout` in worker.ts (280s default,
+# raisable per call via the bash tool's timeoutMs up to the 20-min ceiling
+# BASH_TIMEOUT_MAX_MS), which yields a genuine exit 124 through the normal
+# result path, and worker.ts launches each process with the SDK's own
+# per-process `timeout` a margin above that. This sits 40s above the 20-min
+# ceiling so it never wins the race. Bump alongside BASH_TIMEOUT_MAX_MS
 # (src/execution/bashTimeout.ts); changing it requires a container rebuild +
 # redeploy.
 ENV COMMAND_TIMEOUT_MS=1240000
@@ -53,8 +55,8 @@ RUN apt-get update \
 # execs the real client. src/deploy/sandboxDocker.test.ts holds its shape.
 COPY --chmod=0755 docker-wrapper.sh /usr/local/bin/docker
 
-# Node 24, not the base's. The published 0.12.9 base ships Node 22.23.2
-# (copied from node:22-slim: the binary at /usr/local/bin/node, npm and
+# Node 24, not the base's. The 0.13.0-next base ships Node 22.23.2 like the
+# 0.12.9 one (copied from node:22-slim: the binary at /usr/local/bin/node, npm and
 # corepack under /usr/local/lib/node_modules, npm/npx symlinked into it), while
 # this repository builds and tests on Node 24 (.nvmrc, CI) and its published
 # CLI requires `>=24`. A run that exercised the suite inside this image read a
@@ -174,9 +176,11 @@ RUN npm install -g @earendil-works/pi-coding-agent@0.85.1 \
   && pi --version | grep -qx '0.85.1' \
   && pi --help | grep -q -- '--mode <mode>'
 
-# PID 1 keeps the container alive across a crash of the SDK's container
-# server (the supervisor's header says why); the base image's ENTRYPOINT is
-# the server itself, so one uncaught exception there ended the container.
+# The container outlives a crash of the SDK's container server (the
+# supervisor's header says why). The base image's ENTRYPOINT is tini running
+# the server, so one uncaught exception there ended the container; here tini
+# stays PID 1 — it reaps orphans and forwards the platform's signals — and
+# runs the supervisor, which starts the server again when it exits.
 # src/deploy/sandboxRuntimeSupervisor.test.ts holds this pair of lines.
 COPY --chmod=0755 runtime-supervisor.sh /usr/local/bin/sandbox-runtime-supervisor
-ENTRYPOINT ["/usr/local/bin/sandbox-runtime-supervisor"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/sandbox-runtime-supervisor"]

@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  isContainerStarting,
   isFleetBusyError,
   thrownShape,
   thrownText,
@@ -11,7 +10,6 @@ import {
   fleetBusyExecAnswer,
   fleetBusyExhaustedMessage,
   isFleetBusy,
-  isRuntimeProxyFailure,
   isRuntimeUnreachableError,
   RUNTIME_UNREACHABLE_ERROR_NAME,
   RUNTIME_UNREACHABLE_REASON,
@@ -132,17 +130,6 @@ describe("isFleetBusyError / thrownShape", () => {
   });
 });
 
-// Feature: docs/reference/specs/execution.md item 4 — a booting container is the one
-// failure the Worker still retries itself: nothing ran.
-describe("isContainerStarting", () => {
-  it("recognizes the 0.12.x boot-time answer and nothing else", () => {
-    expect(isContainerStarting(new Error("Container is starting. Please retry in a moment."))).toBe(true);
-    expect(isContainerStarting({ message: "Container is starting. Please retry in a moment" })).toBe(true);
-    expect(isContainerStarting(new Error("Container is starting the wrong way"))).toBe(false);
-    expect(isContainerStarting(new Error("no Container instance available"))).toBe(false);
-  });
-});
-
 // Feature: docs/reference/specs/execution.md items 3 and 6 — a failure text is never
 // empty. During a Worker+image rollout a new thread's Durable Object can be
 // placed on a container still running the previous 0.3.x image; the 0.12.x
@@ -179,49 +166,33 @@ describe("thrownText", () => {
 });
 
 // Feature: docs/reference/specs/execution.md item 9 — a runtime that did not
-// answer is named, with the container. The containers base class answers a
-// failed proxy to the container's port with a plain-text 500 the SDK client
-// renders as the bare `HTTP error! status: 500`; the Worker reads the body
-// first and carries the token, the container id, the SDK pin and the
+// answer is named, with the container. The SDK's connect to the container's
+// control port aborts after 30 s with a bare `The operation was aborted`; the
+// Durable Object carries the token, the container id, the SDK pin and the
 // platform's running flag instead.
-describe("isRuntimeProxyFailure", () => {
-  it("recognizes the base class's two plain-text 500 bodies", () => {
-    expect(isRuntimeProxyFailure(500, "Error proxying request to container: ")).toBe(true);
-    expect(isRuntimeProxyFailure(500, "Error proxying request to container: connect ECONNREFUSED")).toBe(true);
-    expect(isRuntimeProxyFailure(500, "Container suddenly disconnected, try again")).toBe(true);
-  });
-
-  it("is NOT a JSON 500 from a live server, a 503, or an unrelated body", () => {
-    expect(isRuntimeProxyFailure(500, '{"code":"INTERNAL_ERROR","message":"Command execution failed"}')).toBe(false);
-    expect(isRuntimeProxyFailure(503, "Error proxying request to container: ")).toBe(false);
-    expect(isRuntimeProxyFailure(500, "")).toBe(false);
-    expect(isRuntimeProxyFailure(200, "Error proxying request to container: ")).toBe(false);
-  });
-});
-
 describe("the runtime-unreachable message and error", () => {
   const facts = {
     containerId: "3708bca6db4a",
     running: true,
-    sdkVersion: "0.12.9",
-    cause: "Error proxying request to container: ",
+    sdkVersion: "0.13.0-next.751.1",
+    cause: "The operation was aborted",
   };
 
   it("starts with the token and names the container, the SDK pin, the platform's flag and the cause", () => {
     const m = runtimeUnreachableMessage(facts);
     expect(m.startsWith("runtime-unreachable: ")).toBe(true);
     expect(m).toContain("container 3708bca6db4a");
-    expect(m).toContain("sandbox SDK 0.12.9");
+    expect(m).toContain("sandbox SDK 0.13.0-next.751.1");
     expect(m).toContain("reports the container running");
-    expect(m).toContain("(Error proxying request to container:)");
+    expect(m).toContain("(The operation was aborted)");
     expect(m).toContain("/workspace is intact");
-    expect(m).toContain("may not have run");
+    expect(m).toContain("nothing ran");
   });
 
   it("says when the platform reports the container stopped, or nothing, and when the cause is empty", () => {
     expect(runtimeUnreachableMessage({ ...facts, running: false })).toContain("reports the container stopped");
     expect(runtimeUnreachableMessage({ ...facts, running: undefined })).toContain("a state it did not report");
-    expect(runtimeUnreachableMessage({ ...facts, cause: "  " })).toContain("(no detail from the platform)");
+    expect(runtimeUnreachableMessage({ ...facts, cause: "  " })).toContain("(no detail from the SDK)");
   });
 
   it("the typed error carries the name and the token, and is recognized by either after the RPC boundary", () => {
@@ -249,7 +220,7 @@ describe("the runtime-unreachable message and error", () => {
 });
 
 describe("the runtime-unreachable answer shapes the Worker sends", () => {
-  const message = runtimeUnreachableMessage({ containerId: "c1", running: true, sdkVersion: "0.12.9", cause: "x" });
+  const message = runtimeUnreachableMessage({ containerId: "c1", running: true, sdkVersion: "0.13.0", cause: "x" });
 
   it("the /read and /write shape carries the reason and the text as the error", () => {
     expect(runtimeUnreachableAnswer(message)).toEqual({ error: message, reason: RUNTIME_UNREACHABLE_REASON });

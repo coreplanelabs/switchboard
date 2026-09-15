@@ -3,9 +3,9 @@
   "name": "{{script}}",
   "main": "worker.ts",
   "compatibility_date": "2026-08-01",
-  // @cloudflare/sandbox 0.12.x imports Node built-ins (wrangler's dry run names
+  // @cloudflare/sandbox imports Node built-ins (wrangler's dry run names
   // sandbox-*.js and warns the Worker "may throw errors at runtime" without
-  // this); the resident Worker on the 0.13 line carries the same flag.
+  // this); the resident Worker on the same 0.13 line carries the same flag.
   "compatibility_flags": ["nodejs_compat"],
   // The installation's Cloudflare account (deploy/profile.json `account`) — every Worker deploys to it.
   "account_id": "{{account}}",
