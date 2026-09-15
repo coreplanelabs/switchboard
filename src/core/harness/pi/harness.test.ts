@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentDef } from "../../../agents/registry.js";
-import type { Executor } from "../../../execution/executor.js";
+import { ExecInfraError, ExecSandboxRestartedError, type Executor } from "../../../execution/executor.js";
 import type { ChatMessage } from "../../chatMessage.js";
 import {
   HARD_STOP_MESSAGE,
@@ -28,14 +28,18 @@ import {
   type RelayedToolAnswer,
 } from "./relay.js";
 import { judgeToolCall, type ToolRuleContext } from "./toolRules.js";
+import { PiContainerError } from "./container.js";
 import { FakePiContainer } from "./testing/fakeContainer.js";
 import {
   compactionSteer,
   isTransientProviderError,
+  PiContainerReplacedError,
   piHarnessFactsOf,
   promptOf,
+  replacedCallNote,
   runPiHarness,
   runPiHarnessOpen,
+  saysContainerReplaced,
   settlementResults,
   splitSeed,
   type PiHarnessDeps,
@@ -1653,6 +1657,189 @@ describe("runPiHarness — after a bot restart", () => {
     });
     expect(session[2].parentId).toBe(session[1].id);
     expect(session[3].parentId).toBe(session[2].id);
+  });
+});
+
+// Feature: docs/reference/specs/harness-pi.md item 16 — a container replaced
+// under a live run (the floor of record 0038's survival clause): the harness
+// tells a pi that died with its container from a pi that died in the container
+// it still runs in, settles the call in flight with the restart note, says what
+// happened on the record and ends the run by the redispatch path; a death in
+// the same container keeps the failure it always was.
+describe("runPiHarness — the container replaced under a live run", () => {
+  /** A pi that opens one bash call — its extension asking the gate, as the real one does — and then meets `fate` mid-call. */
+  function piMidCall(w: ReturnType<typeof world>, fate: (c: FakePiContainer) => void) {
+    scriptedPi(w.container, (_n, c) => {
+      const msg = assistant([{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "npm test" } }]);
+      c.emit(
+        { type: "turn_start" },
+        { type: "message_end", message: msg },
+        { type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: { command: "npm test" } },
+      );
+      authorizeToolCall(w.registry.get("run-7")!, { toolCallId: "c1", tool: "bash", input: { command: "npm test" } });
+      fate(c);
+    });
+  }
+  /** The container's read of pi's log fails with `error` once the log is drained — after the records already written were read. */
+  function failOnceDrained(c: FakePiContainer, error: Error) {
+    const read = c.readLog.bind(c);
+    c.readLog = async (path, offset, max) => {
+      const chunk = await read(path, offset, max);
+      if (chunk.length === 0) throw error;
+      return chunk;
+    };
+  }
+  const noteKinds = (w: ReturnType<typeof world>) =>
+    w.events.filter((e) => e.type === "run_note").map((e) => (e as { kind: string }).kind);
+  const noteSummaries = (w: ReturnType<typeof world>) =>
+    w.events.filter((e) => e.type === "run_note").map((e) => (e as { summary: string }).summary);
+
+  it("the resident's ExecSandboxRestartedError from the alive probe is a replaced container: the call in flight is settled with the restart note and its span ends, a sandbox_restarted note names both containers and the executor's words, the run ends by the redispatch path — never 'pi exited before the run settled' — and nothing is killed or removed in the container the executor reaches now", async () => {
+    const w = world({ withSpans: true });
+    piMidCall(w, (c) => {
+      // The resident's container rolls under the run: the executor waits for
+      // the wake, re-attaches to the replacement — which names itself anew —
+      // and hands the probe back as the restart (resident-repos item 65).
+      c.vm = "vm-new";
+      c.alive = async () => {
+        throw new ExecSandboxRestartedError(
+          "the sandbox restarted under the run (waited 42 s); the worktree is main@abc1234",
+          42_000,
+        );
+      };
+    });
+    const err = await w.start().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PiContainerReplacedError);
+    expect((err as Error).message).toBe(
+      "the container running pi was replaced (vm-fake → vm-new; the executor said: the sandbox restarted under the run (waited 42 s); the worktree is main@abc1234); the run restarts from its request",
+    );
+    expect(err).toMatchObject({ was: "vm-fake", now: "vm-new" });
+    // The call in flight is settled on the record: its span ends, its result is the restart note.
+    expect(w.events.filter((e) => e.type === "tool_result")).toEqual([
+      expect.objectContaining({ tool: "bash", ok: false, callId: "c1", summary: replacedCallNote("bash") }),
+    ]);
+    expect(w.sink.ended("tool.bash")?.status).toBe("error");
+    expect(w.sink.ended("run.agent")?.status).toBe("error");
+    expect(noteSummaries(w)).toEqual([(err as Error).message]);
+    expect(w.events.find((e) => e.type === "run_note")).toMatchObject({ kind: "sandbox_restarted" });
+    // A pid in the replacement is a stranger's, and pi's root was on the old container's disk.
+    expect(w.container.killed).toEqual([]);
+    expect(w.container.removed).toEqual([]);
+    // The run is forgotten on the relay all the same, and the row's facts still name pi's container.
+    expect(w.registry.get("run-7")).toBeUndefined();
+    expect(w.facts.at(-1)).toMatchObject({ pid: 4242, container: "vm-fake" });
+  });
+
+  it("the executor's word is the condition whatever the container answers for its name: `runtime-unreachable:` from the log read in a container that names itself as before, or `runtime-replaced` on a line into the FIFO, takes the replaced path with nothing killed or removed; any other failed read is the failure it was", async () => {
+    // The kernel's boot id is the same word for a container replaced on the
+    // same kernel: the executor's word decides, and the note says the words matched.
+    const unreachable = world();
+    piMidCall(unreachable, (c) =>
+      failOnceDrained(
+        c,
+        new ExecInfraError(
+          "runtime-unreachable: the sandbox container's runtime did not answer (container abc, sandbox SDK 1.0.0; the platform reports the container stopped) — nothing ran",
+        ),
+      ),
+    );
+    const err = await unreachable.start().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PiContainerReplacedError);
+    expect((err as Error).message).toMatch(
+      /^the container running pi was replaced \(vm-fake → vm-fake; the executor said: runtime-unreachable: the sandbox container's runtime did not answer/,
+    );
+    expect(unreachable.events.filter((e) => e.type === "tool_result")).toEqual([
+      expect.objectContaining({ tool: "bash", ok: false, callId: "c1", summary: replacedCallNote("bash") }),
+    ]);
+    expect(noteKinds(unreachable)).toEqual(["sandbox_restarted"]);
+    expect(unreachable.container.killed).toEqual([]);
+    expect(unreachable.container.removed).toEqual([]);
+
+    // A write that failed with the word surfaces at the next read (the transport's order): here the very first command, before any prompt.
+    const onSend = world();
+    onSend.container.failNext = {
+      operation: "send",
+      error: new PiContainerError(
+        "send",
+        "runtime-replaced: the resident runtime was replaced (a deploy) while this command ran",
+      ),
+    };
+    scriptedPi(onSend.container, () => {});
+    const err2 = await onSend.start().catch((e: unknown) => e);
+    expect(err2).toBeInstanceOf(PiContainerReplacedError);
+    expect((err2 as Error).message).toMatch(
+      /^the container running pi was replaced \(vm-fake → vm-fake; the executor said: pi container: send failed — runtime-replaced: /,
+    );
+    expect(onSend.events.filter((e) => e.type === "tool_result")).toEqual([]);
+    expect(noteKinds(onSend)).toEqual(["sandbox_restarted"]);
+    expect(onSend.container.killed).toEqual([]);
+
+    // A read that failed for any other reason is that failure, as before.
+    const other = world();
+    piMidCall(other, (c) => failOnceDrained(c, new PiContainerError("read", "tail: cannot open '/tmp/x' for reading")));
+    await expect(other.start()).rejects.toThrow(/^pi container: read failed — tail: cannot open/);
+    expect(noteKinds(other)).not.toContain("sandbox_restarted");
+    expect(other.container.killed).toEqual([4242]);
+  });
+
+  it("a pi found dead without the executor's word died where it ran: the failure it always was — 'pi exited before the run settled' with the error log's tail, no sandbox_restarted note, pi ended and its root removed — and a container that names itself differently by then is named in the failure, never the condition", async () => {
+    const same = world();
+    same.container.files.set(paths.errLog, "Error: cannot find module 'foo'\n");
+    piMidCall(same, (c) => c.die());
+    const err = await same.start().catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(PiContainerReplacedError);
+    expect((err as Error).message).toBe("pi exited before the run settled: Error: cannot find module 'foo'");
+    expect(noteKinds(same)).not.toContain("sandbox_restarted");
+    expect(same.container.killed).toEqual([4242]);
+    expect(same.container.removed).toEqual([paths.dir]);
+
+    const renamed = world();
+    piMidCall(renamed, (c) => {
+      c.vm = "vm-new";
+      c.die();
+    });
+    await expect(renamed.start()).rejects.toThrow(
+      "pi exited before the run settled (the container names itself vm-new now; pi's was vm-fake)",
+    );
+    expect(noteKinds(renamed)).not.toContain("sandbox_restarted");
+    expect(renamed.container.killed).toEqual([4242]);
+
+    const nameless = world();
+    nameless.container.vm = undefined;
+    piMidCall(nameless, (c) => {
+      c.vm = "vm-new";
+      c.die();
+    });
+    await expect(nameless.start()).rejects.toThrow(/^pi exited before the run settled$/);
+    expect(nameless.container.killed).toEqual([4242]);
+  });
+
+  it("saysContainerReplaced reads the executors' words for a replaced runtime — the resident's ExecSandboxRestartedError, an error opening `runtime-unreachable:` or `runtime-replaced`, the same words under the seam's own wrap and the executors' exit prefix — and nothing else", () => {
+    expect(saysContainerReplaced(new ExecSandboxRestartedError("the sandbox restarted under the run", 1))).toBe(true);
+    expect(
+      saysContainerReplaced(new ExecInfraError("runtime-unreachable: the sandbox container's runtime did not answer")),
+    ).toBe(true);
+    expect(
+      saysContainerReplaced(
+        new Error("runtime-replaced: the resident runtime was replaced (a deploy) while this command ran"),
+      ),
+    ).toBe(true);
+    expect(
+      saysContainerReplaced(
+        new PiContainerError("alive", "exit 127: runtime-replaced: the resident runtime was replaced"),
+      ),
+    ).toBe(true);
+    expect(
+      saysContainerReplaced(
+        new PiContainerError("read", "runtime-unreachable: the container's control port did not answer"),
+      ),
+    ).toBe(true);
+    expect(saysContainerReplaced(new PiContainerError("read", "tail: cannot open '/tmp/x' for reading"))).toBe(false);
+    expect(
+      saysContainerReplaced(new ExecInfraError("resident /exec: worktree still unavailable after a re-attach")),
+    ).toBe(false);
+    expect(saysContainerReplaced(new Error("ECONNRESET"))).toBe(false);
+    expect(saysContainerReplaced(new Error("the command mentioned runtime-replaced in its output"))).toBe(false);
+    expect(saysContainerReplaced("runtime-replaced")).toBe(false);
   });
 });
 

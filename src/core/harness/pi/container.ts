@@ -176,11 +176,21 @@ export function removeScript(dir: string): string {
 
 const STDERR_MARK = "\n--- stderr ---\n";
 
+/** The executors' word in place of a command's output: the resident answers
+ *  an isolate swapped under a command with `runtime-replaced: …` as the
+ *  command's text (resident-repos item 43), and the sandbox names a runtime
+ *  nothing answered `runtime-unreachable: …` (execution item 9). Neither is
+ *  what the command printed — it may never have run — so neither is an
+ *  answer to `alive`, `read` or `send`; the harness reads the word for a
+ *  container replaced under the run (harness-pi item 16). */
+const RUNTIME_WORD = /^(?:runtime-unreachable:|runtime-replaced)/;
+
 /** The stdout of an executor's answer: the `exit N:` prefix is a failure, the
- *  stderr the executors append is dropped, the empty marker is empty. */
+ *  executors' runtime word is a failure naming it, the stderr the executors
+ *  append is dropped, the empty marker is empty. */
 export function stdoutOf(operation: string, out: string): string {
   const exit = parseExitPrefix(out);
-  if (exit.failed) throw new PiContainerError(operation, out);
+  if (exit.failed || RUNTIME_WORD.test(out)) throw new PiContainerError(operation, out);
   const cut = out.indexOf(STDERR_MARK);
   const stdout = cut >= 0 ? out.slice(0, cut) : out;
   return stdout === "(no output)" ? "" : stdout;

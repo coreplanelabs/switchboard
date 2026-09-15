@@ -64,6 +64,7 @@ import {
 import type { FrictionDiagnosis } from "./runFriction.js";
 import { claimRun, type RunDeps } from "./dispatch/run.js";
 import { runLoop } from "./dispatch/runLoop.js";
+import { PiContainerReplacedError } from "./harness/pi/harness.js";
 import { afterReply, deliverAnswer, type ReplyDeps } from "./dispatch/reply.js";
 import { writeTombstone } from "./dispatch/record.js";
 import { runShipBranch, type ShipDeps } from "./dispatch/ship.js";
@@ -1206,6 +1207,19 @@ export async function dispatch(
     });
     return ended;
   } catch (err) {
+    if (err instanceof PiContainerReplacedError) {
+      // pi's container was replaced under the live run (harness-pi item 16):
+      // the run loop closed the run `interrupted` with the note that says why
+      // and its card says it restarts, so no failure reply lands here. Its
+      // request runs again as a new run once the outer finally frees the
+      // thread — the path a refused re-attach takes (item 54), and the same
+      // outcome for the request: a refusal by name, never a failure.
+      refused = true;
+      ended.refusal ??= "container_replaced";
+      restartRequest = msg;
+      console.log(`[dispatch] ${msg.threadKey} run ${registered?.id ?? "?"} restarts from its request: ${err.message}`);
+      return ended;
+    }
     caught = true;
     const errMsg = err instanceof Error ? err.message : String(err);
     // A card left spinning after a setup failure looks like a hang; close it.
@@ -1284,14 +1298,16 @@ export async function dispatch(
     ended.status = caught ? "failed" : refused ? "refused" : stopMode ? "stopped" : "completed";
     root.end(caught ? "error" : "ok", { status: ended.status });
     if (restartRequest) {
-      // The resumed run's request, dispatched again as a new run now that the
-      // thread is free (item 54), with the follow-ups the resumed run never
-      // consumed appended, as a fresh turn would carry them.
+      // The run's request, dispatched again as a new run now that the thread
+      // is free — a resumed run whose workspace could not be re-attached (item
+      // 54), or a live run whose pi container was replaced under it
+      // (harness-pi item 16) — with the follow-ups the run never consumed
+      // appended, as a fresh turn would carry them.
       const pending = settled.kind === "handed-on" ? settled.pending : [];
       const restart = prepareRestartTurn(deps, { request: restartRequest, pending, clock });
       await dispatch(deps, restart.msg, io, restart.opts).catch((err: unknown) =>
         console.error(
-          `[dispatch] ${msg.threadKey} restart after a lost workspace failed: ${err instanceof Error ? err.message : String(err)}`,
+          `[dispatch] ${msg.threadKey} restart from the request failed: ${err instanceof Error ? err.message : String(err)}`,
         ),
       );
     } else if (settled.kind === "handed-on") {

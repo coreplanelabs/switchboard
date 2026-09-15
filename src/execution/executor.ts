@@ -145,11 +145,12 @@ export class ExecCapacityError extends Error {
  *  resident-repos.md item 65): the resident's container exited inside a
  *  rollout, the executor waited for the wake and re-attached, and the command
  *  it was about to send never ran. Deliberately NOT an `ExecInfraError`: the
- *  sandbox is alive again. The native loop settled the interrupted call with
- *  a synthetic result; the pi harness has no reader for it yet (harness-pi.md,
- *  the item 19 gap), so a run on pi fails when its container is replaced.
- *  `message` carries the facts a reader would give the model: the wait and
- *  the fresh worktree's ref and sha. */
+ *  sandbox is alive again. The pi harness reads it as the container replaced
+ *  under the run (harness-pi.md item 16): pi ran inside the old container and
+ *  is gone with it, so the call in flight is settled with the restart note,
+ *  the run ends `interrupted` and its request is dispatched again as a new
+ *  run. `message` carries the facts a reader would give the model: the wait
+ *  and the fresh worktree's ref and sha. */
 export class ExecSandboxRestartedError extends Error {
   readonly restarted = true as const;
   constructor(

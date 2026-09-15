@@ -564,9 +564,10 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
         });
         return;
       case "sandbox_restarted":
-        // The container rolled under the run and came back: the run went on,
-        // but the minutes spent waiting for the wake are friction the deploy
-        // window owns.
+        // The container rolled under the run: on pi the run ends here and its
+        // request starts over (harness-pi item 16); on the deleted native loop
+        // it went on after the wake. Either way the roll's cost is friction the
+        // deploy window owns.
         findings.push({
           category: "infra_failure",
           severity: "medium",

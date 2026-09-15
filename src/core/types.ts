@@ -149,8 +149,11 @@ export interface StatusHandle {
   handle?: { channel: string; ts: string };
 }
 
-/** How a run ended, as reported to the channel once its record is closed. */
-export type RunFinalStatus = "completed" | "failed" | "stopped_soft" | "stopped_hard";
+/** How a run ended, as reported to the channel once its record is closed.
+ *  `interrupted` is a run whose pi container was replaced under it
+ *  (docs/reference/specs/harness-pi.md item 16): its request runs again as a
+ *  new run on the same channel handle, whose own receipt follows. */
+export type RunFinalStatus = "completed" | "failed" | "stopped_soft" | "stopped_hard" | "interrupted";
 
 /** The receipt a channel gets when the run behind its request finishes: the
  *  run id (the `/runs/:id` record) and its terminal status. Never the view

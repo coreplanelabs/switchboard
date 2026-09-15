@@ -76,11 +76,13 @@ export type RunNoteKind =
    *  wait had refused; on pi the container is provisioned before pi starts, so
    *  the note is a record fact from before the loop's deletion. */
   | "fleet_busy"
-  /** The sandbox restarted under the run and came back (docs/reference/specs/
-   *  resident-repos.md item 65): the executor waited for the resident's wake
-   *  and re-attached. The native loop settled the interrupted call and went
-   *  on; the pi harness has no such settlement yet (harness-pi.md, the item 19
-   *  gap), so the note is a record fact from before the loop's deletion. */
+  /** The container the run's pi ran in was replaced under the live run
+   *  (docs/reference/specs/harness-pi.md item 16; the resident's roll,
+   *  resident-repos.md item 65): the harness settled the call in flight with
+   *  the restart note, the summary names both containers, and the run ends
+   *  `interrupted` for a restart from its request. On a record from before the
+   *  native loop's deletion the note says that loop's settlement instead: the
+   *  executor waited for the wake and the run went on. */
   | "sandbox_restarted"
   | "stop_requested"
   | "stopped"

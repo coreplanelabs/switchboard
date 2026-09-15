@@ -17,7 +17,13 @@ import { budgetedAgent, type RunProfile } from "../../config/profile.js";
 import { parseModelRef } from "../provider.js";
 import { mergeTools, TOOLSETS } from "../../tools/toolsets.js";
 import { piContainerFor } from "../harness/pi/botHostContainer.js";
-import { piHarnessFactsOf, runPiHarnessOpen, type OpenPiSession, type PiHarnessFacts } from "../harness/pi/harness.js";
+import {
+  PiContainerReplacedError,
+  piHarnessFactsOf,
+  runPiHarnessOpen,
+  type OpenPiSession,
+  type PiHarnessFacts,
+} from "../harness/pi/harness.js";
 import { softStopAnswer, timeBudgetAnswer } from "../harness/pi/windDown.js";
 import { piRunPathsAt } from "../harness/pi/process.js";
 import { loopEndingOf, reviewPostedBefore, type LoopEnding } from "../runLedger/resume.js";
@@ -437,6 +443,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
   // is told the review was carried forward.
   let carried: { reviewed: string; current: string; commits: number } | undefined;
   let runFailed = false; // the runner threw → terminal status `failed`
+  // The harness's verdict that pi's container was replaced under the run
+  // (harness-pi item 16): the loop threw, but the run is interrupted, not
+  // failed — its card says it restarts, and the dispatcher runs the request
+  // again once the thread is free, the path a refused re-attach takes
+  // (run-history item 54).
+  let replaced: PiContainerReplacedError | undefined;
   let runDiagnosis: FrictionDiagnosis | undefined; // the finish-site diagnosis: the done card's shape line
   // The run keeps its pi alive past the loop (harness-pi item 14): the
   // reviewed-head settle's re-review and the description turn below are one
@@ -944,7 +956,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
         }),
       );
   } catch (err) {
-    runFailed = true;
+    if (err instanceof PiContainerReplacedError) replaced = err;
+    else runFailed = true;
     // pi first: it runs in the workspace released next (a no-op once ended).
     await piSession?.end();
     await root.span("post.workspace_release", (span) => releaseWorkspace(span));
@@ -952,13 +965,15 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
   } finally {
     clearInterval(heartbeat);
     const stopped = run.control.requested;
-    const status: RunStatus = runFailed
-      ? "failed"
-      : stopped === "hard"
-        ? "stopped_hard"
-        : stopped === "soft"
-          ? "stopped_soft"
-          : "completed";
+    const status: RunStatus = replaced
+      ? "interrupted"
+      : runFailed
+        ? "failed"
+        : stopped === "hard"
+          ? "stopped_hard"
+          : stopped === "soft"
+            ? "stopped_soft"
+            : "completed";
     // Close the live-view stream and start the TTL, handing the registry the
     // terminal status so every summary projects it (the index, `runs list`)
     // instead of re-deriving it. The one status the registry cannot know is
@@ -1022,11 +1037,26 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     // The diagnosis rides the run record (above): the friction ledger the
     // cross-run proposer reads is run history, so nothing is written twice.
     // A run whose loop threw closes its card here, after the finish, so the
-    // card's total is the run's; the outer catch replies and drains.
+    // card's total is the run's; the outer catch replies and drains. A run
+    // interrupted by a replaced container closes saying it restarts from its
+    // request (harness-pi item 16): the fresh run's card follows this one.
     if (runFailed)
       await root
         .span("post.card_close", () =>
           card.done(shell.close({ kind: "done", icon: "❌", detail: checklistAsLeft(), ...doneLines(diagnosis) })),
+        )
+        .catch(() => {});
+    else if (replaced)
+      await root
+        .span("post.card_close", () =>
+          card.done(
+            shell.close({
+              kind: "refused",
+              icon: "🔁",
+              reason: "container replaced under the run; restarting from the request",
+              ...doneLines(diagnosis),
+            }),
+          ),
         )
         .catch(() => {});
   }

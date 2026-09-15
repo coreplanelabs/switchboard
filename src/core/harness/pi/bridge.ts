@@ -432,11 +432,15 @@ export class PiBridge {
     return this.openTools.has(callId);
   }
 
-  /** End whatever tool spans a stopped pi left open, so no span outlives the run. */
-  closeOpenSpans(reason: string): void {
+  /** End whatever tool spans a stopped pi left open, so no span outlives the
+   *  run; `reason` is each call's result summary — one for all, or the note
+   *  each call is settled with (harness-pi item 16: the restart note, said of
+   *  the container). */
+  closeOpenSpans(reason: string | ((open: { callId: string; tool: string }) => string)): void {
     for (const [callId, open] of this.openTools) {
       open.span?.end("error", { callId, ok: false });
-      this.emit({ type: "tool_result", tool: open.tool, ok: false, callId, summary: redactAndCap(reason) });
+      const summary = typeof reason === "string" ? reason : reason({ callId, tool: open.tool });
+      this.emit({ type: "tool_result", tool: open.tool, ok: false, callId, summary: redactAndCap(summary) });
     }
     this.openTools.clear();
     this.vetted.clear();
