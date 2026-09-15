@@ -143,13 +143,6 @@ export async function ensureWorkArea(
 }
 
 /**
- * Pure: the `image` a rendered `wrangler.jsonc` builds from when it is a
- * Dockerfile OUTSIDE the Worker's own directory (`../…`), else undefined — a
- * registry reference or a Dockerfile beside the config is buildable from a
- * materialised directory; the bot's `../../Dockerfile` needs the repository
- * around it, which the package does not carry. Comment lines are ignored.
- */
-/**
  * Pure: in a checkout, a Worker's install holds when its `wrangler` resolves from the Worker's
  * directory — nested under it (`<root>/<dir>/node_modules/wrangler`, npm's placement while the Worker
  * pins a version the root does not) or hoisted to the root (`<root>/node_modules/wrangler`, the usual
@@ -162,6 +155,13 @@ export function checkoutInstallHolds(root: string, dir: string, exists: (path: s
   return exists(join(root, dir, "node_modules", "wrangler")) || exists(join(root, "node_modules", "wrangler"));
 }
 
+/**
+ * Pure: the `image` a rendered `wrangler.jsonc` builds from when it is a
+ * Dockerfile OUTSIDE the Worker's own directory (`../…`), else undefined — a
+ * registry reference or a Dockerfile beside the config is buildable from a
+ * materialised directory; the bot's `../../Dockerfile` needs the repository
+ * around it, which the package does not carry. Comment lines are ignored.
+ */
 export function imageBuiltOutsideDir(renderedConfig: string): string | undefined {
   const code = renderedConfig
     .split("\n")
