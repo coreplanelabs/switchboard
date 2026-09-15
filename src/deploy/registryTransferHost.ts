@@ -11,9 +11,14 @@
 // `PATCH` parts (one part's bytes in memory at a time, never a whole layer),
 // each part but the last at least 5 MiB — the registry's rule — then committed
 // with a `PUT ?digest=`. A part that fails is sent once more; a second failure
-// stops the copy naming the part. The manifest goes last, byte-identical and
-// under the source's media type, and the registry is asked for its digest
-// afterwards: a push that returned 201 is not the proof, the digest is.
+// stops the copy naming the part. A source stream that breaks before the blob's
+// end (the source closing the connection mid-layer — ghcr.io did, 23 s into a
+// 364 MiB layer, and the whole copy died with a bare `terminated`) is re-opened
+// with a `Range` request from the byte it stopped at, `RESUMES` times per blob
+// at most: the parts already uploaded and the bytes already hashed stand. The
+// manifest goes last, byte-identical and under the source's media type, and the
+// registry is asked for its digest afterwards: a push that returned 201 is not
+// the proof, the digest is.
 //
 // The account registry is also READ here (`listAccountRegistry`: `GET /v2/_catalog?tags=true`
 // under the same credential — what `wrangler containers images list` does), so
@@ -103,6 +108,8 @@ export type RegistryListing = { value: RegistryImage[] } | { error: string; unau
 /** A small request's budget, and a part's or a blob stream's. */
 const SHORT_MS = 60_000;
 const LONG_MS = 30 * 60_000;
+/** How many times one blob's source stream is re-opened after it breaks before the copy stops. */
+export const RESUMES = 3;
 
 /** A failure with a place to go — the problem the command prints; `unauthorized` when the account registry
  *  refused the credential. */
@@ -122,6 +129,14 @@ const refused = async (what: string, res: Response): Promise<TransferProblem> =>
 const said = async (res: Response): Promise<string> => {
   const text = (await res.text().catch(() => "")).trim();
   return `HTTP ${res.status}${text ? `: ${text}` : ""}`;
+};
+
+/** A thrown failure's words, with its cause's when fetch wrapped one — `terminated (other side closed)`, not
+ *  `terminated` alone. */
+const reason = (err: unknown): string => {
+  if (!(err instanceof Error)) return String(err);
+  const cause = err.cause instanceof Error ? err.cause.message : undefined;
+  return cause && cause !== err.message ? `${err.message} (${cause})` : err.message;
 };
 
 const MiB = 1024 * 1024;
@@ -196,10 +211,7 @@ export async function transferImage(
   } catch (err) {
     if (err instanceof TransferProblem)
       return { ok: false, problem: err.message, ...(err.unauthorized ? { unauthorized: true } : {}) };
-    return {
-      ok: false,
-      problem: `copying ${copy.source} failed — ${err instanceof Error ? err.message : String(err)}`,
-    };
+    return { ok: false, problem: `copying ${copy.source} failed — ${reason(err)}` };
   }
 }
 
@@ -299,16 +311,16 @@ async function transfer(
     if (started.status !== 202 || !startedAt)
       throw await refused(`starting the upload of ${short(blob.digest)} to ${targetName} failed`, started);
     let location = resolveLocation(startedAt, `${targetBase}/blobs/uploads/`);
-    const source = await fromSource(
-      `reading ${short(blob.digest)} from ${copy.source}`,
-      `${sourceBase}/v2/${repository}/blobs/${blob.digest}`,
-      { signal: AbortSignal.timeout(LONG_MS) },
+    const blobUrl = `${sourceBase}/v2/${repository}/blobs/${blob.digest}`;
+    const chunks = sourceBytes(blob, copy.source, log, (from) =>
+      fromSource(`reading ${short(blob.digest)} from ${copy.source}`, blobUrl, {
+        headers: from > 0 ? { range: `bytes=${from}-` } : {},
+        signal: AbortSignal.timeout(LONG_MS),
+      }),
     );
-    if (!source.ok || !source.body)
-      throw new TransferProblem(`reading ${short(blob.digest)} from ${copy.source} failed — ${await said(source)}`);
     const hash = createHash("sha256");
     let index = 0;
-    for await (const { part, bytes: partBytesBuffer } of partsOf(source.body, parts, hash, blob, copy.source)) {
+    for await (const { part, bytes: partBytesBuffer } of partsOf(chunks, parts, hash, blob, copy.source)) {
       index++;
       const label = `part ${index}/${parts.length} (${contentRange(part)})`;
       const patch = () =>
@@ -386,10 +398,63 @@ function sha256(bytes: Uint8Array): string {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
+/** The blob's bytes from the source as they arrive. A stream that breaks before the blob's end is re-opened
+ *  with a `Range` request from the byte it stopped at, `RESUMES` times per blob at most, so the parts already
+ *  uploaded and the bytes already hashed stand; the source must answer 206 from that byte (ghcr.io's blob CDN
+ *  does). One break too many, a 200 in the range's place or another Content-Range stops the copy naming the
+ *  blob, the byte and the cause. */
+async function* sourceBytes(
+  blob: Descriptor,
+  source: string,
+  log: (line: string) => void,
+  open: (from: number) => Promise<Response>,
+): AsyncGenerator<Uint8Array> {
+  let consumed = 0;
+  let resumes = 0;
+  for (;;) {
+    const res = await open(consumed);
+    const what =
+      consumed === 0
+        ? `reading ${short(blob.digest)} from ${source}`
+        : `resuming ${short(blob.digest)} from ${source} at byte ${consumed}`;
+    if (consumed === 0 ? !res.ok : res.status !== 206) {
+      // A 200 in the range's place carries the whole blob: named, never read into the message.
+      const words =
+        consumed > 0 && res.status === 200
+          ? "HTTP 200 where 206 was expected (the source ignored the Range)"
+          : await said(res);
+      void res.body?.cancel().catch(() => {});
+      throw new TransferProblem(`${what} failed — ${words}`);
+    }
+    const contentRange = res.headers.get("content-range");
+    if (consumed > 0 && !contentRange?.startsWith(`bytes ${consumed}-`))
+      throw new TransferProblem(`${what} failed — the source answered Content-Range ${contentRange ?? "none"}`);
+    if (!res.body) throw new TransferProblem(`${what} failed — no body`);
+    try {
+      for await (const chunk of res.body) {
+        consumed += chunk.byteLength;
+        yield chunk;
+      }
+      return;
+    } catch (err) {
+      // Every byte arrived and the stream still broke: nothing left to resume; `partsOf` judges the length.
+      if (consumed >= blob.size) return;
+      if (resumes >= RESUMES)
+        throw new TransferProblem(
+          `reading ${short(blob.digest)} from ${source} broke at byte ${consumed} of ${blob.size} after ${resumes} resumes — ${reason(err)}`,
+        );
+      resumes++;
+      log(
+        `[images]   ${short(blob.digest)} broke at ${mib(consumed)} of ${mib(blob.size)} (${reason(err)}) — resuming from there, ${resumes} of ${RESUMES}`,
+      );
+    }
+  }
+}
+
 /** The blob's bytes as they stream, cut at the planned part boundaries — one part's buffer in memory at a
  *  time, every byte through the hash. A stream shorter or longer than the descriptor's size is a problem. */
 async function* partsOf(
-  body: ReadableStream<Uint8Array>,
+  body: AsyncIterable<Uint8Array>,
   parts: readonly Part[],
   hash: ReturnType<typeof createHash>,
   blob: Descriptor,

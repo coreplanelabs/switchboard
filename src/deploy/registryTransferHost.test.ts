@@ -137,6 +137,13 @@ class FakeRegistries {
   minPartBytes = MIN_PART_BYTES;
   failPatchOnce: number | undefined;
   corruptBlob: string | undefined;
+  /** The source closes the connection once this blob's byte `after` is reached (at least one byte into a read that
+   *  starts past it), on the next `times` reads of it. */
+  cutBlob: { digest: string; after: number; times: number } | undefined;
+  /** The source answers a `Range` request with the whole blob and 200 — a source that ignores ranges. */
+  ignoreRange = false;
+  /** Every `Range` header a source blob read carried, in order. */
+  sourceRanges: string[] = [];
   lieAboutManifestDigest = false;
   private patches = 0;
   private uploadIds = 0;
@@ -157,6 +164,9 @@ class FakeRegistries {
     this.minPartBytes = MIN_PART_BYTES;
     this.failPatchOnce = undefined;
     this.corruptBlob = undefined;
+    this.cutBlob = undefined;
+    this.ignoreRange = false;
+    this.sourceRanges = [];
     this.lieAboutManifestDigest = false;
     this.patches = 0;
   }
@@ -219,10 +229,30 @@ class FakeRegistries {
     }
     const blob = this.source.blobs[m[3]];
     if (!blob) return json(res, 404, { errors: [{ code: "BLOB_UNKNOWN" }] });
-    const bytes = m[3] === this.corruptBlob ? Buffer.concat([blob.subarray(1), Buffer.from("!")]) : blob;
-    res.writeHead(200, { "content-type": "application/octet-stream", "content-length": String(bytes.length) });
+    const whole = m[3] === this.corruptBlob ? Buffer.concat([blob.subarray(1), Buffer.from("!")]) : blob;
+    // A `Range: bytes=<from>-` read answers 206 from that byte (what ghcr.io's blob CDN does), unless this
+    // source ignores ranges and sends the whole blob under 200.
+    const range = /^bytes=(\d+)-$/.exec(req.headers.range ?? "");
+    if (req.headers.range !== undefined) this.sourceRanges.push(req.headers.range);
+    const from = range && !this.ignoreRange ? Number(range[1]) : 0;
+    const bytes = whole.subarray(from);
+    res.writeHead(from > 0 ? 206 : 200, {
+      "content-type": "application/octet-stream",
+      "content-length": String(bytes.length),
+      ...(from > 0 ? { "content-range": `bytes ${from}-${whole.length - 1}/${whole.length}` } : {}),
+    });
     // Chunked on purpose: the client must not assume one read is one part.
-    for (let i = 0; i < bytes.length; i += 64 * 1024) res.write(bytes.subarray(i, i + 64 * 1024));
+    const cut = this.cutBlob && this.cutBlob.digest === m[3] && this.cutBlob.times > 0 ? this.cutBlob : undefined;
+    const upTo = cut ? Math.max(1, Math.min(bytes.length, cut.after - from)) : bytes.length;
+    let i = 0;
+    for (; i + 64 * 1024 <= upTo; i += 64 * 1024) res.write(bytes.subarray(i, i + 64 * 1024));
+    if (cut) {
+      cut.times--;
+      // The bytes so far flushed, then the socket closed short of the content-length — the client's stream breaks.
+      res.write(bytes.subarray(i, upTo), () => res.destroy());
+      return;
+    }
+    res.write(bytes.subarray(i));
     res.end();
   }
 
@@ -513,6 +543,52 @@ describe("transferImage", () => {
     expect(refused.problem).toContain("part 2/3");
     expect(refused.problem).toContain("HTTP 416");
     expect(refused.problem).toContain("RANGE_ERROR");
+    expect(fake.targetManifests.size).toBe(0);
+  });
+
+  it("a source stream that breaks mid-blob is resumed with a Range from the byte it stopped at — the parts already uploaded stand, the hash still verifies, the copy lands and the log says where it broke", async () => {
+    const layer = randomBytes(11 * MiB);
+    fake.source = sourceImage([layer]);
+    fake.cutBlob = { digest: sha256(layer), after: 7 * MiB, times: 1 };
+    const log: string[] = [];
+    const r = await transferImage(COPY, ACCOUNT, CREDENTIAL, io(log));
+    expect(r).toMatchObject({ ok: true, report: { uploaded: 2, digest: fake.source.manifestDigest } });
+    // One resume, from a byte inside the blob; the three parts were PATCHed once each — none sent again.
+    expect(fake.sourceRanges).toHaveLength(1);
+    const from = Number(/^bytes=(\d+)-$/.exec(fake.sourceRanges[0])?.[1]);
+    expect(from).toBeGreaterThan(0);
+    expect(from).toBeLessThan(11 * MiB);
+    expect(fake.requests.filter((q) => q.startsWith("PATCH "))).toHaveLength(1 + 3);
+    expect(fake.targetBlobs.get(TARGET_NAME)?.has(sha256(layer))).toBe(true);
+    expect(log.filter((l) => l.includes("broke at") && l.includes("resuming"))).toHaveLength(1);
+    expect(log.find((l) => l.includes("broke at"))).toContain(sha256(layer).slice(0, 19));
+  });
+
+  it("a source stream that breaks a fourth time stops the copy naming the blob, the byte it broke at and the cause, with nothing committed and no manifest pushed", async () => {
+    const layer = randomBytes(6 * MiB);
+    fake.source = sourceImage([layer]);
+    fake.cutBlob = { digest: sha256(layer), after: 5 * MiB + 512 * 1024, times: 4 };
+    const r = await transferImage(COPY, ACCOUNT, CREDENTIAL, io());
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("unreachable");
+    expect(fake.sourceRanges).toHaveLength(3);
+    expect(r.problem).toContain(sha256(layer).slice(0, 19));
+    expect(r.problem).toMatch(/broke at byte \d+ of 6291456 after 3 resumes — terminated/);
+    expect(fake.targetBlobs.get(TARGET_NAME)?.has(sha256(layer)) ?? false).toBe(false);
+    expect(fake.targetManifests.size).toBe(0);
+  });
+
+  it("a source that answers the resume with the whole blob (200, the Range ignored) is named — the bytes already hashed cannot be hashed twice", async () => {
+    const layer = randomBytes(6 * MiB);
+    fake.source = sourceImage([layer]);
+    fake.cutBlob = { digest: sha256(layer), after: 2 * MiB, times: 1 };
+    fake.ignoreRange = true;
+    const r = await transferImage(COPY, ACCOUNT, CREDENTIAL, io());
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("unreachable");
+    expect(r.problem).toMatch(
+      /resuming sha256:[0-9a-f]{12} from .* at byte \d+ failed — HTTP 200 where 206 was expected/,
+    );
     expect(fake.targetManifests.size).toBe(0);
   });
 
