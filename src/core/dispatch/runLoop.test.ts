@@ -34,7 +34,7 @@ import {
 } from "../harness/pi/relay.js";
 import { spawnCapabilityFor, type SpawnCapability, type SpawnDeps } from "./spawn.js";
 import type { SessionCapability } from "../../tools/session.js";
-import { PiContainerReplacedError } from "../harness/pi/harness.js";
+import { ModelPolicyRefusedError, PiContainerReplacedError } from "../harness/pi/harness.js";
 import { FakePiContainer } from "../harness/pi/testing/fakeContainer.js";
 import { scriptPiFromProvider } from "../harness/pi/testing/providerPi.js";
 import { judgeToolCall, type ToolRuleContext } from "../harness/pi/toolRules.js";
@@ -441,6 +441,38 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     s.ending.drain(undefined);
     await s.writer.settled();
     expect((await s.store.get("run-l"))!.status).toBe("failed");
+  });
+
+  // docs/reference/specs/run-history.md item 57: the failure by name. The
+  // provider's refusal reaches the loop as the harness's typed error, and the
+  // record says so, so the session's next seed can leave the request out.
+  it("a run whose model call the provider refused under its usage policy fails by name: the error is the refusal, the record says failure: policy_refusal beside status failed and the note keeps the provider's words; a run failed for any other reason carries no failure key", async () => {
+    const refusing: Provider = {
+      name: "fake",
+      async complete() {
+        return { content: [{ type: "text", text: "blocked by the provider's classifier" }], stopReason: "refusal" };
+      },
+    };
+    const s = setup("unused", { provider: refusing });
+    const err = await runLoop(s.deps, s.ctx).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(ModelPolicyRefusedError);
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "failed" });
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const rec = (await s.store.get("run-l"))!;
+    expect(rec).toMatchObject({ status: "failed", failure: { kind: "policy_refusal" } });
+    expect(rec.events.filter((e) => e.type === "run_note" && e.kind === "policy_refusal")).toEqual([
+      expect.objectContaining({ summary: expect.stringContaining("blocked by the provider's classifier") }),
+    ]);
+
+    const down = setup(new Error("provider down"));
+    await expect(runLoop(down.deps, down.ctx)).rejects.toThrow("provider down");
+    down.ending.drain(undefined);
+    await down.writer.settled();
+    expect("failure" in (await down.store.get("run-l"))!).toBe(false);
   });
 });
 

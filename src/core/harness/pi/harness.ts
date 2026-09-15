@@ -421,6 +421,27 @@ export class PiContainerReplacedError extends Error {
   }
 }
 
+/** What the thread reads when the provider refused the run's call under its
+ *  usage policy: how to go on, in one sentence. The provider's own words stay
+ *  on the run page (the `policy_refusal` note), never in the reply. */
+export const POLICY_REFUSAL_REPLY =
+  "the model refused this request under its usage policy — rephrase it and the thread continues";
+
+/** The provider refused the run's model call under its usage policy — the
+ *  stop reason its wire names, which pi keeps beside the error it maps the
+ *  refusal to (`POLICY_REFUSAL_STOP_REASONS`; harness-pi item 6). The run
+ *  fails, and this is the failure by name: never retried (the same words are
+ *  refused again), its message the one sentence the thread reads, the
+ *  provider's explanation on the run's `policy_refusal` note, and the record
+ *  marked `failure: policy_refusal` (run-history item 57) so the session's
+ *  next seed leaves the refused request out (session-log item 9). */
+export class ModelPolicyRefusedError extends Error {
+  constructor(readonly providerMessage: string) {
+    super(POLICY_REFUSAL_REPLY);
+    this.name = "ModelPolicyRefusedError";
+  }
+}
+
 /** Whether a container command's failure says the runtime under it was
  *  replaced: the resident's `ExecSandboxRestartedError` (resident-repos item
  *  65 — the container exited inside a rollout and came back before the
@@ -470,6 +491,19 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): 
   const note = (kind: RunNoteKind, summary: string, mode?: StopMode) => {
     run.onProgress?.(summary);
     emit({ type: "run_note", kind, summary, ...(mode ? { mode } : {}) });
+  };
+  /** The failure by name for a call the provider refused under its usage
+   *  policy (item 6): the provider's explanation goes on the record for the
+   *  run page — a note, not a card line, since the thread is told how to go
+   *  on and never the provider's words — and the error the run ends with
+   *  carries the thread's sentence. */
+  const policyRefused = (explanation: string): ModelPolicyRefusedError => {
+    emit({
+      type: "run_note",
+      kind: "policy_refusal",
+      summary: `the model refused the call under the provider's usage policy: ${explanation}`,
+    });
+    return new ModelPolicyRefusedError(explanation);
   };
   const bridge = new PiBridge({
     emit,
@@ -952,6 +986,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): 
     const iterator = transport.lines[Symbol.asyncIterator]();
     let pending: Promise<IteratorResult<string>> | undefined;
     let providerError: string | undefined;
+    /** The failed call was refused under the provider's usage policy: the failure by name (item 6). */
+    let providerRefusal = false;
     /** The one transient failure this run already spent its retry on. */
     let retriedProviderError: string | undefined;
     let retryPromptSent = false;
@@ -1059,17 +1095,27 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): 
       if (obs.providerError !== undefined) {
         if (catchingUp)
           note("harness_error", `a model call failed while the bot was away (${obs.providerError}); continuing`);
-        else if (retriedProviderError === undefined && !writeUp && isTransientProviderError(obs.providerError)) {
+        else if (
+          obs.policyRefusal !== true &&
+          retriedProviderError === undefined &&
+          !writeUp &&
+          isTransientProviderError(obs.providerError)
+        ) {
           // A truncated stream or a dropped connection is transient: the run
           // gets ONE retry — the failed call produced nothing, so pi is
           // re-prompted after a short backoff when it settles below. A second
-          // failure, or a non-transient one, fails the run as before.
+          // failure, or a non-transient one, fails the run as before. A call
+          // refused under the provider's usage policy is never transient: the
+          // same words would be refused again.
           retriedProviderError = obs.providerError;
           note(
             "harness_error",
             `the model call failed (${obs.providerError}) — that looks transient; retrying once after ${PROVIDER_RETRY_BACKOFF_MS / 1000}s`,
           );
-        } else providerError = obs.providerError;
+        } else {
+          providerError = obs.providerError;
+          providerRefusal = obs.policyRefusal === true;
+        }
       }
       if (obs.settled && !catchingUp) {
         if (retriedProviderError !== undefined && providerError === undefined && !retryPromptSent && !hardStopped) {
@@ -1125,12 +1171,14 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): 
           `pi exited before the run settled${renamed}${tail.trim() ? `: ${redactAndCap(tail.trim(), 400)}` : ""}`,
         );
       }
-      if (providerError !== undefined)
+      if (providerError !== undefined) {
+        if (providerRefusal) throw policyRefused(providerError);
         throw new Error(
           retriedProviderError !== undefined
             ? `the model call failed after a retry: ${providerError} — this is usually transient; re-ask in the thread to run it again`
             : `the model call failed: ${providerError}`,
         );
+      }
       const text = bridge.answer() ?? "";
       answer =
         writeUp?.kind === "time"
@@ -1171,6 +1219,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): 
       const id = `${ids.prompt}:follow-up:${++followUps}`;
       let turnSettled = false;
       let turnError: string | undefined;
+      /** The turn's failed call was refused under the provider's usage policy (item 6). */
+      let turnRefusal = false;
       /** The turn threw — a refused prompt, a dead pi, a failed model call, a bypass — so its span ends `error`. */
       let turnFailed = false;
       /** The turn's budget and the stops — on every event and every tick. */
@@ -1233,7 +1283,10 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): 
           }
           if (obs.response?.id === id && obs.response.success === false)
             throw new PromptRefused(String(obs.response.error ?? "no reason"));
-          if (obs.providerError !== undefined) turnError = obs.providerError;
+          if (obs.providerError !== undefined) {
+            turnError = obs.providerError;
+            turnRefusal = obs.policyRefusal === true;
+          }
           if (obs.settled) {
             turnSettled = true;
             break;
@@ -1252,7 +1305,10 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): 
             `pi exited before the turn settled${tail.trim() ? `: ${redactAndCap(tail.trim(), 400)}` : ""}`,
           );
         }
-        if (turnError !== undefined) throw new Error(`the model call failed: ${turnError}`);
+        if (turnError !== undefined) {
+          if (turnRefusal) throw policyRefused(turnError);
+          throw new Error(`the model call failed: ${turnError}`);
+        }
         const text = bridge.answer() ?? "";
         if (writeUp?.kind === "time") return timeBudgetAnswer(text, input.maxMinutes);
         if (writeUp?.kind === "turns") return turnGuardAnswer(text, writeUp.pace);

@@ -1,7 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RunSession } from "../runRecord.js";
 import type { RunView } from "../runsService.js";
-import { previousRunOf, readThread, stickyAgentOf, THREAD_READ_LIMIT, threadPrOf, threadRouteOf } from "./thread.js";
+import {
+  previousRunOf,
+  readThread,
+  refusedRequestsOf,
+  stickyAgentOf,
+  THREAD_READ_LIMIT,
+  threadPrOf,
+  threadRouteOf,
+} from "./thread.js";
 
 // docs/reference/specs/routing-and-config.md item 3 and session-log.md item 9:
 // one read of the thread's newest runs, and what the dispatcher derives from it.
@@ -102,6 +110,34 @@ describe("previousRunOf — the agent's previous finished run", () => {
         "coding",
       ),
     ).toBeUndefined();
+  });
+});
+
+describe("refusedRequestsOf — the requests the provider refused under its usage policy", () => {
+  it("the request row of every finished run of the agent whose record says failure: policy_refusal and names its session; a run failed otherwise, another agent's, a live one and one without a session count for nothing", () => {
+    const refused = (id: string, request: number, over: Partial<RunView> = {}): RunView =>
+      run({
+        id,
+        agent: "coding",
+        status: "failed",
+        failure: { kind: "policy_refusal" },
+        session: { ...closed, request },
+        ...over,
+      });
+    expect(
+      refusedRequestsOf(
+        [
+          refused("r6", 43),
+          refused("r5", 42),
+          run({ id: "r4", agent: "coding", status: "failed", session: closed }),
+          refused("r3", 30, { agent: "review" }),
+          refused("live", 29, { finished: false }),
+          refused("r1", 28, { session: undefined }),
+        ],
+        "coding",
+      ),
+    ).toEqual([43, 42]);
+    expect(refusedRequestsOf([], "coding")).toEqual([]);
   });
 });
 

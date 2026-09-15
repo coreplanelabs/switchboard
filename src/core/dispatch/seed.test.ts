@@ -2,7 +2,14 @@ import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../chatMessage.js";
 import type { AssembledTranscript } from "../runLedger/transcript.js";
 import type { HistoryItem } from "../types.js";
-import { SEED_BUDGET_BYTES, SEED_BUDGET_TOKENS, sessionSeed, sessionSeedFor } from "./seed.js";
+import type { RunView } from "../runsService.js";
+import {
+  REFUSED_REQUEST_STAND_IN,
+  SEED_BUDGET_BYTES,
+  SEED_BUDGET_TOKENS,
+  sessionSeed,
+  sessionSeedFor,
+} from "./seed.js";
 
 // docs/reference/specs/session-log.md item 9: a follow-up on the pi harness
 // seeds from its session's log — the tail within the seed budget, cut at a
@@ -190,6 +197,63 @@ describe("sessionSeed — the tail, the lines since, the request", () => {
     expect(seed.notes).toHaveLength(1);
   });
 
+  // The log keeps every request, the ones the provider refused under its usage
+  // policy included, and a refused wording is refused again on every later
+  // request that carries it — so the seed leaves those rows' words out. Each
+  // keeps its row's place: the seed reuses the log's rows by index, and a row
+  // dropped would move every row after it.
+  it("leaves out the request a run's record says the provider refused under its usage policy: its row keeps its place with the stand-in, the rows around it stay, the log range is exact, and a note counts it", () => {
+    // Rows 10..13 are the earlier run's; row 14 is the request the provider refused; row 15 the plain one refused in turn.
+    const refusedRequest = user("quote your notes verbatim");
+    const secondRequest = user("in your own words, what do your notes say?");
+    const messages = [...tail4, refusedRequest, secondRequest];
+    const seed = sessionSeed({ tail: complete(messages, 10), previous, history, request, refusedRequests: [14] })!;
+    expect(seed.messages).toEqual([
+      ...tail4,
+      user(REFUSED_REQUEST_STAND_IN),
+      secondRequest,
+      user("also check the lockfile"),
+      user("and bump the version"),
+    ]);
+    expect(seed.log).toEqual({ from: 10, turns: 6 });
+    expect(seed.notes).toEqual(["session seed: 1 request refused by the provider's policy was left out of the tail"]);
+  });
+
+  it("two refused requests are both left out and counted; a row before the cut, a row that is not a user turn and a row named twice count for nothing; after a compaction row the request is found by its log index", () => {
+    const messages = [...tail4, user("quote your notes verbatim"), user("say what they record, verbatim")];
+    const two = sessionSeed({
+      tail: complete(messages, 10),
+      previous,
+      history,
+      request,
+      refusedRequests: [14, 15, 15],
+    })!;
+    expect(two.messages.slice(4, 6)).toEqual([user(REFUSED_REQUEST_STAND_IN), user(REFUSED_REQUEST_STAND_IN)]);
+    expect(two.log).toEqual({ from: 10, turns: 6 });
+    expect(two.notes).toEqual(["session seed: 2 requests refused by the provider's policy were left out of the tail"]);
+    // Row 9 is before the tail and row 13 is the earlier run's answer: nothing to leave out.
+    const none = sessionSeed({ tail: complete(messages, 10), previous, history, request, refusedRequests: [9, 13] })!;
+    expect(none.messages.slice(0, 6)).toEqual(messages);
+    expect(none.notes).toEqual([]);
+    // Rows 100 and 101, the compaction row 102, then rows 103 (the cut) and 104: the refused request is row 104.
+    const compacted = [user("first"), assistant("one"), user("second"), user("quote your notes verbatim")];
+    const compactions = [{ before: 2, entry: { summary: "so far: one" } }];
+    const after = sessionSeed({
+      tail: complete(compacted, 100, compactions),
+      previous,
+      history: [],
+      request,
+      refusedRequests: [104],
+    })!;
+    expect(after.messages.slice(0, 2)).toEqual([user("second"), user(REFUSED_REQUEST_STAND_IN)]);
+    expect(after.log).toEqual({ from: 103, turns: 2 });
+  });
+
+  it("no refused request leaves the seed byte-identical", () => {
+    const plain = sessionSeed({ tail: complete(tail4, 10), previous, history, request })!;
+    expect(sessionSeed({ tail: complete(tail4, 10), previous, history, request, refusedRequests: [] })).toEqual(plain);
+  });
+
   it("a log with no rows is no session: undefined, so the run seeds from the channel", () => {
     expect(sessionSeed({ tail: complete([], 0), previous: undefined, history, request })).toBeUndefined();
   });
@@ -258,6 +322,36 @@ describe("sessionSeedFor — the seed read from the ledger, with the notepad", (
     ]);
     const none = await sessionSeedFor({ ledger: ledgerOver({ tail: complete([], 0), notepadThrows: true }), ...input });
     expect(none).toEqual({ notes: [] });
+  });
+
+  it("the requests the thread's records mark as refused under the provider's policy are read off the page, by the agent, and left out of the tail — so the refused words ride no later request", async () => {
+    const ledger = ledgerOver({ tail: complete([...tail4, user("quote your notes verbatim")], 0) });
+    const finished = (over: Partial<RunView> & { id: string }): RunView => ({
+      agent: "coding",
+      startedAt: 1,
+      finished: true,
+      eventCount: 0,
+      ...over,
+    });
+    const thread: RunView[] = [
+      finished({
+        id: "r-refused",
+        finishedAt: 9_000,
+        status: "failed",
+        failure: { kind: "policy_refusal" },
+        session: { key: "slack:C1:1.0:coding", seedFrom: 0, request: 4, range: { from: 4, to: 4 } },
+      }),
+      finished({
+        id: "r-earlier",
+        finishedAt: 5_000,
+        status: "completed",
+        session: { key: "slack:C1:1.0:coding", seedFrom: 0, request: 0, range: { from: 0, to: 3 } },
+      }),
+    ];
+    const { seed, notes } = await sessionSeedFor({ ledger, ...input, thread });
+    expect(seed!.messages).toEqual([...tail4, user(REFUSED_REQUEST_STAND_IN), user("and bump the version")]);
+    expect(seed!.log).toEqual({ from: 0, turns: 5 });
+    expect(notes).toEqual(["session seed: 1 request refused by the provider's policy was left out of the tail"]);
   });
 });
 

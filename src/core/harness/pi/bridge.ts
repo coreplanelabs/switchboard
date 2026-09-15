@@ -69,9 +69,20 @@ export interface PiAssistantMessage {
   role: "assistant";
   content: Array<Record<string, unknown>>;
   stopReason?: string;
+  /** The provider's own stop reason, which pi keeps beside the one it maps
+   *  it to — the word a refusal under the provider's usage policy is read
+   *  from, since pi maps that refusal to `error` with the explanation as
+   *  `errorMessage`. */
+  rawStopReason?: string;
   errorMessage?: string;
   timestamp?: number;
 }
+
+/** The provider's stop reasons for a call it refused under its usage policy
+ *  (harness-pi item 6): the Messages API's `refusal` (its classifier) and
+ *  `sensitive` (its safety filter), the Chat Completions `content_filter`. A
+ *  closed set of wire words — the explanation's text is never read. */
+export const POLICY_REFUSAL_STOP_REASONS: ReadonlySet<string> = new Set(["refusal", "sensitive", "content_filter"]);
 
 /** What the harness does with one observed event. */
 export interface BridgeObservation {
@@ -85,6 +96,9 @@ export interface BridgeObservation {
   message?: Record<string, unknown>;
   /** An assistant turn that ended in a provider error, with pi's message. */
   providerError?: string;
+  /** Beside `providerError`: the provider's stop reason says it refused the
+   *  call under its usage policy, so the harness fails the run by that name. */
+  policyRefusal?: true;
   /** A call ended that the gate never saw (`gateSaw` was not called for its
    *  id) and that pi did not answer by itself: the tool ran unvetted. The
    *  harness fails the run closed on it. */
@@ -283,6 +297,8 @@ export class PiBridge {
     }
     if (message.stopReason === "error") {
       out.providerError = redactAndCap(message.errorMessage ?? "the model call failed", 400);
+      if (typeof message.rawStopReason === "string" && POLICY_REFUSAL_STOP_REASONS.has(message.rawStopReason))
+        out.policyRefusal = true;
       return;
     }
     const content = Array.isArray(message.content) ? message.content : [];

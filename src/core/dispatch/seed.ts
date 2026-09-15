@@ -4,13 +4,16 @@
 // read by the object as whole turns (item 4) and cut here forward to the first
 // user turn that carries text — so the conversation opens as providers
 // require and no tool call is parted from its result — with thinking dropped
-// and the calls a previous run left in flight settled; then a gap marker when
+// and the calls a previous run left in flight settled, and the words of a
+// request the provider refused under its usage policy left out (the thread's
+// records name those runs); then a gap marker when
 // the previous run's log ends short; then the channel's user lines written
 // after that run ended; then the request. The cut costs the first kept turn
 // the tool results that answer calls made before it, and the seed's notes say
 // so. The rows the seed reuses are named
 // so the write-through appends only what is new (item 2): the run's local
-// index i is the log's index `log.from + i` throughout.
+// index i is the log's index `log.from + i` throughout — which is why a
+// refused request's row keeps its place with a stand-in instead of going.
 //
 // pi's compaction entries never ride the seed as rows: the tail begins after
 // the newest one, and that entry's summary is handed back for the system
@@ -22,12 +25,17 @@ import type { LedgerWriteThrough } from "../runLedger/writeThrough.js";
 import type { RunView } from "../runsService.js";
 import type { DocumentAttachment, HistoryItem, ImageAttachment } from "../types.js";
 import { requestContent, turnContent } from "./messages.js";
-import { previousRunOf } from "./thread.js";
+import { previousRunOf, refusedRequestsOf } from "./thread.js";
 
 /** The seed budget (record 0035, "The seed"): the tail a follow-up starts
  *  from, in tokens, at the four characters a token the memory block assumes. */
 export const SEED_BUDGET_TOKENS = 60_000;
 export const SEED_BUDGET_BYTES = SEED_BUDGET_TOKENS * 4;
+
+/** What stands in the seed for a request the provider refused under its
+ *  usage policy: the row keeps its place and its role, the words stay in the
+ *  log for `recall`, and the model reads that something was left out here. */
+export const REFUSED_REQUEST_STAND_IN = "(a request the model refused under its usage policy was left out here)";
 
 /** What the ledger's tail read answers (`readSessionTail`): the log index the
  *  rows start at and the transcript assembled from them, counted from 0. */
@@ -82,8 +90,12 @@ export function sessionSeed(input: {
     /** The quoted blocks of the request's referenced conversations (record 0037), text parts after the request's own. */
     references?: readonly string[];
   };
+  /** The log indices of the request rows the provider refused under its usage
+   *  policy (`refusedRequestsOf`, off the thread's records): their words are
+   *  left out of the tail. Absent or empty, the tail is reused as it is. */
+  refusedRequests?: readonly number[];
 }): SessionSeed | undefined {
-  const { tail, previous, history, request } = input;
+  const { tail, previous, history, request, refusedRequests = [] } = input;
   const { from, transcript } = tail;
   if (from === 0 && transcript.turns === 0) return undefined;
   const notes: string[] = [];
@@ -124,6 +136,28 @@ export function sessionSeed(input: {
           : `session seed: ${orphans} tool results answering calls before the cut were dropped from the tail's first turn`,
       );
     }
+  }
+  // A request the provider refused under its usage policy is refused again on
+  // every later request that carries its words, so those words leave the
+  // tail. The row itself stays, as one text part saying so: the seed reuses
+  // the log's rows by index (`log.from + i`), so a row dropped would move
+  // every row after it and the write-through would write the tail again as
+  // new rows. The log keeps the words for `recall`. A row before the cut, or
+  // one that is not a user turn (the record would be wrong), is nothing to
+  // leave out.
+  let leftOut = 0;
+  for (const row of new Set(refusedRequests)) {
+    const k = row - logFrom;
+    if (k < 0 || k >= kept.length || kept[k].role !== "user") continue;
+    kept[k] = { role: "user", content: [{ type: "text", text: REFUSED_REQUEST_STAND_IN }] };
+    leftOut++;
+  }
+  if (leftOut > 0) {
+    notes.push(
+      leftOut === 1
+        ? "session seed: 1 request refused by the provider's policy was left out of the tail"
+        : `session seed: ${leftOut} requests refused by the provider's policy were left out of the tail`,
+    );
   }
   if (kept.length === 0) {
     notes.push(
@@ -183,7 +217,7 @@ export function sessionSeed(input: {
 /**
  * The seed for a follow-up, read from the ledger: the log of this thread and
  * agent (`sessionKey`), its tail within the budget, the previous run of the
- * agent off the thread's runs. A log that
+ * agent and the requests the provider refused off the thread's runs. A log that
  * cannot be read — a state Worker without the route, a failed request — is no
  * session: the run seeds from the channel, and the note says why.
  */
@@ -214,6 +248,7 @@ export async function sessionSeedFor(input: {
     previous: previousRunOf(input.thread, input.agent),
     history: input.history,
     request: input.request,
+    refusedRequests: refusedRequestsOf(input.thread, input.agent),
   });
   if (!seed) return { notes: [] };
   // The notepad rides the prompt, never a row (item 10); a notepad that cannot

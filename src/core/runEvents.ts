@@ -158,6 +158,14 @@ export type RunNoteKind =
    *  know — named, so a pi bump is visible in the first run's record. Published
    *  by the pi bridge. */
   | "harness_error"
+  /** The model provider refused the run's call under its usage policy — the
+   *  stop reason its wire names for a classifier's refusal, never the words
+   *  (harness-pi.md item 6): the summary carries the provider's explanation
+   *  for the run page; the run fails by name, its record says
+   *  `failure: policy_refusal` (run-history.md item 57), the thread reads one
+   *  sentence on how to go on, and the session's next seed leaves the refused
+   *  request out (session-log.md item 9). Published by the pi harness. */
+  | "policy_refusal"
   /** The harness's gate refused a tool call the model asked for (harness-pi.md
    *  item 7): the summary names the tool and the rule; the model read the same
    *  reason as the tool's result. Published by the bot's authorize route. */
@@ -191,6 +199,7 @@ export const RUN_NOTE_KINDS = [
   "review_not_posted",
   "compacted",
   "harness_error",
+  "policy_refusal",
   "tool_refused",
   "stuck_loop",
 ] as const satisfies readonly RunNoteKind[];

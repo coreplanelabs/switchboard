@@ -106,6 +106,11 @@ export interface RunRecord {
   stepCount?: number;
   schema?: number;
   status: RunStatus;
+  /** The failure by name, when a `failed` run has one (item 57):
+   *  `policy_refusal`, the provider refused the run's model call under its
+   *  usage policy. Absent on a run that did not fail, on one that failed for
+   *  a reason without a name here, and on records written before the field. */
+  failure?: RunFailure;
   /** Events the run published in total — unchanged by truncation. */
   eventCount: number;
   /** Events actually present in `events` (= `events.length`). */
@@ -296,6 +301,23 @@ function isRunPullRequestShape(v: unknown): v is RunPullRequest {
     p.url.length > 0 &&
     (p.head === undefined || (typeof p.head === "string" && p.head.length > 0))
   );
+}
+
+/** Why a `failed` run failed, when the failure has a name a reader acts on
+ *  (item 57). `policy_refusal`: the model provider refused the run's call
+ *  under its usage policy — the stop reason its wire names, never the
+ *  explanation's words — so the session's next seed leaves the refused
+ *  request out of its tail (docs/reference/specs/session-log.md item 9). A
+ *  failure without a name here leaves the record without the field. */
+export const RUN_FAILURE_KINDS = ["policy_refusal"] as const;
+export type RunFailureKind = (typeof RUN_FAILURE_KINDS)[number];
+export interface RunFailure {
+  kind: RunFailureKind;
+}
+
+export function isRunFailure(v: unknown): v is RunFailure {
+  if (typeof v !== "object" || v === null) return false;
+  return RUN_FAILURE_KINDS.includes((v as Record<string, unknown>).kind as RunFailureKind);
 }
 
 /** The three places a run's conversation can start (item 52): the thread's
@@ -724,6 +746,8 @@ export function isRunRecord(v: unknown): v is RunRecord {
   if (r.seed !== undefined && !RUN_SEEDS.includes(r.seed as RunSeed)) return false;
   // The run's place in its session's log (item 53), or absent.
   if (r.session !== undefined && !isRunSession(r.session)) return false;
+  // The failure by name (item 57): one of the named kinds, or absent.
+  if (r.failure !== undefined && !isRunFailure(r.failure)) return false;
   if (r.usage !== undefined && !isRunUsage(r.usage)) return false;
   // A coordinator's child (item 48): the instance id in the platform's alphabet
   // and the key `<instance>:<step>` — both or neither; one alone is no tag.

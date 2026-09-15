@@ -705,6 +705,24 @@ describe("isRunRecord — the seed field", () => {
   });
 });
 
+// docs/reference/specs/run-history.md item 57: a failure the record has a name
+// for — the provider refused the run's call under its usage policy.
+describe("isRunRecord — the failure field", () => {
+  it("accepts `failure: { kind: policy_refusal }` — also after a JSON round-trip — and a record without one carries no key", () => {
+    const refused = record({ status: "failed", failure: { kind: "policy_refusal" } });
+    expect(isRunRecord(refused)).toBe(true);
+    expect(isRunRecord(JSON.parse(JSON.stringify(refused)))).toBe(true);
+    expect("failure" in record()).toBe(false);
+    expect(isRunRecord(record())).toBe(true);
+  });
+
+  it("refuses a failure outside the vocabulary: another kind, a bare word, an empty object", () => {
+    expect(isRunRecord({ ...record(), failure: { kind: "timeout" } })).toBe(false);
+    expect(isRunRecord({ ...record(), failure: "policy_refusal" })).toBe(false);
+    expect(isRunRecord({ ...record(), failure: {} })).toBe(false);
+  });
+});
+
 // docs/reference/specs/run-history.md item 48: a coordinator's child names the
 // instance it belongs to and the key its spawn carried; every other record
 // carries neither.

@@ -385,6 +385,14 @@ describe("assembleRunRecord — the handoff on the record", () => {
     expect("seed" in assembleRunRecord(base())).toBe(false);
   });
 
+  it("carries the failure by name — `policy_refusal` for a run the provider refused under its usage policy — and validates; a caller without one leaves no key", () => {
+    const refused = assembleRunRecord({ ...base(), status: "failed", failure: { kind: "policy_refusal" } });
+    expect(refused.failure).toEqual({ kind: "policy_refusal" });
+    expect(isRunRecord(refused)).toBe(true);
+    expect(isRunRecord(JSON.parse(JSON.stringify(refused)))).toBe(true);
+    expect("failure" in assembleRunRecord({ ...base(), status: "failed" })).toBe(false);
+  });
+
   it("the drain deadline's interrupted record and the reclaim's close carry the seed the row names", () => {
     const registry = new RunRegistry({ genId: () => "run-child", genToken: () => "tok", now: () => 1000 });
     const run = registry.create("research · child", {

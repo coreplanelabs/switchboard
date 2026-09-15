@@ -18,6 +18,7 @@ import { parseModelRef } from "../provider.js";
 import { mergeTools, TOOLSETS } from "../../tools/toolsets.js";
 import { piContainerFor } from "../harness/pi/botHostContainer.js";
 import {
+  ModelPolicyRefusedError,
   PiContainerReplacedError,
   piHarnessFactsOf,
   runPiHarnessOpen,
@@ -50,7 +51,7 @@ import { startReviewDescription } from "../reviewDescription.js";
 import { isSpanRecord, type RunEvent } from "../runEvents.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "../runFriction.js";
 import { markdownOutput } from "../llmOutput/index.js";
-import { pushedBranchesOf, type RunSeed, type RunStatus } from "../runRecord.js";
+import { pushedBranchesOf, type RunFailure, type RunSeed, type RunStatus } from "../runRecord.js";
 import type { RunHandle, RunRegistry } from "../runRegistry.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
 import type { RunsReadCapability, SteerCapability } from "../../tools/runs.js";
@@ -443,6 +444,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
   // is told the review was carried forward.
   let carried: { reviewed: string; current: string; commits: number } | undefined;
   let runFailed = false; // the runner threw → terminal status `failed`
+  // The failure by name (run-history item 57), when the harness's throw has
+  // one: the record says it, so the session's next seed can act on it.
+  let failure: RunFailure | undefined;
   // The harness's verdict that pi's container was replaced under the run
   // (harness-pi item 16): the loop threw, but the run is interrupted, not
   // failed — its card says it restarts, and the dispatcher runs the request
@@ -957,7 +961,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
       );
   } catch (err) {
     if (err instanceof PiContainerReplacedError) replaced = err;
-    else runFailed = true;
+    else {
+      runFailed = true;
+      if (err instanceof ModelPolicyRefusedError) failure = { kind: "policy_refusal" };
+    }
     // pi first: it runs in the workspace released next (a no-op once ended).
     await piSession?.end();
     await root.span("post.workspace_release", (span) => releaseWorkspace(span));
@@ -1033,6 +1040,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
       ...(parentRunId !== undefined ? { parentRunId } : {}),
       ...(coordinator !== undefined ? { coordinator } : {}),
       ...(seed !== undefined ? { seed } : {}),
+      ...(failure !== undefined ? { failure } : {}),
     });
     // The diagnosis rides the run record (above): the friction ledger the
     // cross-run proposer reads is run history, so nothing is written twice.

@@ -110,6 +110,10 @@ export interface RunView {
    *  session-log item 2): the key, where its seed began, its request row and
    *  its range — `broken` when it detached. A live row carries none here. */
   session?: RunSession;
+  /** A finished run's failure by name (`RunRecord.failure`, run-history item
+   *  57) — what the session seed reads to leave a refused request out of the
+   *  tail (session-log item 9). From the store; a live row carries none. */
+  failure?: RunRecord["failure"];
   /** The route the run ran under (`RunRecord.route`, routing-and-config item
    *  21; a live ledger row's `meta.route`) — what a sticky follow-up's card
    *  carries as its `routed:` receipt. Absent on an unrouted run and on a live

@@ -5,10 +5,11 @@
 // thread, not a view the requester holds. From that page the dispatcher
 // derives everything it knows about the thread before the request runs: the
 // lineage (a reply in a spawned thread is that child's), the sticky agent (a
-// follow-up continues the agent whose transcript the thread holds) and the
+// follow-up continues the agent whose transcript the thread holds), the
 // previous run of the agent the request resolved to (when it ended, and
-// whether its log ends short). Read only for a reply in an existing thread: a
-// message that starts a thread has no runs.
+// whether its log ends short) and the requests of that agent the provider
+// refused under its usage policy (the rows the seed leaves out). Read only for
+// a reply in an existing thread: a message that starts a thread has no runs.
 import type { RunPullRequest } from "../runRecord.js";
 import type { RunView, RunsService } from "../runsService.js";
 import type { PreviousRun } from "./seed.js";
@@ -85,6 +86,19 @@ export function previousRunOf(runs: readonly RunView[], agent: string): Previous
     ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),
     broken: run.session!.range === "broken",
   };
+}
+
+/** The log rows of the requests the provider refused under its usage policy
+ *  (session-log item 9): the request row of every finished run of `agent`
+ *  in the page whose record names its session and says
+ *  `failure: policy_refusal` (run-history.md item 57) — the rows the next
+ *  seed leaves out of the tail, since the words in them are refused again on
+ *  every request that carries them. A run that failed for another reason,
+ *  another agent's run, a live run and a run without a session name none. */
+export function refusedRequestsOf(runs: readonly RunView[], agent: string): number[] {
+  return runs
+    .filter((r) => r.agent === agent && continuable(r) && r.failure?.kind === "policy_refusal")
+    .map((r) => r.session!.request);
 }
 
 /** The pull request the thread's work lives on (docs/reference/specs/
