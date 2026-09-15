@@ -7,7 +7,10 @@ import { CLI_ACTOR, resolveActor } from "../authz/actor.js";
 import { ALL_GRANTS, grantsFor, parseGrantsConfig } from "../authz/grants.js";
 import type { Actor } from "../authz/types.js";
 import { chatCallerFor } from "../commandChat.js";
-import { CommandRegistry, UNTRUSTED_OPEN, type Caller } from "../commandRegistry.js";
+import { CommandRegistry, renderText, UNTRUSTED_OPEN, type Caller } from "../commandRegistry.js";
+import type { ChatMessage } from "../chatMessage.js";
+import { InMemoryCoordinatorInstanceStore } from "../coordinator/instanceStore.js";
+import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { callerWith } from "../testing/callers.js";
 import { jsonSchemaFor } from "../commandSurface.js";
 import type { RunEvent } from "../runEvents.js";
@@ -137,16 +140,35 @@ const ids = (res: { ok: true; value: unknown } | { ok: false }) =>
   value<{ runs: { id: string }[] }>(res).runs.map((r) => r.id);
 
 describe("runs.* registrations", () => {
-  it("registers the five commands with the declared actions and chat opt-outs", () => {
+  it("registers the eight commands with the declared actions and chat opt-outs", () => {
     const byId = Object.fromEntries(runsCommands.map((c) => [c.id, c]));
-    expect(Object.keys(byId).sort()).toEqual(["runs.events", "runs.friction", "runs.get", "runs.list", "runs.stop"]);
-    for (const id of ["runs.list", "runs.get", "runs.events", "runs.friction"]) {
+    expect(Object.keys(byId).sort()).toEqual([
+      "runs.children",
+      "runs.events",
+      "runs.friction",
+      "runs.get",
+      "runs.list",
+      "runs.search",
+      "runs.stop",
+      "runs.unit",
+    ]);
+    for (const id of [
+      "runs.list",
+      "runs.get",
+      "runs.events",
+      "runs.friction",
+      "runs.unit",
+      "runs.children",
+      "runs.search",
+    ]) {
       expect(byId[id].action).toBe("runs:read");
       expect(byId[id].effect).toBe("read");
     }
     expect(byId["runs.stop"]).toMatchObject({ action: "runs:write", effect: "write" });
-    expect(byId["runs.list"].surfaces?.chat).toBeUndefined();
-    for (const id of ["runs.get", "runs.events", "runs.friction"]) expect(byId[id].surfaces?.chat).toBe(false);
+    // The listings of run metadata are chat-shaped; what carries stored free text is not.
+    for (const id of ["runs.list", "runs.unit", "runs.children"]) expect(byId[id].surfaces?.chat).toBeUndefined();
+    for (const id of ["runs.get", "runs.events", "runs.friction", "runs.search"])
+      expect(byId[id].surfaces?.chat).toBe(false);
   });
 
   it("jsonSchemaFor(runs.list) has a three-value status enum", () => {
@@ -242,6 +264,26 @@ describe("runs.list", () => {
     );
     expect(out.runs.map((r) => r.id)).toEqual([live.id, "fin-t1"]);
     expect(out.runs.every((r) => r.threadKey === "mcp:X:t1")).toBe(true);
+  });
+
+  it("the parent option lists the runs one run spawned or that continue a thread it opened, newest first, and nothing else", async () => {
+    const { store, registry, deps } = await setup();
+    await store.put(
+      record("kid-1", NOW - 500, { parentRunId: "fin-x", channelId: "mcp:X", channelVisibility: "machine" }),
+    );
+    await store.put(
+      record("kid-2", NOW - 700, { parentRunId: "fin-x", channelId: "mcp:X", channelVisibility: "machine" }),
+    );
+    expect(ids(await registry.invoke("runs.list", { options: { status: "all", parent: "fin-x" } }, cli, deps))).toEqual(
+      ["kid-1", "kid-2"],
+    );
+    expect(ids(await registry.invoke("runs.list", { options: { status: "all", parent: "fin-y" } }, cli, deps))).toEqual(
+      [],
+    );
+    // the same predicate as every listing: a caller pinned elsewhere sees none of them
+    expect(
+      ids(await registry.invoke("runs.list", { options: { status: "all", parent: "fin-x" } }, unpinned, deps)),
+    ).toEqual([]);
   });
 
   it("limit:'10' (string) and limit:10 yield the same result", async () => {
@@ -640,5 +682,191 @@ describe("runs.stop", () => {
     if (res.ok) throw new Error("unreachable");
     expect(res.message).toMatch(/mode/);
     expect(res.message).not.toMatch(/nuke/);
+  });
+});
+
+// docs/reference/specs/agent-ship.md item 17, agent-conductor.md item 11 and
+// session-log.md item 11 — the three listings that read across runs, on the
+// command surface: a unit's runs in round order, a conductor's children, one
+// session's search; each under the caller's predicate, a deny `not_found` or
+// empty exactly as the point reads and the list answer.
+describe("runs unit / runs children / runs search — the unit is the reading unit", () => {
+  const T0 = NOW - 100_000;
+  const KEY = "slack:C1:u1:coding";
+  const turn = (role: "user" | "assistant", text: string): ChatMessage => ({ role, content: [{ type: "text", text }] });
+
+  async function world() {
+    let n = 0;
+    const reg = new RunRegistry({ genId: () => `id-${++n}`, genToken: () => `tok-${n}`, now: () => NOW });
+    const store = new InMemoryRunStore({ now: () => NOW });
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await instances.put({
+      id: "plan-p-1",
+      kind: "ship",
+      userId: "slack:UALICE",
+      channelId: "slack:C1",
+      threadKey: "slack:C1:parent",
+      repo: "acme/api",
+      branch: "plan/p/u1",
+      createdAt: T0 - 1_000,
+    });
+    await instances.putUnits([
+      {
+        instanceId: "plan-p-1",
+        unit: "U16",
+        slug: "u1",
+        branch: "plan/p/u1",
+        dependsOn: [],
+        threadKey: "slack:C1:u1",
+        reviewThread: { threadKey: "slack:C1:u1r" },
+        rounds: [
+          { index: 0, agent: "coding", outcome: "started", at: T0 },
+          { index: 1, agent: "review", outcome: "started", at: T0 + 11_000 },
+          { index: 1, agent: "coding", outcome: "started", at: T0 + 21_000 },
+        ],
+      },
+    ]);
+    const at = (id: string, threadKey: string, agent: string, startedAt: number, over: Partial<RunRecord> = {}) =>
+      record(id, startedAt + 5_000, { threadKey, agent, startedAt, ...over });
+    await store.put(
+      at("c0", "slack:C1:u1", "coding", T0 + 1_000, {
+        session: { key: KEY, seedFrom: 0, request: 0, range: { from: 0, to: 1 } },
+      }),
+    );
+    await store.put(at("r1", "slack:C1:u1r", "review", T0 + 12_000));
+    await store.put(at("c1", "slack:C1:u1", "coding", T0 + 22_000));
+    await store.put(at("cond", "slack:C1:cond", "conductor", T0));
+    await store.put(at("k1", "slack:C1:k1", "research", T0 + 2_000, { parentRunId: "cond" }));
+    await store.put(at("k2", "slack:C1:k2", "explore", T0 + 1_000, { parentRunId: "cond" }));
+    const ledger = new InMemoryRunLedger(() => NOW);
+    await ledger.claimSession(KEY, "c0", "g1");
+    await ledger.seed(
+      "c0",
+      "g1",
+      [turn("user", "please fix the flaky lockfile test"), turn("assistant", "the lockfile is fine")].map(
+        (message, idx) => ({ idx, message }),
+      ),
+      KEY,
+    );
+    const runs = createRunsService({ registry: reg, store, units: instances, sessions: ledger });
+    const registry = new CommandRegistry<RunsCommandDeps>({ audit: () => {} });
+    registerRunsCommands(registry);
+    const denied: RunReadDenied[] = [];
+    const deps: RunsCommandDeps = { runs: async () => runs, denied: (e) => denied.push(e) };
+    return { registry, deps, denied };
+  }
+
+  it("runs unit answers the unit's runs in round order with their round and thread, and renders one line per run under the unit's threads — aligned columns for the terminal, a chat shape without padded columns", async () => {
+    const { registry, deps } = await world();
+    const res = await registry.invoke("runs.unit", { args: ["plan-p-1:U16"], options: {} }, cli, deps);
+    const v = value<{
+      unit: string;
+      threads: Record<string, string>;
+      runs: Array<{ id: string; round: number; thread: string }>;
+    }>(res);
+    expect(v.unit).toBe("plan-p-1:U16");
+    expect(v.threads).toEqual({ coding: "slack:C1:u1", review: "slack:C1:u1r" });
+    expect(v.runs.map((r) => [r.id, r.round, r.thread])).toEqual([
+      ["c0", 0, "coding"],
+      ["r1", 1, "review"],
+      ["c1", 1, "coding"],
+    ]);
+    expect(JSON.stringify(v)).not.toMatch(/tok-/);
+    const cmd = registry.get("runs.unit")!;
+    const text = renderText(cmd, value(res));
+    const lines = text.split("\n");
+    expect(lines[0]).toBe("unit plan-p-1:U16 — coding thread slack:C1:u1, review thread slack:C1:u1r");
+    expect(lines).toHaveLength(4);
+    expect(lines[1]).toMatch(/^c0\s+coding\s+completed\s+\S+\s+round 0 coding$/);
+    expect(lines[2]).toMatch(/^r1\s+review\s+completed\s+\S+\s+round 1 review$/);
+    const chat = renderText(cmd, value(res), { surface: "chat" });
+    expect(chat.split("\n")[1]).toMatch(/^• `c0` — coding · completed · \S+ · round 0 coding$/);
+    expect(chat.split("\n").filter((l) => /\S {2,}\S/.test(l))).toEqual([]);
+    expect(renderText(cmd, { unit: "plan-p-1:U17", instanceId: "plan-p-1", threads: {}, rounds: [], runs: [] })).toBe(
+      "unit plan-p-1:U17 — coding thread not opened yet, review thread not opened yet\n(none)",
+    );
+  });
+
+  it("an unknown unit is not_found (`unit not found`), a malformed key is invalid_input naming `unit`, a reader outside the predicate is told not_found exactly as for an unknown unit, and chat is a surface for the listing", async () => {
+    const { registry, deps } = await world();
+    expect(await registry.invoke("runs.unit", { args: ["plan-p-1:U77"], options: {} }, cli, deps)).toMatchObject({
+      ok: false,
+      error: "not_found",
+      message: "unit not found",
+      decidedBy: "handler",
+    });
+    const malformed = await registry.invoke("runs.unit", { args: ["nonsense"], options: {} }, cli, deps);
+    expect(malformed).toMatchObject({ ok: false, error: "invalid_input" });
+    if (malformed.ok) throw new Error("unreachable");
+    expect(malformed.message).toMatch(/unit/);
+    expect(await registry.invoke("runs.unit", { args: ["plan-p-1:U16"], options: {} }, pinnedX, deps)).toMatchObject({
+      ok: false,
+      error: "not_found",
+      message: "unit not found",
+    });
+    expect(
+      await registry.invoke("runs.unit", { args: ["plan-p-1:U16"], options: {} }, chatOperator, deps),
+    ).toMatchObject({ ok: true });
+  });
+
+  it("runs children lists the runs naming the parent oldest started first, behind the parent's own point read: an unknown parent, and a parent outside the predicate, are run not found with the deny on the audit line", async () => {
+    const { registry, deps, denied } = await world();
+    const res = await registry.invoke("runs.children", { args: ["cond"], options: {} }, cli, deps);
+    const v = value<{ parentRunId: string; runs: Array<{ id: string; parentRunId?: string }> }>(res);
+    expect(v.parentRunId).toBe("cond");
+    expect(v.runs.map((r) => [r.id, r.parentRunId])).toEqual([
+      ["k2", "cond"],
+      ["k1", "cond"],
+    ]);
+    const cmd = registry.get("runs.children")!;
+    expect(renderText(cmd, value(res)).split("\n")).toHaveLength(3);
+    expect(renderText(cmd, value(res)).split("\n")[0]).toBe("children of cond");
+    expect(renderText(cmd, { parentRunId: "k1", runs: [] })).toBe("children of k1\n(none)");
+    expect(await registry.invoke("runs.children", { args: ["nope"], options: {} }, cli, deps)).toMatchObject({
+      ok: false,
+      error: "not_found",
+      message: "run not found",
+    });
+    expect(await registry.invoke("runs.children", { args: ["cond"], options: {} }, pinnedX, deps)).toMatchObject({
+      ok: false,
+      error: "not_found",
+    });
+    expect(denied).toEqual([
+      { commandId: "runs.children", actorId: "mcp:x-bot", action: "runs:read", reason: expect.any(String) },
+    ]);
+  });
+
+  it("runs search answers the matching turns with their run, snippets wrapped as untrusted, the limit option capping them; a reader outside the predicate gets no hits, a malformed key is invalid_input naming session, and chat is not a surface for it", async () => {
+    const { registry, deps } = await world();
+    const res = await registry.invoke("runs.search", { args: [KEY, "flaky lockfile"], options: {} }, cli, deps);
+    const v = value<{
+      session: string;
+      hits: Array<{ turn: number; role: string; snippet: string; runId?: string }>;
+      gaps: number[];
+    }>(res);
+    expect(v.session).toBe(KEY);
+    expect(v.gaps).toEqual([]);
+    expect(v.hits.map((h) => [h.turn, h.role, h.runId])).toEqual([
+      [0, "user", "c0"],
+      [1, "assistant", "c0"],
+    ]);
+    for (const h of v.hits) expect(h.snippet).toContain(UNTRUSTED_OPEN);
+    expect(v.hits[0].snippet).toContain("please fix the flaky lockfile test");
+    const one = await registry.invoke(
+      "runs.search",
+      { args: [KEY, "flaky lockfile"], options: { limit: 1 } },
+      cli,
+      deps,
+    );
+    expect(value<{ hits: unknown[] }>(one).hits).toHaveLength(1);
+    const outside = await registry.invoke("runs.search", { args: [KEY, "flaky"], options: {} }, pinnedX, deps);
+    expect(value<{ hits: unknown[] }>(outside)).toEqual({ session: KEY, hits: [], gaps: [] });
+    const malformed = await registry.invoke("runs.search", { args: ["bad key!", "flaky"], options: {} }, cli, deps);
+    expect(malformed).toMatchObject({ ok: false, error: "invalid_input" });
+    if (malformed.ok) throw new Error("unreachable");
+    expect(malformed.message).toMatch(/session/);
+    expect(
+      await registry.invoke("runs.search", { args: [KEY, "flaky"], options: {} }, chatOperator, deps),
+    ).toMatchObject({ ok: false, error: "not_found" });
   });
 });

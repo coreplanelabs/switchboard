@@ -12,6 +12,11 @@ import { RunRegistry, type RunRegistryOptions } from "./runRegistry.js";
 import { InMemoryRunStore, type RunStore } from "./runStore.js";
 import { createRunsService, type RunActor, type RunsService } from "./runsService.js";
 import { InMemoryRunLedger } from "./runLedger/inMemory.js";
+import type { ChatMessage } from "./chatMessage.js";
+import type { Predicate } from "./authz/types.js";
+import type { CoordinatorInstance, CoordinatorUnit } from "./coordinator/contract.js";
+import { InMemoryCoordinatorInstanceStore } from "./coordinator/instanceStore.js";
+import { GAP_MARKER } from "./runLedger/sessionLog.js";
 
 const DAY = 86_400_000;
 const NOW = 1_700_000_000_000;
@@ -1290,5 +1295,282 @@ describe("RunsService — the pull request on the record (run-history item 2)", 
     await inner.put(record(run.id, NOW + 5_000, { startedAt: NOW, status: "completed", agent: "coding", pr }));
     const finished = await svc.getRun(run.id);
     expect(finished.ok && finished.value).toMatchObject({ id: run.id, finished: true, pr });
+  });
+});
+
+// docs/reference/specs/agent-ship.md item 17 and agent-conductor.md item 11: the
+// unit is the reading unit — a ship unit's runs in round order from one read,
+// a conductor's children as the same listing — under the reader's predicate.
+describe("RunsService.listUnitRuns — a unit's runs in round order", () => {
+  const T0 = NOW - 100_000;
+  const instance: CoordinatorInstance = {
+    id: "plan-p-1",
+    kind: "ship",
+    userId: "slack:UALICE",
+    channelId: "slack:C1",
+    threadKey: "slack:C1:parent",
+    repo: "acme/api",
+    branch: "plan/p/u1",
+    createdAt: T0 - 1_000,
+  };
+  /** Round 0 is the coding round; review round n and its findings step share n — the runner's own vocabulary. */
+  const rounds: CoordinatorUnit["rounds"] = [
+    { index: 0, agent: "coding", outcome: "started", at: T0 },
+    { index: 0, agent: "coding", outcome: "pr_opened", at: T0 + 10_000 },
+    { index: 1, agent: "review", outcome: "started", at: T0 + 11_000 },
+    { index: 1, agent: "review", outcome: "request_changes", at: T0 + 20_000 },
+    { index: 1, agent: "coding", outcome: "started", at: T0 + 21_000 },
+    { index: 1, agent: "coding", outcome: "completed", at: T0 + 30_000 },
+    { index: 2, agent: "review", outcome: "started", at: T0 + 31_000 },
+    { index: 2, agent: "review", outcome: "approve", at: T0 + 40_000 },
+  ];
+  const u1: CoordinatorUnit = {
+    instanceId: "plan-p-1",
+    unit: "U16",
+    slug: "u1",
+    branch: "plan/p/u1",
+    dependsOn: [],
+    threadKey: "slack:C1:u1",
+    reviewThread: { threadKey: "slack:C1:u1r" },
+    rounds,
+  };
+  const u2: CoordinatorUnit = {
+    instanceId: "plan-p-1",
+    unit: "U17",
+    slug: "u2",
+    branch: "plan/p/u2",
+    dependsOn: ["U16"],
+    rounds: [],
+  };
+  const CHANNEL_C2: Predicate = { kind: "channels-in", channelIds: new Set(["slack:C2"]) };
+  const CHANNEL_C1: Predicate = { kind: "channels-in", channelIds: new Set(["slack:C1"]) };
+  const PUBLIC: Predicate = { kind: "visibility-in", visibilities: new Set(["public"]) };
+
+  async function world(units: CoordinatorUnit[] = [u1, u2]) {
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await instances.put(instance);
+    await instances.putUnits(units);
+    const store = new InMemoryRunStore({ now: () => NOW });
+    const inThread = (id: string, threadKey: string, agent: string, startedAt: number) =>
+      record(id, startedAt + 5_000, { threadKey, agent, startedAt, channelVisibility: "public" });
+    await store.put(inThread("c0", "slack:C1:u1", "coding", T0 + 1_000));
+    await store.put(inThread("r1", "slack:C1:u1r", "review", T0 + 12_000));
+    await store.put(inThread("c1", "slack:C1:u1", "coding", T0 + 22_000));
+    await store.put(inThread("r2", "slack:C1:u1r", "review", T0 + 32_000));
+    // The requesting thread's own past and the pipeline's record: never a round's run.
+    await store.put(inThread("before", "slack:C1:u1", "general", T0 - 50_000));
+    await store.put(record("ship", T0 + 50_000, { threadKey: "slack:C1:u1", agent: "ship", startedAt: T0 - 1_000 }));
+    // A findings run in flight in the coding thread, after round 1's boundary.
+    const { reg } = testRegistry({ now: () => T0 + 41_000 });
+    const live = reg.create("coding · live", {
+      agent: "coding",
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:u1",
+      channelVisibility: "public",
+    });
+    const svc = createRunsService({ registry: reg, store, units: instances });
+    return { svc, instances, store, live };
+  }
+
+  it("a unit with two rounds lists coding 0, review 1, coding 1, review 2 in time order, each run with its round and thread and every field of its view, the run in flight last with its round; the view names the threads and the row's boundaries", async () => {
+    const { svc, live } = await world();
+    const res = await svc.listUnitRuns("plan-p-1:U16", ALL);
+    if (!res.ok) throw new Error("expected the listing");
+    expect(res.value.runs.map((r) => [r.id, r.round, r.thread, r.finished])).toEqual([
+      ["c0", 0, "coding", true],
+      ["r1", 1, "review", true],
+      ["c1", 1, "coding", true],
+      ["r2", 2, "review", true],
+      [live.id, 1, "coding", false],
+    ]);
+    expect(res.value.runs[0]).toMatchObject({
+      agent: "coding",
+      threadKey: "slack:C1:u1",
+      persisted: true,
+      status: "completed",
+    });
+    expect(res.value).toMatchObject({
+      unit: "plan-p-1:U16",
+      instanceId: "plan-p-1",
+      threads: { coding: "slack:C1:u1", review: "slack:C1:u1r" },
+      rounds,
+    });
+    expectNoToken(res.value);
+  });
+
+  it("a unit whose review thread does not exist yet lists the coding thread alone, and names no review thread", async () => {
+    const { svc } = await world([{ ...u1, reviewThread: undefined, rounds: rounds.slice(0, 2) }]);
+    const res = await svc.listUnitRuns("plan-p-1:U16", ALL);
+    if (!res.ok) throw new Error("expected the listing");
+    expect(res.value.runs.map((r) => [r.id, r.round, r.thread])).toEqual([
+      ["c0", 0, "coding"],
+      ["c1", 0, "coding"],
+      [expect.stringMatching(/^id-/), 0, "coding"],
+    ]);
+    expect(res.value.threads).toEqual({ coding: "slack:C1:u1" });
+  });
+
+  it("a unit not started lists nothing and names no thread; an unknown unit, a malformed key and a process without the coordinator's records are not_found", async () => {
+    const { svc, store } = await world();
+    expect(await svc.listUnitRuns("plan-p-1:U17", ALL)).toEqual({
+      ok: true,
+      value: { unit: "plan-p-1:U17", instanceId: "plan-p-1", threads: {}, rounds: [], runs: [] },
+    });
+    expect(await svc.listUnitRuns("plan-p-1:U77", ALL)).toEqual({ ok: false, error: "not_found" });
+    expect(await svc.listUnitRuns("plan-p-9:U16", ALL)).toEqual({ ok: false, error: "not_found" });
+    expect(await svc.listUnitRuns("nonsense", ALL)).toEqual({ ok: false, error: "not_found" });
+    const { reg } = testRegistry();
+    expect(await createRunsService({ registry: reg, store }).listUnitRuns("plan-p-1:U16", ALL)).toEqual({
+      ok: false,
+      error: "not_found",
+    });
+  });
+
+  it("a reader outside the predicate is told not_found, byte-identical to an unknown unit — another channel's reader, another user's — while a reader who may see any run of the unit sees the whole listing, and a unit not started yet follows its requester's channel", async () => {
+    const { svc } = await world();
+    expect(await svc.listUnitRuns("plan-p-1:U16", CHANNEL_C2)).toEqual({ ok: false, error: "not_found" });
+    expect(await svc.listUnitRuns("plan-p-1:U16", { kind: "user-is", userId: "slack:UBOB" })).toEqual({
+      ok: false,
+      error: "not_found",
+    });
+    expect(await svc.listUnitRuns("plan-p-1:U16", { kind: "none" })).toEqual({ ok: false, error: "not_found" });
+    for (const visibleTo of [CHANNEL_C1, PUBLIC, { kind: "user-is", userId: "slack:UALICE" } as Predicate]) {
+      const res = await svc.listUnitRuns("plan-p-1:U16", visibleTo);
+      expect(res.ok && res.value.runs).toHaveLength(5);
+    }
+    // No run yet: the requester's channel decides, and nothing else — a public-only
+    // reader is told not_found until the first run carries the channel's stamp.
+    expect((await svc.listUnitRuns("plan-p-1:U17", CHANNEL_C1)).ok).toBe(true);
+    expect(await svc.listUnitRuns("plan-p-1:U17", CHANNEL_C2)).toEqual({ ok: false, error: "not_found" });
+    expect(await svc.listUnitRuns("plan-p-1:U17", PUBLIC)).toEqual({ ok: false, error: "not_found" });
+  });
+});
+
+describe("RunsService.listChildren — a conductor's children in start order", () => {
+  it("lists the runs naming the parent — persisted and live — oldest started first, under the predicate, the store asked with the parent as its own filter; a run with no children, a reader outside the predicate and a `none` predicate are an empty list", async () => {
+    const { reg } = testRegistry({ now: () => NOW - 1_000 });
+    const store = new InMemoryRunStore({ now: () => NOW });
+    await store.put(record("k1", NOW - 20_000, { parentRunId: "P", startedAt: NOW - 30_000 }));
+    await store.put(record("k2", NOW - 5_000, { parentRunId: "P", startedAt: NOW - 50_000 }));
+    await store.put(record("other", NOW - 3_000, { parentRunId: "Q" }));
+    const live = reg.create("research · child", {
+      agent: "research",
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:k3",
+      parentRunId: "P",
+    });
+    const list = vi.spyOn(store, "list");
+    const svc = createRunsService({ registry: reg, store });
+    const children = await svc.listChildren("P", ALL);
+    expect(children.map((r) => [r.id, r.finished, r.parentRunId])).toEqual([
+      ["k2", true, "P"],
+      ["k1", true, "P"],
+      [live.id, false, "P"],
+    ]);
+    expect(list).toHaveBeenLastCalledWith(expect.objectContaining({ parentRunId: "P" }));
+    expectNoToken(children);
+    expect(await svc.listChildren("none", ALL)).toEqual([]);
+    expect(await svc.listChildren("Q", { kind: "channels-in", channelIds: new Set(["slack:C2"]) })).toEqual([]);
+    expect(await svc.listChildren("P", { kind: "none" })).toEqual([]);
+    // `runs list --parent`'s filter is the same one, newest first as every listing is.
+    const listed = await svc.listRuns({ status: "all", visibleTo: ALL, parentRunId: "P" });
+    expect(listed.runs.map((r) => r.id)).toEqual([live.id, "k2", "k1"]);
+  });
+});
+
+// docs/reference/specs/session-log.md item 11: a person's search over one
+// session's log — the read `recall` makes — under the reader's predicate.
+describe("RunsService.searchSession — a person's search over one session's log", () => {
+  const KEY = "slack:C1:s:coding";
+  const say = (text: string): ChatMessage => ({ role: "user", content: [{ type: "text", text }] });
+  const reply = (text: string): ChatMessage => ({ role: "assistant", content: [{ type: "text", text }] });
+  const failed: ChatMessage = {
+    role: "user",
+    content: [{ type: "tool_result", toolUseId: "c1", content: "1 failed: lockfile.test.ts" }],
+  };
+
+  async function world() {
+    const ledger = new InMemoryRunLedger(() => NOW);
+    await ledger.claimSession(KEY, "run-a", "g1");
+    await ledger.seed(
+      "run-a",
+      "g1",
+      [
+        say("please fix the flaky lockfile test"),
+        reply("the lockfile is fine"),
+        say(GAP_MARKER),
+        failed,
+        say("unrelated remark"),
+      ].map((message, idx) => ({ idx, message })),
+      KEY,
+    );
+    const store = new InMemoryRunStore({ now: () => NOW });
+    // Two runs of the session: the first wrote turns 0–1, the second (after a
+    // detach the marker at 2 names) turns 2–4.
+    await store.put(
+      record("run-a", NOW - 20_000, {
+        threadKey: "slack:C1:s",
+        agent: "coding",
+        session: { key: KEY, seedFrom: 0, request: 0, range: { from: 0, to: 1 } },
+      }),
+    );
+    await store.put(
+      record("run-b", NOW - 10_000, {
+        threadKey: "slack:C1:s",
+        agent: "coding",
+        session: { key: KEY, seedFrom: 0, request: 3, range: { from: 2, to: 4 } },
+      }),
+    );
+    const { reg } = testRegistry();
+    const svc = createRunsService({ registry: reg, store, sessions: ledger });
+    return { svc, ledger, store, reg };
+  }
+
+  it("answers the matching turns in relevance order, each with its role, a one-line snippet and the run whose range holds it, the gap markers the hits straddle, and on a hit past a marker the marker's turn; `limit` caps the hits", async () => {
+    const { svc } = await world();
+    expect(await svc.searchSession(KEY, "flaky lockfile", 5, ALL)).toEqual({
+      session: KEY,
+      hits: [
+        { turn: 0, role: "user", snippet: "please fix the flaky lockfile test", runId: "run-a" },
+        { turn: 3, role: "user", snippet: "1 failed: lockfile.test.ts", runId: "run-b", gap: 2 },
+        { turn: 1, role: "assistant", snippet: "the lockfile is fine", runId: "run-a" },
+      ],
+      gaps: [2],
+    });
+    expect((await svc.searchSession(KEY, "flaky lockfile", 1, ALL)).hits).toHaveLength(1);
+    expect(await svc.searchSession(KEY, "unrelated", 5, ALL)).toEqual({
+      session: KEY,
+      hits: [{ turn: 4, role: "user", snippet: "unrelated remark", runId: "run-b" }],
+      gaps: [],
+    });
+  });
+
+  it("a reader outside the predicate, a session nobody ran, a key that is not one and a process without a ledger all search empty — one answer, and the log is never asked for a reader it is not for", async () => {
+    const { svc, ledger, store, reg } = await world();
+    const search = vi.spyOn(ledger, "searchSession");
+    const empty = { session: KEY, hits: [], gaps: [] };
+    expect(
+      await svc.searchSession(KEY, "flaky", 5, { kind: "channels-in", channelIds: new Set(["slack:C2"]) }),
+    ).toEqual(empty);
+    expect(await svc.searchSession(KEY, "flaky", 5, { kind: "user-is", userId: "slack:UBOB" })).toEqual(empty);
+    expect(await svc.searchSession(KEY, "flaky", 5, { kind: "none" })).toEqual(empty);
+    expect(await svc.searchSession("slack:C1:none:coding", "flaky", 5, ALL)).toEqual({
+      ...empty,
+      session: "slack:C1:none:coding",
+    });
+    expect(await svc.searchSession("nonsense", "flaky", 5, ALL)).toEqual({ ...empty, session: "nonsense" });
+    expect(search).not.toHaveBeenCalled();
+    // The thread's runs of another agent are another session: `slack:C1:s:review` has none.
+    expect(await svc.searchSession("slack:C1:s:review", "flaky", 5, ALL)).toEqual({
+      ...empty,
+      session: "slack:C1:s:review",
+    });
+    expect(await createRunsService({ registry: reg, store }).searchSession(KEY, "flaky", 5, ALL)).toEqual(empty);
+    // A reader who may see the session's runs is answered.
+    expect((await svc.searchSession(KEY, "flaky", 5, { kind: "user-is", userId: "slack:UALICE" })).hits).toHaveLength(
+      1,
+    );
   });
 });

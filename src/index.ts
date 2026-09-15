@@ -411,7 +411,13 @@ export async function runBot(): Promise<void> {
   // resident admin client the config names. ---
   // One RunsService for every surface: the command registry (HTTP/MCP/chat), the
   // /runs pages, and the run tools a spawning run holds (the dispatcher's `runs`).
-  const runsService = createRunsService({ registry: defaultRunRegistry, store: runStore, ledger: ledgerClient });
+  const runsService = createRunsService({
+    registry: defaultRunRegistry,
+    store: runStore,
+    ledger: ledgerClient,
+    sessions: ledgerClient,
+    units: coordinatorInstances,
+  });
   deps.runs = runsService;
   // Scheduled firings are recorded on the state Worker's ScheduleDO;
   // `schedule list` and the /runs "Scheduled" panel read the same store.

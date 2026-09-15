@@ -51,6 +51,8 @@ import { MCP_OFF_MESSAGE, type McpService } from "../mcp/service.js";
 import type { Operations } from "./operations.js";
 import { residentAdminFromConfig, type ResidentAdminClient } from "./residentAdmin.js";
 import { reviewAbridgerFromConfig, ReviewAbridger } from "./reviewAbridge.js";
+import { buildCoordinatorInstanceStore } from "./coordinator/instanceStore.js";
+import { buildRunLedger } from "./runLedgerWorker.js";
 import type { RunRegistry } from "./runRegistry.js";
 import type { RunStore } from "./runStore.js";
 import { createRunsService, type RunsService } from "./runsService.js";
@@ -215,9 +217,19 @@ export function buildCoreCommands(
   const cfg = once(config);
   const runStore = once(store);
   const ledger = once(async () => wiring.frictionLedger ?? selectFrictionLedger(await runStore()));
-  const runs = once(
-    async () => wiring.runs ?? createRunsService({ registry: wiring.registry, store: await runStore() }),
-  );
+  // A process binding its own service (the CLI) reads a unit's rows and a
+  // session's log from the same Worker its run store names — the bot hands
+  // its one service in with the ledger it drives runs on.
+  const runs = once(async () => {
+    if (wiring.runs) return wiring.runs;
+    const history = (await cfg()).config.runHistory;
+    return createRunsService({
+      registry: wiring.registry,
+      store: await runStore(),
+      sessions: buildRunLedger(history, wiring.secrets),
+      units: buildCoordinatorInstanceStore(history, wiring.secrets),
+    });
+  });
   const admin = async (): Promise<ResidentAdminClient | { unavailable: string }> =>
     wiring.residentAdmin?.() ?? residentAdminFromConfig(await cfg(), wiring.secrets);
   // ONE abridger per binding: its running/failed state is per process, and

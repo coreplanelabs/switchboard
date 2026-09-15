@@ -1124,6 +1124,26 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
       },
     ],
     "effect": "read",
+    "id": "runs.children",
+    "options": [],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "runs:read",
+    "args": [
+      {
+        "name": "id",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "read",
     "id": "runs.events",
     "options": [
       {
@@ -1223,6 +1243,11 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
       {
+        "name": "parent",
+        "required": false,
+        "type": "string",
+      },
+      {
         "name": "sinceMs",
         "required": false,
         "type": "integer",
@@ -1252,6 +1277,37 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "runs:read",
+    "args": [
+      {
+        "name": "session",
+        "required": true,
+        "type": "string",
+      },
+      {
+        "name": "query",
+        "required": true,
+        "rest": true,
+        "type": "string",
+      },
+    ],
+    "effect": "read",
+    "id": "runs.search",
+    "options": [
+      {
+        "name": "limit",
+        "required": false,
+        "type": "integer",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
     "action": "runs:write",
     "args": [
       {
@@ -1273,6 +1329,26 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         ],
       },
     ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "runs:read",
+    "args": [
+      {
+        "name": "unit",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "read",
+    "id": "runs.unit",
+    "options": [],
     "resource": "command",
     "surfaces": [
       "chat",

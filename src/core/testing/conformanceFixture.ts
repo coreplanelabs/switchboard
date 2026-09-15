@@ -75,6 +75,9 @@ import type { RunRecord } from "../runRecord.js";
 import { RunRegistry } from "../runRegistry.js";
 import { InMemoryRunStore } from "../runStore.js";
 import { createRunsService } from "../runsService.js";
+import type { ChatMessage } from "../chatMessage.js";
+import { InMemoryCoordinatorInstanceStore } from "../coordinator/instanceStore.js";
+import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { SCHEDULES } from "../schedules.js";
 import { InMemoryScheduleStore } from "../scheduleStore.js";
 import {
@@ -432,6 +435,10 @@ export function recording(inner: CommandInvoker, recorded: Recorded[]): CommandI
 export interface Stubs {
   reg: RunRegistry;
   store: InMemoryRunStore;
+  /** The coordinator's records: the fixture's one ship instance and its unit row (`runs unit`). */
+  units: InMemoryCoordinatorInstanceStore;
+  /** The run ledger, for its session logs alone (`runs search`); no live row is ever claimed on it. */
+  ledger: InMemoryRunLedger;
   abridger: ReviewAbridger;
   tracker: InMemoryIssueTracker;
   config: ConfigStore;
@@ -545,7 +552,8 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
         output: `> ${op}\n\nok`,
       }),
   };
-  const runs = async () => createRunsService({ registry: s.reg, store: s.store, clock: () => NOW });
+  const runs = async () =>
+    createRunsService({ registry: s.reg, store: s.store, clock: () => NOW, units: s.units, sessions: s.ledger });
   // `delivery report`: one merged pull request of the fixture repo, reviewed
   // twice by a bot the fixture names, merged in the week of the pinned clock —
   // read from memory, never from GitHub (`fetch` is disarmed here).
@@ -834,6 +842,60 @@ export async function fixture(
   await store.put(record(FIXTURE.persistedRun, NOW - 1000));
   await store.put(record("fin-2", NOW - 2000));
   await store.put(reviewRecord(FIXTURE.reviewRun, NOW - 3000));
+  // The unit is the reading unit: one ship instance whose task unit ran a
+  // coding round in its thread and a review round in its review thread
+  // (`runs unit`), the coding run's session log with the words a search finds
+  // (`runs search`), and one child of the persisted run (`runs children`).
+  const units = new InMemoryCoordinatorInstanceStore();
+  await units.put({
+    id: "ship-fin-1",
+    kind: "ship",
+    userId: "slack:UALICE",
+    channelId: "slack:C1",
+    threadKey: "slack:C1:unit",
+    repo: FIXTURE.repo,
+    branch: "ship/fin-1",
+    createdAt: NOW - 30_000,
+  });
+  await units.putUnits([
+    {
+      instanceId: "ship-fin-1",
+      unit: "task",
+      slug: "task",
+      branch: "ship/fin-1",
+      dependsOn: [],
+      threadKey: "slack:C1:unit",
+      reviewThread: { threadKey: "slack:C1:unit-review" },
+      rounds: [
+        { index: 0, agent: "coding", outcome: "started", at: NOW - 25_000 },
+        { index: 0, agent: "coding", outcome: "pr_opened", at: NOW - 16_000 },
+        { index: 1, agent: "review", outcome: "started", at: NOW - 15_000 },
+        { index: 1, agent: "review", outcome: "approve", at: NOW - 6_000 },
+      ],
+    },
+  ]);
+  await store.put({
+    ...record("unit-coding", NOW - 16_000),
+    threadKey: "slack:C1:unit",
+    startedAt: NOW - 24_000,
+    session: { key: FIXTURE.sessionKey, seedFrom: 0, request: 0, range: { from: 0, to: 3 } },
+  });
+  await store.put({ ...reviewRecord("unit-review", NOW - 6_000), startedAt: NOW - 14_000 });
+  await store.put({ ...record("child-1", NOW - 4_000), startedAt: NOW - 9_000, parentRunId: FIXTURE.persistedRun });
+  const ledger = new InMemoryRunLedger(() => NOW);
+  await ledger.claimSession(FIXTURE.sessionKey, "unit-coding", "g1");
+  const turn = (role: ChatMessage["role"], text: string): ChatMessage => ({ role, content: [{ type: "text", text }] });
+  await ledger.seed(
+    "unit-coding",
+    "g1",
+    [
+      turn("user", `please do the thing ${PLANTED_TEXT}`),
+      turn("assistant", `a sample turn ${PLANTED_TEXT}`),
+      turn("user", "and the rest"),
+      turn("assistant", "all done"),
+    ].map((message, idx) => ({ idx, message })),
+    FIXTURE.sessionKey,
+  );
   const abridger = fakeAbridger(store);
   const tracker = new InMemoryIssueTracker();
   const { store: config, overridesPath } = freshConfig(yaml);
@@ -858,6 +920,8 @@ export async function fixture(
     fakeDeps({
       reg,
       store,
+      units,
+      ledger,
       abridger,
       tracker,
       config,

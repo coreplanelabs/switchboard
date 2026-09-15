@@ -759,7 +759,7 @@ describe("run history routes", () => {
     });
   });
 
-  it("list: newest-first, limit 1000 → at most 200 rows plus a cursor; before/sinceMs/agent/channel/threadKey filters; no events on the wire", async () => {
+  it("list: newest-first, limit 1000 → at most 200 rows plus a cursor; before/sinceMs/agent/channel/threadKey/parentRunId filters; no events on the wire", async () => {
     const key = storeKey();
     const now = Date.now();
     for (let i = 0; i < 230; i++) {
@@ -770,6 +770,7 @@ describe("run history routes", () => {
           agent: i % 2 ? "review" : "coding",
           channelId: i % 5 ? "slack:C1" : "slack:C2",
           threadKey: i % 7 ? "slack:C1:t1" : "slack:C1:t2",
+          ...(i % 11 === 0 ? { parentRunId: "parent-x" } : {}),
         }),
       );
     }
@@ -811,7 +812,90 @@ describe("run history routes", () => {
     expect(newest.map((r) => r.id)).toEqual(["r000"]);
     expect((await post("/runs/list", { storeKey: key, threadKey: "slack:C1:none" })).data.items).toEqual([]);
     expect((await post("/runs/list", { storeKey: key, threadKey: 7 })).status).toBe(400);
+    // run-history item 57: the runs one run spawned, newest first — a conductor's children as one listing.
+    const children = (await post("/runs/list", { storeKey: key, parentRunId: "parent-x" })).data.items as Array<{
+      id: string;
+      parentRunId?: string;
+    }>;
+    expect(children).toHaveLength(21);
+    expect(children.every((r) => r.parentRunId === "parent-x")).toBe(true);
+    expect(children[0].id).toBe("r000");
+    expect((await post("/runs/list", { storeKey: key, parentRunId: "parent-none" })).data.items).toEqual([]);
+    expect((await post("/runs/list", { storeKey: key, parentRunId: "not a run id!" })).status).toBe(400);
   }, 60_000);
+
+  it("a table created before the parent column gains it, filled from each record's own `parentRunId`, so a child stored earlier still lists under its parent; a later put writes the column beside the row", async () => {
+    const key = storeKey();
+    const now = Date.now();
+    // Recreate the pre-column schema by hand: drop the index, then the column.
+    await runInDurableObject(stubOf(key), async (_inst: RunHistoryDO, state) => {
+      state.storage.sql.exec(`DROP INDEX IF EXISTS runs_parent`);
+      state.storage.sql.exec(`ALTER TABLE runs DROP COLUMN parent_run_id`);
+      const columns = state.storage.sql
+        .exec<{ name: string }>(`PRAGMA table_info(runs)`)
+        .toArray()
+        .map((c) => c.name);
+      expect(columns).not.toContain("parent_run_id");
+    });
+    // Two rows written straight into the old shape: a child whose summary names its parent, and an orphan.
+    await runInDurableObject(stubOf(key), async (_inst: RunHistoryDO, state) => {
+      for (const rec of [
+        record("legacy-child", now - 1000, { parentRunId: "parent-1" }),
+        record("legacy-orphan", now - 2000),
+      ]) {
+        const { events: _e, ...summary } = rec;
+        state.storage.sql.exec(
+          `INSERT INTO runs (run_id, label, agent, model, channel_id, user_id, thread_key, channel_visibility, repo, started_at, finished_at, stored_at, status, event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          summary.id,
+          summary.label ?? null,
+          summary.agent ?? null,
+          summary.model ?? null,
+          summary.channelId,
+          summary.userId,
+          summary.threadKey,
+          summary.channelVisibility,
+          null,
+          summary.startedAt,
+          summary.finishedAt,
+          now,
+          summary.status,
+          0,
+          0,
+          0,
+          100,
+          JSON.stringify(summary.diagnosis),
+          JSON.stringify(summary),
+        );
+      }
+    });
+    // The migration the DO applies at every construction.
+    await runInDurableObject(stubOf(key), (inst: RunHistoryDO) => inst.migrateRunsTable());
+    const columnOf = () =>
+      runInDurableObject(stubOf(key), async (_i: RunHistoryDO, state) =>
+        state.storage.sql
+          .exec<{ run_id: string; parent: string | null }>(
+            `SELECT run_id, parent_run_id AS parent FROM runs ORDER BY run_id`,
+          )
+          .toArray(),
+      );
+    expect(await columnOf()).toEqual([
+      { run_id: "legacy-child", parent: "parent-1" },
+      { run_id: "legacy-orphan", parent: null },
+    ]);
+    const idsUnder = async (parent: string) =>
+      ((await post("/runs/list", { storeKey: key, parentRunId: parent })).data.items as Array<{ id: string }>).map(
+        (r) => r.id,
+      );
+    expect(await idsUnder("parent-1")).toEqual(["legacy-child"]);
+    // Idempotent: a second construction changes nothing.
+    await runInDurableObject(stubOf(key), (inst: RunHistoryDO) => inst.migrateRunsTable());
+    expect(await columnOf()).toHaveLength(2);
+    // A put after the migration writes the column beside the row.
+    const fresh = record("new-child", now - 500, { parentRunId: "parent-1", events: events(1) });
+    expect((await post("/runs/put", { storeKey: key, record: fresh })).status).toBe(200);
+    expect(await idsUnder("parent-1")).toEqual(["new-child", "legacy-child"]);
+  });
 
   it("/runs/summary returns the listing row (no events, with bytes) for a kept run and {summary: null} otherwise, reading no event rows", async () => {
     const key = storeKey();

@@ -18,7 +18,7 @@ import { safeBasename } from "../artifacts/keys.js";
 import { authorize } from "../core/authz/authorize.js";
 import { whereIs, type ThreadAsset } from "../core/dispatch/threadAssets.js";
 import { redactSecrets } from "../core/runEvents.js";
-import { NOTEPAD_MAX_BYTES } from "../core/runLedger/sessionLog.js";
+import { NOTEPAD_MAX_BYTES, SEARCH_MAX_HITS, snippetOf } from "../core/runLedger/sessionLog.js";
 import type { FenceResult, Notepad, SessionHit } from "../core/runLedger/types.js";
 import type { LedgerRun, LedgerWriteThrough } from "../core/runLedger/writeThrough.js";
 import type { RunSession } from "../core/runRecord.js";
@@ -108,8 +108,7 @@ const nameAt = (name: string): RegExp =>
 
 const UNAVAILABLE = "the session tools are not available in this context: this run has no session log.";
 const DEFAULT_HITS = 5;
-const MAX_HITS = 50;
-const SNIPPET_CHARS = 300;
+const MAX_HITS = SEARCH_MAX_HITS;
 
 /** Whether the requester may read this run — the same `runs:read` point read
  *  `get_run_status` makes on a run; without the reads' capability the answer
@@ -119,11 +118,6 @@ async function mayRead(ctx: ToolContext): Promise<boolean> {
   const res = await ctx.runs.service.getRun(ctx.runs.runId);
   return res.ok && authorize(ctx.runs.actor, "runs:read", runResource(res.value)).allow;
 }
-
-const snippetOf = (text: string): string => {
-  const line = text.replace(/\s+/g, " ").trim();
-  return line.length > SNIPPET_CHARS ? `${line.slice(0, SNIPPET_CHARS - 1)}…` : line;
-};
 
 export const recallTool: RunnableTool = {
   name: "recall",

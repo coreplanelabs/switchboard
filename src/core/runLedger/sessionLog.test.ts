@@ -12,6 +12,8 @@ import {
   SESSION_KEY_PATTERN,
   sessionKey,
   sessionsToDrop,
+  SNIPPET_CHARS,
+  snippetOf,
   tailCut,
   textOfStoredRow,
 } from "./sessionLog.js";
@@ -160,6 +162,16 @@ describe("droppedToolResultRow — the marker that replaces a dropped tool resul
     ).toBeUndefined();
     expect(droppedToolResultRow(JSON.stringify({ compaction: { summary: "s" } }))).toBeUndefined();
     expect(droppedToolResultRow("not json")).toBeUndefined();
+  });
+});
+
+describe("snippetOf — a hit's text as one line", () => {
+  it("collapses whitespace to one line, trims, and cuts at the cap with an ellipsis; a short text is itself", () => {
+    expect(snippetOf("  the  lockfile\n\tis fine \n")).toBe("the lockfile is fine");
+    const long = snippetOf(`${"w".repeat(SNIPPET_CHARS)} more`);
+    expect(long).toHaveLength(SNIPPET_CHARS);
+    expect(long.endsWith("…")).toBe(true);
+    expect(snippetOf("x".repeat(SNIPPET_CHARS))).toBe("x".repeat(SNIPPET_CHARS));
   });
 });
 

@@ -51,6 +51,7 @@ import {
   planSessionTrim,
   roleOfStoredRow,
   rowKind,
+  SEARCH_MAX_HITS,
   sessionsToDrop,
   tailCut,
   textOfStoredRow,
@@ -148,7 +149,7 @@ const traceSinks = [workerLogSink((line) => console.log(line))];
 // keeps the 512 KB one.
 //   POST /runs/put    {storeKey, record, policy?, policyUpdatedAt?} → {ok, retained, stored, rewritten}
 //   POST /runs/get    {storeKey, id} → {record: RunRecord | null}      (unknown/expired: null, 200)
-//   POST /runs/list   {storeKey, limit?, before?, beforeId?, sinceMs?, agent?, channel?, threadKey?}
+//   POST /runs/list   {storeKey, limit?, before?, beforeId?, sinceMs?, agent?, channel?, threadKey?, parentRunId?}
 //                       → {items: RunListItem[], nextBefore?: {finishedAt, id}}   (cursor = the last row's list key)
 //   POST /runs/events {storeKey, id, afterSeq?, limit?} → {events: (RunEvent & {seq})[] | null, nextAfterSeq?}
 //                       (`events: null` when the run is unknown or hidden by retention; `seq` is the registry's stamp)
@@ -225,7 +226,6 @@ const MAX_MATCH_TOKENS = 24;
 /** A `recall` query's size and the most hits one answers (session-log item 10):
  *  a query is a few words, and the tool's default is five. */
 const MAX_SEARCH_QUERY_BYTES = 1_024;
-const MAX_SEARCH_HITS = 50;
 /** Request body ceiling, checked against Content-Length before parsing. A full
  *  batch (50 × 4000-char texts + keywords + envelope) fits comfortably. */
 const MAX_BODY_BYTES = 512 * 1024;
@@ -1152,31 +1152,16 @@ export class RunHistoryDO extends DurableObject<Env> {
         value TEXT NOT NULL
       );
     `);
-    // The one column migration this DO has (the run-visibility stamp): a table
-    // created before the visibility stamp gains the column with `unknown` for
-    // every existing row — so a run written before the stamp is never public.
-    // Then the indexes the visibility predicate's leaves walk (`channel_id IN`,
-    // `channel_visibility IN`, `user_id =`), each ordered like the page.
-    const columns = new Set(
-      this.sql
-        .exec<{ name: string }>(`PRAGMA table_info(runs)`)
-        .toArray()
-        .map((c) => c.name),
-    );
-    if (!columns.has("channel_visibility"))
-      this.sql.exec(`ALTER TABLE runs ADD COLUMN channel_visibility TEXT NOT NULL DEFAULT 'unknown'`);
-    // The session a run was a range of (session-log item 7), so the sweep can
-    // tell which sessions still have a kept run; null for a record without one.
-    if (!columns.has("session_key")) this.sql.exec(`ALTER TABLE runs ADD COLUMN session_key TEXT`);
-    // What the run cost in tokens (costs.md, cost by user): the record's `usage`
-    // as JSON; NULL for a record written before the field existed, until the
-    // by-user aggregate fills it in from the run's stored events.
-    if (!columns.has("usage_json")) this.sql.exec(`ALTER TABLE runs ADD COLUMN usage_json TEXT`);
+    this.migrateRunsTable();
+    // The indexes the visibility predicate's leaves walk (`channel_id IN`,
+    // `channel_visibility IN`, `user_id =`), each ordered like the page; the
+    // session the sweep asks about; the parent a children listing filters on.
     this.sql.exec(`
       CREATE INDEX IF NOT EXISTS runs_channel_finished ON runs(channel_id, finished_at DESC, run_id DESC);
       CREATE INDEX IF NOT EXISTS runs_visibility_finished ON runs(channel_visibility, finished_at DESC, run_id DESC);
       CREATE INDEX IF NOT EXISTS runs_user_finished ON runs(user_id, finished_at DESC, run_id DESC);
       CREATE INDEX IF NOT EXISTS runs_session ON runs(session_key);
+      CREATE INDEX IF NOT EXISTS runs_parent ON runs(parent_run_id, finished_at DESC, run_id DESC);
     `);
     // The sessions registry (session-log item 7): every session log a run of
     // this store claimed, with its thread — the sweep cannot enumerate the
@@ -1331,6 +1316,37 @@ export class RunHistoryDO extends DurableObject<Env> {
   private liveRow(runId: string): LiveRunRow | undefined {
     const r = this.sql.exec<LiveRow>(`SELECT * FROM live_runs WHERE run_id = ?`, runId).toArray()[0];
     return r ? rowToLive(r) : undefined;
+  }
+
+  /** The `runs` table's column migrations, run at every construction and
+   *  idempotent: a table created before a column existed gains it, with the
+   *  value a row written back then should read. The run-visibility stamp: a
+   *  run written before the stamp is `unknown`, never public. The session a
+   *  run was a range of (session-log item 7), so the sweep can tell which
+   *  sessions still have a kept run; null for a record without one. What the
+   *  run cost in tokens (costs.md, cost by user), NULL until the by-user
+   *  aggregate fills it from the run's stored events. The parent a child names
+   *  (run-history item 46), the column a children listing filters on: the
+   *  record already carries it in `summary_json`, so existing rows are filled
+   *  from there once, and every later `put` writes it beside the row. */
+  migrateRunsTable(): void {
+    const columns = new Set(
+      this.sql
+        .exec<{ name: string }>(`PRAGMA table_info(runs)`)
+        .toArray()
+        .map((c) => c.name),
+    );
+    if (!columns.has("channel_visibility"))
+      this.sql.exec(`ALTER TABLE runs ADD COLUMN channel_visibility TEXT NOT NULL DEFAULT 'unknown'`);
+    if (!columns.has("session_key")) this.sql.exec(`ALTER TABLE runs ADD COLUMN session_key TEXT`);
+    if (!columns.has("usage_json")) this.sql.exec(`ALTER TABLE runs ADD COLUMN usage_json TEXT`);
+    if (!columns.has("parent_run_id")) {
+      this.sql.exec(`ALTER TABLE runs ADD COLUMN parent_run_id TEXT`);
+      this.sql.exec(
+        `UPDATE runs SET parent_run_id = json_extract(summary_json, '$.parentRunId')
+         WHERE json_type(summary_json, '$.parentRunId') = 'text'`,
+      );
+    }
   }
 
   private liveByThread(threadKey: string): LiveRunRow | undefined {
@@ -1832,8 +1848,8 @@ export class RunHistoryDO extends DurableObject<Env> {
         );
       this.sql.exec(
         `INSERT INTO runs (run_id, label, agent, model, channel_id, user_id, thread_key, channel_visibility, repo, started_at, finished_at, stored_at, status,
-                           event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json, session_key, usage_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json, session_key, usage_json, parent_run_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(run_id) DO UPDATE SET
            label = excluded.label, agent = excluded.agent, model = excluded.model, channel_id = excluded.channel_id,
            user_id = excluded.user_id, thread_key = excluded.thread_key, channel_visibility = excluded.channel_visibility,
@@ -1842,7 +1858,8 @@ export class RunHistoryDO extends DurableObject<Env> {
            event_count = excluded.event_count, stored_event_count = excluded.stored_event_count, truncated = excluded.truncated,
            bytes = excluded.bytes, diagnosis_json = excluded.diagnosis_json, summary_json = excluded.summary_json,
            session_key = excluded.session_key,
-           usage_json = COALESCE(excluded.usage_json, runs.usage_json)`,
+           usage_json = COALESCE(excluded.usage_json, runs.usage_json),
+           parent_run_id = excluded.parent_run_id`,
         stored.id,
         stored.label ?? null,
         stored.agent ?? null,
@@ -1864,6 +1881,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         JSON.stringify(summary),
         stored.session?.key ?? null,
         stored.usage ? JSON.stringify(stored.usage) : null,
+        stored.parentRunId ?? null,
       );
       // The session's registry row learns its newest finish (session-log item
       // 7); a record that reaches the store without a claim (the plain put
@@ -2199,6 +2217,10 @@ export class RunHistoryDO extends DurableObject<Env> {
       where.push(`thread_key = ?`);
       params.push(q.threadKey);
     }
+    if (q.parentRunId !== undefined) {
+      where.push(`parent_run_id = ?`);
+      params.push(q.parentRunId);
+    }
     if (q.visibleTo !== undefined && q.visibleTo.kind !== "all") where.push(visibilitySql(q.visibleTo, params));
     const select = `SELECT run_id, agent, channel_id, finished_at, bytes, event_count, summary_json FROM runs WHERE ${where.join(" AND ")} ORDER BY finished_at DESC, run_id DESC`;
     // `LIMIT` holds on the over-bound path too: the kept set is the newest
@@ -2441,6 +2463,11 @@ function parseRunList(body: unknown): Validated<{ storeKey: string; query: RunLi
       return invalid(`${field} must be a string of at most ${MAX_KEY_CHARS} characters`);
     query[field] = v;
   }
+  if (b.parentRunId !== undefined) {
+    const id = parseRunId(b.parentRunId);
+    if (!id.ok) return invalid("parentRunId must match ^[A-Za-z0-9_-]{1,64}$");
+    query.parentRunId = id.value;
+  }
   if (b.visibleTo !== undefined) {
     // A malformed filter is a 400, never "all": the bot degrades to live rows
     // rather than the DO widening what an actor may see.
@@ -2453,8 +2480,8 @@ function parseRunList(body: unknown): Validated<{ storeKey: string; query: RunLi
 }
 
 /** Parameters the page query binds before any filter: the cursor pair (3) and the age floor (1),
- *  plus `agent`, `channel`, `threadKey`, and the LIMIT at most — the headroom `visibleTo` must fit under. */
-const RUN_LIST_BASE_PARAMETERS = 8;
+ *  plus `agent`, `channel`, `threadKey`, `parentRunId`, and the LIMIT at most — the headroom `visibleTo` must fit under. */
+const RUN_LIST_BASE_PARAMETERS = 9;
 
 /** How many `?` a filter binds (one per id, one per user). */
 function boundParameters(f: RunVisibilityFilter): number {
@@ -3400,8 +3427,8 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
       )
         return json({ error: `query must be a non-empty string of at most ${MAX_SEARCH_QUERY_BYTES} bytes` }, 400);
       const limit = b.limit;
-      if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > MAX_SEARCH_HITS)
-        return json({ error: `limit must be an integer in 1..${MAX_SEARCH_HITS}` }, 400);
+      if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > SEARCH_MAX_HITS)
+        return json({ error: `limit must be an integer in 1..${SEARCH_MAX_HITS}` }, 400);
       const hits = await stub.search(b.query, limit);
       const gaps =
         hits.length > 1

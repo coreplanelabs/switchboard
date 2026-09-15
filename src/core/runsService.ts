@@ -19,7 +19,11 @@ import type { RunSnapshot, RunStopStatus, RunSummary } from "./runRegistry/proje
 import type { RunStore } from "./runStore.js";
 import type { RunLedger } from "./runLedger/ledger.js";
 import type { LiveRunRow } from "./runLedger/types.js";
+import { snippetOf } from "./runLedger/sessionLog.js";
 import { activityOfEvents } from "./runRegistry/activity.js";
+import { parseUnitKey } from "./coordinator/contract.js";
+import type { CoordinatorInstanceStore } from "./coordinator/instanceStore.js";
+import { unitRunsOf, type UnitRunsView } from "./unitRuns.js";
 
 /** How long one ledger listing serves the service's reads (item 41): a page
  *  view is a run read, an events read and a friction read within a second, and
@@ -181,6 +185,10 @@ export interface ListRunsOptions {
    *  `limit: 1` is the thread's newest run: the read behind a thread's lineage
    *  and a child's thread-aware rows (agent-conductor item 10). */
   threadKey?: string;
+  /** The runs one run spawned or that continue a thread it opened
+   *  (`RunView.parentRunId`) — a conductor's children, live and finished,
+   *  ANDed with `visibleTo`. */
+  parentRunId?: string;
   /** Only runs finished (or, while live, started) at or after this epoch ms. */
   sinceMs?: number;
   /** Rows after the merge: default `RUN_LIST_DEFAULT_LIMIT`, capped at `RUN_LIST_MAX_LIMIT`. */
@@ -224,6 +232,26 @@ export interface StopRunView {
   state: "stopping";
 }
 
+/** One hit of a session search (session-log item 11): the log turn, whose it
+ *  is, one line of its text, the run whose range holds the turn — a finished
+ *  run of the session whose record names it — and, when the hit lies past a
+ *  gap marker the hits straddle, that marker's turn. */
+export interface SessionSearchHit {
+  turn: number;
+  role?: "user" | "assistant";
+  snippet: string;
+  runId?: string;
+  gap?: number;
+}
+
+/** What a session search answers: the hits in relevance order and every gap
+ *  marker between the oldest and the newest of them, as `recall` reports them. */
+export interface SessionSearchView {
+  session: string;
+  hits: SessionSearchHit[];
+  gaps: number[];
+}
+
 /** The registry capabilities handed to the live HTML/SSE path once the token
  *  checked out: the subscription, the backlog, and the token-gated stop (the
  *  page's Stop/Kill buttons stay capability-gated, not operator-gated). */
@@ -247,6 +275,21 @@ export interface RunsService {
   getRunEvents(id: string, opts: { afterSeq?: number; limit?: number }): Promise<Result<RunEventsPageView>>;
   getRunFriction(id: string): Promise<Result<RunFrictionView>>;
   stopRun(id: string, mode: StopMode, actor: RunActor): Promise<Result<StopRunView>>;
+  /** A ship unit's runs in round order (agent-ship item 17): the coding
+   *  thread's and the review thread's runs, live and finished, cut at the round
+   *  boundaries the unit's row records, under `visibleTo`. `not_found` for a
+   *  key that names no unit — and for a unit the reader may see nothing of,
+   *  byte-identical, as a point read on a run is. */
+  listUnitRuns(unitKey: string, visibleTo: Predicate): Promise<Result<UnitRunsView>>;
+  /** The runs that name `parentRunId` as their parent — a conductor's
+   *  children, live and finished — in start order, under `visibleTo`. Who may
+   *  see the parent is the caller's point read to make first. */
+  listChildren(parentRunId: string, visibleTo: Predicate): Promise<RunView[]>;
+  /** One session log's full-text search (session-log item 11): the read
+   *  `recall` makes, for a person. Empty — never an error — when the process
+   *  has no ledger, when the reader may see no run of the session, and when no
+   *  such session exists; the three are one answer, so existence is not revealed. */
+  searchSession(key: string, query: string, limit: number, visibleTo: Predicate): Promise<SessionSearchView>;
   /** Synchronous capability check for the live HTML/SSE routes: the
    *  registry subscription when `token` is right for a non-evicted run, else null. */
   authorizeLive(id: string, token: string): LiveRunAccess | null;
@@ -273,6 +316,15 @@ export interface RunsServiceDeps {
    *  process's registry list, read, page, diagnose and stop like any run. Null or
    *  absent when the ledger is off. */
   ledger?: Pick<RunLedger, "listLive" | "readEvents" | "requestStop"> | null;
+  /** The session logs' search (session-log item 8) — the same ledger object in
+   *  the bot. A process that reads history without driving runs (the CLI)
+   *  hands the ledger here alone, so its run listing stays the store's. Null
+   *  or absent: every search is empty. */
+  sessions?: Pick<RunLedger, "searchSession"> | null;
+  /** The coordinator's records (run-history items 49–50): the instance a unit
+   *  belongs to and the unit rows a unit listing is cut by. Null or absent:
+   *  every unit is `not_found`. */
+  units?: Pick<CoordinatorInstanceStore, "get" | "listUnits"> | null;
 }
 
 /** A live row of the run ledger as a view (run-history item 41): the row's meta
@@ -384,6 +436,8 @@ function pageBounded(events: readonly RunEvent[], limit: number, moreAfter: bool
 export function createRunsService(deps: RunsServiceDeps): RunsService {
   const { registry, store } = deps;
   const ledger = deps.ledger ?? null;
+  const sessions = deps.sessions ?? null;
+  const units = deps.units ?? null;
   const analyze = deps.analyze ?? ((events, opts) => analyzeRunFriction(events, opts));
   const clock = deps.clock ?? systemClock;
   const warn = deps.warn ?? ((m: string) => console.warn(m));
@@ -486,7 +540,14 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     };
   };
 
-  return {
+  /** Every run of one thread, live and finished, as this reader may see it — a
+   *  unit's thread, a session's thread. `undefined` (a thread not opened yet) is nothing. */
+  const threadRuns = async (threadKey: string | undefined, visibleTo: Predicate): Promise<RunView[]> =>
+    threadKey === undefined
+      ? []
+      : (await service.listRuns({ status: "all", visibleTo, threadKey, limit: RUN_LIST_MAX_LIMIT })).runs;
+
+  const service: RunsService = {
     async listRuns(opts) {
       const limit = clampListLimit(opts.limit);
       // `none` is decided here, once: no live row qualifies and the store is not asked.
@@ -496,6 +557,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
         (opts.agent === undefined || r.agent === opts.agent) &&
         (opts.channel === undefined || r.channelId === opts.channel) &&
         (opts.threadKey === undefined || r.threadKey === opts.threadKey) &&
+        (opts.parentRunId === undefined || r.parentRunId === opts.parentRunId) &&
         (opts.sinceMs === undefined || (r.finishedAt ?? r.startedAt) >= opts.sinceMs);
       const paging = opts.before !== undefined;
       const live = paging
@@ -540,6 +602,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
             ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
             ...(opts.channel !== undefined ? { channel: opts.channel } : {}),
             ...(opts.threadKey !== undefined ? { threadKey: opts.threadKey } : {}),
+            ...(opts.parentRunId !== undefined ? { parentRunId: opts.parentRunId } : {}),
             ...(opts.sinceMs !== undefined ? { sinceMs: opts.sinceMs } : {}),
             ...(opts.before !== undefined ? { before: opts.before } : {}),
             ...(opts.beforeId !== undefined ? { beforeId: opts.beforeId } : {}),
@@ -716,5 +779,89 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
         requestStop: (mode) => registry.requestStop(id, token, mode),
       };
     },
+
+    async listUnitRuns(unitKey, visibleTo) {
+      const key = parseUnitKey(unitKey);
+      if (!key || !units || visibleTo.kind === "none") return notFound;
+      const unit = (await units.listUnits(key.instanceId)).find((u) => u.unit === key.unit);
+      if (!unit) return notFound;
+      const [coding, review] = await Promise.all([
+        threadRuns(unit.threadKey, visibleTo),
+        threadRuns(unit.reviewThread?.threadKey, visibleTo),
+      ]);
+      const runs = unitRunsOf(unit, { coding, review });
+      // A unit the reader sees no run of is theirs only if a run of its
+      // requester in its channel would be — a unit not started yet, read by
+      // its own channel; never a unit of another channel, whose thread keys
+      // and round outcomes would otherwise say a ship happened there.
+      if (runs.length === 0) {
+        const instance = await units.get(key.instanceId);
+        if (!instance) return notFound;
+        const identity = {
+          channelId: instance.channelId,
+          userId: instance.userId,
+          ...(instance.repo !== undefined ? { repo: instance.repo } : {}),
+          channelVisibility: "unknown" as const,
+        };
+        if (!matchesPredicate(visibleTo, identity)) return notFound;
+      }
+      return {
+        ok: true,
+        value: {
+          unit: unitKey,
+          instanceId: unit.instanceId,
+          threads: {
+            ...(unit.threadKey !== undefined ? { coding: unit.threadKey } : {}),
+            ...(unit.reviewThread !== undefined ? { review: unit.reviewThread.threadKey } : {}),
+          },
+          rounds: unit.rounds,
+          runs,
+        },
+      };
+    },
+
+    async listChildren(parentRunId, visibleTo) {
+      if (visibleTo.kind === "none") return [];
+      const { runs } = await service.listRuns({ status: "all", visibleTo, parentRunId, limit: RUN_LIST_MAX_LIMIT });
+      return runs.sort((a, b) => a.startedAt - b.startedAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    },
+
+    async searchSession(key, query, limit, visibleTo) {
+      const empty: SessionSearchView = { session: key, hits: [], gaps: [] };
+      // The key is `<threadKey>:<agent>` (`sessionKey`): the thread's runs of
+      // that agent are the session's runs, and a reader outside every one of
+      // them sees nothing — the same answer a session nobody ran gets.
+      const at = key.lastIndexOf(":");
+      if (!sessions || visibleTo.kind === "none" || at <= 0) return empty;
+      const agent = key.slice(at + 1);
+      const own = (await threadRuns(key.slice(0, at), visibleTo)).filter(
+        (r) => r.session?.key === key || (r.session === undefined && r.agent === agent),
+      );
+      if (own.length === 0) return empty;
+      const found = await sessions.searchSession(key, query, limit);
+      const gaps = [...found.gaps].sort((a, b) => a - b);
+      const runOf = (turn: number): string | undefined =>
+        own.find((r) => {
+          const range = r.session?.range;
+          return typeof range === "object" && range.from <= turn && (range.to === undefined || turn <= range.to);
+        })?.id;
+      const gapBefore = (turn: number): number | undefined => gaps.filter((g) => g < turn).at(-1);
+      return {
+        session: key,
+        hits: found.hits.map((h) => {
+          const runId = runOf(h.idx);
+          const gap = gapBefore(h.idx);
+          return {
+            turn: h.idx,
+            ...(h.role !== undefined ? { role: h.role } : {}),
+            snippet: snippetOf(h.text),
+            ...(runId !== undefined ? { runId } : {}),
+            ...(gap !== undefined ? { gap } : {}),
+          };
+        }),
+        gaps,
+      };
+    },
   };
+  return service;
 }
