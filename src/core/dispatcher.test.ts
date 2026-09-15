@@ -4476,6 +4476,21 @@ describe("closed-card checklist and review verdict run link", () => {
     expect(replies.some((r) => r.includes("Live run"))).toBe(false);
   });
 
+  it("a failed run's error reply carries the run link — the transcript is one click from the thread", async () => {
+    vi.stubEnv("PUBLIC_BASE_URL", "https://bot.example");
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        throw new Error("model exploded");
+      },
+    };
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("hello there"), io);
+    const fail = replies.find((r) => r.includes("model exploded"));
+    expect(fail).toMatch(/⚠️ model exploded\n\n\[Live run\]\(https:\/\/bot\.example\/runs\/.+\)/);
+  });
+
   it("a review with no PUBLIC_BASE_URL replies the bare answer (graceful degradation)", async () => {
     const deps = reviewRunDeps(capturingProvider());
     const { io, replies } = fakeIO();

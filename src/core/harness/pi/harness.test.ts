@@ -31,6 +31,7 @@ import { judgeToolCall, type ToolRuleContext } from "./toolRules.js";
 import { FakePiContainer } from "./testing/fakeContainer.js";
 import {
   compactionSteer,
+  isTransientProviderError,
   piHarnessFactsOf,
   promptOf,
   relayedTools,
@@ -722,6 +723,92 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       );
     });
     await expect(errored.start()).rejects.toThrow("the model call failed: 403 revoked");
+  });
+
+  // Feature: docs/reference/specs/harness-pi.md item 6 — a transient provider
+  // failure (a stream cut mid-message) gets ONE retry after a backoff; a
+  // second failure fails the run naming the retry in plain words.
+  it("a transient provider failure is retried once after a backoff — pi is re-prompted and the retry's answer is the run's", async () => {
+    const w = world();
+    const streamError = {
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [],
+        stopReason: "error",
+        errorMessage: "Anthropic stream ended before message_stop",
+      },
+    };
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0) c.emit(streamError, { type: "agent_settled" });
+      else finalTurn(c, "recovered");
+    });
+    const answer = await w.start();
+    expect(answer).toBe("recovered");
+    expect(w.notes.some((n) => n.includes("retrying once"))).toBe(true);
+    const prompts = w.container.commands().filter((c) => c.type === "prompt");
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toMatchObject({ message: expect.stringContaining("failed mid-stream") });
+  });
+
+  it("a retry that also fails ends the run saying it is retryable in plain words; a non-transient error is never retried", async () => {
+    const streamError = {
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [],
+        stopReason: "error",
+        errorMessage: "Anthropic stream ended before message_stop",
+      },
+    };
+    const twice = world();
+    scriptedPi(twice.container, (_n, c) => c.emit(streamError, { type: "agent_settled" }));
+    await expect(twice.start()).rejects.toThrow(
+      /the model call failed after a retry: .*stream ended.*re-ask in the thread/,
+    );
+    expect(twice.container.commands().filter((c) => c.type === "prompt").length).toBe(2);
+
+    const auth = world();
+    scriptedPi(auth.container, (_n, c) =>
+      c.emit(
+        {
+          type: "message_end",
+          message: { role: "assistant", content: [], stopReason: "error", errorMessage: "403 revoked" },
+        },
+        { type: "agent_settled" },
+      ),
+    );
+    await expect(auth.start()).rejects.toThrow("the model call failed: 403 revoked");
+    expect(auth.container.commands().filter((c) => c.type === "prompt")).toHaveLength(1);
+  });
+
+  // The classifier is anchored: a transient token embedded in a non-transient
+  // message (a status code inside an id, `terminated` or a retryable number in
+  // an auth error's words) never earns the retry.
+  it("isTransientProviderError matches real transient failures and never a non-transient message carrying one of its tokens", () => {
+    for (const m of [
+      "Anthropic stream ended before message_stop",
+      "fetch failed",
+      "terminated",
+      "connection terminated",
+      "stream reset by peer",
+      "network error",
+      "request timed out",
+      "Anthropic API error 529: overloaded_error",
+      "HTTP 503 Service Unavailable",
+      "status code 429",
+    ])
+      expect(isTransientProviderError(m), m).toBe(true);
+    for (const m of [
+      "403 revoked",
+      "401 invalid x-api-key",
+      "request terminated: invalid api key",
+      "invalid request: network parameter unknown",
+      "model claude-502-test not found",
+      "prompt is 429000 tokens over the limit",
+      "invalid_request_error: max_tokens must be positive",
+    ])
+      expect(isTransientProviderError(m), m).toBe(false);
   });
 
   it("a dialog pi raises is cancelled and noted; an unknown event kind is noted", async () => {

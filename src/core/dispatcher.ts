@@ -1214,7 +1214,15 @@ export async function dispatch(
     await ending
       .sealAfterReply(
         async () => {},
-        () => root.span(replyName, () => io.reply(redactSecrets(stripAnsi(errorReply(err))))),
+        () =>
+          root.span(replyName, () => {
+            // The failure reply carries the run link when a run started: the
+            // card scrolls away, and a failed run's transcript should be one
+            // click from the thread.
+            const line = redactSecrets(stripAnsi(errorReply(err)));
+            const link = admitted?.runLink;
+            return io.reply(link ? `${line}\n\n[Live run](${link})` : line);
+          }),
       )
       .catch(() => {});
   } finally {
