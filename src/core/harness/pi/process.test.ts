@@ -12,6 +12,7 @@ import {
   piLaunchFiles,
   piModelsJson,
   piRunPaths,
+  piRunPathsAt,
   piThinkingLevel,
   takesAdaptiveThinking,
   type PiLaunchSpec,
@@ -73,6 +74,19 @@ describe("piRunPaths", () => {
     expect(p.dir.startsWith(`${other.dir}/`)).toBe(false);
     // The shared root of before is gone in every case: no path is under it.
     expect(Object.values(p).some((v) => v.startsWith("/tmp/switchboard-pi/"))).toBe(false);
+  });
+
+  // A run's row records the root its pi was filed under (harness-pi item 8),
+  // and the build that comes back after a restart lays the same files out
+  // under that root, whatever root it would choose for a fresh run of its own.
+  it("piRunPathsAt lays a run's files out under a given root, the one a row recorded, and piRunPaths is that layout under this build's own root", () => {
+    const theirs = piRunPathsAt("/tmp/switchboard-pi-worker2/run-7");
+    expect(theirs.dir).toBe("/tmp/switchboard-pi-worker2/run-7");
+    expect(theirs.log).toBe("/tmp/switchboard-pi-worker2/run-7/rpc.log");
+    expect(theirs.fifo).toBe("/tmp/switchboard-pi-worker2/run-7/rpc.in");
+    expect(theirs.sessionDir).toBe("/tmp/switchboard-pi-worker2/run-7/agent/sessions");
+    expect(Object.values(theirs).every((v) => v === theirs.dir || v.startsWith(`${theirs.dir}/`))).toBe(true);
+    expect(piRunPaths("run-7")).toEqual(piRunPathsAt("/tmp/switchboard-pi-run-7"));
   });
 });
 

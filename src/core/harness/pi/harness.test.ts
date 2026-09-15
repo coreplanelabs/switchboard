@@ -17,12 +17,13 @@ import { RunControl } from "../../runRegistry/runControl.js";
 import { recordingSink } from "../../testing/recordingSink.js";
 import { FollowUpInbox } from "../../threadAdmission.js";
 import { createTracer } from "../../trace/tracer.js";
-import { HARNESS_URL_ENV, RUN_BEARER_ENV, piRunPaths } from "./process.js";
+import { HARNESS_URL_ENV, RUN_BEARER_ENV, piRunPaths, piRunPathsAt } from "./process.js";
 import { HarnessRegistry, authorizeToolCall } from "./relay.js";
 import { judgeToolCall, type ToolRuleContext } from "./toolRules.js";
 import { FakePiContainer } from "./testing/fakeContainer.js";
 import {
   compactionSteer,
+  piHarnessFactsOf,
   promptOf,
   relayedTools,
   runPiHarness,
@@ -253,6 +254,9 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(started.paths).toEqual(paths);
     expect(started.env.PI_CODING_AGENT_DIR).toBe(paths.agentDir);
     expect(started.args[started.args.indexOf("--session-dir") + 1]).toBe(paths.sessionDir);
+    // The row's first facts name the root beside the pid, so the build that
+    // comes back after a restart re-attaches where this one filed pi (item 8).
+    expect(w.facts[0]).toEqual({ pid: 4242, logOffset: 0, root: paths.dir });
     expect(w.container.killed).toEqual([4242]);
     expect(w.container.removed).toEqual([paths.dir]);
   });
@@ -316,9 +320,9 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       { firstIdx: 1, inFlight: [{ callId: "call_0", tool: "bash" }], turn: 1 },
       { firstIdx: 2, inFlight: [], turn: 1 },
     ]);
-    // The facts: pid, offset and the session file land on the row; pi is ended; the run is off the registry.
-    expect(w.facts[0]).toEqual({ pid: 4242, logOffset: 0 });
-    expect(w.facts.at(-1)).toMatchObject({ pid: 4242, sessionFile: `${paths.sessionDir}/s.jsonl` });
+    // The facts: pid, offset, the root and the session file land on the row; pi is ended; the run is off the registry.
+    expect(w.facts[0]).toEqual({ pid: 4242, logOffset: 0, root: paths.dir });
+    expect(w.facts.at(-1)).toMatchObject({ pid: 4242, root: paths.dir, sessionFile: `${paths.sessionDir}/s.jsonl` });
     expect(w.facts.at(-1)!.logOffset).toBeGreaterThan(0);
     expect(w.container.killed).toEqual([4242]);
     expect(w.registry.get("run-7")).toBeUndefined();
@@ -788,7 +792,7 @@ describe("runPiHarness — after a bot restart", () => {
       },
       { type: "agent_settled" },
     );
-    w.run.resume = resume({ pid: 4242, logOffset: skip, sessionFile: "s.jsonl" });
+    w.run.resume = resume({ pid: 4242, logOffset: skip, sessionFile: "s.jsonl", root: paths.dir });
     scriptedPi(w.container, (n, c) => finalTurn(c, "picked up where I left off"));
     const answer = await w.start();
     expect(answer).toBe("picked up where I left off");
@@ -823,7 +827,7 @@ describe("runPiHarness — after a bot restart", () => {
       },
       { type: "agent_settled" },
     );
-    w.run.resume = resume({ pid: 4242, logOffset: 0, sessionFile: "s.jsonl" });
+    w.run.resume = resume({ pid: 4242, logOffset: 0, sessionFile: "s.jsonl", root: paths.dir });
     scriptedPi(w.container, (n, c) => {
       bashTurn(w, "c1", "ls", "a");
       finalTurn(c, "continued");
@@ -836,6 +840,50 @@ describe("runPiHarness — after a bot restart", () => {
         .map((e) => (e as { summary: string }).summary),
     ).toEqual(["a model call failed while the bot was away (fetch failed); continuing"]);
     expect(w.events.filter((e) => e.type === "tool_result").map((e) => e.callId)).toEqual(["c0", "c1"]);
+  });
+
+  // The row's facts name the root pi was filed under, so the re-attach reads
+  // the log and feeds the FIFO where the build that started pi put them,
+  // whatever root this build would file a fresh run under (harness-pi item 8):
+  // a deploy that changes the shape no longer loses the runs in flight.
+  it("re-attaches at the root the row recorded, a previous build's shape: pi's log is read and its FIFO fed there, not under this build's own root, and that root goes when the run ends", async () => {
+    const w = world();
+    const theirs = piRunPathsAt("/tmp/switchboard-pi-worker2/run-7");
+    await w.container.start({ paths: theirs, args: [], env: {} });
+    w.run.resume = resume({ pid: 4242, logOffset: 0, sessionFile: "s.jsonl", root: theirs.dir });
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "picked up where I left off"));
+    expect(await w.start()).toBe("picked up where I left off");
+    expect(w.container.starts).toHaveLength(1); // the previous generation's start alone
+    expect(w.container.commands().map((c) => c.type)).toEqual(["set_auto_retry", "get_state", "prompt"]);
+    expect(w.facts.at(-1)).toMatchObject({ pid: 4242, root: theirs.dir });
+    expect(w.container.killed).toEqual([4242]);
+    expect(w.container.removed).toEqual([theirs.dir]);
+  });
+
+  // A row a build before the root was recorded wrote names a pid and nothing
+  // this build can find it by: that pi is ended where it runs and the run goes
+  // on as it does when pi died, on a session rebuilt from the mirror.
+  it("a row whose facts name no root cannot be re-attached: its pi is ended by pid and a fresh pi starts on this build's root from the mirrored transcript, the note saying why", async () => {
+    const w = world();
+    const theirs = piRunPathsAt("/tmp/switchboard-pi/run-7");
+    await w.container.start({ paths: theirs, args: [], env: {} }); // alive, filed where this build never looks
+    w.run.resume = resume({ pid: 4242, logOffset: 0, sessionFile: "s.jsonl" });
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "continued"));
+    expect(await w.start()).toBe("continued");
+    // The old pi ended before the new one starts, then the new one at the end.
+    expect(w.container.killed).toEqual([4242, 4242]);
+    expect(w.container.starts).toHaveLength(2);
+    const started = w.container.starts[1];
+    expect(started.paths.dir).toBe(paths.dir);
+    expect(started.args[started.args.indexOf("--session") + 1]).toMatch(
+      new RegExp(`^${paths.sessionDir}/resumed-\\d+\\.jsonl$`),
+    );
+    expect(w.facts.at(-1)).toMatchObject({ pid: 4242, root: paths.dir });
+    const notes = w.events.filter((e) => e.type === "run_note").map((e) => (e as { summary: string }).summary);
+    expect(notes[0]).toMatch(
+      /^resumed after a restart: the row named no directory for its pi \(pid 4242\), so it was ended and pi restarted on the mirrored transcript — 1 call\(s\) were in flight/,
+    );
+    expect(w.container.removed).toEqual([paths.dir]);
   });
 
   it("restarts a dead pi on a session rebuilt from the mirrored transcript, the calls in flight answered with the restart note, and continues", async () => {
@@ -954,6 +1002,16 @@ describe("the small pure pieces", () => {
       },
       { type: "tool_result", toolUseId: "b", content: "gone", isError: true },
     ]);
+  });
+  it("piHarnessFactsOf reads the facts a previous generation wrote on the row (pid, log offset, session file, root), keeps a row without a root as facts without one, and answers no facts for another shape", () => {
+    expect(
+      piHarnessFactsOf({ pid: 7, logOffset: 120, sessionFile: "s.jsonl", root: "/tmp/switchboard-pi-run-7" }),
+    ).toEqual({ pid: 7, logOffset: 120, sessionFile: "s.jsonl", root: "/tmp/switchboard-pi-run-7" });
+    expect(piHarnessFactsOf({ pid: 7, logOffset: 120 })).toEqual({ pid: 7, logOffset: 120 });
+    expect(piHarnessFactsOf({ pid: 7, logOffset: 120, root: 42 })).toEqual({ pid: 7, logOffset: 120 });
+    expect(piHarnessFactsOf({ pid: "7", logOffset: 120 })).toBeUndefined();
+    expect(piHarnessFactsOf(undefined)).toBeUndefined();
+    expect(piHarnessFactsOf(null)).toBeUndefined();
   });
 });
 
