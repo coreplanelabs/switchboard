@@ -298,6 +298,34 @@ export function scriptPiFromProvider(container: FakePiContainer, opts: ProviderP
         return;
       }
       if (signal.aborted) return;
+      if (result.stopReason === "refusal") {
+        // A call the provider refused under its usage policy, as pi's provider
+        // library hands it on: the wire's stop reason kept as `rawStopReason`
+        // beside an errored message whose text is the provider's explanation
+        // — the script's text parts here — or the library's own line when the
+        // provider gave none.
+        const explanation = result.content
+          .filter((p): p is Extract<ContentPart, { type: "text" }> => p.type === "text")
+          .map((p) => p.text)
+          .join("\n")
+          .trim();
+        const refused = {
+          role: "assistant",
+          content: [],
+          stopReason: "error",
+          rawStopReason: "refusal",
+          errorMessage: explanation || "The model refused to complete the request",
+          model: s.model,
+        };
+        container.emit(
+          { type: "message_start", message: { ...refused, stopReason: "pending" } },
+          { type: "message_end", message: refused },
+          { type: "turn_end", message: refused, toolResults: [] },
+          { type: "agent_end", messages: [], willRetry: false },
+        );
+        finish();
+        return;
+      }
       const calls = result.content.filter(
         (p): p is Extract<ContentPart, { type: "tool_use" }> => p.type === "tool_use",
       );

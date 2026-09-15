@@ -380,6 +380,51 @@ describe("turns, narration and the answer — the loop's rules", () => {
     });
     expect(obs.providerError).toBe("403 revoked");
   });
+
+  // The provider's own word for a call it refused under its usage policy rides
+  // pi's errored message as `rawStopReason`, beside the error pi flattens the
+  // refusal into — so the harness fails the run by that word, never by the
+  // explanation's text.
+  it("an errored assistant whose raw stop reason is the provider's refusal word is a policy refusal beside the provider error; another word, or none, is not", () => {
+    const { bridge } = harness();
+    const refused = bridge.observe({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [],
+        stopReason: "error",
+        rawStopReason: "refusal",
+        errorMessage: "this request was blocked by the provider's classifier",
+      },
+    });
+    expect(refused.providerError).toBe("this request was blocked by the provider's classifier");
+    expect(refused.policyRefusal).toBe(true);
+    expect(refused.message).toBeUndefined();
+    for (const raw of ["sensitive", "content_filter"]) {
+      const obs = bridge.observe({
+        type: "message_end",
+        message: { role: "assistant", content: [], stopReason: "error", rawStopReason: raw, errorMessage: "stopped" },
+      });
+      expect(obs.policyRefusal, raw).toBe(true);
+    }
+    const plain = bridge.observe({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [],
+        stopReason: "error",
+        rawStopReason: "max_tokens",
+        errorMessage: "503",
+      },
+    });
+    expect(plain.providerError).toBe("503");
+    expect(plain.policyRefusal).toBeUndefined();
+    const wordless = bridge.observe({
+      type: "message_end",
+      message: { role: "assistant", content: [], stopReason: "error", errorMessage: "403 revoked" },
+    });
+    expect(wordless.policyRefusal).toBeUndefined();
+  });
 });
 
 describe("the notes — compaction, harness errors, dialogs, the unknown", () => {

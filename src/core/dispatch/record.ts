@@ -12,6 +12,7 @@ import { isSpanRecord, type RunEvent } from "../runEvents.js";
 import { usageOfEvents } from "../runUsage.js";
 import {
   fitRecordToBudget,
+  type RunFailure,
   type RunProfileRecord,
   type RunRecord,
   type RunReference,
@@ -322,6 +323,9 @@ export function assembleRunRecord(input: {
    *  Omitted for a run without one; the ledger's finish closes the range on
    *  the record it writes, so a caller here passes the row's open range. */
   session?: RunSession;
+  /** The failure by name (item 57), when the runner's throw had one — the
+   *  provider's refusal under its usage policy. Omitted for every other run. */
+  failure?: RunFailure;
 }): RunRecord {
   const { run, snap, msg, seal } = input;
   const atFinish = snap?.events ?? [];
@@ -375,6 +379,7 @@ export function assembleRunRecord(input: {
     ...coordinatorFields(input.coordinator),
     ...(input.seed !== undefined ? { seed: input.seed } : {}),
     ...(input.session !== undefined ? { session: input.session } : {}),
+    ...(input.failure !== undefined ? { failure: input.failure } : {}),
     ...(pr !== undefined ? { pr } : {}),
     // What the run cost (cost by user): summed here, before the budget can cut
     // a middle event, from every model.turn span the run published.
@@ -519,6 +524,8 @@ export interface FinishRecordContext {
   coordinator?: CoordinatorTag;
   /** Where the run's conversation started (item 52); the dispatcher always hands it. */
   seed?: RunSeed;
+  /** The failure by name (item 57), when the run loop caught one. */
+  failure?: RunFailure;
 }
 
 /**
@@ -554,6 +561,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
     parentRunId,
     coordinator,
     seed,
+    failure,
   } = ctx;
   // A tracked run finishes through the ledger: the record replaces its
   // live rows in one transaction (a refused finish falls back to the store).
@@ -584,6 +592,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
           ...(parentRunId !== undefined ? { parentRunId } : {}),
           ...(coordinator !== undefined ? { coordinator } : {}),
           ...(seed !== undefined ? { seed } : {}),
+          ...(failure !== undefined ? { failure } : {}),
         }),
         { span: root, ...(ledgerRun ? { via: ledgerRun.sink } : {}) },
       ),

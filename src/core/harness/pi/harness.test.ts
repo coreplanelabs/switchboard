@@ -33,8 +33,10 @@ import { FakePiContainer } from "./testing/fakeContainer.js";
 import {
   compactionSteer,
   isTransientProviderError,
+  ModelPolicyRefusedError,
   PiContainerReplacedError,
   piHarnessFactsOf,
+  POLICY_REFUSAL_REPLY,
   promptOf,
   replacedCallNote,
   runPiHarness,
@@ -849,6 +851,45 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       "invalid_request_error: max_tokens must be positive",
     ])
       expect(isTransientProviderError(m), m).toBe(false);
+  });
+
+  // A call the provider refused under its usage policy is the failure by name:
+  // the run fails at once (the same words would be refused again), the note
+  // keeps the provider's explanation for the run page, and the error the
+  // thread reads says how to go on, never the provider's words.
+  it("a call refused under the provider's usage policy fails the run by name at once — no retry, the provider's words on a policy_refusal note, the error's message the one sentence the thread reads", async () => {
+    const w = world();
+    scriptedPi(w.container, (_n, c) =>
+      c.emit(
+        {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [],
+            stopReason: "error",
+            rawStopReason: "refusal",
+            errorMessage: "this request was blocked by the provider's classifier",
+          },
+        },
+        { type: "agent_settled" },
+      ),
+    );
+    const failed = await w.start().then(
+      () => undefined,
+      (err: unknown) => err,
+    );
+    expect(failed).toBeInstanceOf(ModelPolicyRefusedError);
+    expect((failed as Error).message).toBe(POLICY_REFUSAL_REPLY);
+    expect((failed as ModelPolicyRefusedError).providerMessage).toBe(
+      "this request was blocked by the provider's classifier",
+    );
+    expect(w.container.commands().filter((c) => c.type === "prompt")).toHaveLength(1);
+    expect(w.events.filter((e) => e.type === "run_note" && e.kind === "policy_refusal")).toEqual([
+      expect.objectContaining({
+        summary:
+          "the model refused the call under the provider's usage policy: this request was blocked by the provider's classifier",
+      }),
+    ]);
   });
 
   it("a dialog pi raises is cancelled and noted; an unknown event kind is noted", async () => {

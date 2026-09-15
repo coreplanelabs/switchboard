@@ -4638,6 +4638,27 @@ describe("closed-card checklist and review verdict run link", () => {
     );
   });
 
+  // harness-pi item 6: a call the provider refused under its usage policy is
+  // the failure by name, and the thread reads how to go on — never the
+  // provider's words, which the run page keeps.
+  it("a run the provider refused under its usage policy replies the one sentence that says how to go on, with the run link and none of the provider's words; any other provider error keeps the harness's text", async () => {
+    vi.stubEnv("PUBLIC_BASE_URL", "https://bot.example");
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        return { content: [{ type: "text", text: "blocked by the provider's classifier" }], stopReason: "refusal" };
+      },
+    };
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("hello there"), io);
+    const fail = replies.find((r) => r.startsWith("⚠️"));
+    expect(fail).toMatch(
+      /^⚠️ the model refused this request under its usage policy — rephrase it and the thread continues\n\n\[Live run\]\(https:\/\/bot\.example\/runs\/.+\)$/,
+    );
+    expect(replies.join("\n")).not.toContain("classifier");
+  });
+
   it("a review with no PUBLIC_BASE_URL replies the bare answer (graceful degradation)", async () => {
     const deps = reviewRunDeps(capturingProvider());
     const { io, replies } = fakeIO();
