@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.218.0](https://github.com/coreplanelabs/switchboard/compare/v1.217.0...v1.218.0) (2026-09-15)
+
+
+### Features
+
+* **mcp:** a pinned server behind Cloudflare Access — headersEnv names the service-token headers by bot env var, resolved per run beside the bearer ([#1127](https://github.com/coreplanelabs/switchboard/issues/1127)) ([2e10cec](https://github.com/coreplanelabs/switchboard/commit/2e10ceca196240f4a6fe2519dd44ebee6c3a95e2))
+* **runs:** recall and notes — a run on a workspace preset searches its session's whole log and keeps a notepad per thread that rides the next run's prompt and is steered to pi after every compaction ([#1129](https://github.com/coreplanelabs/switchboard/issues/1129)) ([3e1765b](https://github.com/coreplanelabs/switchboard/commit/3e1765b170c6090f85355b7661c21528aef275ed))
+
+
+### Bug fixes
+
+* **deploy:** a hoisted Worker install is an install — the runner no longer runs npm ci inside a workspace directory, which pruned zod out from under the bot's bundle ([#1131](https://github.com/coreplanelabs/switchboard/issues/1131)) ([8ccafcf](https://github.com/coreplanelabs/switchboard/commit/8ccafcfbeeffe51c51758d675870b9039b13f02d))
+
+
+### Documentation
+
+* **docs:** U34b's status line records its two pull requests, the relevance-ordered search and the run's session handle ([#1130](https://github.com/coreplanelabs/switchboard/issues/1130)) ([5b9ba35](https://github.com/coreplanelabs/switchboard/commit/5b9ba3505d7f8b3fd9fb08aeb696f07c9c300fd6))
+
 ## [1.217.0](https://github.com/coreplanelabs/switchboard/compare/v1.216.2...v1.217.0) (2026-09-14)
 
 
