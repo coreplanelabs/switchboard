@@ -55,6 +55,7 @@ import { createLedgerWriteThrough, mintGeneration, NullLedgerWriteThrough } from
 import { reclaimRuns, startReclaimSweep, closeReclaimed, type ReclaimOutcome } from "./core/boot.js";
 import { launchResumes } from "./core/resumeLaunch.js";
 import { ThreadsElsewhere } from "./core/runLedger/threadsElsewhere.js";
+import { LedgerTakeover } from "./core/runLedger/takeover.js";
 import { nullChannelIO } from "./core/nullChannelIo.js";
 import type { ChannelIO } from "./core/types.js";
 import { getAgent } from "./agents/registry.js";
@@ -337,6 +338,11 @@ export async function runBot(): Promise<void> {
   // The threads whose live run is on the ledger but not here (thread-admission
   // item 5): fed by every reclaim outcome below, read at admission.
   const threadsElsewhere = new ThreadsElsewhere();
+  // The runs the ledger lists as live that this generation has not finished
+  // resuming (harness-pi item 7): fed by every reclaim outcome and the resume
+  // launcher below, read by the harness door, which holds for a surviving pi's
+  // bearer until its run is back on the harness instead of refusing it.
+  const takeover = new LedgerTakeover();
   // The resident admin plane: the client the config names, or — without
   // residents, or without the admin bearer — the null client carrying the
   // reason, which the residents dash and `repo list` render as their 503.
@@ -537,7 +543,7 @@ export async function runBot(): Promise<void> {
     // run's pi extension asks over the run's own bearer — its relayed tool
     // definitions, the gate's verdict before each tool call, a relayed tool run
     // here. The shim forwards them blind like the proxy; the bearer is the door.
-    const harnessRoutes = createHarnessRoutesHandler({ bearers: runBearers, harnesses });
+    const harnessRoutes = createHarnessRoutesHandler({ bearers: runBearers, harnesses, takeover });
     // The bot steps a ship coordinator calls (docs/reference/specs/http-ingress.md
     // item 9): `POST /admin/coordinator/spawn|read-record|pr-check`, and the
     // `authorize` question the shim asks before it creates an instance — for
@@ -1016,6 +1022,7 @@ export async function runBot(): Promise<void> {
           `[resume] ${run.row.runId} ${run.row.threadKey} closed interrupted (${why})${closed.ok ? "" : ` — finish refused (${closed.reason})`}`,
         );
       },
+      onDone: (runId) => takeover.done(runId),
       log: (l) => console.log(l),
       warn: (w) => console.warn(w),
     });
@@ -1028,6 +1035,9 @@ export async function runBot(): Promise<void> {
       log: (l) => console.log(l),
       warn: (w) => console.warn(w),
     });
+    // The harness door learns which runs are on their way back before anything
+    // else is awaited: a surviving pi's re-ask may already be waiting on it.
+    takeover.take(bootReclaim);
     // The card sweep guard and the replied runs' cards, before the socket
     // opens; the resumes wait for it (they post to threads and need the client
     // connected like any run).
@@ -1041,6 +1051,9 @@ export async function runBot(): Promise<void> {
         .filter((r) => r.ownerGen !== generation && r.leaseUntil > systemClock())
         .flatMap((r) => (r.card ? [r.card] : [])),
     );
+  } else {
+    // No ledger: nothing is ever on its way back, so the door's verdict is final from the start.
+    takeover.settle();
   }
   await app.start();
   // The runs the boot reclaim found resumable continue now that the socket is
@@ -1054,6 +1067,7 @@ export async function runBot(): Promise<void> {
       log: (l) => console.log(l),
       warn: (w) => console.warn(w),
       onOutcome: async (outcome) => {
+        takeover.take(outcome);
         await guardCards(outcome);
         await launch(outcome);
       },

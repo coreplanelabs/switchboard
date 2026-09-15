@@ -6,9 +6,14 @@
 // refused before a byte of the body is read; past it, the run must be one this
 // process is driving on pi. A relayed call that outlives one request is
 // answered `202 { pending }` at the relay's window and asked again by the
-// extension with the same call id, which joins the one run. Pure handler over
-// a small request shape, then the node:http adapter: the model proxy's own
-// split.
+// extension with the same call id, which joins the one run. One exception to
+// the door's finality: during a generation's boot a bearer this process does
+// not know may be the previous generation's, held by a pi that outlived it and
+// whose run this generation is still bringing back — the door holds until the
+// boot reclaim has listed the ledger and, for such a run, answers so the
+// extension asks again rather than the 4xx it takes as final. Pure handler
+// over a small request shape, then the node:http adapter: the model proxy's
+// own split.
 
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
 import type { RunBearerStore } from "../core/modelProxy/runBearers.js";
@@ -19,6 +24,8 @@ import {
   type HarnessRegistry,
   type ToolCallAsk,
 } from "../core/harness/pi/relay.js";
+import { HANDOFF_BUDGET_MS } from "../core/drain.js";
+import type { TakeoverFacts } from "../core/runLedger/takeover.js";
 import { readBody } from "./http.js";
 
 export const HARNESS_TOOLS_PATH = "/harness/tools";
@@ -27,6 +34,16 @@ export const HARNESS_TOOL_PATH = "/harness/tool";
 export const HARNESS_PATHS = [HARNESS_TOOLS_PATH, HARNESS_AUTHORIZE_PATH, HARNESS_TOOL_PATH] as const;
 /** A tool input can carry a whole PR description; a call never carries a file's bytes. */
 export const MAX_HARNESS_BODY_BYTES = 4 * 1024 * 1024;
+
+/** How long the door holds a request naming a run it does not know while the
+ *  boot reclaim has not yet listed the ledger: the previous generation had
+ *  `HANDOFF_BUDGET_MS` to mark its runs and exit, and this one gets as long
+ *  again, plus a margin, to take them (one ledger round trip after `listen()`).
+ *  Under the extension's own 60 s on one request, so a held request is
+ *  answered, never abandoned; a reclaim slower than this answers retryable. */
+export const DOOR_HOLD_MS = HANDOFF_BUDGET_MS + 4_000;
+/** What a held answer's `Retry-After` says: the extension's own retry cadence (2 s). */
+const HELD_RETRY_AFTER_S = 2;
 
 export function isHarnessPath(path: string): boolean {
   return (HARNESS_PATHS as readonly string[]).includes(path);
@@ -42,6 +59,8 @@ const ROUTE_WORD: Record<string, string> = {
 export interface HarnessRouteDeps {
   bearers: RunBearerStore;
   harnesses: HarnessRegistry;
+  /** This generation's takeover of the ledger's live runs: what the door holds on. */
+  takeover: TakeoverFacts;
   log?: (line: string) => void;
   /** How long one `POST /harness/tool` waits on a running tool before answering
    *  `pending` (`RELAY_POLL_WINDOW_MS` by default), and the sleep that paces it. */
@@ -60,7 +79,16 @@ export interface HarnessRequest {
 export interface HarnessResponse {
   status: number;
   body: Record<string, unknown>;
+  /** Beyond the JSON content type: a held answer's `retry-after`. */
+  headers?: Record<string, string>;
 }
+
+/** Why the door held rather than refused: the boot reclaim has not listed the
+ *  ledger within the hold, or the run is one this generation is still resuming. */
+export type HeldReason = "reclaim_pending" | "run_resuming";
+
+export type HarnessDoor =
+  { ok: true; runId: string } | { ok: false; response: HarnessResponse; held?: { reason: HeldReason; runId?: string } };
 
 function bearerOf(headers: IncomingHttpHeaders): string | undefined {
   const raw = headers.authorization;
@@ -69,13 +97,10 @@ function bearerOf(headers: IncomingHttpHeaders): string | undefined {
   return m ? m[1] : undefined;
 }
 
-/** The door from the headers alone: which live harness a bearer names, or the refusal. */
-export function admitHarnessRequest(
-  deps: HarnessRouteDeps,
-  headers: IncomingHttpHeaders,
-): { ok: true; runId: string } | { ok: false; response: HarnessResponse } {
-  const presented = bearerOf(headers);
-  if (!presented) return { ok: false, response: { status: 401, body: { error: "missing_bearer" } } };
+type Judgement = { ok: true; runId: string } | { ok: false; status: number; reason: string; runId?: string };
+
+/** The store's word on a bearer, then the registry's on its run. */
+function judge(deps: HarnessRouteDeps, presented: string): Judgement {
   const verdict = deps.bearers.verify(presented);
   if (!verdict.ok) {
     const status =
@@ -86,12 +111,66 @@ export function admitHarnessRequest(
           : verdict.reason === "unknown_bearer"
             ? 401
             : 403;
-    return { ok: false, response: { status, body: { error: verdict.reason } } };
+    return {
+      ok: false,
+      status,
+      reason: verdict.reason,
+      ...(verdict.reason === "malformed" ? {} : { runId: verdict.runId }),
+    };
   }
   const runId = verdict.grant.runId;
-  if (!deps.harnesses.get(runId))
-    return { ok: false, response: { status: 404, body: { error: "run_not_on_harness" } } };
+  if (!deps.harnesses.get(runId)) return { ok: false, status: 404, reason: "run_not_on_harness", runId };
   return { ok: true, runId };
+}
+
+/** The refusals a resume can still turn into an admission: the run's entry not
+ *  minted here yet, minted but the surviving pi's secret not adopted yet, or
+ *  not yet registered on the harness. A malformed token, a revoked or an
+ *  expired bearer are final whatever the boot is doing. */
+const RESUME_CAN_OPEN: ReadonlySet<string> = new Set(["unknown_run", "unknown_bearer", "run_not_on_harness"]);
+
+/** The answer that makes the extension ask again: its relay treats a pending
+ *  answer as a call still running and its hook a 5xx as a bot not yet
+ *  answering — both re-asked on their own cadence, neither taken as final. */
+function held(path: string, reason: HeldReason, runId: string | undefined): HarnessDoor {
+  const response: HarnessResponse =
+    path === HARNESS_TOOL_PATH
+      ? { status: 202, body: { pending: true, reason } }
+      : { status: 503, body: { error: reason }, headers: { "retry-after": String(HELD_RETRY_AFTER_S) } };
+  return { ok: false, response, held: { reason, ...(runId !== undefined ? { runId } : {}) } };
+}
+
+const refused = (j: Extract<Judgement, { ok: false }>): HarnessDoor => ({
+  ok: false,
+  response: { status: j.status, body: { error: j.reason } },
+});
+
+/** The door from the headers alone: which live harness a bearer names, or the
+ *  refusal — or, for a bearer this generation does not know while it is still
+ *  taking over the ledger's live runs, the hold: the request waits for the
+ *  boot reclaim's listing (up to `DOOR_HOLD_MS`) and is judged again; a run
+ *  the listing names as live and not yet resumed here is answered retryably
+ *  (`held`), as is every such bearer while the listing has not arrived. */
+export async function admitHarnessRequest(
+  deps: HarnessRouteDeps,
+  headers: IncomingHttpHeaders,
+  path: string,
+): Promise<HarnessDoor> {
+  const presented = bearerOf(headers);
+  if (!presented) return { ok: false, response: { status: 401, body: { error: "missing_bearer" } } };
+  let verdict = judge(deps, presented);
+  if (verdict.ok) return verdict;
+  if (!RESUME_CAN_OPEN.has(verdict.reason)) return refused(verdict);
+  if (!deps.takeover.settled) {
+    await deps.takeover.whenSettled(DOOR_HOLD_MS);
+    verdict = judge(deps, presented);
+    if (verdict.ok) return verdict;
+    if (!RESUME_CAN_OPEN.has(verdict.reason)) return refused(verdict);
+    if (!deps.takeover.settled) return held(path, "reclaim_pending", verdict.runId);
+  }
+  if (verdict.runId !== undefined && deps.takeover.pending(verdict.runId))
+    return held(path, "run_resuming", verdict.runId);
+  return refused(verdict);
 }
 
 function askOf(body: unknown): ToolCallAsk | undefined {
@@ -106,7 +185,7 @@ export async function handleHarnessRequest(deps: HarnessRouteDeps, req: HarnessR
   const wantsGet = req.path === HARNESS_TOOLS_PATH;
   if ((req.method ?? "GET") !== (wantsGet ? "GET" : "POST"))
     return { status: 405, body: { error: "method_not_allowed" } };
-  const door = admitHarnessRequest(deps, req.headers);
+  const door = await admitHarnessRequest(deps, req.headers, req.path);
   if (!door.ok) return door.response;
   const harness = deps.harnesses.get(door.runId)!;
   if (wantsGet) return { status: 200, body: { tools: relayedToolDefinitions(harness) } };
@@ -137,17 +216,22 @@ export function createHarnessRoutesHandler(
   const log = deps.log ?? ((line: string) => console.log(line));
   return (req, res) => {
     const json = (r: HarnessResponse) => {
-      res.writeHead(r.status, { "content-type": "application/json", "cache-control": "no-store" });
+      res.writeHead(r.status, { ...r.headers, "content-type": "application/json", "cache-control": "no-store" });
       res.end(JSON.stringify(r.body));
     };
     void (async () => {
       const path = (req.url ?? "/").split("?")[0];
-      const door = admitHarnessRequest({ ...deps, log }, req.headers);
+      const door = await admitHarnessRequest({ ...deps, log }, req.headers, path);
       if (!door.ok) {
-        log(`[harness] ${door.response.status} ${ROUTE_WORD[path] ?? "other"} — ${String(door.response.body.error)}`);
+        const word = ROUTE_WORD[path] ?? "other";
+        log(
+          door.held
+            ? `[harness] ${door.response.status} ${word} — held (${door.held.reason})${door.held.runId ? ` run=${door.held.runId}` : ""}`
+            : `[harness] ${door.response.status} ${word} — ${String(door.response.body.error)}`,
+        );
         json(door.response);
-        // The body is never read on a refusal: drain it so the answer reaches
-        // the client whole — destroying the socket could drop the queued JSON.
+        // The body is never read on a refusal or a hold: drain it so the answer
+        // reaches the client whole — destroying the socket could drop the queued JSON.
         req.resume();
         return;
       }
