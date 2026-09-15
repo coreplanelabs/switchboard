@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { NullCostsService, type CostReport, type CostsService } from "../core/costs.js";
+import type { UserCostReport } from "../core/costsByUser.js";
 import { createCostsViewHandler, parseCostsRoute } from "./costsView.js";
 import { makeShellRenderer } from "./webShell.js";
 import { ALL_CAPABILITIES } from "../core/capabilities.js";
@@ -76,8 +77,43 @@ function seedOf(html: string): CostsSeed {
 function fakeService(
   impl: (group: string, days: string | null) => Promise<CostReport>,
   groups = ["switchboard"],
+  usersReport: CostsService["usersReport"] = () => Promise.reject(new Error("no by-user report in this test")),
 ): CostsService {
-  return { groups: () => groups, report: impl };
+  return { groups: () => groups, report: impl, usersReport };
+}
+
+/** A by-user report shaped like the builder's, small. */
+function usersReport(): UserCostReport {
+  const r = report();
+  return {
+    group: r.group,
+    range: r.range,
+    coverage: { from: r.range.from, retentionDays: 30, clamped: false, historyOn: true },
+    users: [
+      {
+        userId: "slack:UALICE",
+        userName: "alice",
+        runs: 3,
+        wallMs: 60_000,
+        llmUsd: 12,
+        cloudUsd: 1,
+        totalUsd: 13,
+        unpricedTokens: 0,
+        byModel: {},
+      },
+    ],
+    days: [],
+    pending: 0,
+    reconciliation: {
+      attributedLlmUsd: 12,
+      workspaceLlmUsd: 19.5,
+      unattributedLlmUsd: 7.5,
+      cloudAllocatedUsd: 1,
+      cloudUnallocatedUsd: 2.4,
+    },
+    viewer: { userIds: ["slack:UALICE"], matchedByEmail: true },
+    generatedAt: r.generatedAt,
+  };
 }
 
 function fakeReqRes(method: string, url: string) {
@@ -113,11 +149,37 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
 
 describe("parseCostsRoute", () => {
   it("matches the bare index, a group page, and a group's JSON twin", () => {
-    expect(parseCostsRoute("/costs")).toEqual({ kind: "page", group: null });
-    expect(parseCostsRoute("/costs/")).toEqual({ kind: "page", group: null });
-    expect(parseCostsRoute("/costs/switchboard")).toEqual({ kind: "page", group: "switchboard" });
-    expect(parseCostsRoute("/costs/switchboard.json")).toEqual({ kind: "json", group: "switchboard" });
-    expect(parseCostsRoute("/costs.json")).toEqual({ kind: "json", group: null });
+    expect(parseCostsRoute("/costs")).toEqual({ kind: "page", group: null, view: "daily" });
+    expect(parseCostsRoute("/costs/")).toEqual({ kind: "page", group: null, view: "daily" });
+    expect(parseCostsRoute("/costs/switchboard")).toEqual({ kind: "page", group: "switchboard", view: "daily" });
+    expect(parseCostsRoute("/costs/switchboard.json")).toEqual({ kind: "json", group: "switchboard", view: "daily" });
+    expect(parseCostsRoute("/costs.json")).toEqual({ kind: "json", group: null, view: "daily" });
+  });
+  // costs.md item 10: the by-user tab and its twin.
+  it("matches the by-user tab (?view=users) and its JSON twin /costs/<group>/users.json; a twin never has a view", () => {
+    expect(parseCostsRoute("/costs/switchboard", "?view=users&days=7")).toEqual({
+      kind: "page",
+      group: "switchboard",
+      view: "users",
+    });
+    expect(parseCostsRoute("/costs", "?view=users")).toEqual({ kind: "page", group: null, view: "users" });
+    expect(parseCostsRoute("/costs/switchboard", "?view=bogus")).toEqual({
+      kind: "page",
+      group: "switchboard",
+      view: "daily",
+    });
+    expect(parseCostsRoute("/costs/switchboard/users.json")).toEqual({
+      kind: "users-json",
+      group: "switchboard",
+      view: "users",
+    });
+    expect(parseCostsRoute("/costs/switchboard.json", "?view=users")).toEqual({
+      kind: "json",
+      group: "switchboard",
+      view: "daily",
+    });
+    expect(parseCostsRoute("/costs/../users.json")).toBeNull();
+    expect(parseCostsRoute("/costs/switchboard/other.json")).toBeNull();
   });
   it("rejects anything else, including traversal-shaped and over-long slugs", () => {
     expect(parseCostsRoute("/costsX")).toBeNull();
@@ -193,6 +255,66 @@ describe("createCostsViewHandler", () => {
       expect(io.body()).not.toContain("<title>Switchboard <b>");
     }
     expect(calls).toBe(2);
+  });
+
+  // costs.md item 10: the by-user tab reads one more report, only when asked
+  // for, with the verified viewer; its twin serves exactly that report.
+  it("?view=users seeds the by-user report beside the daily one and hands the viewer through; the twin serves the report; the daily page reads no by-user report", async () => {
+    const calls: Array<{ group: string; days: string | null; viewer: unknown }> = [];
+    const h = createCostsViewHandler(
+      fakeService(
+        () => Promise.resolve(report()),
+        ["switchboard"],
+        (group, days, viewer) => {
+          calls.push({ group, days, viewer });
+          return Promise.resolve(usersReport());
+        },
+      ),
+      shell,
+    );
+    const identity = { sub: "access-sub-1", email: "alice@example.com" };
+    const page = fakeReqRes("GET", "/costs/switchboard?view=users&days=7");
+    h(page.req, page.res, { identity });
+    await tick();
+    expect(page.status).toBe(200);
+    const seed = seedOf(page.body());
+    expect(seed.view).toBe("users");
+    expect(seed.users).toEqual(usersReport());
+    expect(seed.report).toEqual(report());
+    expect(calls).toEqual([{ group: "switchboard", days: "7", viewer: identity }]);
+
+    const twin = fakeReqRes("GET", "/costs/switchboard/users.json?days=7");
+    h(twin.req, twin.res, { identity });
+    await tick();
+    expect(twin.status).toBe(200);
+    expect(twin.headers["content-type"]).toContain("application/json");
+    expect(twin.headers["cache-control"]).toBe("no-store");
+    expect(JSON.parse(twin.body())).toEqual(usersReport());
+    expect(calls).toHaveLength(2);
+
+    const daily = fakeReqRes("GET", "/costs/switchboard");
+    h(daily.req, daily.res, { identity });
+    await tick();
+    expect(seedOf(daily.body()).view).toBe("daily");
+    expect(seedOf(daily.body()).users).toBeUndefined();
+    expect(calls).toHaveLength(2);
+  });
+
+  it("a by-user read that fails upstream is a capped 502 like the daily one", async () => {
+    const h = createCostsViewHandler(
+      fakeService(
+        () => Promise.resolve(report()),
+        ["switchboard"],
+        () => Promise.reject(new Error("run history unreachable " + "x".repeat(600))),
+      ),
+      shell,
+    );
+    const io = fakeReqRes("GET", "/costs/switchboard/users.json");
+    h(io.req, io.res, {});
+    await tick();
+    expect(io.status).toBe(502);
+    expect(io.body()).toContain("cost sources unavailable: run history unreachable");
+    expect(io.body().length).toBeLessThan(450);
   });
 
   it("passes ?days through and 404s an unknown group", async () => {

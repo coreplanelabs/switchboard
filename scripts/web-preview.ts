@@ -6,6 +6,8 @@ import { makeShellRenderer, WEB_HTML_HEADERS } from "../src/channels/webShell.js
 import type { PageSeed, RunIndexRowSeed } from "../src/channels/webSeed.js";
 import { ALL_CAPABILITIES, NO_CAPABILITIES } from "../src/core/capabilities.js";
 import type { CostReport, DailyCost } from "../src/core/costs.js";
+import { buildUserCostReport } from "../src/core/costsByUser.js";
+import type { RunUsage, UserDayUsage } from "../src/core/runUsage.js";
 import { buildDeliveryReport, resolveDeliveryRange, type PullRequestFacts } from "../src/core/delivery.js";
 import { FAVICON_ICO_SVG } from "../src/channels/favicon.js";
 import { isRunSchedule, SCHEDULES } from "../src/core/schedules.js";
@@ -23,7 +25,7 @@ import { READING_DIFF_GIT, READING_DIFF_MEAT, READING_DIFF_SUMMARY } from "./web
 //   /runs/hist-1     a finished run in history mode        /runs/nope   the 404
 //   /runs/review-1   a finished PR review carrying both reading diffs (the panel)
 //   /runs/hist-4     a finished PR review with a request_changes verdict as the Reply
-//   /runs/scheduled  the Scheduled tab                     /residents   /costs   /delivery
+//   /runs/scheduled  the Scheduled tab                     /residents   /costs   /costs?view=users   /delivery
 //
 // SWITCHBOARD_PREVIEW_CAPABILITIES=minimal serves the same fixtures with every
 // optional capability off (the nav shrinks to Runs, no Scheduled tab, no docs).
@@ -965,6 +967,76 @@ const COSTS: CostReport = {
   },
 };
 
+// Cost by user (costs.md item 10), built through the real builder over the same
+// thirty days: three made-up Slack users starting runs on most days, `alice` the
+// signed-in viewer, one older model the price table does not know. The history
+// began ten days into the range, so the coverage line has something to say.
+const previewUsage = (
+  model: string,
+  input: number,
+  output: number,
+  cacheRead: number,
+  cacheWrite: number,
+): RunUsage => ({
+  turns: 1,
+  byModel: {
+    [`anthropic/${model}`]: {
+      turns: 1,
+      inputTokens: input,
+      outputTokens: output,
+      cacheReadTokens: cacheRead,
+      cacheWriteTokens: cacheWrite,
+    },
+  },
+});
+const COSTS_USERS_FROM = 10;
+const COSTS_USER_ROWS: UserDayUsage[] = COSTS_DAYS.slice(COSTS_USERS_FROM).flatMap((d, j) => {
+  const i = j + COSTS_USERS_FROM;
+  const rows: UserDayUsage[] = [
+    {
+      userId: "slack:U0ALICE00",
+      userName: "alice",
+      day: d.date,
+      runs: 3 + (i % 3),
+      wallMs: (40 + (i % 5) * 6) * 60_000,
+      usage: previewUsage("claude-fable-5", 600_000 + i * 20_000, 90_000 + i * 3_000, 2_400_000, 500_000),
+    },
+    {
+      userId: "slack:U0SAM0000",
+      userName: "sam",
+      day: d.date,
+      runs: 1 + (i % 2),
+      wallMs: (15 + (i % 4) * 5) * 60_000,
+      usage: previewUsage("claude-haiku-4-5-20251001", 900_000, 120_000, 3_000_000, 400_000),
+    },
+  ];
+  if (i % 4 === 1)
+    rows.push({
+      userId: "slack:U0PRIYA00",
+      userName: "priya",
+      day: d.date,
+      runs: 1,
+      wallMs: 25 * 60_000,
+      usage: previewUsage("claude-legacy-2", 300_000, 40_000, 0, 0),
+    });
+  return rows;
+});
+const COSTS_USERS = buildUserCostReport({
+  group: COSTS.group,
+  range: COSTS.range,
+  usage: {
+    rows: COSTS_USER_ROWS,
+    pending: 2,
+    earliestFinishedAt: NOW - (29 - COSTS_USERS_FROM) * 86_400_000,
+    retentionDays: 30,
+  },
+  days: COSTS_DAYS,
+  historyOn: true,
+  viewerUserIds: ["slack:U0ALICE00"],
+  matchedByEmail: true,
+  generatedAt: NOW,
+});
+
 // The delivery page's four weeks, built through the real aggregation so the
 // fixture cannot drift from the report shape: eight merged pull requests of
 // `acme/api`, five linked to a board issue, one reviewed twice after a
@@ -1137,7 +1209,11 @@ const SCHEDULED = {
   ],
 };
 
-function page(pathname: string, all: boolean): { title: string; seed: PageSeed; status?: number } | null {
+function page(
+  pathname: string,
+  all: boolean,
+  search: string,
+): { title: string; seed: PageSeed; status?: number } | null {
   if (pathname === "/runs")
     return {
       title: all ? "All runs" : "(2) Live runs",
@@ -1224,11 +1300,15 @@ function page(pathname: string, all: boolean): { title: string; seed: PageSeed; 
   if (pathname === "/residents") return { title: "Resident repos", seed: { page: "residents", ...RESIDENTS } };
   if (pathname.startsWith("/residents/"))
     return { title: "acme/web", seed: { page: "resident", slug: "acme/web", record: RESIDENTS.residents[0] } };
-  if (pathname.startsWith("/costs"))
+  if (pathname.startsWith("/costs")) {
+    const users = new URLSearchParams(search).get("view") === "users";
     return {
       title: "Switchboard spend",
-      seed: { page: "costs", report: COSTS, groups: ["api", "web"] },
+      seed: users
+        ? { page: "costs", report: COSTS, groups: ["api", "web"], view: "users", users: COSTS_USERS }
+        : { page: "costs", report: COSTS, groups: ["api", "web"], view: "daily" },
     };
+  }
   if (pathname.startsWith("/delivery"))
     return {
       title: "acme/api delivery",
@@ -1324,7 +1404,7 @@ createServer((req, res) => {
     res.end(`<!doctype html><html><body style="background:#3a3a3a;margin:0">${frames}</body></html>`);
     return;
   }
-  const p = page(url.pathname, url.searchParams.get("all") === "1");
+  const p = page(url.pathname, url.searchParams.get("all") === "1", url.search);
   if (!p) {
     res.writeHead(404, { "content-type": "text/plain" });
     res.end("not a preview route");

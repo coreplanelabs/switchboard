@@ -1,6 +1,7 @@
 import type { RunStatus } from "../core/runRecord.js";
 import type { RunView } from "../core/runsService.js";
 import type { CostReport } from "../core/costs.js";
+import type { UserCostReport } from "../core/costsByUser.js";
 import type { DeliveryReport } from "../core/delivery.js";
 import type { ScheduledRow } from "./scheduledPanel.js";
 import type { LiveFrame } from "./liveView/sse.js";
@@ -135,6 +136,10 @@ export interface CostsSeed {
   page: "costs";
   report: CostReport;
   groups: string[];
+  /** Which tab the page opens on: the daily table, or cost by user (`?view=users`). */
+  view: "daily" | "users";
+  /** Present when `view` is `users`: the by-user report for the same group and range. */
+  users?: UserCostReport;
 }
 
 export interface DeliverySeed {

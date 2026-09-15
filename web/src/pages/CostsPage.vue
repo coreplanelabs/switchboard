@@ -2,6 +2,7 @@
 import { computed } from "vue";
 import AppShell from "../components/AppShell.vue";
 import CostChart from "../components/costs/CostChart.vue";
+import CostsByUser from "../components/costs/CostsByUser.vue";
 import { useSeed } from "../lib/seed";
 import {
   accountLabelOf,
@@ -24,6 +25,16 @@ import {
 const seed = useSeed("costs");
 const report = computed(() => seed?.report ?? null);
 const groups = computed(() => seed?.groups ?? []);
+/** Which tab is open: the daily tables, or cost by user (`?view=users`, the
+ *  by-user report riding along in the seed). */
+const view = computed<"daily" | "users">(() => seed?.view ?? "daily");
+const users = computed(() => (view.value === "users" ? (seed?.users ?? null) : null));
+/** The same page for another group, range or tab — the two other pills keep the third. */
+function hrefOf(group: string, days: number, v: "daily" | "users"): string {
+  const q = [`days=${days}`];
+  if (v === "users") q.push("view=users");
+  return `/costs/${group}?${q.join("&")}`;
+}
 const series = computed(() => (report.value ? seriesOf(report.value) : []));
 const tiles = computed(() => (report.value ? tilesOf(report.value) : null));
 const split = computed(() => (report.value ? resourceSplitOf(report.value) : []));
@@ -118,7 +129,7 @@ function monthDay(date: string): string {
           <a
             v-else
             class="rounded-md px-2.5 py-1 font-mono text-xs tabular-nums text-muted no-underline hover:bg-elevated hover:text-highlighted"
-            :href="`/costs/${report.group}?days=${n}`"
+            :href="hrefOf(report.group, n, view)"
             >{{ rangeLabel(n) }}</a
           >
         </template>
@@ -134,7 +145,7 @@ function monthDay(date: string): string {
           <a
             v-else
             class="rounded-md px-2.5 py-1 text-xs text-muted no-underline hover:bg-elevated hover:text-highlighted"
-            :href="`/costs/${g}`"
+            :href="hrefOf(g, report.range.days, view)"
             >{{ g }}</a
           >
         </template>
@@ -259,7 +270,43 @@ function monthDay(date: string): string {
       </p>
     </section>
 
-    <section class="mb-5 grid gap-3 rounded-lg border border-default bg-elevated px-5 py-4">
+    <!-- The tabs above the tables: the group's day-by-day figures, or the same
+         dollars laid against who started the runs. The tiles and the chart
+         above are the group's context on both. -->
+    <nav class="mb-3 flex items-center gap-1 border-b border-default" aria-label="View">
+      <template v-for="v in ['daily', 'users'] as const" :key="v">
+        <span
+          v-if="v === view"
+          class="-mb-px border-b-2 border-primary px-3 py-1.5 text-sm font-medium text-highlighted"
+          aria-current="page"
+          >{{ v === "daily" ? "Daily" : "By user" }}</span
+        >
+        <a
+          v-else
+          class="-mb-px border-b-2 border-transparent px-3 py-1.5 text-sm text-muted no-underline hover:border-muted hover:text-highlighted"
+          :href="hrefOf(report.group, report.range.days, v)"
+          >{{ v === "daily" ? "Daily" : "By user" }}</a
+        >
+      </template>
+    </nav>
+
+    <section v-if="view === 'users'" class="mb-5 grid gap-3 rounded-lg border border-default bg-elevated px-5 py-4">
+      <div>
+        <h2 class="text-[0.9375rem] font-medium">Cost by user</h2>
+        <p class="text-sm text-muted">
+          Who started the runs · LLM at list from their tokens · cloud allocated by wall-clock
+        </p>
+      </div>
+      <CostsByUser v-if="users" :report="users" />
+      <p v-else class="text-sm text-warn">The by-user report did not load with this page.</p>
+      <p class="text-xs text-muted">
+        Machine-readable twin:
+        <code class="rounded bg-accented px-1 py-0.5">GET /costs/{{ report.group }}/users.json</code> (same Access
+        gate).
+      </p>
+    </section>
+
+    <section v-if="view === 'daily'" class="mb-5 grid gap-3 rounded-lg border border-default bg-elevated px-5 py-4">
       <div>
         <h2 class="text-[0.9375rem] font-medium">What each cloud dollar buys</h2>
       </div>
@@ -291,7 +338,7 @@ function monthDay(date: string): string {
       </table>
     </section>
 
-    <section class="mb-5 grid gap-3 rounded-lg border border-default bg-elevated px-5 py-4">
+    <section v-if="view === 'daily'" class="mb-5 grid gap-3 rounded-lg border border-default bg-elevated px-5 py-4">
       <details open>
         <summary class="cursor-pointer text-sm text-muted">Table view — daily cost by component (USD)</summary>
         <!-- The table scrolls sideways on a narrow screen instead of squishing
