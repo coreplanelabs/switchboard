@@ -1,6 +1,6 @@
 import { App, SocketModeReceiver, webApi } from "@slack/bolt";
 import { dispatch, type CoreDeps } from "../core/dispatcher.js";
-import { type SlackThreadMessage, threadTurns } from "./slack/threadTurns.js";
+import { type SlackThreadMessage, stripAppFooter, threadTurns } from "./slack/threadTurns.js";
 import {
   createStatusBudget,
   STATUS_EDITS_PER_MINUTE,
@@ -806,30 +806,9 @@ async function threadIfBotInIt(
   }
 }
 
-/** Slack appends "*Sent using* <@APP|Name>" as the LAST line of a message an
- *  app posts on a user's behalf (the Claude Slack plugin does this). It is
- *  platform chrome, not the user's words — left in, it breaks strict inline
- *  parsers (`repo onboard …` saw `*Sent` as a bad token). Only whole trailing
- *  footers of exactly that shape are removed (repeated for stacked footers);
- *  the phrase inside a user's own text is untouched. The footer is anchored to
- *  the END of the text, not to its own line: the raw event text arrives as
- *  `friction report *Sent using* <@UAPP>` — same line, no newline — so a
- *  line-anchored regex lets `*Sent` reach the command parser (`repo list`
- *  masks this because it ignores trailing text). An optional bracketed sender
- *  attribution after the mention is tolerated too. */
-const APP_FOOTER_RE = /(?:^|\s)(?:\*Sent using\*|Sent using)\s+<@[A-Z0-9]+(?:\|[^>]*)?>(?:\s*\[[^\]\n]*\])?\s*$/;
-
-/** Exported for tests. */
+/** The request text as the model sees it: the bot mention removed, then the
+ *  Slack app footer (`stripAppFooter` in slack/threadTurns.ts — the same strip
+ *  every history and quoted-thread turn gets). Exported for tests. */
 export function stripMention(text: string, botUserId?: string): string {
-  const stripped = botUserId ? text.replaceAll(`<@${botUserId}>`, "") : text.replace(/<@[A-Z0-9]+>/, "");
-  // Exactly the two shapes Slack emits (bold or plain — never asymmetric), as
-  // a whole trailing line; repeated because a forwarded app message can stack
-  // two, and a message that is nothing but mention + footer strips to "".
-  let out = stripped.trim();
-  let prev: string;
-  do {
-    prev = out;
-    out = out.replace(APP_FOOTER_RE, "").trim();
-  } while (out !== prev);
-  return out;
+  return stripAppFooter(botUserId ? text.replaceAll(`<@${botUserId}>`, "") : text.replace(/<@[A-Z0-9]+>/, ""));
 }
