@@ -102,6 +102,26 @@ describe("stdoutOf — an executor's answer as the operation's stdout", () => {
     expect(() => stdoutOf("start", "exit 127:\nsh: pi: not found")).toThrow(PiContainerError);
     expect(() => stdoutOf("start", "exit 127:\nsh: pi: not found")).toThrow(/start failed — exit 127/);
   });
+
+  // harness-pi item 16: the resident answers an isolate swapped under a
+  // command with `runtime-replaced: …` as the command's own text, and the
+  // sandbox names a silent runtime `runtime-unreachable: …`; neither is what
+  // the command printed, so `alive` must not read the first as "dead" nor
+  // `read` decode it as log bytes — the operation fails naming the word.
+  it("the executors' runtime word in place of a command's output is a failure naming it, never the command's stdout", () => {
+    const replaced =
+      "runtime-replaced: the resident runtime was replaced (a deploy) while this command ran\n" +
+      "The command may have started; re-check its effects (e.g. git status, the files it writes) before re-running it.";
+    expect(() => stdoutOf("alive", replaced)).toThrow(PiContainerError);
+    expect(() => stdoutOf("alive", replaced)).toThrow(
+      /^pi container: alive failed — runtime-replaced: the resident runtime was replaced/,
+    );
+    expect(() =>
+      stdoutOf("read", "runtime-unreachable: the sandbox container's runtime did not answer (container abc)"),
+    ).toThrow(/^pi container: read failed — runtime-unreachable: /);
+    // A command's own output that mentions the word is the output it is.
+    expect(stdoutOf("read", "grep: runtime-replaced matched 3 lines")).toBe("grep: runtime-replaced matched 3 lines");
+  });
 });
 
 describe("ExecPiContainer — each operation is one command over the executor", () => {

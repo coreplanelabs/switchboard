@@ -18,6 +18,7 @@ import { knownToolsFor, resumeMessage } from "./resumeLaunch.js";
 import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
 import { makeExecutor } from "../execution/factory.js";
 import { InMemoryArtifactStore } from "../artifacts/store.js";
+import { ExecSandboxRestartedError } from "../execution/executor.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
 import type { ChannelIO, HistoryItem, RunReceipt, StatusUpdate } from "./types.js";
 import { activeRunCount, dispatch, type CoreDeps, type DispatchOutcome } from "./dispatcher.js";
@@ -62,6 +63,7 @@ import { createRunHistoryWriter, NullRunHistoryWriter } from "./runHistoryWriter
 import { InMemoryRunLedger } from "./runLedger/inMemory.js";
 import { messageFromInbox } from "./runLedger/inboxMessage.js";
 import { createLedgerWriteThrough, NullLedgerWriteThrough } from "./runLedger/writeThrough.js";
+import { textTurnsOf } from "./dispatch/textTurns.js";
 import { runPiHarnessOpen, type OpenPiSession } from "./harness/pi/harness.js";
 import { HarnessRegistry, authorizeToolCall, relayToolCall, type ToolCallAsk } from "./harness/pi/relay.js";
 import { FakePiContainer } from "./harness/pi/testing/fakeContainer.js";
@@ -9952,6 +9954,135 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(registry.listActive().map((r) => r.id)).toEqual(["run-l"]);
     expect(ledger.finished.get("run-l")?.status).toBe("completed");
     expect(ledger.live.has("run-old")).toBe(false);
+  });
+
+  // Feature: docs/reference/specs/harness-pi.md item 16 — a container replaced
+  // under a live pi run ends the way a refused re-attach does (item 54): the
+  // row closes `interrupted` with the note that says why, no failure reply,
+  // and the request runs again as a new run once the thread is free.
+  it("a live pi run whose resident container is replaced under it closes interrupted with the sandbox_restarted note and no ❌, and its request runs again as a new run once the thread is free — the outcome a refused re-attach has (item 54)", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const { calls } = residentFetchStub();
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const provider = capturingProvider("started over and done");
+    let n = 0;
+    const registry = new RunRegistry({ genId: () => `run-${++n}`, genToken: () => `tok-${n}` });
+    const store = new InMemoryRunStore();
+    const writer = createRunHistoryWriter({
+      store,
+      warn: () => {},
+      onPersisted: (id) => registry.markPersisted(id),
+      sleep: async () => {},
+    });
+    const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.runHistoryWriter = writer;
+    deps.runLedger = createLedgerWriteThrough({
+      ledger,
+      gen: "gen-T",
+      fallback: { put: async () => {} },
+      warn: () => {},
+    });
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
+    const harnesses = new HarnessRegistry();
+    const bearers = new RunBearerStore({ clock: Date.now });
+    deps.runBearers = bearers;
+    /** The first run's pi opens one bash call and dies with its container, which names itself anew; the restarted run's pi is scripted from the provider. */
+    const containers: FakePiContainer[] = [];
+    deps.harness = {
+      registry: harnesses,
+      harnessUrl: "https://bot.test",
+      loopbackUrl: "http://127.0.0.1:8080",
+      containerFor: () => {
+        const container = new FakePiContainer();
+        containers.push(container);
+        if (containers.length > 1) {
+          scriptPiFromProvider(container, {
+            provider,
+            registry: harnesses,
+            bearers,
+            beforeModelCall: () => realSleep(10),
+          });
+          return container;
+        }
+        container.onStdin = (line, c) => {
+          const cmd = JSON.parse(line) as Record<string, unknown>;
+          if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
+            c.emit({
+              id: cmd.id,
+              type: "response",
+              command: cmd.type,
+              success: true,
+              data: { sessionFile: "s.jsonl" },
+            });
+          if (cmd.type !== "prompt") return;
+          const call = {
+            role: "assistant",
+            content: [{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "npm test" } }],
+            stopReason: "toolUse",
+          };
+          c.emit(
+            { id: cmd.id, type: "response", command: "prompt", success: true },
+            { type: "agent_start" },
+            { type: "message_end", message: call },
+            { type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: { command: "npm test" } },
+          );
+          authorizeToolCall(harnesses.get("run-1")!, {
+            toolCallId: "c1",
+            tool: "bash",
+            input: { command: "npm test" },
+          });
+          // The resident's container rolls under the run: the executor waits for the wake, re-attaches to the
+          // replacement — which names itself anew — and hands the probe back as the restart (resident-repos item 65).
+          c.vm = "vm-new";
+          c.alive = async () => {
+            throw new ExecSandboxRestartedError("the sandbox restarted under the run (waited 42 s)", 42_000);
+          };
+        };
+        return container;
+      },
+      pollMs: 1,
+      tickMs: 5,
+      sleep: realSleep,
+    };
+    const { io, replies } = ioWithCard();
+    const outcome = await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    await writer.settled();
+    // The interrupted run: the same outcome shape as a refused re-attach, its row closed with the note in its record, no failure reply.
+    expect(outcome).toEqual({ status: "refused", refusal: "container_replaced" });
+    const closed = ledger.finished.get("run-1");
+    expect(closed?.status).toBe("interrupted");
+    const note = closed?.events.find((e) => e.type === "run_note") as { kind: string; summary: string } | undefined;
+    expect(note).toMatchObject({
+      kind: "sandbox_restarted",
+      summary:
+        "the container running pi was replaced (vm-fake → vm-new; the executor said: the sandbox restarted under the run (waited 42 s)); the run restarts from its request",
+    });
+    expect(closed?.events.find((e) => e.type === "tool_result")).toMatchObject({
+      tool: "bash",
+      ok: false,
+      callId: "c1",
+    });
+    expect(replies.some((r) => r.startsWith("❌"))).toBe(false);
+    expect(containers[0]!.killed).toEqual([]); // a pid in the new container is a stranger's
+    // The restarted run: the original request, attached as a fresh run is, on its own id, answering the thread.
+    expect(containers).toHaveLength(2);
+    expect(provider.requests).toHaveLength(1);
+    expect(textTurnsOf(provider.requests[0]!.messages).at(-1)).toMatchObject({
+      role: "user",
+      text: expect.stringContaining("fix it"),
+    });
+    expect(replies.at(-1)).toBe("started over and done");
+    const attaches = calls.filter((c) => c.path === "/status" || c.path === "/attach");
+    expect(attaches.map((c) => c.path)).toEqual(["/status", "/attach", "/status", "/attach"]);
+    expect(attaches[1]!.body).not.toHaveProperty("reuse");
+    expect(attaches[3]!.body).not.toHaveProperty("reuse");
+    expect(ledger.finished.get("run-2")?.status).toBe("completed");
+    expect(ledger.live.has("run-1")).toBe(false);
+    expect(registry.getById("run-1")).toMatchObject({ finished: true, status: "interrupted" });
+    expect(registry.getById("run-2")).toMatchObject({ finished: true, status: "completed" });
   });
 
   it("a steered follow-up is written to the run's durable inbox with its seq, and the next step record says the run consumed it (thread-admission item 5, run-history item 40)", async () => {

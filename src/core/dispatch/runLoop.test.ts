@@ -7,7 +7,7 @@ import { getAgent } from "../../agents/registry.js";
 import { declaredProfile } from "../../config/profile.js";
 import { InMemoryGithubApi } from "../../execution/githubApi.js";
 import type { Provider } from "../provider.js";
-import type { Executor } from "../../execution/executor.js";
+import { ExecSandboxRestartedError, type Executor } from "../../execution/executor.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import { createRunEnding } from "../runEnding.js";
 import { createRunHistoryWriter } from "../runHistoryWriter.js";
@@ -34,6 +34,7 @@ import {
 } from "../harness/pi/relay.js";
 import { spawnCapabilityFor, type SpawnCapability, type SpawnDeps } from "./spawn.js";
 import type { SessionCapability } from "../../tools/session.js";
+import { PiContainerReplacedError } from "../harness/pi/harness.js";
 import { FakePiContainer } from "../harness/pi/testing/fakeContainer.js";
 import { scriptPiFromProvider } from "../harness/pi/testing/providerPi.js";
 import { judgeToolCall, type ToolRuleContext } from "../harness/pi/toolRules.js";
@@ -912,6 +913,81 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
 // review post-step exactly as the native loop's does: the reviewed-head guard,
 // the `LGTM:` line, a comment and never an approval. Without the block, or
 // with `review: native`, a review is the native loop byte for byte.
+// Feature: docs/reference/specs/harness-pi.md item 16 — the run stage reads the
+// harness's replaced-container verdict as an interruption, never a failure:
+// the terminal shape a refused re-attach leaves (run-history item 54), so the
+// dispatcher runs the request again as a new run.
+describe("the pi harness — the container replaced under a live run", () => {
+  it("a run whose pi container is replaced under it ends `interrupted`, not failed: the replaced-container error propagates for the dispatcher's restart, the registry and the record say interrupted with the sandbox_restarted note and the settled call, the workspace is released, and the card closes 🔁 saying the run restarts from its request — never ❌", async () => {
+    const registry = new HarnessRegistry();
+    const container = new FakePiContainer();
+    container.onStdin = (line, c) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
+        c.emit({ id: cmd.id, type: "response", command: cmd.type, success: true, data: { sessionFile: "s.jsonl" } });
+      if (cmd.type !== "prompt") return;
+      const call = {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "npm test" } }],
+        stopReason: "toolUse",
+      };
+      c.emit(
+        { id: cmd.id, type: "response", command: "prompt", success: true },
+        { type: "agent_start" },
+        { type: "message_end", message: call },
+        { type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: { command: "npm test" } },
+      );
+      authorizeToolCall(registry.get("run-l")!, { toolCallId: "c1", tool: "bash", input: { command: "npm test" } });
+      // The resident's container rolls under the run: the executor waits for
+      // the wake, re-attaches to the replacement — which names itself anew —
+      // and hands the probe back as the restart (resident-repos item 65).
+      c.vm = "vm-new";
+      c.alive = async () => {
+        throw new ExecSandboxRestartedError("the sandbox restarted under the run (waited 42 s)", 42_000);
+      };
+    };
+    const s = setup("unused", {
+      agent: "coding",
+      yaml: YAML + "harness:\n  coding: pi\n",
+      harness: {
+        registry,
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => container,
+        pollMs: 1,
+        tickMs: 5,
+      },
+    });
+    const err = await runLoop(s.deps, s.ctx).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PiContainerReplacedError);
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "interrupted" });
+    expect(s.releases).toEqual(["paired"]);
+    expect(s.closes).toHaveLength(1);
+    const close = JSON.stringify(s.closes[0]);
+    expect(close).toContain("🔁");
+    expect(close).toContain("container replaced under the run; restarting from the request");
+    expect(close).not.toContain("❌");
+    expect(s.published).toEqual([]);
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const record = (await s.store.get("run-l"))!;
+    expect(record.status).toBe("interrupted");
+    const note = record.events.find((e) => e.type === "run_note") as { kind: string; summary: string };
+    expect(note).toMatchObject({
+      kind: "sandbox_restarted",
+      summary:
+        "the container running pi was replaced (vm-fake → vm-new; the executor said: the sandbox restarted under the run (waited 42 s)); the run restarts from its request",
+    });
+    expect(record.events.find((e) => e.type === "tool_result")).toMatchObject({
+      tool: "bash",
+      ok: false,
+      callId: "c1",
+      summary: expect.stringMatching(/^The container running pi was replaced while this bash call was in flight/),
+    });
+    expect(container.killed).toEqual([]);
+  });
+});
+
 describe("the pi harness — the review preset", () => {
   const REVIEW_PI_YAML = YAML + "harness:\n  review: pi\n";
   const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";

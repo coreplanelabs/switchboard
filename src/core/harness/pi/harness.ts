@@ -19,6 +19,7 @@ import { randomUUID } from "node:crypto";
 import type { AgentDef } from "../../../agents/registry.js";
 import type { PiCompactionConfig } from "../../../config.js";
 import type { Effort } from "../../../effort.js";
+import { ExecSandboxRestartedError } from "../../../execution/executor.js";
 import type { ChatMessage } from "../../chatMessage.js";
 import type { ProviderConfig } from "../../provider.js";
 import {
@@ -392,6 +393,59 @@ export function settlementAnswer(s: Settlement): RelayedToolAnswer {
   return { content: [{ type: "text", text: settlementText(s) }], isError: true };
 }
 
+/** The container pi ran in was replaced under the live run (harness-pi item
+ *  16): the executor said so on a container command — pi and the tool it was
+ *  running died with the old container's disk, and the record holds
+ *  everything the run had. The run ends `interrupted` and its request is
+ *  dispatched again as a new run — the outcome a refused workspace re-attach
+ *  already has (run-history item 54). The relaunch of pi in the new
+ *  container with a rotated bearer is record 0038's stage A, not this.
+ *  `said` is the executor's word, the condition; `was` is the container the
+ *  row recorded for pi and `now` the one that answered when pi was found
+ *  gone — corroboration for the record, never the condition (the word is the
+ *  kernel's boot id, which a container replaced on the same kernel keeps),
+ *  either unknown when a container could not name itself. Nothing of the
+ *  run's is in the container that answers now: a pid there is a stranger's,
+ *  and pi's root was on the old disk. */
+export class PiContainerReplacedError extends Error {
+  constructor(
+    readonly said: string,
+    readonly was: string | undefined,
+    readonly now: string | undefined,
+  ) {
+    super(
+      `the container running pi was replaced (${was ?? "unknown"} → ${now ?? "unknown"}; the executor said: ` +
+        `${redactAndCap(said.replace(/\s+/g, " ").trim(), 240)}); the run restarts from its request`,
+    );
+    this.name = "PiContainerReplacedError";
+  }
+}
+
+/** Whether a container command's failure says the runtime under it was
+ *  replaced: the resident's `ExecSandboxRestartedError` (resident-repos item
+ *  65 — the container exited inside a rollout and came back before the
+ *  command ran), or an error opening `runtime-unreachable:` (the sandbox
+ *  Worker's word for a control port nothing answers, execution item 9) or
+ *  `runtime-replaced` (the resident's word for an isolate swapped
+ *  mid-command, item 43, which the seam raises from a command's answer) —
+ *  read under the seam's own wrap (`pi container: <op> failed — …`) and the
+ *  executors' `exit N:` prefix, and nowhere else in a message, so a command's
+ *  own output that mentions the word is not a replacement. */
+export function saysContainerReplaced(err: unknown): boolean {
+  if (err instanceof ExecSandboxRestartedError) return true;
+  if (!(err instanceof Error)) return false;
+  const text = err.message.replace(/^pi container: [a-z]+ failed — /, "").replace(/^exit \d+: /, "");
+  return /^(?:runtime-unreachable:|runtime-replaced)/.test(text);
+}
+
+/** The restart note a call in flight when the container was replaced is
+ *  settled with (item 16): item 8's note for a call the bot lost, said of the
+ *  container — the tool ran in the container and its result died with it, so
+ *  it is never re-run from here. */
+export function replacedCallNote(tool: string): string {
+  return `The container running pi was replaced while this ${tool} call was in flight; its result was lost — re-check its effects before re-running it.`;
+}
+
 /** The closed form: the loop, and pi ended before the answer comes back — the
  *  run stage's shape until item 14, and every caller's that runs no post-turn. */
 export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Promise<string> {
@@ -476,6 +530,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): 
   let writeUpAt: number | undefined;
   let hardStopped = false;
   let bypass: GateBypassed | undefined;
+  /** The container was replaced under the run (item 16): the loop's verdict once pi was found gone before the run settled. */
+  let replaced: PiContainerReplacedError | undefined;
   const toolsBlocked = (): string | undefined => {
     if (!writeUp) return undefined;
     if (writeUp.kind === "time")
@@ -567,6 +623,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): 
     );
     save();
     forget();
+    // pi's container was replaced (item 16): the executor reaches the
+    // replacement now, where a pid is a stranger's and the run's root never
+    // was, so nothing is ended or removed — whatever the container answers
+    // for its name.
+    if (replaced !== undefined) return;
     if (pid !== undefined) await container.kill(pid).catch(() => {});
     if (paths !== undefined) await container.remove(paths).catch(() => {});
   };
@@ -894,11 +955,40 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): 
     /** The one transient failure this run already spent its retry on. */
     let retriedProviderError: string | undefined;
     let retryPromptSent = false;
+    /** A container command under the read failed saying the runtime was replaced (item 16): the loop ends for the judgement below. */
+    let containerSaid: Error | undefined;
+    /** Item 16's judgement, once pi is found gone before the run settled. The
+     *  condition is the executor's word: a container command failed saying
+     *  the runtime under it was replaced. The container this run was handed
+     *  then names itself again, and the word is set beside the one recorded
+     *  for pi's on the note — corroboration for the record, never the
+     *  condition, since the word is the kernel's boot id and a container
+     *  replaced on the same kernel keeps it. Without the executor's word a
+     *  dead pi died where it ran, and the failure names the container's word
+     *  when it changed all the same. */
+    const containerReplaced = async (said: Error | undefined): Promise<PiContainerReplacedError | undefined> => {
+      if (said === undefined) return undefined;
+      return new PiContainerReplacedError(
+        said.message,
+        facts?.container,
+        await container.identity().catch(() => undefined),
+      );
+    };
     check();
     for (;;) {
       pending ??= iterator.next();
       const tick = deps.sleep(deps.tickMs ?? 1000).then(() => "tick" as const);
-      const next = await Promise.race([pending, tick]);
+      let next: IteratorResult<string> | "tick";
+      try {
+        next = await Promise.race([pending, tick]);
+      } catch (err) {
+        // The read failed under the loop: the executor's word that the runtime
+        // under pi was replaced is the verdict below; any other failure is the
+        // run's, as it always was.
+        if (!(err instanceof Error && saysContainerReplaced(err))) throw err;
+        containerSaid = err;
+        break;
+      }
       if (next === "tick") {
         check();
         if (hardStopped) break;
@@ -1010,8 +1100,30 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): 
     } else {
       if (bypass) throw bypass;
       if (!settled) {
+        // pi is gone before the run settled, or its container stopped
+        // answering. A container replaced under the run (item 16) — the
+        // executor's word on a container command — ends the run by the
+        // redispatch path: the call in flight is settled with the restart
+        // note, the record says what happened, and the run loop closes the
+        // run `interrupted` and runs the request again. pi dead without that
+        // word died where it ran: the failure it always was, naming the
+        // container's word when it changed so the record can be read.
+        replaced = await containerReplaced(containerSaid);
+        if (replaced) {
+          bridge.closeOpenSpans((open) => replacedCallNote(open.tool));
+          note("sandbox_restarted", replaced.message);
+          throw replaced;
+        }
         const tail = await container.tail(paths.errLog, 2000);
-        throw new Error(`pi exited before the run settled${tail.trim() ? `: ${redactAndCap(tail.trim(), 400)}` : ""}`);
+        const was = facts?.container;
+        const now = await container.identity().catch(() => undefined);
+        const renamed =
+          was !== undefined && now !== undefined && was !== now
+            ? ` (the container names itself ${now} now; pi's was ${was})`
+            : "";
+        throw new Error(
+          `pi exited before the run settled${renamed}${tail.trim() ? `: ${redactAndCap(tail.trim(), 400)}` : ""}`,
+        );
       }
       if (providerError !== undefined)
         throw new Error(
