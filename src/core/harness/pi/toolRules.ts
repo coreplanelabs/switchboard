@@ -48,11 +48,20 @@ export const CODING_REACH: ReadonlySet<string> = new Set([
  *  GitHub reads and the verdict; never `write-files`, `github-write` or `pr`. */
 export const READ_REACH: ReadonlySet<string> = new Set(["shell", "files", "web", "search", "github-read", "verdict"]);
 
+/** A run without an identity's reach for pi's own tools: none of them. Such a
+ *  run has no workspace (machine class `none`) and its pi is a child of the
+ *  bot, so a shell or a file tool would run on the bot host; every tool it has
+ *  is a relayed one, allowed by name before these rules are asked
+ *  (harness-pi item 12). */
+export const NONE_REACH: ReadonlySet<string> = new Set();
+
 /** The reach a run's identity gives its pi: a write run reaches what the
- *  coding preset does; a read run (and a preset without an identity, which
- *  never has a workspace to run pi in) reaches nothing that writes. */
+ *  coding preset does; a read run reaches nothing that writes; a run without
+ *  an identity reaches none of pi's own tools. */
 export function reachFor(identity: Identity): ReadonlySet<string> {
-  return identity === "write" ? CODING_REACH : READ_REACH;
+  if (identity === "write") return CODING_REACH;
+  if (identity === "read") return READ_REACH;
+  return NONE_REACH;
 }
 
 /** One call's verdict: allowed; refused by a rule the reason names; or a tool
@@ -127,7 +136,11 @@ export function judgeToolCall(tool: string, input: unknown, ctx: ToolRuleContext
   const bundle = PI_TOOL_BUNDLES[tool];
   if (bundle === undefined) return outside(`${tool} is not in any bundle the ${ctx.identity} identity reaches`);
   if (!reachFor(ctx.identity).has(bundle)) {
-    return outside(`${tool} is the \`${bundle}\` bundle, outside the ${ctx.identity} identity's reach`);
+    return outside(
+      ctx.identity === "none"
+        ? `${tool} is the \`${bundle}\` bundle: a run without a workspace (identity none) has none of pi's own tools`
+        : `${tool} is the \`${bundle}\` bundle, outside the ${ctx.identity} identity's reach`,
+    );
   }
   const args = isRecord(input) ? input : {};
   if (tool === "bash") return judgeBash(args.command, ctx);

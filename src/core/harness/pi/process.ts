@@ -26,12 +26,19 @@ export const PI_BUILTIN_TOOLS: readonly string[] = ["read", "bash", "edit", "wri
  *  `write`. Off the allowlist, so pi never has them — the gate (toolRules.ts)
  *  would refuse a call, but a tool pi does not have is never called. */
 export const PI_READ_TOOLS: readonly string[] = ["read", "bash", "grep", "find", "ls"];
+/** pi's own tools a run without an identity holds: none. Such a run has no
+ *  workspace (machine class `none`) and runs pi as a child of the bot, so a
+ *  shell or a file tool would run on the bot host; its tools are the relayed
+ *  ones alone (harness-pi item 12). */
+export const PI_NO_TOOLS: readonly string[] = [];
 
-/** The built-in tools a run's identity gives its pi (harness-pi item 10): a
- *  write run holds them all; a read run — and a preset without an identity —
- *  holds nothing that writes. */
+/** The built-in tools a run's identity gives its pi (harness-pi items 10 and
+ *  12): a write run holds them all; a read run holds nothing that writes; a
+ *  run without an identity holds none of them. */
 export function piBuiltinToolsFor(identity: Identity): readonly string[] {
-  return identity === "write" ? PI_BUILTIN_TOOLS : PI_READ_TOOLS;
+  if (identity === "write") return PI_BUILTIN_TOOLS;
+  if (identity === "read") return PI_READ_TOOLS;
+  return PI_NO_TOOLS;
 }
 
 /** The five effort tiers onto pi's seven thinking levels: the names coincide,
@@ -100,7 +107,8 @@ export interface PiLaunchSpec {
   paths: PiRunPaths;
   /** The resolved `<provider>/<model>` and the provider's wire shape — the proxy route pi calls. */
   model: { id: string; providerType: ProviderConfig["type"]; maxTokens: number };
-  /** The bot's base URL as the container reaches it (through the shim). */
+  /** The bot's base URL as pi reaches it: the public one (through the shim)
+   *  from a run's container, the bot's own loopback from the bot host. */
   harnessUrl: string;
   effort?: Effort;
   /** The preset's identity: it decides which of pi's own tools the allowlist
@@ -227,8 +235,19 @@ export function piModelsJson(spec: PiLaunchSpec): string {
  *  run's tools keep theirs. Said once and last, so a prompt written for the
  *  native loop's `read_file` and `write_file` still lands on a tool that
  *  exists; a read run is told it has no `edit` or `write`, so a prompt that
- *  names neither is not contradicted and one that did would be. */
+ *  names neither is not contradicted and one that did would be; a run without
+ *  a workspace is told it has none of pi's own tools, and no native name is
+ *  mapped onto one. */
 export function harnessPromptNote(relayTools: readonly string[], identity: Identity): string {
+  const named = relayTools.map((t) => `\`${t}\``).join(", ");
+  if (identity === "none") {
+    return [
+      "HARNESS NOTE: this run has no workspace, so none of pi's own tools (`read`, `bash`, `edit`, `write`, `grep`, `find` and `ls`) is available, and a call to any of them is refused.",
+      relayTools.length > 0
+        ? `This run's tools are exactly these, each under its own name: ${named}.`
+        : "No tools are available in this run.",
+    ].join(" ");
+  }
   const write = identity === "write";
   return [
     write
@@ -238,7 +257,7 @@ export function harnessPromptNote(relayTools: readonly string[], identity: Ident
       ? "Where these instructions say `read_file` use `read`; where they say `write_file` use `write` (a whole file) or `edit` (a targeted change)."
       : "Where these instructions say `read_file` use `read`.",
     relayTools.length > 0
-      ? `Every other tool named above is available under its own name: ${relayTools.map((t) => `\`${t}\``).join(", ")}.`
+      ? `Every other tool named above is available under its own name: ${named}.`
       : "No other tools are available in this run.",
   ].join(" ");
 }

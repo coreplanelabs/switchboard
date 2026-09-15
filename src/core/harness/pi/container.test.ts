@@ -265,3 +265,14 @@ describe("ExecPiContainer on a resident, two thread users on one container", () 
     expect([...tree.dirs.keys()]).toEqual(["/", "/tmp"]);
   });
 });
+
+// docs/reference/specs/harness-pi.md items 4 and 12: the seam's answer to
+// where a fresh run's files go. The exec container names the predictable root
+// its scripts make at 700 as the thread's user; no command runs for the answer.
+describe("ExecPiContainer.makeRoot", () => {
+  it("answers the predictable root under /tmp, the layout piRunPaths lays out, without running a command", async () => {
+    const { executor, calls } = recordingExecutor();
+    expect(await new ExecPiContainer(executor).makeRoot("run-7")).toEqual(piRunPaths("run-7"));
+    expect(calls).toEqual([]);
+  });
+});

@@ -58,7 +58,7 @@ const executor: Executor = {
   writeFile: async () => "",
 };
 
-function live(opts: { blocked?: string; withSpan?: boolean; identity?: "read" | "write" } = {}) {
+function live(opts: { blocked?: string; withSpan?: boolean; identity?: "none" | "read" | "write" } = {}) {
   const events: RunEvent[] = [];
   const progress: string[] = [];
   const sink = recordingSink();
@@ -216,6 +216,38 @@ describe("authorizeToolCall — a read-identity run", () => {
       "edit refused: edit is the `write-files` bundle, outside the read identity's reach",
       "write refused: write is the `write-files` bundle, outside the read identity's reach",
       "bash refused: read-only — a read-identity run never pushes",
+    ]);
+  });
+});
+
+// docs/reference/specs/harness-pi.md item 12: the gate for a run without a
+// workspace. pi's own tools are never on such a run's allowlist, so pi never
+// has one to call; a call that reaches the gate all the same (a stale
+// allowlist, a pi that grew a tool) is refused by name with a `tool_refused`
+// note, and the run's relayed tools are allowed as on every run.
+describe("authorizeToolCall: a run without a workspace (identity none)", () => {
+  it("refuses every one of pi's own tools by name, each a tool_refused note, and allows the relayed tools", () => {
+    const { harness, events } = live({ identity: "none" });
+    expect(authorizeToolCall(harness, { toolCallId: "a", tool: "update_status", input: { checklist: "x" } })).toEqual({
+      allow: true,
+    });
+    expect(authorizeToolCall(harness, { toolCallId: "b", tool: "github_file", input: {} })).toEqual({ allow: true });
+    expect(authorizeToolCall(harness, { toolCallId: "c", tool: "bash", input: { command: "ls" } })).toEqual({
+      allow: false,
+      reason: "bash is the `shell` bundle: a run without a workspace (identity none) has none of pi's own tools",
+    });
+    expect(authorizeToolCall(harness, { toolCallId: "d", tool: "read", input: { path: "README.md" } })).toEqual({
+      allow: false,
+      reason: "read is the `files` bundle: a run without a workspace (identity none) has none of pi's own tools",
+    });
+    expect(authorizeToolCall(harness, { toolCallId: "e", tool: "write", input: { path: "x", content: "" } })).toEqual({
+      allow: false,
+      reason: "write is the `write-files` bundle: a run without a workspace (identity none) has none of pi's own tools",
+    });
+    expect(events.map((e) => (e.type === "run_note" ? e.summary : e.type))).toEqual([
+      "bash refused: bash is the `shell` bundle: a run without a workspace (identity none) has none of pi's own tools",
+      "read refused: read is the `files` bundle: a run without a workspace (identity none) has none of pi's own tools",
+      "write refused: write is the `write-files` bundle: a run without a workspace (identity none) has none of pi's own tools",
     ]);
   });
 });

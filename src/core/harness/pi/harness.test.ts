@@ -155,10 +155,12 @@ function world(
     withSpans?: boolean;
     /** The session's notepad the compaction steer reads (session-log item 10). */
     notepad?: () => Promise<{ text: string; updatedAt: number } | null>;
+    /** The container to drive; a fresh fake unless a test brings one of its own shape. */
+    container?: FakePiContainer;
   } = {},
 ) {
   const clock = opts.clock ?? { now: NOW };
-  const container = new FakePiContainer();
+  const container = opts.container ?? new FakePiContainer();
   const registry = new HarnessRegistry();
   const bearers = new RunBearerStore({ clock: () => clock.now });
   const sink = recordingSink();
@@ -1018,6 +1020,32 @@ describe("the small pure pieces", () => {
 // docs/reference/specs/harness-pi.md item 10 — a preset of the read identity
 // on the harness: pi's allowlist, the note in its framing and the rules the
 // gate judges by all read the preset's identity, folded in once here.
+// docs/reference/specs/harness-pi.md items 4, 8 and 12: where a fresh run's
+// files go is the container's answer (`makeRoot`), asked before anything is
+// filed and recorded on the row's facts, so a container that makes a root of
+// its own (the bot host's mkdtemp) is found there by the next generation and
+// a dead pi's recorded root elsewhere goes when the fresh start is filed.
+describe("runPiHarness: the root the container makes", () => {
+  class ElsewhereContainer extends FakePiContainer {
+    override async makeRoot(runId: string) {
+      return piRunPathsAt(`/tmp/elsewhere-${runId}-a1b2c3`);
+    }
+  }
+  it("files a fresh run under the root the container makes, records that root on the facts, and removes it when the run ends", async () => {
+    const w = world({ container: new ElsewhereContainer() });
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "Done."));
+    await expect(w.start()).resolves.toBe("Done.");
+    const root = "/tmp/elsewhere-run-7-a1b2c3";
+    expect(w.container.starts[0].paths).toEqual(piRunPathsAt(root));
+    expect([...w.container.files.keys()].every((f) => f.startsWith(`${root}/`))).toBe(true);
+    expect(w.facts[0]).toMatchObject({ root });
+    expect(w.container.removed).toEqual([root]);
+  });
+  it("the fake answers the predictable root, so every other test's run is filed where it always was", async () => {
+    expect(await new FakePiContainer().makeRoot("run-7")).toEqual(piRunPaths("run-7"));
+  });
+});
+
 describe("runPiHarness — a read-identity preset", () => {
   it("starts pi with no edit or write on its allowlist, writes the read-only note into SYSTEM.md, and registers rules of the read identity the gate refuses a write by", async () => {
     const w = world({

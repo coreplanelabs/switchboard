@@ -1060,3 +1060,187 @@ describe("the harness seam — the review preset on pi", () => {
     );
   });
 });
+
+// Feature: docs/reference/specs/harness-pi.md item 12: a preset without a
+// workspace on the harness. `harness: { general: pi }` runs a general ask on
+// pi as a child of the bot itself (the run's machine class is `none`, so
+// there is no container to exec through, and the loopback URL is where pi
+// reaches the bot's own server), with none of pi's own tools on its allowlist
+// and the `assistant` toolset relayed; a built-in tool pi asks for all the
+// same is refused by name; the record replays like a native run's. Without
+// the key, or with `general: native`, a general ask is the native loop byte
+// for byte and pi never starts.
+describe("the harness seam: a preset without a workspace on pi, as a child of the bot", () => {
+  const GENERAL_PI_YAML = YAML + "harness:\n  general: pi\n";
+  const GENERAL_NATIVE_YAML = YAML + "harness:\n  general: native\n";
+  const assistant = (content: Record<string, unknown>[], stopReason = "toolUse") => ({
+    role: "assistant",
+    content,
+    stopReason,
+  });
+
+  /** A pi that asks the gate for a shell it was never given (refused), then
+   *  calls the relayed `update_status` through the bot as the real extension
+   *  does (`POST /harness/tool`), then answers. */
+  function scriptedGeneralPi(container: FakePiContainer, registry: HarnessRegistry, finalText: string) {
+    const refusals: Array<{ allow: boolean; reason?: string }> = [];
+    container.onStdin = (line, c) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
+        c.emit({ id: cmd.id, type: "response", command: cmd.type, success: true, data: { sessionFile: "s.jsonl" } });
+      if (cmd.type !== "prompt") return;
+      const live = registry.get("run-l")!;
+      c.emit({ id: cmd.id, type: "response", command: "prompt", success: true }, { type: "agent_start" });
+      const shell = { command: "ls" };
+      const t1 = assistant([{ type: "toolCall", id: "c1", name: "bash", arguments: shell }]);
+      c.emit(
+        { type: "message_end", message: t1 },
+        { type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: shell },
+      );
+      const gate = authorizeToolCall(live, { toolCallId: "c1", tool: "bash", input: shell });
+      refusals.push(gate);
+      c.emit(
+        {
+          type: "tool_execution_end",
+          toolCallId: "c1",
+          toolName: "bash",
+          result: { content: [{ type: "text", text: `Tool execution blocked: ${gate.allow ? "" : gate.reason}` }] },
+          isError: true,
+        },
+        { type: "turn_end", message: t1, toolResults: [] },
+      );
+      const status = { checklist: "- [x] looked it up" };
+      const t2 = assistant([{ type: "toolCall", id: "c2", name: "update_status", arguments: status }]);
+      c.emit(
+        { type: "message_end", message: t2 },
+        { type: "tool_execution_start", toolCallId: "c2", toolName: "update_status", args: status },
+      );
+      authorizeToolCall(live, { toolCallId: "c2", tool: "update_status", input: status });
+      void runRelayedTool(live, { toolCallId: "c2", tool: "update_status", input: status }).then((answer) => {
+        c.emit(
+          {
+            type: "tool_execution_end",
+            toolCallId: "c2",
+            toolName: "update_status",
+            result: { content: answer.content },
+            isError: answer.isError,
+          },
+          { type: "turn_end", message: t2, toolResults: [] },
+        );
+        const done = assistant([{ type: "text", text: finalText }], "stop");
+        c.emit(
+          { type: "message_end", message: done },
+          { type: "turn_end", message: done, toolResults: [] },
+          { type: "agent_settled" },
+        );
+      });
+    };
+    return refusals;
+  }
+
+  it("`harness: { general: pi }` runs a general ask on pi on the bot host: the container is asked for by the `none` machine class, pi reaches the bot over loopback, its allowlist is the assistant toolset's relays and none of pi's own tools, the note says so, a shell pi asks for is refused by name, the relayed update_status runs in the bot, and pi's answer is the run's", async () => {
+    const container = new FakePiContainer();
+    const registry = new HarnessRegistry();
+    const refusals = scriptedGeneralPi(container, registry, "General says done.");
+    const asked: string[] = [];
+    let providerCalls = 0;
+    const provider: Provider = {
+      name: "fake",
+      async complete() {
+        providerCalls++;
+        return { content: [{ type: "text", text: "native answer" }], stopReason: "end_turn" };
+      },
+    };
+    const s = setup("", {
+      provider,
+      yaml: GENERAL_PI_YAML,
+      harness: {
+        registry,
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: (_executor, machine) => {
+          asked.push(machine);
+          return container;
+        },
+      },
+      bearer: "sbr_run-l.s3cret",
+    });
+    const out = await runLoop(s.deps, s.ctx);
+    expect(out.answer).toBe("General says done.");
+    expect(providerCalls).toBe(0);
+    expect(asked).toEqual(["none"]);
+    expect(container.starts).toHaveLength(1);
+    const start = container.starts[0];
+    expect(start.env.SWITCHBOARD_HARNESS_URL).toBe("http://127.0.0.1:8080");
+    expect(start.env.SWITCHBOARD_RUN_BEARER).toBe("sbr_run-l.s3cret");
+    const tools = start.args[start.args.indexOf("--tools") + 1].split(",");
+    expect(tools).toEqual([
+      "web_fetch",
+      "update_status",
+      "github_repos",
+      "github_file",
+      "github_tree",
+      "github_search_code",
+      "github_issue_list",
+      "github_issue_get",
+      "github_issue_create",
+      "github_issue_update",
+      "github_issue_comment",
+      "github_issue_delete",
+    ]);
+    for (const own of ["read", "bash", "edit", "write", "grep", "find", "ls"]) expect(tools).not.toContain(own);
+    const models = JSON.parse(container.files.get("/tmp/switchboard-pi-run-l/agent/models.json")!);
+    expect(models.providers.switchboard.baseUrl).toBe("http://127.0.0.1:8080");
+    const system = container.files.get("/tmp/switchboard-pi-run-l/agent/SYSTEM.md")!;
+    expect(system.startsWith("the system prompt\n\nHARNESS NOTE:")).toBe(true);
+    expect(system).toContain("none of pi's own tools");
+    expect(refusals).toEqual([
+      {
+        allow: false,
+        reason: "bash is the `shell` bundle: a run without a workspace (identity none) has none of pi's own tools",
+      },
+    ]);
+    // The relayed tool ran in the bot with the run's own context: the card's checklist is its.
+    expect(s.frames.some((f) => f.detail?.includes("looked it up"))).toBe(true);
+    expect(container.killed).toEqual([4242]);
+    expect(container.removed).toEqual(["/tmp/switchboard-pi-run-l"]);
+    expect(s.published).toEqual(["answer:General says done."]);
+    s.ending.drain(true);
+    await s.writer.settled();
+    const rec = (await s.store.get("run-l"))!;
+    expect(rec.events.filter((e) => e.type === "tool_call").map((e) => (e as { tool: string }).tool)).toEqual([
+      "bash",
+      "update_status",
+    ]);
+    expect(rec.events.filter((e) => e.type === "run_note" && (e as { kind: string }).kind === "tool_refused")).toEqual([
+      expect.objectContaining({
+        summary:
+          "bash refused: bash is the `shell` bundle: a run without a workspace (identity none) has none of pi's own tools",
+      }),
+    ]);
+  });
+
+  it("without the key, or with `general: native`, a general ask is the native loop and pi never starts; a block moving another preset leaves general native", async () => {
+    const container = new FakePiContainer();
+    const harness: HarnessDeps = {
+      registry: new HarnessRegistry(),
+      harnessUrl: "https://bot.example.com",
+      loopbackUrl: "http://127.0.0.1:8080",
+      containerFor: () => container,
+    };
+    for (const yaml of [YAML, GENERAL_NATIVE_YAML, YAML + "harness:\n  coding: pi\n"]) {
+      const s = setup("native answer", { yaml, harness, bearer: "sbr_run-l.s3cret" });
+      expect((await runLoop(s.deps, s.ctx)).answer).toBe("native answer");
+    }
+    expect(container.starts).toEqual([]);
+  });
+
+  it("a preset without a workspace on pi in a process without the loopback URL fails the run naming PORT: the public URL alone is not where a bot-host pi reaches the bot", async () => {
+    const s = setup("", {
+      yaml: GENERAL_PI_YAML,
+      harness: { registry: new HarnessRegistry(), harnessUrl: "https://bot.example.com" },
+      bearer: "sbr_run-l.s3cret",
+    });
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow(/PORT/);
+  });
+});

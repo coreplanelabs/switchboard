@@ -1,7 +1,7 @@
 // The container as the pi harness needs it (docs/reference/specs/harness-pi.md
-// item 4): a seam of seven operations — write a file, start pi detached, feed
-// its stdin, read its log from an offset, ask whether it lives, end it, remove
-// the run's directory — with
+// item 4): a seam of operations — make the run's root, write a file, start pi
+// detached, feed its stdin, read its log from an offset, ask whether it lives,
+// end it, remove the run's directory — with
 // two implementations: `ExecPiContainer`, which turns each into one command
 // over the run's own `Executor` (the resident's `/exec` as the thread's user,
 // the sandbox's, the local host's), and the in-memory fake the tests drive.
@@ -14,7 +14,7 @@
 import { parseExitPrefix, redactAndCap } from "../../runEvents.js";
 import { shellQuote } from "../../../execution/shellQuote.js";
 import type { Executor } from "../../../execution/executor.js";
-import type { PiRunPaths } from "./process.js";
+import { piRunPaths, type PiRunPaths } from "./process.js";
 
 export interface PiStart {
   paths: PiRunPaths;
@@ -23,7 +23,16 @@ export interface PiStart {
 }
 
 export interface PiContainer {
-  /** Create or replace `path` with `content`, mode 600, parents made. */
+  /** Where a fresh run's files go: the run's root, laid out by `piRunPathsAt`.
+   *  The exec container answers the predictable `/tmp/switchboard-pi-<runId>`
+   *  its scripts make at 700 (harness-pi item 4); the bot host makes a root of
+   *  its own, exclusively (item 12). The harness files nothing before it has
+   *  the answer and records it on the row (item 8), so the way back never has
+   *  to guess it. */
+  makeRoot(runId: string): Promise<PiRunPaths>;
+  /** Create `path` with `content`, mode 600, parents made. A container over a
+   *  predictable root replaces what is there; one over a root it made itself
+   *  finds nothing to replace and refuses a path already present. */
   writeFile(path: string, content: string): Promise<void>;
   /** Start pi detached in the run's directory; the pid is the wrapper's, the group pi runs in. */
   start(start: PiStart): Promise<{ pid: number }>;
@@ -59,8 +68,10 @@ export const WRITE_CHUNK_CHARS = 40_000;
 export const INLINE_LINE_CHARS = 40_000;
 /** The most a log read asks for: the base64 of it stays under every executor's output cap. */
 export const LOG_READ_BYTES = 48 * 1024;
+/** What marks a streaming delta in pi's stdout: a line carrying it never reaches the log, on any container. */
+export const MESSAGE_UPDATE_MARK = '"type":"message_update"';
 /** The log filter: pi's streaming deltas never reach the log. */
-const LOG_FILTER = `grep --line-buffered -v ${shellQuote('"type":"message_update"')}`;
+const LOG_FILTER = `grep --line-buffered -v ${shellQuote(MESSAGE_UPDATE_MARK)}`;
 
 /** `content` in chunks a shell argument can carry, each `printf '%s'`-ed, the
  *  first creating the file and its directories: exact bytes, no newline added,
@@ -158,6 +169,12 @@ export class ExecPiContainer implements PiContainer {
   private commandNo = 0;
 
   constructor(private readonly executor: Executor) {}
+
+  /** The predictable root under the sticky /tmp: no command runs here, the
+   *  write and start scripts make it at 700 as the thread's user (item 4). */
+  async makeRoot(runId: string): Promise<PiRunPaths> {
+    return piRunPaths(runId);
+  }
 
   async writeFile(path: string, content: string): Promise<void> {
     for (const script of writeFileScripts(path, content)) stdoutOf("write", await this.exec(script));

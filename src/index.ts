@@ -362,9 +362,10 @@ export async function runBot(): Promise<void> {
   // minted by the provision stage as a run's executor attaches, revoked as the
   // run ends; in-process, so a restart drops them with the runs that held them.
   const runBearers = new RunBearerStore({ clock: systemClock });
-  // The runs driving a pi in their container (docs/reference/specs/harness-pi.md):
-  // the harness routes answer for exactly these; the bot's public URL is where
-  // a container reaches the proxy and the routes.
+  // The runs driving a pi (docs/reference/specs/harness-pi.md): the harness
+  // routes answer for exactly these; the bot's public URL is where a run's
+  // container reaches the proxy and the routes, and this process's own port,
+  // over loopback, is where a pi running as a child of the bot does (item 12).
   const harnesses = new HarnessRegistry();
   const deps: CoreDeps = {
     config,
@@ -374,6 +375,7 @@ export async function runBot(): Promise<void> {
     harness: {
       registry: harnesses,
       ...(process.env.PUBLIC_BASE_URL ? { harnessUrl: process.env.PUBLIC_BASE_URL } : {}),
+      ...(process.env.PORT ? { loopbackUrl: `http://127.0.0.1:${process.env.PORT}` } : {}),
     },
     capabilities,
     residentFleet,

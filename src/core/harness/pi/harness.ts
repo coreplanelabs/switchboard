@@ -45,7 +45,14 @@ import type { Clock, Span } from "../../trace/types.js";
 import { PiBridge } from "./bridge.js";
 import type { PiContainer } from "./container.js";
 import { PiMirror, piSessionFile } from "./mirror.js";
-import { piLaunchArgs, piLaunchEnv, piLaunchFiles, piRunPaths, piRunPathsAt, type PiLaunchSpec } from "./process.js";
+import {
+  piLaunchArgs,
+  piLaunchEnv,
+  piLaunchFiles,
+  piRunPathsAt,
+  type PiLaunchSpec,
+  type PiRunPaths,
+} from "./process.js";
 import { parsePiLine } from "./protocol.js";
 import type { HarnessRegistry, LiveHarness } from "./relay.js";
 import type { ToolRuleContext } from "./toolRules.js";
@@ -269,9 +276,11 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
     emit({ type: "run_note", kind, summary, ...(mode ? { mode } : {}) });
   };
   const bridge = new PiBridge({ emit, onProgress: run.onProgress, agentSpan, clock });
-  // Where pi's files are: this build's own root for a pi started here, the
-  // root the row recorded for a pi another build started (the re-attach below).
-  let paths = piRunPaths(run.runId);
+  // Where pi's files are: the root the row recorded for a pi another build
+  // started (the re-attach below), else the root the container makes for a
+  // fresh start (`makeRoot`: the exec container's predictable one, the bot
+  // host's own). Nothing is filed before one of the two is known.
+  let paths: PiRunPaths | undefined;
   const remainingMs = run.resume?.remainingMs ?? run.agent.maxMinutes * 60_000;
   const deadline = now() + remainingMs;
   const warnAt = deadline - Math.min(3 * 60_000, run.agent.maxMinutes * 15_000);
@@ -330,8 +339,8 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
     // there, whatever root this build files a fresh run under. A row without
     // a root (written before the root was recorded) names a pi this build
     // cannot find: it is ended where it runs and a fresh pi starts below, as
-    // after a death. A dead pi's root, when known and not this build's own,
-    // goes with it.
+    // after a death. A dead pi's root, when known and not the one the fresh
+    // start is filed under, goes with it (below).
     const recorded = run.resume?.facts;
     let reattached = false;
     /** A live pi the row named no root for, ended here for the fresh start. */
@@ -344,11 +353,9 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
       } else if (alive) {
         ended = true;
         await container.kill(recorded.pid).catch(() => {});
-      } else if (recorded.root !== undefined && recorded.root !== paths.dir) {
-        await container.remove(piRunPathsAt(recorded.root)).catch(() => {});
       }
     }
-    if (reattached && recorded) {
+    if (reattached && recorded && paths !== undefined) {
       pid = recorded.pid;
       facts = { ...recorded };
       transport = new PiRpcTransport({
@@ -365,6 +372,11 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
         `resumed after a restart: pi still runs in the container (pid ${pid}); continuing its session with ${Math.round(remainingMs / 60_000)} min of budget left`,
       );
     } else {
+      // The fresh start's root is the container's to make; a dead pi's
+      // recorded root, when it is another, goes with it.
+      paths = await container.makeRoot(run.runId);
+      if (recorded?.root !== undefined && recorded.root !== paths.dir)
+        await container.remove(piRunPathsAt(recorded.root)).catch(() => {});
       const spec: PiLaunchSpec = {
         runId: run.runId,
         paths,
@@ -653,7 +665,7 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
     // its log, session or FIFO again — a later run in the thread seeds from
     // the record, and a resume that finds pi alive belongs to a generation
     // that never reached this line. Best-effort, like the kill.
-    await container.remove(paths).catch(() => {});
+    if (paths !== undefined) await container.remove(paths).catch(() => {});
     agentSpan?.end(hardStopped || bypass ? "error" : "ok");
   }
 }

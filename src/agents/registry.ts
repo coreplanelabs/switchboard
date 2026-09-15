@@ -121,8 +121,9 @@ export interface AgentDef {
   residentSystem?: string;
   /** Which loop drives the preset's runs (`HARNESSES`): the native loop
    *  unless declared, and whatever a deployment's `harness.<preset>` says
-   *  over that. Only a preset with a workspace can run on pi — pi is a process
-   *  in the run's execution container. */
+   *  over that. A preset with a workspace runs pi in the run's execution
+   *  container; a preset without one (machine class `none`) runs it as a
+   *  child of the bot, with none of pi's own tools. */
   harness?: Harness;
 }
 

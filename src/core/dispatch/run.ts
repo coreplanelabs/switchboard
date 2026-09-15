@@ -40,17 +40,26 @@ import { processSecrets } from "../../secrets.js";
 import type { PiContainer } from "../harness/pi/container.js";
 import type { HarnessRegistry } from "../harness/pi/relay.js";
 import type { Executor } from "../../execution/executor.js";
+import type { MachineClass } from "../../agents/registry.js";
 
 /** What a run on the pi harness needs from the process (docs/reference/specs/
  *  harness-pi.md): the registry the harness routes answer from, the bot's URL
- *  as a container reaches it (the proxy's and the routes' home), and — for a
- *  test — the container to drive in place of the run's executor. */
+ *  as pi reaches it (the public one from a run's container, the bot's own
+ *  loopback from the bot host, item 12) and, for a test, the container to
+ *  drive in place of the run's own. */
 export interface HarnessDeps {
   registry: HarnessRegistry;
-  /** `PUBLIC_BASE_URL`; without it no run can go on pi and the run says so. */
+  /** `PUBLIC_BASE_URL`, where a run's container reaches the proxy and the
+   *  routes; without it no preset with a workspace can go on pi and the run says so. */
   harnessUrl?: string;
-  /** The container over the run's executor; absent → `ExecPiContainer`. */
-  containerFor?: (executor: Executor) => PiContainer;
+  /** `http://127.0.0.1:<PORT>`, where a pi on the bot host reaches this
+   *  process's own server; without it no preset without a workspace can go on
+   *  pi and the run says so. */
+  loopbackUrl?: string;
+  /** The container for a run, given its executor and machine class; absent →
+   *  `piContainerFor`: over the executor for a class with a workspace, the
+   *  bot host for `none`. */
+  containerFor?: (executor: Executor, machine: MachineClass) => PiContainer;
 }
 
 /** What the run stage reads off the dispatcher's dependencies: the tools'
