@@ -175,8 +175,35 @@ describe("buildUserCostReport", () => {
     expect(r.reconciliation.attributedLlmUsd).toBeCloseTo(61, 9);
     expect(r.reconciliation.workspaceLlmUsd).toBeCloseTo(72.5, 9);
     expect(r.reconciliation.unattributedLlmUsd).toBeCloseTo(11.5, 9);
+    expect(r.reconciliation.comparedDays).toBe(3);
+    expect(r.reconciliation.uncomparedDays).toBe(0);
+    expect(r.reconciliation.uncomparedLlmUsd).toBe(0);
     expect(r.reconciliation.cloudAllocatedUsd).toBeCloseTo(10.5, 9);
     expect(r.reconciliation.cloudUnallocatedUsd).toBe(0);
+  });
+
+  it("a day whose runs spent tokens but whose workspace figure is zero was billed elsewhere: left out of the tie-out and counted apart, never a negative remainder", () => {
+    // Day 0's spend went to another workspace (the key had not moved yet): $11 of
+    // attributed tokens against a $0 figure. Day 1 compares; day 2 has tokens the
+    // table cannot price ($0 attributed) against a $0.50 figure and compares too.
+    const r = buildUserCostReport({
+      group: "switchboard",
+      range,
+      usage: report,
+      days: [day(d0, 3, 0), day(d1, 6, 60), day(d2, 1.5, 0.5)],
+      historyOn: true,
+      viewerUserIds: [],
+      matchedByEmail: false,
+      generatedAt,
+    });
+    expect(r.reconciliation.comparedDays).toBe(2);
+    expect(r.reconciliation.attributedLlmUsd).toBeCloseTo(50, 9); // day 1 only
+    expect(r.reconciliation.workspaceLlmUsd).toBeCloseTo(60.5, 9);
+    expect(r.reconciliation.unattributedLlmUsd).toBeCloseTo(10.5, 9);
+    expect(r.reconciliation.uncomparedDays).toBe(1);
+    expect(r.reconciliation.uncomparedLlmUsd).toBeCloseTo(11, 9); // alice $10 + bob $1 on day 0
+    // The users' own rows still carry every day's dollars.
+    expect(r.users.find((u) => u.userId === "slack:UALICE")?.llmUsd).toBeCloseTo(60, 9);
   });
 
   it("a day with cloud spend and no runs is unallocated, never invented onto a user; the range is clamped to where the history begins", () => {

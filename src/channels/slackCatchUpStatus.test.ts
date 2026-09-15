@@ -68,6 +68,7 @@ describe("missingBotScopes (pure comparison against the adapter's required set)"
       "channels:read",
       "groups:read",
       "users:read",
+      "users:read.email",
     ]);
   });
 

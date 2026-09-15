@@ -28,6 +28,7 @@ export const REQUIRED_BOT_SCOPES: readonly string[] = [
   "channels:read",
   "groups:read",
   "users:read",
+  "users:read.email", // a person's email (users.info profile.email): the costs page's me toggle and the MCP connect ticket match the Access identity by it
 ];
 
 /** What `/healthz` shows. Every field is optional: absent until the first scan
