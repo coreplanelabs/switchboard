@@ -6,7 +6,9 @@
 // require and no tool call is parted from its result — with thinking dropped
 // and the calls a previous run left in flight settled; then a gap marker when
 // the previous run's log ends short; then the channel's user lines written
-// after that run ended; then the request. The rows the seed reuses are named
+// after that run ended; then the request. The cut costs the first kept turn
+// the tool results that answer calls made before it, and the seed's notes say
+// so. The rows the seed reuses are named
 // so the write-through appends only what is new (item 2): the run's local
 // index i is the log's index `log.from + i` throughout.
 //
