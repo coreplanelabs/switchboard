@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.225.0](https://github.com/coreplanelabs/switchboard/compare/v1.224.0...v1.225.0) (2026-09-15)
+
+
+### Features
+
+* **costs:** the month projection adds cloud and LLM run-rates, every figure links to where it is billed with the account named, and a day's bar hover opens a tooltip panel ([#1198](https://github.com/coreplanelabs/switchboard/issues/1198)) ([e836f2b](https://github.com/coreplanelabs/switchboard/commit/e836f2bc79687d72c71d2ec5b2eb0fa0a33fe667))
+* **harness:** the request router and memory reflection call the model through pi's library — pi-ai in the bot process as the config's provider table for the two calls made outside a run loop, OpenRouter with it, the native adapters no longer on their path ([#1196](https://github.com/coreplanelabs/switchboard/issues/1196)) ([74c6887](https://github.com/coreplanelabs/switchboard/commit/74c68874f24508d7e8ab34c97d4e28b8fb4fbf2d))
+* **web:** a file's name on the run page opens it in place — a picture, a player for video and audio, the first 64 KB of a text file, an explicit Download for the rest — never a link that downloads; the reply-writing turn says wrote the reply and points at the Reply ([#1202](https://github.com/coreplanelabs/switchboard/issues/1202)) ([1b39d4d](https://github.com/coreplanelabs/switchboard/commit/1b39d4d9715332e7463e8bd4a0710b2412257504))
+
+
+### Bug fixes
+
+* **deploy:** both execution images pin bun at 1.4.2 like pnpm and yarn — the bases' 1.3.x could not read a lockfileVersion-3 bun.lock, so every attach to a bun repo failed deps-install ([#1201](https://github.com/coreplanelabs/switchboard/issues/1201)) ([03cc19d](https://github.com/coreplanelabs/switchboard/commit/03cc19d2ab7f057090b9f47ea79a91673de020ef))
+
+
+### Documentation
+
+* **docs:** a pi run across a bot restart leaves known limits — the re-read past a tool result written just before the death is proven live, so the explanation page states both closures as proven and the limits page no longer lists it ([#1199](https://github.com/coreplanelabs/switchboard/issues/1199)) ([312d6ae](https://github.com/coreplanelabs/switchboard/commit/312d6ae8d6bec514a7c01b03f918fa599f762154))
+* **docs:** the two re-attach gaps the explanation page and known limits called open are closed — a re-attach re-reads pi's log from the last turn the ledger holds and a resume keeps the run's workspace; known limits now says what is proven live and what only by tests ([#1194](https://github.com/coreplanelabs/switchboard/issues/1194)) ([45fbb5f](https://github.com/coreplanelabs/switchboard/commit/45fbb5f344c72fb6ba03a65188bdcb6fe9e0ce07))
+
 ## [1.224.0](https://github.com/coreplanelabs/switchboard/compare/v1.223.0...v1.224.0) (2026-09-15)
 
 
