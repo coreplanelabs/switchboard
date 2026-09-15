@@ -505,6 +505,23 @@ export async function dispatch(
     requestRow = taken.requestRow;
     await foldCarriedInbox(deps, admissionCtx, admitted);
 
+    // The references step (dispatch/references.ts, record 0037): a permalink
+    // to another conversation the bot is in becomes a quoted, untrusted block
+    // on the request turn — after both fast paths and after admission, so a
+    // request they answer or refuse makes no adapter call and spends none of
+    // the requester's window; before the model, so nothing it does can widen
+    // what was read. The parsers above read `msg.text` and `history`, neither
+    // of which this touches. A resume replays its plan's messages and a
+    // restart re-dispatches a request already answered, so neither resolves
+    // again. Off by default (`references.enabled`).
+    const references =
+      !resume && !restart && referencesOn(deps.config.config)
+        ? await root.span("dispatch.references", () =>
+            readReferences(deps, { msg, actor: resolveChatActor(msg, (id) => deps.config.grantsFor(id)) }),
+          )
+        : NO_REFERENCES;
+    if (references.refused.length > 0) await io.reply(REFERENCE_REFUSAL);
+
     // The provider behind the model ref, and the target repo/ref/PR resolution
     // STARTED here (dispatch/resolve.ts) so the GitHub round trip overlaps the
     // memory read below; awaited after the ack.
