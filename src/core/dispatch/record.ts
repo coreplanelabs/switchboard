@@ -8,11 +8,12 @@ import type { ChannelDirectory, ChannelVisibility } from "../authz/types.js";
 import { STATIC_CHANNEL_DIRECTORY } from "../authz/channelDirectory.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "../runFriction.js";
 import { SPAN_SCHEMA } from "../normalizeSpans.js";
-import { isSpanRecord } from "../runEvents.js";
+import { isSpanRecord, type RunEvent } from "../runEvents.js";
 import {
   fitRecordToBudget,
   type RunProfileRecord,
   type RunRecord,
+  type RunReference,
   type RunSeed,
   type RunSession,
   type RunStatus,
@@ -355,6 +356,7 @@ export function assembleRunRecord(input: {
     // What the run was last doing / how it ended, and where it came from — so the
     // index can say what failed and link the thread without the events (item 20).
     ...(activityOfEvents(events) !== undefined ? { activity: activityOfEvents(events) } : {}),
+    ...(referencesOfEvents(events).length > 0 ? { references: referencesOfEvents(events) } : {}),
     ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
     ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
     ...(input.handoff !== undefined ? { handoff: redactHandoff(input.handoff) } : {}),
@@ -578,4 +580,16 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
         { span: root, ...(ledgerRun ? { via: ledgerRun.sink } : {}) },
       ),
   });
+}
+
+/** The conversations the run quoted (record 0037), one per `reference` event
+ *  in publish order — the record's `references`, derived from the events like
+ *  `pr` is, so no call site has to thread them. */
+export function referencesOfEvents(events: readonly RunEvent[]): RunReference[] {
+  const out: RunReference[] = [];
+  for (const e of events) {
+    if (e.type !== "reference") continue;
+    out.push({ url: e.url, channelId: e.channelId, messages: e.messages });
+  }
+  return out;
 }

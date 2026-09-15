@@ -261,8 +261,13 @@ export function isSpanRecord(e: { type: string }): e is SpanStartEvent | SpanEnd
  *  `mcp_unavailable` / `spans_dropped` / `cold_sandbox` / `rebind_refused` notes. */
 export function isHeadMaterial(event: RunEvent): boolean {
   switch (event.type) {
+    // `reference` (record 0037): a quoted conversation is published right
+    // after `input` and is the audit trail a steered run's record needs; the
+    // backlog trim and the record budget would otherwise drop it first, being
+    // the oldest non-head event.
     case "input":
     case "context":
+    case "reference":
     case "run_meta":
     case "route":
       return true;
@@ -405,6 +410,22 @@ export type RunEvent =
        *  run sent rather than a person (a parent's `send_to_run`), that run's
        *  id (docs/reference/specs/agent-conductor.md item 8). */
       source?: { url?: string; channel?: string; user?: string; run?: string };
+      seq?: number;
+      at?: number;
+    }
+  /** One referenced conversation the model was given (record 0037): a thread
+   *  another channel's permalink named, quoted onto the request turn as an
+   *  untrusted block. `text` is that block as the model saw it (header, fence,
+   *  one line per message), redacted; `messages` its count; `channelName` the
+   *  classifier's fresh name, never the link's label. One event per reference,
+   *  published right after `input`, so the page shows exactly what was quoted. */
+  | {
+      type: "reference";
+      url: string;
+      channelId: string;
+      channelName: string;
+      messages: number;
+      text: string;
       seq?: number;
       at?: number;
     }

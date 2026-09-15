@@ -53,6 +53,7 @@ import { channelVisibilityOf, type RecordDeps } from "./record.js";
 import { attachmentSuffix, composeRunLabel, humanizeMessageText, isMrkdwnChannel, liveViewLink } from "./reply.js";
 import { contextMessageTexts, type TextTurn } from "./messages.js";
 import { ROUTED_CARD_FOOTER, routedLabel, routedPartLines, type RouteDecided } from "./route.js";
+import type { ReferencedConversation } from "../references/types.js";
 
 /** What the provision stage reads off the dispatcher's dependencies. A run's
  *  row is stamped with its channel's visibility (the record slice), reserved on
@@ -295,6 +296,10 @@ export interface RegisterRunContext {
   seedTurns?: TextTurn[];
   /** How the preset was chosen (`run_meta.agentSource`). */
   agentSource: AgentSource;
+  /** The conversations the request pointed at and the step quoted (record
+   *  0037): one `reference` event each, right after `input`. Absent or empty
+   *  when the request carried none or the step is off. */
+  references?: { conversations: readonly ReferencedConversation[]; blocks: readonly string[] };
   /** The router's answer, when it gave one, as the record's `route` event: the
    *  preset it chose (with a compound's parts), or the default the run fell
    *  to after a rejected compound with the `compound_rejected` reason. */
@@ -460,6 +465,26 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
       attachments ? `${requestText} ${attachments}` : requestText,
       Object.keys(source).length > 0 ? source : undefined,
     );
+  // The conversations the request pointed at (record 0037), one `reference`
+  // event each, right after the request: the block as the model saw it,
+  // redacted, under the per-event byte budget by the step's own caps, so the
+  // page shows exactly what was quoted and the record's `references` field
+  // (derived from these events at finish) says where it came from.
+  if (!resume && ctx.references) {
+    const { conversations, blocks } = ctx.references;
+    conversations.forEach((rc, i) => {
+      registry.publish(run.id, {
+        type: "reference",
+        url: rc.permalink,
+        channelId: rc.ref.channelId,
+        channelName: rc.channelName,
+        messages: rc.messages.length,
+        text: redactSecrets(blocks[i] ?? ""),
+        at: clock(),
+      });
+      console.log(`[event] ${msg.threadKey} type=reference channel=${rc.ref.channelId} messages=${rc.messages.length}`);
+    });
+  }
   // What the run is about (live-view item 19): agent, model, and the repo
   // context as resolved NOW — so the page can head the record with linked
   // owner/repo · ref · #PR · sha. Straight after the request; published once

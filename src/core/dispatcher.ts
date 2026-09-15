@@ -729,6 +729,7 @@ export async function dispatch(
       ...(seedTurns ? { seedTurns } : {}),
       agentSource,
       ...(routeEvent ? { route: routeEvent } : {}),
+      ...(references.conversations.length > 0 ? { references } : {}),
     });
     const { run, runId, channelVisibility, liveUrl, publishText, publishMeta } = registration;
     registered = run;
