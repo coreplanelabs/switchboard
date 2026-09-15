@@ -693,13 +693,81 @@ describe("buildRoutePrompt — the compound form, described apart from the table
     expect(rules).not.toContain('"preset": "<a name from the table>"');
   });
 
-  it("through route(): a requester restricted from coding is offered the readers rule and no write-ask sentence, since the table names no write preset", async () => {
+  it("through route(): a requester restricted from coding is offered the readers rule and no write-ask clause, since the table names no write preset", async () => {
     const model = scripted(answer("general"));
     await route({ ...base, allowed: ["general", "review", "research", "explore"], compound: OFFER }, model);
     const system = model.prompts[0].system;
     expect(system).toContain("each part's preset is one of `general`, `review`, `research`, `explore`");
     expect(system).not.toMatch(/never a part/);
     expect(system).not.toMatch(/coding/);
+  });
+
+  it("what is NOT compound is said once, in one place: independence is judged on the request as typed, a request wanting one answer from several steps is one ask whatever sources they reach, the write-ask clause follows in the same rule paragraph, the doubt rule closes it, and the tool's parts description keeps the same order", () => {
+    const p = buildRoutePrompt({ ...base, compound: OFFER });
+    const lines = p.system.slice(p.system.indexOf("Compound requests:")).split("\n");
+    // The opening, the shape, one rule paragraph: the write-ask rule is no paragraph of its own.
+    expect(lines).toHaveLength(3);
+    const rule = lines[2];
+    expect(rule).toMatch(
+      /^Independent means neither part needs the other's result, judged on the request as the person typed it/,
+    );
+    const countFirst = rule.indexOf("First count what the person wants back");
+    const steps = rule.indexOf("is NOT compound");
+    const oneVerdict = rule.indexOf("is one ask too, one verdict built from a web step and a repository step");
+    const chain = rule.indexOf("a later step that uses an earlier step's result is a step of the same ask, not a part");
+    const write = rule.indexOf("An ask that needs `coding` is never a part");
+    const subjects = rule.indexOf("ARE compound");
+    const readersRule = rule.indexOf("Each part runs as a child that only reads");
+    expect(countFirst).toBeGreaterThan(-1);
+    expect(rule).toMatch(/one answer, recommendation, verdict, comparison or summary is one ask/);
+    expect(steps).toBeGreaterThan(countFirst);
+    expect(rule).toMatch(/however many steps it takes and whatever sources the steps reach/);
+    expect(oneVerdict).toBeGreaterThan(steps);
+    expect(chain).toBeGreaterThan(oneVerdict);
+    expect(rule).toMatch(/needing two sources is not independence/);
+    const capability = rule.indexOf("Never split one ask by capability");
+    expect(capability).toBeGreaterThan(chain);
+    expect(rule).toMatch(/splitting is not how to reach a lesser preset/);
+    expect(write).toBeGreaterThan(capability);
+    expect(subjects).toBeGreaterThan(write);
+    expect(rule).toMatch(/two different subjects that each want an answer of their own/);
+    expect(readersRule).toBeGreaterThan(subjects);
+    expect(rule.endsWith("When one ask is in doubt, do not split it.")).toBe(true);
+    expect(p.system.match(/never a part/g)).toHaveLength(1);
+    // The shape's reason slot asks for the separate things the person wanted, so the check happens as the answer is written.
+    expect(lines[1]).toContain(
+      '"reason": "<one line: the separate things the person asked for, and why neither needs the other>"',
+    );
+    // The schema's parts description: the count-first rule, the several-steps exclusion, the write-ask sentence after it, the doubt rule last.
+    const schema = p.tool.inputSchema as {
+      properties: { parts: { description: string }; reason: { description: string } };
+    };
+    expect(schema.properties.reason.description).toBe(
+      "one line, under 100 characters: why this preset; for conductor, the separate things the person asked for",
+    );
+    const single = routeTool(presets).inputSchema as { properties: { reason: { description: string } } };
+    expect(single.properties.reason.description).toBe("one line, under 100 characters: why this preset");
+    const d = schema.properties.parts.description;
+    expect(d).toMatch(
+      /First count what the person wants back: one answer, recommendation or verdict is one ask, never split/,
+    );
+    const dSteps = d.indexOf(
+      "A single ask with several steps is one request on one preset, and so is one that wants one answer built from what its steps find, whatever sources the steps reach",
+    );
+    const dCapability = d.indexOf("One ask is never split by capability");
+    const dWrite = d.indexOf("An ask that needs coding is never a part");
+    const dDoubt = d.indexOf("When one ask is in doubt, omit parts");
+    expect(d).toMatch(/INDEPENDENT asks on different subjects, each wanting an answer of its own/);
+    expect(dSteps).toBeGreaterThan(-1);
+    expect(dCapability).toBeGreaterThan(dSteps);
+    expect(dWrite).toBeGreaterThan(dCapability);
+    expect(dDoubt).toBeGreaterThan(dWrite);
+    expect(d.match(/never a part/g)).toHaveLength(1);
+    // The enum's conductor entry says the same at the moment the preset is picked.
+    const preset = (p.tool.inputSchema as { properties: { preset: { description: string } } }).properties.preset;
+    expect(preset.description).toMatch(
+      /conductor: only for a compound request \(two or more asks that each want an answer of their own\), with parts; never for one ask whose steps need different presets/,
+    );
   });
 });
 
@@ -846,6 +914,24 @@ describe("parseRouteAnswer — the compound form", () => {
   it("parts without a preset or a reason: the compound form with a reason that says it was inferred", () => {
     const d = parseRouteAnswer(JSON.stringify({ parts: TWO_PARTS }), allNames, OFFER);
     expect(d).toEqual({ preset: "conductor", reason: "compound inferred from parts", parts: TWO_PARTS });
+  });
+
+  it("the conductor named with its parts but no reason is the compound form too, the reason `no reason given`: the parts are the answer, a write part still collapses, and a single route or a partless conductor without a reason is still a missing reason", () => {
+    const d = parseRouteAnswer(JSON.stringify({ preset: "conductor", parts: TWO_PARTS }), allNames, OFFER);
+    expect(d).toEqual({ preset: "conductor", reason: "no reason given", parts: TWO_PARTS });
+    // A live probe answered exactly this with a coding part: the collapse must not be lost to the missing field.
+    const c = parseRouteAnswer(
+      JSON.stringify({ preset: "conductor", parts: [TWO_PARTS[0], { text: "fix the flaky test", preset: "coding" }] }),
+      allNames,
+      OFFER,
+    );
+    expect(c).toEqual({ preset: "coding", reason: "no reason given", collapsed: { presets: ["review", "coding"] } });
+    expect(parseRouteAnswer(JSON.stringify({ preset: "general" }), allNames, OFFER).reason).toBe(
+      `missing reason in the router's answer: {"preset":"general"}`,
+    );
+    expect(parseRouteAnswer(JSON.stringify({ preset: "conductor" }), allNames, OFFER).reason).toBe(
+      `missing reason in the router's answer: {"preset":"conductor"}`,
+    );
   });
 
   it("parts without a preset and without the offer is compound_rejected like any unoffered compound — never a silent single route", () => {

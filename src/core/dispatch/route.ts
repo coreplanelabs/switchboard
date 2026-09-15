@@ -182,6 +182,8 @@ export function routeTool(presets: readonly RoutablePreset[], compound?: Compoun
   const writers = presets.filter((p) => p.identity === "write").map((p) => p.name);
   // The rules ride the schema too: a forced tool call reads its descriptions
   // as closely as the system prompt, and a bare `parts` field invites a split.
+  // What is NOT compound is stated in the prompt's order: the several-steps
+  // exclusion first, the write-ask sentence after it (`compoundRules`).
   const table = presets.map((p) => `${p.name}: ${oneLine(p.description)}`).join("; ");
   const writeAsk =
     writers.length > 0
@@ -192,15 +194,22 @@ export function routeTool(presets: readonly RoutablePreset[], compound?: Compoun
       type: "string",
       enum: compound ? [...names, COMPOUND_PRESET] : names,
       description: `the least capable preset whose description covers the request — ${table}${
-        compound ? `; ${COMPOUND_PRESET}: only for a compound request, with parts` : ""
+        compound
+          ? `; ${COMPOUND_PRESET}: only for a compound request (two or more asks that each want an answer of their own), with parts; never for one ask whose steps need different presets`
+          : ""
       }`,
     },
-    reason: { type: "string", description: "one line, under 100 characters: why this preset" },
+    reason: {
+      type: "string",
+      description: `one line, under 100 characters: why this preset${
+        compound ? `; for ${COMPOUND_PRESET}, the separate things the person asked for` : ""
+      }`,
+    },
     ...(compound
       ? {
           parts: {
             type: "array",
-            description: `only when the request has two or more INDEPENDENT asks on different subjects, each rewritten so it stands alone and each on a read-only preset (${nameList(readers)}), with preset "${COMPOUND_PRESET}".${writeAsk} A single ask with several steps is one request on one preset: omit parts and name that preset. When one ask is in doubt, omit parts.`,
+            description: `only when the request has two or more INDEPENDENT asks on different subjects, each wanting an answer of its own, each rewritten so it stands alone and each on a read-only preset (${nameList(readers)}), with preset "${COMPOUND_PRESET}". First count what the person wants back: one answer, recommendation or verdict is one ask, never split. A single ask with several steps is one request on one preset, and so is one that wants one answer built from what its steps find, whatever sources the steps reach: omit parts and name that preset. One ask is never split by capability: when its steps need the web and a repository, name the one preset covering every step, even though one step alone would fit a lesser one.${writeAsk} When one ask is in doubt, omit parts.`,
             minItems: 2,
             maxItems: compound.maxParts,
             items: {
@@ -287,34 +296,52 @@ export function buildRoutePrompt(input: Omit<RouteInput, "allowed">): RoutePromp
   return { system, user, tool: routeTool(input.presets, input.compound) };
 }
 
-/** The compound form as the model reads it, after the table: the shape, when
- *  it applies — two or more parts that are independent, each standing alone —
- *  what is NOT compound (one ask with several steps), the cap, and the rows a
- *  part may run on: the read-identity presets alone, named off the table
- *  (`partPresets`), since a part runs as a spawned child and a child is a
- *  reader (record 0034). When the table offers a write preset, the write-ask
- *  rule follows (`writeAskRule`). */
+/** The compound form as the model reads it, after the table: the shape (its
+ *  `reason` slot asks for the separate things the person asked for, so the
+ *  check happens as the answer is written), when it applies — two or more
+ *  parts that are independent, each standing alone — and one rule paragraph.
+ *  What is NOT compound is said once, in one place, the two exclusions side by
+ *  side, and the paragraph opens by counting what the person wants back: one
+ *  answer is one ask, never split, however many steps or sources it takes (a
+ *  later step that uses an earlier step's result is a step, not a part; one
+ *  ask is never split by capability, and splitting is not how to reach a
+ *  lesser preset), and, when the table offers a write preset, an ask that
+ *  needs it is never a part either (`writeAskClause`). Then what IS compound
+ *  (two asks that each want an answer of their own), the cap, the rows a part
+ *  may run on (the read-identity presets alone, named off the table by
+ *  `partPresets`, since a part runs as a spawned child and a child is a
+ *  reader: record 0034), and the doubt rule closes the paragraph. The
+ *  write-ask rule once stood as a paragraph of its own after the reader rule;
+ *  read there, as the one exception to splitting, the live model took two
+ *  sources for two asks ("one needs web search, one needs GitHub") and split a
+ *  dependent read-only chain, and the replay's no-decoy-split row went red.
+ *  Folding it back was not enough: under three wordings that only defined
+ *  independence more carefully the same decoy split in about half of the
+ *  fixture-only probes, with that reason every time, and held five of five
+ *  once the paragraph counted answers first and named the capability split. */
 function compoundRules(offer: CompoundOffer, presets: readonly RoutablePreset[]): string[] {
   const readers = partPresets(presets).map((p) => p.name);
   const writers = presets.filter((p) => p.identity === "write").map((p) => `\`${p.name}\``);
   return [
     "Compound requests: when the request has two or more INDEPENDENT parts — neither part needs the other's result, and each would stand alone as a request of its own — answer this form instead, and only then:",
-    `{"preset": "${COMPOUND_PRESET}", "parts": [{"text": "<one part, rewritten so it stands alone>", "preset": "<one of ${readers.join(", ")}>"}, …], "reason": "<one line: why the parts are independent>"}`,
-    `Independent means neither part needs the other's result. A single ask with several steps ("clone it, run the tests, tell me what fails") is NOT compound: it is one request on one preset, however many steps it takes. Two asks on two different subjects ("summarize what is in the docs folder, and run the lint on main in a sandbox") ARE compound even when both are read-only or would land on the same preset — the same preset may appear twice. When one ask is in doubt, do not split it. At most ${offer.maxParts} parts. Each part runs as a child that only reads, so each part's preset is one of ${readers.map((r) => `\`${r}\``).join(", ")} (the rows above whose credential is none or read), chosen for that part alone by the same rules as a single request — least capable first.`,
-    ...(writers.length > 0 ? [writeAskRule(writers)] : []),
+    `{"preset": "${COMPOUND_PRESET}", "parts": [{"text": "<one part, rewritten so it stands alone>", "preset": "<one of ${readers.join(", ")}>"}, …], "reason": "<one line: the separate things the person asked for, and why neither needs the other>"}`,
+    `Independent means neither part needs the other's result, judged on the request as the person typed it, not on lookups you could carve out of it. First count what the person wants back: one answer, recommendation, verdict, comparison or summary is one ask, however many steps or sources it takes, and one ask is never split. A single ask with several steps ("clone it, run the tests, tell me what fails") is NOT compound: it is one request on one preset, however many steps it takes and whatever sources the steps reach. "Look up what a tool's new release changed and tell me whether our pins are affected" is one ask too, one verdict built from a web step and a repository step: a later step that uses an earlier step's result is a step of the same ask, not a part, and needing two sources is not independence. Never split one ask by capability: when its steps need the web and a repository, the whole ask runs on the one preset whose description covers every step, even though one step alone would fit a lesser preset; splitting is not how to reach a lesser preset.${writers.length > 0 ? ` ${writeAskClause(writers)}` : ""} Two asks on two different subjects that each want an answer of their own ("summarize what is in the docs folder, and run the lint on main in a sandbox"; "what did the tool's new release change, and separately how many issues are open") ARE compound even when both are read-only or would land on the same preset — the same preset may appear twice. At most ${offer.maxParts} parts. Each part runs as a child that only reads, so each part's preset is one of ${readers.map((r) => `\`${r}\``).join(", ")} (the rows above whose credential is none or read), chosen for that part alone by the same rules as a single request — least capable first. When one ask is in doubt, do not split it.`,
   ];
 }
 
-/** The write-ask rule, stated only when the table offers a preset that
- *  implements changes (named off the table, never typed): a part runs as a
- *  child that only reads, so an ask that needs a write preset is never a part.
- *  When any part of the request would need one, the request is not split: it
- *  routes whole to that preset as one run, which does its own reading. The
- *  parse holds the same line (`parseCompound`), so a prompt the model ignores
- *  still lands the request on that preset and never on the default agent. */
-function writeAskRule(writers: readonly string[]): string {
+/** The write-ask clause of the rule paragraph, present only when the table
+ *  offers a preset that implements changes (named off the table, never
+ *  typed): a part runs as a child that only reads, so an ask that needs a
+ *  write preset is never a part. When any part of the request would need one,
+ *  the request is not split: it routes whole to that preset as one run, which
+ *  does its own reading. It follows the several-steps exclusion in the same
+ *  paragraph, never as a paragraph of its own (`compoundRules` says why).
+ *  The parse holds the same line (`parseCompound`), so a prompt the model
+ *  ignores still lands the request on that preset and never on the default
+ *  agent. */
+function writeAskClause(writers: readonly string[]): string {
   const names = writers.join(" or ");
-  return `An ask that needs ${names} is never a part: a part runs as a child that only reads, and ${names} pushes. When any part of the request would need ${names}, do not split it: answer ${names} alone for the whole request as typed, and it reads what it must before it changes anything ("review PR 7 and fix what it finds" is one ${names} request; "research X and open a PR for Y" is one ${names} request).`;
+  return `An ask that needs ${names} is never a part either: a part runs as a child that only reads, and ${names} pushes, so when any part of the request would need ${names}, do not split it: answer ${names} alone for the whole request as typed, and it reads what it must before it changes anything ("review PR 7 and fix what it finds" is one ${names} request; "research X and open a PR for Y" is one ${names} request).`;
 }
 
 /** The imperative rule, stated only when the table offers a preset that
@@ -366,9 +393,17 @@ export function parseRouteAnswer(raw: string, allowed: readonly string[], compou
   // hides what the model did — the same courtesy the not-JSON case pays.
   if (preset === undefined)
     return { preset: undefined, reason: `missing preset in the router's answer: ${tidyReason(trimmed)}` };
-  if (typeof reason !== "string" && !inferred)
+  // A compound that carries its parts but no reason is the compound form too:
+  // the parts are the answer, and the same forced call skips that field (a
+  // live probe answered the conductor with a `coding` part and no reason, and
+  // the collapse onto `coding` was lost to the refusal). A single route or a
+  // partless conductor without a reason is still refused: nothing else in it
+  // says why.
+  const partsAnswer = preset === COMPOUND_PRESET && Array.isArray(parts);
+  if (typeof reason !== "string" && !partsAnswer)
     return { preset: undefined, reason: `missing reason in the router's answer: ${tidyReason(trimmed)}` };
-  const tidy = typeof reason === "string" ? tidyReason(reason) : "compound inferred from parts";
+  const tidy =
+    typeof reason === "string" ? tidyReason(reason) : inferred ? "compound inferred from parts" : "no reason given";
   if (preset === COMPOUND_PRESET) return parseCompound(parts, tidy, allowed, compound);
   if (!allowed.includes(preset))
     return { preset: undefined, reason: `router said "${tidyReason(preset)}", not a preset the requester may run` };
