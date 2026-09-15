@@ -475,7 +475,11 @@ export async function resolveRepoContext(
     // Unvetted (no probe), an addressed slug is the weak token it always was —
     // `in try/catch` is ordinary prose, and only the registry can tell.
     if (a.slug !== undefined) return probe && (await vet(a.slug)) ? a.slug : undefined;
-    const matches = ((await listSlugs()) ?? []).filter((slug) => slug.split("/")[1] === a.name);
+    // Exact name match only, case-insensitive: the addressed name is
+    // lowercased at extraction, and a registry slug's case must not hide the
+    // one repo that carries the name — substring matches never count, so an
+    // unrelated onboarded repo can never shadow the exact one.
+    const matches = ((await listSlugs()) ?? []).filter((slug) => slug.split("/")[1]?.toLowerCase() === a.name);
     return matches.length === 1 ? matches[0] : undefined;
   };
   // Strong signal in this message → it (re)binds: a URL, `owner/name#N`, or an

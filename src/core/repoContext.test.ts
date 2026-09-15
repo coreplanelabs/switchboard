@@ -944,6 +944,23 @@ describe("addressed repos: `in <owner/name>` and `in <name>` bind and rebind onc
     });
   });
 
+  it("`in <name>` picks the exact-name repo even when unrelated repos are onboarded beside it", async () => {
+    const mixed = vi.fn(async () => ["ops/installations", "acme/ledger", "acme/api"]);
+    await expect(resolveRepoContext(msg("agent:coding in ledger: fix it"), [], probe, mixed)).resolves.toEqual({
+      repo: "acme/ledger",
+    });
+  });
+
+  it("`in <name>` matches a registry slug case-insensitively — the extracted name is lowercased, the listing may not be", async () => {
+    const cased = vi.fn(async () => ["acme/Ledger", "ops/installations"]);
+    await expect(resolveRepoContext(msg("agent:coding in Ledger: fix it"), [], probe, cased)).resolves.toEqual({
+      repo: "acme/Ledger",
+    });
+    await expect(resolveRepoContext(msg("agent:coding in ledger: fix it"), [], probe, cased)).resolves.toEqual({
+      repo: "acme/Ledger",
+    });
+  });
+
   it("`in <name>` rebinds a URL-bound thread too (the target was named explicitly)", async () => {
     await expect(
       resolveRepoContext(msg("agent:coding in atlas: same fix there"), boundToApi, probe, slugs),
