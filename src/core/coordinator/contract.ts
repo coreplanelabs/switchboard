@@ -36,6 +36,25 @@ export function idempotencyKeyFor(parentInstanceId: string, step: string): strin
   return `${parentInstanceId}:${step}`;
 }
 
+/** A unit's id as the plan spells it (`U16`) or `task` — the `unit` field of a unit row. */
+export const UNIT_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
+/** `<instanceId>:<unit>` — the one name a unit has outside its instance: the
+ *  prefix every child's idempotency key carries before its `/<round>/<kind>`
+ *  step, so a unit is addressed by the same words its runs are stamped with.
+ *  An instance id has no colon, so the first colon splits the two halves. */
+export const UNIT_KEY_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,99}:[A-Za-z0-9_-]{1,32}$/;
+
+export function unitKeyOf(unit: { instanceId: string; unit: string }): string {
+  return `${unit.instanceId}:${unit.unit}`;
+}
+
+/** The two halves of a unit key, or undefined for anything that is not one. */
+export function parseUnitKey(key: string): { instanceId: string; unit: string } | undefined {
+  if (!UNIT_KEY_PATTERN.test(key)) return undefined;
+  const at = key.indexOf(":");
+  return { instanceId: key.slice(0, at), unit: key.slice(at + 1) };
+}
+
 /** The event a child's terminal record sends its parent: the type carries the
  *  run id, so each `waitForEvent` matches its own child and a duplicate is
  *  buffered harmlessly. An event type is the platform's alphabet — letters,

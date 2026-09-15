@@ -12,6 +12,9 @@ import {
   sendRunFinished,
   STEP_NAME_PATTERN,
   isCoordinatorUnit,
+  parseUnitKey,
+  UNIT_KEY_PATTERN,
+  unitKeyOf,
   type CoordinatorInstance,
   type CoordinatorUnit,
   type WorkflowSender,
@@ -80,6 +83,32 @@ describe("the coordinator's names", () => {
       parentInstanceId: "inst_1",
       idempotencyKey: "inst_1:s",
     });
+  });
+});
+
+describe("a unit's key — the instance and the unit, the prefix of every child's idempotency key", () => {
+  it("unitKeyOf spells the row's instance and unit, parseUnitKey reads them back, and the key is the head of each child's idempotency key", () => {
+    const key = unitKeyOf({ instanceId: "plan-p-2", unit: "U16" });
+    expect(key).toBe("plan-p-2:U16");
+    expect(UNIT_KEY_PATTERN.test(key)).toBe(true);
+    expect(parseUnitKey(key)).toEqual({ instanceId: "plan-p-2", unit: "U16" });
+    expect(parseUnitKey(unitKeyOf({ instanceId: "ship-abc_1", unit: "task" }))).toEqual({
+      instanceId: "ship-abc_1",
+      unit: "task",
+    });
+    expect(idempotencyKeyFor("plan-p-2", "U16/1/coding").startsWith(`${key}/`)).toBe(true);
+  });
+
+  it("refuses what is not a key: no colon, an empty half, a unit with a slash or a colon, an instance over 100 characters", () => {
+    for (const bad of [
+      "plan-p-2",
+      ":U16",
+      "plan-p-2:",
+      "plan-p-2:U16/1/coding",
+      "plan-p-2:U16:6",
+      `${"a".repeat(101)}:U16`,
+    ])
+      expect(parseUnitKey(bad), bad).toBeUndefined();
   });
 });
 

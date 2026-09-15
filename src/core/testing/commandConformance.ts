@@ -205,7 +205,7 @@ export const QUOTED_SAMPLE = `quoted "double" and 'single' words`;
  *    constrains (no hint, not a baseline) and accepts the sample — so the chat
  *    tokenizer's quoting must round-trip the value exactly;
  *  - an unknown option;
- *  - a missing required argument (when the command declares one).
+ *  - a missing required argument (the last one, when the command declares any).
  * A field with no acceptable sample is reported in `missingSamples` rather than
  * silently dropped — the test fails listing them.
  */
@@ -280,13 +280,16 @@ export function exhaustiveVariants(
     expect: { ok: false, error: "invalid_input", field: UNKNOWN_OPTION },
     planted: MISMATCH_MARKER,
   });
-  const firstRequiredArg = fields.find((f) => f.kind === "arg" && f.required);
-  if (firstRequiredArg) {
-    const { [firstRequiredArg.name]: _omitted, ...rest } = requiredOnly;
+  // The LAST required argument: on a positional grammar the words shift, so
+  // omitting an earlier one binds the next word to it and the grammar can only
+  // name the last — the one case every surface refuses naming the same field.
+  const lastRequiredArg = fields.filter((f) => f.kind === "arg" && f.required).at(-1);
+  if (lastRequiredArg) {
+    const { [lastRequiredArg.name]: _omitted, ...rest } = requiredOnly;
     variants.push({
-      name: `missing argument ${firstRequiredArg.name}`,
+      name: `missing argument ${lastRequiredArg.name}`,
       named: rest,
-      expect: { ok: false, error: "invalid_input", field: firstRequiredArg.name },
+      expect: { ok: false, error: "invalid_input", field: lastRequiredArg.name },
     });
   }
   return { variants, missingSamples };
@@ -499,6 +502,10 @@ export const FIXTURE = {
   ownMemoryRecord: `mem:user:${CALLER_ID}:1`,
   /** The seeded MCP server (auth none) present in every tier the suite asks for. */
   mcpServer: "linear",
+  /** The one ship unit of the fixture (`runs unit`): a task whose coding round and review round each ran once. */
+  unitKey: "ship-fin-1:task",
+  /** The coding thread's session log of that unit (`runs search`): the session its coding run was a range of. */
+  sessionKey: "slack:C1:unit:coding",
 } as const;
 
 /** Hints by FIELD NAME: a value the fixture honors (an id that exists, a slug
@@ -528,6 +535,8 @@ export const FIELD_HINTS: SampleHints = {
   unit: "U16",
   // delivery.report: a calendar day the range resolver accepts (`YYYY-MM-DD`).
   since: "2026-09-01T00:00:00Z".slice(0, 10),
+  // runs.search: the session log the fixture seeded (a key the pattern accepts is not enough — the search must find a session's runs).
+  session: FIXTURE.sessionKey,
 };
 
 /** Commands the generic fixture cannot drive on its own: `hints` override a
@@ -555,6 +564,14 @@ export const COMMAND_FIXTURES: Readonly<Record<string, { hints?: SampleHints; ba
   "review.abridge": {
     hints: { id: FIXTURE.reviewRun },
     why: "the run must be a finished PR review that recorded a git reading diff — the generic `id` hint is a live coding run",
+  },
+  "runs.unit": {
+    hints: { unit: FIXTURE.unitKey },
+    why: "the argument is the coordinator store's unit key `<instance>:<unit>` — the generic `unit` hint is a plan's bare unit id for `contract render`",
+  },
+  "runs.children": {
+    hints: { id: FIXTURE.persistedRun },
+    why: "the persisted run has a child in the fixture — the generic `id` hint is the live run, which spawned nothing",
   },
   "deploy.restart": {
     hints: { only: "bot" },

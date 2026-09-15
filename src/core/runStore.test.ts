@@ -116,6 +116,20 @@ function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION
       expect(await store.list({ threadKey: "slack:C1:none" })).toEqual([]);
     });
 
+    // docs/reference/specs/run-history.md item 57: a conductor's children are one
+    // listing over the parent they name, so the store filters by `parentRunId`.
+    it("list filters by `parentRunId` — the runs one run spawned, newest first, under the same cap — and a run with no children is empty", async () => {
+      const { store } = make();
+      await store.put(record("k1", NOW - 3000, { parentRunId: "parent-a" }));
+      await store.put(record("k2", NOW - 1000, { parentRunId: "parent-a" }));
+      await store.put(record("k3", NOW - 2000, { parentRunId: "parent-b" }));
+      await store.put(record("solo", NOW - 500));
+      expect((await store.list({ parentRunId: "parent-a" })).map((r) => r.id)).toEqual(["k2", "k1"]);
+      expect((await store.list({ parentRunId: "parent-a", limit: 1 })).map((r) => r.id)).toEqual(["k2"]);
+      expect((await store.list({ parentRunId: "parent-a", agent: "explore" })).map((r) => r.id)).toEqual([]);
+      expect(await store.list({ parentRunId: "solo" })).toEqual([]);
+    });
+
     // 30 s timeout, not the 5 s default: the FileRunStore variant's 205 puts
     // each re-read the index, stat every kept record (compact's intact check),
     // and rewrite the index — O(n) I/O per put by design (self-healing index).

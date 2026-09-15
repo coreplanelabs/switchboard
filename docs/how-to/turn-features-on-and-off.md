@@ -71,7 +71,7 @@ A command under two capabilities is on when either gives it a backend.
 | `readingDiffAbridge` | `review abridge` |
 | `dashboardAuth` | — |
 
-The other 25 commands are on in every installation.
+The other 28 commands are on in every installation.
 
 <!-- /generated:capability-commands -->
 

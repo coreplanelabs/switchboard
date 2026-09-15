@@ -453,6 +453,9 @@ export interface RunListOptions {
   /** One thread's runs (`slack:C0123:1712.34`), newest first — the read behind
    *  a thread's lineage and a child's thread-aware rows (agent-conductor item 10). */
   threadKey?: string;
+  /** The runs one run spawned or that continue a thread it opened
+   *  (`RunRecord.parentRunId`, item 46) — a conductor's children as one listing. */
+  parentRunId?: string;
   /** What the ACTOR may see (authorization): the store predicate compiled
    *  from the policy, pushed down so no surface loads rows and filters after.
    *  Absent = no visibility constraint — only a caller that has already decided

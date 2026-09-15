@@ -15,6 +15,19 @@ export { isRunSession, SESSION_KEY_PATTERN, type RunSession } from "../runRecord
 /** The byte policy's default: `RetentionPolicy.sessionLogMaxBytes`. */
 export const DEFAULT_SESSION_LOG_MAX_BYTES = DEFAULT_RETENTION_POLICY.sessionLogMaxBytes;
 
+/** How much of a hit's text a search answers with (item 10): one line, at most this many characters. */
+export const SNIPPET_CHARS = 300;
+/** The most hits one search answers — the object's cap, `recall`'s and the search route's alike. */
+export const SEARCH_MAX_HITS = 50;
+
+/** A hit's text as one line of at most `SNIPPET_CHARS` — what `recall` and
+ *  the session search route answer beside the turn, so a reader sees where
+ *  the words fell without the turn's whole body. */
+export function snippetOf(text: string): string {
+  const line = text.replace(/\s+/g, " ").trim();
+  return line.length > SNIPPET_CHARS ? `${line.slice(0, SNIPPET_CHARS - 1)}…` : line;
+}
+
 /** The object's name: the thread and the agent, the pair record 0034 calls a
  *  session. A run without a resolved agent keys on a dash so the name still
  *  has both halves. */

@@ -176,6 +176,7 @@ export function selectListItems<T extends RunListItem>(items: readonly T[], opts
   if (opts.agent !== undefined) out = out.filter((r) => r.agent === opts.agent);
   if (opts.channel !== undefined) out = out.filter((r) => r.channelId === opts.channel);
   if (opts.threadKey !== undefined) out = out.filter((r) => r.threadKey === opts.threadKey);
+  if (opts.parentRunId !== undefined) out = out.filter((r) => r.parentRunId === opts.parentRunId);
   if (opts.visibleTo !== undefined) out = out.filter((r) => matchesVisibility(opts.visibleTo!, r));
   return out.slice(0, clampListLimit(opts.limit));
 }

@@ -506,6 +506,9 @@ describe("handleMcpRequest — registry commands as tools", () => {
       "runs_events",
       "runs_friction",
       "runs_stop",
+      "runs_unit",
+      "runs_children",
+      "runs_search",
     ]);
     const list = tools.find((t) => t.name === "runs_list")!;
     expect(list.description).toBeTruthy();

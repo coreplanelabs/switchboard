@@ -114,7 +114,9 @@ describe("WorkerRunStore", () => {
     });
     const store = new WorkerRunStore({ ...OPTS, fetch });
     expect(await store.get("a")).toEqual(rec);
-    expect(await store.list({ limit: 5, agent: "review" })).toEqual([{ ...rec, events: undefined, bytes: 10 }]);
+    expect(await store.list({ limit: 5, agent: "review", parentRunId: "parent-1" })).toEqual([
+      { ...rec, events: undefined, bytes: 10 },
+    ]);
     expect(await store.events("a", { afterSeq: 1, limit: 1 })).toEqual({
       events: [{ ...rec.events[1], seq: 2 }],
       nextAfterSeq: 2,
@@ -127,7 +129,7 @@ describe("WorkerRunStore", () => {
       expect(c.body.storeKey).toBe("runs:default");
     }
     expect(calls[0].body).toEqual({ storeKey: "runs:default", id: "a" });
-    expect(calls[1].body).toEqual({ storeKey: "runs:default", limit: 5, agent: "review" });
+    expect(calls[1].body).toEqual({ storeKey: "runs:default", limit: 5, agent: "review", parentRunId: "parent-1" });
     expect(calls[2].body).toEqual({ storeKey: "runs:default", id: "a", afterSeq: 1, limit: 1 });
     expect(calls[3].body).toEqual({ storeKey: "runs:default", id: "a" });
   });

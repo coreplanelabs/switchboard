@@ -637,7 +637,10 @@ export function renderCompact(
  *  nothing else). Text = aligned columns for a terminal; chat = one bullet with
  *  the id in a code span and ` · ` between the fields, because padded columns
  *  collapse in a proportional font. */
-function renderRunLine(r: JsonObject, now: number, surface: "chat" | "text"): string {
+/** One run as the text surfaces list it — short id, agent, status, duration;
+ *  never channel, user, thread or label. `runs list`'s line, and the line every
+ *  other listing of runs (a unit's, a conductor's children) prefixes. */
+export function renderRunLine(r: JsonObject, now: number, surface: "chat" | "text"): string {
   const id = typeof r.id === "string" ? r.id.slice(0, 8) : "?";
   const agent = typeof r.agent === "string" ? r.agent : "-";
   const startedAt = typeof r.startedAt === "number" ? r.startedAt : undefined;
