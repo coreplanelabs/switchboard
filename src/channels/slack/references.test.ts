@@ -265,6 +265,36 @@ describe("SlackConversationReader.readConversation — text only, newest kept", 
     expect(missing.messages).toEqual([]);
   });
 
+  it("strips the Slack plugin's 'Sent using' footer from a quoted line as the request text is; a footer-only message is dropped", async () => {
+    // A message the Claude Slack plugin posted on a user's behalf carries the
+    // app footer as its last line (same-line or newline, with or without a
+    // bracketed sender). Quoted verbatim it is noise in the model's input and
+    // a stray mention token inside the fence — the same strip the request text
+    // and the current thread's history get applies here.
+    const { client } = fakeClient({
+      channels: { C_PUB: PUBLIC },
+      replies: {
+        "C_PUB:1.0": [
+          { user: "U_ALICE", text: "please look at the flaky test *Sent using* <@UAPPFOOTER|Claude>", ts: "1.0" },
+          { user: "U_BOB", text: "on it\n*Sent using* <@UAPPFOOTER|Claude> [Bob <bob@example.com>]", ts: "2.0" },
+          { user: "U_ALICE", text: "*Sent using* <@UAPPFOOTER|Claude>", ts: "3.0" },
+          { user: "U_BOB", text: "what does Sent using <@UAPPFOOTER> mean?", ts: "4.0" },
+        ],
+      },
+      users: { U_ALICE: { real_name: "Alice" }, U_BOB: { name: "bob" } },
+    });
+    const r = new SlackConversationReader(client);
+    const out = await r.readConversation(
+      { channelId: "slack:C_PUB", threadKey: "slack:C_PUB:1.0", url: "https://x" },
+      caps,
+    );
+    expect(out.messages.map((m) => [m.author, m.text])).toEqual([
+      ["Alice", "please look at the flaky test"],
+      ["bob", "on it"],
+      ["bob", "what does Sent using @user mean?"],
+    ]);
+  });
+
   it("a user whose name cannot be resolved is named by id; the channel name comes from the classifier's answer, never a stale cache", async () => {
     const { client } = fakeClient({
       channels: { C_PUB: { ...PUBLIC, name: "renamed" } },

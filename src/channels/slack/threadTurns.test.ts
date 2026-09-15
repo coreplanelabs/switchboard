@@ -54,6 +54,28 @@ describe("threadTurns — the thread-page-to-turns mapping", () => {
     expect(turns[0].files).toEqual(files);
   });
 
+  it("strips the Slack app 'Sent using' footer from every kept turn, with or without a bot mention; a footer-only turn is dropped", () => {
+    // The Claude Slack plugin's footer is platform chrome on the request text
+    // (`stripMention`) and on every turn of a thread alike — the current
+    // thread's history and a quoted linked thread must not read it as words.
+    const thread = [
+      { user: "UA", text: "<@UBOT> first ask *Sent using* <@UAPPFOOTER|Claude>", ts: "1.0" },
+      { user: "UB", text: "on it\nSent using <@UAPPFOOTER> [Bea <bea@example.com>]", ts: "2.0" },
+      { user: "UA", text: "*Sent using* <@UAPPFOOTER|Claude>", ts: "3.0" },
+      { user: "UB", text: "what does Sent using <@UAPPFOOTER> mean?", ts: "4.0" },
+    ];
+    expect(threadTurns(thread, { botUserId: "UBOT" }).map((t) => t.text)).toEqual([
+      "first ask",
+      "on it",
+      "what does Sent using <@UAPPFOOTER> mean?",
+    ]);
+    expect(threadTurns(thread, {}).map((t) => t.text)).toEqual([
+      "<@UBOT> first ask",
+      "on it",
+      "what does Sent using <@UAPPFOOTER> mean?",
+    ]);
+  });
+
   it("keeps the author id on every turn so a reader can name the speaker", () => {
     const thread = [
       { user: "UA", text: "one", ts: "1.0" },

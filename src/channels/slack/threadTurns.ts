@@ -39,17 +39,50 @@ export interface ThreadTurnsOptions {
   botUserId?: string;
 }
 
+/** Slack appends "*Sent using* <@APP|Name>" as the LAST line of a message an
+ *  app posts on a user's behalf (the Claude Slack plugin does this). It is
+ *  platform chrome, not the user's words — left in, it breaks strict inline
+ *  parsers (`repo onboard …` saw `*Sent` as a bad token) and, quoted from a
+ *  linked thread, puts a stray mention token inside the fence. Only whole
+ *  trailing footers of exactly that shape are removed (repeated for stacked
+ *  footers); the phrase inside a user's own text is untouched. The footer is
+ *  anchored to the END of the text, not to its own line: the raw event text
+ *  arrives as `friction report *Sent using* <@UAPP>` — same line, no newline —
+ *  so a line-anchored regex lets `*Sent` reach the command parser (`repo list`
+ *  masks this because it ignores trailing text). An optional bracketed sender
+ *  attribution after the mention is tolerated too. */
+const APP_FOOTER_RE = /(?:^|\s)(?:\*Sent using\*|Sent using)\s+<@[A-Z0-9]+(?:\|[^>]*)?>(?:\s*\[[^\]\n]*\])?\s*$/;
+
+/**
+ * Remove the app footer(s) from the end of a message's text and trim it.
+ * Exactly the two shapes Slack emits (bold or plain — never asymmetric), as a
+ * whole trailing line; repeated because a forwarded app message can stack two,
+ * and a message that is nothing but the footer strips to "". Applied to the
+ * request text (`stripMention`) and to every turn `threadTurns` keeps, so the
+ * current thread's history and a quoted thread read the same words.
+ */
+export function stripAppFooter(text: string): string {
+  let out = text.trim();
+  let prev: string;
+  do {
+    prev = out;
+    out = out.replace(APP_FOOTER_RE, "").trim();
+  } while (out !== prev);
+  return out;
+}
+
 /**
  * Map a thread page to turns. Drops the triggering message (by `skipTs`), the
  * bot's own status cards (`STATUS_PREFIXES`), and any message left with neither
- * text nor a user's files; strips the bot mention; stamps `at` from `ts`.
+ * text nor a user's files; strips the bot mention and the app footer; stamps
+ * `at` from `ts`.
  */
 export function threadTurns(messages: readonly SlackThreadMessage[], opts: ThreadTurnsOptions): ThreadTurn[] {
   const kept: ThreadTurn[] = [];
   for (const mm of messages) {
     if (opts.skipTs !== undefined && mm.ts === opts.skipTs) continue;
     const raw = mm.text ?? "";
-    const text = opts.botUserId ? raw.replaceAll(`<@${opts.botUserId}>`, "").trim() : raw;
+    const text = stripAppFooter(opts.botUserId ? raw.replaceAll(`<@${opts.botUserId}>`, "") : raw);
     if (STATUS_PREFIXES.some((p) => text.startsWith(p))) continue;
     const files = mm.bot_id ? undefined : mm.files;
     if (!text && !files?.length) continue;
