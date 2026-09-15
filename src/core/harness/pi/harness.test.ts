@@ -19,7 +19,14 @@ import { FollowUpInbox } from "../../threadAdmission.js";
 import { createTracer } from "../../trace/tracer.js";
 import { textTurnsOf } from "../../dispatch/textTurns.js";
 import { HARNESS_URL_ENV, RUN_BEARER_ENV, piRunPaths, piRunPathsAt, type PiRunPaths } from "./process.js";
-import { HarnessRegistry, authorizeToolCall, runRelayedTool, type RelayedToolAnswer } from "./relay.js";
+import {
+  HarnessRegistry,
+  authorizeToolCall,
+  relayToolCall,
+  runRelayedTool,
+  type RelayProgress,
+  type RelayedToolAnswer,
+} from "./relay.js";
 import { judgeToolCall, type ToolRuleContext } from "./toolRules.js";
 import { FakePiContainer } from "./testing/fakeContainer.js";
 import {
@@ -67,11 +74,17 @@ const updateStatus: RunnableTool = {
 };
 const executor: Executor = { exec: async () => "", readFile: async () => "", writeFile: async () => "" };
 
-/** A pi that answers the harness's commands with recorded records. */
+/** What pi's `prompt` answers while its agent loop runs (pi's agent-session, word for word). */
+const PI_BUSY_REFUSAL =
+  "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.";
+
+/** A pi that answers the harness's commands with recorded records. `busy` is a
+ *  pi inside a tool call: it refuses a plain `prompt` as pi does and accepts one
+ *  queued as a steer, which its script delivers when the call ends. */
 function scriptedPi(
   c: FakePiContainer,
   turns: (n: number, c: FakePiContainer) => void,
-  opts: { refusePrompt?: string; sessionFile?: string } = {},
+  opts: { refusePrompt?: string; sessionFile?: string; busy?: boolean } = {},
 ) {
   let prompts = 0;
   c.onStdin = (line) => {
@@ -84,14 +97,25 @@ function scriptedPi(
         type: "response",
         command: "get_state",
         success: true,
-        data: { sessionFile: opts.sessionFile ?? `${paths.sessionDir}/s.jsonl`, sessionId: "sid", isStreaming: false },
+        data: {
+          sessionFile: opts.sessionFile ?? `${paths.sessionDir}/s.jsonl`,
+          sessionId: "sid",
+          isStreaming: opts.busy ?? false,
+        },
       });
     if (cmd.type === "prompt") {
       if (opts.refusePrompt) {
         c.emit({ id: cmd.id, type: "response", command: "prompt", success: false, error: opts.refusePrompt });
         return;
       }
-      c.emit({ id: cmd.id, type: "response", command: "prompt", success: true }, { type: "agent_start" });
+      if (opts.busy && cmd.streamingBehavior === undefined) {
+        c.emit({ id: cmd.id, type: "response", command: "prompt", success: false, error: PI_BUSY_REFUSAL });
+        return;
+      }
+      c.emit(
+        { id: cmd.id, type: "response", command: "prompt", success: true },
+        ...(opts.busy ? [] : [{ type: "agent_start" }]),
+      );
       turns(prompts++, c);
     }
     if (cmd.type === "steer") c.emit({ type: "response", command: "steer", success: true });
@@ -823,6 +847,8 @@ describe("runPiHarness — after a bot restart", () => {
     expect(w.container.starts).toHaveLength(1); // no second pi
     expect(w.container.commands().map((c) => c.type)).toEqual(["set_auto_retry", "get_state", "prompt"]);
     expect(String(w.container.commands()[2].message)).toMatch(/^Continue where you left off/);
+    // The continue is queued as a steer whatever pi is doing: an idle pi takes it as the prompt it is.
+    expect(w.container.commands()[2]).toMatchObject({ streamingBehavior: "steer" });
     const notes = w.events
       .filter((e) => e.type === "run_note")
       .map((e) => (e as { kind: string; summary: string }).summary);
@@ -876,6 +902,104 @@ describe("runPiHarness — after a bot restart", () => {
         .map((e) => (e as { summary: string }).summary),
     ).toEqual(["a model call failed while the bot was away (fetch failed); continuing"]);
     expect(w.events.filter((e) => e.type === "tool_result").map((e) => e.callId)).toEqual(["c0", "c1"]);
+  });
+
+  // The bot died while pi was inside a relayed call: its extension asked the
+  // generation that died and never heard back, so it asks this one with the
+  // same call id — and pi's agent loop runs the whole time, so pi refuses a
+  // plain prompt. The row's calls in flight name the call; the harness must
+  // answer it from the record and continue pi without a prompt pi refuses.
+  it("re-attaches to a pi still inside a relayed call: the continue is a prompt queued as a steer, never the plain prompt pi refuses while processing; the calls in flight are settled on the relay before anything is awaited, so the extension's re-ask reads the restart note and the tool never runs; the run settles when pi ends its turn", async () => {
+    const w = world();
+    let ran = 0;
+    w.run.tools = [{ ...updateStatus, run: async () => (ran++, "status updated") }];
+    await w.container.start({ paths, args: [], env: {} });
+    // The log past the recorded offset: the turn that made the call and the
+    // call's start — nothing since, pi is waiting on the bot's answer.
+    const call = assistant([{ type: "toolCall", id: "c0", name: "update_status", arguments: { checklist: "step 1" } }]);
+    w.container.emit(
+      { type: "turn_start" },
+      { type: "message_start", message: { ...call, content: [] } },
+      { type: "message_end", message: call },
+      { type: "tool_execution_start", toolCallId: "c0", toolName: "update_status", args: { checklist: "step 1" } },
+    );
+    const toolUse = { type: "tool_use" as const, id: "c0", name: "update_status", input: { checklist: "step 1" } };
+    w.run.resume = {
+      messages: [
+        { role: "user", content: [{ type: "text", text: "fix the failing test" }] },
+        { role: "assistant", content: [toolUse] },
+      ],
+      settlements: [{ toolUse, action: "rerun" }],
+      remainingMs: 20 * 60_000,
+      turn: 1,
+      inboxConsumedSeq: 2,
+      facts: { pid: 4242, logOffset: 0, sessionFile: "s.jsonl", root: paths.dir, bearerHash: bearerHashOf(w.bearer) },
+    };
+    const ask = { toolCallId: "c0", tool: "update_status", input: { checklist: "step 1" } };
+    let relayed: RelayProgress | undefined;
+    scriptedPi(
+      w.container,
+      (_n, c) => {
+        void (async () => {
+          // The extension asks again for the call it never got an answer for.
+          relayed = await relayToolCall(w.registry.get("run-7")!, w.registry.calls("run-7")!, ask, { windowMs: 1_000 });
+          const text = relayed.done && relayed.answer.content[0].type === "text" ? relayed.answer.content[0].text : "";
+          // pi ends the call on that answer, reads the queued continue as the next user turn, and answers.
+          c.emit(
+            {
+              type: "tool_execution_end",
+              toolCallId: "c0",
+              toolName: "update_status",
+              result: { content: [{ type: "text", text }] },
+              isError: true,
+            },
+            {
+              type: "message_end",
+              message: {
+                role: "toolResult",
+                toolCallId: "c0",
+                toolName: "update_status",
+                content: [{ type: "text", text }],
+                isError: true,
+              },
+            },
+            { type: "turn_end", message: call, toolResults: [] },
+          );
+          finalTurn(c, "picked up mid-call");
+        })();
+      },
+      { busy: true },
+    );
+    const started = w.start();
+    // Settled on the registration, before the harness has probed anything: an
+    // ask that lands during the probes is answered from the record too.
+    expect(w.registry.calls("run-7")?.size).toBe(1);
+    expect(await started).toBe("picked up mid-call");
+    const commands = w.container.commands();
+    expect(commands.map((c) => c.type)).toEqual(["set_auto_retry", "get_state", "prompt"]);
+    expect(commands.filter((c) => c.type === "prompt").every((c) => c.streamingBehavior === "steer")).toBe(true);
+    expect(String(commands[2].message)).toMatch(/^Continue where you left off/);
+    expect(relayed).toEqual({
+      done: true,
+      answer: {
+        content: [
+          {
+            type: "text",
+            text: "The bot restarted while this update_status call was in flight; its result was lost — re-check its effects before re-running it.",
+          },
+        ],
+        isError: true,
+      },
+    });
+    expect(ran).toBe(0);
+    expect(w.container.starts).toHaveLength(1); // the previous generation's pi, continued
+    expect(w.container.commands().some((c) => c.type === "abort")).toBe(false);
+    const notes = w.events.filter((e) => e.type === "run_note").map((e) => e as { kind: string; summary: string });
+    expect(notes.filter((n) => n.kind === "harness_error")).toEqual([]);
+    expect(notes[0].summary).toMatch(
+      /^resumed after a restart: pi still runs in the container \(pid 4242\); continuing its session with 20 min of budget left — 1 call\(s\) were in flight, each answered with a restart note if pi asks for it again$/,
+    );
+    expect(w.events.find((e) => e.type === "tool_result" && e.callId === "c0")).toMatchObject({ ok: false });
   });
 
   // The row's facts name the root pi was filed under, so the re-attach reads
@@ -1088,6 +1212,9 @@ describe("runPiHarness — after a bot restart", () => {
       /^resumed after a restart: pi restarted on the mirrored transcript — 1 call\(s\) were in flight/,
     );
     expect(w.steps.at(-1)?.inboxConsumedSeq).toBe(2);
+    // A fresh pi is idle by construction: its continue is the plain prompt.
+    expect(w.container.commands()[2]).toMatchObject({ type: "prompt", message: expect.stringMatching(/^Continue/) });
+    expect(w.container.commands()[2].streamingBehavior).toBeUndefined();
   });
 
   // docs/reference/specs/session-log.md item 6: the compaction rows the ledger

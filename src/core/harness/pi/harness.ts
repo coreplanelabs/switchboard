@@ -55,7 +55,7 @@ import {
   type PiRunPaths,
 } from "./process.js";
 import { parsePiLine } from "./protocol.js";
-import type { HarnessRegistry, LiveHarness } from "./relay.js";
+import type { HarnessRegistry, LiveHarness, RelayedToolAnswer } from "./relay.js";
 import type { ToolRuleContext } from "./toolRules.js";
 import { PiRpcTransport } from "./transport.js";
 
@@ -110,7 +110,11 @@ export interface PiHarnessResume {
    *  where they sat so the restarted pi's window is what pi had, not the raw
    *  turns compacted again. Absent on a plan from before the log kept them. */
   compactions?: AssembledCompaction[];
-  /** The calls in flight at the kill; under pi none is re-run — its effects are the container's. */
+  /** The calls in flight at the kill; under pi none is re-run — its effects
+   *  are the container's. A restarted pi reads each one's restart note as a
+   *  tool result in its rebuilt session; a re-attached pi's extension, still
+   *  asking for the call the dead generation never answered, is answered the
+   *  same note over the relay (item 8). */
   settlements: Settlement[];
   remainingMs: number;
   turn: number;
@@ -276,9 +280,17 @@ export function promptOf(seed: readonly ChatMessage[]): {
   return { message: texts.join("\n\n"), ...(images.length > 0 ? { images } : {}) };
 }
 
-/** The settlement's text for a call in flight at the kill: pi ran the tool in
- *  the container and its result died with the bot's view of it, so every one
- *  reads as the ledger's restart result — never re-run from here. */
+/** The restart note a call in flight at the kill is answered with: pi ran the
+ *  tool in the container and its result died with the bot's view of it, so
+ *  every one reads as the ledger's restart result — never re-run from here. A
+ *  synthetic settlement carries its own words. */
+export function settlementText(s: Settlement): string {
+  return s.action === "synthetic"
+    ? s.text
+    : `The bot restarted while this ${s.toolUse.name} call was in flight; its result was lost — re-check its effects before re-running it.`;
+}
+
+/** The settlements as the user turn a rebuilt session ends on (item 8): one error tool result per call in flight. */
 export function settlementResults(settlements: Settlement[]): ChatMessage | undefined {
   if (settlements.length === 0) return undefined;
   return {
@@ -286,13 +298,15 @@ export function settlementResults(settlements: Settlement[]): ChatMessage | unde
     content: settlements.map((s) => ({
       type: "tool_result" as const,
       toolUseId: s.toolUse.id,
-      content:
-        s.action === "synthetic"
-          ? s.text
-          : `The bot restarted while this ${s.toolUse.name} call was in flight; its result was lost — re-check its effects before re-running it.`,
+      content: settlementText(s),
       isError: true as const,
     })),
   };
+}
+
+/** The same note as the relay's answer (item 8): what a re-attached pi's extension reads when it asks again for the call. */
+export function settlementAnswer(s: Settlement): RelayedToolAnswer {
+  return { content: [{ type: "text", text: settlementText(s) }], isError: true };
 }
 
 export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Promise<string> {
@@ -380,6 +394,14 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
     },
   };
   const forget = deps.registry.register(live);
+  // A call the row says was in flight when the bot died is answered from the
+  // record if pi asks the relay for it again (item 8): a re-attached pi's
+  // extension does, with the call id whose answer died with the previous
+  // generation; a pi restarted on the mirrored transcript never does — its
+  // session file carries the same note. Settled before anything is awaited, so
+  // no ask can start the tool between the registration and here.
+  const calls = deps.registry.calls(run.runId);
+  for (const s of run.resume?.settlements ?? []) calls?.settle(s.toolUse.id, settlementAnswer(s));
 
   let pid: number | undefined;
   let transport: PiRpcTransport | undefined;
@@ -452,9 +474,13 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
         offset: recorded.logOffset,
       });
       catchingUp = true;
+      const inFlight = run.resume?.settlements.length ?? 0;
       note(
         "resumed",
-        `resumed after a restart: pi still runs in the container (pid ${pid}); continuing its session with ${Math.round(remainingMs / 60_000)} min of budget left`,
+        `resumed after a restart: pi still runs in the container (pid ${pid}); continuing its session with ${Math.round(remainingMs / 60_000)} min of budget left` +
+          (inFlight > 0
+            ? ` — ${inFlight} call(s) were in flight, each answered with a restart note if pi asks for it again`
+            : ""),
       );
     } else {
       // The fresh start's root is the container's to make; a dead pi's
@@ -552,7 +578,17 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
 
     transport.send({ id: "retry", type: "set_auto_retry", enabled: false });
     transport.send({ id: "state", type: "get_state" });
-    if (reattached || run.resume) transport.send({ id: "prompt", type: "prompt", message: CONTINUE_PROMPT });
+    if (reattached)
+      // The pi found alive may be inside a tool call — its extension waiting on
+      // the relay for the answer the dead generation never sent — and pi
+      // refuses a plain `prompt` while its loop runs ("Agent is already
+      // processing"), a refusal that failed the run and ended pi. Queued as a
+      // steer, the continue lands after the call as the next user turn; an
+      // idle pi (a model call failed while the bot was away, the loop ended)
+      // takes the same command as the prompt it is. The row cannot tell the
+      // two apart — its calls in flight name both — so pi decides.
+      transport.send({ id: "prompt", type: "prompt", message: CONTINUE_PROMPT, streamingBehavior: "steer" });
+    else if (run.resume) transport.send({ id: "prompt", type: "prompt", message: CONTINUE_PROMPT });
     else transport.send({ id: "prompt", type: "prompt", ...promptOf(run.messages) });
 
     let warned = false;

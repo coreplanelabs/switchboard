@@ -109,9 +109,11 @@ export type RelayProgress = { done: true; answer: RelayedToolAnswer } | { done: 
 /** The relayed calls of one live run, by call id. A request for a call already
  *  running joins it and never starts it twice, so a `spawn_run` asked again
  *  after a lost response spawns once; an answered call keeps its answer until
- *  the run ends, so the ask that comes after the answer landed reads it. When
- *  the run ends, every call still running is told to stop through the context
- *  signal it was run with. */
+ *  the run ends, so the ask that comes after the answer landed reads it. A
+ *  call the run's record settled before pi asked — one in flight when the
+ *  previous bot generation died — is answered from the record and never run
+ *  here (`settle`). When the run ends, every call still running is told to
+ *  stop through the context signal it was run with. */
 export class RelayedCalls {
   private readonly calls = new Map<string, Promise<RelayedToolAnswer>>();
   private readonly ending = new AbortController();
@@ -133,6 +135,14 @@ export class RelayedCalls {
       this.calls.set(callId, answer);
     }
     return answer;
+  }
+
+  /** The call's answer is known before it is asked (harness-pi item 8): the
+   *  record's settlement for a call in flight when the previous generation
+   *  died, whose extension asks again with the same id. Every ask reads it and
+   *  the tool never runs; a call already joined keeps the answer it has. */
+  settle(callId: string, answer: RelayedToolAnswer): void {
+    if (!this.calls.has(callId)) this.calls.set(callId, Promise.resolve(answer));
   }
 
   end(): void {

@@ -645,6 +645,51 @@ describe("relayToolCall: a relayed call that outlives one request", () => {
   });
 });
 
+// Feature: docs/reference/specs/harness-pi.md items 7 and 8 — a call the run's
+// row says was in flight when the previous bot generation died is settled on
+// the relay before pi's extension can ask again: the answer is the record's
+// restart note, and the tool never runs a second time.
+describe("RelayedCalls.settle — a call in flight when the previous generation died", () => {
+  const note: RelayedToolAnswer = {
+    content: [
+      {
+        type: "text",
+        text: "The bot restarted while this update_status call was in flight; its result was lost — re-check its effects before re-running it.",
+      },
+    ],
+    isError: true,
+  };
+
+  it("an ask for a settled call id is answered at once with the record's note and the tool never runs, asked once or again; a call the record does not know runs as before; a call already running keeps its own answer", async () => {
+    const { harness, progress } = live();
+    const calls = new RelayedCalls();
+    calls.settle("c0", note);
+    const ask = { toolCallId: "c0", tool: "update_status", input: { checklist: "step 1" } };
+    expect(await relayToolCall(harness, calls, ask, { windowMs: 1_000 })).toEqual({ done: true, answer: note });
+    expect(await relayToolCall(harness, calls, ask, { windowMs: 1_000 })).toEqual({ done: true, answer: note });
+    expect(progress).toEqual([]);
+    const fresh = { toolCallId: "c1", tool: "update_status", input: { checklist: "fresh" } };
+    expect(await relayToolCall(harness, calls, fresh, { windowMs: 1_000 })).toEqual(answerOf("status updated: fresh"));
+    expect(progress).toEqual(["fresh"]);
+    let release!: (text: string) => void;
+    let runs = 0;
+    harness.tools = [
+      {
+        name: "slow",
+        description: "waits",
+        inputSchema: { type: "object", properties: {} },
+        run: async () => (runs++, new Promise<string>((r) => (release = r))),
+      },
+    ];
+    const running = relayToolCall(harness, calls, { toolCallId: "c2", tool: "slow", input: {} }, { windowMs: 10_000 });
+    calls.settle("c2", note);
+    release("ran to its end");
+    expect(await running).toEqual(answerOf("ran to its end"));
+    expect(runs).toBe(1);
+    expect(calls.size).toBe(3);
+  });
+});
+
 // Feature: docs/reference/specs/agent-conductor.md item 3, the conductor's
 // spawn_run on pi. The relay hands the tool the run's conversation as the
 // harness offers it (the session log's rows), read once the bridge has seen
