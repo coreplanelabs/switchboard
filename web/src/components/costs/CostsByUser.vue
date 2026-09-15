@@ -34,6 +34,7 @@ const isMe = (u: UserCostRow): boolean => props.report.viewer.userIds.includes(u
 /** `slack:U…` → the name when known, else the id without its platform prefix. */
 const labelOf = (u: UserCostRow): string => u.userName ?? u.userId.replace(/^[a-z]+:/, "");
 const platformOf = (u: UserCostRow): string => u.userId.split(":")[0] ?? "";
+const dayCount = (n: number): string => `${n} day${n === 1 ? "" : "s"}`;
 </script>
 
 <template>
@@ -160,10 +161,19 @@ const platformOf = (u: UserCostRow): string => u.userId.split(":")[0] ?? "";
 
     <!-- One plain line: does the attributed total tie out to the group's figure? -->
     <p class="reconciliation font-mono text-xs tabular-nums text-muted">
-      LLM attributed {{ usd(report.reconciliation.attributedLlmUsd) }} of
-      {{ usd(report.reconciliation.workspaceLlmUsd) }} on the workspace ·
-      {{ usd(report.reconciliation.unattributedLlmUsd) }} unattributed (router, review abridges, runs without a record,
-      list vs invoice) · cloud allocated {{ usd(report.reconciliation.cloudAllocatedUsd)
+      <template v-if="report.reconciliation.comparedDays > 0">
+        LLM attributed {{ usd(report.reconciliation.attributedLlmUsd) }} of
+        {{ usd(report.reconciliation.workspaceLlmUsd) }} on the workspace over
+        {{ dayCount(report.reconciliation.comparedDays) }} ·
+        {{ usd(report.reconciliation.unattributedLlmUsd) }} unattributed (router, review abridges, runs without a
+        record, list vs invoice)
+      </template>
+      <template v-else>no day in range has a workspace LLM figure to compare against</template>
+      <template v-if="report.reconciliation.uncomparedDays > 0">
+        · {{ dayCount(report.reconciliation.uncomparedDays) }} with {{ usd(report.reconciliation.uncomparedLlmUsd) }} of
+        run tokens but no workspace figure (billed outside this workspace) not compared</template
+      >
+      · cloud allocated {{ usd(report.reconciliation.cloudAllocatedUsd)
       }}<template v-if="report.reconciliation.cloudUnallocatedUsd > 0">
         · {{ usd(report.reconciliation.cloudUnallocatedUsd) }} on days with no runs</template
       >

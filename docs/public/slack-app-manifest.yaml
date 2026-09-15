@@ -29,6 +29,9 @@ oauth_config:
       - channels:read
       - groups:read
       - users:read
+      # A person's email from their profile: the costs page's "me" toggle and the MCP connect
+      # ticket match the signed-in Access identity to their Slack user by it.
+      - users:read.email
       # Download attachments (images go to the model); attach long command output as a file
       # instead of a run of chunked messages.
       - files:read

@@ -108,6 +108,9 @@ function usersReport(over: Partial<UserCostReport> = {}): UserCostReport {
       attributedLlmUsd: 15.75,
       workspaceLlmUsd: 19.5,
       unattributedLlmUsd: 3.75,
+      comparedDays: 3,
+      uncomparedDays: 0,
+      uncomparedLlmUsd: 0,
       cloudAllocatedUsd: 2.0,
       cloudUnallocatedUsd: 1.4,
     },
@@ -500,14 +503,59 @@ describe("CostsPage · By user", () => {
   it("carries one reconciliation line: attributed LLM against the workspace figure, the unattributed remainder, cloud allocated and unallocated", () => {
     const w = mountApp(CostsPage, { seed: usersSeed() });
     const line = w.find(".reconciliation").text().replace(/\s+/g, " ");
-    expect(line).toContain("LLM attributed $15.75 of $19.50 on the workspace");
+    expect(line).toContain("LLM attributed $15.75 of $19.50 on the workspace over 3 days");
     expect(line).toContain("$3.75 unattributed");
+    expect(line).not.toContain("not compared");
     expect(line).toContain("cloud allocated $2.00");
     expect(line).toContain("$1.40 on days with no runs");
     const tidy = mountApp(CostsPage, {
       seed: usersSeed(usersReport({ reconciliation: { ...usersReport().reconciliation, cloudUnallocatedUsd: 0 } })),
     });
     expect(tidy.find(".reconciliation").text()).not.toContain("days with no runs");
+  });
+
+  it("days whose runs spent tokens against a zero workspace figure are named apart from the tie-out, and a range with no figure at all says so instead of comparing", () => {
+    const rec = usersReport().reconciliation;
+    const partly = mountApp(CostsPage, {
+      seed: usersSeed(
+        usersReport({
+          reconciliation: {
+            ...rec,
+            attributedLlmUsd: 3.5,
+            workspaceLlmUsd: 3.6,
+            unattributedLlmUsd: 0.1,
+            comparedDays: 1,
+            uncomparedDays: 2,
+            uncomparedLlmUsd: 12.25,
+          },
+        }),
+      ),
+    });
+    const line = partly.find(".reconciliation").text().replace(/\s+/g, " ");
+    expect(line).toContain("LLM attributed $3.50 of $3.60 on the workspace over 1 day");
+    expect(line).toContain(
+      "2 days with $12.25 of run tokens but no workspace figure (billed outside this workspace) not compared",
+    );
+    expect(line).not.toContain("-$");
+    const none = mountApp(CostsPage, {
+      seed: usersSeed(
+        usersReport({
+          reconciliation: {
+            ...rec,
+            attributedLlmUsd: 0,
+            workspaceLlmUsd: 0,
+            unattributedLlmUsd: 0,
+            comparedDays: 0,
+            uncomparedDays: 3,
+            uncomparedLlmUsd: 15.75,
+          },
+        }),
+      ),
+    });
+    const text = none.find(".reconciliation").text().replace(/\s+/g, " ");
+    expect(text).toContain("no day in range has a workspace LLM figure to compare against");
+    expect(text).not.toContain("LLM attributed");
+    expect(text).toContain("3 days with $15.75 of run tokens");
   });
 
   it("keeps the tab on the range and group pills, names the by-user JSON twin, and says so when the by-user report did not come with the page", () => {

@@ -63,13 +63,23 @@ export interface UserCostReport {
   days: UserCostDay[];
   /** Runs in range whose usage the history has not priced yet (backfill outstanding). */
   pending: number;
+  /** The tie-out, over the covered days that HAVE a workspace figure: a day
+   *  whose Anthropic figure is zero while its runs spent tokens was billed to
+   *  another workspace (the bot's key before it moved; a key of its own) and
+   *  is counted apart, never subtracted into a negative remainder. */
   reconciliation: {
-    /** Sum of the users' LLM dollars (list price, from run tokens). */
+    /** Sum of the users' LLM dollars (list price, from run tokens) on the compared days. */
     attributedLlmUsd: number;
-    /** The group's LLM figure for the same days from the daily report (invoice or estimate). */
+    /** The group's LLM figure (invoice or estimate) on the compared days. */
     workspaceLlmUsd: number;
     /** `workspace − attributed`: router calls, review abridges, runs without a record, list-vs-invoice drift. */
     unattributedLlmUsd: number;
+    /** Covered days with a workspace figure — the days the two numbers above span. */
+    comparedDays: number;
+    /** Covered days whose runs spent tokens but whose workspace figure is zero: not compared. */
+    uncomparedDays: number;
+    /** The users' LLM dollars on those days (still in each user's row, only left out of the tie-out). */
+    uncomparedLlmUsd: number;
     cloudAllocatedUsd: number;
     /** Cloud spend on days with no run wall-clock to split it by. */
     cloudUnallocatedUsd: number;
@@ -202,8 +212,18 @@ export function buildUserCostReport(input: {
   }
   for (const row of users.values()) row.totalUsd = row.llmUsd + row.cloudUsd;
 
-  const attributedLlmUsd = days.reduce((s, d) => s + d.llmUsd, 0);
-  const workspaceLlmUsd = input.days.filter((d) => covered(d.date)).reduce((s, d) => s + d.llmUsd, 0);
+  // The tie-out spans only the days the workspace has a figure for. A day with
+  // run tokens and a zero figure was billed elsewhere (the key before it moved
+  // into this workspace); it stays in the users' rows and is named apart.
+  const workspaceByDay = new Map(input.days.filter((d) => covered(d.date)).map((d) => [d.date, d.llmUsd]));
+  const attributedByDay = new Map<string, number>();
+  for (const d of days) attributedByDay.set(d.day, (attributedByDay.get(d.day) ?? 0) + d.llmUsd);
+  const comparedDayList = [...workspaceByDay].filter(([, llm]) => llm > 0).map(([day]) => day);
+  const compared = new Set(comparedDayList);
+  const attributedLlmUsd = comparedDayList.reduce((s, day) => s + (attributedByDay.get(day) ?? 0), 0);
+  const workspaceLlmUsd = comparedDayList.reduce((s, day) => s + (workspaceByDay.get(day) ?? 0), 0);
+  const uncompared = [...attributedByDay].filter(([day, llm]) => llm > 0 && !compared.has(day));
+  const uncomparedLlmUsd = uncompared.reduce((s, [, llm]) => s + llm, 0);
   return {
     group: input.group,
     range: {
@@ -228,6 +248,9 @@ export function buildUserCostReport(input: {
       attributedLlmUsd,
       workspaceLlmUsd,
       unattributedLlmUsd: workspaceLlmUsd - attributedLlmUsd,
+      comparedDays: comparedDayList.length,
+      uncomparedDays: uncompared.length,
+      uncomparedLlmUsd,
       cloudAllocatedUsd,
       cloudUnallocatedUsd,
     },
