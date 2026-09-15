@@ -6,7 +6,7 @@ import { ConfigStore } from "../../config.js";
 import { getAgent } from "../../agents/registry.js";
 import { declaredProfile } from "../../config/profile.js";
 import { InMemoryGithubApi } from "../../execution/githubApi.js";
-import type { Provider } from "../../providers/types.js";
+import type { Provider } from "../provider.js";
 import type { Executor } from "../../execution/executor.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import { createRunEnding } from "../runEnding.js";
@@ -42,7 +42,7 @@ import type { ResidentBinding } from "../../execution/resident.js";
 import { InMemoryArtifactStore, type ArtifactStore } from "../../artifacts/store.js";
 import type { ReviewCommentTarget } from "../../execution/githubComments.js";
 import type { RunEvent } from "../runEvents.js";
-import type { ChatMessage } from "../../providers/types.js";
+import type { ChatMessage } from "../chatMessage.js";
 import type { ResumeContext } from "./admission.js";
 import type { AppendableEvent, LiveRunRow, StepRecord } from "../runLedger/types.js";
 

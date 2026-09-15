@@ -19,7 +19,7 @@
 // bearer is the same hash, which buys nothing on its own.
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import type { ProviderConfig } from "../../providers/types.js";
+import type { ProviderConfig } from "../provider.js";
 import type { RunEvent } from "../runEvents.js";
 import type { Clock, Span } from "../trace/types.js";
 

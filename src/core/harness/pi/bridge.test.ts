@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AgentDef } from "../../../agents/registry.js";
 import type { Executor } from "../../../execution/executor.js";
-import type { CompletionResult, Provider } from "../../../providers/types.js";
+import type { CompletionResult, Provider } from "../../provider.js";
 import { runAgent } from "../../../runner.js";
 import { PI_EVENT_HOME } from "../../../load/piRpc.js";
 import type { RunEvent } from "../../runEvents.js";

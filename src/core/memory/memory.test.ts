@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Provider } from "../../providers/types.js";
+import type { Provider } from "../provider.js";
 import { authorize } from "../authz/index.js";
 import type { MemoryRecord, MemoryStore } from "./types.js";
 import { InMemoryMemoryStore, NullMemoryStore } from "./stores.js";

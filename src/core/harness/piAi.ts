@@ -34,15 +34,13 @@ import type {
 } from "@earendil-works/pi-ai";
 import {
   ANTHROPIC_API_KEY_ENV,
-  type ChatMessage,
   type CompletionRequest,
   type CompletionResult,
-  type ContentPart,
   type Provider,
   type ProviderConfig,
   type TokenUsage,
-  type ToolResultContent,
-} from "../../providers/types.js";
+} from "../provider.js";
+import type { ChatMessage, ContentPart, ToolResultContent } from "../chatMessage.js";
 import { processSecrets, type Secrets } from "../../secrets.js";
 import { systemClock } from "../trace/clock.js";
 import type { Clock } from "../trace/types.js";

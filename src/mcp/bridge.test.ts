@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { RunEvent } from "../core/runEvents.js";
 import type { Executor } from "../execution/executor.js";
-import { TOOLSETS, type ToolContext } from "../tools/workspace.js";
+import { TOOLSETS } from "../tools/workspace.js";
+import type { ToolContext } from "../tools/runnableTool.js";
 import {
   bridgeMcpTools,
   MCP_MAX_CALLS_PER_RUN,

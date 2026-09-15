@@ -42,7 +42,7 @@ The provider's models are now valid as `groq/<model-id>` anywhere a model is acc
 
 ## Write an adapter for any other shape
 
-Implement the `Provider` interface from `src/providers/types.ts` in a new file beside `anthropic.ts` and `openaiCompat.ts`. Add its `type` to the switch in `src/providers/registry.ts`, with tests beside theirs.
+Implement the `Provider` interface from `src/core/provider.ts` in a new file beside `anthropic.ts` and `openaiCompat.ts`. Add its `type` to the switch in `src/providers/registry.ts`, with tests beside theirs.
 
 An adapter turns one model call into a vendor's HTTP shape and back; it knows nothing about channels, permissions or where tools run. The contract is the [run loop](../reference/specs/run-loop.md) spec.
 

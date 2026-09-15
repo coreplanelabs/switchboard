@@ -23,9 +23,10 @@
 import type { AgentDef } from "../agents/registry.js";
 import type { Effort } from "../effort.js";
 import { resolveBaseRef, type OpenPrRef } from "../execution/githubPulls.js";
-import type { ChatMessage, Provider } from "../providers/types.js";
+import type { ChatMessage } from "./chatMessage.js";
+import type { Provider } from "./provider.js";
 import { runAgent } from "../runner.js";
-import type { RunnableTool, ToolContext } from "../tools/workspace.js";
+import type { RunnableTool, ToolContext } from "../tools/runnableTool.js";
 import type { CodingPrTarget, WorkspaceObservation } from "./codingPrPostStep.js";
 import type { PrDescription } from "./prDescription.js";
 import { normalizeHead, sameCommit } from "./reviewedHead.js";

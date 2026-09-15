@@ -8,7 +8,7 @@ import { createRunsService, LEDGER_LIST_TTL_MS } from "../core/runsService.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunEvent } from "../core/runEvents.js";
 import type { RunRecord } from "../core/runRecord.js";
-import type { ChatMessage } from "../providers/types.js";
+import type { ChatMessage } from "../core/chatMessage.js";
 import type { SpawnCapability } from "../core/dispatch/spawn.js";
 import { steerRun, type DispatchFollowUp } from "../core/dispatch/admission.js";
 import { AWAIT_POLL_MS, waitCapabilityFor, type WaitCapability } from "../core/dispatch/awaitChildren.js";
@@ -17,7 +17,7 @@ import { RunControl } from "../core/runRegistry/runControl.js";
 import { FollowUpInbox, ThreadAdmission } from "../core/threadAdmission.js";
 import { RUN_DEADLINE_RESERVE_MS } from "../execution/bashTimeout.js";
 import type { Executor } from "../execution/executor.js";
-import type { ToolContext } from "./workspace.js";
+import type { ToolContext } from "./runnableTool.js";
 import {
   awaitRunsTool,
   getRunStatusTool,

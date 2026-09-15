@@ -14,7 +14,7 @@
 
 import { isDeepStrictEqual } from "node:util";
 import type { StepReport } from "../../../runner.js";
-import type { ChatMessage, ContentPart } from "../../../providers/types.js";
+import type { ChatMessage, ContentPart } from "../../chatMessage.js";
 import type { AssembledCompaction } from "../../runLedger/transcript.js";
 import type { CompactionEntry } from "../../runLedger/types.js";
 

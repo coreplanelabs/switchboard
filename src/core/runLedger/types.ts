@@ -3,7 +3,8 @@
 // Worker so the next bot generation can resume it. Node-free — imported by the
 // bot and by `deploy/cloudflare-memory/worker.ts` alike, the way runRecord.ts is.
 
-import type { ChatMessage, ToolDef } from "../../providers/types.js";
+import type { ChatMessage } from "../chatMessage.js";
+import type { ToolDef } from "../provider.js";
 import type { ChannelVisibility } from "../authz/types.js";
 import type { RunProfile } from "../../config/profile.js";
 import type { RunEvent } from "../runEvents.js";

@@ -21,7 +21,7 @@
 // already posted is read off its `review_posted` event (`reviewPostedBefore`)
 // so the post-step never posts twice.
 
-import type { ChatMessage, ContentPart } from "../../providers/types.js";
+import type { ChatMessage, ContentPart } from "../chatMessage.js";
 import type { ReviewPost } from "../reviewVerdict.js";
 import type { RunEvent, RunNoteKind } from "../runEvents.js";
 import { transcriptCompleteness } from "./decisions.js";

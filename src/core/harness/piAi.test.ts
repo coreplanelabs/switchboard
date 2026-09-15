@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { AssistantMessage as PiAssistantMessage, Context, Model, ProviderStreams } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { secretsFrom } from "../../secrets.js";
-import type { CompletionRequest, ProviderConfig } from "../../providers/types.js";
+import type { CompletionRequest, ProviderConfig } from "../provider.js";
 import {
   ANTHROPIC_BASE_URL,
   fromPiMessage,

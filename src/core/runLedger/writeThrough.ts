@@ -14,7 +14,8 @@
 
 import { randomUUID } from "node:crypto";
 import type { StepReport } from "../../runner.js";
-import type { ChatMessage, ToolDef } from "../../providers/types.js";
+import type { ChatMessage } from "../chatMessage.js";
+import type { ToolDef } from "../provider.js";
 import type { RunEvent } from "../runEvents.js";
 import type { RunRecord, RunSession } from "../runRecord.js";
 import type { AssembledTranscript } from "./transcript.js";

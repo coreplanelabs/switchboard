@@ -1,13 +1,5 @@
-import {
-  toolResultText,
-  type ChatMessage,
-  type CompletionRequest,
-  type CompletionResult,
-  type ContentPart,
-  type Provider,
-  type ProviderConfig,
-  type TokenUsage,
-} from "./types.js";
+import { toolResultText, type ChatMessage, type ContentPart } from "../core/chatMessage.js";
+import type { CompletionRequest, CompletionResult, Provider, ProviderConfig, TokenUsage } from "../core/provider.js";
 import { processSecrets, type Secret } from "../secrets.js";
 
 // Generic adapter for any OpenAI-compatible Chat Completions endpoint:

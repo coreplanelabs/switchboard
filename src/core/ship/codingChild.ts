@@ -6,7 +6,7 @@
 // unit thread as a message of their own (item 7), so the coding session there
 // continues with them.
 
-import type { ChatMessage } from "../../providers/types.js";
+import type { ChatMessage } from "../chatMessage.js";
 
 /** The unit contract enters the child's FIRST user turn (docs/reference/specs/agent-ship.md
  *  item 13): appended as its own text part after the request's text, so the

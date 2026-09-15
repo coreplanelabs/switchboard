@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { Secret, secretsFrom } from "../secrets.js";
-import type { ToolContext } from "./workspace.js";
+import type { ToolContext } from "./runnableTool.js";
 import {
   BlockedUrlError,
   BraveWebSearch,
@@ -17,7 +17,7 @@ import {
   type WebSearch,
   MAX_FETCH_TEXT_CHARS,
 } from "./web.js";
-import { toolResultText } from "../providers/types.js";
+import { toolResultText } from "../core/chatMessage.js";
 
 // Feature: docs/reference/specs/web-tools.md — provider-agnostic URL reading + web search.
 

@@ -20,7 +20,7 @@ import type { ArtifactStore } from "../../artifacts/store.js";
 import type { OpenedPullRequest, OpenPrRef, PullRequestTarget, RepoShipInfo } from "../../execution/githubPulls.js";
 import type { ReviewCommentTarget } from "../../execution/githubComments.js";
 import { workspaceBindingFor, type ExecutorSelection } from "../../execution/factory.js";
-import type { ChatMessage } from "../../providers/types.js";
+import type { ChatMessage } from "../chatMessage.js";
 import type { McpToolsForRun } from "../../mcp/source.js";
 import type { RepoContext } from "../repoContext.js";
 import type { PrCommitList } from "../headMoved.js";

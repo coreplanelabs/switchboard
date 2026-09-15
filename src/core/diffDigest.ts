@@ -1,7 +1,7 @@
 // Pure diff distiller: git's per-file statistics in, a compact human-readable
 // digest out. No I/O, no process, no platform SDK — strings -> string — so it
 // is trivially unit-testable and provider/channel-agnostic. The diff_digest
-// tool (src/tools/workspace.ts) runs `git diff --numstat` and
+// tool (src/tools/diffDigest.ts) runs `git diff --numstat` and
 // `git diff --name-status` over the merge-base range through the Executor seam
 // and renders their output with this function; the coding agent shapes its PR
 // description from the digest and the review agent orients with it.

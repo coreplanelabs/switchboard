@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ChatMessage } from "../../providers/types.js";
+import type { ChatMessage } from "../chatMessage.js";
 import { assembleTranscript, chunkRows, turnRows } from "./transcript.js";
 import { ATTACHMENT_REF_BYTES, TRANSCRIPT_PART_BYTES } from "./types.js";
 

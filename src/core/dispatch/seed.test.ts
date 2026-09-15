@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ChatMessage } from "../../providers/types.js";
+import type { ChatMessage } from "../chatMessage.js";
 import type { AssembledTranscript } from "../runLedger/transcript.js";
 import type { HistoryItem } from "../types.js";
 import { SEED_BUDGET_BYTES, SEED_BUDGET_TOKENS, sessionSeed, sessionSeedFor } from "./seed.js";

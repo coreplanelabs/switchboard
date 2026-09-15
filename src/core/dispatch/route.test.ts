@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { AGENTS, COMPOUND_PRESET, presetDoor } from "../../agents/registry.js";
 import { TOOLSETS } from "../../tools/workspace.js";
 import { ConfigStore } from "../../config.js";
-import type { CompletionRequest, CompletionResult, Provider } from "../../providers/types.js";
+import type { CompletionRequest, CompletionResult, Provider } from "../provider.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import type { IncomingMessage } from "../types.js";
 import {

@@ -6,7 +6,7 @@
 // once and referenced, so a 20 MB PDF in the seed is one attachment row, not
 // a 20 MB part row.
 
-import type { ChatMessage, ContentPart } from "../../providers/types.js";
+import type { ChatMessage, ContentPart } from "../chatMessage.js";
 import { utf8ByteLength } from "../runRecord.js";
 import {
   ATTACHMENT_REF_BYTES,

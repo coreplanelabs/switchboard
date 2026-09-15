@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { submitPrDescriptionTool, submitVerdictTool } from "../tools/workspace.js";
+import { submitPrDescriptionTool, submitVerdictTool } from "../tools/submit.js";
 import piExtension, {
   HOOK_PREFIX,
   type PiExtensionApi,
@@ -9,9 +9,9 @@ import piExtension, {
 
 // The extension pi loads for `load:pi` (docs/reference/specs/load-harness.md,
 // the pi driver items): the two terminal tools as the bot's own definitions —
-// the production relay serves the native table's description and schema, and
-// pi holds the model to whatever schema it is served, so a definition that
-// drifts from the native one changes what the model is asked for (a
+// the production relay serves the description and schema src/tools/submit.ts
+// declares, and pi holds the model to whatever schema it is served, so a
+// definition that drifts from the bot's changes what the model is asked for (a
 // `submit_verdict` served without `head` yields verdicts naming no head) —
 // and a `tool_call` hook that reports every call the model asked for. It has
 // no imports so pi's own loader runs it unchanged; its one channel back to the

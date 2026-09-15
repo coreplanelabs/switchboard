@@ -4,7 +4,7 @@
 // document parts, text files inlined and fenced — merged into the alternation
 // providers require; and the same turns as the text-only `context` events,
 // newest first within a byte budget, attachments as metadata lines.
-import type { ChatMessage, ContentPart } from "../../providers/types.js";
+import type { ChatMessage, ContentPart } from "../chatMessage.js";
 import { redactSecrets } from "../runEvents.js";
 import { utf8ByteLength } from "../runRecord.js";
 import type { DocumentAttachment, HistoryItem, ImageAttachment } from "../types.js";

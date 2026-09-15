@@ -4,7 +4,7 @@
 // the spawn stage reaches it, and the dashboard's typecheck types every core
 // module the run tools reach, so a heavier import here would pull the
 // dispatcher's modules into a program built for the browser.
-import type { ChatMessage, ContentPart } from "../../providers/types.js";
+import type { ChatMessage, ContentPart } from "../chatMessage.js";
 
 /** One turn of a conversation reduced to what it said: the role and the text.
  *  A spawned child's seed is its parent's conversation in this shape — a

@@ -8,15 +8,10 @@ import { join } from "node:path";
 import type { DigestReport } from "../core/diffDigest.js";
 import type { PrDescription } from "../core/prDescription.js";
 import type { Handoff } from "../core/ship/handoff.js";
-import {
-  bashTool,
-  diffDigestTool,
-  submitHandoffTool,
-  submitPrDescriptionTool,
-  submitVerdictTool,
-  TOOLSETS,
-  type ToolContext,
-} from "./workspace.js";
+import { bashTool, TOOLSETS } from "./workspace.js";
+import { diffDigestTool } from "./diffDigest.js";
+import { submitHandoffTool, submitPrDescriptionTool, submitVerdictTool } from "./submit.js";
+import type { ToolContext } from "./runnableTool.js";
 
 // Feature: docs/reference/specs/distilled-diffs.md. The diff_digest tool is a thin
 // wrapper: it runs `git diff --numstat` + `--name-status` over `<base>...HEAD`

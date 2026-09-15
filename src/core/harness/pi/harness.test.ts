@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AgentDef } from "../../../agents/registry.js";
 import type { Executor } from "../../../execution/executor.js";
-import type { ChatMessage } from "../../../providers/types.js";
+import type { ChatMessage } from "../../chatMessage.js";
 import {
   HARD_STOP_MESSAGE,
   SOFT_STOP_INSTRUCTION,
@@ -10,7 +10,7 @@ import {
   wrapUpInstruction,
   type StepReport,
 } from "../../../runner.js";
-import type { RunnableTool } from "../../../tools/workspace.js";
+import type { RunnableTool } from "../../../tools/runnableTool.js";
 import { bearerHashOf, RunBearerStore } from "../../modelProxy/runBearers.js";
 import type { RunEvent } from "../../runEvents.js";
 import { RunControl } from "../../runRegistry/runControl.js";

@@ -4,7 +4,7 @@
 // workflow) approves a PR when the review App's review body STARTS WITH the
 // exact token `LGTM:`. That token must therefore never depend on how the model happens to
 // phrase its opening line. The model states its judgement through the
-// structured `submit_verdict` tool (src/tools/workspace.ts); this module turns
+// structured `submit_verdict` tool (src/tools/submit.ts); this module turns
 // that structured value into the first line of the posted body:
 //
 //   approve          → "LGTM: <summary>"

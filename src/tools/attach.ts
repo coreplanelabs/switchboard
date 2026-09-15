@@ -7,7 +7,7 @@ import { BASH_TIMEOUT_MAX_MS, bashBudgetWithinRun } from "../execution/bashTimeo
 import { MAX_READ_BYTES, parseByteSize, statCommandFor } from "../execution/binaryRead.js";
 import type { ExecOptions } from "../execution/executor.js";
 import { shellQuote } from "../execution/shellQuote.js";
-import type { RunnableTool, ToolContext } from "./workspace.js";
+import type { RunnableTool, ToolContext } from "./runnableTool.js";
 
 // A run's binary artifact — the screenshot `playwright screenshot` wrote, a
 // PDF, a recording — handed to the person in the conversation

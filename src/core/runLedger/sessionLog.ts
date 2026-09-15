@@ -6,7 +6,7 @@
 // text the full-text index sees for a row, the byte policy's choice of what to
 // drop, the tail cut a follow-up seeds from, and the sweep's drop decision.
 
-import type { ChatMessage, ContentPart } from "../../providers/types.js";
+import type { ChatMessage, ContentPart } from "../chatMessage.js";
 import { DEFAULT_RETENTION_POLICY, utf8ByteLength } from "../runRecord.js";
 import type { StoredRow } from "./transcript.js";
 

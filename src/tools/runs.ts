@@ -18,7 +18,7 @@ import { nullSpawnCapability, type SpawnCapability, type SpawnRequest } from "..
 import type { RunEvent } from "../core/runEvents.js";
 import { clampListLimit, RUN_LIST_MAX_LIMIT } from "../core/runRecord.js";
 import { runResource, type RunListCursor, type RunsService, type RunView } from "../core/runsService.js";
-import type { RunnableTool, ToolContext } from "./workspace.js";
+import type { RunnableTool, ToolContext } from "./runnableTool.js";
 
 // The run tools (docs/reference/specs/agent-conductor.md items 3–4 and 8): what
 // a spawning run holds over other runs. `spawn_run` calls the run's spawn

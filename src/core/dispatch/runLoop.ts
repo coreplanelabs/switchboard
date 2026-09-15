@@ -12,7 +12,7 @@ import type { AgentDef } from "../../agents/registry.js";
 import type { CoordinatorTag } from "../coordinator/contract.js";
 import { budgetedAgent, type RunProfile } from "../../config/profile.js";
 import { mergeTools, runAgent, softStopAnswer, stuckLoopAnswer, timeBudgetAnswer } from "../../runner.js";
-import { parseModelRef } from "../../providers/types.js";
+import { parseModelRef, type Provider } from "../provider.js";
 import { TOOLSETS } from "../../tools/workspace.js";
 import { effectiveHarness } from "../harness/select.js";
 import { piContainerFor } from "../harness/pi/botHostContainer.js";
@@ -20,7 +20,7 @@ import { piHarnessFactsOf, relayedTools, runPiHarness, type PiHarnessFacts } fro
 import { piRunPathsAt } from "../harness/pi/process.js";
 import { loopEndingOf, reviewPostedBefore, type LoopEnding } from "../runLedger/resume.js";
 import { fetchRepoShipInfo, findOpenPrByHead, openPullRequest } from "../../execution/githubPulls.js";
-import type { ChatMessage, Provider } from "../../providers/types.js";
+import type { ChatMessage } from "../chatMessage.js";
 import type { McpToolsForRun } from "../../mcp/source.js";
 import { currentPrHeadSha, prCommitsSince, type RepoContext } from "../repoContext.js";
 import { PrDescriptionSchema, redactPrDescription, type PrDescription } from "../prDescription.js";

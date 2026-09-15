@@ -16,7 +16,8 @@ import { randomUUID } from "node:crypto";
 import type { AgentDef } from "../../../agents/registry.js";
 import type { PiCompactionConfig } from "../../../config.js";
 import type { Effort } from "../../../effort.js";
-import type { ChatMessage, ProviderConfig } from "../../../providers/types.js";
+import type { ChatMessage } from "../../chatMessage.js";
+import type { ProviderConfig } from "../../provider.js";
 import {
   HARD_STOP_MESSAGE,
   SOFT_STOP_INSTRUCTION,
@@ -34,7 +35,7 @@ import {
   wrapUpNote,
   type StepReport,
 } from "../../../runner.js";
-import type { RunnableTool, ToolContext } from "../../../tools/workspace.js";
+import type { RunnableTool, ToolContext } from "../../../tools/runnableTool.js";
 import { bearerHashOf, type RunBearerStore } from "../../modelProxy/runBearers.js";
 import { redactAndCap, redactSecrets, type RunEvent, type RunNoteKind, type StopMode } from "../../runEvents.js";
 import type { Settlement } from "../../runLedger/resume.js";
