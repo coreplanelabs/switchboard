@@ -68,6 +68,8 @@ describe("R2ArtifactStore.head (item 20)", () => {
       calls.push(req);
       if (req.url.includes("gone")) return new Response(null, { status: 404 });
       if (req.url.includes("broken")) return new Response(null, { status: 503 });
+      if (req.url.includes("unsized"))
+        return new Response(null, { status: 200, headers: { "content-type": "text/plain" } });
       return new Response(null, { status: 200, headers: { "content-length": "3145728", "content-type": "image/png" } });
     }) as unknown as typeof fetch;
     const store = r2({ fetch: fetchImpl });
@@ -77,6 +79,10 @@ describe("R2ArtifactStore.head (item 20)", () => {
     expect(await store.head("runs/r1/out/gone.png")).toBeNull();
     await expect(store.head("runs/r1/out/broken.png")).rejects.toThrow(
       /HEAD runs\/r1\/out\/broken\.png answered HTTP 503/,
+    );
+    // `Number(null)` is 0: a 200 with no length must throw, never read as an empty object.
+    await expect(store.head("runs/r1/out/unsized.txt")).rejects.toThrow(
+      /HEAD runs\/r1\/out\/unsized\.txt answered HTTP 200 without a length/,
     );
   });
 });

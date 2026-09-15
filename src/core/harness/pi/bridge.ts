@@ -15,6 +15,7 @@ import { formatDuration } from "../../time/formatDuration.js";
 import {
   COMMAND_CAP,
   parseExitPrefix,
+  toolTextFailed,
   prepareToolResult,
   redactAndCap,
   redactSecrets,
@@ -305,7 +306,9 @@ export class PiBridge {
     const tool = open?.tool ?? str(event.toolName);
     const isError = event.isError === true;
     const text = piResultText(event.result);
-    const exit = tool === "bash" ? piBashExit(text, isError) : { failed: isError, ...(isError ? {} : {}) };
+    // A relayed tool answers `error: …` in text instead of raising pi's isError:
+    // the record calls that a failure too, as the native loop does (toolTextFailed).
+    const exit = tool === "bash" ? piBashExit(text, isError) : { failed: isError || toolTextFailed(text) };
     const ok = !exit.failed;
     this.emit({
       type: "tool_result",

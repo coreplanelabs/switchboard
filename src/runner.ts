@@ -12,6 +12,7 @@ import {
 import {
   COMMAND_CAP,
   parseExitPrefix,
+  toolTextFailed,
   prepareToolResult,
   redactAndCap,
   redactSecrets,
@@ -535,18 +536,19 @@ async function runLoop(
         const output = await untilHardStop(tool.run((tu.input ?? {}) as Record<string, unknown>, ctx));
         const text = toolResultText(output);
         // A bash command that exited nonzero did not succeed, whatever the tool
-        // returned — the executors say so with an `exit N:` prefix (runEvents).
-        const exit = tu.name === "bash" ? parseExitPrefix(text) : undefined;
+        // returned — the executors say so with an `exit N:` prefix (runEvents);
+        // any other tool says so with an `error:` opening (toolTextFailed).
+        const exit = tu.name === "bash" ? parseExitPrefix(text) : { failed: toolTextFailed(text) };
         emit({
           type: "tool_result",
           tool: tu.name,
-          ok: !exit?.failed,
+          ok: !exit.failed,
           callId: tu.id,
-          ...(exit?.exitCode !== undefined ? { exitCode: exit.exitCode } : {}),
+          ...(exit.exitCode !== undefined ? { exitCode: exit.exitCode } : {}),
           ...prepareToolResult(text),
           ...spanId,
         });
-        settle(!exit?.failed, exit?.exitCode !== undefined ? { exitCode: exit.exitCode } : {});
+        settle(!exit.failed, exit.exitCode !== undefined ? { exitCode: exit.exitCode } : {});
         // The model never receives more than MAX_TOOL_RESULT_CHARS of text from
         // one tool, whatever the tool returned (providers/types.ts).
         return { type: "tool_result", toolUseId: tu.id, content: capToolResultContent(output) };

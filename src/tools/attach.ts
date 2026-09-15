@@ -77,9 +77,21 @@ const describe = (err: unknown): string => (err instanceof Error ? err.message :
 const secs = (ms: number): number => Math.max(0, Math.round(ms / 1000));
 
 /** The command the container runs to PUT the file to the store: the type is
- *  signed into the URL, so the header must be exactly what was presigned. */
+ *  signed into the URL, so the header must be exactly what was presigned. curl
+ *  reports what it did on its last line — the status the store answered and
+ *  the bytes it sent — so a HEAD that disagrees can say which side is short. */
 export function putCommandFor(path: string, contentType: string, url: string): string {
-  return `curl -fsS -T ${shellQuote(path)} -H ${shellQuote(`Content-Type: ${contentType}`)} ${shellQuote(url)}`;
+  return `curl -fsS -T ${shellQuote(path)} -H ${shellQuote(`Content-Type: ${contentType}`)} -o /dev/null -w ${shellQuote(PUT_REPORT_FORMAT)} ${shellQuote(url)}`;
+}
+
+/** curl's `-w` format for the PUT: one line, status then bytes sent. */
+const PUT_REPORT_FORMAT = "\\n%{http_code} %{size_upload}";
+
+/** curl's report as the error names it (`HTTP 200 after sending 119 bytes`), or
+ *  null when the output carries none (a test double, a curl that died first). */
+export function parsePutReport(output: string): { httpCode: number; sentBytes: number } | null {
+  const m = /(\d{3}) (\d{1,15})\s*$/.exec(output);
+  return m ? { httpCode: Number(m[1]), sentBytes: Number(m[2]) } : null;
 }
 
 /** The command the container runs to POST the file to the channel's ticket.
@@ -137,11 +149,16 @@ async function attachThroughStore(
   if (parseExitPrefix(putOut).failed) {
     return `error: the upload of ${name} to the artifact store failed: ${putOut.trim()}`;
   }
+  // curl's own account of the PUT rides along in the error: whether the store
+  // read short or curl sent short is the first question the record must answer.
+  const report = parsePutReport(putOut);
+  const curlSaid = report ? `; curl reported HTTP ${report.httpCode} after sending ${report.sentBytes} bytes` : "";
   const head = await artifacts.store.head(key);
-  if (!head)
-    return `error: the artifact store holds nothing under ${key} after the upload of ${name} — nothing was posted`;
+  if (!head) {
+    return `error: the artifact store holds nothing under ${key} after the upload of ${name}${curlSaid} — nothing was posted`;
+  }
   if (head.size !== size) {
-    return `error: the artifact store holds ${head.size} bytes for ${name}, not the ${size} measured — nothing was posted`;
+    return `error: the artifact store holds ${head.size} bytes for ${name}, not the ${size} measured${curlSaid} — nothing was posted`;
   }
   ctx.publish?.({ type: "artifact", direction: "out", key, name, size, contentType });
   // 4. Into the conversation. A channel with an upload ticket gets the same

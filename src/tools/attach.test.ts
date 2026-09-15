@@ -5,7 +5,7 @@ import { BASH_TIMEOUT_MAX_MS } from "../execution/bashTimeout.js";
 import { MAX_READ_BYTES } from "../execution/binaryRead.js";
 import type { Executor } from "../execution/executor.js";
 import { Secret } from "../secrets.js";
-import { attachFileTool, MAX_ARTIFACT_BYTES, type UploadTicketCapability } from "./attach.js";
+import { attachFileTool, MAX_ARTIFACT_BYTES, parsePutReport, type UploadTicketCapability } from "./attach.js";
 import { TOOLSETS, type ToolContext } from "./workspace.js";
 import { ConsoleIO } from "../cli.js";
 import { HttpIO } from "../channels/http.js";
@@ -124,7 +124,8 @@ describe("attach_file", () => {
 // stops the chain and names itself; the bot never holds the file.
 describe("attach_file through the artifact store", () => {
   const SIZE = 3_145_728;
-  const PUT_URL = /^curl -fsS -T 'shots\/page\.png' -H 'Content-Type: image\/png' '(memory:\/\/test\/[^']+)'$/;
+  const PUT_URL =
+    /^curl -fsS -T 'shots\/page\.png' -H 'Content-Type: image\/png' -o \/dev\/null -w '\\n%\{http_code\} %\{size_upload\}' '(memory:\/\/test\/[^']+)'$/;
 
   /** An executor whose `exec` records every command and answers by prefix: the
    *  PUT lands the bytes in the in-memory store (as R2 would), the rest is scripted. */
@@ -146,7 +147,7 @@ describe("attach_file through the artifact store", () => {
         const url = new URL(/'([^']+)'$/.exec(command)![1]);
         const key = decodeURIComponent(url.pathname.slice(1));
         store.put(key, new Uint8Array(over.sizeInStore ?? SIZE), url.searchParams.get("content-type") ?? "");
-        return "";
+        return `\n200 ${SIZE}`; // curl's -w line: the store answered 200 and the whole file was sent
       }
       if (command.startsWith("curl -fsS --upload-file ")) {
         log.push("post");
@@ -253,15 +254,26 @@ describe("attach_file through the artifact store", () => {
     expect(h.tickets.completed).toEqual(["page.png", "page.png"]); // the lead defaults to the name
   });
 
-  it("a HEAD that answers a different size stops the chain: no ticket, no complete, no event; both sizes named", async () => {
+  it("a HEAD that answers a different size stops the chain: no ticket, no complete, no event; both sizes and curl's own report named", async () => {
     const h = harness({ sizeInStore: 1024 });
     const out = await attachFileTool.run({ path: "shots/page.png" }, h.ctx);
     expect(out).toBe(
-      "error: the artifact store holds 1024 bytes for page.png, not the 3145728 measured — nothing was posted",
+      "error: the artifact store holds 1024 bytes for page.png, not the 3145728 measured; curl reported HTTP 200 after sending 3145728 bytes — nothing was posted",
     );
     expect(h.log).toEqual(["stat", "put"]);
     expect(h.events).toEqual([]);
     expect(h.tickets.minted).toEqual([]);
+  });
+
+  it("a PUT whose output carries no report (a curl that printed nothing) leaves the error without the curl clause", async () => {
+    const h = harness({ put: "" }); // the double stores nothing when told what to answer
+    const out = await attachFileTool.run({ path: "shots/page.png" }, h.ctx);
+    expect(out).toBe(
+      "error: the artifact store holds nothing under runs/r1/out/1-page.png after the upload of page.png — nothing was posted",
+    );
+    expect(parsePutReport("")).toBeNull();
+    expect(parsePutReport("\n200 119")).toEqual({ httpCode: 200, sentBytes: 119 });
+    expect(parsePutReport("some body\n200 0\n")).toEqual({ httpCode: 200, sentBytes: 0 });
   });
 
   it("a failed PUT carries curl's words; nothing is verified, recorded or minted", async () => {
