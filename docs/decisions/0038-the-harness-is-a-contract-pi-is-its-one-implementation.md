@@ -1,0 +1,252 @@
+---
+title: The harness is a six-clause contract the bot holds a process to; pi is its one implementation; a second harness enters as a conformance row before it enters an image
+status: proposed
+date: 2026-09-15
+pattern: Ports and Adapters with one production adapter and a scripted test adapter; a contract test (the conformance suite) stands where a second implementation would; the container-runtime-interface shape, where the kubelet keeps the record and the runtime keeps its own state
+---
+
+# The harness is a six-clause contract the bot holds a process to; pi is its one implementation; a second harness enters as a conformance row before it enters an image
+
+**The ask.** Two decisions, the maintainer's, before the deletion step of record [0032](0032-pi-is-the-harness-the-native-loop-retires.md) merges. First: adopt the six-clause harness contract below as the seam between Switchboard and any process that runs a model loop for it, with pi as its one implementation and OpenAI's Codex CLI, driven over its `app-server` protocol, as a conformance row filled from its documentation and built nowhere; and schedule the code that makes the contract checkable (an interface pi implements, a scripted harness in tests, a conformance suite) as one unit after the deletion step. Second: accept that the survival clause covers a replaced container as well as a dead bot, so the same unit gives pi a relaunch with a rotated credential; its mechanics go to that unit's plan. Asked 2026-09-15: push the design's boundaries with a second harness and make sure the abstraction is clean, not necessarily to use it. Written for a veteran engineer new to Switchboard who has read record 0032, its amendment of 2026-09-15 (pi's row as production runs it) and [harness-pi.md](../reference/specs/harness-pi.md).
+
+Success criteria: (1) every clause is bound to a pi behaviour a test or a live receipt already proves; (2) the Codex row answers every clause with how, or with cannot and the fact that says so; (3) every clause is stated as behaviour observable from outside the harness's process, so a harness with no extension can be judged against it; (4) nothing on a production path changes before the deletion step; (5) the conformance suite is harness-neutral: the scripted harness passes it with none of pi's hooks or files, and removing one clause's behaviour from it fails the suite.
+
+## TL;DR
+
+After the deletion step every preset runs on pi and nothing says what a harness owes: the seam is a 21-field run type, an 11-method container seam, three routes and a 23-kind event table, and the row's facts changed four times in two days. The bet is a six-clause contract that trusts the harness with nothing but the conversation: a bearer for a key, the bot's decision on every tool call, our tools over one relay, every event a home on the record, the conversation as seed, steer and prompt, and facts on the row so the bot finds the process or rebuilds it. It costs one record, one interface with pi behind it and a scripted stand-in, and one table. Codex's row found the first honest cannot: it cannot ask before a read-only shell command, and the clause stays strict because those rules guard credentials. Doing nothing leaves pi's accidents as Switchboard's architecture.
+
+## Today at `1f1359f2`
+
+The five facts the design turns on; every fact checked, with its proof, is in Appendix A.
+
+1. **The seam is one word and one branch, not a type.** `HARNESSES = ["native", "pi"]` (`src/agents/registry.ts:51`), `effectiveHarness` picks the word, and the run stage branches on it three times, building `PiHarnessRun` (21 fields) and `PiHarnessDeps` (11) by hand (`src/core/dispatch/runLoop.ts:569, 589, 689`). Record 0032 retires the word with the native loop, so after the deletion step the tree has one loop and no seam.
+2. **The clauses already exist, in pi's names.** The extension asks the bot before every call pi makes and blocks after 90 s without an answer (`src/core/harness/pi/extensionSource.ts:34-46, 180`); relayed tools run in the bot, the ask for one answered allow by name because the tool then runs under the bot's own gates (`src/core/harness/pi/relay.ts:198`); pi's 23 event kinds each carry one of five dispositions (`src/core/harness/pi/bridge.ts:38-61`); the proxy speaks two wire shapes, pins the model and counts turns (`src/channels/modelProxy.ts:28-29, 199`).
+3. **The process seam is typed; nothing above it is.** `PiContainer` has 11 methods and two implementations, one over `/exec` for the resident and sandbox classes and one over `node:child_process` for class `none` (`src/core/harness/pi/container.ts:25, 193`; `src/core/harness/pi/botHostContainer.ts:55`). A second harness reuses it unchanged.
+4. **The row's facts moved four times with nothing to move them against.** `{pid, logOffset, sessionFile, root, bearerHash, container}` (`src/core/harness/pi/harness.ts:74-106`): alive here means re-attach, another container or dead means a fresh pi on the mirrored transcript (harness-pi item 8). Three fields arrived and one was redefined on 2026-09-14 and 2026-09-15 (#1145, #1152, #1169, #1189).
+5. **A replaced container kills a pi run, and the only code that survives one is being deleted.** Review run `529ee3a1` lost its pi when release 1.225.0 rebuilt the execution image (#1201) and replaced the resident container at 18:06Z on 2026-09-15; the run failed "pi exited before the run settled" (#1219). The executor already names the event, `ExecSandboxRestartedError` (`src/execution/resident.ts:539`); its one handler is the native loop's (`src/runner.ts:596`, run-loop item 19), which the deletion step removes.
+
+## The shape
+
+A **harness** is a process that runs the model loop for one run, in the container the run's machine class provides. The **contract** is the six things the bot holds it to. **Credential**: it starts with the run bearer and the proxy's URL, never a provider key. **Gate**: every tool call it runs is decided by the bot, before it runs when it runs in the container, at execution when it runs in the bot, and a call that ran undecided fails the run closed. **Relay**: Switchboard's tools are served to it by the bot and executed by the bot under the run's context and the bot's own gates. **Record**: every event kind it emits has a disposition onto the run stream, and its finished turns are mirrored into the ledger in the record's vocabulary. **Conversation**: it is driven as a seed, steers and prompts, counts its own turns, and is ended. **Survival**: it leaves facts on the row so the bot, in this generation or the next, finds it alive or rebuilds it from our record, and a rebuilt process is the only one the run's credential still serves. A **conformance row** is one harness's answer to the six clauses; pi's is code, Codex's is prose, and a clause Codex cannot meet from outside the process is either a clause that was pi-shaped or a guarantee Codex lacks, and the row argues which.
+
+The closest well-known shape is the Kubernetes container runtime interface: the kubelet never runs a container itself, it drives a runtime such as containerd over a fixed contract, keeps the pod's status as the record while the runtime keeps its own state, and a conformance suite is what a runtime passes before anyone ships it. The one difference: our runtime is not trusted. It holds a per-run bearer instead of the node's credentials, and it asks the kubelet before every system call.
+
+| Clause | pi (code) | Codex (documentation) |
+|---|---|---|
+| Credential | proxy as the one provider; bearer in the environment | `model_providers` with `base_url`, `env_key`; needs a third proxy shape |
+| Gate | `tool_call` hook asks the bot on every call | asks on writes and network only; **cannot** for read-only commands |
+| Relay | tools served, registered, run in the bot | the bot as an MCP server; `mcpToolCall` items |
+| Record | 23 kinds, 5 dispositions; mirror to ledger steps | 15 item types map the same way; `contextCompaction` is the row |
+| Conversation | authored session, `prompt`, `steer`, one more `prompt`, `abort` | `thread/start`, `turn/steer`, `turn/start`, `turn/interrupt` |
+| Survival | facts on the row; re-attach or rebuild from the ledger | own store: `thread/resume` where it is; gone means restart the request |
+
+## One trace: the release that rolls the resident under a review
+
+Real case, #1219, walked under the contract on pi, with the one step Codex takes differently.
+
+```mermaid
+sequenceDiagram
+  participant H as Run loop and harness (bot)
+  participant A as Container A (boot id A)
+  participant B as Container B (boot id B)
+  participant L as Ledger
+  participant P as Model proxy
+  H->>L: facts {pid, root, offset, bearerHash, container A} after the last mirrored turn
+  Note over A: 18:06Z release rolls the resident; pi's group dies mid tool call
+  H->>A: read log / probe pid
+  A-->>H: ExecSandboxRestartedError; identity() answers B
+  H->>H: row names A, not B: nothing here is judged or ended
+  H->>B: re-attach the recorded worktree (refused by name if B cannot keep it)
+  H->>P: rotate the run's bearer; A's hash is revoked
+  L-->>H: transcript, compactions, notepad, the call in flight as a settlement
+  H->>B: write the authored session; start pi; the settlement is the tool's result
+  B->>P: next model call with the new bearer, on the same meter
+  H->>L: run_note resumed: relaunched in B after A was replaced; the call was not re-run
+```
+
+1. At 18:05Z pi is inside a tool call the gate allowed; the mirror wrote the assistant turn with the call in flight as a ledger step (item 8), and the row's facts name the pid, the root, the log boundary, the bearer's hash and container A's boot id.
+2. At 18:06Z the release replaces the resident container; pi's process group dies with it, and the tool's command with it. The bot lives.
+3. Today the harness reads the next command's `ExecSandboxRestartedError` as pi's death and fails the run (#1219). From here the trace is the contract.
+4. Survival: the harness asks the container it holds to name itself. The row names A and the answer is B, so the row's pid is a stranger's here: it is neither probed nor ended, and the verdict is **another container**, the state the spec calls "elsewhere".
+5. The run loop, not the harness, re-attaches the run's workspace binding in B, never re-provisioning; a worktree B cannot keep is **refused by name**, the resident naming it in the run's note, and the run closes `interrupted` with its request dispatched again as a new run (#1169). Here it is kept.
+6. Credential: the run loop rotates the run's bearer, revoking A's hash at the proxy and the harness door, so a pi that somehow survived in A can neither spend nor ask; the new pi gets the new bearer once, in its environment. Rotation is only possible with a relaunch: a live process cannot be handed a new bearer, which is why a re-attach adopts the old hash instead (#1152).
+7. Rebuild: the harness writes pi's session from the ledger, the mirrored steps with each compaction where it sat, the notepad, and one user turn carrying the settlement's note (`settlementText`, `harness.ts:334`): the bot did not see this call finish, its effects are the container's, do not run it again.
+8. Gate: pi's first call in B asks the bot, which answers from the table as the requester, as it did in A. The proxy counts the next model call on the run's meter, pinned to the run's model.
+9. Record: one `resumed` run note names the orphan by pid and container; the run page shows one run with a relaunch, never two.
+10. The review runs to its verdict; if the head moved during the outage, one more `prompt` on the same session names the new head (item 14).
+11. Codex diverges at step 7: no session can be authored and `thread/resume` needs a rollout that lived on A's disk, so the own-store rule closes the run `interrupted` with a note and dispatches its request again, the outcome of step 5's refusal.
+12. The property: a replaced container costs a run at most one model call and never a tool's effects, and the record is complete without anything the container held. Record 0032 promised this for a bot death; the contract promises it for the container too.
+
+## The difficulty map
+
+Ranked by the risk of being wrong; the section lengths follow this order.
+
+1. Whether the gate may decide relayed tools by class and still refuse Codex a class decision on read-only commands. [The gate as a protocol ask](#the-gate-as-a-protocol-ask).
+2. Surviving a replaced container needs a credential fence against the orphan and a step a live run cannot reach today, on a base rate of one. [A replaced container](#a-replaced-container).
+3. A harness that keeps its own store cannot be rebuilt from our record, and a fresh run's seed depends on the same fact. [Own store or authored session](#own-store-or-authored-session).
+4. The record across a harness version bump. [The record clause](#the-record-clause).
+5. (most work) Carving `Harness`, `HarnessRun` and `HarnessDeps` out of the hand-built pi types and writing the scenario table two unlike implementations both pass. [Rollout](#rollout).
+
+## The gate as a protocol ask
+
+Today the gate is `pi.on("tool_call")`, an in-process hook that sees every call pi makes, its seven built-ins included, and asks the bot before it runs (`src/core/harness/pi/extensionSource.ts:180`). The rules read the command, not only its effect: origin-only pushes, the protected base, no merge or approval, no credential reads or environment dumps, paths inside the checkout (`judgeToolCall`, `src/core/harness/pi/toolRules.ts:135`). For a relayed tool the same ask is answered allow by name (`src/core/harness/pi/relay.ts:198`), because the tool then runs in the bot, where the bot's own gates decide it at execution: a `spawn_run` naming `coding` is refused by the spawn, a GitHub write by the identity the tool context carries. A Rust harness has no hook. Codex offers approval requests for command execution and file changes, a `request_permissions` tool for escalation, built-ins that ask nothing (`webSearch`, `imageView`), and its own sandbox and approval policy, which decide inside the container, the one place record [0007](0007-authorization-policy-table.md) forbids a decision.
+
+The clause is about where the decision is made, not how often: the bot decides every call, before it runs when the call runs in the container, at execution when it runs in the bot. That is why a relayed tool may be allowed by class at the ask and a shell command may not: the bot gets a second look at the relayed tool and none at the shell command, which has run in the container by the time anyone else sees it. Three roads follow. First, relayed tools are served by identity and run in the bot under its gates, so the ask for one is allow by name on every harness. Second, the harness's own shell and file tools are decided by its protocol ask, answered by `judgeToolCall` with the run's identity and rules, `accept` or `decline` and never `acceptForSession`, so a grant lost mid-run is refused on the next call, the property the extension has today because it caches nothing. Third, a built-in with no ask is disabled by configuration and Switchboard's relayed tool of the same purpose stands in. A call the record shows ran without a decision fails the run closed (#1067's rule, kept).
+
+Codex's row on the second road is the record's one cannot. Its `on-request` policy asks only when a command exceeds the sandbox or the model requests escalation; under `danger-full-access` its documentation says "no sandbox; no approvals"; the policy that asked before every untrusted command, `untrusted`, is no longer supported; and execpolicy rules ask by command prefix (`prefix_rule` with `decision = "prompt"`) with no documented catch-all. So Codex under `sandbox_mode = "read-only"` asks before every write and every network call, the sandbox being the wall that raises the ask and the bot's answer the decision, and prefix rules ask before the credential-reading prefixes the rules name, but a read-only command no prefix names runs undecided. The clause stays strict because the read-side rules guard real credentials: the sandbox's exec logs carried a token once, an open finding on the tracker. The row reads: met for writes and network by sandbox escalation, met for named read prefixes by rules, cannot for the rest until Codex offers an ask-before-every-command policy again. The alternative, relaxing the clause to calls that write or reach the network, was rejected for that reason. A harness whose row says cannot is not admitted, and the contract has done its job by saying so in one sentence.
+
+Invariants: every tool call that ran has a decision beside it in the record, or the run failed closed; a call the harness itself refused before running, such as pi answering a call whose arguments fail validation, is a `harness_error` note and not a bypass (`src/core/harness/pi/bridge.ts:367`); no decision is cached outside the bot; a gate unreachable for 90 s blocks the call, never the run, and the door answers a call it cannot yet judge as unavailable, never as refused. Failure modes: a harness release adds a built-in, it appears in the record undecided, the run fails closed, and the conformance row is extended before the pin moves; a surviving harness re-asks in the window between a new bot generation's listener coming up and the run's re-registration, about 10 s, and today's door answers `4xx`, which the extension takes as final (#1220, a fix in flight), so the invariant's last clause is a gap row in harness-pi.md until that door answers unavailable.
+
+## A replaced container
+
+Today "another container means relaunch here" runs only on a bot generation change, through the ledger's resume (`src/core/dispatch/runLoop.ts:569`). When the bot lives and the container is replaced under a live pi, the executor waits for the container's wake and then hands the harness `ExecSandboxRestartedError` (#1146, `src/execution/resident.ts:539`); the pi seam has no catch for it and the run fails (#1219), while the native loop catches it and settles the call (`src/runner.ts:596`, run-loop item 19) and the deletion step removes that handler with the loop. The base rate is one incident in the two days pi has run on the resident; every release that rebuilds the execution image is a candidate, as 1.225.0 was (#1201), and the rate is the first number the code unit's plan measures.
+
+The clause is one rule for every class, and it is the run loop's to carry: the harness reports its process not alive here, and the loop relaunches from the record in the container it was handed. "Not alive here" has three triggers: the liveness probe answers no; the container names itself differently from the row; a container command fails with `ExecSandboxRestartedError`. Before the relaunch the loop does two things the resume path does today and a live run cannot reach: it re-attaches the workspace binding or refuses it by name (`attachWorkspace`, `abandonLostWorkspace`, `src/core/dispatch/reattach.ts:44`, made callable mid-run; a refusal closes the run `interrupted` and dispatches the request again, or ends it without re-dispatch when the request cannot be read), and it **rotates the credential**. The rotation is the fence against the orphan: the bearer store accumulates hashes per run and admits any live one (`src/core/modelProxy/runBearers.ts:76, 96`), so a pi that survived in a container the deploy did not destroy would keep spending the meter and asking the door under the same run; the loop mints a new bearer, revokes the old hashes, and the orphan's next call fails at the proxy and at the door. The old process is ended and its root removed only in a container whose identity matches the row's. Relaunches are counted on the row's harness facts, so the count survives a bot generation, and bounded at two; the third finding closes the run `interrupted` with a note, so a crash-looping container cannot spin a run.
+
+Invariants: at most one credentialed process per run; the rebuilt session carries every settled call's note; a relaunch never re-runs a tool. Failure modes: the worktree is not kept, so the run closes and its request is dispatched again; the second container dies too, so the second relaunch runs and the third finding closes the run; the container cannot name itself because it is dead, which is the third trigger, not the second, and relaunches the same way. What the plan must answer before the unit lands: whether the container names itself at the moment the old command fails or fails too, what holds the workspace binding so the resume path's two functions can run mid-run without re-provisioning, and whether the bound of two should be the wall clock instead.
+
+The alternative it beat is leaning on the executor's wait for the container's wake (#1146). The wait re-attaches the executor and hands the harness the typed error; it cannot rebuild a process it did not start, and the harness has to survive the bot-death case anyway.
+
+## Own store or authored session
+
+Records 0032 and [0035](0035-a-session-log-outlives-its-runs-compaction-is-a-pointer.md) make Switchboard's record the source of truth and the harness's file a cache, and pi honours that because its history is a JSONL file the bot writes (`piSessionFile`, `src/core/harness/pi/mirror.ts:226`) and pi reads on start. The same file carries a fresh run's seed, the thread so far as the session and the request as the prompt (item 9). Codex has neither half: `thread/resume` reads only its own rollout, kept under `CODEX_HOME` in a format its documentation does not state, and `thread/start` takes no history, so the thread's earlier turns can reach it only as text inside the first turn.
+
+Each harness therefore declares one of two words, and three clauses read it. An **authored session** harness accepts a history the bot wrote as its own; pi is one. An **own store** harness has no history but its private store; Codex is one. For an authored-session harness a fresh run's seed is the written session and a rebuild is a rewrite of it. For an own-store harness the seed's earlier turns are quoted into the first prompt as one fenced block marked as quotation, a rebuild is `thread/resume` when the store is where the row says, and a store that is gone closes the run `interrupted` with a note and dispatches its request again as a new run, the outcome #1169 already chose for a refused worktree. The record is complete under both words because the mirror writes from the harness's events, never from its store; what an own-store record may lack is the compaction summary itself, if the harness's compaction event carries none, and the row says so.
+
+Invariants: the ledger's transcript is complete without any file the container holds, on both words; an own-store harness never resumes a thread the bot did not watch begin, so a `thread/resume` of an id the row does not name is refused; a quoted seed enters the record as a text part of the request turn, the way record [0037](0037-a-linked-thread-is-quoted-not-joined.md) fences a referenced thread, never as prior assistant turns. Failure modes: an authored session the harness rejects after a version bump, which pi shows as an exit before its first turn (#1166's shape), fails the run closed with the process's stderr tail; an own-store harness whose store survived in another container is not probed, and its run restarts from the request.
+
+The alternative it beat is requiring an authored session of every harness. That keeps Codex's seed exact, but it means reverse-engineering an undocumented JSONL and re-doing it on every Codex release, so the effort lands on a file format instead of on the seam. Revisable: the day Codex documents its rollout format, its row moves to authored-session by changing one word.
+
+## The record clause
+
+Each harness brings a disposition table over its own event vocabulary, held to pi's five words (`structure`, `mapped`, `folded`, `note`, `impossible`), and a kind the table does not name lands as a `harness_error` run note carrying the kind's name (`src/core/harness/pi/bridge.ts:205`), so a version bump is visible in the first run's record. The harness counts its own turns for the wrap-up steer (harness-pi item 6) and the proxy enforces the cap (model-proxy item 5); the hard stop is the protocol's abort (`harness.ts:793`) and the container seam's `kill` when the session ends (`harness.ts:541`). The effort map from Switchboard's five tiers (`src/effort.ts:9`) to the harness's words is a table per harness; pi's is the identity by a coincidence of names.
+
+## Why not X
+
+**Why not adopt the Agent Client Protocol as the contract, since pi, Codex and Claude all speak it through adapters?** ACP is an editor protocol. It has the gate (`session/request_permission`), the steer, the cancel and a usage update, and it is the right reference for the contract's names, so Appendix B maps each clause onto it. It lacks the one thing the survival clause turns on: an authored session. `session/load` replays the agent's own history to the client and takes none from it, so under ACP every harness is own-store and the record can never rebuild one. Using ACP as the wire for the gate and the conversation while the record and the credential ride beside it is an implementation choice open to any row; it is not the contract.
+
+**Why not just fix #1219 in the pi path and skip the contract?** Catching `ExecSandboxRestartedError` in `harness.ts` is the smallest patch and it lands regardless; the contract is what says what the catch must do. The smallest catch settles the call and fails the run, as the native loop does; the survival clause says rebuild from the record, rotate the credential, bound the relaunches, and that is a different fix. The same applies to the interface: after the deletion step there is no seam, and the row's facts moved four times in two days without a sentence to check the moves against (today, fact 4); the scripted harness is what makes that sentence a check instead of prose.
+
+**Why Codex and not Claude Code as the second row?** Claude Code is the more popular harness and the worse probe: closed, Anthropic-only, with a private session format. It pushes one boundary, that the record must come from the event stream alone, and then goes dark. Codex is open source and differs from pi on every clause at once, which is how it found the gate's cannot.
+
+**Why not build Codex for real now?** A third proxy shape, an MCP server and an image whose size nobody has measured (pi's cost 434 MB per image), for no user, and the gate says cannot. The row cost a day of reading; the code would cost weeks and a second prompt surface, which record 0032 rejected.
+
+## Boundaries
+
+No second harness enters an image under this record. The provider layer for calls made outside a run loop (the router and reflection on pi's library, harness-pi item 13) is not a harness. The `harness:` word on a preset goes with the native loop, as record 0032 says; the contract's roster is the code's, with one member. Ship's orchestrator is never a harness (record [0031](0031-the-coordinator-runs-a-plan-not-a-pull-request.md)). A harness's own sandbox is a wall, never a decision. What a second row would cost if it ever became code is named and not scheduled: the proxy declares the wire shapes it speaks, today two (`src/channels/modelProxy.ts:28-29`), and configuration validation refuses a harness whose wire is not in the roster, so Codex would add the Responses shape, a route, a pin and a meter; and the relay for a harness without an extension is the bot as an MCP server, which lacks the relay's `202 pending`, so how long a relayed call really runs is the p99 to measure from the run store before anyone builds it. Compatibility: nothing a user sees changes; pi's rows in harness-pi.md stay, and the contract's harness-neutral rows go to a new living spec, `harness.md`, in the same pull request as the code seam.
+
+## What would change our mind
+
+| Assumption | Cheapest evidence | When |
+|---|---|---|
+| The suite can be passed by a scripted harness with none of pi's hooks | Write the scripted harness first in the code unit; a clause it needs a hook to pass is pi-shaped and moves | First day of the code unit |
+| Container replacement under a live run recurs | Count `ExecSandboxRestartedError` in the run store per release | Before the plan sizes the relaunch |
+| Codex's rollout format stays undocumented | Read `codex-rs/core/src/rollout` once at the version the row cites | Before the code unit; the row moves to authored-session if it is documented |
+| Codex has no ask-before-every-command policy | Re-read the approvals page at each Codex release named in the row | At each re-read of the row |
+
+Reversibility: the record and the interface are deletable and nothing in production changes; the last point of retreat is the day a second harness enters an image.
+
+## Rollout
+
+After the deletion step merges, one unit: `src/core/harness/contract.ts` with the `Harness` interface (the name is free once the deletion step removes the `"native" | "pi"` union) and the `HarnessFacts` row type, `PiHarness` implementing it over the code that exists, `PiContainer` renamed `HarnessContainer` because it is the harness-neutral seam, a scripted harness in tests speaking a toy line protocol, and the conformance suite as one scenario table run against both, whose rows are the validation criteria below. The same unit carries the two behaviours this record adds to pi: the relaunch on `ExecSandboxRestartedError` with the credential rotation, and the mid-run workspace re-attach. Its scope: the 160-line seam in `src/core/dispatch/runLoop.ts` (542 to 700), the two type blocks in `harness.ts`, one rename, two new files; a guess of under 1,000 lines with tests, checked when the plan is written. Same pull request: the living spec `harness.md` with the six clauses as rows, and harness-pi.md re-pointed where a pi row is now a contract row. The Codex row stays in this record's Appendix B and in `harness.md` as prose. Sequencing and blast radius belong to the program plan.
+
+## Open questions
+
+| Question | Owner | Resolves it | Needed before |
+|---|---|---|---|
+| Does the container name itself at the moment the old command fails, or fail too? | The maintainer of the container seam | The first live relaunch receipt | The code unit's relaunch rows |
+| The relaunch bound: two, or the preset's wall clock alone? | The maintainer | The same receipt | The code unit |
+| Does Codex's `contextCompaction` item carry the summary text, so an own-store record can hold it? | Whoever writes the code unit | One read of the app-server item schema | The row's wording only |
+| Can one MCP streamable-HTTP request be held past the relayed call p99 through the resident shim? | The maintainer of the harness routes | The p99 query, then a stub run | Any Codex code, which is unscheduled |
+
+## Validation criteria
+
+Each criterion is one row of the conformance suite's scenario table, run against pi and against the scripted harness; every row is `[gap]` until the code unit binds it, and pi's existing proofs are named so the binding is a re-point, not a new test.
+
+1. `[gap]` The scripted harness passes every row with none of pi's hooks or files.
+2. `[gap]` Removing one clause's behaviour from the scripted harness fails the suite, once per clause.
+3. `[gap]` A command the harness runs without asking fails the run closed (pi's proof today: the #1067 rows in harness-pi.md item 7).
+4. `[gap]` Own store, store gone: the run closes `interrupted` with a note and its request is dispatched again (pi's proof for the refused worktree: `src/core/dispatch/reattach.test.ts`).
+5. `[gap]` A replaced container under a living bot relaunches the harness from the record in the new container with a rotated bearer, once; the old hash is refused at the proxy and the door; a third finding closes the run. Human-gated live receipt: a resident roll under a review run, the successor to #1219.
+6. `[gap]` An unknown event kind lands as a `harness_error` note naming the kind (pi's proof today: `src/core/harness/pi/bridge.test.ts`).
+7. `[gap]` A quoted seed enters the record as a text part of the request turn and never as prior assistant turns.
+8. `[gap]` Configuration validation refuses a harness whose declared wire is not in the proxy's roster.
+
+## Sources
+
+- Records [0002](0002-dispatcher-is-the-only-orchestrator.md), [0007](0007-authorization-policy-table.md), [0019](0019-durable-run-ledger-resume-after-kill.md), [0031](0031-the-coordinator-runs-a-plan-not-a-pull-request.md), [0032](0032-pi-is-the-harness-the-native-loop-retires.md) with its as-built sections and its amendment of 2026-09-15 (#1221), [0034](0034-one-agent-per-unit-a-run-continues-a-transcript.md), [0035](0035-a-session-log-outlives-its-runs-compaction-is-a-pointer.md), [0037](0037-a-linked-thread-is-quoted-not-joined.md).
+- Living specs: [harness-pi.md](../reference/specs/harness-pi.md) items 4, 6, 7, 8, 9, 12, 13, 14; [model-proxy.md](../reference/specs/model-proxy.md) items 1, 4, 5; [run-loop.md](../reference/specs/run-loop.md) item 19; [session-log.md](../reference/specs/session-log.md).
+- On the tracker: #1219, #1220, #1161, #1201, #1067, #1145, #1146, #1148, #1152, #1166, #1169, #1188, #1189, and the deletion step's item #1010.
+- Codex: the `app-server` protocol page, the configuration reference, the agent approvals and security page and the non-interactive page of its documentation site, and the `execpolicy` README in its repository, read 2026-09-15. Agent Client Protocol: the schema, initialization and session-setup pages, read the same day.
+- The peer sessions' state of the pi series at 18:35Z on 2026-09-15, which "today" was checked against before the code.
+
+## Appendix A: the survey
+
+| Fact | Value | Proof at `1f1359f2` |
+|---|---|---|
+| Harness words | `["native", "pi"]`; `type Harness` is that union | `src/agents/registry.ts:51-52` |
+| Selection | one pure function of preset and the deployment's block | `src/core/harness/select.ts:10-15` |
+| Run stage branches | `harness === "pi"` at 569 (resume finish) and 589; `runAgent` at 689 | `src/core/dispatch/runLoop.ts:542-700` |
+| pi implementation size | 3,625 non-test lines, 11 files | `src/core/harness/pi/*.ts` |
+| Routes and proxy | 174 and 685 lines | `src/channels/harnessRoutes.ts`, `src/channels/modelProxy.ts` |
+| Native loop and adapters the deletion step removes | 1,100 + 542 + 190 lines at `3626c745` | `src/runner.ts`, `src/providers/*.ts`, `src/tools/workspace.ts` |
+| `PiHarnessRun` fields | 21 | `src/core/harness/pi/harness.ts:142-186` |
+| `PiHarnessDeps` fields | 11 | `src/core/harness/pi/harness.ts:188-218` |
+| `PiContainer` methods | 11: `makeRoot`, `cwd`, `writeFile`, `start`, `writeLine`, `readLog`, `alive`, `identity`, `kill`, `tail`, `remove` | `src/core/harness/pi/container.ts:25-65` |
+| Container implementations | `ExecPiContainer`, `BotHostPiContainer` | `container.ts:193`, `botHostContainer.ts:55` |
+| RPC commands the harness sends | `prompt`, `steer`, `abort`, `get_state`, `set_auto_retry` | `src/core/harness/pi/*.ts`; abort at `harness.ts:793` |
+| Extension hooks used | `registerTool` per served definition, `tool_call` | `src/core/harness/pi/extensionSource.ts:179-180` |
+| Authorize timing | retry 2 s, wait 90 s; tool request timeout 60 s, wait 90 s, re-ask floor 1 s | `extensionSource.ts:34-46` |
+| Relay hold; relayed ask allowed by name; settlement | 30 s then `202 pending`; `allow: true` for a served name; `settle` | `src/core/harness/pi/relay.ts:106, 198, 145` |
+| The two routes' handlers | `authorizeToolCall` on `/harness/authorize`, `relayToolCall` on `/harness/tool` | `src/channels/harnessRoutes.ts:116, 120` |
+| Event kinds and dispositions; unknown kind; pi's own refusal | 23 kinds; five dispositions; `harness_error`; `piAnsweredWithoutRunning` | `src/core/harness/pi/bridge.ts:38-61, 205, 367` |
+| Proxy shapes | `/v1/messages`, `/v1/chat/completions` | `src/channels/modelProxy.ts:28-29` |
+| Proxy pin | `model` and `max_tokens` or `max_completion_tokens` from the grant | `modelProxy.ts:199` |
+| Bearer store | hashes accumulate per run; any live one admits | `src/core/modelProxy/runBearers.ts:76, 96` |
+| Row facts | `pid`, `logOffset`, `sessionFile?`, `root?`, `bearerHash?`, `container?`; a row without the shape is no facts | `harness.ts:74-106, 108` |
+| Settlement note | `settlementText`, the in-flight call's result on a rebuild | `harness.ts:334` |
+| Unvetted call fails the run closed | `GateBypassed` | `harness.ts:267` |
+| Built-in tools by identity | write: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`; read: without `edit`, `write`; none: nothing | `src/core/harness/pi/process.ts:25-43` |
+| Bearer's environment variable | `SWITCHBOARD_RUN_BEARER` | `process.ts:18` |
+| Effort tiers | `low`, `medium`, `high`, `xhigh`, `max`; pi map is the identity | `src/effort.ts:9`, `process.ts:48` |
+| Post-turns on the session | `runPiHarnessOpen` keeps pi alive for the description turn and the head-move re-review | `harness.ts:389`, harness-pi item 14 |
+| Session file authored by the bot | `piSessionFile` | `src/core/harness/pi/mirror.ts:226` |
+| Container roll as a typed error | `ExecSandboxRestartedError` thrown by the resident executor; caught only by the native loop | `src/execution/resident.ts:539`, `src/runner.ts:596` |
+| Workspace re-attach and refusal | resume path only | `src/core/dispatch/reattach.ts:44`, `src/core/dispatch/provision.ts` |
+| Resident roll kills a pi run | review `529ee3a1`, 18:06Z 2026-09-15, after the image rebuild of #1201 | #1219 |
+
+## Appendix B: the Codex row in full, with the ACP mapping
+
+Checked against Codex's documentation site (the `app-server`, configuration, approvals and non-interactive pages) and its repository's `execpolicy` README, and against the Agent Client Protocol's site, on 2026-09-15. Codex has fifteen documented item types: `userMessage`, `agentMessage`, `functionCallOutput`, `plan`, `reasoning`, `commandExecution`, `fileChange`, `mcpToolCall`, `dynamicToolCall`, `collabToolCall`, `webSearch`, `imageView`, `enteredReviewMode`, `exitedReviewMode`, `contextCompaction`; four server-to-client requests, the two approval requests answered `accept`, `acceptForSession`, `decline` or `cancel` (command approval also `acceptWithExecpolicyAmendment`), `item/permissions/requestApproval` answered with the granted subset and an optional scope, and `mcpServer/elicitation/request`; rollouts live under `CODEX_HOME` in a format the documentation does not state.
+
+| Clause | Codex configuration and protocol | ACP method the clause maps onto |
+|---|---|---|
+| Credential | `model_providers.switchboard = { base_url = <proxy>, env_key = "SWITCHBOARD_RUN_BEARER", wire_api = "responses" }`; the proxy pins the model regardless | none; ACP leaves the model to the agent |
+| Gate | `sandbox_mode = "read-only"` so every write and network call raises `item/commandExecution/requestApproval` or `item/fileChange/requestApproval`, answered `accept` or `decline` from `judgeToolCall`; `approval_policy = { granular = { sandbox_approval = true, rules = true, mcp_elicitations = false, request_permissions = false, skill_approval = false } }`, so permission and skill prompts fail closed by configuration; a `.rules` file with `decision = "prompt"` on the credential-reading prefixes the rules name; `web_search = "disabled"`; `tools.view_image = false` for identity `none`; a `dynamicToolCall` or `collabToolCall` item, which no road covers, fails the run closed by the gate's rule; **cannot** for a read-only command no prefix names | `session/request_permission` |
+| Relay | `mcp_servers.switchboard = { url = <harness URL>/harness/mcp, bearer_token_env_var = "SWITCHBOARD_RUN_BEARER" }`; the bot serves the run's relayed tools and runs them under its own gates; MCP prompts are off, so no call asks twice | `mcpServers` on `session/new` |
+| Record | `item/started` and `item/completed` by item type: `agentMessage`, `reasoning`, `userMessage`, `functionCallOutput` as messages; `commandExecution`, `fileChange`, `mcpToolCall` as tool steps; `contextCompaction` as the compacted row, its summary if the item carries one; `plan`, `enteredReviewMode`, `exitedReviewMode` as `structure`; `webSearch`, `imageView`, `dynamicToolCall`, `collabToolCall` as `impossible`; `thread/tokenUsage/updated` folded; an unknown item type a `harness_error` note | `session/update` kinds `agent_message_chunk`, `tool_call`, `tool_call_update`, `plan`, `usage_update` |
+| Conversation | `thread/start { cwd }` with the quoted seed in the first `turn/start`; `turn/steer` for steers and the wrap-up; `turn/start` on the same thread for post-turns; `turn/interrupt` for the hard stop; turns counted at `turn/completed`; effort `low`, `medium`, `high`, `xhigh` through, `max` to `xhigh` | `session/new`, `session/prompt`, `session/cancel`, `session/set_mode` |
+| Survival | facts `{pid, threadId, root: CODEX_HOME, bearerHash, container}`; alive here on a workspace class: reconnect to the wrapper's FIFO and log, the thread still open in the live process; dead here with the store present: `thread/resume threadId` in a new process; another container, or store gone: the own-store rule | `session/load` replays the agent's own history; ACP has no authored session |
+
+## Appendix C: the interface, as a sketch for the code unit
+
+```ts
+interface Harness<Facts extends HarnessFacts = HarnessFacts> {
+  readonly name: string;                              // the roster key, and the facts' discriminator
+  readonly wire: ReadonlySet<"anthropic-messages" | "openai-completions" | "openai-responses">;
+  readonly history: "authored-session" | "own-store"; // the word three clauses read
+  readonly dispositions: Readonly<Record<string, Disposition>>;
+  readonly effort: (tier: Effort) => string | undefined;
+  builtinTools(identity: Identity): readonly string[]; // every one on a gate road or disabled
+  open(deps: HarnessDeps, run: HarnessRun<Facts>): Promise<HarnessSession>;
+  find(facts: Facts, container: HarnessContainer): Promise<"alive-here" | "another-container" | "dead">;
+}
+interface HarnessFacts { harness: string; relaunches: number }   // each harness extends it with its own fields
+interface HarnessSession {
+  readonly answer: string;
+  followUp(text: string, hooks: FollowUpHooks): Promise<string>; // one more prompt on the same session
+  end(): Promise<void>;
+}
+```
+
+`HarnessRun` and `HarnessDeps` are `PiHarnessRun` and `PiHarnessDeps` with the pi-only fields (`compaction`, the root layout) moved behind the implementation. `PiHarnessFacts` extends `HarnessFacts` with today's six fields; a row written before the discriminator existed is read as pi's, the one harness that ever wrote a row. The relaunch and the credential rotation are the run loop's, called with the `find` verdict; `HarnessContainer` is today's `PiContainer` with its eleven methods and a truthful name.
