@@ -630,7 +630,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
           messages,
           tools: relayedTools(mergeTools(TOOLSETS[agent.toolset] ?? [], mcpForRun?.tools)),
           toolContext,
-          ...(session ? { notepad: () => session.readNotepad() } : {}),
+          ...(session ? { notepad: () => session.readNotepad(), conversation: () => session.readConversation() } : {}),
           rules: {
             checkout: binding?.workspace ?? "/workspace",
             ...(ownBranch !== undefined ? { branch: ownBranch } : {}),

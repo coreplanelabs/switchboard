@@ -213,9 +213,12 @@ export const spawnRunTool: RunnableTool = {
       request.budget = budget;
     }
     const spawn = ctx.spawn ?? nullSpawnCapability;
+    // The conversation at the call: the runner's array at once, the harness's
+    // log read awaited; a read that gives none seeds the child from its thread.
+    const conversation = ctx.conversation ? await ctx.conversation() : undefined;
     const out = await spawn.spawn(request, {
       remainingMs: ctx.remainingMs?.() ?? Number.POSITIVE_INFINITY,
-      ...(ctx.conversation ? { conversation: ctx.conversation() } : {}),
+      ...(conversation ? { conversation } : {}),
     });
     if (out.kind === "refused") return `spawn refused (${out.reason}): ${out.message}`;
     return (

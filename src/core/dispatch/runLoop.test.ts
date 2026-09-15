@@ -22,7 +22,18 @@ import { buildMessages } from "./messages.js";
 import { resolveRun } from "./resolve.js";
 import type { HarnessDeps, RunDeps } from "./run.js";
 import { runLoop } from "./runLoop.js";
-import { HarnessRegistry, authorizeToolCall, runRelayedTool, type LiveHarness } from "../harness/pi/relay.js";
+import {
+  HarnessRegistry,
+  RelayedCalls,
+  authorizeToolCall,
+  relayToolCall,
+  runRelayedTool,
+  type LiveHarness,
+  type RelayedToolAnswer,
+  type ToolCallAsk,
+} from "../harness/pi/relay.js";
+import { spawnCapabilityFor, type SpawnCapability, type SpawnDeps } from "./spawn.js";
+import type { SessionCapability } from "../../tools/session.js";
 import { FakePiContainer } from "../harness/pi/testing/fakeContainer.js";
 import { judgeToolCall, type ToolRuleContext } from "../harness/pi/toolRules.js";
 import type { CoordinatorTag } from "../coordinator/contract.js";
@@ -110,6 +121,10 @@ function setup(
       head: string;
       post: (target: ReviewCommentTarget, body: string) => Promise<void>;
     };
+    /** The run's spawn capability, as the dispatcher hands it to a conductor. */
+    spawn?: SpawnCapability;
+    /** The run's reach into its session log, as the dispatcher hands it to a run with a session. */
+    session?: SessionCapability;
   } = {},
 ) {
   const config = configStore(opts.yaml);
@@ -206,6 +221,8 @@ function setup(
     ending,
     ...(opts.bearer ? { bearer: opts.bearer } : {}),
     ...(opts.coordinator ? { coordinator: opts.coordinator } : {}),
+    ...(opts.spawn ? { spawn: opts.spawn } : {}),
+    ...(opts.session ? { session: opts.session } : {}),
   };
   return { deps, ctx, registry, run, store, writer, replies, frames, closes, releases, published, ending };
 }
@@ -1245,6 +1262,321 @@ describe("the harness seam: a preset without a workspace on pi, as a child of th
       bearer: "sbr_run-l.s3cret",
     });
     await expect(runLoop(s.deps, s.ctx)).rejects.toThrow(/PORT/);
+  });
+
+  // harness-pi item 12, the research and conductor presets: the same bot-host
+  // path as general, each with its own toolset relayed and nothing else; the
+  // conductor's spawn through the relay (agent-conductor item 3).
+  const RESEARCH_PI_YAML = YAML + "harness:\n  research: pi\n";
+  const CONDUCTOR_PI_YAML = YAML + "harness:\n  conductor: pi\n";
+  const GITHUB_READS = [
+    "github_repos",
+    "github_file",
+    "github_tree",
+    "github_search_code",
+    "github_issue_list",
+    "github_issue_get",
+  ];
+  const rpcAnswers = (cmd: Record<string, unknown>, c: FakePiContainer) => {
+    if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
+      c.emit({ id: cmd.id, type: "response", command: cmd.type, success: true, data: { sessionFile: "s.jsonl" } });
+  };
+  const textOf = (answer: RelayedToolAnswer) => answer.content.map((p) => (p.type === "text" ? p.text : "")).join("");
+
+  /** One relayed call as the extension makes it: announced by pi, asked of the
+   *  gate, then asked of the relay until it answers; the call's end, its result
+   *  as pi's own entry and the turn's end emitted after. */
+  async function relayedTurn(
+    c: FakePiContainer,
+    live: LiveHarness,
+    calls: RelayedCalls,
+    ask: ToolCallAsk,
+    text?: string,
+  ): Promise<RelayedToolAnswer> {
+    const msg = assistant([
+      ...(text ? [{ type: "text", text }] : []),
+      { type: "toolCall", id: ask.toolCallId, name: ask.tool, arguments: ask.input },
+    ]);
+    c.emit(
+      { type: "message_end", message: msg },
+      { type: "tool_execution_start", toolCallId: ask.toolCallId, toolName: ask.tool, args: ask.input },
+    );
+    authorizeToolCall(live, ask);
+    let progress = await relayToolCall(live, calls, ask);
+    while (!progress.done) progress = await relayToolCall(live, calls, ask);
+    const answer = progress.answer;
+    c.emit(
+      {
+        type: "tool_execution_end",
+        toolCallId: ask.toolCallId,
+        toolName: ask.tool,
+        result: { content: answer.content },
+        isError: answer.isError,
+      },
+      {
+        type: "message_end",
+        message: { role: "toolResult", toolCallId: ask.toolCallId, toolName: ask.tool, content: answer.content },
+      },
+      { type: "turn_end", message: msg, toolResults: [] },
+    );
+    return answer;
+  }
+  const settle = (c: FakePiContainer, text: string) => {
+    const done = assistant([{ type: "text", text }], "stop");
+    c.emit(
+      { type: "message_end", message: done },
+      { type: "turn_end", message: done, toolResults: [] },
+      { type: "agent_settled" },
+    );
+  };
+
+  it("`harness: { research: pi }` runs a research ask on pi on the bot host: the container asked for by the `none` class, pi reaching the bot over loopback, the allowlist the web toolset's relays and none of pi's own tools, a shell refused by name, the relayed web_fetch run in the bot under its own URL guard, and pi's answer the run's", async () => {
+    const container = new FakePiContainer();
+    const registry = new HarnessRegistry();
+    const asked: string[] = [];
+    const refusals: Array<{ allow: boolean; reason?: string }> = [];
+    container.onStdin = (line, c) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      rpcAnswers(cmd, c);
+      if (cmd.type !== "prompt") return;
+      c.emit({ id: cmd.id, type: "response", command: "prompt", success: true }, { type: "agent_start" });
+      const live = registry.get("run-l")!;
+      const calls = registry.calls("run-l")!;
+      void (async () => {
+        const shell = { command: "curl http://127.0.0.1:8080/secret" };
+        const t1 = assistant([{ type: "toolCall", id: "c1", name: "bash", arguments: shell }]);
+        c.emit(
+          { type: "message_end", message: t1 },
+          { type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: shell },
+        );
+        const gate = authorizeToolCall(live, { toolCallId: "c1", tool: "bash", input: shell });
+        refusals.push(gate);
+        c.emit(
+          {
+            type: "tool_execution_end",
+            toolCallId: "c1",
+            toolName: "bash",
+            result: { content: [{ type: "text", text: `Tool execution blocked: ${gate.allow ? "" : gate.reason}` }] },
+            isError: true,
+          },
+          { type: "turn_end", message: t1, toolResults: [] },
+        );
+        const fetched = await relayedTurn(c, live, calls, {
+          toolCallId: "c2",
+          tool: "web_fetch",
+          input: { url: "http://127.0.0.1:8080/secret" },
+        });
+        settle(c, `Research says: ${textOf(fetched)}`);
+      })();
+    };
+    const s = setup("", {
+      agent: "research",
+      yaml: RESEARCH_PI_YAML,
+      harness: {
+        registry,
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: (_executor, machine) => {
+          asked.push(machine);
+          return container;
+        },
+      },
+      bearer: "sbr_run-l.s3cret",
+    });
+    const out = await runLoop(s.deps, s.ctx);
+    expect(out.answer).toMatch(/^Research says: web_fetch refused: /);
+    expect(asked).toEqual(["none"]);
+    expect(container.starts).toHaveLength(1);
+    const start = container.starts[0];
+    expect(start.env.SWITCHBOARD_HARNESS_URL).toBe("http://127.0.0.1:8080");
+    expect(start.env.SWITCHBOARD_RUN_BEARER).toBe("sbr_run-l.s3cret");
+    const tools = start.args[start.args.indexOf("--tools") + 1].split(",");
+    expect(tools).toEqual(["web_fetch", "web_search", "update_status", ...GITHUB_READS]);
+    for (const own of ["read", "bash", "edit", "write", "grep", "find", "ls"]) expect(tools).not.toContain(own);
+    expect(refusals).toEqual([
+      {
+        allow: false,
+        reason: "bash is the `shell` bundle: a run without a workspace (identity none) has none of pi's own tools",
+      },
+    ]);
+    expect(container.killed).toEqual([4242]);
+    s.ending.drain(true);
+    await s.writer.settled();
+    const rec = (await s.store.get("run-l"))!;
+    expect(rec.events.filter((e) => e.type === "tool_call").map((e) => (e as { tool: string }).tool)).toEqual([
+      "bash",
+      "web_fetch",
+    ]);
+  });
+
+  /** A spawning run over the real stage with `dispatch()` stubbed: a dispatched child registers at once; what it was dispatched with is kept. */
+  function stubbedSpawn() {
+    const dispatched: Array<{ text: string; opts: unknown }> = [];
+    const leads: string[] = [];
+    const quiet: ChannelIO = {
+      reply: async () => {},
+      status: async () => ({ update: () => {}, done: async () => {} }),
+      history: async () => [],
+    };
+    const deps: SpawnDeps = {
+      core: {
+        config: { config: {}, grantsFor: () => new Set(), canRunAgent: () => true },
+        runStore: {},
+        runLedger: { pushInbox: async () => ({ ok: true }) },
+      } as unknown as SpawnDeps["core"],
+      dispatch: async (_core, message, childIo, opts) => {
+        dispatched.push({ text: message.text, opts });
+        childIo.runStarted?.({ id: "run-child" });
+        return { status: "completed" };
+      },
+      registry: { listActive: () => [] },
+      clock: () => NOW,
+    };
+    const spawn = spawnCapabilityFor(deps, {
+      runId: "run-l",
+      depth: 0,
+      agentName: "conductor",
+      msg: msg("look into durable objects"),
+      io: {
+        ...quiet,
+        openThread: async (lead) => {
+          leads.push(lead);
+          return { thread: { threadKey: "slack:CX:9.0" }, io: quiet };
+        },
+      },
+    });
+    return { spawn, dispatched, leads };
+  }
+  /** The conductor's session log as the harness reads it: the request, then what the conductor said before spawning. */
+  const conductorLog: ChatMessage[] = [
+    { role: "user", content: [{ type: "text", text: "look into durable objects" }] },
+    { role: "assistant", content: [{ type: "text", text: "Storage first: one research child." }] },
+  ];
+  const sessionWith = (readConversation: () => Promise<ChatMessage[]>): SessionCapability => ({
+    session: { key: `${THREAD}:conductor`, seedFrom: 0, request: 0, range: { from: 1 } },
+    search: async () => ({ hits: [], gaps: [] }),
+    readTurn: async () => undefined,
+    readConversation,
+    readNotepad: async () => null,
+    writeNotepad: async () => ({ ok: true }),
+  });
+
+  it("`harness: { conductor: pi }` runs the conductor on pi on the bot host with the conductor toolset relayed: a `coding` spawn is refused `spawn_identity` in the tool result and starts nothing; a `research` spawn reaches spawnChild with the text turns of the conversation the session log holds, so the child is dispatched with `seed` set; pi's answer is the run's", async () => {
+    const container = new FakePiContainer();
+    const registry = new HarnessRegistry();
+    const asked: string[] = [];
+    const { spawn, dispatched, leads } = stubbedSpawn();
+    const results: string[] = [];
+    container.onStdin = (line, c) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      rpcAnswers(cmd, c);
+      if (cmd.type !== "prompt") return;
+      c.emit({ id: cmd.id, type: "response", command: "prompt", success: true }, { type: "agent_start" });
+      const live = registry.get("run-l")!;
+      const calls = registry.calls("run-l")!;
+      void (async () => {
+        results.push(
+          textOf(
+            await relayedTurn(
+              c,
+              live,
+              calls,
+              {
+                toolCallId: "t1",
+                tool: "spawn_run",
+                input: { preset: "coding", prompt: "fix the login test", repo: "acme/api" },
+              },
+              "Storage first: one research child.",
+            ),
+          ),
+        );
+        results.push(
+          textOf(
+            await relayedTurn(c, live, calls, {
+              toolCallId: "t2",
+              tool: "spawn_run",
+              input: { preset: "research", prompt: "what is a Durable Object?" },
+            }),
+          ),
+        );
+        settle(c, results.join("\n"));
+      })();
+    };
+    const s = setup("", {
+      agent: "conductor",
+      yaml: CONDUCTOR_PI_YAML,
+      harness: {
+        registry,
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: (_executor, machine) => {
+          asked.push(machine);
+          return container;
+        },
+      },
+      bearer: "sbr_run-l.s3cret",
+      spawn,
+      session: sessionWith(async () => conductorLog),
+    });
+    const out = await runLoop(s.deps, s.ctx);
+    expect(asked).toEqual(["none"]);
+    const start = container.starts[0];
+    expect(start.env.SWITCHBOARD_HARNESS_URL).toBe("http://127.0.0.1:8080");
+    const tools = start.args[start.args.indexOf("--tools") + 1].split(",");
+    expect(tools).toEqual([
+      "spawn_run",
+      "send_to_run",
+      "await_runs",
+      "list_runs",
+      "get_run_status",
+      "web_fetch",
+      "update_status",
+      ...GITHUB_READS,
+    ]);
+    for (const own of ["read", "bash", "edit", "write", "grep", "find", "ls"]) expect(tools).not.toContain(own);
+    expect(results[0]).toMatch(/^spawn refused \(spawn_identity\): `coding` runs as a `write` identity/);
+    expect(results[1]).toContain("spawned a research run: run-child in thread slack:CX:9.0");
+    expect(out.answer).toBe(results.join("\n"));
+    // The coding spawn opened nothing; the research child was dispatched as the requester with the parent's text turns as its seed.
+    expect(leads).toHaveLength(1);
+    expect(leads[0]).toContain("*research*");
+    expect(dispatched).toEqual([
+      {
+        text: "agent:research what is a Durable Object?",
+        opts: {
+          parent: { runId: "run-l", depth: 1, remainingMs: expect.any(Number) },
+          seed: [
+            { role: "user", text: "look into durable objects" },
+            { role: "assistant", text: "Storage first: one research child." },
+          ],
+        },
+      },
+    ]);
+    expect(container.killed).toEqual([4242]);
+    s.ending.drain(true);
+    await s.writer.settled();
+    const rec = (await s.store.get("run-l"))!;
+    expect(rec.events.filter((e) => e.type === "tool_call").map((e) => (e as { tool: string }).tool)).toEqual([
+      "spawn_run",
+      "spawn_run",
+    ]);
+  });
+
+  it("without the key, with the preset declared native, or with a block moving another preset, a research ask and a conductor ask run the native loop and pi never starts", async () => {
+    const container = new FakePiContainer();
+    const harness: HarnessDeps = {
+      registry: new HarnessRegistry(),
+      harnessUrl: "https://bot.example.com",
+      loopbackUrl: "http://127.0.0.1:8080",
+      containerFor: () => container,
+    };
+    for (const agent of ["research", "conductor"] as const) {
+      for (const yaml of [YAML, YAML + `harness:\n  ${agent}: native\n`, GENERAL_PI_YAML]) {
+        const s = setup("native answer", { agent, yaml, harness, bearer: "sbr_run-l.s3cret" });
+        expect((await runLoop(s.deps, s.ctx)).answer).toBe("native answer");
+      }
+    }
+    expect(container.starts).toEqual([]);
   });
 });
 

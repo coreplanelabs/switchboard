@@ -141,6 +141,12 @@ export interface PiHarnessRun {
    *  10), read when pi compacts so the steer that follows carries it; absent
    *  for a run without a session, and the steer says the notes are empty. */
   notepad?: () => Promise<Notepad | null>;
+  /** The run's conversation as its session log holds it (session-log item 3),
+   *  read at the call: what the relayed `spawn_run` hands `spawnChild` as the
+   *  child's seed (agent-conductor item 3), since pi keeps the transcript in
+   *  its own process and the bot's copy is the mirror's rows on the ledger.
+   *  Absent for a run without a session: a child then starts from its thread. */
+  conversation?: () => Promise<readonly ChatMessage[]>;
   backend?: Backend;
   span?: Span;
   control?: RunControl;
@@ -184,6 +190,11 @@ export function relayedTools(tools: readonly RunnableTool[]): RunnableTool[] {
 }
 
 const FINALE_TIMEOUT_MS = 3 * 60_000;
+/** How long a relayed request waits for the bridge to read its call's start off
+ *  the log (`LiveHarness.callSeen`): a few polls of the transport, counted in
+ *  ticks of the harness's own sleep so a fixed clock cannot stall it. */
+const CALL_SEEN_WAIT_MS = 3_000;
+const CALL_SEEN_TICK_MS = 50;
 const CONTINUE_PROMPT =
   "Continue where you left off: the bot restarted mid-run, so re-check the effects of your last command before relying on them.";
 
@@ -306,6 +317,28 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
   const deadline = now() + remainingMs;
   const warnAt = deadline - Math.min(3 * 60_000, run.agent.maxMinutes * 15_000);
   run.toolContext.remainingMs = () => deadline - now();
+  // The conversation the run's tools read (agent-conductor item 3): the native
+  // loop hands its own array; here it is the session log's rows, so a read the
+  // ledger cannot answer costs the child its seed, never the spawn: the tool
+  // is told there is none, and the record says why.
+  if (run.conversation) {
+    const readConversation = run.conversation;
+    run.toolContext.conversation = async () => {
+      try {
+        return await readConversation();
+      } catch (err) {
+        emit({
+          type: "run_note",
+          kind: "seed",
+          summary: redactAndCap(
+            `the conversation could not be read from the session log for a child's seed (${err instanceof Error ? err.message : String(err)}); a child spawned now starts from its own thread`,
+            300,
+          ),
+        });
+        return undefined;
+      }
+    };
+  }
   bridge.turns = run.resume?.turn ?? 0;
   const mirror = new PiMirror({
     onStep: run.onStep,
@@ -337,6 +370,10 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
     toolSpan: (callId) => bridge.openSpan(callId),
     gateSaw: (callId) => bridge.gateSaw(callId),
     toolsBlocked,
+    callSeen: async (callId) => {
+      for (let waited = 0; !bridge.callOpen(callId) && waited < CALL_SEEN_WAIT_MS; waited += CALL_SEEN_TICK_MS)
+        await deps.sleep(CALL_SEEN_TICK_MS);
+    },
   };
   const forget = deps.registry.register(live);
 

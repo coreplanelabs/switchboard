@@ -258,7 +258,7 @@ describe("spawn_run — the capability, called with the run's remaining wall clo
   // docs/reference/specs/routing-and-config.md item 20: the child's seed is the
   // parent's conversation at the call — read off the context the runner
   // installs, handed to the capability beside the clock.
-  it("hands the capability the conversation the context offers beside the clock, and only the clock when the context keeps none", async () => {
+  it("hands the capability the conversation the context offers beside the clock (the loop's own array, or the pi harness's read of the session log, awaited) and only the clock when the context keeps none or the read gives none", async () => {
     const spawn = {
       spawn: vi.fn(async () => ({ kind: "spawned" as const, runId: "run-child", threadKey: "slack:CX:9.0" })),
       childOutcome: () => undefined,
@@ -272,7 +272,20 @@ describe("spawn_run — the capability, called with the run's remaining wall clo
       { preset: "research", prompt: "q" },
       { remainingMs: 1_000, conversation },
     );
+    await spawnRunTool.run(
+      { preset: "research", prompt: "q" },
+      { executor, spawn, remainingMs: () => 1_000, conversation: async () => conversation },
+    );
+    expect(spawn.spawn).toHaveBeenLastCalledWith(
+      { preset: "research", prompt: "q" },
+      { remainingMs: 1_000, conversation },
+    );
     await spawnRunTool.run({ preset: "research", prompt: "q" }, { executor, spawn, remainingMs: () => 1_000 });
+    expect(spawn.spawn).toHaveBeenLastCalledWith({ preset: "research", prompt: "q" }, { remainingMs: 1_000 });
+    await spawnRunTool.run(
+      { preset: "research", prompt: "q" },
+      { executor, spawn, remainingMs: () => 1_000, conversation: async () => undefined },
+    );
     expect(spawn.spawn).toHaveBeenLastCalledWith({ preset: "research", prompt: "q" }, { remainingMs: 1_000 });
   });
 

@@ -4,11 +4,14 @@
 // in a directory with no node_modules. It does two things. It registers the
 // run's relayed tools — the definitions it fetches from the bot, one JSON
 // Schema each — so `update_status`, `submit_pr_description` and the rest run
-// in the bot with the run's own context and answer here; and its `tool_call`
-// hook asks the bot before every tool executes, pi's own included, and blocks
-// with the bot's reason when the bot refuses or cannot be reached for long
-// enough. The bearer and the bot's URL come from the process environment the
-// harness started pi with; nothing here holds a rule, a key or a decision.
+// in the bot with the run's own context and answer here, a call the bot says
+// is still running asked again with the same call id until it answers (the
+// conductor's waits run for minutes; the bot runs the call once); and its
+// `tool_call` hook asks the bot before every tool executes, pi's own included,
+// and blocks with the bot's reason when the bot refuses or cannot be reached
+// for long enough. The bearer and the bot's URL come from the process
+// environment the harness started pi with; nothing here holds a rule, a key or
+// a decision.
 //
 // Shipped as a string on purpose: the file the container runs is exactly this
 // text, the tests import it from a file they write, and `tsc` carries it to
@@ -30,6 +33,17 @@ const URL_ENV = "SWITCHBOARD_HARNESS_URL";
 /** How long the tool_call hook keeps asking an unreachable bot before it blocks. */
 const AUTHORIZE_WAIT_MS = 90_000;
 const AUTHORIZE_RETRY_MS = 2_000;
+/** How long one request for a relayed tool's result may take before it is asked
+ *  again: over the bot's window (30 s, after which it answers that the call is
+ *  still running), under this runtime's own five-minute header timeout on a
+ *  fetch, so a hung connection costs a minute of the wait, not five. */
+const TOOL_REQUEST_TIMEOUT_MS = 60_000;
+/** How long a relayed call keeps asking a bot it cannot reach before it fails; the cadence is the hook's. */
+const TOOL_WAIT_MS = 90_000;
+/** A bot that says a call is still running is asked again after the window it
+ *  held the request for; one that answered sooner is asked again no sooner
+ *  than this, so a misbehaving bot is never asked in a hot loop. */
+const TOOL_REASK_FLOOR_MS = 1_000;
 
 function settings() {
   const url = process.env[URL_ENV];
@@ -103,6 +117,49 @@ async function authorize(event) {
   }
 }
 
+/** pi's abort signal for the call, with this request's own timeout beside it
+ *  where the runtime can combine the two; pi's alone where it cannot. */
+function requestSignal(signal) {
+  const timeout = typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(TOOL_REQUEST_TIMEOUT_MS) : undefined;
+  if (!timeout) return signal;
+  if (!signal) return timeout;
+  return typeof AbortSignal.any === "function" ? AbortSignal.any([signal, timeout]) : signal;
+}
+
+/** A relayed tool's result. The call is posted with its id; a bot that answers
+ *  that the call is still running (a wait on other runs can take minutes) is
+ *  asked again with the same id until it answers: the bot runs the call once
+ *  and every later ask joins it. A bot that cannot be reached or is failing (a
+ *  network error, a timed-out request, a 5xx) is asked again every two seconds
+ *  until the wait is up, then the call fails naming why; a refusal at the door
+ *  (a 4xx) fails it at once; an abort from pi ends the asking. */
+async function relay(toolCallId, tool, input, signal) {
+  let lastAnswered = Date.now();
+  let lastError = "";
+  for (;;) {
+    if (signal && signal.aborted) throw new Error("switchboard harness: " + tool + " was aborted before the bot answered");
+    const asked = Date.now();
+    let answer;
+    try {
+      answer = await call("POST", "/harness/tool", { toolCallId, tool, input }, requestSignal(signal));
+    } catch (err) {
+      if (signal && signal.aborted) throw err;
+      const status = err instanceof HarnessAnswerError ? err.status : undefined;
+      if (status !== undefined && status >= 400 && status < 500) throw err;
+      lastError = err instanceof Error ? err.message : String(err);
+      if (Date.now() - lastAnswered >= TOOL_WAIT_MS) {
+        throw new Error("switchboard harness: the bot did not answer " + tool + " for 90 s (" + lastError + ")");
+      }
+      await sleep(AUTHORIZE_RETRY_MS);
+      continue;
+    }
+    lastAnswered = Date.now();
+    if (!answer.pending) return answer;
+    const held = Date.now() - asked;
+    if (held < TOOL_REASK_FLOOR_MS) await sleep(TOOL_REASK_FLOOR_MS - held);
+  }
+}
+
 function relayTool(def) {
   return {
     name: def.name,
@@ -110,7 +167,7 @@ function relayTool(def) {
     description: def.description,
     parameters: def.inputSchema,
     async execute(toolCallId, params, signal) {
-      const answer = await call("POST", "/harness/tool", { toolCallId, tool: def.name, input: params }, signal);
+      const answer = await relay(toolCallId, def.name, params, signal);
       if (answer.isError) throw new Error(answer.content.map((c) => (c.type === "text" ? c.text : "")).join("\\n"));
       return { content: answer.content, details: {} };
     },

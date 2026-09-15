@@ -1,18 +1,31 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Executor } from "../../../execution/executor.js";
+import type { ChatMessage } from "../../../providers/types.js";
+import { awaitRunsTool, sendToRunTool, spawnRunTool } from "../../../tools/runs.js";
 import { TOOLSETS, submitVerdictTool, type RunnableTool } from "../../../tools/workspace.js";
+import { ALL_GRANTS } from "../../authz/grants.js";
+import type { Actor } from "../../authz/types.js";
+import { sleepUnlessAborted, type WaitCapability } from "../../dispatch/awaitChildren.js";
+import { webCapability } from "../../dispatch/run.js";
+import { spawnCapabilityFor, type SpawnDeps } from "../../dispatch/spawn.js";
 import { buildReviewPostBody, type ReviewVerdict } from "../../reviewVerdict.js";
 import { checkReviewedHead } from "../../reviewedHead.js";
 import type { RunEvent } from "../../runEvents.js";
+import type { RunsService, RunView } from "../../runsService.js";
 import { recordingSink } from "../../testing/recordingSink.js";
 import { createTracer } from "../../trace/tracer.js";
+import type { ChannelIO, IncomingMessage } from "../../types.js";
 import {
   HarnessRegistry,
+  RELAY_POLL_WINDOW_MS,
+  RelayedCalls,
   authorizeToolCall,
   piContentOf,
+  relayToolCall,
   relayedToolDefinitions,
   runRelayedTool,
   type LiveHarness,
+  type RelayedToolAnswer,
 } from "./relay.js";
 import { relayedTools } from "./harness.js";
 
@@ -369,5 +382,395 @@ describe("runRelayedTool — a native tool run in the bot for pi", () => {
       isError: false,
     });
     expect(piContentOf("plain")).toEqual([{ type: "text", text: "plain" }]);
+  });
+});
+
+const admin: Actor = { kind: "user", id: "slack:UADMIN", grants: ALL_GRANTS };
+const textOf = (answer: RelayedToolAnswer) => answer.content.map((c) => (c.type === "text" ? c.text : "")).join("");
+const answerOf = (text: string) => ({ done: true, answer: { content: [{ type: "text", text }], isError: false } });
+
+// Feature: docs/reference/specs/harness-pi.md item 12, the research preset on
+// pi: its `web` toolset is what pi is served and nothing else; each relayed
+// tool is the native one run in the bot with the run's own context, under the
+// bot's own gates; every one of pi's own tools, and any tool outside the
+// toolset, is refused at the gate with a `tool_refused` note.
+describe("the research preset on pi: the web toolset relayed, run in the bot as the requesting user", () => {
+  const research = () => {
+    const w = live({ identity: "none" });
+    w.harness.tools = relayedTools(TOOLSETS.web);
+    w.harness.toolContext = { executor, web: webCapability() };
+    return w;
+  };
+
+  it("serves exactly the web toolset's definitions (web_fetch, web_search, update_status and the GitHub reads) and none of pi's own tools", () => {
+    const { harness } = research();
+    expect(relayedToolDefinitions(harness).map((d) => d.name)).toEqual([
+      "web_fetch",
+      "web_search",
+      "update_status",
+      "github_repos",
+      "github_file",
+      "github_tree",
+      "github_search_code",
+      "github_issue_list",
+      "github_issue_get",
+    ]);
+  });
+
+  it("the gate allows web_fetch and web_search by name and refuses bash, edit and a tool outside the toolset (spawn_run) with a tool_refused note each", () => {
+    const { harness, events } = research();
+    const ask = (tool: string, input: unknown) => authorizeToolCall(harness, { toolCallId: `a-${tool}`, tool, input });
+    expect(ask("web_fetch", { url: "https://example.com" })).toEqual({ allow: true });
+    expect(ask("web_search", { query: "durable objects" })).toEqual({ allow: true });
+    expect(ask("bash", { command: "curl https://example.com" })).toEqual({
+      allow: false,
+      reason: "bash is the `shell` bundle: a run without a workspace (identity none) has none of pi's own tools",
+    });
+    expect(ask("edit", { path: "notes.md" })).toEqual({
+      allow: false,
+      reason: "edit is the `write-files` bundle: a run without a workspace (identity none) has none of pi's own tools",
+    });
+    expect(ask("spawn_run", { preset: "research", prompt: "q" })).toEqual({
+      allow: false,
+      reason: "spawn_run is not in any bundle the none identity reaches",
+    });
+    expect(events.map((e) => (e as { kind?: string }).kind)).toEqual(["tool_refused", "tool_refused", "tool_refused"]);
+  });
+
+  it("a relayed web_fetch is the native tool run in the bot under its own URL guard: an internal address is refused without a fetch and the refusal is the content pi reads; a tool outside the toolset asked of the relay is named unknown", async () => {
+    const { harness } = research();
+    const answer = await runRelayedTool(harness, {
+      toolCallId: "c9",
+      tool: "web_fetch",
+      input: { url: "http://127.0.0.1:8080/secret" },
+    });
+    expect(answer.isError).toBe(false);
+    expect(answer.content).toEqual([{ type: "text", text: expect.stringMatching(/^web_fetch refused: /) }]);
+    expect(await runRelayedTool(harness, { toolCallId: "c10", tool: "spawn_run", input: {} })).toEqual({
+      content: [{ type: "text", text: "Unknown tool: spawn_run" }],
+      isError: true,
+    });
+  });
+});
+
+// Feature: docs/reference/specs/harness-pi.md item 7, a relayed call that
+// outlives one request. The bot answers within a window or says the call is
+// still running; the same call id joins the one run and never starts it
+// twice; the answer waits for the ask that reads it; a run's end stops what
+// still runs.
+describe("relayToolCall: a relayed call that outlives one request", () => {
+  afterEach(() => vi.useRealTimers());
+
+  /** A tool that answers when the test releases it, counting its runs. */
+  function gated(name: string) {
+    let release!: (text: string) => void;
+    const answered = new Promise<string>((r) => (release = r));
+    let runs = 0;
+    const tool: RunnableTool = {
+      name,
+      description: "waits",
+      inputSchema: { type: "object", properties: {} },
+      run: async () => {
+        runs++;
+        return answered;
+      },
+    };
+    return { tool, release, runs: () => runs };
+  }
+
+  it("a tool that answers within the window answers in one request, as before", async () => {
+    const { harness } = live();
+    const calls = new RelayedCalls();
+    const ask = { toolCallId: "c1", tool: "update_status", input: { checklist: "x" } };
+    expect(await relayToolCall(harness, calls, ask, { windowMs: 1_000 })).toEqual(answerOf("status updated: x"));
+    expect(calls.size).toBe(1);
+  });
+
+  it("a tool still running after the window is pending; every later ask with the same call id joins the one run and never starts it twice; the ask after it answers reads the answer, and so does a retry after that", async () => {
+    vi.useFakeTimers();
+    const g = gated("slow");
+    const { harness } = live();
+    harness.tools = [g.tool];
+    const calls = new RelayedCalls();
+    const ask = { toolCallId: "c5", tool: "slow", input: {} };
+    const first = relayToolCall(harness, calls, ask);
+    const second = relayToolCall(harness, calls, ask);
+    await vi.advanceTimersByTimeAsync(RELAY_POLL_WINDOW_MS);
+    expect(await first).toEqual({ done: false });
+    expect(await second).toEqual({ done: false });
+    expect(g.runs()).toBe(1);
+    const third = relayToolCall(harness, calls, ask);
+    g.release("done at last");
+    expect(await third).toEqual(answerOf("done at last"));
+    expect(await relayToolCall(harness, calls, ask)).toEqual(answerOf("done at last"));
+    expect(g.runs()).toBe(1);
+    expect(calls.size).toBe(1);
+  });
+
+  it("an await_runs that ends after seven minutes of the run's clock is asked after every thirty-second window and answers once, the tool having run once: the wait outlives any single request", async () => {
+    vi.useFakeTimers({ now: 1_000_000 });
+    const endAt = Date.now() + 7 * 60_000 + 1_000;
+    const child: RunView = {
+      id: "run-child",
+      agent: "research",
+      parentRunId: "run-7",
+      threadKey: "slack:CX:9.0",
+      startedAt: Date.now() - 1_000,
+      eventCount: 0,
+      finished: false,
+    };
+    const service = {
+      async getRun(id: string, opts: { include?: "messages" } = {}) {
+        if (id !== "run-child") return { ok: false as const, error: "not_found" as const };
+        const finished = Date.now() >= endAt;
+        return {
+          ok: true as const,
+          value: {
+            ...child,
+            finished,
+            ...(finished ? { finishedAt: endAt, status: "completed" as const } : {}),
+            ...(finished && opts.include === "messages"
+              ? { events: [{ type: "answer", text: "A single-instance coordination point." }] }
+              : {}),
+          },
+        };
+      },
+      async listRuns() {
+        return { runs: [] };
+      },
+    } as unknown as RunsService;
+    const wait: WaitCapability = {
+      stopRequested: () => undefined,
+      followUpsPending: () => 0,
+      watch: () => () => {},
+      now: () => Date.now(),
+      sleep: sleepUnlessAborted,
+    };
+    const { harness } = live({ identity: "none" });
+    harness.tools = [awaitRunsTool];
+    harness.toolContext = {
+      executor,
+      runs: { service, actor: admin, runId: "run-7" },
+      wait,
+      remainingMs: () => 60 * 60_000,
+    };
+    const calls = new RelayedCalls();
+    const ask = { toolCallId: "c-await", tool: "await_runs", input: { ids: ["run-child"] } };
+    let pendings = 0;
+    let progress: Awaited<ReturnType<typeof relayToolCall>>;
+    for (;;) {
+      const asked = relayToolCall(harness, calls, ask);
+      await vi.advanceTimersByTimeAsync(RELAY_POLL_WINDOW_MS);
+      progress = await asked;
+      if (progress.done) break;
+      if (++pendings > 20) throw new Error("the wait never ended");
+    }
+    expect(pendings).toBe(14);
+    expect(progress.answer.isError).toBe(false);
+    const report = JSON.parse(textOf(progress.answer)) as { ended: string; waitedMs: number; runs: unknown[] };
+    expect(report).toMatchObject({
+      ended: "all_ended",
+      runs: [
+        {
+          id: "run-child",
+          status: "completed",
+          finalReply: expect.stringContaining("A single-instance coordination point."),
+        },
+      ],
+    });
+    expect(report.waitedMs).toBeGreaterThanOrEqual(7 * 60_000);
+    // A retry after the answer landed reads it again, with no second wait and no second run.
+    expect(await relayToolCall(harness, calls, ask)).toEqual(progress);
+    expect(calls.size).toBe(1);
+  });
+
+  it("send_to_run through the relay steers the run's live child as the requester, and the steer's answer is the content pi reads", async () => {
+    const child: RunView = {
+      id: "run-child",
+      agent: "research",
+      parentRunId: "run-7",
+      threadKey: "slack:CX:9.0",
+      startedAt: 1,
+      eventCount: 0,
+      finished: false,
+    };
+    const service = {
+      async getRun(id: string) {
+        return id === "run-child" ? { ok: true, value: child } : { ok: false, error: "not_found" };
+      },
+    } as unknown as RunsService;
+    const steer = vi.fn(async () => ({ kind: "steered" as const, where: "here" as const, at: 2 }));
+    const { harness } = live({ identity: "none" });
+    harness.tools = [sendToRunTool];
+    harness.toolContext = { executor, runs: { service, actor: admin, runId: "run-7" }, steer: { steer } };
+    const answer = await relayToolCall(harness, new RelayedCalls(), {
+      toolCallId: "c-steer",
+      tool: "send_to_run",
+      input: { id: "run-child", text: "narrow it to Workers" },
+    });
+    expect(answer).toEqual(
+      answerOf(
+        "steered: folded into the research run run-child — it reads it at its next step; a child that finishes before then never reads it.",
+      ),
+    );
+    expect(steer).toHaveBeenCalledWith(
+      { runId: "run-child", threadKey: "slack:CX:9.0", agent: "research" },
+      "narrow it to Workers",
+    );
+  });
+
+  it("when the run ends, a call still running is told to stop through its context's signal, and the registry's calls go with the registration", async () => {
+    const registry = new HarnessRegistry();
+    const { harness } = live();
+    harness.tools = [
+      {
+        name: "waiting",
+        description: "waits for the end",
+        inputSchema: { type: "object", properties: {} },
+        run: (_input, ctx) =>
+          new Promise((r) => ctx.signal?.addEventListener("abort", () => r("stopped"), { once: true })),
+      },
+    ];
+    const forget = registry.register(harness);
+    const calls = registry.calls("run-7")!;
+    const asked = relayToolCall(
+      harness,
+      calls,
+      { toolCallId: "c-w", tool: "waiting", input: {} },
+      { windowMs: 10_000 },
+    );
+    forget();
+    expect(await asked).toEqual(answerOf("stopped"));
+    expect(registry.calls("run-7")).toBeUndefined();
+  });
+});
+
+// Feature: docs/reference/specs/agent-conductor.md item 3, the conductor's
+// spawn_run on pi. The relay hands the tool the run's conversation as the
+// harness offers it (the session log's rows), read once the bridge has seen
+// the call, so the child seeds from the parent's text turns exactly as a
+// native conductor's child does; a write preset is refused by name in the tool
+// result; a conversation the log cannot give seeds nothing.
+describe("runRelayedTool: the conductor's spawn_run on pi", () => {
+  const text = (role: "user" | "assistant", t: string): ChatMessage => ({ role, content: [{ type: "text", text: t }] });
+  /** The parent's conversation as its session log holds it at the call: the seed, then the assistant turn that makes the call. */
+  const log: ChatMessage[] = [
+    text("user", "look into durable objects"),
+    {
+      role: "assistant",
+      content: [
+        { type: "text", text: "Storage first: one research child." },
+        {
+          type: "tool_use",
+          id: "t1",
+          name: "spawn_run",
+          input: { preset: "research", prompt: "what is a Durable Object?" },
+        },
+      ],
+    },
+  ];
+  const quiet: ChannelIO = {
+    reply: async () => {},
+    status: async () => ({ update: () => {}, done: async () => {} }),
+    history: async () => [],
+  };
+
+  /** A spawning run over the real stage with `dispatch()` stubbed: a dispatched child registers at once. */
+  function conducting(conversation: () => Promise<readonly ChatMessage[] | undefined>) {
+    const dispatched: Array<{ text: string; opts: unknown }> = [];
+    const leads: string[] = [];
+    const order: string[] = [];
+    const io: ChannelIO = {
+      ...quiet,
+      openThread: async (lead) => {
+        leads.push(lead);
+        return { thread: { threadKey: "slack:CX:9.0" }, io: quiet };
+      },
+    };
+    const deps: SpawnDeps = {
+      core: {
+        config: { config: {}, grantsFor: () => new Set(), canRunAgent: () => true },
+        runStore: {},
+        runLedger: { pushInbox: async () => ({ ok: true }) },
+      } as unknown as SpawnDeps["core"],
+      dispatch: async (_core, msg, childIo, opts) => {
+        dispatched.push({ text: msg.text, opts });
+        childIo.runStarted?.({ id: "run-child" });
+        return { status: "completed" };
+      },
+      registry: { listActive: () => [] },
+      clock: () => 1,
+    };
+    const msg: IncomingMessage = {
+      channelId: "slack:CX",
+      userId: "slack:UX",
+      userName: "alice",
+      threadKey: "slack:CX:1.0",
+      text: "agent:conductor look into durable objects",
+      receivedAt: 1,
+    };
+    const spawn = spawnCapabilityFor(deps, { runId: "run-7", depth: 0, agentName: "conductor", msg, io });
+    const { harness, events } = live({ identity: "none" });
+    harness.tools = [spawnRunTool];
+    harness.toolContext = {
+      executor,
+      spawn,
+      remainingMs: () => 30 * 60_000,
+      conversation: () => {
+        order.push("read");
+        return conversation();
+      },
+    };
+    harness.callSeen = async (callId) => void order.push(`seen ${callId}`);
+    return { harness, events, dispatched, leads, order };
+  }
+
+  it("reaches spawnChild with the parent's text turns (the conversation the harness offers, read after the bridge has seen the call), so the child is dispatched with `seed` set to what was said, never the tool call", async () => {
+    const w = conducting(async () => log);
+    const answer = await runRelayedTool(w.harness, {
+      toolCallId: "t1",
+      tool: "spawn_run",
+      input: { preset: "research", prompt: "what is a Durable Object?" },
+    });
+    expect(answer.isError).toBe(false);
+    expect(textOf(answer)).toContain("spawned a research run: run-child in thread slack:CX:9.0");
+    expect(w.order).toEqual(["seen t1", "read"]);
+    expect(w.dispatched).toEqual([
+      {
+        text: "agent:research what is a Durable Object?",
+        opts: {
+          parent: { runId: "run-7", depth: 1, remainingMs: 30 * 60_000 },
+          seed: [
+            { role: "user", text: "look into durable objects" },
+            { role: "assistant", text: "Storage first: one research child." },
+          ],
+        },
+      },
+    ]);
+    expect(w.leads).toHaveLength(1);
+  });
+
+  it("a `coding` spawn is refused `spawn_identity` by name in the tool result and starts nothing: no thread, no dispatch", async () => {
+    const w = conducting(async () => log);
+    const answer = await runRelayedTool(w.harness, {
+      toolCallId: "t2",
+      tool: "spawn_run",
+      input: { preset: "coding", prompt: "fix the login test", repo: "acme/api" },
+    });
+    expect(answer.isError).toBe(false);
+    expect(textOf(answer)).toMatch(/^spawn refused \(spawn_identity\): `coding` runs as a `write` identity/);
+    expect(w.dispatched).toEqual([]);
+    expect(w.leads).toEqual([]);
+  });
+
+  it("a conversation the harness cannot give hands the stage none: the child is dispatched without a seed and starts from its own thread", async () => {
+    const w = conducting(async () => undefined);
+    await runRelayedTool(w.harness, {
+      toolCallId: "t3",
+      tool: "spawn_run",
+      input: { preset: "research", prompt: "q" },
+    });
+    expect(w.dispatched).toHaveLength(1);
+    expect(w.dispatched[0].opts).toEqual({ parent: { runId: "run-7", depth: 1, remainingMs: 30 * 60_000 } });
   });
 });

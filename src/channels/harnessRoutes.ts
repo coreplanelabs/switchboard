@@ -4,15 +4,18 @@
 // is the model proxy's: the bearer names its run and verifies against the
 // store, so an unknown run, a wrong secret, an expired or revoked bearer are
 // refused before a byte of the body is read; past it, the run must be one this
-// process is driving on pi. Pure handler over a small request shape, then the
-// node:http adapter — the same split as the model proxy.
+// process is driving on pi. A relayed call that outlives one request is
+// answered `202 { pending }` at the relay's window and asked again by the
+// extension with the same call id, which joins the one run. Pure handler over
+// a small request shape, then the node:http adapter: the model proxy's own
+// split.
 
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
 import type { RunBearerStore } from "../core/modelProxy/runBearers.js";
 import {
   authorizeToolCall,
+  relayToolCall,
   relayedToolDefinitions,
-  runRelayedTool,
   type HarnessRegistry,
   type ToolCallAsk,
 } from "../core/harness/pi/relay.js";
@@ -40,6 +43,10 @@ export interface HarnessRouteDeps {
   bearers: RunBearerStore;
   harnesses: HarnessRegistry;
   log?: (line: string) => void;
+  /** How long one `POST /harness/tool` waits on a running tool before answering
+   *  `pending` (`RELAY_POLL_WINDOW_MS` by default), and the sleep that paces it. */
+  relayWindowMs?: number;
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
 
 export interface HarnessRequest {
@@ -110,7 +117,15 @@ export async function handleHarnessRequest(deps: HarnessRouteDeps, req: HarnessR
     deps.log?.(`[harness] run=${door.runId} authorize ${ask.tool} → ${answer.allow ? "allow" : "refuse"}`);
     return { status: 200, body: { ...answer } };
   }
-  const answer = await runRelayedTool(harness, ask);
+  const progress = await relayToolCall(harness, deps.harnesses.calls(door.runId)!, ask, {
+    ...(deps.relayWindowMs !== undefined ? { windowMs: deps.relayWindowMs } : {}),
+    ...(deps.sleep ? { sleep: deps.sleep } : {}),
+  });
+  if (!progress.done) {
+    deps.log?.(`[harness] run=${door.runId} tool ${ask.tool} → pending`);
+    return { status: 202, body: { pending: true, toolCallId: ask.toolCallId } };
+  }
+  const { answer } = progress;
   deps.log?.(`[harness] run=${door.runId} tool ${ask.tool} → ${answer.isError ? "error" : "ok"}`);
   return { status: 200, body: { ...answer } };
 }

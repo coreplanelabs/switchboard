@@ -50,13 +50,16 @@ export interface ToolContext {
    *  command can never outlive the run. Absent → no clipping (a tool used
    *  outside a run). */
   remainingMs?: () => number;
-  /** The run's conversation so far, on the runner's own array — the seed and
-   *  every turn the model has seen, this step's assistant turn included — read
-   *  at the call. `spawn_run` seeds a child from its text turns
+  /** The run's conversation so far (the seed and every turn the model has
+   *  seen, this step's assistant turn included), read at the call: the native
+   *  runner's own array, or the pi harness's read of the run's session log
+   *  (docs/reference/specs/agent-conductor.md item 3), which is why it may be
+   *  a promise. `spawn_run` seeds a child from its text turns
    *  (docs/reference/specs/routing-and-config.md item 20). Absent (a tool used
-   *  outside a run, a loop that holds its transcript elsewhere) → a child
-   *  starts from its own thread's history. */
-  conversation?: () => readonly ChatMessage[];
+   *  outside a run, a run without a session), or a read that answers nothing
+   *  (a log the bot could not reach) → a child starts from its own thread's
+   *  history. */
+  conversation?: () => readonly ChatMessage[] | undefined | Promise<readonly ChatMessage[] | undefined>;
   /** Replace the user-facing progress checklist on the status card. */
   reportProgress?: (checklist: string) => void;
   /** The requesting thread's file upload behind `attach_file`
