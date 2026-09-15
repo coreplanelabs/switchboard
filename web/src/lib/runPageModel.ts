@@ -237,6 +237,18 @@ export interface ContextTurnVm {
   text: string;
 }
 
+/** One conversation the request pointed at and the run quoted (a `reference`
+ *  event, record 0037): the block as the model saw it, the channel the
+ *  classifier named and the permalink — the page's Referenced thread block. */
+export interface ReferenceVm {
+  key: string;
+  at?: number;
+  url: string;
+  channelName: string;
+  messages: number;
+  text: string;
+}
+
 /** What the run sent back: the `answer` event — a review's verdict, a coding
  *  run's PR note, the general agent's answer. The page's word is Reply. */
 export interface ReplyVm {
@@ -270,6 +282,8 @@ export interface RunPageModel {
     request: RequestVm | null;
     meta: MetaVm | null;
     context: ContextTurnVm[];
+    /** The conversations the request pointed at (`reference` events), in publish order. */
+    references: ReferenceVm[];
     log: LogItem[];
     reply: ReplyVm | null;
     /** The PR the coding post-step opened or edited, once the stream said so. */
@@ -465,6 +479,7 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
     request: null,
     meta: null,
     context: [],
+    references: [],
     log: [],
     reply: null,
     prOpened: null,
@@ -700,6 +715,16 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
         return;
       case "context":
         state.context.push({ key: key("ctx"), at: change.at, text: change.text });
+        return;
+      case "reference":
+        state.references.push({
+          key: key("ref"),
+          at: change.at,
+          url: change.url,
+          channelName: change.channelName,
+          messages: change.messages,
+          text: change.text,
+        });
         return;
       case "note":
         // The follow-up's snippet note stays on the record for the card; on

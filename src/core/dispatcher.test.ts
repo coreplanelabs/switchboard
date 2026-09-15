@@ -38,6 +38,8 @@ import { withResidentTrace } from "../execution/residentTrace.js";
 import { createAlsContext, createTickingClock, timedFakes, type Tick } from "./testing/tickingClock.js";
 import { ThreadAdmission } from "./threadAdmission.js";
 import { isHeadMaterial, isSpanRecord, type RunEvent } from "./runEvents.js";
+import type { ConversationReader } from "./references/types.js";
+import type { ContentPart } from "./chatMessage.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import type { OpenedPullRequest, PullRequestFacts, PullRequestTarget } from "../execution/githubPulls.js";
 import { runAgent } from "../runner.js";
@@ -12846,5 +12848,82 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     await dispatch(plain.deps, followUp, fakeIO(history).io);
     await plain.writer.settled();
     expect(none).toBeUndefined();
+  });
+});
+
+// Record 0037: the references step through `dispatch()` — the flag gate lives
+// here, not in the step, so this is where "off means no adapter call" and "on
+// means the block reaches the model on the request turn" are proven.
+describe("the references step in dispatch (record 0037)", () => {
+  const PERMALINK = "https://team.example/archives/C_PUB/p1700000000000100";
+  function fakeReader() {
+    const calls = { classify: 0, read: 0, member: 0 };
+    const reader: ConversationReader = {
+      platform: "slack",
+      parseConversationUrl: (u) =>
+        u === PERMALINK ? { channelId: "slack:C_PUB", threadKey: "slack:C_PUB:1700000000.000100", url: u } : undefined,
+      classifyConversation: async () => {
+        calls.classify++;
+        return { visibility: "public", botIsMember: true, channelName: "frontend" };
+      },
+      readConversation: async (ref) => {
+        calls.read++;
+        return {
+          kind: "reference",
+          ref,
+          channelName: "frontend",
+          permalink: ref.url,
+          messages: [{ at: 1_700_000_000_000, author: "teammate", text: "we concluded: ship it" }],
+        };
+      },
+      requesterIsFullMember: async () => {
+        calls.member++;
+        return true;
+      },
+    };
+    return { reader, calls };
+  }
+  const lastUserTexts = (req: CompletionRequest) => {
+    const last = [...req.messages].reverse().find((m) => m.role === "user")!;
+    return last.content
+      .filter((p): p is Extract<ContentPart, { type: "text" }> => p.type === "text")
+      .map((p) => p.text);
+  };
+
+  it("with references.enabled off (the default) a registered reader is never called and the model sees the request alone", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const { reader, calls } = fakeReader();
+    deps.conversationReaders = [reader];
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg(`what did we conclude? ${PERMALINK}`), io);
+    expect(calls).toEqual({ classify: 0, read: 0, member: 0 });
+    expect(provider.requests).toHaveLength(1);
+    expect(lastUserTexts(provider.requests[0])).toEqual([`what did we conclude? ${PERMALINK}`]);
+    expect(replies.some((r) => r.includes("I can't read that thread"))).toBe(false);
+  });
+
+  it("with references.enabled on, the quoted block reaches the model as a text part after the request's text, and its event is head material", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE + "references: { enabled: true }\n", provider);
+    const { reader, calls } = fakeReader();
+    deps.conversationReaders = [reader];
+    const { io } = fakeIO();
+    await dispatch(deps, msg(`what did we conclude? ${PERMALINK}`), io);
+    expect(calls).toEqual({ classify: 1, read: 1, member: 1 });
+    const texts = lastUserTexts(provider.requests[0]);
+    expect(texts[0]).toBe(`what did we conclude? ${PERMALINK}`);
+    expect(texts[1]).toMatch(/^Referenced thread · #frontend · 1 message · https:\/\/team\.example/);
+    expect(texts[1]).toContain("teammate: we concluded: ship it");
+    expect(
+      isHeadMaterial({
+        type: "reference",
+        url: PERMALINK,
+        channelId: "slack:C_PUB",
+        channelName: "frontend",
+        messages: 1,
+        text: "…",
+      }),
+    ).toBe(true);
   });
 });

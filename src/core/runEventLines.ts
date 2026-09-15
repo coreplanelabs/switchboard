@@ -67,6 +67,16 @@ function isRunEvent(v: unknown): v is RunEvent {
       return typeof o.text === "string"; // the narrative events carry text, not a summary
     case "run_meta":
       return typeof o.agent === "string" && (o.model === undefined || typeof o.model === "string");
+    case "reference":
+      // A quoted conversation (record 0037): the live analyzer counts it as a
+      // side fact, so a captured replay must keep it too or the two disagree.
+      return (
+        typeof o.text === "string" &&
+        typeof o.url === "string" &&
+        typeof o.channelId === "string" &&
+        typeof o.channelName === "string" &&
+        typeof o.messages === "number"
+      );
     case "span_start":
       return typeof o.spanId === "string" && typeof o.name === "string";
     case "span_end":

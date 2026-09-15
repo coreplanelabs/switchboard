@@ -55,6 +55,10 @@ This is delivered in stages. **PR1 shipped the seam + the READ path; PR2 the WRI
 28. **Atomic with the batch.** The in-process store evicts right after the batch loop; the Worker's Durable Object evicts inside the same `transactionSync` as the inserts, so a batch never commits with the scope over the cap and a mid-batch eviction can never be observed half-applied. The Worker fetches the full active set only when the active count (an indexed `COUNT(*)`) exceeds the cap — the common under-cap batch does no full scan — and each evicted row's `records_fts` entry is deleted with the status flip (§15). `write` returns an `evicted` count; the Worker logs `[write] <scope> <- n candidates (evicted m)` only when `m > 0`.
 29. **One value, every store.** `buildMemoryStore` reads `memory.maxRecordsPerScope` once and hands it to whichever store it builds; `WorkerMemoryStore` sends it as `cap` on every `POST /write` (omitted when unset → the Worker's own default 500). The Worker validates `cap` as an integer 1–10000 (else 400), and `buildMemoryStore` validates the config value the same way up front — an out-of-range or non-integer `maxRecordsPerScope` logs a startup warning and the default applies, so a typo can neither evict everything (`0`) nor 400 every write (`> 10000`). `selectMemoryStore`'s dev fallback is capped the same way. Within one batch, records inserted together share `createdAt`, so their relative eviction order is unspecified — irrelevant in practice since a batch (≤50) is far below any sane cap.
 
+## Behavior (quoted conversations)
+
+30. **Reflection writes under the narrowest visibility the run read** ([record 0037](../../decisions/0037-a-linked-thread-is-quoted-not-joined.md)). The origin the write gate decides under ([authorization.md](authorization.md) item 8) is `narrowestVisibility(stamp, ...quoted)` — `dm` < `private` < `unknown` < `machine` < `public` — over the run's stamped channel visibility and the visibility of every conversation the references step quoted, so a private thread quoted from inside its channel never seeds an org fact through the run's answer, and a run that quoted nothing writes exactly as before. Inert while every cross-channel reference is public, which the `conversation:read` row makes so today.
+
 ## Roadmap (gaps)
 
 - `repo`/`channel` derivers → §21–23; `memory list` / `memory forget` → §24–26; the per-scope cap → §27–29. No open `[gap]` in this file.
@@ -64,6 +68,7 @@ This is delivered in stages. **PR1 shipped the seam + the READ path; PR2 the WRI
 
 | Criterion | Proof |
 |---|---|
+| Item 30: a public origin with a private reference narrows to private, a dm origin stays dm, `unknown` beats public either way, no references leaves the origin | `[unit]` `src/core/memory/reflection.test.ts::narrowestVisibility — the origin narrowed by every quoted conversation::*` |
 | Scorer = α·keyword + β·recency; keyword dominates, recency breaks ties; recency uses `lastUsedAt` and decays to 1/e at τ | `[unit]` `src/core/memory/scorer.test.ts::scoreRecord`, `::recencyScore` |
 | `keywordMatch` is the fraction of query word-tokens hitting the record; whole-token, not substring; 0 for empty query | `[unit]` `src/core/memory/scorer.test.ts::keywordMatch` |
 | Hard budget caps by record count and token estimate (costed on the rendered/escaped bullet, so the rendered block stays within `maxTokens`); first record always kept; order preserved | `[unit]` `src/core/memory/scorer.test.ts::applyBudget` |
