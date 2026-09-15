@@ -15,7 +15,25 @@ const groups = computed(() => seed?.groups ?? []);
 const series = computed(() => (report.value ? seriesOf(report.value) : []));
 const tiles = computed(() => (report.value ? tilesOf(report.value) : null));
 const split = computed(() => (report.value ? resourceSplitOf(report.value) : []));
-const ranges = [7, 30, 90];
+/** Newest first: the open day on top, where the eye lands. */
+const daysNewestFirst = computed(() => (report.value ? [...report.value.days].reverse() : []));
+/** The range presets. Both billing sources bucket by UTC day (the cost report
+ *  offers nothing finer), so the short one is today, not a rolling 24 hours. */
+const ranges = [1, 7, 30, 90];
+const rangeLabel = (n: number): string => (n === 1 ? "today" : `${n}d`);
+
+/** The LLM tile's second line: yesterday's and the open day's figures, the
+ *  estimate said so; or why there is no figure at all. */
+const llmTileLine = computed(() => {
+  const r = report.value;
+  const t = tiles.value;
+  if (!r || !t) return "";
+  if (!r.llmAvailable) return "LLM spend not configured";
+  const parts: string[] = [];
+  if (t.llm.yesterday !== undefined) parts.push(`yesterday ${usd(t.llm.yesterday)}`);
+  if (t.llm.today) parts.push(`today ${usd(t.llm.today.usd)}${t.llm.today.estimated ? " (estimate)" : ""}`);
+  return parts.length ? parts.join(" · ") : "in range";
+});
 
 /** An ISO day (`YYYY-MM-DD`) → `Aug 1` — the range line and the table read at a glance. */
 function monthDay(date: string): string {
@@ -28,19 +46,25 @@ function monthDay(date: string): string {
 
 <template>
   <AppShell v-if="report && tiles" :title="`${report.label} spend`" nav="costs">
-    <template #actions>
-      <span class="text-xs text-muted">
-        <template v-for="(n, i) in ranges" :key="n">
-          <template v-if="i > 0"> · </template>
-          <b v-if="n === report.range.days" class="text-highlighted">{{ n }}d</b>
-          <a v-else class="text-primary hover:underline" :href="`/costs/${report.group}?days=${n}`">{{ n }}d</a>
-        </template>
-      </span>
-    </template>
-
-    <!-- One glance: which group, which window. Groups are a pill switcher (the
-         current one solid), the range a short human line. -->
+    <!-- One glance: which group, which window. Groups and ranges are pill
+         switchers (the current one solid), the range also a short human line. -->
     <div class="mb-4 flex flex-wrap items-center gap-x-4 gap-y-2">
+      <nav class="flex items-center gap-1" aria-label="Range">
+        <template v-for="n in ranges" :key="n">
+          <span
+            v-if="n === report.range.days"
+            class="rounded-md bg-accented px-2.5 py-1 font-mono text-xs font-medium tabular-nums text-highlighted"
+            aria-current="page"
+            >{{ rangeLabel(n) }}</span
+          >
+          <a
+            v-else
+            class="rounded-md px-2.5 py-1 font-mono text-xs tabular-nums text-muted no-underline hover:bg-elevated hover:text-highlighted"
+            :href="`/costs/${report.group}?days=${n}`"
+            >{{ rangeLabel(n) }}</a
+          >
+        </template>
+      </nav>
       <nav v-if="groups.length > 1" class="flex items-center gap-1" aria-label="Cost groups">
         <template v-for="g in groups" :key="g">
           <span
@@ -67,13 +91,20 @@ function monthDay(date: string): string {
     </div>
 
     <section class="mb-5 grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] gap-3">
-      <div class="grid gap-0.5 rounded-lg border border-default bg-elevated px-4 py-3.5">
+      <!-- The lead tile is the last full day; a range with none (1d) leads with
+           the open day instead of an empty "yesterday". -->
+      <div v-if="tiles.yesterday" class="grid gap-0.5 rounded-lg border border-default bg-elevated px-4 py-3.5">
         <span class="font-mono text-[0.6875rem] font-medium uppercase tracking-widest text-dimmed">Yesterday</span>
+        <span class="font-mono text-2xl font-medium tabular-nums">{{ usd(tiles.yesterday.total) }}</span>
+        <span class="text-xs text-muted">{{ tiles.yesterday.date }} · last full day</span>
+      </div>
+      <div v-else class="grid gap-0.5 rounded-lg border border-default bg-elevated px-4 py-3.5">
+        <span class="font-mono text-[0.6875rem] font-medium uppercase tracking-widest text-dimmed">Today so far</span>
         <span class="font-mono text-2xl font-medium tabular-nums">{{
-          tiles.yesterday ? usd(tiles.yesterday.total) : "—"
+          tiles.today ? usd(tiles.today.total) : "—"
         }}</span>
         <span class="text-xs text-muted">{{
-          tiles.yesterday ? `${tiles.yesterday.date} · last full day` : "no full day in range"
+          tiles.today ? `${tiles.today.date} · partial day, UTC` : "no day in range"
         }}</span>
       </div>
       <div class="grid gap-0.5 rounded-lg border border-default bg-elevated px-4 py-3.5">
@@ -88,16 +119,14 @@ function monthDay(date: string): string {
         <span class="font-mono text-2xl font-medium tabular-nums">{{ usd(tiles.projectedMonth, 0) }}</span>
         <span class="text-xs text-muted">7-day rate × 30.4, before plan fees and included allowances</span>
       </div>
+      <!-- Dollars, not a share: model spend runs an order of magnitude above the
+           Cloudflare spend, so its share of the total says nothing. -->
       <div class="grid gap-0.5 rounded-lg border border-default bg-elevated px-4 py-3.5">
-        <span class="font-mono text-[0.6875rem] font-medium uppercase tracking-widest text-dimmed">{{
-          report.llmAvailable ? "LLM share" : "LLM spend"
-        }}</span>
+        <span class="font-mono text-[0.6875rem] font-medium uppercase tracking-widest text-dimmed">LLM spend</span>
         <span class="font-mono text-2xl font-medium tabular-nums">{{
-          report.llmAvailable ? `${tiles.llmShare}%` : "—"
+          report.llmAvailable ? usd(tiles.llm.range) : "—"
         }}</span>
-        <span class="text-xs text-muted">{{
-          report.llmAvailable ? "of the range total" : "LLM spend not configured"
-        }}</span>
+        <span class="text-xs text-muted">{{ llmTileLine }}</span>
       </div>
       <div class="grid gap-0.5 rounded-lg border border-default bg-elevated px-4 py-3.5">
         <span class="font-mono text-[0.6875rem] font-medium uppercase tracking-widest text-dimmed"
@@ -128,6 +157,14 @@ function monthDay(date: string): string {
       <p v-if="!report.llmAvailable" class="text-xs text-warn">
         LLM spend not configured — set <code>ANTHROPIC_ADMIN_KEY</code> and the group's
         <code>anthropicWorkspaceId</code> to layer it in.
+      </p>
+      <p v-else-if="report.days.some((d) => d.llmEstimated)" class="text-xs text-muted">
+        A day the Anthropic cost report has not closed yet (today, and yesterday until a few hours after midnight UTC)
+        shows its LLM figure as an estimate: the hourly usage report priced at list. The closed days are the cost report
+        itself.
+        <template v-if="report.days.some((d) => d.llmUnpricedTokens > 0)">
+          Some tokens ran under a model this page has no price for and are not in the estimate.
+        </template>
       </p>
     </section>
 
@@ -183,12 +220,13 @@ function monthDay(date: string): string {
               </tr>
             </thead>
             <tbody>
-              <tr v-for="d in report.days" :key="d.date">
+              <tr v-for="d in daysNewestFirst" :key="d.date">
                 <td class="border-b border-muted px-2.5 py-1.5" :title="d.date">
                   {{ monthDay(d.date) }}
                   <span v-if="report.range.partialLastDay && d.date === report.range.to" class="text-xs text-dimmed"
-                    >(partial day)</span
+                    >(partial day{{ d.llmEstimated ? " · LLM estimated" : "" }})</span
                   >
+                  <span v-else-if="d.llmEstimated" class="text-xs text-dimmed">(LLM estimated)</span>
                 </td>
                 <td v-for="s in series" :key="s" class="border-b border-muted px-2.5 py-1.5 text-right">
                   {{ usd(valueOf(d, s), 3) }}
@@ -214,7 +252,9 @@ function monthDay(date: string): string {
           <div>
             <b>Live.</b> Both billing sources are read live from this page — nothing cached, nothing stored. Cloudflare
             bills vCPU on active use only; memory and disk bill on the provisioned size for every second a container is
-            awake. LLM spend is the Anthropic Admin API cost report for this group's workspace (gross, USD).
+            awake. LLM spend is the Anthropic Admin API cost report for this group's workspace (gross, USD); a day the
+            cost report has not closed is the Admin API usage report, hourly, priced at Anthropic list per model (input,
+            output, cache writes, cache reads) and marked as an estimate.
           </div>
           <div>
             <b>Method.</b> Cloudflare GraphQL Analytics, every meter a Workers deployment is billed on:

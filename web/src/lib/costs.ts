@@ -37,30 +37,54 @@ export function valueOf(d: DailyCost, series: string): number {
 
 export interface CostTiles {
   yesterday?: { date: string; total: number };
+  /** The open day (`partialLastDay`), so a one-day range has a figure to lead with. */
+  today?: { date: string; total: number };
   avg7: number;
   projectedMonth: number;
-  llmShare: number;
+  /** LLM dollars over the range, yesterday's, and the open day's (an estimate
+   *  from the usage report when the cost report has not closed it). Not a
+   *  share: LLM spend dwarfs the Cloudflare spend, so a percentage of the total
+   *  would say nothing. */
+  llm: { range: number; yesterday?: number; today?: { usd: number; estimated: boolean } };
   /** This group's share of the account's whole Cloudflare spend in range (percent, rounded). */
   accountShare: number;
 }
 
-/** The stat tiles, computed over FULL days only (a partial today would
- *  understate every figure); the shares over the whole range. */
+/** The stat tiles: the averages over FULL days only (a partial today would
+ *  understate every figure), the open day named as such, the shares over the
+ *  whole range. */
 export function tilesOf(report: CostReport): CostTiles {
   const full = report.range.partialLastDay ? report.days.slice(0, -1) : report.days;
+  const today = report.range.partialLastDay ? report.days[report.days.length - 1] : undefined;
   const yesterday = full[full.length - 1];
   const last7 = full.slice(-7);
   const avg7 = last7.length ? last7.reduce((s, d) => s + d.total, 0) / last7.length : 0;
-  const llmShare = report.totals.total > 0 ? Math.round((report.totals.llmUsd / report.totals.total) * 100) : 0;
   const accountShare =
     report.account.cloudUsd > 0 ? Math.round((report.totals.cloudUsd / report.account.cloudUsd) * 100) : 0;
   return {
     ...(yesterday ? { yesterday: { date: yesterday.date, total: yesterday.total } } : {}),
+    ...(today ? { today: { date: today.date, total: today.total } } : {}),
     avg7,
     projectedMonth: avg7 * 30.4,
-    llmShare,
+    llm: {
+      range: report.totals.llmUsd,
+      ...(yesterday ? { yesterday: yesterday.llmUsd } : {}),
+      ...(today ? { today: { usd: today.llmUsd, estimated: today.llmEstimated } } : {}),
+    },
     accountShare,
   };
+}
+
+/** The hover text for one day: every series and the total, one per line, the
+ *  open day's LLM estimate said so. */
+export function dayTitleOf(d: DailyCost, series: string[], partial: boolean): string {
+  const lines = [`${d.date} · total ${usd(d.total)}${partial ? " (partial day)" : ""}`];
+  for (const s of series) {
+    const v = valueOf(d, s);
+    if (v <= 0) continue;
+    lines.push(`${s} ${usd(v)}${s === LLM_LABEL && d.llmEstimated ? " (estimate)" : ""}`);
+  }
+  return lines.join("\n");
 }
 
 export interface ChartSegment {
@@ -69,18 +93,27 @@ export interface ChartSegment {
   y: number;
   width: number;
   height: number;
-  title: string;
 }
 export interface ChartTick {
   x?: number;
   y?: number;
   label: string;
 }
+/** One transparent hover target per day, the full column, whose title is the
+ *  day's whole breakdown (`dayTitleOf`). Drawn over the segments. */
+export interface ChartDayHover {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  title: string;
+}
 export interface ChartModel {
   width: number;
   height: number;
   gridLines: Array<{ y: number; label: string }>;
   segments: ChartSegment[];
+  dayHovers: ChartDayHover[];
   dayLabels: Array<{ x: number; label: string }>;
   axisY: number;
   marginLeft: number;
@@ -88,7 +121,8 @@ export interface ChartModel {
 }
 
 /** The stacked-bar geometry (one bar per day, one <rect> per positive series
- *  value, a <title> per segment so hover works without JS). */
+ *  value, and one column-high <rect> per day whose <title> is the whole day's
+ *  breakdown — the one hover target, working without JS). */
 export function chartModelOf(report: CostReport, series: string[]): ChartModel {
   const W = 960;
   const H = 260;
@@ -105,11 +139,19 @@ export function chartModelOf(report: CostReport, series: string[]): ChartModel {
     return { y: Number(y(v).toFixed(1)), label: usd(v) };
   });
   const segments: ChartSegment[] = [];
+  const dayHovers: ChartDayHover[] = [];
   const dayLabels: Array<{ x: number; label: string }> = [];
   days.forEach((d, i) => {
     let acc = 0;
     const x = m.l + i * bw + gap / 2;
     const w = bw - gap;
+    dayHovers.push({
+      x: Number((m.l + i * bw).toFixed(1)),
+      y: m.t,
+      width: Number(bw.toFixed(1)),
+      height: ih,
+      title: dayTitleOf(d, series, report.range.partialLastDay && i === days.length - 1),
+    });
     series.forEach((s, si) => {
       const v = valueOf(d, s);
       if (v <= 0) return;
@@ -122,7 +164,6 @@ export function chartModelOf(report: CostReport, series: string[]): ChartModel {
         y: Number(y0.toFixed(1)),
         width: Number(w.toFixed(1)),
         height: Number(h.toFixed(1)),
-        title: `${d.date} · ${s} · ${usd(v)}`,
       });
       acc += v;
     });
@@ -135,6 +176,7 @@ export function chartModelOf(report: CostReport, series: string[]): ChartModel {
     height: H,
     gridLines,
     segments,
+    dayHovers,
     dayLabels,
     axisY: Number(y(0).toFixed(1)),
     marginLeft: m.l,

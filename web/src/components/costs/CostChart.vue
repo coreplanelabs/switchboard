@@ -3,8 +3,11 @@ import { computed } from "vue";
 import type { CostReport } from "@core/core/costs.js";
 import { chartModelOf, SERIES_FILL } from "../../lib/costs";
 
-// The daily-cost stacked bars as inline SVG — a <title> per segment, so hover
-// identifies a value with no script, exactly like the server-rendered chart.
+// The daily-cost stacked bars as inline SVG. Hover is per DAY, not per
+// segment: one transparent column over each bar whose <title> is that day's
+// whole breakdown (every series and the total), with no script. The segments
+// carry no <title> of their own — the column above them would take the
+// pointer anyway, and a one-value tooltip under a whole-day one was noise.
 
 const props = defineProps<{ report: CostReport; series: string[] }>();
 const model = computed(() => chartModelOf(props.report, props.series));
@@ -44,8 +47,17 @@ const model = computed(() => chartModelOf(props.report, props.series));
         :y="s.y"
         :width="s.width"
         :height="s.height"
+      />
+      <rect
+        v-for="(d, i) in model.dayHovers"
+        :key="`h${i}`"
+        class="day fill-transparent"
+        :x="d.x"
+        :y="d.y"
+        :width="d.width"
+        :height="d.height"
       >
-        <title>{{ s.title }}</title>
+        <title>{{ d.title }}</title>
       </rect>
       <text
         v-for="(d, i) in model.dayLabels"
