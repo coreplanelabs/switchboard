@@ -165,8 +165,17 @@ const dayCount = (n: number): string => `${n} day${n === 1 ? "" : "s"}`;
         LLM attributed {{ usd(report.reconciliation.attributedLlmUsd) }} of
         {{ usd(report.reconciliation.workspaceLlmUsd) }} on the workspace over
         {{ dayCount(report.reconciliation.comparedDays) }} ·
-        {{ usd(report.reconciliation.unattributedLlmUsd) }} unattributed (router, review abridges, runs without a
-        record, list vs invoice)
+        <template v-if="report.reconciliation.unattributedLlmUsd >= 0">
+          {{ usd(report.reconciliation.unattributedLlmUsd) }} unattributed (router, review abridges, runs without a
+          record, list vs invoice)
+        </template>
+        <!-- More attributed than the workspace shows: list above invoice, or a
+             day on which part of the spend was billed to another workspace (a
+             key that moved mid-day). Named, never printed as a negative dollar. -->
+        <template v-else>
+          {{ usd(-report.reconciliation.unattributedLlmUsd) }} more attributed than the workspace figure (list vs
+          invoice, or spend billed outside this workspace on a compared day)
+        </template>
       </template>
       <template v-else>no day in range has a workspace LLM figure to compare against</template>
       <template v-if="report.reconciliation.uncomparedDays > 0">

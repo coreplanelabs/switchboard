@@ -1108,6 +1108,8 @@ export interface CostsServiceDeps {
   runStore?: RunStore;
   /** A Slack user id (`U…`) → its email, when the app can read it — how the
    *  viewer's Access email is matched to the run ids the history bills. */
+  /** A Slack user's profile email by platform-namespaced id (`slack:U…`) — the bot's
+   *  `slackEmailLookup`; undefined without `users:read.email` or for an unknown id. */
   emailOfSlackUser?: (userId: string) => Promise<string | undefined>;
 }
 
@@ -1147,14 +1149,17 @@ export async function viewerRunUserIds(
     // Only a person can be the viewer: an app nobody was found behind
     // (`slack:bot:<id>`, slack-channel.md item 13) has no email to look up.
     if (!id.startsWith("slack:") || id.startsWith("slack:bot:")) continue;
-    const slackId = id.slice("slack:".length);
+    // The lookup takes the platform-namespaced id as every other consumer of
+    // the bot's email lookup does (`slack:U…`, the MCP connect ticket's
+    // `resolveEmail`); the first version passed the bare `U…` and the lookup
+    // answered nothing for anyone, so the toggle never matched a soul.
     // A known email is cached for the process; an unknown one is asked again
     // next time, since a lookup that failed quietly must not pin the user as
     // unmatchable for as long as the bot runs.
-    let known = cache.get(slackId);
+    let known = cache.get(id);
     if (known === undefined) {
-      known = (await emailOfSlackUser(slackId))?.toLowerCase();
-      if (known !== undefined) cache.set(slackId, known);
+      known = (await emailOfSlackUser(id))?.toLowerCase();
+      if (known !== undefined) cache.set(id, known);
     }
     if (known === email) out.push(id);
   }

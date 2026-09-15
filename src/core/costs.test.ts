@@ -1096,7 +1096,7 @@ describe("createCostsService.usersReport", () => {
     const store = { usageByUser: async (q: unknown) => (asked.push(q), usageReport) } as unknown as RunStore;
     const looked: string[] = [];
     // Bob's email is unknown on the first read (a lookup that failed quietly) and known on the next.
-    const emails: Record<string, string | undefined> = { UALICE: "Alice@Example.com", UBOB: undefined };
+    const emails: Record<string, string | undefined> = { "slack:UALICE": "Alice@Example.com", "slack:UBOB": undefined };
     const service = createCostsService(cfg, cloudflare, llm, now, {
       runStore: store,
       emailOfSlackUser: async (id) => (looked.push(id), emails[id]),
@@ -1109,12 +1109,12 @@ describe("createCostsService.usersReport", () => {
     expect(r.users[0].llmUsd).toBeCloseTo(1, 9); // 1M haiku input at $1/MTok
     expect(r.pending).toBe(1);
     expect(r.viewer).toEqual({ userIds: ["slack:UALICE"], matchedByEmail: true });
-    expect(looked.sort()).toEqual(["UALICE", "UBOB"]); // the HTTP subject and the app (`slack:bot:…`) are never looked up
+    expect(looked.sort()).toEqual(["slack:UALICE", "slack:UBOB"]); // the whole namespaced id, as the bot's lookup takes it; the HTTP subject and the app (`slack:bot:…`) are never looked up
     // A second read looks up only the user whose email was unknown: a known
     // email is cached for the process, an unknown one is never pinned.
-    emails.UBOB = "bob@example.com";
+    emails["slack:UBOB"] = "bob@example.com";
     const again = await service.usersReport("switchboard", "3", { sub: "s2", email: "bob@example.com" });
-    expect(looked.sort()).toEqual(["UALICE", "UBOB", "UBOB"]);
+    expect(looked.sort()).toEqual(["slack:UALICE", "slack:UBOB", "slack:UBOB"]);
     expect(again.viewer).toEqual({ userIds: ["slack:UBOB"], matchedByEmail: true });
   });
 

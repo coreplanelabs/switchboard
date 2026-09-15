@@ -23,7 +23,7 @@
     "web/src/components/StatusDot.vue": "e31004d149370c7455a11e6aa63553327b2b219b3d224bc45cfd99c0843c58e7",
     "web/src/components/ThemeToggle.vue": "025a9a0c7ccc2983772c1888f7426ec161feb3ffaea87c914c65d15bdfd740d3",
     "web/src/components/costs/CostChart.vue": "d48000d00266ad30e01826f51d00c4c21e5527676733b66b46842eca223f4686",
-    "web/src/components/costs/CostsByUser.vue": "dfb7e8fdcfbc86378d71fe43c24e6ec96d11d421e1ee6a24b12d62c82d670cd7",
+    "web/src/components/costs/CostsByUser.vue": "df094fa42c3ff175c38f1ab1e2c1ad18e463f27f9a0313b49a4cfcf13c72f703",
     "web/src/components/run/CallCard.vue": "908739a4052d576576ce7537a643a9be139bc1072fb0bd81f71bc272040f8ec8",
     "web/src/components/run/MessageFiles.vue": "9e8f0cb159284ea5ee3fd9984824fc3914933028ee0d456b1da31a5bad7c58f7",
     "web/src/components/run/ReplyBlock.vue": "b9173c6bc51fd7a85cc7a6584a8f43b180efbbdcf03ec90707e35e1b97b43ca3",
