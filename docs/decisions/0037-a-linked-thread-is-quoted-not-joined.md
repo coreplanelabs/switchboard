@@ -1,6 +1,6 @@
 ---
 title: A linked thread is quoted, not joined — the bot reads what it was invited to, the policy table decides who may point at it, and the text never enters the conversation the parsers read
-status: proposed
+status: implemented
 date: 2026-09-15
 pattern: Confused-deputy avoidance by grant-on-the-resource (Teams resource-specific consent, Anthropic's Slack app's bot-membership gate) plus an untrusted-data fence (the runs tool's existing wrapper) instead of per-user permission mirroring
 ---
