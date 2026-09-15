@@ -148,8 +148,8 @@
       "when": "`-- --changed origin/main...HEAD [--test-guard]` before review; `-- --require` fails on an uncovered path; `-- --json` for machines."
     },
     "decisions:check": {
-      "does": "Every record under `docs/decisions/` and `docs/plans/` carries a valid `status`, a superseded one names what replaced it, and an accepted record's body is unchanged against `origin/main`.",
-      "when": "Part of `check:consistency`; a failing record is superseded by a new one, never edited."
+      "does": "Every record under `docs/decisions/` and `docs/plans/` has a valid `status`, a superseded one names its successor, and an accepted body changes only by an appended `## Amended` re-evaluation.",
+      "when": "Part of `check:consistency`; a failing record is superseded or amended by appending, never edited."
     },
     "hygiene:check": {
       "does": "The public tree's imprint (company, people, trackers, plan ids, ids, dates) equals the recorded list, which only shrinks.",

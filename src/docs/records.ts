@@ -102,6 +102,27 @@ export function statusProblems(records: readonly RecordText[], exists: (path: st
  * change freely; once accepted, implemented or superseded, only the mutable
  * frontmatter keys may differ — and the record must still exist.
  */
+/** The one edit an accepted record may take (the documentation rule's post-acceptance
+ *  amendment): everything it already said stays byte-identical, and one or more dated
+ *  `## Amended <date>` sections follow, each carrying the re-evaluation that restates
+ *  why the record was accepted and checks the change against that reasoning. A section
+ *  under any other heading, one without a re-evaluation, or any change above the first
+ *  amendment is an edit, and an edit is a new record. */
+export const AMENDMENT_HEADING = /^## Amended \d{4}-\d{2}-\d{2}\b/;
+export function isAppendedAmendment(before: string, now: string): boolean {
+  if (!now.startsWith(before)) return false;
+  const rest = now.slice(before.length);
+  // The heading must open a line of its own: appended to a body without a trailing
+  // newline it would render as text, not a heading, and pass the regex anyway.
+  if (!(before.endsWith("\n") || rest.startsWith("\n"))) return false;
+  const added = rest.trimStart();
+  if (!AMENDMENT_HEADING.test(added)) return false;
+  // Split at every second-level heading, so a non-amendment section smuggled inside
+  // an amendment ("## Amended … ## New policy …") is its own chunk and fails the test.
+  const sections = added.split(/^(?=## )/m).filter((s) => s.trim() !== "");
+  return sections.every((s) => AMENDMENT_HEADING.test(s) && /re-evaluation/i.test(s));
+}
+
 export function immutabilityProblems(
   records: readonly RecordText[],
   base: ReadonlyMap<string, string>,
@@ -117,10 +138,10 @@ export function immutabilityProblems(
       problems.push({ path, what: `was ${was.fields.status} and lost its frontmatter` });
       continue;
     }
-    if (now.body !== was.body)
+    if (now.body !== was.body && !isAppendedAmendment(was.body, now.body))
       problems.push({
         path,
-        what: `was ${was.fields.status} on the base and its body changed — a record is never edited; write a new one and set this one's \`status: superseded\` + \`superseded_by:\``,
+        what: `was ${was.fields.status} on the base and its body changed — a record is never edited; write a new one and set this one's \`status: superseded\` + \`superseded_by:\`, or append a dated \`## Amended <date>\` section carrying a re-evaluation`,
       });
     const frozenBefore = JSON.stringify(frozenFrontmatter(was.fields));
     const frozenNow = JSON.stringify(frozenFrontmatter(now.fields));
