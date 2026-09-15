@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.227.0](https://github.com/coreplanelabs/switchboard/compare/v1.226.1...v1.227.0) (2026-09-15)
+
+
+### Features
+
+* **authz:** the inert seams of record 0037 — the thread-turn mapping, the fence fix, the references flag, the conversation:read row ([#1230](https://github.com/coreplanelabs/switchboard/issues/1230)) ([b9dc595](https://github.com/coreplanelabs/switchboard/commit/b9dc5953ab341f5e06aac25a276277361770ed99))
+
+
+### Bug fixes
+
+* **deploy:** a source stream that breaks mid-layer is resumed from the byte it stopped at — the image copy re-opens ghcr.io with a Range request up to three times per blob instead of dying with a bare terminated ([#1226](https://github.com/coreplanelabs/switchboard/issues/1226)) ([1f1359f](https://github.com/coreplanelabs/switchboard/commit/1f1359f256a58c857ec9f27b68984824b4c3d7d4))
+* **dispatcher:** a sticky follow-up in a routed thread keeps the routed receipt on its card ([#1228](https://github.com/coreplanelabs/switchboard/issues/1228)) ([af1e7fe](https://github.com/coreplanelabs/switchboard/commit/af1e7fe6fca01bc62b88b4ed69ba40a15445d359))
+* **harness:** a surviving pi's re-ask during a new generation's boot is held and answered retryably until its run is back on the harness, never refused with a 4xx the extension takes as final ([#1236](https://github.com/coreplanelabs/switchboard/issues/1236)) ([f3d947b](https://github.com/coreplanelabs/switchboard/commit/f3d947bb7a8afff01b419f7e59dfab436ddb8daa))
+* **resident:** a follow-up attaches at the branch its own run opened a pull request on — a default-bound thread moves there once, when the tree has the branch and no uncommitted changes; a dirty tree keeps its binding and the card says why ([#1223](https://github.com/coreplanelabs/switchboard/issues/1223)) ([6b0c7ed](https://github.com/coreplanelabs/switchboard/commit/6b0c7edf5657cbf2d77f3b9fb75ed37897f61027))
+* **sandbox:** a crash of the container's SDK runtime no longer ends the thread's sandbox — PID 1 is a supervisor that starts the server again, so /workspace and a detached pi survive ([#1227](https://github.com/coreplanelabs/switchboard/issues/1227)) ([889b400](https://github.com/coreplanelabs/switchboard/commit/889b400225f257b6f9a6405eeb1d2bf1ddf21935))
+* **sandbox:** a sandbox whose runtime stopped answering is named on the card — runtime-unreachable, with the container id — instead of the bare HTTP error! status: 500 ([#1233](https://github.com/coreplanelabs/switchboard/issues/1233)) ([aab76b1](https://github.com/coreplanelabs/switchboard/commit/aab76b190bbbd8805e23e13a30d7f268a41fc597))
+
+
+### Documentation
+
+* **docs:** plan for record 0036 unit 1, ship through the front door as one plan instance with merge as an instance field and the thread's pull request adopted ([#1239](https://github.com/coreplanelabs/switchboard/issues/1239)) ([7853742](https://github.com/coreplanelabs/switchboard/commit/78537427c0908fefecc586ed9d4fb7659fa8fae7))
+* **docs:** record 0036 accepted with the ship normalization amendment, every ship request a plan instance seeded or generated with merge as an instance field, and record 0031's matching note ([#1225](https://github.com/coreplanelabs/switchboard/issues/1225)) ([171b3b9](https://github.com/coreplanelabs/switchboard/commit/171b3b9d26883b94aa78a7302f576a036b1d466e))
+* **docs:** record 0038 — the harness is a six-clause contract the bot holds a process to; pi is its one implementation; a second harness enters as a conformance row before it enters an image ([#1235](https://github.com/coreplanelabs/switchboard/issues/1235)) ([fc33540](https://github.com/coreplanelabs/switchboard/commit/fc335403bd2189d163dc0ca10256eab747fb87b7))
+
 ## [1.226.1](https://github.com/coreplanelabs/switchboard/compare/v1.226.0...v1.226.1) (2026-09-15)
 
 
