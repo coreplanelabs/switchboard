@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.219.0](https://github.com/coreplanelabs/switchboard/compare/v1.218.0...v1.219.0) (2026-09-15)
+
+
+### Features
+
+* **core:** a reply that promises a file the run never produced is an unkept_promise friction finding, and the explore prompt says it cannot attach files ([#1136](https://github.com/coreplanelabs/switchboard/issues/1136)) ([04a06f3](https://github.com/coreplanelabs/switchboard/commit/04a06f3bdbd65de6589a34d753fef3d092628888))
+* **dispatcher:** a later run in a thread finds the files dropped on its earlier messages — the prior runs' records name the keys and the run pulls what the store still holds, copying nothing again ([#1139](https://github.com/coreplanelabs/switchboard/issues/1139)) ([539fd73](https://github.com/coreplanelabs/switchboard/commit/539fd7336b3ccef0a830625afec75d3021961769))
+* **harness:** a file dropped as a steer into a pi run reaches its workspace — the pi harness stages the follow-up's files before it sends the steer, as the native loop does ([#1137](https://github.com/coreplanelabs/switchboard/issues/1137)) ([a1909c7](https://github.com/coreplanelabs/switchboard/commit/a1909c7e92bc8aaef6cf9ebfbb5eabf94f8f8649))
+
+
+### Bug fixes
+
+* **core:** `in <name>` matches a resident's name exactly and case-insensitively ([#1135](https://github.com/coreplanelabs/switchboard/issues/1135)) ([63437c3](https://github.com/coreplanelabs/switchboard/commit/63437c3543b1e6159ff78bc4b1a1b002429ec113))
+
+
+### Documentation
+
+* **docs:** U29's status records its pull-request series, the native loop's three callers and the type move the deletion really is ([#1142](https://github.com/coreplanelabs/switchboard/issues/1142)) ([9dcd7f7](https://github.com/coreplanelabs/switchboard/commit/9dcd7f7056b73866bf7382cdeffa3c808ae353bc))
+
 ## [1.218.0](https://github.com/coreplanelabs/switchboard/compare/v1.217.0...v1.218.0) (2026-09-15)
 
 
