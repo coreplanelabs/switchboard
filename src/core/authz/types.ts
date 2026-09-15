@@ -77,7 +77,16 @@ export type Resource =
   | { readonly type: "repo"; readonly owner: string; readonly name: string }
   /** A config tier (routing-and-config: a channel's or a user's scope, or the
    *  org-wide defaults — the three tiers MCP servers live in as well). */
-  | { readonly type: "config-scope"; readonly kind: "channel" | "user"; readonly id: string }
+  | {
+      readonly type: "config-scope";
+      readonly kind: "channel";
+      readonly id: string;
+      /** The channel's own visibility, read by `member-of`'s public half when the
+       *  scope is read from another channel (`config show --channel`); absent →
+       *  `unknown`, never public. */
+      readonly visibility?: ChannelVisibility;
+    }
+  | { readonly type: "config-scope"; readonly kind: "user"; readonly id: string }
   | { readonly type: "config-scope"; readonly kind: "org" }
   | { readonly type: "agent"; readonly name: string }
   /** List-shaped actions with no single resource (`runs.list`, `friction.report`). */

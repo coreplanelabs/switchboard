@@ -5,6 +5,8 @@ import type { Boundary } from "../../config/profile.js";
 import { IDENTITIES, MACHINE_CLASSES, type MachineClass } from "../../agents/registry.js";
 import { EFFORT_LEVELS, type Effort } from "../../effort.js";
 import { authorize } from "../authz/authorize.js";
+import { pointingActor } from "../authz/pointingActor.js";
+import type { ChannelVisibility } from "../authz/types.js";
 import {
   CommandError,
   commandDefiner,
@@ -51,6 +53,12 @@ export interface ConfigCommandDeps {
     /** The agent names a scope may pin (`AGENTS` keys). */
     agentNames(): string[];
   };
+  /** The visibility of a channel a caller names with `--channel` — the channel
+   *  directory behind the run stamp, bounded the same way (`channelVisibilityOf`).
+   *  Read only when the target is not the caller's own channel. Absent →
+   *  `unknown`, so only a grant or the origin admits the read
+   *  (authorization.md item 4, the channelConfig read half). */
+  channelVisibility?: (channelId: string) => Promise<ChannelVisibility>;
 }
 
 const defineCommand = commandDefiner<ConfigCommandDeps>();
@@ -110,6 +118,28 @@ function assertMayEditChannel(caller: Caller, channel: string): void {
     throw new CommandError("unauthorized", "Channel config changes are restricted.");
 }
 
+/** Reading a channel's scope — its instructions text included — from another
+ *  channel is the table's decision (authorization.md item 4, the `config:read`
+ *  rows on `config-scope { channel }`), asked twice: for the caller's own actor
+ *  (by grant: whoever may set the scope may read it, a channel grant naming it,
+ *  a public channel) and for the pointing actor (record 0037: one membership,
+ *  the origin, no grants — so a private channel's scope is read from inside it
+ *  and nowhere else). Inside the channel the membership decides, so the
+ *  visibility is not looked up; elsewhere it is the directory's, and `unknown`
+ *  — no directory, a failed or slow lookup — reads as private: fail-closed. One
+ *  refusal text for private, DM, unknown and nonexistent alike: the reply says
+ *  nothing about the channel a workspace member could not already learn. */
+async function assertMayReadChannel(caller: Caller, channel: string, deps: ConfigCommandDeps): Promise<void> {
+  const origin = caller.origin?.channelId;
+  const visibility: ChannelVisibility =
+    origin === channel || !deps.channelVisibility ? "unknown" : await deps.channelVisibility(channel);
+  const scope = { type: "config-scope", kind: "channel", id: channel, visibility } as const;
+  const allowed =
+    authorize(caller.actor, "config:read", scope).allow ||
+    (origin !== undefined && authorize(pointingActor(caller.actor, origin), "config:read", scope).allow);
+  if (!allowed) throw new CommandError("unauthorized", "That channel's config is restricted.");
+}
+
 /** Scope as shown in replies: instructions are elided to their length so a
  *  2000-char paragraph isn't echoed every time someone changes their model. */
 function summarizeScope(s: Scope): JsonObject {
@@ -133,6 +163,7 @@ export const configShow = defineCommand({
   render: (output) => formatConfigDescription(output as unknown as ConfigDescription),
   handler: async ({ options, caller, deps }) => {
     const channel = targetChannel(caller, options.channel);
+    await assertMayReadChannel(caller, channel, deps);
     // The same question `config set channel` asks, answered for THIS caller's actor — the CLI's `all`, a token's grants, a Slack user's — never for an id the store looks up on its own.
     const description: ConfigDescription = {
       ...(await deps.config.describeConfig(channel, caller.id)),
@@ -287,6 +318,8 @@ export const configInstructions = defineCommand({
   },
   handler: async ({ args, options, caller, deps }) => {
     const channel = args.scope === "channel" ? targetChannel(caller, options.channel) : undefined;
+    // The peek reads another channel's text under the same rule `config show` does; a write is gated below.
+    if (args.text === undefined && channel !== undefined) await assertMayReadChannel(caller, channel, deps);
     const scopes = await deps.config.scopes(channel ?? caller.origin?.channelId ?? "", caller.id);
     const current = (args.scope === "channel" ? scopes.channel : scopes.user).instructions?.trim();
     // No value at all only SHOWS the current text (a peek must never clear).

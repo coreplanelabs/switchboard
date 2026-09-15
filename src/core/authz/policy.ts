@@ -110,6 +110,14 @@ export const POLICY: readonly Rule[] = [
   // adapter proves channel membership yet (the channel directory's `isMember`
   // is where that fact will come from).
   { action: "config:write", resource: "config-scope", resourceKind: "channel", when: [grant("config:write")] },
+  // Reading ANOTHER channel's scope — its instructions text included — is the
+  // table's decision too (`config show --channel`, the instructions peek): by
+  // the channel-config right for the caller's own actor (whoever may set it may
+  // read it), or by `member-of` asked for a pointing actor (`pointingActor`,
+  // record 0037: one membership, the origin, no grants) — a public channel's
+  // scope from anywhere, a private one only from inside it, `unknown` never.
+  { action: "config:read", resource: "config-scope", resourceKind: "channel", when: [grant("config:write")] },
+  { action: "config:read", resource: "config-scope", resourceKind: "channel", when: [MEMBER_OF] },
   // A user edits only their own scope.
   { action: "config:write", resource: "config-scope", resourceKind: "user", when: [IS_SELF] },
 

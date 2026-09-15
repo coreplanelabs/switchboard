@@ -43,11 +43,12 @@ function store(yaml = YAML): ConfigStore {
   return new ConfigStore(join(dir, "config.yaml"), join(dir, "overrides.json"));
 }
 
-function bind(config: ConfigStore): CommandInvoker {
+function bind(config: ConfigStore, channelVisibility?: ConfigCommandDeps["channelVisibility"]): CommandInvoker {
   const registry = new CommandRegistry<ConfigCommandDeps>({ audit: () => {} });
   registerConfigCommands(registry);
   return bindCommands(registry, {
     config: { ...configDeps(config), agentNames: () => ["general", "review", "coding"] },
+    ...(channelVisibility ? { channelVisibility } : {}),
   });
 }
 
@@ -117,10 +118,10 @@ describe("config show", () => {
     expect(await show(chat(gated, "slack:UX"))).toMatchObject({ ok: true, value: { channelConfigRestricted: true } });
   });
 
-  it("--channel names another channel; a machine caller must name one (no origin) and needs config:read", async () => {
+  it("--channel names another (public) channel; a machine caller must name one (no origin) and needs config:read", async () => {
     const config = store();
     await config.setChannelOverride("slack:COTHER", { agent: "review" });
-    const commands = bind(config);
+    const commands = bind(config, async () => "public" as const);
     expect((await say(commands, "config show --channel slack:COTHER", chat(config, "slack:UX"))).text).toContain(
       "agent `review`",
     );
@@ -135,6 +136,88 @@ describe("config show", () => {
     expect(
       await commands.invoke("config.show", { options: { channel: "slack:COTHER" } }, mcp("dispatch")),
     ).toMatchObject({ ok: false, error: "unauthorized" });
+  });
+});
+
+// Feature: docs/reference/specs/authorization.md item 4 (the channelConfig read
+// half). `--channel` names another channel's scope — its instructions text
+// included — so the read is the table's decision, not the caller's baseline: the
+// `config:read` rows on `config-scope { channel }` admit a public channel from
+// anywhere, a private one from inside it (the pointing actor's one membership)
+// or by grant, and `unknown` (no directory, a failed lookup) like a private one.
+describe("config show --channel is bound by the target channel's visibility", () => {
+  const RESTRICTED = "That channel's config is restricted.";
+  const visibilityOf =
+    (answers: Record<string, "public" | "private" | "dm" | "unknown">, calls: string[] = []) =>
+    async (channelId: string) => {
+      calls.push(channelId);
+      return answers[channelId] ?? ("unknown" as const);
+    };
+
+  it("a chat user reads a public channel's scope from anywhere, a private or unknown one only from inside it; every refusal is the same line", async () => {
+    const config = store();
+    await config.setChannelOverride("slack:COTHER", { agent: "review", instructions: "Secret channel rules." });
+    const ux = chat(config, "slack:UX");
+    const show = (commands: CommandInvoker, caller: Caller) =>
+      say(commands, "config show --channel slack:COTHER", caller);
+
+    expect((await show(bind(config, visibilityOf({ "slack:COTHER": "public" })), ux)).text).toContain("agent `review`");
+
+    const refused = await Promise.all([
+      show(bind(config, visibilityOf({ "slack:COTHER": "private" })), ux),
+      show(bind(config, visibilityOf({ "slack:COTHER": "dm" })), ux),
+      show(bind(config, visibilityOf({})), ux),
+      show(bind(config), ux),
+    ]);
+    for (const r of refused) {
+      expect(r.res).toMatchObject({ ok: false, error: "unauthorized", decidedBy: "handler", message: RESTRICTED });
+      expect(r.text).not.toContain("Secret channel rules.");
+    }
+
+    // From inside the channel the read needs no lookup: the pointing actor's one membership admits it.
+    const calls: string[] = [];
+    const inside = bind(config, visibilityOf({ "slack:COTHER": "private" }, calls));
+    expect((await show(inside, chat(config, "slack:UX", "slack:COTHER"))).text).toContain("agent `review`");
+    expect((await say(inside, "config show", chat(config, "slack:UX", "slack:COTHER"))).text).toContain(
+      "agent `review`",
+    );
+    expect(calls).toEqual([]);
+  });
+
+  it("by grant: the admin and a credential holding config:write read a private channel's scope from anywhere; a credential on config:read alone reads only a public one", async () => {
+    const config = store();
+    await config.setChannelOverride("slack:COTHER", { agent: "review" });
+    const priv = bind(config, visibilityOf({ "slack:COTHER": "private" }));
+    const pub = bind(config, visibilityOf({ "slack:COTHER": "public" }));
+    const show = (commands: CommandInvoker, caller: Caller) =>
+      commands.invoke("config.show", { options: { channel: "slack:COTHER" } }, caller);
+    const readOnly = callerWith("mcp", "mcp:alice", { actions: new Set(["config:read"]) });
+    const writer = callerWith("mcp", "mcp:alice", { actions: new Set(["config:read", "config:write"]) });
+
+    expect(await show(priv, chat(config, "slack:UADMIN"))).toMatchObject({ ok: true });
+    expect(await show(priv, callerWith("cli", "cli:local", "all"))).toMatchObject({ ok: true });
+    expect(await show(priv, writer)).toMatchObject({ ok: true });
+    expect(await show(priv, readOnly)).toMatchObject({ ok: false, error: "unauthorized", message: RESTRICTED });
+    expect(await show(pub, readOnly)).toMatchObject({ ok: true });
+  });
+
+  it("the instructions peek on another channel rides the same read rule: refused on a private channel from elsewhere, shown from inside or on a public one", async () => {
+    const config = store();
+    await config.setChannelOverride("slack:COTHER", { instructions: "Secret channel rules." });
+    const peek = (commands: CommandInvoker, caller: Caller) =>
+      commands.invoke("config.instructions", { args: ["channel"], options: { channel: "slack:COTHER" } }, caller);
+    const ux = chat(config, "slack:UX");
+
+    const res = await peek(bind(config, visibilityOf({ "slack:COTHER": "private" })), ux);
+    expect(res).toMatchObject({ ok: false, error: "unauthorized", message: RESTRICTED });
+    expect(JSON.stringify(res)).not.toContain("Secret channel rules.");
+    expect(await peek(bind(config, visibilityOf({ "slack:COTHER": "public" })), ux)).toMatchObject({
+      ok: true,
+      value: { action: "show", instructions: "Secret channel rules." },
+    });
+    expect(
+      await peek(bind(config, visibilityOf({ "slack:COTHER": "private" })), chat(config, "slack:UX", "slack:COTHER")),
+    ).toMatchObject({ ok: true, value: { action: "show", instructions: "Secret channel rules." } });
   });
 });
 

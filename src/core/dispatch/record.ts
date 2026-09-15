@@ -88,7 +88,10 @@ const DIRECTORY_TIMED_OUT = Symbol("channel directory timed out");
  *  channel directory says, asked once per run and awaited for at most
  *  `channelDirectoryTimeoutMs`; a directory that throws, rejects, or is too slow
  *  yields `unknown` — never public, never a member. */
-export async function channelVisibilityOf(deps: RecordDeps, channelId: string): Promise<ChannelVisibility> {
+export async function channelVisibilityOf(
+  deps: Pick<RecordDeps, "channelDirectory" | "channelDirectoryTimeoutMs">,
+  channelId: string,
+): Promise<ChannelVisibility> {
   const timeoutMs = deps.channelDirectoryTimeoutMs ?? CHANNEL_DIRECTORY_TIMEOUT_MS;
   const failed = (err: unknown): ChannelVisibility => {
     console.warn(

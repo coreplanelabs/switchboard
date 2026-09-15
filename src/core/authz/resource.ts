@@ -131,7 +131,9 @@ export function attributesOf(resource: Resource): ResourceAttributes {
     case "config-scope":
       switch (resource.kind) {
         case "channel":
-          return { channelId: resource.id, visibility: "unknown" };
+          // The scope IS the channel's: its visibility is what `member-of`'s
+          // public half reads when the scope is read from elsewhere.
+          return { channelId: resource.id, visibility: "unknown", channelVisibility: resource.visibility ?? "unknown" };
         case "user":
           return { userId: resource.id, visibility: "unknown" };
         case "org":

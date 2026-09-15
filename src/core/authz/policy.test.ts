@@ -30,7 +30,12 @@ const repo = (slug: string): Resource => {
   return { type: "repo", owner, name };
 };
 const agent = (name: string): Resource => ({ type: "agent", name });
-const channelConfig = (id: string): Resource => ({ type: "config-scope", kind: "channel", id });
+const channelConfig = (id: string, visibility?: ChannelVisibility): Resource => ({
+  type: "config-scope",
+  kind: "channel",
+  id,
+  ...(visibility ? { visibility } : {}),
+});
 const userConfig = (id: string): Resource => ({ type: "config-scope", kind: "user", id });
 const orgConfig: Resource = { type: "config-scope", kind: "org" };
 
@@ -278,6 +283,38 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
       [A.reader, channelConfig("slack:C_PUB1")],
       [A.browser, channelConfig("slack:C_PUB1")],
       [A.mcpWriter, channelConfig("slack:C_PUB1")],
+    ],
+  },
+  // Reading another channel's scope (`config show --channel`, the instructions
+  // peek): whoever may set it may read it…
+  "config:read config-scope/channel [has-grant(config:write)]": {
+    allow: [
+      [A.admin, channelConfig("slack:C_PRIV", "private")],
+      [A.operator, channelConfig("slack:C_PRIV", "private")],
+      [A.chatUser, channelConfig("slack:C_PRIV", "private")],
+    ],
+    deny: [
+      [A.chatUserGated, channelConfig("slack:C_PRIV", "private")],
+      [A.reader, channelConfig("slack:C_PRIV")],
+      [A.browser, channelConfig("slack:C_PRIV", "private")],
+    ],
+  },
+  // …and, asked for a pointing actor (one membership, the origin, no grants),
+  // `member-of` reads: a public channel's scope from anywhere, a private one
+  // only from inside it; `unknown` is never public; an admin's `all` is not
+  // consulted on this row (the grant row above is theirs).
+  "config:read config-scope/channel [member-of]": {
+    allow: [
+      [pointing(A.chatUserGated, "pub2"), channelConfig("slack:C_PUB1", "public")],
+      [pointing(A.chatUserGated, "priv"), channelConfig("slack:C_PRIV", "private")],
+      [A.chatUserGated, channelConfig("slack:C_PUB2", "public")],
+      [A.member, channelConfig("slack:C_PRIV", "private")],
+    ],
+    deny: [
+      [pointing(A.chatUserGated, "pub1"), channelConfig("slack:C_PRIV", "private")],
+      [pointing(A.admin, "pub1"), channelConfig("slack:C_PRIV", "private")],
+      [pointing(A.member, "pub1"), channelConfig("slack:C_PRIV", "private")],
+      [A.chatUserGated, channelConfig("slack:C_PUB1")],
     ],
   },
   "config:write config-scope/user [is-self]": {
