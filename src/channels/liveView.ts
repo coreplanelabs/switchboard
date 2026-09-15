@@ -417,32 +417,57 @@ export function createLiveViewHandler(
    *  (`nosniff`), the response is sandboxed so an HTML or SVG file cannot run
    *  as this origin, and only the four raster image types render inline —
    *  everything else downloads under its recorded basename. A key whose object
-   *  is gone answers 410 naming the retention window. The caller looks the key
+   *  is gone answers 410 naming the retention window. The request's single
+   *  `Range` is honoured — the page's video and audio players seek by it — as
+   *  a 206 with `Content-Range` and the part's length, a 416 naming the size
+   *  past the end, and every answer says `Accept-Ranges: bytes`; a range the
+   *  syntax does not admit streams the whole object. The caller looks the key
    *  up (`artifactNamed`) so it can audit a read of a named key — served or
    *  expired — before serving, and audit nothing for a key the run never named. */
   const artifactNamed = (events: readonly RunEvent[], key: string): ArtifactEvent | undefined =>
     events.find((e): e is ArtifactEvent => e.type === "artifact" && e.key === key);
-  const serveArtifact = async (res: ServerResponse, named: ArtifactEvent | undefined): Promise<void> => {
+  const serveArtifact = async (
+    res: ServerResponse,
+    named: ArtifactEvent | undefined,
+    range: string | undefined,
+  ): Promise<void> => {
     if (!named || !deps.artifacts) {
       text(res, 404, NOT_FOUND);
       return;
     }
-    const object = await deps.artifacts.store.get(named.key);
+    const object = await deps.artifacts.store.get(named.key, range === undefined ? {} : { range });
     if (!object) {
       text(res, 410, `artifact expired: files are kept for ${deps.artifacts.retentionDays} days`);
       return;
     }
+    if ("unsatisfiable" in object) {
+      res.writeHead(416, {
+        "content-range": `bytes */${object.size}`,
+        "accept-ranges": "bytes",
+        "cache-control": "private, no-store",
+      });
+      res.end();
+      return;
+    }
     const inline = INLINE_IMAGE_TYPES.has(named.contentType);
     const filename = safeBasename(named.name);
-    res.writeHead(200, {
+    const { part } = object;
+    res.writeHead(part ? 206 : 200, {
       "content-type": named.contentType,
-      "content-length": String(object.size),
+      "content-length": String(part ? part.end - part.start + 1 : object.size),
+      ...(part ? { "content-range": `bytes ${part.start}-${part.end}/${object.size}` } : {}),
+      "accept-ranges": "bytes",
       "content-disposition": `${inline ? "inline" : "attachment"}; filename="${filename}"`,
       "x-content-type-options": "nosniff",
       "content-security-policy": "sandbox",
       "cache-control": "private, no-store",
     });
     await pipeToResponse(object.body, res);
+  };
+  /** The request's `Range` header as one string, or nothing. */
+  const rangeOf = (req: HttpRequest): string | undefined => {
+    const h = req.headers.range;
+    return typeof h === "string" && h.length > 0 ? h : undefined;
   };
   /** One rendered index page: the rows, the store-degraded flag, the "Older runs" href and whether a cursor got us here. */
   interface IndexPage {
@@ -626,7 +651,7 @@ export function createLiveViewHandler(
           text(res, 404, NOT_FOUND);
           return true;
         }
-        run(res, () => serveArtifact(res, artifactNamed(snap.events, route.key)));
+        run(res, () => serveArtifact(res, artifactNamed(snap.events, route.key), rangeOf(req)));
         return true;
       }
       // Read-only friction diagnosis of the run's retained backlog: works
@@ -771,7 +796,7 @@ export function createLiveViewHandler(
         // named is not a read of anything, and must not log as one.
         const named = artifactNamed(view.events ?? [], route.key);
         if (named) audit({ route: "artifact", runId: route.id, identity: actor.id });
-        await serveArtifact(res, named);
+        await serveArtifact(res, named, rangeOf(req));
         return;
       }
       audit({ route: route.kind === "page" ? "page" : "events", runId: route.id, identity: actor.id });

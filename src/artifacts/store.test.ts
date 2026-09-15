@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Secret } from "../secrets.js";
-import { InMemoryArtifactStore, PRESIGN_TTL_SECONDS, R2ArtifactStore, type ArtifactStore } from "./store.js";
+import {
+  InMemoryArtifactStore,
+  parseByteRange,
+  PRESIGN_TTL_SECONDS,
+  R2ArtifactStore,
+  type ArtifactStore,
+} from "./store.js";
 
 // Feature: docs/reference/specs/execution.md item 20 — the artifact store seam.
 // The bot signs URLs and reads sizes; it never carries a file. R2 through its
@@ -92,6 +98,83 @@ describe("R2ArtifactStore.head (item 20)", () => {
   });
 });
 
+describe("parseByteRange (item 20)", () => {
+  it("reads the three single-range forms and nothing else", () => {
+    expect(parseByteRange("bytes=0-99")).toEqual({ start: 0, end: 99 });
+    expect(parseByteRange("bytes=100-")).toEqual({ start: 100 });
+    expect(parseByteRange("bytes=-500")).toEqual({ suffix: 500 });
+    expect(parseByteRange(" Bytes=7-7 ")).toEqual({ start: 7, end: 7 });
+    // Not a single byte range: an inverted pair, a multi-range list, another unit, an empty suffix, prose.
+    for (const bad of ["bytes=9-3", "bytes=0-9,20-29", "items=0-9", "bytes=-", "bytes=", "0-99", "", undefined]) {
+      expect(parseByteRange(bad), String(bad)).toBeUndefined();
+    }
+  });
+});
+
+describe("R2ArtifactStore.get with a range (item 20)", () => {
+  const BYTES = new Uint8Array(200).map((_, i) => i % 256);
+  /** An S3 double that honours a single `Range` the way R2 does: 206 with `Content-Range`, 416 past the end. */
+  function ranged(honour = true) {
+    const requests: Request[] = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const req = input as Request;
+      requests.push(req);
+      const range = req.headers.get("range");
+      if (!range || !honour) {
+        return new Response(BYTES, {
+          status: 200,
+          headers: { "content-length": "200", "content-type": "video/mp4" },
+        });
+      }
+      const m = /^bytes=(\d*)-(\d*)$/.exec(range)!;
+      const start = m[1] === "" ? Math.max(0, 200 - Number(m[2])) : Number(m[1]);
+      const end = m[1] === "" || m[2] === "" ? 199 : Math.min(199, Number(m[2]));
+      if (start > 199) {
+        return new Response(null, { status: 416, headers: { "content-range": "bytes */200" } });
+      }
+      const part = BYTES.slice(start, end + 1);
+      return new Response(part, {
+        status: 206,
+        headers: {
+          "content-length": String(part.byteLength),
+          "content-type": "video/mp4",
+          "content-range": `bytes ${start}-${end}/200`,
+        },
+      });
+    }) as unknown as typeof fetch;
+    return { requests, store: r2({ fetch: fetchImpl }) };
+  }
+
+  it("forwards a valid single range on the wire (unsigned — aws4fetch leaves `range` out of the signature, as S3 expects) and maps a 206 to the part, the object's size and the type", async () => {
+    const { requests, store } = ranged();
+    const got = await store.get("runs/r1/out/1-clip.mp4", { range: "bytes=10-19" });
+    expect(requests[0]!.headers.get("range")).toBe("bytes=10-19");
+    expect(requests[0]!.headers.get("accept-encoding")).toBe("identity");
+    expect(requests[0]!.headers.get("authorization")).not.toMatch(/SignedHeaders=[^,]*range/);
+    expect(got).toMatchObject({ size: 200, contentType: "video/mp4", part: { start: 10, end: 19 } });
+    expect(
+      new Uint8Array(await new Response((got as { body: ReadableStream<Uint8Array> }).body).arrayBuffer()),
+    ).toEqual(BYTES.slice(10, 20));
+  });
+
+  it("a store that ignores the range answers the whole object with no part; a range past the end is unsatisfiable, naming the total; bad syntax sends no range at all", async () => {
+    const ignoring = ranged(false);
+    const whole = await ignoring.store.get("runs/r1/out/1-clip.mp4", { range: "bytes=10-19" });
+    expect(whole).toMatchObject({ size: 200, contentType: "video/mp4" });
+    expect(whole).not.toHaveProperty("part");
+
+    const { requests, store } = ranged();
+    expect(await store.get("runs/r1/out/1-clip.mp4", { range: "bytes=500-" })).toMatchObject({
+      unsatisfiable: true,
+      size: 200,
+    });
+    const plain = await store.get("runs/r1/out/1-clip.mp4", { range: "bytes=0-9,20-29" });
+    expect(requests.at(-1)!.headers.has("range")).toBe(false);
+    expect(plain).toMatchObject({ size: 200 });
+    expect(plain).not.toHaveProperty("part");
+  });
+});
+
 describe("R2ArtifactStore.copyFromUrl (item 20)", () => {
   it("POSTs the copy to the bot's own Worker with the copy bearer and a timeout, and accepts only the size it asked for", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
@@ -153,7 +236,39 @@ function contract(
       // `get` opens the object as a stream with the same head: what the proxy route pipes.
       const got = await store.get("runs/r1/out/1-a.png");
       expect(got).toMatchObject({ size: 3, contentType: "image/png" });
-      expect(new Uint8Array(await new Response(got!.body).arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]));
+      expect(got).not.toHaveProperty("part");
+      expect(
+        new Uint8Array(await new Response((got as { body: ReadableStream<Uint8Array> }).body).arrayBuffer()),
+      ).toEqual(new Uint8Array([1, 2, 3]));
+    });
+
+    // The proxy's players seek by byte range (live-view.md item 26): a single
+    // range comes back as that slice with `part` naming it against the whole
+    // size; an open end and a suffix are clamped; a start past the end is
+    // unsatisfiable with the size the 416 must name.
+    it("a single byte range reads the slice with `part` against the object's size; an open end and a suffix clamp; a start past the end is unsatisfiable", async () => {
+      const { store, seed } = await make();
+      await seed("runs/r1/out/2-clip.bin", new Uint8Array([10, 11, 12, 13, 14]), "video/mp4");
+      const bytesOf = async (o: unknown) => [
+        ...new Uint8Array(await new Response((o as { body: ReadableStream<Uint8Array> }).body).arrayBuffer()),
+      ];
+      const mid = await store.get("runs/r1/out/2-clip.bin", { range: "bytes=1-2" });
+      expect(mid).toMatchObject({ size: 5, contentType: "video/mp4", part: { start: 1, end: 2 } });
+      expect(await bytesOf(mid)).toEqual([11, 12]);
+      const open = await store.get("runs/r1/out/2-clip.bin", { range: "bytes=3-" });
+      expect(open).toMatchObject({ part: { start: 3, end: 4 } });
+      expect(await bytesOf(open)).toEqual([13, 14]);
+      const long = await store.get("runs/r1/out/2-clip.bin", { range: "bytes=2-99" });
+      expect(long).toMatchObject({ part: { start: 2, end: 4 } });
+      const suffix = await store.get("runs/r1/out/2-clip.bin", { range: "bytes=-2" });
+      expect(suffix).toMatchObject({ part: { start: 3, end: 4 } });
+      expect(await bytesOf(suffix)).toEqual([13, 14]);
+      // The 416 names the size; its type is whatever the store's error answer carries, and the route never reads it.
+      expect(await store.get("runs/r1/out/2-clip.bin", { range: "bytes=5-" })).toMatchObject({
+        unsatisfiable: true,
+        size: 5,
+      });
+      expect(await store.get("runs/r1/out/missing.bin", { range: "bytes=0-1" })).toBeNull();
     });
   });
 }
@@ -174,6 +289,24 @@ contract("R2ArtifactStore (over a fetch double)", async () => {
     if (req.method === "GET") expect(req.headers.get("authorization")).toMatch(/^AWS4-HMAC-SHA256 /);
     // Every read asks for the object's own bytes: no edge compression, so the length is on the wire.
     expect(req.headers.get("accept-encoding"), `${req.method} ${key}`).toBe("identity");
+    const range = req.headers.get("range");
+    if (req.method === "GET" && range) {
+      // What R2's S3 endpoint does with one `Range`: the slice as a 206, or 416 past the end.
+      const m = /^bytes=(\d*)-(\d*)$/.exec(range)!;
+      const total = o.bytes.byteLength;
+      const start = m[1] === "" ? Math.max(0, total - Number(m[2])) : Number(m[1]);
+      const end = m[1] === "" || m[2] === "" ? total - 1 : Math.min(total - 1, Number(m[2]));
+      if (start >= total) return new Response(null, { status: 416, headers: { "content-range": `bytes */${total}` } });
+      const part = o.bytes.slice(start, end + 1);
+      return new Response(part, {
+        status: 206,
+        headers: {
+          "content-length": String(part.byteLength),
+          "content-type": o.type,
+          "content-range": `bytes ${start}-${end}/${total}`,
+        },
+      });
+    }
     const headers = { "content-length": String(o.bytes.byteLength), "content-type": o.type };
     return new Response(req.method === "HEAD" ? null : o.bytes, { status: 200, headers });
   }) as unknown as typeof fetch;
