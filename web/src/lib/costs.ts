@@ -189,6 +189,34 @@ export function dayTitleOf(d: DailyCost, series: string[], partial: boolean): st
   return lines.join("\n");
 }
 
+/** An ISO day (`YYYY-MM-DD`) → `Aug 1`, the way the page reads dates aloud. */
+export function monthDayOf(date: string): string {
+  const d = new Date(`${date}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return date;
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${months[d.getUTCMonth()]} ${d.getUTCDate()}`;
+}
+
+/** The tooltip's content for one day, structured so the panel can lay it out
+ *  as a header and a two-column table: the components that cost anything,
+ *  largest first, the LLM estimate tagged. */
+export interface DayTip {
+  date: string;
+  /** `Aug 29` */
+  label: string;
+  partial: boolean;
+  total: number;
+  rows: Array<{ series: string; usd: number; estimated: boolean }>;
+}
+
+export function dayTipOf(d: DailyCost, series: string[], partial: boolean): DayTip {
+  const rows = series
+    .map((s) => ({ series: s, usd: valueOf(d, s), estimated: s === LLM_LABEL && d.llmEstimated }))
+    .filter((r) => r.usd > 0)
+    .sort((a, b) => b.usd - a.usd);
+  return { date: d.date, label: monthDayOf(d.date), partial, total: d.total, rows };
+}
+
 export interface ChartSegment {
   seriesIndex: number;
   x: number;
@@ -208,7 +236,10 @@ export interface ChartDayHover {
   y: number;
   width: number;
   height: number;
+  /** The breakdown as one text, for the column's accessible label. */
   title: string;
+  /** The same breakdown structured, for the tooltip panel. */
+  tip: DayTip;
 }
 export interface ChartModel {
   width: number;
@@ -253,6 +284,7 @@ export function chartModelOf(report: CostReport, series: string[]): ChartModel {
       width: Number(bw.toFixed(1)),
       height: ih,
       title: dayTitleOf(d, series, report.range.partialLastDay && i === days.length - 1),
+      tip: dayTipOf(d, series, report.range.partialLastDay && i === days.length - 1),
     });
     series.forEach((s, si) => {
       const v = valueOf(d, s);

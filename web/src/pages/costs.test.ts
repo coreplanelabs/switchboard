@@ -232,21 +232,59 @@ describe("CostsPage", () => {
     expect(w.findAll("rect.day title").length).toBe(0);
   });
 
-  it("hovering a day shows a tooltip panel with that day's breakdown, and leaving hides it", async () => {
+  it("hovering a day shows a compact tooltip: the day and its total on top, then one row per component, largest first, the estimate tagged; leaving hides it", async () => {
     const w = mountApp(CostsPage, { seed: seed() });
     expect(w.find(".chart-tip").exists()).toBe(false);
     const [, , openDay] = w.findAll("rect.day");
-    await openDay.trigger("pointerenter", { clientX: 700, clientY: 120 });
+    await openDay.trigger("pointerenter", { clientX: 300, clientY: 120 });
     const tip = w.find(".chart-tip");
     expect(tip.exists()).toBe(true);
     expect(tip.attributes("role")).toBe("tooltip");
-    expect(tip.text()).toContain(report().days[2].date);
-    expect(tip.text()).toContain("total $4.20");
-    expect(tip.text()).toContain("LLM (Anthropic)");
-    expect(tip.text()).toContain("$3.00");
-    expect(tip.text()).toContain("estimate");
+    // Header: a human date and the partial-day marker, the total on the right.
+    const head = tip.find(".tip-head");
+    expect(head.text()).toContain("Aug 29");
+    expect(head.text()).toContain("partial day");
+    expect(head.text()).toContain("$4.20");
+    expect(head.text()).not.toContain("total"); // the number speaks; no label prose
+    // Rows: series → dollars, sorted by size, zero components omitted, the estimate tagged short.
+    const rows = tip.findAll(".tip-row");
+    expect(rows.map((r) => r.find(".tip-name").text())).toEqual([
+      "LLM (Anthropic)",
+      "bot",
+      "Durable Objects",
+      "Workers · storage · R2",
+    ]);
+    expect(rows[0].find(".tip-usd").text()).toBe("$3.00");
+    expect(rows[0].text()).toContain("est.");
+    expect(rows[1].text()).not.toContain("est.");
     await openDay.trigger("pointerleave");
     expect(w.find(".chart-tip").exists()).toBe(false);
+  });
+
+  it("the tooltip lives outside the chart's scroll box, has a fixed width, and flips to the left near the right edge instead of growing the card", async () => {
+    const w = mountApp(CostsPage, { seed: seed() });
+    const host = w.find(".chart-host");
+    // The scroll box is a child of the host; the tip is the host's child, never the scroll box's.
+    Object.defineProperty(host.element, "clientWidth", { value: 800, configurable: true });
+    Object.defineProperty(host.element, "clientHeight", { value: 300, configurable: true });
+    const [first, , last] = w.findAll("rect.day");
+    await first.trigger("pointerenter", { clientX: 100, clientY: 40 });
+    let tip = w.find(".chart-tip");
+    expect(tip.element.parentElement).toBe(host.element);
+    expect(tip.element.parentElement?.classList.contains("overflow-x-auto")).toBe(false);
+    expect(tip.classes().some((c) => /^w-/.test(c))).toBe(true);
+    expect(tip.classes()).toContain("whitespace-nowrap");
+    expect(parseFloat((tip.attributes("style") ?? "").match(/left:\s*([\d.]+)px/)?.[1] ?? "NaN")).toBeGreaterThan(100);
+    await first.trigger("pointerleave");
+    // Near the right edge the panel opens to the left of the pointer; near the bottom, above it.
+    await last.trigger("pointerenter", { clientX: 780, clientY: 290 });
+    tip = w.find(".chart-tip");
+    const left = parseFloat((tip.attributes("style") ?? "").match(/left:\s*([\d.]+)px/)?.[1] ?? "NaN");
+    const top = parseFloat((tip.attributes("style") ?? "").match(/top:\s*([\d.]+)px/)?.[1] ?? "NaN");
+    expect(left).toBeLessThan(780 - 200);
+    expect(left).toBeGreaterThanOrEqual(0);
+    expect(top).toBeLessThan(290);
+    expect(top).toBeGreaterThanOrEqual(0);
   });
 
   it("includes a legend and a table view so identity is never color-alone; dates read human with the ISO on hover", () => {
