@@ -81,6 +81,15 @@ export class BotHostPiContainer implements PiContainer {
     }
   }
 
+  /** The run's own root: `start` spawns pi in it, so that is the directory a
+   *  session written for this root names, present on this host in this
+   *  generation. The checkout the harness names is a container path this host
+   *  does not have (a `none` run has no workspace), and the previous
+   *  generation's root is gone with its pi: neither is where pi runs. */
+  cwd(paths: PiRunPaths, _checkout: string): string {
+    return paths.dir;
+  }
+
   /** Parents at 700, the file at 600, exact bytes, created and never
    *  replaced: under a root this container made nothing is there before the
    *  harness writes it, so a path already present is a named failure, never

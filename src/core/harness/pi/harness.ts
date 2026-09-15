@@ -434,12 +434,16 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
       let sessionPath: string | undefined;
       if (session) {
         sessionPath = `${paths.sessionDir}/${session.stem}-${now()}.jsonl`;
+        // The session's working directory is where THIS pi runs, the
+        // container's answer for the root just made: pi refuses a session
+        // whose stored directory does not exist where it runs, and the bot
+        // host has no checkout and a new root in each generation (item 12).
         await container.writeFile(
           sessionPath,
           piSessionFile(
             session.messages,
             {
-              cwd: run.rules.checkout,
+              cwd: container.cwd(paths, run.rules.checkout),
               model: {
                 provider: run.model.provider,
                 id: run.model.id,

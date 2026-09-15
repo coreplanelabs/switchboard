@@ -157,7 +157,12 @@ export class PiMirror {
  *  the mirrored transcript a restarted pi continues from: the header, then one
  *  linear branch of entries — user turns, assistant turns with their tool
  *  calls, one toolResult per result part — each with an id and its parent's,
- *  so pi's `--session <path>` loads it as a session it wrote. The assistant
+ *  so pi's `--session <path>` loads it as a session it wrote. The header's
+ *  `cwd` is the directory the pi that loads the file runs in, the container
+ *  seam's answer (`PiContainer.cwd`), never a constant: pi exits at once on a
+ *  stored directory that does not exist where it runs, and the same transcript
+ *  is resumed in a checkout on a container and in the run's own root on the
+ *  bot host. The assistant
  *  entries carry the model the run resolved and no usage: the proxy is the
  *  meter. A document part is named in a text block: the session carries none.
  *  The log's compaction rows (docs/reference/specs/session-log.md item 6) become

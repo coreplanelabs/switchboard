@@ -17,7 +17,7 @@ import { RunControl } from "../../runRegistry/runControl.js";
 import { recordingSink } from "../../testing/recordingSink.js";
 import { FollowUpInbox } from "../../threadAdmission.js";
 import { createTracer } from "../../trace/tracer.js";
-import { HARNESS_URL_ENV, RUN_BEARER_ENV, piRunPaths, piRunPathsAt } from "./process.js";
+import { HARNESS_URL_ENV, RUN_BEARER_ENV, piRunPaths, piRunPathsAt, type PiRunPaths } from "./process.js";
 import { HarnessRegistry, authorizeToolCall } from "./relay.js";
 import { judgeToolCall, type ToolRuleContext } from "./toolRules.js";
 import { FakePiContainer } from "./testing/fakeContainer.js";
@@ -1114,6 +1114,77 @@ describe("runPiHarness: the root the container makes", () => {
   });
   it("the fake answers the predictable root, so every other test's run is filed where it always was", async () => {
     expect(await new FakePiContainer().makeRoot("run-7")).toEqual(piRunPaths("run-7"));
+  });
+
+  // The session file's working directory is the container's answer for the
+  // root pi is filed under (`cwd`), never the checkout the run loop names: pi
+  // refuses to resume a session whose stored directory does not exist where
+  // it runs, and the bot host has no /workspace and a new root in each
+  // generation. The fake answers as the exec container does, the checkout;
+  // this container answers as the bot host does, the root itself.
+  class BotHostShapedContainer extends FakePiContainer {
+    private generation = 0;
+    override async makeRoot(runId: string) {
+      return piRunPathsAt(`${piRunPaths(runId).dir}-gen${++this.generation}`);
+    }
+    override cwd(paths: PiRunPaths) {
+      return paths.dir;
+    }
+  }
+  const header = (w: { container: FakePiContainer }, stem: string) => {
+    const [started] = w.container.starts;
+    const sessionPath = started.args[started.args.indexOf("--session") + 1];
+    expect(sessionPath).toMatch(new RegExp(`^${started.paths.sessionDir}/${stem}-\\d+\\.jsonl$`));
+    return { root: started.paths.dir, header: JSON.parse(w.container.files.get(sessionPath)!.split("\n")[0]) };
+  };
+  it("a dead pi on the bot host is restarted on a session whose working directory is the root this generation made, not the checkout and not the root the row recorded, which goes", async () => {
+    const w = world({ container: new BotHostShapedContainer() });
+    const previous = piRunPathsAt(`${paths.dir}-gen0`);
+    w.run.resume = {
+      messages: [
+        { role: "user", content: [{ type: "text", text: "what is new" }] },
+        { role: "assistant", content: [{ type: "text", text: "looking" }] },
+      ],
+      settlements: [],
+      remainingMs: 20 * 60_000,
+      turn: 1,
+      inboxConsumedSeq: 0,
+      facts: { pid: 999, logOffset: 50, root: previous.dir },
+    };
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "continued"));
+    expect(await w.start()).toBe("continued");
+    const resumed = header(w, "resumed");
+    expect(resumed.root).toBe(`${paths.dir}-gen1`);
+    expect(resumed.header).toMatchObject({ type: "session", version: 3, cwd: `${paths.dir}-gen1` });
+    expect(resumed.header.cwd).not.toBe(w.run.rules.checkout);
+    expect(w.container.removed).toEqual([previous.dir, `${paths.dir}-gen1`]);
+  });
+  it("a fresh run on the bot host with the thread's earlier turns starts on a seed session whose working directory is that root too", async () => {
+    const w = world({ container: new BotHostShapedContainer() });
+    w.run.messages = [
+      { role: "user", content: [{ type: "text", text: "earlier" }] },
+      { role: "assistant", content: [{ type: "text", text: "noted" }] },
+      { role: "user", content: [{ type: "text", text: "and now this" }] },
+    ];
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "Done."));
+    expect(await w.start()).toBe("Done.");
+    const seed = header(w, "seed");
+    expect(seed.header).toMatchObject({ type: "session", version: 3, cwd: seed.root });
+    expect(seed.root).toBe(`${paths.dir}-gen1`);
+  });
+  it("on the exec container the session's working directory is the checkout the harness names, where the executor runs pi, as before", async () => {
+    const w = world();
+    w.run.resume = {
+      messages: [{ role: "user", content: [{ type: "text", text: "fix it" }] }],
+      settlements: [],
+      remainingMs: 20 * 60_000,
+      turn: 1,
+      inboxConsumedSeq: 0,
+      facts: { pid: 999, logOffset: 50, root: paths.dir },
+    };
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "continued"));
+    expect(await w.start()).toBe("continued");
+    expect(header(w, "resumed").header).toMatchObject({ cwd: "/workspace/threads/t/main" });
   });
 });
 

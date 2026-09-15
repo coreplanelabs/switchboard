@@ -58,6 +58,11 @@ export class FakePiContainer implements PiContainer {
     return piRunPaths(runId);
   }
 
+  /** The checkout, as the exec container answers; a test whose pi runs in the root itself (the bot host's shape) overrides this. */
+  cwd(_paths: PiRunPaths, checkout: string): string {
+    return checkout;
+  }
+
   async writeFile(path: string, content: string): Promise<void> {
     this.maybeFail("write");
     this.files.set(path, content);
