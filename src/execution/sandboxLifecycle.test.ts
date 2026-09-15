@@ -173,6 +173,15 @@ describe("sandbox Worker wiring (static)", () => {
     expect(worker).not.toContain(".message ?? String(err)");
   });
 
+  // items 9 and 14: the executor waits on `reason`, never on the text, so a
+  // refusal the Durable Object named — the stat under a binary read on a full
+  // fleet included — leaves with its token.
+  it("a file route's refusal carries the Durable Object's reason token", () => {
+    expect(worker).toContain("function refused(r: FileRefusal)");
+    expect(worker).toMatch(/reason: r\.reason/);
+    expect(worker).toMatch(/status: 503, reason: stat\.reason/);
+  });
+
   it("the Worker never destroys a container of its own accord", () => {
     expect(worker).not.toMatch(/this\.destroy\(/);
   });
