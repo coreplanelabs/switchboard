@@ -4,7 +4,19 @@ import { describe, expect, it } from "vitest";
 import { floatingImagePins, imagePins } from "./imagePins.js";
 
 const ROOT = resolve(import.meta.dirname, "../..");
-const IMAGES = ["deploy/cloudflare-resident/Dockerfile", "deploy/cloudflare-sandbox/Dockerfile", "Dockerfile"] as const;
+const read = (path: string) => readFileSync(resolve(ROOT, path), "utf8");
+const RESIDENT = "deploy/cloudflare-resident/Dockerfile";
+const EXECUTION_IMAGES = [RESIDENT, "deploy/cloudflare-sandbox/Dockerfile"] as const;
+const IMAGES = [...EXECUTION_IMAGES, "Dockerfile"] as const;
+
+/** The instruction lines of a Dockerfile, continuations joined, comments dropped. */
+function instructions(text: string): string[] {
+  return text
+    .replace(/\\\r?\n/g, " ")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith("#"));
+}
 
 // Feature: docs/reference/specs/execution.md item 10 — the execution images' toolchain is
 // PINNED. `RUN npm install -g pnpm@latest yarn@latest` in the resident image
@@ -69,10 +81,7 @@ describe.each(IMAGES)("%s", (path) => {
 // make the Chromium a run drives a property of the last image build, and a
 // Playwright minor moves the browser build with it.
 describe("the execution images' playwright", () => {
-  const EXECUTION_IMAGES = ["deploy/cloudflare-resident/Dockerfile", "deploy/cloudflare-sandbox/Dockerfile"] as const;
-  const pins = EXECUTION_IMAGES.map((path) =>
-    imagePins(readFileSync(resolve(ROOT, path), "utf8")).filter((p) => p.tool === "playwright"),
-  );
+  const pins = EXECUTION_IMAGES.map((path) => imagePins(read(path)).filter((p) => p.tool === "playwright"));
 
   it("is one exact global install per image", () => {
     for (const [i, path] of EXECUTION_IMAGES.entries()) {
@@ -84,5 +93,61 @@ describe("the execution images' playwright", () => {
   it("names the same version in both images", () => {
     expect(pins[0][0]?.spec).toMatch(/^\d+\.\d+\.\d+$/);
     expect(new Set(pins.map((p) => p[0]?.spec)).size).toBe(1);
+  });
+});
+
+// bun is the one package manager the cloudflare/sandbox bases already ship —
+// a real binary at /usr/local/bin/bun, on the 1.3 line — and the one whose
+// baked version is the version that RUNS: unlike pnpm, bun does not
+// self-manage `packageManager`, so a repo pinning a newer bun than the image
+// fails its own lockfile at every install (a `bun.lock` at lockfileVersion 3
+// — bun 1.4's stamp for scoped `overrides` — is "Unknown lockfile version"
+// to the base's 1.3.x), and every resident attach to such a repo fell to a
+// cold sandbox that way. So bun is installed at an
+// exact pin like pnpm's, in both execution images, and the layer proves the
+// bun on PATH IS the pin — after removing the base's binary, which npm would
+// not write its `bun` link over, and which would otherwise stay behind as a
+// second bun to find.
+describe("the execution images' bun", () => {
+  const sources = EXECUTION_IMAGES.map(read);
+  const pins = sources.map((s) => imagePins(s).filter((p) => p.tool === "bun"));
+  /** The version as the Dockerfile's `grep -x` pattern spells it: every regex metacharacter escaped (a semver has only the dots). */
+  const escaped = (version: string) => version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  it("is one exact global install per image — the pin, not the base's binary, is the bun a run's install gets", () => {
+    for (const [i, path] of EXECUTION_IMAGES.entries()) {
+      expect(pins[i].length, `${path} installs bun once`).toBe(1);
+      expect(pins[i][0].floating, `${path}: bun@${pins[i][0]?.spec}`).toBe(false);
+    }
+  });
+
+  it("names the same version in both images", () => {
+    expect(pins[0][0]?.spec).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(new Set(pins.map((p) => p[0]?.spec)).size).toBe(1);
+  });
+
+  it("removes the base's own bun before the install and proves the bun on PATH is the pin, in the same layer", () => {
+    for (const [i, path] of EXECUTION_IMAGES.entries()) {
+      const layer = instructions(sources[i]).find((l) => /^RUN\b.*\bnpm install -g .*\bbun@/.test(l)) ?? "";
+      expect(layer, `${path}: a RUN layer installs bun`).not.toBe("");
+      const removal = layer.indexOf("rm -f /usr/local/bin/bun");
+      expect(removal, `${path}: the base's binary is removed`).toBeGreaterThan(-1);
+      expect(removal, `${path}: removed BEFORE the install`).toBeLessThan(layer.indexOf("npm install -g"));
+      // The npm package is a placeholder until its postinstall moves the real
+      // binary in; npm's global installs are growing an allowlist for install
+      // scripts, so the one this layer needs is allowed by name.
+      expect(layer, `${path}: bun's postinstall is allowed by name`).toContain("--allow-scripts=bun");
+      expect(layer).toContain(`bun --version | grep -qx '${escaped(pins[i][0]?.spec ?? "")}'`);
+    }
+  });
+
+  it("the resident image proves it once more as worker1 after the pool exists — a thread's install runs through the same su", () => {
+    const resident = EXECUTION_IMAGES.indexOf(RESIDENT);
+    const lines = instructions(sources[resident]);
+    const pool = lines.findIndex((l) => /useradd -m -u "\$\(\(2000 \+ i\)\)"/.test(l));
+    const asWorker = lines.findIndex((l) => /^RUN su -s \/bin\/bash worker1 -c ".*bun --version \| grep -qx/.test(l));
+    expect(pool, "the user pool layer").toBeGreaterThan(-1);
+    expect(asWorker, "a bun version proof run through su as worker1").toBeGreaterThan(pool);
+    expect(lines[asWorker]).toContain(`bun --version | grep -qx '${escaped(pins[resident][0]?.spec ?? "")}'`);
   });
 });

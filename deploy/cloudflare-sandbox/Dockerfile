@@ -1,7 +1,7 @@
 # Sandbox container image: the @cloudflare/sandbox base plus git + gh, a Docker
-# engine, Node 24 with pnpm, and the toolchain a run builds and looks with
-# (compilers, ffmpeg, a headless Chromium), so the coding/review/explore
-# agents work out of the box.
+# engine, Node 24 with pnpm and a pinned bun, and the toolchain a run builds
+# and looks with (compilers, ffmpeg, a headless Chromium), so the
+# coding/review/explore agents work out of the box.
 
 # The Node this image ships (copied in below), at the exact tag every image in
 # this repository shares — its major is .nvmrc's, which is what CI runs and
@@ -76,7 +76,7 @@ RUN node --version | grep -qx 'v24.21.0' \
   && npm --version >/dev/null \
   && npx --version >/dev/null
 
-# pnpm: the base image ships Node + npm (corepack is under
+# pnpm + bun: the base image ships Node + npm (corepack is under
 # /usr/local/lib/node_modules but not on PATH) and not pnpm, so coding runs in pnpm repos hit
 # `pnpm: command not found` on install/build. Installed globally with npm, the
 # same way the resident image does it, so this version is here before any run
@@ -84,13 +84,32 @@ RUN node --version | grep -qx 'v24.21.0' \
 # repo's own `packageManager` field and fetches it, so a pnpm repo that pins
 # one still needs the registry on its first install.
 #
-# EXACT version, enforced by src/deploy/imagePins.test.ts, same pin and same
-# reason as the resident image (deploy/cloudflare-resident/Dockerfile): with
+# EXACT versions, enforced by src/deploy/imagePins.test.ts, same pins and same
+# reasons as the resident image (deploy/cloudflare-resident/Dockerfile): with
 # `@latest` here the pnpm major moved on a rebuild, and pnpm 11 stopped
 # reading `package.json`'s `pnpm` field. pnpm still honours a repo's own
-# `packageManager`, so this is the floor for repos that name none.
-RUN npm install -g pnpm@10.34.5 \
-  && pnpm --version | grep -qx '10\.34\.5'
+# `packageManager`, so this is the floor for repos that name none. bun does
+# NOT honour it: the version baked here is the one a repo's `bun install`
+# runs, and the base's own bun — a real binary at /usr/local/bin/bun, 1.3.12
+# on this base, measured — rejects a `bun.lock` at lockfileVersion 3 as
+# "Unknown lockfile version" (bun 1.4 stamps v3 when `overrides` carry scoped
+# `name@range` rules), so a coding run in such a repo fails its install
+# exactly as the resident's attach did. The pin must therefore sit at
+# or above what any repo we run pins, and it moves by a commit, not a base
+# bump. The base's binary is removed first (npm will not write its `bun` link
+# over a file it does not own; the container server at
+# /container-server/sandbox is a standalone bun-compiled executable and does
+# not run through it), bun's postinstall is allowed by name (the npm package
+# is a placeholder until that script moves the real binary in from the
+# platform optional dependency, and npm's global installs are growing an
+# `allow-scripts` allowlist for install scripts), the grep proves the bun on
+# PATH is the pin, and the npm cache (bun's tarball is large) is dropped in
+# the same layer.
+RUN rm -f /usr/local/bin/bun \
+  && npm install -g --allow-scripts=bun pnpm@10.34.5 bun@1.4.2 \
+  && npm cache clean --force \
+  && pnpm --version | grep -qx '10\.34\.5' \
+  && bun --version | grep -qx '1\.4\.2'
 
 # The toolchain for what a run BUILDS and LOOKS AT — the same layer as the
 # resident image's (deploy/cloudflare-resident/Dockerfile);

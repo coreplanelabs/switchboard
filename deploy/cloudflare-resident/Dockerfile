@@ -1,6 +1,7 @@
 # Resident container image: the @cloudflare/sandbox base (Ubuntu 22.04; already
-# ships git, curl, jq, npm, bun, cloudflared and a Node 22 this image replaces
-# with Node 24 below) plus GitHub tooling and a pool of unprivileged users.
+# ships git, curl, jq, npm, cloudflared, and a Node 22 and a bun this image
+# replaces with pinned ones below) plus GitHub tooling and a pool of
+# unprivileged users.
 
 # The Node this image ships (copied in below), at the exact tag every image in
 # this repository shares — its major is .nvmrc's, which is what CI runs and
@@ -64,14 +65,14 @@ RUN node --version | grep -qx 'v24.21.0' \
   && npm --version >/dev/null \
   && npx --version >/dev/null
 
-# pnpm + yarn: the base ships npm + bun but neither pnpm nor yarn, so a
-# repo whose onboard table is detected as pnpm or yarn (resident-repos item 52 —
-# every manager `detectCommands` can emit must exist here, or the table fails
-# deterministically at provision) couldn't be provisioned (install → build).
-# corepack is NOT on this base's PATH (unlike the older sandbox base), so both
-# come from npm at build time. yarn here is classic (1.x); a Yarn Berry repo
-# bootstraps through it via the `yarnPath` release it commits under
-# `.yarn/releases`.
+# pnpm + yarn + bun: the base ships npm and a bun of its own, but neither pnpm
+# nor yarn, so a repo whose onboard table is detected as pnpm or yarn
+# (resident-repos item 52 — every manager `detectCommands` can emit must exist
+# here, or the table fails deterministically at provision) couldn't be
+# provisioned (install → build). corepack is NOT on this base's PATH (unlike
+# the older sandbox base), so all three come from npm at build time. yarn here
+# is classic (1.x); a Yarn Berry repo bootstraps through it via the `yarnPath`
+# release it commits under `.yarn/releases`.
 #
 # EXACT versions, enforced by src/deploy/imagePins.test.ts. This line once read
 # `pnpm@latest yarn@latest`, which made the pnpm major a property of the last
@@ -87,9 +88,38 @@ RUN node --version | grep -qx 'v24.21.0' \
 # pinning pnpm@10.10.0 gets exactly that), so provisioning needs the registry,
 # not just the image. The grep asserts the pin took, so a resolution surprise
 # fails the build instead of a provision.
-RUN npm install -g pnpm@10.34.5 yarn@1.22.22 \
+#
+# bun is the opposite case, which is why it is pinned here instead of taken
+# from the base: bun does NOT self-manage `packageManager`, so the version
+# baked here IS the one a repo's `bun install` runs, whatever the repo pins.
+# The base ships bun as a real binary at /usr/local/bin/bun on the 1.3 line,
+# and 1.3.x rejects a `bun.lock` at lockfileVersion 3 as "Unknown lockfile
+# version" (bun 1.4 stamps v3 when `overrides` carry scoped `name@range`
+# rules) — so a repo pinning `bun@1.4.2` with such a lockfile failed
+# `deps-install` at EVERY attach (`bun install v1.3.14 … "lockfileVersion":
+# 3`) and every run on it fell to a cold sandbox. For bun the pin is a ceiling
+# as well as a floor: it must be at or above what any onboarded repo pins, and
+# it moves by a commit here, never by a base bump. The base's binary is
+# removed first: npm will not write its `bun` link over a file it does not
+# own, and a leftover would be a second bun to find. It has to be THIS
+# directory: a thread's commands run through `su`, whose PATH is
+# /etc/environment's (pam_env), not this file's ENV — /usr/local/bin is on it,
+# a prefix of our own would not be. The container server
+# (/container-server/sandbox) is a standalone bun-compiled executable and does
+# not run through this binary. The npm `bun` package is a placeholder until
+# its postinstall runs: that script moves the linux-x64 binary out of the
+# platform optional dependency into the package's own `bin` (no second copy),
+# and npm's global installs are growing an allowlist for install scripts
+# (`allow-scripts`; 11.19 warns about every script outside it), so the one
+# script this layer depends on is allowed by name. The grep proves the bun on
+# PATH is the pin, and the proof runs again as worker1 below. The npm cache
+# (bun's tarball is large) is dropped in the same layer.
+RUN rm -f /usr/local/bin/bun \
+  && npm install -g --allow-scripts=bun pnpm@10.34.5 yarn@1.22.22 bun@1.4.2 \
+  && npm cache clean --force \
   && pnpm --version | grep -qx '10\.34\.5' \
-  && yarn --version | grep -qx '1\.22\.22'
+  && yarn --version | grep -qx '1\.22\.22' \
+  && bun --version | grep -qx '1\.4\.2'
 
 # squashfs-tools (`unsquashfs`): the SDK's presigned restore does not extract
 # an archive, it MOUNTS it (squashfuse + fuse-overlayfs at the handle's dir)
@@ -199,3 +229,8 @@ RUN su -s /bin/bash worker1 -c "playwright screenshot --viewport-size=640,480 'd
 # and pi answers without a writable home (its config directory is the run's
 # own, named by PI_CODING_AGENT_DIR at start).
 RUN su -s /bin/bash worker1 -c "pi --version | grep -qx '0.85.1'"
+
+# bun once more, as worker1: a thread's `bun install` runs as the thread's user
+# through the same `su`, whose PATH is /etc/environment's rather than this
+# file's — so the BUILD proves that PATH resolves the pin, not the base's bun.
+RUN su -s /bin/bash worker1 -c "bun --version | grep -qx '1\.4\.2'"
