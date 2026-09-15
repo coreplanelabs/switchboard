@@ -84,3 +84,42 @@ describe("contextMessageTexts — the thread context as `context` events", () =>
     expect(kept.at(-1)).toBe("user: turn 29");
   });
 });
+
+// Record 0037: a referenced conversation rides the request turn as its own
+// text part after the request's text — never as a turn of its own, never as
+// an assistant turn — so the parsers that read `history` never see it and pi's
+// `promptOf`, which joins every text part of the last user turn, carries it.
+describe("buildMessages — referenced conversations on the request turn", () => {
+  const history: HistoryItem[] = [
+    { role: "user", text: "earlier" },
+    { role: "assistant", text: "reply" },
+  ];
+
+  it("appends each quoted block as a text part after the request's own text; no other turn changes", () => {
+    const messages = buildMessages(history, "what did we conclude?", undefined, undefined, ["BLOCK ONE", "BLOCK TWO"]);
+    expect(messages.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
+    expect(messages[0].content).toEqual([{ type: "text", text: "earlier" }]);
+    expect(messages[2].content).toEqual([
+      { type: "text", text: "what did we conclude?" },
+      { type: "text", text: "BLOCK ONE" },
+      { type: "text", text: "BLOCK TWO" },
+    ]);
+    expect(
+      messages.some(
+        (m) => m.role === "assistant" && m.content.some((p) => p.type === "text" && p.text.includes("BLOCK")),
+      ),
+    ).toBe(false);
+  });
+
+  it("the request's attachments come first, then its text, then the blocks", () => {
+    const [, , request] = buildMessages(history, "look", [{ mediaType: "image/png", data: "QUJD" }], undefined, [
+      "BLOCK",
+    ]);
+    expect(request.content.map((p) => (p.type === "text" ? p.text : p.type))).toEqual(["image", "look", "BLOCK"]);
+  });
+
+  it("no references leaves the output byte-identical to the four-argument call", () => {
+    expect(buildMessages(history, "plain", undefined, undefined, [])).toEqual(buildMessages(history, "plain"));
+    expect(buildMessages(history, "plain", undefined, undefined, undefined)).toEqual(buildMessages(history, "plain"));
+  });
+});

@@ -19,7 +19,7 @@ import type { AssembledTranscript } from "../runLedger/transcript.js";
 import type { LedgerWriteThrough } from "../runLedger/writeThrough.js";
 import type { RunView } from "../runsService.js";
 import type { DocumentAttachment, HistoryItem, ImageAttachment } from "../types.js";
-import { turnContent } from "./messages.js";
+import { requestContent, turnContent } from "./messages.js";
 import { previousRunOf } from "./thread.js";
 
 /** The seed budget (record 0035, "The seed"): the tail a follow-up starts
@@ -73,7 +73,13 @@ export function sessionSeed(input: {
   tail: SessionTail;
   previous: PreviousRun | undefined;
   history: readonly HistoryItem[];
-  request: { text: string; images?: ImageAttachment[]; documents?: DocumentAttachment[] };
+  request: {
+    text: string;
+    images?: ImageAttachment[];
+    documents?: DocumentAttachment[];
+    /** The quoted blocks of the request's referenced conversations (record 0037), text parts after the request's own. */
+    references?: readonly string[];
+  };
 }): SessionSeed | undefined {
   const { tail, previous, history, request } = input;
   const { from, transcript } = tail;
@@ -160,7 +166,10 @@ export function sessionSeed(input: {
     }
   }
 
-  messages.push({ role: "user", content: turnContent(request.text, request.images, request.documents) });
+  messages.push({
+    role: "user",
+    content: requestContent(request.text, request.images, request.documents, request.references),
+  });
   return {
     messages,
     log: { from: logFrom, turns: kept.length },
@@ -182,7 +191,13 @@ export async function sessionSeedFor(input: {
   agent: string;
   thread: readonly RunView[];
   history: readonly HistoryItem[];
-  request: { text: string; images?: ImageAttachment[]; documents?: DocumentAttachment[] };
+  request: {
+    text: string;
+    images?: ImageAttachment[];
+    documents?: DocumentAttachment[];
+    /** The quoted blocks of the request's referenced conversations (record 0037), text parts after the request's own. */
+    references?: readonly string[];
+  };
 }): Promise<{ seed?: SessionSeed; notes: string[] }> {
   const key = sessionKey(input.threadKey, input.agent);
   let tail: SessionTail;

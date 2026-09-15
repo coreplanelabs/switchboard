@@ -25,6 +25,9 @@ import {
   type ResumeContext,
 } from "./dispatch/admission.js";
 import { answerChatCommand, answerOperation, type FastPathDeps } from "./dispatch/fastPath.js";
+import { NO_REFERENCES, readReferences, REFERENCE_REFUSAL, type ReferenceDeps } from "./dispatch/references.js";
+import { resolveChatActor } from "./authz/actor.js";
+import { referencesOn } from "../config.js";
 import { readRequest, resolveProfile, resolveRun, resolveTarget, type ResolveDeps } from "./dispatch/resolve.js";
 import { compoundBrief, routeRequest, type RouteDecided, type RouteDeps } from "./dispatch/route.js";
 import {
@@ -101,6 +104,7 @@ export interface CoreDeps
     RunDeps,
     ReplyDeps,
     RecordDeps,
+    ReferenceDeps,
     ShipDeps {
   /** The tracer behind every root this process starts; the no-gaps test injects one with its `SpanContext`. */
   tracer?: Tracer;
@@ -654,6 +658,7 @@ export async function dispatch(
               text: requestText,
               ...(msg.images ? { images: msg.images } : {}),
               ...(msg.documents ? { documents: msg.documents } : {}),
+              ...(references.blocks.length > 0 ? { references: references.blocks } : {}),
             },
           })
         : undefined;
@@ -664,7 +669,7 @@ export async function dispatch(
       opts.seed ?? (session ? textTurnsOf(session.messages.slice(0, -1)) : undefined);
     const built = session
       ? session.messages
-      : buildMessages(opts.seed ?? history, requestText, msg.images, msg.documents);
+      : buildMessages(opts.seed ?? history, requestText, msg.images, msg.documents, references.blocks);
     const messages = resume
       ? resume.plan.messages
       : contractBlock !== undefined && agent.name !== "review"
