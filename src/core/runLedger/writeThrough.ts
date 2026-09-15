@@ -13,7 +13,7 @@
 // where that lands.
 
 import { randomUUID } from "node:crypto";
-import type { StepReport } from "../../runner.js";
+import type { StepReport } from "./stepReport.js";
 import type { ChatMessage } from "../chatMessage.js";
 import type { ToolDef } from "../provider.js";
 import type { RunEvent } from "../runEvents.js";
@@ -493,6 +493,12 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       this.sessionRow = session;
     }
 
+    /** The state the promoting claim already wrote to the row, folded into this
+     *  run's own so later patches merge into it rather than replace it. */
+    adoptState(state: RunState): void {
+      this.state = { ...this.state, ...state };
+    }
+
     get resumable(): boolean {
       return !this.detached && (this.seeded || this.adopted);
     }
@@ -788,6 +794,10 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           return undefined;
         }
         if (claimed.session) reserved.bindSession(claimed.session);
+        // The claim wrote the dispatcher's state onto the row (the workspace
+        // binding, item 54); the reserved run merges it into its own, so the
+        // first patch after the claim carries it on instead of writing over it.
+        if (req.state) reserved.adoptState(req.state);
         if (req.seed) await reserved.seed(req.seed.messages, req.seed.budgetMs);
         return reserved;
       }

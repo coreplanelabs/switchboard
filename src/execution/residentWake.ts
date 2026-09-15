@@ -10,7 +10,8 @@ import { isServiceable } from "./residentState.js";
 // exited` before the command starts. The resident wakes itself from its
 // snapshot within about a minute (the next attach or refresh instance
 // restores it), so the refusal is a pause, not a dead sandbox; read as two
-// infra failures, the two-strikes rule (run-loop.md item 7) aborted the run.
+// infra failures, the native loop's two-strikes rule aborted the run; the pi
+// harness has no reader for the restart yet (harness-pi.md, the rolling-container gap).
 // These are the pure decisions the client makes before it counts a strike;
 // the wait itself is `ResidentExecutor.awaitWake`.
 

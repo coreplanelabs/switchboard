@@ -2,15 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  ExecCapacityError,
-  ExecHealthTracker,
-  ExecInfraError,
-  LocalExecutor,
-  execDeadline,
-  LocalOperations,
-  type Executor,
-} from "./executor.js";
+import { LocalExecutor, execDeadline, LocalOperations } from "./executor.js";
 
 // Feature: docs/reference/specs/resident-repos.md — LocalOperations: the dev-only
 // second Operations implementation (≥2-implementations invariant).
@@ -88,127 +80,7 @@ function ops(dir: string): LocalOperations {
   return new LocalOperations(dir);
 }
 
-// Distinguishing an exec-infrastructure failure (a dead/wedged sandbox)
-// from a normal nonzero command exit, and counting consecutive ones so the
-// runner can fail fast instead of toiling into a dead sandbox.
-describe("ExecHealthTracker", () => {
-  function scripted(fn: () => Promise<string>): Executor {
-    return { exec: fn, readFile: fn, writeFile: async () => fn() };
-  }
-
-  it("counts consecutive ExecInfraError throws", async () => {
-    const t = new ExecHealthTracker(
-      scripted(async () => {
-        throw new ExecInfraError("boom");
-      }),
-    );
-    await expect(t.exec("x")).rejects.toBeInstanceOf(ExecInfraError);
-    expect(t.consecutiveInfraFailures).toBe(1);
-    await expect(t.exec("x")).rejects.toBeInstanceOf(ExecInfraError);
-    expect(t.consecutiveInfraFailures).toBe(2);
-  });
-
-  it("resets the count on any successful op", async () => {
-    let calls = 0;
-    const t = new ExecHealthTracker(
-      scripted(async () => {
-        calls++;
-        if (calls === 1) throw new ExecInfraError("boom");
-        return "ok";
-      }),
-    );
-    await expect(t.exec("x")).rejects.toBeInstanceOf(ExecInfraError);
-    expect(t.consecutiveInfraFailures).toBe(1);
-    await t.exec("x");
-    expect(t.consecutiveInfraFailures).toBe(0);
-  });
-
-  it("leaves the count untouched on a non-infra throw (not a health signal, not a reset)", async () => {
-    let calls = 0;
-    const t = new ExecHealthTracker(
-      scripted(async () => {
-        calls++;
-        if (calls === 1) throw new ExecInfraError("boom");
-        throw new Error("Path escapes workspace"); // an ordinary tool error
-      }),
-    );
-    await expect(t.exec("x")).rejects.toBeInstanceOf(ExecInfraError);
-    expect(t.consecutiveInfraFailures).toBe(1);
-    await expect(t.exec("x")).rejects.toThrow("Path escapes workspace");
-    expect(t.consecutiveInfraFailures).toBe(1); // unchanged
-  });
-
-  // Feature: docs/reference/specs/execution.md item 14 — a full fleet is capacity, not a
-  // dead sandbox: ExecCapacityError is deliberately NOT an ExecInfraError, so
-  // it must neither count toward fail-fast nor reset a real streak.
-  it("leaves the count untouched on ExecCapacityError (a full fleet is not a dead sandbox)", async () => {
-    let calls = 0;
-    const t = new ExecHealthTracker(
-      scripted(async () => {
-        calls++;
-        if (calls === 1) throw new ExecInfraError("boom");
-        throw new ExecCapacityError("sandbox fleet busy — no free per-thread sandbox after waiting 300s");
-      }),
-    );
-    await expect(t.exec("x")).rejects.toBeInstanceOf(ExecInfraError);
-    expect(t.consecutiveInfraFailures).toBe(1);
-    await expect(t.exec("x")).rejects.toBeInstanceOf(ExecCapacityError);
-    await expect(t.exec("x")).rejects.toBeInstanceOf(ExecCapacityError);
-    expect(t.consecutiveInfraFailures).toBe(1); // unchanged: neither counted nor reset
-    expect(t.lastInfraError).toBe("boom");
-  });
-
-  it("remembers the LAST infra error's text (for a truthful abort diagnosis) and forgets it on success", async () => {
-    let calls = 0;
-    const t = new ExecHealthTracker(
-      scripted(async () => {
-        calls++;
-        if (calls === 1) throw new ExecInfraError("first: transport reset");
-        if (calls === 2) throw new ExecInfraError("second: Process handle refers to a previous runtime incarnation");
-        return "ok";
-      }),
-    );
-    expect(t.lastInfraError).toBeUndefined();
-    await expect(t.exec("x")).rejects.toBeInstanceOf(ExecInfraError);
-    expect(t.lastInfraError).toBe("first: transport reset");
-    await expect(t.exec("x")).rejects.toBeInstanceOf(ExecInfraError);
-    expect(t.lastInfraError).toBe("second: Process handle refers to a previous runtime incarnation");
-    await t.exec("x");
-    expect(t.lastInfraError).toBeUndefined();
-  });
-
-  it("a normal nonzero exit (returned as output, no throw) resets the count", async () => {
-    let calls = 0;
-    const t = new ExecHealthTracker(
-      scripted(async () => {
-        calls++;
-        if (calls === 1) throw new ExecInfraError("boom");
-        return "exit 1:\nnpm ERR!"; // a normal command failure is output, not a throw
-      }),
-    );
-    await expect(t.exec("x")).rejects.toBeInstanceOf(ExecInfraError);
-    expect(t.consecutiveInfraFailures).toBe(1);
-    expect(await t.exec("x")).toContain("exit 1");
-    expect(t.consecutiveInfraFailures).toBe(0);
-  });
-
-  it("forwards the exec abort signal to the inner executor (hard stop reaches the sandbox)", async () => {
-    let seen: AbortSignal | undefined;
-    const inner: Executor = {
-      exec: async (_c, opts) => {
-        seen = opts?.signal;
-        return "ok";
-      },
-      readFile: async () => "",
-      writeFile: async () => "",
-    };
-    const ctl = new AbortController();
-    await new ExecHealthTracker(inner).exec("x", { signal: ctl.signal });
-    expect(seen).toBe(ctl.signal);
-  });
-});
-
-// Feature: docs/reference/specs/run-loop.md item 8 — a hard stop's AbortSignal kills
+// Feature: docs/reference/specs/harness-pi.md item 6 — a hard stop's AbortSignal kills
 // the local child process instead of waiting out its 5-minute budget.
 describe("LocalExecutor exec abort", () => {
   it("kills a running command when the signal aborts and returns an exit line, never throws", async () => {

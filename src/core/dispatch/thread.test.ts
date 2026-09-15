@@ -19,7 +19,6 @@ const session = (range: RunSession["range"]): RunSession => ({
   range,
 });
 const closed = session({ from: 0, to: 9 });
-const onPi = (agent: string) => agent === "coding";
 
 describe("readThread — one page of the thread's newest runs", () => {
   afterEach(() => vi.restoreAllMocks());
@@ -47,19 +46,17 @@ describe("readThread — one page of the thread's newest runs", () => {
 });
 
 describe("stickyAgentOf — the thread's agent by transcript", () => {
-  it("the newest run's agent when that run finished with a session log and runs on the pi harness", () => {
+  it("the newest run's agent when that run finished with a session log, whatever its preset", () => {
     expect(
-      stickyAgentOf([run({ id: "r2", agent: "coding", session: closed }), run({ id: "r1", agent: "review" })], onPi),
+      stickyAgentOf([run({ id: "r2", agent: "coding", session: closed }), run({ id: "r1", agent: "review" })]),
     ).toBe("coding");
+    expect(stickyAgentOf([run({ id: "r1", agent: "review", session: closed })])).toBe("review");
   });
 
-  it("nothing when the newest run is live, has no session log (refused at a gate, or from before the log), runs on the native loop, or the thread has no run", () => {
-    expect(
-      stickyAgentOf([run({ id: "live", agent: "coding", finished: false, session: closed })], onPi),
-    ).toBeUndefined();
-    expect(stickyAgentOf([run({ id: "r1", agent: "coding" })], onPi)).toBeUndefined();
-    expect(stickyAgentOf([run({ id: "r1", agent: "review", session: closed })], onPi)).toBeUndefined();
-    expect(stickyAgentOf([], onPi)).toBeUndefined();
+  it("nothing when the newest run is live, has no session log (refused at a gate, or from before the log), or the thread has no run", () => {
+    expect(stickyAgentOf([run({ id: "live", agent: "coding", finished: false, session: closed })])).toBeUndefined();
+    expect(stickyAgentOf([run({ id: "r1", agent: "coding" })])).toBeUndefined();
+    expect(stickyAgentOf([])).toBeUndefined();
   });
 });
 

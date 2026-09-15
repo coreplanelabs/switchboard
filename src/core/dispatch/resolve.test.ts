@@ -7,8 +7,6 @@ import { getAgent, type Identity, type MachineClass } from "../../agents/registr
 import { declaredProfile } from "../../config/profile.js";
 import { resetResidentProbeCache } from "../../execution/factory.js";
 import { resolveGithubToken } from "../../execution/githubApp.js";
-import type { ProviderRegistry } from "../../providers/registry.js";
-import type { Provider } from "../provider.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import type { RepoContext } from "../repoContext.js";
 import type { ChannelIO, HistoryItem, IncomingMessage } from "../types.js";
@@ -75,25 +73,6 @@ const msg = (text: string): IncomingMessage => ({
   text,
 });
 
-/** A provider registry that hands out one fake provider and remembers what it was asked for. */
-function providers(): { registry: ProviderRegistry; asked: string[]; provider: Provider } {
-  const asked: string[] = [];
-  const provider: Provider = {
-    name: "fake",
-    async complete() {
-      return { content: [{ type: "text", text: "answer" }], stopReason: "end_turn" };
-    },
-  };
-  const registry = {
-    get: (name: string) => {
-      asked.push(name);
-      if (name !== "anthropic") throw new Error(`Unknown provider "${name}"`);
-      return provider;
-    },
-  } as unknown as ProviderRegistry;
-  return { registry, asked, provider };
-}
-
 function root(message: IncomingMessage) {
   return startRequestRoot({ clock: () => NOW }, { channel: channelOf(message.channelId), receivedAt: NOW });
 }
@@ -122,15 +101,16 @@ describe("readRequest — the request as the model will see it", () => {
 });
 
 describe("resolveRun — the (agent, model, effort) triple", () => {
-  const deps = (): ResolveDeps => ({ config: configStore(), providers: providers().registry });
+  const deps = (): ResolveDeps => ({ config: configStore() });
 
   it("a request directive wins over the thread's sticky directive, which wins over the defaults", () => {
-    const history: HistoryItem[] = [{ role: "user", text: "agent:coding effort:low start the work" }];
+    const history: HistoryItem[] = [{ role: "user", text: "effort:low start the work" }];
     const message = msg("agent:review and now review it");
     const { sticky, resolved } = resolveRun(deps(), {
       msg: message,
       directives: { agent: "review", text: "and now review it" },
       history,
+      stickyAgent: "coding",
     });
     expect(sticky.agent).toBe("coding");
     expect(sticky.effort).toBe("low");
@@ -139,16 +119,25 @@ describe("resolveRun — the (agent, model, effort) triple", () => {
     expect(resolved.effort).toBe("low"); // no effort on this message: the thread's sticky effort still applies
   });
 
-  it("a follow-up without directives runs on the agent the thread established", () => {
+  it("a follow-up without directives runs on the agent the thread established — the caller's read of the thread's transcript; an agent: token in the history alone establishes nothing", () => {
     const history: HistoryItem[] = [{ role: "user", text: "agent:coding start the work" }];
-    const { resolved } = resolveRun(deps(), { msg: msg("continue"), directives: { text: "continue" }, history });
-    expect(resolved.agentName).toBe("coding");
-    expect(resolved.modelRef).toBe("anthropic/coding-model");
+    const byTranscript = resolveRun(deps(), {
+      msg: msg("continue"),
+      directives: { text: "continue" },
+      history,
+      stickyAgent: "coding",
+    });
+    expect(byTranscript.resolved.agentName).toBe("coding");
+    expect(byTranscript.resolved.modelRef).toBe("anthropic/coding-model");
+    expect(byTranscript.agentSource).toBe("sticky");
+    const fromHistory = resolveRun(deps(), { msg: msg("continue"), directives: { text: "continue" }, history });
+    expect(fromHistory.sticky.agent).toBeUndefined();
+    expect(fromHistory.resolved.agentName).toBe("general");
   });
 
-  // routing-and-config item 3, the store-read clause: the agent of the thread's
-  // newest continuable run on the pi harness is sticky by transcript.
-  it("the thread's sticky agent by transcript wins over the user turns' derivation; a directive still wins over both; model and effort stay the turns'", () => {
+  // routing-and-config item 3: the agent of the thread's newest continuable run
+  // is sticky by transcript; the model and the effort are the user turns'.
+  it("the thread's sticky agent by transcript joins the user turns' model and effort; a directive still wins over it", () => {
     const history: HistoryItem[] = [{ role: "user", text: "agent:review effort:low look at it" }];
     const byTranscript = resolveRun(deps(), {
       msg: msg("continue"),
@@ -180,21 +169,19 @@ describe("resolveRun — the (agent, model, effort) triple", () => {
   });
 });
 
-describe("resolveTarget — the provider, and the target repo/ref/PR started", () => {
+describe("resolveTarget — the provider checked, and the target repo/ref/PR started", () => {
   const message = msg("fix the login bug in acme/api");
   const history: HistoryItem[] = [];
   const resolvedFor = (agentName: string) =>
     resolveRun(
-      { config: configStore(), providers: providers().registry },
+      { config: configStore() },
       { msg: message, directives: { agent: agentName, text: message.text }, history },
     ).resolved;
 
   it("an agent that declares no repository resolves none: the resolver is never asked, the context is empty", async () => {
-    const p = providers();
     const calls: unknown[] = [];
     const deps: ResolveDeps = {
       config: configStore(),
-      providers: p.registry,
       resolveRepoContext: (m, h) => {
         calls.push([m, h]);
         return { repo: "acme/api" };
@@ -211,12 +198,35 @@ describe("resolveTarget — the provider, and the target repo/ref/PR started", (
       resume: undefined,
       root: root(message).root,
     });
-    expect(out.provider).toBe(p.provider);
-    expect(out.model).toBe("general-model");
-    expect(p.asked).toEqual(["anthropic"]);
     expect(out.needsRepo).toBe(false);
     expect(await out.repoCtxP).toEqual({});
     expect(calls).toEqual([]);
+  });
+
+  // The run's own model calls go through the proxy with the config's key, so
+  // a model ref naming a provider the config lacks is refused here, before any
+  // card — not at pi's first model call, minutes in.
+  it("a model ref naming a provider the config does not have throws by name before any card, listing the configured ones", () => {
+    const agent = getAgent("general");
+    const resolved = resolveRun(
+      { config: configStore() },
+      { msg: message, directives: { agent: "general", model: "nope/some-model", text: message.text }, history },
+    ).resolved;
+    expect(resolved.modelRef).toBe("nope/some-model");
+    expect(() =>
+      resolveTarget(
+        { config: configStore() },
+        {
+          msg: message,
+          history,
+          agent,
+          profile: declaredProfile(agent),
+          resolved,
+          resume: undefined,
+          root: root(message).root,
+        },
+      ),
+    ).toThrow(/Unknown provider "nope"\. Configured providers: anthropic/);
   });
 
   it("a repo-needing agent resolves the target through the injected resolver, once, with the message and the history; an empty answer means no repo", async () => {
@@ -224,7 +234,6 @@ describe("resolveTarget — the provider, and the target repo/ref/PR started", (
     let answer: RepoContext = { repo: "acme/api", ref: "main" };
     const deps: ResolveDeps = {
       config: configStore(),
-      providers: providers().registry,
       resolveRepoContext: (m, h) => {
         calls.push([m, h]);
         return answer;
@@ -261,7 +270,6 @@ describe("resolveTarget — the provider, and the target repo/ref/PR started", (
     const calls: unknown[] = [];
     const deps: ResolveDeps = {
       config: configStore(),
-      providers: providers().registry,
       resolveRepoContext: () => {
         calls.push(1);
         return { repo: "acme/other" };
@@ -287,7 +295,6 @@ describe("resolveTarget — the provider, and the target repo/ref/PR started", (
     const calls: unknown[] = [];
     const deps: ResolveDeps = {
       config: store,
-      providers: providers().registry,
       resolveRepoContext: () => {
         calls.push(1);
         return {};
@@ -340,14 +347,13 @@ describe("resolveTarget — the vet a machine class gets", () => {
    *  identity), resolved by the production resolver. */
   function target(machine: MachineClass, identity: Identity = "write") {
     const store = configStore(RESIDENT_YAML);
-    const p = providers();
     const resolved = resolveRun(
-      { config: store, providers: p.registry },
+      { config: store },
       { msg: message, directives: { agent: "coding", text: message.text }, history: [] },
     ).resolved;
     const agent = { ...getAgent("coding"), machine, identity };
     return resolveTarget(
-      { config: store, providers: p.registry },
+      { config: store },
       {
         msg: message,
         history: [],

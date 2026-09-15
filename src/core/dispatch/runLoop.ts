@@ -1,30 +1,24 @@
 // The run stage's loop (docs/decisions/0024-dispatcher-as-a-staged-pipeline.md):
 // the model turn and everything that rides on it. The card frame the loop
-// paints (checklist, activity line, the shutdown notice); the agent loop with
-// the follow-up inbox; the reviewed-head settle; the workspace observation, the
-// description turn and the coding PR post-step; the answer published as the
-// record's source of truth; then the finish — the registry closed with the
-// terminal status, the friction diagnosis, the record registered for the drain
-// — and the workspace released on a failure. On pi the run's session outlives
-// the loop for the settle's re-review and the description turn (harness-pi
-// item 14) and is ended here after them. The stage's claim and the tools'
-// capabilities are run.ts.
+// paints (checklist, activity line, the shutdown notice); the run on the pi
+// harness (docs/reference/specs/harness-pi.md) with the follow-up inbox; the
+// reviewed-head settle; the workspace observation, the description turn and
+// the coding PR post-step; the answer published as the record's source of
+// truth; then the finish — the registry closed with the terminal status, the
+// friction diagnosis, the record registered for the drain — and the workspace
+// released on a failure. The run's pi session outlives the loop for the
+// settle's re-review and the description turn (harness-pi item 14) and is
+// ended here after them. The stage's claim and the tools' capabilities are
+// run.ts.
 import type { ResolvedRequest } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
 import type { CoordinatorTag } from "../coordinator/contract.js";
 import { budgetedAgent, type RunProfile } from "../../config/profile.js";
-import { mergeTools, runAgent, softStopAnswer, stuckLoopAnswer, timeBudgetAnswer } from "../../runner.js";
-import { parseModelRef, type Provider } from "../provider.js";
-import { TOOLSETS } from "../../tools/workspace.js";
-import { effectiveHarness } from "../harness/select.js";
+import { parseModelRef } from "../provider.js";
+import { mergeTools, TOOLSETS } from "../../tools/toolsets.js";
 import { piContainerFor } from "../harness/pi/botHostContainer.js";
-import {
-  piHarnessFactsOf,
-  relayedTools,
-  runPiHarnessOpen,
-  type OpenPiSession,
-  type PiHarnessFacts,
-} from "../harness/pi/harness.js";
+import { piHarnessFactsOf, runPiHarnessOpen, type OpenPiSession, type PiHarnessFacts } from "../harness/pi/harness.js";
+import { softStopAnswer, timeBudgetAnswer } from "../harness/pi/windDown.js";
 import { piRunPathsAt } from "../harness/pi/process.js";
 import { loopEndingOf, reviewPostedBefore, type LoopEnding } from "../runLedger/resume.js";
 import type { RouteDecided } from "./route.js";
@@ -41,13 +35,7 @@ import {
   type ReviewVerdict,
 } from "../reviewVerdict.js";
 import { parseDigestReport, type DigestReport } from "../diffDigest.js";
-import {
-  runReviewPostStep,
-  settleReviewedHead,
-  type makeSystemComposer,
-  type ReviewPostOutcome,
-  type RoundWorkspace,
-} from "../reviewRound.js";
+import { runReviewPostStep, settleReviewedHead, type ReviewPostOutcome, type RoundWorkspace } from "../reviewRound.js";
 import { postReviewComment } from "../../execution/githubComments.js";
 import { observeCodingWorkspace, runCodingPrPostStep, trackPushedBranch } from "../codingPrPostStep.js";
 import { descriptionTurnTarget, runDescriptionTurn } from "../descriptionTurn.js";
@@ -106,11 +94,8 @@ export interface RunLoopContext {
   /** The run's effective profile: the budget the runner is handed is its minutes. */
   profile: RunProfile;
   resolved: ResolvedRequest;
-  provider: Provider;
-  model: string;
   messages: ChatMessage[];
   system: string;
-  composeSystem: ReturnType<typeof makeSystemComposer>;
   mcpForRun: McpToolsForRun;
   run: RunHandle;
   registry: RunRegistry;
@@ -171,8 +156,8 @@ export interface RunLoopContext {
    *  record; `dispatch()` always hands it. */
   seed?: RunSeed;
   /** The run's model-proxy bearer as minted (docs/reference/specs/model-proxy.md):
-   *  a run on the pi harness hands it to pi as its provider key. Absent without
-   *  a store; a native run never reads it. */
+   *  the harness hands it to pi as its provider key. Absent without a store —
+   *  then no run can start here, and the loop says so by name. */
   bearer?: string;
 }
 
@@ -192,11 +177,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     io,
     profile,
     resolved,
-    provider,
-    model,
     messages,
     system,
-    composeSystem,
     mcpForRun,
     run,
     registry,
@@ -456,10 +438,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
   let carried: { reviewed: string; current: string; commits: number } | undefined;
   let runFailed = false; // the runner threw → terminal status `failed`
   let runDiagnosis: FrictionDiagnosis | undefined; // the finish-site diagnosis: the done card's shape line
-  // A run on pi keeps its pi alive past the loop (harness-pi item 14): the
+  // The run keeps its pi alive past the loop (harness-pi item 14): the
   // reviewed-head settle's re-review and the description turn below are one
   // more prompt on that session, and it is ended here once they are done — or
-  // on a throw, before the workspace pi runs in is released.
+  // on a throw, before the workspace pi runs in is released. A `finish` plan
+  // has none: the loop had answered before the restart and its pi is ended
+  // below, so the post-turns run no turn (item 14).
   let piSession: OpenPiSession | undefined;
   // Give the workspace back now rather than at the inactivity sweep: a
   // resident's pool user is a scarce slot (docs/reference/specs/resident-repos.md item
@@ -553,10 +537,6 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     onHandoff,
     onDispositions,
   };
-  // Which loop drives the run (docs/reference/specs/harness-pi.md item 1): the
-  // preset's harness, or the deployment's word for it. Everything before this
-  // point and everything after it is the same for both.
-  const harness = effectiveHarness(agent, deps.config.config.harness);
   // A resume whose plan is `finish` (run-history item 37): the model had
   // already answered when the previous generation died, so no loop runs here
   // and only the post-steps and the reply are owed, with that answer in hand.
@@ -583,7 +563,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
         kind: "resumed",
         summary: `resumed after a restart: the model had already answered (${describeEnding(loopEnding)}); running the post-steps with its answer`,
       });
-      if (harness === "pi" && piFacts) {
+      if (piFacts) {
         // pi's loop had ended too, but the process that would have ended pi
         // died first: end it at the pid and root the row recorded, best-effort,
         // and only in the container the row names (harness-pi item 8): in
@@ -603,12 +583,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
         }
       }
       answer = answerUnderEnding(finish.answer, loopEnding, agent.maxMinutes);
-    } else if (harness === "pi") {
+    } else {
       // The pi harness (harness-pi.md): pi in the run's own container, the
       // bearer as its key, the bridge putting its events on this same stream,
       // the relayed tools running here under this same tool context.
       if (!deps.harness)
-        throw new Error(`the ${agent.name} preset is on the pi harness, but this process has no harness deps`);
+        throw new Error(`the ${agent.name} preset runs on the pi harness, but this process has no harness deps`);
       // Where pi runs and how it reaches the bot follow the run's machine class
       // (harness-pi.md item 12): a class with a workspace has an executor to
       // exec through, and pi reaches the bot at its public URL; `none` has no
@@ -656,7 +636,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
           // every run on pi (harness-pi item 4); absent, pi's defaults stand.
           ...(deps.config.config.pi?.compaction ? { compaction: deps.config.config.pi.compaction } : {}),
           clock,
-          sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+          sleep: deps.harness.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
+          ...(deps.harness.pollMs !== undefined ? { pollMs: deps.harness.pollMs } : {}),
+          ...(deps.harness.tickMs !== undefined ? { tickMs: deps.harness.tickMs } : {}),
         },
         {
           runId: run.id,
@@ -665,7 +647,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
           model: { id: modelId, provider: providerName, providerType: providerCfg.type },
           system,
           messages,
-          tools: relayedTools(mergeTools(TOOLSETS[agent.toolset] ?? [], mcpForRun?.tools)),
+          tools: mergeTools(TOOLSETS[agent.toolset] ?? [], mcpForRun?.tools),
           toolContext,
           ...(session ? { notepad: () => session.readNotepad(), conversation: () => session.readConversation() } : {}),
           rules: {
@@ -702,39 +684,6 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
         },
       );
       answer = piSession.answer;
-    } else {
-      answer = await runAgent({
-        provider,
-        model,
-        agent,
-        messages,
-        system,
-        effort: resolved.effort,
-        toolContext,
-        ...(mcpForRun && mcpForRun.tools.length > 0 ? { extraTools: mcpForRun.tools } : {}),
-        onProgress,
-        onEvent,
-        span: root, // the loop is `run.agent` under the run's root (docs/reference/specs/tracing.md)
-        ...(round.selection.backend ? { backend: round.selection.backend } : {}),
-        control: run.control, // operator stop from /runs
-        inbox: admitted.inbox, // thread follow-ups steered into this run (thread-admission item 2)
-        ...(stageFollowUps ? { stageFollowUps } : {}),
-        // The step record before each step's tools (run-history item 35).
-        ...(ledgerRun ? { onStep: ledgerRun.step.bind(ledgerRun) } : {}),
-        // A resume re-enters the loop from the plan (run-history item 37).
-        ...(reentry
-          ? {
-              resume: {
-                settlements: reentry.settlements,
-                stepRecorded: reentry.stepRecorded,
-                inboxConsumedSeq: reentry.inboxConsumedSeq,
-                turn: reentry.turn,
-                iteration: reentry.iteration,
-                remainingMs: reentry.remainingMs,
-              },
-            }
-          : {}),
-      });
     }
     // Reviewed-head settle (docs/reference/specs/agent-review.md items 8 + 12,
     // settleReviewedHead in reviewRound.ts): for a PR review, read the
@@ -742,11 +691,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     // below releases the workspace — and reconcile a PR head that moved
     // during the run: adopt the current head when the run reviewed it,
     // carry the review across a rebase of the same commits, or void the
-    // verdict and re-review ONCE at the new head (worktree moved, prompt
-    // recomposed, one more model turn — on pi, one more prompt on the run's
-    // own session, harness-pi item 14). A hard stop observes nothing and
-    // settles nothing; a verdict already posted before a restart is settled
-    // (it landed at its head) and is not re-reviewed.
+    // verdict and re-review ONCE at the new head (worktree moved, one more
+    // prompt on the run's own pi session, harness-pi item 14). A hard stop
+    // observes nothing and settles nothing; a verdict already posted before a
+    // restart is settled (it landed at its head) and is not re-reviewed; a
+    // `finish` plan has no session, so a move it finds is left to the post
+    // gate (agent-review item 10).
     if (
       isPrReview &&
       repoCtx.repo &&
@@ -762,19 +712,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
         verdict,
         answer,
         messages,
-        composeSystem,
         executor,
         turn: {
-          provider,
-          model,
           agent,
-          effort: resolved.effort,
           toolContext,
-          extraTools: mcpForRun?.tools,
-          onProgress,
           onEvent,
           control: run.control,
-          ...(round.selection.backend ? { backend: round.selection.backend } : {}),
           ...(piSession ? { followUp: piSession.followUp } : {}),
         },
         fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
@@ -852,9 +795,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     // the answer lands or the workspace is released. The description arrives
     // through the same onPrDescription hook the first turn fed (so
     // `prDescription` and the ledger row see it); the workspace is observed
-    // again afterwards in case the turn pushed. A hard stop asks nothing. On
-    // pi the turn is one more prompt on the run's own session (harness-pi
-    // item 14), the same hook fed through the relay.
+    // again afterwards in case the turn pushed. A hard stop asks nothing. The
+    // turn is one more prompt on the run's own pi session (harness-pi item
+    // 14), the same hook fed through the relay; a `finish` plan has no session
+    // and asks nothing — the post-step's note then says the description was
+    // not resubmitted.
     let descriptionTurnRan = false;
     if (isCodingPrRun && run.control.requested !== "hard" && prDescription === undefined) {
       const turnTarget = await descriptionTurnTarget({
@@ -876,20 +821,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
           runDescriptionTurn({
             span,
             target: turnTarget,
-            answer,
-            messages,
-            system,
             turn: {
-              provider,
-              model,
               agent,
-              effort: resolved.effort,
               toolContext,
-              extraTools: mcpForRun?.tools,
               onProgress,
               onEvent,
-              control: run.control,
-              ...(round.selection.backend ? { backend: round.selection.backend } : {}),
               ...(piSession ? { followUp: piSession.followUp } : {}),
             },
             logKey: msg.threadKey,
@@ -1119,18 +1055,18 @@ function describeEnding(ending: LoopEnding): string {
 }
 
 /** The answer the thread would have seen had the previous generation lived to
- *  reply: the runner's own label for the ending (the ⏹ of a soft stop, the ⚠️
- *  of a budget or a stuck loop) over the write-up, or the text as it stands.
- *  The turn guard's and a dead sandbox's labels carry their note's summary,
- *  which names the pace or the diagnosis the runner would have put there. */
+ *  reply: the harness's own label for the ending (the ⏹ of a soft stop, the ⚠️
+ *  of a budget) over the write-up, or the text as it stands. The turn guard's
+ *  label — and the labels of the notes only the deleted native loop wrote
+ *  (`stuck_loop`, `sandbox_dead`), which a row from before this release may
+ *  still carry — carry their note's summary, which names the pace or the
+ *  diagnosis that loop put there. */
 function answerUnderEnding(text: string, ending: LoopEnding, maxMinutes: number): string {
   if (ending.kind === "answered") return text || "_(no response)_";
   if (ending.kind === "soft_stop") return softStopAnswer(text);
   switch (ending.note) {
     case "time_budget_exhausted":
       return timeBudgetAnswer(text, maxMinutes);
-    case "stuck_loop":
-      return stuckLoopAnswer(text);
     default:
       return text ? `⚠️ _${ending.summary}_\n\n${text}` : `⚠️ ${ending.summary}`;
   }

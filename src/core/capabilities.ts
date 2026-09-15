@@ -1,6 +1,6 @@
 import type { AppConfig } from "../config.js";
 import { parseMcpSettings } from "../mcp/config.js";
-import { anthropicApiKey } from "../providers/anthropic.js";
+import { anthropicApiKey } from "./anthropicApiKey.js";
 import { parseCostsConfig } from "./costs.js";
 import { resolveDashboardAuthMode, type DashboardAuthMode } from "./dashboardAuthConfig.js";
 import { parseIngressTokenMap } from "./ingressTokens.js";

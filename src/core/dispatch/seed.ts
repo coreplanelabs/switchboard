@@ -1,6 +1,6 @@
 // The session seed (docs/reference/specs/session-log.md item 9; records 0034
-// and 0035): what a follow-up on the pi harness starts from when its thread
-// and agent have a session log. The log's newest turns within the seed budget,
+// and 0035): what a follow-up starts from when its thread and agent have a
+// session log. The log's newest turns within the seed budget,
 // read by the object as whole turns (item 4) and cut here forward to the first
 // user turn that carries text — so the conversation opens as providers
 // require and no tool call is parted from its result — with thinking dropped
@@ -181,9 +181,9 @@ export function sessionSeed(input: {
 }
 
 /**
- * The seed for a follow-up whose agent runs on the pi harness, read from the
- * ledger: the log of this thread and agent (`sessionKey`), its tail within the
- * budget, the previous run of the agent off the thread's runs. A log that
+ * The seed for a follow-up, read from the ledger: the log of this thread and
+ * agent (`sessionKey`), its tail within the budget, the previous run of the
+ * agent off the thread's runs. A log that
  * cannot be read — a state Worker without the route, a failed request — is no
  * session: the run seeds from the channel, and the note says why.
  */

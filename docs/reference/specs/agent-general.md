@@ -2,9 +2,9 @@
 
 The default — the plain @-mention. A fast model with a small, workspace-free toolset: it answers directly, reads the org's repositories and acts on their issues through Switchboard's GitHub credential, and reads a linked URL — so the everyday asks are answered here, and only code changes, PR reviews, and web research are handed to the other agents.
 
-- **Code**: `src/agents/registry.ts` (`general`, `GENERAL_SYSTEM`), `src/tools/workspace.ts` (the `assistant` toolset), `src/tools/github.ts`, default model in the deployed config (`config/config.example.yaml` documents the key)
+- **Code**: `src/agents/registry.ts` (`general`, `GENERAL_SYSTEM`), `src/tools/toolsets.ts` (the `assistant` toolset), `src/tools/github.ts`, default model in the deployed config (`config/config.example.yaml` documents the key)
 - **Docs**: [The agents and their toolsets](../../explanation/agents-and-toolsets.md), [github-tools.md](github-tools.md)
-- **Budgets**: 5 min / 16k tokens (the turn guard is derived: 30, six a minute — [run-loop.md](run-loop.md) item 1) · toolset `assistant`
+- **Budgets**: 5 min / 16k tokens (the turn guard is derived: 30, six a minute — [harness-pi.md](harness-pi.md) item 15) · toolset `assistant`
 
 ## Behavior
 
@@ -14,13 +14,13 @@ The default — the plain @-mention. A fast model with a small, workspace-free t
 4. **Runs on machine class `none`** (`AgentDef.machine`): a general ask never creates, reconnects, or touches a sandbox or workspace — even when remote execution (E2B/Cloudflare) is configured, and even when the sandbox credential is missing. The GitHub tools are REST calls in the bot process, not a workspace. See [execution.md](execution.md) behavior 7.
 5. **Knows its own settings — and itself.** Like every agent, its system prompt carries the dispatcher's config block ([routing-and-config.md](routing-and-config.md) behavior 8) naming the agent/model that actually resolved and how users tune them, and the self-description block (behavior 11) saying what Switchboard is, which agents exist, how residents work, and where the source and specs live — so "what are your settings?" and "how does your resident system work?" are answered from fact, never with a confabulated "I'm stateless" or a public-web 404.
 6. **Issue writes are permission-gated per repo** ([github-tools.md](github-tools.md) item 3): `restrict.repos` against the requesting user's `repos` grant, checked before any API call; a refusal is reported to the user, not retried.
-7. **Runs on the harness a deployment names.** The `harness` key applies to it like every preset ([harness-pi.md](harness-pi.md) item 1): `harness: { general: pi }` runs a general ask on pi as a child of the bot: no workspace, so none of pi's own shell or file tools, the `assistant` toolset relayed and run in the bot as the requesting user, pi reaching the model proxy over loopback, the same record ([harness-pi.md](harness-pi.md) item 12). Without the key the general preset declares no harness and runs the native loop byte for byte.
+7. **Runs on pi as a child of the bot.** Like every preset it runs on the pi harness ([harness-pi.md](harness-pi.md) item 1); having no workspace, its pi is a child of the bot itself: none of pi's own shell or file tools, the `assistant` toolset relayed and run in the bot as the requesting user, pi reaching the model proxy over loopback, the same record ([harness-pi.md](harness-pi.md) item 12).
 
 ## Validation criteria
 
 | Criterion | Proof |
 |---|---|
-| Toolset `assistant`, 5 min; the turn guard derived from the wall clock | `[unit]` `src/agents/registry.test.ts::general: the assistant toolset*`, `::the turn cap is a runaway guard derived from the wall clock (docs/reference/specs/run-loop.md item 1)::*` |
+| Toolset `assistant`, 5 min; the turn guard derived from the wall clock | `[unit]` `src/agents/registry.test.ts::general: the assistant toolset*`, `::the turn cap is a runaway guard derived from the wall clock…::*` |
 | `assistant` = GitHub reads + issue writes + `web_fetch` + `update_status`, nothing else | `[unit]` `src/tools/github.test.ts::toolset wiring::assistant has no shell*` |
 | Machine class `none` (coding and review declare `repo-resident`) | `[unit]` `src/agents/registry.test.ts::machine class declarations: coding and review run on repo-resident; general and research on none` |
 | With remote execution configured, a general ask provisions no sandbox and still answers | `[unit]` `src/core/dispatcher.test.ts::a general ask with remote execution configured provisions no sandbox and still answers` |
@@ -31,4 +31,4 @@ The default — the plain @-mention. A fast model with a small, workspace-free t
 | Self question → answered from the About block | `[agent]` `@switchboard how does your resident repo system work, and how do I add a repo?` (fresh thread, no directive) — expect residents, `repo onboard`, the cap, and a pointer to `docs/reference/specs/resident-repos.md`; never "I have no access". |
 | Issue ask → done, not redirected | `[agent]` `@switchboard open an issue on the switchboard app with the title "foo" and the body "bar"` → the reply quotes `<owner>/<repo>#<n>` + URL and the issue exists on GitHub. |
 | Code-change / PR-review ask → honest redirect | `[agent]` `@switchboard fix the flaky test in acme/api and open a PR` (no `agent:` directive, fresh thread) — expect a redirect to `agent:coding`; no invented diffs, commands-to-run-yourself, or fabricated output. |
-| 7: `harness: { general: pi }` runs a general ask on pi as a child of the bot with the assistant toolset relayed and none of pi's own tools; without the key, with `general: native`, or with a block moving another preset, the native loop runs and pi never starts | `[unit]` `src/core/dispatch/runLoop.test.ts::the harness seam: a preset without a workspace on pi, as a child of the bot::*` |
+| 7: a general ask runs on pi as a child of the bot with the assistant toolset relayed and none of pi's own tools | `[unit]` `src/core/dispatch/runLoop.test.ts::the pi harness — a preset without a workspace, as a child of the bot::*` |

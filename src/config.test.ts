@@ -26,8 +26,6 @@ import { ALL_GRANTS } from "./core/authz/grants.js";
 import { NO_GRANTS } from "./core/authz/types.js";
 import { resolveShipCaps, SHIP_DEFAULT_MAX_MINUTES, shipPresetFor } from "./core/shipPipeline.js";
 import { DEFAULT_MAX_CHILDREN, maxChildrenOf } from "./core/dispatch/spawn.js";
-import { OpenAICompatProvider } from "./providers/openaiCompat.js";
-import { ProviderRegistry } from "./providers/registry.js";
 import { PiAiProviders } from "./core/harness/piAi.js";
 
 // Feature: docs/reference/specs/routing-and-config.md — layered resolution & permission gates.
@@ -731,16 +729,17 @@ describe("routing block (routing.auto, routing.model)", () => {
   });
 });
 
-// Feature: docs/reference/specs/harness-pi.md item 1 — the `harness` block:
-// which loop drives each preset's runs, a deployment decision validated at
-// load so a misspelt preset or a value that is neither harness can never read
-// as a working setting.
-describe("harness block (harness.<preset>: native | pi)", () => {
-  it("parses a preset's harness; an absent block leaves the field unset (every preset on its own harness)", () => {
-    expect(store(YAML_FIXTURE + "harness:\n  coding: pi\n").config.harness).toEqual({ coding: "pi" });
-    expect(store(YAML_FIXTURE + "harness:\n  coding: native\n  review: native\n").config.harness).toEqual({
-      coding: "native",
-      review: "native",
+// Feature: docs/reference/specs/harness-pi.md item 1 — the `harness` block is
+// a retired key: it named a loop per preset while record 0032's series moved
+// the presets onto pi one at a time; there is one harness now. A config written
+// during the series still loads (every value `pi`), and `native` — the loop
+// that no longer exists — fails by name, so no setting reads as "this preset
+// runs the native loop" while nothing does.
+describe("harness block (a retired key: harness.<preset>: pi)", () => {
+  it("parses a mapping of presets to pi; an absent block leaves the field unset", () => {
+    expect(store(YAML_FIXTURE + "harness:\n  coding: pi\n  review: pi\n").config.harness).toEqual({
+      coding: "pi",
+      review: "pi",
     });
     expect(store().config.harness).toBeUndefined();
   });
@@ -749,17 +748,16 @@ describe("harness block (harness.<preset>: native | pi)", () => {
     expect(() => store(YAML_FIXTURE + "harness:\n  codng: pi\n")).toThrow(/harness\.codng is not a known agent/);
   });
 
-  it("refuses a value that is neither harness, naming the two", () => {
-    expect(() => store(YAML_FIXTURE + "harness:\n  coding: claude\n")).toThrow(
-      /harness\.coding must be one of native, pi/,
+  it("refuses `native` — the deleted loop — and any other value, naming the one harness and the deletion", () => {
+    expect(() => store(YAML_FIXTURE + "harness:\n  coding: native\n")).toThrow(
+      /harness\.coding must be pi — the native loop is deleted and every preset runs on pi/,
     );
-    expect(() => store(YAML_FIXTURE + "harness:\n  coding: true\n")).toThrow(
-      /harness\.coding must be one of native, pi/,
-    );
+    expect(() => store(YAML_FIXTURE + "harness:\n  coding: claude\n")).toThrow(/harness\.coding must be pi/);
+    expect(() => store(YAML_FIXTURE + "harness:\n  coding: true\n")).toThrow(/harness\.coding must be pi/);
   });
 
   it("refuses a non-mapping at load", () => {
-    expect(() => store(YAML_FIXTURE + "harness: pi\n")).toThrow(/harness must be a mapping of preset to harness/);
+    expect(() => store(YAML_FIXTURE + "harness: pi\n")).toThrow(/harness must be a mapping of preset to pi/);
   });
 });
 
@@ -863,34 +861,17 @@ describe("the example config's commented provider blocks", () => {
     return new ConfigStore(cfg, join(dir, "overrides.json"));
   };
 
-  it("the OpenRouter block, uncommented, loads and ProviderRegistry builds an openai-compatible provider from it with the trailing slash stripped from baseUrl", () => {
+  // Feature: docs/reference/specs/harness-pi.md item 13 — the block is the one
+  // the router and reflection reach OpenRouter through, on pi's library.
+  it("the OpenRouter block, uncommented, loads and is one openai-completions model on pi's library — the same base, the trailing slash stripped, the key from the block's variable", () => {
     const yaml = uncommented("openrouter");
     expect(yaml).toContain("\n  openrouter:\n    type: openai-compatible\n");
-
     const store = storeFrom(yaml);
     expect(store.config.providers.openrouter).toEqual({
       type: "openai-compatible",
       baseUrl: "https://openrouter.ai/api/v1",
       apiKeyEnv: "OPENROUTER_API_KEY",
     });
-
-    const provider = new ProviderRegistry(store.config.providers).get("openrouter");
-    expect(provider).toBeInstanceOf(OpenAICompatProvider);
-    expect((provider as unknown as { baseUrl: string }).baseUrl).toBe("https://openrouter.ai/api/v1");
-
-    // The same block with a trailing slash on baseUrl reaches the adapter without it.
-    const slashed = storeFrom(
-      yaml.replace("baseUrl: https://openrouter.ai/api/v1", "baseUrl: https://openrouter.ai/api/v1/"),
-    );
-    expect(slashed.config.providers.openrouter?.baseUrl).toBe("https://openrouter.ai/api/v1/");
-    const fromSlashed = new ProviderRegistry(slashed.config.providers).get("openrouter");
-    expect((fromSlashed as unknown as { baseUrl: string }).baseUrl).toBe("https://openrouter.ai/api/v1");
-  });
-
-  // Feature: docs/reference/specs/harness-pi.md item 13 — the same block is the
-  // one the router and reflection reach OpenRouter through, on pi's library.
-  it("the OpenRouter block, uncommented, is one openai-completions model on pi's library too — the same base, the trailing slash stripped, the key from the block's variable", () => {
-    const store = storeFrom(uncommented("openrouter"));
     const provider = new PiAiProviders(store.config.providers, { secrets: secretsFrom({}) }).get("openrouter");
     expect(provider).toMatchObject({
       name: "openrouter",

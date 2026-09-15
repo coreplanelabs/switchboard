@@ -60,22 +60,25 @@ const resumable = (over: Partial<ResumeRun> = {}): ResumeRun => ({
   row: row(),
   reclaimedFrom: "live",
   lastStep: step(),
-  transcript: { complete: true, turns: 2, messages: [user("go"), calling("c1", "read_file")], compactions: [] },
+  transcript: { complete: true, turns: 2, messages: [user("go"), calling("c1", "read")], compactions: [] },
   events: [
     { type: "input", messageId: "m1", text: "please review", at: 1, seq: 1 },
-    { type: "tool_call", tool: "read_file", summary: "x", at: 2, seq: 2 },
+    { type: "tool_call", tool: "read", summary: "x", at: 2, seq: 2 },
   ],
   inbox: [{ seq: 1, message: { text: "also the numbers", userId: "slack:UBOB" } }],
   ...over,
 });
-const reviewAgent = { toolset: "readonly" } as AgentDef;
+const reviewAgent = { toolset: "readonly", identity: "read" } as AgentDef;
 
 describe("the pure pieces", () => {
-  it("knownToolsFor names the agent's static tools with their side-effect-free flag; a toolset with none is empty", () => {
-    const tools = knownToolsFor({ toolset: "readonly" });
-    expect(tools.find((t) => t.name === "read_file")).toEqual({ name: "read_file", sideEffectFree: true });
-    expect(tools.some((t) => t.name === "write_file")).toBe(false); // readonly: reads (and a read-only shell), no writes
-    expect(knownToolsFor({ toolset: "none" })).toEqual([]);
+  it("knownToolsFor names the toolset the bot relays with its side-effect-free flags, plus pi's own workspace tools for the identity — reads side-effect-free, the shell not, no write tool for a read identity; a preset without a workspace has the relayed ones alone", () => {
+    const tools = knownToolsFor({ toolset: "readonly", identity: "read" });
+    expect(tools.find((t) => t.name === "web_fetch")).toEqual({ name: "web_fetch", sideEffectFree: true });
+    expect(tools.find((t) => t.name === "read")).toEqual({ name: "read", sideEffectFree: true });
+    expect(tools.find((t) => t.name === "bash")).toEqual({ name: "bash" });
+    expect(tools.some((t) => t.name === "write" || t.name === "edit")).toBe(false); // read identity: no writes
+    expect(knownToolsFor({ toolset: "full", identity: "write" }).some((t) => t.name === "edit")).toBe(true);
+    expect(knownToolsFor({ toolset: "none", identity: "none" })).toEqual([]);
   });
 
   it("inputTextOf is the first input event's text, or empty", () => {

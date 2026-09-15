@@ -14,7 +14,7 @@ import {
   githubTreeTool,
   githubIssueCommentTool,
 } from "./github.js";
-import { TOOLSETS } from "./workspace.js";
+import { TOOLSETS } from "./toolsets.js";
 import type { ToolContext } from "./runnableTool.js";
 import type { Executor } from "../execution/executor.js";
 
@@ -230,23 +230,13 @@ describe("toolset wiring", () => {
   });
 
   // docs/reference/specs/agent-explore.md item 2: the investigation preset's
-  // reach — a shell and file reads, the web (search included), the skill tools
-  // and the GitHub reads; nothing that writes a file, submits a verdict, a
-  // description, dispositions or a handoff, or writes an issue.
-  it("explore holds bash, read_file, update_status, web_fetch, web_search, the skill tools, the session tools and the GitHub reads — no write_file, no submit_*, no issue writes", () => {
+  // relayed reach — the web (search included), the skill tools, the session
+  // tools and the GitHub reads; nothing that submits a verdict, a description,
+  // dispositions or a handoff, or writes an issue. Its shell and file reads
+  // are pi's own tools in its cold sandbox, never rows of this table.
+  it("explore relays update_status, web_fetch, web_search, the skill tools, the session tools and the GitHub reads — no submit_*, no issue writes, and none of pi's own workspace tools", () => {
     expect(names("explore").sort()).toEqual(
-      [
-        "bash",
-        "read_file",
-        "update_status",
-        "web_fetch",
-        "web_search",
-        "list_skills",
-        "use_skill",
-        "recall",
-        "notes",
-        ...reads,
-      ].sort(),
+      ["update_status", "web_fetch", "web_search", "list_skills", "use_skill", "recall", "notes", ...reads].sort(),
     );
     expect(names("explore").filter((n) => n.startsWith("submit_"))).toEqual([]);
   });

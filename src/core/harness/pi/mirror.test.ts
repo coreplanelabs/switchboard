@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { StepReport } from "../../../runner.js";
+import type { StepReport } from "../../runLedger/stepReport.js";
 import type { ChatMessage } from "../../chatMessage.js";
 import { PiMirror, chatMessageOf, piSessionFile } from "./mirror.js";
 

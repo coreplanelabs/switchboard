@@ -438,6 +438,7 @@ export const awaitRunsTool: RunnableTool = {
     }
     const { wait } = ctx;
     const startedAt = wait.now();
+    const arrivedAtStart = wait.followUpsArrived();
     const budgetEndsAt = budgetEndOf(startedAt, ctx.remainingMs?.() ?? Number.POSITIVE_INFINITY);
     const timeoutAt = timeoutMinutes !== undefined ? startedAt + timeoutMinutes * 60_000 : undefined;
     const watch = new ChildrenWatch(ids);
@@ -456,7 +457,7 @@ export const awaitRunsTool: RunnableTool = {
         budgetEndsAt,
         timeoutAt,
         stop: wait.stopRequested(),
-        followUpPending: wait.followUpsPending() > 0,
+        followUpPending: wait.followUpsArrived() > arrivedAtStart,
       });
       if (decision.kind === "end") {
         const running = watch.pending();

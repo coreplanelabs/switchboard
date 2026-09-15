@@ -140,11 +140,13 @@ describe("waitCapabilityFor — what a waiting tool watches", () => {
       },
     });
     expect(cap.stopRequested()).toBeUndefined();
-    expect(cap.followUpsPending()).toBe(0);
+    expect(cap.followUpsArrived()).toBe(0);
     control.requestStop("soft");
     inbox.push({ text: "also", userId: "slack:U", at: NOW });
     expect(cap.stopRequested()).toBe("soft");
-    expect(cap.followUpsPending()).toBe(1);
+    expect(cap.followUpsArrived()).toBe(1);
+    inbox.drain(); // the harness drained it: the arrival still counts
+    expect(cap.followUpsArrived()).toBe(1);
     expect(cap.now()).toBe(NOW);
 
     const child = registry.create("child", { channelId: "slack:C", userId: "slack:U", threadKey: "slack:C:1" });

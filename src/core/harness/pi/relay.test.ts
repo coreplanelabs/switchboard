@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Executor } from "../../../execution/executor.js";
 import type { ChatMessage } from "../../chatMessage.js";
 import { awaitRunsTool, sendToRunTool, spawnRunTool } from "../../../tools/runs.js";
-import { TOOLSETS } from "../../../tools/workspace.js";
+import { TOOLSETS } from "../../../tools/toolsets.js";
 import { submitVerdictTool } from "../../../tools/submit.js";
 import type { RunnableTool } from "../../../tools/runnableTool.js";
 import { ALL_GRANTS } from "../../authz/grants.js";
@@ -29,7 +29,6 @@ import {
   type LiveHarness,
   type RelayedToolAnswer,
 } from "./relay.js";
-import { relayedTools } from "./harness.js";
 
 // Feature: docs/reference/specs/harness-pi.md item 7 — the bot's side of the
 // extension: the tool definitions served as they are declared, the gate that
@@ -123,7 +122,7 @@ describe("relayedToolDefinitions", () => {
   });
   it("a review run's pi is served the readonly toolset's submit_verdict as the native tool declares it — the description that says to run `git rev-parse HEAD`, and a schema requiring `head` beside the verdict and the summary (harness-pi item 11)", () => {
     const { harness } = live({ identity: "read" });
-    harness.tools = relayedTools(TOOLSETS.readonly);
+    harness.tools = TOOLSETS.readonly;
     const served = relayedToolDefinitions(harness).find((d) => d.name === "submit_verdict")!;
     expect(served).toEqual({
       name: "submit_verdict",
@@ -421,7 +420,7 @@ const answerOf = (text: string) => ({ done: true, answer: { content: [{ type: "t
 describe("the research preset on pi: the web toolset relayed, run in the bot as the requesting user", () => {
   const research = () => {
     const w = live({ identity: "none" });
-    w.harness.tools = relayedTools(TOOLSETS.web);
+    w.harness.tools = TOOLSETS.web;
     w.harness.toolContext = { executor, web: webCapability() };
     return w;
   };
@@ -565,7 +564,7 @@ describe("relayToolCall: a relayed call that outlives one request", () => {
     } as unknown as RunsService;
     const wait: WaitCapability = {
       stopRequested: () => undefined,
-      followUpsPending: () => 0,
+      followUpsArrived: () => 0,
       watch: () => () => {},
       now: () => Date.now(),
       sleep: sleepUnlessAborted,

@@ -70,13 +70,25 @@ export function configAwarenessBlock(i: ConfigAwarenessInput): string {
   ];
 
   const fromMessage = fmtDirective(i.messageDirective);
-  const fromThread = fmtDirective(i.threadDirective);
+  // The thread carries its agent by transcript — the agent of its newest
+  // finished run, never an `agent:` token in its history (routing-and-config
+  // item 3) — and its model and effort from the directives its user turns
+  // carry, so the two halves are attributed apart.
+  const { agent: threadAgent, ...threadRest } = i.threadDirective;
+  const fromThread = fmtDirective(threadRest);
   if (fromMessage) {
     lines.push(`This message's \`${fromMessage}\` directive set the agent/model/effort for this run.`);
-  } else if (fromThread) {
-    lines.push(
-      `A \`${fromThread}\` directive earlier in this thread set the agent/model/effort for this run (thread stickiness).`,
-    );
+  } else {
+    if (threadAgent) {
+      lines.push(
+        `The thread's earlier \`${threadAgent}\` run set the agent for this run (thread stickiness: a follow-up continues the agent whose conversation the thread holds).`,
+      );
+    }
+    if (fromThread) {
+      lines.push(
+        `A \`${fromThread}\` directive earlier in this thread set the model/effort for this run (thread stickiness).`,
+      );
+    }
   }
 
   // Custom instructions: name WHICH scopes carry them, never

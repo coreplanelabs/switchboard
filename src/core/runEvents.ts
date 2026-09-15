@@ -59,22 +59,28 @@ export interface PrDescriptionArtifactEvent extends PrDescriptionArtifact {
 // exhaustion, dead sandbox) as typed kinds instead of only free-text progress.
 // All additive: consumers that only know tool_call/tool_result keep working.
 
-/** Typed lifecycle notices the runner emits alongside its `onProgress` text.
+/** Typed lifecycle notices the harness emits alongside its `onProgress` text.
  *  `stop_requested` is published by the registry when an operator asks the run
- *  to stop from /runs; `stopped` by the runner when it honors it. */
+ *  to stop from /runs; `stopped` by the harness when it honors it. */
 export type RunNoteKind =
   | "wrap_up"
   | "time_budget_exhausted"
   | "turn_budget_exhausted"
+  /** The native loop's fail-fast on a wedged sandbox. Written by no loop since
+   *  record 0032's series deleted that loop; a record from before it may carry
+   *  the note, and every reader still knows the kind. */
   | "sandbox_dead"
   /** The sandbox fleet had no free instance for this thread within the
    *  executor's bounded wait (docs/reference/specs/execution.md item 14). Capacity, not a
-   *  dead sandbox: the run goes on and the model is told to retry or finish. */
+   *  dead sandbox. Written by the native loop, whose tool call the executor's
+   *  wait had refused; on pi the container is provisioned before pi starts, so
+   *  the note is a record fact from before the loop's deletion. */
   | "fleet_busy"
   /** The sandbox restarted under the run and came back (docs/reference/specs/
    *  resident-repos.md item 65): the executor waited for the resident's wake
-   *  and re-attached; the interrupted call was settled with a synthetic
-   *  result (run-loop.md item 19) and the run goes on. */
+   *  and re-attached. The native loop settled the interrupted call and went
+   *  on; the pi harness has no such settlement yet (harness-pi.md, the item 19
+   *  gap), so the note is a record fact from before the loop's deletion. */
   | "sandbox_restarted"
   | "stop_requested"
   | "stopped"
@@ -154,9 +160,9 @@ export type RunNoteKind =
    *  item 7): the summary names the tool and the rule; the model read the same
    *  reason as the tool's result. Published by the bot's authorize route. */
   | "tool_refused"
-  /** The stuck-loop guard fired (docs/reference/specs/run-loop.md item 18):
-   *  the same tool call failed identically six times in a row, so the run is
-   *  forced into its write-up instead of looping to the wall clock. */
+  /** The native loop's stuck-loop guard: the same tool call failed identically
+   *  six times in a row and the run was forced into its write-up. Written by
+   *  no loop since that loop's deletion; a record from before it may carry it. */
   | "stuck_loop";
 
 /** Every `RunNoteKind`, as a value (a reader that filters notes by kind uses
@@ -692,11 +698,11 @@ export function parseExitPrefix(output: string): { failed: boolean; exitCode?: n
  *  that opens `error:` (`attach_file`, the `submit_*` tools, the run tools —
  *  each declares `failsInText` on its `RunnableTool`) instead of throwing, so
  *  the model can read the reason and go on. The record must call that result
- *  what the model reads it as: `ok:false`. Both loops (the native runner and
- *  the pi bridge) derive `ok` for such a tool through this one reader; bash
- *  keeps `parseExitPrefix`; a tool relaying content it did not write is never
- *  read this way. Ordinary output that merely contains the word later on is a
- *  success. */
+ *  what the model reads it as: `ok:false`. The pi bridge derives `ok` for such
+ *  a tool through this one reader (the native loop did too, before record
+ *  0032's series deleted it); bash keeps `parseExitPrefix`; a tool relaying
+ *  content it did not write is never read this way. Ordinary output that
+ *  merely contains the word later on is a success. */
 export function toolTextFailed(output: string): boolean {
   return /^\s*error:/i.test(stripAnsi(output));
 }

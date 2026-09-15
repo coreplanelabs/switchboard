@@ -5,7 +5,6 @@ import { OPERATOR_ROOT } from "./deploy/host.js";
 import { installationPath } from "./deploy/operatorRoot.js";
 import { openConfigStore } from "./config.js";
 import { capabilitiesFrom } from "./core/capabilities.js";
-import { ProviderRegistry } from "./providers/registry.js";
 import { PiAiProviders } from "./core/harness/piAi.js";
 import { createSlackApp } from "./channels/slack.js";
 import { SlackChannelDirectory } from "./channels/slackChannelDirectory.js";
@@ -172,9 +171,9 @@ export async function runBot(): Promise<void> {
     meatBinary: meatOnPath(publicEnv()),
   });
   console.log(`[capabilities] ${JSON.stringify(capabilities)}`);
-  const providers = new ProviderRegistry(config.config.providers);
-  // The same table on pi's model library, for the model calls made outside a
-  // run loop — the router's and reflection's (docs/reference/specs/harness-pi.md item 13).
+  // The config's provider table on pi's model library, for the model calls made
+  // outside a run — the router's and reflection's (docs/reference/specs/harness-pi.md
+  // item 13); a run's own calls go through the model proxy below.
   const completions = new PiAiProviders(config.config.providers);
   // Bundled skills (docs/reference/specs/skills.md): loaded once from the seeded `skills/` dir and shared
   // across all channels via CoreDeps, so review/coding get their scoped skill
@@ -380,7 +379,6 @@ export async function runBot(): Promise<void> {
   const harnesses = new HarnessRegistry();
   const deps: CoreDeps = {
     config,
-    providers,
     completions,
     spanLog,
     runBearers,
@@ -1090,7 +1088,7 @@ export async function runBot(): Promise<void> {
   }
 
   console.log(
-    `switchboard running (providers: ${providers.names().join(", ")}; default agent: ${config.config.defaults.agent})`,
+    `switchboard running (providers: ${completions.names().join(", ")}; default agent: ${config.config.defaults.agent})`,
   );
 
   // Graceful drain: close the Slack socket (no new events), let in-flight

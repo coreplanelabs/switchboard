@@ -317,19 +317,13 @@ workspaceDir: ./workspaces
 #   maxRounds: 3      # review rounds per unit
 #   maxMinutes: 120   # the ship preset's wall-clock budget in minutes (the registry's default)
 
-# Which loop drives each preset's runs (docs/reference/specs/harness-pi.md):
-# `native`, the in-process turn loop, or `pi`, the pi coding agent started
-# inside the run's own execution container and driven over its RPC protocol —
-# with the run's model-proxy bearer as its only key, every event bridged onto
-# the run's own record, our tools and tool rules as its extension. Every
-# preset declares `native` until the pi series moves it; a deployment moves a
-# preset early here. A preset with a workspace (coding, review, explore) runs
-# pi in the run's container; a preset without one (general, research,
-# conductor) runs it as a child of the bot, with none of pi's own shell or
-# file tools. A preset the registry does not know, or a value that is
-# neither harness, fails the load by name.
-# harness:
-#   coding: pi
+# `harness` is a retired key (docs/reference/specs/harness-pi.md item 1). It
+# moved the presets onto pi one at a time; every preset runs on pi now — the pi
+# coding agent started inside the run's own execution container (or as a child
+# of the bot for a preset without a workspace) with the run's model-proxy
+# bearer as its only key — and there is no other loop. A block written during
+# the series still loads when every value is `pi`; `native` names the deleted
+# loop and fails the load by name, as does an unknown preset. Remove the block.
 
 # What the harness writes into pi's per-run settings for every run on pi
 # (docs/reference/specs/harness-pi.md item 4): pi's compaction thresholds, in

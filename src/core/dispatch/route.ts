@@ -27,7 +27,7 @@
 // still names a write part collapses to one route on that preset with the
 // message as typed as its request.
 import { AGENTS, COMPOUND_PRESET, type Identity, type MachineClass } from "../../agents/registry.js";
-import { TOOLSETS } from "../../tools/workspace.js";
+import { TOOLSETS } from "../../tools/toolsets.js";
 import { routingOn, type ConfigStore, type ResolvedRequest } from "../../config.js";
 import type { RouteAnswerMode } from "../../config/validate.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";

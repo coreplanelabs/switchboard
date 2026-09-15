@@ -155,7 +155,7 @@ function request(d: ProvisionDeps, text: string, agentName = "general") {
   const directives = parseDirectives(text);
   const history: HistoryItem[] = [];
   const { sticky, resolved } = resolveRun(
-    { config: d.config, providers: { get: () => ({}) as never } as never },
+    { config: d.config },
     { msg: message, directives: { ...directives, agent: agentName }, history },
   );
   const agent = getAgent(resolved.agentName);

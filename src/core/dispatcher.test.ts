@@ -10,7 +10,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { processSecrets } from "../secrets.js";
 import { ConfigStore } from "../config.js";
 import { MAX_INSTRUCTIONS_LENGTH } from "../config/validate.js";
-import type { ProviderRegistry } from "../providers/registry.js";
 import type { ChatMessage } from "./chatMessage.js";
 import type { CompletionRequest, CompletionResult, Provider } from "./provider.js";
 import { AGENTS, getAgent } from "../agents/registry.js";
@@ -42,7 +41,6 @@ import type { ConversationReader } from "./references/types.js";
 import type { ContentPart } from "./chatMessage.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import type { OpenedPullRequest, PullRequestFacts, PullRequestTarget } from "../execution/githubPulls.js";
-import { runAgent } from "../runner.js";
 import { shipBranchName, shipTaskText } from "./ship/preflight.js";
 import type { GithubIdentity } from "../execution/githubApp.js";
 import { InMemoryMemoryStore, NullMemoryStore, type MemoryRecord } from "./memory/index.js";
@@ -66,6 +64,8 @@ import { createLedgerWriteThrough, NullLedgerWriteThrough } from "./runLedger/wr
 import { runPiHarnessOpen, type OpenPiSession } from "./harness/pi/harness.js";
 import { HarnessRegistry, authorizeToolCall, relayToolCall, type ToolCallAsk } from "./harness/pi/relay.js";
 import { FakePiContainer } from "./harness/pi/testing/fakeContainer.js";
+import { scriptPiFromProvider } from "./harness/pi/testing/providerPi.js";
+import { SOFT_STOP_INSTRUCTION } from "./harness/pi/windDown.js";
 import { ThreadsElsewhere } from "./runLedger/threadsElsewhere.js";
 import type { LiveRunRow, StepRecord } from "./runLedger/types.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./runStoreWorker.js";
@@ -134,18 +134,13 @@ vi.mock("../execution/factory.js", async (importOriginal) => {
   return { ...mod, makeExecutor: vi.fn(mod.makeExecutor) };
 });
 
-// Pass-through spy like makeExecutor above: the agent:ship suite asserts each
-// child round's CLIPPED AgentDef on the runAgent it was dispatched with;
-// behavior everywhere is the real runner's.
-vi.mock("../runner.js", async (importOriginal) => {
-  const mod = await importOriginal<typeof import("../runner.js")>();
-  return { ...mod, runAgent: vi.fn(mod.runAgent) };
-});
-
 // Pass-through spy on the pi harness's open form, the entry the run loop takes
-// (harness-pi item 14): the session-seed suite scripts
-// one run's answer and reads the seed the dispatcher handed over; behavior
-// everywhere else is the real harness's.
+// (harness-pi item 14): the boundary suites assert each run's CLIPPED AgentDef
+// on the harness it was handed to, the session-seed suite scripts one run's
+// answer and reads the seed the dispatcher handed over; behavior everywhere
+// else is the real harness's — over a fake container whose pi is scripted from
+// the test's provider (`scriptPiFromProvider`), so a model script drives the
+// real bridge, mirror, relay and gate.
 vi.mock("./harness/pi/harness.js", async (importOriginal) => {
   const mod = await importOriginal<typeof import("./harness/pi/harness.js")>();
   return { ...mod, runPiHarnessOpen: vi.fn(mod.runPiHarnessOpen) };
@@ -154,21 +149,49 @@ vi.mock("./harness/pi/harness.js", async (importOriginal) => {
 /** What a scripted pi run answers: the loop's answer with a session that takes no follow-up and ends at once. */
 const piAnswered = (answer: string): OpenPiSession => ({ answer, followUp: async () => answer, end: async () => {} });
 
+/** The process's own timer, taken before any test fakes them: the harness polls
+ *  a scripted pi on it, so a test that advances fake timers around a model turn
+ *  or a tool call still sees pi's records read. */
+const realSetTimeout = setTimeout;
+const realSleep = (ms: number) => new Promise<void>((r) => realSetTimeout(r, ms));
+
 function makeDeps(fixtureYaml: string, provider: Provider): TestDeps {
   const dir = mkdtempSync(join(tmpdir(), "swb-dispatch-"));
   const cfgPath = join(dir, "config.yaml");
   writeFileSync(cfgPath, fixtureYaml.replaceAll("__WORKDIR__", join(dir, "workspaces")));
   const config = new ConfigStore(cfgPath, join(dir, "overrides.json"));
-  const providers = { get: () => provider } as unknown as ProviderRegistry;
   // The Null Objects a process without the subsystem is wired with (routing-and-
   // config item 16): a test that needs the real thing sets it after `makeDeps`.
-  // One scripted provider answers the loop (`providers`) and the calls made
-  // outside it (`completions`: the router, reflection) unless a test sets the
-  // second apart.
+  // One scripted provider answers the run's turns — as the model behind a
+  // scripted pi in a fake container, one container per run — and the calls
+  // made outside a run (`completions`: the router, reflection) unless a test
+  // sets the second apart. The harness pieces are the process's: the relay
+  // registry, the bearer store the proxy would meter, the bot's URLs, and a
+  // fast poll so a scripted pi's records are read without waiting.
+  const harnesses = new HarnessRegistry();
+  const runBearers = new RunBearerStore({ clock: Date.now });
   const deps: TestDeps = {
     config,
-    providers,
-    completions: providers,
+    completions: { get: () => provider },
+    runBearers,
+    harness: {
+      registry: harnesses,
+      harnessUrl: "https://bot.test",
+      loopbackUrl: "http://127.0.0.1:8080",
+      containerFor: () => {
+        const container = new FakePiContainer();
+        scriptPiFromProvider(container, {
+          provider,
+          registry: harnesses,
+          bearers: deps.runBearers, // whatever store the test wired, read when the run starts
+          beforeModelCall: () => realSleep(10), // two harness ticks: the inbox drained, the budgets checked
+        });
+        return container;
+      },
+      pollMs: 1,
+      tickMs: 5,
+      sleep: realSleep,
+    },
     capabilities: capabilitiesFrom(config.config, process.env, processSecrets),
     residentFleet: NO_FLEET,
     memory: new NullMemoryStore(),
@@ -205,6 +228,66 @@ restrict:
 routing: { auto: false }
 workspaceDir: __WORKDIR__
 `;
+
+/** The thread's newest run, finished with a session log: what a follow-up
+ *  continues (routing-and-config item 3, by transcript — never an `agent:`
+ *  token in the thread's history). */
+async function threadWithFinishedRun(deps: TestDeps, agent: string, over: Partial<RunRecord> = {}) {
+  const store = new InMemoryRunStore();
+  await store.put({
+    id: "run-prev",
+    label: `${agent} · #CX`,
+    agent,
+    model: `anthropic/${agent}-model`,
+    channelId: "slack:CX",
+    userId: "slack:UADMIN",
+    threadKey: "slack:CX:1.0",
+    channelVisibility: "public",
+    startedAt: Date.now() - 20_000, // near now: the store retains rows by age
+    finishedAt: Date.now() - 10_000,
+    status: "completed",
+    eventCount: 0,
+    storedEventCount: 0,
+    truncated: false,
+    events: [],
+    diagnosis: analyzeRunFriction([]),
+    seed: "channel",
+    session: { key: `slack:CX:1.0:${agent}`, seedFrom: 0, request: 0, range: { from: 0, to: 1 } },
+    ...over,
+  });
+  deps.runStore = store;
+  deps.runs = createRunsService({ registry: deps.runRegistry ?? new RunRegistry(), store });
+}
+
+/** The run store as production reads it once the ledger has drained a finished
+ *  run into it (run-history item 36): the in-memory pair keeps the two apart, so
+ *  the ledger's finished records are copied over before every read. */
+function ledgerBackedStore(ledger: InMemoryRunLedger, store: RunStore): RunStore {
+  const drained = async () => {
+    for (const record of ledger.finished.values()) await store.put(record);
+  };
+  return {
+    put: (record, trace) => store.put(record, trace),
+    get: async (id) => {
+      await drained();
+      return store.get(id);
+    },
+    getSummary: async (id) => {
+      await drained();
+      return store.getSummary(id);
+    },
+    list: async (opts) => {
+      await drained();
+      return store.list(opts);
+    },
+    events: async (id, opts) => {
+      await drained();
+      return store.events(id, opts);
+    },
+    delete: (id) => store.delete(id),
+    usageByUser: (query) => store.usageByUser(query),
+  };
+}
 
 function capturingProvider(answer = "answer"): Provider & { requests: CompletionRequest[] } {
   const requests: CompletionRequest[] = [];
@@ -278,7 +361,21 @@ describe("dispatch", () => {
     expect(replies).toContain("answer");
   });
 
-  it("thread follow-ups stick to the agent the thread established", async () => {
+  it("thread follow-ups stick to the agent the thread established — by transcript: the newest finished run's agent, not an agent: token in the history", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    await threadWithFinishedRun(deps, "review");
+    // The history names another agent: it decides nothing.
+    const history: HistoryItem[] = [
+      { role: "user", text: "agent:coding look at this PR" },
+      { role: "assistant", text: "reviewed, LGTM" },
+    ];
+    const { io } = fakeIO(history);
+    await dispatch(deps, msg("thanks — double-check the tests too"), io);
+    expect(provider.requests[0].model).toBe("review-model");
+  });
+
+  it("an agent: token in the thread's history alone establishes nothing: with no finished run in the thread a plain follow-up resolves through the scopes", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);
     const history: HistoryItem[] = [
@@ -287,14 +384,14 @@ describe("dispatch", () => {
     ];
     const { io } = fakeIO(history);
     await dispatch(deps, msg("thanks — double-check the tests too"), io);
-    expect(provider.requests[0].model).toBe("review-model");
+    expect(provider.requests[0].model).toBe("general-model");
   });
 
   it("an explicit directive on the follow-up overrides the sticky agent", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);
-    const history: HistoryItem[] = [{ role: "user", text: "agent:review look at this PR" }];
-    const { io } = fakeIO(history);
+    await threadWithFinishedRun(deps, "review");
+    const { io } = fakeIO([{ role: "user", text: "look at this PR" }]);
     await dispatch(deps, msg("agent:general summarize the thread"), io);
     expect(provider.requests[0].model).toBe("general-model");
   });
@@ -304,8 +401,8 @@ describe("dispatch", () => {
     const deps = makeDeps(YAML_FIXTURE, provider);
     // Thread established coding by an allowed user; a non-allowed user's
     // follow-up must be denied, not smuggled through stickiness.
-    const history: HistoryItem[] = [{ role: "user", text: "agent:coding fix it" }];
-    const { io, replies } = fakeIO(history);
+    await threadWithFinishedRun(deps, "coding");
+    const { io, replies } = fakeIO([{ role: "user", text: "fix it" }]);
     await dispatch(deps, msg("keep going"), io);
     expect(replies[0]).toContain("🚫");
     expect(provider.requests).toHaveLength(0);
@@ -443,7 +540,7 @@ describe("executor provisioning by agent resources", () => {
     expect(release).toHaveBeenCalledTimes(1);
   });
 
-  // Feature: docs/reference/specs/run-loop.md item 8 — a HARD stop tears the
+  // Feature: docs/reference/specs/harness-pi.md item 6 — a HARD stop tears the
   // workspace down (`release("always")`, even for a coding run that would
   // otherwise keep dirty work), and the card/answer say the run was stopped.
   it("a hard stop from /runs releases the executor with 'always' and reports the abort", async () => {
@@ -497,7 +594,10 @@ describe("executor provisioning by agent resources", () => {
             stopReason: "tool_use",
           };
         }
-        expect(req.tools).toBeUndefined(); // the finale
+        // the finale: the write-up instruction steered in as the last user turn (harness-pi item 6)
+        const last = req.messages.at(-1)!;
+        expect(last.role).toBe("user");
+        expect(JSON.stringify(last.content)).toContain(SOFT_STOP_INSTRUCTION);
         return { content: [{ type: "text", text: "summary so far" }], stopReason: "end_turn" };
       },
     };
@@ -1512,8 +1612,9 @@ describe("repo/ref resolution + resident prompt selection", () => {
     const { calls } = residentFetchStub();
     const provider = capturingProvider();
     const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
+    await threadWithFinishedRun(deps, "coding", { repo: "acme/api" }); // the thread's coding run: sticky by transcript
     const history: HistoryItem[] = [
-      { role: "user", text: "agent:coding fix the login bug in acme/api" },
+      { role: "user", text: "fix the login bug in acme/api" },
       { role: "assistant", text: "🌿 Which branch of `acme/api` should this thread work on?" },
     ];
     const { io, replies } = fakeIO(history);
@@ -1587,9 +1688,11 @@ describe("repo/ref resolution + resident prompt selection", () => {
       diagnosis: analyzeRunFriction([]),
       repo: "acme/api",
       pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+      // Finished with a session log: what makes the run's agent sticky by transcript (routing-and-config item 3).
+      session: { key: "slack:CX:1.0:coding", seedFrom: 0, request: 0, range: { from: 0, to: 1 } },
     });
     const history: HistoryItem[] = [
-      { role: "user", text: "agent:coding fix the login bug in acme/api", at: nowMs - 30_000 },
+      { role: "user", text: "fix the login bug in acme/api", at: nowMs - 30_000 },
       { role: "assistant", text: "PR opened: https://github.com/acme/api/pull/7", at: nowMs - 10_000 },
     ];
     const { io, replies, statuses } = fakeIO(history);
@@ -2237,7 +2340,7 @@ describe("review post-step", () => {
       const contract = contractFromTask({ task: "do the unit", rebase: { branch: "plan/p/u10", onto: "main" } });
       const block = renderContract(contract, { maxChars: DEFAULT_CONTRACT_MAX_CHARS }).text;
       const { deps } = reviewDeps(async () => PR_HEAD);
-      const provider = deps.providers.get("anthropic") as Provider & { requests: CompletionRequest[] };
+      const provider = deps.completions.get("anthropic") as Provider & { requests: CompletionRequest[] };
       const text = "agent:review https://github.com/acme/api/pull/42";
       await dispatch(deps, msg(text), fakeIO().io, { contract });
       const system = provider.requests[0].system ?? "";
@@ -2461,9 +2564,10 @@ describe("review post-step", () => {
         role: "assistant",
         content: [{ type: "text", text: "First review: approve." }],
       });
-      // The system prompt's REVIEW TARGET now names the new head (and no longer claims an attach-time verification).
-      expect(second.system).toContain(`Head commit: ${OTHER_HEAD}`);
-      expect(second.system).not.toContain(`Head commit: ${PR_HEAD}`);
+      // pi reads its system prompt once, at load: the REVIEW TARGET block stays the
+      // session's and the follow-up alone names the new head (harness-pi item 14).
+      expect(second.system).toContain(`Head commit: ${PR_HEAD}`);
+      expect(second.system).not.toContain(`Head commit: ${OTHER_HEAD}`);
       // Posted once, pinned to the new head, with the SECOND verdict and answer — the first approve is void.
       expect(spy.calls).toHaveLength(1);
       expect(spy.calls[0].target).toEqual({ repo: "acme/api", number: 42, commitId: OTHER_HEAD });
@@ -2603,7 +2707,7 @@ describe("review post-step", () => {
     });
   });
 
-  // Feature: docs/reference/specs/run-loop.md item 8 — a HARD-stopped review has no
+  // Feature: docs/reference/specs/harness-pi.md item 6 — a HARD-stopped review has no
   // findings (its answer is the abort line), so nothing is posted to the PR.
   it("a hard-stopped review posts nothing to the PR", async () => {
     const registry = new RunRegistry({ genId: () => "r1", genToken: () => "t1" });
@@ -3862,9 +3966,9 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     codingExecutor({ head: HEAD, branch: "feat/x", bindingRef: "main" });
     deps.openPullRequest = openSpy().fn;
     await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), fakeIO().io, { contract });
+    // The request turn reaches pi as one prompt: its text parts joined with a blank line (harness-pi item 9).
     const texts = firstUserTexts(provider.requests);
-    expect(texts[0]).toBe("fix it");
-    expect(texts.at(-1)).toBe(block);
+    expect(texts).toEqual([`fix it\n\n${block}`]);
     expect(block).toContain("## Contract");
     expect(block).toContain("Rebase `plan/p/u10` onto `main`");
 
@@ -4084,6 +4188,7 @@ describe("live run-view wiring (Area 2)", () => {
       "-model.turn",
       "+tool.bash",
       "tool_call",
+      "run_note", // the gate's refusal: general holds no shell (harness-pi item 12)
       "tool_result",
       "-tool.bash",
       "+model.turn",
@@ -4233,6 +4338,7 @@ describe("live run-view wiring (Area 2)", () => {
       "-model.turn",
       "+tool.bash",
       "tool_call",
+      "run_note", // the gate's refusal: general holds no shell (harness-pi item 12)
       "tool_result",
       "-tool.bash",
       "+model.turn",
@@ -4523,7 +4629,10 @@ describe("closed-card checklist and review verdict run link", () => {
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("hello there"), io);
     const fail = replies.find((r) => r.includes("model exploded"));
-    expect(fail).toMatch(/⚠️ model exploded\n\n\[Live run\]\(https:\/\/bot\.example\/runs\/.+\)/);
+    // The harness names the failed call before the provider's words (harness-pi item 6).
+    expect(fail).toMatch(
+      /⚠️ the model call failed: model exploded\n\n\[Live run\]\(https:\/\/bot\.example\/runs\/.+\)/,
+    );
   });
 
   it("a review with no PUBLIC_BASE_URL replies the bare answer (graceful degradation)", async () => {
@@ -4781,7 +4890,9 @@ describe("skill loading / progressive disclosure", () => {
   it("no store on CoreDeps → no skill block (skilled agents unchanged)", async () => {
     const provider = capturingProvider();
     await dispatch(makeDeps(YAML_FIXTURE, provider), msg("agent:review look at the code"), fakeIO().io);
-    expect(provider.requests[0].system).not.toContain("use_skill");
+    // The harness note names every relayed tool, `use_skill` among them; the block is what a store adds.
+    expect(provider.requests[0].system).not.toContain("## Skills");
+    expect(provider.requests[0].system).not.toContain("SKILL BODY");
   });
 
   it("passes the store to the tool context: use_skill returns the body into the run", async () => {
@@ -4984,7 +5095,7 @@ describe("cross-session memory WRITE path", () => {
     expect(written).toEqual([]);
   });
 
-  // Feature: docs/reference/specs/run-loop.md item 8 — a HARD-stopped run has no
+  // Feature: docs/reference/specs/harness-pi.md item 6 — a HARD-stopped run has no
   // summary to distill (its answer is the abort line), so it never reflects even
   // when the gate (long thread) would otherwise qualify it.
   it("a hard-stopped run does NOT reflect, even when the gate would qualify it", async () => {
@@ -5531,14 +5642,17 @@ channels:
 
   it("a sticky thread directive is attributed to the thread, not this message", async () => {
     const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    await threadWithFinishedRun(deps, "review"); // the thread's review run: sticky by transcript
     const history: HistoryItem[] = [
-      { role: "user", text: "agent:review look at this" },
+      { role: "user", text: "effort:low look at this" },
       { role: "assistant", text: "looked" },
     ];
-    await dispatch(makeDeps(YAML_FIXTURE, provider), msg("and now?"), fakeIO(history).io);
+    await dispatch(deps, msg("and now?"), fakeIO(history).io);
     const sys = provider.requests[0].system ?? "";
     expect(sys).toContain("agent `review`");
-    expect(sys).toMatch(/`agent:review` directive earlier in this thread/i);
+    expect(sys).toMatch(/The thread's earlier `review` run set the agent for this run \(thread stickiness/);
+    expect(sys).toMatch(/A `effort:low` directive earlier in this thread set the model\/effort/);
     expect(sys).not.toMatch(/this message's/i);
   });
 
@@ -5614,7 +5728,7 @@ describe("self-improvement wiring", () => {
     expect(rec.runId).toBe("run-friction-1");
     expect(rec.agent).toBe("general");
     expect(rec.label).toContain("general");
-    expect(rec.diagnosis.eventCount).toBe(2); // tool_call + tool_result (the two `turn` receipts are narrative, not steps)
+    expect(rec.diagnosis.eventCount).toBe(3); // the gate's tool_refused note, tool_call, tool_result (the narrative events are not steps)
     // The general agent has no shell: its `bash` call is an unknown tool → a failed_tool finding.
     expect(rec.diagnosis.byCategory.failed_tool.count).toBe(1);
   });
@@ -6404,7 +6518,7 @@ describe("friction diagnosis reads the registry backlog", () => {
       }),
     );
     expect(rec.diagnosis.shape).toBeDefined();
-    expect(rec.diagnosis.eventCount).toBe(2); // the narrative events (input/answer/turn) do not count
+    expect(rec.diagnosis.eventCount).toBe(3); // the gate's tool_refused note, tool_call, tool_result; the narrative events do not count
   });
 });
 
@@ -7630,7 +7744,7 @@ workspaceDir: __WORKDIR__
   let fetchGuard: ReturnType<typeof vi.fn>;
   beforeEach(() => {
     vi.mocked(makeExecutor).mockClear();
-    vi.mocked(runAgent).mockClear();
+    vi.mocked(runPiHarnessOpen).mockClear();
     fetchGuard = vi.fn(async (url: unknown) => {
       throw new Error(`unexpected network call: ${String(url)}`);
     });
@@ -7641,9 +7755,9 @@ workspaceDir: __WORKDIR__
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
     expect(makeExecutor).not.toHaveBeenCalled();
-    expect(runAgent).not.toHaveBeenCalled();
+    expect(runPiHarnessOpen).not.toHaveBeenCalled();
     vi.mocked(makeExecutor).mockReset();
-    vi.mocked(runAgent).mockClear();
+    vi.mocked(runPiHarnessOpen).mockClear();
   });
 
   it("channel guard: agent:ship over an HTTP/MCP-originated dispatch is refused with a run-page pointer, nothing handed to the runner", async () => {
@@ -8075,8 +8189,8 @@ describe("MCP tools (docs/reference/specs/mcp-tools.md)", () => {
     const registry = new RunRegistry();
     const runIds = new Set<string>();
     const create = registry.create.bind(registry);
-    registry.create = (label, meta) => {
-      const h = create(label, meta);
+    registry.create = (...args) => {
+      const h = create(...args);
       runIds.add(h.id);
       return h;
     };
@@ -8245,6 +8359,13 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     sourceUrl: "https://slack.example/p2",
     userName: user.slice(6).toLowerCase(),
   });
+  /** The follow-up reached the live run: the harness drained it on its next tick and steered pi (harness-pi item 6). */
+  const foldedIn = (registry: RunRegistry, id: string, text: string) =>
+    vi.waitFor(() =>
+      expect(registry.snapshotById(id)?.events ?? []).toContainEqual(
+        expect.objectContaining({ type: "input", text: expect.stringContaining(text) }),
+      ),
+    );
 
   it("a thread reply while a run is in flight is steered: no second run, the follow-up reaches the live run at its next step, the reply says where it went", async () => {
     vi.stubEnv("PUBLIC_BASE_URL", "https://sb.example");
@@ -8267,6 +8388,7 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     expect(second.replies[0]).toContain(" · https://sb.example/runs/r1?t=t"); // bare URL: the reply path escapes mrkdwn <url|label>
     // The live run reads it at its next step: the answer it was writing is
     // superseded, the follow-up is the next user turn, the run's answer follows it.
+    await foldedIn(registry, "r1", "and also include the numbers");
     settle().answer("first draft");
     await run;
     expect(requests).toHaveLength(2);
@@ -8348,6 +8470,7 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     expect(second.statuses).toEqual([]);
     expect(second.replies).toEqual([expect.stringMatching(/^↪ Folded into the \*review\* run already in flight/)]);
     expect(second.replies[0]).toContain(" · https://sb.example/runs/r1?t=t");
+    await foldedIn(registry, "r1", "also check the migration");
     settle().answer("verdict draft");
     await run;
     expect(requests).toHaveLength(2);
@@ -8419,6 +8542,7 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     const second = fakeIO();
     await dispatch(deps, threadMsg("and also the numbers", "slack:UY"), second.io);
     expect(second.replies[0]).toMatch(/^↪/);
+    await foldedIn(registry, "r1", "and also the numbers"); // steered into pi, which then never reads it
     settle().fail(new Error("provider exploded"));
     await run;
     // The first run failed and said so; the follow-up was NOT lost with it: it
@@ -8471,6 +8595,7 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     await dispatch(deps, threadMsg("and a chart", "slack:UZ"), b.io);
     expect(a.replies[0]).toMatch(/^↪/);
     expect(b.replies[0]).toMatch(/^↪/);
+    await foldedIn(registry, "r1", "and a chart");
     settle().fail(new Error("boom"));
     await run;
     expect(requests).toHaveLength(2);
@@ -8634,7 +8759,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(seen.transcriptAtSecondCall).toMatchObject({ complete: true, turns: seedTurns + 1 });
     expect(seen.transcriptAtSecondCall!.messages[seedTurns].role).toBe("assistant");
     // The dispatcher's state: the checklist landed while the run was live.
-    expect(seen.stateAtSecondCall).toEqual({ checklist: "○ look around" });
+    expect(seen.stateAtSecondCall).toMatchObject({ checklist: "○ look around" }); // beside the harness facts
     // finishing was taken before anything reached the thread.
     expect(seen.phaseAtReply).toBe("finishing");
     expect(replies.at(-1)).toBe("all done");
@@ -8642,16 +8767,16 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(ledger.live.has("run-l")).toBe(false);
     expect(ledger.steps.has("run-l")).toBe(false);
     expect(ledger.finished.get("run-l")).toMatchObject({ id: "run-l", status: "completed" });
-    // The record's range: the seed rows, then the first assistant turn — the
-    // final answer has no tools, so no step report carries it or its results
-    // (the record's events do) — closed at finish, the rows kept in the log.
+    // The record's range: the seed rows, then the first assistant turn, the
+    // results turn and the final answer — the mirror writes every turn pi
+    // finished as a row (harness-pi item 8) — closed at finish, kept in the log.
     expect(ledger.finished.get("run-l")!.session).toEqual({
       key: "slack:CX:1.0:general",
       seedFrom: 0,
       request: seedTurns - 1,
-      range: { from: 0, to: seedTurns },
+      range: { from: 0, to: seedTurns + 2 },
     });
-    expect((await ledger.readSession("slack:CX:1.0:general", 0)).turns).toBe(seedTurns + 1);
+    expect((await ledger.readSession("slack:CX:1.0:general", 0)).turns).toBe(seedTurns + 3); // every finished turn a row
     const appended = ledger.events.get("run-l")!;
     expect(appended.map((e) => e.type)).toEqual(
       expect.arrayContaining(["input", "run_meta", "context", "tool_call", "tool_result", "answer"]),
@@ -8713,7 +8838,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
     await writer.settled();
     expect(order).toEqual(["reply", "release-start", "release-end(live=false, finished=true)"]);
-    expect(stateAtReply).toEqual({ finalStatus: "completed" });
+    expect(stateAtReply).toMatchObject({ finalStatus: "completed" }); // beside the harness facts (harness-pi item 8)
     expect(phaseAtReply).toBe("finishing");
     expect(fallbackPuts).toEqual([]);
   });
@@ -9301,10 +9426,14 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     // update_status re-ran (it exists), bash got the not-available result (general has no bash).
     expect(firstRequest!.slice(0, 2)).toEqual(transcript);
     expect(firstRequest![2].role).toBe("user");
-    const results = firstRequest![2].content as { toolUseId: string; content: unknown; isError?: boolean }[];
+    // The settlement turn: one result per call in flight, then pi's continue prompt as text (harness-pi item 8).
+    const results = (firstRequest![2].content as Array<{ type: string; toolUseId: string; content: unknown }>).filter(
+      (p) => p.type === "tool_result",
+    );
     expect(results.map((r) => r.toolUseId)).toEqual(["s1", "b1"]);
     expect(String(results[1].content)).toContain("not available after the bot restarted");
-    expect(stateAtFirstCall).toEqual({ checklist: "○ resumed" }); // the re-run update_status refreshed the row's state
+    // No call is re-run on pi (harness-pi item 8): the settlement is the restart note, so the row's state stands as recorded.
+    expect(stateAtFirstCall).toMatchObject({ checklist: "○ before" });
     // Same run id everywhere; the record carries the replayed events and the new ones as one stream.
     expect(registry.listActive().map((r) => r.id)).toEqual(["run-old"]);
     expect(ledger.live.has("run-old")).toBe(false);
@@ -9891,11 +10020,14 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     await writer.settled();
     expect(registry.listActive().map((r) => r.id)).toEqual(["run-l"]); // no rival run
     expect(first.replies.at(-1)).toBe("done");
-    // Step 1's record precedes the boundary the follow-up rode; step 2's says it was consumed.
+    // Step 1's record precedes the boundary the follow-up rode; step 2's, the
+    // turn after pi echoed the steer, says it was consumed; the mirror records
+    // the final text turn as a step of its own (harness-pi item 8).
     expect(stepRecords.map((s) => [s.step, s.inboxConsumedSeq])).toEqual([
       [0, 0],
       [1, 0],
       [2, 1],
+      [3, 1],
     ]);
     expect(
       ledger.finished.get("run-l")!.events.some((e) => e.type === "input" && e.text === "and also the numbers"),
@@ -9976,8 +10108,9 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     });
     // The redispatch carried the seed: the fresh run's model started from the parent's turn, then the request.
     expect(provider.requests).toHaveLength(1);
+    // The two text parts reach pi as one prompt, joined with a blank line (harness-pi item 9).
     const opening = provider.requests[0].messages[0].content as Array<{ type: string; text?: string }>;
-    expect(opening.map((p) => p.text)).toEqual(["look into durable objects", "what changed?"]);
+    expect(opening.map((p) => p.text)).toEqual(["look into durable objects\n\nwhat changed?"]);
     expect(elsewhere.get("slack:CX:9.0")).toBeUndefined();
   });
 
@@ -10383,7 +10516,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     const { deps, writer } = wired(provider, { ledger });
     await dispatch(deps, msg("agent:review look at this", "slack:UADMIN"), ioWithCard().io);
     await writer.settled();
-    expect(stateAtSecondCall).toEqual({ verdict: { verdict: "request_changes", summary: "two findings" } });
+    expect(stateAtSecondCall).toMatchObject({ verdict: { verdict: "request_changes", summary: "two findings" } }); // beside the harness facts
     expect(ledger.finished.get("run-l")?.status).toBe("completed");
   });
 });
@@ -10695,11 +10828,11 @@ workspaceDir: __WORKDIR__
 
   beforeEach(() => {
     vi.mocked(makeExecutor).mockClear();
-    vi.mocked(runAgent).mockClear();
+    vi.mocked(runPiHarnessOpen).mockClear();
   });
   afterEach(() => {
     vi.mocked(makeExecutor).mockClear();
-    vi.mocked(runAgent).mockClear();
+    vi.mocked(runPiHarnessOpen).mockClear();
   });
 
   it("identity above the cap: `agent:coding` in a channel bounded to `read` is refused by name before any card, thread claim, ledger row or executor; `agent:review` in the same channel is admitted with its declared profile", async () => {
@@ -10763,7 +10896,7 @@ workspaceDir: __WORKDIR__
     expect(replies.some((r) => r.includes("answer"))).toBe(true);
     const profile = { machine: "repo-resident", identity: "write", minutes: 10, boundedBy: "channel" };
     expect(vi.mocked(makeExecutor).mock.calls[0][1].profile).toEqual(profile);
-    expect(vi.mocked(runAgent).mock.calls[0][0].agent.maxMinutes).toBe(10); // the runner's deadline is the clipped budget
+    expect(vi.mocked(runPiHarnessOpen).mock.calls[0][1].agent.maxMinutes).toBe(10); // the runner's deadline is the clipped budget
     expect(AGENTS.coding.maxMinutes).toBe(45); // the shared def is never mutated
     // The ledger row and its seed carry the clip, so a resume runs on it (run-history's resume rule).
     expect(seen.row?.meta).toMatchObject({ agent: "coding", readonly: false, profile });
@@ -10784,7 +10917,7 @@ workspaceDir: __WORKDIR__
     await writer.settled();
     const declared = { machine: "repo-resident", identity: "write", minutes: 45 };
     expect(vi.mocked(makeExecutor).mock.calls[0][1].profile).toEqual(declared);
-    expect(vi.mocked(runAgent).mock.calls[0][0].agent.maxMinutes).toBe(45);
+    expect(vi.mocked(runPiHarnessOpen).mock.calls[0][1].agent.maxMinutes).toBe(45);
     expect(seen.row?.meta).toMatchObject({ agent: "coding", readonly: false, profile: declared });
     expect(seen.steps).toEqual([expect.objectContaining({ step: 0, remainingMs: 45 * 60_000 })]);
     expect((await store.get("run-u"))!.profile).toEqual({ preset: "coding", ...declared });
@@ -10864,13 +10997,13 @@ workspaceDir: __WORKDIR__
     vi.stubEnv("SANDBOX_TOKEN", "sbx");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "res-op");
     vi.mocked(makeExecutor).mockClear();
-    vi.mocked(runAgent).mockClear();
+    vi.mocked(runPiHarnessOpen).mockClear();
   });
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
     vi.mocked(makeExecutor).mockClear();
-    vi.mocked(runAgent).mockClear();
+    vi.mocked(runPiHarnessOpen).mockClear();
   });
 
   it("agent:explore against a deployment with a resident fleet reaches the factory with `repo-cold` and identity `read`, vets the repository against GitHub once, and never calls the resident Worker", async () => {
@@ -10888,7 +11021,7 @@ workspaceDir: __WORKDIR__
     expect(ctx.profile).toEqual({ machine: "repo-cold", identity: "read", minutes: 120 });
     await expect(vi.mocked(makeExecutor).mock.results[0].value).resolves.toMatchObject({ backend: "sandbox" });
     // The runner ran the explore preset's own def — 120 minutes, the explore toolset.
-    expect(vi.mocked(runAgent).mock.calls[0][0].agent).toMatchObject({ name: "explore", maxMinutes: 120 });
+    expect(vi.mocked(runPiHarnessOpen).mock.calls[0][1].agent).toMatchObject({ name: "explore", maxMinutes: 120 });
     // One GitHub lookup with the run's credential; the resident registry and Worker untouched.
     expect(urls).toEqual(["https://api.github.com/repos/acme/api"]);
     expect(urls.some((u) => u.includes("resident.example"))).toBe(false);
@@ -10913,7 +11046,7 @@ workspaceDir: __WORKDIR__
     expect(provider.requests).toHaveLength(1);
     const profile = { machine: "repo-cold", identity: "read", minutes: 30, boundedBy: "directive" };
     expect(vi.mocked(makeExecutor).mock.calls[0][1].profile).toEqual(profile);
-    expect(vi.mocked(runAgent).mock.calls[0][0].agent.maxMinutes).toBe(30);
+    expect(vi.mocked(runPiHarnessOpen).mock.calls[0][1].agent.maxMinutes).toBe(30);
     expect(AGENTS.explore.maxMinutes).toBe(120); // the shared def is never mutated
     expect((await store.get("run-b30"))!.profile).toEqual({ preset: "explore", ...profile });
     expect(
@@ -10939,7 +11072,7 @@ workspaceDir: __WORKDIR__
       identity: "read",
       minutes: 120,
     });
-    expect(vi.mocked(runAgent).mock.calls[0][0].agent.maxMinutes).toBe(120);
+    expect(vi.mocked(runPiHarnessOpen).mock.calls[0][1].agent.maxMinutes).toBe(120);
     expect((await store.get("run-b200"))!.profile).toEqual({
       preset: "explore",
       machine: "repo-cold",
@@ -11132,18 +11265,28 @@ workspaceDir: __WORKDIR__
     // The one runs service every surface reads, over the store the writer
     // writes — the run tools' reads reach a finished child's record through it.
     deps.runStore = store;
-    deps.runs = createRunsService({ registry, store });
-    return { deps, registry, store, writer, admission };
+    // The session log: what a conductor's spawn hands its child as the seed
+    // (agent-conductor item 3 — the parent's text turns, read off the log);
+    // a finished run's record lands on it, where the runs service reads it.
+    const ledger = new InMemoryRunLedger();
+    deps.runLedger = createLedgerWriteThrough({
+      ledger,
+      gen: "gen-C",
+      fallback: { put: async () => {} },
+      warn: () => {},
+    });
+    deps.runs = createRunsService({ registry, store: ledgerBackedStore(ledger, store), ledger });
+    return { deps, registry, store, writer, admission, ledger };
   }
   const agentsProvisioned = () => vi.mocked(makeExecutor).mock.calls.map((c) => c[1].agent.name);
 
   beforeEach(() => {
     vi.mocked(makeExecutor).mockClear();
-    vi.mocked(runAgent).mockClear();
+    vi.mocked(runPiHarnessOpen).mockClear();
   });
   afterEach(() => {
     vi.mocked(makeExecutor).mockClear();
-    vi.mocked(runAgent).mockClear();
+    vi.mocked(runPiHarnessOpen).mockClear();
   });
 
   it("spawns a research child as the requester in a thread of its own: the child runs the full pipeline with its budget clipped to the parent's remaining minutes as `parent`, its record and live summary carry parentRunId, the parent's tool result names the child, and the parent's own thread slot is untouched", async () => {
@@ -11163,7 +11306,7 @@ workspaceDir: __WORKDIR__
     await dispatch(t.deps, inChannel("CX", "agent:conductor budget:6 look into durable objects"), parent.io);
     await vi.waitFor(() => expect(t.registry.getById("run-child")?.finished).toBe(true));
     await t.writer.settled();
-    const childMinutes = (await t.store.get("run-child"))!.profile!.minutes;
+    const childMinutes = (await t.ledger.finished.get("run-child"))!.profile!.minutes;
     expect([5, 6]).toContain(childMinutes);
 
     // The parent's answer echoes the tool result: the child's id, thread and link.
@@ -11178,7 +11321,7 @@ workspaceDir: __WORKDIR__
     expect(child.replies).toEqual(["A Durable Object is a single-instance coordination point."]);
     // Both runs were provisioned, each on its own class (`none`), the child as the requester.
     expect(agentsProvisioned()).toEqual(["conductor", "research"]);
-    const childRecord = (await t.store.get("run-child"))!;
+    const childRecord = (await t.ledger.finished.get("run-child"))!;
     expect(childRecord).toMatchObject({
       agent: "research",
       userId: "slack:UADMIN",
@@ -11190,8 +11333,8 @@ workspaceDir: __WORKDIR__
       profile: { preset: "research", machine: "none", identity: "none", minutes: childMinutes, boundedBy: "parent" },
     });
     expect(t.registry.getById("run-child")).toMatchObject({ parentRunId: "run-parent", agent: "research" });
-    expect("parentRunId" in (await t.store.get("run-parent"))!).toBe(false);
-    expect((await t.store.get("run-parent"))!.seed).toBe("channel");
+    expect("parentRunId" in (await t.ledger.finished.get("run-parent"))!).toBe(false);
+    expect((await t.ledger.finished.get("run-parent"))!.seed).toBe("channel");
     // The card and the config block say what clipped the child.
     expect(
       child.statuses
@@ -11202,9 +11345,9 @@ workspaceDir: __WORKDIR__
     expect(childRequest.system).toContain(
       `Budget: ${childMinutes} min (clipped by the parent run's budget; the preset asks 8).`,
     );
-    expect(vi.mocked(runAgent).mock.calls.find((c) => c[0].agent.name === "research")![0].agent.maxMinutes).toBe(
-      childMinutes,
-    );
+    expect(
+      vi.mocked(runPiHarnessOpen).mock.calls.find((c) => c[1].agent.name === "research")![1].agent.maxMinutes,
+    ).toBe(childMinutes);
     // Admission: the parent held its own slot while the child ran on a slot of its own.
     expect(slotsAtChildTurn).toEqual({ parent: "conductor", child: "research" });
     expect(admission.get(PARENT_THREAD)).toBeUndefined();
@@ -11305,7 +11448,7 @@ workspaceDir: __WORKDIR__
       ["assistant", ["Storage first: one research child."]],
       ["user", ["what is a Durable Object?"]],
     ]);
-    const childRecord = (await t.store.get("run-child"))!;
+    const childRecord = (await t.ledger.finished.get("run-child"))!;
     expect(childRecord.seed).toBe("parent");
     expect(childRecord.events.filter((e) => e.type === "context").map((e) => (e as { text: string }).text)).toEqual([
       "user: look into durable objects",
@@ -11314,7 +11457,7 @@ workspaceDir: __WORKDIR__
     expect(childRecord.events.filter((e) => e.type === "input").map((e) => (e as { text: string }).text)).toEqual([
       "what is a Durable Object?",
     ]);
-    expect((await t.store.get("run-parent"))!.seed).toBe("channel");
+    expect((await t.ledger.finished.get("run-parent"))!.seed).toBe("channel");
     expect(agentsProvisioned()).toEqual(["conductor", "research"]);
   });
 
@@ -11341,13 +11484,24 @@ workspaceDir: __WORKDIR__
     t.deps.runs = createRunsService({ registry: t.registry, store: t.store, ledger });
     const container = new FakePiContainer();
     const harnesses = new HarnessRegistry();
+    const bearers = new RunBearerStore({ clock: Date.now });
+    let starts = 0;
     t.deps.harness = {
       registry: harnesses,
       harnessUrl: "https://bot.test",
       loopbackUrl: "http://127.0.0.1:8080",
-      containerFor: () => container,
+      // The first pi is the scripted conductor below; the research child's is scripted from the provider.
+      containerFor: () => {
+        if (starts++ === 0) return container;
+        const child = new FakePiContainer();
+        scriptPiFromProvider(child, { provider, registry: harnesses, bearers, beforeModelCall: () => realSleep(10) });
+        return child;
+      },
+      pollMs: 1,
+      tickMs: 5,
+      sleep: realSleep,
     };
-    t.deps.runBearers = new RunBearerStore({ clock: Date.now });
+    t.deps.runBearers = bearers;
     const assistant = (content: Record<string, unknown>[], stopReason = "toolUse") => ({
       role: "assistant",
       content,
@@ -11464,7 +11618,7 @@ workspaceDir: __WORKDIR__
     // pi ran once, as a child of the bot, reaching it over loopback.
     expect(container.starts).toHaveLength(1);
     expect(container.starts[0].env.SWITCHBOARD_HARNESS_URL).toBe("http://127.0.0.1:8080");
-    expect(vi.mocked(runAgent).mock.calls.map((c) => c[0].agent.name)).toEqual(["research"]);
+    expect(vi.mocked(runPiHarnessOpen).mock.calls.map((c) => c[1].agent.name)).toEqual(["conductor", "research"]);
   });
 
   it("a child cannot spawn: a conductor child's own spawn_run is refused `spawn_depth`, and no grandchild exists", async () => {
@@ -11537,10 +11691,12 @@ workspaceDir: __WORKDIR__
           }
           return { content: [{ type: "text", text: results.join("\n---\n") }], stopReason: "end_turn" };
         }
-        // The child: the first turn waits for the parent's steer to land, then
-        // makes one bookkeeping call so the steer rides its results turn.
+        // The child: the first turn waits for the parent's steer to land (the
+        // harness drains and steers it on its next tick, so the inbox's arrival
+        // count is the signal, not its size), then makes one bookkeeping call
+        // so the steer rides the next user turn.
         if (!req.messages.some((m) => m.role === "assistant")) {
-          await vi.waitFor(() => expect(admission.get(CHILD_THREAD)?.inbox.size).toBe(1));
+          await vi.waitFor(() => expect(admission.get(CHILD_THREAD)?.inbox.arrived).toBe(1));
           return {
             content: [{ type: "tool_use", id: "c1", name: "update_status", input: { checklist: "○ reading" } }],
             stopReason: "tool_use",
@@ -11566,7 +11722,7 @@ workspaceDir: __WORKDIR__
     await t.writer.settled();
     // The child heard the steer on its next step and answered from it, in its own thread.
     expect(child.replies).toEqual(["heard: narrow it to Workers"]);
-    const childRecord = (await t.store.get("run-child"))!;
+    const childRecord = (await t.ledger.finished.get("run-child"))!;
     const inputs = childRecord.events.filter((e) => e.type === "input");
     expect(inputs).toHaveLength(2); // the request, then the steer
     expect(inputs[1]).toMatchObject({
@@ -11680,7 +11836,7 @@ workspaceDir: __WORKDIR__
     sourceUrl: url,
   });
 
-  it("a person's reply in a spawned thread after the child ended is a run of the same child: its record carries the parent's id and `seed: channel`, its budget is its own (no parent clock to inherit), and a parent that already ended is told nothing", async () => {
+  it("a person's reply in a spawned thread after the child ended is a run of the same child — its agent, sticky by transcript, continuing its session (`seed: session`): its record carries the parent's id, its budget is its own (no parent clock to inherit), and a parent that already ended is told nothing", async () => {
     const { provider } = treeProvider(
       [{ preset: "research", prompt: "what is a Durable Object?" }],
       "A Durable Object is a single-instance coordination point.",
@@ -11697,22 +11853,24 @@ workspaceDir: __WORKDIR__
       child.io,
     );
     await t.writer.settled();
-    const third = (await t.store.get("run-third"))!;
+    const third = (await t.ledger.finished.get("run-third"))!;
+    // The continuation is the child's agent (routing-and-config item 3: the thread's newest finished run is
+    // sticky by transcript, a spawned thread's included) and seeds from the child's session log.
     expect(third).toMatchObject({
-      agent: "general", // the thread's default: the child's directive lives in no user turn (the stickiness gap row)
+      agent: "research",
       threadKey: CHILD_THREAD,
       userId: "slack:UADMIN",
       parentRunId: "run-parent",
-      seed: "channel",
+      seed: "session",
       status: "completed",
     });
-    expect(third.profile).toMatchObject({ preset: "general", minutes: AGENTS.general.maxMinutes });
+    expect(third.profile).toMatchObject({ preset: "research", minutes: AGENTS.research.maxMinutes });
     expect(third.profile!.boundedBy).not.toBe("parent");
-    expect(t.registry.getById("run-third")).toMatchObject({ parentRunId: "run-parent", agent: "general" });
+    expect(t.registry.getById("run-third")).toMatchObject({ parentRunId: "run-parent", agent: "research" });
     expect(child.replies).toHaveLength(2); // the child's answer, then the continuation's, both in the child's thread
-    expect(agentsProvisioned()).toEqual(["conductor", "research", "general"]);
+    expect(agentsProvisioned()).toEqual(["conductor", "research", "research"]);
     // The parent had ended: one input on its record, nothing more in its thread.
-    const parentRecord = (await t.store.get("run-parent"))!;
+    const parentRecord = (await t.ledger.finished.get("run-parent"))!;
     expect(parentRecord.events.filter((e) => e.type === "input")).toHaveLength(1);
     expect(parent.replies).toHaveLength(1);
   });
@@ -11832,6 +11990,14 @@ workspaceDir: __WORKDIR__
       // flushed to the store so the reply below finds B however the registry has aged it.
       await vi.waitFor(() => expect(ioB.replies).toEqual(["B: a Workflow is a durable execution."]));
       await t.writer.settled();
+      // …and the parent is in its wait: the reply below must land while it awaits.
+      await vi.waitFor(() =>
+        expect(
+          (t.registry.snapshotById("run-parent")?.events ?? []).some(
+            (e) => e.type === "tool_call" && (e as { tool: string }).tool === "await_runs",
+          ),
+        ).toBe(true),
+      );
       // The requester corrects [B] in its thread. The child ended, so this is a new run of it.
       await dispatch(
         t.deps,
@@ -11843,18 +12009,19 @@ workspaceDir: __WORKDIR__
       await parentDone;
       await t.writer.settled();
 
-      // The continuation is a run of the same child: the parent's id on its record, seeded from its thread.
-      const b2 = (await t.store.get("run-B2"))!;
+      // The continuation is a run of the same child: the child's agent, sticky by transcript, seeded from its
+      // session log (routing-and-config item 3), the parent's id on its record.
+      const b2 = (await t.ledger.finished.get("run-B2"))!;
       expect(b2).toMatchObject({
-        agent: "general",
+        agent: "research",
         threadKey: THREAD_B,
         parentRunId: "run-parent",
-        seed: "channel",
+        seed: "session",
         status: "completed",
       });
       expect(b2.profile!.boundedBy).not.toBe("parent");
       // The parent heard the reply as a follow-up from the child, linked to the reply, naming the new run.
-      const parentRecord = (await t.store.get("run-parent"))!;
+      const parentRecord = (await t.ledger.finished.get("run-parent"))!;
       const inputs = parentRecord.events.filter((e) => e.type === "input");
       expect(inputs).toHaveLength(2);
       expect(inputs[1]).toMatchObject({
@@ -11882,7 +12049,7 @@ workspaceDir: __WORKDIR__
       expect("continuedBy" in report.runs[0]).toBe(false);
       expect(String(report.runs[0].finalReply)).toContain("coordination point");
       expect(ioA.replies).toEqual(["A: a Durable Object is a coordination point."]);
-      expect(agentsProvisioned()).toEqual(["conductor", "research", "research", "general"]);
+      expect(agentsProvisioned()).toEqual(["conductor", "research", "research", "research"]);
       expect(admission.get(PARENT_THREAD)).toBeUndefined();
       expect(admission.get(THREAD_B)).toBeUndefined();
     },
@@ -11901,7 +12068,7 @@ describe("the model proxy's run bearer through dispatch()", () => {
     const provider: Provider = {
       name: "fake",
       async complete(): Promise<CompletionResult> {
-        // Mid-turn: the run's entry exists, a bearer issued on it verifies, and no turn has gone through the proxy.
+        // Mid-turn: the run's entry exists, a bearer issued on it verifies, and the meter has spent this one turn.
         const issued = runId ? store.issue(runId) : undefined;
         const verdict = issued ? store.verify(issued.token) : undefined;
         seen.push({ runId, verified: verdict?.ok === true, turns: verdict?.ok ? verdict.turns : undefined });
@@ -11915,7 +12082,7 @@ describe("the model proxy's run bearer through dispatch()", () => {
     const io: ChannelIO = { ...base.io, runStarted: ({ id }) => void (runId = id) };
     await dispatch(deps, msg("hello there"), io);
     expect(base.replies).toContain("answer");
-    expect(seen).toEqual([{ runId, verified: true, turns: 0 }]);
+    expect(seen).toEqual([{ runId, verified: true, turns: 1 }]);
     const facts = store.grantOf(runId!);
     expect(facts).toMatchObject({
       runId,
@@ -11925,7 +12092,7 @@ describe("the model proxy's run bearer through dispatch()", () => {
       model: "general-model",
       maxTurns: 30, // the general preset's turn guard: its five minutes × RUNAWAY_TURNS_PER_MINUTE
       maxTokens: 16000,
-      turns: 0,
+      turns: 1, // the one model call, metered as the proxy meters it
       revoked: true,
       expiresAt: clock.now + 5 * 60_000 + BEARER_MARGIN_MS, // the general preset's five minutes, plus the margin
     });
@@ -12208,8 +12375,15 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
       deps.runHistoryWriter = writer;
       deps.admission = new ThreadAdmission<DispatchFollowUp>();
       deps.runStore = store;
-      deps.runs = createRunsService({ registry, store });
-      return { deps, registry, store, writer };
+      const ledger = new InMemoryRunLedger();
+      deps.runLedger = createLedgerWriteThrough({
+        ledger,
+        gen: "gen-C",
+        fallback: { put: async () => {} },
+        warn: () => {},
+      });
+      deps.runs = createRunsService({ registry, store: ledgerBackedStore(ledger, store), ledger });
+      return { deps, registry, store, writer, ledger };
     }
     const compoundMsg = (user = "slack:UADMIN") => ({
       ...msg(
@@ -12261,7 +12435,7 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
           parts: PARTS,
         }),
       ]);
-      expect((await t.store.get("run-parent"))!.events.filter((e) => e.type === "input")).toEqual([
+      expect((await t.ledger.finished.get("run-parent"))!.events.filter((e) => e.type === "input")).toEqual([
         expect.objectContaining({
           text: "summarize the open issues in acme/api and also look into why the staging resident went down last night",
         }),
@@ -12270,7 +12444,7 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
       expect(leads).toHaveLength(2);
       expect(leads[0]).toContain("*general*");
       expect(leads[1]).toContain("*research*");
-      const kids = await Promise.all([t.store.get("run-child-1"), t.store.get("run-child-2")]);
+      const kids = await Promise.all([t.ledger.finished.get("run-child-1"), t.ledger.finished.get("run-child-2")]);
       expect(kids.map((k) => k!.agent).sort()).toEqual(["general", "research"]);
       for (const kid of kids) {
         expect(kid).toMatchObject({ userId: "slack:UADMIN", parentRunId: "run-parent", status: "completed" });
@@ -12386,7 +12560,7 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
         }),
       );
       expect(event).not.toHaveProperty("parts");
-      expect((await t.store.get("run-parent"))!.events.filter((e) => e.type === "input")).toEqual([
+      expect((await t.ledger.finished.get("run-parent"))!.events.filter((e) => e.type === "input")).toEqual([
         expect.objectContaining({ text }),
       ]);
     });
@@ -12805,20 +12979,6 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     expect(meta?.agentSource).toBe("sticky");
   });
 
-  it("the same thread with coding on the native loop resolves by the user turns and seeds from the channel, as before", async () => {
-    const t = await threadWithSession(REMOTE_YAML_FIXTURE);
-    const { io } = fakeIO(history);
-    await dispatch(t.deps, followUp, io);
-    await t.writer.settled();
-    expect(vi.mocked(runPiHarnessOpen)).not.toHaveBeenCalled();
-    // The finish lands on the ledger (the history store in production); the plain store keeps the tombstone.
-    const record = t.ledger.finished.get("run-next")!;
-    expect(record).toMatchObject({ agent: "general", seed: "channel", status: "completed" });
-    // The channel seed: the thread's history merged into three turns, the request the last; the final answer has no
-    // tools, so no step report carries it and the range closes at the request row.
-    expect(record.session).toEqual({ key: `${THREAD}:general`, seedFrom: 0, request: 2, range: { from: 0, to: 2 } });
-  });
-
   it("a log that cannot be read seeds from the channel with a seed note naming it, and the agent is still the thread's", async () => {
     const t = await threadWithSession(PI_YAML);
     t.deps.runLedger.readSessionTail = async () => {
@@ -12944,10 +13104,15 @@ describe("the references step in dispatch (record 0037)", () => {
     const { io } = fakeIO();
     await dispatch(deps, msg(`what did we conclude? ${PERMALINK}`), io);
     expect(calls).toEqual({ classify: 1, read: 1, member: 1 });
-    const texts = lastUserTexts(provider.requests[0]);
-    expect(texts[0]).toBe(`what did we conclude? ${PERMALINK}`);
-    expect(texts[1]).toMatch(/^Referenced thread · #frontend · 1 message · https:\/\/team\.example/);
-    expect(texts[1]).toContain("teammate: we concluded: ship it");
+    // The request turn reaches pi as one prompt: the request, then the quoted block, joined with a blank line (harness-pi item 9).
+    const [prompt, ...rest] = lastUserTexts(provider.requests[0]);
+    expect(rest).toEqual([]);
+    expect(prompt).toMatch(
+      new RegExp(
+        `^what did we conclude\\? ${PERMALINK.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}\n\nReferenced thread · #frontend · 1 message · https://team\\.example`,
+      ),
+    );
+    expect(prompt).toContain("teammate: we concluded: ship it");
     expect(
       isHeadMaterial({
         type: "reference",

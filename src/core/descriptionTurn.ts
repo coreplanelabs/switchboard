@@ -7,37 +7,31 @@
 // heads an open PR and no `submit_pr_description` call, the dispatcher runs
 // ONE more bounded model turn asking for it, before the answer lands and
 // before the workspace is released. Mirrors the review agent's re-review turn
-// (reviewRound.ts settleReviewedHead): the turn is appended to the run's own
-// message list (the seed, the run's answer, this follow-up), runs on the same
-// tool context — so the description arrives through the same
-// `onPrDescription` hook the first turn used — and its tool events join the
-// run record like any other. What it may cost is capped below the agent's own
-// budgets; what it must not do (push again, open a PR) is said in the prompt.
+// (reviewRound.ts settleReviewedHead): the turn is one more `prompt` on the
+// run's own pi session (docs/reference/specs/harness-pi.md item 14), through
+// the seam the run stage hands over (`followUp`), on the same tool context —
+// so the description arrives through the same `onPrDescription` hook the
+// first turn used — and its tool events join the run record like any other.
+// What it may cost is capped below the agent's own budgets; what it must not
+// do (push again, open a PR) is said in the prompt. A run with no session to
+// prompt — a `finish` plan, whose loop answered in a previous bot generation
+// and whose pi is gone — runs no turn and reports nothing submitted; the
+// post-step's note then says the description was not resubmitted.
 //
 // Two pieces, so each is testable alone: `descriptionTurnTarget` decides — no
 // description, a push the remote proves, a branch that is not the base, an
 // open PR heading it (the same lookup open-or-edit starts with; a failed
 // lookup means no turn, never a throw) — and `runDescriptionTurn` runs the
-// turn and reports what it submitted. Which loop runs it is the run's
-// harness (docs/reference/specs/harness-pi.md item 14): on the native loop
-// one more `runAgent`; on pi one more `prompt` on the run's own pi session,
-// through the seam the run stage hands over — the same text, hook, note,
-// budget and failure handling either way.
+// turn and reports what it submitted.
 
 import type { AgentDef } from "../agents/registry.js";
-import type { Effort } from "../effort.js";
 import { resolveBaseRef, type OpenPrRef } from "../execution/githubPulls.js";
-import type { ChatMessage } from "./chatMessage.js";
-import type { Provider } from "./provider.js";
-import { runAgent } from "../runner.js";
-import type { RunnableTool, ToolContext } from "../tools/runnableTool.js";
+import type { ToolContext } from "../tools/runnableTool.js";
 import type { CodingPrTarget, WorkspaceObservation } from "./codingPrPostStep.js";
 import type { PiFollowUpTurn } from "./harness/pi/harness.js";
 import type { PrDescription } from "./prDescription.js";
 import { normalizeHead, sameCommit } from "./reviewedHead.js";
-import type { RunControl } from "./runRegistry/runControl.js";
 import type { RunEvent } from "./runEvents.js";
-import type { Backend } from "./trace/attrs.js";
 import { systemClock } from "./trace/clock.js";
 import type { Span } from "./trace/types.js";
 
@@ -111,63 +105,48 @@ export function descriptionFollowUp(t: DescriptionTurnTarget): string {
 /** Everything a second model turn on this run needs — the same shape the
  *  re-review turn takes (reviewRound.ts ReviewTurnSpec). */
 export interface CodingTurnSpec {
-  /** Where the turn's commands execute (docs/reference/specs/tracing.md). */
-  backend?: Backend;
-  provider: Provider;
-  model: string;
+  /** The preset with its effective budget; the turn's clip is taken from it. */
   agent: AgentDef;
-  effort?: Effort;
   toolContext: ToolContext;
-  /** This run's per-run tools (bridged MCP tools) — the turn sees exactly what
-   *  the first turn saw (docs/reference/specs/mcp-tools.md item 12). */
-  extraTools?: RunnableTool[];
   onProgress: (note: string) => void;
   onEvent: (event: RunEvent) => void;
-  control: RunControl;
-  /** One more turn on the run's own pi session (harness-pi item 14), when the
-   *  run is on pi; absent, the turn is the native loop's. */
+  /** One more turn on the run's own pi session (harness-pi item 14). Absent —
+   *  a `finish` plan, whose session ended with the previous generation — the
+   *  turn is not run and nothing is submitted. */
   followUp?: PiFollowUpTurn;
 }
 
 /**
- * Run the description turn: publish the `description_turn` run note, append
- * the run's answer and the follow-up to its messages IN PLACE, and run the
- * agent once more on a clipped COPY of its def (never the shared AgentDef) —
- * through `runAgent`, or as a `prompt` on the run's pi session when the run
- * stage handed one over (`followUp`), under the same clip. The description
- * arrives through the tool context's `onPrDescription` hook — the same one the
- * first turn fed — and is ALSO returned, so the caller can tell "submitted"
- * from "the turn ran and still submitted nothing" without reaching into its
- * own state. Never throws past a loop failure: a turn that fails is logged
- * and reported as having submitted nothing.
+ * Run the description turn: publish the `description_turn` run note and prompt
+ * the run's pi session once more with the follow-up (`followUp`), under a clip
+ * below the agent's own budgets (`DESCRIPTION_TURN_MAX_TURNS`,
+ * `DESCRIPTION_TURN_MAX_MINUTES`). The description arrives through the tool
+ * context's `onPrDescription` hook — the same one the first turn fed — and is
+ * ALSO returned, so the caller can tell "submitted" from "the turn ran and
+ * still submitted nothing" without reaching into its own state. Never throws
+ * past a turn failure: a turn that fails is logged and reported as having
+ * submitted nothing. Without a session to prompt (a `finish` plan) the note
+ * says so and nothing is submitted.
  */
 export async function runDescriptionTurn(input: {
   span?: Span;
   target: DescriptionTurnTarget;
-  /** The run's answer so far — appended as the assistant turn before the follow-up. */
-  answer: string;
-  /** The run's message list — the turn appends to it IN PLACE. */
-  messages: ChatMessage[];
-  system: string | undefined;
   turn: CodingTurnSpec;
   logKey: string;
 }): Promise<{ description: PrDescription | undefined }> {
   const { target: t, turn, logKey } = input;
+  if (!turn.followUp) {
+    const summary = `pushed ${t.branch} onto the open ${t.repo}#${t.pr.number} without resubmitting its description — no session to ask on (the loop answered before a restart), so the description stands as it was`;
+    console.log(`[description-turn] ${logKey} ${summary}`);
+    turn.onEvent({ type: "run_note", kind: "description_turn", summary, at: systemClock() });
+    return { description: undefined };
+  }
   const summary = `pushed ${t.branch} onto the open ${t.repo}#${t.pr.number} without resubmitting its description — asking for it (one turn)`;
   console.log(`[description-turn] ${logKey} ${summary}`);
   turn.onEvent({ type: "run_note", kind: "description_turn", summary, at: systemClock() });
   turn.onProgress(`re-evaluating the description of ${t.repo}#${t.pr.number} at ${t.headSha.slice(0, 7)}`);
   let submitted: PrDescription | undefined;
   const followUpText = descriptionFollowUp(t);
-  input.messages.push(
-    { role: "assistant", content: [{ type: "text", text: input.answer }] },
-    { role: "user", content: [{ type: "text", text: followUpText }] },
-  );
-  const agent: AgentDef = {
-    ...turn.agent,
-    maxTurns: Math.min(turn.agent.maxTurns, DESCRIPTION_TURN_MAX_TURNS),
-    maxMinutes: Math.min(turn.agent.maxMinutes, DESCRIPTION_TURN_MAX_MINUTES),
-  };
   const toolContext: ToolContext = {
     ...turn.toolContext,
     onPrDescription: (d) => {
@@ -180,31 +159,13 @@ export async function runDescriptionTurn(input: {
     // stays the first loop's, and the post-step's "PR updated: … body
     // re-rendered at <sha>" note is what tells the reader the outcome. The
     // description — the turn's only deliverable — arrives through the hook.
-    if (turn.followUp) {
-      await turn.followUp({
-        text: followUpText,
-        maxTurns: agent.maxTurns,
-        maxMinutes: agent.maxMinutes,
-        toolContext,
-        ...(input.span ? { span: input.span } : {}),
-      });
-    } else {
-      await runAgent({
-        provider: turn.provider,
-        model: turn.model,
-        agent,
-        messages: input.messages,
-        ...(input.system !== undefined ? { system: input.system } : {}),
-        ...(turn.effort !== undefined ? { effort: turn.effort } : {}),
-        ...(input.span ? { span: input.span } : {}),
-        ...(turn.backend ? { backend: turn.backend } : {}),
-        toolContext,
-        ...(turn.extraTools && turn.extraTools.length > 0 ? { extraTools: turn.extraTools } : {}),
-        onProgress: turn.onProgress,
-        onEvent: turn.onEvent,
-        control: turn.control,
-      });
-    }
+    await turn.followUp({
+      text: followUpText,
+      maxTurns: Math.min(turn.agent.maxTurns, DESCRIPTION_TURN_MAX_TURNS),
+      maxMinutes: Math.min(turn.agent.maxMinutes, DESCRIPTION_TURN_MAX_MINUTES),
+      toolContext,
+      ...(input.span ? { span: input.span } : {}),
+    });
   } catch (err) {
     console.error(`[description-turn] ${logKey} turn failed: ${err instanceof Error ? err.message : String(err)}`);
   }

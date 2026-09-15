@@ -26,7 +26,7 @@ import { ConfigDocumentClient, parseConfigLocation, stateWorkerFrom } from "./co
 import type { EnvRecord, Secrets } from "./secrets.js";
 import type { Grants } from "./core/authz/types.js";
 import { isRunSchedule, SCHEDULES } from "./core/schedules.js";
-import { AGENTS, type Harness } from "./agents/registry.js";
+import { AGENTS } from "./agents/registry.js";
 import type { McpServerEntry } from "./mcp/registry.js";
 import {
   validateBoundaries,
@@ -289,12 +289,14 @@ export interface AppConfig {
    */
   references?: ReferencesConfig;
   /**
-   * Which loop drives each preset's runs (docs/reference/specs/harness-pi.md
-   * item 1): `<preset>: native | pi`, a deployment decision over the preset's
-   * own declaration (`AgentDef.harness`). Absent → every preset runs the
-   * harness it declares — the native loop today — and nothing changes.
+   * Retired (docs/reference/specs/harness-pi.md item 1): the block a deployment
+   * set while record 0032's series moved the presets onto pi one at a time.
+   * There is one harness now, so the block selects nothing; it is still
+   * accepted — every value `pi`, every key a preset — so a config written
+   * during the series loads, and refused by name when a value says `native`,
+   * the loop that no longer exists. Remove it.
    */
-  harness?: Record<string, Harness>;
+  harness?: Record<string, "pi">;
   /**
    * What the harness writes into pi's per-run settings for every run on pi
    * (docs/reference/specs/harness-pi.md item 4): today the compaction

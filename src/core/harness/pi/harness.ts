@@ -1,13 +1,13 @@
-// The pi harness (docs/reference/specs/harness-pi.md): what drives a run whose
-// preset is on pi, in place of `runAgent`. It writes pi's files into the run's
-// container, starts pi detached with the run bearer as its only key on a
-// session holding the thread's earlier turns, sends the request as the prompt
-// (the seed rule, item 9), and then does what the native loop does
-// around a model that pi now drives: it counts turns for the guard, warns at
-// the wrap-up, forces the write-up at the deadline or the guard with every
-// tool refused, honours a soft stop with a write-up and a hard stop with an
-// abort, folds the thread's follow-ups in as steers, mirrors the transcript
-// onto the ledger, and answers with the same words the loop would. A run that
+// The pi harness (docs/reference/specs/harness-pi.md): what drives every run.
+// It writes pi's files into the run's container, starts pi detached with the
+// run bearer as its only key on a session holding the thread's earlier turns,
+// sends the request as the prompt (the seed rule, item 9), and then does
+// around the model pi drives what a run loop owes its run (item 15): it counts
+// turns for the guard, warns at the wrap-up, forces the write-up at the
+// deadline or the guard with every tool refused, honours a soft stop with a
+// write-up and a hard stop with an abort, folds the thread's follow-ups in as
+// steers, mirrors the transcript onto the ledger, and answers under the
+// wind-down words (`./windDown.ts`). A run that
 // comes back after a bot restart re-attaches to its pi where it still runs, at
 // the root the row recorded, or restarts pi on a session rebuilt from the
 // mirrored transcript. The open form (`runPiHarnessOpen`, item 14) hands the
@@ -36,8 +36,8 @@ import {
   turnGuardPace,
   wrapUpInstruction,
   wrapUpNote,
-  type StepReport,
-} from "../../../runner.js";
+} from "./windDown.js";
+import type { StepReport } from "../../runLedger/stepReport.js";
 import type { RunnableTool, ToolContext } from "../../../tools/runnableTool.js";
 import { bearerHashOf, type RunBearerStore } from "../../modelProxy/runBearers.js";
 import { redactAndCap, redactSecrets, type RunEvent, type RunNoteKind, type StopMode } from "../../runEvents.js";
@@ -150,7 +150,7 @@ export interface PiHarnessRun {
    *  turns, then the request as the last user turn. The earlier turns become
    *  pi's session, the request its prompt (`splitSeed`). */
   messages: ChatMessage[];
-  /** The tools pi relays to the bot — the preset's toolset less the workspace tools pi has of its own. */
+  /** The tools pi relays to the bot — the preset's toolset (src/tools/toolsets.ts), every one run here. */
   tools: RunnableTool[];
   toolContext: ToolContext;
   /** The thread's facts the gate judges pi's own tools by: the checkout, the
@@ -234,14 +234,6 @@ export interface OpenPiSession {
   followUp: PiFollowUpTurn;
   /** Ends pi, removes its root, forgets the run on the relay. */
   end(): Promise<void>;
-}
-
-/** The workspace tools pi has of its own; the native names are not relayed. */
-export const NATIVE_WORKSPACE_TOOLS: ReadonlySet<string> = new Set(["bash", "read_file", "write_file"]);
-
-/** The tools a preset relays to the bot under pi: its toolset without the workspace tools. */
-export function relayedTools(tools: readonly RunnableTool[]): RunnableTool[] {
-  return tools.filter((t) => !NATIVE_WORKSPACE_TOOLS.has(t.name));
 }
 
 const FINALE_TIMEOUT_MS = 3 * 60_000;
@@ -437,6 +429,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): 
   // fresh start (`makeRoot`: the exec container's predictable one, the bot
   // host's own). Nothing is filed before one of the two is known.
   let paths: PiRunPaths | undefined;
+  /** Hands the follow-ups pi was sent and never echoed back to the inbox; bound once the loop's drain exists. */
+  let requeueUnechoed: () => void = () => {};
   const remainingMs = run.resume?.remainingMs ?? run.agent.maxMinutes * 60_000;
   const deadline = now() + remainingMs;
   const warnAt = deadline - Math.min(3 * 60_000, run.agent.maxMinutes * 15_000);
@@ -491,6 +485,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): 
     return "an operator asked this run to stop: no more tool calls — write your final answer now";
   };
   const rules: ToolRuleContext = { ...run.rules, identity: run.agent.identity };
+  // The waits on the bridge pace with the log poll: a test that polls every millisecond is not made to wait fifty.
+  const seenTick = Math.min(CALL_SEEN_TICK_MS, deps.pollMs ?? CALL_SEEN_TICK_MS);
   const live: LiveHarness = {
     runId: run.runId,
     tools: run.tools,
@@ -502,8 +498,12 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): 
     gateSaw: (callId) => bridge.gateSaw(callId),
     toolsBlocked,
     callSeen: async (callId) => {
-      for (let waited = 0; !bridge.callOpen(callId) && waited < CALL_SEEN_WAIT_MS; waited += CALL_SEEN_TICK_MS)
-        await deps.sleep(CALL_SEEN_TICK_MS);
+      for (let waited = 0; !bridge.callOpen(callId) && waited < CALL_SEEN_WAIT_MS; waited += seenTick)
+        await deps.sleep(seenTick);
+    },
+    callEnded: async (callId) => {
+      for (let waited = 0; bridge.callOpen(callId) && waited < CALL_SEEN_WAIT_MS; waited += seenTick)
+        await deps.sleep(seenTick);
     },
   };
   const forget = deps.registry.register(live);
@@ -768,25 +768,38 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): 
     // never steered ahead of the first. The queue is `check`'s only asynchronous
     // work; `check` itself stays synchronous for the event loop below.
     let steers: Promise<void> = Promise.resolve();
+    // The steers pi has been sent and has not yet echoed as a user message.
+    // A drained follow-up is the model's only once pi echoes the steer — that
+    // echo is the turn the mirror writes — so the ledger's `inboxConsumedSeq`
+    // moves then, never at the drain: a resume from a step before the echo
+    // folds the follow-up in again instead of losing it. A loop that fails
+    // with steers still unechoed hands them back to the inbox, so the run
+    // stage's fresh-turn path runs them as it runs any follow-up the loop
+    // never read (thread-admission item 4).
+    const unechoed: { message: string; seq: number; inputs: FollowUpInput[] }[] = [];
+    // pi echoes a steer verbatim today; the match tolerates the whitespace a
+    // renderer might fold, so a folded echo never leaves a read steer
+    // "unechoed" and hands a follow-up the model already has back for a second turn.
+    const echoKey = (text: string) => text.replace(/\s+/g, " ").trim();
+    const steerEchoed = (message: Record<string, unknown>) => {
+      const text = Array.isArray(message.content)
+        ? (message.content as Array<Record<string, unknown>>)
+            .flatMap((p) => (p.type === "text" && typeof p.text === "string" ? [p.text] : []))
+            .join("")
+        : undefined;
+      if (text === undefined) return;
+      const key = echoKey(text);
+      const at = unechoed.findIndex((u) => echoKey(u.message) === key);
+      if (at < 0) return;
+      const [echoed] = unechoed.splice(at, 1);
+      if (echoed!.seq > mirror.inboxConsumedSeq) mirror.inboxConsumedSeq = echoed!.seq;
+    };
+    requeueUnechoed = () => {
+      run.inbox?.requeue(unechoed.splice(0).flatMap((u) => u.inputs));
+    };
     const drainFollowUps = () => {
       const inputs: FollowUpInput[] = run.inbox?.drain() ?? [];
       if (inputs.length === 0) return;
-      for (const input of inputs) {
-        if (input.ledgerSeq !== undefined && input.ledgerSeq > mirror.inboxConsumedSeq)
-          mirror.inboxConsumedSeq = input.ledgerSeq;
-        const source = {
-          ...(input.sourceUrl ? { url: input.sourceUrl } : {}),
-          ...(input.userName ? { user: input.userName } : {}),
-          ...(input.from ? { run: input.from.runId } : {}),
-        };
-        emit({
-          type: "input",
-          text: redactSecrets(input.text),
-          messageId: followUpMessageId(input),
-          ...(Object.keys(source).length > 0 ? { source } : {}),
-        });
-        note("follow_up", `follow-up folded in: ${redactSecrets(followUpSnippet(input))}`);
-      }
       const images = inputs.flatMap((i) =>
         (i.images ?? []).map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mediaType })),
       );
@@ -804,13 +817,30 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): 
             note("follow_up", `staging the follow-up's files failed: ${redactSecrets(stagedLine)}`);
           }
         }
-        if (settled) return;
+        if (settled) {
+          // pi settled before the steer could go: the follow-ups are the run
+          // stage's to run as a fresh turn, exactly as ones the loop never drained.
+          run.inbox?.requeue(inputs);
+          return;
+        }
+        for (const input of inputs) {
+          const source = {
+            ...(input.sourceUrl ? { url: input.sourceUrl } : {}),
+            ...(input.userName ? { user: input.userName } : {}),
+            ...(input.from ? { run: input.from.runId } : {}),
+          };
+          emit({
+            type: "input",
+            text: redactSecrets(input.text),
+            messageId: followUpMessageId(input),
+            ...(Object.keys(source).length > 0 ? { source } : {}),
+          });
+          note("follow_up", `follow-up folded in: ${redactSecrets(followUpSnippet(input))}`);
+        }
         const prompt = followUpPrompt(inputs);
-        transport!.send({
-          type: "steer",
-          message: stagedLine ? `${prompt}\n\n${stagedLine}` : prompt,
-          ...(images.length > 0 ? { images } : {}),
-        });
+        const message = stagedLine ? `${prompt}\n\n${stagedLine}` : prompt;
+        unechoed.push({ message, seq: Math.max(0, ...inputs.map((i) => i.ledgerSeq ?? 0)), inputs });
+        transport!.send({ type: "steer", message, ...(images.length > 0 ? { images } : {}) });
       });
     };
     /** The budgets, the stops and the inbox — on every event and every tick. */
@@ -910,6 +940,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): 
           if (!continuing) mirror.expectSeedEcho();
         }
       }
+      if (obs.message?.role === "user") steerEchoed(obs.message);
       if (obs.message && (await mirror.onMessage(obs.message, bridge.turns))) held();
       if (obs.compaction) {
         if (await mirror.onCompaction(obs.compaction, bridge.turns)) held();
@@ -969,6 +1000,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): 
       if (hardStopped) break;
     }
 
+    // A steer pi never echoed was never read: pi reads a queued steer at its
+    // next turn boundary and had none. Back to the inbox, for the fresh turn.
+    requeueUnechoed();
     let answer: string;
     if (hardStopped) {
       note("stopped", hardStopNote(), "hard");
@@ -1124,7 +1158,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): 
     return { answer, followUp, end };
   } catch (err) {
     // A loop that throws — a refused prompt, a dead pi, a failed model call, a
-    // gate bypass — is a failed loop, and its span says so.
+    // gate bypass — is a failed loop, and its span says so. The follow-ups it
+    // was sent and never read go back to the inbox for the fresh turn.
+    requeueUnechoed();
     agentSpan?.end("error");
     await end();
     throw err;

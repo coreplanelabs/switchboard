@@ -15,16 +15,30 @@ import type { ResumableRun } from "./boot.js";
 import { messageFromInbox } from "./runLedger/inboxMessage.js";
 import { planResume, type KnownTool } from "./runLedger/resume.js";
 import type { LiveRunRow } from "./runLedger/types.js";
-import { TOOLSETS } from "../tools/workspace.js";
+import { TOOLSETS } from "../tools/toolsets.js";
+import { piBuiltinToolsFor } from "./harness/pi/process.js";
+
+/** pi's own workspace tools that only read (harness-pi item 12): the planner
+ *  words their settlement as a lost result, never as an unknown tool. */
+const PI_READ_ONLY_TOOLS: ReadonlySet<string> = new Set(["read", "grep", "find", "ls"]);
 
 /** What the planner needs to know about the agent's static tools: their names
- *  and which are side-effect-free. A bridged MCP tool is deliberately absent —
+ *  and which are side-effect-free — the toolset the bot relays, and pi's own
+ *  workspace tools for the preset's identity, so a `bash` or `read` in flight
+ *  at the kill is settled as a known call whose result was lost, not as a
+ *  tool that no longer exists. A bridged MCP tool is deliberately absent —
  *  unknown to the planner, it gets the not-available result (plan D3). */
-export function knownToolsFor(agent: Pick<AgentDef, "toolset">): KnownTool[] {
-  return (TOOLSETS[agent.toolset] ?? []).map((t) => ({
-    name: t.name,
-    ...(t.sideEffectFree ? { sideEffectFree: true as const } : {}),
-  }));
+export function knownToolsFor(agent: Pick<AgentDef, "toolset" | "identity">): KnownTool[] {
+  return [
+    ...(TOOLSETS[agent.toolset] ?? []).map((t) => ({
+      name: t.name,
+      ...(t.sideEffectFree ? { sideEffectFree: true as const } : {}),
+    })),
+    ...piBuiltinToolsFor(agent.identity).map((name) => ({
+      name,
+      ...(PI_READ_ONLY_TOOLS.has(name) ? { sideEffectFree: true as const } : {}),
+    })),
+  ];
 }
 
 /** The request text of a run, from the `input` event it published first. */

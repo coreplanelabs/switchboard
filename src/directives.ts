@@ -20,8 +20,12 @@ export interface RequestDirectives {
   text: string;
 }
 
-/** The directive values a thread can carry forward (stickiness). A budget is
- *  a property of one request and is never carried. */
+/** The directive values a thread carries forward (stickiness,
+ *  docs/reference/specs/routing-and-config.md item 3): the model and the effort
+ *  from the thread's user turns, and the agent from the thread's transcript —
+ *  the agent of its newest finished run with a session log, read by the
+ *  dispatcher (`stickyAgentOf`), never from an `agent:` token in the history.
+ *  A budget is a property of one request and is never carried. */
 export interface ThreadDirectives {
   agent?: string;
   model?: string;
@@ -40,21 +44,23 @@ function parseBudgetMinutes(value: string): number | undefined {
 }
 
 /**
- * Last agent/model directives mentioned in earlier thread messages (user turns
- * only, last one wins) — used to keep follow-ups on the agent/model a thread
- * already established instead of falling back to the global default. Lenient
- * where parseDirectives is strict: history is data being scanned, not a
- * command being executed, so malformed or unknown values are skipped, never
- * thrown. A `budget:` in the history is skipped on purpose: it bounded the
- * run it rode on and nothing after it.
+ * The last model and effort directives mentioned in earlier thread messages
+ * (user turns only, last one wins) — used to keep follow-ups on the model and
+ * effort a thread already established instead of falling back to the global
+ * default. The agent is not read here: a thread's agent is the one whose
+ * transcript it holds (`stickyAgentOf`), so an `agent:` token in the history
+ * is skipped — it named the run it rode on, and that run's session is what
+ * carries the agent forward. Lenient where parseDirectives is strict: history
+ * is data being scanned, not a command being executed, so malformed or
+ * unknown values are skipped, never thrown. A `budget:` in the history is
+ * skipped on purpose: it bounded the run it rode on and nothing after it.
  */
 export function lastThreadDirectives(history: Array<{ role: string; text: string }>): ThreadDirectives {
   const out: ThreadDirectives = {};
   for (const h of history) {
     if (h.role !== "user") continue;
     for (const m of h.text.matchAll(DIRECTIVE_RE)) {
-      if (m[1] === "agent" && AGENTS[m[2]]) out.agent = m[2];
-      else if (m[1] === "model") out.model = m[2];
+      if (m[1] === "model") out.model = m[2];
       else if (m[1] === "effort" && isEffort(m[2])) out.effort = m[2];
     }
   }

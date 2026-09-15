@@ -38,7 +38,7 @@ The seams are Channel, Provider, Executor and Agent. The dispatcher sits between
 | Seam | Interface | Implementations | Knows nothing about |
 |---|---|---|---|
 | Channel | `ChannelIO` + `IncomingMessage` (`src/core/types.ts`) | Slack (Socket Mode), the CLI's `ask`, HTTP ingress, MCP | agents, models, where tools run |
-| Provider | `Provider` (`src/core/provider.ts`) | Anthropic; OpenAI-compatible (OpenAI, Groq, Ollama, vLLM); the same blocks on pi's model library for the router's and reflection's calls | Slack, authorization, where tools run |
+| Provider | `Provider` (`src/core/provider.ts`) and the config's `providers` blocks | A run's pi calls the model proxy, which forwards the two wire shapes — Anthropic Messages, OpenAI Chat Completions (OpenAI, Groq, Ollama, vLLM) — with the deployment's key; the same blocks on pi's model library (`PiAiProviders`) for the router's and reflection's calls | Slack, authorization, where tools run |
 | Executor | `Executor` (`src/execution/executor.ts`) | the bot host; an E2B or Cloudflare sandbox per thread; a resident | which agent, model or channel asked |
 | Agent | `AgentDef` data (`src/agents/registry.ts`) | `general`, `coding`, `review`, `ship`, `research`, `explore`, `conductor` | the channel, the executor |
 

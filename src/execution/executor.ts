@@ -19,7 +19,7 @@ export { BASH_TIMEOUT_MS, BASH_TIMEOUT_MAX_MS, EXEC_CALL_MARGIN_MS, clampBashTim
 // call an Executor, which is either the local host (dev/CLI) or a remote
 // per-thread sandbox (production).
 
-/** The caller's span — the runner's `exec.*` span — so an executor's own
+/** The caller's span — the tool call's `exec.*` span — so an executor's own
  *  outbound calls become its `http.client` children (docs/reference/specs/tracing.md item
  *  21). Absent from a caller with no trace: the call is then a plain fetch. */
 export interface ExecTraceOptions {
@@ -115,10 +115,10 @@ export interface ReleaseResult {
  *  unrecoverable after re-attach. This is categorically different from a normal
  *  nonzero command exit, which every Executor returns as ordinary output text
  *  and NEVER as a throw. Remote executors throw this (not a bare `Error`) for
- *  infra failures so the runner can tell a wedged sandbox from a command the
- *  agent should keep handling, and fail fast instead of toiling commands into a
- *  dead sandbox. Extends `Error`, so `err.message`/`instanceof Error`
- *  callers are unaffected. */
+ *  infra failures so a caller can tell a wedged sandbox from a command the
+ *  agent should keep handling — the pi harness's container operations and the
+ *  relayed tools read it as a failure of the operation, named. Extends
+ *  `Error`, so `err.message`/`instanceof Error` callers are unaffected. */
 export class ExecInfraError extends Error {
   readonly infra = true as const;
   constructor(message: string) {
@@ -130,11 +130,9 @@ export class ExecInfraError extends Error {
 /** An exec-CAPACITY failure: the sandbox fleet had no free instance for this
  *  thread within the executor's bounded wait (docs/reference/specs/execution.md item 14).
  *  Nothing ran and nothing is broken — the fleet's `max_instances` is reached
- *  — so this is deliberately NOT an `ExecInfraError`: `ExecHealthTracker`
- *  neither counts it nor resets on it, and the runner hands it to the model as
- *  a retry-later outcome instead of aborting the run (two of these in a row,
- *  read as infra, would abort the run within seconds). `extends Error`
- *  so message/`instanceof Error` callers are unaffected. */
+ *  — so this is deliberately NOT an `ExecInfraError`: a caller that reads
+ *  infra failures as a dead sandbox must not read this one so. `extends
+ *  Error` so message/`instanceof Error` callers are unaffected. */
 export class ExecCapacityError extends Error {
   readonly capacity = true as const;
   constructor(message: string) {
@@ -147,10 +145,11 @@ export class ExecCapacityError extends Error {
  *  resident-repos.md item 65): the resident's container exited inside a
  *  rollout, the executor waited for the wake and re-attached, and the command
  *  it was about to send never ran. Deliberately NOT an `ExecInfraError`: the
- *  sandbox is alive again, so `ExecHealthTracker` neither counts it nor
- *  resets on it, and the runner settles the interrupted call with a synthetic
- *  result instead of striking (run-loop.md item 19). `message` carries the
- *  facts the model needs: the wait and the fresh worktree's ref and sha. */
+ *  sandbox is alive again. The native loop settled the interrupted call with
+ *  a synthetic result; the pi harness has no reader for it yet (harness-pi.md,
+ *  the item 19 gap), so a run on pi fails when its container is replaced.
+ *  `message` carries the facts a reader would give the model: the wait and
+ *  the fresh worktree's ref and sha. */
 export class ExecSandboxRestartedError extends Error {
   readonly restarted = true as const;
   constructor(
@@ -159,57 +158,6 @@ export class ExecSandboxRestartedError extends Error {
   ) {
     super(message);
     this.name = "ExecSandboxRestartedError";
-  }
-}
-
-/** Decorates an Executor to track CONSECUTIVE exec-infrastructure failures
- *  (`ExecInfraError`) with no successful operation between them — the signal the
- *  runner uses to detect an unrecoverable sandbox. A successful op resets
- *  the count to 0 (proves the sandbox is alive, so a one-off blip never aborts);
- *  an `ExecInfraError` increments it; any OTHER throw (e.g. a path-escape
- *  rejection, a missing file) is neither a health signal nor a reset and leaves
- *  the count untouched. A normal nonzero exit returns output (no throw), so it
- *  too resets the count and can never trip the abort. */
-export class ExecHealthTracker implements Executor {
-  consecutiveInfraFailures = 0;
-  /** Message of the most recent `ExecInfraError` in the current streak — the
-   *  evidence the runner's abort diagnosis quotes instead of guessing a cause.
-   *  Cleared by a successful op along with the count. */
-  lastInfraError: string | undefined;
-  /** Present exactly when the inner executor reads bytes — a decorator that
-   *  always offered it would promise what the transport cannot do. */
-  readBytes?: (path: string, opts?: ExecTraceOptions) => Promise<Uint8Array>;
-
-  constructor(private readonly inner: Executor) {
-    const innerReadBytes = inner.readBytes?.bind(inner);
-    if (innerReadBytes) this.readBytes = (path, opts) => this.track(() => innerReadBytes(path, opts));
-  }
-
-  private async track<T>(op: () => Promise<T>): Promise<T> {
-    try {
-      const out = await op();
-      this.consecutiveInfraFailures = 0;
-      this.lastInfraError = undefined;
-      return out;
-    } catch (err) {
-      if (err instanceof ExecInfraError) {
-        this.consecutiveInfraFailures++;
-        this.lastInfraError = err.message;
-      }
-      throw err;
-    }
-  }
-
-  exec(command: string, opts?: ExecOptions): Promise<string> {
-    return this.track(() => this.inner.exec(command, opts));
-  }
-
-  readFile(path: string, opts?: ExecTraceOptions): Promise<string> {
-    return this.track(() => this.inner.readFile(path, opts));
-  }
-
-  writeFile(path: string, content: string, opts?: ExecTraceOptions): Promise<string> {
-    return this.track(() => this.inner.writeFile(path, content, opts));
   }
 }
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { StepReport } from "../../runner.js";
+import type { StepReport } from "./stepReport.js";
 import type { ChatMessage } from "../chatMessage.js";
 import type { RunRecord } from "../runRecord.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "../runStoreWorker.js";

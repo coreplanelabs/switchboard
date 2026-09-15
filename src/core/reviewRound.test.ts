@@ -7,8 +7,6 @@ import { declaredProfile } from "../config/profile.js";
 import { resetResidentProbeCache } from "../execution/factory.js";
 import type { Executor } from "../execution/executor.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
-import type { Provider } from "./provider.js";
-import type { RunOptions } from "../runner.js";
 import type { PiFollowUpTurnInput } from "./harness/pi/harness.js";
 import type { PrCommitList } from "./headMoved.js";
 import type { RunEvent } from "./runEvents.js";
@@ -23,13 +21,6 @@ import {
   settleReviewedHead,
   type SettleReviewedHeadInput,
 } from "./reviewRound.js";
-
-// The native loop is mocked HERE so the settle's re-review wiring — which loop
-// it reaches for, on what messages, with which system prompt and hook — is
-// asserted without a model; the dispatcher suite drives the native turn end to
-// end through a real loop (`head moved during the run (item 12)`).
-const { runAgentMock } = vi.hoisted(() => ({ runAgentMock: vi.fn() }));
-vi.mock("../runner.js", () => ({ runAgent: runAgentMock }));
 
 // Feature: docs/reference/specs/agent-ship.md — the review-round and coding-PR machinery
 // extracted from dispatch() as callable units, each parameterized on an
@@ -715,19 +706,17 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
 });
 
 // agent-review.md item 12 + harness-pi.md item 14: a substantive head move's
-// ONE more turn. On the native loop it is `runAgent` on the round's messages
-// with the system prompt recomposed at the new head; on a preset on pi it is a
-// `prompt` on the run's own pi session — the seam the run stage hands over —
-// with the same follow-up text, the turn's own verdict capture, and the same
-// settle around it (worktree moved first, head re-probed after).
+// ONE more turn is a `prompt` on the run's own pi session — the seam the run
+// stage hands over (`followUp`) — with the follow-up text naming the new head,
+// the turn's own verdict capture, and the settle around it (worktree moved
+// first, head re-probed after). A round with no session left (a `finish` plan)
+// keeps the verdict for the head it reviewed and says so.
 describe("settleReviewedHead — the head-move re-review", () => {
   const list = (subjects: string[]): PrCommitList => ({
     commits: subjects.map((message, i) => ({ sha: `${i + 1}`.repeat(40), message })),
     files: ["src/x.ts"],
     filesTruncated: false,
   });
-  const provider: Provider = { name: "fake", complete: async () => ({ content: [], stopReason: "end_turn" }) };
-
   /** A settle whose PR moved substantively under the review: reviewed `HEAD`,
    *  the PR now at `OTHER` with one more commit; a movable executor whose
    *  `rev-parse HEAD` follows the move. */
@@ -752,14 +741,10 @@ describe("settleReviewedHead — the head-move re-review", () => {
       verdict: { verdict: "approve", summary: "ok", head: HEAD, findings: [] },
       answer: "First review: approve.",
       messages: [{ role: "user", content: [{ type: "text", text: "review acme/api#42" }] }],
-      composeSystem: (h) => `SYSTEM at ${h.sha} (${h.verified ? "verified" : "unverified"})`,
       executor,
       turn: {
-        provider,
-        model: "anthropic/claude-fable-5",
         agent: AGENTS.review,
         toolContext: { executor },
-        onProgress: () => {},
         onEvent: (e) => void events.push(e),
         control: new RunControl(),
         ...turn,
@@ -773,8 +758,7 @@ describe("settleReviewedHead — the head-move re-review", () => {
     return { input, executor, events, replies, labels, moves };
   }
 
-  it("on the pi harness a substantive move's one more turn is a prompt on the run's session: the worktree moved first, the same follow-up text as the appended user turn, the round's budget, the turn's own verdict capture, the head re-probed after — and runAgent is never called", async () => {
-    runAgentMock.mockReset();
+  it("a substantive move's one more turn is a prompt on the run's session: the worktree moved first, the follow-up text as the appended user turn, the round's budget, the turn's own verdict capture, the head re-probed after", async () => {
     const followUp = vi.fn(async (input: PiFollowUpTurnInput) => {
       // the relayed submit_verdict, run in the bot under THIS turn's context
       input.toolContext.onVerdict?.({
@@ -787,7 +771,6 @@ describe("settleReviewedHead — the head-move re-review", () => {
     });
     const w = moved({ followUp });
     const out = await settleReviewedHead(w.input);
-    expect(runAgentMock).not.toHaveBeenCalled();
     expect(w.moves).toEqual([OTHER]);
     expect(followUp).toHaveBeenCalledTimes(1);
     const input = followUp.mock.calls[0][0];
@@ -797,7 +780,7 @@ describe("settleReviewedHead — the head-move re-review", () => {
     expect(input.maxTurns).toBe(AGENTS.review.maxTurns);
     expect(input.maxMinutes).toBe(AGENTS.review.maxMinutes);
     expect(input.toolContext.executor).toBe(w.executor);
-    // the transcript grew the same way as on the native loop: the first review, then the follow-up
+    // the round's transcript grew: the first review, then the follow-up
     expect(w.input.messages).toHaveLength(3);
     expect(w.input.messages[1]).toEqual({
       role: "assistant",
@@ -818,27 +801,7 @@ describe("settleReviewedHead — the head-move re-review", () => {
     expect(w.replies[0]).toContain("🔀 acme/api#42 moved during the run");
   });
 
-  it("on the native loop the same move runs runAgent on the round's messages with the system prompt recomposed at the new head and its own verdict capture — unchanged", async () => {
-    runAgentMock.mockReset();
-    runAgentMock.mockImplementation(async (opts: RunOptions) => {
-      opts.toolContext.onVerdict?.({ verdict: "request_changes", summary: "wrong", head: OTHER, findings: [] });
-      return "Second review.";
-    });
-    const w = moved();
-    const out = await settleReviewedHead(w.input);
-    expect(runAgentMock).toHaveBeenCalledTimes(1);
-    const opts = runAgentMock.mock.calls[0][0] as RunOptions;
-    expect(opts.messages).toBe(w.input.messages);
-    expect(opts.system).toBe(`SYSTEM at ${OTHER} (verified)`);
-    expect(opts.agent).toBe(AGENTS.review);
-    expect(w.moves).toEqual([OTHER]);
-    expect(out.answer).toBe("Second review.");
-    expect(out.verdict?.head).toBe(OTHER);
-    expect(out.reviewHead).toBe(OTHER);
-  });
-
-  it("a follow-up turn pi refuses fails the settle the way a runner failure does: the throw propagates to the run, nothing is swallowed", async () => {
-    runAgentMock.mockReset();
+  it("a follow-up turn pi refuses fails the settle: the throw propagates to the run, nothing is swallowed", async () => {
     const w = moved({
       followUp: async () => {
         throw new Error("pi refused the prompt: no reason");
@@ -846,6 +809,34 @@ describe("settleReviewedHead — the head-move re-review", () => {
     });
     await expect(settleReviewedHead(w.input)).rejects.toThrow("pi refused the prompt");
     expect(w.moves).toEqual([OTHER]); // the worktree had moved before the turn was asked for
-    expect(runAgentMock).not.toHaveBeenCalled();
+  });
+
+  // A `finish` plan (run-history item 37): the loop answered before a bot
+  // restart and its pi is gone, so a move it finds has no session to re-review
+  // on. The verdict stands for the head it reviewed, the record says so, and
+  // the post gate pins it there (agent-review item 10).
+  it("without a session to prompt (a finish plan) a substantive move is not re-reviewed: no worktree move, a head_moved note saying the session is gone, the verdict and the reviewed head kept, the observed head re-read", async () => {
+    const w = moved();
+    const out = await settleReviewedHead(w.input);
+    expect(w.moves).toEqual([]);
+    expect(w.replies).toEqual([]);
+    expect(w.labels).toEqual([]);
+    expect(w.events).toEqual([
+      expect.objectContaining({
+        type: "run_note",
+        kind: "head_moved",
+        summary: expect.stringMatching(
+          /not re-reviewed: the loop answered before a restart and its session is gone; the verdict stands for e8e43f4/,
+        ),
+      }),
+    ]);
+    expect(out).toEqual({
+      answer: "First review: approve.",
+      verdict: expect.objectContaining({ verdict: "approve", head: HEAD }),
+      reviewHead: HEAD,
+      observedHead: HEAD,
+      carried: undefined,
+    });
+    expect(w.input.messages).toHaveLength(1); // nothing appended: no turn was asked
   });
 });

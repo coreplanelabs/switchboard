@@ -24,7 +24,7 @@ Placed right after the mention, before the request text:
 
 Combine freely: `agent:ship model:anthropic/claude-opus-5 effort:high in acme/api: fix #42`.
 
-`agent:`, `model:` and `effort:` are sticky in a thread — a follow-up without them keeps the last ones used; on the pi harness the agent is the one whose conversation the thread holds, and the follow-up continues it ([session-log.md](specs/session-log.md) item 9). `budget:` is not: it bounds the one run it rides on; a lower budget on every turn is a boundary (`config set me --boundary.maxMinutes <n>`).
+`model:` and `effort:` are sticky in a thread — a follow-up without them keeps the last ones used. The agent is sticky by transcript: a follow-up continues the agent whose conversation the thread holds — the thread's newest finished run's — and picks up where it left off ([session-log.md](specs/session-log.md) item 9); an `agent:` in an earlier message decides nothing by itself. `budget:` is not sticky: it bounds the one run it rides on; a lower budget on every turn is a boundary (`config set me --boundary.maxMinutes <n>`).
 
 ## Every command you can run in chat
 

@@ -16,10 +16,7 @@
 
 import type { AgentDef, Identity } from "../agents/registry.js";
 import type { RunProfile } from "../config/profile.js";
-import type { Effort } from "../effort.js";
 import type { ChatMessage } from "./chatMessage.js";
-import type { Provider } from "./provider.js";
-import { runAgent } from "../runner.js";
 import {
   makeExecutor,
   type ExecutorFactoryOptions,
@@ -27,9 +24,8 @@ import {
   type WorkspaceBinding,
 } from "../execution/factory.js";
 import type { Executor, ReleaseMode, ReleaseOptions } from "../execution/executor.js";
-import type { RunnableTool, ToolContext } from "../tools/runnableTool.js";
+import type { ToolContext } from "../tools/runnableTool.js";
 import type { Span } from "../core/trace/types.js";
-import type { Backend } from "../core/trace/attrs.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import type { PiFollowUpTurn } from "./harness/pi/harness.js";
 import {
@@ -346,29 +342,21 @@ export function makeSystemComposer(input: {
 // ---- reviewed-head settle: probe + head-move void + single re-review --------
 // (agent-review.md items 8 + 12)
 
-/** Everything one more model turn needs, grouped: the round's agent and model
- *  coordinates plus the run wiring the first turn already used. The settle
- *  reuses `toolContext` for its re-review turn with its own verdict capture
- *  (the voided verdict must not leak back through the first turn's hook).
- *  Which loop runs the turn is the run's harness (harness-pi item 14): the
- *  native loop, or — with `followUp` handed over by the run stage — one more
- *  `prompt` on the run's own pi session. */
+/** Everything one more model turn needs, grouped: the round's preset and the
+ *  run wiring the first turn already used. The settle reuses `toolContext` for
+ *  its re-review turn with its own verdict capture (the voided verdict must
+ *  not leak back through the first turn's hook). The turn is one more `prompt`
+ *  on the run's own pi session, through `followUp` (harness-pi item 14). */
 export interface ReviewTurnSpec {
-  /** Where the re-review's commands execute (docs/reference/specs/tracing.md). */
-  backend?: Backend;
-  provider: Provider;
-  model: string;
+  /** The preset with its effective budget: the re-review's own budget. */
   agent: AgentDef;
-  effort?: Effort;
   toolContext: ToolContext;
-  /** This run's per-run tools (bridged MCP tools) — the re-review turn must
-   *  see exactly what the first turn saw (docs/reference/specs/mcp-tools.md item 12). */
-  extraTools?: RunnableTool[];
-  onProgress: (note: string) => void;
   onEvent: (event: RunEvent) => void;
   control: RunControl;
-  /** One more turn on the run's own pi session (harness-pi item 14), when the
-   *  run is on pi; absent, the re-review is the native loop's. */
+  /** One more turn on the run's own pi session (harness-pi item 14). Absent —
+   *  a `finish` plan, whose session ended with the previous generation — a
+   *  substantive move is not re-reviewed: the verdict stands for the head it
+   *  reviewed and the post gate pins it there (agent-review item 10). */
   followUp?: PiFollowUpTurn;
 }
 
@@ -394,12 +382,13 @@ export interface SettledReviewHead {
  *   reviewed = resolved ≠ current → the PR moved under the review: classify
  *     the move from GitHub's compare lists. A rebase of the same commits
  *     carries the review to the new head (`carried`); a substantive move
- *     voids the verdict and re-reviews at the new head — worktree moved,
- *     prompt recomposed via `composeSystem`, ONE more model turn (`messages`
- *     is appended in place) — before returning. Unclassifiable → item 10
- *     (the post gate pins to the reviewed head; the note follows the post).
- *     Once: a head that moves again after the re-review is item 10's problem,
- *     never a third turn.
+ *     voids the verdict and re-reviews at the new head — worktree moved, ONE
+ *     more prompt on the run's pi session (`messages` is appended in place) —
+ *     before returning; a round with no session left to prompt (a `finish`
+ *     plan) keeps the verdict for the head it reviewed and says so.
+ *     Unclassifiable → item 10 (the post gate pins to the reviewed head; the
+ *     note follows the post). Once: a head that moves again after the
+ *     re-review is item 10's problem, never a third turn.
  *   reviewed ≠ both → returned as-is; the post gate refuses (item 8).
  *
  * The caller decides whether to invoke this at all (a hard-stopped round
@@ -427,7 +416,6 @@ export interface SettleReviewedHeadInput {
   answer: string;
   /** The round's message list — the re-review appends its turns IN PLACE. */
   messages: ChatMessage[];
-  composeSystem: (head: HeadPin) => string;
   executor: Executor;
   turn: ReviewTurnSpec;
   fetchPrHead: FetchPrHead;
@@ -471,12 +459,19 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
         to: current,
       });
       const move = classified?.move;
+      const followUp = turn.followUp;
       if (move?.kind === "rebase") {
         console.log(
           `[review] ${logKey} head moved during run: ${expected.slice(0, 7)} → ${current.slice(0, 7)} — rebase of the same ${move.commits} commit(s); review carried to ${current.slice(0, 7)} (${where})`,
         );
         carried = { reviewed: expected, current, commits: move.commits };
-      } else if (classified && move?.kind === "substantive") {
+      } else if (classified && move?.kind === "substantive" && !followUp) {
+        // No session to re-review on (a `finish` plan): the review stands for
+        // the head it read, said on the record, and the post gate pins it there.
+        const summary = `head moved ${expected.slice(0, 7)} → ${current.slice(0, 7)} — not re-reviewed: the loop answered before a restart and its session is gone; the verdict stands for ${expected.slice(0, 7)}`;
+        console.log(`[review] ${logKey} ${summary} (${where})`);
+        turn.onEvent({ type: "run_note", kind: "head_moved", summary, at: systemClock() });
+      } else if (classified && move?.kind === "substantive" && followUp) {
         const summary = `head moved ${expected.slice(0, 7)} → ${current.slice(0, 7)} — re-reviewing at ${current.slice(0, 7)}`;
         console.log(`[review] ${logKey} ${summary} (${where})`);
         turn.onEvent({ type: "run_note", kind: "head_moved", summary, at: systemClock() });
@@ -520,33 +515,16 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
             verdict = v;
           },
         };
-        // One more turn, on the loop the run is on. On pi the follow-up alone
+        // One more turn on the run's own pi session. The follow-up alone
         // carries the new head: pi reads its system prompt once, at load, so
         // the REVIEW TARGET block stays the session's (harness-pi item 14).
-        answer = turn.followUp
-          ? await turn.followUp({
-              text: followUpText,
-              maxTurns: turn.agent.maxTurns,
-              maxMinutes: turn.agent.maxMinutes,
-              toolContext,
-              ...(span ? { span } : {}),
-            })
-          : await runAgent({
-              provider: turn.provider,
-              model: turn.model,
-              agent: turn.agent,
-              messages: input.messages,
-              // Recomposed at the new head, so the prompt does not contradict the follow-up.
-              system: input.composeSystem({ sha: current, verified: worktreeMoved }),
-              effort: turn.effort,
-              ...(span ? { span } : {}),
-              ...(turn.backend ? { backend: turn.backend } : {}),
-              toolContext,
-              ...(turn.extraTools && turn.extraTools.length > 0 ? { extraTools: turn.extraTools } : {}),
-              onProgress: turn.onProgress,
-              onEvent: turn.onEvent,
-              control: turn.control,
-            });
+        answer = await followUp({
+          text: followUpText,
+          maxTurns: turn.agent.maxTurns,
+          maxMinutes: turn.agent.maxMinutes,
+          toolContext,
+          ...(span ? { span } : {}),
+        });
         // Re-read, not narrowed: the stop may have been requested during the turn.
         if (!turn.control.hardSignal.aborted) observedHead = await probeHead();
       }
