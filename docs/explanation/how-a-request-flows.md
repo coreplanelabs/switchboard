@@ -98,5 +98,6 @@ A pipeline per integration drifts: fix an authorization bug in one, forget the o
 ## Read next
 
 - [Architecture](architecture.md) — the seams as the system's parts.
+- [A thread's conversation outlives its runs](a-thread-continues.md) — what a follow-up in a thread starts from, and why.
 - [Execution and trust](execution-and-trust.md) — what "run the tool call" means once sandboxed.
 - [Add a model provider](../how-to/add-a-provider.md), [Add an agent](../how-to/add-an-agent.md).

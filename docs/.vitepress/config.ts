@@ -261,6 +261,7 @@ export default defineConfig({
           { text: "Worker topology", link: "/explanation/worker-topology" },
           { text: "One definition, every surface", link: "/explanation/one-command-many-surfaces" },
           { text: "Runs: live, then remembered", link: "/explanation/runs-live-and-history" },
+          { text: "A thread's conversation outlives its runs", link: "/explanation/a-thread-continues" },
           { text: "Why config is layered", link: "/explanation/config-layers" },
           { text: "Security model", link: "/explanation/security-model" },
           { text: "Execution and trust", link: "/explanation/execution-and-trust" },
