@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RunSession } from "../runRecord.js";
 import type { RunView } from "../runsService.js";
-import { previousRunOf, readThread, stickyAgentOf, THREAD_READ_LIMIT, threadPrOf } from "./thread.js";
+import { previousRunOf, readThread, stickyAgentOf, THREAD_READ_LIMIT, threadPrOf, threadRouteOf } from "./thread.js";
 
 // docs/reference/specs/routing-and-config.md item 3 and session-log.md item 9:
 // one read of the thread's newest runs, and what the dispatcher derives from it.
@@ -60,6 +60,29 @@ describe("stickyAgentOf — the thread's agent by transcript", () => {
     expect(stickyAgentOf([run({ id: "r1", agent: "coding" })], onPi)).toBeUndefined();
     expect(stickyAgentOf([run({ id: "r1", agent: "review", session: closed })], onPi)).toBeUndefined();
     expect(stickyAgentOf([], onPi)).toBeUndefined();
+  });
+});
+
+// docs/reference/specs/routing-and-config.md item 21: the route a sticky-by-
+// transcript follow-up carries — the thread's decision, receipt intact.
+describe("threadRouteOf — the route a sticky follow-up carries", () => {
+  const route = { preset: "coding", reason: "an imperative ask", model: "anthropic/fast" };
+
+  it("the newest continuable run's route for the sticky agent, with a compound's parts and a collapse stripped — the follow-up spawns nothing and collapsed nothing", () => {
+    const routed = run({
+      id: "r2",
+      agent: "coding",
+      session: closed,
+      route: { ...route, parts: [{ preset: "general", text: "x" }], collapsed: { presets: ["review", "coding"] } },
+    });
+    expect(threadRouteOf([routed, run({ id: "r1" })], "coding")).toEqual(route);
+  });
+
+  it("nothing when the newest run was not routed, cannot be continued, is another agent's, or the thread has no run — an unrouted thread's card is exactly what it was", () => {
+    expect(threadRouteOf([run({ id: "r1", agent: "coding", session: closed })], "coding")).toBeUndefined();
+    expect(threadRouteOf([run({ id: "r1", agent: "coding", route })], "coding")).toBeUndefined();
+    expect(threadRouteOf([run({ id: "r1", agent: "review", session: closed, route })], "coding")).toBeUndefined();
+    expect(threadRouteOf([], "coding")).toBeUndefined();
   });
 });
 

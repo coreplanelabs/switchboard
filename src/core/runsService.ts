@@ -110,6 +110,11 @@ export interface RunView {
    *  session-log item 2): the key, where its seed began, its request row and
    *  its range — `broken` when it detached. A live row carries none here. */
   session?: RunSession;
+  /** The route the run ran under (`RunRecord.route`, routing-and-config item
+   *  21; a live ledger row's `meta.route`) — what a sticky follow-up's card
+   *  carries as its `routed:` receipt. Absent on an unrouted run and on a live
+   *  registry row (the thread read wants finished runs alone). */
+  route?: RunRecord["route"];
   /** The coordinator instance a child belongs to and the key its spawn carried
    *  (`RunMeta` / `LiveRunMeta` / `RunRecord`, run-history item 48) — live here,
    *  live on another generation, or persisted; absent on every other run. */
@@ -288,6 +293,7 @@ function ledgerView(row: LiveRunRow, events: readonly RunEvent[]): RunView {
     ...(m.sourceUrl !== undefined ? { sourceUrl: m.sourceUrl } : {}),
     ...(m.userName !== undefined ? { userName: m.userName } : {}),
     ...(m.parentRunId !== undefined ? { parentRunId: m.parentRunId } : {}),
+    ...(m.route !== undefined ? { route: m.route } : {}),
     ...(m.parentInstanceId !== undefined ? { parentInstanceId: m.parentInstanceId } : {}),
     ...(m.idempotencyKey !== undefined ? { idempotencyKey: m.idempotencyKey } : {}),
     ...(row.stop ? { stop: { mode: row.stop, state: "stopping" as const } } : {}),

@@ -16,7 +16,9 @@ import {
   type RunSeed,
   type RunSession,
   type RunStatus,
+  type RunRouteDecision,
   prOfEvents,
+  routeOfEvents,
 } from "../runRecord.js";
 import type { RunProfile } from "../../config/profile.js";
 import { redactHandoff, type Handoff } from "../ship/handoff.js";
@@ -197,6 +199,7 @@ export function reclaimedRunRecord(input: {
     // included); a row from before profiles existed leaves the record without one.
     ...(row.meta.profile && row.meta.agent ? { profile: { preset: row.meta.agent, ...row.meta.profile } } : {}),
     ...(row.meta.parentRunId !== undefined ? { parentRunId: row.meta.parentRunId } : {}),
+    ...(row.meta.route !== undefined ? { route: row.meta.route } : {}),
     ...(row.meta.seed !== undefined ? { seed: row.meta.seed } : {}),
     // The row's place in its session log (item 53): the range stays open on a
     // record closed here, since the closer has no turn count to end it with.
@@ -292,6 +295,11 @@ export function assembleRunRecord(input: {
    *  skip's reason redacted HERE like every other free string. Omitted when
    *  the run has none. */
   reviewPost?: ReviewPost;
+  /** The route the run ran under (routing-and-config item 21) — its own or the
+   *  thread's decision a sticky follow-up carried, which publishes no `route`
+   *  event; when the caller has none, the events supply it (`routeOfEvents`),
+   *  so a drain's tombstone of a routed run still carries it. */
+  route?: RunRouteDecision;
   /** The effective profile the run was admitted with, with its preset. Omitted
    *  when the caller has none (the drain's tombstone of a run whose registry
    *  row predates profiles). */
@@ -316,6 +324,9 @@ export function assembleRunRecord(input: {
   // The pull request the run reached (run-history item 2): the post-step's
   // `pr_opened`, published before the stream finished, so it is in the events.
   const pr = prOfEvents(events);
+  // The route the run ran under: the caller's (a sticky-carried decision has
+  // no `route` event), else what the events say.
+  const route = input.route ?? routeOfEvents(events);
   const fitted = fitRecordToBudget({
     id: run.id,
     ...(run.label !== undefined ? { label: run.label } : {}),
@@ -351,6 +362,7 @@ export function assembleRunRecord(input: {
     ...(input.reviewHead !== undefined ? { reviewHead: input.reviewHead } : {}),
     ...(input.dispositions !== undefined ? { dispositions: redactDispositions(input.dispositions) } : {}),
     ...(input.reviewPost !== undefined ? { reviewPost: redactReviewPost(input.reviewPost) } : {}),
+    ...(route !== undefined ? { route } : {}),
     ...(input.profile !== undefined ? { profile: input.profile } : {}),
     ...(input.parentRunId !== undefined ? { parentRunId: input.parentRunId } : {}),
     ...coordinatorFields(input.coordinator),
@@ -380,6 +392,9 @@ export interface TombstoneContext {
   run: RunHandle;
   registry: RunRegistry;
   resume: ResumeContext | undefined;
+  /** The route the run ran under (routing-and-config item 21), when it has one
+   *  — a sticky-carried decision has no `route` event for the assembly to read. */
+  route?: RunRouteDecision;
   /** The run that spawned this one (item 46), when it is a child. */
   parentRunId?: string;
   /** The coordinator's instance and key (item 48), when a coordinator spawned it. */
@@ -407,6 +422,7 @@ export function writeTombstone(deps: RecordDeps, ctx: TombstoneContext): void {
     run,
     registry,
     resume,
+    route,
     parentRunId,
     coordinator,
     seed,
@@ -442,6 +458,7 @@ export function writeTombstone(deps: RecordDeps, ctx: TombstoneContext): void {
           channelVisibility,
           repo: repoCtx.repo,
           profile: profileRecordOf(agent, profile),
+          ...(route !== undefined ? { route } : {}),
           ...(parentRunId !== undefined ? { parentRunId } : {}),
           ...(coordinator !== undefined ? { coordinator } : {}),
           ...(seed !== undefined ? { seed } : {}),
@@ -483,6 +500,9 @@ export interface FinishRecordContext {
   dispositions?: FindingDisposition[];
   /** How the review run's post-step ended (agent-review.md item 18), when it ran one. */
   reviewPost?: ReviewPost;
+  /** The route the run ran under — the router's own decision or the thread's a
+   *  sticky follow-up carried (routing-and-config item 21), when it has one. */
+  route?: RunRouteDecision;
   /** The run that spawned this one (item 46), when it is a child. */
   parentRunId?: string;
   /** The coordinator's instance and key (item 48), when a coordinator spawned it. */
@@ -520,6 +540,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
     reviewHead,
     dispositions,
     reviewPost,
+    route,
     parentRunId,
     coordinator,
     seed,
@@ -549,6 +570,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
           ...(reviewHead !== undefined ? { reviewHead } : {}),
           ...(dispositions !== undefined ? { dispositions } : {}),
           ...(reviewPost !== undefined ? { reviewPost } : {}),
+          ...(route !== undefined ? { route } : {}),
           ...(parentRunId !== undefined ? { parentRunId } : {}),
           ...(coordinator !== undefined ? { coordinator } : {}),
           ...(seed !== undefined ? { seed } : {}),

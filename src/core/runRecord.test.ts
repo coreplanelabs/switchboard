@@ -18,6 +18,7 @@ import {
   normalizeDiagnosis,
   normalizeStored,
   prOfEvents,
+  routeOfEvents,
   storedEventSeqs,
   toVisibilityFilter,
   utf8ByteLength,
@@ -830,5 +831,60 @@ describe("the pull request on the record (docs/reference/specs/run-history.md it
       { type: "pr_opened", url: "https://github.com/acme/api/pull/2", number: 2, created: false },
     ];
     expect(prOfEvents(events)).toEqual({ number: 2, url: "https://github.com/acme/api/pull/2" });
+  });
+});
+
+// docs/reference/specs/routing-and-config.md item 21: the route a record's
+// events say the run ran under — counted only when run_meta says the router
+// chose the preset, so a rejected compound's route event on a default run is
+// no route (the boot reclaim's rule).
+describe("routeOfEvents — the route the events say the run ran under", () => {
+  const meta = (agentSource: string): RunEvent => ({ type: "run_meta", agentSource }) as unknown as RunEvent;
+  const routeEvent: RunEvent = {
+    type: "route",
+    preset: "review",
+    reason: "a review ask",
+    model: "anthropic/fast",
+  };
+
+  it("the route event when run_meta says the router chose the preset, parts and collapse kept", () => {
+    const full = { ...routeEvent, parts: [{ preset: "general", text: "x" }], collapsed: { presets: ["review"] } };
+    expect(routeOfEvents([meta("route"), full as RunEvent])).toEqual({
+      preset: "review",
+      reason: "a review ask",
+      model: "anthropic/fast",
+      parts: [{ preset: "general", text: "x" }],
+      collapsed: { presets: ["review"] },
+    });
+  });
+
+  it("nothing for a rejected compound (a route event on a default run), a run without a route event, or no run_meta", () => {
+    expect(routeOfEvents([meta("default"), routeEvent])).toBeUndefined();
+    expect(routeOfEvents([meta("route")])).toBeUndefined();
+    expect(routeOfEvents([routeEvent])).toBeUndefined();
+    expect(routeOfEvents([])).toBeUndefined();
+  });
+});
+
+// docs/reference/specs/routing-and-config.md item 21: the record's `route`
+// field — shape only, like the handoff.
+describe("isRunRecord — the route field", () => {
+  const route = { preset: "review", reason: "a review ask", model: "anthropic/fast" };
+
+  it("accepts a route with and without parts and a collapse — also after a JSON round-trip — and a record without one carries no key", () => {
+    expect(isRunRecord(record({ route }))).toBe(true);
+    expect(
+      isRunRecord(
+        record({ route: { ...route, parts: [{ preset: "general", text: "x" }], collapsed: { presets: ["review"] } } }),
+      ),
+    ).toBe(true);
+    expect(isRunRecord(JSON.parse(JSON.stringify(record({ route }))))).toBe(true);
+    expect("route" in record()).toBe(false);
+  });
+
+  it("refuses a malformed route: a missing field, a malformed part, a non-string collapse preset", () => {
+    expect(isRunRecord(record({ route: { preset: "review", reason: "r" } as never }))).toBe(false);
+    expect(isRunRecord(record({ route: { ...route, parts: [{ preset: "general" }] } as never }))).toBe(false);
+    expect(isRunRecord(record({ route: { ...route, collapsed: { presets: [1] } } as never }))).toBe(false);
   });
 });

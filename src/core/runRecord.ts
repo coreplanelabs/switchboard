@@ -126,6 +126,15 @@ export interface RunRecord {
    *  (docs/reference/specs/agent-ship.md item 6), the last call's set, redacted;
    *  present only on a coding run dispatched as a fix round that submitted one. */
   dispositions?: FindingDisposition[];
+  /** The router's decision the run ran under (docs/reference/specs/routing-and-config.md
+   *  item 21): the preset, the one-line reason and the model that decided —
+   *  the run's own route, or, on a sticky-by-transcript follow-up that
+   *  continued a routed thread, the thread's decision carried forward (parts
+   *  and a collapse are the routed run's alone, never carried). On the record
+   *  so the next follow-up's card can keep the `routed:` receipt without
+   *  reading the events. Absent for a preset a person, a scope or the default
+   *  chose, and on records written before it existed. */
+  route?: RunRouteDecision;
   /** The effective profile the run was admitted with (docs/decisions/0026-capability-profiles-and-request-routing.md):
    *  the preset, its machine class and identity, the minutes it ran on and —
    *  when a boundary clipped the budget — the scope that did, so a reader can
@@ -179,6 +188,55 @@ export function prOfEvents(events: readonly RunEvent[]): RunPullRequest | undefi
   let pr: RunPullRequest | undefined;
   for (const e of events) if (e.type === "pr_opened") pr = { number: e.number, url: e.url };
   return pr;
+}
+
+/** The router's decision as a record carries it — the same fields the
+ *  `route` event and the ledger row's `meta.route` carry (routing-and-config
+ *  item 21). */
+export interface RunRouteDecision {
+  preset: string;
+  reason: string;
+  model: string;
+  parts?: { preset: string; text: string }[];
+  collapsed?: { presets: string[] };
+}
+
+/** The route the run's events say it ran under: the `route` event, counted
+ *  only when `run_meta.agentSource` is `route` — a rejected compound leaves a
+ *  `route` event on a run that ran on the default, and that is no route
+ *  (the same rule the boot reclaim applies). */
+export function routeOfEvents(events: readonly RunEvent[]): RunRouteDecision | undefined {
+  const meta = events.find((e) => e.type === "run_meta");
+  if (meta?.type !== "run_meta" || meta.agentSource !== "route") return undefined;
+  const r = events.find((e) => e.type === "route");
+  if (r?.type !== "route") return undefined;
+  return {
+    preset: r.preset,
+    reason: r.reason,
+    model: r.model,
+    ...(r.parts ? { parts: r.parts.map((p) => ({ preset: p.preset, text: p.text })) } : {}),
+    ...(r.collapsed ? { collapsed: { presets: [...r.collapsed.presets] } } : {}),
+  };
+}
+
+function isRunRouteShape(v: unknown): v is RunRouteDecision {
+  if (typeof v !== "object" || v === null) return false;
+  const r = v as Record<string, unknown>;
+  if (typeof r.preset !== "string" || typeof r.reason !== "string" || typeof r.model !== "string") return false;
+  if (r.parts !== undefined) {
+    if (!Array.isArray(r.parts)) return false;
+    for (const p of r.parts) {
+      if (typeof p !== "object" || p === null) return false;
+      const part = p as Record<string, unknown>;
+      if (typeof part.preset !== "string" || typeof part.text !== "string") return false;
+    }
+  }
+  if (r.collapsed !== undefined) {
+    const c = r.collapsed as Record<string, unknown>;
+    if (typeof c !== "object" || c === null) return false;
+    if (!Array.isArray(c.presets) || !c.presets.every((p) => typeof p === "string")) return false;
+  }
+  return true;
 }
 
 function isRunPullRequestShape(v: unknown): v is RunPullRequest {
@@ -606,6 +664,9 @@ export function isRunRecord(v: unknown): v is RunRecord {
     return false;
   if (r.dispositions !== undefined && !isFindingDispositionsShape(r.dispositions)) return false;
   if (r.reviewPost !== undefined && !isReviewPostShape(r.reviewPost)) return false;
+  // The route the run ran under (routing-and-config item 21): shape only, like
+  // the handoff — the reason was redacted and capped when it was decided.
+  if (r.route !== undefined && !isRunRouteShape(r.route)) return false;
   if (r.profile !== undefined && !isRunProfileRecord(r.profile)) return false;
   // The pull request the run reached (item 2): a positive integer and a URL, or absent.
   if (r.pr !== undefined && !isRunPullRequestShape(r.pr)) return false;

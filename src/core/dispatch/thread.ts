@@ -55,6 +55,25 @@ export function stickyAgentOf(runs: readonly RunView[], onPi: (agent: string) =>
   return newest.agent;
 }
 
+/** The route a sticky-by-transcript follow-up carries (routing-and-config
+ *  item 21): the decision the thread's newest run ran under, off its record
+ *  (`RunRecord.route` — the run's own route, or one it carried in turn, so the
+ *  receipt survives a chain of follow-ups). Read only for the run
+ *  `stickyAgentOf` picked, and only its preset, reason and model: a compound's
+ *  parts and a collapse were that run's alone — the follow-up spawns nothing
+ *  and collapsed nothing. Undefined when the newest run was not routed, so an
+ *  unrouted thread's card is exactly what it was. */
+export function threadRouteOf(
+  runs: readonly RunView[],
+  agent: string,
+): { preset: string; reason: string; model: string } | undefined {
+  const newest = runs[0];
+  if (newest === undefined || !continuable(newest) || newest.agent !== agent || newest.route === undefined)
+    return undefined;
+  const { preset, reason, model } = newest.route;
+  return { preset, reason, model };
+}
+
 /** The thread's previous run of `agent` a seed continues from (session-log
  *  item 9): its end, so the lines written after it can be told apart, and
  *  whether its record says the log ends short of what it saw. */
