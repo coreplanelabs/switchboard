@@ -75,6 +75,10 @@ export interface LaunchResumesOptions {
   agentFor: (name: string | undefined) => AgentDef | undefined;
   /** Injectable for tests; default the real `dispatch`. */
   dispatchFn?: (deps: CoreDeps, msg: IncomingMessage, io: ChannelIO, opts: DispatchOptions) => Promise<void>;
+  /** Told, once per run, when its resume is over: the dispatch settled (the
+   *  run ended, or the dispatch threw) or the run was closed here instead. The
+   *  harness door stops holding for the run on it (`LedgerTakeover.done`). */
+  onDone?: (runId: string) => void;
   log?: (line: string) => void;
   warn?: (line: string) => void;
 }
@@ -97,6 +101,14 @@ export async function launchResumes(
   const warn = opts.warn ?? (() => {});
   const dispatchFn = opts.dispatchFn ?? (await import("./dispatcher.js")).dispatch;
   const outcome: LaunchOutcome = { launched: [], closed: [] };
+  /** Fire the dispatch and forget it; tell `onDone` when it is over, however it ends. */
+  const start = (row: LiveRunRow, dispatched: Promise<unknown>, failure: string): void => {
+    void dispatched
+      .catch((err: unknown) =>
+        warn(`[resume] ${row.runId} ${row.threadKey}: ${failure}: ${err instanceof Error ? err.message : String(err)}`),
+      )
+      .finally(() => opts.onDone?.(row.runId));
+  };
   for (const run of resumable) {
     const { row } = run;
     const agent = opts.agentFor(row.meta.agent);
@@ -122,11 +134,7 @@ export async function launchResumes(
         `[resume] ${row.runId} ${row.threadKey}: restarting from its request (killed while attaching; ${run.inbox.length} follow-up(s) pending)`,
       );
       outcome.launched.push(row.runId);
-      void dispatchFn(deps, restored.msg, io, { restart: { row, inbox: run.inbox } }).catch((err: unknown) =>
-        warn(
-          `[resume] ${row.runId} ${row.threadKey}: restart dispatch failed: ${err instanceof Error ? err.message : String(err)}`,
-        ),
-      );
+      start(row, dispatchFn(deps, restored.msg, io, { restart: { row, inbox: run.inbox } }), "restart dispatch failed");
       continue;
     }
     const plan = planResume({ transcript: run.transcript, lastStep: run.lastStep, tools: knownToolsFor(agent) });
@@ -155,11 +163,7 @@ export async function launchResumes(
         : `[resume] ${row.runId} ${row.threadKey}: resuming (${plan.stepRecorded ? "settling" : "running fresh"} step ${plan.step}, ${plan.settlements.length} call(s), ${Math.round(plan.remainingMs / 60_000)} min left)`,
     );
     outcome.launched.push(row.runId);
-    void dispatchFn(deps, resumeMessage(row, inputTextOf(run.events)), io, { resume: ctx }).catch((err: unknown) =>
-      warn(
-        `[resume] ${row.runId} ${row.threadKey}: dispatch failed: ${err instanceof Error ? err.message : String(err)}`,
-      ),
-    );
+    start(row, dispatchFn(deps, resumeMessage(row, inputTextOf(run.events)), io, { resume: ctx }), "dispatch failed");
   }
   return outcome;
 
@@ -170,5 +174,6 @@ export async function launchResumes(
     } catch (err) {
       warn(`[resume] ${run.row.runId}: could not close: ${err instanceof Error ? err.message : String(err)}`);
     }
+    opts.onDone?.(run.row.runId);
   }
 }

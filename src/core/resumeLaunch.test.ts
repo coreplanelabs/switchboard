@@ -248,6 +248,43 @@ describe("launchResumes", () => {
     expect(bad.dispatched).toEqual([]);
   });
 
+  it("onDone names each run once its resume is over — a dispatch that resolved, one that threw, or a run closed instead of launched — and never before", async () => {
+    const done: string[] = [];
+    let finish!: () => void;
+    let fail!: (err: Error) => void;
+    const outcome = await launchResumes(
+      {} as CoreDeps,
+      [
+        resumable(),
+        resumable({ row: row({ runId: "r2", threadKey: "slack:C1:2.0" }) }),
+        resumable({ row: row({ runId: "r3", threadKey: "slack:C1:3.0", meta: { ...row().meta, agent: "nobody" } }) }),
+      ],
+      {
+        ioFor: () => ({
+          reply: async () => {},
+          status: async () => ({ update() {}, async done() {} }),
+          history: async () => [],
+        }),
+        close: async () => {},
+        agentFor: (name) => (name === "nobody" ? undefined : reviewAgent),
+        dispatchFn: (_d, msg) =>
+          msg.threadKey.endsWith("1.0")
+            ? new Promise<void>((r) => (finish = r))
+            : new Promise<void>((_r, j) => (fail = j)),
+        onDone: (runId) => done.push(runId),
+        warn: () => {},
+      },
+    );
+    expect(outcome.launched).toEqual(["r1", "r2"]);
+    expect(done).toEqual(["r3"]); // closed here: over at once; the two dispatched runs are still going
+    finish();
+    await new Promise((r) => setImmediate(r));
+    expect(done).toEqual(["r3", "r1"]);
+    fail(new Error("boom"));
+    await new Promise((r) => setImmediate(r));
+    expect(done).toEqual(["r3", "r1", "r2"]);
+  });
+
   it("a dispatch that throws is logged, never propagated; the other runs still launch", async () => {
     const dispatched: string[] = [];
     const warnings: string[] = [];

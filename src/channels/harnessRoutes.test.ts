@@ -2,11 +2,13 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { HarnessRegistry, type LiveHarness } from "../core/harness/pi/relay.js";
-import { RunBearerStore } from "../core/modelProxy/runBearers.js";
+import { RunBearerStore, bearerHashOf } from "../core/modelProxy/runBearers.js";
 import type { RunEvent } from "../core/runEvents.js";
+import { LedgerTakeover, type TakeoverFacts } from "../core/runLedger/takeover.js";
 import { createTracer } from "../core/trace/tracer.js";
 import type { RunnableTool } from "../tools/runnableTool.js";
 import {
+  DOOR_HOLD_MS,
   HARNESS_AUTHORIZE_PATH,
   HARNESS_TOOLS_PATH,
   HARNESS_TOOL_PATH,
@@ -18,12 +20,52 @@ import {
 // Feature: docs/reference/specs/harness-pi.md item 7 — the three harness
 // routes: the run bearer is the whole door, decided from the headers before
 // the body; a run that is not on the harness answers nothing; then the tool
-// definitions, the gate's verdict, or a relayed tool's result.
+// definitions, the gate's verdict, or a relayed tool's result. During a
+// generation's boot the door holds and answers retryably for a run the
+// ledger still lists as live and not yet resumed here.
 
 const clock = { now: 1_700_000_000_000 };
 const root = createTracer({ clock: () => clock.now }).start("request", { sinks: [] });
 
-function world() {
+/** The boot's takeover as the door reads it, driven by the test: unsettled
+ *  until `settle` (with the runs the reclaim handed on), or timed out by `elapse`. */
+function fakeTakeover(over: { settled?: boolean; pending?: string[] } = {}) {
+  let settled = over.settled ?? true;
+  const pending = new Set(over.pending ?? []);
+  const waiters: ((settledInTime: boolean) => void)[] = [];
+  const holds: number[] = [];
+  const facts: TakeoverFacts = {
+    get settled() {
+      return settled;
+    },
+    whenSettled: (ms) => {
+      holds.push(ms);
+      return settled ? Promise.resolve(true) : new Promise<boolean>((r) => waiters.push(r));
+    },
+    pending: (id) => pending.has(id),
+  };
+  return {
+    facts,
+    holds,
+    settle: (ids: string[] = []) => {
+      settled = true;
+      for (const id of ids) pending.add(id);
+      for (const w of waiters.splice(0)) w(true);
+    },
+    elapse: () => {
+      for (const w of waiters.splice(0)) w(false);
+    },
+    done: (id: string) => void pending.delete(id),
+  };
+}
+
+function settledTakeover(): TakeoverFacts {
+  const t = new LedgerTakeover();
+  t.settle();
+  return t;
+}
+
+function world(takeover: TakeoverFacts = settledTakeover()) {
   const bearers = new RunBearerStore({ clock: () => clock.now });
   const harnesses = new HarnessRegistry();
   const events: RunEvent[] = [];
@@ -58,9 +100,20 @@ function world() {
   const bearer = bearers.mint(grant("run-7"));
   const other = bearers.mint(grant("run-8")); // minted, but not on the harness
   harnesses.register(harness);
-  const deps = { bearers, harnesses };
+  const deps = { bearers, harnesses, takeover };
   const headers = (b = bearer) => ({ authorization: `Bearer ${b}` });
-  return { deps, bearer, other, headers, events, bearers, harness };
+  return { deps, bearer, other, headers, events, bearers, harnesses, harness, grant };
+}
+
+/** Whether a promise has settled by the next macrotask — a held door has not. */
+async function answeredYet(p: Promise<unknown>): Promise<boolean> {
+  let answered = false;
+  void p.then(
+    () => (answered = true),
+    () => (answered = true),
+  );
+  await new Promise((r) => setImmediate(r));
+  return answered;
 }
 
 /** A relayed tool that answers when the test releases it, counting its runs. */
@@ -185,6 +238,107 @@ describe("handleHarnessRequest", () => {
   });
 });
 
+describe("the door during a generation's boot — a run the ledger lists as live and not yet resumed here", () => {
+  const strangers = { authorization: "Bearer sbr_run-9.abc" };
+  const ask = (deps: Parameters<typeof handleHarnessRequest>[0], path: string, headers: Record<string, string>) =>
+    handleHarnessRequest(deps, {
+      method: path === HARNESS_TOOLS_PATH ? "GET" : "POST",
+      path,
+      headers,
+      body: { toolCallId: "c-9", tool: "update_status", input: {} },
+    });
+
+  it("an unknown bearer before the reclaim settles is held, not answered, for up to DOOR_HOLD_MS; a reclaim that lists no such run makes it the store's 404 after all", async () => {
+    const takeover = fakeTakeover({ settled: false });
+    const { deps } = world(takeover.facts);
+    const held = ask(deps, HARNESS_TOOL_PATH, strangers);
+    expect(await answeredYet(held)).toBe(false);
+    expect(takeover.holds).toEqual([DOOR_HOLD_MS]);
+    takeover.settle([]);
+    expect(await held).toEqual({ status: 404, body: { error: "unknown_run" } });
+  });
+
+  it("a reclaim that hands the run to the launcher makes the held ask retryable: 202 pending on /harness/tool, 503 with Retry-After on authorize and tools — never a 4xx", async () => {
+    const takeover = fakeTakeover({ settled: false });
+    const { deps } = world(takeover.facts);
+    const tool = ask(deps, HARNESS_TOOL_PATH, strangers);
+    const authorize = ask(deps, HARNESS_AUTHORIZE_PATH, strangers);
+    const tools = ask(deps, HARNESS_TOOLS_PATH, strangers);
+    expect(await answeredYet(Promise.all([tool, authorize, tools]))).toBe(false);
+    takeover.settle(["run-9"]);
+    expect(await tool).toEqual({ status: 202, body: { pending: true, reason: "run_resuming" } });
+    expect(await authorize).toEqual({
+      status: 503,
+      body: { error: "run_resuming" },
+      headers: { "retry-after": "2" },
+    });
+    expect(await tools).toEqual({ status: 503, body: { error: "run_resuming" }, headers: { "retry-after": "2" } });
+  });
+
+  it("the bound elapsing before the reclaim settles answers retryable too (reclaim_pending): the ledger has not spoken, so no bearer is unknown for good", async () => {
+    const takeover = fakeTakeover({ settled: false });
+    const { deps } = world(takeover.facts);
+    const tool = ask(deps, HARNESS_TOOL_PATH, strangers);
+    const authorize = ask(deps, HARNESS_AUTHORIZE_PATH, strangers);
+    expect(await answeredYet(Promise.all([tool, authorize]))).toBe(false);
+    takeover.elapse();
+    expect(await tool).toEqual({ status: 202, body: { pending: true, reason: "reclaim_pending" } });
+    expect(await authorize).toEqual({
+      status: 503,
+      body: { error: "reclaim_pending" },
+      headers: { "retry-after": "2" },
+    });
+  });
+
+  it("a surviving pi's bearer is retryable through the whole resume — unknown run before this generation's mint, unknown bearer between the mint and the adoption — and the same ask succeeds once the run registers and adopts it; after the resume ends the store's verdict is final again", async () => {
+    const takeover = fakeTakeover({ settled: true, pending: ["run-5"] });
+    const { deps, bearers, harnesses, harness, grant } = world(takeover.facts);
+    // The bearer the previous generation revealed to its pi, and the hash its row carries.
+    const previous = new RunBearerStore({ clock: () => clock.now });
+    const old = previous.mint(grant("run-5"));
+    const survivor = { authorization: `Bearer ${old}` };
+    expect(await ask(deps, HARNESS_TOOL_PATH, survivor)).toEqual({
+      status: 202,
+      body: { pending: true, reason: "run_resuming" },
+    });
+    expect(takeover.holds).toEqual([]); // settled: nothing to wait for
+    bearers.mint(grant("run-5")); // the resume's own mint: the old secret is a wrong one for a known run…
+    expect(await ask(deps, HARNESS_AUTHORIZE_PATH, survivor)).toMatchObject({
+      status: 503,
+      body: { error: "run_resuming" },
+    });
+    harnesses.register({ ...harness, runId: "run-5" }); // …registered, still not adopted…
+    expect(await ask(deps, HARNESS_TOOL_PATH, survivor)).toMatchObject({ status: 202 });
+    expect(bearers.adopt("run-5", bearerHashOf(old)!)).toBe(true); // …adopted: the door opens on the same bearer
+    expect(await ask(deps, HARNESS_TOOL_PATH, survivor)).toEqual({
+      status: 200,
+      body: { content: [{ type: "text", text: "status updated: undefined" }], isError: false },
+    });
+    takeover.done("run-5");
+    expect(await ask(deps, HARNESS_TOOL_PATH, { authorization: "Bearer sbr_run-5.wrong" })).toEqual({
+      status: 401,
+      body: { error: "unknown_bearer" },
+    });
+    expect(await ask(deps, HARNESS_TOOL_PATH, strangers)).toEqual({ status: 404, body: { error: "unknown_run" } });
+  });
+
+  it("a malformed, revoked or expired bearer, or a missing one, is final whatever the takeover says: nothing later adopts it", async () => {
+    const takeover = fakeTakeover({ settled: false });
+    const { deps, bearer, bearers } = world(takeover.facts);
+    expect(await ask(deps, HARNESS_TOOL_PATH, {})).toEqual({ status: 401, body: { error: "missing_bearer" } });
+    expect(await ask(deps, HARNESS_TOOL_PATH, { authorization: "Bearer nope" })).toEqual({
+      status: 401,
+      body: { error: "malformed" },
+    });
+    bearers.revoke("run-7");
+    expect(await ask(deps, HARNESS_TOOL_PATH, { authorization: `Bearer ${bearer}` })).toEqual({
+      status: 403,
+      body: { error: "revoked" },
+    });
+    expect(takeover.holds).toEqual([]);
+  });
+});
+
 describe("createHarnessRoutesHandler — the node adapter", () => {
   let server: Server | undefined;
   afterEach(() => server?.close());
@@ -240,5 +394,31 @@ describe("createHarnessRoutesHandler — the node adapter", () => {
     expect(answered.status).toBe(200);
     expect(await answered.json()).toEqual({ content: [{ type: "text", text: "finally" }], isError: false });
     expect(slow.runs()).toBe(1);
+  });
+
+  it("over HTTP a run still resuming is answered 503 with a Retry-After header, 202 pending on /harness/tool, and the log names the hold; the body is never read for it", async () => {
+    const takeover = fakeTakeover({ settled: true, pending: ["run-9"] });
+    const { deps } = world(takeover.facts);
+    const lines: string[] = [];
+    const handler = createHarnessRoutesHandler({ ...deps, log: (l) => lines.push(l) });
+    server = createServer(handler);
+    await new Promise<void>((r) => server!.listen(0, "127.0.0.1", () => r()));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const survivor = { authorization: "Bearer sbr_run-9.abc" };
+    const tools = await fetch(`${base}${HARNESS_TOOLS_PATH}`, { headers: survivor });
+    expect(tools.status).toBe(503);
+    expect(tools.headers.get("retry-after")).toBe("2");
+    expect(await tools.json()).toEqual({ error: "run_resuming" });
+    const tool = await fetch(`${base}${HARNESS_TOOL_PATH}`, {
+      method: "POST",
+      headers: { ...survivor, "content-type": "application/json" },
+      body: "{not json — never parsed",
+    });
+    expect(tool.status).toBe(202);
+    expect(await tool.json()).toEqual({ pending: true, reason: "run_resuming" });
+    expect(lines).toEqual([
+      "[harness] 503 tools — held (run_resuming) run=run-9",
+      "[harness] 202 tool — held (run_resuming) run=run-9",
+    ]);
   });
 });

@@ -264,6 +264,49 @@ describe("the harness extension", () => {
     expect(posts.map((c) => c.headers.authorization)).toEqual(Array(3).fill("Bearer sbr_run-7.s3cret"));
   });
 
+  // harness-pi item 7: the door during a generation's boot. A pi that outlived
+  // the bot asks again for a call in flight; the new generation's door holds
+  // and answers retryably until the run is back on the harness, and the
+  // extension's own rules — a 5xx is a bot not yet answering, a pending answer
+  // a call still running — carry the same call id onto the settled answer.
+  it("a bot whose door opens late — 503 reclaim_pending, then 202 run_resuming, then the settled answer — is asked again with the same call id until it answers, and the hook waits through the same 503 for its verdict", async () => {
+    vi.useFakeTimers();
+    const answer = (body: unknown, status: number) => new Response(JSON.stringify(body), { status });
+    let toolAsks = 0;
+    let authorizeAsks = 0;
+    const { calls } = fakeBot({
+      "/harness/tools": TOOLS,
+      "/harness/tool": () => {
+        toolAsks++;
+        if (toolAsks === 1) return answer({ error: "reclaim_pending" }, 503);
+        if (toolAsks <= 3) return answer({ pending: true, reason: "run_resuming" }, 202);
+        return {
+          content: [{ type: "text", text: "the bot restarted while update_status was running; it was not run again" }],
+          isError: true,
+        };
+      },
+      "/harness/authorize": () => (++authorizeAsks <= 2 ? answer({ error: "run_resuming" }, 503) : { allow: true }),
+    });
+    const pi = fakePi();
+    await (
+      await load()
+    )(pi.api);
+    const relayed = pi.tools[0].execute("c1", { checklist: "x" });
+    const settled = expect(relayed).rejects.toThrow(
+      /^the bot restarted while update_status was running; it was not run again$/,
+    );
+    await vi.advanceTimersByTimeAsync(6_000);
+    await settled;
+    const posts = calls.filter((c) => c.path === "/harness/tool");
+    expect(posts).toHaveLength(4);
+    expect(posts.map((c) => (c.body as { toolCallId: string }).toolCallId)).toEqual(["c1", "c1", "c1", "c1"]);
+    const hook = pi.handlers.get("tool_call")!;
+    const verdict = hook({ toolCallId: "c2", toolName: "bash", input: { command: "ls" } }, {});
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(verdict).resolves.toBeUndefined();
+    expect(authorizeAsks).toBe(3);
+  });
+
   it("a bot that stops answering mid-wait is asked again every two seconds and the call fails after 90 s naming the tool; a refusal at the door fails it at once; pi's abort stops the asking", async () => {
     vi.useFakeTimers();
     fakeBot({ "/harness/tools": TOOLS });
