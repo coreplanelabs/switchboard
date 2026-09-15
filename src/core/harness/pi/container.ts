@@ -30,6 +30,14 @@ export interface PiContainer {
    *  the answer and records it on the row (item 8), so the way back never has
    *  to guess it. */
   makeRoot(runId: string): Promise<PiRunPaths>;
+  /** The directory pi runs in under `paths`: what a session file written for
+   *  that root names as its working directory (harness-pi item 8), because pi
+   *  refuses to resume a session whose stored directory does not exist where
+   *  it runs. The exec container's pi runs where the executor runs every
+   *  command, the thread's checkout the harness names; the bot host's in the
+   *  run's own root, the one it made and spawns pi in, a new name in each
+   *  generation (item 12). Never a constant. */
+  cwd(paths: PiRunPaths, checkout: string): string;
   /** Create `path` with `content`, mode 600, parents made. A container over a
    *  predictable root replaces what is there; one over a root it made itself
    *  finds nothing to replace and refuses a path already present. */
@@ -174,6 +182,13 @@ export class ExecPiContainer implements PiContainer {
    *  write and start scripts make it at 700 as the thread's user (item 4). */
   async makeRoot(runId: string): Promise<PiRunPaths> {
     return piRunPaths(runId);
+  }
+
+  /** The start script never changes directory, so pi runs where the executor
+   *  runs every command: the thread's checkout, which the harness names (a
+   *  resident's `/exec` runs in the thread's worktree). No command runs here. */
+  cwd(_paths: PiRunPaths, checkout: string): string {
+    return checkout;
   }
 
   async writeFile(path: string, content: string): Promise<void> {

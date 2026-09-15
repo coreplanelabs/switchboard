@@ -143,6 +143,25 @@ describe("BotHostPiContainer: pi as a child of the bot", () => {
     expect(await container.alive(pid)).toBe(false);
   });
 
+  it("cwd answers the run's root, whatever checkout the harness names: the directory start spawns pi in, present on this host, so a session written for that root names a directory pi finds when it resumes", async () => {
+    const { spawn, calls } = scripted(FAKE_PI);
+    const container = new BotHostPiContainer({ spawn });
+    const paths = await rootOf(container);
+    expect(container.cwd(paths, "/workspace")).toBe(paths.dir);
+    expect(container.cwd(paths, "/workspace/threads/t/main")).toBe(paths.dir);
+    expect(existsSync(container.cwd(paths, "/workspace"))).toBe(true);
+    const { pid } = await container.start({ paths, args: [], env: {} });
+    try {
+      expect(calls[0].options?.cwd).toBe(container.cwd(paths, "/workspace"));
+    } finally {
+      await container.kill(pid);
+    }
+    // A second generation's root is another directory, and the answer follows it.
+    const next = await rootOf(container);
+    expect(next.dir).not.toBe(paths.dir);
+    expect(container.cwd(next, "/workspace")).toBe(next.dir);
+  });
+
   it("feeds a line to pi's stdin and reads pi's answers from the log as exact bytes from an offset: the streaming deltas never land, a long line goes through whole, and stderr is what tail reads", async () => {
     const container = new BotHostPiContainer({ spawn: scripted(FAKE_PI).spawn });
     const paths = await rootOf(container);

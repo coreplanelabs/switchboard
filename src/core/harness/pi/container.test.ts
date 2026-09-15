@@ -276,3 +276,11 @@ describe("ExecPiContainer.makeRoot", () => {
     expect(calls).toEqual([]);
   });
 });
+
+describe("ExecPiContainer.cwd", () => {
+  it("answers the checkout the harness names, where the executor runs every command and so pi, without running a command", () => {
+    const { executor, calls } = recordingExecutor();
+    expect(new ExecPiContainer(executor).cwd(paths, "/workspace/threads/t/main")).toBe("/workspace/threads/t/main");
+    expect(calls).toEqual([]);
+  });
+});
