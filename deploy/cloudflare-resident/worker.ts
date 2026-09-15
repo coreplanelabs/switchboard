@@ -5417,14 +5417,13 @@ export class ResidentDO extends Sandbox<Env> {
           "deps-seed",
           REFRESH_BUILD_TIMEOUT_MS,
         );
-        const paths = mutableCachePaths(`${scratch}/node_modules`, parsed.mutableListing);
-        if (paths.length > 0) {
-          await this.runDepScript(
-            mutableCacheSwapScript(seedNm, `${scratch}/node_modules`, BUILD_USER, paths),
-            "deps-seed-swap",
-            GIT_NETWORK_TIMEOUT_MS,
-          );
-        }
+        await this.swapMutableCaches(
+          seedNm,
+          `${scratch}/node_modules`,
+          BUILD_USER,
+          parsed.mutableListing,
+          "deps-seed-swap",
+        );
         console.log(`deps: ${key.slice(0, 8)} seeded from ${seed.slice(0, 8)} (${parsed.mech})`);
       }
       // Unprivileged and token-free, in a tree only this attempt
@@ -5527,16 +5526,42 @@ export class ResidentDO extends Sandbox<Env> {
       "deps-materialize",
       REFRESH_BUILD_TIMEOUT_MS,
     );
-    const nmDst = `${tree}/node_modules`;
-    const paths = mutableCachePaths(nmDst, parsed.mutableListing);
-    if (paths.length > 0) {
-      await this.runDepScript(
-        mutableCacheSwapScript(entryNodeModules ?? `${CHECKOUT_DIR}/node_modules`, nmDst, user, paths),
-        "deps-mutable-swap",
-        GIT_NETWORK_TIMEOUT_MS,
+    await this.swapMutableCaches(
+      entryNodeModules ?? `${CHECKOUT_DIR}/node_modules`,
+      `${tree}/node_modules`,
+      user,
+      parsed.mutableListing,
+      "deps-mutable-swap",
+    );
+    return parsed.mech;
+  }
+
+  /** The tool-cache swap for a freshly hardlinked node_modules: the listing
+   *  through `mutableCachePaths`, every swap in one fork
+   *  (`mutableCacheSwapScript`). A path the source has no counterpart for is
+   *  a tree-private entry the script leaves in place and names on a
+   *  `skipped=` line; the log carries those names so a refresh that read warm
+   *  still says what it left alone (the failure path already quotes the
+   *  script's stdout). */
+  private async swapMutableCaches(
+    srcNodeModules: string,
+    dstNodeModules: string,
+    user: string,
+    mutableListing: string[],
+    step: "deps-mutable-swap" | "deps-seed-swap",
+  ): Promise<void> {
+    const paths = mutableCachePaths(dstNodeModules, mutableListing);
+    if (paths.length === 0) return;
+    const swapped = await this.runDepScript(
+      mutableCacheSwapScript(srcNodeModules, dstNodeModules, user, paths),
+      step,
+      GIT_NETWORK_TIMEOUT_MS,
+    );
+    if (swapped.skipped.length > 0) {
+      console.log(
+        `deps: ${step} left ${swapped.skipped.length} tree-private node_modules entr${swapped.skipped.length === 1 ? "y" : "ies"} with no store counterpart in place: ${swapped.skipped.join(", ")}`,
       );
     }
-    return parsed.mech;
   }
 
   /** Adopt a checkout that already holds node_modules but whose key has no

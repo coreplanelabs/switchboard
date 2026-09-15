@@ -1,3 +1,7 @@
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   DEP_CACHE_DIRS,
@@ -181,7 +185,19 @@ describe("depCacheScript (all five dirs in ONE fork, tagged output)", () => {
 describe("parseDepCacheScriptOutput", () => {
   it("folds the per-dir mechanism lines exactly like the old loop: node_modules decides", () => {
     const out = "dir:node_modules=hardlink\ndir:dist=copy\n";
-    expect(parseDepCacheScriptOutput(out)).toEqual({ mech: "hardlink", mutableListing: [], failedStep: null });
+    expect(parseDepCacheScriptOutput(out)).toEqual({
+      mech: "hardlink",
+      mutableListing: [],
+      skipped: [],
+      failedStep: null,
+    });
+  });
+  it("collects the skipped= lines the swap script prints for tree-private entries (no store counterpart), so the Worker can name what it left in place", () => {
+    expect(parseDepCacheScriptOutput("skipped=.eports.d.ts\nskipped=loader/.cache\n").skipped).toEqual([
+      ".eports.d.ts",
+      "loader/.cache",
+    ]);
+    expect(parseDepCacheScriptOutput("dir:node_modules=hardlink\n").skipped).toEqual([]);
   });
   it("a cp -al fallback reports copy; build dirs alone report copy", () => {
     expect(parseDepCacheScriptOutput("dir:node_modules=copy\n").mech).toBe("copy");
@@ -230,6 +246,55 @@ describe("mutableCacheSwapScript (the per-path rm/cp/chown swaps in ONE fork)", 
     expect(copy).toBeGreaterThan(-1);
     expect(chmod).toBeGreaterThan(copy);
     expect(chown).toBeGreaterThan(chmod);
+  });
+
+  // The paths come from a `find` over the TREE, and the tree's listing can
+  // name a top-level dot entry the store entry lacks (a repo's tree listed
+  // `node_modules/.eports.d.ts`; its store entry could not stat it). The swap
+  // `rm -rf`'d it, died on the `cp` of the missing source, and every refresh
+  // cycle after failed the same way until the resident parked itself on a
+  // degraded streak. Such an entry is not a shared inode: whatever is there
+  // is already tree-private, and there is nothing to swap.
+  it("a path whose store counterpart does not exist is tree-private, not a shared inode: no rm/cp/chmod/chown for it, a skipped= line names it, and every path with a counterpart keeps the exact rm/cp/chmod/chown sequence inside its guard", () => {
+    const s = mutableCacheSwapScript("/workspace/deps/k/node_modules", "/wt/node_modules", "worker4", [
+      "/wt/node_modules/.bin",
+      "/wt/node_modules/.eports.d.ts",
+      "/wt/node_modules/loader/.cache",
+    ]);
+    for (const rel of [".bin", ".eports.d.ts", "loader/.cache"]) {
+      const src = `'/workspace/deps/k/node_modules/${rel}'`;
+      const dst = `'/wt/node_modules/${rel}'`;
+      expect(s).toContain(
+        [
+          `if [ -e ${src} ] || [ -L ${src} ]; then`,
+          `  rm -rf ${dst} || { echo err=deps-mutable-rm; exit 1; }`,
+          `  cp -R ${src} ${dst} || { echo err=deps-mutable-copy; exit 1; }`,
+          `  chmod -R u+w ${dst} || { echo err=deps-mutable-chmod; exit 1; }`,
+          `  chown -Rh 'worker4:worker4' ${dst} || { echo err=deps-mutable-chown; exit 1; }`,
+          `else`,
+          `  echo 'skipped=${rel}'`,
+          `fi`,
+        ].join("\n"),
+      );
+    }
+  });
+
+  it("run for real over a tree whose dot entries have no store counterpart: exit 0, every entry still in place, each named on stdout in path order", () => {
+    const dir = mkdtempSync(join(tmpdir(), "swap-"));
+    try {
+      const store = join(dir, "store", "node_modules");
+      const tree = join(dir, "tree", "node_modules");
+      mkdirSync(store, { recursive: true });
+      mkdirSync(join(tree, "loader", ".cache"), { recursive: true });
+      writeFileSync(join(tree, ".eports.d.ts"), "export {};\n");
+      writeFileSync(join(tree, "loader", ".cache", "x"), "x");
+      const s = mutableCacheSwapScript(store, tree, "nobody", [`${tree}/.eports.d.ts`, `${tree}/loader/.cache`]);
+      expect(execFileSync("sh", ["-c", s], { encoding: "utf8" })).toBe("skipped=.eports.d.ts\nskipped=loader/.cache\n");
+      expect(existsSync(join(tree, ".eports.d.ts"))).toBe(true);
+      expect(existsSync(join(tree, "loader", ".cache", "x"))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

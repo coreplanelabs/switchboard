@@ -213,6 +213,10 @@ export interface DepCacheScriptParse {
   /** Raw `find` output for the hardlinked node_modules (the exact
    *  `mutableCacheFindArgv` shape), for `mutableCachePaths`. */
   mutableListing: string[];
+  /** The swap script's `skipped=` lines: tool-managed paths (relative to
+   *  node_modules) it left in place because the source has no counterpart —
+   *  tree-private entries, not shared inodes (see `mutableCacheSwapScript`). */
+  skipped: string[];
   failedStep: string | null;
 }
 
@@ -275,6 +279,7 @@ export function depCacheScript(
 export function parseDepCacheScriptOutput(stdout: string): DepCacheScriptParse {
   let mech: DepCacheMaterialization | "none" = "none";
   const mutableListing: string[] = [];
+  const skipped: string[] = [];
   let failedStep: string | null = null;
   for (const raw of stdout.split("\n")) {
     const line = raw.trim();
@@ -285,19 +290,34 @@ export function parseDepCacheScriptOutput(stdout: string): DepCacheScriptParse {
       }
     } else if ((m = /^mutable=(.+)$/.exec(line))) {
       mutableListing.push(m[1]);
+    } else if ((m = /^skipped=(.+)$/.exec(line))) {
+      skipped.push(m[1]);
     } else if ((m = /^err=(.+)$/.exec(line))) {
       failedStep ??= m[1];
     }
   }
-  return { mech, mutableListing, failedStep };
+  return { mech, mutableListing, skipped, failedStep };
 }
 
 /** The per-path swaps for a hardlinked node_modules' tool-managed entries
  *  (`mutableCachePaths` output), all in one fork: `rm -rf` the shared
- *  subtree, `cp -R` the warm checkout's matching subpath (fresh inodes),
- *  `chown -Rh` to the thread user (-h: a postinstall-planted symlink is
+ *  subtree, `cp -R` the source's matching subpath (fresh inodes), `chmod -R
+ *  u+w`, `chown -Rh` to the thread user (-h: a postinstall-planted symlink is
  *  re-owned as a LINK, never followed to an out-of-tree target). Same steps,
- *  same order, same flags as the old per-spawn loop. */
+ *  same order, same flags as the old per-spawn loop.
+ *
+ *  Each swap is gated on the counterpart existing in the source. The paths
+ *  come from a `find` over the TREE, and the tree's listing can name an
+ *  entry the source cannot stat — a top-level dot entry the store entry
+ *  lacks (one repo's tree listed `node_modules/.eports.d.ts`). Such an entry
+ *  is not a shared inode to swap: whatever is at that path is already
+ *  tree-private. Deleting it is a regression, and failing on it took the
+ *  whole refresh down — the `rm` had run, the `cp` died on the missing
+ *  source, and the resident degraded on every cycle after. It is left in
+ *  place and named on a `skipped=<path relative to node_modules>` line so
+ *  the step's output says so (`DepCacheScriptParse.skipped`). `-L` beside
+ *  `-e`: `-e` follows symlinks, and a dangling link in the source is still
+ *  an entry `cp -R` copies as a link. */
 export function mutableCacheSwapScript(
   srcRoot: string,
   dstRoot: string,
@@ -309,13 +329,19 @@ export function mutableCacheSwapScript(
   const lines: string[] = [];
   for (const p of paths) {
     const rel = p.slice(root.length);
-    lines.push(`rm -rf ${shellQuote(p)} || { echo err=deps-mutable-rm; exit 1; }`);
-    lines.push(`cp -R ${shellQuote(`${srcRoot}${rel}`)} ${shellQuote(p)} || { echo err=deps-mutable-copy; exit 1; }`);
+    const src = shellQuote(`${srcRoot}${rel}`);
+    const dst = shellQuote(p);
+    lines.push(`if [ -e ${src} ] || [ -L ${src} ]; then`);
+    lines.push(`  rm -rf ${dst} || { echo err=deps-mutable-rm; exit 1; }`);
+    lines.push(`  cp -R ${src} ${dst} || { echo err=deps-mutable-copy; exit 1; }`);
     // cp copies mode bits: a store entry's files are owner-read-only (item 59,
     // hardened so no consumer can write through the shared inodes), and a
     // cache the tree's own tools must rewrite in place has to be writable.
-    lines.push(`chmod -R u+w ${shellQuote(p)} || { echo err=deps-mutable-chmod; exit 1; }`);
-    lines.push(`chown -Rh ${owner} ${shellQuote(p)} || { echo err=deps-mutable-chown; exit 1; }`);
+    lines.push(`  chmod -R u+w ${dst} || { echo err=deps-mutable-chmod; exit 1; }`);
+    lines.push(`  chown -Rh ${owner} ${dst} || { echo err=deps-mutable-chown; exit 1; }`);
+    lines.push(`else`);
+    lines.push(`  echo ${shellQuote(`skipped=${rel.replace(/^\/+/, "")}`)}`);
+    lines.push(`fi`);
   }
   return lines.join("\n");
 }
