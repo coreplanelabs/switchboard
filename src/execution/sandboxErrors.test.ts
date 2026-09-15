@@ -11,6 +11,14 @@ import {
   fleetBusyExecAnswer,
   fleetBusyExhaustedMessage,
   isFleetBusy,
+  isRuntimeProxyFailure,
+  isRuntimeUnreachableError,
+  RUNTIME_UNREACHABLE_ERROR_NAME,
+  RUNTIME_UNREACHABLE_REASON,
+  runtimeUnreachableAnswer,
+  runtimeUnreachableExecAnswer,
+  runtimeUnreachableMessage,
+  SandboxRuntimeUnreachableError,
 } from "./sandboxErrors.js";
 import { BASH_TIMEOUT_MS } from "./bashTimeout.js";
 
@@ -167,5 +175,94 @@ describe("thrownText", () => {
     expect(text.length).toBeGreaterThan(0);
     expect(text).toContain("(no error name)");
     expect(thrownText({ message: undefined })).toContain("(no error name)");
+  });
+});
+
+// Feature: docs/reference/specs/execution.md item 9 — a runtime that did not
+// answer is named, with the container. The containers base class answers a
+// failed proxy to the container's port with a plain-text 500 the SDK client
+// renders as the bare `HTTP error! status: 500`; the Worker reads the body
+// first and carries the token, the container id, the SDK pin and the
+// platform's running flag instead.
+describe("isRuntimeProxyFailure", () => {
+  it("recognizes the base class's two plain-text 500 bodies", () => {
+    expect(isRuntimeProxyFailure(500, "Error proxying request to container: ")).toBe(true);
+    expect(isRuntimeProxyFailure(500, "Error proxying request to container: connect ECONNREFUSED")).toBe(true);
+    expect(isRuntimeProxyFailure(500, "Container suddenly disconnected, try again")).toBe(true);
+  });
+
+  it("is NOT a JSON 500 from a live server, a 503, or an unrelated body", () => {
+    expect(isRuntimeProxyFailure(500, '{"code":"INTERNAL_ERROR","message":"Command execution failed"}')).toBe(false);
+    expect(isRuntimeProxyFailure(503, "Error proxying request to container: ")).toBe(false);
+    expect(isRuntimeProxyFailure(500, "")).toBe(false);
+    expect(isRuntimeProxyFailure(200, "Error proxying request to container: ")).toBe(false);
+  });
+});
+
+describe("the runtime-unreachable message and error", () => {
+  const facts = {
+    containerId: "3708bca6db4a",
+    running: true,
+    sdkVersion: "0.12.9",
+    cause: "Error proxying request to container: ",
+  };
+
+  it("starts with the token and names the container, the SDK pin, the platform's flag and the cause", () => {
+    const m = runtimeUnreachableMessage(facts);
+    expect(m.startsWith("runtime-unreachable: ")).toBe(true);
+    expect(m).toContain("container 3708bca6db4a");
+    expect(m).toContain("sandbox SDK 0.12.9");
+    expect(m).toContain("reports the container running");
+    expect(m).toContain("(Error proxying request to container:)");
+    expect(m).toContain("/workspace is intact");
+    expect(m).toContain("may not have run");
+  });
+
+  it("says when the platform reports the container stopped, or nothing, and when the cause is empty", () => {
+    expect(runtimeUnreachableMessage({ ...facts, running: false })).toContain("reports the container stopped");
+    expect(runtimeUnreachableMessage({ ...facts, running: undefined })).toContain("a state it did not report");
+    expect(runtimeUnreachableMessage({ ...facts, cause: "  " })).toContain("(no detail from the platform)");
+  });
+
+  it("the typed error carries the name and the token, and is recognized by either after the RPC boundary", () => {
+    const err = new SandboxRuntimeUnreachableError(facts);
+    expect(err.name).toBe(RUNTIME_UNREACHABLE_ERROR_NAME);
+    expect(err.reason).toBe("runtime-unreachable");
+    expect(isRuntimeUnreachableError(err)).toBe(true);
+    // Across the boundary: a plain object with the name, or with the message only.
+    expect(isRuntimeUnreachableError({ name: RUNTIME_UNREACHABLE_ERROR_NAME, message: "" })).toBe(true);
+    expect(isRuntimeUnreachableError(new Error(err.message))).toBe(true);
+    expect(isRuntimeUnreachableError("runtime-unreachable: the sandbox container's runtime did not answer")).toBe(true);
+  });
+
+  it("is NOT a fleet-busy, a recycle, a stale session or an unrelated failure", () => {
+    expect(isRuntimeUnreachableError(new Error("HTTP error! status: 500"))).toBe(false);
+    expect(
+      isRuntimeUnreachableError({ name: "ContainerUnavailableError", message: "no container instance available" }),
+    ).toBe(false);
+    expect(
+      isRuntimeUnreachableError({ name: "SessionTerminatedError", message: "Session 'x' shell exited (exit code: 1)" }),
+    ).toBe(false);
+    expect(isRuntimeUnreachableError(new Error("Session 'x' not found"))).toBe(false);
+    expect(isFleetBusyError(new SandboxRuntimeUnreachableError(facts))).toBe(false);
+  });
+});
+
+describe("the runtime-unreachable answer shapes the Worker sends", () => {
+  const message = runtimeUnreachableMessage({ containerId: "c1", running: true, sdkVersion: "0.12.9", cause: "x" });
+
+  it("the /read and /write shape carries the reason and the text as the error", () => {
+    expect(runtimeUnreachableAnswer(message)).toEqual({ error: message, reason: RUNTIME_UNREACHABLE_REASON });
+    expect(RUNTIME_UNREACHABLE_REASON).toBe("runtime-unreachable");
+  });
+
+  it("the /exec shape is the dual in-body failure form (error + exit 127 + stderr) plus the reason", () => {
+    expect(runtimeUnreachableExecAnswer(message)).toEqual({
+      error: message,
+      reason: "runtime-unreachable",
+      stdout: "",
+      stderr: message,
+      exitCode: 127,
+    });
   });
 });

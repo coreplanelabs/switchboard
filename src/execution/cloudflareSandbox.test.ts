@@ -5,7 +5,12 @@ import { configureInternalHosts, internalHostsOf, NO_INTERNAL_HOSTS } from "../c
 import { parseTraceparent } from "../core/trace/traceparent.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import { ExecCapacityError, ExecInfraError } from "./executor.js";
-import { FLEET_BUSY_WAIT_MAX_MS } from "./sandboxErrors.js";
+import {
+  FLEET_BUSY_WAIT_MAX_MS,
+  runtimeUnreachableAnswer,
+  runtimeUnreachableExecAnswer,
+  runtimeUnreachableMessage,
+} from "./sandboxErrors.js";
 
 // Feature: docs/reference/specs/execution.md item 11 — per-call bash timeout on the
 // per-thread sandbox path. Like the resident client: the budget rides in the
@@ -558,5 +563,73 @@ describe("CloudflareSandboxExecutor per-send deadline", () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(state().kind).toBe("rejected");
     expect(calls).toHaveLength(2);
+  });
+});
+
+// Feature: docs/reference/specs/execution.md item 9 — a runtime that did not
+// answer arrives named (`runtime-unreachable: …`, the container id in the
+// text). `/exec` carries it in-body and is sent exactly once: the command may
+// have been in flight when the server died. `/read` and `/write` carry it as
+// an HTTP 503, which the transport retry re-sends a few seconds later — by
+// then the image's PID 1 has started the server again.
+describe("CloudflareSandboxExecutor runtime-unreachable", () => {
+  const MESSAGE = runtimeUnreachableMessage({
+    containerId: "3708bca6db4a20195c5b8cdd4f43965d7dfd27e408e63da7580f87843890b3b8",
+    running: true,
+    sdkVersion: "0.12.9",
+    cause: "Error proxying request to container: ",
+  });
+
+  function scriptedFetch(responses: Array<{ status?: number; body: unknown }>) {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fn = vi.fn(async (url: unknown, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      const r = responses[Math.min(calls.length - 1, responses.length - 1)];
+      return new Response(JSON.stringify(r.body), { status: r.status ?? 200 });
+    });
+    vi.stubGlobal("fetch", fn);
+    return { fn, calls };
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("/exec: the in-body answer is ExecInfraError after exactly one send, naming the token and the container", async () => {
+    const { calls } = scriptedFetch([{ body: runtimeUnreachableExecAnswer(MESSAGE) }]);
+    const outcome = new CloudflareSandboxExecutor(OPTS).exec("tail -c +1 /tmp/pi.log").catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(FLEET_BUSY_WAIT_MAX_MS);
+    const err = await outcome;
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toBe(`sandbox worker /exec: ${MESSAGE}`);
+    expect((err as Error).message).toContain(
+      "container 3708bca6db4a20195c5b8cdd4f43965d7dfd27e408e63da7580f87843890b3b8",
+    );
+    expect(calls).toHaveLength(1);
+  });
+
+  it("/read: the HTTP 503 answer is re-sent on the transport retry and the eventual answer is returned", async () => {
+    const { calls } = scriptedFetch([
+      { status: 503, body: runtimeUnreachableAnswer(MESSAGE) },
+      { body: { content: "file body" } },
+    ]);
+    const p = new CloudflareSandboxExecutor(OPTS).readFile("README.md");
+    await vi.advanceTimersByTimeAsync(3_000);
+    await expect(p).resolves.toBe("file body");
+    expect(calls).toHaveLength(2);
+    expect(sentBody(calls[1])).toEqual(sentBody(calls[0]));
+  });
+
+  it("/read: a runtime that never comes back is ExecInfraError naming the token after the transport retries are spent", async () => {
+    const { calls } = scriptedFetch([{ status: 503, body: runtimeUnreachableAnswer(MESSAGE) }]);
+    const outcome = new CloudflareSandboxExecutor(OPTS).readFile("README.md").catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(30_000);
+    const err = await outcome;
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toBe(`sandbox worker /read HTTP 503: ${MESSAGE}`);
+    expect(calls).toHaveLength(4);
   });
 });
