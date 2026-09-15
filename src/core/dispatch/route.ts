@@ -501,6 +501,8 @@ export async function route(
   const { compound: offer, ...rest } = input;
   const offered = rest.presets.filter((p) => rest.allowed.includes(p.name));
   if (offered.length === 0) return { preset: undefined, reason: "no preset the requester may run" };
+  const structural = structuralRoute(rest.text, offered);
+  if (structural) return structural;
   // The form needs a reader for a part to run on: a requester whose presets
   // are all write-identity is not offered it (an empty parts enum is no
   // schema), and a compound answer is then refused as not offered.
@@ -523,6 +525,36 @@ export async function route(
     offered.map((p) => p.name),
     compound,
   );
+}
+
+/** The token a request names when it wants the file tool itself, whatever else
+ *  it says: word-bounded, so `attach_files` or `reattach_file` is not it. */
+const ATTACH_TOOL_TOKEN = /(?<![\w-])attach_file(?![\w-])/;
+
+/** The structural route: a decision the request's text settles without the
+ *  model, before the prompt is built. A request that literally names
+ *  `attach_file` routes to the one offered preset whose toolset holds the tool.
+ *  This is code and not a prompt rule because the rule failed five times in two
+ *  days as prose: a mostly read-only ask ("no code changes", polling, a report)
+ *  that ends by naming the tool read as read-only work to the router each time,
+ *  through two rewordings — the tool's name is a token and which preset holds
+ *  it is registry data (`RoutablePreset.attaches`), so it is a fact to enforce,
+ *  not a judgement to ask for (record 0036's pattern: structural facts leave
+ *  the prompt). The preset is never named here: `attaches` is read off the
+ *  offered table, so when `coding` leaves the table and `ship` takes its seat
+ *  the route follows by itself. `offered` is already the requester's allowlist,
+ *  so a person who may not run the holder falls through to the model. Zero or
+ *  two holders is no structural answer either — the model decides as before.
+ *  An ask that describes a file without naming the tool is the prompt rule's
+ *  (`attachRule`); an ask that names the tool to refuse it ("do not use
+ *  attach_file") still lands on the holder, which can do everything a reader
+ *  can — a heavier preset, never a wrong outcome. */
+export function structuralRoute(text: string, offered: readonly RoutablePreset[]): RouteDecision | undefined {
+  if (!ATTACH_TOOL_TOKEN.test(text)) return undefined;
+  const holders = offered.filter((p) => p.attaches);
+  if (holders.length !== 1) return undefined;
+  const holder = holders[0]!.name;
+  return { preset: holder, reason: `names attach_file, which only ${holder} holds` };
 }
 
 /** The production seam: one completion on the router's model, the prompt's two

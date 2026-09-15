@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { AGENTS, COMPOUND_PRESET, presetDoor } from "../../agents/registry.js";
 import { TOOLSETS } from "../../tools/workspace.js";
+import { ROUTE_ATTACH_FIXTURES } from "../../load/routeAttachFixtures.js";
 import { ConfigStore } from "../../config.js";
 import type { CompletionRequest, CompletionResult, Provider } from "../provider.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
@@ -28,6 +29,7 @@ import {
   ROUTE_TEXT_CAP,
   ROUTE_TOOL_NAME,
   routeMaxOutputTokens,
+  structuralRoute,
   routeTool,
   type RouteDecision,
   type RouteModel,
@@ -343,6 +345,78 @@ describe("route — the decision over a scripted model", () => {
     const d = await route({ ...input, allowed: [] }, model);
     expect(d.preset).toBeUndefined();
     expect(model.prompts).toHaveLength(0);
+  });
+
+  // The structural route (routing-and-config.md item 21): a request that names
+  // `attach_file` goes to the one offered preset whose toolset holds it, in
+  // code, before any prompt is built — the prompt rule for this shape lost
+  // five times in two days to a read-only preamble, through two rewordings.
+  describe("the structural route — a request that names attach_file is settled before the model", () => {
+    const never: RouteModel = async () => {
+      throw new Error("the model must not be asked");
+    };
+    const holder = presets.filter((p) => p.attaches).map((p) => p.name);
+
+    it("the four production misses each route to the holder with the fixed reason and no model call", async () => {
+      expect(holder).toEqual(["coding"]);
+      for (const fixture of ROUTE_ATTACH_FIXTURES.filter((f) => f.kind === "imperative")) {
+        const d = await route({ ...input, text: fixture.text, allowed: allNames }, never);
+        expect(d, fixture.id).toEqual({ preset: "coding", reason: "names attach_file, which only coding holds" });
+      }
+    });
+
+    it("the control — the same shape naming no tool — and an ask that only describes a file still go to the model", async () => {
+      const control = ROUTE_ATTACH_FIXTURES.find((f) => f.kind === "decoy")!;
+      const model = scripted(answer("explore", "a polling loop, read-only"));
+      expect(await route({ ...input, text: control.text, allowed: allNames }, model)).toEqual({
+        preset: "explore",
+        reason: "a polling loop, read-only",
+      });
+      const described = scripted(answer("coding", "a screenshot to post"));
+      await route(
+        { ...input, text: "attach the screenshot here when the build is green", allowed: allNames },
+        described,
+      );
+      expect(described.prompts).toHaveLength(1);
+      expect(model.prompts).toHaveLength(1);
+    });
+
+    it("a requester whose allowlist lacks the holder falls through to the model, and the offered table carries no holder", async () => {
+      const model = scripted(answer("general", "no file preset for this requester"));
+      const d = await route({ ...input, text: "call attach_file on out/x.txt", allowed: ["general", "review"] }, model);
+      expect(d).toEqual({ preset: "general", reason: "no file preset for this requester" });
+      expect(model.prompts).toHaveLength(1);
+      expect(model.prompts[0].system).not.toContain("attach_file");
+    });
+
+    it("the token is the word itself: a refusal that names it still lands on the holder (the documented trade-off), a longer identifier does not", async () => {
+      expect(
+        await route({ ...input, text: "look around but do not use attach_file", allowed: allNames }, never),
+      ).toEqual({
+        preset: "coding",
+        reason: "names attach_file, which only coding holds",
+      });
+      const model = scripted(answer("general"));
+      await route({ ...input, text: "what does reattach_file_handles do in the daemon?", allowed: allNames }, model);
+      expect(model.prompts).toHaveLength(1);
+      expect(structuralRoute("see attach_files in the api", presets)).toBeUndefined();
+      expect(structuralRoute("ATTACH_FILE", presets)).toBeUndefined();
+    });
+
+    it("structuralRoute is pure over the offered table: no holder or two holders is no answer", () => {
+      const coding = presets.find((p) => p.name === "coding")!;
+      expect(
+        structuralRoute(
+          "use attach_file",
+          presets.filter((p) => !p.attaches),
+        ),
+      ).toBeUndefined();
+      expect(structuralRoute("use attach_file", [coding, { ...coding, name: "ship" }])).toBeUndefined();
+      expect(structuralRoute("use attach_file", [{ ...coding, name: "ship" }])).toEqual({
+        preset: "ship",
+        reason: "names attach_file, which only ship holds",
+      });
+    });
   });
 });
 
