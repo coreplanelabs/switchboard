@@ -7,6 +7,8 @@ import {
   manifestDrift,
   missingVariants,
   recordsToMirror,
+  resolutionProblems,
+  resolveDependency,
 } from "../scripts/check-lockfile.mjs";
 
 // The lockfile gate's decision, and the repository's own lockfile against it.
@@ -139,6 +141,163 @@ describe("check-lockfile recordsToMirror", () => {
   });
 });
 
+// The third gate: every edge the lock declares must be satisfied by the record
+// npm resolves for it, and every fetched record must be pinned. The lock had
+// carried `web/node_modules/@types/node` at 26.5.0 — against `web`'s own
+// `^24.0.0`, with no `resolved`/`integrity` — since the scaffold. npm treated
+// the edge as invalid and re-resolved the range against the registry on every
+// install; the day `@types/node` published a new 24.x, `npm ci` on every cold
+// runner refused the lock. `npm ls --omit=dev` never looked at it: the entry
+// was a devDependency of a workspace.
+describe("check-lockfile resolutionProblems", () => {
+  const pinned = (version: string, more: Record<string, unknown> = {}) => ({
+    version,
+    resolved: `https://registry.npmjs.org/x/-/x-${version}.tgz`,
+    integrity: `sha512-${version}`,
+    ...more,
+  });
+  const valid = {
+    packages: {
+      "": {
+        name: "r",
+        version: "1.0.0",
+        workspaces: ["web"],
+        dependencies: { a: "^1.0.0", aliased: "npm:b@^3.0.0", "git-dep": "github:o/r#main" },
+        devDependencies: { "@types/node": "^24.0.0", web: "^0.0.0" },
+      },
+      web: { name: "web", version: "0.0.0", devDependencies: { "@types/node": "^24.0.0", vitest: "^4.1.11" } },
+      "node_modules/web": { resolved: "web", link: true },
+      "node_modules/a": pinned("1.2.0", {
+        dependencies: { b: "^2.0.0", c: "^1.0.0", bundled: "^1.0.0" },
+        optionalDependencies: { c: "^1.0.0" },
+        peerDependencies: { p: "^9.0.0" },
+        bundleDependencies: ["bundled"],
+      }),
+      "node_modules/a/node_modules/b": pinned("2.5.0"),
+      "node_modules/b": pinned("3.0.0"),
+      "node_modules/aliased": pinned("3.1.0", { name: "b" }),
+      "node_modules/git-dep": { version: "0.1.0", resolved: "git+ssh://git@github.com/o/r.git#abc" },
+      "node_modules/@types/node": pinned("24.13.4", { dependencies: { "undici-types": "~7.18.0" } }),
+      "node_modules/undici-types": pinned("7.18.2"),
+      "node_modules/vitest": pinned("5.0.0"),
+      "web/node_modules/vitest": pinned("4.1.11"),
+    },
+  };
+
+  it("resolves nested before hoisted, walking up from the dependant, and follows a workspace link", () => {
+    expect(resolveDependency(valid.packages, "node_modules/a", "b")).toEqual({
+      path: "node_modules/a/node_modules/b",
+      record: valid.packages["node_modules/a/node_modules/b"],
+    });
+    expect(resolveDependency(valid.packages, "node_modules/a/node_modules/b", "undici-types")).toEqual({
+      path: "node_modules/undici-types",
+      record: valid.packages["node_modules/undici-types"],
+    });
+    expect(resolveDependency(valid.packages, "web", "vitest")?.path).toBe("web/node_modules/vitest");
+    expect(resolveDependency(valid.packages, "web", "@types/node")?.path).toBe("node_modules/@types/node");
+    expect(resolveDependency(valid.packages, "", "web")).toEqual({ path: "web", record: valid.packages.web });
+    expect(resolveDependency(valid.packages, "node_modules/a", "nope")).toBeUndefined();
+  });
+
+  it("passes a lock whose every edge is satisfied by what npm resolves — bundled, optional-missing, peer-missing, alias and non-semver specs included", () => {
+    expect(resolutionProblems(valid)).toEqual([]);
+  });
+
+  it("names the defect that motivated the gate: a nested copy that violates its dependant's range, and the unpinned records beside it", () => {
+    const broken = {
+      packages: {
+        ...valid.packages,
+        "web/node_modules/@types/node": { version: "26.5.0", dev: true, dependencies: { "undici-types": "~8.9.0" } },
+        "web/node_modules/undici-types": { version: "8.9.0", dev: true },
+      },
+    };
+    expect(resolutionProblems(broken)).toEqual([
+      {
+        kind: "unsatisfied",
+        from: "web",
+        field: "devDependencies",
+        name: "@types/node",
+        spec: "^24.0.0",
+        at: "web/node_modules/@types/node",
+        version: "26.5.0",
+      },
+      { kind: "unpinned", at: "web/node_modules/@types/node", version: "26.5.0" },
+      { kind: "unpinned", at: "web/node_modules/undici-types", version: "8.9.0" },
+    ]);
+  });
+
+  it("names a hoisted record that drifted out of the root's range, a required dependency nothing resolves, and an alias whose target misses its range", () => {
+    const drifted = {
+      packages: {
+        ...valid.packages,
+        "node_modules/a": {
+          ...valid.packages["node_modules/a"],
+          version: "2.0.0",
+          dependencies: { b: "^2.0.0", d: "^1.0.0" },
+        },
+        "node_modules/aliased": pinned("2.9.0", { name: "b" }),
+      },
+    };
+    expect(resolutionProblems(drifted)).toEqual([
+      {
+        kind: "unsatisfied",
+        from: "",
+        field: "dependencies",
+        name: "a",
+        spec: "^1.0.0",
+        at: "node_modules/a",
+        version: "2.0.0",
+      },
+      {
+        kind: "unsatisfied",
+        from: "",
+        field: "dependencies",
+        name: "aliased",
+        spec: "npm:b@^3.0.0",
+        at: "node_modules/aliased",
+        version: "2.9.0",
+      },
+      { kind: "missing", from: "node_modules/a", field: "dependencies", name: "d", spec: "^1.0.0" },
+    ]);
+  });
+
+  it("does not report a workspace record, a link or a bundled copy as unpinned — only a fetched package without resolved and integrity", () => {
+    const withBundled = {
+      packages: {
+        ...valid.packages,
+        "node_modules/a/node_modules/bundled": { version: "1.0.0", inBundle: true },
+      },
+    };
+    expect(resolutionProblems(withBundled)).toEqual([]);
+  });
+
+  it("a record bundling everything (`bundleDependencies: true`) has no edges to judge; a record with a resolved URL and no integrity passes, a record with neither is unpinned", () => {
+    const bundlesAll = {
+      packages: {
+        ...valid.packages,
+        "node_modules/a": {
+          ...valid.packages["node_modules/a"],
+          bundleDependencies: true,
+          dependencies: { b: "^2.0.0", zz: "^1.0.0" },
+        },
+      },
+    };
+    expect(resolutionProblems(bundlesAll)).toEqual([]);
+    // npm's own shape for a nested duplicate of a package it already fetched: the URL, no integrity of its own.
+    const urlOnly = {
+      packages: {
+        ...valid.packages,
+        "node_modules/b": { version: "3.0.0", resolved: "https://registry.npmjs.org/b/-/b-3.0.0.tgz" },
+      },
+    };
+    expect(resolutionProblems(urlOnly)).toEqual([]);
+    const versionOnly = {
+      packages: { ...valid.packages, "node_modules/b": { version: "3.0.0", integrity: "sha512-3.0.0" } },
+    };
+    expect(resolutionProblems(versionOnly)).toEqual([{ kind: "unpinned", at: "node_modules/b", version: "3.0.0" }]);
+  });
+});
+
 describe("the repository's package-lock.json", () => {
   const root = fileURLToPath(new URL("..", import.meta.url));
   const readJson = (rel: string) => JSON.parse(readFileSync(new URL(rel, `file://${root}`), "utf8"));
@@ -146,6 +305,10 @@ describe("the repository's package-lock.json", () => {
 
   it("records every required platform variant", () => {
     expect(missingVariants(Object.keys(lock.packages))).toEqual([]);
+  });
+
+  it("has every declared edge satisfied by the record npm resolves for it, and every fetched record pinned", () => {
+    expect(resolutionProblems(lock)).toEqual([]);
   });
 
   it("mirrors package.json and every workspace's package.json in its records", () => {
