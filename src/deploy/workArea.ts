@@ -149,6 +149,19 @@ export async function ensureWorkArea(
  * materialised directory; the bot's `../../Dockerfile` needs the repository
  * around it, which the package does not carry. Comment lines are ignored.
  */
+/**
+ * Pure: in a checkout, a Worker's install holds when its `wrangler` resolves from the Worker's
+ * directory — nested under it (`<root>/<dir>/node_modules/wrangler`, npm's placement while the Worker
+ * pins a version the root does not) or hoisted to the root (`<root>/node_modules/wrangler`, the usual
+ * once every workspace agrees). A `node_modules` directory alone proves nothing: a hoisted install
+ * leaves the Worker's own directory without one, and the runner must not read that as "missing" —
+ * an `npm ci` run inside a workspace directory prunes the tree to that workspace and takes the
+ * root's own dependencies (`zod`, what `src/` imports) out from under the bundle.
+ */
+export function checkoutInstallHolds(root: string, dir: string, exists: (path: string) => boolean): boolean {
+  return exists(join(root, dir, "node_modules", "wrangler")) || exists(join(root, "node_modules", "wrangler"));
+}
+
 export function imageBuiltOutsideDir(renderedConfig: string): string | undefined {
   const code = renderedConfig
     .split("\n")

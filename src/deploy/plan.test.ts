@@ -391,7 +391,7 @@ describe("planDeploy", () => {
     ]);
     expect(p.checks.nodeModulesMissing).toEqual(["deploy/cloudflare-resident", "deploy/cloudflare-sandbox"]);
     expect(formatPlan(p)).toContain(
-      "; node_modules missing in deploy/cloudflare-resident, deploy/cloudflare-sandbox — the runner will `npm ci` there first",
+      "; install missing for deploy/cloudflare-resident, deploy/cloudflare-sandbox — the runner will `npm ci` at the checkout's root first",
     );
     expect(formatPlan(p)).not.toContain("present in every dir");
     // Only the planned steps are probed: a skipped Worker's dir is nobody's business.
