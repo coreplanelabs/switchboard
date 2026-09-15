@@ -48,6 +48,7 @@ export class StreamableHttpMcpClient implements McpClient {
   private readonly clientInfo: { name: string; version: string };
   private sessionId: string | undefined;
   private initialized: Promise<void> | undefined;
+  private serverInstructions: string | undefined;
   private nextId = 1;
 
   constructor(opts: StreamableHttpMcpClientOptions) {
@@ -100,6 +101,13 @@ export class StreamableHttpMcpClient implements McpClient {
     };
   }
 
+  /** What the server said about itself at `initialize` — the same handshake
+   *  every other call rides, so this costs no extra round trip. */
+  async instructions(opts?: { signal?: AbortSignal }): Promise<string | undefined> {
+    await this.ensureInitialized(opts?.signal);
+    return this.serverInstructions;
+  }
+
   // ---- protocol ---------------------------------------------------------------
 
   /** One JSON-RPC request with the session established first. A `404` on an
@@ -136,8 +144,10 @@ export class StreamableHttpMcpClient implements McpClient {
       { protocolVersion: MCP_PROTOCOL_VERSION, capabilities: {}, clientInfo: this.clientInfo },
       signal,
       { initializing: true },
-    )) as { protocolVersion?: unknown } | undefined;
+    )) as { protocolVersion?: unknown; instructions?: unknown } | undefined;
     if (!result || typeof result !== "object") throw new McpError("protocol", "initialize returned no result");
+    this.serverInstructions =
+      typeof result.instructions === "string" && result.instructions.trim() ? result.instructions.trim() : undefined;
     // Fire-and-forget by spec (202 expected); a failure here is not fatal to
     // the session — the server already answered initialize.
     await this.post({ jsonrpc: "2.0", method: "notifications/initialized" }, signal).catch(() => undefined);
