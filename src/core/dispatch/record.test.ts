@@ -346,6 +346,18 @@ describe("assembleRunRecord — the handoff on the record", () => {
     expect("parentRunId" in assembleRunRecord(base())).toBe(false);
   });
 
+  // docs/reference/specs/slack-channel.md item 13: a request an app relayed for a
+  // person is that person's run, and the record says which app posted it.
+  it("carries relayedBy when the message came through an app for the person, and the record still validates; a person's own message → no key", () => {
+    const b = base();
+    const relayed = assembleRunRecord({ ...b, msg: { ...b.msg, relayedBy: "Claude [fixing the build]" } });
+    expect(relayed.userId).toBe(b.msg.userId);
+    expect(relayed.relayedBy).toBe("Claude [fixing the build]");
+    expect(isRunRecord(relayed)).toBe(true);
+    expect(isRunRecord(JSON.parse(JSON.stringify(relayed)))).toBe(true);
+    expect("relayedBy" in assembleRunRecord(base())).toBe(false);
+  });
+
   it("the drain deadline's interrupted record carries the parent the registry row names (a child abandoned mid-flight still points at its parent)", () => {
     const registry = new RunRegistry({ genId: () => "run-child", genToken: () => "tok", now: () => 1000 });
     const run = registry.create("research · child", {

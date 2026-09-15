@@ -1144,7 +1144,9 @@ export async function viewerRunUserIds(
   if (!email || !emailOfSlackUser) return { userIds: [], matchedByEmail: false };
   const out: string[] = [];
   for (const id of new Set(userIds)) {
-    if (!id.startsWith("slack:")) continue;
+    // Only a person can be the viewer: an app nobody was found behind
+    // (`slack:bot:<id>`, slack-channel.md item 13) has no email to look up.
+    if (!id.startsWith("slack:") || id.startsWith("slack:bot:")) continue;
     const slackId = id.slice("slack:".length);
     // A known email is cached for the process; an unknown one is asked again
     // next time, since a lookup that failed quietly must not pin the user as

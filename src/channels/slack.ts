@@ -27,6 +27,7 @@ import {
 } from "./slack/attachments.js";
 import { dedupeDelivery, wasHandledHere } from "./slack/dedupe.js";
 import { resolveChannelName, resolveTeamUrl, resolveUserName, slackPermalink } from "./slack/lookups.js";
+import { resolveSlackRequester, type SlackPoster } from "./slack/requester.js";
 import { isLiveCard, liveCardKey, liveCards, refreshForeignLiveCards, render } from "./slack/statusCard.js";
 import { ACK_EMOJI, catchUpMissedMentions, tsMs } from "./slackCatchUp.js";
 import { processSecrets, type Secret } from "../secrets.js";
@@ -229,12 +230,17 @@ export function createSlackApp(deps: CoreDeps) {
 
   app.event("app_mention", async ({ event, client }) => {
     botUserId ??= (await client.auth.test()).user_id ?? undefined;
+    // An app's post that mentions the bot arrives here with no `user`: the
+    // poster rides along and the requester is resolved from it (item 13).
+    const posted = event as { bot_id?: string; username?: string; bot_profile?: { name?: string } };
     await handle(
       deps,
       { client, statusClient },
       {
         channel: event.channel,
-        user: event.user ?? "unknown",
+        user: event.user,
+        poster: posterOf(posted),
+        rawText: event.text ?? "",
         text: stripMention(event.text ?? "", botUserId),
         ts: event.ts,
         threadTs: event.thread_ts ?? event.ts,
@@ -277,7 +283,9 @@ export function createSlackApp(deps: CoreDeps) {
       { client, statusClient },
       {
         channel: m.channel,
-        user: m.user ?? "unknown",
+        user: m.user,
+        poster: posterOf(m),
+        rawText: m.text ?? "",
         text: stripMention(m.text ?? "", botUserId),
         ts: m.ts,
         threadTs: m.thread_ts ?? m.ts,
@@ -295,9 +303,20 @@ export function createSlackApp(deps: CoreDeps) {
   return { app, receiver, statusClient };
 }
 
+/** The app behind a message with no `user`, as Slack names it. */
+function posterOf(m: { bot_id?: string; username?: string; bot_profile?: { name?: string } }): SlackPoster | undefined {
+  if (!m.bot_id && !m.username && !m.bot_profile?.name) return undefined;
+  const name = m.username ?? m.bot_profile?.name;
+  return { ...(m.bot_id !== undefined ? { botId: m.bot_id } : {}), ...(name !== undefined ? { name } : {}) };
+}
+
 interface SlackEvent {
   channel: string;
-  user: string;
+  /** The sender, when a person posted the message; absent on an app's post (`poster` says which). */
+  user?: string;
+  poster?: SlackPoster;
+  /** The text as Slack delivered it, footers included — the requester's relay footer is read from it. */
+  rawText?: string;
   text: string;
   /** ts of the triggering message itself (history() skips it by this) */
   ts: string;
@@ -423,9 +442,24 @@ async function receiveSlackMessage(
   // lookup leaves the field undefined (the label falls back to the raw id) and
   // never fails the dispatch. Resolved in parallel so the two lookups don't add
   // up on the first message for a new channel/user.
+  // Who asked (item 13): the sender, or the person an app relayed for — read
+  // before the name lookups, which take the resolved person. A person's post
+  // resolves without a call; a relay costs one `conversations.replies`.
+  const requester = await resolveSlackRequester(client, {
+    channel: ev.channel,
+    ts: ev.ts,
+    threadTs: ev.threadTs,
+    ...(ev.user !== undefined ? { user: ev.user } : {}),
+    text: ev.rawText ?? ev.text,
+    ...(ev.poster !== undefined ? { poster: ev.poster } : {}),
+    ...(ev.thread !== undefined ? { thread: ev.thread } : {}),
+  });
+  span.setAttrs({ requester: requester.resolvedBy });
   const [channelName, userName, team] = await Promise.all([
     resolveChannelName(client, ev.channel),
-    resolveUserName(client, ev.user),
+    requester.slackUserId !== undefined
+      ? resolveUserName(client, requester.slackUserId)
+      : Promise.resolve(requester.userName),
     resolveTeamUrl(client),
   ]);
   // Tell the model about attachments it can't see, so it never claims an
@@ -436,7 +470,9 @@ async function receiveSlackMessage(
       : "";
   return {
     channelId: `${PLATFORM}:${ev.channel}`,
-    userId: `${PLATFORM}:${ev.user}`,
+    userId: requester.userId,
+    ...(requester.relayedBy !== undefined ? { relayedBy: requester.relayedBy } : {}),
+    ...(requester.postedBy !== undefined ? { postedBy: requester.postedBy } : {}),
     threadKey: `${PLATFORM}:${ev.channel}:${ev.threadTs}`,
     text: ev.text + note,
     messageId: ev.ts,

@@ -53,20 +53,29 @@ export interface ThreadTurnsOptions {
  *  attribution after the mention is tolerated too. */
 const APP_FOOTER_RE = /(?:^|\s)(?:\*Sent using\*|Sent using)\s+<@[A-Z0-9]+(?:\|[^>]*)?>(?:\s*\[[^\]\n]*\])?\s*$/;
 
+/** The other footer the Claude Slack app appends — to a message it posts from
+ *  a Claude Code session: the source channel, a separator, the permalink of the
+ *  person's own thread (`Sent by Claude in <#C…|name> · <permalink|thread>`).
+ *  Chrome of the same kind, anchored to the end of the text the same way; the
+ *  requester resolver (`slack/requester.ts`) reads it before it is stripped. */
+export const RELAY_FOOTER_RE =
+  /(?:^|\s)Sent by Claude in <#([CGD][A-Z0-9_]+)(?:\|[^>]*)?>\s*(?:·|•|-|—)\s*<(https?:\/\/[^|>\s]+)(?:\|[^>]*)?>\s*$/;
+
 /**
  * Remove the app footer(s) from the end of a message's text and trim it.
- * Exactly the two shapes Slack emits (bold or plain — never asymmetric), as a
- * whole trailing line; repeated because a forwarded app message can stack two,
- * and a message that is nothing but the footer strips to "". Applied to the
- * request text (`stripMention`) and to every turn `threadTurns` keeps, so the
- * current thread's history and a quoted thread read the same words.
+ * Exactly the two `Sent using` shapes Slack emits (bold or plain — never
+ * asymmetric) and the relay footer, as whole trailing lines; repeated because a
+ * forwarded app message can stack two, and a message that is nothing but the
+ * footer strips to "". Applied to the request text (`stripMention`) and to
+ * every turn `threadTurns` keeps, so the current thread's history and a quoted
+ * thread read the same words.
  */
 export function stripAppFooter(text: string): string {
   let out = text.trim();
   let prev: string;
   do {
     prev = out;
-    out = out.replace(APP_FOOTER_RE, "").trim();
+    out = out.replace(APP_FOOTER_RE, "").replace(RELAY_FOOTER_RE, "").trim();
   } while (out !== prev);
   return out;
 }

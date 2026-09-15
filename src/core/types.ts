@@ -73,6 +73,20 @@ export interface IncomingMessage {
    * adapter hint like the names above — absent for HTTP/MCP.
    */
   sourceUrl?: string;
+  /**
+   * The app that posted the message for the person `userId` names, when the
+   * message was not their own (a Claude Code session relaying a request from
+   * its owner's thread, docs/reference/specs/slack-channel.md item 13) — its
+   * display name. Absent when the person posted the message themselves.
+   */
+  relayedBy?: string;
+  /**
+   * The same app as a platform-namespaced actor id (`slack:bot:<bot_id>`), set
+   * exactly when `relayedBy` is: authorization treats the run as that app
+   * acting on behalf of `userId`, so a relayed request never holds more than
+   * the app and the person both hold (authorization.md item 14).
+   */
+  postedBy?: string;
   /** Images attached to the triggering message, if any. */
   images?: ImageAttachment[];
   /** Non-image files (PDFs, text/code/CSV/logs) on the triggering message, if any. */

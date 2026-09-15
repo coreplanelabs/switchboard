@@ -451,6 +451,9 @@ describe("isRunRecord", () => {
     expect(isRunRecord({ ...record(), finishedAt: "2" })).toBe(false);
     expect(isRunRecord({ ...record(), truncated: "no" })).toBe(false);
     expect(isRunRecord({ ...record(), storedEventCount: undefined })).toBe(false);
+    // The relaying app's name (slack-channel.md item 13): optional, a string when present.
+    expect(isRunRecord({ ...record(), relayedBy: "Claude [ci]" })).toBe(true);
+    expect(isRunRecord({ ...record(), relayedBy: 7 })).toBe(false);
   });
 
   it("isRunListItem accepts a record minus events (with or without numeric bytes) and rejects a bad bytes or a bad row", () => {

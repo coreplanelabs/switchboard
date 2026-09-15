@@ -275,7 +275,7 @@ export function assembleRunRecord(input: {
   snap: RunSnapshot | null;
   agent?: string;
   model?: string;
-  msg: Pick<IncomingMessage, "channelId" | "userId" | "threadKey" | "sourceUrl" | "userName">;
+  msg: Pick<IncomingMessage, "channelId" | "userId" | "threadKey" | "sourceUrl" | "userName" | "relayedBy">;
   /** The stamp taken at create (`channelVisibilityOf`) — the record carries what the run was stamped with. */
   channelVisibility: ChannelVisibility;
   repo?: string;
@@ -339,6 +339,7 @@ export function assembleRunRecord(input: {
     ...(input.model !== undefined ? { model: input.model } : {}),
     channelId: msg.channelId,
     userId: msg.userId,
+    ...(msg.relayedBy !== undefined ? { relayedBy: msg.relayedBy } : {}),
     threadKey: msg.threadKey,
     channelVisibility: input.channelVisibility,
     ...(input.repo !== undefined ? { repo: input.repo } : {}),
