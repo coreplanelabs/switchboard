@@ -1,18 +1,31 @@
 // The records gate: reads every record under docs/decisions/ and docs/plans/,
-// reads their copies on the base branch, and reports through the pure rules in
-// src/docs/records.ts (docs/reference/specs/docs-site.md item 16).
+// reads their copies at the merge-base of HEAD and the base branch, and
+// reports through the pure rules in src/docs/records.ts
+// (docs/reference/specs/docs-site.md item 16).
 //
-//   npm run decisions:check                       # every record, against origin/main (locally and in CI)
-//   DECISIONS_BASE=<ref> npm run decisions:check  # against another base, e.g. the branch a stacked PR targets
+//   npm run decisions:check                       # every record, against the merge-base with origin/main (locally and in CI)
+//   DECISIONS_BASE=<ref> npm run decisions:check  # merge-base with another ref, e.g. the branch a stacked PR targets
 //
-// Without a reachable base ref (a shallow clone) the immutability half is
-// skipped and said so; the status half always runs.
+// The merge-base, not the tip: a branch judged against origin/main's tip fails
+// when a record was accepted, amended or added on main after the branch was
+// cut, though the branch never touched it. Judged against the commit it was
+// cut from, only the branch's own edits count.
+//
+// Without a reachable base (a shallow clone, or no common ancestor) the
+// immutability half is skipped and said so; the status half always runs.
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { immutabilityProblems, RECORD_DIRS, statusProblems, type RecordText } from "../src/docs/records.js";
+import {
+  baseRecords,
+  immutabilityProblems,
+  RECORD_DIRS,
+  statusProblems,
+  type BaseHistory,
+  type RecordText,
+} from "../src/docs/records.js";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 
@@ -31,42 +44,41 @@ function listRecords(): RecordText[] {
 }
 
 const git = (...args: string[]) => execFileSync("git", args, { cwd: root, stdio: "pipe" }).toString();
-
-/**
- * Every record on the base: the ones the tree still has (so edits are caught)
- * and the ones it no longer has (so deletions are). Null when the ref is not
- * reachable, e.g. a shallow clone.
- */
-function baseTexts(ref: string): Map<string, string> | null {
-  let listed: string[];
+/** A git answer, or null where git has none (an unknown ref, no common ancestor). */
+const gitOrNull = (...args: string[]): string | null => {
   try {
-    git("rev-parse", "--verify", "--quiet", `${ref}^{commit}`);
-    listed = git("ls-tree", "-r", "--name-only", ref, "--", ...RECORD_DIRS)
-      .split("\n")
-      .filter((p) => p.endsWith(".md") && !p.endsWith("/README.md"));
+    return git(...args).trim() || null;
   } catch {
     return null;
   }
-  const base = new Map<string, string>();
-  for (const path of listed) base.set(path, git("show", `${ref}:${path}`));
-  return base;
-}
+};
+
+/** The repository as `baseRecords` reads it. */
+const history: BaseHistory = {
+  commitOf: (ref) => gitOrNull("rev-parse", "--verify", "--quiet", `${ref}^{commit}`),
+  mergeBase: (a, b) => gitOrNull("merge-base", a, b),
+  recordPaths: (commit) =>
+    git("ls-tree", "-r", "--name-only", commit, "--", ...RECORD_DIRS)
+      .split("\n")
+      .filter((p) => p.endsWith(".md") && !p.endsWith("/README.md")),
+  textAt: (commit, path) => git("show", `${commit}:${path}`),
+};
 
 function main(): number {
   const records = listRecords();
   const problems = statusProblems(records, (path) => existsSync(join(root, path)));
   const ref = process.env.DECISIONS_BASE ?? "origin/main";
-  const base = baseTexts(ref);
-  if (base !== null) problems.push(...immutabilityProblems(records, base));
+  const base = baseRecords(ref, history);
+  if (base.kind === "found") problems.push(...immutabilityProblems(records, base.texts));
   for (const p of problems) console.error(`decisions:check ${p.path}: ${p.what}`);
   if (problems.length > 0) {
     console.error(`decisions:check FAILED — ${problems.length} problem(s) in ${records.length} record(s)`);
     return 1;
   }
   const immutability =
-    base === null
-      ? ` (immutability not checked: ${ref} is not reachable here)`
-      : `, accepted bodies unchanged against ${ref}`;
+    base.kind === "unreachable"
+      ? ` (immutability not checked: ${base.why})`
+      : `, accepted bodies unchanged against ${base.commit.slice(0, 8)} (the merge-base with ${ref})`;
   console.log(
     `decisions:check ok — ${records.length} record(s) carry a valid status, every superseded_by resolves${immutability}`,
   );
