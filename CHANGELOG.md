@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.220.0](https://github.com/coreplanelabs/switchboard/compare/v1.219.0...v1.220.0) (2026-09-15)
+
+
+### Features
+
+* **harness:** the general preset can run on pi as a child of the bot, dark behind harness: { general: pi }, with none of pi's own tools and its assistant toolset relayed over loopback ([#1148](https://github.com/coreplanelabs/switchboard/issues/1148)) ([4da3ec0](https://github.com/coreplanelabs/switchboard/commit/4da3ec03e439600c64bc7778c764d68a1a00b21a))
+
+
+### Bug fixes
+
+* **dispatcher:** a follow-up continues the thread's pull request — the run record names the PR its post-step opened, the thread read hands it to the target resolution, and a follow-up naming no ref runs on that PR's head branch, so its pushes and its resubmitted description land on the PR instead of being refused on the repo default ([e09cd2e](https://github.com/coreplanelabs/switchboard/commit/e09cd2ee5320bab068aa7c3ef5a8d36138565a9a))
+* **dispatcher:** the router names the presets that can post a file, read off their toolsets — an ask for an attachment no longer lands on explore ([#1154](https://github.com/coreplanelabs/switchboard/issues/1154)) ([d54d280](https://github.com/coreplanelabs/switchboard/commit/d54d2800dd01e803cbe66af40755154388ca2797))
+* **dispatcher:** the router says what is NOT compound once, in one place - a dependent chain that crosses sources is one ask, and the write-ask clause follows it instead of standing as a paragraph of its own ([#1150](https://github.com/coreplanelabs/switchboard/issues/1150)) ([565e61c](https://github.com/coreplanelabs/switchboard/commit/565e61c47bd34c8166bf50e44c126bed0efa7594))
+* **harness:** a pi run survives the bot restart its pi outlives — the row carries the hash of the bearer pi was started with and the generation that re-attaches adopts it onto its model proxy, so pi's calls verify instead of failing 401 unknown_bearer ([d75af34](https://github.com/coreplanelabs/switchboard/commit/d75af3406150a13b9a6d8cc395c24e131e4973d8))
+* **harness:** a pi run's row records the root its pi was filed under, so the generation that comes back after a deploy re-attaches where the last build put pi, and a live pi whose row names no root is ended and restarted instead of failing the run ([#1145](https://github.com/coreplanelabs/switchboard/issues/1145)) ([df0a45d](https://github.com/coreplanelabs/switchboard/commit/df0a45d33f9472d3ca7301ecdbec01a116849313))
+* **resident:** a run admitted inside the post-deploy container rollout waits for the wake instead of dying ([#1146](https://github.com/coreplanelabs/switchboard/issues/1146)) ([541735c](https://github.com/coreplanelabs/switchboard/commit/541735c05fb169f9b5f9950da9ed41e817d864e1))
+* **runs:** a run handed off after its final answer resumes into its post-steps and finishes instead of closing interrupted ([#1153](https://github.com/coreplanelabs/switchboard/issues/1153)) ([6a5c0da](https://github.com/coreplanelabs/switchboard/commit/6a5c0da35a7901d63ca1f9694f8e0eca68f3697f))
+
+
+### Documentation
+
+* **docs:** record 0033 reads implemented ([#1149](https://github.com/coreplanelabs/switchboard/issues/1149)) ([693725e](https://github.com/coreplanelabs/switchboard/commit/693725e8e4831540e471be5dcfefee263de10e47))
+
 ## [1.219.0](https://github.com/coreplanelabs/switchboard/compare/v1.218.0...v1.219.0) (2026-09-15)
 
 
