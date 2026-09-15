@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.226.1](https://github.com/coreplanelabs/switchboard/compare/v1.226.0...v1.226.1) (2026-09-15)
+
+
+### Documentation
+
+* **docs:** record 0032 amended 2026-09-15 — the harness contract as production runs it before step 5: process ownership by machine class, the re-attach protocol, the relay timing and its open boot window, the settings and limits, the pin and the series status ([#1221](https://github.com/coreplanelabs/switchboard/issues/1221)) ([bd790d3](https://github.com/coreplanelabs/switchboard/commit/bd790d3273b939b7df5884e9c419f85b119ba90f))
+
 ## [1.226.0](https://github.com/coreplanelabs/switchboard/compare/v1.225.0...v1.226.0) (2026-09-15)
 
 
