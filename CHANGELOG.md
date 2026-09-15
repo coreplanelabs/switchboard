@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.226.0](https://github.com/coreplanelabs/switchboard/compare/v1.225.0...v1.226.0) (2026-09-15)
+
+
+### Features
+
+* **harness:** the coding description turn and the review's head-move re-review are a prompt on the run's own pi session — the harness's open form keeps pi alive past the loop for the run stage's two post-turns, and the run loop ends it after them ([#1206](https://github.com/coreplanelabs/switchboard/issues/1206)) ([b89317d](https://github.com/coreplanelabs/switchboard/commit/b89317d2f973351c431323fae71dc4bf1bfa446c))
+* **runs:** a file's event names what it belongs to — a received artifact carries the message it arrived with, a sent one the call that posted it — and the run page binds by those ids alone, the order-and-name inference gone ([#1212](https://github.com/coreplanelabs/switchboard/issues/1212)) ([44b6ded](https://github.com/coreplanelabs/switchboard/commit/44b6ded3578cad687aa76be52b2676d874ae6eb5))
+
+
+### Bug fixes
+
+* **costs:** the chart tooltip sits outside the scroll box, keeps a fixed width, flips to stay inside the card, and reads as a compact breakdown ([#1211](https://github.com/coreplanelabs/switchboard/issues/1211)) ([37d9ee8](https://github.com/coreplanelabs/switchboard/commit/37d9ee8a792da4ffe824ee5ced489e43dd524541))
+* **dispatcher:** a session seed drops the tool results its first kept turn carries for calls made before the cut — pi answers a tool batch and a steer in one user turn and compacts between the batch's calls and its results, so a follow-up after a compaction opened on results without their calls and the provider refused the whole seed ([#1209](https://github.com/coreplanelabs/switchboard/issues/1209)) ([06a9707](https://github.com/coreplanelabs/switchboard/commit/06a97079b4652ccc4e8c8898d9c71bb60435e761))
+* **mcp:** keep the settled refresh entry so a raced credential read never refreshes twice ([#1204](https://github.com/coreplanelabs/switchboard/issues/1204)) ([6b066d4](https://github.com/coreplanelabs/switchboard/commit/6b066d42297d9d5de283958b8497dbbc70b9e61a))
+* **memory:** reflection accepts a fenced or cap-cut extractor reply and logs one outcome line per pass ([#1217](https://github.com/coreplanelabs/switchboard/issues/1217)) ([1078fa9](https://github.com/coreplanelabs/switchboard/commit/1078fa9ce7f12fd61f4d8e6a369e90ac67af2150))
+
+
+### Documentation
+
+* **docs:** record 0036 proposes one front door, the router offering every command and the ship loop, with coding leaving the table and the auto-merge refusal replaced by the per-pull-request fact ([#1215](https://github.com/coreplanelabs/switchboard/issues/1215)) ([3626c74](https://github.com/coreplanelabs/switchboard/commit/3626c7454bb45da2cfd1a5718cb32b6f75b00694))
+* **docs:** record 0037 — a linked thread is quoted, not joined ([#1216](https://github.com/coreplanelabs/switchboard/issues/1216)) ([d0096ae](https://github.com/coreplanelabs/switchboard/commit/d0096aecb3ffb4ff2d9cbce7f54959f652b58e97))
+
+
+### Refactoring
+
+* **providers:** the chat, completion and tool vocabulary leaves src/providers/types.ts and src/tools/workspace.ts for homes the pi series keeps — no behaviour change ([#1203](https://github.com/coreplanelabs/switchboard/issues/1203)) ([e1746cd](https://github.com/coreplanelabs/switchboard/commit/e1746cd3a29bd0022eb2b2f2db70d7c15184f406))
+
 ## [1.225.0](https://github.com/coreplanelabs/switchboard/compare/v1.224.0...v1.225.0) (2026-09-15)
 
 
