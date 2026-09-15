@@ -12,6 +12,7 @@
 // the root the row recorded, or restarts pi on a session rebuilt from the
 // mirrored transcript.
 
+import { randomUUID } from "node:crypto";
 import type { AgentDef } from "../../../agents/registry.js";
 import type { PiCompactionConfig } from "../../../config.js";
 import type { Effort } from "../../../effort.js";
@@ -45,7 +46,7 @@ import type { Backend } from "../../trace/attrs.js";
 import type { Clock, Span } from "../../trace/types.js";
 import { PiBridge } from "./bridge.js";
 import type { PiContainer } from "./container.js";
-import { PiMirror, piSessionFile } from "./mirror.js";
+import { PiMirror, piSessionFile, type LedgerTail } from "./mirror.js";
 import {
   piLaunchArgs,
   piLaunchEnv,
@@ -62,7 +63,12 @@ import { PiRpcTransport } from "./transport.js";
 /** What a run's row remembers about its pi, so the next bot generation finds it (harness-pi item 8). */
 export interface PiHarnessFacts {
   pid: number;
-  /** The log byte the next read starts at. */
+  /** The log byte the next generation reads from: the boundary after the last
+   *  record whose effect the ledger holds — the assistant turn the mirror
+   *  wrote as a step, the compaction it wrote as a row — and never where the
+   *  transport had read to. What pi wrote after it (the results and steers
+   *  pending for the next step) lived in the mirror's memory and died with
+   *  the bot, so the generation that re-attaches reads it again (harness-pi item 8). */
   logOffset: number;
   /** pi's session file, once `get_state` named it. */
   sessionFile?: string;
@@ -304,6 +310,21 @@ export function settlementResults(settlements: Settlement[]): ChatMessage | unde
   };
 }
 
+/** The last row the ledger's transcript holds, as `planResume` assembled it
+ *  (item 8): the compaction that closed the span when one did (its `before`
+ *  is the message count), else the last message when an assistant's; nothing
+ *  for a transcript ending on a user turn, or none at all. The mirror knows
+ *  this row by sight, so reading it again writes it no second time. */
+export function ledgerTailOf(
+  resume: Pick<PiHarnessResume, "messages" | "compactions"> | undefined,
+): LedgerTail | undefined {
+  if (!resume) return undefined;
+  const closing = resume.compactions?.filter((c) => c.before === resume.messages.length).at(-1);
+  if (closing) return { compaction: closing.entry };
+  const last = resume.messages.at(-1);
+  return last?.role === "assistant" ? { turn: last } : undefined;
+}
+
 /** The same note as the relay's answer (item 8): what a re-attached pi's extension reads when it asks again for the call. */
 export function settlementAnswer(s: Settlement): RelayedToolAnswer {
   return { content: [{ type: "text", text: settlementText(s) }], isError: true };
@@ -358,10 +379,17 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
     };
   }
   bridge.turns = run.resume?.turn ?? 0;
+  // The transcript's last row: the row's offset is saved after the ledger's
+  // write, so a bot that died between the two left it one row behind, and that
+  // row is read again — the mirror knows it by sight. The index the first step
+  // takes counts every row the transcript holds, compaction rows included: the
+  // ledger writes a step's rows from that index (`writeThrough`).
+  const tail = ledgerTailOf(run.resume);
   const mirror = new PiMirror({
     onStep: run.onStep,
-    seedLength: run.resume?.messages.length ?? run.messages.length,
+    seedLength: run.resume ? run.resume.messages.length + (run.resume.compactions?.length ?? 0) : run.messages.length,
     remainingMs: () => deadline - now(),
+    ...(tail ? { mirroredTail: tail } : {}),
   });
   mirror.inboxConsumedSeq = run.resume?.inboxConsumedSeq ?? 0;
 
@@ -406,11 +434,22 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
   let pid: number | undefined;
   let transport: PiRpcTransport | undefined;
   let facts: PiHarnessFacts | undefined;
+  /** The log boundary after the last record whose effect the ledger holds
+   *  (`PiHarnessFacts.logOffset`): a fresh pi's log from its first byte, a
+   *  re-attach from where the row said, then wherever the mirror last wrote. */
+  let mirrored = 0;
   const save = () => {
     if (facts) {
-      if (transport) facts = { ...facts, logOffset: transport.offset };
+      facts = { ...facts, logOffset: mirrored };
       run.saveFacts?.(facts);
     }
+  };
+  /** The ledger moved — a step or a compaction row landed — so the row's
+   *  offset follows it at once: what a re-attach reads again is then exactly
+   *  what pi wrote since, the results and steers the mirror still holds. */
+  const held = () => {
+    if (transport) mirrored = transport.consumedOffset;
+    save();
   };
   /** Catching up on a re-attach: what the log holds before our own prompt is
    *  answered happened while the bot was away — a failed model call and pi's
@@ -465,13 +504,14 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
       pid = recorded.pid;
       // The row learns the container it was found in, when it did not say.
       facts = { ...recorded, ...(recorded.container === undefined && here !== undefined ? { container: here } : {}) };
+      mirrored = recorded.logOffset;
       transport = new PiRpcTransport({
         container,
         paths,
         pid,
         pollMs: deps.pollMs ?? 750,
         sleep: deps.sleep,
-        offset: recorded.logOffset,
+        offset: mirrored,
       });
       catchingUp = true;
       const inFlight = run.resume?.settlements.length ?? 0;
@@ -576,8 +616,16 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
       transport = new PiRpcTransport({ container, paths, pid, pollMs: deps.pollMs ?? 750, sleep: deps.sleep });
     }
 
-    transport.send({ id: "retry", type: "set_auto_retry", enabled: false });
-    transport.send({ id: "state", type: "get_state" });
+    // This generation's command ids carry the moment it began and a nonce: the
+    // answers a dead generation's pi gave to ITS commands, read again when the
+    // re-attach starts before them (item 8), are never taken for answers to
+    // ours — not even a generation's begun in the same millisecond.
+    const stamp = `${now()}-${randomUUID().slice(0, 8)}`;
+    const ids = { retry: `retry:${stamp}`, state: `state:${stamp}`, prompt: `prompt:${stamp}` };
+    /** A resume of either kind continues pi rather than seeding it. */
+    const continuing = reattached || run.resume !== undefined;
+    transport.send({ id: ids.retry, type: "set_auto_retry", enabled: false });
+    transport.send({ id: ids.state, type: "get_state" });
     if (reattached)
       // The pi found alive may be inside a tool call — its extension waiting on
       // the relay for the answer the dead generation never sent — and pi
@@ -587,9 +635,9 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
       // idle pi (a model call failed while the bot was away, the loop ended)
       // takes the same command as the prompt it is. The row cannot tell the
       // two apart — its calls in flight name both — so pi decides.
-      transport.send({ id: "prompt", type: "prompt", message: CONTINUE_PROMPT, streamingBehavior: "steer" });
-    else if (run.resume) transport.send({ id: "prompt", type: "prompt", message: CONTINUE_PROMPT });
-    else transport.send({ id: "prompt", type: "prompt", ...promptOf(run.messages) });
+      transport.send({ id: ids.prompt, type: "prompt", message: CONTINUE_PROMPT, streamingBehavior: "steer" });
+    else if (run.resume) transport.send({ id: ids.prompt, type: "prompt", message: CONTINUE_PROMPT });
+    else transport.send({ id: ids.prompt, type: "prompt", ...promptOf(run.messages) });
 
     let warned = false;
     let settled = false;
@@ -722,7 +770,7 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
       if (obs.response) {
         const r = obs.response;
         if (
-          r.id === "state" &&
+          r.id === ids.state &&
           r.success === true &&
           typeof (r.data as Record<string, unknown> | undefined)?.sessionFile === "string"
         ) {
@@ -730,14 +778,18 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
           facts = { ...(facts ?? { pid: pid!, logOffset: 0, root: paths.dir }), sessionFile: String(data.sessionFile) };
           save();
         }
-        if (r.id === "prompt") {
+        if (r.id === ids.prompt) {
           catchingUp = false;
           if (r.success === false) throw new PromptRefused(String(r.error ?? "no reason"));
+          // pi echoes the prompt as the first user message of the turn that
+          // answers it: the seed's is on the ledger already and is not written
+          // twice; a continue prompt's is a turn the model was told, like a steer's.
+          if (!continuing) mirror.expectSeedEcho();
         }
       }
-      if (obs.message) await mirror.onMessage(obs.message, bridge.turns);
+      if (obs.message && (await mirror.onMessage(obs.message, bridge.turns))) held();
       if (obs.compaction) {
-        await mirror.onCompaction(obs.compaction, bridge.turns);
+        if (await mirror.onCompaction(obs.compaction, bridge.turns)) held();
         // The notepad's second read point (session-log item 10): after every
         // compaction, at pi's next turn boundary, unless the run is winding
         // down or this is history a re-attach is catching up on. pi compacts
@@ -765,7 +817,6 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
           note("harness_error", `a model call failed while the bot was away (${obs.providerError}); continuing`);
         else providerError = obs.providerError;
       }
-      if (obs.turnEnded) save();
       if (obs.settled && !catchingUp) {
         settled = true;
         break;

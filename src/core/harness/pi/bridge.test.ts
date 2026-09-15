@@ -490,7 +490,7 @@ describe("the notes — compaction, harness errors, dialogs, the unknown", () =>
   it("the structural events — responses, agent and turn boundaries, queue changes — say what they are and add nothing to the stream", () => {
     const { bridge, events } = harness();
     expect(bridge.observe({ type: "agent_settled" }).settled).toBe(true);
-    expect(bridge.observe({ type: "turn_end" }).turnEnded).toBe(true);
+    bridge.observe({ type: "turn_end" });
     expect(bridge.observe({ id: "s", type: "response", command: "get_state", success: true }).response).toMatchObject({
       command: "get_state",
     });

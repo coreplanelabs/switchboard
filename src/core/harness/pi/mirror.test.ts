@@ -70,6 +70,7 @@ describe("PiMirror — step records as the runner writes them", () => {
 
   it("skips the echoed seed, reports the assistant turn with its calls in flight before the results, then the results as one user turn with the next assistant turn", async () => {
     const { m, reports } = mirror();
+    m.expectSeedEcho(); // pi answered the seed's prompt: the next user message is its echo
     await m.onMessage({ role: "user", content: "go" }, 0); // the prompt echoed: the seed, already on the ledger
     await m.onMessage(bashCall, 1);
     expect(reports).toHaveLength(1);
@@ -104,6 +105,7 @@ describe("PiMirror — step records as the runner writes them", () => {
   // hole as an incomplete transcript — so it is not a turn at all.
   it("an assistant message with no parts is not a turn: no step, no index taken, the results pending ride the next turn", async () => {
     const { m, reports } = mirror();
+    m.expectSeedEcho();
     await m.onMessage({ role: "user", content: "go" }, 0);
     await m.onMessage(bashCall, 1);
     await m.onMessage(bashResult, 1);
@@ -129,6 +131,7 @@ describe("PiMirror — step records as the runner writes them", () => {
   // before the next assistant turn — and the index moves past it.
   it("a compaction is its own step report: the pending results as the user turn, the entry as the row after them, nothing in flight; the next assistant turn lands after it", async () => {
     const { m, reports } = mirror();
+    m.expectSeedEcho();
     await m.onMessage({ role: "user", content: "go" }, 0);
     await m.onMessage(bashCall, 1);
     await m.onMessage(bashResult, 1);
@@ -147,10 +150,115 @@ describe("PiMirror — step records as the runner writes them", () => {
 
   it("a compaction with nothing pending is a report of the entry alone", async () => {
     const { m, reports } = mirror();
+    m.expectSeedEcho();
     await m.onMessage({ role: "user", content: "go" }, 0);
     await m.onCompaction({ summary: "nothing yet" }, 0);
     expect(reports).toHaveLength(1);
     expect(reports[0]).toMatchObject({ firstIdx: 1, turns: [], inFlight: [], compaction: { summary: "nothing yet" } });
+  });
+
+  // harness-pi item 8: the row's offset follows the ledger, so the harness asks
+  // after every message whether the ledger now holds everything up to it.
+  it("answers whether the ledger holds everything up to the message: no for the echo, a result or a steer left pending and a message with no parts; yes once a step or a compaction is written; never without a step hook", async () => {
+    const { m } = mirror();
+    m.expectSeedEcho();
+    expect(await m.onMessage({ role: "user", content: "go" }, 0)).toBe(false);
+    expect(await m.onMessage(bashCall, 1)).toBe(true);
+    expect(await m.onMessage(bashResult, 1)).toBe(false);
+    expect(await m.onMessage({ role: "user", content: "also: run the tests" }, 1)).toBe(false);
+    expect(await m.onMessage({ role: "assistant", content: [], stopReason: "error", errorMessage: "x" }, 1)).toBe(
+      false,
+    );
+    expect(await m.onCompaction({ summary: "so far" }, 1)).toBe(true);
+    expect(await m.onMessage(final, 2)).toBe(true);
+    const unwired = new PiMirror({ seedLength: 1, remainingMs: () => 1 });
+    expect(await unwired.onMessage(bashCall, 1)).toBe(false);
+    expect(await unwired.onCompaction({ summary: "so far" }, 1)).toBe(false);
+  });
+
+  // The way back (harness-pi item 8): the row's offset is saved after the
+  // ledger's write, so a bot that died between the two leaves it one turn
+  // behind, and the generation that re-attaches reads that turn again. No seed
+  // is sent on a re-attach, so its first user message is a steer's text.
+  it("on a re-attach the transcript's last assistant turn, met again, is not written twice — the results before it went with its step, no index is spent — and a first user message is a steer's text, not an echo", async () => {
+    const transcript: ChatMessage[] = [
+      { role: "user", content: [{ type: "text", text: "go" }] },
+      chatMessageOf(bashCall)!,
+    ];
+    const reports: StepReport[] = [];
+    const m = new PiMirror({
+      onStep: async (r) => void reports.push(r),
+      seedLength: transcript.length,
+      remainingMs: () => 600_000,
+      mirroredTail: { turn: transcript.at(-1)! },
+    });
+    await m.onMessage({ role: "user", content: "an earlier steer" }, 1); // before the turn read again: was its step's user turn
+    expect(await m.onMessage(bashCall, 1)).toBe(true);
+    expect(reports).toEqual([]);
+    await m.onMessage(bashResult, 1);
+    await m.onMessage({ role: "user", content: "Continue where you left off." }, 1);
+    await m.onMessage(final, 2);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({ firstIdx: 2, iteration: 0, inFlight: [] });
+    expect(reports[0].turns).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", toolUseId: "call_0", content: " M README.md" },
+          { type: "text", text: "Continue where you left off." },
+        ],
+      },
+      { role: "assistant", content: [{ type: "text", text: "Done." }] },
+    ]);
+  });
+
+  it("the transcript's tail is compared with the first row the mirror meets alone: one that differs is a row of its own, and every row after it is written whatever it says", async () => {
+    const reports: StepReport[] = [];
+    const m = new PiMirror({
+      onStep: async (r) => void reports.push(r),
+      seedLength: 2,
+      remainingMs: () => 600_000,
+      mirroredTail: { turn: chatMessageOf(bashCall)! },
+    });
+    await m.onMessage(final, 1);
+    await m.onMessage(bashCall, 2);
+    expect(reports.map((r) => ({ firstIdx: r.firstIdx, turns: r.turns }))).toEqual([
+      { firstIdx: 2, turns: [chatMessageOf(final)] },
+      { firstIdx: 3, turns: [chatMessageOf(bashCall)] },
+    ]);
+    // A compaction met first against an assistant tail is a row of its own too.
+    const second: StepReport[] = [];
+    const n = new PiMirror({
+      onStep: async (r) => void second.push(r),
+      seedLength: 2,
+      remainingMs: () => 600_000,
+      mirroredTail: { turn: chatMessageOf(bashCall)! },
+    });
+    await n.onCompaction({ summary: "so far" }, 1);
+    await n.onMessage(bashCall, 2);
+    expect(second.map((r) => r.firstIdx)).toEqual([2, 3]);
+  });
+
+  // The same one-behind window for a compaction: the row's offset is saved
+  // after the compaction step's write, so a death between the two leaves the
+  // compaction record to be read again.
+  it("a compaction row the ledger already holds, met again as the first row, is not written twice: the results pending before it went with it, no index is spent, and the next assistant turn lands after it", async () => {
+    const entry = { summary: "the tree had one change", tokensBefore: 150_000, firstKeptEntryId: "abc123" };
+    const reports: StepReport[] = [];
+    // The transcript: the seed, the assistant turn, its result as the compaction's user turn, the compaction row — four rows.
+    const m = new PiMirror({
+      onStep: async (r) => void reports.push(r),
+      seedLength: 4,
+      remainingMs: () => 600_000,
+      mirroredTail: { compaction: entry },
+    });
+    await m.onMessage(bashResult, 1); // read again: was the compaction step's user turn
+    expect(await m.onCompaction(entry, 1)).toBe(true);
+    expect(reports).toEqual([]);
+    await m.onMessage(final, 2);
+    expect(reports.map((r) => ({ firstIdx: r.firstIdx, turns: r.turns, compaction: r.compaction }))).toEqual([
+      { firstIdx: 4, turns: [chatMessageOf(final)], compaction: undefined },
+    ]);
   });
 });
 
