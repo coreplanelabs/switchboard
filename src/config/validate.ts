@@ -30,7 +30,7 @@ import {
   MCP_SERVER_NAME_RE,
   MCP_SERVERS_PER_SCOPE_MAX,
 } from "../mcp/registry.js";
-import type { AppConfig, RoutingConfig, Scope, TracingConfig } from "../config.js";
+import type { AppConfig, PiCompactionConfig, PiConfig, RoutingConfig, Scope, TracingConfig } from "../config.js";
 
 /** Upper bound on one scope's `instructions` text (prepended to every turn). */
 export const MAX_INSTRUCTIONS_LENGTH = 2000;
@@ -61,6 +61,7 @@ const CONFIG_KEYS: Record<keyof AppConfig, true> = {
   spawn: true,
   routing: true,
   harness: true,
+  pi: true,
   slack: true,
   runHistory: true,
   runtimeOverrides: true,
@@ -306,7 +307,35 @@ export function validateConfig(cfg: AppConfig): void {
   if (cfg.routing !== undefined) validateRouting(cfg.routing, cfg.providers);
   if (cfg.artifacts !== undefined) validateArtifacts(cfg.artifacts);
   if (cfg.harness !== undefined) validateHarness(cfg.harness);
+  if (cfg.pi !== undefined) validatePi(cfg.pi);
   validateDashboardConfig(cfg.dashboard);
+}
+
+/** The `pi` block's keys and its `compaction` block's, held equal to the types the way the top-level keys are. */
+const PI_KEYS: Record<keyof PiConfig, true> = { compaction: true };
+const PI_COMPACTION_KEYS: Record<keyof PiCompactionConfig, true> = { reserveTokens: true, keepRecentTokens: true };
+
+/** `pi` (docs/reference/specs/harness-pi.md item 4): a mapping whose only key
+ *  today is `compaction`, itself a mapping of `reserveTokens` and
+ *  `keepRecentTokens` to positive integers — pi's own settings, in tokens. A
+ *  non-mapping, an unknown key at either level, and a value that is not a
+ *  positive integer fail the load by name: a threshold that silently read as
+ *  "pi's default" while the operator believed a run would compact sooner
+ *  would leave a receipt waiting on a compaction that never comes. */
+function validatePi(pi: unknown): void {
+  if (typeof pi !== "object" || pi === null || Array.isArray(pi)) throw new Error("config.yaml: pi must be a mapping");
+  for (const key of unknownKeys(pi, PI_KEYS)) throw new Error(`config.yaml: pi.${key} is not a known key`);
+  const { compaction } = pi as PiConfig;
+  if (compaction === undefined) return;
+  if (typeof compaction !== "object" || compaction === null || Array.isArray(compaction))
+    throw new Error("config.yaml: pi.compaction must be a mapping");
+  for (const key of unknownKeys(compaction, PI_COMPACTION_KEYS))
+    throw new Error(`config.yaml: pi.compaction.${key} is not a known key`);
+  for (const key of Object.keys(PI_COMPACTION_KEYS) as Array<keyof PiCompactionConfig>) {
+    const value = compaction[key];
+    if (value !== undefined && (typeof value !== "number" || !Number.isInteger(value) || value <= 0))
+      throw new Error(`config.yaml: pi.compaction.${key} must be a positive integer (tokens)`);
+  }
 }
 
 /** `harness` (docs/reference/specs/harness-pi.md item 1): a mapping of preset

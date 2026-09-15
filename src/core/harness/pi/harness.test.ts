@@ -158,6 +158,8 @@ function world(
     notepad?: () => Promise<{ text: string; updatedAt: number } | null>;
     /** The container to drive; a fresh fake unless a test brings one of its own shape. */
     container?: FakePiContainer;
+    /** The deployment's compaction thresholds for pi's settings (harness-pi item 4). */
+    compaction?: { reserveTokens?: number; keepRecentTokens?: number };
   } = {},
 ) {
   const clock = opts.clock ?? { now: NOW };
@@ -215,6 +217,7 @@ function world(
         harnessUrl: "https://bot.example.com",
         registry,
         bearers,
+        ...(opts.compaction ? { compaction: opts.compaction } : {}),
         clock: () => clock.now,
         sleep: () => new Promise((r) => setImmediate(r)),
         pollMs: 10,
@@ -1433,5 +1436,29 @@ describe("runPiHarness: the run's conversation for a child's seed", () => {
     conversationTurn(w, (a) => (read = a));
     expect(await w.start()).toBe("done");
     expect(textOf(read)).toBeNull();
+  });
+});
+
+// harness-pi item 4: the deployment's compaction thresholds reach pi through
+// the settings file the harness writes, the same for every run on pi.
+describe("runPiHarness — the deployment's compaction thresholds in pi's settings", () => {
+  it("writes them under pi's `compaction` key when the deps carry them, and writes the file exactly as before without them", async () => {
+    const w = world({ compaction: { reserveTokens: 150_000, keepRecentTokens: 8_000 } });
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "done"));
+    expect(await w.start()).toBe("done");
+    const settings = w.container.files.get(`${paths.agentDir}/settings.json`);
+    expect(settings).toBeDefined();
+    expect(JSON.parse(settings!)).toEqual({
+      defaultProjectTrust: "never",
+      checkForUpdates: false,
+      compaction: { reserveTokens: 150_000, keepRecentTokens: 8_000 },
+    });
+    const plain = world();
+    scriptedPi(plain.container, (_n, c) => finalTurn(c, "done"));
+    expect(await plain.start()).toBe("done");
+    expect(JSON.parse(plain.container.files.get(`${paths.agentDir}/settings.json`)!)).toEqual({
+      defaultProjectTrust: "never",
+      checkForUpdates: false,
+    });
   });
 });

@@ -328,6 +328,20 @@ workspaceDir: ./workspaces
 # harness:
 #   coding: pi
 
+# What the harness writes into pi's per-run settings for every run on pi
+# (docs/reference/specs/harness-pi.md item 4): pi's compaction thresholds, in
+# tokens, under pi's own names. pi compacts when the context passes the model's
+# window less `reserveTokens` and keeps about `keepRecentTokens` of the newest
+# turns; unset, pi's defaults stand (16384 reserved, 20000 kept) and the file
+# is exactly what it was before this block existed. A reserve near the window
+# makes a short run compact — what a receipt or a test of the compaction path
+# wants; production leaves it unset. Positive integers only; any other shape
+# or key fails the load by name.
+# pi:
+#   compaction:
+#     reserveTokens: 150000
+#     keepRecentTokens: 8000
+
 # The fan-out cap a spawning run meets (docs/reference/specs/agent-conductor.md).
 # `agent:conductor` starts child runs as the person who asked — each an
 # ordinary run in a thread of its own, under that person's permissions — and

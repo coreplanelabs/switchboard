@@ -1622,3 +1622,39 @@ describe("boundaries (Scope.boundary): a scope caps, never grants", () => {
     expect(store().describe("slack:CX", "slack:UX")).not.toMatch(/boundary/i);
   });
 });
+
+// Feature: docs/reference/specs/harness-pi.md item 4 — the `pi` block: the
+// compaction thresholds the harness writes into pi's per-run settings,
+// deployment-wide; positive integers in tokens, every other shape refused by
+// name, and no block at all leaves pi on its own defaults.
+describe("pi block (pi.compaction.reserveTokens, pi.compaction.keepRecentTokens)", () => {
+  it("parses both thresholds, either alone, and an empty compaction block; an absent block leaves the field unset", () => {
+    expect(
+      store(YAML_FIXTURE + "pi:\n  compaction:\n    reserveTokens: 150000\n    keepRecentTokens: 8000\n").config.pi,
+    ).toEqual({ compaction: { reserveTokens: 150_000, keepRecentTokens: 8_000 } });
+    expect(store(YAML_FIXTURE + "pi:\n  compaction:\n    reserveTokens: 150000\n").config.pi).toEqual({
+      compaction: { reserveTokens: 150_000 },
+    });
+    expect(store(YAML_FIXTURE + "pi:\n  compaction: {}\n").config.pi).toEqual({ compaction: {} });
+    expect(store().config.pi).toBeUndefined();
+  });
+
+  it("refuses a threshold that is not a positive integer by name — a float, zero, a negative, a string", () => {
+    for (const value of ["1.5", "0", "-1", '"16384"', "true"])
+      expect(() => store(YAML_FIXTURE + `pi:\n  compaction:\n    reserveTokens: ${value}\n`)).toThrow(
+        /pi\.compaction\.reserveTokens must be a positive integer/,
+      );
+    expect(() => store(YAML_FIXTURE + "pi:\n  compaction:\n    keepRecentTokens: 2.5\n")).toThrow(
+      /pi\.compaction\.keepRecentTokens must be a positive integer/,
+    );
+  });
+
+  it("refuses a non-mapping and an unknown key at either level, naming the key", () => {
+    expect(() => store(YAML_FIXTURE + "pi: true\n")).toThrow(/pi must be a mapping/);
+    expect(() => store(YAML_FIXTURE + "pi:\n  compaction: 16384\n")).toThrow(/pi\.compaction must be a mapping/);
+    expect(() => store(YAML_FIXTURE + "pi:\n  reserveTokens: 16384\n")).toThrow(/pi\.reserveTokens is not a known key/);
+    expect(() => store(YAML_FIXTURE + "pi:\n  compaction:\n    enabled: false\n")).toThrow(
+      /pi\.compaction\.enabled is not a known key/,
+    );
+  });
+});

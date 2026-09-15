@@ -110,6 +110,24 @@ export interface RoutingConfig {
   answer?: RouteAnswerMode;
 }
 
+/** pi's compaction thresholds, in tokens, as pi's own `settings.json` names
+ *  them (docs/reference/specs/harness-pi.md item 4): pi compacts when the
+ *  context passes the window less `reserveTokens` and keeps about
+ *  `keepRecentTokens` of the newest turns. Unset, pi's defaults stand. */
+export interface PiCompactionConfig {
+  reserveTokens?: number;
+  keepRecentTokens?: number;
+}
+
+/** The `pi` block (`AppConfig.pi`): what the harness writes into pi's per-run
+ *  settings for every run on it, deployment-wide. */
+export interface PiConfig {
+  /** A reserve near the model's window makes a short run compact, which is
+   *  what a receipt or a test of the compaction path needs; production leaves
+   *  it unset and pi compacts as it would on its own. */
+  compaction?: PiCompactionConfig;
+}
+
 /** Whether the request router runs (docs/reference/specs/routing-and-config.md
  *  item 21): `routing.auto` where the block sets it, else on — a deployment
  *  with no `routing` block, or one naming only `model`, routes a plain
@@ -257,6 +275,13 @@ export interface AppConfig {
    * harness it declares — the native loop today — and nothing changes.
    */
   harness?: Record<string, Harness>;
+  /**
+   * What the harness writes into pi's per-run settings for every run on pi
+   * (docs/reference/specs/harness-pi.md item 4): today the compaction
+   * thresholds. Absent → pi's own defaults, the settings file byte-identical
+   * to before the block existed. Validated at load.
+   */
+  pi?: PiConfig;
   /** Slack adapter behavior that is not pure transport. */
   slack?: SlackConfig;
   /**
