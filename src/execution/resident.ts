@@ -3,7 +3,18 @@ import { classifyError } from "../core/trace/classify.js";
 import { tracedFetch } from "../core/trace/tracedFetch.js";
 import type { Span } from "../core/trace/types.js";
 import { redactSecrets, stripAnsi } from "../core/redact.js";
+import { systemClock } from "../core/trace/clock.js";
+import { isServiceable } from "./residentState.js";
 import { residentState, sanitizeResidentBody } from "./residentText.js";
+import {
+  WAKE_POLL_MS,
+  WAKE_PROBE_TIMEOUT_MS,
+  describeProbe,
+  isContainerRolling,
+  sandboxRestartedMessage,
+  wakeDecision,
+  wakeWaitBudget,
+} from "./residentWake.js";
 import type { ResidentStep } from "./residentStepTrace.js";
 import { sanitizeGraftedSteps, withResidentTrace } from "./residentTrace.js";
 import { repoResourceId } from "../core/residentAdmin.js";
@@ -11,6 +22,7 @@ import { EXEC_CALL_MARGIN_MS, clampBashTimeout } from "./bashTimeout.js";
 import {
   BASH_TIMEOUT_MS,
   ExecInfraError,
+  ExecSandboxRestartedError,
   decodeBase64Read,
   execDeadline,
   truncate,
@@ -43,11 +55,39 @@ import type { ExecTraceOptions } from "./executor.js";
 // recycled; the binding survives in the resident's storage, so one re-attach
 // recreates the tree on the same ref — this client auto-re-attaches ONCE and
 // retries, then fails legibly.
+//
+// A `not-serviceable` refusal naming a container that just exited (the
+// container rollout after a resident Worker deploy, docs/reference/specs/
+// resident-repos.md item 65) is a pause, not a dead sandbox: the client reads
+// the engine view (`GET /status`), waits for the wake while the engine says
+// the container is coming back, re-attaches, re-issues the idempotent routes
+// and hands /exec back as `ExecSandboxRestartedError` for the runner to
+// settle (`awaitWake`). A definite non-recovering answer is the strike it
+// always was.
 
 /** /detach is a small control-plane POST the dispatcher makes once the answer
  *  is out: bound it tightly so a sick resident holds the run's slot for
  *  seconds, not a multi-minute exec budget. */
 const DETACH_TIMEOUT_MS = 10_000;
+
+/** Resolve after `ms`; reject the moment `signal` fires. A hard stop never
+ *  sits out a wake, and the rejection is a plain error (not infra: nothing is
+ *  wrong with the sandbox) that the runner's hard-stop path unwinds. */
+function wakePause(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const stopped = () => new Error("stopped waiting for the resident to wake: the run was stopped");
+    if (signal?.aborted) return reject(stopped());
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(stopped());
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 export interface ResidentExecutorOptions {
   /** Base URL of the resident Worker. */
@@ -90,6 +130,11 @@ export interface ResidentBinding {
   /** The resident's total for the attach (`attachMs`), for the clock-skew attr. */
   attachMs?: number;
 }
+
+/** What one `/attach` answered: the binding, or the refusal as the service
+ *  sent it (its resolved status and body). */
+type AttachAnswer =
+  { ok: true; binding: ResidentBinding } | { ok: false; status: number; data: Record<string, unknown> };
 
 /** 409 needs:"ref" from /attach — the thread has no ref binding yet (a
  *  binding is explicit or asked for once, never a silent guess). Typed so the
@@ -325,11 +370,22 @@ export class ResidentExecutor implements Executor {
    *  malformed resident (the attach contract always carries them) and is an
    *  error, never a half-bound executor. */
   async attach(span?: Span): Promise<ResidentBinding> {
+    const answer = await this.attachOnce(span);
+    if (answer.ok) return answer.binding;
+    throw this.attachRefusal(answer);
+  }
+
+  /** One `/attach`, answered rather than thrown: the binding on a 200, else
+   *  the refusal's status and body, so the wake wait (item 65) can read the
+   *  refusal's own words and keep waiting through a container still rolling.
+   *  `timeoutMs` bounds the call; the default is the exec ceiling, since an
+   *  attach may wait on a restore or a deps install. */
+  private async attachOnce(span?: Span, timeoutMs?: number): Promise<AttachAnswer> {
     const body: Record<string, unknown> = {};
     if (this.opts.refHint) body.refHint = this.opts.refHint;
     if (this.opts.readonly) body.readonly = true;
     if (this.opts.sha) body.sha = this.opts.sha;
-    const answered = await this.call("/attach", body, undefined, undefined, span);
+    const answered = await this.call("/attach", body, timeoutMs, undefined, span);
     const data = answered.data;
     // Post-validation answers stream like /exec (heartbeat whitespace then one
     // JSON document over HTTP 200, item 59) so an attach that waits on a deps
@@ -339,36 +395,38 @@ export class ResidentExecutor implements Executor {
       answered.status === 200 && typeof data.error === "string" && typeof data.status === "number"
         ? data.status
         : answered.status;
-    if (status === 200) {
-      if (typeof data.ref !== "string" || typeof data.sha !== "string") {
-        throw new Error(`resident attach: malformed answer for ${this.opts.resource} (missing ref/sha)`);
-      }
-      const trace = sanitizeGraftedSteps(data.trace);
-      this.lastBinding = {
-        ref: data.ref,
-        sha: data.sha,
-        ...(typeof data.workspace === "string" && data.workspace ? { workspace: data.workspace } : {}),
-        ...(typeof data.user === "string" && data.user ? { user: data.user } : {}),
-        ...(trace.length > 0 ? { trace } : {}),
-        ...(typeof data.attachMs === "number" && Number.isFinite(data.attachMs) ? { attachMs: data.attachMs } : {}),
-      };
-      return this.lastBinding;
+    if (status !== 200) return { ok: false, status, data };
+    if (typeof data.ref !== "string" || typeof data.sha !== "string") {
+      throw new Error(`resident attach: malformed answer for ${this.opts.resource} (missing ref/sha)`);
     }
-    const err = String(data.error ?? `HTTP ${status}`);
-    // The steps the resident ran before refusing ride the error (docs/reference/specs/
-    // tracing.md item 19): the dispatcher grafts them under its attach span.
-    const failedTrace = sanitizeGraftedSteps(data.trace);
-    const fail = (e: Error): never => {
-      throw failedTrace.length > 0 ? withResidentTrace(e, { steps: failedTrace }) : e;
+    const trace = sanitizeGraftedSteps(data.trace);
+    this.lastBinding = {
+      ref: data.ref,
+      sha: data.sha,
+      ...(typeof data.workspace === "string" && data.workspace ? { workspace: data.workspace } : {}),
+      ...(typeof data.user === "string" && data.user ? { user: data.user } : {}),
+      ...(trace.length > 0 ? { trace } : {}),
+      ...(typeof data.attachMs === "number" && Number.isFinite(data.attachMs) ? { attachMs: data.attachMs } : {}),
     };
+    return { ok: true, binding: this.lastBinding };
+  }
+
+  /** The legible error for a refused attach, by the refusal the service
+   *  named: needs-ref typed for the ask-once flow, not onboarded, anything
+   *  else with its own words. The steps the resident ran before refusing ride
+   *  the error (docs/reference/specs/tracing.md item 19): the dispatcher grafts
+   *  them under its attach span. */
+  private attachRefusal(answer: { status: number; data: Record<string, unknown> }): Error {
+    const { status, data } = answer;
+    const err = String(data.error ?? `HTTP ${status}`);
+    const failedTrace = sanitizeGraftedSteps(data.trace);
+    const traced = (e: Error): Error => (failedTrace.length > 0 ? withResidentTrace(e, { steps: failedTrace }) : e);
     if (status === 409 && data.needs === "ref") {
       const defaultRef = typeof data.defaultRef === "string" && data.defaultRef ? data.defaultRef : undefined;
-      return fail(new ResidentNeedsRefError(this.opts.resource, defaultRef));
+      return traced(new ResidentNeedsRefError(this.opts.resource, defaultRef));
     }
-    if (status === 404) {
-      return fail(new Error(`resident attach: ${this.opts.resource} is not onboarded (${err})`));
-    }
-    return fail(new Error(`resident attach failed for ${this.opts.resource}: ${err}`));
+    if (status === 404) return traced(new Error(`resident attach: ${this.opts.resource} is not onboarded (${err})`));
+    return traced(new Error(`resident attach failed for ${this.opts.resource}: ${err}`));
   }
 
   /** Move the thread's worktree to `sha` (agent-review.md item 12): one more
@@ -413,14 +471,23 @@ export class ResidentExecutor implements Executor {
    *  serves this thread — but the op is re-issued only for the idempotent
    *  routes (/read, /write). /exec is handed back to the caller as-is: the
    *  command may have started, so it is never blind-retried. Two such answers
-   *  with no success between them are infra (a flapping resident). */
+   *  with no success between them are infra (a flapping resident).
+   *
+   *  A refusal naming a container that just exited (item 65) waits for the
+   *  wake first (`awaitWake`): the refusal came before the command started, so
+   *  nothing ran, and the wait ends with the resident back and this thread
+   *  re-attached, or with the strike the two-strikes rule always had. The
+   *  idempotent routes are then re-issued; /exec is handed back to the runner
+   *  as a restart to settle, since the worktree it was aimed at is gone with
+   *  the old container's disk. `waitBudgetMs` (the command's budget) bounds
+   *  that wait; `callTimeoutMs` bounds each call. */
   private async opWithReattach(
     route: string,
     body: Record<string, unknown>,
-    signal?: AbortSignal,
-    callTimeoutMs: number = BASH_TIMEOUT_MS,
-    span?: Span,
+    opts: { signal?: AbortSignal; callTimeoutMs?: number; waitBudgetMs?: number; span?: Span } = {},
   ): Promise<{ status: number; data: Record<string, unknown> }> {
+    const { signal, span } = opts;
+    const callTimeoutMs = opts.callTimeoutMs ?? BASH_TIMEOUT_MS;
     // Worktree still gone after a re-attach — the resident is unhealthy
     // (mid-restore or worse). Infra, not a command exit: counts toward
     // fail-fast so the run doesn't keep dispatching into it.
@@ -433,6 +500,19 @@ export class ResidentExecutor implements Executor {
         { kind: "infra", code: "attach" },
       );
     let r = await this.call(route, body, callTimeoutMs, signal, span);
+    if (isContainerRolling(r.data.error)) {
+      const woke = await this.awaitWake(route, String(r.data.error), { signal, budgetMs: opts.waitBudgetMs, span });
+      if (route === "/exec") throw new ExecSandboxRestartedError(sandboxRestartedMessage(woke), woke.waitedMs);
+      r = await this.call(route, body, callTimeoutMs, signal, span);
+      if (isContainerRolling(r.data.error)) {
+        throw classifyError(
+          new ExecInfraError(
+            `resident ${route}: ${String(r.data.error)}; the container vanished again right after it woke`,
+          ),
+          { kind: "infra", code: "container-exited" },
+        );
+      }
+    }
     if (r.data.needs === "attach") {
       await this.attach(span); // the recovery rides the same trace as the op it rescues
       r = await this.call(route, body, callTimeoutMs, signal, span);
@@ -467,6 +547,65 @@ export class ResidentExecutor implements Executor {
     }
   }
 
+  /** Item 65: the container is gone for a moment. One `/status` decides
+   *  whether it is coming back (`wakeDecision`); then, until the budget is
+   *  spent, poll every `WAKE_POLL_MS` and re-attach as soon as the engine
+   *  says it serves (the attach's own hydrate is the wake when nothing else
+   *  has started it; a refusal that still names a rolling container keeps
+   *  the wait going). Answers the wait and the fresh binding. Throws the
+   *  strike (an `ExecInfraError` the tracker counts) when nothing is
+   *  recovering, when the resident goes down mid-wait, when a re-attach does
+   *  not answer, or when the budget is spent; a hard stop rejects at once
+   *  with a plain error the runner unwinds; any other attach refusal is the
+   *  attach's own legible error. */
+  private async awaitWake(
+    route: string,
+    refusal: string,
+    opts: { signal?: AbortSignal; budgetMs?: number; span?: Span },
+  ): Promise<{ waitedMs: number; ref: string; sha: string }> {
+    const t0 = systemClock();
+    const waited = () => systemClock() - t0;
+    const strike = (why: string): ExecInfraError =>
+      classifyError(new ExecInfraError(`resident ${route}: ${refusal}; ${why}`), {
+        kind: "infra",
+        code: "container-exited",
+      });
+    const probe = () =>
+      ResidentExecutor.probeStatus(
+        this.opts.baseUrl,
+        this.opts.token,
+        this.opts.resource,
+        WAKE_PROBE_TIMEOUT_MS,
+        opts.span,
+      );
+    let seen = await probe();
+    const decision = wakeDecision(seen);
+    if (!decision.wait) throw strike(decision.why);
+    const budget = wakeWaitBudget(opts.budgetMs);
+    for (;;) {
+      const spent = waited();
+      if (spent >= budget) {
+        throw strike(
+          `waited ${Math.round(spent / 1000)}s for the resident to wake (last seen ${describeProbe(seen)}) and gave up`,
+        );
+      }
+      await wakePause(Math.min(WAKE_POLL_MS, budget - spent), opts.signal);
+      seen = await probe();
+      const again = wakeDecision(seen);
+      if (!again.wait) throw strike(again.why);
+      if (seen.kind !== "status" || !isServiceable(seen.state, seen.reason)) continue;
+      let answer: AttachAnswer;
+      try {
+        answer = await this.attachOnce(opts.span, Math.max(budget - waited(), 1_000));
+      } catch (err) {
+        if (!(err instanceof ExecInfraError)) throw err;
+        throw strike(`the re-attach after ${Math.round(waited() / 1000)}s did not answer (${err.message})`);
+      }
+      if (answer.ok) return { waitedMs: waited(), ref: answer.binding.ref, sha: answer.binding.sha };
+      if (!isContainerRolling(answer.data.error)) throw this.attachRefusal(answer);
+    }
+  }
+
   async exec(command: string, opts?: ExecOptions): Promise<string> {
     // Per-call budget (docs/reference/specs/execution.md item 11). It rides in the body
     // only when the caller asked for one, so an older resident Worker sees the
@@ -483,13 +622,14 @@ export class ResidentExecutor implements Executor {
     // given, so an older resident sees the body it always did; the Worker reads
     // it through the one validated reader and hands it to the exec's env option.
     if (opts?.env !== undefined) body.env = opts.env;
-    const { status, data } = await this.opWithReattach(
-      "/exec",
-      body,
-      opts?.signal,
-      timeoutMs + EXEC_CALL_MARGIN_MS,
-      opts?.span,
-    );
+    const { status, data } = await this.opWithReattach("/exec", body, {
+      signal: opts?.signal,
+      callTimeoutMs: timeoutMs + EXEC_CALL_MARGIN_MS,
+      // The wake wait (item 65) may take what the command itself could: the
+      // tool layer already clipped this to the run's remaining wall clock.
+      waitBudgetMs: timeoutMs,
+      span: opts?.span,
+    });
     // A pre-validation client rejection — a plain HTTP 400 with an {error} and NO
     // `needs` (e.g. command-too-long), nothing streamed — is agent-fixable, not a
     // sick resident. Surface it as a normal Error so it does NOT count toward the
@@ -526,7 +666,7 @@ export class ResidentExecutor implements Executor {
   }
 
   async readFile(path: string, opts?: ExecTraceOptions): Promise<string> {
-    const { status, data } = await this.opWithReattach("/read", { path }, undefined, undefined, opts?.span);
+    const { status, data } = await this.opWithReattach("/read", { path }, { span: opts?.span });
     if (status !== 200) {
       throw classifyError(new ExecInfraError(`resident /read: ${String(data.error ?? `HTTP ${status}`)}`), {
         kind: "http",
@@ -541,13 +681,7 @@ export class ResidentExecutor implements Executor {
    *  route's 404 as for `readFile`, an over-cap file and a Worker that predates
    *  binary reads are `decodeBase64Read`'s plain errors. */
   async readBytes(path: string, opts?: ExecTraceOptions): Promise<Uint8Array> {
-    const { status, data } = await this.opWithReattach(
-      "/read",
-      { path, encoding: "base64" },
-      undefined,
-      undefined,
-      opts?.span,
-    );
+    const { status, data } = await this.opWithReattach("/read", { path, encoding: "base64" }, { span: opts?.span });
     if (status !== 200) {
       throw classifyError(new ExecInfraError(`resident /read: ${String(data.error ?? `HTTP ${status}`)}`), {
         kind: "http",
@@ -558,7 +692,7 @@ export class ResidentExecutor implements Executor {
   }
 
   async writeFile(path: string, content: string, opts?: ExecTraceOptions): Promise<string> {
-    const { status, data } = await this.opWithReattach("/write", { path, content }, undefined, undefined, opts?.span);
+    const { status, data } = await this.opWithReattach("/write", { path, content }, { span: opts?.span });
     if (status !== 200) {
       throw classifyError(new ExecInfraError(`resident /write: ${String(data.error ?? `HTTP ${status}`)}`), {
         kind: "http",

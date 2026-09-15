@@ -133,6 +133,25 @@ export class ExecCapacityError extends Error {
   }
 }
 
+/** The sandbox restarted under a live run and came back (docs/reference/specs/
+ *  resident-repos.md item 65): the resident's container exited inside a
+ *  rollout, the executor waited for the wake and re-attached, and the command
+ *  it was about to send never ran. Deliberately NOT an `ExecInfraError`: the
+ *  sandbox is alive again, so `ExecHealthTracker` neither counts it nor
+ *  resets on it, and the runner settles the interrupted call with a synthetic
+ *  result instead of striking (run-loop.md item 19). `message` carries the
+ *  facts the model needs: the wait and the fresh worktree's ref and sha. */
+export class ExecSandboxRestartedError extends Error {
+  readonly restarted = true as const;
+  constructor(
+    message: string,
+    readonly waitedMs: number,
+  ) {
+    super(message);
+    this.name = "ExecSandboxRestartedError";
+  }
+}
+
 /** Decorates an Executor to track CONSECUTIVE exec-infrastructure failures
  *  (`ExecInfraError`) with no successful operation between them — the signal the
  *  runner uses to detect an unrecoverable sandbox. A successful op resets

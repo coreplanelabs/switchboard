@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ExecHealthTracker, ExecInfraError } from "./executor.js";
+import { ExecHealthTracker, ExecInfraError, ExecSandboxRestartedError } from "./executor.js";
 import { ResidentExecutor, ResidentNeedsRefError, ResidentOperations } from "./resident.js";
 import { residentTraceOf } from "./residentTrace.js";
 import { createTracer } from "../core/trace/tracer.js";
@@ -1048,5 +1048,181 @@ describe("resident text is made safe at the parse (item 62)", () => {
     expect(err).toBeInstanceOf(Error);
     expect((err as Error).message).not.toContain("ghp_");
     expect((err as Error).message).not.toContain("\x1b");
+  });
+});
+
+// Feature: docs/reference/specs/resident-repos.md item 65: a resident container
+// that exited under a live run (the container rollout after a resident Worker
+// deploy) is gone for about a minute, not for good. Before counting a strike
+// the client asks the resident for its engine view (`GET /status`); while the
+// engine says the container is coming back it waits for the wake, bounded by
+// the command's budget under a three-minute ceiling, re-attaches, and hands
+// /exec back as an `ExecSandboxRestartedError` the runner settles. A definite
+// non-recovering answer keeps the two-strikes rule exactly as it was.
+describe("ResidentExecutor waits for the wake (item 65: a container rollout is a minute, not a dead sandbox)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  const JUST_EXITED = {
+    error: "not-serviceable: The container just exited",
+    status: 503,
+    state: "warm",
+    reason: "",
+    stdout: "",
+    stderr: "not-serviceable: The container just exited",
+    exitCode: 127,
+  };
+  const status = (state: string, reason = "") => ({ body: { state, reason, inFlight: 0 } });
+  const restoring = () => status("restoring", "rehydrating");
+
+  it("a container exit during a live restore waits for warm, re-attaches, and hands /exec back as a restart the runner settles; never a strike", async () => {
+    const { calls } = stubFetch({ body: JUST_EXITED }, restoring(), restoring(), status("warm"), { body: ATTACH_OK });
+    const tracker = new ExecHealthTracker(new ResidentExecutor(OPTS));
+    const p = tracker.exec("git status").catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(10_000);
+    const err = await p;
+    expect(err).toBeInstanceOf(ExecSandboxRestartedError);
+    expect((err as ExecSandboxRestartedError).waitedMs).toBe(10_000);
+    expect((err as Error).message).toContain("after 10s");
+    expect((err as Error).message).toContain("master@1220b9c");
+    expect(calls.map(route)).toEqual(["/exec", "/status", "/status", "/status", "/attach"]);
+    expect(calls[1].url).toContain("resource=repo%3Ajshttp%2Fvary");
+    expect(tracker.consecutiveInfraFailures).toBe(0);
+  });
+
+  it("a container exit with a definite non-recovering engine view strikes at once: an ExecInfraError the tracker counts, two in a row abort", async () => {
+    const down = status("down", "no-snapshot: resident has no recorded snapshot to rehydrate from");
+    const { calls } = stubFetch({ body: JUST_EXITED }, down, { body: JUST_EXITED }, down);
+    const tracker = new ExecHealthTracker(new ResidentExecutor(OPTS));
+    const first = await tracker.exec("git status").catch((e: unknown) => e);
+    expect(first).toBeInstanceOf(ExecInfraError);
+    expect((first as Error).message).toContain("The container just exited");
+    expect((first as Error).message).toContain("down");
+    expect(tracker.consecutiveInfraFailures).toBe(1);
+    const second = await tracker.exec("git status").catch((e: unknown) => e);
+    expect(second).toBeInstanceOf(ExecInfraError);
+    expect(tracker.consecutiveInfraFailures).toBe(2);
+    expect(calls.map(route)).toEqual(["/exec", "/status", "/exec", "/status"]);
+  });
+
+  it("an unreachable /status is a strike too: nothing says the container is coming back", async () => {
+    stubFetch({ body: JUST_EXITED }, { reject: "fetch failed" });
+    const err = await new ResidentExecutor(OPTS).exec("true").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toContain("fetch failed");
+  });
+
+  it("a refusal that does not name a rolling container keeps the old rule: one strike, no probe", async () => {
+    const { calls } = stubFetch({
+      body: { ...JUST_EXITED, error: "not-serviceable: registry record or repo facts missing" },
+    });
+    const err = await new ResidentExecutor(OPTS).exec("true").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect(calls.map(route)).toEqual(["/exec"]);
+  });
+
+  it("the wait respects the command's budget: a wake that never comes is a strike when the budget is spent, not at the ceiling", async () => {
+    const { calls } = stubFetch({ body: JUST_EXITED }, ...Array.from({ length: 8 }, restoring));
+    const tracker = new ExecHealthTracker(new ResidentExecutor(OPTS));
+    let settled: unknown;
+    const p = tracker.exec("sleep 5", { timeoutMs: 20_000 }).catch((e: unknown) => (settled = e));
+    await vi.advanceTimersByTimeAsync(19_999);
+    expect(settled).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    await p;
+    expect(settled).toBeInstanceOf(ExecInfraError);
+    expect((settled as Error).message).toContain("waited 20s");
+    expect((settled as Error).message).toContain("restoring");
+    expect(calls.map(route)).toEqual(["/exec", "/status", "/status", "/status", "/status", "/status"]);
+    expect(tracker.consecutiveInfraFailures).toBe(1);
+  });
+
+  it("the wait is capped at the three-minute ceiling whatever the command's budget", async () => {
+    stubFetch({ body: JUST_EXITED }, ...Array.from({ length: 40 }, restoring));
+    let settled: unknown;
+    const p = new ResidentExecutor(OPTS)
+      .exec("sleep 5", { timeoutMs: 10 * 60_000 })
+      .catch((e: unknown) => (settled = e));
+    await vi.advanceTimersByTimeAsync(179_999);
+    expect(settled).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    await p;
+    expect(settled).toBeInstanceOf(ExecInfraError);
+    expect((settled as Error).message).toContain("waited 180s");
+  });
+
+  it("the resident going down mid-wait ends the wait with the strike naming it", async () => {
+    const { calls } = stubFetch({ body: JUST_EXITED }, restoring(), status("down", "snapshot-stamp-mismatch: stale"));
+    const p = new ResidentExecutor(OPTS).exec("true").catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(5_000);
+    const err = await p;
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toContain("snapshot-stamp-mismatch");
+    expect(calls.map(route)).toEqual(["/exec", "/status", "/status"]);
+  });
+
+  it("a hard stop ends the wait at once, as a plain error the runner unwinds, never a strike", async () => {
+    stubFetch({ body: JUST_EXITED }, ...Array.from({ length: 5 }, restoring));
+    const control = new AbortController();
+    const tracker = new ExecHealthTracker(new ResidentExecutor(OPTS));
+    const p = tracker.exec("true", { signal: control.signal }).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(2_000);
+    control.abort();
+    const err = await p;
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toMatch(/stopped/);
+    expect(tracker.consecutiveInfraFailures).toBe(0);
+  });
+
+  it("a re-attach refused while the container is still rolling (image-stale) keeps waiting; the next one binds", async () => {
+    const imageStale = {
+      status: 503,
+      body: {
+        error: "image-stale: the container predates the current pool and is restarting; retry shortly",
+        status: 503,
+        state: "restoring",
+        reason: "image-stale",
+      },
+    };
+    const { calls } = stubFetch({ body: JUST_EXITED }, status("warm"), status("warm"), imageStale, status("warm"), {
+      body: ATTACH_OK,
+    });
+    const p = new ResidentExecutor(OPTS).exec("true").catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(10_000);
+    const err = await p;
+    expect(err).toBeInstanceOf(ExecSandboxRestartedError);
+    expect(calls.map(route)).toEqual(["/exec", "/status", "/status", "/attach", "/status", "/attach"]);
+  });
+
+  it("any other attach refusal mid-wait is the attach's own legible error (here: not onboarded), not a strike", async () => {
+    stubFetch({ body: JUST_EXITED }, status("warm"), status("warm"), {
+      status: 404,
+      body: { error: "repo:jshttp/vary is not onboarded" },
+    });
+    const tracker = new ExecHealthTracker(new ResidentExecutor(OPTS));
+    const p = tracker.exec("true").catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(5_000);
+    const err = await p;
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toMatch(/not onboarded/);
+  });
+
+  it("the idempotent routes re-issue after the wake: /read waits, re-attaches and answers the content", async () => {
+    const { calls } = stubFetch(
+      {
+        status: 503,
+        body: { error: "not-serviceable: The container just exited", status: 503, state: "warm", reason: "" },
+      },
+      status("warm"),
+      status("warm"),
+      { body: ATTACH_OK },
+      { body: { content: "hello", truncated: false } },
+    );
+    const p = new ResidentExecutor(OPTS).readFile("README.md").catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(p).resolves.toBe("hello");
+    expect(calls.map(route)).toEqual(["/read", "/status", "/status", "/attach", "/read"]);
   });
 });
