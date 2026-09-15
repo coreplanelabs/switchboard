@@ -40,6 +40,11 @@ import {
   fleetBusyExecAnswer,
   isContainerStarting,
   isFleetBusyError,
+  isRuntimeProxyFailure,
+  isRuntimeUnreachableError,
+  runtimeUnreachableAnswer,
+  runtimeUnreachableExecAnswer,
+  SandboxRuntimeUnreachableError,
   thrownShape,
   thrownText,
 } from "../../src/execution/sandboxErrors.js";
@@ -94,6 +99,38 @@ export class SwitchboardSandbox extends Sandbox {
         `sandbox.version-skew container=${v} sdk=${SDK_PIN} — this instance may be on a previous image (Worker/image rollout in progress)`,
       );
     }
+  }
+
+  // A proxied fetch that nothing answered (docs/reference/specs/execution.md
+  // item 9): the `@cloudflare/containers` base class turns a failed fetch to
+  // the container's port into a plain-text HTTP 500 — `Error proxying request
+  // to container: …` when nothing listens (the SDK's server exited, or the
+  // image's PID 1 has not started it again yet), `Container suddenly
+  // disconnected` when the connection dropped mid-request — and the SDK's
+  // client, expecting JSON, throws the bare `HTTP error! status: 500`. Read
+  // the body here, before the client does, and throw the named error with the
+  // facts a card and a log search need: this container's id (the Durable
+  // Object's id is the container id in the `containers` dataset), the SDK
+  // pin, and whether the platform still calls the container running. Every
+  // other answer passes through untouched — a 500 body that is not the proxy's
+  // is re-wrapped unread by the client.
+  override async containerFetch(
+    requestOrUrl: Request | string | URL,
+    portOrInit?: number | RequestInit,
+    portParam?: number,
+  ): Promise<Response> {
+    const res = await super.containerFetch(requestOrUrl, portOrInit, portParam);
+    if (res.status !== 500) return res;
+    const body = await res.text();
+    if (isRuntimeProxyFailure(res.status, body)) {
+      throw new SandboxRuntimeUnreachableError({
+        containerId: this.ctx.id.toString(),
+        running: this.ctx.container?.running,
+        sdkVersion: SDK_PIN,
+        cause: body,
+      });
+    }
+    return new Response(body, { status: res.status, statusText: res.statusText, headers: res.headers });
   }
 
   override async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
@@ -316,6 +353,11 @@ export default {
       // Never an empty text (item 3): a message-less SDK error is named as
       // such, with the rollout hint.
       const msg = thrownText(thrownShape(err));
+      // Nothing answered at the container's port (item 9): the file op never
+      // reached a server, so a 503 the executor's transport retry re-sends —
+      // by then the image's PID 1 has the server back — with the named reason
+      // and the container in the text.
+      if (isRuntimeUnreachableError(err)) return json(runtimeUnreachableAnswer(msg), 503);
       // A full fleet (docs/reference/specs/execution.md item 14): the SDK could not get a
       // container instance for this thread's Durable Object, so no session
       // exists and the file op never started — re-sending is safe by
@@ -406,6 +448,13 @@ function streamExec(
           // message-less SDK error is named, with the rollout hint. The
           // classifiers below still read the raw `shape`.
           const raw = thrownText(shape);
+          // Nothing answered at the container's port (item 9): named, with the
+          // container, in the dual shape — and never re-sent by anyone, since a
+          // command in flight when the server died may have run.
+          if (isRuntimeUnreachableError(err)) {
+            finish(runtimeUnreachableExecAnswer(raw));
+            return;
+          }
           // A full fleet (docs/reference/specs/execution.md item 14): session creation
           // failed because no container instance was free, so the command
           // never started — re-sending it is safe by construction. The named
