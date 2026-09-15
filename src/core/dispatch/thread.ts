@@ -5,10 +5,10 @@
 // thread, not a view the requester holds. From that page the dispatcher
 // derives everything it knows about the thread before the request runs: the
 // lineage (a reply in a spawned thread is that child's), the sticky agent (a
-// follow-up continues the agent whose transcript the thread holds, when that
-// agent runs on the pi harness) and the previous run of the agent the request
-// resolved to (when it ended, and whether its log ends short). Read only for a
-// reply in an existing thread: a message that starts a thread has no runs.
+// follow-up continues the agent whose transcript the thread holds) and the
+// previous run of the agent the request resolved to (when it ended, and
+// whether its log ends short). Read only for a reply in an existing thread: a
+// message that starts a thread has no runs.
 import type { RunPullRequest } from "../runRecord.js";
 import type { RunView, RunsService } from "../runsService.js";
 import type { PreviousRun } from "./seed.js";
@@ -46,12 +46,13 @@ export function continuable(run: RunView): run is RunView & { agent: string } {
 }
 
 /** The thread's sticky agent by transcript (routing-and-config item 3): the
- *  agent of the thread's newest run when that run can be continued and runs on
- *  the pi harness. A newest run on the native loop, or one that cannot be
- *  continued, leaves the derivation from the thread's user turns to stand. */
-export function stickyAgentOf(runs: readonly RunView[], onPi: (agent: string) => boolean): string | undefined {
+ *  agent of the thread's newest run when that run can be continued. A newest
+ *  run that cannot be — live, refused at a gate, from before the log — leaves
+ *  no sticky agent: the request resolves through the config scopes (and the
+ *  router, for a plain message) as a fresh thread's would. */
+export function stickyAgentOf(runs: readonly RunView[]): string | undefined {
   const newest = runs[0];
-  if (newest === undefined || !continuable(newest) || !onPi(newest.agent)) return undefined;
+  if (newest === undefined || !continuable(newest)) return undefined;
   return newest.agent;
 }
 

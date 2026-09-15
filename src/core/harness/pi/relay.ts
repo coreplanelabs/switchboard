@@ -47,6 +47,10 @@ export interface LiveHarness {
    *  that reads the run's conversation (`spawn_run`, for its child's seed)
    *  wants the mirror caught up to the turn that made the call. Absent, no wait. */
   callSeen?: (callId: string) => Promise<void>;
+  /** Resolves once the bridge has read the call's end off the log — the mirror
+   *  image of `callSeen`, for a scripted pi that must not run ahead of the
+   *  harness between one call's result and the next model turn. */
+  callEnded?: (callId: string) => Promise<void>;
 }
 
 export interface ToolCallAsk {

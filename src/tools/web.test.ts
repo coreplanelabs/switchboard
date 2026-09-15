@@ -532,7 +532,7 @@ describe("BraveWebSearch adapter", () => {
 
 describe("toolset + agent wiring", () => {
   it("gates web_search to the research and explore toolsets; web_fetch is broad", async () => {
-    const { TOOLSETS } = await import("./workspace.js");
+    const { TOOLSETS } = await import("./toolsets.js");
     const names = (key: string) => (TOOLSETS[key] ?? []).map((t) => t.name);
     expect(names("web")).toEqual(expect.arrayContaining(["web_fetch", "web_search"]));
     expect(names("explore")).toEqual(expect.arrayContaining(["web_fetch", "web_search"]));
@@ -547,7 +547,7 @@ describe("toolset + agent wiring", () => {
 
   it("registers a no-repo research agent; general holds the assistant toolset (web_fetch, no web_search)", async () => {
     const { AGENTS } = await import("../agents/registry.js");
-    const { TOOLSETS } = await import("./workspace.js");
+    const { TOOLSETS } = await import("./toolsets.js");
     expect(AGENTS.research.toolset).toBe("web");
     expect(AGENTS.research.machine).toBe("none");
     expect(AGENTS.general.toolset).toBe("assistant");

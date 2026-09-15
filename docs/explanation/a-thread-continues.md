@@ -37,7 +37,7 @@ The seed is then built in a fixed order, within a fixed budget:
 | the lines since | what people wrote in the thread after the previous run ended | the conversation the agent missed while it was not running |
 | the request | the message that started this run | as the last user turn |
 
-The record says which source a run's conversation came from — the thread's channel history, a spawning parent's turns, or its own session — and a run's range in the log begins at the tail's end, so the rows the seed reused are never written twice. The channel path still exists: a thread whose newest run ran on the native loop, or one with no run at all, behaves as it always did.
+The record says which source a run's conversation came from — the thread's channel history, a spawning parent's turns, or its own session — and a run's range in the log begins at the tail's end, so the rows the seed reused are never written twice. The channel path still exists: a thread with no finished run of the agent — a first mention, a directive naming an agent the thread has not run — starts from the channel's history as it always did.
 
 ## Compaction is a pointer, never a loss
 

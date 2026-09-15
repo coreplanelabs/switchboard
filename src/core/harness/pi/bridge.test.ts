@@ -1,8 +1,4 @@
 import { describe, expect, it } from "vitest";
-import type { AgentDef } from "../../../agents/registry.js";
-import type { Executor } from "../../../execution/executor.js";
-import type { CompletionResult, Provider } from "../../provider.js";
-import { runAgent } from "../../../runner.js";
 import { PI_EVENT_HOME } from "../../../load/piRpc.js";
 import type { RunEvent } from "../../runEvents.js";
 import { recordingSink } from "../../testing/recordingSink.js";
@@ -13,10 +9,11 @@ import type { PiEvent } from "./protocol.js";
 // Feature: docs/reference/specs/harness-pi.md item 5 — the bridge: every event
 // pi's stream carries becomes what the native loop would have put on the run's
 // stream for the same moment, or is decided to be structure, folded,
-// impossible or a note; and nothing is dropped without a note. The proof of
-// sameness is the native loop itself: the same turn is run through `runAgent`
-// with a scripted provider and through the bridge with the equivalent pi
-// stream, and the tool and narration events compare equal.
+// impossible or a note; and nothing is dropped without a note. The vocabulary
+// is the native loop's, held as a literal here: the tool and narration events
+// the deleted loop emitted for this turn (compared equal against a scripted
+// provider while both loops stood), which the bridge must still emit for the
+// equivalent pi stream.
 
 const NOW = 1_700_000_000_000;
 
@@ -77,45 +74,6 @@ const piStream: PiEvent[] = [
   { type: "agent_settled" },
 ];
 
-const nativeAgent: AgentDef = {
-  name: "coding",
-  description: "",
-  system: "s",
-  toolset: "full",
-  machine: "none",
-  identity: "none",
-  maxTurns: 10,
-  maxTokens: 1000,
-  maxMinutes: 10,
-};
-
-async function nativeEvents(): Promise<RunEvent[]> {
-  const script: CompletionResult[] = [
-    {
-      content: [
-        { type: "text", text: "Checking the tree." },
-        { type: "tool_use", id: "call_0", name: "bash", input: { command: COMMAND } },
-      ],
-      stopReason: "tool_use",
-    },
-    { content: [{ type: "text", text: "Done." }], stopReason: "end_turn" },
-  ];
-  let i = 0;
-  const provider: Provider = { name: "fake", complete: async () => script[Math.min(i++, script.length - 1)] };
-  const executor: Executor = { exec: async () => RESULT, readFile: async () => "", writeFile: async () => "" };
-  const events: RunEvent[] = [];
-  await runAgent({
-    provider,
-    model: "m",
-    agent: nativeAgent,
-    messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
-    toolContext: { executor },
-    onEvent: (e) => void events.push(e),
-    now: () => NOW,
-  });
-  return events;
-}
-
 const comparable = (events: RunEvent[]) =>
   events
     .filter((e) => e.type === "tool_call" || e.type === "tool_result" || e.type === "assistant")
@@ -135,13 +93,11 @@ describe("PI_EVENT_DISPOSITION — every event kind pi's protocol documents is d
   });
 });
 
-describe("the bridge against the native loop — the same turn, the same events", () => {
-  it("tool_call, tool_result and the model's narration compare equal to what runAgent emits for the same turn", async () => {
-    const native = comparable(await nativeEvents());
+describe("the bridge speaks the loop's vocabulary — the same turn, the same events", () => {
+  it("tool_call, tool_result and the model's narration are the events the native loop emitted for the same turn", async () => {
     const { bridge, events } = harness();
     for (const e of piStream) bridge.observe(e);
-    expect(comparable(events)).toEqual(native);
-    expect(native).toEqual([
+    expect(comparable(events)).toEqual([
       { type: "assistant", text: "Checking the tree." },
       { type: "tool_call", tool: "bash", summary: `$ ${COMMAND}`, command: COMMAND, callId: "call_0" },
       {

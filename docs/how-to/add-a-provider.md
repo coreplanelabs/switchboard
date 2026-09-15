@@ -40,13 +40,9 @@ The provider's models are now valid as `groq/<model-id>` anywhere a model is acc
 - `config set`
 - a `defaults.models` entry ([Configure your defaults](configure-your-defaults.md))
 
-## Write an adapter for any other shape
+## Any other wire shape
 
-Implement the `Provider` interface from `src/core/provider.ts` in a new file beside `anthropic.ts` and `openaiCompat.ts`. Add its `type` to the switch in `src/providers/registry.ts`, with tests beside theirs.
-
-An adapter turns one model call into a vendor's HTTP shape and back; it knows nothing about channels, permissions or where tools run. The contract is the [run loop](../reference/specs/run-loop.md) spec.
-
-Two calls are not the run loop's: the request router's and memory reflection's go through pi's model library (`@earendil-works/pi-ai`, `src/core/harness/piAi.ts`), which reads the same two `type`s — `anthropic` and `openai-compatible` — off the same block, so a new block needs nothing there; a new `type` would need its API named there too ([harness-pi.md](../reference/specs/harness-pi.md) item 13).
+There is no adapter to write: Switchboard holds no model adapters of its own. A run's model calls are made by pi inside the run's container and go through the bot's model proxy, which forwards exactly two wire shapes — Anthropic Messages (`POST /v1/messages`) and OpenAI Chat Completions (`POST /v1/chat/completions`) — with the deployment's key ([model-proxy.md](../reference/specs/model-proxy.md)); the request router's and memory reflection's calls go through pi's model library (`@earendil-works/pi-ai`, `src/core/harness/piAi.ts`), which reads the same two `type`s — `anthropic` and `openai-compatible` — off the same block ([harness-pi.md](../reference/specs/harness-pi.md) item 13). A new block of either type needs nothing in code. A vendor that speaks neither shape needs a third `type`: its API named in `piApiFor` (`src/core/harness/piAi.ts`) for the router and reflection, the shape `piModelsJson` writes for a run's pi (`src/core/harness/pi/process.ts`), the proxy's forward and meter for it (`src/channels/modelProxy.ts`, `src/core/modelProxy/usage.ts`), and the validator that admits the `type` (`src/config/validate.ts`) — with tests beside each.
 
 ## Next
 

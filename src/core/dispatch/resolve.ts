@@ -1,10 +1,10 @@
 // The resolve stage of the dispatch pipeline (docs/decisions/0024-dispatcher-as-a-staged-pipeline.md):
 // what this request is. The directives and the thread's history; the (agent,
 // model, effort) triple through the layered configuration with thread
-// stickiness; the provider behind the model ref; and the target repository,
-// ref and pull request, started as a promise so the GitHub round trip overlaps
-// the memory read and lands after the ack card. Pure resolution — the gates
-// that judge the result are authorize.ts.
+// stickiness; the provider the model ref names, checked against the config;
+// and the target repository, ref and pull request, started as a promise so the
+// GitHub round trip overlaps the memory read and lands after the ack card.
+// Pure resolution — the gates that judge the result are authorize.ts.
 import type { ConfigStore, ResolvedRequest } from "../../config.js";
 import { machineNeedsRepo, type AgentDef } from "../../agents/registry.js";
 import { boundedByParent, effectiveProfile, type ProfileResolution, type RunProfile } from "../../config/profile.js";
@@ -14,8 +14,7 @@ import {
   type RequestDirectives,
   type ThreadDirectives,
 } from "../../directives.js";
-import { parseModelRef, type Provider } from "../provider.js";
-import type { ProviderRegistry } from "../../providers/registry.js";
+import { parseModelRef } from "../provider.js";
 import {
   githubTokenScopeFor,
   residentOnboardedProbe,
@@ -39,7 +38,6 @@ import type { ResumeContext } from "./admission.js";
  *  extends this; a caller's shape is unchanged. */
 export interface ResolveDeps {
   config: ConfigStore;
-  providers: ProviderRegistry;
   /**
    * Resolves the target repo/ref for a message (resident environments).
    * Defaults to the production resolver in repoContext.ts (explicit repo/PR/
@@ -98,24 +96,22 @@ export function resolveRun(
     directives: RequestDirectives;
     history: HistoryItem[];
     /** The thread's sticky agent by transcript (item 3; dispatch/thread.ts):
-     *  the agent of the thread's newest continuable run when it runs on the pi
-     *  harness. It stands in for the agent the user turns would derive; the
-     *  model and the effort are the turns' either way. */
+     *  the agent of the thread's newest finished run with a session log, the
+     *  one the caller read. The model and the effort are the user turns'. */
     stickyAgent?: string;
   },
 ): ResolvedRun {
   const { msg, directives, history } = ctx;
   // Thread stickiness (item 3): a follow-up without explicit directives runs
   // on the agent/model this thread already established, not the channel or
-  // global default — otherwise "continue" in an agent:coding thread silently
-  // lands on the toolless default agent. The agent comes from the thread's
-  // transcript when the newest run is on the pi harness (the caller read it),
-  // else from the last directive in the thread's user turns; the model and
-  // the effort always from the turns. Derived on every message, never stored:
-  // restart-safe, and consistent with how the Slack adapter re-derives thread
-  // participation.
+  // global default — otherwise "continue" in a coding thread silently lands
+  // on the toolless default agent. The agent is the thread's by transcript
+  // (the caller read the thread's runs); the model and the effort come from
+  // the last directive in the thread's user turns. Derived on every message,
+  // never stored: restart-safe, and consistent with how the Slack adapter
+  // re-derives thread participation.
   const fromTurns = lastThreadDirectives(history);
-  const sticky = ctx.stickyAgent !== undefined ? { ...fromTurns, agent: ctx.stickyAgent } : fromTurns;
+  const sticky: ThreadDirectives = ctx.stickyAgent !== undefined ? { ...fromTurns, agent: ctx.stickyAgent } : fromTurns;
   const resolved = deps.config.resolve({
     channelId: msg.channelId,
     userId: msg.userId,
@@ -176,11 +172,9 @@ export function resolveProfile(ctx: {
   return resolution;
 }
 
-/** The provider and model behind the resolved ref, whether the run's machine
- *  class carries a repository, and the target's resolution in flight. */
+/** Whether the run's machine class carries a repository, and the target's
+ *  resolution in flight. */
 export interface ResolvedTarget {
-  provider: Provider;
-  model: string;
   needsRepo: boolean;
   repoCtxP: Promise<RepoContext>;
 }
@@ -203,16 +197,20 @@ export interface ResolveTargetContext {
 }
 
 /**
- * The provider behind the model ref (an unknown provider throws here, before
- * any card), and the target repo/ref/PR resolution, STARTED — a promise the
- * caller awaits after the ack card, so the GitHub round trip overlaps the
- * memory read. A resume carries its repo context; a run whose machine class
- * carries no repository resolves none.
+ * The provider the model ref names, checked against the config's `providers`
+ * (an unknown one throws here, before any card — the run's pi would only find
+ * out at its first model call), and the target repo/ref/PR resolution,
+ * STARTED — a promise the caller awaits after the ack card, so the GitHub
+ * round trip overlaps the memory read. A resume carries its repo context; a
+ * run whose machine class carries no repository resolves none.
  */
 export function resolveTarget(deps: ResolveDeps, ctx: ResolveTargetContext): ResolvedTarget {
   const { msg, history, profile, resolved, resume, root } = ctx;
-  const { provider: providerName, model } = parseModelRef(resolved.modelRef);
-  const provider = deps.providers.get(providerName);
+  const { provider: providerName } = parseModelRef(resolved.modelRef);
+  const providers = deps.config.config.providers;
+  if (!providers[providerName]) {
+    throw new Error(`Unknown provider "${providerName}". Configured providers: ${Object.keys(providers).join(", ")}`);
+  }
 
   // Target repo/ref for resident environments, resolved BEFORE the model
   // turn: explicit signals in the message, else the repo this thread
@@ -244,7 +242,7 @@ export function resolveTarget(deps: ResolveDeps, ctx: ResolveTargetContext): Res
         : Promise.resolve({}),
   );
   repoCtxP.catch(() => {});
-  return { provider, model, needsRepo, repoCtxP };
+  return { needsRepo, repoCtxP };
 }
 
 /**

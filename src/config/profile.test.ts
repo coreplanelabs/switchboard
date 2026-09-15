@@ -222,7 +222,7 @@ describe("declaredProfile and budgetedAgent", () => {
     expect(AGENTS.coding.maxMinutes).toBe(45);
   });
 
-  it("a 45-minute preset clipped to 10 minutes gets 60 turns — the runaway guard follows the clipped budget (docs/reference/specs/run-loop.md item 1)", () => {
+  it("a 45-minute preset clipped to 10 minutes gets 60 turns — the runaway guard follows the clipped budget (docs/reference/specs/harness-pi.md item 15)", () => {
     expect(AGENTS.coding.maxMinutes).toBe(45);
     expect(AGENTS.coding.maxTurns).toBe(270);
     const budgeted = budgetedAgent(AGENTS.coding, { machine: "repo-resident", identity: "write", minutes: 10 });

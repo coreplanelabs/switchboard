@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { AGENTS, COMPOUND_PRESET, presetDoor } from "../../agents/registry.js";
-import { TOOLSETS } from "../../tools/workspace.js";
+import { TOOLSETS } from "../../tools/toolsets.js";
 import { ROUTE_ATTACH_FIXTURES } from "../../load/routeAttachFixtures.js";
 import { ConfigStore } from "../../config.js";
 import type { CompletionRequest, CompletionResult, Provider } from "../provider.js";

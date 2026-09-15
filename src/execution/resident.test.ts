@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ExecHealthTracker, ExecInfraError, ExecSandboxRestartedError } from "./executor.js";
+import { ExecInfraError, ExecSandboxRestartedError } from "./executor.js";
 import { ResidentExecutor, ResidentNeedsRefError, ResidentOperations, ResidentReuseRefusedError } from "./resident.js";
 import { residentTraceOf } from "./residentTrace.js";
 import { createTracer } from "../core/trace/tracer.js";
@@ -344,25 +344,26 @@ describe("ResidentExecutor.exec", () => {
   });
 });
 
-// The fail-fast counter (ExecHealthTracker) must fire on a genuinely dead
-// resident but NEVER on a healthy one that merely rejected agent-fixable input.
-// A client/validation rejection (command-too-long) is the exact false-positive
+// An infra failure (`ExecInfraError`) names a genuinely dead resident and
+// NEVER a healthy one that merely rejected agent-fixable input. A
+// client/validation rejection (command-too-long) is the exact false-positive
 // the classification closes.
-describe("ResidentExecutor infra classification through ExecHealthTracker", () => {
-  it("two consecutive command-too-long rejections don't increment the infra counter (healthy resident)", async () => {
+describe("ResidentExecutor infra classification", () => {
+  it("two consecutive command-too-long rejections are plain errors, never infra (healthy resident)", async () => {
     stubFetch(
       { status: 400, body: { error: "command must be a non-empty string of at most 64000 chars" } },
       { status: 400, body: { error: "command must be a non-empty string of at most 64000 chars" } },
     );
-    const tracker = new ExecHealthTracker(new ResidentExecutor(OPTS));
-    await expect(tracker.exec("x".repeat(65000))).rejects.toThrow(/64000 chars/);
-    await expect(tracker.exec("y".repeat(65000))).rejects.toThrow(/64000 chars/);
-    // Two client rejections crossed the old MAX_CONSECUTIVE_INFRA_FAILURES (2)
-    // and falsely aborted; a healthy resident must stay at zero.
-    expect(tracker.consecutiveInfraFailures).toBe(0);
+    const executor = new ResidentExecutor(OPTS);
+    const first = await executor.exec("x".repeat(65000)).catch((e: unknown) => e);
+    const second = await executor.exec("y".repeat(65000)).catch((e: unknown) => e);
+    for (const err of [first, second]) {
+      expect((err as Error).message).toMatch(/64000 chars/);
+      expect(err).not.toBeInstanceOf(ExecInfraError); // a healthy resident, not a dead one
+    }
   });
 
-  it("a genuine infra failure (worktree still gone after re-attach) counts toward fail-fast", async () => {
+  it("a genuine infra failure (worktree still gone after re-attach) is an ExecInfraError", async () => {
     stubFetch(
       { body: { error: "evicted", needs: "attach", stdout: "", stderr: "evicted", exitCode: 127 } },
       { body: ATTACH_OK },
@@ -376,13 +377,12 @@ describe("ResidentExecutor infra classification through ExecHealthTracker", () =
         },
       },
     );
-    const tracker = new ExecHealthTracker(new ResidentExecutor(OPTS));
-    const err = await tracker.exec("echo x").catch((e: unknown) => e);
+    const executor = new ResidentExecutor(OPTS);
+    const err = await executor.exec("echo x").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ExecInfraError);
-    expect(tracker.consecutiveInfraFailures).toBe(1);
   });
 
-  it("a single runtime-replaced (one deploy) never counts toward fail-fast", async () => {
+  it("a single runtime-replaced (one deploy) is a recoverable outcome, never infra", async () => {
     stubFetch(
       {
         body: {
@@ -395,27 +395,23 @@ describe("ResidentExecutor infra classification through ExecHealthTracker", () =
       },
       { body: ATTACH_OK },
     );
-    const tracker = new ExecHealthTracker(new ResidentExecutor(OPTS));
-    await expect(tracker.exec("echo x")).resolves.toMatch(/runtime-replaced/);
-    expect(tracker.consecutiveInfraFailures).toBe(0);
+    const executor = new ResidentExecutor(OPTS);
+    await expect(executor.exec("echo x")).resolves.toMatch(/runtime-replaced/);
   });
 
-  it("a non-2xx HTTP status is infra and counts toward fail-fast", async () => {
+  it("a non-2xx HTTP status is infra", async () => {
     stubFetch({ status: 503, raw: "mirror busy" });
-    const tracker = new ExecHealthTracker(new ResidentExecutor(OPTS));
-    const err = await tracker.exec("echo x").catch((e: unknown) => e);
+    const executor = new ResidentExecutor(OPTS);
+    const err = await executor.exec("echo x").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ExecInfraError);
-    expect(tracker.consecutiveInfraFailures).toBe(1);
   });
 
   // A deploy that ROLLS the container (not just swaps the isolate) makes
   // the resident answer the SAME `reason:"runtime-replaced"` it does for an
   // isolate swap — because worker.ts classifies the raw workerd refusal
   // "The container is not running, consider calling start()" as a replacement.
-  // Answered as a bare infra error instead, two of them in a row would trip
-  // MAX_CONSECUTIVE_INFRA_FAILURES (2) and abort the run with a misleading
-  // "Sandbox exec transport failed". These two assert the
-  // contract at the fail-fast boundary the bug tripped.
+  // Answered as a bare infra error instead, the roll would read as a dead
+  // sandbox. These two assert the contract at the boundary the bug tripped.
   const containerRolled = {
     error:
       "resident /exec: runtime-replaced: the resident runtime was replaced (a deploy) while this command was " +
@@ -426,24 +422,22 @@ describe("ResidentExecutor infra classification through ExecHealthTracker", () =
     exitCode: 127,
   };
 
-  it("a single container roll rides through as recoverable — 0 infra failures, re-attached once", async () => {
+  it("a single container roll rides through as recoverable — no infra error, re-attached once", async () => {
     const { calls } = stubFetch({ body: containerRolled }, { body: ATTACH_OK });
-    const tracker = new ExecHealthTracker(new ResidentExecutor(OPTS));
-    const out = await tracker.exec("git status");
+    const executor = new ResidentExecutor(OPTS);
+    const out = await executor.exec("git status");
     expect(out).toMatch(/consider calling start/); // the named outcome reaches the model, not an abort
     expect(out).toMatch(/re-check/i);
     expect(calls.map(route)).toEqual(["/exec", "/attach"]); // re-attach restarts + rehydrates the container
-    expect(tracker.consecutiveInfraFailures).toBe(0);
   });
 
-  it("bound: a container that cannot come back still aborts — a second roll with no success between is infra", async () => {
+  it("bound: a container that cannot come back is infra — a second roll with no success between", async () => {
     stubFetch({ body: containerRolled }, { body: ATTACH_OK }, { body: containerRolled }, { body: ATTACH_OK });
-    const tracker = new ExecHealthTracker(new ResidentExecutor(OPTS));
-    await expect(tracker.exec("git status")).resolves.toMatch(/consider calling start/);
-    const err = await tracker.exec("git status").catch((e: unknown) => e);
+    const executor = new ResidentExecutor(OPTS);
+    await expect(executor.exec("git status")).resolves.toMatch(/consider calling start/);
+    const err = await executor.exec("git status").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ExecInfraError);
     expect((err as Error).message).toMatch(/2 times in a row/);
-    expect(tracker.consecutiveInfraFailures).toBe(1);
   });
 });
 
@@ -1095,8 +1089,6 @@ describe("ResidentExecutor per-send deadline", () => {
     const err = await p;
     expect(err).toBeInstanceOf(ExecInfraError);
     expect((err as Error).message).toContain("resident worker /exec request failed");
-    // It is an ExecInfraError, so ExecHealthTracker counts it toward fail-fast.
-    expect(err).toBeInstanceOf(ExecInfraError);
   });
 });
 
@@ -1186,10 +1178,10 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
   const status = (state: string, reason = "") => ({ body: { state, reason, inFlight: 0 } });
   const restoring = () => status("restoring", "rehydrating");
 
-  it("a container exit during a live restore waits for warm, re-attaches, and hands /exec back as a restart the runner settles; never a strike", async () => {
+  it("a container exit during a live restore waits for warm, re-attaches, and hands /exec back as a restart (ExecSandboxRestartedError); never infra", async () => {
     const { calls } = stubFetch({ body: JUST_EXITED }, restoring(), restoring(), status("warm"), { body: ATTACH_OK });
-    const tracker = new ExecHealthTracker(new ResidentExecutor(OPTS));
-    const p = tracker.exec("git status").catch((e: unknown) => e);
+    const executor = new ResidentExecutor(OPTS);
+    const p = executor.exec("git status").catch((e: unknown) => e);
     await vi.advanceTimersByTimeAsync(10_000);
     const err = await p;
     expect(err).toBeInstanceOf(ExecSandboxRestartedError);
@@ -1198,21 +1190,18 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     expect((err as Error).message).toContain("master@1220b9c");
     expect(calls.map(route)).toEqual(["/exec", "/status", "/status", "/status", "/attach"]);
     expect(calls[1].url).toContain("resource=repo%3Ajshttp%2Fvary");
-    expect(tracker.consecutiveInfraFailures).toBe(0);
   });
 
-  it("a container exit with a definite non-recovering engine view strikes at once: an ExecInfraError the tracker counts, two in a row abort", async () => {
+  it("a container exit with a definite non-recovering engine view is infra at once, on every call", async () => {
     const down = status("down", "no-snapshot: resident has no recorded snapshot to rehydrate from");
     const { calls } = stubFetch({ body: JUST_EXITED }, down, { body: JUST_EXITED }, down);
-    const tracker = new ExecHealthTracker(new ResidentExecutor(OPTS));
-    const first = await tracker.exec("git status").catch((e: unknown) => e);
+    const executor = new ResidentExecutor(OPTS);
+    const first = await executor.exec("git status").catch((e: unknown) => e);
     expect(first).toBeInstanceOf(ExecInfraError);
     expect((first as Error).message).toContain("The container just exited");
     expect((first as Error).message).toContain("down");
-    expect(tracker.consecutiveInfraFailures).toBe(1);
-    const second = await tracker.exec("git status").catch((e: unknown) => e);
+    const second = await executor.exec("git status").catch((e: unknown) => e);
     expect(second).toBeInstanceOf(ExecInfraError);
-    expect(tracker.consecutiveInfraFailures).toBe(2);
     expect(calls.map(route)).toEqual(["/exec", "/status", "/exec", "/status"]);
   });
 
@@ -1234,9 +1223,9 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
 
   it("the wait respects the command's budget: a wake that never comes is a strike when the budget is spent, not at the ceiling", async () => {
     const { calls } = stubFetch({ body: JUST_EXITED }, ...Array.from({ length: 8 }, restoring));
-    const tracker = new ExecHealthTracker(new ResidentExecutor(OPTS));
+    const executor = new ResidentExecutor(OPTS);
     let settled: unknown;
-    const p = tracker.exec("sleep 5", { timeoutMs: 20_000 }).catch((e: unknown) => (settled = e));
+    const p = executor.exec("sleep 5", { timeoutMs: 20_000 }).catch((e: unknown) => (settled = e));
     await vi.advanceTimersByTimeAsync(19_999);
     expect(settled).toBeUndefined();
     await vi.advanceTimersByTimeAsync(1);
@@ -1245,7 +1234,6 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     expect((settled as Error).message).toContain("waited 20s");
     expect((settled as Error).message).toContain("restoring");
     expect(calls.map(route)).toEqual(["/exec", "/status", "/status", "/status", "/status", "/status"]);
-    expect(tracker.consecutiveInfraFailures).toBe(1);
   });
 
   it("the wait is capped at the three-minute ceiling whatever the command's budget", async () => {
@@ -1272,18 +1260,17 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     expect(calls.map(route)).toEqual(["/exec", "/status", "/status"]);
   });
 
-  it("a hard stop ends the wait at once, as a plain error the runner unwinds, never a strike", async () => {
+  it("a hard stop ends the wait at once, as a plain error the caller unwinds, never infra", async () => {
     stubFetch({ body: JUST_EXITED }, ...Array.from({ length: 5 }, restoring));
     const control = new AbortController();
-    const tracker = new ExecHealthTracker(new ResidentExecutor(OPTS));
-    const p = tracker.exec("true", { signal: control.signal }).catch((e: unknown) => e);
+    const executor = new ResidentExecutor(OPTS);
+    const p = executor.exec("true", { signal: control.signal }).catch((e: unknown) => e);
     await vi.advanceTimersByTimeAsync(2_000);
     control.abort();
     const err = await p;
     expect(err).toBeInstanceOf(Error);
     expect(err).not.toBeInstanceOf(ExecInfraError);
     expect((err as Error).message).toMatch(/stopped/);
-    expect(tracker.consecutiveInfraFailures).toBe(0);
   });
 
   it("a re-attach refused while the container is still rolling (image-stale) keeps waiting; the next one binds", async () => {
@@ -1311,8 +1298,8 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
       status: 404,
       body: { error: "repo:jshttp/vary is not onboarded" },
     });
-    const tracker = new ExecHealthTracker(new ResidentExecutor(OPTS));
-    const p = tracker.exec("true").catch((e: unknown) => e);
+    const executor = new ResidentExecutor(OPTS);
+    const p = executor.exec("true").catch((e: unknown) => e);
     await vi.advanceTimersByTimeAsync(5_000);
     const err = await p;
     expect(err).toBeInstanceOf(Error);

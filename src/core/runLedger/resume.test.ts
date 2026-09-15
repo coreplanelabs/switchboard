@@ -34,8 +34,8 @@ const results = (...ids: string[]): ChatMessage => ({
 
 const TOOLS: KnownTool[] = [
   { name: "bash" },
-  { name: "write_file" },
-  { name: "read_file", sideEffectFree: true },
+  { name: "write" },
+  { name: "read", sideEffectFree: true },
   { name: "web_fetch", sideEffectFree: true },
   { name: "github_file", sideEffectFree: true },
   { name: "github_issue_comment" },
@@ -76,17 +76,14 @@ describe("settlementFor — D4", () => {
       action: "synthetic",
       text: expect.stringMatching(/restarted while this mcp_jira_create_ticket call was in flight/),
     });
-    for (const name of [
-      "read_file",
-      "web_fetch",
-      "github_file",
-      "write_file",
-      "update_status",
-      "submit_verdict",
-      "submit_handoff",
-    ]) {
+    for (const name of ["read", "web_fetch", "github_file", "update_status", "submit_verdict", "submit_handoff"]) {
       expect(settlementFor(call("c", name), toolMap)).toEqual({ toolUse: call("c", name), action: "rerun" });
     }
+    // pi's whole-file write is a mutation like any other: its effects are the container's, unknowable after a restart.
+    expect(settlementFor(call("c", "write", { path: "a.ts", content: "x" }), toolMap)).toMatchObject({
+      action: "synthetic",
+      text: expect.stringMatching(/restarted while this write call was in flight.*re-check/),
+    });
     expect(settlementFor(call("c", "mcp_acme_search"), toolMap)).toMatchObject({
       action: "synthetic",
       text: "Tool mcp_acme_search is not available after the bot restarted; continue without it.",
@@ -120,14 +117,14 @@ describe("planResume", () => {
   it("resume: the step's record landed and its calls were in flight — every call of the last assistant turn is settled by the D4 rule, the record's counters carry over", () => {
     const messages = [
       user("go"),
-      assistantCalling(call("a", "read_file"), call("b", "bash"), call("c", "github_issue_comment")),
+      assistantCalling(call("a", "read"), call("b", "bash"), call("c", "github_issue_comment")),
     ];
     const plan = planResume({
       transcript: complete(messages),
       lastStep: step({
         turnIndex: 2,
         inFlight: [
-          { callId: "a", tool: "read_file" },
+          { callId: "a", tool: "read" },
           { callId: "b", tool: "bash" },
           { callId: "c", tool: "github_issue_comment" },
         ],

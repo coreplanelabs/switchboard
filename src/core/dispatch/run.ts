@@ -11,8 +11,7 @@ import type { AgentDef } from "../../agents/registry.js";
 import type { RouteDecided } from "./route.js";
 import { coordinatorFields, type CoordinatorTag } from "../coordinator/contract.js";
 import type { RunProfile } from "../../config/profile.js";
-import { mergeTools } from "../../runner.js";
-import { TOOLSETS } from "../../tools/workspace.js";
+import { mergeTools, TOOLSETS } from "../../tools/toolsets.js";
 import { makeWebCapability } from "../../tools/web.js";
 import { RestGithubApi, type GithubApi } from "../../execution/githubApi.js";
 import type { GithubCapability } from "../../tools/github.js";
@@ -60,6 +59,13 @@ export interface HarnessDeps {
    *  `piContainerFor`: over the executor for a class with a workspace, the
    *  bot host for `none`. */
   containerFor?: (executor: Executor, machine: MachineClass) => PiContainer;
+  /** How often the harness polls pi's log and checks the budgets, and the
+   *  sleep that paces it, for a test that drives a scripted pi (one under fake
+   *  timers hands the harness a clock of its own); absent, the harness's own
+   *  cadence on the process's timers. */
+  pollMs?: number;
+  tickMs?: number;
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /** What the run stage reads off the dispatcher's dependencies: the tools'
@@ -76,8 +82,8 @@ export interface RunDeps
   config: ConfigStore;
   /**
    * The pi harness's process-wide pieces (docs/reference/specs/harness-pi.md).
-   * Absent (the CLI, tests) → a preset on pi cannot run here and says so;
-   * every native run is untouched.
+   * Absent (a test of the stages before the loop) → no run can start here,
+   * and the run stage says so by name.
    */
   harness?: HarnessDeps;
   /**

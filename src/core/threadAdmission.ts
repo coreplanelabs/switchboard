@@ -80,6 +80,7 @@ export class FollowUpInbox<T extends FollowUpInput = FollowUpInput> {
    *  boot-gap steer that finds the run live once its push lands — and must
    *  fold in once. Items without a seq are never deduplicated. */
   private readonly seen = new Set<number>();
+  private pushed = 0;
 
   push(input: T): void {
     if (input.ledgerSeq !== undefined) {
@@ -87,6 +88,23 @@ export class FollowUpInbox<T extends FollowUpInput = FollowUpInput> {
       this.seen.add(input.ledgerSeq);
     }
     this.pending.push(input);
+    this.pushed++;
+  }
+
+  /** Every follow-up ever accepted, drained or not. A wait in the run's own
+   *  tools reads the count, not `size`: the harness drains the inbox on its own
+   *  cadence and steers what it drained into pi, so a follow-up that landed
+   *  during the wait is gone from `pending` before the wait's next tick and
+   *  still ended it (agent-conductor item 8). */
+  get arrived(): number {
+    return this.pushed;
+  }
+
+  /** Follow-ups a loop drained and then never read (the pi harness's steers a
+   *  failed loop left unechoed) go back to the front, in their order, for the
+   *  run stage's fresh turn — past the arrival dedup, since they arrived once. */
+  requeue(inputs: readonly T[]): void {
+    this.pending.unshift(...inputs);
   }
 
   /** Everything pushed since the last drain, oldest first; the inbox is empty after. */

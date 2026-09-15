@@ -2,7 +2,7 @@
 // progress checklist through `ctx.reportProgress`, which the dispatcher binds
 // to the card. It mutates the run's own state, so it is never side-effect-free
 // and runs strictly in order; a status-only turn does not count against the
-// turn guard (docs/reference/specs/run-loop.md item 15). Relayed to pi like
+// turn guard (docs/reference/specs/harness-pi.md item 5). Relayed to pi like
 // every bot tool (docs/reference/specs/harness-pi.md item 7); the toolset
 // wiring stays in src/tools/workspace.ts.
 

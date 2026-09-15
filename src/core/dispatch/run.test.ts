@@ -104,7 +104,7 @@ function setup() {
   };
   const message = msg("agent:coding fix it");
   const { resolved } = resolveRun(
-    { config, providers: { get: () => ({}) as never } as never },
+    { config },
     { msg: message, directives: { agent: "coding", text: "fix it" }, history: [] },
   );
   const agent = getAgent(resolved.agentName);
@@ -168,7 +168,7 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
       seed: { messages: [], budgetMs: base.agent.maxMinutes * 60_000 },
       reservation: reserved,
     });
-    expect(req.tools.map((t) => t.name)).toContain("bash");
+    expect(req.tools.map((t) => t.name)).toContain("attach_file"); // the coding toolset, as relayed
     expect(req.onStop).toBeTypeOf("function");
     registry.publish(run.id, { type: "input", messageId: "m1", text: "fix it", at: NOW });
     expect(ledger.handle!.events.map((e) => e.event.type)).toEqual(["input"]);

@@ -420,7 +420,7 @@ export function runToolCapabilities<D extends SpawnCoreDeps>(
   },
   run: SpawningRun & {
     control: Pick<RunControl, "requested">;
-    inbox: Pick<FollowUpInbox<DispatchFollowUp>, "size">;
+    inbox: Pick<FollowUpInbox<DispatchFollowUp>, "arrived">;
   },
 ): { spawn: SpawnCapability; runs: RunsReadCapability; steer: SteerCapability; wait: WaitCapability } {
   const { core } = deps;

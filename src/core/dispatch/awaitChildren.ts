@@ -150,8 +150,9 @@ export function budgetEndOf(now: number, remainingMs: number): number {
 export interface WaitCapability {
   /** The run's own stop request, read at every tick. */
   stopRequested(): StopMode | undefined;
-  /** How many follow-ups wait in this run's own inbox. */
-  followUpsPending(): number;
+  /** How many follow-ups have ever reached this run's own inbox; a wait ends
+   *  `follow_up` when the count grows past what it was when the wait began. */
+  followUpsArrived(): number;
   /** Call `onChange` whenever one of `ids` finishes, is sealed, discarded or
    *  evicted in this process's registry — or any run this run spawned ends
    *  (a child by `parentRunId`: a thread's continuation, whatever its id) — a
@@ -192,7 +193,7 @@ export function sleepUnlessAborted(ms: number, signal?: AbortSignal): Promise<vo
 export function waitCapabilityFor(deps: {
   registry: Pick<RunRegistry, "subscribeIndex">;
   control: Pick<RunControl, "requested">;
-  inbox: Pick<FollowUpInbox<FollowUpInput>, "size">;
+  inbox: Pick<FollowUpInbox<FollowUpInput>, "arrived">;
   clock: Clock;
   sleep?: WaitCapability["sleep"];
   /** The waiting run's own id: its children by `parentRunId` wake it as they end. */
@@ -200,7 +201,7 @@ export function waitCapabilityFor(deps: {
 }): WaitCapability {
   return {
     stopRequested: () => deps.control.requested,
-    followUpsPending: () => deps.inbox.size,
+    followUpsArrived: () => deps.inbox.arrived,
     watch: (ids, onChange) => {
       let replaying = true; // `subscribeIndex` replays the active set synchronously before it returns
       const unsubscribe = deps.registry.subscribeIndex((event) => {

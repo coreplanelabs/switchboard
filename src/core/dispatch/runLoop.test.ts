@@ -35,6 +35,7 @@ import {
 import { spawnCapabilityFor, type SpawnCapability, type SpawnDeps } from "./spawn.js";
 import type { SessionCapability } from "../../tools/session.js";
 import { FakePiContainer } from "../harness/pi/testing/fakeContainer.js";
+import { scriptPiFromProvider } from "../harness/pi/testing/providerPi.js";
 import { judgeToolCall, type ToolRuleContext } from "../harness/pi/toolRules.js";
 import type { CoordinatorTag } from "../coordinator/contract.js";
 import type { RepoContext } from "../repoContext.js";
@@ -43,12 +44,11 @@ import { InMemoryArtifactStore, type ArtifactStore } from "../../artifacts/store
 import type { ReviewCommentTarget } from "../../execution/githubComments.js";
 import type { PrCommitList } from "../headMoved.js";
 import type { PrDescription } from "../prDescription.js";
-import type { RunEvent } from "../runEvents.js";
 import type { ChatMessage } from "../chatMessage.js";
 import type { ResumeContext } from "./admission.js";
 import type { AppendableEvent, LiveRunRow, StepRecord } from "../runLedger/types.js";
 
-// Feature: docs/reference/specs/run-loop.md, docs/reference/specs/run-history.md
+// Feature: docs/reference/specs/harness-pi.md, docs/reference/specs/run-history.md
 // items 20–22, docs/reference/specs/llm-output.md item 5 — the loop's own
 // contract on the two ways it ends: a completed run whose answer is published
 // and whose record is registered for the drain, and a failed run whose card is
@@ -106,10 +106,13 @@ function setup(
     executor?: Partial<Executor>;
     /** The config to run under; the default names no harness block. */
     yaml?: string;
-    /** The pi harness's process deps, when the test drives one. */
-    harness?: HarnessDeps;
-    /** The run's model-proxy bearer, as the dispatcher would hand it over. */
-    bearer?: string;
+    /** The pi harness's process deps, when the test scripts pi itself; absent,
+     *  a fake container whose pi is scripted from the run's provider; `null`,
+     *  a process without them. */
+    harness?: HarnessDeps | null;
+    /** The run's model-proxy bearer, as the dispatcher would hand it over;
+     *  `null`, a run handed none. */
+    bearer?: string | null;
     /** The thread's resolved repository context; nothing resolved by default. */
     repoCtx?: RepoContext;
     /** The coordinator's tag, when a coordinator spawned the run. */
@@ -139,13 +142,33 @@ function setup(
   const agentName = opts.agent ?? "general";
   const store = new InMemoryRunStore();
   const writer = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
+  const runProvider = opts.provider ?? provider(answer);
+  const harness: HarnessDeps | null =
+    opts.harness !== undefined
+      ? opts.harness
+      : {
+          registry: new HarnessRegistry(),
+          harnessUrl: "https://bot.example.com",
+          loopbackUrl: "http://127.0.0.1:8080",
+          containerFor: () => {
+            const container = new FakePiContainer();
+            scriptPiFromProvider(container, {
+              provider: runProvider,
+              registry: harness!.registry,
+              beforeModelCall: () => new Promise((r) => setTimeout(r, 10)),
+            });
+            return container;
+          },
+          pollMs: 1,
+          tickMs: 5,
+        };
   const deps: RunDeps = {
     config,
     runLedger: new NullLedgerWriteThrough("gen-T", new NullRunStore()),
     runHistoryWriter: writer,
     runStore: new NullRunStore(),
     githubApi: new InMemoryGithubApi(),
-    ...(opts.harness ? { harness: opts.harness } : {}),
+    ...(harness ? { harness } : {}),
     ...(opts.artifacts ? { artifacts: opts.artifacts } : {}),
     ...(opts.review
       ? {
@@ -157,7 +180,7 @@ function setup(
   };
   const message = msg("hello there");
   const { resolved } = resolveRun(
-    { config, providers: { get: () => ({}) as never } as never },
+    { config },
     { msg: message, directives: { text: "hello there", ...(opts.agent ? { agent: opts.agent } : {}) }, history: [] },
   );
   const agent = getAgent(resolved.agentName);
@@ -190,11 +213,8 @@ function setup(
     agent,
     profile: declaredProfile(agent),
     resolved,
-    provider: opts.provider ?? provider(answer),
-    model: "general-model",
     messages: buildMessages([], "hello there"),
     system: "the system prompt",
-    composeSystem: () => "the system prompt",
     mcpForRun: { tools: [], servers: [] },
     run,
     registry,
@@ -227,7 +247,7 @@ function setup(
       registry.publish(run.id, type === "input" ? { type, messageId: "m1", text, at: NOW } : { type, text, at: NOW });
     },
     ending,
-    ...(opts.bearer ? { bearer: opts.bearer } : {}),
+    ...(opts.bearer === null ? {} : { bearer: opts.bearer ?? "sbr_run-l.s3cret" }),
     ...(opts.coordinator ? { coordinator: opts.coordinator } : {}),
     ...(opts.spawn ? { spawn: opts.spawn } : {}),
     ...(opts.session ? { session: opts.session } : {}),
@@ -387,89 +407,6 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     );
   });
 
-  // record 0033: a follow-up steered into the live run that carries a staged
-  // file — the file is copied into the store and pulled into the workspace over
-  // the run's executor BEFORE the model reads the turn, whose text ends with the
-  // line; the record carries the `in` event.
-  it("a steered follow-up's staged file is copied and pulled before the model reads it; the turn ends with the attachments line", async () => {
-    const clip = {
-      name: "clip.mp4",
-      size: 3_120,
-      type: "video/mp4",
-      url: "https://files.slack.com/files-pri/T1-F1/clip.mp4",
-      messageId: "1700000000.000300",
-    };
-    const store = new InMemoryArtifactStore({
-      bucket: "test",
-      fetch: (async () =>
-        new Response(new Uint8Array(clip.size), {
-          status: 200,
-          headers: { "content-type": "video/mp4" },
-        })) as unknown as typeof fetch,
-    });
-    const commands: string[] = [];
-    const seen: string[] = [];
-    let turn = 0;
-    const provider: Provider = {
-      name: "fake",
-      async complete(req) {
-        const last = req.messages.at(-1)!;
-        seen.push(
-          typeof last.content === "string"
-            ? last.content
-            : last.content.map((p) => (p.type === "text" ? p.text : `[${p.type}]`)).join("\n"),
-        );
-        if (turn++ === 0)
-          return {
-            content: [{ type: "tool_use", id: "t1", name: "bash", input: { command: "echo hi" } }],
-            stopReason: "tool_use",
-          };
-        return { content: [{ type: "text", text: "done" }], stopReason: "end_turn" };
-      },
-    };
-    const s = setup("", {
-      agent: "coding",
-      provider,
-      executor: {
-        exec: async (command) => {
-          commands.push(command);
-          return "";
-        },
-      },
-      artifacts: store,
-    });
-    // The steer lands while the run is live (before its first step reads the inbox).
-    s.ctx.admitted.inbox.push({
-      text: "and cut a contact sheet from this",
-      userId: "slack:UX",
-      at: NOW + 1,
-      staged: [clip],
-      msg: { channelId: "slack:CX", userId: "slack:UX", threadKey: THREAD, text: "and cut a contact sheet from this" },
-    });
-    await runLoop(s.deps, s.ctx);
-    s.ending.drain(true);
-    await s.writer.settled();
-    // The copy under the thread's key, the pull over the executor, both before the second model read.
-    expect(store.copies.map((c) => c.key)).toEqual(["threads/slack-CX-1.0/in/1700000000.000300/1-clip.mp4"]);
-    expect(commands).toEqual([
-      "echo hi",
-      expect.stringMatching(/^mkdir -p attachments && curl -fsS -o 'attachments\/1-clip\.mp4' 'memory:\/\/test\//),
-    ]);
-    expect(seen[1]).toMatch(
-      /and cut a contact sheet from this[\s\S]*Attached files are in \.\/attachments\/: 1-clip\.mp4 \(3 KB, video\/mp4\)$/,
-    );
-    const rec = (await s.store.get("run-l"))!;
-    expect(rec.events.filter((e) => e.type === "artifact")).toMatchObject([
-      {
-        type: "artifact",
-        direction: "in",
-        key: "threads/slack-CX-1.0/in/1700000000.000300/1-clip.mp4",
-        name: "clip.mp4",
-        size: 3_120,
-      },
-    ]);
-  });
-
   it("a completed run: the answer comes back through the typed-output boundary and is published, the registry is finished `completed`, the record is registered for the drain, the workspace is NOT released here", async () => {
     const s = setup("the answer");
     const out = await runLoop(s.deps, s.ctx);
@@ -511,7 +448,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
 // of `runAgent`, and everything around it — the card, the stream, the answer's
 // publish, the finish — is the same code; without the block, a run is the
 // native loop byte for byte and pi is never started.
-describe("the harness seam — pi in place of the native loop when the preset says so", () => {
+describe("the pi harness — every preset's runs, in the run's container", () => {
   const PI_YAML = YAML + "harness:\n  coding: pi\n";
 
   /** A pi that answers the harness's first prompt with one bash turn and a
@@ -880,20 +817,6 @@ describe("the harness seam — pi in place of the native loop when the preset sa
     expect(container.removed).toEqual(["/tmp/switchboard-pi-run-l"]);
   });
 
-  it("without a harness block the same preset runs the native loop and pi is never started; a preset declared native is untouched by a block naming another", async () => {
-    const container = new FakePiContainer();
-    const harness: HarnessDeps = {
-      registry: new HarnessRegistry(),
-      harnessUrl: "https://bot.example.com",
-      containerFor: () => container,
-    };
-    const native = setup("native answer", { agent: "coding", harness, bearer: "sbr_run-l.s3cret" });
-    expect((await runLoop(native.deps, native.ctx)).answer).toBe("native answer");
-    const other = setup("native answer", { agent: "general", yaml: PI_YAML, harness, bearer: "sbr_run-l.s3cret" });
-    expect((await runLoop(other.deps, other.ctx)).answer).toBe("native answer");
-    expect(container.starts).toEqual([]);
-  });
-
   it("the gate's push rules follow the thread: a pull-request thread's or a unit child's bound branch is the run's own — the one push target, its base protected; a plain thread's binding is the protected base", async () => {
     const seen: ToolRuleContext[] = [];
     class RecordingRegistry extends HarnessRegistry {
@@ -961,7 +884,7 @@ describe("the harness seam — pi in place of the native loop when the preset sa
   });
 
   it("a preset on pi in a process without the harness deps, a public URL or a bearer fails the run naming what is missing", async () => {
-    const noDeps = setup("", { agent: "coding", yaml: PI_YAML, bearer: "sbr_x.y" });
+    const noDeps = setup("", { agent: "coding", yaml: PI_YAML, harness: null, bearer: "sbr_x.y" });
     await expect(runLoop(noDeps.deps, noDeps.ctx)).rejects.toThrow(/no harness deps/);
     const noUrl = setup("", {
       agent: "coding",
@@ -974,6 +897,7 @@ describe("the harness seam — pi in place of the native loop when the preset sa
       agent: "coding",
       yaml: PI_YAML,
       harness: { registry: new HarnessRegistry(), harnessUrl: "https://b" },
+      bearer: null,
     });
     await expect(runLoop(noBearer.deps, noBearer.ctx)).rejects.toThrow(/model-proxy bearer/);
   });
@@ -988,9 +912,8 @@ describe("the harness seam — pi in place of the native loop when the preset sa
 // review post-step exactly as the native loop's does: the reviewed-head guard,
 // the `LGTM:` line, a comment and never an approval. Without the block, or
 // with `review: native`, a review is the native loop byte for byte.
-describe("the harness seam — the review preset on pi", () => {
+describe("the pi harness — the review preset", () => {
   const REVIEW_PI_YAML = YAML + "harness:\n  review: pi\n";
-  const REVIEW_NATIVE_YAML = YAML + "harness:\n  review: native\n";
   const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
   const VERDICT = {
     verdict: "approve",
@@ -1081,23 +1004,6 @@ describe("the harness seam — the review preset on pi", () => {
           },
         );
       });
-    };
-  }
-
-  /** The native loop's review: one `submit_verdict` turn, then the text. */
-  function nativeReviewProvider(finalText: string): Provider {
-    let calls = 0;
-    return {
-      name: "fake",
-      async complete() {
-        calls++;
-        return calls === 1
-          ? {
-              content: [{ type: "tool_use", id: "t1", name: "submit_verdict", input: VERDICT }],
-              stopReason: "tool_use",
-            }
-          : { content: [{ type: "text", text: finalText }], stopReason: "end_turn" };
-      },
     };
   }
 
@@ -1301,59 +1207,6 @@ describe("the harness seam — the review preset on pi", () => {
       expect.objectContaining({ type: "review_posted", head: NEW, verdict: "request_changes" }),
     ]);
   });
-
-  it("`harness: { review: native }` and no block are the same review byte for byte — the native loop, pi never started, the same events, replies and post", async () => {
-    const container = new FakePiContainer();
-    const harness: HarnessDeps = {
-      registry: new HarnessRegistry(),
-      harnessUrl: "https://bot.example.com",
-      containerFor: () => container,
-    };
-    const runNative = async (yaml: string) => {
-      const posts: Array<{ target: ReviewCommentTarget; body: string }> = [];
-      const s = setup("", {
-        agent: "review",
-        provider: nativeReviewProvider("The native review."),
-        yaml,
-        harness,
-        bearer: "sbr_run-l.s3cret",
-        ...prThread,
-        review: { head: HEAD, post: async (target, body) => void posts.push({ target, body }) },
-      });
-      const out = await runLoop(s.deps, s.ctx);
-      s.ending.drain(true);
-      await s.writer.settled();
-      const rec = (await s.store.get("run-l"))!;
-      // The substance of the record: every event less the wall-clock stamp
-      // and the span id, which differ between any two runs of anything.
-      const events = rec.events.map((e) => {
-        const { at: _at, spanId: _spanId, ...rest } = e as RunEvent & { at?: number; spanId?: string };
-        return rest;
-      });
-      return {
-        answer: out.answer,
-        posts,
-        replies: s.replies,
-        published: s.published,
-        events,
-        reviewPost: rec.reviewPost,
-      };
-    };
-    const absent = await runNative(YAML);
-    const pinned = await runNative(REVIEW_NATIVE_YAML);
-    expect(absent.answer).toBe("The native review.");
-    expect(absent.posts).toEqual([
-      {
-        target: { repo: "o/r", number: 42, commitId: HEAD },
-        body: `LGTM: looks correct\n- [nit] F1 src/x.ts:3 — a name\n\nThe native review.`,
-      },
-    ]);
-    expect(pinned).toEqual(absent);
-    expect(container.starts).toEqual([]);
-    expect(absent.events.some((e) => e.type === "tool_call" && (e as { tool: string }).tool === "submit_verdict")).toBe(
-      true,
-    );
-  });
 });
 
 // Feature: docs/reference/specs/harness-pi.md item 12: a preset without a
@@ -1365,9 +1218,8 @@ describe("the harness seam — the review preset on pi", () => {
 // same is refused by name; the record replays like a native run's. Without
 // the key, or with `general: native`, a general ask is the native loop byte
 // for byte and pi never starts.
-describe("the harness seam: a preset without a workspace on pi, as a child of the bot", () => {
+describe("the pi harness — a preset without a workspace, as a child of the bot", () => {
   const GENERAL_PI_YAML = YAML + "harness:\n  general: pi\n";
-  const GENERAL_NATIVE_YAML = YAML + "harness:\n  general: native\n";
   const assistant = (content: Record<string, unknown>[], stopReason = "toolUse") => ({
     role: "assistant",
     content,
@@ -1513,21 +1365,6 @@ describe("the harness seam: a preset without a workspace on pi, as a child of th
           "bash refused: bash is the `shell` bundle: a run without a workspace (identity none) has none of pi's own tools",
       }),
     ]);
-  });
-
-  it("without the key, or with `general: native`, a general ask is the native loop and pi never starts; a block moving another preset leaves general native", async () => {
-    const container = new FakePiContainer();
-    const harness: HarnessDeps = {
-      registry: new HarnessRegistry(),
-      harnessUrl: "https://bot.example.com",
-      loopbackUrl: "http://127.0.0.1:8080",
-      containerFor: () => container,
-    };
-    for (const yaml of [YAML, GENERAL_NATIVE_YAML, YAML + "harness:\n  coding: pi\n"]) {
-      const s = setup("native answer", { yaml, harness, bearer: "sbr_run-l.s3cret" });
-      expect((await runLoop(s.deps, s.ctx)).answer).toBe("native answer");
-    }
-    expect(container.starts).toEqual([]);
   });
 
   it("a preset without a workspace on pi in a process without the loopback URL fails the run naming PORT: the public URL alone is not where a bot-host pi reaches the bot", async () => {
@@ -1835,23 +1672,6 @@ describe("the harness seam: a preset without a workspace on pi, as a child of th
       "spawn_run",
       "spawn_run",
     ]);
-  });
-
-  it("without the key, with the preset declared native, or with a block moving another preset, a research ask and a conductor ask run the native loop and pi never starts", async () => {
-    const container = new FakePiContainer();
-    const harness: HarnessDeps = {
-      registry: new HarnessRegistry(),
-      harnessUrl: "https://bot.example.com",
-      loopbackUrl: "http://127.0.0.1:8080",
-      containerFor: () => container,
-    };
-    for (const agent of ["research", "conductor"] as const) {
-      for (const yaml of [YAML, YAML + `harness:\n  ${agent}: native\n`, GENERAL_PI_YAML]) {
-        const s = setup("native answer", { agent, yaml, harness, bearer: "sbr_run-l.s3cret" });
-        expect((await runLoop(s.deps, s.ctx)).answer).toBe("native answer");
-      }
-    }
-    expect(container.starts).toEqual([]);
   });
 });
 

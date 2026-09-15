@@ -1,4 +1,4 @@
-import { AGENTS, getAgent } from "../agents/registry.js";
+import { getAgent } from "../agents/registry.js";
 import type { LedgerRun } from "./runLedger/writeThrough.js";
 import { systemClock } from "./trace/index.js";
 import type { SpanSink, Tracer } from "./trace/types.js";
@@ -78,7 +78,6 @@ import { sessionSeedFor } from "./dispatch/seed.js";
 import { sessionCapabilityFor } from "../tools/session.js";
 import { readThread, stickyAgentOf, threadPrOf, threadRouteOf } from "./dispatch/thread.js";
 import { describeAsset, readThreadAssets, type ThreadAsset } from "./dispatch/threadAssets.js";
-import { effectiveHarness } from "./harness/select.js";
 import { runToolCapabilities, type ParentRun } from "./dispatch/spawn.js";
 import { createRunsService } from "./runsService.js";
 import type { CoordinatorTag } from "./coordinator/contract.js";
@@ -358,15 +357,11 @@ export async function dispatch(
     };
 
     // The (agent, model, effort) this request resolves to (dispatch/resolve.ts):
-    // a directive, else the thread's sticky one — by transcript when the
-    // thread's newest run is on the pi harness, by the user turns' directives
-    // otherwise — else the config scopes.
-    const harnessBlock = deps.config.config.harness;
-    const onPi = (name: string): boolean => {
-      const def = AGENTS[name];
-      return def !== undefined && effectiveHarness(def, harnessBlock) === "pi";
-    };
-    const stickyAgent = thread ? stickyAgentOf(thread, onPi) : undefined;
+    // a directive, else the thread's sticky agent by transcript — the agent of
+    // the thread's newest finished run with a session log (routing-and-config
+    // item 3) — else the config scopes; the model and the effort from the
+    // thread's user turns, then the scopes.
+    const stickyAgent = thread ? stickyAgentOf(thread) : undefined;
     // The same page names the pull request the thread's work lives on
     // (resident-repos item 29): the one its newest finished run opened, for
     // the target resolution below.
@@ -529,7 +524,7 @@ export async function dispatch(
     // The provider behind the model ref, and the target repo/ref/PR resolution
     // STARTED here (dispatch/resolve.ts) so the GitHub round trip overlaps the
     // memory read below; awaited after the ack.
-    const { provider, model, needsRepo, repoCtxP } = resolveTarget(deps, {
+    const { needsRepo, repoCtxP } = resolveTarget(deps, {
       msg,
       history,
       agent,
@@ -640,14 +635,14 @@ export async function dispatch(
     const requestText = route?.parts ? compoundBrief(directives.text, route.parts) : directives.text;
     // Where the conversation starts (run-history item 52), and every row and
     // record the run has says which: a spawned child from its parent's text
-    // turns (routing-and-config item 20); a follow-up whose agent runs on the
-    // pi harness from the log of its thread and agent when the thread has one
-    // (session-log item 9: the log's tail within the seed budget, the lines
-    // since the previous run ended, the request — the tail's rows reused, not
-    // rewritten); every other run from its thread's history. A log that could
-    // not be read is the channel, and a note on the record says why.
+    // turns (routing-and-config item 20); a follow-up in a thread from the log
+    // of that thread and its agent when the thread has one (session-log item
+    // 9: the log's tail within the seed budget, the lines since the previous
+    // run ended, the request — the tail's rows reused, not rewritten); every
+    // other run from its thread's history. A log that could not be read is the
+    // channel, and a note on the record says why.
     const fromSession =
-      !resume && !opts.seed && thread && effectiveHarness(agent, harnessBlock) === "pi"
+      !resume && !opts.seed && thread
         ? await sessionSeedFor({
             ledger: deps.runLedger,
             threadKey: msg.threadKey,
@@ -992,7 +987,7 @@ export async function dispatch(
           }
         : {}),
     });
-    const { mcpForRun, composeSystem, system } = prompt;
+    const { mcpForRun, system } = prompt;
     // The PR head this run reviews — the resolved head, or the one adopted at
     // attach; the head settle (item 12) advances it after the model turn.
     const reviewHead = prompt.reviewHead;
@@ -1122,11 +1117,8 @@ export async function dispatch(
       resolved,
       stagingIndex: nextStagedIndex,
       workspaceFiles,
-      provider,
-      model,
       messages,
       system,
-      composeSystem,
       mcpForRun,
       run,
       registry,

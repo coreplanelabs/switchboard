@@ -271,7 +271,7 @@ function unionMs(intervals: ReadonlyArray<{ start: number; end: number }>): numb
 /** One tool call's identity for retry/streak accounting: the tool name plus
  *  the call's one-line summary (which carries the arguments — a bash command,
  *  a path, a url). Shared with the runner's stuck-loop guard
- *  (docs/reference/specs/run-loop.md item 18), so both count "the same call"
+ *  (the stuck-loop guard the native loop had; the pi harness's gap, docs/reference/specs/harness-pi.md), so both count "the same call"
  *  identically. */
 export const callSignature = (tool: string, summary: string): string => `${tool} ${summary}`;
 

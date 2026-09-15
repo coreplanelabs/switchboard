@@ -83,6 +83,15 @@ describe("the three images carry one pi", () => {
     const pkg = JSON.parse(read("package.json")) as { dependencies?: Record<string, string> };
     expect(pkg.dependencies?.["@earendil-works/pi-ai"]).toBe(PI_VERSION);
   });
+
+  // harness-pi.md item 3: a process outside the images — the CLI's `ask` on a
+  // developer's machine, the test that spawns it on a CI runner — starts pi
+  // from its PATH, which under npm carries `node_modules/.bin`; the pin there
+  // is the same one, so no run anywhere is driven by a pi the images do not carry.
+  it("`@earendil-works/pi-coding-agent` is a devDependency at the same exact pin, so `npm test` and a developer's `ask` spawn the pi the images carry", () => {
+    const pkg = JSON.parse(read("package.json")) as { devDependencies?: Record<string, string> };
+    expect(pkg.devDependencies?.["@earendil-works/pi-coding-agent"]).toBe(PI_VERSION);
+  });
 });
 
 describe("the resident image proves pi as a thread user", () => {

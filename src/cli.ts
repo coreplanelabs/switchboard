@@ -48,6 +48,7 @@
 // already read the config and the data directory.
 
 import "./loadEnv.js";
+import { createServer } from "node:http";
 import { Console } from "node:console";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { buildArtifactStore } from "./artifacts/buildStore.js";
@@ -84,8 +85,12 @@ import { buildMemoryStore, NullMemoryStore } from "./core/memory/index.js";
 import { residentAdminFromConfig } from "./core/residentAdmin.js";
 import { NO_FLEET, residentFleetWatcherFor, type ResidentFleetFacts } from "./core/residentFleet.js";
 import type { ChannelIO, OpenedThread, RunReceipt, StatusHandle, StatusUpdate } from "./core/types.js";
-import { ProviderRegistry } from "./providers/registry.js";
 import { PiAiProviders } from "./core/harness/piAi.js";
+import { HarnessRegistry } from "./core/harness/pi/relay.js";
+import { LedgerTakeover } from "./core/runLedger/takeover.js";
+import { RunBearerStore } from "./core/modelProxy/runBearers.js";
+import { createModelProxyHandler, isModelProxyPath } from "./channels/modelProxy.js";
+import { createHarnessRoutesHandler, isHarnessPath } from "./channels/harnessRoutes.js";
 import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 import { buildMcp } from "./mcp/index.js";
 import { NullMcpToolSource } from "./mcp/source.js";
@@ -612,8 +617,9 @@ async function main(): Promise<void> {
   // status lines; the reply reaches stdout through `ConsoleIO`'s own stream.
   globalThis.console = new Console({ stdout: process.stderr, stderr: process.stderr });
   const { config, runStore } = await bot();
-  const providers = new ProviderRegistry(config.config.providers);
-  // The same table on pi's model library, for the router's and reflection's calls (harness-pi.md item 13).
+  // The config's provider table on pi's model library, for the router's and
+  // reflection's calls (harness-pi.md item 13); the run's own go through the
+  // loopback proxy below.
   const completions = new PiAiProviders(config.config.providers);
   const skills = new BundledSkillStore(DEFAULT_SKILLS_DIR);
   // What is on in this process (src/core/capabilities.ts): the CLI's `ask`
@@ -646,10 +652,20 @@ async function main(): Promise<void> {
   const artifacts = buildArtifactStore(config.config.artifacts, processSecrets, {
     copyBaseUrl: process.env.PUBLIC_BASE_URL,
   });
+  // The run's pi needs what the bot's HTTP server gives it: the model proxy
+  // its bearer buys calls through and the three harness routes its extension
+  // asks (docs/reference/specs/harness-pi.md item 12). A one-shot process has
+  // no PORT, so `ask` opens a loopback server on a free port for the length of
+  // the run — pi reaches it over 127.0.0.1 whether it runs as a child of this
+  // process (no workspace) or in the local workspace (a coding run here).
+  const runBearers = new RunBearerStore({ clock: systemClock });
+  const harnesses = new HarnessRegistry();
+  const loopback = await askLoopbackServer({ bearers: runBearers, harnesses, config });
   const deps: CoreDeps = {
     config,
-    providers,
     completions,
+    runBearers,
+    harness: { registry: harnesses, harnessUrl: loopback.url, loopbackUrl: loopback.url },
     capabilities,
     residentFleet,
     ...(artifacts ? { artifacts } : {}),
@@ -676,8 +692,45 @@ async function main(): Promise<void> {
   );
   // Wait for the record write to settle before exiting rather than dropping it.
   await runHistoryWriter.settled();
+  loopback.close();
   // The exit code is set, not forced: the process ends when its last write has drained.
   process.exitCode = askExitCode(io.finished);
+}
+
+/** The `ask` process's own HTTP server on a free loopback port: the model
+ *  proxy and the harness routes, nothing else — what a run's pi reaches with
+ *  its bearer. Closed once the run's record has settled. */
+async function askLoopbackServer(input: {
+  bearers: RunBearerStore;
+  harnesses: HarnessRegistry;
+  config: ConfigStore;
+}): Promise<{ url: string; close: () => void }> {
+  const modelProxy = createModelProxyHandler({
+    bearers: input.bearers,
+    providers: () => input.config.config.providers,
+    secrets: processSecrets,
+    clock: systemClock,
+  });
+  // No ledger here, so nothing is ever being taken over: the door holds on nothing.
+  const takeover = new LedgerTakeover();
+  takeover.settle();
+  const harnessRoutes = createHarnessRoutesHandler({ bearers: input.bearers, harnesses: input.harnesses, takeover });
+  const server = createServer((req, res) => {
+    const path = (req.url ?? "/").split("?")[0];
+    if (isModelProxyPath(path)) modelProxy(req, res);
+    else if (isHarnessPath(path)) harnessRoutes(req, res);
+    else {
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("not found");
+    }
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve());
+  });
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("ask: the loopback server has no port");
+  return { url: `http://127.0.0.1:${address.port}`, close: () => server.close() };
 }
 
 // Run only when invoked as a script (tsx/node src/cli.ts, the `switchboard`

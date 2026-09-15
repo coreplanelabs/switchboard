@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import type { AppConfig } from "../config.js";
 import { COMPARE_DIFF_MAX_CHARS, GithubApiError, RestGithubApi, type GithubApi } from "../execution/githubApi.js";
 import { githubAppConfigured } from "../execution/githubApp.js";
-import { anthropicApiKey } from "../providers/anthropic.js";
+import { anthropicApiKey } from "./anthropicApiKey.js";
 import type { EnvRecord, Secrets } from "../secrets.js";
 import { meatOnHost, type MeatRun, type MeatRunResult } from "./meatProcess.js";
 import {

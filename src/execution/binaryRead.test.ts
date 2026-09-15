@@ -16,7 +16,7 @@ import {
   statCommandFor,
   tooLargeMessage,
 } from "./binaryRead.js";
-import { decodeBase64Read, ExecHealthTracker, ExecInfraError, LocalExecutor, type Executor } from "./executor.js";
+import { decodeBase64Read, ExecInfraError, LocalExecutor } from "./executor.js";
 
 // Feature: docs/reference/specs/execution.md item 19 — a binary read on the
 // Executor seam: whole files as bytes under one cap, through the same `/read`
@@ -152,26 +152,5 @@ describe("LocalExecutor.readBytes (item 19)", () => {
   it("refuses a file over the cap by name with its size, before reading it", async () => {
     writeFileSync(join(dir, "big.bin"), Buffer.alloc(MAX_READ_BYTES + 1));
     await expect(ex.readBytes("big.bin")).rejects.toThrow(tooLargeMessage("big.bin", MAX_READ_BYTES + 1));
-  });
-});
-
-describe("ExecHealthTracker.readBytes (item 19)", () => {
-  it("is present exactly when the inner executor reads bytes, and counts its infra failures like every op", async () => {
-    const plain: Executor = { exec: async () => "", readFile: async () => "", writeFile: async () => "" };
-    expect(new ExecHealthTracker(plain).readBytes).toBeUndefined();
-    let fail = true;
-    const withBytes: Executor = {
-      ...plain,
-      readBytes: async () => {
-        if (fail) throw new ExecInfraError("resident /read HTTP 502");
-        return new Uint8Array([1]);
-      },
-    };
-    const t = new ExecHealthTracker(withBytes);
-    await expect(t.readBytes!("a.png")).rejects.toBeInstanceOf(ExecInfraError);
-    expect(t.consecutiveInfraFailures).toBe(1);
-    fail = false;
-    expect(Array.from(await t.readBytes!("a.png"))).toEqual([1]);
-    expect(t.consecutiveInfraFailures).toBe(0);
   });
 });

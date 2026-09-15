@@ -136,7 +136,9 @@ describe("the CLI process running `ask` against a provider", () => {
     script = { kind: "refuse", status: 401, body: '{"error":{"message":"invalid api key"}}' };
     const r = await ask("what is 2+2");
     expect(r.code, `${r.stdout}\n${r.stderr}`).toBe(1);
-    expect(r.stdout).toContain('⚠️ Provider "fake" HTTP 401');
+    // The run's pi called the model through the process's loopback proxy, which forwarded the provider's refusal.
+    expect(r.stdout).toContain("⚠️ the model call failed: 401");
+    expect(r.stdout).toContain("invalid api key");
     expect(r.stdout).not.toMatch(PROCESS_LOG_LINE);
     expect(r.stderr).toMatch(/❌ \*general\* on `fake\/m`/);
   }, 60_000);

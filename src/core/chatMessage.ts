@@ -19,7 +19,7 @@ export type ContentPart =
    *  runner (never shown, never redacted — `collectText` skips it) and echoed
    *  back byte-for-byte in the next request: Anthropic verifies `signature`
    *  and rejects a modified or reordered block, and dropping them breaks the
-   *  turn on Claude Fable 5 (docs/reference/specs/run-loop.md item 11). Providers without
+   *  turn on Claude Fable 5 (docs/reference/specs/harness-pi.md item 5). Providers without
    *  the concept drop them on the way out. */
   | { type: "thinking"; thinking: string; signature: string }
   | { type: "redacted_thinking"; data: string };

@@ -177,6 +177,14 @@ export class RunBearerStore {
   }
 
   /** The run's grant and counters, for an operator surface — never its secrets. */
+  /** The span a run's proxied turns hang under (`reparent`), for a meter that
+   *  holds the run and not a token — the tests' scripted pi, which stands in
+   *  for the proxy's meter as well as for pi. Nothing for an unknown or ended run. */
+  spanOf(runId: string): Span | undefined {
+    const entry = this.entries.get(runId);
+    return entry && !entry.revoked ? entry.grant.span : undefined;
+  }
+
   grantOf(runId: string): RunBearerFacts | undefined {
     const entry = this.entries.get(runId);
     if (!entry) return undefined;

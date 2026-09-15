@@ -147,7 +147,7 @@ export class PiBridge {
   toolCalls = 0;
   /** The last text-only assistant message: the answer if pi settles on it. */
   private answerText: string | undefined;
-  /** Text beside a bookkeeping-only call, held until the next message decides (run-loop item 15). */
+  /** Text beside a bookkeeping-only call, held until the next message decides (harness-pi item 5). */
   private heldAnswer: string | undefined;
   private assistantStartedAt: number | undefined;
   /** The calls under way: their span, their tool, and whether their end is

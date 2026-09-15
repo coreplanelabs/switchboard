@@ -82,48 +82,51 @@ describe("parseDirectives — budget", () => {
     expect(parseDirectives("budget:2 ok").budget).toBe(2);
   });
 
-  it("is never sticky: a thread carrying budget:30 hands the follow-up its agent, and no budget", () => {
+  it("is never sticky: a thread carrying budget:30 hands the follow-up no budget (and no agent — that is the transcript's)", () => {
     const sticky = lastThreadDirectives([
-      { role: "user", text: "agent:explore budget:30 time the suite" },
+      { role: "user", text: "agent:explore budget:30 effort:low time the suite" },
       { role: "assistant", text: "done" },
     ]);
-    expect(sticky).toEqual({ agent: "explore" });
+    expect(sticky).toEqual({ effort: "low" });
     expect("budget" in sticky).toBe(false);
   });
 });
 
+// routing-and-config item 3: the model and the effort carry forward from the
+// thread's user turns; the agent never does — a thread's agent is the one
+// whose transcript it holds (`stickyAgentOf`, dispatch/thread.ts), so an
+// `agent:` token in the history is skipped like a `budget:`.
 describe("lastThreadDirectives (thread stickiness)", () => {
-  it("returns the last agent/model directives from user turns", () => {
+  it("returns the last model/effort directives from user turns, and never an agent", () => {
     const sticky = lastThreadDirectives([
-      { role: "user", text: "agent:coding fix the thing" },
+      { role: "user", text: "agent:coding effort:high fix the thing" },
       { role: "assistant", text: "on it" },
       { role: "user", text: "agent:review model:anthropic/claude-opus-5 check it" },
     ]);
-    expect(sticky.agent).toBe("review");
-    expect(sticky.model).toBe("anthropic/claude-opus-5");
+    expect(sticky).toEqual({ model: "anthropic/claude-opus-5", effort: "high" });
+    expect("agent" in sticky).toBe(false);
   });
 
   it("ignores assistant turns so quoted directives cannot hijack the thread", () => {
     const sticky = lastThreadDirectives([
-      { role: "user", text: "agent:coding fix" },
-      { role: "assistant", text: "you could try agent:review here" },
+      { role: "user", text: "model:anthropic/a fix" },
+      { role: "assistant", text: "you could try model:anthropic/b here" },
     ]);
-    expect(sticky.agent).toBe("coding");
+    expect(sticky.model).toBe("anthropic/a");
   });
 
-  it("is lenient: unknown agents in history are skipped, never thrown", () => {
+  it("is lenient: an unknown effort in history is skipped, never thrown; an agent token, known or not, is skipped too", () => {
     const sticky = lastThreadDirectives([
-      { role: "user", text: "agent:doesnotexist do something" },
-      { role: "user", text: "agent:coding do it" },
+      { role: "user", text: "agent:doesnotexist effort:bogus do something" },
+      { role: "user", text: "agent:coding effort:low do it" },
       { role: "user", text: "agent:alsofake follow up" },
     ]);
-    expect(sticky.agent).toBe("coding");
+    expect(sticky).toEqual({ effort: "low" });
   });
 
   it("returns nothing for a thread with no directives", () => {
     const sticky = lastThreadDirectives([{ role: "user", text: "hello" }]);
-    expect(sticky.agent).toBeUndefined();
-    expect(sticky.model).toBeUndefined();
+    expect(sticky).toEqual({});
   });
 });
 

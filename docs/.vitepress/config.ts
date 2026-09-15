@@ -98,8 +98,14 @@ export default defineConfig({
   // .gitignore's `dist/` already covers it. deploy/cloudflare-docs/ uploads it.
   cleanUrls: true,
   lastUpdated: true,
-  // A dead internal link is a build failure, not a 404 someone finds later.
-  ignoreDeadLinks: false,
+  // A dead internal link is a build failure, not a 404 someone finds later —
+  // with one allowance: a decision record is frozen once accepted
+  // (decisions:check), so a record that cited `run-loop.md` before that spec
+  // retired into `harness-pi.md` (record 0032's series, step 5) keeps its
+  // link; record 0032's amendment trail says where the spec went. No living
+  // page links there (src/docs/links.test.ts and the specs index), so the
+  // allowance names the one retired path and nothing else.
+  ignoreDeadLinks: [/\/run-loop$/],
   markdown: {
     // The highlighter's two palettes, one per appearance: the system's pair. The
     // block's ground is the theme's own token (`--vp-code-block-bg`), not a theme's.

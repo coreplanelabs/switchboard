@@ -1,0 +1,53 @@
+import { describe, expect, it } from "vitest";
+import { usageFromAnthropic, usageFromOpenAI } from "./usage.js";
+
+// Feature: docs/reference/specs/model-proxy.md item 3 — the meter reads each wire
+// shape's usage into the one TokenUsage; a malformed usage leaves a turn
+// unmetered, never failed.
+
+describe("usageFromAnthropic (token usage → TokenUsage)", () => {
+  it("maps input/output and both cache counters", () => {
+    expect(
+      usageFromAnthropic({
+        input_tokens: 12,
+        output_tokens: 3,
+        cache_read_input_tokens: 1000,
+        cache_creation_input_tokens: 40,
+      }),
+    ).toEqual({
+      inputTokens: 12,
+      outputTokens: 3,
+      cacheReadTokens: 1000,
+      cacheWriteTokens: 40,
+    });
+  });
+  it("omits absent/null cache counters and returns undefined when there is no usage or the core counts are missing", () => {
+    expect(
+      usageFromAnthropic({
+        input_tokens: 5,
+        output_tokens: 1,
+        cache_read_input_tokens: null,
+        cache_creation_input_tokens: null,
+      }),
+    ).toEqual({ inputTokens: 5, outputTokens: 1 });
+    expect(usageFromAnthropic(undefined)).toBeUndefined();
+    expect(usageFromAnthropic({ input_tokens: "x", output_tokens: 1 })).toBeUndefined();
+  });
+});
+
+describe("usageFromOpenAI (token usage → TokenUsage)", () => {
+  it("maps prompt/completion tokens and the cached-prompt detail when present", () => {
+    expect(
+      usageFromOpenAI({ prompt_tokens: 20, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 16 } }),
+    ).toEqual({
+      inputTokens: 20,
+      outputTokens: 4,
+      cacheReadTokens: 16,
+    });
+    expect(usageFromOpenAI({ prompt_tokens: 20, completion_tokens: 4 })).toEqual({ inputTokens: 20, outputTokens: 4 });
+  });
+  it("returns undefined when usage is absent or malformed", () => {
+    expect(usageFromOpenAI(undefined)).toBeUndefined();
+    expect(usageFromOpenAI({ prompt_tokens: 1 })).toBeUndefined();
+  });
+});

@@ -90,13 +90,13 @@ export type ResumePlan =
     };
 
 /** The built-in tools that are safe to run again although they are not
- *  side-effect-free: `write_file` is idempotent (the resident already re-issues
- *  it after a runtime swap), `update_status` and the `submit_*` recorders only
- *  set dispatcher state. A closed list — anything else that mutates (a shell
- *  command, a GitHub write, a bridged MCP tool that creates a ticket) has
- *  effects a restart makes unknowable, and is never re-issued. */
+ *  side-effect-free: `update_status` and the `submit_*` recorders only set
+ *  dispatcher state. A closed list — anything else that mutates (a shell
+ *  command, a file write, a GitHub write, a bridged MCP tool that creates a
+ *  ticket) has effects a restart makes unknowable, and is never re-issued. On
+ *  the pi harness no call is re-run: the action decides the words of the
+ *  restart note the rebuilt session ends on (harness-pi.md item 8). */
 export const RERUN_SAFE_TOOLS: ReadonlySet<string> = new Set([
-  "write_file",
   "update_status",
   "submit_verdict",
   "submit_pr_description",

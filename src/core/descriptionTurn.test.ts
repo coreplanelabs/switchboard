@@ -2,9 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 import { AGENTS } from "../agents/registry.js";
 import type { Executor } from "../execution/executor.js";
 import type { OpenPrRef } from "../execution/githubPulls.js";
-import type { ChatMessage } from "./chatMessage.js";
-import type { Provider } from "./provider.js";
-import type { RunOptions } from "../runner.js";
 import type { CodingPrTarget, WorkspaceObservation } from "./codingPrPostStep.js";
 import {
   DESCRIPTION_TURN_MAX_MINUTES,
@@ -17,19 +14,15 @@ import {
 import type { PiFollowUpTurnInput } from "./harness/pi/harness.js";
 import type { PrDescription } from "./prDescription.js";
 import type { RunEvent } from "./runEvents.js";
-import { RunControl } from "./runRegistry/runControl.js";
 import type { Span } from "./trace/types.js";
 
 // Feature: docs/reference/specs/pr-description.md item 5 — the description turn.
 // The decision (`descriptionTurnTarget`) and the turn (`runDescriptionTurn`)
 // are driven here as units; the dispatcher suite proves the turn end to end
-// through a real agent loop (a fake provider submits on the second turn). The
-// runner is mocked HERE so the turn's wiring — the clipped def, the messages
-// appended in place, the hook that both forwards and reports the description
-// — is asserted without a model loop.
-
-const { runAgentMock } = vi.hoisted(() => ({ runAgentMock: vi.fn() }));
-vi.mock("../runner.js", () => ({ runAgent: runAgentMock }));
+// through the pi harness (a scripted pi submits on the follow-up prompt). The
+// session's follow-up entry is a spy HERE so the turn's wiring — the clipped
+// budget, the follow-up text, the hook that both forwards and reports the
+// description — is asserted without a model.
 
 const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
 const PR: OpenPrRef = { number: 700, htmlUrl: "https://github.com/acme/api/pull/700" };
@@ -181,7 +174,7 @@ describe("descriptionFollowUp — the user turn the model is given", () => {
   });
 });
 
-describe("runDescriptionTurn — one clipped turn on the run's own messages", () => {
+describe("runDescriptionTurn — one clipped prompt on the run's own pi session (harness-pi item 14)", () => {
   const t: DescriptionTurnTarget = {
     repo: "acme/api",
     branch: "dependabot/github_actions/actions-4c45254bbe",
@@ -194,43 +187,29 @@ describe("runDescriptionTurn — one clipped turn on the run's own messages", ()
     writeFile: async () => {},
     release: async () => ({ released: true }),
   } as unknown as Executor;
-  const provider: Provider = { name: "fake", complete: async () => ({ content: [], stopReason: "end_turn" }) };
 
   function turnSpec(over: Partial<Parameters<typeof runDescriptionTurn>[0]["turn"]> = {}) {
     const events: RunEvent[] = [];
     const progress: string[] = [];
     const forwarded: PrDescription[] = [];
     const turn = {
-      provider,
-      model: "anthropic/claude-fable-5",
       agent: AGENTS.coding,
       toolContext: { executor, onPrDescription: (d: PrDescription) => forwarded.push(d) },
       onProgress: (n: string) => progress.push(n),
       onEvent: (e: RunEvent) => events.push(e),
-      control: new RunControl(),
       ...over,
     };
     return { turn, events, progress, forwarded };
   }
 
-  it("publishes the description_turn note, appends the answer + follow-up IN PLACE, runs the agent on a clipped COPY of the def with the same tools, and reports the description the hook received", async () => {
-    runAgentMock.mockReset();
-    runAgentMock.mockImplementation(async (opts: RunOptions) => {
-      opts.toolContext.onPrDescription?.(DESCRIPTION); // the model called submit_pr_description
+  it("publishes the description_turn note and prompts the session once: the follow-up text, the clipped budget (never the shared def's), the turn's tool context with the hook under the caller's span; the description the relayed tool submits reaches the hook AND the return value", async () => {
+    const followUp = vi.fn(async (input: PiFollowUpTurnInput) => {
+      input.toolContext.onPrDescription?.(DESCRIPTION); // the relayed submit_pr_description, run in the bot under THIS turn's context
       return "Description resubmitted.";
     });
-    const { turn, events, progress, forwarded } = turnSpec({ extraTools: [{ name: "mcp_x" } as never] });
-    const messages: ChatMessage[] = [{ role: "user", content: [{ type: "text", text: "fix the failing check" }] }];
-    const span = { id: "s-turn", name: "run.description_turn" } as unknown as import("./trace/types.js").Span;
-    const out = await runDescriptionTurn({
-      span,
-      target: t,
-      answer: "Pushed the fix.",
-      messages,
-      system: "SYS",
-      turn,
-      logKey: "t",
-    });
+    const { turn, events, progress, forwarded } = turnSpec({ followUp });
+    const span = { id: "s-turn", name: "run.description_turn" } as unknown as Span;
+    const out = await runDescriptionTurn({ span, target: t, turn, logKey: "t" });
     // the note, before the turn
     expect(events).toEqual([
       expect.objectContaining({
@@ -240,114 +219,24 @@ describe("runDescriptionTurn — one clipped turn on the run's own messages", ()
       }),
     ]);
     expect(progress.some((p) => p.includes("acme/api#700"))).toBe(true);
-    // the run's transcript grew by the assistant answer and the follow-up, in that order
-    expect(messages).toHaveLength(3);
-    expect(messages[1]).toEqual({ role: "assistant", content: [{ type: "text", text: "Pushed the fix." }] });
-    expect(messages[2].role).toBe("user");
-    expect(JSON.stringify(messages[2].content)).toContain("submit_pr_description");
-    // one agent run, on the same messages array, system and tools; the def clipped, never the shared one
-    expect(runAgentMock).toHaveBeenCalledTimes(1);
-    const opts = runAgentMock.mock.calls[0][0] as RunOptions;
-    expect(opts.messages).toBe(messages);
-    expect(opts.system).toBe("SYS");
-    expect(opts.span).toBe(span); // the loop's `run.agent` hangs under `run.description_turn` (tracing.md item 17)
-    expect(opts.extraTools).toEqual([{ name: "mcp_x" }]);
-    expect(opts.agent).not.toBe(AGENTS.coding);
-    expect(opts.agent.maxTurns).toBe(DESCRIPTION_TURN_MAX_TURNS);
-    expect(opts.agent.maxMinutes).toBe(DESCRIPTION_TURN_MAX_MINUTES);
-    expect(opts.agent.system).toBe(AGENTS.coding.system); // everything else is the coding def
-    expect(AGENTS.coding.maxTurns).toBeGreaterThan(DESCRIPTION_TURN_MAX_TURNS); // the clip is a clip
-    // the description reached BOTH the caller's hook and the return value
-    expect(forwarded).toEqual([DESCRIPTION]);
-    expect(out.description).toEqual(DESCRIPTION);
-  });
-
-  it("a turn that submits nothing reports undefined; a turn whose runner throws is logged and reports the same, never throws", async () => {
-    runAgentMock.mockReset();
-    runAgentMock.mockResolvedValueOnce("I left the description as it was.");
-    const a = turnSpec();
-    const out1 = await runDescriptionTurn({
-      target: t,
-      answer: "x",
-      messages: [],
-      system: undefined,
-      turn: a.turn,
-      logKey: "t",
-    });
-    expect(out1.description).toBeUndefined();
-    expect(a.forwarded).toEqual([]);
-    runAgentMock.mockRejectedValueOnce(new Error("provider down"));
-    const b = turnSpec();
-    const out2 = await runDescriptionTurn({
-      target: t,
-      answer: "x",
-      messages: [],
-      system: undefined,
-      turn: b.turn,
-      logKey: "t",
-    });
-    expect(out2.description).toBeUndefined();
-    expect(b.events.filter((e) => e.type === "run_note")).toHaveLength(1); // the note was still published
-  });
-
-  // harness-pi item 14: on a preset on pi the turn is a `prompt` on the run's own
-  // pi session — the seam the run stage hands over — never a second `runAgent`
-  // loop: the same follow-up text, the same clipped budget, the same hook, the
-  // same note, and the same failure handling.
-  it("on the pi harness the turn is a prompt on the run's own session: the same follow-up text, the clipped budget, the turn's tool context with the hook, never runAgent; the description the relayed tool submits is reported", async () => {
-    runAgentMock.mockReset();
-    const followUp = vi.fn(async (input: PiFollowUpTurnInput) => {
-      input.toolContext.onPrDescription?.(DESCRIPTION); // the relayed submit_pr_description, run in the bot under THIS turn's context
-      return "Description resubmitted.";
-    });
-    const { turn, events, progress, forwarded } = turnSpec({ followUp });
-    const messages: ChatMessage[] = [{ role: "user", content: [{ type: "text", text: "fix the failing check" }] }];
-    const span = { id: "s-turn", name: "run.description_turn" } as unknown as Span;
-    const out = await runDescriptionTurn({
-      span,
-      target: t,
-      answer: "Pushed the fix.",
-      messages,
-      system: "SYS",
-      turn,
-      logKey: "t",
-    });
-    expect(runAgentMock).not.toHaveBeenCalled();
     expect(followUp).toHaveBeenCalledTimes(1);
     const input = followUp.mock.calls[0][0];
     expect(input.text).toBe(descriptionFollowUp(t));
+    expect(JSON.stringify(input.text)).toContain("submit_pr_description");
     expect(input.maxTurns).toBe(DESCRIPTION_TURN_MAX_TURNS);
     expect(input.maxMinutes).toBe(DESCRIPTION_TURN_MAX_MINUTES);
-    expect(input.span).toBe(span); // the turn's `run.agent` hangs under `run.description_turn` on pi too (tracing.md item 17)
+    expect(AGENTS.coding.maxTurns).toBeGreaterThan(DESCRIPTION_TURN_MAX_TURNS); // the clip is a clip
+    expect(AGENTS.coding.maxMinutes).toBeGreaterThan(DESCRIPTION_TURN_MAX_MINUTES);
+    expect(input.span).toBe(span); // the turn's `run.agent` hangs under `run.description_turn` (tracing.md item 17)
     expect(input.toolContext.executor).toBe(executor);
-    // the same note, the same transcript growth — the follow-up IS the appended user turn
-    expect(events).toEqual([
-      expect.objectContaining({
-        type: "run_note",
-        kind: "description_turn",
-        summary: expect.stringContaining("acme/api#700"),
-      }),
-    ]);
-    expect(progress.some((p) => p.includes("acme/api#700"))).toBe(true);
-    expect(messages).toHaveLength(3);
-    expect(messages[1]).toEqual({ role: "assistant", content: [{ type: "text", text: "Pushed the fix." }] });
-    expect(messages[2]).toEqual({ role: "user", content: [{ type: "text", text: input.text }] });
     // the description reached BOTH the caller's hook and the return value
     expect(forwarded).toEqual([DESCRIPTION]);
     expect(out.description).toEqual(DESCRIPTION);
   });
 
-  it("a follow-up turn on pi that submits nothing reports undefined; one pi refuses (the turn throws) is logged and reports the same, never throws — and the native loop is never reached for", async () => {
-    runAgentMock.mockReset();
+  it("a turn that submits nothing reports undefined; a turn pi refuses (the prompt throws) is logged and reports the same, never throws", async () => {
     const a = turnSpec({ followUp: async () => "I left the description as it was." });
-    const out1 = await runDescriptionTurn({
-      target: t,
-      answer: "x",
-      messages: [],
-      system: undefined,
-      turn: a.turn,
-      logKey: "t",
-    });
+    const out1 = await runDescriptionTurn({ target: t, turn: a.turn, logKey: "t" });
     expect(out1.description).toBeUndefined();
     expect(a.forwarded).toEqual([]);
     const b = turnSpec({
@@ -355,16 +244,26 @@ describe("runDescriptionTurn — one clipped turn on the run's own messages", ()
         throw new Error("pi refused the prompt: Agent is already processing");
       },
     });
-    const out2 = await runDescriptionTurn({
-      target: t,
-      answer: "x",
-      messages: [],
-      system: undefined,
-      turn: b.turn,
-      logKey: "t",
-    });
+    const out2 = await runDescriptionTurn({ target: t, turn: b.turn, logKey: "t" });
     expect(out2.description).toBeUndefined();
-    expect(b.events.filter((e) => e.type === "run_note")).toHaveLength(1);
-    expect(runAgentMock).not.toHaveBeenCalled();
+    expect(b.events.filter((e) => e.type === "run_note")).toHaveLength(1); // the note was still published
+  });
+
+  // A `finish` plan (run-history item 37): the loop answered before a bot
+  // restart and its pi is gone, so there is no session to prompt. The turn
+  // runs nothing and says so; the post-step's note then reads "not resubmitted".
+  it("without a session to prompt (a finish plan) the turn asks nothing: one note saying no session, nothing submitted, no throw", async () => {
+    const { turn, events, progress, forwarded } = turnSpec();
+    const out = await runDescriptionTurn({ target: t, turn, logKey: "t" });
+    expect(out.description).toBeUndefined();
+    expect(forwarded).toEqual([]);
+    expect(progress).toEqual([]);
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "run_note",
+        kind: "description_turn",
+        summary: expect.stringMatching(/no session to ask on \(the loop answered before a restart\)/),
+      }),
+    ]);
   });
 });

@@ -24,7 +24,7 @@ docs: {
 },
 ```
 
-Every field is documented on `AgentDef` in the same file. The turn cap is never set by hand: `loopBudget(minutes)` gives the preset its `maxMinutes` and a `maxTurns` of six times that, a pace only a looping run sustains ([run loop](../reference/specs/run-loop.md) item 1).
+Every field is documented on `AgentDef` in the same file. The turn cap is never set by hand: `loopBudget(minutes)` gives the preset its `maxMinutes` and a `maxTurns` of six times that, a pace only a looping run sustains ([the pi harness](../reference/specs/harness-pi.md) item 15).
 
 | Field | What it decides |
 |---|---|

@@ -79,7 +79,6 @@
     "load": "tsx scripts/load.ts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.124.0",
     "@earendil-works/pi-ai": "0.85.1",
     "@slack/bolt": "^5.1.0",
     "aws4fetch": "^1.0.20",
@@ -90,6 +89,7 @@
     "zod": "^4.5.4"
   },
   "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.85.1",
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.0.0",
     "eslint": "^10.10.0",

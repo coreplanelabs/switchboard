@@ -13,7 +13,7 @@
 // request become the session, the request alone is the prompt.
 
 import { isDeepStrictEqual } from "node:util";
-import type { StepReport } from "../../../runner.js";
+import type { StepReport } from "../../runLedger/stepReport.js";
 import type { ChatMessage, ContentPart } from "../../chatMessage.js";
 import type { AssembledCompaction } from "../../runLedger/transcript.js";
 import type { CompactionEntry } from "../../runLedger/types.js";

@@ -6,7 +6,7 @@ import { MAX_READ_BYTES } from "../execution/binaryRead.js";
 import type { Executor } from "../execution/executor.js";
 import { Secret } from "../secrets.js";
 import { attachFileTool, MAX_ARTIFACT_BYTES, parsePutReport, type UploadTicketCapability } from "./attach.js";
-import { TOOLSETS } from "./workspace.js";
+import { TOOLSETS } from "./toolsets.js";
 import type { ToolContext } from "./runnableTool.js";
 import { ConsoleIO } from "../cli.js";
 import { HttpIO } from "../channels/http.js";

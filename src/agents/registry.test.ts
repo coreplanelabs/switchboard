@@ -35,14 +35,6 @@ describe("agent registry matches the feature specs", () => {
     expect(AGENTS.coding.effort).toBeUndefined();
   });
 
-  // docs/reference/specs/harness-pi.md item 1: the harness is a preset property
-  // a deployment may override; until the coding preset's flip, every preset
-  // declares the native loop, so a deployment that sets nothing is unchanged.
-  it("every preset declares the native harness; coding names it explicitly, the one the pi series moves first", () => {
-    for (const agent of Object.values(AGENTS)) expect(agent.harness ?? "native", agent.name).toBe("native");
-    expect(AGENTS.coding.harness).toBe("native");
-  });
-
   it("general's prompt names its GitHub tools and redirects code/PR/web-research asks to the other agents", () => {
     // The general agent points at the agents that can act — it never invents a
     // repo URL or tells the user to run git themselves. It holds the issue tools
@@ -119,12 +111,12 @@ describe("agent registry matches the feature specs", () => {
   });
 });
 
-// Feature: docs/reference/specs/run-loop.md item 1 — the wall clock is the
+// Feature: docs/reference/specs/harness-pi.md item 15 — the wall clock is the
 // budget; the turn cap is a runaway guard derived from it, never a number a
 // working run reaches. A turn every ten seconds for the whole budget is a loop,
 // not work: six a minute, times the minutes. Ship is the one exception — its
 // def never runs the loop, so its 1 is structural.
-describe("the turn cap is a runaway guard derived from the wall clock (docs/reference/specs/run-loop.md item 1)", () => {
+describe("the turn cap is a runaway guard derived from the wall clock (docs/reference/specs/harness-pi.md item 15)", () => {
   it("the rule: six turns a minute over the wall clock", () => {
     expect(RUNAWAY_TURNS_PER_MINUTE).toBe(6);
     expect(runawayTurnCap(45)).toBe(270);
@@ -934,7 +926,6 @@ describe("explore agent (docs/reference/specs/agent-explore.md)", () => {
     expect(AGENTS.explore.maxMinutes).toBe(120);
     expect(AGENTS.explore.maxTurns).toBeGreaterThanOrEqual(100);
     expect(AGENTS.explore.maxTokens).toBeGreaterThanOrEqual(64000);
-    expect(AGENTS.explore.cacheTtl).toBe("1h"); // a long step must not outlive the 5-minute cache entry
     expect(AGENTS.explore.effort).toBeUndefined(); // the config layers decide, as for coding
     expect(AGENTS.explore.residentSystem).toBeUndefined(); // never a resident: the class is cold
     expect(getAgent("explore")).toBe(AGENTS.explore);

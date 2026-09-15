@@ -1,6 +1,5 @@
 // Agent definitions. An agent is a system prompt + toolset + machine class + wall-clock budget.
 import type { Effort } from "../effort.js";
-import type { CacheTtl } from "../core/provider.js";
 import { BASH_TIMEOUT_MAX_MS } from "../execution/bashTimeout.js";
 import { CONTRACT_HEADING, CONTRACT_SECTION_HEADINGS, PR_TITLE_GUARD } from "../core/ship/contract.js";
 // Which model runs it is resolved separately by the config layers, so any
@@ -42,21 +41,12 @@ export function machineNeedsRepo(machine: MachineClass): boolean {
 export const IDENTITIES = ["none", "read", "write"] as const;
 export type Identity = (typeof IDENTITIES)[number];
 
-/** The loops a preset's runs can be driven by (docs/reference/specs/harness-pi.md
- *  item 1): `native`, the in-process turn loop (`src/runner.ts`), or `pi`, the
- *  pi coding agent in the run's own execution container, driven over its RPC
- *  protocol and bridged onto the run's events. A deployment's `harness:` block
- *  overrides a preset's own declaration (`effectiveHarness`,
- *  src/core/harness/select.ts). */
-export const HARNESSES = ["native", "pi"] as const;
-export type Harness = (typeof HARNESSES)[number];
-
 /** The pace that marks a run as looping rather than working: a model turn
  *  every ten seconds, sustained for the whole wall clock. A busy run takes
  *  20–40 s a turn (a model think plus a tool call), so a run that averages six
  *  a minute from start to end is re-issuing calls, not making progress — and
  *  its turn cap ends it before the wall clock would, with a write-up that
- *  says so (docs/reference/specs/run-loop.md item 1). */
+ *  says so (docs/reference/specs/harness-pi.md item 15). */
 export const RUNAWAY_TURNS_PER_MINUTE = 6;
 
 /** The turn cap a wall clock implies: `maxMinutes × RUNAWAY_TURNS_PER_MINUTE`.
@@ -76,7 +66,8 @@ export interface AgentDef {
   name: string;
   description: string;
   system: string;
-  /** key into TOOLSETS: "full" | "readonly" | "web" | "assistant" | "explore" | "conductor" | "none" */
+  /** key into TOOLSETS (src/tools/toolsets.ts): the tools the bot relays to
+   *  the preset's pi; pi's own workspace tools follow `identity`. */
   toolset: "full" | "readonly" | "web" | "assistant" | "explore" | "conductor" | "none";
   /** The runaway guard, not a budget: `runawayTurnCap(maxMinutes)` for every
    *  preset that runs the loop (`loopBudget`). The wall clock below is the
@@ -91,11 +82,6 @@ export interface AgentDef {
    *  every config layer (directive, thread, user, channel, `defaults.efforts`)
    *  beats it; see `src/effort.ts`. Omit to leave it to config / the model. */
   effort?: Effort;
-  /** Prompt-cache TTL for this agent's model calls (docs/reference/specs/run-loop.md item
-   *  11). Omit for the provider default (`5m`); set `1h` where one step (a long
-   *  model turn plus its tool run) can exceed 5 minutes, or the cache written
-   *  by each call expires before the next call can read it. */
-  cacheTtl?: CacheTtl;
   /** Where the agent's tools execute: the machine class the executor factory
    *  provisions for its runs (`MACHINE_CLASSES`). `none` provisions nothing —
    *  no workspace, no sandbox, no credential. */
@@ -119,12 +105,6 @@ export interface AgentDef {
    *  discovery, no gh CLI. Selected by the dispatcher AFTER executor
    *  resolution via RunOptions.system; the shared AgentDef is never mutated. */
   residentSystem?: string;
-  /** Which loop drives the preset's runs (`HARNESSES`): the native loop
-   *  unless declared, and whatever a deployment's `harness.<preset>` says
-   *  over that. A preset with a workspace runs pi in the run's execution
-   *  container; a preset without one (machine class `none`) runs it as a
-   *  child of the bot, with none of pi's own tools. */
-  harness?: Harness;
 }
 
 // Every PR the coding agent ships carries a rich description by default —
@@ -551,17 +531,10 @@ const WORK_PRESETS = {
     toolset: "full",
     maxTokens: 64000,
     ...loopBudget(45),
-    // Coding steps run long: a single model turn can take 5-6 minutes and
-    // installs/tests add more — a 5m cache entry would expire between
-    // requests, so the 2× write buys reads for the whole run.
-    cacheTtl: "1h",
     // No built-in effort: the deployment decides (`defaults.efforts.coding`,
     // `config set channel efforts.coding=…`, or `effort:` per request).
     machine: "repo-resident",
     identity: "write", // pushes branches and opens pull requests
-    // The native loop until the pi series moves this preset; a deployment
-    // flips it early with `harness: { coding: pi }` (docs/reference/specs/harness-pi.md).
-    harness: "native",
   },
   review: {
     name: "review",
@@ -627,9 +600,6 @@ const WORK_PRESETS = {
     identity: "read", // a read-scoped token: it can clone and read, never push — whatever the caller holds
     maxTokens: 64000,
     ...loopBudget(120),
-    // A detached job polled across calls makes long steps: a 5m cache entry
-    // would expire between them, so the 2× write buys reads for the whole run.
-    cacheTtl: "1h",
     // No built-in effort: the deployment decides, as for coding.
   },
 } satisfies Record<string, AgentDef>;

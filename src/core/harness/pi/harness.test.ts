@@ -8,8 +8,8 @@ import {
   timeBudgetInstruction,
   turnGuardInstruction,
   wrapUpInstruction,
-  type StepReport,
-} from "../../../runner.js";
+} from "./windDown.js";
+import type { StepReport } from "../../runLedger/stepReport.js";
 import type { RunnableTool } from "../../../tools/runnableTool.js";
 import { bearerHashOf, RunBearerStore } from "../../modelProxy/runBearers.js";
 import type { RunEvent } from "../../runEvents.js";
@@ -34,7 +34,6 @@ import {
   isTransientProviderError,
   piHarnessFactsOf,
   promptOf,
-  relayedTools,
   runPiHarness,
   runPiHarnessOpen,
   settlementResults,
@@ -47,7 +46,7 @@ import {
 // Feature: docs/reference/specs/harness-pi.md — the harness end to end over a
 // fake container and a scripted pi: the files and the process, the first
 // prompt, the events the bridge puts on the stream, the mirror's step records,
-// the wind-downs with the native loop's words, the stops, the steers, the
+// the wind-downs in the loop's words, the stops, the steers, the
 // deaths, and the two ways back after a restart.
 
 const NOW = 1_700_000_000_000;
@@ -63,7 +62,6 @@ const agent: AgentDef = {
   maxTurns: 270,
   maxTokens: 64000,
   maxMinutes: 45,
-  harness: "pi",
 };
 
 const updateStatus: RunnableTool = {
@@ -476,13 +474,24 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(seen?.registered).toBe(true);
   });
 
-  it("a thread follow-up is steered into pi with the loop's follow-up prompt, recorded as an input and a follow_up note", async () => {
+  it("a thread follow-up is steered into pi with the loop's follow-up prompt, recorded as an input and a follow_up note; the ledger counts it consumed once pi echoes the steer, not before", async () => {
     const w = world();
-    scriptedPi(w.container, (n, c) => {
+    scriptedPi(w.container, () => {
       w.inbox.push({ text: "also bump the version", userId: "slack:UANN", userName: "ann", at: NOW, ledgerSeq: 3 });
       bashTurn(w, "c1", "ls", "files");
-      finalTurn(c, "done");
     });
+    // pi reads a steer at the turn boundary and echoes it as the next user
+    // message, then answers: the echo is what the mirror sees.
+    const scripted = w.container.onStdin!;
+    w.container.onStdin = (line, c) => {
+      scripted(line, c);
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type !== "steer") return;
+      // The echo with its whitespace folded, as a renderer might: still the steer's.
+      const echo = { role: "user", content: [{ type: "text", text: String(cmd.message).replace(/\s+/g, " ").trim() }] };
+      c.emit({ type: "message_start", message: echo }, { type: "message_end", message: echo });
+      finalTurn(c, "done");
+    };
     await w.start();
     const steer = w.container.commands().find((c) => c.type === "steer");
     expect(steer).toBeDefined();
@@ -496,7 +505,34 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       }),
     ]);
     expect(w.events.filter((e) => e.type === "run_note" && e.kind === "follow_up")).toHaveLength(1);
-    expect(w.steps.at(-1)!.inboxConsumedSeq).toBe(3);
+    // The bash step's record predates the echo; the final turn's record says the seq is consumed.
+    expect(w.steps.map((s) => s.inboxConsumedSeq)).toEqual([0, 3]);
+    expect(w.inbox.size).toBe(0);
+  });
+
+  it("a follow-up steered into pi that the loop then fails before pi echoes it goes back to the inbox — the run stage's fresh turn, never the floor; one pi settled before the steer could go too", async () => {
+    const failed = world();
+    scriptedPi(failed.container, (_n, c) => {
+      failed.inbox.push({ text: "also bump the version", userId: "slack:UANN", at: NOW, ledgerSeq: 3 });
+      bashTurn(failed, "c1", "ls", "files");
+      // The next model call fails with the steer still queued in pi.
+      c.emit(
+        { type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "503" } },
+        { type: "agent_settled" },
+      );
+    });
+    await expect(failed.start()).rejects.toThrow("the model call failed: 503");
+    expect(failed.container.commands().some((c) => c.type === "steer")).toBe(true);
+    expect(failed.inbox.drain().map((i) => i.text)).toEqual(["also bump the version"]);
+    expect(failed.steps.every((s) => s.inboxConsumedSeq === 0)).toBe(true);
+
+    const settled = world();
+    scriptedPi(settled.container, (n, c) => {
+      settled.inbox.push({ text: "one more thing", userId: "slack:UANN", at: NOW });
+      finalTurn(c, "done"); // pi answers before it could read the drain's steer
+    });
+    expect(await settled.start()).toBe("done");
+    expect(settled.inbox.drain().map((i) => i.text)).toEqual(["one more thing"]);
   });
 
   // docs/reference/specs/session-log.md item 10: the notepad's second read point.
@@ -1621,18 +1657,6 @@ describe("runPiHarness — after a bot restart", () => {
 });
 
 describe("the small pure pieces", () => {
-  it("relayedTools drops the workspace tools pi has of its own and keeps the rest", () => {
-    const named = (name: string): RunnableTool => ({ name, description: "", inputSchema: {}, run: async () => "" });
-    expect(
-      relayedTools([
-        named("bash"),
-        named("read_file"),
-        named("write_file"),
-        named("update_status"),
-        named("web_fetch"),
-      ]).map((t) => t.name),
-    ).toEqual(["update_status", "web_fetch"]);
-  });
   it("splitSeed: the last user turn is the prompt and every turn before it is the session; a one-turn seed has no session; an empty seed has neither", () => {
     const ask: ChatMessage = { role: "user", content: [{ type: "text", text: "what does CI run?" }] };
     const told: ChatMessage = { role: "assistant", content: [{ type: "text", text: "`npm run verify`." }] };
