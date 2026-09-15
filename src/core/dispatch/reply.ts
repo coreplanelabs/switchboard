@@ -255,6 +255,8 @@ export function activityLine(e: RunEvent): string {
       return "request received";
     case "context":
       return "context recorded";
+    case "notes":
+      return "📝 notes saved";
     case "answer":
       return "answer ready";
     case "run_meta":

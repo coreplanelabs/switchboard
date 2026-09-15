@@ -23,6 +23,7 @@ import {
   type UploadTicketCapability,
 } from "./attach.js";
 import { RUN_TOOLS, type RunsReadCapability, type SteerCapability } from "./runs.js";
+import { SESSION_TOOLS, type SessionCapability } from "./session.js";
 import type { WaitCapability } from "../core/dispatch/awaitChildren.js";
 import type { SpawnCapability } from "../core/dispatch/spawn.js";
 import type { SkillStore } from "../skills/index.js";
@@ -97,6 +98,10 @@ export interface ToolContext {
    *  REQUESTER's actor, so a run sees exactly what the person who asked may
    *  see. Absent → the tools report themselves unavailable. */
   runs?: RunsReadCapability;
+  /** The run's reach into its own session log (docs/reference/specs/session-log.md
+   *  item 10): what `recall` searches and reads and `notes` writes. Built by
+   *  the dispatcher for a run with a session; absent, the tools say so. */
+  session?: SessionCapability;
   /** The steer behind `send_to_run` (docs/reference/specs/agent-conductor.md
    *  item 8): into a live child's inbox as the requester, through the path a
    *  thread reply takes. Built by the dispatcher beside `runs`; absent → the
@@ -666,6 +671,11 @@ export const updateStatusTool: RunnableTool = {
 // attach_file (docs/reference/specs/agent-coding.md item 10) is full-only: the
 // coding agent is the one that renders screenshots and PDFs worth showing; it
 // posts into the conversation, so it never joins a read-only toolset.
+// The session tools (docs/reference/specs/session-log.md item 10) — `recall`
+// over the thread-and-agent log and `notes`, the session's notepad — join the
+// toolsets of the presets that have a workspace and so can run on the pi
+// harness: `full`, `readonly` and `explore`. The notepad is the session's own
+// state, not a repository write, so the read-only review agent keeps it too.
 export const TOOLSETS: Record<string, RunnableTool[]> = {
   full: [
     bashTool,
@@ -682,6 +692,7 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
     useSkillTool,
     ...GITHUB_READ_TOOLS,
     ...GITHUB_ISSUE_WRITE_TOOLS,
+    ...SESSION_TOOLS,
   ],
   readonly: [
     bashTool,
@@ -693,6 +704,7 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
     listSkillsTool,
     useSkillTool,
     ...GITHUB_READ_TOOLS,
+    ...SESSION_TOOLS,
   ],
   web: [webFetchTool, webSearchTool, updateStatusTool, ...GITHUB_READ_TOOLS],
   /** The general agent: no workspace, no shell — GitHub reads + issue writes
@@ -713,6 +725,7 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
     listSkillsTool,
     useSkillTool,
     ...GITHUB_READ_TOOLS,
+    ...SESSION_TOOLS,
   ],
   /** The conductor (docs/reference/specs/agent-conductor.md): the five run
    *  tools — the only toolset that holds them, so no other preset can start,

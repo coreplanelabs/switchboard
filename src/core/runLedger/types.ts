@@ -206,6 +206,23 @@ export interface TranscriptRow {
   json: string;
 }
 
+/** One hit of a session log's full-text search (session-log item 10): the
+ *  row's turn and part, whose turn it is, what kind of row (`rowKind`), and
+ *  the text the index held for it. */
+export interface SessionHit {
+  idx: number;
+  part: number;
+  role?: "user" | "assistant";
+  kind: string;
+  text: string;
+}
+
+/** A session's notepad (record 0035, "The notepad"): the text and when it was last written. */
+export interface Notepad {
+  text: string;
+  updatedAt: number;
+}
+
 /** An externalized attachment: base64 data stored once, referenced from a row. */
 export interface TranscriptAttachment {
   ref: string;

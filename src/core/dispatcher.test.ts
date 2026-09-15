@@ -11825,6 +11825,8 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       tail.map((message, idx) => ({ idx, message })),
       KEY,
     );
+    // The previous run kept notes (session-log item 10): they ride the next run's prompt.
+    await ledger.writeNotepad(KEY, "gen-R", "decided: keep the helper; head green at abc123");
     await ledger.releaseSession(KEY, "run-prev", "gen-R");
     await store.put({
       id: "run-prev",
@@ -11861,9 +11863,15 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
     let handed: ChatMessage[] | undefined;
     let agentOnPi: string | undefined;
+    let systemOnPi: string | undefined;
+    let notepadOnPi: string | undefined;
+    let sessionTools: string[] = [];
     vi.mocked(runPiHarness).mockImplementationOnce(async (_deps, run) => {
       handed = run.messages;
       agentOnPi = run.agent.name;
+      systemOnPi = run.system;
+      notepadOnPi = (await run.notepad?.())?.text;
+      sessionTools = run.tools.map((tool) => tool.name).filter((name) => name === "recall" || name === "notes");
       return "bumped";
     });
     const { io, replies } = fakeIO(history);
@@ -11871,6 +11879,12 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     await t.writer.settled();
     expect(agentOnPi).toBe("coding");
     expect(handed).toEqual([...tail, user("also check the lockfile"), user("and bump the version")]);
+    // The notepad rides the prompt (session-log item 10), never a row; the harness can read it for
+    // the compaction steer; the two session tools are relayed to pi.
+    expect(systemOnPi).toContain("YOUR NOTES FOR THIS THREAD");
+    expect(systemOnPi).toContain("decided: keep the helper; head green at abc123");
+    expect(notepadOnPi).toBe("decided: keep the helper; head green at abc123");
+    expect(sessionTools).toEqual(["recall", "notes"]);
     expect(replies.at(-1)).toBe("bumped");
     // The router was never asked and the scripted provider never called: the agent came from the thread's transcript.
     expect(t.provider.requests).toHaveLength(0);

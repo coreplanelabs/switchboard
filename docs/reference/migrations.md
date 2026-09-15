@@ -4,6 +4,10 @@ What an operator changes when a release breaks something: one section per such r
 
 A section says, in this order: what no longer works as it did, what replaces it, and the smallest edit that gets an installation from one to the other — a config key to rename, a command to re-run, a secret to add. Nothing else: history and reasons live in the changelog and the [decision records](../explanation/design-decisions.md).
 
+## 1.218.0
+
+- Runs on the `coding`, `review` and `explore` presets have two more tools: `recall`, which searches the thread's whole conversation log (every turn of every run of that agent in the thread, compacted turns included) and reads a turn back, and `notes`, a notepad per thread and agent that rides the next run's system prompt and is steered to pi after every compaction ([session-log](specs/session-log.md) item 10). Their prompts say what belongs in the notes. Nothing for an operator to change; the notepad lives in the session log object the previous release created.
+
 ## 1.217.0
 
 - A follow-up in a thread whose newest run is on the pi harness continues that run's agent and its conversation ([session-log](specs/session-log.md) item 9): the agent is sticky by transcript, the router is not asked, and the model starts from the session log's newest turns, the lines written since and the reply instead of the thread's Slack history; the record says `seed: session`. A thread on the native loop behaves as before. Nothing for an operator to change; a deployment with no pi preset (`harness:` unset) sees no difference.

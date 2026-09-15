@@ -292,6 +292,29 @@ describe("makeSystemComposer (head-pinned composition with an explicit AgentDef)
     expect(compose({ sha: undefined, verified: false })).toBe(AGENTS.general.system);
   });
 
+  // docs/reference/specs/session-log.md item 10: what the session already knows
+  // is advisory context like memory, and sits right after it.
+  it("the notes block follows the memory block and precedes the config block; absent, the prompt is untouched", () => {
+    const compose = makeSystemComposer({
+      agent: AGENTS.general,
+      resident: false,
+      repo: undefined,
+      workspace: undefined,
+      prTarget: undefined,
+      blocks: { ...blocks, memory: "MEMORY", notes: "NOTES", config: "CONFIG" },
+    });
+    expect(compose({ sha: undefined, verified: false })).toBe(`MEMORY\n\nNOTES\n\nCONFIG\n\n${AGENTS.general.system}`);
+    const without = makeSystemComposer({
+      agent: AGENTS.general,
+      resident: false,
+      repo: undefined,
+      workspace: undefined,
+      prTarget: undefined,
+      blocks: { ...blocks, memory: "MEMORY", config: "CONFIG" },
+    });
+    expect(without({ sha: undefined, verified: false })).toBe(`MEMORY\n\nCONFIG\n\n${AGENTS.general.system}`);
+  });
+
   it("a PR review target pins the REVIEW TARGET block to the given head and recomposes at a new one", () => {
     const compose = makeSystemComposer({
       agent: AGENTS.review,

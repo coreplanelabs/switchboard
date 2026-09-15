@@ -36,6 +36,7 @@ import type { RunBearerStore } from "../../modelProxy/runBearers.js";
 import { redactAndCap, redactSecrets, type RunEvent, type RunNoteKind, type StopMode } from "../../runEvents.js";
 import type { Settlement } from "../../runLedger/resume.js";
 import type { AssembledCompaction } from "../../runLedger/transcript.js";
+import type { Notepad } from "../../runLedger/types.js";
 import type { RunControl } from "../../runRegistry/runControl.js";
 import { followUpPrompt, followUpSnippet, type FollowUpInbox, type FollowUpInput } from "../../threadAdmission.js";
 import type { Backend } from "../../trace/attrs.js";
@@ -93,6 +94,10 @@ export interface PiHarnessRun {
    *  (`agent.identity`) and is folded in here, so the allowlist pi starts
    *  with and the reach the gate judges by read one word (harness-pi item 10). */
   rules: Omit<ToolRuleContext, "identity">;
+  /** The session's notepad as the `notes` tool last wrote it (session-log item
+   *  10), read when pi compacts so the steer that follows carries it; absent
+   *  for a run without a session, and the steer says the notes are empty. */
+  notepad?: () => Promise<Notepad | null>;
   backend?: Backend;
   span?: Span;
   control?: RunControl;
@@ -157,6 +162,28 @@ class GateBypassed extends Error {
  *  alternation, so nothing follows it): the last user turn is the prompt pi is
  *  sent and every turn before it is the session pi starts on. A seed of one
  *  turn has no session; an empty seed has neither. */
+/** The steer pi is sent after a compaction (session-log item 10): the notepad
+ *  as it stands — or that it is empty and how to keep one, or that it could
+ *  not be read just now — and that every earlier turn is still within reach. */
+export function compactionSteer(notepad: string | undefined, opts: { unavailable?: boolean } = {}): string {
+  const notes = notepad?.trim();
+  const reach =
+    "Your context was just compacted: the summary now standing in for the earlier turns is pi's, and every one of " +
+    "those turns is still reachable with the `recall` tool (search by words, or read a turn by its number).\n\n";
+  if (opts.unavailable)
+    return (
+      reach +
+      "Your notes for this thread could not be read just now; `notes {}` reads them on demand, and `notes { text }` still writes them."
+    );
+  return (
+    reach +
+    (notes
+      ? `YOUR NOTES FOR THIS THREAD, as you last wrote them with \`notes\`:\n${notes}`
+      : "Your notes for this thread are empty. Write them with the `notes` tool when you have decisions, the names of things " +
+        "you found and what is not yet proven worth keeping — they survive every compaction and reach the next run in this thread.")
+  );
+}
+
 export function splitSeed(seed: readonly ChatMessage[]): { session: ChatMessage[]; prompt?: ChatMessage } {
   for (let i = seed.length - 1; i >= 0; i--) {
     if (seed[i].role === "user") return { session: seed.slice(0, i), prompt: seed[i] };
@@ -477,7 +504,30 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
         }
       }
       if (obs.message) await mirror.onMessage(obs.message, bridge.turns);
-      if (obs.compaction) await mirror.onCompaction(obs.compaction, bridge.turns);
+      if (obs.compaction) {
+        await mirror.onCompaction(obs.compaction, bridge.turns);
+        // The notepad's second read point (session-log item 10): after every
+        // compaction, at pi's next turn boundary, unless the run is winding
+        // down or this is history a re-attach is catching up on. pi compacts
+        // after a tool batch and before its next response, so the steer lands
+        // one response late; the summary and the newest turns cover that one.
+        if (!writeUp && !hardStopped && !catchingUp) {
+          // The steer is advisory: a notepad read that fails — a ledger blip,
+          // a Worker without the route — costs the steer its notes, never the run.
+          let notepad: string | undefined;
+          let unavailable = false;
+          try {
+            notepad = run.notepad ? (await run.notepad())?.text : undefined;
+          } catch (err) {
+            unavailable = true;
+            note(
+              "harness_error",
+              `the notepad could not be read for the compaction steer (${err instanceof Error ? err.message : String(err)}); steered without it`,
+            );
+          }
+          transport.send({ type: "steer", message: compactionSteer(notepad, { unavailable }) });
+        }
+      }
       if (obs.providerError !== undefined) {
         if (catchingUp)
           note("harness_error", `a model call failed while the bot was away (${obs.providerError}); continuing`);

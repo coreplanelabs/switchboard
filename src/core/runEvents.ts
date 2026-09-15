@@ -387,6 +387,12 @@ export type RunEvent =
    *  `input`, bounded (newest 20 turns / 256 KiB) and gated by
    *  `runHistory.includeContext`. */
   | { type: "context"; text: string; seq?: number; at?: number }
+  /** The agent's notes for this thread as the `notes` tool last wrote them
+   *  (docs/reference/specs/session-log.md item 10; record 0035, "The notepad"):
+   *  the whole notepad, at most `NOTEPAD_MAX_BYTES`, so the record shows what
+   *  the next run of the session starts from. Published by the tool on every
+   *  write; the record's last one is the final text. */
+  | { type: "notes"; text: string; spanId?: string; seq?: number; at?: number }
   /** The model's prose BETWEEN tool calls — text content that rode alongside
    *  tool_use in one completion. Emitted by the runner, redacted, uncapped. The
    *  final text-only completion is NOT one of these (that is the `answer`). */

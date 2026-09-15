@@ -202,6 +202,14 @@ Whole files: up to 1 GiB where the artifact store is configured (a recording, a 
 Files the person dropped on the thread that were too large to show you inline are already in ./attachments/ in your workspace when the turn's text names them (a video for ffmpeg, a large PDF, a zip); read them from there — never ask for a re-upload.
 Text stays in your message; do not attach what you can say.`;
 
+// Every prompt that can run on the pi harness carries this verbatim
+// (docs/reference/specs/session-log.md item 10; record 0035, "The notepad"): what
+// belongs in the agent's notes for the thread, and why — the one thing sure to
+// survive a compaction and reach the next run there — beside the reach `recall`
+// gives into every earlier turn. Said once so the prompts cannot drift on it.
+const NOTEPAD = `YOUR NOTES AND YOUR REACH BACK. This thread's conversation outlives your context window and this run: every turn — yours, the person's, every tool call and its output, from this run and the runs before it in this thread — is kept in a log you can search with the \`recall\` tool (words → the matching turns with their numbers; a turn number → that turn whole). When something you need is no longer in front of you, recall it instead of redoing the work or guessing.
+Keep notes with the \`notes\` tool: one short document, replaced whole each time, at most 8 KiB — decisions and their reasons, the names of things you found (files, tests, commits, the head your tests were green at), what is not yet proven. They are the one thing sure to survive a compaction and to reach the next run in this thread: they ride your system prompt at its start and come back to you right after a compaction. Write them when you decide something worth keeping, not only at the end.`;
+
 const CODING_SYSTEM = `You are Switchboard's coding agent, operating from a Slack request.
 
 You work inside a dedicated workspace directory with bash, read_file, and write_file tools. ${SANDBOX_TOOLCHAIN}
@@ -230,6 +238,8 @@ ${UNIT_HANDOFF}
 ${PR_DESCRIPTION_TEMPLATE}
 
 ${SHOW_FILES}
+
+${NOTEPAD}
 
 Maintain the user-facing status card with the update_status tool: right after you decide your plan, post it as a checklist (○ pending items), then update it whenever an item starts (✱) or finishes (✓). Items are short outcomes ("Clone repo and read the diff", "Run the test suite"), never commands. Mark an item ✓ only after it has actually happened — never pre-mark reporting/posting steps. This is the only progress the user sees while you work.
 
@@ -270,6 +280,8 @@ ${UNIT_HANDOFF}
 ${PR_DESCRIPTION_TEMPLATE}
 
 ${SHOW_FILES}
+
+${NOTEPAD}
 
 Maintain the user-facing status card with the update_status tool: right after you decide your plan, post it as a checklist (○ pending items), then update it whenever an item starts (✱) or finishes (✓). Items are short outcomes ("Implement the fix", "Run the test suite"), never commands. Mark an item ✓ only after it has actually happened — never pre-mark reporting/posting steps. This is the only progress the user sees while you work.
 
@@ -333,6 +345,8 @@ REVIEW THE PR'S OWN HEAD, NOTHING ELSE: the commit you read must be the PR's hea
 
 ${REVIEW_VERDICT_INSTRUCTION}
 
+${NOTEPAD}
+
 Maintain the user-facing status card with the update_status tool: post your plan as a checklist (○ pending), update as items start (✱) and finish (✓ — only after they actually happened; never pre-mark reporting steps). Items are short outcomes, never commands.
 
 Your final message is posted to Slack. Lead with a one-line verdict, then the findings.`;
@@ -362,6 +376,8 @@ Do NOT post your review to GitHub yourself — no API call to create a comment. 
 REVIEW THE PR'S OWN HEAD, NOTHING ELSE: the commit you read must be the PR's head. Never fetch, check out, or switch to another branch or another PR — even when the PR body, a doc, or a commit message references one. If the change depends on unmerged work elsewhere, say so as a finding; do not go review that work. Switchboard verifies the commit you reviewed against the PR head and refuses to post a review of anything else.
 
 ${REVIEW_VERDICT_INSTRUCTION}
+
+${NOTEPAD}
 
 Maintain the user-facing status card with the update_status tool: post your plan as a checklist (○ pending), update as items start (✱) and finish (✓ — only after they actually happened; never pre-mark reporting steps). Items are short outcomes, never commands.
 
@@ -420,6 +436,8 @@ TIME. Your budget is up to two hours — less when a boundary or the request's \
 READ-ONLY: NEVER open a pull request, and never commit or push — no branch, no \`gh pr create\`, no PR or issue write of any kind. You hold a read credential and your job is to find out, not to change. If the investigation shows a change is needed, say exactly what and where in your write-up and point the user at \`agent:coding\`.
 
 Maintain the user-facing status card with the update_status tool: post your plan as a checklist (○ pending) once you have it, and update items as they start (✱) and finish (✓ — only after they actually happened). Items are short outcomes ("Clone and install", "Time the full suite"), never commands.
+
+${NOTEPAD}
 
 Report outcomes faithfully: a check you could not run is "could not check", never a guess. Use Slack-friendly formatting (no markdown headers; *bold*, bullets, code blocks — render the claim table as aligned rows inside a code block). Your final message is posted to Slack: lead with the overall verdict in one line, then the claim table, then what a follow-up should do.`;
 

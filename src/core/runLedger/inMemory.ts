@@ -16,10 +16,15 @@ import {
   attachmentRefsOf,
   DEFAULT_SESSION_LOG_MAX_BYTES,
   droppedToolResultRow,
+  GAP_MARKER,
   planSessionTrim,
+  roleOfStoredRow,
   rowKind,
   tailCut,
+  textOfStoredRow,
 } from "./sessionLog.js";
+import { tokenize } from "../memory/scorer.js";
+import type { Notepad, SessionHit } from "./types.js";
 import { assembleTranscript, turnRows, type AssembledTranscript } from "./transcript.js";
 import type {
   AppendableEvent,
@@ -54,6 +59,8 @@ export interface SessionLog {
   maxBytes: number;
   /** The `(idx, part)` keys the byte policy already replaced, so a pass never picks them again. */
   trimmed: Set<string>;
+  /** The session's notepad (item 10), once a run wrote it. */
+  notepad?: Notepad;
 }
 
 /** A marker's bytes, for the trim plan's first estimate; the pass re-measures. */
@@ -370,6 +377,51 @@ export class InMemoryRunLedger implements RunLedger {
       return { from: next, transcript: assembleTranscript([], [], next) };
     }
     return { from, transcript: await this.readSession(key, from) };
+  }
+
+  /** The search as the object answers it (session-log item 10), by the memory
+   *  scorer's tokens: a row scores the distinct query words its indexed text
+   *  carries, the highest first and the newest among equals — the same order
+   *  the object's bm25 rank gives for one-word texts, close enough for the
+   *  reference — with the gap markers between the oldest and the newest hit. */
+  async searchSession(key: string, query: string, limit: number): Promise<{ hits: SessionHit[]; gaps: number[] }> {
+    const log = this.sessions.get(key);
+    const words = [...new Set(tokenize(query))];
+    if (!log || words.length === 0) return { hits: [], gaps: [] };
+    const scored = log.rows
+      .map((r) => {
+        const text = textOfStoredRow(r.json);
+        const has = new Set(tokenize(text));
+        return { r, text, score: words.filter((w) => has.has(w)).length };
+      })
+      .filter((s) => s.score > 0)
+      .sort((a, b) => b.score - a.score || b.r.idx - a.r.idx || b.r.part - a.r.part)
+      .slice(0, limit);
+    const hits: SessionHit[] = scored.map(({ r, text }) => {
+      const role = roleOfStoredRow(r.json);
+      return { idx: r.idx, part: r.part, ...(role !== undefined ? { role } : {}), kind: rowKind(r.json), text };
+    });
+    if (hits.length < 2) return { hits, gaps: [] };
+    const lo = Math.min(...hits.map((h) => h.idx));
+    const hi = Math.max(...hits.map((h) => h.idx));
+    const gaps = [
+      ...new Set(
+        log.rows.filter((r) => r.idx >= lo && r.idx <= hi && textOfStoredRow(r.json) === GAP_MARKER).map((r) => r.idx),
+      ),
+    ].sort((a, b) => a - b);
+    return { hits, gaps };
+  }
+
+  async readNotepad(key: string): Promise<Notepad | null> {
+    return this.sessions.get(key)?.notepad ?? null;
+  }
+
+  async writeNotepad(key: string, gen: string, text: string): Promise<FenceResult> {
+    const log = this.sessions.get(key);
+    if (!log?.owner) return { ok: false, reason: "unknown-run" };
+    if (log.owner.gen !== gen) return { ok: false, reason: "fenced" };
+    log.notepad = { text, updatedAt: this.now() };
+    return { ok: true };
   }
 
   async abandon(runId: string, gen: string): Promise<FenceResult> {

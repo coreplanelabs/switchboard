@@ -46,7 +46,10 @@ import {
   attachmentRefsOf,
   DEFAULT_SESSION_LOG_MAX_BYTES,
   droppedToolResultRow,
+  GAP_MARKER,
+  NOTEPAD_MAX_BYTES,
   planSessionTrim,
+  roleOfStoredRow,
   rowKind,
   sessionsToDrop,
   tailCut,
@@ -80,6 +83,7 @@ import {
   type LiveRunRow,
   type ReclaimedRun,
   type RunState,
+  type SessionHit,
   type StepRecord,
   type StopMode,
   type TranscriptAttachment,
@@ -210,6 +214,10 @@ const FTS_CANDIDATES_FLOOR = 50;
  *  tokens and are untouched; the engine still ranks with the FULL query, so the
  *  cap only shapes which rows can become candidates. */
 const MAX_MATCH_TOKENS = 24;
+/** A `recall` query's size and the most hits one answers (session-log item 10):
+ *  a query is a few words, and the tool's default is five. */
+const MAX_SEARCH_QUERY_BYTES = 1_024;
+const MAX_SEARCH_HITS = 50;
 /** Request body ceiling, checked against Content-Length before parsing. A full
  *  batch (50 × 4000-char texts + keywords + envelope) fits comfortably. */
 const MAX_BODY_BYTES = 512 * 1024;
@@ -2892,18 +2900,65 @@ export class SessionLogDO extends DurableObject<Env> {
     return { ...(await this.read(from)), from };
   }
 
-  /** The rows whose text matches `query`, newest first. */
-  async search(query: string, limit: number): Promise<Array<{ idx: number; part: number; text: string }>> {
+  /** The rows whose text matches `query`, in relevance order (FTS5's bm25 rank,
+   *  the order the memory store's search uses; the newest first among equals),
+   *  each with its turn, part, role, kind and indexed text — what `recall`
+   *  answers (session-log item 10). */
+  async search(query: string, limit: number): Promise<SessionHit[]> {
     const match = ftsMatchExpr(query);
     if (match === null) return [];
     return this.sql
-      .exec<{ idx: number; part: number; text: string }>(
-        `SELECT t.idx, t.part, t.text FROM turns_fts f JOIN turns t ON t.id = f.rowid
-          WHERE turns_fts MATCH ? ORDER BY t.idx DESC, t.part DESC LIMIT ?`,
+      .exec<{ idx: number; part: number; kind: string; json: string; text: string }>(
+        `SELECT t.idx, t.part, t.kind, t.json, t.text FROM turns_fts f JOIN turns t ON t.id = f.rowid
+          WHERE turns_fts MATCH ? ORDER BY f.rank, t.idx DESC, t.part DESC LIMIT ?`,
         match,
         limit,
       )
-      .toArray();
+      .toArray()
+      .map(({ idx, part, kind, json, text }) => {
+        const role = roleOfStoredRow(json);
+        return { idx, part, ...(role !== undefined ? { role } : {}), kind, text };
+      });
+  }
+
+  /** The gap markers (session-log item 9) whose turn lies in `[from, to]`: the
+   *  rows a follow-up appended because the run before it detached, so a search
+   *  whose hits straddle one can say the log ends short between them. */
+  async gapsBetween(from: number, to: number): Promise<number[]> {
+    return this.sql
+      .exec<{ idx: number }>(
+        `SELECT DISTINCT idx FROM turns WHERE idx >= ? AND idx <= ? AND kind = 'text' AND text = ? ORDER BY idx`,
+        from,
+        to,
+        GAP_MARKER,
+      )
+      .toArray()
+      .map((r) => r.idx);
+  }
+
+  /** The notepad, replaced whole by the live run (session-log item 10): the
+   *  same fence as a row write — unknown-run before an owner, fenced for
+   *  another generation — and the write's time kept beside the text. */
+  async writeNotepad(gen: string, text: string, now: number): Promise<FenceResult> {
+    let out: FenceResult = { ok: true };
+    this.ctx.storage.transactionSync(() => {
+      const owner = this.owner();
+      if (owner === undefined) {
+        out = { ok: false, reason: "unknown-run" };
+        return;
+      }
+      if (owner.gen !== gen) {
+        out = { ok: false, reason: "fenced" };
+        return;
+      }
+      this.sql.exec(
+        `INSERT INTO notepad (k, text, updated_at) VALUES (1, ?, ?)
+         ON CONFLICT(k) DO UPDATE SET text = excluded.text, updated_at = excluded.updated_at`,
+        text,
+        now,
+      );
+    });
+    return out;
   }
 
   async bytes(): Promise<number> {
@@ -2968,6 +3023,9 @@ const LEDGER_ROUTES = new Set([
   "/runs/session/read",
   "/runs/session/read-tail",
   "/runs/session/clear-owner",
+  "/runs/session/search",
+  "/runs/session/notepad",
+  "/runs/session/notepad/write",
 ]);
 
 /** Routes whose bodies may carry a record, a transcript chunk, or an event batch. */
@@ -3186,6 +3244,38 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
       const g = gen(b.gen);
       if (!g.ok) return json({ error: g.error }, 400);
       return fenced(await stub.clearOwner(runId.value, g.value));
+    }
+    // `recall` (session-log item 10): the hits in relevance order, and the gap
+    // markers that lie between the oldest and the newest of them.
+    if (pathname === "/runs/session/search") {
+      if (
+        typeof b.query !== "string" ||
+        b.query.trim().length === 0 ||
+        utf8ByteLength(b.query) > MAX_SEARCH_QUERY_BYTES
+      )
+        return json({ error: `query must be a non-empty string of at most ${MAX_SEARCH_QUERY_BYTES} bytes` }, 400);
+      const limit = b.limit;
+      if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > MAX_SEARCH_HITS)
+        return json({ error: `limit must be an integer in 1..${MAX_SEARCH_HITS}` }, 400);
+      const hits = await stub.search(b.query, limit);
+      const gaps =
+        hits.length > 1
+          ? await stub.gapsBetween(Math.min(...hits.map((h) => h.idx)), Math.max(...hits.map((h) => h.idx)))
+          : [];
+      console.log(`[runs/session/search] ${key.value} -> ${hits.length} hit(s), ${gaps.length} gap(s)`);
+      return json({ hits, gaps });
+    }
+    if (pathname === "/runs/session/notepad") return json({ notepad: await stub.notepad() });
+    if (pathname === "/runs/session/notepad/write") {
+      const g = gen(b.gen);
+      if (!g.ok) return json({ error: g.error }, 400);
+      if (typeof b.text !== "string") return json({ error: "text must be a string" }, 400);
+      const bytes = utf8ByteLength(b.text);
+      if (bytes > NOTEPAD_MAX_BYTES)
+        return json({ error: `text is ${bytes} bytes; the notepad holds at most ${NOTEPAD_MAX_BYTES}` }, 400);
+      const r = await stub.writeNotepad(g.value, b.text, systemClock());
+      console.log(`[runs/session/notepad/write] ${key.value} <- ${bytes} byte(s), ok=${r.ok}`);
+      return fenced(r);
     }
     return json({ error: "not found" }, 404);
   }

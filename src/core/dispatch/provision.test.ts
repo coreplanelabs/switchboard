@@ -34,6 +34,7 @@ import {
   attachWorkspace,
   budgetClipLabel,
   composePrompt,
+  sessionNotesBlock,
   mintRunBearer,
   openAckCard,
   registerRun,
@@ -644,6 +645,51 @@ describe("composePrompt — the system prompt for the first turn", () => {
     expect(r.trace.spansSoFar().map((s) => s.name)).toEqual(
       expect.arrayContaining(["dispatch.mcp_discovery", "dispatch.compose"]),
     );
+  });
+
+  // docs/reference/specs/session-log.md item 10: what the session already knows
+  // rides the prompt right after memory — the notepad, then the compaction summary.
+  it("a follow-up seeded from its session carries its notes and the compaction's summary as one block after the memory block; a run without either carries no block", async () => {
+    const d = deps();
+    const r = request(d, "continue", "general");
+    const base = {
+      msg: r.message,
+      agent: r.agent,
+      profile: r.profile,
+      resolved: r.resolved,
+      directives: r.directives,
+      sticky: r.sticky,
+      repoCtx: {},
+      selection: { executor: {} as never, resident: false },
+      isPrReview: false,
+      memoryBlockP: Promise.resolve("MEMORY BLOCK"),
+      verifiedAtAttach: false,
+      resume: undefined,
+      root: r.root,
+    };
+    const withNotes = await composePrompt(d, {
+      ...base,
+      session: { notepad: "decided: keep the helper", summary: "so far: two tests failed, one fixed" },
+    });
+    const memoryAt = withNotes.system.indexOf("MEMORY BLOCK");
+    const notesAt = withNotes.system.indexOf("YOUR NOTES FOR THIS THREAD");
+    const summaryAt = withNotes.system.indexOf("SUMMARY OF THE EARLIER CONVERSATION");
+    const agentAt = withNotes.system.indexOf(r.agent.system);
+    expect(memoryAt).toBeGreaterThanOrEqual(0);
+    expect(notesAt).toBeGreaterThan(memoryAt);
+    expect(summaryAt).toBeGreaterThan(notesAt);
+    expect(agentAt).toBeGreaterThan(summaryAt);
+    expect(withNotes.system).toContain("decided: keep the helper");
+    expect(withNotes.system).toContain("so far: two tests failed, one fixed");
+    expect(withNotes.system).toContain("`recall`");
+    const summaryOnly = await composePrompt(d, { ...base, session: { summary: "so far" } });
+    expect(summaryOnly.system).not.toContain("YOUR NOTES FOR THIS THREAD");
+    expect(summaryOnly.system).toContain("SUMMARY OF THE EARLIER CONVERSATION");
+    const without = await composePrompt(d, base);
+    expect(without.system).not.toContain("YOUR NOTES FOR THIS THREAD");
+    expect(without.system).not.toContain("SUMMARY OF THE EARLIER CONVERSATION");
+    expect(sessionNotesBlock({})).toBeUndefined();
+    expect(sessionNotesBlock({ notepad: "  " })).toBeUndefined();
   });
 
   it("a resume re-sends the prompt the run started with, verbatim", async () => {

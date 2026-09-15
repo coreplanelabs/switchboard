@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../../providers/types.js";
 import type { AssembledTranscript } from "../runLedger/transcript.js";
 import type { HistoryItem } from "../types.js";
-import { SEED_BUDGET_BYTES, SEED_BUDGET_TOKENS, sessionSeed } from "./seed.js";
+import { SEED_BUDGET_BYTES, SEED_BUDGET_TOKENS, sessionSeed, sessionSeedFor } from "./seed.js";
 
 // docs/reference/specs/session-log.md item 9: a follow-up on the pi harness
 // seeds from its session's log — the tail within the seed budget, cut at a
@@ -172,5 +172,55 @@ describe("sessionSeed — the tail, the lines since, the request", () => {
         { type: "text", text: "look" },
       ],
     });
+  });
+});
+
+describe("sessionSeedFor — the seed read from the ledger, with the notepad", () => {
+  const ledgerOver = (over: {
+    tail?: ReturnType<typeof complete>;
+    notepad?: { text: string; updatedAt: number } | null;
+    notepadThrows?: boolean;
+  }) => ({
+    readSessionTail: async () => over.tail ?? complete(tail4, 0),
+    readNotepad: async () => {
+      if (over.notepadThrows) throw new Error("no route");
+      return over.notepad ?? null;
+    },
+  });
+  const input = { threadKey: "slack:C1:1.0", agent: "coding", thread: [], history, request };
+
+  it("reads the log's tail under the budget by the thread-and-agent key, then the notepad, which rides the seed for the prompt and never as a row", async () => {
+    const calls: string[] = [];
+    const ledger = {
+      readSessionTail: async (key: string, maxBytes: number) => {
+        calls.push(`tail ${key} ${maxBytes}`);
+        return complete(tail4, 0);
+      },
+      readNotepad: async (key: string) => {
+        calls.push(`notepad ${key}`);
+        return { text: "decided: keep the helper", updatedAt: 5_000 };
+      },
+    };
+    const { seed, notes } = await sessionSeedFor({ ledger, ...input });
+    expect(calls).toEqual([`tail slack:C1:1.0:coding ${SEED_BUDGET_BYTES}`, "notepad slack:C1:1.0:coding"]);
+    expect(seed!.notepad).toBe("decided: keep the helper");
+    expect(seed!.messages).toEqual([...tail4, user("and bump the version")]); // no thread page: no previous end, no lines since
+    expect(notes).toEqual([expect.stringContaining("lines written since")]);
+  });
+
+  it("an empty or absent notepad leaves the seed without one; a notepad read that fails is a note and the seed stands; an empty log reads no notepad and is no session", async () => {
+    expect((await sessionSeedFor({ ledger: ledgerOver({ notepad: null }), ...input })).seed!.notepad).toBeUndefined();
+    expect(
+      (await sessionSeedFor({ ledger: ledgerOver({ notepad: { text: "   ", updatedAt: 1 } }), ...input })).seed!
+        .notepad,
+    ).toBeUndefined();
+    const failed = await sessionSeedFor({ ledger: ledgerOver({ notepadThrows: true }), ...input });
+    expect(failed.seed!.messages.length).toBeGreaterThan(0);
+    expect(failed.notes).toEqual([
+      expect.stringContaining("lines written since"),
+      expect.stringContaining("notepad of slack:C1:1.0:coding could not be read (no route)"),
+    ]);
+    const none = await sessionSeedFor({ ledger: ledgerOver({ tail: complete([], 0), notepadThrows: true }), ...input });
+    expect(none).toEqual({ notes: [] });
   });
 });

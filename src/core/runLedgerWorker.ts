@@ -29,8 +29,12 @@
 //   POST /runs/session/read        {key, from, to?}                      → {rows, attachments}
 //   POST /runs/session/read-tail   {key, maxBytes}                       → {rows, attachments, from}
 //   POST /runs/session/clear-owner {key, runId, gen}                     → {ok} | 409 fenced
+//   POST /runs/session/search      {key, query, limit}                   → {hits, gaps}
+//   POST /runs/session/notepad     {key}                                 → {notepad: {text, updatedAt} | null}
+//   POST /runs/session/notepad/write {key, gen, text}                    → {ok} | 409 fenced | 400 over the size
 
 import { RUN_ID_PATTERN, SESSION_KEY_PATTERN, type RunRecord } from "./runRecord.js";
+import type { Notepad, SessionHit } from "./runLedger/types.js";
 import { retentionPolicyOf, type RunHistoryConfig } from "./runStore.js";
 import {
   DEFAULT_RUN_STORE_TOKEN_ENV,
@@ -284,6 +288,30 @@ export class WorkerRunLedger implements RunLedger {
         from,
       ),
     };
+  }
+
+  async searchSession(key: string, query: string, limit: number): Promise<{ hits: SessionHit[]; gaps: number[] }> {
+    this.checkSessionKey(key);
+    const r = await this.post("/runs/session/search", { key, query, limit });
+    return {
+      hits: Array.isArray(r.data.hits) ? (r.data.hits as SessionHit[]) : [],
+      gaps: Array.isArray(r.data.gaps) ? (r.data.gaps as number[]) : [],
+    };
+  }
+
+  async readNotepad(key: string): Promise<Notepad | null> {
+    this.checkSessionKey(key);
+    const r = await this.post("/runs/session/notepad", { key });
+    const n = r.data.notepad as { text?: unknown; updatedAt?: unknown } | null | undefined;
+    return n && typeof n.text === "string" && typeof n.updatedAt === "number"
+      ? { text: n.text, updatedAt: n.updatedAt }
+      : null;
+  }
+
+  async writeNotepad(key: string, gen: string, text: string): Promise<FenceResult> {
+    this.checkSessionKey(key);
+    if (!GEN_PATTERN.test(gen)) throw new PermanentStoreError(`run ledger: malformed generation`);
+    return this.fenceResult(await this.post("/runs/session/notepad/write", { key, gen, text }));
   }
 
   async heartbeat(runId: string, gen: string, leaseMs: number): Promise<HeartbeatResult> {

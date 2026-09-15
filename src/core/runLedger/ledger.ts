@@ -7,6 +7,7 @@
 
 import type { RunRecord } from "../runRecord.js";
 import type { AssembledTranscript } from "./transcript.js";
+import type { Notepad, SessionHit } from "./types.js";
 import type {
   InboxItem,
   AppendableEvent,
@@ -65,6 +66,15 @@ export interface RunLedger {
   readSession(key: string, from: number, to?: number): Promise<AssembledTranscript>;
   /** The newest whole turns within `maxBytes` and the index they start at (item 4). */
   readSessionTail(key: string, maxBytes: number): Promise<{ from: number; transcript: AssembledTranscript }>;
+  /** The rows whose text matches `query`, in relevance order, at most `limit`,
+   *  and the gap markers that lie between the oldest and the newest hit — what
+   *  `recall` answers (item 10). */
+  searchSession(key: string, query: string, limit: number): Promise<{ hits: SessionHit[]; gaps: number[] }>;
+  /** The session's notepad, or null when nothing has written it (item 10). */
+  readNotepad(key: string): Promise<Notepad | null>;
+  /** Replace the notepad whole under the owner's fence (item 10); `text` is at
+   *  most `NOTEPAD_MAX_BYTES` — the caller refuses more before asking. */
+  writeNotepad(key: string, gen: string, text: string): Promise<FenceResult>;
   heartbeat(runId: string, gen: string, leaseMs: number): Promise<HeartbeatResult>;
   append(runId: string, gen: string, events: AppendableEvent[]): Promise<FenceResult>;
   setState(runId: string, gen: string, state: RunState): Promise<FenceResult>;

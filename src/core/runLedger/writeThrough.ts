@@ -18,6 +18,7 @@ import type { ChatMessage, ToolDef } from "../../providers/types.js";
 import type { RunEvent } from "../runEvents.js";
 import type { RunRecord, RunSession } from "../runRecord.js";
 import type { AssembledTranscript } from "./transcript.js";
+import type { FenceResult, Notepad, SessionHit } from "./types.js";
 import { PermanentStoreError, RouteMissingError } from "../runStoreWorker.js";
 import { createAppendFlusher } from "./flusher.js";
 import type { RunLedger } from "./ledger.js";
@@ -161,6 +162,10 @@ export interface LedgerRun {
   readonly resumable: boolean;
   /** True once this generation handed the run to the next (SIGTERM). */
   readonly handedOff: boolean;
+  /** The run's place in its session log (session-log item 2), once the claim
+   *  set it — what the session tools read and write by (item 10); undefined
+   *  for a run without a session or before its claim. */
+  readonly session: RunSession | undefined;
   /** The finish record's sink: the ledger's one-transaction `finish`, else the
    *  plain store — never both, never neither. Throws only a transient failure
    *  (the writer retries it; a repeated `finish` is idempotent). */
@@ -223,6 +228,14 @@ export interface LedgerWriteThrough {
    *  is cut from (item 9). A log with no rows answers `from` 0 and no turns.
    *  Throws as the ledger does; the caller decides what a failed read means. */
   readSessionTail(key: string, maxBytes: number): Promise<{ from: number; transcript: AssembledTranscript }>;
+  /** The rows `[from, to]` of a session log as a conversation counted from `from` (item 3) — one turn when `to` is `from`. */
+  readSession(key: string, from: number, to?: number): Promise<AssembledTranscript>;
+  /** The full-text search `recall` makes (item 10): hits in relevance order, and the gap markers between them. */
+  searchSession(key: string, query: string, limit: number): Promise<{ hits: SessionHit[]; gaps: number[] }>;
+  /** The session's notepad, or null when nothing wrote it (item 10). */
+  readNotepad(key: string): Promise<Notepad | null>;
+  /** Replace the notepad whole under this generation's fence (item 10). */
+  writeNotepad(key: string, text: string): Promise<FenceResult>;
   /** SIGTERM (plan D8): mark every resumable live run `handoff` on the ledger so
    *  the next generation takes it at once, whatever its lease. The runs keep
    *  running here until the process exits; their writes are fenced the moment
@@ -262,6 +275,18 @@ export class NullLedgerWriteThrough implements LedgerWriteThrough {
   async readSessionTail(_key: string, _maxBytes: number): Promise<{ from: number; transcript: AssembledTranscript }> {
     return { from: 0, transcript: { complete: true, turns: 0, messages: [], compactions: [] } };
   }
+  async readSession(_key: string, _from: number, _to?: number): Promise<AssembledTranscript> {
+    return { complete: true, turns: 0, messages: [], compactions: [] };
+  }
+  async searchSession(_key: string, _query: string, _limit: number): Promise<{ hits: SessionHit[]; gaps: number[] }> {
+    return { hits: [], gaps: [] };
+  }
+  async readNotepad(_key: string): Promise<Notepad | null> {
+    return null;
+  }
+  async writeNotepad(_key: string, _text: string): Promise<FenceResult> {
+    return { ok: false, reason: "unknown-run" };
+  }
   async handoff(): Promise<{ marked: string[]; failed?: string }> {
     return { marked: [] };
   }
@@ -272,6 +297,7 @@ export class NullLedgerWriteThrough implements LedgerWriteThrough {
 export class NullLedgerRun implements LedgerRun {
   readonly resumable = false;
   readonly handedOff = false;
+  readonly session = undefined;
   constructor(
     readonly runId: string,
     readonly sink: RecordSink,
@@ -413,7 +439,10 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     /** The run's place in its session log (session-log item 2); undefined for
      *  a run without a conversation of its own and for an adopted row claimed
      *  before the log existed. */
-    private session: RunSession | undefined;
+    private sessionRow: RunSession | undefined;
+    get session(): RunSession | undefined {
+      return this.sessionRow;
+    }
     /** Turns of the run's conversation on the ledger, counted from its seed —
      *  the last step record's `turnIndex` — so the finish can close the range. */
     private turnsWritten: number | undefined;
@@ -455,12 +484,12 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       this.stepNo = from.stepNo;
       this.lastSeq = from.lastSeq;
       this.adopted = from.resumable === true;
-      this.session = from.session;
+      this.sessionRow = from.session;
     }
 
     /** A reservation learns its session when the prompt's claim promotes it. */
     bindSession(session: RunSession): void {
-      this.session = session;
+      this.sessionRow = session;
     }
 
     get resumable(): boolean {
@@ -476,14 +505,14 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
      *  ends short of what the model saw, and the next run in the session must
      *  know. A run that wrote no turn leaves the range open. */
     private sessionOnRecord(): RunSession | undefined {
-      if (!this.session) return undefined;
-      if (this.broken) return { ...this.session, range: "broken" };
-      const from = this.session.range === "broken" ? this.session.seedFrom : this.session.range.from;
+      if (!this.sessionRow) return undefined;
+      if (this.broken) return { ...this.sessionRow, range: "broken" };
+      const from = this.sessionRow.range === "broken" ? this.sessionRow.seedFrom : this.sessionRow.range.from;
       const to =
         this.turnsWritten !== undefined && this.turnsWritten > 0
-          ? this.session.seedFrom + this.turnsWritten - 1
+          ? this.sessionRow.seedFrom + this.turnsWritten - 1
           : undefined;
-      return { ...this.session, range: to !== undefined && to >= from ? { from, to } : { from } };
+      return { ...this.sessionRow, range: to !== undefined && to >= from ? { from, to } : { from } };
     }
 
     readonly sink: RecordSink = {
@@ -541,12 +570,14 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       // item 2); a run without a session writes its own object from 0. The
       // messages the seed reused from the log (item 9) — the rows between
       // `seedFrom` and the range's start — are there already and are skipped.
-      const base = this.session?.seedFrom ?? 0;
+      const base = this.sessionRow?.seedFrom ?? 0;
       const reused =
-        this.session && this.session.range !== "broken" ? this.session.range.from - this.session.seedFrom : 0;
+        this.sessionRow && this.sessionRow.range !== "broken"
+          ? this.sessionRow.range.from - this.sessionRow.seedFrom
+          : 0;
       const turns: TranscriptTurn[] = messages.slice(reused).map((message, i) => ({ idx: base + reused + i, message }));
       try {
-        const seeded = await ledger.seed(this.runId, gen, turns, this.session?.key);
+        const seeded = await ledger.seed(this.runId, gen, turns, this.sessionRow?.key);
         if (!seeded.ok) {
           this.detach(`seed refused (${seeded.reason})`);
           return;
@@ -568,7 +599,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
             iteration: 0,
           },
           [],
-          this.session?.key,
+          this.sessionRow?.key,
         );
         if (!recorded.ok) this.detach(`seed record refused (${recorded.reason})`);
         else this.seeded = true;
@@ -582,7 +613,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       // Every row at its log index: the run's local index plus where its seed
       // began. A compaction entry rides as the row after the step's turns and
       // counts as a turn, so the completeness rule sees one index per row.
-      const base = this.session?.seedFrom ?? 0;
+      const base = this.sessionRow?.seedFrom ?? 0;
       const turns: TranscriptTurn[] = report.turns.map((message, i) => ({ idx: base + report.firstIdx + i, message }));
       if (report.compaction)
         turns.push({ idx: base + report.firstIdx + report.turns.length, compaction: report.compaction });
@@ -598,7 +629,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       };
       for (let attempt = 1; ; attempt++) {
         try {
-          const result = await ledger.step(this.runId, gen, record, turns, this.session?.key);
+          const result = await ledger.step(this.runId, gen, record, turns, this.sessionRow?.key);
           if (!result.ok) this.detach(`step ${record.step} refused (${result.reason})`);
           else this.turnsWritten = record.turnIndex;
           return;
@@ -812,6 +843,10 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       }
     },
     readSessionTail: (key, maxBytes) => ledger.readSessionTail(key, maxBytes),
+    readSession: (key, from, to) => ledger.readSession(key, from, to),
+    searchSession: (key, query, limit) => ledger.searchSession(key, query, limit),
+    readNotepad: (key) => ledger.readNotepad(key),
+    writeNotepad: (key, text) => ledger.writeNotepad(key, gen, text),
 
     async handoff() {
       const candidates = [...live].filter((r) => r.resumable && r.tracked() && !r.handedOff);
