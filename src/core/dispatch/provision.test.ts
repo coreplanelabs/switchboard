@@ -688,8 +688,24 @@ describe("composePrompt — the system prompt for the first turn", () => {
     const without = await composePrompt(d, base);
     expect(without.system).not.toContain("YOUR NOTES FOR THIS THREAD");
     expect(without.system).not.toContain("SUMMARY OF THE EARLIER CONVERSATION");
+    expect(without.system).not.toContain("FILES OF THIS THREAD");
     expect(sessionNotesBlock({})).toBeUndefined();
     expect(sessionNotesBlock({ notepad: "  " })).toBeUndefined();
+    expect(sessionNotesBlock({ files: [] })).toBeUndefined();
+    // The thread's files (record 0033): one line each after the notes and the summary, and a block
+    // of their own when the run has neither — a thread's files are a thread fact, not a session's.
+    const files = [
+      "clip.mp4 (312 MB, video/mp4) — received on this thread; in this workspace at ./attachments/2-clip.mp4",
+      "sheet.png (5 KB, image/png) — produced by run r0; on that run's page, not in this workspace",
+    ];
+    const withFiles = await composePrompt(d, { ...base, session: { notepad: "decided: keep the helper", files } });
+    const filesAt = withFiles.system.indexOf("FILES OF THIS THREAD");
+    expect(filesAt).toBeGreaterThan(withFiles.system.indexOf("YOUR NOTES FOR THIS THREAD"));
+    expect(withFiles.system).toContain(`- ${files[0]}\n- ${files[1]}`);
+    expect(withFiles.system).toContain("`recall {assets: true}`");
+    const filesOnly = sessionNotesBlock({ files })!;
+    expect(filesOnly.startsWith("FILES OF THIS THREAD")).toBe(true);
+    expect(filesOnly).not.toContain("YOUR NOTES");
   });
 
   it("a resume re-sends the prompt the run started with, verbatim", async () => {

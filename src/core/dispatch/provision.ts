@@ -738,7 +738,12 @@ export function mintRunBearer(deps: ProvisionDeps, ctx: MintBearerContext): stri
 /** The block a follow-up seeded from its session starts with (session-log item
  *  10): the agent's own notes for this thread, then the summary its newest
  *  compaction wrote — each only when there is one; undefined when neither. */
-export function sessionNotesBlock(session: { notepad?: string; summary?: string }): string | undefined {
+export function sessionNotesBlock(session: {
+  notepad?: string;
+  summary?: string;
+  /** The thread's files (record 0033), one line each as `describeAsset` writes them. */
+  files?: readonly string[];
+}): string | undefined {
   const parts: string[] = [];
   const notepad = session.notepad?.trim();
   const summary = session.summary?.trim();
@@ -751,6 +756,11 @@ export function sessionNotesBlock(session: { notepad?: string; summary?: string 
     parts.push(
       "SUMMARY OF THE EARLIER CONVERSATION (written when the context was compacted; every earlier turn is still reachable with `recall`):\n" +
         summary,
+    );
+  if (session.files && session.files.length > 0)
+    parts.push(
+      "FILES OF THIS THREAD (received on its messages or produced by its runs, as their records name them; `recall {assets: true}` lists them with their keys):\n" +
+        session.files.map((line) => `- ${line}`).join("\n"),
     );
   return parts.length ? parts.join("\n\n") : undefined;
 }
@@ -782,8 +792,10 @@ export interface PromptContext {
   /** What this session already knows (docs/reference/specs/session-log.md item
    *  10), for a follow-up seeded from its session log: the agent's notepad as
    *  the `notes` tool last wrote it, and the summary its newest compaction
-   *  wrote. Rendered as one block right after memory; absent on every other run. */
-  session?: { notepad?: string; summary?: string };
+   *  wrote — and, for any run in a thread with files (record 0033), the
+   *  thread's files one line each. Rendered as one block right after memory;
+   *  absent when there is none of the three. */
+  session?: { notepad?: string; summary?: string; files?: readonly string[] };
   /** A plan unit's rendered contract for a review child (agent-ship item 13):
    *  placed right after the REVIEW TARGET block, as the ship pipeline's review
    *  round places it. Absent on every other request. */

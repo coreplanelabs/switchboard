@@ -15,7 +15,7 @@ import {
   stageIntoWorkspace,
   stageThreadArtifacts,
   stagingIndex,
-  threadInboundArtifacts,
+  WorkspaceFiles,
 } from "./staging.js";
 
 // Feature: docs/reference/specs/execution.md item 20 (record 0033) — inbound staging:
@@ -237,39 +237,17 @@ describe("staging — the thread's earlier files", () => {
   const K1 = "threads/slack-C1-1700000000.000100/in/1700000000.000100/1-first.mp4";
   const K2 = "threads/slack-C1-1700000000.000100/in/1700000000.000300/1-second.mp4";
 
-  it("the prior runs' `in` events, oldest run first and in event order, deduplicated by key; `out` events and other kinds are not files the thread received", () => {
-    const older: RunEvent[] = [
-      { type: "assistant", text: "hello" },
-      inEvent(K1, "first.mp4", 10),
-      {
-        type: "artifact",
-        direction: "out",
-        key: "runs/r1/out/1-sheet.png",
-        name: "sheet.png",
-        size: 5,
-        contentType: "image/png",
-      },
-    ];
-    const newer: RunEvent[] = [inEvent(K1, "first.mp4", 10), inEvent(K2, "second.mp4", 20)];
-    expect(threadInboundArtifacts([older, newer])).toEqual([
-      { key: K1, name: "first.mp4", size: 10, contentType: "video/mp4" },
-      { key: K2, name: "second.mp4", size: 20, contentType: "video/mp4" },
-    ]);
-    expect(threadInboundArtifacts([])).toEqual([]);
-  });
-
-  it("each key is checked by HEAD: a held one takes the run's next index and its own `in` event; one the store no longer holds is named as expired with no index and no event; nothing is copied", async () => {
-    const store = storeWithSlack();
-    store.put(K1, new Uint8Array(10), "video/mp4");
+  it("a file the catalogue says the store holds takes the run's next index and its own `in` event; one the store no longer holds is named as expired with no index and no event; one the store could not be asked about is named so; nothing is copied and the store is not asked again", () => {
     const events: RunEvent[] = [];
     const nextIndex = stagingIndex();
     nextIndex(); // the run already numbered one file
-    const outcomes = await stageThreadArtifacts(
+    const outcomes = stageThreadArtifacts(
       [
-        { key: K1, name: "first.mp4", size: 10, contentType: "video/mp4" },
-        { key: K2, name: "second.mp4", size: 20, contentType: "video/mp4" },
+        { key: K1, name: "first.mp4", size: 10, contentType: "video/mp4", held: true },
+        { key: K2, name: "second.mp4", size: 20, contentType: "video/mp4", held: false },
+        { key: "threads/t/in/3/1-third.mp4", name: "third.mp4", size: 30, contentType: "video/mp4" },
       ],
-      { store, nextIndex, publish: (e) => void events.push(e) },
+      { nextIndex, publish: (e) => void events.push(e) },
     );
     expect(outcomes).toEqual([
       { file: { name: "first.mp4", size: 10, type: "video/mp4" }, basename: "2-first.mp4", key: K1, earlier: true },
@@ -280,11 +258,35 @@ describe("staging — the thread's earlier files", () => {
         earlier: true,
         error: "the store no longer holds it (its retention passed)",
       },
+      {
+        file: { name: "third.mp4", size: 30, type: "video/mp4" },
+        basename: "third.mp4",
+        key: "threads/t/in/3/1-third.mp4",
+        earlier: true,
+        error: "the store could not be asked whether it still holds it",
+      },
     ]);
     expect(events).toEqual([inEvent(K1, "first.mp4", 10)]);
-    expect(store.copies).toEqual([]);
     expect(attachmentsLine(outcomes)).toBe(
-      "Attached files are in ./attachments/: 2-first.mp4 (10 B, video/mp4, from earlier in the thread). second.mp4 could not be staged: the store no longer holds it (its retention passed)",
+      "Attached files are in ./attachments/: 2-first.mp4 (10 B, video/mp4, from earlier in the thread). second.mp4 could not be staged: the store no longer holds it (its retention passed). third.mp4 could not be staged: the store could not be asked whether it still holds it",
     );
+  });
+
+  it("WorkspaceFiles resolves a key to the path THIS run staged it under, across every round, and nothing for a file that did not land", () => {
+    const files = new WorkspaceFiles();
+    files.record([
+      { file: { name: "first.mp4", size: 10, type: "video/mp4" }, basename: "1-first.mp4", key: K1 },
+      { file: { name: "second.mp4", size: 20, type: "video/mp4" }, basename: "second.mp4", key: K2, error: "gone" },
+    ]);
+    files.record([
+      {
+        file: { name: "steer.bin", size: 5, type: "application/octet-stream" },
+        basename: "2-steer.bin",
+        key: "threads/t/in/9/2-steer.bin",
+      },
+    ]);
+    expect(files.pathOf(K1)).toBe("attachments/1-first.mp4");
+    expect(files.pathOf("threads/t/in/9/2-steer.bin")).toBe("attachments/2-steer.bin");
+    expect(files.pathOf(K2)).toBeUndefined();
   });
 });

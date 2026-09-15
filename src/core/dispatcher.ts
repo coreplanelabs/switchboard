@@ -43,6 +43,7 @@ import {
   pullStaged,
   stageThreadArtifacts,
   stagingIndex,
+  WorkspaceFiles,
   type StagedOutcome,
 } from "./dispatch/staging.js";
 import type { RunSeed } from "./runRecord.js";
@@ -70,7 +71,8 @@ import { prepareFreshTurn, settleThread, tellDropped } from "./dispatch/settle.j
 import { lineageOf, lineageParent, tellParent, type LineageHeard } from "./dispatch/lineage.js";
 import { sessionSeedFor } from "./dispatch/seed.js";
 import { sessionCapabilityFor } from "../tools/session.js";
-import { readThread, readThreadArtifacts, stickyAgentOf, threadPrOf } from "./dispatch/thread.js";
+import { readThread, stickyAgentOf, threadPrOf } from "./dispatch/thread.js";
+import { describeAsset, readThreadAssets, type ThreadAsset } from "./dispatch/threadAssets.js";
 import { effectiveHarness } from "./harness/select.js";
 import { runToolCapabilities, type ParentRun } from "./dispatch/spawn.js";
 import { createRunsService } from "./runsService.js";
@@ -707,7 +709,9 @@ export async function dispatch(
     const staged = !resume && deps.artifacts && msg.staged && msg.staged.length > 0 ? msg.staged : [];
     // One counter for every round this run stages (the request here, each
     // steer in the loop): two files of one name never share a workspace path.
+    // And one map of where each staged file landed, for `recall` and the prompt.
     const nextStagedIndex = stagingIndex();
+    const workspaceFiles = new WorkspaceFiles();
     const stagedCopies: Promise<StagedOutcome[]> | undefined =
       staged.length > 0 && agent.machine !== "none"
         ? copyStaged(staged, {
@@ -717,22 +721,36 @@ export async function dispatch(
             publish: (e) => registry.publish(runId, e),
           })
         : undefined;
-    // The thread's earlier files (record 0033): what prior runs' records name
-    // as received is still in the store for the retention window, so a later
-    // run pulls it too — HEAD-checked, never copied again. Started here, beside
-    // the message's own copies, so both overlap the workspace attach; the
+    // The thread's files (record 0033): the one catalogue — what the thread's
+    // runs' records name as received or produced, and whether the store still
+    // holds each — read once here for its three readers: the re-pull below, the
+    // prompt's list of the thread's files, and `recall` (which reads it again,
+    // fresh, on demand). Started beside the message's own copies, so both
+    // overlap the workspace attach. Nothing to read for a thread that has not
+    // run, nothing on a resume (its turn already carried the files).
+    // This run's own row is live in the list already and its copies are
+    // recording events while the read runs: its files are the turn's own, so
+    // they are left out here — the attachments line names them, and `recall`
+    // reads them fresh.
+    const threadAssets: Promise<ThreadAsset[]> | undefined =
+      !resume && deps.artifacts && thread && thread.length > 0
+        ? readThreadAssets({ runs: runsService, store: deps.artifacts }, msg.threadKey).then((assets) =>
+            assets.filter((a) => a.runId !== runId),
+          )
+        : undefined;
+    // What prior runs' records name as received is still in the store for the
+    // retention window, so a later run pulls it too — never copied again. The
     // message's files took their indexes when `copyStaged` was called, so the
     // earlier files number after them and the pull order is fixed: the
     // message's own, then the thread's earlier ones, oldest first. A
     // workspace-less agent gets nothing here, as for the message's own files.
     const earlierStaged: Promise<StagedOutcome[]> | undefined =
-      !resume && deps.artifacts && agent.machine !== "none" && thread && thread.length > 0
-        ? readThreadArtifacts(runsService, thread).then((found) =>
-            stageThreadArtifacts(found, {
-              store: deps.artifacts!,
-              nextIndex: nextStagedIndex,
-              publish: (e) => registry.publish(runId, e),
-            }),
+      threadAssets && agent.machine !== "none"
+        ? threadAssets.then((assets) =>
+            stageThreadArtifacts(
+              assets.filter((a) => a.direction === "in"),
+              { nextIndex: nextStagedIndex, publish: (e) => registry.publish(runId, e) },
+            ),
           )
         : undefined;
     const reservation = await reserveRun(deps, {
@@ -798,16 +816,16 @@ export async function dispatch(
     // sequence of turns (a child's thread slot is released on the tick it was).
     const earlier = earlierStaged ? await earlierStaged : [];
     if (staged.length > 0 || earlier.length > 0) {
-      const line =
-        stagedCopies || earlier.length > 0
-          ? attachmentsLine(
-              await pullStaged([...(stagedCopies ? await stagedCopies : []), ...earlier], {
-                store: deps.artifacts!,
-                executor,
-                resident: resident !== undefined,
-              }),
-            )
-          : noWorkspaceLine(staged);
+      let line: string;
+      if (stagedCopies || earlier.length > 0) {
+        const pulled = await pullStaged([...(stagedCopies ? await stagedCopies : []), ...earlier], {
+          store: deps.artifacts!,
+          executor,
+          resident: resident !== undefined,
+        });
+        workspaceFiles.record(pulled);
+        line = attachmentsLine(pulled);
+      } else line = noWorkspaceLine(staged);
       const request = messages[messages.length - 1];
       if (request && request.role === "user" && line) {
         request.content = Array.isArray(request.content)
@@ -861,6 +879,11 @@ export async function dispatch(
     // the PR from the workspace's observed origin remote (an agent-discovered
     // repo; the App token bounds what is writable either way).
     const isCodingPrRun = agent.toolset === "full";
+    // The thread's files, one line each, where each is for this run — the
+    // pull above has landed the held ones, so their workspace paths are known.
+    const threadFiles = threadAssets
+      ? (await threadAssets).map((a) => describeAsset(a, workspaceFiles.pathOf(a.key)))
+      : [];
     // The prompt (dispatch/provision.ts): skills, MCP discovery, the config and
     // self-description blocks, the custom instructions, the memory block, and
     // the system composer pinned to the head this run reviews.
@@ -880,12 +903,14 @@ export async function dispatch(
       root,
       ...(contractBlock !== undefined && agent.name === "review" ? { contract: contractBlock } : {}),
       // What the session already knows (session-log item 10): the notepad and
-      // the newest compaction's summary the seed brought back, for the prompt.
-      ...(session && (session.notepad !== undefined || session.summary !== undefined)
+      // the newest compaction's summary the seed brought back, and the thread's
+      // files (record 0033) with where each is for this run, for the prompt.
+      ...(session?.notepad !== undefined || session?.summary !== undefined || threadFiles.length > 0
         ? {
             session: {
-              ...(session.notepad !== undefined ? { notepad: session.notepad } : {}),
-              ...(session.summary !== undefined ? { summary: session.summary } : {}),
+              ...(session?.notepad !== undefined ? { notepad: session.notepad } : {}),
+              ...(session?.summary !== undefined ? { summary: session.summary } : {}),
+              ...(threadFiles.length > 0 ? { files: threadFiles } : {}),
             },
           }
         : {}),
@@ -969,7 +994,16 @@ export async function dispatch(
     // `recall` and `notes` tools over the row's place in the log, once the
     // claim set it; a run without a session (untracked, a ship pipeline, no
     // ledger) has none and the tools say so.
-    const sessionTools = sessionCapabilityFor(ledgerRun, deps.runLedger);
+    const sessionTools = sessionCapabilityFor(
+      ledgerRun,
+      deps.runLedger,
+      deps.artifacts
+        ? {
+            read: () => readThreadAssets({ runs: runsService, store: deps.artifacts! }, msg.threadKey),
+            pathOf: (key) => workspaceFiles.pathOf(key),
+          }
+        : undefined,
+    );
     // What this run may do to other runs (dispatch/spawn.ts; docs/reference/specs/
     // agent-conductor.md): spawn a child as this run, read the runs its
     // REQUESTER may, steer a child through the inbox a thread reply takes, and
@@ -997,6 +1031,7 @@ export async function dispatch(
       profile,
       resolved,
       stagingIndex: nextStagedIndex,
+      workspaceFiles,
       provider,
       model,
       messages,

@@ -1,15 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RunSession } from "../runRecord.js";
 import type { RunView } from "../runsService.js";
-import type { RunEvent } from "../runEvents.js";
-import {
-  previousRunOf,
-  readThread,
-  readThreadArtifacts,
-  stickyAgentOf,
-  THREAD_READ_LIMIT,
-  threadPrOf,
-} from "./thread.js";
+import { previousRunOf, readThread, stickyAgentOf, THREAD_READ_LIMIT, threadPrOf } from "./thread.js";
 
 // docs/reference/specs/routing-and-config.md item 3 and session-log.md item 9:
 // one read of the thread's newest runs, and what the dispatcher derives from it.
@@ -51,73 +43,6 @@ describe("readThread — one page of the thread's newest runs", () => {
     });
     expect(await readThread({ listRuns }, "slack:C1:1.0")).toBeUndefined();
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("slack:C1:1.0: thread read failed — store down"));
-  });
-});
-
-// execution.md item 20 (record 0033): the files the thread received before this
-// run, read from the prior runs' records — every page of every run, since a
-// steer's file lands wherever in the log the steer did.
-describe("readThreadArtifacts — the thread's received files from its records", () => {
-  const inEvent = (key: string, name: string): RunEvent => ({
-    type: "artifact",
-    direction: "in",
-    key,
-    name,
-    size: 10,
-    contentType: "video/mp4",
-  });
-  const filler = (n: number): RunEvent[] =>
-    Array.from({ length: n }, (_, i) => ({ type: "assistant", text: `step ${i}` }) as RunEvent);
-  /** A service whose events come in pages of `pageSize`, `nextAfterSeq` while more follow. */
-  const paged = (byRun: Record<string, RunEvent[]>, pageSize: number) => {
-    const reads: Array<{ id: string; afterSeq?: number }> = [];
-    const getRunEvents = vi.fn(async (id: string, opts: { afterSeq?: number }) => {
-      reads.push({ id, ...(opts.afterSeq !== undefined ? { afterSeq: opts.afterSeq } : {}) });
-      const all = byRun[id];
-      if (!all) return { ok: false as const, error: "not_found" as const };
-      const from = opts.afterSeq ?? 0;
-      const events = all.slice(from, from + pageSize);
-      const end = from + events.length;
-      return { ok: true as const, value: { events, ...(end < all.length ? { nextAfterSeq: end } : {}) } };
-    });
-    return { getRunEvents, reads };
-  };
-
-  it("pages every prior run to its end — an `in` event on a late page (a steered file) is found — oldest run first, one entry per key", async () => {
-    const older = [inEvent("threads/t/in/1/1-a.mp4", "a.mp4"), ...filler(30)];
-    const newer = [
-      ...filler(45),
-      inEvent("threads/t/in/9/1-late.mp4", "late.mp4"),
-      inEvent("threads/t/in/1/1-a.mp4", "a.mp4"),
-    ];
-    const svc = paged({ older, newer }, 10);
-    const found = await readThreadArtifacts(svc, [run({ id: "newer" }), run({ id: "older" })]);
-    expect(found.map((a) => a.key)).toEqual(["threads/t/in/1/1-a.mp4", "threads/t/in/9/1-late.mp4"]);
-    // older: 31 events in 4 pages; newer: 47 events in 5 pages — every page read, none capped.
-    expect(svc.reads.filter((r) => r.id === "older")).toHaveLength(4);
-    expect(svc.reads.filter((r) => r.id === "newer")).toHaveLength(5);
-    expect(svc.reads[0]).toEqual({ id: "older" });
-  });
-
-  it("a page the service refuses stops that run's read with what was read so far and a warning naming the run; a throw does the same; the other runs still count", async () => {
-    const warnings: string[] = [];
-    const first = [inEvent("threads/t/in/1/1-a.mp4", "a.mp4"), ...filler(15)];
-    const svc = paged({ first }, 10);
-    const found = await readThreadArtifacts(
-      svc,
-      [run({ id: "gone" }), run({ id: "first" })],
-      (line) => void warnings.push(line),
-    );
-    expect(found.map((a) => a.key)).toEqual(["threads/t/in/1/1-a.mp4"]);
-    expect(warnings).toEqual(["[thread] gone: reading its received files stopped after 0 event(s) — not_found"]);
-    const throwing = {
-      getRunEvents: vi.fn(async () => {
-        throw new Error("store down");
-      }),
-    };
-    const warned: string[] = [];
-    expect(await readThreadArtifacts(throwing, [run({ id: "r1" })], (line) => void warned.push(line))).toEqual([]);
-    expect(warned).toEqual(["[thread] r1: reading its received files failed after 0 event(s) — store down"]);
   });
 });
 

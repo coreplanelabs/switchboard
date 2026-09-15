@@ -66,7 +66,7 @@ import type { DispatchFollowUp, ResumeContext } from "./admission.js";
 import type { RegisteredRun } from "./provision.js";
 import { registerFinishRecord } from "./record.js";
 import { activityLine, artifactLink } from "./reply.js";
-import { stageIntoWorkspace, stagingIndex } from "./staging.js";
+import { stageIntoWorkspace, stagingIndex, type WorkspaceFiles } from "./staging.js";
 import { githubCapabilityFor, shutdownNotice, webCapability, type RunDeps } from "./run.js";
 
 /** What the loop hands back once the run has finished: the answer as
@@ -147,6 +147,9 @@ export interface RunLoopContext {
    *  staging in the dispatcher so a steer's files never reuse a workspace
    *  path. Absent (a loop driven outside `dispatch()`) → a counter of its own. */
   stagingIndex?: () => number;
+  /** Where this run's staged files sit in its workspace (record 0033), shared
+   *  with the dispatcher's staging so a steer's files resolve for `recall` too. */
+  workspaceFiles?: WorkspaceFiles;
   /** The run that spawned this one (run-history item 46), when it is a child. */
   parentRunId?: string;
   /** The coordinator's instance and key (item 48), when a coordinator spawned it. */
@@ -483,6 +486,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
           executor,
           resident: round.selection.resident !== undefined,
         });
+        ctx.workspaceFiles?.record(staged.outcomes);
         return staged.line;
       }
     : undefined;

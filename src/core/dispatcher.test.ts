@@ -11946,6 +11946,17 @@ describe("inbound staging (record 0033)", () => {
     expect(text).toContain("1-clip.mp4 (3 KB, video/mp4)");
     expect(text).toContain("2-earlier.mp4 (4 KB, video/mp4, from earlier in the thread)");
     expect(text).toContain("gone.mp4 could not be staged: the store no longer holds it (its retention passed)");
+    // The prompt lists the thread's files (record 0033) — the same catalogue the re-pull read — one line
+    // each with where the file is for this run; this run's own file is the turn's, not the list's.
+    const system = provider.requests[0].system ?? "";
+    expect(system).toContain("FILES OF THIS THREAD");
+    expect(system).toContain(
+      "- earlier.mp4 (4 KB, video/mp4) — received on this thread; in this workspace at ./attachments/2-earlier.mp4",
+    );
+    expect(system).toContain(
+      "- gone.mp4 (8 KB, video/mp4) — received on this thread; no longer in the store (its retention passed)",
+    );
+    expect(system).not.toContain("clip.mp4 (3 KB");
     // The new record names the earlier key as its own `in` event — the run page serves only keys the run
     // names; the copy and the HEAD answer concurrently, so the two events' order is not fixed.
     const mine = registry.snapshotById("r1")!.events.filter((e) => e.type === "artifact");

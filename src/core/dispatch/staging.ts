@@ -112,6 +112,21 @@ export function stagingIndex(): () => number {
   return () => ++n;
 }
 
+/** Where this run's staged files sit in its workspace, by key: filled by every
+ *  round the run stages (the request, each steer) and read by `recall` and the
+ *  prompt, so a file's key resolves to `attachments/<index>-<basename>` for
+ *  THIS run — a path another run's staging gave the same key is not this one's. */
+export class WorkspaceFiles {
+  private readonly paths = new Map<string, string>();
+  /** Every outcome that landed: its key now names a workspace path. */
+  record(outcomes: readonly StagedOutcome[]): void {
+    for (const o of outcomes) if (o.error === undefined) this.paths.set(o.key, `${ATTACHMENTS_DIR}/${o.basename}`);
+  }
+  pathOf(key: string): string | undefined {
+    return this.paths.get(key);
+  }
+}
+
 /** The copies, all at once: the bot asks its Worker for each file and records
  *  the `artifact` event when the store holds it. A copy that fails is an
  *  outcome with the reason, never a throw — the turn still runs, naming it. */
@@ -172,33 +187,19 @@ export async function pullStaged(outcomes: readonly StagedOutcome[], deps: PullD
   });
 }
 
-/** A file the thread received on an earlier message, as a prior run's record names it. */
+/** A file the thread received on an earlier message, as a prior run's record
+ *  names it and as the thread's catalogue read (`readThreadAssets`) answers:
+ *  `held` says whether the store still has it — false once its retention
+ *  passed, undefined when the store could not be asked. */
 export interface ThreadArtifact {
   key: string;
   name: string;
   size: number;
   contentType: string;
-}
-
-/** Pure: the files the thread received before this run — the `artifact` events
- *  with `direction: "in"` across the thread's prior runs, oldest run first and
- *  in event order, one entry per key (a later run re-pulling a file records the
- *  same key again). The record is the catalogue: nothing here lists the store. */
-export function threadInboundArtifacts(runsOldestFirst: ReadonlyArray<readonly RunEvent[]>): ThreadArtifact[] {
-  const seen = new Set<string>();
-  const out: ThreadArtifact[] = [];
-  for (const events of runsOldestFirst) {
-    for (const e of events) {
-      if (e.type !== "artifact" || e.direction !== "in" || seen.has(e.key)) continue;
-      seen.add(e.key);
-      out.push({ key: e.key, name: e.name, size: e.size, contentType: e.contentType });
-    }
-  }
-  return out;
+  held?: boolean;
 }
 
 export interface ThreadStageDeps {
-  store: ArtifactStore;
   /** The run's staging counter — the same one the message's own files take, so basenames never collide. */
   nextIndex: () => number;
   /** Where this run's own `artifact` event for a re-pulled file goes: the run page serves only keys the run names. */
@@ -206,33 +207,28 @@ export interface ThreadStageDeps {
 }
 
 /** The thread's earlier files as outcomes ready to pull: no copy and no Slack
- *  call — the store already holds them — one HEAD each. A key the store no
- *  longer holds (its retention passed) is an outcome with that reason and no
- *  event; a held one takes the run's next index and is recorded on this run. */
-export async function stageThreadArtifacts(
-  artifacts: readonly ThreadArtifact[],
-  deps: ThreadStageDeps,
-): Promise<StagedOutcome[]> {
+ *  call — the store already holds them, and the catalogue read already asked
+ *  it. A key the store no longer holds (its retention passed) is an outcome
+ *  with that reason and no event; one the store could not be asked about is
+ *  named so; a held one takes the run's next index and is recorded on this run. */
+export function stageThreadArtifacts(artifacts: readonly ThreadArtifact[], deps: ThreadStageDeps): StagedOutcome[] {
   const outcomes: StagedOutcome[] = [];
   for (const a of artifacts) {
     const file = { name: a.name, size: a.size, type: a.contentType };
     // The index is taken only for a file that will land: a key the store no
     // longer holds leaves no gap in the workspace's numbering (its outcome
     // carries the bare name; nothing is pulled for it).
-    let held: boolean;
-    try {
-      held = (await deps.store.head(a.key)) !== null;
-    } catch (err) {
+    if (a.held === undefined) {
       outcomes.push({
         file,
         basename: safeBasename(a.name),
         key: a.key,
         earlier: true,
-        error: `the store could not be asked: ${describe(err)}`,
+        error: "the store could not be asked whether it still holds it",
       });
       continue;
     }
-    if (!held) {
+    if (!a.held) {
       outcomes.push({
         file,
         basename: safeBasename(a.name),
