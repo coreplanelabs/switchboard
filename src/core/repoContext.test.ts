@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { PR_BODY_CAP, ownPrOf, prCommitsSince, repoFromThread, resolveRepoContext } from "./repoContext.js";
+import { PR_BODY_CAP, ownPrOf, prCommitsSince, recordPrOf, repoFromThread, resolveRepoContext } from "./repoContext.js";
 
 // Feature: docs/reference/specs/resident-repos.md item 29 — repo/ref resolution BEFORE the
 // model turn: explicit signals in the current message (owner/name slug,
@@ -1239,6 +1239,30 @@ describe("resolveRepoContext: the pull request the thread's own run opened binds
     expect(person).toMatchObject({ pr: 9, ref: "p9", refFromPr: true, prFromMessage: true });
     expect(ownPrOf(person)).toBeUndefined();
     expect(ownPrOf({ repo: "acme/api" })).toBeUndefined();
+  });
+
+  it("recordPrOf: the record's PR with its head commit is where a description resubmitted without a push lands — whatever ref the message phrased; a PR a person named, or no PR, is none", async () => {
+    openAt("fix/exact-match");
+    const own = await resolveRepoContext(msg("continue"), history, undefined, undefined, records);
+    expect(recordPrOf(own)).toEqual({ number: 40, headSha: SHA });
+    // The message phrased a ref of its own: the ref is not the PR's, but the thread is still its own.
+    openAt("fix/exact-match");
+    const named = await resolveRepoContext(
+      msg("on branch hotfix/x: do it there"),
+      history,
+      undefined,
+      undefined,
+      records,
+    );
+    expect(named).toMatchObject({ pr: 40, prFromRecord: true, ref: "hotfix/x" });
+    expect(named.refFromPr).toBeUndefined();
+    expect(recordPrOf(named)).toEqual({ number: 40, headSha: SHA });
+    openAt("p9");
+    const person = await resolveRepoContext(msg("now review acme/api#9"), history, undefined, undefined, records);
+    expect(recordPrOf(person)).toBeUndefined();
+    expect(recordPrOf({ repo: "acme/api" })).toBeUndefined();
+    // A record PR with no head commit is not a target: the body could not be rendered at anything.
+    expect(recordPrOf({ repo: "acme/api", pr: 40, prFromRecord: true })).toBeUndefined();
   });
 
   it("fails closed like every inherited PR: a closed or unreachable PR binds no ref and no pr, and the context says why", async () => {

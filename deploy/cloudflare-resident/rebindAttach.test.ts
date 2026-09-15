@@ -123,6 +123,35 @@ describe("rebindToOwnPr moves the binding in place, or names why it stands", () 
     expect(rebind).not.toMatch(/allocateThreadUser\(/);
   });
 
+  it("a dirty tree already on the branch moves the record alone: HEAD is measured as the thread user only once the tree is dirty, the checkout runs only on the verdict's word, the binding is written either way and the note rides the outcome", () => {
+    // The HEAD probe follows the status probe and is gated on its dirt.
+    const status = rebind.indexOf('"git status --porcelain -uno"');
+    const headGate = rebind.indexOf("if (tree.dirty) {");
+    const headProbe = rebind.indexOf('"git rev-parse --abbrev-ref HEAD"');
+    const verdict = rebind.indexOf("const verdict = rebindVerdict(again, tree);");
+    expect(status).toBeGreaterThan(-1);
+    expect(headGate).toBeGreaterThan(status);
+    expect(headProbe).toBeGreaterThan(headGate);
+    expect(verdict).toBeGreaterThan(headProbe);
+    expect(rebind).toMatch(
+      /this\.threadRun\(\s*current\.user,\s*wt,\s*"git rev-parse --abbrev-ref HEAD",\s*DEFAULT_EXEC_TIMEOUT_MS,?\s*\)/,
+    );
+    expect(rebind).toMatch(/if \(head\.exitCode === 0\) tree\.head = head\.stdout\.trim\(\);/);
+    // The checkout sits inside the verdict's gate; the write follows the gate, so both verdicts reach it.
+    const checkoutGate = rebind.indexOf("if (verdict.checkout) {");
+    const checkout = rebind.indexOf("git checkout --quiet");
+    const put = rebind.indexOf("await this.ctx.storage.put(key, moved);");
+    expect(checkoutGate).toBeGreaterThan(verdict);
+    expect(checkout).toBeGreaterThan(checkoutGate);
+    expect(put).toBeGreaterThan(checkout);
+    // No other git command touches the tree on that path: no fetch, no reset, no clean.
+    expect(rebind).not.toMatch(/git (fetch|reset|clean|stash)/);
+    // The outcome carries the verdict's note, and the log line says the tree was not touched.
+    expect(rebind).toMatch(/note: verdict\.note/);
+    expect(rebind).toMatch(/outcome\.note/);
+    expect(source).toMatch(/kind: "rebound"; moved: ThreadBinding; rebound: Rebound; note\?: string/);
+  });
+
   it("a rebind rewrites the re-read binding's ref and records the move on it, inside the mutex; a mutex timeout is the attach's 503 mirror-busy", () => {
     expect(rebind).toMatch(
       /const rebound: Rebound = \{\s*from: current\.ref,\s*to: again\.to,\s*pr: again\.pr,\s*at: /,

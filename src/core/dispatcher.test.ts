@@ -3333,6 +3333,46 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     expect(replies.some((r) => /PR opened/.test(r) && r.includes("`feat/login-fix`"))).toBe(true);
   });
 
+  // A description-only follow-up in a thread whose own run opened the pull
+  // request (docs/reference/specs/resident-repos.md item 29): the workspace
+  // sits on the base — the binding still the repo default because a dirty
+  // tree kept the resident from moving it, and the tree recreated there — and
+  // the run pushed nothing. The description is for the thread's own PR: it is
+  // edited by number and rendered at ITS head, never refused as "the branch
+  // is the base", never rendered at the base's tip the workspace shows.
+  it("a description resubmitted from the base branch in a thread whose own run opened the PR → that PR is edited by number with the body at its head; no open call, no base-branch refusal", async () => {
+    const PR_HEAD = "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432";
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION, "Resubmitted."));
+    deps.resolveRepoContext = () => ({
+      repo: "acme/api",
+      ref: "docs/seed-header",
+      refFromPr: true,
+      pr: 41,
+      prFromRecord: true,
+      headSha: PR_HEAD,
+      baseRef: "main",
+    });
+    codingExecutor({ head: HEAD, branch: "main", bindingRef: "main" });
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const updated: Array<{ repo: string; number: number; title: string; body: string }> = [];
+    deps.updatePullRequest = vi.fn(async (repo: string, number: number, patch: { title: string; body: string }) => {
+      updated.push({ repo, number, ...patch });
+    });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding add the tests' names to the PR description", "slack:UADMIN"), io);
+    expect(spy.calls).toHaveLength(0);
+    expect(updated).toHaveLength(1);
+    expect(updated[0]).toMatchObject({ repo: "acme/api", number: 41, title: "Fix the login redirect" });
+    expect(updated[0].body).toContain(`https://github.com/acme/api/blob/${PR_HEAD}/src/login.ts#L10-L20`);
+    expect(updated[0].body).not.toContain(HEAD);
+    // The link is matched as a regex with a digit guard, never as a URL substring check.
+    expect(
+      replies.some((r) => /PR updated/.test(r) && /https:\/\/github\.com\/acme\/api\/pull\/41(?!\d)/.test(r)),
+    ).toBe(true);
+    expect(replies.some((r) => /base branch/.test(r))).toBe(false);
+  });
+
   it("the pushed branch is gone from the remote while the checkout moved on → the note names BOTH branches, no PR call", async () => {
     const deps = codingDeps(
       bashThenDescribe(["git push -u origin feat/login-fix", "git checkout -b chore/other"], DESCRIPTION),

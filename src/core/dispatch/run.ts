@@ -142,6 +142,14 @@ export interface RunDeps
    */
   findOpenPrByHead?: (repo: string, branch: string) => Promise<OpenPrRef | null>;
   /**
+   * Edits a pull request by number (githubPulls.updatePullRequest): the
+   * post-step asks it when a description arrives from a workspace on the base
+   * in a thread whose own run opened the pull request — the run pushed
+   * nothing, so the description is for that PR (docs/reference/specs/pr-description.md
+   * item 5). Injectable for the same reason.
+   */
+  updatePullRequest?: (repo: string, number: number, patch: { title: string; body: string }) => Promise<void>;
+  /**
    * Repo facts for the agent:ship gate (docs/reference/specs/agent-ship.md item 9): the
    * `allow_auto_merge` flag — ship refuses when it is enabled OR unknown
    * (fail-closed: an LGTM into auto-merge would merge with no human) — and

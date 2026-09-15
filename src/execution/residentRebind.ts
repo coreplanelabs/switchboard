@@ -24,7 +24,10 @@
  *  - the branch is a local branch of the thread's OWN worktree — the physical
  *    fact that this thread's run created it; a branch the tree never made is
  *    refused whatever the caller says;
- *  - the tree has no uncommitted tracked changes — never at the cost of work.
+ *  - the tree has no uncommitted tracked changes — never at the cost of work —
+ *    unless its HEAD is already the branch: the run made the branch in this
+ *    tree and left an edit after pushing, so the record alone moves and no
+ *    git command touches the tree.
  *  The move is a `git checkout` inside the existing tree: same path, same pool
  *  user, deps and snapshot lineage untouched. Every refusal is named in the
  *  attach answer so the bot can say why the follow-up runs where it does. */
@@ -253,11 +256,20 @@ export interface RebindTreeFacts {
   /** `git status --porcelain -uno` listed a tracked change (untracked scratch
    *  files are the thread's own state and survive a checkout). */
   dirty?: boolean;
+  /** `git rev-parse --abbrev-ref HEAD` in the tree — the branch checked out
+   *  (`HEAD` when detached) — measured once the tree is dirty: the one fact
+   *  that tells a dirty tree already on the branch from one elsewhere. */
+  head?: string;
 }
 
 export type RebindVerdict =
-  /** Check the branch out in the existing tree. */
-  | { kind: "rebind" }
+  /** Move the binding. `checkout: true`: check the branch out in the existing
+   *  tree. `checkout: false`: the tree is dirty but its HEAD is already the
+   *  branch — the run made it here and left an edit after pushing — so only
+   *  the record moves; no checkout, no fetch, no reset, the tree not touched
+   *  by the rebind (`note` says so for the log). */
+  | { kind: "rebind"; checkout: true }
+  | { kind: "rebind"; checkout: false; note: string }
   /** The tree is gone (a slept container) and the thread's own runs pushed the
    *  branch: move the binding and let the attach recreate the tree at it. */
   | { kind: "recreate" }
@@ -297,6 +309,17 @@ export function rebindVerdict(plan: { to: string; pr: number; own?: boolean }, t
     };
   }
   if (tree.dirty === true) {
+    // A dirty tree whose HEAD is the branch has nothing a checkout could
+    // cost: the run created the branch in this very tree and left the edit
+    // after pushing, and only the record still names the old ref. Moving
+    // the record is the whole move. Any other HEAD keeps the guard.
+    if (tree.head === plan.to) {
+      return {
+        kind: "rebind",
+        checkout: false,
+        note: `the worktree is dirty but its HEAD is already ${JSON.stringify(plan.to)} (the run made the branch here); the binding moves, the tree is not touched`,
+      };
+    }
     return {
       kind: "refuse",
       refused: rebindRefused(
@@ -306,5 +329,5 @@ export function rebindVerdict(plan: { to: string; pr: number; own?: boolean }, t
       ),
     };
   }
-  return { kind: "rebind" };
+  return { kind: "rebind", checkout: true };
 }
