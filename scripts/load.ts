@@ -90,7 +90,7 @@ import { COMPOUND_PRESET } from "../src/agents/registry.js";
 import { providerRouteModel, routablePresets, route, ROUTE_TIMEOUT_MS } from "../src/core/dispatch/route.js";
 import { DEFAULT_MAX_CHILDREN } from "../src/core/dispatch/spawn.js";
 import { WorkerRunStore } from "../src/core/runStoreWorker.js";
-import { ProviderRegistry } from "../src/providers/registry.js";
+import { PiAiProviders } from "../src/core/harness/piAi.js";
 import { parsePrDescription } from "../src/core/prDescription.js";
 import { CloudflareSandboxExecutor } from "../src/execution/cloudflareSandbox.js";
 import { ResidentExecutor } from "../src/execution/resident.js";
@@ -1054,7 +1054,10 @@ async function routeReplay(f: Flags): Promise<boolean> {
   }
   const modelId = str(f, "model");
   const baseUrl = typeof f["base-url"] === "string" ? f["base-url"] : undefined;
-  const providers = new ProviderRegistry({
+  // The router's model exactly as production builds it: the one-block table on
+  // pi's model library (harness-pi.md item 13), so the replay scores the call
+  // path the deployment runs, not a stand-in.
+  const providers = new PiAiProviders({
     [providerName]: {
       type: providerName === "anthropic" ? "anthropic" : "openai-compatible",
       apiKeyEnv: keyEnv,

@@ -5,7 +5,6 @@ import { describe, expect, it } from "vitest";
 import { AGENTS, COMPOUND_PRESET, presetDoor } from "../../agents/registry.js";
 import { TOOLSETS } from "../../tools/workspace.js";
 import { ConfigStore } from "../../config.js";
-import type { ProviderRegistry } from "../../providers/registry.js";
 import type { CompletionRequest, CompletionResult, Provider } from "../../providers/types.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import type { IncomingMessage } from "../types.js";
@@ -550,8 +549,8 @@ describe("the card's words", () => {
 describe("routeRequest — the stage: when it runs, what always wins", () => {
   function deps(yaml: string, model: RouteModel) {
     const config = configStore(yaml);
-    const providers = { get: () => ({}) as Provider } as unknown as ProviderRegistry;
-    return { config, providers, routeModel: model };
+    const completions = { get: () => ({}) as Provider };
+    return { config, completions, routeModel: model };
   }
   const root = () => startRequestRoot({ clock: () => NOW }, { channel: channelOf("slack:CX"), receivedAt: NOW }).root;
   const ctx = (agentSource: "directive" | "sticky" | "user" | "channel" | "default", text = "look at this PR") => ({
@@ -582,6 +581,41 @@ describe("routeRequest — the stage: when it runs, what always wins", () => {
     const named = scripted(answer("review"));
     const onModel = await routeRequest(deps(YAML + "routing:\n  model: anthropic/fast-model\n", named), ctx("default"));
     expect(onModel.kind === "routed" && onModel.route.model).toBe("anthropic/fast-model");
+  });
+
+  // Feature: docs/reference/specs/harness-pi.md item 13 — the router's one
+  // call is made through pi's model library: with no scripted `routeModel`
+  // the stage reads the provider the ref names off `completions` (the table
+  // on pi-ai) and asks it for the forced tool call, exactly as before.
+  it("without a scripted model, the router's completion comes from `completions` — the provider table on pi's library — asked by the ref's provider name for the forced route call", async () => {
+    const requests: CompletionRequest[] = [];
+    const asked: string[] = [];
+    const provider: Provider = {
+      name: "anthropic",
+      async complete(req) {
+        requests.push(req);
+        return {
+          content: [{ type: "tool_use", id: "t1", name: ROUTE_TOOL_NAME, input: { preset: "review", reason: "a PR" } }],
+          stopReason: "tool_use",
+        };
+      },
+    };
+    const completions = {
+      get: (name: string) => {
+        asked.push(name);
+        return provider;
+      },
+    };
+    const out = await routeRequest({ config: configStore(YAML), completions }, ctx("default"));
+    expect(asked).toEqual(["anthropic"]);
+    expect(requests).toHaveLength(1);
+    expect(requests[0].model).toBe("general-model");
+    expect(requests[0].toolChoice).toEqual({ type: "tool", name: ROUTE_TOOL_NAME });
+    expect(out.kind === "routed" && out.route).toEqual({
+      preset: "review",
+      reason: "a PR",
+      model: "anthropic/general-model",
+    });
   });
 
   it("a reply into a thread with a run in flight is a follow-up, not a request: unrouted, the model never paid", async () => {
@@ -642,8 +676,8 @@ describe("routeRequest — the stage: when it runs, what always wins", () => {
           return { content: [{ type: "text", text: answer("review") }], stopReason: "end_turn" };
         },
       };
-      const providers = { get: () => provider } as unknown as ProviderRegistry;
-      return { deps: { config: configStore(yaml), providers }, requests };
+      const completions = { get: () => provider };
+      return { deps: { config: configStore(yaml), completions }, requests };
     };
     const forced = seam(YAML);
     const routed = await routeRequest(forced.deps, ctx("default"));
@@ -1126,8 +1160,8 @@ describe("routeRequest — a compound route resolves the conductor, a rejected o
     ) + "routing:\n  auto: true\n";
   function deps(yaml: string, model: RouteModel) {
     const config = configStore(yaml);
-    const providers = { get: () => ({}) as Provider } as unknown as ProviderRegistry;
-    return { config, providers, routeModel: model };
+    const completions = { get: () => ({}) as Provider };
+    return { config, completions, routeModel: model };
   }
   const root = () => startRequestRoot({ clock: () => NOW }, { channel: channelOf("slack:CX"), receivedAt: NOW }).root;
   const ctx = (text: string, user = "slack:UX") => ({

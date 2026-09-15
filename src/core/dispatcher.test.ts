@@ -155,9 +155,13 @@ function makeDeps(fixtureYaml: string, provider: Provider): TestDeps {
   const providers = { get: () => provider } as unknown as ProviderRegistry;
   // The Null Objects a process without the subsystem is wired with (routing-and-
   // config item 16): a test that needs the real thing sets it after `makeDeps`.
+  // One scripted provider answers the loop (`providers`) and the calls made
+  // outside it (`completions`: the router, reflection) unless a test sets the
+  // second apart.
   const deps: TestDeps = {
     config,
     providers,
+    completions: providers,
     capabilities: capabilitiesFrom(config.config, process.env, processSecrets),
     residentFleet: NO_FLEET,
     memory: new NullMemoryStore(),
@@ -4701,6 +4705,43 @@ describe("cross-session memory WRITE path", () => {
     expect(written.map((r) => r.kind).sort()).toEqual(["fact", "summary"]);
     expect(written[0].sourceThreadKey).toBe("slack:CX:1.0");
     expect(written.every((r) => typeof r.sourceRunId === "string" && r.sourceRunId.length > 0)).toBe(true);
+  });
+
+  // Feature: docs/reference/specs/memory.md item 11, harness-pi.md item 13 —
+  // reflection's one call goes through pi's model library: the provider is
+  // read off `completions` by the ref's name, never off the loop's `providers`.
+  it("reflection's one call is made through `completions` — the table on pi's library — and the run's own provider never sees it", async () => {
+    const { provider, requests } = runThenReflect({ toolFirst: true });
+    const reflections: CompletionRequest[] = [];
+    const asked: string[] = [];
+    const reflector: Provider = {
+      name: "anthropic",
+      async complete(req): Promise<CompletionResult> {
+        reflections.push(req);
+        return { content: [{ type: "text", text: REFLECTION_REPLY }], stopReason: "end_turn" };
+      },
+    };
+    const store = new InMemoryMemoryStore();
+    const deps: CoreDeps = {
+      ...makeDeps(MEMORY_WRITE_YAML, provider),
+      completions: {
+        get: (name) => {
+          asked.push(name);
+          return reflector;
+        },
+      },
+      memory: store,
+      channelDirectory: PUBLIC_CHANNEL,
+    };
+    await dispatch(deps, msg("how do we deploy?"), fakeIO().io);
+    await drainReflections();
+    expect(asked).toEqual(["anthropic"]);
+    expect(reflections).toHaveLength(1);
+    expect(reflections[0].model).toBe("cheap-model");
+    expect(reflections[0].system).toBe(REFLECTION_SYSTEM);
+    expect(requests.filter((r) => r.system === REFLECTION_SYSTEM)).toHaveLength(0);
+    const written = await store.retrieve({ scopeKey: "org:acme", query: "deploy command", limit: 10 });
+    expect(written.map((r) => r.kind).sort()).toEqual(["fact", "summary"]);
   });
 
   // Feature: docs/reference/specs/memory.md §10 — a `review` run never reflects: its

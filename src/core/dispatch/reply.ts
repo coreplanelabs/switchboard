@@ -28,7 +28,7 @@ import type { CardShell } from "../statusCardFrame.js";
 import type { Span } from "../trace/types.js";
 import type { HistoryItem, IncomingMessage, StatusHandle } from "../types.js";
 import type { ProvisionDeps } from "./provision.js";
-import type { ResolveDeps } from "./resolve.js";
+import type { RouteDeps } from "./route.js";
 
 /** The external live-view capability URL for a run, or undefined when
  *  PUBLIC_BASE_URL is unset/blank — the feature degrades gracefully (no link,
@@ -368,7 +368,7 @@ export async function replyCommandOutput(io: ChannelIO, parsed: ParsedChatComman
 /** What the reply stage's post-run step reads off the dispatcher's
  *  dependencies: the memory store and providers for the reflection pass.
  *  `CoreDeps` extends this; a caller's shape is unchanged. */
-export interface ReplyDeps extends Pick<ProvisionDeps, "memory">, Pick<ResolveDeps, "providers"> {
+export interface ReplyDeps extends Pick<ProvisionDeps, "memory">, Pick<RouteDeps, "completions"> {
   config: ConfigStore;
 }
 
@@ -528,7 +528,9 @@ export function afterReply(deps: ReplyDeps, ctx: AfterReplyContext): void {
     scheduleReflection({
       cfg: deps.config.config.memory,
       store: deps.memory,
-      providers: deps.providers,
+      // The extractor's one call goes through pi's model library
+      // (harness-pi.md item 13), never the loop's own provider adapters.
+      providers: deps.completions,
       runModelRef: resolved.modelRef,
       gate: { toolCalls, historyTurns: history.length, agentName: resolved.agentName },
       threadKey: msg.threadKey,

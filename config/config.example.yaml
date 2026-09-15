@@ -24,7 +24,10 @@ providers:
   # vendor, so a model is named openrouter/anthropic/claude-sonnet-4 (the first
   # slash separates the provider; the rest is passed through). The compatible
   # adapter sends no effort tier, turns document inputs into a text note and
-  # asks for no provider-side prompt caching.
+  # asks for no provider-side prompt caching. The request router and memory
+  # reflection reach it through pi's model library instead (the same block,
+  # the same key), which applies its own OpenRouter rules there, prompt-cache
+  # markers included.
   # openrouter:
   #   type: openai-compatible
   #   baseUrl: https://openrouter.ai/api/v1

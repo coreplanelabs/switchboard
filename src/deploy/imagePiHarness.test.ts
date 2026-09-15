@@ -75,6 +75,14 @@ describe("the three images carry one pi", () => {
     expect(new Set(pins).size).toBe(1);
     expect(pins[0]).toBe(PI_VERSION);
   });
+
+  // Feature: docs/reference/specs/harness-pi.md item 13 — pi's model library
+  // runs inside the bot too, for the calls made outside a run loop, at the
+  // same exact version as the pi the images carry: one pin, moved together.
+  it("the bot's `@earendil-works/pi-ai` dependency is pinned exactly at the same version, so the library in the process and the pi in the images move together", () => {
+    const pkg = JSON.parse(read("package.json")) as { dependencies?: Record<string, string> };
+    expect(pkg.dependencies?.["@earendil-works/pi-ai"]).toBe(PI_VERSION);
+  });
 });
 
 describe("the resident image proves pi as a thread user", () => {
