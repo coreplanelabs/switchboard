@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.229.0](https://github.com/coreplanelabs/switchboard/compare/v1.228.0...v1.229.0) (2026-09-15)
+
+
+### Features
+
+* **costs:** the spend page gets a By user tab — each requester's runs priced at list from their tokens, each day's cloud spend allocated by run wall-clock, a filter and a me toggle for the signed-in viewer, the range bounded by the history and one line reconciling against the workspace figure ([#1265](https://github.com/coreplanelabs/switchboard/issues/1265)) ([95f8943](https://github.com/coreplanelabs/switchboard/commit/95f89435933216bc00a199f5944cd8dc16af7efa))
+* **harness:** the native loop, both provider adapters and the native tool table are deleted — every preset runs on pi, run-loop.md retires into harness-pi.md, and a thread's agent is sticky by transcript on every preset ([#1267](https://github.com/coreplanelabs/switchboard/issues/1267)) ([146f928](https://github.com/coreplanelabs/switchboard/commit/146f92872f0894ba550bc6e8c59745f5112373e3))
+* **runs:** the artifact proxy honours a single byte range — a 206 with Content-Range and Accept-Ranges on every answer, a 416 past the end — so the run page's video and audio players seek instead of downloading from the start ([#1285](https://github.com/coreplanelabs/switchboard/issues/1285)) ([25ce06f](https://github.com/coreplanelabs/switchboard/commit/25ce06ff8893c4771ab8da5fa308b92af48c7d55))
+* **web:** the run page shows the threads a request pointed at as a Referenced threads fold beside Earlier in this thread ([#1264](https://github.com/coreplanelabs/switchboard/issues/1264)) ([bbb149c](https://github.com/coreplanelabs/switchboard/commit/bbb149cee1ee31b7e7ea22b93c250e42fa1af1a6))
+
+
+### Bug fixes
+
+* **authz:** config show --channel reads another channel's scope only when the table admits it — public from anywhere, private from inside it or by grant ([#1272](https://github.com/coreplanelabs/switchboard/issues/1272)) ([e8a4f70](https://github.com/coreplanelabs/switchboard/commit/e8a4f700b512e98d738f42a5c07da95eac055149))
+* **deploy:** the sandbox live gate sends its probe only once the deploy's version registered, so the gate's own thread no longer lands on the previous image, and an in-body probe error names that image as the cause ([#1284](https://github.com/coreplanelabs/switchboard/issues/1284)) ([a3c69d0](https://github.com/coreplanelabs/switchboard/commit/a3c69d04f06ef486e5b9139d149d83c8f67babea))
+* **resident:** the mutable-cache swap leaves a tree-private node_modules dot entry with no store counterpart in place and names it on the step's output, instead of failing the whole refresh on the cp ([#1281](https://github.com/coreplanelabs/switchboard/issues/1281)) ([137fddd](https://github.com/coreplanelabs/switchboard/commit/137fddd58c198df9171743728bd59b786ad10687))
+* **web:** the run page draws the agent's notepad as a Notes block with its Markdown instead of a ⏱ line, and the workspace prompts ask for a headed shape ([#1271](https://github.com/coreplanelabs/switchboard/issues/1271)) ([a304003](https://github.com/coreplanelabs/switchboard/commit/a3040036fbbb537418fffd9216b63e4b202f6bb3))
+
+
+### Documentation
+
+* **dispatcher:** say the tail cut drops results answering pre-cut calls ([#1270](https://github.com/coreplanelabs/switchboard/issues/1270)) ([37ddee0](https://github.com/coreplanelabs/switchboard/commit/37ddee0d6401328567636e4fc8d426b1aa789ba3))
+* **docs:** execution item 6 names the skew failure a 0.12 container answers a 0.13 Worker with — the missing getRuntimeMetadata call, as the first 0.13 deploy's live probe saw it ([#1278](https://github.com/coreplanelabs/switchboard/issues/1278)) ([f1cef7e](https://github.com/coreplanelabs/switchboard/commit/f1cef7e95423d184bc01b33dd03a5755c2cdbe06))
+* **docs:** record 0037 is implemented — the linked-thread feature is live behind references.enabled, red-teamed and receipted on its tracker ([#1274](https://github.com/coreplanelabs/switchboard/issues/1274)) ([1a3e943](https://github.com/coreplanelabs/switchboard/commit/1a3e943e03844ac2c5637208e6d8ff5143b07cfc))
+* **docs:** the explanation page says how a thread's worktree follows its own pull request on the resident — moved once from an unnamed default, never over uncommitted work — and names the seed's dropped results as a note on the run's record ([#1283](https://github.com/coreplanelabs/switchboard/issues/1283)) ([08f9626](https://github.com/coreplanelabs/switchboard/commit/08f9626749607fe861043fd3b699c69cf4eebdff))
+* **docs:** U29 complete — the pi series landed as six pull requests and every step is receipted on the tracker; record 0032's rollout is done and its status flip is the owner's ([#1277](https://github.com/coreplanelabs/switchboard/issues/1277)) ([2cf1a4e](https://github.com/coreplanelabs/switchboard/commit/2cf1a4e7c640e6fe9344700759703d866c9ee58f))
+* **docs:** U36 — OpenRouter as a first-class upstream: the Responses route forwards to it and U8's paid A/B lands, recorded as the plan's amendment of 2026-09-15 ([#1269](https://github.com/coreplanelabs/switchboard/issues/1269)) ([d1cdb19](https://github.com/coreplanelabs/switchboard/commit/d1cdb19716d32dfe952a8a295fef6e1eb62e71f1))
+
 ## [1.228.0](https://github.com/coreplanelabs/switchboard/compare/v1.227.0...v1.228.0) (2026-09-15)
 
 
