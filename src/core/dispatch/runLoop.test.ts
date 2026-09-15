@@ -521,6 +521,132 @@ describe("the harness seam — pi in place of the native loop when the preset sa
     };
   }
 
+  /** A pi that starts on the prompt and finishes only once a steer arrives — so the
+   *  test sees the steer's text the way pi would, staged files and all. */
+  function piFinishingOnSteer(container: FakePiContainer, finalText: string) {
+    const steers: string[] = [];
+    container.onStdin = (line, c) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
+        c.emit({ id: cmd.id, type: "response", command: cmd.type, success: true, data: { sessionFile: "s.jsonl" } });
+      if (cmd.type === "prompt")
+        c.emit({ id: cmd.id, type: "response", command: "prompt", success: true }, { type: "agent_start" });
+      if (cmd.type === "steer") {
+        steers.push(String(cmd.message));
+        const done = { role: "assistant", content: [{ type: "text", text: finalText }], stopReason: "stop" };
+        c.emit(
+          { type: "message_end", message: done },
+          { type: "turn_end", message: done, toolResults: [] },
+          { type: "agent_settled" },
+        );
+      }
+    };
+    return steers;
+  }
+
+  const clip = {
+    name: "clip.mp4",
+    size: 3_120,
+    type: "video/mp4",
+    url: "https://files.slack.com/files-pri/T1-F1/clip.mp4",
+    messageId: "1700000000.000300",
+  };
+  const steered = () => ({
+    text: "and cut a contact sheet from this",
+    userId: "slack:UX",
+    at: NOW + 1,
+    staged: [clip],
+    msg: { channelId: "slack:CX", userId: "slack:UX", threadKey: THREAD, text: "and cut a contact sheet from this" },
+  });
+
+  // record 0033: on pi too, a follow-up steered into the live run that carries a
+  // staged file is copied into the store and pulled into the container over the
+  // run's executor BEFORE the steer pi reads, whose text ends with the line.
+  it("a steered follow-up's staged file is copied and pulled before pi reads the steer; the steer's text ends with the attachments line; the record carries the `in` event", async () => {
+    const container = new FakePiContainer();
+    const steers = piFinishingOnSteer(container, "sheet cut");
+    const store = new InMemoryArtifactStore({
+      bucket: "test",
+      fetch: (async () =>
+        new Response(new Uint8Array(clip.size), {
+          status: 200,
+          headers: { "content-type": "video/mp4" },
+        })) as unknown as typeof fetch,
+    });
+    const commands: string[] = [];
+    const s = setup("", {
+      agent: "coding",
+      provider: provider("unused"),
+      yaml: PI_YAML,
+      harness: {
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        containerFor: () => container,
+      },
+      bearer: "sbr_run-l.s3cret",
+      executor: {
+        exec: async (command) => {
+          commands.push(command);
+          return "";
+        },
+      },
+      artifacts: store,
+    });
+    s.ctx.admitted.inbox.push(steered());
+    const out = await runLoop(s.deps, s.ctx);
+    expect(out.answer).toBe("sheet cut");
+    expect(store.copies.map((c) => c.key)).toEqual(["threads/slack-CX-1.0/in/1700000000.000300/1-clip.mp4"]);
+    expect(commands).toEqual([
+      expect.stringMatching(/^mkdir -p attachments && curl -fsS -o 'attachments\/1-clip\.mp4' 'memory:\/\/test\//),
+    ]);
+    expect(steers).toHaveLength(1);
+    expect(steers[0]).toMatch(
+      /and cut a contact sheet from this[\s\S]*Attached files are in \.\/attachments\/: 1-clip\.mp4 \(3 KB, video\/mp4\)$/,
+    );
+    s.ending.drain(true);
+    await s.writer.settled();
+    const rec = (await s.store.get("run-l"))!;
+    expect(rec.events.filter((e) => e.type === "artifact")).toMatchObject([
+      {
+        type: "artifact",
+        direction: "in",
+        key: "threads/slack-CX-1.0/in/1700000000.000300/1-clip.mp4",
+        name: "clip.mp4",
+        size: 3_120,
+      },
+    ]);
+  });
+
+  it("without a store the pi steer is sent as before: no copy, no pull, no line", async () => {
+    const container = new FakePiContainer();
+    const steers = piFinishingOnSteer(container, "done");
+    const commands: string[] = [];
+    const s = setup("", {
+      agent: "coding",
+      provider: provider("unused"),
+      yaml: PI_YAML,
+      harness: {
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        containerFor: () => container,
+      },
+      bearer: "sbr_run-l.s3cret",
+      executor: {
+        exec: async (command) => {
+          commands.push(command);
+          return "";
+        },
+      },
+    });
+    s.ctx.admitted.inbox.push(steered());
+    const out = await runLoop(s.deps, s.ctx);
+    expect(out.answer).toBe("done");
+    expect(commands).toEqual([]);
+    expect(steers).toHaveLength(1);
+    expect(steers[0]).toContain("and cut a contact sheet from this");
+    expect(steers[0]).not.toContain("Attached files");
+  });
+
   it("a preset the deployment moved to pi runs on the harness: pi's answer is the run's, its tool events are on the stream, the bearer reaches pi and the provider is never called", async () => {
     const container = new FakePiContainer();
     const registry = new HarnessRegistry();

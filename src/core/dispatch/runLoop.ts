@@ -466,6 +466,24 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
   // The run's staging counter: the dispatcher's when it handed one over (the
   // request's files took 1..n there), else this loop's own.
   const nextStagedIndex = ctx.stagingIndex ?? stagingIndex();
+  // A steered follow-up's staged files (record 0033): copied into the store and
+  // pulled into this workspace before the model reads the turn — the same hook
+  // for the native loop and the pi harness, bound only when a store exists.
+  const stageFollowUps = deps.artifacts
+    ? async (inputs: readonly { staged?: readonly StagedFile[] }[]): Promise<string> => {
+        const files = inputs.flatMap((i) => i.staged ?? []);
+        if (files.length === 0) return "";
+        const staged = await stageIntoWorkspace(files, {
+          store: deps.artifacts!,
+          threadKey: msg.threadKey,
+          publish: (e) => registry.publish(run.id, e),
+          nextIndex: nextStagedIndex,
+          executor,
+          resident: round.selection.resident !== undefined,
+        });
+        return staged.line;
+      }
+    : undefined;
   let artifactSeq = 0;
   // A ticketless channel's lead links the file itself: this run's artifact proxy
   // under its live token (the same capability the status card's link carries).
@@ -564,6 +582,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
           span: root,
           control: run.control,
           inbox: admitted.inbox,
+          ...(stageFollowUps ? { stageFollowUps } : {}),
           onEvent,
           onProgress,
           ...(ledgerRun
@@ -603,25 +622,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
         ...(round.selection.backend ? { backend: round.selection.backend } : {}),
         control: run.control, // operator stop from /runs
         inbox: admitted.inbox, // thread follow-ups steered into this run (thread-admission item 2)
-        // A steered follow-up's staged files (record 0033): copied into the
-        // store and pulled into this workspace before the model reads the turn.
-        ...(deps.artifacts
-          ? {
-              stageFollowUps: async (inputs: readonly { staged?: readonly StagedFile[] }[]) => {
-                const files = inputs.flatMap((i) => i.staged ?? []);
-                if (files.length === 0) return "";
-                const staged = await stageIntoWorkspace(files, {
-                  store: deps.artifacts!,
-                  threadKey: msg.threadKey,
-                  publish: (e) => registry.publish(run.id, e),
-                  nextIndex: nextStagedIndex,
-                  executor,
-                  resident: round.selection.resident !== undefined,
-                });
-                return staged.line;
-              },
-            }
-          : {}),
+        ...(stageFollowUps ? { stageFollowUps } : {}),
         // The step record before each step's tools (run-history item 35).
         ...(ledgerRun ? { onStep: ledgerRun.step.bind(ledgerRun) } : {}),
         // A resume re-enters the loop from the plan (run-history item 37).
