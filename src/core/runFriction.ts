@@ -562,6 +562,17 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
           eventIndex: index,
         });
         return;
+      case "sandbox_restarted":
+        // The container rolled under the run and came back: the run went on,
+        // but the minutes spent waiting for the wake are friction the deploy
+        // window owns.
+        findings.push({
+          category: "infra_failure",
+          severity: "medium",
+          summary: `sandbox restarted: ${ev.summary}`,
+          eventIndex: index,
+        });
+        return;
     }
   });
   // A slow turn whose produced event is past the stream (a turn that ended the run).

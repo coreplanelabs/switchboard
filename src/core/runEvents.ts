@@ -71,6 +71,11 @@ export type RunNoteKind =
    *  executor's bounded wait (docs/reference/specs/execution.md item 14). Capacity, not a
    *  dead sandbox: the run goes on and the model is told to retry or finish. */
   | "fleet_busy"
+  /** The sandbox restarted under the run and came back (docs/reference/specs/
+   *  resident-repos.md item 65): the executor waited for the resident's wake
+   *  and re-attached; the interrupted call was settled with a synthetic
+   *  result (run-loop.md item 19) and the run goes on. */
+  | "sandbox_restarted"
   | "stop_requested"
   | "stopped"
   /** Setup spans the request's stream sink had to drop before this run was
@@ -154,6 +159,7 @@ export const RUN_NOTE_KINDS = [
   "turn_budget_exhausted",
   "sandbox_dead",
   "fleet_busy",
+  "sandbox_restarted",
   "stop_requested",
   "stopped",
   "spans_dropped",

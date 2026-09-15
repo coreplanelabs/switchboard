@@ -10,7 +10,7 @@ import {
 } from "./providers/types.js";
 import { RunControl } from "./core/runRegistry/runControl.js";
 import type { Executor } from "./execution/executor.js";
-import { ExecCapacityError, ExecInfraError } from "./execution/executor.js";
+import { ExecCapacityError, ExecInfraError, ExecSandboxRestartedError } from "./execution/executor.js";
 import type { RunEvent } from "./core/runEvents.js";
 import { runAgent, type StepReport } from "./runner.js";
 import type { RunnableTool } from "./tools/workspace.js";
@@ -2968,5 +2968,99 @@ describe("an answer written alongside a bookkeeping call (docs/reference/specs/r
       resume: { settlements: [], stepRecorded: true, inboxConsumedSeq: 0, turn: 1, iteration: 1, remainingMs: 600_000 },
     });
     expect(answer).toBe("_(no response)_");
+  });
+});
+
+// Feature: docs/reference/specs/run-loop.md item 19 (with resident-repos.md
+// item 65): the sandbox restarted under the run and came back. The executor
+// waited for the wake and re-attached; the call it interrupted never ran and
+// the worktree is fresh. The runner settles that call like one in flight at a
+// bot restart (item 14): a synthetic result telling the model to re-check
+// before re-running, a typed `sandbox_restarted` note, and no strike, since
+// the sandbox is alive again.
+describe("a sandbox restart under a live run is settled, not counted (run-loop.md item 19)", () => {
+  const RESTART_DETAIL =
+    "the resident container exited under a rollout and woke from its snapshot after 53s; the worktree was recreated at main@abc1234, so uncommitted changes and unpushed commits from earlier in this run are gone";
+
+  function restarting(times: number): Executor & { calls: number } {
+    const ex: Executor & { calls: number } = {
+      ...fakeExecutor,
+      calls: 0,
+      exec: async () => {
+        ex.calls++;
+        if (ex.calls <= times) throw new ExecSandboxRestartedError(RESTART_DETAIL, 53_000);
+        return "ok";
+      },
+    };
+    return ex;
+  }
+
+  it("the interrupted call gets the restart result (it did not run; re-check the tree) and the run goes on to the model's own answer", async () => {
+    const executor = restarting(1);
+    const provider = scripted([bashUse("t1"), bashUse("t2"), text("done")]);
+    const events: RunEvent[] = [];
+    const answer = await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 10, maxMinutes: 30 }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor },
+      onEvent: (e) => events.push(e),
+    });
+    expect(answer).toBe("done");
+    expect(executor.calls).toBe(2);
+    // The second model call reads the settlement as the interrupted call's result.
+    const settled = provider.requests[1].messages.at(-1)!;
+    expect(settled.role).toBe("user");
+    const parts = settled.content as Array<{ type: string; toolUseId?: string; content?: unknown; isError?: boolean }>;
+    const result = parts.find((p) => p.type === "tool_result")!;
+    expect(result.toolUseId).toBe("t1");
+    expect(result.isError).toBe(true);
+    expect(String(result.content)).toMatch(/sandbox restarted/i);
+    expect(String(result.content)).toMatch(/did not run/);
+    expect(String(result.content)).toMatch(/re-check/i);
+    expect(String(result.content)).toContain(RESTART_DETAIL);
+    // Not infra: the sandbox is alive again, so nothing counts toward the breaker.
+    const results = events.filter((e) => e.type === "tool_result");
+    expect(results[0]).toMatchObject({ ok: false, callId: "t1" });
+    expect("infra" in results[0]).toBe(false);
+    expect(results[1]).toMatchObject({ ok: true, callId: "t2" });
+  });
+
+  it("emits one typed sandbox_restarted note carrying the detail, never sandbox_dead, and the progress line names the restart", async () => {
+    const events: RunEvent[] = [];
+    const progress: string[] = [];
+    await runAgent({
+      provider: scripted([bashUse("t1"), text("done")]),
+      model: "m",
+      agent: agent({ maxTurns: 10, maxMinutes: 30 }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: restarting(1) },
+      onEvent: (e) => events.push(e),
+      onProgress: (n) => progress.push(n),
+    });
+    const notes = events.filter((e) => e.type === "run_note");
+    expect(notes.map((n) => n.kind)).toEqual(["sandbox_restarted"]);
+    expect(notes[0].summary).toContain("after 53s");
+    expect(progress.some((n) => /sandbox restarted/i.test(n))).toBe(true);
+  });
+
+  it("two restarts in a row never abort: the run still ends with the model's own answer", async () => {
+    const executor = restarting(2);
+    const events: RunEvent[] = [];
+    const answer = await runAgent({
+      provider: scripted([bashUse("t1"), bashUse("t2"), text("finished with what I have")]),
+      model: "m",
+      agent: agent({ maxTurns: 10, maxMinutes: 30 }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor },
+      onEvent: (e) => events.push(e),
+    });
+    expect(answer).toBe("finished with what I have");
+    expect(answer).not.toMatch(/transport failed|aborting/i);
+    expect(events.filter((e) => e.type === "run_note").map((n) => n.kind)).toEqual([
+      "sandbox_restarted",
+      "sandbox_restarted",
+    ]);
   });
 });

@@ -23,7 +23,12 @@ import type { RunControl } from "./core/runRegistry/runControl.js";
 import { followUpPrompt, followUpSnippet, type FollowUpInbox, type FollowUpInput } from "./core/threadAdmission.js";
 import type { Settlement } from "./core/runLedger/resume.js";
 import type { CompactionEntry } from "./core/runLedger/types.js";
-import { ExecCapacityError, ExecHealthTracker, ExecInfraError } from "./execution/executor.js";
+import {
+  ExecCapacityError,
+  ExecHealthTracker,
+  ExecInfraError,
+  ExecSandboxRestartedError,
+} from "./execution/executor.js";
 import { TracingExecutor } from "./execution/tracingExecutor.js";
 import { TOOLSETS, type RunnableTool, type ToolContext } from "./tools/workspace.js";
 import type { Backend } from "./core/trace/attrs.js";
@@ -570,6 +575,20 @@ async function runLoop(
           settle(false, { infra: true });
           return { type: "tool_result", toolUseId: tu.id, content: text, isError: true };
         }
+        // The sandbox restarted under the run and came back (docs/reference/specs/
+        // resident-repos.md item 65): the executor waited for the wake and
+        // re-attached, and the call it interrupted never ran. Settled like a
+        // call in flight at a bot restart (item 14): a synthetic result that
+        // tells the model to re-check before re-running, and a typed note so
+        // the wait is visible on the card and the run page. Not infra: the
+        // sandbox is alive again, so nothing counts toward the breaker.
+        if (err instanceof ExecSandboxRestartedError) {
+          const text = sandboxRestartedResult(tu.name, message);
+          emit({ type: "tool_result", tool: tu.name, ok: false, callId: tu.id, ...prepareToolResult(text), ...spanId });
+          note("sandbox_restarted", `⟳ Sandbox restarted: ${message}`);
+          settle(false);
+          return { type: "tool_result", toolUseId: tu.id, content: text, isError: true };
+        }
         // `infra` marks a sandbox/transport failure (not the command's own error)
         // so downstream analysis never mistakes a dead sandbox for a failing command.
         const infra = err instanceof ExecInfraError;
@@ -982,6 +1001,16 @@ function sandboxDeadDiagnosis(lastInfraError: string | undefined): string {
     ? `last: ${lastInfraError.trim()}`
     : "no error text was captured; possible causes include the sandbox running out of memory or disk, or its exec transport dying";
   return `Sandbox exec transport failed ${MAX_CONSECUTIVE_INFRA_FAILURES} times in a row (${evidence})`;
+}
+
+/** The synthetic result for a call a sandbox restart interrupted (run-loop.md
+ *  item 19): the shape the ledger's resume gives a call in flight at a bot
+ *  restart, with the facts the executor learned while it waited. */
+function sandboxRestartedResult(tool: string, detail: string): string {
+  return (
+    `The sandbox restarted while this ${tool} call was in flight; the call did not run, and ${detail}. ` +
+    "Re-check the worktree (git status, git log, the files you changed) before re-running it, and redo what is missing."
+  );
 }
 
 /** Fail fast on an unrecoverable sandbox: the same guaranteed-finale path as
