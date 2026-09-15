@@ -22,6 +22,8 @@ export interface ThreadTurn {
   text: string;
   /** Epoch ms from Slack's fractional-seconds `ts`; absent when it does not parse. */
   at?: number;
+  /** Slack's own `ts`, exactly as sent — the id a permalink names a message by. */
+  ts?: string;
   /** The author's user id; absent on a bot's message. */
   user?: string;
   /** The posting app's bot id; a message with one is an `assistant` turn. */
@@ -56,6 +58,7 @@ export function threadTurns(messages: readonly SlackThreadMessage[], opts: Threa
       role: mm.bot_id ? "assistant" : "user",
       text,
       ...(at !== undefined ? { at } : {}),
+      ...(mm.ts !== undefined ? { ts: mm.ts } : {}),
       ...(mm.user !== undefined ? { user: mm.user } : {}),
       ...(mm.bot_id !== undefined ? { botId: mm.bot_id } : {}),
       files,

@@ -9,6 +9,7 @@ import { ProviderRegistry } from "./providers/registry.js";
 import { PiAiProviders } from "./core/harness/piAi.js";
 import { createSlackApp } from "./channels/slack.js";
 import { SlackChannelDirectory } from "./channels/slackChannelDirectory.js";
+import { SlackConversationReader } from "./channels/slack/references.js";
 import { createIngressHandler, parseIngressTokens } from "./channels/http.js";
 import { createMcpHandler } from "./channels/mcp.js";
 import { FAVICON_ICO_SVG, createLiveViewHandler } from "./channels/liveView.js";
@@ -496,6 +497,13 @@ export async function runBot(): Promise<void> {
   // failure — so a public channel's runs are readable by everyone and a private
   // channel's or DM's stay grants-only. Non-Slack ids keep the static answer.
   deps.channelDirectory = new SlackChannelDirectory(app.client);
+  // The conversation reader (record 0037): a permalink to another thread the
+  // bot is in becomes a quoted, untrusted block on the request turn — this
+  // workspace's URL grammar, one fresh `conversations.info` per classification,
+  // a text-only fetch. Inert until `references.enabled` is set; the host it
+  // recognises is read from `auth.test` once the socket is up.
+  const conversationReader = new SlackConversationReader(app.client);
+  deps.conversationReaders = [conversationReader];
   // Connect tickets bind to the requester's email when Slack can tell us
   // (`users:read.email`); without the scope the lookup yields undefined and the
   // ticket binds to the first Access identity that opens it instead.
