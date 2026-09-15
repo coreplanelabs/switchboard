@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.220.1](https://github.com/coreplanelabs/switchboard/compare/v1.220.0...v1.220.1) (2026-09-15)
+
+
+### Bug fixes
+
+* **tools:** a tool declares that it reports failure as an error: text (failsInText) — read_file and the other relays are no longer judged by their content ([#1159](https://github.com/coreplanelabs/switchboard/issues/1159)) ([78c782e](https://github.com/coreplanelabs/switchboard/commit/78c782ee59520325b77654d9360cf8f399195b7e))
+* **tools:** attach_file's store path tells the truth about a short upload — a HEAD with no length throws instead of reading as 0 bytes, the size-mismatch error carries curl's own report of the PUT, and a tool that answers error: is recorded ok:false in both loops ([#1156](https://github.com/coreplanelabs/switchboard/issues/1156)) ([b8ed442](https://github.com/coreplanelabs/switchboard/commit/b8ed44256e502d6a6867df414b729c9b20230c4d))
+
 ## [1.220.0](https://github.com/coreplanelabs/switchboard/compare/v1.219.0...v1.220.0) (2026-09-15)
 
 
