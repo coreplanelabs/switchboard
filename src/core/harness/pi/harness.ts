@@ -102,6 +102,11 @@ export interface PiHarnessRun {
   span?: Span;
   control?: RunControl;
   inbox?: FollowUpInbox;
+  /** A steered follow-up's staged files (record 0033): awaited before the steer is sent, so the
+   *  files are copied into the store and pulled into the container's workspace first; the line
+   *  it answers with (the attachments line, or empty) ends the steer's text. Bound by the loop
+   *  only when the deployment configures a store — absent, the steer is sent as it always was. */
+  stageFollowUps?: (inputs: readonly FollowUpInput[]) => Promise<string>;
   onEvent?: (event: RunEvent) => void;
   onProgress?: (note: string) => void;
   onStep?: (report: StepReport) => Promise<void>;
@@ -394,6 +399,12 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
       writeUpAt = now();
       transport!.send({ type: "steer", message: instruction });
     };
+    // Steers go out in the order their follow-ups were drained: the staging of one
+    // batch (a copy into the store, a pull over the container) is awaited before
+    // its steer is sent, and the next batch queues behind it, so a second drop is
+    // never steered ahead of the first. The queue is `check`'s only asynchronous
+    // work; `check` itself stays synchronous for the event loop below.
+    let steers: Promise<void> = Promise.resolve();
     const drainFollowUps = () => {
       const inputs: FollowUpInput[] = run.inbox?.drain() ?? [];
       if (inputs.length === 0) return;
@@ -411,7 +422,28 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
       const images = inputs.flatMap((i) =>
         (i.images ?? []).map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mediaType })),
       );
-      transport!.send({ type: "steer", message: followUpPrompt(inputs), ...(images.length > 0 ? { images } : {}) });
+      steers = steers.then(async () => {
+        // The staged files land before pi reads the steer that names them — the
+        // native loop's order (src/runner.ts `drainFollowUps`). A hook that throws
+        // (a store the bot cannot reach) still steers the words, saying so, rather
+        // than dropping the person's message on the floor.
+        let stagedLine = "";
+        if (run.stageFollowUps) {
+          try {
+            stagedLine = await run.stageFollowUps(inputs);
+          } catch (err) {
+            stagedLine = `Attached files could not be staged: ${err instanceof Error ? err.message : String(err)}`;
+            note("follow_up", `staging the follow-up's files failed: ${redactSecrets(stagedLine)}`);
+          }
+        }
+        if (settled) return;
+        const prompt = followUpPrompt(inputs);
+        transport!.send({
+          type: "steer",
+          message: stagedLine ? `${prompt}\n\n${stagedLine}` : prompt,
+          ...(images.length > 0 ? { images } : {}),
+        });
+      });
     };
     /** The budgets, the stops and the inbox — on every event and every tick. */
     const check = () => {
