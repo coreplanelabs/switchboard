@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.224.0](https://github.com/coreplanelabs/switchboard/compare/v1.223.0...v1.224.0) (2026-09-15)
+
+
+### Features
+
+* **web:** a run's files show inside the message they arrived on or left with — the request's and a follow-up's under their text, the reply's with the picture inline — and the standalone files block goes ([#1190](https://github.com/coreplanelabs/switchboard/issues/1190)) ([0ed7d3a](https://github.com/coreplanelabs/switchboard/commit/0ed7d3afd9247211cad2fc18892f405d1c5d0c37))
+
+
+### Bug fixes
+
+* **harness:** a re-attach reads pi's log again from the last turn the ledger holds — the tool result pi wrote before the bot died is the next step's user turn, a turn read twice is written once, and a dead generation's answers to its own commands are not taken for this generation's ([#1189](https://github.com/coreplanelabs/switchboard/issues/1189)) ([6f9a6a4](https://github.com/coreplanelabs/switchboard/commit/6f9a6a4433f3b9f88897d5570ad194ec5660bc72))
+
 ## [1.223.0](https://github.com/coreplanelabs/switchboard/compare/v1.222.0...v1.223.0) (2026-09-15)
 
 
