@@ -59,8 +59,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # `decisions:check` (in check:consistency) diffs accepted records against origin/main;
-          # a shallow clone has no origin/main and would skip that half.
+          # `decisions:check` (in check:consistency) diffs accepted records against the
+          # merge-base of HEAD and origin/main; a shallow clone has neither and would skip that half.
           fetch-depth: 0
           # No step here pushes or fetches after the checkout, so the token
           # never lands in .git/config (here and in every checkout below).

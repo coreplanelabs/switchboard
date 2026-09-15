@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  baseRecords,
   frozenFrontmatter,
   immutabilityProblems,
   MUTABLE_KEYS,
@@ -10,6 +11,7 @@ import {
   RECORD_DIRS,
   STATUSES,
   statusProblems,
+  type BaseHistory,
 } from "./records.js";
 
 // The records gate (docs/reference/specs/docs-site.md, the documentation rule): every
@@ -284,6 +286,58 @@ describe("immutabilityProblems", () => {
     expect(
       immutabilityProblems([rec("docs/plans/i.md", { status: "superseded", date: "d", superseded_by: "j.md" })], b),
     ).toEqual([]);
+  });
+});
+
+describe("baseRecords", () => {
+  const path = "docs/decisions/0038-x.md";
+  const proposed = rec(path, { title: "X", status: "proposed", date: "d" }, "# X\n\nFirst draft.\n");
+  const accepted = rec(path, { title: "X", status: "accepted", date: "d" }, "# X\n\nFirst draft.\n\nAccepted words.\n");
+  /** A history: `origin/main` at `tip`, the branch cut at `cut`; each commit's records by path. */
+  const history = (commits: Record<string, Record<string, string>>, mergeBase: string | null = "cut"): BaseHistory => ({
+    commitOf: (ref) => (ref === "origin/main" ? "tip" : ref in commits ? ref : null),
+    mergeBase: (a, b) => (a === "HEAD" && b === "tip" ? mergeBase : null),
+    recordPaths: (commit) => Object.keys(commits[commit] ?? {}),
+    textAt: (commit, p) => commits[commit][p],
+  });
+
+  it("reads the copies at the merge-base of HEAD and the ref, not the ref's tip: a branch behind a record accepted on main since it was cut passes, and a branch that itself edits a frozen record still fails", () => {
+    // The false positive: main accepted the record after the branch was cut; the branch never touched it.
+    const behind = baseRecords(
+      "origin/main",
+      history({ cut: { [path]: proposed.text }, tip: { [path]: accepted.text } }),
+    );
+    expect(behind).toMatchObject({ kind: "found", commit: "cut" });
+    if (behind.kind !== "found") throw new Error("unreachable");
+    expect(behind.texts.get(path)).toBe(proposed.text);
+    expect(immutabilityProblems([proposed], behind.texts)).toEqual([]);
+    // Measured from the tip the same branch would have been an edit — the defect this rule removes.
+    expect(immutabilityProblems([proposed], new Map([[path, accepted.text]]))).toHaveLength(1);
+    // The rule still bites: a branch cut after acceptance that edits the body differs from its own merge-base.
+    const edited = rec(
+      path,
+      { title: "X", status: "accepted", date: "d" },
+      "# X\n\nFirst draft.\n\nAccepted words, reworded.\n",
+    );
+    const editing = baseRecords(
+      "origin/main",
+      history({ cut: { [path]: accepted.text }, tip: { [path]: accepted.text } }),
+    );
+    if (editing.kind !== "found") throw new Error("unreachable");
+    expect(immutabilityProblems([edited], editing.texts).map((p) => p.what)).toEqual([
+      expect.stringContaining("was accepted on the base and its body changed"),
+    ]);
+  });
+
+  it("a ref that does not resolve, or a history that connects HEAD to no common ancestor, is unreachable by name — the host skips the immutability half and says so", () => {
+    expect(baseRecords("origin/main", { ...history({}), commitOf: () => null })).toEqual({
+      kind: "unreachable",
+      why: "origin/main is not reachable here",
+    });
+    expect(baseRecords("origin/main", history({ tip: {} }, null))).toEqual({
+      kind: "unreachable",
+      why: "HEAD and origin/main share no ancestor here",
+    });
   });
 });
 

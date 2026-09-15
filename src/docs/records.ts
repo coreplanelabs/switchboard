@@ -6,13 +6,18 @@
 // from a closed set (and a `superseded_by` that resolves when it is
 // superseded), so a record whose state nobody wrote down is a failing build,
 // not a document of unknown standing. And once a record is accepted, its body
-// is frozen: the check diffs it against the copy on the base branch and fails
-// on any change other than the status lines — or on the record being gone —
-// naming the file and telling you to supersede it.
+// is frozen: the check diffs it against the copy at the MERGE-BASE of the tree
+// and the base branch — the commit the branch was cut from, never the base
+// branch's tip — and fails on any change other than the status lines, or on
+// the record being gone, naming the file and telling you to supersede it. The
+// merge-base matters: a record accepted or amended on main after a branch was
+// cut differs from that branch's copy without the branch having touched it,
+// and measured from the tip that read as an edit — two docs-only branches were
+// red on a record they never opened before the base moved here.
 //
 // Pure: records in, problems out. The host (scripts/decisions-check.ts) reads
-// the tree and the base; the docs generator reads frontmatter through
-// parseFrontmatter for the Design decisions index.
+// the tree and answers `BaseHistory` with git; the docs generator reads
+// frontmatter through parseFrontmatter for the Design decisions index.
 
 import { dirname, join } from "node:path";
 
@@ -33,6 +38,42 @@ export interface RecordText {
 export interface RecordProblem {
   path: string;
   what: string;
+}
+
+/** What the host answers from git so `baseRecords` can pick the base copies without a repository in the test. */
+export interface BaseHistory {
+  /** The commit a ref names, or null when it is not reachable here (a shallow clone, an unknown ref). */
+  commitOf(ref: string): string | null;
+  /** The newest common ancestor of two commits, or null when the history here does not connect them. */
+  mergeBase(a: string, b: string): string | null;
+  /** Every record's path at a commit. */
+  recordPaths(commit: string): string[];
+  /** A file's text at a commit. */
+  textAt(commit: string, path: string): string;
+}
+
+export type BaseRecords =
+  { kind: "found"; commit: string; texts: Map<string, string> } | { kind: "unreachable"; why: string };
+
+/**
+ * The records a tree is judged against: every record's copy at the merge-base
+ * of `HEAD` and `ref` — the commit the branch was cut from — never at `ref`'s
+ * tip. A record accepted or amended on the base branch after the cut differs
+ * from the branch's copy without the branch having edited it; from the tip that
+ * reads as an edit, from the merge-base it is nothing. A branch that itself
+ * edits a frozen record still differs from its own merge-base and is still
+ * caught. Unreachable, by name, when `ref` does not resolve or shares no
+ * ancestor with `HEAD` (a shallow clone): the host then skips the immutability
+ * half and says so.
+ */
+export function baseRecords(ref: string, history: BaseHistory): BaseRecords {
+  const tip = history.commitOf(ref);
+  if (tip === null) return { kind: "unreachable", why: `${ref} is not reachable here` };
+  const commit = history.mergeBase("HEAD", tip);
+  if (commit === null) return { kind: "unreachable", why: `HEAD and ${ref} share no ancestor here` };
+  const texts = new Map<string, string>();
+  for (const path of history.recordPaths(commit)) texts.set(path, history.textAt(commit, path));
+  return { kind: "found", commit, texts };
 }
 
 /**
