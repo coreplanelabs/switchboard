@@ -9,6 +9,7 @@ import { ConfigStore } from "../../config.js";
 import type { CompletionRequest, CompletionResult, Provider } from "../provider.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import type { IncomingMessage } from "../types.js";
+import type { McpCatalogEntry, McpToolSource } from "../../mcp/source.js";
 import {
   buildRoutePrompt,
   COMPOUND_BRIEF_HEADING,
@@ -31,6 +32,9 @@ import {
   routeMaxOutputTokens,
   structuralRoute,
   routeTool,
+  routeSources,
+  ROUTE_SOURCE_INSTRUCTIONS_CAP,
+  ROUTE_SOURCES_MAX,
   type RouteDecision,
   type RouteModel,
   type RoutePrompt,
@@ -1333,5 +1337,112 @@ describe("routeRequest — a compound route resolves the conductor, a rejected o
       model: "anthropic/general-model",
       collapsed: { presets: ["review", "coding"] },
     });
+  });
+});
+
+// Feature: record 0040 — the front door knows the data sources a run can reach.
+describe("buildRoutePrompt — the connected data sources a run can reach (record 0040)", () => {
+  const input = {
+    text: "how many autofix PRs merged in the last 7 days?",
+    recentDirectives: {},
+    presets,
+    fallback: "general",
+  };
+
+  it("with no source list the prompt is unchanged; an empty list adds the rule and says none", () => {
+    const bare = buildRoutePrompt(input);
+    expect(bare.system).not.toContain("Connected data sources");
+    expect(bare.user).not.toContain("Connected data sources");
+    const empty = buildRoutePrompt({ ...input, sources: [] });
+    const bareLines = new Set(bare.system.split("\n"));
+    const extra = empty.system.split("\n").filter((l) => !bareLines.has(l));
+    expect(extra).toHaveLength(1);
+    expect(extra[0]).toMatch(/Connected data sources/);
+    expect(empty.user).toContain("Connected data sources for this request: none");
+    expect(empty.tool).toEqual(bare.tool);
+  });
+
+  it("renders each source with its receiving preset and a clipped instruction head in the user half, and leaves the tool schema alone", () => {
+    const long = "L".repeat(ROUTE_SOURCE_INSTRUCTIONS_CAP + 40);
+    const p = buildRoutePrompt({
+      ...input,
+      sources: [
+        {
+          server: "lake",
+          preset: "general",
+          instructions: "The org's admin API and its production\nevent lake.",
+        },
+        { server: "wiki", preset: "general" },
+        { server: "big", preset: "research", instructions: long },
+      ],
+    });
+    expect(p.user).toContain(
+      "Connected data sources for this request:\n- lake → general: The org's admin API and its production event lake.\n- wiki → general\n- big → research: " +
+        "L".repeat(ROUTE_SOURCE_INSTRUCTIONS_CAP),
+    );
+    expect(p.user.indexOf("Connected data sources")).toBeLessThan(p.user.indexOf("<request>"));
+    expect(p.system).toMatch(/a question one of them answers/i);
+    expect(p.tool).toEqual(buildRoutePrompt(input).tool);
+  });
+
+  it("routeSources picks the least capable offered preset per server and drops a server none of whose agents is offered", () => {
+    const catalog: McpCatalogEntry[] = [
+      { server: "lake", agents: ["general", "research"], instructions: "lake" },
+      { server: "wide", agents: ["research", "explore", "coding"] },
+      { server: "coding-only", agents: ["coding"] },
+    ];
+    const offered = presets.filter((p) => p.name !== "coding");
+    expect(routeSources(catalog, offered)).toEqual([
+      { server: "lake", preset: "general", instructions: "lake" },
+      { server: "wide", preset: "research" },
+    ]);
+    expect(routeSources(catalog, presets).find((s) => s.server === "coding-only")).toEqual({
+      server: "coding-only",
+      preset: "coding",
+    });
+    // Bounded: the list rides the per-message half, so a caller with more sources than the cap sees the first ones.
+    const many: McpCatalogEntry[] = Array.from({ length: ROUTE_SOURCES_MAX + 3 }, (_, i) => ({
+      server: `s${i}`,
+      agents: ["general"],
+    }));
+    expect(routeSources(many, presets)).toHaveLength(ROUTE_SOURCES_MAX);
+    expect(routeSources(many, presets)[0].server).toBe("s0");
+  });
+});
+
+describe("routeRequest — the stage over the dispatcher's dependencies", () => {
+  it("reads the connected sources off deps.mcp for the requester and shows them to the model; without an MCP source the prompt has none", async () => {
+    const calls: Array<{ userId: string; channelId?: string }> = [];
+    const mcp: McpToolSource = {
+      toolsFor: async () => {
+        throw new Error("the router never discovers");
+      },
+      catalogFor: async (caller) => {
+        calls.push(caller);
+        return [{ server: "lake", agents: ["general", "research"], instructions: "the org's lake" }];
+      },
+    };
+    const text = "how many autofix PRs merged last week?";
+    const config = configStore(YAML);
+    const completions = { get: () => ({}) as Provider };
+    const ctx = () => ({
+      msg: msg(text),
+      directives: { text },
+      sticky: {},
+      agentSource: "default" as const,
+      threadLive: false,
+      root: startRequestRoot({ clock: () => NOW }, { channel: channelOf("slack:CX"), receivedAt: NOW }).root,
+    });
+    const model = scripted(answer("general", "the lake answers it"));
+    const out = await routeRequest({ config, completions, routeModel: model, mcp }, ctx());
+    expect(out.kind).toBe("routed");
+    expect(calls).toEqual([{ userId: "slack:UX", channelId: "slack:CX" }]);
+    expect(model.prompts).toHaveLength(1);
+    expect(model.prompts[0].user).toContain("- lake → general: the org's lake");
+    expect(model.prompts[0].system).toMatch(/Connected data sources/);
+    const plain = scripted(answer("general"));
+    await routeRequest({ config, completions, routeModel: plain }, ctx());
+    expect(plain.prompts[0].user).not.toContain("Connected data sources");
+    expect(plain.prompts[0].system).not.toContain("Connected data sources");
   });
 });

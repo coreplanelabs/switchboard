@@ -30,6 +30,7 @@ import { resolveChatActor } from "./authz/actor.js";
 import { referencesOn } from "../config.js";
 import { readRequest, resolveProfile, resolveRun, resolveTarget, type ResolveDeps } from "./dispatch/resolve.js";
 import { compoundBrief, routeRequest, type RouteDecided, type RouteDeps } from "./dispatch/route.js";
+import type { McpToolSource } from "../mcp/source.js";
 import {
   authorizeAgent,
   authorizeAttachedHead,
@@ -105,6 +106,9 @@ export interface CoreDeps
     RecordDeps,
     ReferenceDeps,
     ShipDeps {
+  /** The MCP tool source: required for provisioning (every run asks it for its tools), and the same instance the
+   *  route stage reads the caller's catalog off (record 0040) — declared here so the two bases agree. */
+  mcp: McpToolSource;
   /** The tracer behind every root this process starts; the no-gaps test injects one with its `SpanContext`. */
   tracer?: Tracer;
   /** The root's leading sinks (a test's recording sink); default: the one log sink at `tracing.log`. */

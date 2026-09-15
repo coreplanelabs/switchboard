@@ -234,6 +234,23 @@ describe("McpService — tiers and authorization (items 13–14)", () => {
     });
   });
 
+  it("catalog(caller) lists the servers a caller's runs can reach without opening a credential", async () => {
+    const h = harness();
+    await h.service.add(alice, ME(alice), { name: "vanta", url: "https://mcp.vanta.com/mcp", auth: "bearer" });
+    expect(await h.service.catalog({ userId: alice.id, channelId: "slack:CSTATIC" })).toEqual([
+      { key: "org/github", name: "github", agents: ["general", "coding"] },
+      { key: "channel:slack:CSTATIC/notion", name: "notion", agents: ["general", "research"] },
+      { key: "channel:slack:CSTATIC/compliance", name: "compliance", agents: ["general", "research"] },
+      { key: "user:slack:UALICE/vanta", name: "vanta", agents: ["general", "research"] },
+    ]);
+    // Another channel: the channel tier changes, the org and user tiers stay.
+    expect((await h.service.catalog({ userId: alice.id, channelId: "slack:C1" })).map((c) => c.name)).toEqual([
+      "github",
+      "vanta",
+    ]);
+    expect(h.clients).toHaveLength(0); // no probe, no credential opened
+  });
+
   it("a static server with `headersEnv` (a Cloudflare Access service token in front of it) reaches runs with the env values as request headers, lists as `static`, cannot be connected, and an unset variable is a named `unavailable`", async () => {
     const yaml = YAML.replace(
       "  mcpServers:\n    github:",

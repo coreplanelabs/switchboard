@@ -48,7 +48,12 @@ import {
 } from "./registry.js";
 import { openCredential, randomNonce, sealCredential, type CredentialKey } from "./sealed.js";
 import type { McpSecretStore } from "./secretStore.js";
-import { DiscoveringMcpToolSource, type DiscoveringSourceOptions, type ResolvedServer } from "./source.js";
+import {
+  type CatalogedServer,
+  DiscoveringMcpToolSource,
+  type DiscoveringSourceOptions,
+  type ResolvedServer,
+} from "./source.js";
 import type { McpClientFactory, McpServerSpec } from "./types.js";
 
 // The MCP server rules in ONE place (docs/reference/specs/mcp-tools.md items 13–17), over
@@ -695,6 +700,23 @@ export class McpService {
     return out;
   }
 
+  /** The servers a caller's runs can reach, for any agent, as the front door
+   *  reads them (record 0040): the same tier walk as `resolveForRun` with the
+   *  same agent narrowing, shadowed names dropped, and no credential opened —
+   *  the key is the credential key, so a discovering source can find the
+   *  server's cached instructions by it. */
+  catalog(caller: { userId: string; channelId?: string }): Array<{ key: string; name: string; agents: string[] }> {
+    const out: Array<{ key: string; name: string; agents: string[] }> = [];
+    for (const r of this.opts.config.mcpServersFor(caller.channelId ?? `none:${caller.userId}`, caller.userId)) {
+      if (r.shadowedBy) continue;
+      const declared = r.entry.agents ?? MCP_SELF_SERVE_AGENTS;
+      const agents = r.kind === "org" ? [...declared] : declared.filter((a) => MCP_SELF_SERVE_AGENTS.includes(a));
+      if (agents.length === 0) continue;
+      out.push({ key: mcpCredentialKey(r.scopeKey, r.name), name: r.name, agents });
+    }
+    return out;
+  }
+
   // ---- internals -----------------------------------------------------------------
 
   private checkAgents(kind: McpScopeKind, agents: string[] | undefined): string[] {
@@ -931,6 +953,10 @@ export class ConfigMcpToolSource extends DiscoveringMcpToolSource {
     opts: DiscoveringSourceOptions,
   ) {
     super(opts);
+  }
+
+  protected async catalog(caller: { userId: string; channelId?: string }): Promise<CatalogedServer[]> {
+    return this.service.catalog(caller).map(({ key, name, agents }) => ({ key, server: name, agents }));
   }
 
   protected async resolve(

@@ -37,12 +37,25 @@ export interface McpToolsForRun {
   servers: McpServerOutcome[];
 }
 
+/** One server as the front door sees it (record 0040): a fact for the preset
+ *  choice, never a tool. `agents` is the list the run will be scoped by;
+ *  `instructions` is the server's own head text when discovery has cached it. */
+export interface McpCatalogEntry {
+  server: string;
+  agents: string[];
+  instructions?: string;
+}
+
 export interface McpToolSource {
   toolsFor(
     agentName: string,
     caller: { userId: string; channelId?: string },
     opts?: { signal?: AbortSignal },
   ): Promise<McpToolsForRun>;
+  /** The servers this caller's runs can reach, whatever the agent — read from
+   *  configuration and the discovery cache alone: no credential is opened, no
+   *  client is built, no server is asked (record 0040). */
+  catalogFor(caller: { userId: string; channelId?: string }): Promise<McpCatalogEntry[]>;
 }
 
 /** The source of a process without MCP (a Null Object, routing-and-config item
@@ -57,6 +70,18 @@ export class NullMcpToolSource implements McpToolSource {
   ): Promise<McpToolsForRun> {
     return { tools: [], servers: [] };
   }
+
+  async catalogFor(_caller: { userId: string; channelId?: string }): Promise<McpCatalogEntry[]> {
+    return [];
+  }
+}
+
+/** A server as a subclass lists it for the catalog: its cache key (the same
+ *  `keyOf` gives a spec), its name and the agents it is scoped to. */
+export interface CatalogedServer {
+  key: string;
+  server: string;
+  agents: string[];
 }
 
 /** A server the subclass resolved for this run — a usable spec, or a named
@@ -85,6 +110,17 @@ export abstract class DiscoveringMcpToolSource implements McpToolSource {
     agentName: string,
     caller: { userId: string; channelId?: string },
   ): Promise<ResolvedServer[]>;
+
+  /** Every server this caller's runs can reach, for any agent, without a
+   *  credential: what the catalog is built from. */
+  protected abstract catalog(caller: { userId: string; channelId?: string }): Promise<CatalogedServer[]>;
+
+  async catalogFor(caller: { userId: string; channelId?: string }): Promise<McpCatalogEntry[]> {
+    return (await this.catalog(caller)).map(({ key, server, agents }) => {
+      const instructions = this.cache.get(key)?.instructions;
+      return { server, agents, ...(instructions ? { instructions } : {}) };
+    });
+  }
 
   async toolsFor(
     agentName: string,
@@ -189,6 +225,10 @@ export class StaticMcpToolSource extends DiscoveringMcpToolSource {
   protected async resolve(agentName: string): Promise<ResolvedServer[]> {
     return this.serversFor(agentName).map((spec) => ({ spec }));
   }
+
+  protected async catalog(): Promise<CatalogedServer[]> {
+    return this.servers.map((s) => ({ key: this.keyOf(s), server: s.name, agents: [...s.agents] }));
+  }
 }
 
 /** Several sources as one: outcomes concatenate; a tool whose name an earlier
@@ -196,6 +236,20 @@ export class StaticMcpToolSource extends DiscoveringMcpToolSource {
  *  runner would otherwise throw on the duplicate — item 12). */
 export class CompositeMcpToolSource implements McpToolSource {
   constructor(private readonly sources: McpToolSource[]) {}
+
+  /** The catalogs concatenated, an earlier source winning a name — the same
+   *  precedence `toolsFor` gives its tools. */
+  async catalogFor(caller: { userId: string; channelId?: string }): Promise<McpCatalogEntry[]> {
+    const parts = await Promise.all(this.sources.map((s) => s.catalogFor(caller)));
+    const seen = new Set<string>();
+    const out: McpCatalogEntry[] = [];
+    for (const entry of parts.flat()) {
+      if (seen.has(entry.server)) continue;
+      seen.add(entry.server);
+      out.push(entry);
+    }
+    return out;
+  }
 
   async toolsFor(
     agentName: string,
