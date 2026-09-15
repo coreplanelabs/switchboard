@@ -38,7 +38,11 @@
 // already heads an open PR (a follow-up on an existing PR repushes that PR's
 // own branch): if so the note names that PR as updated by the push and the
 // record gets `pr_opened` with `created: false`; only a branch with no open
-// PR gets the compare URL and "open manually".
+// PR gets the compare URL and "open manually". A description from a workspace
+// sitting on the base is refused ("the branch is the base") — unless the
+// thread's own pull request is known (`CodingPrTarget.ownPr`): the run pushed
+// nothing, so the description is for that PR, edited by number and rendered
+// at its own head.
 //
 // Base resolution (CodingPrTarget): the base the caller already knows — a
 // bound PR's true base, else the base a coordinator's spawn put on its child's
@@ -289,6 +293,13 @@ export interface CodingPrTarget {
   bindingRef: string | undefined;
   /** The dispatch's resolved ref — the base of last resort before a GitHub fetch. */
   resolvedRef: string | undefined;
+  /** The pull request the thread's OWN run opened, inherited off the run
+   *  record (`RepoContext.prFromRecord`, `recordPrOf` in repoContext.ts), with
+   *  its head commit as the resolver fetched it. Where a description
+   *  resubmitted by a run that pushed nothing lands — the workspace on the
+   *  base, the binding still the repo default — instead of the base-branch
+   *  refusal. Never a pull request a person named. */
+  ownPr?: { number: number; headSha: string };
 }
 
 /**
@@ -313,6 +324,12 @@ export async function runCodingPrPostStep(input: {
    *  of sending the reader to open a duplicate. A lookup failure degrades to
    *  the "no PR was opened" note (logged, never thrown). */
   findOpenPr: (repo: string, branch: string) => Promise<OpenPrRef | null>;
+  /** Edit a pull request the caller knows by number (githubPulls.ts'
+   *  updatePullRequest). Asked ONLY when a description arrives from a
+   *  workspace sitting on the base while the thread's own pull request is
+   *  known (`target.ownPr`): the run pushed nothing, and the description is
+   *  for that pull request. A failure is reported in the note, never thrown. */
+  updatePullRequest: (repo: string, number: number, patch: { title: string; body: string }) => Promise<void>;
   /** The repo's default branch — the PR base of last resort, fetched via
    *  GitHub (githubPulls.ts' fetchRepoShipInfo; shared with agent:ship's own
    *  base resolution) ONLY when a description was submitted AND none of
@@ -365,6 +382,37 @@ export async function runCodingPrPostStep(input: {
     ? await resolveBaseRefLazy(candidates, repo, input.fetchRepoInfo)
     : resolveBaseRef(candidates, undefined);
   const pushedBranch = branch !== undefined && branch !== base && pushed;
+  if (prDescription && branch !== undefined && branch === base && target.ownPr !== undefined) {
+    // The workspace sits on the base and the run pushed nothing (a push the
+    // run made would have named its branch, and the base is not a branch the
+    // gate lets it push), in a thread whose own run opened a pull request —
+    // the binding still the repo default because a dirty tree kept the
+    // resident from moving it, or the tree recreated there. The description
+    // is for THAT pull request: edit it by number, the body rendered at its
+    // head as the resolver fetched it — never at the base's tip the workspace
+    // shows, which is not the pull request's code. `pr_opened` carries no
+    // `head`: nothing was pushed, so the release has no branch to remember.
+    const { number, headSha: prHead } = target.ownPr;
+    const url = `https://github.com/${repo}/pull/${number}`;
+    try {
+      const body = renderPrDescriptionMarkdown(prDescription, { repo, headSha: prHead });
+      await input.updatePullRequest(repo, number, { title: prDescription.title, body });
+      console.log(
+        `[pr-post] ${logKey} updated ${repo}#${number} — the thread's own pull request, nothing pushed (workspace on ${branchLog}; rendered at its head ${prHead.slice(0, 7)})`,
+      );
+      input.publish({ type: "pr_opened", url, number, created: false, at: systemClock() });
+      input.publish({
+        type: "review_artifact",
+        ...submittedPrDescriptionArtifact(prDescription, { repo, pr: number, headSha: prHead, body }),
+        at: systemClock(),
+      });
+      return `🔀 PR updated: ${url} — body re-rendered at \`${prHead.slice(0, 7)}\``;
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      console.error(`[pr-post] ${logKey} update failed for ${repo}#${number}: ${reason}`);
+      return `⚠️ A PR description was submitted for this thread's pull request ${url} but it could not be updated: ${reason}`;
+    }
+  }
   if (prDescription && branch !== undefined && branch === base) {
     // The branch IS the base the pull request would target — a workspace that
     // never left the default branch, or a run dispatched at a branch the

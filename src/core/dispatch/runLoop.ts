@@ -28,10 +28,15 @@ import { softStopAnswer, timeBudgetAnswer } from "../harness/pi/windDown.js";
 import { piRunPathsAt } from "../harness/pi/process.js";
 import { loopEndingOf, reviewPostedBefore, type LoopEnding } from "../runLedger/resume.js";
 import type { RouteDecided } from "./route.js";
-import { fetchRepoShipInfo, findOpenPrByHead, openPullRequest } from "../../execution/githubPulls.js";
+import {
+  fetchRepoShipInfo,
+  findOpenPrByHead,
+  openPullRequest,
+  updatePullRequest,
+} from "../../execution/githubPulls.js";
 import type { ChatMessage } from "../chatMessage.js";
 import type { McpToolsForRun } from "../../mcp/source.js";
-import { currentPrHeadSha, prCommitsSince, type RepoContext } from "../repoContext.js";
+import { currentPrHeadSha, prCommitsSince, recordPrOf, type RepoContext } from "../repoContext.js";
 import { PrDescriptionSchema, redactPrDescription, type PrDescription } from "../prDescription.js";
 import { parseHandoff, type Handoff } from "../ship/handoff.js";
 import {
@@ -789,12 +794,16 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     // head cannot open — the plan's base is the only signal that names the
     // target, and only the tag carries it), else the resident binding ref,
     // else the dispatch's resolved ref. Shared by the description turn's
-    // decision and the post-step below.
+    // decision and the post-step below. `ownPr`: the pull request the thread's
+    // own run opened, where a description resubmitted without a push lands
+    // even from a workspace on the base (pr-description.md item 5).
+    const ownPr = recordPrOf(repoCtx);
     const prTarget = {
       repo: repoCtx.repo,
       baseRef: repoCtx.baseRef ?? coordinator?.base,
       bindingRef: binding?.ref,
       resolvedRef: repoCtx.ref,
+      ...(ownPr !== undefined ? { ownPr } : {}),
     };
     if (isCodingPrRun && run.control.requested !== "hard") await observeWorkspaceNow();
     // The description turn (docs/reference/specs/pr-description.md item 5,
@@ -888,6 +897,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
           target: prTarget,
           openPullRequest: deps.openPullRequest ?? openPullRequest,
           findOpenPr: deps.findOpenPrByHead ?? findOpenPrByHead,
+          updatePullRequest: deps.updatePullRequest ?? updatePullRequest,
           fetchRepoInfo: deps.fetchRepoShipInfo ?? fetchRepoShipInfo,
           descriptionTurnRan,
           publish: (e) => registry.publish(run.id, e),

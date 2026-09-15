@@ -329,8 +329,39 @@ describe("rebindPlan and rebindVerdict when the thread's tree is gone: the remem
 describe("rebindVerdict: the tree decides a measured plan", () => {
   const plan = { to: OWN_PR.ref, pr: OWN_PR.number };
 
-  it("the branch is a local branch of the thread's worktree and the tree is clean → rebind", () => {
-    expect(rebindVerdict(plan, { exists: true, branchExists: true, dirty: false })).toEqual({ kind: "rebind" });
+  it("the branch is a local branch of the thread's worktree and the tree is clean → rebind, with the checkout", () => {
+    expect(rebindVerdict(plan, { exists: true, branchExists: true, dirty: false })).toEqual({
+      kind: "rebind",
+      checkout: true,
+    });
+    // A clean tree already on the branch is checked out like any other: the checkout is a no-op there.
+    expect(rebindVerdict(plan, { exists: true, branchExists: true, dirty: false, head: OWN_PR.ref })).toEqual({
+      kind: "rebind",
+      checkout: true,
+    });
+  });
+
+  it("a dirty tree whose HEAD is already the branch moves the record alone: no checkout, the tree untouched, the note saying so", () => {
+    expect(rebindVerdict(plan, { exists: true, branchExists: true, dirty: true, head: OWN_PR.ref })).toEqual({
+      kind: "rebind",
+      checkout: false,
+      note: 'the worktree is dirty but its HEAD is already "fix/exact-match" (the run made the branch here); the binding moves, the tree is not touched',
+    });
+  });
+
+  it("a dirty tree whose HEAD is any other ref — the bound branch, a third branch, detached, or unreadable — keeps its binding as before", () => {
+    const dirty = (head: string | undefined) =>
+      rebindVerdict(plan, { exists: true, branchExists: true, dirty: true, ...(head !== undefined ? { head } : {}) });
+    for (const head of ["main", "feat/other", "HEAD", undefined]) {
+      expect(dirty(head)).toEqual({
+        kind: "refuse",
+        refused: {
+          ...plan,
+          reason: "dirty",
+          why: "the worktree has uncommitted changes on the bound branch; the binding stands until they are committed or discarded",
+        },
+      });
+    }
   });
 
   it("a branch the tree never made is refused: the physical fact this thread's run created it is missing", () => {
@@ -355,17 +386,6 @@ describe("rebindVerdict: the tree decides a measured plan", () => {
       refused: {
         reason: "branch-absent",
         why: "the thread's worktree cannot be read; the branch cannot be verified there",
-      },
-    });
-  });
-
-  it("a dirty tree keeps its binding: never at the cost of uncommitted work", () => {
-    expect(rebindVerdict(plan, { exists: true, branchExists: true, dirty: true })).toEqual({
-      kind: "refuse",
-      refused: {
-        ...plan,
-        reason: "dirty",
-        why: "the worktree has uncommitted changes on the bound branch; the binding stands until they are committed or discarded",
       },
     });
   });

@@ -24,6 +24,14 @@ const unreachable = async (): Promise<RepoShipInfo | undefined> => {
 // unless a test says otherwise (the "existing PR" cases below supply their own).
 const noOpenPr = async (): Promise<OpenPrRef | null> => null;
 
+// The edit-by-number seam, reached only when a description arrives from a
+// workspace on the base in a thread whose own pull request is known (item 5).
+// The post-step reports a throw as a failed update, so the tests that must
+// never reach it assert on their own note, not on this throw.
+const noUpdate = async (): Promise<void> => {
+  throw new Error("updatePullRequest must not be called unless the thread's own PR is the target");
+};
+
 // Feature: docs/reference/specs/pr-description.md item 5 — the coding PR post-step as a
 // callable unit: given a workspace observation and the run's submitted
 // PrDescription, open or edit the PR from typed values and return the honest
@@ -81,6 +89,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       openPullRequest: spy.fn,
       fetchRepoInfo,
       findOpenPr: noOpenPr,
+      updatePullRequest: noUpdate,
       publish: (e) => events.push(e),
       logKey: "t",
     });
@@ -115,6 +124,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       openPullRequest: spy.fn,
       fetchRepoInfo: unreachable,
       findOpenPr: noOpenPr,
+      updatePullRequest: noUpdate,
       publish: (e) => events.push(e),
       logKey: "t",
     });
@@ -149,6 +159,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       openPullRequest: openSpy(new Error("boom")).fn,
       fetchRepoInfo: unreachable,
       findOpenPr: noOpenPr,
+      updatePullRequest: noUpdate,
       publish: (e) => events.push(e),
       logKey: "t",
     });
@@ -159,6 +170,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       openPullRequest: openSpy().fn,
       fetchRepoInfo: unreachable,
       findOpenPr: noOpenPr,
+      updatePullRequest: noUpdate,
       publish: (e) => events.push(e),
       logKey: "t",
     });
@@ -174,6 +186,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       openPullRequest: spy.fn,
       fetchRepoInfo: unreachable,
       findOpenPr: noOpenPr,
+      updatePullRequest: noUpdate,
       publish: () => {},
       logKey: "t",
     });
@@ -199,6 +212,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       openPullRequest: spy.fn,
       fetchRepoInfo,
       findOpenPr: noOpenPr,
+      updatePullRequest: noUpdate,
       publish: () => {},
       logKey: "t",
     });
@@ -223,6 +237,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       openPullRequest: spy.fn,
       fetchRepoInfo,
       findOpenPr: noOpenPr,
+      updatePullRequest: noUpdate,
       publish: () => {},
       logKey: "t",
     });
@@ -249,6 +264,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       openPullRequest: spy.fn,
       fetchRepoInfo: unreachable,
       findOpenPr: noOpenPr,
+      updatePullRequest: noUpdate,
       publish: (e) => void published.push(e),
       logKey: "t",
     });
@@ -268,6 +284,125 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     expect(note).not.toContain("/compare/");
   });
 
+  // A description-only follow-up in a thread whose own run opened the pull
+  // request: the workspace sits on the base (the binding still the repo
+  // default) and the run pushed nothing, so the description is for THAT pull
+  // request — edited by number, the body rendered at its head as the resolver
+  // fetched it, never at the base's tip the workspace shows.
+  it("the branch is the base but the thread's own pull request is known (nothing pushed) → that PR is edited by number, the body rendered at ITS head; pr_opened created:false with no head, the submitted artifact, the PR-updated reply — never the refusal, no open call", async () => {
+    const PR_HEAD = "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432";
+    const spy = openSpy();
+    const updates: Array<{ repo: string; number: number; title: string; body: string }> = [];
+    const published: RunEvent[] = [];
+    const note = await runCodingPrPostStep({
+      observed: observation({ branch: "main", checkedOut: "main" }),
+      description: DESCRIPTION,
+      target: {
+        repo: "acme/api",
+        baseRef: "main",
+        bindingRef: "main",
+        resolvedRef: "docs/seed-header",
+        ownPr: { number: 41, headSha: PR_HEAD },
+      },
+      openPullRequest: spy.fn,
+      fetchRepoInfo: unreachable,
+      findOpenPr: noOpenPr,
+      updatePullRequest: async (repo, number, patch) => void updates.push({ repo, number, ...patch }),
+      publish: (e) => void published.push(e),
+      logKey: "t",
+    });
+    expect(spy.calls).toHaveLength(0);
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({ repo: "acme/api", number: 41, title: DESCRIPTION.title });
+    expect(updates[0].body).toContain(`https://github.com/acme/api/blob/${PR_HEAD}/src/login.ts#L10-L20`);
+    expect(updates[0].body).not.toContain(HEAD);
+    expect(published.map((e) => e.type)).toEqual(["pr_opened", "review_artifact"]);
+    expect(published[0]).toEqual({
+      type: "pr_opened",
+      url: "https://github.com/acme/api/pull/41",
+      number: 41,
+      created: false,
+      at: expect.any(Number),
+    });
+    expect(published[1]).toMatchObject({ artifact: "pr_description", origin: "submitted", pr: 41, headSha: PR_HEAD });
+    expect(note).toBe(
+      `🔀 PR updated: https://github.com/acme/api/pull/41 — body re-rendered at \`${PR_HEAD.slice(0, 7)}\``,
+    );
+  });
+
+  it("the edit of the thread's own pull request fails → the note names the PR and the reason, no event, never a fabricated success", async () => {
+    const published: RunEvent[] = [];
+    const note = await runCodingPrPostStep({
+      observed: observation({ branch: "main", checkedOut: "main" }),
+      description: DESCRIPTION,
+      target: {
+        repo: "acme/api",
+        baseRef: "main",
+        bindingRef: "main",
+        resolvedRef: "main",
+        ownPr: { number: 41, headSha: HEAD },
+      },
+      openPullRequest: openSpy().fn,
+      fetchRepoInfo: unreachable,
+      findOpenPr: noOpenPr,
+      updatePullRequest: async () => {
+        throw new Error("PR update failed: HTTP 403");
+      },
+      publish: (e) => void published.push(e),
+      logKey: "t",
+    });
+    expect(published).toEqual([]);
+    expect(note).toContain("https://github.com/acme/api/pull/41");
+    expect(note).toContain("could not be updated");
+    expect(note).toContain("PR update failed: HTTP 403");
+    expect(note).not.toContain("PR updated:");
+  });
+
+  it("the thread's own pull request is known but the run pushed a branch → today's open-or-edit from that branch, never the edit by number", async () => {
+    const spy = openSpy({ number: 41, htmlUrl: "https://github.com/acme/api/pull/41", created: false });
+    const update = vi.fn(noUpdate);
+    const note = await runCodingPrPostStep({
+      observed: observation({ branch: "feat/x", checkedOut: "feat/x" }),
+      description: DESCRIPTION,
+      target: {
+        repo: "acme/api",
+        baseRef: "main",
+        bindingRef: "main",
+        resolvedRef: "main",
+        ownPr: { number: 41, headSha: HEAD },
+      },
+      openPullRequest: spy.fn,
+      fetchRepoInfo: unreachable,
+      findOpenPr: noOpenPr,
+      updatePullRequest: update,
+      publish: () => {},
+      logKey: "t",
+    });
+    expect(update).not.toHaveBeenCalled();
+    expect(spy.calls).toHaveLength(1);
+    expect(spy.calls[0]).toMatchObject({ repo: "acme/api", headBranch: "feat/x", base: "main" });
+    expect(note).toContain("PR updated: https://github.com/acme/api/pull/41");
+  });
+
+  it("the branch is the base and no pull request is known → the refusal stands, and the edit seam is never asked", async () => {
+    const update = vi.fn(noUpdate);
+    const published: RunEvent[] = [];
+    const note = await runCodingPrPostStep({
+      observed: observation({ branch: "main", checkedOut: "main" }),
+      description: DESCRIPTION,
+      target: { repo: "acme/api", baseRef: undefined, bindingRef: "main", resolvedRef: "main" },
+      openPullRequest: openSpy().fn,
+      fetchRepoInfo: unreachable,
+      findOpenPr: noOpenPr,
+      updatePullRequest: update,
+      publish: (e) => void published.push(e),
+      logKey: "t",
+    });
+    expect(update).not.toHaveBeenCalled();
+    expect(published).toEqual([expect.objectContaining({ type: "run_note", kind: "pr_not_opened" })]);
+    expect(note).toContain("is the base branch the pull request would target");
+  });
+
   it("the branch is the base but no description was submitted → nothing to report: no note, no event (the agent's own report stands)", async () => {
     const published: RunEvent[] = [];
     const note = await runCodingPrPostStep({
@@ -277,6 +412,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       openPullRequest: openSpy().fn,
       fetchRepoInfo: unreachable,
       findOpenPr: noOpenPr,
+      updatePullRequest: noUpdate,
       publish: (e) => void published.push(e),
       logKey: "t",
     });
@@ -293,6 +429,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       openPullRequest: spy.fn,
       fetchRepoInfo: async () => undefined,
       findOpenPr: noOpenPr,
+      updatePullRequest: noUpdate,
       publish: () => {},
       logKey: "t",
     });
@@ -312,6 +449,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
         throw new Error("network down");
       },
       findOpenPr: noOpenPr,
+      updatePullRequest: noUpdate,
       publish: () => {},
       logKey: "t",
     });
@@ -328,6 +466,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       openPullRequest: spy.fn,
       fetchRepoInfo: unreachable,
       findOpenPr: noOpenPr,
+      updatePullRequest: noUpdate,
       publish: () => {},
       logKey: "t",
     });
@@ -345,6 +484,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       openPullRequest: spy.fn,
       fetchRepoInfo: unreachable,
       findOpenPr: noOpenPr,
+      updatePullRequest: noUpdate,
       publish: () => {},
       logKey: "t",
     });
@@ -363,6 +503,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       openPullRequest: spy.fn,
       fetchRepoInfo: unreachable,
       findOpenPr: noOpenPr,
+      updatePullRequest: noUpdate,
       publish: () => {},
       logKey: "t",
     });
@@ -387,6 +528,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       target: { repo: "acme/api", baseRef: "main", bindingRef: undefined, resolvedRef: "main" },
       openPullRequest: spy.fn,
       findOpenPr,
+      updatePullRequest: noUpdate,
       fetchRepoInfo: unreachable,
       publish: (e) => events.push(e),
       logKey: "t",
@@ -423,6 +565,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       target: { repo: "acme/api", baseRef: undefined, bindingRef: "main", resolvedRef: "main" },
       openPullRequest: spy.fn,
       findOpenPr,
+      updatePullRequest: noUpdate,
       fetchRepoInfo: unreachable,
       publish: (e) => events.push(e),
       logKey: "t",
@@ -445,6 +588,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       findOpenPr: async () => {
         throw new Error("PR lookup failed: HTTP 502");
       },
+      updatePullRequest: noUpdate,
       fetchRepoInfo: unreachable,
       publish: (e) => events.push(e),
       logKey: "t",
@@ -462,6 +606,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       target: { repo: "acme/api", baseRef: undefined, bindingRef: "main", resolvedRef: "main" },
       openPullRequest: openSpy().fn,
       findOpenPr,
+      updatePullRequest: noUpdate,
       fetchRepoInfo: unreachable,
       publish: () => {},
       logKey: "t",
@@ -489,6 +634,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       openPullRequest: spy.fn,
       fetchRepoInfo,
       findOpenPr: noOpenPr,
+      updatePullRequest: noUpdate,
       publish: () => {},
       logKey: "t",
     });
@@ -510,6 +656,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       openPullRequest: spy.fn,
       fetchRepoInfo: unreachable,
       findOpenPr: noOpenPr,
+      updatePullRequest: noUpdate,
       publish: () => {},
       logKey: "t",
     });
@@ -529,6 +676,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       openPullRequest: spy.fn,
       fetchRepoInfo: unreachable,
       findOpenPr: noOpenPr,
+      updatePullRequest: noUpdate,
       publish: () => {},
       logKey: "t",
     });
@@ -547,6 +695,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       openPullRequest: spy.fn,
       fetchRepoInfo: unreachable,
       findOpenPr: noOpenPr,
+      updatePullRequest: noUpdate,
       publish: () => {},
       logKey: "t",
     });
@@ -566,6 +715,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       openPullRequest: spy.fn,
       fetchRepoInfo: unreachable,
       findOpenPr: noOpenPr,
+      updatePullRequest: noUpdate,
       publish: () => {},
       logKey: "t",
     });

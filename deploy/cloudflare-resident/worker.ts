@@ -1110,7 +1110,9 @@ const NO_REF_HINT_REASON: RefHintReason = { ownPr: null, refByDefault: false };
 type RebindOutcome =
   | { kind: "none"; binding: ThreadBinding }
   | { kind: "refuse"; refused: RebindRefused }
-  | { kind: "rebound"; moved: ThreadBinding; rebound: Rebound };
+  /** `note`: the move was the record alone — a dirty tree already on the
+   *  branch, no checkout run — in the verdict's words, for the log line. */
+  | { kind: "rebound"; moved: ThreadBinding; rebound: Rebound; note?: string };
 
 /** Result of one /op test/build execution. `ok` is the command's
  *  verdict — a failing test run is a RESULT with ok:false, never an error. */
@@ -4654,29 +4656,44 @@ export class ResidentDO extends Sandbox<Env> {
             );
             tree.readable = status.exitCode === 0;
             if (tree.readable) tree.dirty = status.stdout.trim() !== "";
+            if (tree.dirty) {
+              // A dirty tree is refused unless its HEAD is already the branch
+              // (the run made it here and left an edit after pushing): the
+              // one fact that tells the two apart, measured only when it
+              // decides anything.
+              const head = await this.threadRun(
+                current.user,
+                wt,
+                "git rev-parse --abbrev-ref HEAD",
+                DEFAULT_EXEC_TIMEOUT_MS,
+              );
+              if (head.exitCode === 0) tree.head = head.stdout.trim();
+            }
           }
           // Judged on the re-read plan: it carries whether the branch is the
           // thread's own, which the pre-lock plan lacks when it was a recreate.
           const verdict = rebindVerdict(again, tree);
           if (verdict.kind === "recreate") return this.recreateAtOwnBranch(current, again, fetchToken);
           if (verdict.kind !== "rebind") return verdict;
-          const startedAt = systemClock();
-          const checkout = await this.threadRun(
-            current.user,
-            wt,
-            `git checkout --quiet ${shellQuote(again.to)}`,
-            DEFAULT_EXEC_TIMEOUT_MS,
-          );
-          this.stepTrace.getStore()?.record("rebind-checkout", {
-            startedAt,
-            endedAt: systemClock(),
-            exitCode: checkout.exitCode,
-            timedOut: checkout.timedOut,
-          });
-          if (checkout.exitCode !== 0) {
-            const detail =
-              checkout.stderr.trim().split("\n")[0]?.slice(0, 200) || `git checkout exited ${checkout.exitCode}`;
-            return { kind: "refuse", refused: rebindRefused(again, "checkout-failed", detail) };
+          if (verdict.checkout) {
+            const startedAt = systemClock();
+            const checkout = await this.threadRun(
+              current.user,
+              wt,
+              `git checkout --quiet ${shellQuote(again.to)}`,
+              DEFAULT_EXEC_TIMEOUT_MS,
+            );
+            this.stepTrace.getStore()?.record("rebind-checkout", {
+              startedAt,
+              endedAt: systemClock(),
+              exitCode: checkout.exitCode,
+              timedOut: checkout.timedOut,
+            });
+            if (checkout.exitCode !== 0) {
+              const detail =
+                checkout.stderr.trim().split("\n")[0]?.slice(0, 200) || `git checkout exited ${checkout.exitCode}`;
+              return { kind: "refuse", refused: rebindRefused(again, "checkout-failed", detail) };
+            }
           }
           const rebound: Rebound = {
             from: current.ref,
@@ -4686,7 +4703,9 @@ export class ResidentDO extends Sandbox<Env> {
           };
           const moved: ThreadBinding = { ...current, ref: again.to, rebound };
           await this.ctx.storage.put(key, moved);
-          return { kind: "rebound", moved, rebound };
+          return verdict.checkout
+            ? { kind: "rebound", moved, rebound }
+            : { kind: "rebound", moved, rebound, note: verdict.note };
         }, ATTACH_MUTEX_WAIT_MS)
       ).value;
     } catch (err) {
@@ -4705,7 +4724,7 @@ export class ResidentDO extends Sandbox<Env> {
     }
     const { moved, rebound } = outcome;
     console.log(
-      `attach ${prior.threadKey}: rebound ${rebound.from} → ${rebound.to} (the thread's own pull request #${rebound.pr})`,
+      `attach ${prior.threadKey}: rebound ${rebound.from} → ${rebound.to} (the thread's own pull request #${rebound.pr})${outcome.note ? ` — ${outcome.note}` : ""}`,
     );
     return { binding: moved, rebound };
   }

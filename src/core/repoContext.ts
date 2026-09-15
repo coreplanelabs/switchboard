@@ -647,6 +647,19 @@ export function ownPrOf(ctx: RepoContext): { number: number; ref: string } | und
   return { number: ctx.pr, ref: ctx.ref };
 }
 
+/** The pull request the thread's own run opened, with the head commit the
+ *  resolver fetched — where the coding post-step lands a description
+ *  resubmitted by a run that pushed nothing, whatever branch its workspace
+ *  sits on (docs/reference/specs/pr-description.md item 5). Unlike `ownPrOf`
+ *  it does not need the ref to have come from the PR: a follow-up phrasing
+ *  `on main` is still in its own thread, and its description is still for
+ *  its own pull request. Undefined for a PR a person named, for none, and for
+ *  a record PR with no head commit (nothing to render the body at). */
+export function recordPrOf(ctx: RepoContext): { number: number; headSha: string } | undefined {
+  if (!ctx.prFromRecord || ctx.pr === undefined || ctx.headSha === undefined) return undefined;
+  return { number: ctx.pr, headSha: ctx.headSha };
+}
+
 /** The thread's pull request when the message names none (item 29): the last
  *  one a person named in the thread's user turns, or the one the thread's
  *  newest run opened (`records.pr`, off the run record), whichever is newer —
