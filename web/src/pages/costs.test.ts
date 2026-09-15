@@ -558,6 +558,23 @@ describe("CostsPage · By user", () => {
     expect(text).toContain("3 days with $15.75 of run tokens");
   });
 
+  it("a compared range where more was attributed than the workspace shows says so in words, never as a negative dollar", () => {
+    const rec = usersReport().reconciliation;
+    const over = mountApp(CostsPage, {
+      seed: usersSeed(
+        usersReport({
+          reconciliation: { ...rec, attributedLlmUsd: 21.5, workspaceLlmUsd: 19.5, unattributedLlmUsd: -2 },
+        }),
+      ),
+    });
+    const line = over.find(".reconciliation").text().replace(/\s+/g, " ");
+    expect(line).toContain("LLM attributed $21.50 of $19.50 on the workspace over 3 days");
+    expect(line).toContain("$2.00 more attributed than the workspace figure");
+    expect(line).not.toContain("unattributed");
+    expect(line).not.toContain("-$");
+    expect(line).not.toContain("$-");
+  });
+
   it("keeps the tab on the range and group pills, names the by-user JSON twin, and says so when the by-user report did not come with the page", () => {
     const w = mountApp(CostsPage, { seed: usersSeed() });
     const hrefs = w.findAll("a").map((a) => a.attributes("href"));
