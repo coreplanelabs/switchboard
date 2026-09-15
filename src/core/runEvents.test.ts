@@ -3,6 +3,7 @@ import {
   TOOL_OUTPUT_CAP,
   type RunEvent,
   parseExitPrefix,
+  toolTextFailed,
   prepareToolOutput,
   prepareToolResult,
   redactAndCap,
@@ -173,6 +174,17 @@ describe("summarizeToolResult", () => {
 
 // Feature: docs/reference/specs/live-view.md item 13 — the run page shows each tool call
 // as a card with its real exit status and its (bounded) output inside.
+describe("toolTextFailed", () => {
+  it("reads an `error:` opening as a failure, however it is cased or indented, and nothing else", () => {
+    expect(toolTextFailed("error: the artifact store holds 0 bytes for received.txt — nothing was posted")).toBe(true);
+    expect(toolTextFailed("  Error: could not read out/x.txt")).toBe(true);
+    expect(toolTextFailed("[31merror:[0m refused")).toBe(true);
+    expect(toolTextFailed("attached page.png (3145728 bytes) to the conversation and the run page")).toBe(false);
+    expect(toolTextFailed("the log ends with: error: ENOENT — but the copy succeeded")).toBe(false);
+    expect(toolTextFailed("")).toBe(false);
+  });
+});
+
 describe("parseExitPrefix", () => {
   it("reads the numeric exit code every executor prefixes nonzero output with", () => {
     expect(parseExitPrefix("exit 128: fatal: not a git repository\nmore")).toEqual({ failed: true, exitCode: 128 });

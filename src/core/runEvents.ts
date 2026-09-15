@@ -622,6 +622,17 @@ export function parseExitPrefix(output: string): { failed: boolean; exitCode?: n
   return /^\d+$/.test(m[1]) ? { failed: true, exitCode: Number(m[1]) } : { failed: true };
 }
 
+/** A tool that could not do what it was asked answers the model with a text
+ *  that opens `error:` (`src/tools/*` — attach_file, the GitHub writes, the
+ *  session tools) instead of throwing, so the model can read the reason and go
+ *  on. The record must call that result what the model reads it as: `ok:false`.
+ *  Both loops (the native runner and the pi bridge) derive `ok` for a non-bash
+ *  tool through this one reader; bash keeps `parseExitPrefix`. Ordinary output
+ *  that merely contains the word later on is a success. */
+export function toolTextFailed(output: string): boolean {
+  return /^\s*error:/i.test(stripAnsi(output));
+}
+
 /** Upper bound on a `tool_result.output` — large enough for a test run or a
  *  diff to read in full on the run page, small enough that a run of ordinary
  *  length fits the registry's backlog whole (the backlog is bounded by count AND

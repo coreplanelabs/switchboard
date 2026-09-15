@@ -981,6 +981,37 @@ describe("run-visibility events", () => {
     expect(result?.summary).toContain("kaboom");
   });
 
+  // run-visibility.md item 5: a tool that answers `error: …` instead of throwing (the src/tools
+  // convention) failed as far as the model is concerned, and the record says so; text that only
+  // mentions an error later is a success.
+  it("marks a tool that answers error: … with ok:false, and one that merely mentions an error with ok:true", async () => {
+    const readUse = (id: string, path: string): CompletionResult => ({
+      content: [{ type: "tool_use", id, name: "read_file", input: { path } }],
+      stopReason: "tool_use",
+    });
+    // read_file hands back the executor's words: one path answers the tools' error opening, the other a log
+    // that mentions an error and then succeeds.
+    const answers: Record<string, string> = {
+      "out/missing.txt": "error: could not read out/missing.txt: No such file or directory",
+      "build.log": "step 1 logged: error: ENOENT (retried)\nstep 2 ok",
+    };
+    const events: RunEvent[] = [];
+    await runAgent({
+      provider: scripted([readUse("r1", "out/missing.txt"), readUse("r2", "build.log"), text("done")]),
+      model: "m",
+      agent: agent({ maxTurns: 5 }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: { ...fakeExecutor, readFile: async (path) => answers[path] ?? "" } },
+      onEvent: (e) => events.push(e),
+    });
+    const results = events.filter((e) => e.type === "tool_result");
+    expect(results.map((r) => [r.callId, r.ok])).toEqual([
+      ["r1", false],
+      ["r2", true],
+    ]);
+    expect(results[0]!.summary).toMatch(/^error: could not read/);
+  });
+
   it("pairs each tool_result to its tool_call by callId (the provider's tool_use id)", async () => {
     const events: RunEvent[] = [];
     await runAgent({

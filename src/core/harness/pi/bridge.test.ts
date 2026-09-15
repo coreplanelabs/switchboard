@@ -248,6 +248,30 @@ describe("the gate's coverage — every call that ran was vetted", () => {
   const validation =
     'Validation failed for tool "read":\n  - offset: must be number\n\nReceived arguments:\n{\n  "offset": [\n    140,\n    270\n  ]\n}';
 
+  // run-visibility.md item 5: a relayed tool that answers `error: …` in text (attach_file's
+  // "holds 0 bytes", the GitHub writes' refusals) failed as far as the model is concerned; pi's
+  // isError is false for it, so the bridge reads the text the way the native loop does.
+  it("a relayed tool whose text opens error: is recorded ok:false without pi's isError; ordinary text stays ok:true", () => {
+    const { bridge, events } = harness();
+    bridge.gateSaw("a1");
+    bridge.observe(start("a1", "attach_file", { path: "out/received.txt" }));
+    bridge.observe(
+      end(
+        "a1",
+        "attach_file",
+        "error: the artifact store holds 0 bytes for received.txt, not the 119 measured — nothing was posted",
+      ),
+    );
+    bridge.gateSaw("a2");
+    bridge.observe(start("a2", "attach_file", { path: "out/probe-a.txt" }));
+    bridge.observe(end("a2", "attach_file", "attached probe-a.txt (8 bytes) to the conversation and the run page"));
+    const results = events.filter((e) => e.type === "tool_result");
+    expect(results.map((r) => [r.tool, r.ok])).toEqual([
+      ["attach_file", false],
+      ["attach_file", true],
+    ]);
+  });
+
   it("a call the gate saw ends quietly; pi's own pre-gate answer is a harness_error note naming the reason; an unvetted call that ran is reported as a gate bypass", () => {
     const { bridge, events } = harness();
     bridge.gateSaw("c1");

@@ -128,8 +128,13 @@ export class R2ArtifactStore implements ArtifactStore {
     const res = await this.fetchImpl(signed);
     if (res.status === 404) return null;
     if (!res.ok) throw new Error(`artifact store: HEAD ${key} answered HTTP ${res.status}`);
-    const size = Number(res.headers.get("content-length"));
-    if (!Number.isFinite(size) || size < 0) throw new Error(`artifact store: HEAD ${key} answered without a length`);
+    // `Number(null)` is 0: an answer with no length header must not read as an
+    // empty object — the tool would then report "holds 0 bytes", a size nobody measured.
+    const length = res.headers.get("content-length");
+    const size = length === null ? Number.NaN : Number(length);
+    if (!Number.isFinite(size) || size < 0) {
+      throw new Error(`artifact store: HEAD ${key} answered HTTP ${res.status} without a length`);
+    }
     return { size, contentType: res.headers.get("content-type") ?? "application/octet-stream" };
   }
 
