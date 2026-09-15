@@ -7,6 +7,7 @@ A section says, in this order: what no longer works as it did, what replaces it,
 ## 1.219.1
 
 - A follow-up in a coding thread now runs on the pull request the thread's newest run opened: the run record carries it (`pr`, [run-history](specs/run-history.md) item 2) and the resolver binds the follow-up's ref to its head branch when the message names none ([resident-repos](specs/resident-repos.md) item 29), so pushes land on the PR and a resubmitted description edits it instead of being refused on the repo default. A ref phrased in the message (`on branch x`) still wins, and a PR a person named in the thread keeps its rule. Nothing for an operator to change; records written before this release carry no `pr`, so an older thread behaves as before until a run in it opens or edits a pull request.
+- A run on the pi harness now survives a bot restart with its pi still running: the run's row carries the hash of the bearer pi was started with, and the generation that re-attaches honours that bearer on its model proxy ([model-proxy](specs/model-proxy.md) item 2, [harness-pi](specs/harness-pi.md) item 8). Before, the re-attach succeeded and pi's next model call was refused (`401 unknown_bearer`), failing every pi run in flight across a deploy. A row written before this release carries no hash: at the first restart after the deploy its pi is ended and restarted on the mirrored transcript with the new bearer, once. Nothing for an operator to change.
 
 ## 1.218.0
 

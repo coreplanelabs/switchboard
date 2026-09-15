@@ -11,7 +11,7 @@ import {
   type StepReport,
 } from "../../../runner.js";
 import type { RunnableTool } from "../../../tools/workspace.js";
-import { RunBearerStore } from "../../modelProxy/runBearers.js";
+import { bearerHashOf, RunBearerStore } from "../../modelProxy/runBearers.js";
 import type { RunEvent } from "../../runEvents.js";
 import { RunControl } from "../../runRegistry/runControl.js";
 import { recordingSink } from "../../testing/recordingSink.js";
@@ -258,7 +258,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(started.args[started.args.indexOf("--session-dir") + 1]).toBe(paths.sessionDir);
     // The row's first facts name the root beside the pid, so the build that
     // comes back after a restart re-attaches where this one filed pi (item 8).
-    expect(w.facts[0]).toEqual({ pid: 4242, logOffset: 0, root: paths.dir });
+    expect(w.facts[0]).toEqual({ pid: 4242, logOffset: 0, root: paths.dir, bearerHash: bearerHashOf(w.bearer) });
     expect(w.container.killed).toEqual([4242]);
     expect(w.container.removed).toEqual([paths.dir]);
   });
@@ -323,7 +323,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       { firstIdx: 2, inFlight: [], turn: 1 },
     ]);
     // The facts: pid, offset, the root and the session file land on the row; pi is ended; the run is off the registry.
-    expect(w.facts[0]).toEqual({ pid: 4242, logOffset: 0, root: paths.dir });
+    expect(w.facts[0]).toEqual({ pid: 4242, logOffset: 0, root: paths.dir, bearerHash: bearerHashOf(w.bearer) });
     expect(w.facts.at(-1)).toMatchObject({ pid: 4242, root: paths.dir, sessionFile: `${paths.sessionDir}/s.jsonl` });
     expect(w.facts.at(-1)!.logOffset).toBeGreaterThan(0);
     expect(w.container.killed).toEqual([4242]);
@@ -794,7 +794,13 @@ describe("runPiHarness — after a bot restart", () => {
       },
       { type: "agent_settled" },
     );
-    w.run.resume = resume({ pid: 4242, logOffset: skip, sessionFile: "s.jsonl", root: paths.dir });
+    w.run.resume = resume({
+      pid: 4242,
+      logOffset: skip,
+      sessionFile: "s.jsonl",
+      root: paths.dir,
+      bearerHash: bearerHashOf(w.bearer),
+    });
     scriptedPi(w.container, (n, c) => finalTurn(c, "picked up where I left off"));
     const answer = await w.start();
     expect(answer).toBe("picked up where I left off");
@@ -829,7 +835,13 @@ describe("runPiHarness — after a bot restart", () => {
       },
       { type: "agent_settled" },
     );
-    w.run.resume = resume({ pid: 4242, logOffset: 0, sessionFile: "s.jsonl", root: paths.dir });
+    w.run.resume = resume({
+      pid: 4242,
+      logOffset: 0,
+      sessionFile: "s.jsonl",
+      root: paths.dir,
+      bearerHash: bearerHashOf(w.bearer),
+    });
     scriptedPi(w.container, (n, c) => {
       bashTurn(w, "c1", "ls", "a");
       finalTurn(c, "continued");
@@ -852,7 +864,13 @@ describe("runPiHarness — after a bot restart", () => {
     const w = world();
     const theirs = piRunPathsAt("/tmp/switchboard-pi-worker2/run-7");
     await w.container.start({ paths: theirs, args: [], env: {} });
-    w.run.resume = resume({ pid: 4242, logOffset: 0, sessionFile: "s.jsonl", root: theirs.dir });
+    w.run.resume = resume({
+      pid: 4242,
+      logOffset: 0,
+      sessionFile: "s.jsonl",
+      root: theirs.dir,
+      bearerHash: bearerHashOf(w.bearer),
+    });
     scriptedPi(w.container, (_n, c) => finalTurn(c, "picked up where I left off"));
     expect(await w.start()).toBe("picked up where I left off");
     expect(w.container.starts).toHaveLength(1); // the previous generation's start alone
@@ -886,6 +904,59 @@ describe("runPiHarness — after a bot restart", () => {
       /^resumed after a restart: the row named no directory for its pi \(pid 4242\), so it was ended and pi restarted on the mirrored transcript — 1 call\(s\) were in flight/,
     );
     expect(w.container.removed).toEqual([paths.dir]);
+  });
+
+  // The bearer pi holds is the previous generation's (model-proxy item 2): the
+  // row carries its hash, this generation adopts it, and pi's calls verify here.
+  it("re-attaches only after adopting the bearer pi holds: the row's hash joins this generation's store, so the previous generation's bearer verifies here beside this generation's own", async () => {
+    const w = world();
+    const previous = new RunBearerStore({ clock: () => NOW });
+    const theirToken = previous.mint({
+      runId: "run-7",
+      modelRef: "anthropic/claude-fable-5",
+      providerName: "anthropic",
+      providerType: "anthropic",
+      model: "claude-fable-5",
+      maxTokens: 1000,
+      maxTurns: 5,
+      expiresAt: NOW + 60 * 60_000,
+      span: createTracer({ clock: () => NOW }).start("request", { sinks: [] }),
+      publish: () => {},
+    });
+    const theirs = piRunPathsAt("/tmp/switchboard-pi-worker2/run-7");
+    await w.container.start({ paths: theirs, args: [], env: {} });
+    w.run.resume = resume({
+      pid: 4242,
+      logOffset: 0,
+      sessionFile: "s.jsonl",
+      root: theirs.dir,
+      bearerHash: bearerHashOf(theirToken),
+    });
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "picked up where I left off"));
+    // Before the re-attach this generation knows the run but not that bearer.
+    expect(w.bearers.verify(theirToken)).toEqual({ ok: false, reason: "unknown_bearer", runId: "run-7" });
+    expect(await w.start()).toBe("picked up where I left off");
+    expect(w.container.starts).toHaveLength(1); // the previous generation's pi, continued
+    expect(w.bearers.verify(theirToken).ok).toBe(true);
+    expect(w.bearers.verify(w.bearer).ok).toBe(true);
+    expect(w.facts.at(-1)).toMatchObject({ pid: 4242, root: theirs.dir, bearerHash: bearerHashOf(theirToken) });
+  });
+
+  it("a row whose facts carry no bearer hash cannot be re-attached: its pi is ended by pid and a fresh pi starts with this generation's bearer, the note saying why", async () => {
+    const w = world();
+    const theirs = piRunPathsAt("/tmp/switchboard-pi-worker2/run-7");
+    await w.container.start({ paths: theirs, args: [], env: {} }); // alive and findable, holding a bearer nobody here can verify
+    w.run.resume = resume({ pid: 4242, logOffset: 0, sessionFile: "s.jsonl", root: theirs.dir });
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "continued"));
+    expect(await w.start()).toBe("continued");
+    expect(w.container.killed).toEqual([4242, 4242]);
+    expect(w.container.starts).toHaveLength(2);
+    expect(w.container.starts[1].env[RUN_BEARER_ENV]).toBe(w.bearer);
+    expect(w.facts.at(-1)).toMatchObject({ pid: 4242, root: paths.dir, bearerHash: bearerHashOf(w.bearer) });
+    const notes = w.events.filter((e) => e.type === "run_note").map((e) => (e as { summary: string }).summary);
+    expect(notes[0]).toMatch(
+      /^resumed after a restart: the row carried no bearer this generation could honour for its pi \(pid 4242\), so it was ended and pi restarted on the mirrored transcript/,
+    );
   });
 
   it("restarts a dead pi on a session rebuilt from the mirrored transcript, the calls in flight answered with the restart note, and continues", async () => {

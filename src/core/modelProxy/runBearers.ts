@@ -5,14 +5,20 @@
 // the run ends — so a bearer authorizes exactly one run's model calls and no
 // call after them. The store is in-process: a bot restart drops every bearer,
 // which is the right answer (the run that held it is being resumed by a new
-// generation, which mints its own). Nothing here logs, and a token never
-// appears in a message: `verify` answers a reason, never the material.
+// generation, which mints its own) — with one exception: a pi that outlived
+// the bot still holds the bearer the previous generation revealed to it, so
+// the run's ledger row carries that bearer's secret HASH and the generation
+// that re-attaches adopts it onto the run's fresh entry (`adopt`;
+// docs/reference/specs/harness-pi.md item 8). Nothing here logs, and a token
+// never appears in a message: `verify` answers a reason, never the material.
 //
 // The token names its run — `sbr_<runId>.<secret>` — so the proxy can tell an
 // unknown run (404) from a wrong secret for a known one (401) without a second
-// lookup, and the secret is compared in constant time.
+// lookup, and the secret is compared in constant time. The store keeps the
+// SHA-256 of every secret, never the secret: what a row may carry to name a
+// bearer is the same hash, which buys nothing on its own.
 
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { ProviderConfig } from "../../providers/types.js";
 import type { RunEvent } from "../runEvents.js";
 import type { Clock, Span } from "../trace/types.js";
@@ -64,8 +70,10 @@ export type RunBearerFacts = Omit<RunBearerGrant, "span" | "publish"> & { turns:
 
 interface Entry {
   grant: RunBearerGrant;
-  /** Every secret minted for the run (the provision's, plus an operator's `issue`), as bytes. */
-  secrets: Buffer[];
+  /** The SHA-256 of every secret that buys this run's calls: the provision's
+   *  mint, an operator's `issue`, and a previous generation's bearer a pi
+   *  still holds (`adopt`). Never the secrets themselves. */
+  hashes: Buffer[];
   turns: number;
   revoked: boolean;
 }
@@ -85,7 +93,7 @@ export class RunBearerStore {
   mint(grant: RunBearerGrant): string {
     this.sweep();
     const secret = randomBytes(SECRET_BYTES);
-    this.entries.set(grant.runId, { grant, secrets: [secret], turns: 0, revoked: false });
+    this.entries.set(grant.runId, { grant, hashes: [hashOf(secret)], turns: 0, revoked: false });
     return token(grant.runId, secret);
   }
 
@@ -96,8 +104,23 @@ export class RunBearerStore {
     const entry = this.entries.get(runId);
     if (!entry || entry.revoked || this.opts.clock() >= entry.grant.expiresAt) return undefined;
     const secret = randomBytes(SECRET_BYTES);
-    entry.secrets.push(secret);
+    entry.hashes.push(hashOf(secret));
     return { token: token(runId, secret), expiresAt: entry.grant.expiresAt };
+  }
+
+  /** A bearer another generation minted for this run and a pi still holds
+   *  (docs/reference/specs/harness-pi.md item 8): its secret's hash, as the
+   *  run's row carried it, joins the run's live entry — the one this
+   *  generation minted before re-attaching — so the calls that pi makes with
+   *  it verify here under this generation's grant and turn counter. Nothing
+   *  for a run this store never minted, one that ended, one past its expiry
+   *  (as `issue`), or a hash of another shape; the hash itself buys no call. */
+  adopt(runId: string, secretHash: string): boolean {
+    const entry = this.entries.get(runId);
+    if (!entry || entry.revoked || this.opts.clock() >= entry.grant.expiresAt) return false;
+    if (!/^[0-9a-f]{64}$/.test(secretHash)) return false;
+    entry.hashes.push(Buffer.from(secretHash, "hex"));
+    return true;
   }
 
   /** WHO a presented token is, by reason: malformed, an unknown run, a wrong
@@ -108,8 +131,9 @@ export class RunBearerStore {
     if (!parsed) return { ok: false, reason: "malformed" };
     const entry = this.entries.get(parsed.runId);
     if (!entry) return { ok: false, reason: "unknown_run", runId: parsed.runId };
+    const presentedHash = hashOf(parsed.secret);
     let matched = false;
-    for (const secret of entry.secrets) if (constantTimeEqual(secret, parsed.secret)) matched = true;
+    for (const hash of entry.hashes) if (constantTimeEqual(hash, presentedHash)) matched = true;
     if (!matched) return { ok: false, reason: "unknown_bearer", runId: parsed.runId };
     if (entry.revoked) return { ok: false, reason: "revoked", runId: parsed.runId };
     if (this.opts.clock() >= entry.grant.expiresAt) return { ok: false, reason: "expired", runId: parsed.runId };
@@ -180,6 +204,19 @@ export class RunBearerStore {
 
 function token(runId: string, secret: Buffer): string {
   return `${BEARER_PREFIX}${runId}.${secret.toString("base64url")}`;
+}
+
+/** The SHA-256 of a token's secret, hex — what a run's row may carry to name
+ *  the bearer its pi holds (docs/reference/specs/harness-pi.md item 8) without
+ *  carrying a credential: the hash verifies nothing on its own. Nothing for a
+ *  token of another shape. */
+export function bearerHashOf(presented: string): string | undefined {
+  const parsed = parse(presented);
+  return parsed ? hashOf(parsed.secret).toString("hex") : undefined;
+}
+
+function hashOf(secret: Buffer): Buffer {
+  return createHash("sha256").update(secret).digest();
 }
 
 /** `sbr_<runId>.<secret>` → its parts, or nothing for any other shape. A run id

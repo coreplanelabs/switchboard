@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import { createTracer } from "../trace/tracer.js";
 import type { RunEvent } from "../runEvents.js";
-import { BEARER_MARGIN_MS, BEARER_PREFIX, RunBearerStore, type RunBearerGrant } from "./runBearers.js";
+import { BEARER_MARGIN_MS, BEARER_PREFIX, bearerHashOf, RunBearerStore, type RunBearerGrant } from "./runBearers.js";
 
 const START = 1_700_000_000_000;
 
@@ -187,5 +187,56 @@ describe("RunBearerStore — turns and the operator's extra bearer", () => {
     expect(JSON.stringify(read)).not.toMatch(/secret/);
     h.store.revoke("run-1");
     expect(h.store.grantOf("run-1")).toMatchObject({ revoked: true });
+  });
+});
+
+describe("RunBearerStore — a bearer across generations (docs/reference/specs/harness-pi.md item 8)", () => {
+  it("bearerHashOf names a token's secret without being one: 64 hex chars, different per token, nothing for a malformed token", () => {
+    const h = harness();
+    const a = h.store.mint(h.grant("run-a"));
+    const b = h.store.mint(h.grant("run-b"));
+    expect(bearerHashOf(a)).toMatch(/^[0-9a-f]{64}$/);
+    expect(bearerHashOf(a)).not.toBe(bearerHashOf(b));
+    expect(bearerHashOf("Bearer nope")).toBeUndefined();
+    expect(bearerHashOf(`${BEARER_PREFIX}run-a`)).toBeUndefined();
+  });
+
+  it("adopt lets the bearer a previous generation minted verify on this one beside this generation's own, under this generation's grant and turns; the hash itself buys nothing", () => {
+    const previous = harness();
+    const theirs = previous.store.mint(previous.grant("run-1"));
+    const next = harness();
+    const ours = next.store.mint(next.grant("run-1", { maxTurns: 5 }));
+    expect(next.store.verify(theirs)).toEqual({ ok: false, reason: "unknown_bearer", runId: "run-1" });
+    expect(next.store.adopt("run-1", bearerHashOf(theirs)!)).toBe(true);
+    const adopted = next.store.verify(theirs);
+    expect(adopted.ok).toBe(true);
+    if (!adopted.ok) throw new Error("expected ok");
+    expect(adopted.grant.maxTurns).toBe(5);
+    expect(adopted.turns).toBe(0);
+    expect(next.store.verify(ours).ok).toBe(true);
+    const hashAsSecret = `${BEARER_PREFIX}run-1.${Buffer.from(bearerHashOf(theirs)!, "hex").toString("base64url")}`;
+    expect(next.store.verify(hashAsSecret)).toEqual({ ok: false, reason: "unknown_bearer", runId: "run-1" });
+    expect(next.store.grantOf("run-1")).not.toHaveProperty("hashes");
+  });
+
+  it("adopt refuses a run this store never minted, a run past its expiry, a run that ended, and a hash of another shape, and changes nothing", () => {
+    const previous = harness();
+    const theirs = previous.store.mint(previous.grant("run-1"));
+    const hash = bearerHashOf(theirs)!;
+    const next = harness();
+    expect(next.store.adopt("run-1", hash)).toBe(false);
+    expect(next.store.verify(theirs)).toEqual({ ok: false, reason: "unknown_run", runId: "run-1" });
+    next.store.mint(next.grant("run-1"));
+    expect(next.store.adopt("run-1", "not-a-hash")).toBe(false);
+    expect(next.store.adopt("run-1", hash.slice(0, 63))).toBe(false);
+    expect(next.store.verify(theirs)).toEqual({ ok: false, reason: "unknown_bearer", runId: "run-1" });
+    // Past the grant's expiry nothing is adopted (as `issue` mints nothing); back before it, the same hash would be.
+    next.clock.now = START + 45 * 60_000 + BEARER_MARGIN_MS;
+    expect(next.store.adopt("run-1", hash)).toBe(false);
+    next.clock.now = START;
+    expect(next.store.verify(theirs)).toEqual({ ok: false, reason: "unknown_bearer", runId: "run-1" });
+    next.store.revoke("run-1");
+    expect(next.store.adopt("run-1", hash)).toBe(false);
+    expect(next.store.verify(theirs)).toEqual({ ok: false, reason: "unknown_bearer", runId: "run-1" });
   });
 });
