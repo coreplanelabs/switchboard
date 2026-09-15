@@ -114,6 +114,42 @@ describe("sessionSeed — the tail, the lines since, the request", () => {
     expect(seed.summary).toBe("so far: one");
   });
 
+  it("the tail's first turn drops the results of calls made before the cut: pi answers a tool batch and a steer in one user turn and compacts between the batch's calls and its results, so the seed opens on the steer's text alone and says what it dropped", () => {
+    const merged: ChatMessage = {
+      role: "user",
+      content: [
+        { type: "tool_result", toolUseId: "c1", content: "1 failed" },
+        { type: "text", text: "Your context was just compacted" },
+      ],
+    };
+    const messages = [user("fix it"), call("c1", "npm test"), merged, assistant("continuing")];
+    const compactions = [{ before: 2, entry: { summary: "so far: one" } }];
+    const seed = sessionSeed({ tail: complete(messages, 100, compactions), previous, history: [], request })!;
+    expect(seed.messages.slice(0, 2)).toEqual([user("Your context was just compacted"), assistant("continuing")]);
+    expect(seed.log).toEqual({ from: 103, turns: 2 });
+    expect(seed.notes).toEqual([
+      "session seed: one tool result answering a call before the cut was dropped from the tail's first turn",
+    ]);
+  });
+
+  it("the same at a budget cut with no compaction: a first turn of results and text keeps the text, later results keep their calls", () => {
+    const merged: ChatMessage = {
+      role: "user",
+      content: [
+        { type: "tool_result", toolUseId: "c0", content: "old" },
+        { type: "tool_result", toolUseId: "c00", content: "older" },
+        { type: "text", text: "also check the lockfile" },
+      ],
+    };
+    const messages = [merged, ...tail4];
+    const seed = sessionSeed({ tail: complete(messages, 20), previous, history, request })!;
+    expect(seed.messages.slice(0, 5)).toEqual([user("also check the lockfile"), ...tail4]);
+    expect(seed.log).toEqual({ from: 20, turns: 5 });
+    expect(seed.notes).toEqual([
+      "session seed: 2 tool results answering calls before the cut were dropped from the tail's first turn",
+    ]);
+  });
+
   it("a previous run whose log ends short (`broken`) gets a gap marker before the lines since, as a new row", () => {
     const seed = sessionSeed({
       tail: complete(tail4, 0),

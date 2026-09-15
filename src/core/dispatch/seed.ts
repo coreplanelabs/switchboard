@@ -98,6 +98,25 @@ export function sessionSeed(input: {
   // all of which sit before `start` by construction.
   const logFrom = start < 0 ? from + transcript.turns : from + start + compactions.length;
   const kept = start < 0 ? [] : transcript.messages.slice(start).map(withoutThinking);
+  // The first kept turn may answer calls made before the cut: pi answers a
+  // tool batch and a steer in one user turn, and a compaction entry sits
+  // between that batch's calls and its results, so the turn the cut lands on
+  // opens with results whose calls are gone. A provider refuses a result
+  // without its call, so those parts go and the text stays; the results
+  // themselves are one `recall` away, and the seed's notes say what was
+  // dropped.
+  if (kept.length > 0 && kept[0].role === "user") {
+    const first = kept[0];
+    const orphans = first.content.filter((p) => p.type === "tool_result").length;
+    if (orphans > 0) {
+      kept[0] = { ...first, content: first.content.filter((p) => p.type !== "tool_result") };
+      notes.push(
+        orphans === 1
+          ? "session seed: one tool result answering a call before the cut was dropped from the tail's first turn"
+          : `session seed: ${orphans} tool results answering calls before the cut were dropped from the tail's first turn`,
+      );
+    }
+  }
   if (kept.length === 0) {
     notes.push(
       transcript.turns === 0
