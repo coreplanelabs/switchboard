@@ -4,7 +4,7 @@
 // would say is the test's to decide, line by line, so every path — a settled
 // run, a stop, a death, a dialog — is one recorded stream.
 
-import type { PiContainer, PiStart } from "../container.js";
+import { PiContainerError, type PiContainer, type PiStart } from "../container.js";
 import type { PiRunPaths } from "../process.js";
 
 export class FakePiContainer implements PiContainer {
@@ -16,6 +16,13 @@ export class FakePiContainer implements PiContainer {
   readonly removed: string[] = [];
   private log = Buffer.alloc(0);
   private live = false;
+  /** Where the started pi's log and FIFO are. A read or a write at another
+   *  path fails as the real container's would (`tail` or `printf` on a file
+   *  that is not there): a harness that looks for pi under a root other than
+   *  the one it was started under finds nothing. Unset until a start, so a
+   *  transport driven without one reads wherever it is told. */
+  private logPath: string | undefined;
+  private fifoPath: string | undefined;
   /** The pid every start answers; changed by a test that wants two processes told apart. */
   pid = 4242;
   /** Set to make the next operation fail as the executor would report it. */
@@ -55,17 +62,23 @@ export class FakePiContainer implements PiContainer {
     this.maybeFail("start");
     this.starts.push(start);
     this.live = true;
+    this.logPath = start.paths.log;
+    this.fifoPath = start.paths.fifo;
     return { pid: this.pid };
   }
 
-  async writeLine(_paths: PiRunPaths, line: string): Promise<void> {
+  async writeLine(paths: PiRunPaths, line: string): Promise<void> {
     this.maybeFail("send");
+    if (this.fifoPath !== undefined && paths.fifo !== this.fifoPath)
+      throw new PiContainerError("send", `sh: 1: cannot create ${paths.fifo}: Directory nonexistent`);
     this.stdin.push(line);
     this.onStdin?.(line, this);
   }
 
-  async readLog(_path: string, offset: number, maxBytes: number): Promise<Uint8Array> {
+  async readLog(path: string, offset: number, maxBytes: number): Promise<Uint8Array> {
     this.maybeFail("read");
+    if (this.logPath !== undefined && path !== this.logPath)
+      throw new PiContainerError("read", `tail: cannot open '${path}' for reading: No such file or directory`);
     return new Uint8Array(this.log.subarray(offset, Math.min(this.log.length, offset + maxBytes)));
   }
 

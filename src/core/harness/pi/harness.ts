@@ -8,8 +8,9 @@
 // tool refused, honours a soft stop with a write-up and a hard stop with an
 // abort, folds the thread's follow-ups in as steers, mirrors the transcript
 // onto the ledger, and answers with the same words the loop would. A run that
-// comes back after a bot restart re-attaches to its pi where it still runs,
-// or restarts pi on a session rebuilt from the mirrored transcript.
+// comes back after a bot restart re-attaches to its pi where it still runs, at
+// the root the row recorded, or restarts pi on a session rebuilt from the
+// mirrored transcript.
 
 import type { AgentDef } from "../../../agents/registry.js";
 import type { Effort } from "../../../effort.js";
@@ -44,7 +45,7 @@ import type { Clock, Span } from "../../trace/types.js";
 import { PiBridge } from "./bridge.js";
 import type { PiContainer } from "./container.js";
 import { PiMirror, piSessionFile } from "./mirror.js";
-import { piLaunchArgs, piLaunchEnv, piLaunchFiles, piRunPaths, type PiLaunchSpec } from "./process.js";
+import { piLaunchArgs, piLaunchEnv, piLaunchFiles, piRunPaths, piRunPathsAt, type PiLaunchSpec } from "./process.js";
 import { parsePiLine } from "./protocol.js";
 import type { HarnessRegistry, LiveHarness } from "./relay.js";
 import type { ToolRuleContext } from "./toolRules.js";
@@ -57,6 +58,26 @@ export interface PiHarnessFacts {
   logOffset: number;
   /** pi's session file, once `get_state` named it. */
   sessionFile?: string;
+  /** The directory pi was filed under by the build that started it, so the
+   *  build that comes back after a restart reads the log and feeds the FIFO
+   *  there whatever root it would choose for a run of its own. Absent on a
+   *  row written before the root was recorded: that pi cannot be found, so it
+   *  is ended and a fresh one started (harness-pi item 8). */
+  root?: string;
+}
+
+/** The harness facts a previous generation wrote on the row (`state.harness`),
+ *  when they have the shape this build reads; anything else is no facts. */
+export function piHarnessFactsOf(value: unknown): PiHarnessFacts | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const v = value as Record<string, unknown>;
+  if (typeof v.pid !== "number" || typeof v.logOffset !== "number") return undefined;
+  return {
+    pid: v.pid,
+    logOffset: v.logOffset,
+    ...(typeof v.sessionFile === "string" ? { sessionFile: v.sessionFile } : {}),
+    ...(typeof v.root === "string" ? { root: v.root } : {}),
+  };
 }
 
 export interface PiHarnessResume {
@@ -248,7 +269,9 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
     emit({ type: "run_note", kind, summary, ...(mode ? { mode } : {}) });
   };
   const bridge = new PiBridge({ emit, onProgress: run.onProgress, agentSpan, clock });
-  const paths = piRunPaths(run.runId);
+  // Where pi's files are: this build's own root for a pi started here, the
+  // root the row recorded for a pi another build started (the re-attach below).
+  let paths = piRunPaths(run.runId);
   const remainingMs = run.resume?.remainingMs ?? run.agent.maxMinutes * 60_000;
   const deadline = now() + remainingMs;
   const warnAt = deadline - Math.min(3 * 60_000, run.agent.maxMinutes * 15_000);
@@ -287,17 +310,6 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
   };
   const forget = deps.registry.register(live);
 
-  const spec: PiLaunchSpec = {
-    runId: run.runId,
-    paths,
-    model: { id: run.model.id, providerType: run.model.providerType, maxTokens: run.agent.maxTokens },
-    harnessUrl: deps.harnessUrl,
-    ...(run.effort ? { effort: run.effort } : {}),
-    identity: run.agent.identity,
-    system: run.system,
-    relayTools: run.tools.map((t) => t.name),
-  };
-
   let pid: number | undefined;
   let transport: PiRpcTransport | undefined;
   let facts: PiHarnessFacts | undefined;
@@ -313,18 +325,39 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
   let catchingUp = false;
 
   try {
-    const reattached = run.resume?.facts !== undefined && (await container.alive(run.resume.facts.pid));
-    if (reattached && run.resume?.facts) {
-      // The container's pi outlived the bot: read from where the last generation stopped.
-      pid = run.resume.facts.pid;
-      facts = { ...run.resume.facts };
+    // The container's pi outlived the bot when its pid answers and the row
+    // says where it was filed: the re-attach reads its log and feeds its FIFO
+    // there, whatever root this build files a fresh run under. A row without
+    // a root (written before the root was recorded) names a pi this build
+    // cannot find: it is ended where it runs and a fresh pi starts below, as
+    // after a death. A dead pi's root, when known and not this build's own,
+    // goes with it.
+    const recorded = run.resume?.facts;
+    let reattached = false;
+    /** A live pi the row named no root for, ended here for the fresh start. */
+    let ended = false;
+    if (recorded !== undefined) {
+      const alive = await container.alive(recorded.pid);
+      if (alive && recorded.root !== undefined) {
+        reattached = true;
+        paths = piRunPathsAt(recorded.root);
+      } else if (alive) {
+        ended = true;
+        await container.kill(recorded.pid).catch(() => {});
+      } else if (recorded.root !== undefined && recorded.root !== paths.dir) {
+        await container.remove(piRunPathsAt(recorded.root)).catch(() => {});
+      }
+    }
+    if (reattached && recorded) {
+      pid = recorded.pid;
+      facts = { ...recorded };
       transport = new PiRpcTransport({
         container,
         paths,
         pid,
         pollMs: deps.pollMs ?? 750,
         sleep: deps.sleep,
-        offset: run.resume.facts.logOffset,
+        offset: recorded.logOffset,
       });
       catchingUp = true;
       note(
@@ -332,6 +365,16 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
         `resumed after a restart: pi still runs in the container (pid ${pid}); continuing its session with ${Math.round(remainingMs / 60_000)} min of budget left`,
       );
     } else {
+      const spec: PiLaunchSpec = {
+        runId: run.runId,
+        paths,
+        model: { id: run.model.id, providerType: run.model.providerType, maxTokens: run.agent.maxTokens },
+        harnessUrl: deps.harnessUrl,
+        ...(run.effort ? { effort: run.effort } : {}),
+        identity: run.agent.identity,
+        system: run.system,
+        relayTools: run.tools.map((t) => t.name),
+      };
       // What pi starts on. After a restart where pi died with its container
       // (or its facts never landed): a session rebuilt from the mirrored
       // transcript. A fresh run: the seed rule — the thread's earlier turns
@@ -373,15 +416,20 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
       }
       if (run.resume) {
         const lost = run.resume.settlements.length;
+        const how = ended
+          ? `the row named no directory for its pi (pid ${recorded!.pid}), so it was ended and pi restarted`
+          : "pi restarted";
         note(
           "resumed",
-          `resumed after a restart: pi restarted on the mirrored transcript — ${lost} call(s) were in flight, each answered with a restart note; ${Math.round(remainingMs / 60_000)} min of budget left`,
+          `resumed after a restart: ${how} on the mirrored transcript — ${lost} call(s) were in flight, each answered with a restart note; ${Math.round(remainingMs / 60_000)} min of budget left`,
         );
       }
       const launch = sessionPath ? { ...spec, sessionPath } : spec;
       for (const file of piLaunchFiles(launch)) await container.writeFile(file.path, file.content);
       ({ pid } = await container.start({ paths, args: piLaunchArgs(launch), env: piLaunchEnv(launch, deps.bearer) }));
-      facts = { pid, logOffset: 0 };
+      // The root rides the first facts, so the build that comes back after a
+      // restart looks for this pi where it is, not where it would file its own.
+      facts = { pid, logOffset: 0, root: paths.dir };
       save();
       transport = new PiRpcTransport({ container, paths, pid, pollMs: deps.pollMs ?? 750, sleep: deps.sleep });
     }
@@ -527,7 +575,7 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
           typeof (r.data as Record<string, unknown> | undefined)?.sessionFile === "string"
         ) {
           const data = r.data as Record<string, unknown>;
-          facts = { ...(facts ?? { pid: pid!, logOffset: 0 }), sessionFile: String(data.sessionFile) };
+          facts = { ...(facts ?? { pid: pid!, logOffset: 0, root: paths.dir }), sessionFile: String(data.sessionFile) };
           save();
         }
         if (r.id === "prompt") {

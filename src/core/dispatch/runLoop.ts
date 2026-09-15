@@ -16,7 +16,7 @@ import { parseModelRef } from "../../providers/types.js";
 import { TOOLSETS } from "../../tools/workspace.js";
 import { effectiveHarness } from "../harness/select.js";
 import { ExecPiContainer } from "../harness/pi/container.js";
-import { relayedTools, runPiHarness, type PiHarnessFacts } from "../harness/pi/harness.js";
+import { piHarnessFactsOf, relayedTools, runPiHarness, type PiHarnessFacts } from "../harness/pi/harness.js";
 import { fetchRepoShipInfo, findOpenPrByHead, openPullRequest } from "../../execution/githubPulls.js";
 import type { ChatMessage, Provider } from "../../providers/types.js";
 import type { McpToolsForRun } from "../../mcp/source.js";
@@ -552,7 +552,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
           ),
         ),
       ];
-      const facts = resume ? harnessFactsOf(resume.row.state.harness) : undefined;
+      const facts = resume ? piHarnessFactsOf(resume.row.state.harness) : undefined;
       answer = await runPiHarness(
         {
           container: deps.harness.containerFor?.(executor) ?? new ExecPiContainer(executor),
@@ -986,18 +986,5 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     checklistAsLeft,
     checklistCheckedOff,
     releaseWorkspace,
-  };
-}
-
-/** The harness facts a previous generation wrote on the row (`state.harness`),
- *  when they have the shape this build writes; anything else is no facts. */
-function harnessFactsOf(value: unknown): PiHarnessFacts | undefined {
-  if (typeof value !== "object" || value === null) return undefined;
-  const v = value as Record<string, unknown>;
-  if (typeof v.pid !== "number" || typeof v.logOffset !== "number") return undefined;
-  return {
-    pid: v.pid,
-    logOffset: v.logOffset,
-    ...(typeof v.sessionFile === "string" ? { sessionFile: v.sessionFile } : {}),
   };
 }

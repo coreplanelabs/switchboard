@@ -72,7 +72,16 @@ export interface PiRunPaths {
  *  per user would only move that ownership to the runs that know their user.
  *  The run id is unique, so the name needs no suffix. */
 export function piRunPaths(runId: string): PiRunPaths {
-  const dir = `/tmp/switchboard-pi-${runId}`;
+  return piRunPathsAt(`/tmp/switchboard-pi-${runId}`);
+}
+
+/** The run's files under a given root: this build's own for a fresh run
+ *  (`piRunPaths`), or the root a row recorded for the pi a previous build
+ *  started (docs/reference/specs/harness-pi.md item 8), so a re-attach reads
+ *  pi's log and feeds its FIFO where that build put them, whatever root this
+ *  one would choose. The layout under the root is the contract between
+ *  builds: a build that changes it cannot re-attach to a pi of the old one. */
+export function piRunPathsAt(dir: string): PiRunPaths {
   return {
     dir,
     agentDir: `${dir}/agent`,
