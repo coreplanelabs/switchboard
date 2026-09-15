@@ -173,3 +173,10 @@ RUN npm install -g @earendil-works/pi-coding-agent@0.85.1 \
   && npm cache clean --force \
   && pi --version | grep -qx '0.85.1' \
   && pi --help | grep -q -- '--mode <mode>'
+
+# PID 1 keeps the container alive across a crash of the SDK's container
+# server (the supervisor's header says why); the base image's ENTRYPOINT is
+# the server itself, so one uncaught exception there ended the container.
+# src/deploy/sandboxRuntimeSupervisor.test.ts holds this pair of lines.
+COPY --chmod=0755 runtime-supervisor.sh /usr/local/bin/sandbox-runtime-supervisor
+ENTRYPOINT ["/usr/local/bin/sandbox-runtime-supervisor"]
