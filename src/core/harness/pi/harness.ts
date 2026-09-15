@@ -261,16 +261,24 @@ const PROVIDER_RETRY_PROMPT =
 const PROVIDER_RETRY_BACKOFF_MS = 5_000;
 
 /** A provider failure worth one retry: a stream cut mid-message, a dropped
- *  connection, an overload or a 5xx/429 — never an auth or request error
- *  ("403 revoked" must fail the run at once, as before). */
+ *  connection, an overload or a retryable status code — never an auth or
+ *  request error ("403 revoked" must fail the run at once, as before). The
+ *  patterns are anchored so a token embedded in a non-transient message never
+ *  matches: a status code counts only in an HTTP/status/error context (never a
+ *  bare number inside an id or a count), `terminated` only as undici's whole
+ *  bare message or a terminated connection/stream (never "request terminated:
+ *  invalid api key"), and `network` only as a named network error. */
 export function isTransientProviderError(message: string): boolean {
   return (
     /stream ended before message_stop|ended before completion/i.test(message) ||
-    /ECONNRESET|ETIMEDOUT|EPIPE|socket hang up|fetch failed|other side closed|terminated|network|timed? ?out/i.test(
+    /ECONNRESET|ETIMEDOUT|EPIPE|socket hang up|fetch failed|other side closed|network (error|failure)|(connection|stream) (reset|closed|terminated)|timed? ?out/i.test(
       message,
     ) ||
+    /^terminated$/i.test(message.trim()) ||
     /overloaded/i.test(message) ||
-    /\b(429|500|502|503|504|529)\b/.test(message)
+    /(?:\bhttp\b[^a-z0-9]{0,8}|\bstatus(?: code)?\b[^0-9]{0,5}|\berror\b[^0-9]{0,5}|\bapi error\b[^0-9]{0,5})(429|500|502|503|504|529)\b/i.test(
+      message,
+    )
   );
 }
 

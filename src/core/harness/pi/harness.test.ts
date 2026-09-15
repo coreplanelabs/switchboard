@@ -31,6 +31,7 @@ import { judgeToolCall, type ToolRuleContext } from "./toolRules.js";
 import { FakePiContainer } from "./testing/fakeContainer.js";
 import {
   compactionSteer,
+  isTransientProviderError,
   piHarnessFactsOf,
   promptOf,
   relayedTools,
@@ -779,6 +780,35 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     );
     await expect(auth.start()).rejects.toThrow("the model call failed: 403 revoked");
     expect(auth.container.commands().filter((c) => c.type === "prompt")).toHaveLength(1);
+  });
+
+  // The classifier is anchored: a transient token embedded in a non-transient
+  // message (a status code inside an id, `terminated` or a retryable number in
+  // an auth error's words) never earns the retry.
+  it("isTransientProviderError matches real transient failures and never a non-transient message carrying one of its tokens", () => {
+    for (const m of [
+      "Anthropic stream ended before message_stop",
+      "fetch failed",
+      "terminated",
+      "connection terminated",
+      "stream reset by peer",
+      "network error",
+      "request timed out",
+      "Anthropic API error 529: overloaded_error",
+      "HTTP 503 Service Unavailable",
+      "status code 429",
+    ])
+      expect(isTransientProviderError(m), m).toBe(true);
+    for (const m of [
+      "403 revoked",
+      "401 invalid x-api-key",
+      "request terminated: invalid api key",
+      "invalid request: network parameter unknown",
+      "model claude-502-test not found",
+      "prompt is 429000 tokens over the limit",
+      "invalid_request_error: max_tokens must be positive",
+    ])
+      expect(isTransientProviderError(m), m).toBe(false);
   });
 
   it("a dialog pi raises is cancelled and noted; an unknown event kind is noted", async () => {
