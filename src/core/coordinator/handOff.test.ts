@@ -116,6 +116,7 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
       base: "main",
       createdAt: NOW,
       plan: { id: "fixture", path: "docs/plans/fixture.md" },
+      merge: "runner",
       caps: { maxRounds: 3, maxMinutes: 45 },
       card: { channel: "C1", ts: "1.5" },
       runId: "run-s",
@@ -177,7 +178,7 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     expect(await missing.instances.get("plan-fixture")).toBeNull();
   });
 
-  it("a task request is a plan of one unit, `task`, on the entry's ship branch in the requesting thread, under an instance named by the run", async () => {
+  it("a task request is a plan of one unit, `task`, on the entry's ship branch in the requesting thread, under an instance named by the run, with `merge: person` — a task whose text contains the word runner included", async () => {
     const h = harness();
     const out = await handOffToCoordinator(h.deps, input({ requestText: "in acme/api: warm the cache on wake" }));
     expect(out.status).toBe("completed");
@@ -191,6 +192,7 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
       branch: "ship/warm-the-cache-abc123",
       base: "main",
       runId: "run-s",
+      merge: "person",
     });
     expect("plan" in (await h.instances.get("ship-run-s"))!).toBe(false);
     expect(await h.instances.listUnits("ship-run-s")).toEqual([
@@ -203,6 +205,10 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
         rounds: [],
       },
     ]);
+    // The field comes from the request's kind, never its words: "runner" in the text stays a person's merge.
+    const wordy = harness();
+    await handOffToCoordinator(wordy.deps, input({ requestText: "in acme/api: make the runner warm the cache" }));
+    expect(await wordy.instances.get("ship-run-s")).toMatchObject({ merge: "person" });
   });
 
   it("a resume at review (agent-ship item 10) is the one task unit with the pull request on its row, so the runner opens it at the review round; the reply names the pull request and that no coding round runs first", async () => {

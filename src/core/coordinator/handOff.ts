@@ -132,7 +132,8 @@ async function plan(
       ok: true,
       planned: {
         kind: "task",
-        instance: { id, ...identity, branch: entry.branch },
+        // A task's merge is a person's, whatever the request's words say.
+        instance: { id, ...identity, branch: entry.branch, merge: "person" },
         units: [
           {
             instanceId: id,
@@ -234,6 +235,8 @@ export async function handOffToCoordinator(deps: HandOffDeps, input: HandOffInpu
       ...p.identity,
       branch: units[0]!.branch,
       plan: { id: p.planId, path: p.path },
+      // A seeded plan's units are the runner's to merge (record 0031's merge grant).
+      merge: "runner",
     };
     return start(deps, input, instance, units, planWhere(p, units, []), "put");
   }
@@ -282,6 +285,7 @@ export async function handOffToCoordinator(deps: HandOffDeps, input: HandOffInpu
       ...p.identity,
       branch: units[0]!.branch,
       plan: { id: p.planId, path: p.path },
+      merge: "runner",
       ...(attempt > 1 ? { attempt } : {}),
     };
     log(`[ship] ${input.msg.threadKey}: ${latest.id} has records but no instance — replacing the earlier attempt's`);
@@ -296,6 +300,7 @@ export async function handOffToCoordinator(deps: HandOffDeps, input: HandOffInpu
     ...p.identity,
     branch: units[0]!.branch,
     plan: { id: p.planId, path: p.path },
+    merge: "runner",
     attempt: attempt + 1,
   };
   return start(deps, input, instance, units, `attempt ${attempt + 1} of ${planWhere(p, units, mergedBefore)}`, "put");

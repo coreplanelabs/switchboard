@@ -369,7 +369,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect(report).toContain("plan:merge");
   });
 
-  it("merge-ready off a plan branch waits for a person: the machine ends merge_ready and never asks for a merge", () => {
+  it("merge-ready under `merge: person` waits for a person: the machine ends merge_ready, never asks for a merge, and the remaining-gate line names the instance's field, not the branch's shape", () => {
     const d = fresh(input({ unit: { id: "task", branch: "ship/fix-abc123" }, merge: "person" }));
     throughRoundZero(d);
     runChild(
@@ -389,6 +389,9 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect(report).toContain("Verdict: LGTM — clean");
     expect(report).toContain("Declined findings: none");
     expect(report).toContain("a person's merge");
+    // The gate is the instance's field, not a branch-name derivation.
+    expect(report).toContain("the runner merges only when the instance's `merge` field says runner");
+    expect(report).not.toContain("only a plan branch");
   });
 
   it("findings round trip: request_changes → the findings step, a coding child briefed with the review's run, never a `fix` round → re-review with the prior review run and the coding run that answered it → approve; the declined disposition rides the report", () => {

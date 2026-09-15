@@ -889,6 +889,8 @@ async function plan(body: Record<string, unknown>, deps: AdminCoordinatorDeps): 
   return json(200, {
     ok: true,
     ...(instance.plan !== undefined ? { planId: instance.plan.id } : {}),
+    // Who merges: the instance's field; a record written before it existed is a person's merge.
+    merge: instance.merge ?? "person",
     repo: instance.repo,
     base: instance.base ?? "main",
     caps: instance.caps ?? resolveShipCaps(undefined),
@@ -1227,11 +1229,16 @@ async function merge(
     return refused(
       `the runner holds no ${PLAN_MERGE_ACTION} grant (grants["http:${subject}"] in config.yaml) — a person merges`,
     );
-  // The branch decides, never the requester: a plan branch of this plan and nothing else.
+  // The instance's field decides, never the requester or the branch's name:
+  // the hand-off wrote `merge: runner` only on a seeded plan.
+  if (instance.merge !== "runner")
+    return refused(`the instance's \`merge\` field says ${instance.merge ?? "person"} — waits for a person's merge`);
+  // Defense in depth: the field only ever rides a plan instance, so the unit's
+  // branch must still be a branch of THIS instance's plan.
   const planBranch = parsePlanBranch(row.branch);
   if (instance.plan === undefined || planBranch === undefined || planBranch.planId !== instance.plan.id)
     return refused(
-      `\`${row.branch}\` is not a branch of plan \`${instance.plan?.id ?? "(none)"}\` — waits for a person's merge`,
+      `the instance's \`merge\` field says runner but \`${row.branch}\` is not a branch of plan \`${instance.plan?.id ?? "(none)"}\` — waits for a person's merge`,
     );
   const pr = { repo: instance.repo, number: body.prNumber };
   const where = `${instance.repo}#${pr.number}`;

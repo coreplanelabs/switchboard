@@ -424,7 +424,9 @@ export interface UnitPipelineInput {
   /** Each child preset's own wall-clock budget (its `maxMinutes`), the number a
    *  round's budget is clipped from — supplied by the bot, which holds the registry. */
   childMinutes: Readonly<Record<ChildPreset, number>>;
-  /** Who merges: the runner (a plan branch, under its grant) or a person (any other branch). */
+  /** Who merges: the instance's `merge` field as the plan route answers it —
+   *  `runner` (a seeded plan, under its grant) or `person` (a task, or a
+   *  record without the field). */
   merge: "runner" | "person";
   /** Resume at review: an open pull request of ship's own the requester named. */
   resume?: { pr: number; headSha?: string; url?: string };
@@ -1102,7 +1104,7 @@ export function renderUnitReport(s: UnitPipelineState): string {
         `✅ Merge-ready after ${rounds}: ${e.pr.url}`,
         verdictLine,
         declinedLine,
-        "Remaining gate: a person's merge — the runner merges only a plan branch's pull request, and ship never approves.",
+        "Remaining gate: a person's merge — the runner merges only when the instance's `merge` field says runner, and ship never approves.",
       ].join("\n");
     case "merge_refused":
       return join([
