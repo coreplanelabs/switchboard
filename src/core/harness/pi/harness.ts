@@ -10,7 +10,10 @@
 // onto the ledger, and answers with the same words the loop would. A run that
 // comes back after a bot restart re-attaches to its pi where it still runs, at
 // the root the row recorded, or restarts pi on a session rebuilt from the
-// mirrored transcript.
+// mirrored transcript. The open form (`runPiHarnessOpen`, item 14) hands the
+// answer back with pi still alive on its session, so the run stage's
+// post-turns — the coding description turn, the review's head-move re-review
+// — are one more `prompt` on it, and the caller ends pi when they are done.
 
 import { randomUUID } from "node:crypto";
 import type { AgentDef } from "../../../agents/registry.js";
@@ -196,6 +199,37 @@ export interface PiHarnessDeps {
   finaleTimeoutMs?: number;
 }
 
+/** One more turn on the run's own pi session after its loop settled
+ *  (harness-pi item 14): what the run stage hands the coding description turn
+ *  and the review's head-move re-review on a preset on pi, in place of
+ *  `runAgent`. `text` is the user turn the caller appended to the run's
+ *  messages, sent to pi as a `prompt`; the answer is pi's reply, labelled as
+ *  the loop labels a write-up. The tool context is the turn's own — the
+ *  relayed tools read it for the turn's duration, so a hook the caller
+ *  overrides (the description's, the verdict's) is the one fed. The turn is
+ *  bounded by its own budget, never the run's remainder, and its tool spans
+ *  hang under a `run.agent` opened under `span`. pi's system prompt stays the
+ *  session's: pi reads `SYSTEM.md` once, at load. */
+export interface PiFollowUpTurnInput {
+  text: string;
+  maxTurns: number;
+  maxMinutes: number;
+  toolContext: ToolContext;
+  span?: Span;
+}
+export type PiFollowUpTurn = (input: PiFollowUpTurnInput) => Promise<string>;
+
+/** A run on pi whose loop has ended and whose pi still lives, idle on its
+ *  session (harness-pi item 14): the loop's answer, one more turn on that
+ *  session, and the end of it — the caller's duty once the post-turns are
+ *  done or the run failed. Ending is idempotent; a follow-up after it throws. */
+export interface OpenPiSession {
+  answer: string;
+  followUp: PiFollowUpTurn;
+  /** Ends pi, removes its root, forgets the run on the relay. */
+  end(): Promise<void>;
+}
+
 /** The workspace tools pi has of its own; the native names are not relayed. */
 export const NATIVE_WORKSPACE_TOOLS: ReadonlySet<string> = new Set(["bash", "read_file", "write_file"]);
 
@@ -331,7 +365,22 @@ export function settlementAnswer(s: Settlement): RelayedToolAnswer {
   return { content: [{ type: "text", text: settlementText(s) }], isError: true };
 }
 
+/** The closed form: the loop, and pi ended before the answer comes back — the
+ *  run stage's shape until item 14, and every caller's that runs no post-turn. */
 export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Promise<string> {
+  const session = await runPiHarnessOpen(deps, run);
+  try {
+    return session.answer;
+  } finally {
+    await session.end();
+  }
+}
+
+/** The open form (harness-pi item 14): the loop as `runPiHarness` runs it, the
+ *  answer handed back with pi alive on its session for the caller's follow-up
+ *  turns, and the end left to the caller. A throw before the loop settles ends
+ *  pi here, as the closed form does. */
+export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): Promise<OpenPiSession> {
   const { container, clock } = deps;
   const now = () => clock();
   const agentSpan = run.span?.start("run.agent");
@@ -456,6 +505,36 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
    *  answered happened while the bot was away — a failed model call and pi's
    *  settling on it belong to the death, not to this generation's run. */
   let catchingUp = false;
+  /** A write-up is one loop's: the run's, or a follow-up turn's own. */
+  const clearWriteUp = () => {
+    writeUp = undefined;
+    writeUpAt = undefined;
+  };
+  /** How many follow-up turns were prompted on the session, for their command ids. */
+  let followUps = 0;
+  let sessionEnded = false;
+  /** The end of the session (item 14): the transport closed, the spans a
+   *  stopped pi left open ended, the facts saved, the run forgotten on the
+   *  relay, pi killed and its directory removed — pi has ended, and nothing
+   *  reads its log, session or FIFO again: a later run in the thread seeds
+   *  from the record, and a resume that finds pi alive belongs to a generation
+   *  that never reached this line. Best-effort, like the kill; once. */
+  const end = async (): Promise<void> => {
+    if (sessionEnded) return;
+    sessionEnded = true;
+    transport?.close();
+    bridge.closeOpenSpans(
+      hardStopped
+        ? "the run was hard-stopped"
+        : bypass
+          ? "the run was stopped: a tool call bypassed the gate"
+          : "the run ended",
+    );
+    save();
+    forget();
+    if (pid !== undefined) await container.kill(pid).catch(() => {});
+    if (paths !== undefined) await container.remove(paths).catch(() => {});
+  };
 
   try {
     // The container's pi outlived the bot when its pid answers and the row
@@ -826,38 +905,159 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
       if (hardStopped) break;
     }
 
+    let answer: string;
     if (hardStopped) {
       note("stopped", hardStopNote(), "hard");
-      return HARD_STOP_MESSAGE;
+      answer = HARD_STOP_MESSAGE;
+    } else {
+      if (bypass) throw bypass;
+      if (!settled) {
+        const tail = await container.tail(paths.errLog, 2000);
+        throw new Error(`pi exited before the run settled${tail.trim() ? `: ${redactAndCap(tail.trim(), 400)}` : ""}`);
+      }
+      if (providerError !== undefined) throw new Error(`the model call failed: ${providerError}`);
+      const text = bridge.answer() ?? "";
+      answer =
+        writeUp?.kind === "time"
+          ? timeBudgetAnswer(text, run.agent.maxMinutes)
+          : writeUp?.kind === "turns"
+            ? turnGuardAnswer(text, writeUp.pace)
+            : writeUp?.kind === "soft" || stopMode === "soft"
+              ? softStopAnswer(text)
+              : text || "_(no response)_";
     }
-    if (bypass) throw bypass;
-    if (!settled) {
-      const tail = await container.tail(paths.errLog, 2000);
-      throw new Error(`pi exited before the run settled${tail.trim() ? `: ${redactAndCap(tail.trim(), 400)}` : ""}`);
-    }
-    if (providerError !== undefined) throw new Error(`the model call failed: ${providerError}`);
-    const text = bridge.answer() ?? "";
-    if (writeUp?.kind === "time") return timeBudgetAnswer(text, run.agent.maxMinutes);
-    if (writeUp?.kind === "turns") return turnGuardAnswer(text, writeUp.pace);
-    if (writeUp?.kind === "soft" || stopMode === "soft") return softStopAnswer(text);
-    return text || "_(no response)_";
-  } finally {
-    transport?.close();
-    bridge.closeOpenSpans(
-      hardStopped
-        ? "the run was hard-stopped"
-        : bypass
-          ? "the run was stopped: a tool call bypassed the gate"
-          : "the run ended",
-    );
-    save();
-    forget();
-    if (pid !== undefined) await container.kill(pid).catch(() => {});
-    // The run's directory goes with the run: pi has ended, and nothing reads
-    // its log, session or FIFO again — a later run in the thread seeds from
-    // the record, and a resume that finds pi alive belongs to a generation
-    // that never reached this line. Best-effort, like the kill.
-    if (paths !== undefined) await container.remove(paths).catch(() => {});
-    agentSpan?.end(hardStopped || bypass ? "error" : "ok");
+    // The loop is over: its `run.agent` ends here, as the native loop's does,
+    // before any follow-up turn — each of those opens a `run.agent` of its own.
+    agentSpan?.end(hardStopped ? "error" : "ok");
+    // What a follow-up turn drives: the transport and the root the loop settled on.
+    const rpc = transport;
+    const root = paths;
+    /** One more `prompt` on this session (item 14): the same transport, bridge
+     *  and relay entry as the loop, its own budget and its own `run.agent`
+     *  under the caller's span, the relayed tools reading the turn's context
+     *  while it runs. Its rows are not mirrored: the ledger's transcript is the
+     *  loop's — a kill mid-turn resumes from it, as on the native loop
+     *  (pr-description item 5) — so nothing here is a step and the row's
+     *  offset stands. The inbox is not drained: a follow-up in the thread waits
+     *  for the run's end, as it does on the native loop's post-turns. */
+    const followUp: PiFollowUpTurn = async (input) => {
+      if (sessionEnded) throw new Error("the pi session has ended: no follow-up turn can run on it");
+      const turnSpan = input.span?.start("run.agent");
+      if (turnSpan) deps.bearers?.reparent(run.runId, turnSpan);
+      bridge.under(turnSpan);
+      bridge.newPrompt();
+      const runContext = live.toolContext;
+      live.toolContext = input.toolContext;
+      const turnDeadline = now() + input.maxMinutes * 60_000;
+      input.toolContext.remainingMs = () => turnDeadline - now();
+      const turnsBefore = bridge.turns;
+      // The loop's write-up, when it took one, is spent: the turn has its own budget.
+      clearWriteUp();
+      const id = `${ids.prompt}:follow-up:${++followUps}`;
+      let turnSettled = false;
+      let turnError: string | undefined;
+      /** The turn threw — a refused prompt, a dead pi, a failed model call, a bypass — so its span ends `error`. */
+      let turnFailed = false;
+      /** The turn's budget and the stops — on every event and every tick. */
+      const turnCheck = () => {
+        if (run.control?.requested === "hard") {
+          if (!hardStopped) {
+            hardStopped = true;
+            rpc.send({ type: "abort" });
+          }
+          return;
+        }
+        if (writeUp) {
+          if (writeUpAt !== undefined && now() - writeUpAt >= (deps.finaleTimeoutMs ?? FINALE_TIMEOUT_MS)) {
+            writeUpAt = undefined;
+            run.onProgress?.("finale timed out — closing the turn without a write-up");
+            rpc.send({ type: "abort" });
+          }
+          return;
+        }
+        if (run.control?.requested === "soft") {
+          note("stopped", softStopNote(), "soft");
+          startWriteUp({ kind: "soft" }, SOFT_STOP_INSTRUCTION);
+          return;
+        }
+        if (now() >= turnDeadline) {
+          note("time_budget_exhausted", timeBudgetNote());
+          startWriteUp({ kind: "time" }, timeBudgetInstruction());
+          return;
+        }
+        const turns = bridge.turns - turnsBefore;
+        if (turns >= input.maxTurns) {
+          const pace = turnGuardPace(turns, input.maxMinutes * 60_000 - (turnDeadline - now()));
+          note("turn_budget_exhausted", turnGuardNote(pace));
+          startWriteUp({ kind: "turns", pace }, turnGuardInstruction(pace));
+        }
+      };
+      try {
+        rpc.send({ id, type: "prompt", message: input.text });
+        turnCheck();
+        for (;;) {
+          pending ??= iterator.next();
+          const tick = deps.sleep(deps.tickMs ?? 1000).then(() => "tick" as const);
+          const next = await Promise.race([pending, tick]);
+          if (next === "tick") {
+            turnCheck();
+            if (hardStopped) break;
+            continue;
+          }
+          pending = undefined;
+          if (next.done) break;
+          const event = parsePiLine(next.value);
+          if (!event) continue;
+          const obs = bridge.observe(event);
+          for (const reply of obs.replies) rpc.send(reply);
+          if (obs.gateBypassed) {
+            bypass = new GateBypassed(obs.gateBypassed.tool, obs.gateBypassed.callId);
+            note("harness_error", `${bypass.message} — the turn is stopped`);
+            rpc.send({ type: "abort" });
+            break;
+          }
+          if (obs.response?.id === id && obs.response.success === false)
+            throw new PromptRefused(String(obs.response.error ?? "no reason"));
+          if (obs.providerError !== undefined) turnError = obs.providerError;
+          if (obs.settled) {
+            turnSettled = true;
+            break;
+          }
+          turnCheck();
+          if (hardStopped) break;
+        }
+        if (hardStopped) {
+          note("stopped", hardStopNote(), "hard");
+          return HARD_STOP_MESSAGE;
+        }
+        if (bypass) throw bypass;
+        if (!turnSettled) {
+          const tail = await container.tail(root.errLog, 2000);
+          throw new Error(
+            `pi exited before the turn settled${tail.trim() ? `: ${redactAndCap(tail.trim(), 400)}` : ""}`,
+          );
+        }
+        if (turnError !== undefined) throw new Error(`the model call failed: ${turnError}`);
+        const text = bridge.answer() ?? "";
+        if (writeUp?.kind === "time") return timeBudgetAnswer(text, input.maxMinutes);
+        if (writeUp?.kind === "turns") return turnGuardAnswer(text, writeUp.pace);
+        if (writeUp?.kind === "soft") return softStopAnswer(text);
+        return text || "_(no response)_";
+      } catch (err) {
+        turnFailed = true;
+        throw err;
+      } finally {
+        live.toolContext = runContext;
+        bridge.under(undefined);
+        turnSpan?.end(hardStopped || bypass || turnFailed ? "error" : "ok");
+      }
+    };
+    return { answer, followUp, end };
+  } catch (err) {
+    // A loop that throws — a refused prompt, a dead pi, a failed model call, a
+    // gate bypass — is a failed loop, and its span says so.
+    agentSpan?.end("error");
+    await end();
+    throw err;
   }
 }

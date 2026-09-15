@@ -5,8 +5,14 @@ import { join } from "node:path";
 import { AGENTS } from "../agents/registry.js";
 import { declaredProfile } from "../config/profile.js";
 import { resetResidentProbeCache } from "../execution/factory.js";
+import type { Executor } from "../execution/executor.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
+import type { Provider } from "./provider.js";
+import type { RunOptions } from "../runner.js";
+import type { PiFollowUpTurnInput } from "./harness/pi/harness.js";
+import type { PrCommitList } from "./headMoved.js";
 import type { RunEvent } from "./runEvents.js";
+import { RunControl } from "./runRegistry/runControl.js";
 import {
   attachRoundWorkspace,
   checkPrHeadPreflight,
@@ -14,7 +20,16 @@ import {
   makeSystemComposer,
   releaseModeFor,
   runReviewPostStep,
+  settleReviewedHead,
+  type SettleReviewedHeadInput,
 } from "./reviewRound.js";
+
+// The native loop is mocked HERE so the settle's re-review wiring — which loop
+// it reaches for, on what messages, with which system prompt and hook — is
+// asserted without a model; the dispatcher suite drives the native turn end to
+// end through a real loop (`head moved during the run (item 12)`).
+const { runAgentMock } = vi.hoisted(() => ({ runAgentMock: vi.fn() }));
+vi.mock("../runner.js", () => ({ runAgent: runAgentMock }));
 
 // Feature: docs/reference/specs/agent-ship.md — the review-round and coding-PR machinery
 // extracted from dispatch() as callable units, each parameterized on an
@@ -696,5 +711,141 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       const { publish: _publish, ...input } = base(h, []);
       expect(await runReviewPostStep(input)).toMatchObject({ posted: true, head: HEAD });
     });
+  });
+});
+
+// agent-review.md item 12 + harness-pi.md item 14: a substantive head move's
+// ONE more turn. On the native loop it is `runAgent` on the round's messages
+// with the system prompt recomposed at the new head; on a preset on pi it is a
+// `prompt` on the run's own pi session — the seam the run stage hands over —
+// with the same follow-up text, the turn's own verdict capture, and the same
+// settle around it (worktree moved first, head re-probed after).
+describe("settleReviewedHead — the head-move re-review", () => {
+  const list = (subjects: string[]): PrCommitList => ({
+    commits: subjects.map((message, i) => ({ sha: `${i + 1}`.repeat(40), message })),
+    files: ["src/x.ts"],
+    filesTruncated: false,
+  });
+  const provider: Provider = { name: "fake", complete: async () => ({ content: [], stopReason: "end_turn" }) };
+
+  /** A settle whose PR moved substantively under the review: reviewed `HEAD`,
+   *  the PR now at `OTHER` with one more commit; a movable executor whose
+   *  `rev-parse HEAD` follows the move. */
+  function moved(turn: Partial<SettleReviewedHeadInput["turn"]> = {}) {
+    let head = HEAD;
+    const moves: string[] = [];
+    const executor = {
+      exec: async (cmd: string) => (cmd.includes("rev-parse") ? `${head}\n` : ""),
+      moveTo: async (sha: string) => {
+        moves.push(sha);
+        head = sha;
+        return { sha };
+      },
+    } as unknown as Executor;
+    const events: RunEvent[] = [];
+    const replies: string[] = [];
+    const labels: string[] = [];
+    const input: SettleReviewedHeadInput = {
+      pr: { repo: "acme/api", number: 42 },
+      baseRef: "main",
+      reviewHead: HEAD,
+      verdict: { verdict: "approve", summary: "ok", head: HEAD, findings: [] },
+      answer: "First review: approve.",
+      messages: [{ role: "user", content: [{ type: "text", text: "review acme/api#42" }] }],
+      composeSystem: (h) => `SYSTEM at ${h.sha} (${h.verified ? "verified" : "unverified"})`,
+      executor,
+      turn: {
+        provider,
+        model: "anthropic/claude-fable-5",
+        agent: AGENTS.review,
+        toolContext: { executor },
+        onProgress: () => {},
+        onEvent: (e) => void events.push(e),
+        control: new RunControl(),
+        ...turn,
+      },
+      fetchPrHead: async () => OTHER,
+      fetchPrCommits: async ({ sha }) =>
+        sha === HEAD ? list(["feat: the change"]) : list(["feat: the change", "fix: review nits"]),
+      notify: { reply: async (t) => void replies.push(t), headMoved: (s) => void labels.push(s) },
+      logKey: "t",
+    };
+    return { input, executor, events, replies, labels, moves };
+  }
+
+  it("on the pi harness a substantive move's one more turn is a prompt on the run's session: the worktree moved first, the same follow-up text as the appended user turn, the round's budget, the turn's own verdict capture, the head re-probed after — and runAgent is never called", async () => {
+    runAgentMock.mockReset();
+    const followUp = vi.fn(async (input: PiFollowUpTurnInput) => {
+      // the relayed submit_verdict, run in the bot under THIS turn's context
+      input.toolContext.onVerdict?.({
+        verdict: "request_changes",
+        summary: "the new test is wrong",
+        head: OTHER,
+        findings: [],
+      });
+      return "Second review: the new test is wrong.";
+    });
+    const w = moved({ followUp });
+    const out = await settleReviewedHead(w.input);
+    expect(runAgentMock).not.toHaveBeenCalled();
+    expect(w.moves).toEqual([OTHER]);
+    expect(followUp).toHaveBeenCalledTimes(1);
+    const input = followUp.mock.calls[0][0];
+    expect(input.text).toContain("moved from e8e43f4 to d75b5a5");
+    expect(input.text).toContain("Switchboard has already moved your worktree to d75b5a5");
+    expect(input.text).toContain("- 2222222 fix: review nits");
+    expect(input.maxTurns).toBe(AGENTS.review.maxTurns);
+    expect(input.maxMinutes).toBe(AGENTS.review.maxMinutes);
+    expect(input.toolContext.executor).toBe(w.executor);
+    // the transcript grew the same way as on the native loop: the first review, then the follow-up
+    expect(w.input.messages).toHaveLength(3);
+    expect(w.input.messages[1]).toEqual({
+      role: "assistant",
+      content: [{ type: "text", text: "First review: approve." }],
+    });
+    expect(w.input.messages[2]).toEqual({ role: "user", content: [{ type: "text", text: input.text }] });
+    // the settle's outcome: the second answer and verdict, the new head, the observed head re-probed after the turn
+    expect(out).toEqual({
+      answer: "Second review: the new test is wrong.",
+      verdict: expect.objectContaining({ verdict: "request_changes", head: OTHER }),
+      reviewHead: OTHER,
+      observedHead: OTHER,
+      carried: undefined,
+    });
+    // the same notes around it
+    expect(w.events).toEqual([expect.objectContaining({ type: "run_note", kind: "head_moved" })]);
+    expect(w.labels).toEqual(["head moved → d75b5a5"]);
+    expect(w.replies[0]).toContain("🔀 acme/api#42 moved during the run");
+  });
+
+  it("on the native loop the same move runs runAgent on the round's messages with the system prompt recomposed at the new head and its own verdict capture — unchanged", async () => {
+    runAgentMock.mockReset();
+    runAgentMock.mockImplementation(async (opts: RunOptions) => {
+      opts.toolContext.onVerdict?.({ verdict: "request_changes", summary: "wrong", head: OTHER, findings: [] });
+      return "Second review.";
+    });
+    const w = moved();
+    const out = await settleReviewedHead(w.input);
+    expect(runAgentMock).toHaveBeenCalledTimes(1);
+    const opts = runAgentMock.mock.calls[0][0] as RunOptions;
+    expect(opts.messages).toBe(w.input.messages);
+    expect(opts.system).toBe(`SYSTEM at ${OTHER} (verified)`);
+    expect(opts.agent).toBe(AGENTS.review);
+    expect(w.moves).toEqual([OTHER]);
+    expect(out.answer).toBe("Second review.");
+    expect(out.verdict?.head).toBe(OTHER);
+    expect(out.reviewHead).toBe(OTHER);
+  });
+
+  it("a follow-up turn pi refuses fails the settle the way a runner failure does: the throw propagates to the run, nothing is swallowed", async () => {
+    runAgentMock.mockReset();
+    const w = moved({
+      followUp: async () => {
+        throw new Error("pi refused the prompt: no reason");
+      },
+    });
+    await expect(settleReviewedHead(w.input)).rejects.toThrow("pi refused the prompt");
+    expect(w.moves).toEqual([OTHER]); // the worktree had moved before the turn was asked for
+    expect(runAgentMock).not.toHaveBeenCalled();
   });
 });

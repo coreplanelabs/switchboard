@@ -35,8 +35,10 @@ import {
   promptOf,
   relayedTools,
   runPiHarness,
+  runPiHarnessOpen,
   settlementResults,
   splitSeed,
+  type PiHarnessDeps,
   type PiHarnessFacts,
   type PiHarnessRun,
 } from "./harness.js";
@@ -235,24 +237,24 @@ function world(
     onStep: async (r) => void steps.push(r),
     saveFacts: (f) => void facts.push(f),
   };
-  const start = () =>
-    runPiHarness(
-      {
-        container,
-        bearer,
-        harnessUrl: "https://bot.example.com",
-        registry,
-        bearers,
-        ...(opts.compaction ? { compaction: opts.compaction } : {}),
-        clock: () => clock.now,
-        sleep: opts.sleep ?? (() => new Promise((r) => setImmediate(r))),
-        pollMs: 10,
-        tickMs: 10,
-        finaleTimeoutMs: 60_000,
-      },
-      run,
-    );
+  const harnessDeps: PiHarnessDeps = {
+    container,
+    bearer,
+    harnessUrl: "https://bot.example.com",
+    registry,
+    bearers,
+    ...(opts.compaction ? { compaction: opts.compaction } : {}),
+    clock: () => clock.now,
+    sleep: opts.sleep ?? (() => new Promise((r) => setImmediate(r))),
+    pollMs: 10,
+    tickMs: 10,
+    finaleTimeoutMs: 60_000,
+  };
+  const start = () => runPiHarness(harnessDeps, run);
+  /** The open form (harness-pi item 14): the loop's answer with pi still alive for a follow-up turn. */
+  const open = () => runPiHarnessOpen(harnessDeps, run);
   return {
+    open,
     container,
     registry,
     bearers,
@@ -698,9 +700,11 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     // A run that failed takes its directory down like one that settled.
     expect(dead.container.removed).toEqual([paths.dir]);
 
-    const refused = world();
+    const refused = world({ withSpans: true });
     scriptedPi(refused.container, () => {}, { refusePrompt: "no model configured" });
     await expect(refused.start()).rejects.toThrow("pi refused the prompt: no model configured");
+    // A loop that threw is a failed loop: its span says so (tracing.md item 17).
+    expect(refused.sink.ended("run.agent")?.status).toBe("error");
 
     const errored = world();
     scriptedPi(errored.container, (n, c) => {
@@ -1865,5 +1869,194 @@ describe("runPiHarness — the deployment's compaction thresholds in pi's settin
       defaultProjectTrust: "never",
       checkForUpdates: false,
     });
+  });
+});
+
+// harness-pi item 14: the open form. The loop ends and pi stays alive, idle on
+// its session, for the run stage's post-turns — the coding description turn
+// and the review's head-move re-review — each one more `prompt` on that
+// session through the same transport, bridge and relay, bounded by its own
+// budget; then the caller ends pi. The closed form (`runPiHarness`) is the
+// same loop with the end at once, as every test above drives it.
+describe("runPiHarnessOpen — the session stays open for one more turn", () => {
+  const sent = (c: FakePiContainer) => c.stdin.map((l) => JSON.parse(l) as Record<string, unknown>);
+
+  it("hands back the loop's answer with pi alive; a follow-up prompts the same session with its text, its tool call is on the stream under a run.agent of the caller's span, the relayed tools read the turn's context, no step is mirrored for it, and end() kills pi and removes the root once", async () => {
+    const w = world({ withSpans: true });
+    let contextDuringTurn: unknown;
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0) {
+        bashTurn(w, "call_0", "npm test", "ok 12 tests");
+        finalTurn(c, "All green.");
+        return;
+      }
+      contextDuringTurn = w.registry.get("run-7")!.toolContext;
+      bashTurn(w, "call_1", "gh pr view 7", "the body");
+      finalTurn(c, "Description resubmitted.");
+    });
+    const session = await w.open();
+    expect(session.answer).toBe("All green.");
+    // pi lives on, registered for the relay, its root in place
+    expect(w.container.killed).toEqual([]);
+    expect(w.container.removed).toEqual([]);
+    expect(w.registry.get("run-7")).toBeDefined();
+    const stepsAfterLoop = w.steps.length;
+    expect(stepsAfterLoop).toBeGreaterThan(0);
+    const turnSpan = w.root!.start("run.description_turn");
+    const turnContext = { executor, onPrDescription: () => {} };
+    const answer = await session.followUp({
+      text: "You pushed the branch — call submit_pr_description now.",
+      maxTurns: 8,
+      maxMinutes: 5,
+      toolContext: turnContext,
+      span: turnSpan,
+    });
+    turnSpan.end("ok");
+    expect(answer).toBe("Description resubmitted.");
+    // one process, two prompts on it: the request, then the follow-up's text
+    expect(w.container.starts).toHaveLength(1);
+    expect(
+      sent(w.container)
+        .filter((c) => c.type === "prompt")
+        .map((c) => c.message),
+    ).toEqual(["fix the failing test", "You pushed the branch — call submit_pr_description now."]);
+    // the turn's tool call is on the stream like the loop's
+    expect(w.events.filter((e) => e.type === "tool_call").map((e) => (e as { callId: string }).callId)).toEqual([
+      "call_0",
+      "call_1",
+    ]);
+    // the spans: a second run.agent under the caller's span, the turn's tool span under it (tracing.md item 17)
+    const agents = w.sink.ends.filter((e) => e.name === "run.agent");
+    expect(agents).toHaveLength(2);
+    expect(agents[0].parentSpanId).toBe(w.root!.id);
+    expect(agents[1].parentSpanId).toBe(turnSpan.id);
+    const tools = w.sink.ends.filter((e) => e.name === "tool.bash");
+    expect(tools.map((t) => t.parentSpanId)).toEqual([agents[0].spanId, agents[1].spanId]);
+    // the relayed tools read the turn's context while it ran, and the run's again after
+    expect(contextDuringTurn).toBe(turnContext);
+    expect(w.registry.get("run-7")!.toolContext).toBe(w.run.toolContext);
+    // nothing mirrored: the turn's rows are not the ledger's (pr-description item 5)
+    expect(w.steps).toHaveLength(stepsAfterLoop);
+    // the end, once
+    await session.end();
+    await session.end();
+    expect(w.container.killed).toEqual([4242]);
+    expect(w.container.removed).toEqual([paths.dir]);
+    expect(w.registry.get("run-7")).toBeUndefined();
+  });
+
+  it("a follow-up is bounded by its own budget, not the run's: past its turn cap the turn-guard write-up is steered with every tool refused, the note is on the stream and the answer wears the guard's label", async () => {
+    const w = world();
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0) {
+        finalTurn(c, "Done.");
+        return;
+      }
+      bashTurn(w, "c1", "gh pr view 7", "the body"); // the turn's first model turn — at the cap of one
+      finalTurn(c, "Wrote it up.");
+    });
+    const session = await w.open();
+    const answer = await session.followUp({ text: "one more", maxTurns: 1, maxMinutes: 5, toolContext: { executor } });
+    const steers = sent(w.container)
+      .filter((c) => c.type === "steer")
+      .map((c) => String(c.message));
+    expect(steers.some((m) => m.includes("turn guard") && m.includes("can make no more tool calls"))).toBe(true);
+    expect(w.registry.get("run-7")!.toolsBlocked()).toContain("turn guard");
+    expect(w.events.some((e) => e.type === "run_note" && e.kind === "turn_budget_exhausted")).toBe(true);
+    expect(answer).toMatch(
+      /^⚠️ _Stopped after 1 model turn in .* — that pace looks like a loop; findings so far:_\n\nWrote it up\.$/,
+    );
+    await session.end();
+  });
+
+  it("the failure modes: a follow-up pi refuses throws and the session still ends; a hard stop mid-turn aborts pi and answers the hard-stop message; pi dying mid-turn throws naming it", async () => {
+    // pi refuses the prompt
+    {
+      const w = world({ withSpans: true });
+      scriptedPi(w.container, (_n, c) => finalTurn(c, "Done."));
+      const session = await w.open();
+      w.container.onStdin = (line, c) => {
+        const cmd = JSON.parse(line) as Record<string, unknown>;
+        if (cmd.type === "prompt")
+          c.emit({ id: cmd.id, type: "response", command: "prompt", success: false, error: PI_BUSY_REFUSAL });
+      };
+      const turnSpan = w.root!.start("run.description_turn");
+      await expect(
+        session.followUp({ text: "one more", maxTurns: 8, maxMinutes: 5, toolContext: { executor }, span: turnSpan }),
+      ).rejects.toThrow("pi refused the prompt");
+      // the turn's own run.agent ended, and says the turn failed (tracing.md item 17)
+      const agents = w.sink.ends.filter((e) => e.name === "run.agent");
+      expect(agents).toHaveLength(2);
+      expect(agents[0].status).toBe("ok");
+      expect(agents[1].status).toBe("error");
+      await session.end();
+      expect(w.container.killed).toEqual([4242]);
+      expect(w.container.removed).toEqual([paths.dir]);
+    }
+    // a hard stop lands while the turn's model thinks
+    {
+      const w = world();
+      scriptedPi(w.container, (n, c) => {
+        if (n === 0) finalTurn(c, "Done.");
+      });
+      const session = await w.open();
+      const turn = session.followUp({ text: "one more", maxTurns: 8, maxMinutes: 5, toolContext: { executor } });
+      w.control.requestStop("hard");
+      expect(await turn).toBe(HARD_STOP_MESSAGE);
+      expect(sent(w.container).some((c) => c.type === "abort")).toBe(true);
+      expect(w.events.some((e) => e.type === "run_note" && e.kind === "stopped" && e.mode === "hard")).toBe(true);
+      await session.end();
+      expect(w.container.killed).toEqual([4242]);
+    }
+    // pi dies mid-turn
+    {
+      const w = world();
+      scriptedPi(w.container, (n, c) => {
+        if (n === 0) finalTurn(c, "Done.");
+        else c.die();
+      });
+      const session = await w.open();
+      await expect(
+        session.followUp({ text: "one more", maxTurns: 8, maxMinutes: 5, toolContext: { executor } }),
+      ).rejects.toThrow("pi exited before the turn settled");
+      await session.end();
+      expect(w.container.removed).toEqual([paths.dir]);
+    }
+  });
+
+  it("a soft stop mid-follow-up is honoured as the loop honours it: the soft-stop write-up is steered with every tool refused, the `stopped` note says soft, no abort is sent, and the answer wears the ⏹ label", async () => {
+    const w = world();
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "Done."));
+    const session = await w.open();
+    // The follow-up's pi thinks until the write-up steer arrives, then writes up.
+    w.container.onStdin = (line, c) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "prompt")
+        c.emit({ id: cmd.id, type: "response", command: "prompt", success: true }, { type: "agent_start" });
+      if (cmd.type === "steer") {
+        c.emit({ type: "response", command: "steer", success: true });
+        if (String(cmd.message) === SOFT_STOP_INSTRUCTION) finalTurn(c, "Wound up.");
+      }
+    };
+    const turn = session.followUp({ text: "one more", maxTurns: 8, maxMinutes: 5, toolContext: { executor } });
+    w.control.requestStop("soft");
+    const answer = await turn;
+    expect(answer).toBe(`⏹ _Stopped early by an operator (soft stop) — findings so far:_\n\nWound up.`);
+    expect(w.registry.get("run-7")!.toolsBlocked()).toContain("an operator asked this run to stop");
+    expect(w.events.some((e) => e.type === "run_note" && e.kind === "stopped" && e.mode === "soft")).toBe(true);
+    expect(sent(w.container).some((c) => c.type === "abort")).toBe(false);
+    await session.end();
+  });
+
+  it("a session that has ended takes no follow-up: the turn throws naming it, and nothing is sent to pi", async () => {
+    const w = world();
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "Done."));
+    const session = await w.open();
+    await session.end();
+    const before = w.container.stdin.length;
+    await expect(
+      session.followUp({ text: "one more", maxTurns: 8, maxMinutes: 5, toolContext: { executor } }),
+    ).rejects.toThrow("the pi session has ended");
+    expect(w.container.stdin).toHaveLength(before);
   });
 });

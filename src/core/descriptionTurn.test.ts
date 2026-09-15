@@ -14,9 +14,11 @@ import {
   runDescriptionTurn,
   type DescriptionTurnTarget,
 } from "./descriptionTurn.js";
+import type { PiFollowUpTurnInput } from "./harness/pi/harness.js";
 import type { PrDescription } from "./prDescription.js";
 import type { RunEvent } from "./runEvents.js";
 import { RunControl } from "./runRegistry/runControl.js";
+import type { Span } from "./trace/types.js";
 
 // Feature: docs/reference/specs/pr-description.md item 5 — the description turn.
 // The decision (`descriptionTurnTarget`) and the turn (`runDescriptionTurn`)
@@ -286,5 +288,83 @@ describe("runDescriptionTurn — one clipped turn on the run's own messages", ()
     });
     expect(out2.description).toBeUndefined();
     expect(b.events.filter((e) => e.type === "run_note")).toHaveLength(1); // the note was still published
+  });
+
+  // harness-pi item 14: on a preset on pi the turn is a `prompt` on the run's own
+  // pi session — the seam the run stage hands over — never a second `runAgent`
+  // loop: the same follow-up text, the same clipped budget, the same hook, the
+  // same note, and the same failure handling.
+  it("on the pi harness the turn is a prompt on the run's own session: the same follow-up text, the clipped budget, the turn's tool context with the hook, never runAgent; the description the relayed tool submits is reported", async () => {
+    runAgentMock.mockReset();
+    const followUp = vi.fn(async (input: PiFollowUpTurnInput) => {
+      input.toolContext.onPrDescription?.(DESCRIPTION); // the relayed submit_pr_description, run in the bot under THIS turn's context
+      return "Description resubmitted.";
+    });
+    const { turn, events, progress, forwarded } = turnSpec({ followUp });
+    const messages: ChatMessage[] = [{ role: "user", content: [{ type: "text", text: "fix the failing check" }] }];
+    const span = { id: "s-turn", name: "run.description_turn" } as unknown as Span;
+    const out = await runDescriptionTurn({
+      span,
+      target: t,
+      answer: "Pushed the fix.",
+      messages,
+      system: "SYS",
+      turn,
+      logKey: "t",
+    });
+    expect(runAgentMock).not.toHaveBeenCalled();
+    expect(followUp).toHaveBeenCalledTimes(1);
+    const input = followUp.mock.calls[0][0];
+    expect(input.text).toBe(descriptionFollowUp(t));
+    expect(input.maxTurns).toBe(DESCRIPTION_TURN_MAX_TURNS);
+    expect(input.maxMinutes).toBe(DESCRIPTION_TURN_MAX_MINUTES);
+    expect(input.span).toBe(span); // the turn's `run.agent` hangs under `run.description_turn` on pi too (tracing.md item 17)
+    expect(input.toolContext.executor).toBe(executor);
+    // the same note, the same transcript growth — the follow-up IS the appended user turn
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "run_note",
+        kind: "description_turn",
+        summary: expect.stringContaining("acme/api#700"),
+      }),
+    ]);
+    expect(progress.some((p) => p.includes("acme/api#700"))).toBe(true);
+    expect(messages).toHaveLength(3);
+    expect(messages[1]).toEqual({ role: "assistant", content: [{ type: "text", text: "Pushed the fix." }] });
+    expect(messages[2]).toEqual({ role: "user", content: [{ type: "text", text: input.text }] });
+    // the description reached BOTH the caller's hook and the return value
+    expect(forwarded).toEqual([DESCRIPTION]);
+    expect(out.description).toEqual(DESCRIPTION);
+  });
+
+  it("a follow-up turn on pi that submits nothing reports undefined; one pi refuses (the turn throws) is logged and reports the same, never throws — and the native loop is never reached for", async () => {
+    runAgentMock.mockReset();
+    const a = turnSpec({ followUp: async () => "I left the description as it was." });
+    const out1 = await runDescriptionTurn({
+      target: t,
+      answer: "x",
+      messages: [],
+      system: undefined,
+      turn: a.turn,
+      logKey: "t",
+    });
+    expect(out1.description).toBeUndefined();
+    expect(a.forwarded).toEqual([]);
+    const b = turnSpec({
+      followUp: async () => {
+        throw new Error("pi refused the prompt: Agent is already processing");
+      },
+    });
+    const out2 = await runDescriptionTurn({
+      target: t,
+      answer: "x",
+      messages: [],
+      system: undefined,
+      turn: b.turn,
+      logKey: "t",
+    });
+    expect(out2.description).toBeUndefined();
+    expect(b.events.filter((e) => e.type === "run_note")).toHaveLength(1);
+    expect(runAgentMock).not.toHaveBeenCalled();
   });
 });

@@ -5,7 +5,9 @@
 // description turn and the coding PR post-step; the answer published as the
 // record's source of truth; then the finish — the registry closed with the
 // terminal status, the friction diagnosis, the record registered for the drain
-// — and the workspace released on a failure. The stage's claim and the tools'
+// — and the workspace released on a failure. On pi the run's session outlives
+// the loop for the settle's re-review and the description turn (harness-pi
+// item 14) and is ended here after them. The stage's claim and the tools'
 // capabilities are run.ts.
 import type { ResolvedRequest } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
@@ -16,7 +18,13 @@ import { parseModelRef, type Provider } from "../provider.js";
 import { TOOLSETS } from "../../tools/workspace.js";
 import { effectiveHarness } from "../harness/select.js";
 import { piContainerFor } from "../harness/pi/botHostContainer.js";
-import { piHarnessFactsOf, relayedTools, runPiHarness, type PiHarnessFacts } from "../harness/pi/harness.js";
+import {
+  piHarnessFactsOf,
+  relayedTools,
+  runPiHarnessOpen,
+  type OpenPiSession,
+  type PiHarnessFacts,
+} from "../harness/pi/harness.js";
 import { piRunPathsAt } from "../harness/pi/process.js";
 import { loopEndingOf, reviewPostedBefore, type LoopEnding } from "../runLedger/resume.js";
 import { fetchRepoShipInfo, findOpenPrByHead, openPullRequest } from "../../execution/githubPulls.js";
@@ -442,6 +450,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
   let carried: { reviewed: string; current: string; commits: number } | undefined;
   let runFailed = false; // the runner threw → terminal status `failed`
   let runDiagnosis: FrictionDiagnosis | undefined; // the finish-site diagnosis: the done card's shape line
+  // A run on pi keeps its pi alive past the loop (harness-pi item 14): the
+  // reviewed-head settle's re-review and the description turn below are one
+  // more prompt on that session, and it is ended here once they are done — or
+  // on a throw, before the workspace pi runs in is released.
+  let piSession: OpenPiSession | undefined;
   // Give the workspace back now rather than at the inactivity sweep: a
   // resident's pool user is a scarce slot (docs/reference/specs/resident-repos.md item
   // 16a). The release mode is paired to the round's agent by the attach
@@ -614,7 +627,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
           ),
         ),
       ];
-      answer = await runPiHarness(
+      piSession = await runPiHarnessOpen(
         {
           container:
             deps.harness.containerFor?.(executor, profile.machine) ?? piContainerFor(executor, profile.machine),
@@ -671,6 +684,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
             : {}),
         },
       );
+      answer = piSession.answer;
     } else {
       answer = await runAgent({
         provider,
@@ -712,7 +726,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     // during the run: adopt the current head when the run reviewed it,
     // carry the review across a rebase of the same commits, or void the
     // verdict and re-review ONCE at the new head (worktree moved, prompt
-    // recomposed, one more model turn). A hard stop observes nothing and
+    // recomposed, one more model turn — on pi, one more prompt on the run's
+    // own session, harness-pi item 14). A hard stop observes nothing and
     // settles nothing; a verdict already posted before a restart is settled
     // (it landed at its head) and is not re-reviewed.
     if (
@@ -743,6 +758,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
           onEvent,
           control: run.control,
           ...(round.selection.backend ? { backend: round.selection.backend } : {}),
+          ...(piSession ? { followUp: piSession.followUp } : {}),
         },
         fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
         fetchPrCommits: deps.fetchPrCommits ?? prCommitsSince,
@@ -819,7 +835,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     // the answer lands or the workspace is released. The description arrives
     // through the same onPrDescription hook the first turn fed (so
     // `prDescription` and the ledger row see it); the workspace is observed
-    // again afterwards in case the turn pushed. A hard stop asks nothing.
+    // again afterwards in case the turn pushed. A hard stop asks nothing. On
+    // pi the turn is one more prompt on the run's own session (harness-pi
+    // item 14), the same hook fed through the relay.
     let descriptionTurnRan = false;
     if (isCodingPrRun && run.control.requested !== "hard" && prDescription === undefined) {
       const turnTarget = await descriptionTurnTarget({
@@ -855,6 +873,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
               onEvent,
               control: run.control,
               ...(round.selection.backend ? { backend: round.selection.backend } : {}),
+              ...(piSession ? { followUp: piSession.followUp } : {}),
             },
             logKey: msg.threadKey,
           }),
@@ -863,6 +882,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
         if (!run.control.hardSignal.aborted) await observeWorkspaceNow();
       }
     }
+    // The last prompt on the run's pi has been sent: pi ends here, before the
+    // post-step and before the workspace it runs in can be released.
+    await piSession?.end();
     // The accepted PrDescription is a fact of the run: publish it as a typed
     // event BEFORE the finally below finish()es the stream, string fields
     // redacted like every payload, so the run page's review panel renders
@@ -970,6 +992,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
       );
   } catch (err) {
     runFailed = true;
+    // pi first: it runs in the workspace released next (a no-op once ended).
+    await piSession?.end();
     await root.span("post.workspace_release", (span) => releaseWorkspace(span));
     throw err;
   } finally {
