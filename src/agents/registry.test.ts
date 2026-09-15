@@ -948,6 +948,11 @@ describe("explore agent (docs/reference/specs/agent-explore.md)", () => {
     expect(sys).toMatch(/20 minutes/);
     expect(sys).not.toMatch(/nohup/); // the wrong tool is not named, so it cannot be copied
     expect(sys).toMatch(/NEVER open a pull request/);
+    // agent-explore.md item 2: no attach_file in the toolset, so the prompt says so — a reply
+    // that promised "attached below" with nothing attached is the failure this line prevents.
+    expect(sys).toMatch(/cannot attach or post files/);
+    expect(sys).toMatch(/never say a file is attached/i);
+    expect(sys).not.toMatch(/attach_file/);
     expect(sys).toMatch(/never commit or push/i);
     expect(sys).not.toContain("submit_pr_description");
     // the tools it holds are named, so a request about one of our repos is answered from the repo

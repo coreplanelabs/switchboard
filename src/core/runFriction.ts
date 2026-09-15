@@ -38,7 +38,8 @@ export type FrictionCategory =
   | "setup_install"
   | "wrap_up"
   | "budget_hit"
-  | "infra_failure";
+  | "infra_failure"
+  | "unkept_promise";
 
 export const FRICTION_CATEGORIES: readonly FrictionCategory[] = [
   "slow_tool",
@@ -49,6 +50,7 @@ export const FRICTION_CATEGORIES: readonly FrictionCategory[] = [
   "wrap_up",
   "budget_hit",
   "infra_failure",
+  "unkept_promise",
 ];
 
 /** Human labels — the verdict line, the report's table and its finding lines. */
@@ -61,6 +63,7 @@ export const CATEGORY_LABEL: Record<FrictionCategory, string> = {
   wrap_up: "agent wind-down",
   budget_hit: "budget hits",
   infra_failure: "infra failures",
+  unkept_promise: "unkept promises",
 };
 
 /** What a category's time is a share OF: tool time for the categories whose
@@ -75,7 +78,16 @@ export const DENOMINATOR_OF: Record<FrictionCategory, "tool" | "run"> = {
   wrap_up: "run",
   budget_hit: "run",
   infra_failure: "run",
+  unkept_promise: "run",
 };
+
+/** The ways a reply tells the person a file is attached — the promise `unkept_promise` holds a run to.
+ *  One deliberate expression, case-insensitive: "attached below/here/above", "see (the) attached",
+ *  "I've/I have attached", "is/are attached", "attachment(s) (is/are) below/here". A path such as
+ *  `./attachments/1-clip.mp4` or the bare word "attachments/" names a place, not a promise, and
+ *  does not match; nor does prose about attaching in an `assistant` turn — only the `answer` counts. */
+export const ATTACHMENT_PROMISE =
+  /\b(?:attached (?:below|here|above)|see (?:the )?attached|i(?:'ve| have) attached|(?:is|are) attached\b|attachments? (?:(?:is|are) )?(?:below|here))/i;
 
 export type FrictionSeverity = "low" | "medium" | "high";
 
@@ -382,6 +394,9 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
   let sideFactEvents = 0; // skill_use / review_artifact / pr_description / pr_opened / review_posted / ship_round / route: facts about the run, not steps
   let spanEvents = 0; // span_start / span_end (docs/reference/specs/tracing.md): timing records, not steps
   let wrapUp: { index: number; at?: number } | undefined;
+  // The reply and the files the run sent out: what `unkept_promise` compares after the loop.
+  let answer: { index: number; text: string } | undefined;
+  let outboundArtifacts = 0;
   events.forEach((ev, index) => {
     flushTurns(index);
     if (isSpanRecord(ev)) {
@@ -390,8 +405,10 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
     }
     if (isNarrative(ev)) {
       narrativeEvents++; // the narrative and `run_meta` are neither steps nor findings
+      if (ev.type === "answer") answer = { index, text: ev.text };
       return;
     }
+    if (ev.type === "artifact" && ev.direction === "out") outboundArtifacts++;
     // Side facts about the run, not steps: skill_use rides beside a use_skill
     // call that already produced its own tool pair, and artifact beside the
     // attach_file call (or the dispatcher's staging) that moved the file;
@@ -580,6 +597,24 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
     if (at !== undefined && windowEnd !== undefined && f) {
       f.durationMs = Math.max(0, windowEnd - at);
       f.interval = { start: at, end: Math.max(at, windowEnd) };
+    }
+  }
+  // The reply promised a file the run never produced: no tool failed (a preset without
+  // attach_file makes no call), so the answer's own words are the only witness. Once per
+  // run, anchored to the answer, no extent; the line that made the promise is quoted.
+  if (answer !== undefined && outboundArtifacts === 0) {
+    const promised = ATTACHMENT_PROMISE.exec(answer.text);
+    if (promised) {
+      const line =
+        answer.text.slice(0, promised.index).split("\n").pop()! + answer.text.slice(promised.index).split("\n")[0]!;
+      const trimmed = line.trim();
+      const quoted = trimmed.length > 120 ? `…${trimmed.slice(trimmed.length - 119)}` : trimmed;
+      findings.push({
+        category: "unkept_promise",
+        severity: "low",
+        summary: `unkept promise: the reply says a file is attached but the run produced none — "${quoted}"`,
+        eventIndex: answer.index,
+      });
     }
   }
 

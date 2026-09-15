@@ -196,6 +196,15 @@ describe("patternSignature", () => {
   });
 
   it("keys note findings by their kind, not their free text", () => {
+    expect(
+      patternSignature(
+        f({
+          category: "unkept_promise",
+          summary:
+            'unkept promise: the reply says a file is attached but the run produced none — "sheet attached below"',
+        }),
+      ),
+    ).toBe("unkept_promise:attachment");
     expect(patternSignature(f({ category: "budget_hit", summary: "budget hit (time): ~0s left, wrapping up" }))).toBe(
       "budget_hit:time",
     );
@@ -416,6 +425,7 @@ describe("proposeImprovements", () => {
       "wrap_up",
       "budget_hit",
       "infra_failure",
+      "unkept_promise",
       "long_run",
     ] as const;
     for (const kind of kinds) {

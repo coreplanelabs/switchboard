@@ -479,9 +479,94 @@ describe("analyzeRunFriction — aggregation and verdict", () => {
       "setup_install",
       "slow_model_turn",
       "slow_tool",
+      "unkept_promise",
       "wrap_up",
     ]);
     for (const v of Object.values(d.byCategory)) expect(v).toEqual({ count: 0, durationMs: 0 });
+  });
+});
+
+// docs/reference/specs/run-friction.md item 1, `unkept_promise`: a reply that says a file is
+// attached while the run recorded no outbound `artifact` event. The event stream is the only
+// witness — a run on a preset without attach_file leaves no tool call to fail — so the
+// analyzer reads the answer's text. Anchored to the `answer` event, once per run, low.
+describe("analyzeRunFriction — unkept_promise (the reply names an attachment the run never produced)", () => {
+  const artifactOut: RunEvent = {
+    type: "artifact",
+    direction: "out",
+    key: "runs/r1/out/1-sheet.png",
+    name: "sheet.png",
+    size: 3,
+    contentType: "image/png",
+  };
+  const promised = (text: string): RunEvent[] => [
+    ...bash("ffmpeg -i clip.mp4 sheet.png", T0, 5_000),
+    { type: "answer", text, at: T0 + 6_000 },
+  ];
+
+  it("fires once, low, anchored to the answer, when the reply promises a file and no outbound artifact was recorded", () => {
+    const d = analyzeRunFriction(promised("Here are the findings.\n\nContact sheet is attached below:"));
+    const own = d.findings.filter((f) => f.category === "unkept_promise");
+    expect(own).toHaveLength(1);
+    expect(own[0]).toMatchObject({
+      category: "unkept_promise",
+      severity: "low",
+      eventIndex: 2,
+    });
+    expect(own[0]!.summary).toMatch(
+      /^unkept promise: the reply says a file is attached but the run produced none — "…?Contact sheet is attached below:"/,
+    );
+    expect(own[0]!.durationMs).toBeUndefined();
+    expect(d.byCategory.unkept_promise).toEqual({ count: 1, durationMs: 0 });
+    expect(d.verdict).toMatch(/^unkept promises/);
+  });
+
+  it("recognizes the ways a reply promises a file, each once", () => {
+    for (const text of [
+      "The sheet is attached.",
+      "See attached for the contact sheet.",
+      "I've attached the sheet.",
+      "I have attached both files.",
+      "Attachment below.",
+      "The attachments are here:",
+      "Attached here: sheet.png",
+    ]) {
+      expect(categories(analyzeRunFriction(promised(text))), text).toEqual(["unkept_promise"]);
+    }
+  });
+
+  it("does not fire when an outbound artifact was recorded, when nothing is promised, or when the text only names the attachments/ path", () => {
+    expect(
+      categories(
+        analyzeRunFriction([
+          ...promised("Contact sheet is attached below:").slice(0, 2),
+          artifactOut,
+          { type: "answer", text: "Contact sheet is attached below:", at: T0 + 6_000 },
+        ]),
+      ),
+    ).toEqual([]);
+    expect(
+      categories(
+        analyzeRunFriction(promised("The sheet is at out/contact-sheet.png (1280x960, 84 KB): twelve frames, 4x3.")),
+      ),
+    ).toEqual([]);
+    expect(
+      categories(
+        analyzeRunFriction(
+          promised("The video is in ./attachments/1-clip.mp4, 300,275,103 bytes; attachments/ holds nothing else."),
+        ),
+      ),
+    ).toEqual([]);
+    expect(categories(analyzeRunFriction([...bash("ls", T0, 100)]))).toEqual([]);
+    // Only the run's own answer counts: an assistant turn that talks about attaching is not the reply.
+    expect(
+      categories(
+        analyzeRunFriction([
+          { type: "assistant", text: "I'll get the sheet attached below.", at: T0 },
+          { type: "answer", text: "done", at: T0 + 100 },
+        ]),
+      ),
+    ).toEqual([]);
   });
 });
 

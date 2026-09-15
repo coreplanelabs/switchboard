@@ -118,6 +118,7 @@ const KIND_LABEL: Record<PatternKind, string> = {
   wrap_up: "agent wind-down",
   budget_hit: "budget hit",
   infra_failure: "infra failure",
+  unkept_promise: "unkept promise",
   long_run: "long run",
 };
 
@@ -317,6 +318,9 @@ export function patternSignature(f: FrictionFinding): string {
     }
     case "wrap_up":
       return "wrap_up:wrap_up";
+    case "unkept_promise":
+      // One shape of failure whatever the words were: the reply promised a file and none was produced.
+      return "unkept_promise:attachment";
     case "slow_model_turn":
       // A slow think is a property of the agent/model tier, not of the command
       // the model eventually issued — one key, so it clusters across runs.
@@ -632,6 +636,8 @@ function suggestedFix(p: FrictionPattern): string {
         return `Runs ended with \`${p.signature.replace(/^mid-tool /, "")}\` still outstanding — the run (or its transport) was cut while the tool ran. Correlate the affected runs with deploys/drains (\`[drain]\` log lines), the sandbox command timeout (exit 124 / heartbeat streaming, docs/reference/specs/execution.md), and the executor's error surfacing.`;
       }
       return `The exec transport failed during \`${p.signature}\` in ${p.runIds.length} runs (the sandbox, not the command). Check the sandbox/resident Worker logs (\`deploy/bin/cf-logs\`) around the affected runs for the underlying error, and whether the command's runtime exceeds the executor's timeout.`;
+    case "unkept_promise":
+      return `In ${p.runIds.length} runs the reply told the person a file was attached and the run produced none — no outbound \`artifact\` event, so nothing reached the thread or the run page. Read the affected runs' presets: a preset without \`attach_file\` in its toolset (\`src/agents/registry.ts\`) must say in its prompt that its whole answer is text and name the workspace path instead of promising an attachment; an ask that needs the file belongs on a preset with the full toolset (the router's description of the preset should say it cannot post files). If the run did call \`attach_file\` and it failed, the paired \`failed_tool\` proposal has the cause.`;
     case "long_run":
       return `These \`${p.signature}\` runs took ≥ ${LONG_RUN_FACTOR}× the median run time — the closest available proxy for a cost spike (there is no per-run token accounting yet). Open each affected run's friction report for its dominant cause; if the shape of work is legitimately long, split it or lower the agent's effort tier; if it is not, tighten \`maxMinutes\` so a runaway run is cut earlier.`;
   }
