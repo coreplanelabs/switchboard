@@ -313,6 +313,24 @@ function routeCandidate(cand: RoutedCandidate, keys: RequestScopeKeys, scopeOf: 
  *  audience is exactly its participants (`channel`). The other follows when
  *  the run lacks the first. `repo` is never a target — a repo scope is read
  *  from every channel the repo is used in, wider than the origin. */
+/** Narrowest first: a DM is one person's, a private channel its members',
+ *  `unknown` is never public, a machine channel is its tokens', public is
+ *  everyone's. The rank the memory gate narrows by. */
+const VISIBILITY_NARROWNESS: readonly ChannelVisibility[] = ["dm", "private", "unknown", "machine", "public"];
+
+/** The narrowest of several visibilities (record 0037): a run that quoted a
+ *  conversation writes memory as if it had originated in the narrowest channel
+ *  it read, so a private thread quoted into a public channel never seeds an
+ *  org fact. With nothing but the origin, the origin. */
+export function narrowestVisibility(
+  origin: ChannelVisibility,
+  ...others: readonly ChannelVisibility[]
+): ChannelVisibility {
+  let best = origin;
+  for (const v of others) if (VISIBILITY_NARROWNESS.indexOf(v) < VISIBILITY_NARROWNESS.indexOf(best)) best = v;
+  return best;
+}
+
 function narrowingOrder(origin: ChannelVisibility): readonly ("user" | "channel")[] {
   return origin === "dm" ? ["user", "channel"] : ["channel", "user"];
 }

@@ -1202,6 +1202,7 @@ export async function dispatch(
       repoCtx,
       run,
       channelVisibility,
+      referenceVisibilities: references.visibilities,
       stopped,
       answer,
       toolCalls,

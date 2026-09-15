@@ -4,6 +4,7 @@ import { actor } from "../authz/testing.js";
 import type { ChannelVisibility } from "../authz/types.js";
 import type { HistoryItem } from "../types.js";
 import { InMemoryMemoryStore } from "./stores.js";
+import { narrowestVisibility } from "./reflection.js";
 import type { MemoryQuery, MemoryRecord, MemoryStore } from "./types.js";
 import {
   buildReflectionInput,
@@ -978,5 +979,20 @@ describe("trackReflection / pendingReflectionCount (shutdown drain)", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(pendingReflectionCount()).toBe(0);
+  });
+});
+
+// Record 0037: a run that quoted a conversation writes memory under the
+// narrowest visibility it read, so the quoted text of a private thread never
+// becomes an org fact through a public origin.
+describe("narrowestVisibility — the origin narrowed by every quoted conversation", () => {
+  it("public origin with a private reference narrows to private; a dm origin stays dm; no references leaves the origin", () => {
+    expect(narrowestVisibility("public", "private")).toBe("private");
+    expect(narrowestVisibility("public", "public", "public")).toBe("public");
+    expect(narrowestVisibility("dm", "public", "private")).toBe("dm");
+    expect(narrowestVisibility("private")).toBe("private");
+    expect(narrowestVisibility("unknown", "public")).toBe("unknown");
+    expect(narrowestVisibility("public", "unknown")).toBe("unknown");
+    expect(narrowestVisibility("machine", "private")).toBe("private");
   });
 });

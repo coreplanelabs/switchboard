@@ -18,6 +18,7 @@ import type { RequestDirectives } from "../../directives.js";
 import type { RepoContext } from "../repoContext.js";
 import { scheduleReflection } from "../memory/index.js";
 import { resolveChatActor } from "../authz/actor.js";
+import { narrowestVisibility } from "../memory/reflection.js";
 import type { ChannelVisibility } from "../authz/types.js";
 import type { FrictionDiagnosis } from "../runFriction.js";
 import type { StopMode } from "../runEvents.js";
@@ -502,6 +503,9 @@ export interface AfterReplyContext {
   repoCtx: RepoContext;
   run: RunHandle;
   channelVisibility: ChannelVisibility;
+  /** The visibility of every conversation the run quoted (record 0037); the
+   *  memory gate writes under the narrowest of these and the origin. */
+  referenceVisibilities?: readonly ChannelVisibility[];
   stopped: StopMode | undefined;
   answer: string;
   toolCalls: number;
@@ -516,6 +520,7 @@ export interface AfterReplyContext {
  */
 export function afterReply(deps: ReplyDeps, ctx: AfterReplyContext): void {
   const { msg, resolved, directives, history, repoCtx, run, channelVisibility, stopped, answer, toolCalls } = ctx;
+  const referenceVisibilities = ctx.referenceVisibilities ?? [];
   // Cross-session memory — WRITE path. AFTER the reply has
   // landed, distill this run into memory records: fire-and-forget (tracked
   // only for the shutdown drain), so its latency/failures never reach the
@@ -539,9 +544,11 @@ export function afterReply(deps: ReplyDeps, ctx: AfterReplyContext): void {
       runId: run.id,
       // The writes are the policy's decision for the run's principal under the
       // run's stamped origin (authorization.md item 8): the same actor the chat
-      // commands resolve, the same stamp the record carries.
+      // commands resolve, the same stamp the record carries — narrowed to the
+      // narrowest conversation the run quoted (record 0037), so a private
+      // thread quoted into a public channel never seeds an org fact.
       actor: resolveChatActor(msg, (id) => deps.config.grantsFor(id)),
-      originChannelVisibility: channelVisibility,
+      originChannelVisibility: narrowestVisibility(channelVisibility, ...referenceVisibilities),
       organization: deps.config.config.organization,
       userId: msg.userId,
       channelId: msg.channelId,
