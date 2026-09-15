@@ -433,35 +433,91 @@ describe("artifacts", () => {
     at,
   });
 
-  it("two received and one sent file become three rows in event order; nothing lands in the log", () => {
+  const names = (files: readonly { name: string }[] | undefined) => (files ?? []).map((f) => f.name);
+
+  it("files received with the request sit on the request; files received with a follow-up sit on that follow-up; neither is a row in the log", () => {
     const m = model();
     m.handle(input);
     m.handle(artifact("in", "threads/slack-C1-1.0/in/1.0/0-brief.pdf", "brief.pdf", "application/pdf", 1001));
     m.handle(artifact("in", "threads/slack-C1-1.0/in/1.0/1-clip.mp4", "clip.mp4", "video/mp4", 1002));
-    m.handle(call("c1", "attach_file dashboard.png", 2000, "attach_file"));
-    m.handle(artifact("out", "runs/run-1/out/1-dashboard.png", "dashboard.png", "image/png", 2100));
-    expect(m.state.artifacts.map((a) => [a.direction, a.name])).toEqual([
-      ["in", "brief.pdf"],
-      ["in", "clip.mp4"],
-      ["out", "dashboard.png"],
+    m.handle(call("c1", "$ sleep 20", 2000));
+    m.handle({ type: "input", text: "here is one more", at: 2500, source: { user: "alice" } });
+    m.handle(artifact("in", "threads/slack-C1-1.0/in/2.5/2-notes.bin", "notes.bin", "application/octet-stream", 2501));
+    expect(names(m.state.request!.files)).toEqual(["brief.pdf", "clip.mp4"]);
+    expect(m.state.request!.files[0]).toEqual({
+      direction: "in",
+      key: "threads/slack-C1-1.0/in/1.0/0-brief.pdf",
+      name: "brief.pdf",
+      size: 1024,
+      contentType: "application/pdf",
+      at: 1001,
+    });
+    const followUps = m.state.log.filter((l) => l.kind === "followup");
+    expect(followUps).toHaveLength(1);
+    expect(names(followUps[0]!.input.files)).toEqual(["notes.bin"]);
+    expect(m.state.log.filter((l) => l.kind === "step")).toHaveLength(1);
+    expect(step(m).items).toHaveLength(1); // the sleep call alone; a file is never a row in the step
+  });
+
+  it("a received file recorded before any input lands on the first message that arrives", () => {
+    const m = model();
+    m.handle(artifact("in", "threads/slack-C1-1.0/in/1.0/0-brief.pdf", "brief.pdf", "application/pdf", 999));
+    m.handle(input);
+    expect(names(m.state.request!.files)).toEqual(["brief.pdf"]);
+  });
+
+  it("sent files sit on the attach_file call that posted them while the run is live, each on its own call by name, and the card opens; when the reply lands it carries them all", () => {
+    const m = model();
+    m.handle(input);
+    m.handle(call("c1", "attach_file out/dashboard.png", 2000, "attach_file"));
+    m.handle(call("c2", "attach_file out/clip.mp4", 2001, "attach_file"));
+    m.handle(artifact("out", "runs/run-1/out/2-dashboard.png", "dashboard.png", "image/png", 2100));
+    m.handle(artifact("out", "runs/run-1/out/1-clip.mp4", "clip.mp4", "video/mp4", 2101));
+    const calls = step(m).items.flatMap((i) => (i.kind === "call" ? [i.call] : []));
+    expect(calls.map((c) => [c.id, names(c.files), c.open])).toEqual([
+      ["c1", ["dashboard.png"], true],
+      ["c2", ["clip.mp4"], true],
     ]);
-    expect(m.state.artifacts[2]).toEqual({
+    expect(m.state.reply).toBeNull();
+    m.handle({ type: "answer", text: "done", at: 3000 });
+    expect(names(m.state.reply!.files)).toEqual(["dashboard.png", "clip.mp4"]);
+    expect(m.state.reply!.files[0]).toEqual({
       direction: "out",
-      key: "runs/run-1/out/1-dashboard.png",
+      key: "runs/run-1/out/2-dashboard.png",
       name: "dashboard.png",
       size: 1024,
       contentType: "image/png",
       at: 2100,
     });
-    expect(m.state.log.filter((l) => l.kind === "step")).toHaveLength(1);
-    expect(step(m).items).toHaveLength(1); // the attach_file call alone; the artifact is not a row in the step
+    expect(names(m.state.request!.files)).toEqual([]);
   });
 
-  it("a run without artifact events has no rows", () => {
+  it("a sent file whose name no attach_file headline carries falls to the newest attach_file call; with no such call it waits for the reply alone", () => {
+    const m = model();
+    m.handle(input);
+    m.handle(call("c1", "attach_file", 2000, "attach_file"));
+    m.handle(artifact("out", "runs/run-1/out/1-sheet.png", "sheet.png", "image/png", 2100));
+    const calls = step(m).items.flatMap((i) => (i.kind === "call" ? [i.call] : []));
+    expect(names(calls[0]!.files)).toEqual(["sheet.png"]);
+
+    const n = model();
+    n.handle(input);
+    n.handle(call("c1", "$ npm test", 2000));
+    n.handle(artifact("out", "runs/run-1/out/1-sheet.png", "sheet.png", "image/png", 2100));
+    const plain = step(n).items.flatMap((i) => (i.kind === "call" ? [i.call] : []));
+    expect(plain[0]!.files).toBeUndefined();
+    n.handle({ type: "answer", text: "done", at: 3000 });
+    expect(names(n.state.reply!.files)).toEqual(["sheet.png"]);
+  });
+
+  it("a run without artifact events has no files on its request, its calls or its reply", () => {
     const m = model();
     m.handle(input);
     m.handle(call("c1", "$ npm test", 2000));
-    expect(m.state.artifacts).toEqual([]);
+    m.handle({ type: "answer", text: "done", at: 3000 });
+    expect(m.state.request!.files).toEqual([]);
+    expect(step(m).items.flatMap((i) => (i.kind === "call" ? [i.call.files] : []))).toEqual([undefined]);
+    expect(m.state.reply!.files).toEqual([]);
   });
 
   it("artifactHref: the base plus the key encoded per segment, with the live token as `?t=` when the seed has one", () => {

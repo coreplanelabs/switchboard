@@ -1,54 +1,57 @@
 <script setup lang="ts">
-// The Files block (docs/reference/specs/live-view.md item 26): every file the run
-// received from its thread or sent back, one row each in event order — the
-// direction, the name (a link to the run's proxy route when the page has a
-// store to serve from), the size and type. The four raster image types render
-// inline under their row; everything else is a link the route downloads. An
-// image whose object is gone (the route's 410) says so in the row instead of
-// leaving a broken picture; a link to an expired file lands on the 410 text.
-// Like the Reply, it sits first on a finished run's page and last on a live one.
-import { computed, reactive } from "vue";
+// The files of one message (docs/reference/specs/live-view.md item 26): nested
+// inside the card of the message they arrived on or left with — the Request,
+// a Follow-up, the Reply, and on a live page the `attach_file` call that sent
+// them — one row each in event order: the direction word, the name (a link to
+// the run's proxy route when the page has a store to serve from), the size
+// and type. The four raster image types render inline under their row;
+// everything else is a link the route downloads. An image whose object is
+// gone (the route's 410) says so in the row instead of leaving a broken
+// picture; a link to an expired file lands on the 410 text. `preview: false`
+// keeps the rows and drops the picture — the call card's compact form once
+// the Reply carries the same files.
+import { computed, inject, reactive } from "vue";
 import type { TimelineArtifact } from "@core/channels/runTimeline.js";
-import type { ArtifactsSeed } from "@core/channels/webSeed.js";
 import { INLINE_IMAGE_TYPES } from "@core/artifacts/contentType.js";
 import { formatBytes } from "../../lib/format";
-import { artifactHref } from "../../lib/runPageModel";
+import { ArtifactLinksKey, artifactHref } from "../../lib/runPageModel";
 
-const props = defineProps<{
-  artifacts: TimelineArtifact[];
-  /** Where the files are served from; null when no store is configured (rows are text). */
-  links: ArtifactsSeed | null;
-  /** `first` — under the Request, above the work; `last` — after the steps. */
-  position: "first" | "last";
-}>();
+const props = withDefaults(
+  defineProps<{
+    files: TimelineArtifact[];
+    /** True renders a raster image under its row; false keeps the row alone. */
+    preview?: boolean;
+  }>(),
+  { preview: true },
+);
+
+/** Where the files are served from; null when no store is configured (rows are text). */
+const links = inject(ArtifactLinksKey, null);
 
 /** Keys whose image the browser could not load — the object expired. */
 const expired = reactive(new Set<string>());
 
 const rows = computed(() =>
-  props.artifacts.map((a) => ({
+  props.files.map((a) => ({
     ...a,
-    href: props.links ? artifactHref(props.links, a.key) : null,
-    inline: INLINE_IMAGE_TYPES.has(a.contentType),
+    href: links ? artifactHref(links, a.key) : null,
+    inline: props.preview && INLINE_IMAGE_TYPES.has(a.contentType),
     expired: expired.has(a.key),
   })),
 );
 </script>
 
 <template>
-  <section
-    id="artifacts"
-    class="block rounded-lg border border-(--ui-border) bg-(--ui-bg-muted) px-(--sb-gutter) py-3"
-    :class="position === 'first' ? 'mb-4' : 'mt-6'"
-    :data-position="position"
-  >
-    <h2 class="mb-2 flex items-baseline gap-2.5 font-mono text-xs font-medium uppercase tracking-wider text-muted">
+  <div class="files mt-3 border-t border-(--ui-border) pt-2" :data-preview="preview ? '1' : '0'">
+    <h3
+      class="mb-1.5 flex items-baseline gap-2 font-mono text-[0.68rem] font-medium uppercase tracking-wider text-dimmed"
+    >
       <span>Files</span>
-      <span class="count font-normal normal-case tracking-normal text-dimmed"
-        >· {{ artifacts.length }} file{{ artifacts.length === 1 ? "" : "s" }}</span
+      <span class="count font-normal normal-case tracking-normal"
+        >· {{ files.length }} file{{ files.length === 1 ? "" : "s" }}</span
       >
-    </h2>
-    <ul class="m-0 flex list-none flex-col gap-2 p-0">
+    </h3>
+    <ul class="m-0 flex list-none flex-col gap-1.5 p-0">
       <li
         v-for="row in rows"
         :key="row.key"
@@ -87,5 +90,5 @@ const rows = computed(() =>
         />
       </li>
     </ul>
-  </section>
+  </div>
 </template>

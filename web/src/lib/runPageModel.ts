@@ -57,6 +57,10 @@ export interface CallVm {
    *  own timeout signal; a SIGKILL 137 is not one): over budget. */
   timedOut: boolean;
   open: boolean;
+  /** The files this call sent (an `attach_file` call's `artifact` events,
+   *  live-view.md item 26), so a live page shows a picture where it was posted
+   *  before the Reply lands; absent for every other call. */
+  files?: TimelineArtifact[];
 }
 
 export interface QuietVm {
@@ -204,6 +208,10 @@ export interface RequestVm {
   text: string;
   at?: number;
   source?: TimelineSource;
+  /** The files that arrived with this message (`artifact` events with
+   *  `direction: "in"` that follow its `input`, live-view.md item 26): shown
+   *  nested in its card, where Slack showed them. */
+  files: TimelineArtifact[];
 }
 
 export interface MetaVm {
@@ -228,6 +236,9 @@ export interface ContextTurnVm {
 export interface ReplyVm {
   text: string;
   at?: number;
+  /** Every file the run sent (`direction: "out"`), shown nested in the Reply's
+   *  card: the reply is where a reader looks for what came back. */
+  files: TimelineArtifact[];
 }
 
 /** The coding post-step's PR, as the `pr_opened` event recorded it. */
@@ -257,10 +268,6 @@ export interface RunPageModel {
     reply: ReplyVm | null;
     /** The PR the coding post-step opened or edited, once the stream said so. */
     prOpened: PrOpenedVm | null;
-    /** The run's files (`artifact` events, live-view.md item 26), in event
-     *  order — what it received from the thread and what it sent. One block
-     *  on the page, never rows in the log. */
-    artifacts: TimelineArtifact[];
     /** True until the first painted change of any kind. */
     placeholder: boolean;
     allOpen: boolean;
@@ -455,7 +462,6 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
     log: [],
     reply: null,
     prOpened: null,
-    artifacts: [],
     placeholder: true,
     allOpen: false,
     stopMode: null,
@@ -594,17 +600,57 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
     pendingTurn = null;
   }
 
+  /** The message the next received file belongs to: the latest `input`. */
+  let lastInput: RequestVm | null = null;
+  /** Received files recorded before any input — held for the first message. */
+  const receivedBeforeInput: TimelineArtifact[] = [];
+  /** Every file the run sent, in event order — the Reply's list (the same array
+   *  the reply holds once it lands, so a late file still reaches it). */
+  const sent: TimelineArtifact[] = reactive([]);
+
+  /** A file lands where it was received or sent (live-view.md item 26): a
+   *  received file on the latest input's card (the Request or a Follow-up), a
+   *  sent file on the Reply and, until the Reply lands, on the `attach_file`
+   *  call that posted it — the call whose headline names the file, else the
+   *  newest such call (two files posted in one turn each find their own). */
+  function placeArtifact(artifact: TimelineArtifact): void {
+    if (artifact.direction === "in") {
+      if (lastInput) lastInput.files.push(artifact);
+      else receivedBeforeInput.push(artifact);
+      return;
+    }
+    sent.push(artifact);
+    const attaches = [...callVms.values()].filter((c) => c.tool === "attach_file");
+    const call =
+      attaches
+        .reverse()
+        .find((c) => c.headline.endsWith(`/${artifact.name}`) || c.headline.endsWith(` ${artifact.name}`)) ??
+      attaches[0];
+    if (call) {
+      (call.files ??= []).push(artifact);
+      call.open = true; // a posted file is worth the card's body: the picture shows where it was sent
+    }
+  }
+
   function apply(change: TimelineChange): void {
     state.placeholder = false;
     switch (change.kind) {
       case "input": {
-        const vm: RequestVm = { text: change.text, at: change.at, ...(change.source ? { source: change.source } : {}) };
+        const vm: RequestVm = {
+          text: change.text,
+          at: change.at,
+          ...(change.source ? { source: change.source } : {}),
+          // A file recorded before any input (never today — the copy follows the
+          // message it came on) belongs to the first message that arrives.
+          files: receivedBeforeInput.splice(0),
+        };
         // The first input is the request; a later one is a steered follow-up
         // and must never replace it, or the header would show the follow-up
         // as THE request. It takes its place in the timeline —
         // the runner emits it at the step boundary that read it.
         if (state.request) state.log.push({ kind: "followup", key: key("followup"), input: vm });
         else state.request = vm;
+        lastInput = vm;
         return;
       }
       case "step":
@@ -644,7 +690,7 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
         stepFor(change.step).items.push({ kind: "skill", skill: change.skill });
         return;
       case "artifact":
-        state.artifacts.push(change.artifact);
+        placeArtifact(change.artifact);
         return;
       case "context":
         state.context.push({ key: key("ctx"), at: change.at, text: change.text });
@@ -715,7 +761,7 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
       }
       case "answer":
         flushTurn("wrote the reply below"); // the reply's own thinking has no step to sit on
-        state.reply = { text: change.text, at: change.at };
+        state.reply = { text: change.text, at: change.at, files: sent };
         return;
     }
   }
@@ -928,6 +974,15 @@ export function parseFinishedFrame(data: string | undefined): { finishedAt: numb
  *  running card can tick its own elapsed in place (null on a history page:
  *  nothing there is live, so nothing ticks). */
 export const RunnerClockKey: InjectionKey<Ref<number | null>> = Symbol("sb-runner-clock");
+
+/** Where the page's files are served from (the seed's `artifacts`, live-view.md
+ *  item 26), provided by the run page to every card that lists files; null
+ *  when no store is configured, and the rows are text. */
+export const ArtifactLinksKey: InjectionKey<ArtifactsSeed | null> = Symbol("sb-artifact-links");
+
+/** True once the Reply has landed: the `attach_file` call cards then drop
+ *  their pictures, since the Reply carries the same files with theirs. */
+export const ReplyLandedKey: InjectionKey<Ref<boolean>> = Symbol("sb-reply-landed");
 
 /** Two model refs name one model when they are equal, or when one is a bare id
  *  (no provider) and the other is a ref whose name is that id — v0.4.0's runner

@@ -1,5 +1,5 @@
 import { mount } from "@vue/test-utils";
-import { defineComponent, h, provide, type Component, type Slots, type VNode } from "vue";
+import { defineComponent, h, provide, type Component, type InjectionKey, type Slots, type VNode } from "vue";
 import { createMemoryHistory, createRouter } from "vue-router";
 import ui from "@nuxt/ui/vue-plugin";
 import UApp from "@nuxt/ui/components/App.vue";
@@ -36,15 +36,18 @@ export interface MountAppOptions {
   /** A page's seed (stamped with every capability on, as the shell would) or the whole island. */
   seed?: PageSeed | WebSeed | null;
   eventSource?: EventSourceFactory;
+  /** Values a page normally provides to the component under test (an injection key and its value each). */
+  provides?: ReadonlyArray<readonly [InjectionKey<unknown>, unknown]>;
 }
 
 export function mountApp(component: Component, options: MountAppOptions = {}) {
-  const { seed = null, props, slots, eventSource } = options;
+  const { seed = null, props, slots, eventSource, provides = [] } = options;
   const island: WebSeed | null = seed === null ? null : { capabilities: ALL_ON, ...seed };
   const host = defineComponent({
     setup() {
       provide(SeedKey, island);
       if (eventSource) provide(EventSourceKey, eventSource);
+      for (const [key, value] of provides) provide(key, value);
       return () => h(UApp, null, { default: () => h(component, props, slots as unknown as Slots) });
     },
   });

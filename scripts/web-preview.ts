@@ -225,6 +225,16 @@ const HIST_EVENTS = [
     at: NOW - 2_345_000,
     seq: 11,
   },
+  // The file dropped with the follow-up, staged before the turn read it
+  // (docs/reference/specs/live-view.md item 26): the Follow-up card's received row.
+  {
+    type: "artifact",
+    direction: "in",
+    key: "threads/slack-C1-1700000000.000100/in/1700000000.000200/1-retry-cases.csv",
+    name: "retry-cases.csv",
+    size: 4_812,
+    contentType: "text/csv",
+  },
   {
     type: "skill_use",
     skill: "http-retries",
@@ -296,8 +306,8 @@ const HIST_EVENTS = [
   },
   // The run sends a screenshot back (docs/reference/specs/live-view.md item 26): the
   // `attach_file` pair and, between them, the `artifact` event the tool
-  // publishes once the store holds the file — the Files block's `sent` row,
-  // rendered inline because it is a PNG.
+  // publishes once the store holds the file — the Reply card's `sent` row,
+  // rendered inline because it is a PNG (and the call card's, until the Reply lands).
   modelTurn("m4", NOW - 760_000, 4_000, 24, {
     stopReason: "tool_use",
     model: "anthropic/claude-fable-5",
@@ -402,7 +412,7 @@ const HIST_STREAM = normalizeSpans([
   }),
   spanEnd("compose", "dispatch.compose", RECEIVED_AT + 4_900, RECEIVED_AT + 5_000, "root"),
   // A file the thread carried, staged into the workspace before the turn
-  // (docs/reference/specs/live-view.md item 26): the Files block's `received` row.
+  // (docs/reference/specs/live-view.md item 26): the Request card's received row.
   {
     type: "artifact",
     direction: "in",

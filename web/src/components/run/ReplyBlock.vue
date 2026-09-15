@@ -5,7 +5,9 @@
 // work, and last on a live page, where it lands as it arrives. The caption
 // says what the reply is, from the run's facts (`replyCaption`); the moment
 // sits at the right edge like every block heading.
+import type { TimelineArtifact } from "@core/channels/runTimeline.js";
 import MarkdownText from "../MarkdownText.vue";
+import MessageFiles from "./MessageFiles.vue";
 
 defineProps<{
   text: string;
@@ -14,6 +16,8 @@ defineProps<{
   whenTitle: string | undefined;
   /** `first` — under the Request, above the work; `last` — after the steps. */
   position: "first" | "last";
+  /** The files the run sent (live-view.md item 26), nested under the text. */
+  files: TimelineArtifact[];
 }>();
 </script>
 
@@ -42,5 +46,6 @@ defineProps<{
       >
     </h2>
     <MarkdownText :text="text" />
+    <MessageFiles v-if="files.length > 0" :files="files" />
   </section>
 </template>
