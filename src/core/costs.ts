@@ -1000,6 +1000,12 @@ export class AnthropicCostReportSource implements LlmCostSource {
   private async fetchCostReport(range: DateRange): Promise<{ rows: LlmCostRow[]; closedThrough: string | null }> {
     const rows: LlmCostRow[] = [];
     let closedThrough: string | null = null;
+    // The cost report never holds the open day, and the API refuses a range
+    // that begins there (400 "ending date must be after starting date", seen
+    // live on `?days=1`): the query ends at the open day's start, exclusive,
+    // and a range that is only the open day asks the cost report nothing.
+    const endExclusive = range.partialLastDay ? range.to : addDays(range.to, 1);
+    if (range.from >= endExclusive) return { rows, closedThrough };
     let page: string | null = null;
     for (let i = 0; ; i++) {
       // Like the non-USD check: refuse rather than mis-sum. A ≤90-day range at
@@ -1010,7 +1016,7 @@ export class AnthropicCostReportSource implements LlmCostSource {
         );
       const url = new URL(ANTHROPIC_COST_REPORT);
       url.searchParams.set("starting_at", `${range.from}T00:00:00Z`);
-      url.searchParams.set("ending_at", `${addDays(range.to, 1)}T00:00:00Z`);
+      url.searchParams.set("ending_at", `${endExclusive}T00:00:00Z`);
       url.searchParams.set("bucket_width", "1d");
       url.searchParams.append("group_by[]", "workspace_id");
       url.searchParams.set("limit", "31");
