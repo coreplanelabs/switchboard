@@ -30,6 +30,63 @@ export interface ArtifactRef {
  *  bot's process touches an artifact's bytes, and only in transit. */
 export interface ArtifactObject extends ArtifactHead {
   body: ReadableStream<Uint8Array>;
+  /** The slice `body` holds when the read asked for one (inclusive offsets
+   *  into the object; `size` stays the WHOLE object's). Absent, the body is
+   *  the whole object. */
+  part?: { start: number; end: number };
+}
+
+/** A ranged read that lands past the object's end: the size the 416 names. */
+export interface ArtifactUnsatisfiable extends ArtifactHead {
+  unsatisfiable: true;
+}
+
+/** RFC 9110's single-range forms, as the proxy accepts them and the stores
+ *  serve them: `bytes=start-end`, `bytes=start-` (to the end), `bytes=-suffix`
+ *  (the last `suffix` bytes). Anything else — a list of ranges, another unit,
+ *  an inverted pair, prose — is `undefined`: the read then ignores the header
+ *  and answers the whole object, which the RFC allows and every player takes. */
+export interface ByteRange {
+  start?: number;
+  end?: number;
+  suffix?: number;
+}
+
+export function parseByteRange(header: string | undefined): ByteRange | undefined {
+  if (!header) return undefined;
+  const m = /^\s*bytes=(\d*)-(\d*)\s*$/i.exec(header);
+  if (!m) return undefined;
+  const [, from, to] = m;
+  if (from === "" && to === "") return undefined;
+  if (from === "") return { suffix: Number(to) };
+  const start = Number(from);
+  if (to === "") return { start };
+  const end = Number(to);
+  return end < start ? undefined : { start, end };
+}
+
+/** The header the wire carries for a parsed range — canonical, one form each. */
+function rangeHeader(range: ByteRange): string {
+  if (range.suffix !== undefined) return `bytes=-${range.suffix}`;
+  return `bytes=${range.start}-${range.end ?? ""}`;
+}
+
+/** Where a parsed range lands on an object of `total` bytes: the inclusive
+ *  offsets, or null when the start is past the end (a 416). */
+export function resolveByteRange(range: ByteRange, total: number): { start: number; end: number } | null {
+  if (range.suffix !== undefined) {
+    if (range.suffix === 0 || total === 0) return null;
+    return { start: Math.max(0, total - range.suffix), end: total - 1 };
+  }
+  const start = range.start ?? 0;
+  if (start >= total) return null;
+  return { start, end: Math.min(total - 1, range.end ?? total - 1) };
+}
+
+/** What a read may ask for beyond the key. */
+export interface ArtifactGetOptions {
+  /** The request's `Range` header, verbatim; a form `parseByteRange` refuses is ignored. */
+  range?: string;
 }
 
 export interface ArtifactStore {
@@ -40,8 +97,11 @@ export interface ArtifactStore {
   presignGet(key: string): Promise<string>;
   /** The object's size and type, or null when there is none. */
   head(key: string): Promise<ArtifactHead | null>;
-  /** The object's bytes as a stream (a signed GET, minted per call), or null when there is none. */
-  get(key: string): Promise<ArtifactObject | null>;
+  /** The object's bytes as a stream (a signed GET, minted per call), or null
+   *  when there is none. With a `range`, the slice as `part` (the proxy's
+   *  players seek by it), the whole object when the store ignores the range,
+   *  or `unsatisfiable` with the size when the range starts past the end. */
+  get(key: string, opts?: ArtifactGetOptions): Promise<ArtifactObject | ArtifactUnsatisfiable | null>;
   /** Copy `size` bytes from `url` (a Slack `url_private`) into `key` without the bot holding them. */
   copyFromUrl(input: { url: string; size: number; key: string }): Promise<ArtifactRef>;
 }
@@ -147,16 +207,31 @@ export class R2ArtifactStore implements ArtifactStore {
     return { size, contentType: res.headers.get("content-type") ?? "application/octet-stream" };
   }
 
-  async get(key: string): Promise<ArtifactObject | null> {
-    const signed = await this.client.sign(new Request(this.objectUrl(key), { method: "GET", headers: IDENTITY }), {
+  async get(key: string, opts: ArtifactGetOptions = {}): Promise<ArtifactObject | ArtifactUnsatisfiable | null> {
+    // `range` rides beside the signature, not inside it: aws4fetch lists it
+    // among the headers it never signs, which is how S3 clients send it.
+    const range = parseByteRange(opts.range);
+    const headers = range ? { ...IDENTITY, range: rangeHeader(range) } : IDENTITY;
+    const signed = await this.client.sign(new Request(this.objectUrl(key), { method: "GET", headers }), {
       aws: { datetime: amzDate(this.clock()) },
     });
     const res = await this.fetchImpl(signed);
     if (res.status === 404) return null;
+    const contentType = res.headers.get("content-type") ?? "application/octet-stream";
+    if (res.status === 416) {
+      const total = /\/(\d+)\s*$/.exec(res.headers.get("content-range") ?? "");
+      if (!total) throw new Error(`artifact store: GET ${key} answered HTTP 416 without the object's size`);
+      return { unsatisfiable: true, size: Number(total[1]), contentType };
+    }
     if (!res.ok || !res.body) throw new Error(`artifact store: GET ${key} answered HTTP ${res.status}`);
+    if (res.status === 206) {
+      const m = /^bytes (\d+)-(\d+)\/(\d+)\s*$/.exec(res.headers.get("content-range") ?? "");
+      if (!m) throw new Error(`artifact store: GET ${key} answered HTTP 206 without a content-range`);
+      return { size: Number(m[3]), contentType, body: res.body, part: { start: Number(m[1]), end: Number(m[2]) } };
+    }
     const size = Number(res.headers.get("content-length"));
     if (!Number.isFinite(size) || size < 0) throw new Error(`artifact store: GET ${key} answered without a length`);
-    return { size, contentType: res.headers.get("content-type") ?? "application/octet-stream", body: res.body };
+    return { size, contentType, body: res.body };
   }
 
   async copyFromUrl(input: { url: string; size: number; key: string }): Promise<ArtifactRef> {
@@ -211,16 +286,21 @@ export class InMemoryArtifactStore implements ArtifactStore {
     return o ? { size: o.bytes.byteLength, contentType: o.contentType } : null;
   }
 
-  async get(key: string): Promise<ArtifactObject | null> {
+  async get(key: string, opts: ArtifactGetOptions = {}): Promise<ArtifactObject | ArtifactUnsatisfiable | null> {
     const o = this.objects.get(key);
     if (!o) return null;
+    const size = o.bytes.byteLength;
+    const range = parseByteRange(opts.range);
+    const part = range ? resolveByteRange(range, size) : undefined;
+    if (range && !part) return { unsatisfiable: true, size, contentType: o.contentType };
+    const bytes = part ? o.bytes.slice(part.start, part.end + 1) : o.bytes;
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
-        controller.enqueue(o.bytes);
+        controller.enqueue(bytes);
         controller.close();
       },
     });
-    return { size: o.bytes.byteLength, contentType: o.contentType, body };
+    return { size, contentType: o.contentType, body, ...(part ? { part } : {}) };
   }
 
   async copyFromUrl(input: { url: string; size: number; key: string }): Promise<ArtifactRef> {

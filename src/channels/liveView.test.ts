@@ -151,12 +151,12 @@ function recordingSink() {
  *  status, headers and body it writes; `finished` resolves the moment the
  *  handler ends the response (the await every async route needs — an event,
  *  not a poll); `fireClose` plays the client going away. */
-function fakeReqRes(method: string, url: string) {
+function fakeReqRes(method: string, url: string, headers: Record<string, string> = {}) {
   const listeners: Record<string, Array<() => void>> = {};
   const req = {
     method,
     url,
-    headers: {},
+    headers,
     socket: { remoteAddress: "203.0.113.9" },
     on: (ev: string, cb: () => void) => void (listeners[ev] ??= []).push(cb),
   };
@@ -2061,8 +2061,13 @@ describe("artifact route (item 26)", () => {
     return { registry, runs, artifacts, handler };
   }
 
-  async function get(h: ReturnType<typeof harness>, url: string, ctx?: LiveViewContext) {
-    const t = fakeReqRes("GET", url);
+  async function get(
+    h: ReturnType<typeof harness>,
+    url: string,
+    ctx?: LiveViewContext,
+    headers: Record<string, string> = {},
+  ) {
+    const t = fakeReqRes("GET", url, headers);
     expect(h.handler(t.req, t.res, ctx)).toBe(true);
     await t.finished;
     return t;
@@ -2091,6 +2096,7 @@ describe("artifact route (item 26)", () => {
         "x-content-type-options": "nosniff",
         "content-security-policy": "sandbox",
         "cache-control": "private, no-store",
+        "accept-ranges": "bytes",
       });
       expect([...png.bytes()]).toEqual([137, 80, 78]);
 
@@ -2138,6 +2144,53 @@ describe("artifact route (item 26)", () => {
       expect(audit).not.toHaveBeenCalled(); // a key the run never named is not a read of anything
       expect((await get(h, `/runs/r1/artifacts/${PNG.key}`)).status).toBe(200);
       expect(audit.mock.calls.map(([e]) => e)).toEqual([{ route: "artifact", runId: "r1", identity: "access:admin" }]);
+    });
+
+    // The players seek by byte range: a single `Range` answers 206 with the
+    // part's length and `Content-Range` against the whole size, every other
+    // header as on the whole object; a start past the end is 416 naming the
+    // size; a range the syntax does not admit is ignored and the whole object
+    // streams as a 200. Every answer advertises `Accept-Ranges: bytes`.
+    it("a single Range answers 206 with the part, Content-Range and Accept-Ranges; suffix and open forms clamp; past the end is 416 naming the size; bad syntax streams the whole object", async () => {
+      const h = harness();
+      const clip = artifact({ key: "runs/r1/out/5-clip.mp4", name: "clip.mp4", contentType: "video/mp4", size: 10 });
+      h.artifacts.put(clip.key, new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]), "video/mp4");
+      await h.runs.put(record("r1", [clip]));
+      const url = `/runs/r1/artifacts/${clip.key}`;
+
+      const mid = await get(h, url, undefined, { range: "bytes=2-4" });
+      expect(mid.status).toBe(206);
+      expect(mid.headers).toEqual({
+        "content-type": "video/mp4",
+        "content-length": "3",
+        "content-range": "bytes 2-4/10",
+        "accept-ranges": "bytes",
+        "content-disposition": 'attachment; filename="clip.mp4"',
+        "x-content-type-options": "nosniff",
+        "content-security-policy": "sandbox",
+        "cache-control": "private, no-store",
+      });
+      expect([...mid.bytes()]).toEqual([2, 3, 4]);
+
+      const tail = await get(h, url, undefined, { range: "bytes=-3" });
+      expect([tail.status, tail.headers["content-range"], [...tail.bytes()]]).toEqual([206, "bytes 7-9/10", [7, 8, 9]]);
+      const open = await get(h, url, undefined, { range: "bytes=8-" });
+      expect([open.status, open.headers["content-range"], [...open.bytes()]]).toEqual([206, "bytes 8-9/10", [8, 9]]);
+
+      const past = await get(h, url, undefined, { range: "bytes=10-" });
+      expect(past.status).toBe(416);
+      expect(past.headers["content-range"]).toBe("bytes */10");
+      expect(past.headers["accept-ranges"]).toBe("bytes");
+      expect(past.body()).toBe("");
+
+      const multi = await get(h, url, undefined, { range: "bytes=0-1,4-5" });
+      expect([multi.status, multi.headers["content-length"], multi.headers["accept-ranges"]]).toEqual([
+        200,
+        "10",
+        "bytes",
+      ]);
+      expect(multi.headers).not.toHaveProperty("content-range");
+      expect([...multi.bytes()]).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
     });
 
     it("a key the events name whose object is gone answers 410 naming the retention window", async () => {
