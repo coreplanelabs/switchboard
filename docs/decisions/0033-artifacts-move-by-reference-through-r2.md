@@ -1,6 +1,6 @@
 ---
 title: Run artifacts move by reference through one private R2 bucket — containers and the bot's Worker move the bytes over URLs the bot signs, in both directions, and the run record keeps the key
-status: accepted
+status: implemented
 date: 2026-09-14
 pattern: Presigned-URL upload (a browser writing to S3 while the app server only signs), applied to both directions of a run, with the run record as catalogue and access list
 ---
