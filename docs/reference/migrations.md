@@ -4,6 +4,10 @@ What an operator changes when a release breaks something: one section per such r
 
 A section says, in this order: what no longer works as it did, what replaces it, and the smallest edit that gets an installation from one to the other — a config key to rename, a command to re-run, a secret to add. Nothing else: history and reasons live in the changelog and the [decision records](../explanation/design-decisions.md).
 
+## 1.219.1
+
+- A follow-up in a coding thread now runs on the pull request the thread's newest run opened: the run record carries it (`pr`, [run-history](specs/run-history.md) item 2) and the resolver binds the follow-up's ref to its head branch when the message names none ([resident-repos](specs/resident-repos.md) item 29), so pushes land on the PR and a resubmitted description edits it instead of being refused on the repo default. A ref phrased in the message (`on branch x`) still wins, and a PR a person named in the thread keeps its rule. Nothing for an operator to change; records written before this release carry no `pr`, so an older thread behaves as before until a run in it opens or edits a pull request.
+
 ## 1.218.0
 
 - Runs on the `coding`, `review` and `explore` presets have two more tools: `recall`, which searches the thread's whole conversation log (every turn of every run of that agent in the thread, compacted turns included) and reads a turn back, and `notes`, a notepad per thread and agent that rides the next run's system prompt and is steered to pi after every compaction ([session-log](specs/session-log.md) item 10). Their prompts say what belongs in the notes. Nothing for an operator to change; the notepad lives in the session log object the previous release created.

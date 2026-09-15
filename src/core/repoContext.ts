@@ -84,6 +84,16 @@ export interface PrFacts {
 /** The most body `RepoContext.prDescription` carries — GitHub's PR body limit. */
 export const PR_BODY_CAP = 65_536;
 
+/** What the thread's run records say, beside what its text says
+ *  (docs/reference/specs/resident-repos.md item 29): the pull request the
+ *  thread's newest finished run opened or edited (`RunRecord.pr`, handed in by
+ *  the dispatcher from its one read of the thread's runs), with the repo the
+ *  record names and when that run ended. A follow-up that names no ref of its
+ *  own runs on that PR's head branch. */
+export interface RunRecordSignals {
+  pr?: { repo: string; number: number; at?: number };
+}
+
 export interface RepoContext {
   repo?: string;
   ref?: string;
@@ -326,6 +336,10 @@ interface ThreadSignals {
   /** Last user-turn PR reference (URL or `owner/name#N`), any repo; the
    *  resolver checks it against the resolved repo. */
   pr?: { repo: string; number: number };
+  /** When the user turn that named `pr` was written (its `at`, when the
+   *  history carries timestamps) — weighed against the end of a run that
+   *  opened a PR of its own (`RunRecordSignals.pr`). */
+  prAt?: number;
   /** Every user turn's binding-relevant signal, in order: a strong repo (URL,
    *  `owner/name#N`) or an address (`in <slug>` / `in <name>`) still to be
    *  vetted. The async resolver walks these from the last one back, vetting
@@ -352,7 +366,10 @@ export type ResidentSlugs = () => Promise<string[] | undefined>;
 
 const threadSignalsCache = new WeakMap<Array<{ role: string; text: string }>, ThreadSignals>();
 
-function threadSignals(history: Array<{ role: string; text: string }>, isResident?: ResidentPredicate): ThreadSignals {
+function threadSignals(
+  history: Array<{ role: string; text: string; at?: number }>,
+  isResident?: ResidentPredicate,
+): ThreadSignals {
   // Only the unvetted scan is memoized: a predicate can change the answer.
   const cached = isResident ? undefined : threadSignalsCache.get(history);
   if (cached) return cached;
@@ -378,7 +395,11 @@ function threadSignals(history: Array<{ role: string; text: string }>, isResiden
       const weak = s.repo ?? (s.onSlug ? slugOf(s.onSlug) : undefined);
       if (weak && (!isResident || safePredicate(isResident, weak))) out.repo = weak;
     }
-    if (s.pr) out.pr = s.pr;
+    if (s.pr) {
+      out.pr = s.pr;
+      if (h.at !== undefined) out.prAt = h.at;
+      else delete out.prAt;
+    }
   }
   if (!isResident) threadSignalsCache.set(history, out);
   return out;
@@ -432,9 +453,13 @@ export function repoFromThread(
  */
 export async function resolveRepoContext(
   msg: { text: string },
-  history: Array<{ role: string; text: string }> = [],
+  history: Array<{ role: string; text: string; at?: number }> = [],
   probe?: RepoProbe,
   residentSlugs?: ResidentSlugs,
+  /** What the thread's run records say (item 29): the PR the thread's newest
+   *  run opened. Absent for a message that starts a thread, a resume, a
+   *  spawned child, and every caller without the thread's runs in hand. */
+  records?: RunRecordSignals,
 ): Promise<RepoContext> {
   const s = extractSignals(msg.text);
   const thread = threadSignals(history);
@@ -565,8 +590,9 @@ export async function resolveRepoContext(
   // to pin the review to. A closed/merged PR, a failed fetch, or a malformed
   // SHA all leave `pr` unset (Slack-only) rather than risk posting a verdict
   // to a stale PR or an unpinned verdict that a newer push could inherit. The
-  // ref is never rebound from an inherited PR: a thread redirected with
-  // "on <branch>" keeps that binding.
+  // ref is never rebound from a PR a person named in an earlier turn: a thread
+  // redirected with "on <branch>" keeps that binding. The PR the thread's own
+  // run opened does bind it (below): that branch is where the work lives.
   if (repo && s.pr && repo === s.pr.repo) {
     out.pr = s.pr.number;
     out.prFromMessage = true;
@@ -575,8 +601,8 @@ export async function resolveRepoContext(
     if (prSize) out.prSize = prSize;
     if (facts) out.prDescription = facts;
   } else if (repo && !s.pr) {
-    const inherited = thread.pr;
-    if (inherited && inherited.repo === repo) {
+    const inherited = inheritedPr(thread, records, repo);
+    if (inherited) {
       const head = await openPrHeadSha(inherited);
       if ("sha" in head) {
         out.pr = inherited.number;
@@ -584,12 +610,44 @@ export async function resolveRepoContext(
         if (head.base) out.baseRef = head.base;
         if (head.size) out.prSize = head.size;
         if (head.facts) out.prDescription = head.facts;
+        // A PR the thread's own run opened is the branch the thread's work
+        // lives on (item 29): a follow-up that names no ref of its own runs
+        // there, so its pushes land on the PR and its description edits it
+        // — on the repo default the coding post-step could only refuse. A PR
+        // a person named stays as before, and a ref in the message wins.
+        if (inherited.source === "record" && !ref && head.ref) {
+          out.ref = head.ref;
+          out.refFromPr = true;
+        }
       } else {
         out.prUnpostable = { number: inherited.number, reason: head.reason };
       }
     }
   }
   return out;
+}
+
+/** The thread's pull request when the message names none (item 29): the last
+ *  one a person named in the thread's user turns, or the one the thread's
+ *  newest run opened (`records.pr`, off the run record), whichever is newer —
+ *  the turn's timestamp against the run's end. Undated on either side, the
+ *  run's wins: it is the thread's own work, and a person who means another PR
+ *  names it in the message. Either must belong to the resolved repo. */
+function inheritedPr(
+  thread: ThreadSignals,
+  records: RunRecordSignals | undefined,
+  repo: string,
+): { repo: string; number: number; source: "turn" | "record" } | undefined {
+  const turn =
+    thread.pr && thread.pr.repo === repo
+      ? { repo, number: thread.pr.number, source: "turn" as const, at: thread.prAt }
+      : undefined;
+  const record =
+    records?.pr && records.pr.repo === repo
+      ? { repo, number: records.pr.number, source: "record" as const, at: records.pr.at }
+      : undefined;
+  if (!turn || !record) return turn ?? record;
+  return turn.at !== undefined && record.at !== undefined && turn.at > record.at ? turn : record;
 }
 
 /** The fail-closed contract for an INHERITED PR: its head SHA, only if the PR
@@ -599,12 +657,15 @@ export async function resolveRepoContext(
 async function openPrHeadSha(pr: {
   repo: string;
   number: number;
-}): Promise<{ sha: string; base?: string; size?: PrSize; facts?: PrFacts } | { reason: "closed" | "unreachable" }> {
+}): Promise<
+  { sha: string; ref?: string; base?: string; size?: PrSize; facts?: PrFacts } | { reason: "closed" | "unreachable" }
+> {
   const head = await prHead(pr).catch(() => undefined);
   if (head?.state === "closed") return { reason: "closed" };
   if (head?.state === "open" && head.sha) {
     return {
       sha: head.sha,
+      ...(head.ref ? { ref: head.ref } : {}),
       ...(head.base ? { base: head.base } : {}),
       ...(head.size ? { size: head.size } : {}),
       ...(head.facts ? { facts: head.facts } : {}),

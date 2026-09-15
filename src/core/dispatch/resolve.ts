@@ -23,7 +23,13 @@ import {
   type ResidentExecutionConfig,
 } from "../../execution/factory.js";
 import { githubRepoProbe } from "../../execution/githubRepoProbe.js";
-import { resolveRepoContext, type RepoContext, type RepoProbe, type ResidentSlugs } from "../repoContext.js";
+import {
+  resolveRepoContext,
+  type RepoContext,
+  type RepoProbe,
+  type ResidentSlugs,
+  type RunRecordSignals,
+} from "../repoContext.js";
 import type { AgentSource } from "../runEvents.js";
 import type { Span } from "../trace/types.js";
 import type { ChannelIO, HistoryItem, IncomingMessage } from "../types.js";
@@ -38,10 +44,16 @@ export interface ResolveDeps {
    * Resolves the target repo/ref for a message (resident environments).
    * Defaults to the production resolver in repoContext.ts (explicit repo/PR/
    * branch signals in the message, then the thread-established repo from
-   * history); injectable for tests. No repo signal → {} → the per-thread
-   * executor path with no resident probe (total input contract).
+   * history, then the PR the thread's newest run opened — `records`, off the
+   * run record, resident-repos item 29); injectable for tests. No repo signal
+   * → {} → the per-thread executor path with no resident probe (total input
+   * contract).
    */
-  resolveRepoContext?: (msg: IncomingMessage, history: HistoryItem[]) => Promise<RepoContext> | RepoContext;
+  resolveRepoContext?: (
+    msg: IncomingMessage,
+    history: HistoryItem[],
+    records?: RunRecordSignals,
+  ) => Promise<RepoContext> | RepoContext;
 }
 
 /** What `readRequest` reads off the dispatch. */
@@ -184,6 +196,10 @@ export interface ResolveTargetContext {
   resolved: ResolvedRequest;
   resume: ResumeContext | undefined;
   root: Span;
+  /** What the thread's run records say (resident-repos item 29): the pull
+   *  request its newest finished run opened, from the dispatcher's one read
+   *  of the thread's runs; absent for a message that starts a thread. */
+  records?: RunRecordSignals;
 }
 
 /**
@@ -217,8 +233,13 @@ export function resolveTarget(deps: ResolveDeps, ctx: ResolveTargetContext): Res
       : needsRepo
         ? Promise.resolve(
             deps.resolveRepoContext
-              ? deps.resolveRepoContext(msg, history)
-              : resolveRepoContext(msg, history, ...repoVetFor(profile, deps.config.config.execution?.resident)),
+              ? deps.resolveRepoContext(msg, history, ctx.records)
+              : resolveRepoContext(
+                  msg,
+                  history,
+                  ...repoVetFor(profile, deps.config.config.execution?.resident),
+                  ctx.records,
+                ),
           ).then((ctx) => ctx ?? {})
         : Promise.resolve({}),
   );
