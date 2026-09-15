@@ -33,7 +33,7 @@ The seed is then built in a fixed order, within a fixed budget:
 | Part | Where it comes from | Why |
 |---|---|---|
 | the notepad | the session's notes, as the agent last wrote them | decisions and names survive every compaction and every run boundary |
-| the tail | the log's newest turns that fit the budget, cut after the newest compaction and to a whole user turn; results answering calls made before the cut are dropped from that first turn, and the run's notes say so | the model resumes mid-conversation, not from a retelling |
+| the tail | the log's newest turns that fit the budget, cut after the newest compaction and to a whole user turn; results answering calls made before the cut are dropped from that first turn, and the run's record notes it | the model resumes mid-conversation, not from a retelling |
 | the lines since | what people wrote in the thread after the previous run ended | the conversation the agent missed while it was not running |
 | the request | the message that started this run | as the last user turn |
 
@@ -51,6 +51,8 @@ The notepad and the tail are the two things a compaction cannot take away, and b
 ## The branch follows the transcript
 
 A coding follow-up continues the pull request its thread opened. The run record names the PR the coding post-step opened or edited, the dispatcher's read of the thread hands it to the target resolution, and a follow-up that names no branch of its own runs on that PR's head — so its pushes land on the PR and its resubmitted description edits it. A branch phrased in the message still wins, and a PR a person named in the thread keeps its own rule.
+
+On the resident, where a thread's worktree is bound to one branch for its whole life, the thread follows its own work once: the resident remembers the branches the thread's runs pushed, and a thread bound to the repository's default branch only because its first message named none moves onto the branch its own pull request lives on, with the tree recreated there if the run's end had already released it. A tree with uncommitted work is never moved; the follow-up runs where it is and the card says so ([resident-repos spec](../reference/specs/resident-repos.md) item 16).
 
 ## Across a bot restart
 
