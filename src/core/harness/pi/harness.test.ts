@@ -827,6 +827,12 @@ describe("runPiHarness — after a bot restart", () => {
     expect(notes).toContainEqual(
       expect.stringMatching(/^a model call failed while the bot was away \(fetch failed\); continuing$/),
     );
+    // The failed call is a note, never a turn (session-log item 2): the one
+    // step this generation mirrors lands right after the transcript it resumed
+    // from, and no step carries a turn without parts — the log stays whole for
+    // the next reclaim.
+    expect(w.steps.map((s) => s.firstIdx)).toEqual([transcript.length]);
+    expect(w.steps.every((s) => s.turns.every((t) => t.content.length > 0))).toBe(true);
   });
 
   it("re-attaches without judging the calls the log already held — the generation that died vetted them — and judges its own from the prompt on", async () => {
