@@ -220,6 +220,13 @@ export class BotHostPiContainer implements PiContainer {
     return child !== undefined && !child.exited;
   }
 
+  /** The bot host names no container: its pi is a child of one bot generation
+   *  and never outlives it, so a resume judges it by its pid alone (`alive`
+   *  answers no for a pid this container did not start). */
+  async identity(): Promise<string | undefined> {
+    return undefined;
+  }
+
   /** The group first (pi leads it), then pi itself: TERM, the grace, KILL;
    *  a pid this container never started, or one already ended, is nothing to end. */
   async kill(pid: number): Promise<void> {

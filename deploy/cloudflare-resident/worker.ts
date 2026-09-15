@@ -84,6 +84,7 @@ import { BASH_TIMEOUT_MAX_MS, BASH_TIMEOUT_MS, clampBashTimeout } from "../../sr
 import { selectBindingsToPurge } from "../../src/execution/bindingPurge.js";
 import { busyAfterKillReason, planForceDetach } from "../../src/execution/residentDetach.js";
 import { parseReadonly, planReadonlyAttach } from "../../src/execution/residentReadonly.js";
+import { decideWorktree, parseReuse, type WorktreeFacts } from "../../src/execution/residentReuse.js";
 import {
   depCacheScript,
   mutableCachePaths,
@@ -1029,6 +1030,10 @@ interface AttachOk {
   reconciled: boolean;
   /** True when a dirty/stale/missing worktree was wiped and recreated. */
   recreated: boolean;
+  /** Which container the tree is in: the kernel's boot id of this resident's
+   *  VM (docs/reference/specs/harness-pi.md item 8), so the run's row can name
+   *  the container its pi runs in. Absent when the kernel does not say. */
+  container?: string;
   deps: ThreadDepsMechanism;
   /** `ok` — credential file written; `unavailable` — writable attach but no
    *  token (see credentialsError); `none` — read-only attach, deliberately no
@@ -1371,6 +1376,16 @@ class StepError extends Error {
   }
 }
 
+/** A reusing attach (item 66) found no tree it can keep: gone, unreadable, or
+ *  built for the other mode. Nothing on disk was touched; the attach answers
+ *  409 `needs: "recreate"` and the caller decides what a run without its
+ *  workspace does. */
+class ReuseRefusedError extends Error {
+  constructor(readonly why: string) {
+    super(`reuse-refused: ${why}`);
+  }
+}
+
 /** Thrown after the resident has ALREADY been transitioned to `down` (reason
  *  persisted); signals callers the cycle is over without re-flipping. */
 class ResidentDownError extends Error {
@@ -1576,6 +1591,7 @@ export class ResidentDO extends Sandbox<Env> {
   private readonly hydrationMemoTtlMs = 60_000;
   private gitSetupDone = false;
   private stageDirsReady = new Set<string>();
+  private containerIdMemo: string | undefined = undefined;
 
   /** The incarnation: one isolate paired with one container runtime
    *  (docs/reference/specs/resident-repos.md item 22). Minted when the object
@@ -1604,6 +1620,7 @@ export class ResidentDO extends Sandbox<Env> {
     this.hydratedVerdictAt = 0;
     this.gitSetupDone = false;
     this.stageDirsReady.clear();
+    this.containerIdMemo = undefined;
     this.depsStoreDirReady = false;
     this.depsInstallSlots = null;
   }
@@ -4306,6 +4323,7 @@ export class ResidentDO extends Sandbox<Env> {
     refHint: string | null,
     readonly = false,
     wantSha: string | null = null,
+    reuse = false,
     record?: ResidentRecord,
     traceparent?: string,
   ): Promise<AttachOk | ThreadErr> {
@@ -4314,7 +4332,7 @@ export class ResidentDO extends Sandbox<Env> {
     const t0 = systemClock();
     const trace = createStepTrace(t0);
     const res = await this.stepTrace.run(trace, () =>
-      this.attachThreadTraced(threadKey, refHint, readonly, wantSha, record, t0),
+      this.attachThreadTraced(threadKey, refHint, readonly, wantSha, reuse, record, t0),
     );
     // The same steps as the resident's own `resident.attach` root (item 22).
     emitStepRoot("resident.attach", t0, trace.steps(), traceparent, "error" in res ? refusalOutcome(res) : "ok");
@@ -4327,6 +4345,7 @@ export class ResidentDO extends Sandbox<Env> {
     refHint: string | null,
     readonly: boolean,
     wantSha: string | null,
+    reuse: boolean,
     record: ResidentRecord | undefined,
     t0: number,
   ): Promise<AttachOk | ThreadErr> {
@@ -4346,7 +4365,7 @@ export class ResidentDO extends Sandbox<Env> {
       // container under it (and isIdle never parks the cycle mid-attach).
       this.attachesInFlight++;
       try {
-        return await this.attachThreadBody(threadKey, refHint, readonly, wantSha, resourceId, t0, record);
+        return await this.attachThreadBody(threadKey, refHint, readonly, wantSha, reuse, resourceId, t0, record);
       } finally {
         this.attachesInFlight--;
       }
@@ -4376,6 +4395,8 @@ export class ResidentDO extends Sandbox<Env> {
     refHint: string | null,
     readonly: boolean,
     wantSha: string | null,
+    /** A resumed run's attach (item 66): keep the thread's tree as it stands, or refuse. */
+    reuse: boolean,
     resourceId: string,
     t0: number,
     recordFromRoute?: ResidentRecord,
@@ -4439,6 +4460,7 @@ export class ResidentDO extends Sandbox<Env> {
         threadKey,
         refHint,
         wantSha,
+        reuse,
         slug,
         t0,
         facts,
@@ -4460,6 +4482,7 @@ export class ResidentDO extends Sandbox<Env> {
     threadKey: string;
     refHint: string | null;
     wantSha: string | null;
+    reuse: boolean;
     slug: string;
     t0: number;
     facts: RepoFacts;
@@ -4468,7 +4491,7 @@ export class ResidentDO extends Sandbox<Env> {
     mode: ReturnType<typeof planReadonlyAttach>;
     rollback: () => Promise<void>;
   }): Promise<AttachOk | ThreadErr> {
-    const { threadKey, refHint, wantSha, slug, t0, facts, record, binding, mode, rollback } = input;
+    const { threadKey, refHint, wantSha, reuse, slug, t0, facts, record, binding, mode, rollback } = input;
 
     // Command-level token mint — before the lock so mint latency
     // never holds the mutex, and failure never blocks the attach.
@@ -4545,11 +4568,17 @@ export class ResidentDO extends Sandbox<Env> {
         const threadLockKey = await this.lockfileKey(sha);
         const recreated = await this.ensureThreadWorktree(binding, sha, mode.originUrl, mode.modeSwitch, {
           detached: target.kind === "sha",
+          reuse,
         });
         return { sha, threadLockKey, recreated };
       }, ATTACH_MUTEX_WAIT_MS);
     } catch (err) {
       await rollback();
+      // A reusing attach found no tree it can keep (item 66): nothing was
+      // wiped, and the caller (not this resident) decides what a run
+      // without its workspace does.
+      if (err instanceof ReuseRefusedError)
+        return { error: `reuse-refused: ${err.why}`, status: 409, needs: "recreate" };
       if (err instanceof MirrorBusyError) {
         const s = await this.getStatus();
         return { error: errMsg(err), status: 503, state: s.state, reason: "mirror-busy" };
@@ -4617,6 +4646,9 @@ export class ResidentDO extends Sandbox<Env> {
     // step counts it — the admission's free-space term is a live `df`, and the
     // per-part projection it reads from the sample moves only with a cycle.
 
+    // Which container the tree is in, for the run's row (harness-pi item 8):
+    // memoized per incarnation, so this is a read after the first attach.
+    const container = await this.containerIdentity();
     return {
       workspace: binding.worktreePath,
       ref: binding.ref,
@@ -4624,6 +4656,7 @@ export class ResidentDO extends Sandbox<Env> {
       user: binding.user,
       reconciled: deps.reconciled,
       recreated: locked.value.recreated,
+      ...(container !== undefined ? { container } : {}),
       deps: deps.deps,
       credentials,
       ...(credentialsError ? { credentialsError } : {}),
@@ -4634,9 +4667,14 @@ export class ResidentDO extends Sandbox<Env> {
     };
   }
 
-  /** Ensure the worktree exists, wiping dirty/stale trees. Returns
-   *  true when the tree was (re)created. MUST be called holding the mirror
-   *  mutex — the clone reads the mirror.
+  /** Ensure the worktree exists. A provisioning attach wipes dirty/stale
+   *  trees; a reusing attach (`opts.reuse`, item 66) keeps a readable tree
+   *  exactly as it stands (the dirt and the HEAD are the resumed run's own
+   *  work) and throws `ReuseRefusedError` for one it cannot keep, touching
+   *  nothing. The decision is the pure `decideWorktree`; this method measures
+   *  the facts and runs the verdict. Returns true when the tree was
+   *  (re)created. MUST be called holding the mirror mutex: the clone reads
+   *  the mirror.
    *
    *  "Dirty" is tracked-file dirt (`status --porcelain -uno`): untracked
    *  scratch files are the thread's own state and survive re-attach.
@@ -4658,8 +4696,9 @@ export class ResidentDO extends Sandbox<Env> {
     modeSwitch: boolean,
     /** `detached`: the bound ref is gone from the mirror and `sha` is the
      *  expected commit it still holds (item 51) — the tree is checked out at
-     *  that commit, detached, instead of at a branch. */
-    opts: { detached: boolean } = { detached: false },
+     *  that commit, detached, instead of at a branch. `reuse`: a resumed
+     *  run's attach (item 66): keep the tree as it stands, or refuse. */
+    opts: { detached: boolean; reuse: boolean } = { detached: false, reuse: false },
   ): Promise<boolean> {
     const wt = binding.worktreePath;
     const threadDir = parentDir(wt);
@@ -4667,32 +4706,38 @@ export class ResidentDO extends Sandbox<Env> {
     // 700 + thread-user ownership: other thread users cannot traverse in.
     await this.runOk(["install", "-d", "-m", "700", "-o", binding.user, "-g", binding.user, threadDir], "thread-dir");
 
-    // A tree built for the other mode (item 50) is wiped before any other
-    // check: a mirror-origin, credential-less tree must never serve a
-    // writable run, and a GitHub-origin tree must never serve a read-only one.
-    let recreate = modeSwitch;
-    const exists = !recreate && (await this.run(["test", "-d", `${wt}/.git`])).exitCode === 0;
-    if (exists) {
+    // What is on disk, measured as the thread user. A tree built for the
+    // other mode (item 50) is decided before any probe: a mirror-origin,
+    // credential-less tree must never serve a writable run, and a
+    // GitHub-origin tree must never serve a read-only one. The ancestry probe
+    // is a provisioning attach's alone: a reusing attach never judges the HEAD.
+    const facts: WorktreeFacts = { exists: false };
+    if (!modeSwitch && (await this.run(["test", "-d", `${wt}/.git`])).exitCode === 0) {
+      facts.exists = true;
       const status = await this.threadRun(binding.user, wt, "git status --porcelain -uno", DEFAULT_EXEC_TIMEOUT_MS);
       const head = await this.threadRun(binding.user, wt, "git rev-parse HEAD", DEFAULT_EXEC_TIMEOUT_MS);
       if (status.exitCode !== 0 || head.exitCode !== 0) {
-        recreate = true; // unreadable/corrupt (or owned by a previous pool user)
-      } else if (status.stdout.trim() !== "") {
-        recreate = true; // dirty tracked files
+        // unreadable/corrupt (or owned by a previous pool user)
+        facts.readable = false;
+        facts.detail = (status.exitCode !== 0 ? status.stderr : head.stderr).trim().split("\n")[0]?.slice(0, 200) ?? "";
       } else {
-        const headSha = head.stdout.trim();
-        if (headSha !== sha) {
+        facts.readable = true;
+        facts.dirty = status.stdout.trim() !== "";
+        facts.head = head.stdout.trim();
+        if (!opts.reuse && !facts.dirty && facts.head !== sha) {
           const anc = await this.threadRun(
             binding.user,
             wt,
             `git merge-base --is-ancestor ${sha} HEAD`,
             DEFAULT_EXEC_TIMEOUT_MS,
           );
-          if (anc.exitCode !== 0) recreate = true; // stale: behind/diverged from the mirror tip
+          facts.descendsFromTip = anc.exitCode === 0;
         }
       }
-      if (!recreate) return false;
     }
+    const decision = decideWorktree({ reuse: opts.reuse, modeSwitch, sha, worktreePath: wt, facts });
+    if (decision.kind === "refuse") throw new ReuseRefusedError(decision.why);
+    if (decision.kind === "reuse") return false;
 
     await this.runOk(["rm", "-rf", wt], "worktree-clean");
     if (opts.detached) {
@@ -4725,6 +4770,24 @@ export class ResidentDO extends Sandbox<Env> {
       DEFAULT_EXEC_TIMEOUT_MS,
     );
     return true;
+  }
+
+  /** Which container this is: the kernel's boot id, one per VM boot and
+   *  world-readable, so the run's pool user reads the same word from inside
+   *  (docs/reference/specs/harness-pi.md item 8). Memoized per incarnation (a
+   *  replaced runtime clears it with the other memos). Undefined when the
+   *  kernel does not say or the command could not run: then the answer names
+   *  no container, and nothing is judged by it. */
+  private async containerIdentity(): Promise<string | undefined> {
+    if (this.containerIdMemo !== undefined) return this.containerIdMemo;
+    try {
+      const word = (await this.runOk(["cat", "/proc/sys/kernel/random/boot_id"], "boot-id")).trim();
+      if (!/^[A-Za-z0-9-]{1,64}$/.test(word)) return undefined;
+      this.containerIdMemo = word;
+      return word;
+    } catch {
+      return undefined;
+    }
   }
 
   /** Read-only attach (item 50): make sure the tree carries no credential file
@@ -7475,13 +7538,15 @@ async function handleAttach(env: Env, body: Record<string, unknown>, traceparent
   if ("error" in readonly) return json({ error: readonly.error }, 400);
   const want = parseWantSha(body.sha);
   if ("error" in want) return json({ error: want.error }, 400);
+  const reuse = parseReuse(body.reuse);
+  if ("error" in reuse) return json({ error: reuse.error }, 400);
   // Post-validation, the answer streams like /exec (item 59): heartbeat
   // whitespace then ONE JSON document over HTTP 200, so an attach that waits
   // on a deps install (minutes) cannot lose the connection the way a plain
   // response does (`fetch failed` a few minutes in). A refusal
   // carries its `status` in the body; `ResidentExecutor.attach` reads it there.
   return streamHeartbeatJson(
-    ctx.stub.attachThread(ctx.threadKey, refHint, readonly.readonly, want.sha, ctx.record, traceparent),
+    ctx.stub.attachThread(ctx.threadKey, refHint, readonly.readonly, want.sha, reuse.reuse, ctx.record, traceparent),
     (result) => result,
     (err) => ({ error: errMsg(err), status: 500 }),
   );

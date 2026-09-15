@@ -13,7 +13,11 @@ import {
   resetResidentProbeCache,
   residentOnboardedProbe,
   residentSlugsLister,
+  workspaceBindingFor,
+  workspaceBindingOf,
+  WorkspaceReattachRefusedError,
   type ExecutorFactoryOptions,
+  type WorkspaceBinding,
 } from "./factory.js";
 import { resolveGithubToken } from "./githubApp.js";
 
@@ -563,6 +567,128 @@ describe("makeExecutor resident selection", () => {
     stubFetch();
     await expect(makeExecutor(residentOpts(), repoCtx())).rejects.toThrow(/RESIDENT_OPERATOR_TOKEN is not set/);
   });
+
+  // Feature: docs/reference/specs/run-history.md item 54, resident-repos.md item 66:
+  // a resumed run re-attaches where its row says it ran, and never provisions
+  // again: the resident is asked to keep the tree as it stands, a refusal or an
+  // unreachable resident is a typed error the dispatcher restarts the run on,
+  // and the backend the row recorded is the only one consulted.
+  describe("on a resume (ctx.reattach): re-attach, never re-provision", () => {
+    const recorded: WorkspaceBinding = {
+      backend: "resident",
+      workspace: "/workspace/threads/t/master",
+      user: "worker2",
+      container: "vm-1",
+    };
+    const attachOk = (over: Record<string, unknown> = {}) => ({
+      body: {
+        workspace: "/workspace/threads/t/master",
+        ref: "master",
+        sha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05",
+        user: "worker2",
+        container: "vm-1",
+        recreated: false,
+        ...over,
+      },
+    });
+
+    it("a recorded resident binding attaches with reuse:true and answers the resident executor, its binding carrying the container", async () => {
+      stubEnvs();
+      const { calls, bodies } = stubFetch({ body: { state: "warm", reason: "" } }, attachOk());
+      const sel = await makeExecutor(residentOpts(), { ...repoCtx(), reattach: recorded });
+      expect(sel.executor).toBeInstanceOf(ResidentExecutor);
+      expect(sel.resident).toBe(true);
+      expect(calls).toEqual(["/status", "/attach"]);
+      expect(bodies[1]).toMatchObject({ reuse: true, refHint: "master" });
+      expect(sel.binding?.container).toBe("vm-1");
+      expect(workspaceBindingFor(sel)).toEqual(recorded);
+    });
+
+    it("a fresh run (no reattach) never sends reuse: the body is the one every fresh attach always sent", async () => {
+      stubEnvs();
+      const { bodies } = stubFetch({ body: { state: "warm", reason: "" } }, attachOk());
+      await makeExecutor(residentOpts(), repoCtx());
+      expect(bodies[1]).not.toHaveProperty("reuse");
+    });
+
+    it("the resident refusing to reuse the tree (409 needs recreate) is a WorkspaceReattachRefusedError naming why; no sandbox is provisioned", async () => {
+      stubEnvs();
+      const { calls } = stubFetch(
+        { body: { state: "warm", reason: "" } },
+        {
+          status: 409,
+          body: { error: "reuse-refused: no worktree at /workspace/threads/t/master", needs: "recreate" },
+        },
+      );
+      const err = await makeExecutor(residentOpts(), { ...repoCtx(), reattach: recorded }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(WorkspaceReattachRefusedError);
+      expect((err as Error).message).toContain("reuse-refused: no worktree at /workspace/threads/t/master");
+      expect(calls).toEqual(["/status", "/attach"]); // no third call: nothing else was provisioned
+    });
+
+    it("an unreachable resident, or one in a state that cannot serve, refuses the re-attach the same way instead of falling back cold", async () => {
+      stubEnvs();
+      stubFetch({ reject: "fetch failed" });
+      const unreachable = await makeExecutor(residentOpts(), { ...repoCtx(), reattach: recorded }).catch(
+        (e: unknown) => e,
+      );
+      expect(unreachable).toBeInstanceOf(WorkspaceReattachRefusedError);
+      expect((unreachable as Error).message).toMatch(/resident unreachable \(.*fetch failed/);
+      resetResidentProbeCache();
+      stubFetch({ body: { state: "restoring", reason: "rehydrating" } });
+      const restoring = await makeExecutor(residentOpts(), { ...repoCtx(), reattach: recorded }).catch(
+        (e: unknown) => e,
+      );
+      expect(restoring).toBeInstanceOf(WorkspaceReattachRefusedError);
+      expect((restoring as Error).message).toContain("resident restoring (rehydrating)");
+    });
+
+    it("any other attach failure on a re-attach (a mirror-busy 503) is the same typed refusal, never the per-thread fallback", async () => {
+      stubEnvs();
+      stubFetch(
+        { body: { state: "warm", reason: "" } },
+        { status: 503, body: { error: "mirror busy", state: "refreshing", reason: "mirror-busy" } },
+      );
+      const err = await makeExecutor(residentOpts(), { ...repoCtx(), reattach: recorded }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(WorkspaceReattachRefusedError);
+      expect((err as Error).message).toContain("mirror busy");
+    });
+
+    it("a resident whose answer names another worktree or another pool user than the row recorded is refused: that tree is not the run's", async () => {
+      stubEnvs();
+      stubFetch({ body: { state: "warm", reason: "" } }, attachOk({ user: "worker5" }));
+      const err = await makeExecutor(residentOpts(), { ...repoCtx(), reattach: recorded }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(WorkspaceReattachRefusedError);
+      expect((err as Error).message).toContain("as worker5");
+      expect((err as Error).message).toContain("as worker2");
+    });
+
+    it("a recorded sandbox binding re-makes the per-thread executor with ZERO resident calls: a run that started cold is never moved onto the resident", async () => {
+      stubEnvs();
+      const { fn } = stubFetch();
+      const sel = await makeExecutor(residentOpts(), {
+        ...repoCtx(),
+        reattach: { backend: "sandbox" },
+      });
+      expect(sel.executor).toBeInstanceOf(CloudflareSandboxExecutor);
+      expect(sel.note).toBeUndefined();
+      expect(fn).not.toHaveBeenCalled();
+    });
+
+    it("a resident binding without a configured resident, or without a resolved repo, cannot be re-attached and says so", async () => {
+      stubEnvs();
+      stubFetch();
+      const noRepo = await makeExecutor(residentOpts(), { ...ctxOf(AGENTS.coding), reattach: recorded }).catch(
+        (e: unknown) => e,
+      );
+      expect(noRepo).toBeInstanceOf(WorkspaceReattachRefusedError);
+      const noResident = await makeExecutor(
+        { execution: { type: "cloudflare", url: "https://sandbox.example" }, ...dirs() },
+        { ...repoCtx(), reattach: recorded },
+      ).catch((e: unknown) => e);
+      expect(noResident).toBeInstanceOf(WorkspaceReattachRefusedError);
+    });
+  });
 });
 
 // Feature: docs/reference/specs/execution.md item 18 — the two machine classes
@@ -836,5 +962,45 @@ describe("residentSlugsLister", () => {
     await expect(list?.()).resolves.toBeUndefined();
     await expect(list?.()).resolves.toBeUndefined();
     expect(fn).toHaveBeenCalledTimes(1); // second call answered from the outage window
+  });
+});
+
+// Feature: docs/reference/specs/run-history.md item 54: the binding the row
+// records at the claim (`state.binding`) and how the next generation reads it.
+describe("the workspace binding on the row", () => {
+  it("workspaceBindingFor names the backend and, from a resident attach, the worktree, the pool user and the container; nothing for a run without a backend", () => {
+    expect(
+      workspaceBindingFor({
+        executor: new LocalExecutor("/tmp/x"),
+        backend: "resident",
+        resident: true,
+        binding: {
+          ref: "main",
+          sha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05",
+          workspace: "/workspace/threads/t/main",
+          user: "worker3",
+          container: "vm-9",
+        },
+      }),
+    ).toEqual({ backend: "resident", workspace: "/workspace/threads/t/main", user: "worker3", container: "vm-9" });
+    expect(workspaceBindingFor({ executor: new LocalExecutor("/tmp/x"), backend: "sandbox" })).toEqual({
+      backend: "sandbox",
+    });
+    expect(workspaceBindingFor({ executor: new LocalExecutor("/tmp/x") })).toBeUndefined();
+  });
+
+  it("workspaceBindingOf reads a binding this build wrote and answers none for another shape", () => {
+    expect(workspaceBindingOf({ backend: "resident", workspace: "/w", user: "worker2", container: "vm-1" })).toEqual({
+      backend: "resident",
+      workspace: "/w",
+      user: "worker2",
+      container: "vm-1",
+    });
+    expect(workspaceBindingOf({ backend: "sandbox" })).toEqual({ backend: "sandbox" });
+    expect(workspaceBindingOf({ backend: "sandbox", user: 7 })).toEqual({ backend: "sandbox" });
+    expect(workspaceBindingOf({ backend: "mainframe" })).toBeUndefined();
+    expect(workspaceBindingOf({ workspace: "/w" })).toBeUndefined();
+    expect(workspaceBindingOf(undefined)).toBeUndefined();
+    expect(workspaceBindingOf("resident")).toBeUndefined();
   });
 });

@@ -5,12 +5,18 @@ import type { Span } from "../core/trace/types.js";
 import type { ResidentStep } from "./residentStepTrace.js";
 import { residentTraceOf, type ResidentTrace } from "./residentTrace.js";
 import { mkdirSync } from "node:fs";
-import type { AgentDef, Identity } from "../agents/registry.js";
+import type { AgentDef, Identity, MachineClass } from "../agents/registry.js";
 import type { RunProfile } from "../config/profile.js";
 import { LocalExecutor, type Executor } from "./executor.js";
 import { E2BExecutor } from "./e2b.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
-import { ResidentExecutor, ResidentNeedsRefError, type ResidentBinding, type ResidentStatusProbe } from "./resident.js";
+import {
+  ResidentExecutor,
+  ResidentNeedsRefError,
+  type ResidentBinding,
+  type ResidentExecutorOptions,
+  type ResidentStatusProbe,
+} from "./resident.js";
 import { repoResourceId } from "../core/residentAdmin.js";
 import { resolveGithubToken, type GithubTokenScope } from "./githubApp.js";
 import { isServiceable } from "./residentState.js";
@@ -80,6 +86,79 @@ export interface ExecutorContext {
   /** the commit `ref` is expected to be at (a resolved PR head) — the resident
    *  fetches a mirror whose tip lags it (docs/reference/specs/resident-repos.md item 51) */
   headSha?: string;
+  /** A resumed run's recorded binding (docs/reference/specs/run-history.md item 54):
+   *  where the run's workspace is. Set, the factory re-attaches THERE and never
+   *  provisions again: the recorded backend is the only one consulted, the
+   *  resident is asked to keep the tree as it stands, and a refusal or an
+   *  unreachable backend is a `WorkspaceReattachRefusedError`, never a fallback.
+   *  Absent for every fresh run, which provisions as it always did. */
+  reattach?: WorkspaceBinding;
+}
+
+/** Where a run's workspace is (docs/reference/specs/run-history.md item 54):
+ *  recorded on the run's ledger row at the claim (`state.binding`) and read
+ *  back by the generation that resumes the run, so it re-attaches where the
+ *  run ran instead of provisioning as for a new one. */
+export interface WorkspaceBinding {
+  /** The backend the run's commands execute on: the one a resume consults, and the only one. */
+  backend: Backend;
+  /** The worktree the resident bound for the thread; absent on a per-thread
+   *  backend, whose workspace is the container's own. */
+  workspace?: string;
+  /** The pool user the resident runs the thread's commands as. */
+  user?: string;
+  /** The identity of the container the workspace is in (docs/reference/specs/harness-pi.md
+   *  item 8), when the attach answered one: the resident's is its VM's boot id. */
+  container?: string;
+}
+
+const BACKENDS: readonly Backend[] = ["local", "resident", "sandbox", "e2b"];
+
+/** The binding a previous generation wrote on the row, when it has the shape
+ *  this build reads; anything else is no binding (the run provisions afresh, once). */
+export function workspaceBindingOf(value: unknown): WorkspaceBinding | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const v = value as Record<string, unknown>;
+  if (typeof v.backend !== "string" || !(BACKENDS as readonly string[]).includes(v.backend)) return undefined;
+  return {
+    backend: v.backend as Backend,
+    ...(typeof v.workspace === "string" && v.workspace ? { workspace: v.workspace } : {}),
+    ...(typeof v.user === "string" && v.user ? { user: v.user } : {}),
+    ...(typeof v.container === "string" && v.container ? { container: v.container } : {}),
+  };
+}
+
+/** The binding to record for a selection: the backend and, from a resident
+ *  attach, the worktree, the pool user and the container. Nothing for a class
+ *  without a workspace (`none`): there is nothing to re-attach. */
+export function workspaceBindingFor(
+  selection: ExecutorSelection,
+  machine: MachineClass = "repo-resident",
+): WorkspaceBinding | undefined {
+  if (machine === "none" || selection.backend === undefined) return undefined;
+  const b = selection.binding;
+  return {
+    backend: selection.backend,
+    ...(b?.workspace !== undefined ? { workspace: b.workspace } : {}),
+    ...(b?.user !== undefined ? { user: b.user } : {}),
+    ...(b?.container !== undefined ? { container: b.container } : {}),
+  };
+}
+
+/** A resumed run's workspace could not be re-attached where its row says it
+ *  ran (docs/reference/specs/run-history.md item 54): the resident refused to
+ *  keep the tree, could not be reached or cannot serve, or its answer named
+ *  another tree than the run's. Nothing else was provisioned (the run's work
+ *  is on that backend or nowhere, so no other backend is tried), and the
+ *  dispatcher restarts the run from its request, saying why. */
+export class WorkspaceReattachRefusedError extends Error {
+  constructor(
+    readonly recorded: WorkspaceBinding,
+    readonly why: string,
+  ) {
+    super(`the run's workspace on the ${recorded.backend} backend could not be re-attached: ${why}`);
+    this.name = "WorkspaceReattachRefusedError";
+  }
 }
 
 /** Executor selection result. `note` is present when resident selection fell
@@ -156,6 +235,9 @@ export async function makeExecutor(
   if (machine === "none") {
     return { executor: new NullExecutor(ctx.agent.name), backend: "local" };
   }
+  // A resume re-attaches where the row says the run ran (run-history item 54)
+  // and never provisions again: the branches below are a fresh run's.
+  if (ctx.reattach !== undefined) return reattachWorkspace(opts, ctx, ctx.reattach, span);
   // `blank` → the per-thread backend with an empty workspace: no repository,
   // whatever the context carries (a blank run never resolves one), and no
   // credential (nothing says this run acts as anyone). No resident probe.
@@ -251,6 +333,84 @@ export async function makeExecutor(
   };
 }
 
+/** The resumed run's re-attach (run-history item 54): the recorded backend
+ *  and only that one. A per-thread backend is keyed by the thread, so the same
+ *  executor reaches the same container (or its replacement, which the pi
+ *  harness tells apart by the container's identity), and the resident is never
+ *  probed for it: a run that started cold is not moved onto the resident. A
+ *  recorded resident is probed and asked to keep the thread's tree as it
+ *  stands (`reuse`); anything short of a binding on the run's own tree
+ *  (unreachable, not serviceable, a refusal, a needs-ref since a resume never
+ *  binds a branch, an answer naming another tree or user) is a
+ *  `WorkspaceReattachRefusedError`, and no sandbox is provisioned in its place. */
+async function reattachWorkspace(
+  opts: ExecutorFactoryOptions,
+  ctx: ExecutorContext,
+  recorded: WorkspaceBinding,
+  span?: Span,
+): Promise<ExecutorSelection> {
+  const refuse = (why: string) => new WorkspaceReattachRefusedError(recorded, oneLine(why));
+  if (recorded.backend !== "resident") {
+    const input =
+      ctx.profile.machine === "blank"
+        ? { threadKey: ctx.threadKey, resolveEnvs: async () => ({}) }
+        : perThreadCheckout(ctx);
+    return { executor: await makePerThreadExecutor(opts, input), backend: perThreadBackend(opts) };
+  }
+  const resident = opts.execution?.resident;
+  if (!resident) throw refuse("no resident backend is configured in this process");
+  if (!ctx.repo) throw refuse("the run's row names no repository to re-attach on");
+  const tokenEnv = resident.tokenEnv ?? "RESIDENT_OPERATOR_TOKEN";
+  const token = processSecrets.named(tokenEnv);
+  if (!token) throw new Error(`execution.resident is configured but ${tokenEnv} is not set`);
+  const resource = repoResourceId(ctx.repo);
+  const probe = await probeResident(resident, token, resource, span);
+  if (probe.kind === "unreachable") throw refuse(`resident unreachable (${probe.error})`);
+  if (!isServiceable(probe.state, probe.reason))
+    throw refuse(`resident ${probe.state}${probe.reason ? ` (${probe.reason})` : ""}`);
+  const nonWarm =
+    probe.state === "warm" ? undefined : oneLine(`${probe.state}${probe.reason ? ` (${probe.reason})` : ""}`);
+  const executor = new ResidentExecutor({
+    baseUrl: resident.baseUrl,
+    token: token.reveal(),
+    resource,
+    threadKey: ctx.threadKey,
+    refHint: ctx.ref,
+    readonly: ctx.profile.identity === "read" ? true : undefined,
+    sha: ctx.headSha,
+    reuse: true,
+  });
+  let binding: ResidentBinding;
+  try {
+    binding = await executor.attach(span);
+  } catch (err) {
+    throw refuse(err instanceof Error ? err.message : String(err));
+  }
+  // The tree the resident answered must be the run's: the same worktree, the
+  // same pool user. Another (a rebinding since) is not the run's work.
+  const same = (recordedValue: string | undefined, answered: string | undefined) =>
+    recordedValue === undefined || answered === undefined || recordedValue === answered;
+  if (!same(recorded.workspace, binding.workspace) || !same(recorded.user, binding.user)) {
+    const name = (workspace: string | undefined, user: string | undefined) =>
+      `${workspace ?? "(unnamed)"} as ${user ?? "(unnamed)"}`;
+    throw refuse(
+      `the resident's worktree for this thread is ${name(binding.workspace, binding.user)}, not the run's recorded ${name(recorded.workspace, recorded.user)}`,
+    );
+  }
+  const where = `${resource.replace(/^repo:/, "")} · ${binding.ref}@${binding.sha.slice(0, 7)}`;
+  return {
+    executor,
+    resident: true,
+    backend: "resident",
+    ...(binding.trace ? { trace: binding.trace } : {}),
+    ...(binding.attachMs !== undefined ? { attachMs: binding.attachMs } : {}),
+    binding,
+    note: nonWarm
+      ? `resident ${nonWarm} · ${where} · re-attached to the run's worktree`
+      : `resident · ${where} · re-attached to the run's worktree`,
+  };
+}
+
 /** Attach to a serviceable resident and name the result POSITIVELY: the note
  *  reads `resident · <owner/name> · <ref>@<sha7>` (warm) or `resident <state>
  *  (<reason>) · <owner/name> · <ref>@<sha7> — attached to the last snapshot` (refreshing/degraded)
@@ -264,15 +424,7 @@ export async function makeExecutor(
  *  becomes a plain Error — the caller's named `resident attach failed` fallback
  *  note — never a loop. */
 async function openResident(
-  opts: {
-    baseUrl: string;
-    token: string;
-    resource: string;
-    threadKey: string;
-    refHint?: string;
-    readonly?: boolean;
-    sha?: string;
-  },
+  opts: ResidentExecutorOptions,
   /** `<state>[ (<reason>)]` of a serviceable non-warm resident; undefined when warm. */
   nonWarm?: string,
   span?: Span,

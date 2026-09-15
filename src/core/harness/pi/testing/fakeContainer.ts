@@ -25,6 +25,9 @@ export class FakePiContainer implements PiContainer {
   private fifoPath: string | undefined;
   /** The pid every start answers; changed by a test that wants two processes told apart. */
   pid = 4242;
+  /** The identity every `identity()` answers; a test hands another container's
+   *  word to a row's facts to make pi elsewhere, or none to make it unknowable. */
+  vm: string | undefined = "vm-fake";
   /** Set to make the next operation fail as the executor would report it. */
   failNext: { operation: string; error: Error } | undefined;
   /** Runs after each stdin line the harness writes — a scripted pi answering. */
@@ -94,6 +97,10 @@ export class FakePiContainer implements PiContainer {
 
   async alive(pid: number): Promise<boolean> {
     return this.live && pid === this.pid;
+  }
+
+  async identity(): Promise<string | undefined> {
+    return this.vm;
   }
 
   async kill(pid: number): Promise<void> {

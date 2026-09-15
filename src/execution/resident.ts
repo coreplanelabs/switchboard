@@ -108,6 +108,13 @@ export interface ResidentExecutorOptions {
    *  tip is not this commit instead of cloning a stale tip. Sent only when set,
    *  so an older resident sees the body it always did. */
   sha?: string;
+  /** A resumed run's re-attach (docs/reference/specs/resident-repos.md item 66):
+   *  the resident keeps the thread's worktree exactly as it stands (dirty or
+   *  stale, that is the run's own work) and refuses by name a tree it cannot
+   *  keep (`ResidentReuseRefusedError`) instead of wiping and recloning it.
+   *  Sent only when true, so a fresh attach, and an older resident, see the
+   *  body they always did. */
+  reuse?: boolean;
 }
 
 /** What a successful /attach reports about the thread's worktree. */
@@ -124,6 +131,12 @@ export interface ResidentBinding {
    *  user runs the commands (docs/reference/specs/harness-pi.md item 4).
    *  Undefined if the attach answer lacked it. */
   user?: string;
+  /** The identity of the container the worktree is in: the kernel's boot id
+   *  of the resident's VM, read by the resident and memoized for the
+   *  container's life (docs/reference/specs/harness-pi.md item 8): what a run's
+   *  row records so the generation that comes back can tell the container its
+   *  pi runs in from another. Undefined if the attach answer lacked it. */
+  container?: string;
   /** The resident's own step trace for the attach (docs/reference/specs/tracing.md item
    *  19), sanitized at the parse; absent from a Worker predating it. */
   trace?: ResidentStep[];
@@ -155,6 +168,23 @@ export class ResidentNeedsRefError extends Error {
         `Name the branch to work on (e.g. "on main") and try again.`,
     );
     this.name = "ResidentNeedsRefError";
+  }
+}
+
+/** 409 needs:"recreate" from /attach: a resumed run asked the resident to keep
+ *  this thread's worktree as it stands (`reuse`), and there is no tree it can
+ *  keep (gone with a recycled disk or an eviction, unreadable, or built for
+ *  the other mode). The resident touched nothing; the caller decides what a
+ *  run without its workspace does (docs/reference/specs/run-history.md item 54).
+ *  Never a fresh attach's error: without `reuse` the resident recreates. */
+export class ResidentReuseRefusedError extends Error {
+  constructor(
+    readonly resource: string,
+    /** The resident's own words for what it found. */
+    readonly why: string,
+  ) {
+    super(`resident attach: ${resource} cannot reuse this thread's worktree (${why})`);
+    this.name = "ResidentReuseRefusedError";
   }
 }
 
@@ -385,6 +415,7 @@ export class ResidentExecutor implements Executor {
     if (this.opts.refHint) body.refHint = this.opts.refHint;
     if (this.opts.readonly) body.readonly = true;
     if (this.opts.sha) body.sha = this.opts.sha;
+    if (this.opts.reuse) body.reuse = true;
     const answered = await this.call("/attach", body, timeoutMs, undefined, span);
     const data = answered.data;
     // Post-validation answers stream like /exec (heartbeat whitespace then one
@@ -405,6 +436,7 @@ export class ResidentExecutor implements Executor {
       sha: data.sha,
       ...(typeof data.workspace === "string" && data.workspace ? { workspace: data.workspace } : {}),
       ...(typeof data.user === "string" && data.user ? { user: data.user } : {}),
+      ...(typeof data.container === "string" && data.container ? { container: data.container } : {}),
       ...(trace.length > 0 ? { trace } : {}),
       ...(typeof data.attachMs === "number" && Number.isFinite(data.attachMs) ? { attachMs: data.attachMs } : {}),
     };
@@ -425,6 +457,8 @@ export class ResidentExecutor implements Executor {
       const defaultRef = typeof data.defaultRef === "string" && data.defaultRef ? data.defaultRef : undefined;
       return traced(new ResidentNeedsRefError(this.opts.resource, defaultRef));
     }
+    if (status === 409 && data.needs === "recreate")
+      return traced(new ResidentReuseRefusedError(this.opts.resource, err));
     if (status === 404) return traced(new Error(`resident attach: ${this.opts.resource} is not onboarded (${err})`));
     return traced(new Error(`resident attach failed for ${this.opts.resource}: ${err}`));
   }

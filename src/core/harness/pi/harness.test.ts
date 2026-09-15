@@ -258,7 +258,13 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(started.args[started.args.indexOf("--session-dir") + 1]).toBe(paths.sessionDir);
     // The row's first facts name the root beside the pid, so the build that
     // comes back after a restart re-attaches where this one filed pi (item 8).
-    expect(w.facts[0]).toEqual({ pid: 4242, logOffset: 0, root: paths.dir, bearerHash: bearerHashOf(w.bearer) });
+    expect(w.facts[0]).toEqual({
+      pid: 4242,
+      logOffset: 0,
+      root: paths.dir,
+      bearerHash: bearerHashOf(w.bearer),
+      container: "vm-fake",
+    });
     expect(w.container.killed).toEqual([4242]);
     expect(w.container.removed).toEqual([paths.dir]);
   });
@@ -323,7 +329,13 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       { firstIdx: 2, inFlight: [], turn: 1 },
     ]);
     // The facts: pid, offset, the root and the session file land on the row; pi is ended; the run is off the registry.
-    expect(w.facts[0]).toEqual({ pid: 4242, logOffset: 0, root: paths.dir, bearerHash: bearerHashOf(w.bearer) });
+    expect(w.facts[0]).toEqual({
+      pid: 4242,
+      logOffset: 0,
+      root: paths.dir,
+      bearerHash: bearerHashOf(w.bearer),
+      container: "vm-fake",
+    });
     expect(w.facts.at(-1)).toMatchObject({ pid: 4242, root: paths.dir, sessionFile: `${paths.sessionDir}/s.jsonl` });
     expect(w.facts.at(-1)!.logOffset).toBeGreaterThan(0);
     expect(w.container.killed).toEqual([4242]);
@@ -959,6 +971,85 @@ describe("runPiHarness — after a bot restart", () => {
     );
   });
 
+  // The row's facts name the container pi runs in (harness-pi item 8): a run
+  // handed another container (a per-thread sandbox recycled under the same
+  // thread key, a pid reused) must not read its pi as dead, let alone end a
+  // stranger's process at that pid. It is "pi is elsewhere": named, never probed.
+  it("a row whose facts name another container than the one this run was handed is 'pi is elsewhere': the pid is neither probed nor ended here, a fresh pi starts on the mirrored transcript, and the note names the orphan by pid and container", async () => {
+    const w = world();
+    let probed = 0;
+    const alive = w.container.alive.bind(w.container);
+    w.container.alive = async (pid) => (probed++, alive(pid));
+    await w.container.start({ paths, args: [], env: {} }); // whatever runs at that pid HERE is not the row's pi
+    w.run.resume = resume({
+      pid: 4242,
+      logOffset: 0,
+      sessionFile: "s.jsonl",
+      root: paths.dir,
+      bearerHash: bearerHashOf(w.bearer),
+      container: "vm-old",
+    });
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "continued"));
+    expect(await w.start()).toBe("continued");
+    expect(probed).toBe(0);
+    expect(w.container.killed).toEqual([4242]); // the fresh pi's end alone, not the orphan's
+    expect(w.container.starts).toHaveLength(2);
+    expect(w.container.removed).toEqual([paths.dir]); // the orphan's root is not here to remove
+    expect(w.facts.at(-1)).toMatchObject({ pid: 4242, root: paths.dir, container: "vm-fake" });
+    const notes = w.events.filter((e) => e.type === "run_note").map((e) => (e as { summary: string }).summary);
+    expect(notes[0]).toMatch(
+      /^resumed after a restart: pi is elsewhere: the row's pi \(pid 4242\) ran in container vm-old, not the one this run was handed \(vm-fake\), so it was neither probed nor ended here, and pi restarted on the mirrored transcript — 1 call\(s\) were in flight/,
+    );
+  });
+
+  it("a row whose facts name this very container re-attaches as before, and a row from before the container was recorded is judged by its pid alone, the re-attach recording the container it found", async () => {
+    const w = world();
+    await w.container.start({ paths, args: [], env: {} });
+    w.run.resume = resume({
+      pid: 4242,
+      logOffset: 0,
+      sessionFile: "s.jsonl",
+      root: paths.dir,
+      bearerHash: bearerHashOf(w.bearer),
+      container: "vm-fake",
+    });
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "picked up where I left off"));
+    expect(await w.start()).toBe("picked up where I left off");
+    expect(w.container.starts).toHaveLength(1);
+
+    const legacy = world();
+    await legacy.container.start({ paths, args: [], env: {} });
+    legacy.run.resume = resume({
+      pid: 4242,
+      logOffset: 0,
+      sessionFile: "s.jsonl",
+      root: paths.dir,
+      bearerHash: bearerHashOf(legacy.bearer),
+    });
+    scriptedPi(legacy.container, (_n, c) => finalTurn(c, "picked up where I left off"));
+    expect(await legacy.start()).toBe("picked up where I left off");
+    expect(legacy.container.starts).toHaveLength(1);
+    expect(legacy.facts.at(-1)).toMatchObject({ pid: 4242, container: "vm-fake" });
+  });
+
+  it("a container that cannot name itself judges nothing: the row's pi is found by its pid as before", async () => {
+    const w = world();
+    w.container.vm = undefined;
+    await w.container.start({ paths, args: [], env: {} });
+    w.run.resume = resume({
+      pid: 4242,
+      logOffset: 0,
+      sessionFile: "s.jsonl",
+      root: paths.dir,
+      bearerHash: bearerHashOf(w.bearer),
+      container: "vm-old",
+    });
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "picked up where I left off"));
+    expect(await w.start()).toBe("picked up where I left off");
+    expect(w.container.starts).toHaveLength(1);
+    expect(w.facts.at(-1)).toMatchObject({ pid: 4242, container: "vm-old" }); // the row's word stands
+  });
+
   it("restarts a dead pi on a session rebuilt from the mirrored transcript, the calls in flight answered with the restart note, and continues", async () => {
     const w = world();
     w.run.resume = resume({ pid: 999, logOffset: 50 }); // a pid no longer alive
@@ -1076,10 +1167,17 @@ describe("the small pure pieces", () => {
       { type: "tool_result", toolUseId: "b", content: "gone", isError: true },
     ]);
   });
-  it("piHarnessFactsOf reads the facts a previous generation wrote on the row (pid, log offset, session file, root), keeps a row without a root as facts without one, and answers no facts for another shape", () => {
+  it("piHarnessFactsOf reads the facts a previous generation wrote on the row (pid, log offset, session file, root, container), keeps a row without a root as facts without one, and answers no facts for another shape", () => {
     expect(
       piHarnessFactsOf({ pid: 7, logOffset: 120, sessionFile: "s.jsonl", root: "/tmp/switchboard-pi-run-7" }),
     ).toEqual({ pid: 7, logOffset: 120, sessionFile: "s.jsonl", root: "/tmp/switchboard-pi-run-7" });
+    expect(piHarnessFactsOf({ pid: 7, logOffset: 120, root: "/tmp/r", container: "vm-1" })).toEqual({
+      pid: 7,
+      logOffset: 120,
+      root: "/tmp/r",
+      container: "vm-1",
+    });
+    expect(piHarnessFactsOf({ pid: 7, logOffset: 120, container: 9 })).toEqual({ pid: 7, logOffset: 120 });
     expect(piHarnessFactsOf({ pid: 7, logOffset: 120 })).toEqual({ pid: 7, logOffset: 120 });
     expect(piHarnessFactsOf({ pid: 7, logOffset: 120, root: 42 })).toEqual({ pid: 7, logOffset: 120 });
     expect(piHarnessFactsOf({ pid: "7", logOffset: 120 })).toBeUndefined();

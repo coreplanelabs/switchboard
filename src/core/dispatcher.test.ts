@@ -990,11 +990,11 @@ function residentFetchStub(
     attach?: (body: Record<string, unknown>) => Response;
   } = {},
 ) {
-  const calls: Array<{ path: string; body?: Record<string, unknown> }> = [];
+  const calls: Array<{ path: string; host: string; body?: Record<string, unknown> }> = [];
   const fn = vi.fn(async (url: unknown, init?: RequestInit) => {
-    const path = new URL(String(url)).pathname;
+    const { pathname: path, host } = new URL(String(url));
     const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined;
-    calls.push({ path, body });
+    calls.push({ path, host, body });
     if (path === "/status") {
       return handlers.status?.() ?? new Response(JSON.stringify({ state: "warm", reason: "" }), { status: 200 });
     }
@@ -9332,6 +9332,247 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(registry.listActive()).toEqual([]);
     expect(ledger.live.has("run-old")).toBe(false);
     expect(ledger.finished.get("run-old")?.status).toBe("interrupted");
+  });
+
+  // Feature: docs/reference/specs/run-history.md item 54: the row records where
+  // the run's workspace is, a resume re-attaches there in reuse-only mode, and a
+  // workspace that cannot be re-attached restarts the run explicitly: the resumed
+  // row closes with the note that says why, no sandbox is provisioned in its
+  // place, and the request runs again as a new run in the thread.
+  it("the claim records the workspace binding on the row's state: the backend, the resident's worktree, pool user and container (item 54)", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    residentFetchStub({
+      attach: () =>
+        new Response(
+          JSON.stringify({
+            workspace: "/workspace/threads/t/main",
+            ref: "main",
+            sha: "abc",
+            user: "worker2",
+            container: "vm-1",
+          }),
+          { status: 200 },
+        ),
+    });
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    let stateAtFirstCall: unknown;
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        stateAtFirstCall ??= structuredClone(ledger.live.get("run-l")?.state);
+        return { content: [{ type: "text", text: "answer" }], stopReason: "end_turn" };
+      },
+    };
+    const { deps, writer } = wired(provider, { ledger, yaml: RESIDENT_YAML_FIXTURE });
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
+    const { io } = ioWithCard();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    await writer.settled();
+    expect(stateAtFirstCall).toMatchObject({
+      binding: { backend: "resident", workspace: "/workspace/threads/t/main", user: "worker2", container: "vm-1" },
+    });
+  });
+
+  it("a resume re-attaches its recorded resident worktree in reuse-only mode and continues the transcript; the row's binding is refreshed (item 54)", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const { calls } = residentFetchStub({
+      attach: (body) => {
+        if (body.reuse !== true) throw new Error("a resume must attach in reuse-only mode");
+        return new Response(
+          JSON.stringify({
+            workspace: "/workspace/threads/t/main",
+            ref: "main",
+            sha: "abc",
+            user: "worker2",
+            container: "vm-1",
+            recreated: false,
+          }),
+          { status: 200 },
+        );
+      },
+    });
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const request = msg("agent:coding fix it", "slack:UADMIN");
+    await ledger.claim({
+      runId: "run-old",
+      threadKey: "slack:CX:1.0",
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      meta: {
+        channelId: "slack:CX",
+        userId: "slack:UADMIN",
+        threadKey: "slack:CX:1.0",
+        agent: "coding",
+        model: "anthropic/coding-model",
+        repo: "acme/api",
+        ref: "main",
+        request: durableInboxMessage(request, request.text, 4_000),
+      },
+      system: "sys",
+      tools: [],
+      // A row from before the container was recorded: the re-attach completes it.
+      state: { binding: { backend: "resident", workspace: "/workspace/threads/t/main", user: "worker2" } },
+    });
+    await ledger.seed("run-old", "gen-OLD", [
+      { idx: 0, message: { role: "user", content: [{ type: "text", text: "fix it" }] } },
+    ]);
+    await ledger.step(
+      "run-old",
+      "gen-OLD",
+      { step: 0, seq: 0, turnIndex: 1, inFlight: [], inboxConsumedSeq: 0, remainingMs: 300_000, turn: 0, iteration: 0 },
+      [],
+    );
+    ledger.live.get("run-old")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+    let stateAtFirstCall: unknown;
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        stateAtFirstCall ??= structuredClone(ledger.live.get("run-old")?.state);
+        return { content: [{ type: "text", text: "resumed and done" }], stopReason: "end_turn" };
+      },
+    };
+    const { deps, registry, writer } = wired(provider, { ledger, yaml: RESIDENT_YAML_FIXTURE });
+    const plan = planResume({
+      transcript: {
+        complete: true,
+        compactions: [],
+        turns: 1,
+        messages: [{ role: "user", content: [{ type: "text", text: "fix it" }] }],
+      },
+      lastStep: reclaimed.lastStep!,
+      tools: knownToolsFor(getAgent("coding")),
+    });
+    if (plan.kind !== "resume") throw new Error(plan.kind === "interrupted" ? plan.why : plan.kind);
+    const { io, replies } = ioWithCard();
+    await dispatch(deps, resumeMessage(reclaimed.row, "fix it"), io, {
+      resume: {
+        row: reclaimed.row,
+        lastStep: reclaimed.lastStep!,
+        plan,
+        events: [],
+        lastSeq: 0,
+        repoCtx: { repo: "acme/api", ref: "main" },
+        inbox: [],
+      },
+    });
+    await writer.settled();
+    expect(replies.at(-1)).toBe("resumed and done");
+    const attaches = calls.filter((c) => c.path === "/status" || c.path === "/attach");
+    expect(attaches.map((c) => c.path)).toEqual(["/status", "/attach"]);
+    expect(attaches[1].body).toMatchObject({ reuse: true, refHint: "main" });
+    expect(stateAtFirstCall).toMatchObject({
+      binding: { backend: "resident", workspace: "/workspace/threads/t/main", user: "worker2", container: "vm-1" },
+    });
+    expect(registry.listActive().map((r) => r.id)).toEqual(["run-old"]);
+    expect(ledger.finished.get("run-old")?.status).toBe("completed");
+  });
+
+  it("a resume whose recorded resident refuses to reuse the worktree provisions no sandbox: the resumed row closes interrupted with the note that says why, and the request runs again as a new run once the thread is free (item 54)", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const { calls } = residentFetchStub({
+      attach: (body) =>
+        body.reuse === true
+          ? new Response(
+              JSON.stringify({ error: "reuse-refused: no worktree at /workspace/threads/t/main", needs: "recreate" }),
+              { status: 409 },
+            )
+          : new Response(
+              JSON.stringify({ workspace: "/workspace/threads/t/main", ref: "main", sha: "abc", user: "worker3" }),
+              { status: 200 },
+            ),
+    });
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const request = msg("agent:coding fix it", "slack:UADMIN");
+    await ledger.claim({
+      runId: "run-old",
+      threadKey: "slack:CX:1.0",
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      meta: {
+        channelId: "slack:CX",
+        userId: "slack:UADMIN",
+        threadKey: "slack:CX:1.0",
+        agent: "coding",
+        model: "anthropic/coding-model",
+        repo: "acme/api",
+        ref: "main",
+        request: durableInboxMessage(request, request.text, 4_000),
+      },
+      system: "sys",
+      tools: [],
+      state: { binding: { backend: "resident", workspace: "/workspace/threads/t/main", user: "worker2" } },
+    });
+    await ledger.seed("run-old", "gen-OLD", [
+      { idx: 0, message: { role: "user", content: [{ type: "text", text: "fix it" }] } },
+    ]);
+    await ledger.step(
+      "run-old",
+      "gen-OLD",
+      { step: 0, seq: 0, turnIndex: 1, inFlight: [], inboxConsumedSeq: 0, remainingMs: 300_000, turn: 0, iteration: 0 },
+      [],
+    );
+    await ledger.append("run-old", "gen-OLD", [{ type: "input", text: "fix it", at: 1, seq: 1 }]);
+    ledger.live.get("run-old")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+    const provider = capturingProvider("started over and done");
+    const { deps, registry, writer } = wired(provider, { ledger, yaml: RESIDENT_YAML_FIXTURE });
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
+    const plan = planResume({
+      transcript: {
+        complete: true,
+        compactions: [],
+        turns: 1,
+        messages: [{ role: "user", content: [{ type: "text", text: "fix it" }] }],
+      },
+      lastStep: reclaimed.lastStep!,
+      tools: knownToolsFor(getAgent("coding")),
+    });
+    if (plan.kind !== "resume") throw new Error(plan.kind === "interrupted" ? plan.why : plan.kind);
+    const events = await ledger.readEvents("run-old");
+    const { io, replies } = ioWithCard();
+    const outcome = await dispatch(deps, resumeMessage(reclaimed.row, "fix it"), io, {
+      resume: {
+        row: reclaimed.row,
+        lastStep: reclaimed.lastStep!,
+        plan,
+        events,
+        lastSeq: 1,
+        repoCtx: { repo: "acme/api", ref: "main" },
+        inbox: [],
+      },
+    });
+    await writer.settled();
+    // The resumed dispatch itself ran nothing: refused by name, its row closed with the note in its record.
+    expect(outcome.status).toBe("refused");
+    expect(outcome.refusal).toBe("workspace_lost");
+    const closed = ledger.finished.get("run-old");
+    expect(closed?.status).toBe("interrupted");
+    const note = closed?.events.find((e) => e.type === "run_note") as { kind: string; summary: string } | undefined;
+    expect(note).toMatchObject({ kind: "resumed" });
+    expect(note?.summary).toContain("could not be re-attached");
+    expect(note?.summary).toContain("reuse-refused: no worktree at /workspace/threads/t/main");
+    expect(note?.summary).toContain("restarts from its request as a new run");
+    // Never a sandbox for the resumed run: the resident alone was asked, in reuse-only mode; then the
+    // restarted run attached as a fresh run does (no reuse), on its own id, and answered the thread.
+    const attaches = calls.filter((c) => c.path === "/status" || c.path === "/attach");
+    expect(attaches.map((c) => c.path)).toEqual(["/status", "/attach", "/status", "/attach"]);
+    expect(attaches[1].body).toMatchObject({ reuse: true });
+    expect(attaches[3].body).not.toHaveProperty("reuse");
+    expect(calls.every((c) => c.host === "resident.example")).toBe(true);
+    expect(provider.requests).toHaveLength(1);
+    expect(replies.at(-1)).toBe("started over and done");
+    expect(registry.listActive().map((r) => r.id)).toEqual(["run-l"]);
+    expect(ledger.finished.get("run-l")?.status).toBe("completed");
+    expect(ledger.live.has("run-old")).toBe(false);
   });
 
   it("a steered follow-up is written to the run's durable inbox with its seq, and the next step record says the run consumed it (thread-admission item 5, run-history item 40)", async () => {
