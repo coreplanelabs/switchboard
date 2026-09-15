@@ -12564,4 +12564,30 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     await t.writer.settled();
     expect(handedRecords).toEqual([{ pr: { repo: "acme/api", number: 7, at: PREVIOUS_END } }]);
   });
+
+  // docs/reference/specs/harness-pi.md item 4: the config's `pi.compaction` reaches the harness deps for a run on pi.
+  it("the deployment's compaction thresholds ride from the config into the pi harness's deps; a config without the block hands none", async () => {
+    const t = await threadWithSession(PI_YAML + "pi:\n  compaction:\n    reserveTokens: 150000\n");
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
+    let compaction: unknown = "unset";
+    vi.mocked(runPiHarness).mockImplementationOnce(async (deps) => {
+      compaction = deps.compaction;
+      return "done";
+    });
+    const { io } = fakeIO(history);
+    await dispatch(t.deps, followUp, io);
+    await t.writer.settled();
+    expect(compaction).toEqual({ reserveTokens: 150_000 });
+
+    const plain = await threadWithSession(PI_YAML);
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
+    let none: unknown = "unset";
+    vi.mocked(runPiHarness).mockImplementationOnce(async (deps) => {
+      none = deps.compaction;
+      return "done";
+    });
+    await dispatch(plain.deps, followUp, fakeIO(history).io);
+    await plain.writer.settled();
+    expect(none).toBeUndefined();
+  });
 });

@@ -10,6 +10,7 @@ import {
   piLaunchArgs,
   piLaunchEnv,
   piLaunchFiles,
+  piSettingsJson,
   piModelsJson,
   piRunPaths,
   piRunPathsAt,
@@ -286,6 +287,24 @@ describe("piLaunchFiles", () => {
     expect(files[2].content).toContain("`update_status`, `submit_pr_description`");
     expect(files[3].content).toBe(PI_EXTENSION_SOURCE);
     for (const f of files) expect(f.content).not.toContain("s3cret");
+  });
+  // harness-pi item 4: the deployment's compaction thresholds ride pi's own
+  // settings key; without them the file is exactly what it was.
+  it("carries the deployment's compaction thresholds under pi's `compaction` key when set — each alone or both — and is byte-identical without them", () => {
+    const both = piLaunchFiles({ ...spec, compaction: { reserveTokens: 150_000, keepRecentTokens: 8_000 } });
+    expect(JSON.parse(both[0].content)).toEqual({
+      defaultProjectTrust: "never",
+      checkForUpdates: false,
+      compaction: { reserveTokens: 150_000, keepRecentTokens: 8_000 },
+    });
+    expect(JSON.parse(piSettingsJson({ reserveTokens: 150_000 }))).toEqual({
+      defaultProjectTrust: "never",
+      checkForUpdates: false,
+      compaction: { reserveTokens: 150_000 },
+    });
+    expect(piSettingsJson({})).toBe(piSettingsJson());
+    expect(piLaunchFiles(spec)[0].content).toBe(piSettingsJson());
+    expect(piSettingsJson()).not.toContain("compaction");
   });
   it("the harness note maps the native tool names onto pi's and names the relayed tools", () => {
     expect(harnessPromptNote(["update_status"], "write")).toContain("`read_file` use `read`");

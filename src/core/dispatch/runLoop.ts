@@ -622,6 +622,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
           harnessUrl,
           registry: deps.harness.registry,
           ...(deps.runBearers ? { bearers: deps.runBearers } : {}),
+          // The deployment's compaction thresholds ride into pi's settings for
+          // every run on pi (harness-pi item 4); absent, pi's defaults stand.
+          ...(deps.config.config.pi?.compaction ? { compaction: deps.config.config.pi.compaction } : {}),
           clock,
           sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
         },

@@ -13,6 +13,7 @@
 // mirrored transcript.
 
 import type { AgentDef } from "../../../agents/registry.js";
+import type { PiCompactionConfig } from "../../../config.js";
 import type { Effort } from "../../../effort.js";
 import type { ChatMessage, ProviderConfig } from "../../../providers/types.js";
 import {
@@ -172,6 +173,9 @@ export interface PiHarnessDeps {
   harnessUrl: string;
   registry: HarnessRegistry;
   bearers?: RunBearerStore;
+  /** The deployment's compaction thresholds for pi's settings (`pi.compaction`;
+   *  harness-pi item 4), the same for every run on pi; absent, pi's defaults. */
+  compaction?: PiCompactionConfig;
   clock: Clock;
   sleep: (ms: number) => Promise<void>;
   pollMs?: number;
@@ -469,6 +473,7 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
         identity: run.agent.identity,
         system: run.system,
         relayTools: run.tools.map((t) => t.name),
+        ...(deps.compaction ? { compaction: deps.compaction } : {}),
       };
       // What pi starts on. After a restart where pi died with its container
       // (or its facts never landed): a session rebuilt from the mirrored

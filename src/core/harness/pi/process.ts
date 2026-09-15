@@ -10,6 +10,7 @@
 import type { Identity } from "../../../agents/registry.js";
 import type { Effort } from "../../../effort.js";
 import type { ProviderConfig } from "../../../providers/types.js";
+import type { PiCompactionConfig } from "../../../config.js";
 import { PI_EXTENSION_SOURCE } from "./extensionSource.js";
 
 export const PI_BIN = "pi";
@@ -120,6 +121,10 @@ export interface PiLaunchSpec {
   relayTools: readonly string[];
   /** A session file to continue from (a resume after the container's pi died). */
   sessionPath?: string;
+  /** The deployment's compaction thresholds for pi's settings (`pi.compaction`
+   *  in the config; harness-pi item 4). Absent, pi's own defaults stand and the
+   *  settings file is exactly what it was before the block existed. */
+  compaction?: PiCompactionConfig;
 }
 
 /** `pi --mode rpc` with discovery off: no `~/.pi/agent/extensions`, no project
@@ -270,9 +275,19 @@ export function piSystemPrompt(spec: PiLaunchSpec): string {
 
 /** pi's settings for a run: the checkout is never trusted (its `.pi/` never
  *  loads — `--no-extensions` already keeps discovery off; this is the second
- *  lock), no update checks. */
-export function piSettingsJson(): string {
-  return JSON.stringify({ defaultProjectTrust: "never", checkForUpdates: false }, null, 2) + "\n";
+ *  lock), no update checks — and, when the deployment sets them, pi's
+ *  compaction thresholds under pi's own key (`compaction.reserveTokens`,
+ *  `compaction.keepRecentTokens`): pi compacts when the context passes the
+ *  window less the reserve, so a reserve near the window makes a short run
+ *  compact. Unset, the file names no `compaction` and pi's defaults stand. */
+export function piSettingsJson(compaction?: PiCompactionConfig): string {
+  const settings: Record<string, unknown> = { defaultProjectTrust: "never", checkForUpdates: false };
+  const thresholds = {
+    ...(compaction?.reserveTokens !== undefined ? { reserveTokens: compaction.reserveTokens } : {}),
+    ...(compaction?.keepRecentTokens !== undefined ? { keepRecentTokens: compaction.keepRecentTokens } : {}),
+  };
+  if (Object.keys(thresholds).length > 0) settings.compaction = thresholds;
+  return JSON.stringify(settings, null, 2) + "\n";
 }
 
 export interface PiFile {
@@ -283,7 +298,7 @@ export interface PiFile {
 /** Every file the container must hold before pi starts, none of them a secret. */
 export function piLaunchFiles(spec: PiLaunchSpec): PiFile[] {
   return [
-    { path: `${spec.paths.agentDir}/settings.json`, content: piSettingsJson() },
+    { path: `${spec.paths.agentDir}/settings.json`, content: piSettingsJson(spec.compaction) },
     { path: `${spec.paths.agentDir}/models.json`, content: piModelsJson(spec) },
     { path: `${spec.paths.agentDir}/SYSTEM.md`, content: piSystemPrompt(spec) },
     { path: spec.paths.extension, content: PI_EXTENSION_SOURCE },
