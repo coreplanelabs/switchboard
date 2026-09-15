@@ -33,7 +33,7 @@ import {
   type StepReport,
 } from "../../../runner.js";
 import type { RunnableTool, ToolContext } from "../../../tools/workspace.js";
-import type { RunBearerStore } from "../../modelProxy/runBearers.js";
+import { bearerHashOf, type RunBearerStore } from "../../modelProxy/runBearers.js";
 import { redactAndCap, redactSecrets, type RunEvent, type RunNoteKind, type StopMode } from "../../runEvents.js";
 import type { Settlement } from "../../runLedger/resume.js";
 import type { AssembledCompaction } from "../../runLedger/transcript.js";
@@ -71,6 +71,13 @@ export interface PiHarnessFacts {
    *  row written before the root was recorded: that pi cannot be found, so it
    *  is ended and a fresh one started (harness-pi item 8). */
   root?: string;
+  /** The SHA-256 (hex) of the secret in the bearer pi was started with
+   *  (`bearerHashOf`; model-proxy item 2) — never the bearer. The generation
+   *  that re-attaches adopts it onto its own proxy, so the calls pi keeps
+   *  making with the previous generation's bearer verify. Absent on a row
+   *  written before it was recorded: that pi's calls no proxy here can honour,
+   *  so it is ended and a fresh one started with this generation's bearer. */
+  bearerHash?: string;
 }
 
 /** The harness facts a previous generation wrote on the row (`state.harness`),
@@ -83,6 +90,7 @@ export function piHarnessFactsOf(value: unknown): PiHarnessFacts | undefined {
     pid: v.pid,
     logOffset: v.logOffset,
     ...(typeof v.sessionFile === "string" ? { sessionFile: v.sessionFile } : {}),
+    ...(typeof v.bearerHash === "string" ? { bearerHash: v.bearerHash } : {}),
     ...(typeof v.root === "string" ? { root: v.root } : {}),
   };
 }
@@ -343,15 +351,26 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
     // start is filed under, goes with it (below).
     const recorded = run.resume?.facts;
     let reattached = false;
-    /** A live pi the row named no root for, ended here for the fresh start. */
-    let ended = false;
+    /** Why a live pi was ended here for the fresh start: the row named no
+     *  root for it, or carried no bearer this generation could honour. */
+    let ended: string | undefined;
+    /** The bearer pi holds is the one the generation that started it revealed
+     *  (model-proxy item 2): this generation's proxy honours it only once the
+     *  hash the row carries joins the run's entry — the entry this generation
+     *  minted before coming here. Without a store nobody verifies, so nothing
+     *  needs adopting. */
+    const honoured = (hash: string | undefined): boolean =>
+      hash !== undefined && (deps.bearers === undefined || deps.bearers.adopt(run.runId, hash));
     if (recorded !== undefined) {
       const alive = await container.alive(recorded.pid);
-      if (alive && recorded.root !== undefined) {
+      if (alive && recorded.root !== undefined && honoured(recorded.bearerHash)) {
         reattached = true;
         paths = piRunPathsAt(recorded.root);
       } else if (alive) {
-        ended = true;
+        ended =
+          recorded.root === undefined
+            ? "named no directory for its pi"
+            : "carried no bearer this generation could honour for its pi";
         await container.kill(recorded.pid).catch(() => {});
       }
     }
@@ -428,9 +447,10 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
       }
       if (run.resume) {
         const lost = run.resume.settlements.length;
-        const how = ended
-          ? `the row named no directory for its pi (pid ${recorded!.pid}), so it was ended and pi restarted`
-          : "pi restarted";
+        const how =
+          ended !== undefined && recorded !== undefined
+            ? `the row ${ended} (pid ${recorded.pid}), so it was ended and pi restarted`
+            : "pi restarted";
         note(
           "resumed",
           `resumed after a restart: ${how} on the mirrored transcript — ${lost} call(s) were in flight, each answered with a restart note; ${Math.round(remainingMs / 60_000)} min of budget left`,
@@ -440,8 +460,11 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
       for (const file of piLaunchFiles(launch)) await container.writeFile(file.path, file.content);
       ({ pid } = await container.start({ paths, args: piLaunchArgs(launch), env: piLaunchEnv(launch, deps.bearer) }));
       // The root rides the first facts, so the build that comes back after a
-      // restart looks for this pi where it is, not where it would file its own.
-      facts = { pid, logOffset: 0, root: paths.dir };
+      // restart looks for this pi where it is, not where it would file its own;
+      // the bearer's hash rides beside it, so that build's proxy can honour
+      // the bearer this pi keeps presenting (model-proxy item 2).
+      const bearerHash = bearerHashOf(deps.bearer);
+      facts = { pid, logOffset: 0, root: paths.dir, ...(bearerHash !== undefined ? { bearerHash } : {}) };
       save();
       transport = new PiRpcTransport({ container, paths, pid, pollMs: deps.pollMs ?? 750, sleep: deps.sleep });
     }
