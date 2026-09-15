@@ -1,5 +1,36 @@
 # Changelog
 
+## [1.228.0](https://github.com/coreplanelabs/switchboard/compare/v1.227.0...v1.228.0) (2026-09-15)
+
+
+### Features
+
+* **dispatcher:** a linked thread is quoted, not joined — the references step, the Slack conversation reader and the record's references, behind references.enabled ([#1240](https://github.com/coreplanelabs/switchboard/issues/1240)) ([c54e79e](https://github.com/coreplanelabs/switchboard/commit/c54e79e70076f42899e52f8c2877912f89a8a423))
+* **mcp:** a server's initialize instructions reach the model — the client keeps them, the outcome carries them clipped, the guidance block quotes them as the server's own words ([#1247](https://github.com/coreplanelabs/switchboard/issues/1247)) ([42614d5](https://github.com/coreplanelabs/switchboard/commit/42614d55f55c77c01e5324b509fcb7e6d8ec4992))
+* **runs:** every record carries the run's token usage per model, and the store answers who spent what per day, pricing older records from their stored events as it is asked ([#1253](https://github.com/coreplanelabs/switchboard/issues/1253)) ([73dc48e](https://github.com/coreplanelabs/switchboard/commit/73dc48e27ff170df66529f61fe4b634c2ec98266))
+* **sandbox:** the cold sandbox runs on the 0.13 SDK line — one supervised process per command on a container server that no longer dies mid-command, the session fences and the keepalive retired ([#1251](https://github.com/coreplanelabs/switchboard/issues/1251)) ([91f0d10](https://github.com/coreplanelabs/switchboard/commit/91f0d105b91c0b28657828935bf294cf97d2606d))
+* **ship:** the runner merges a unit only when the instance's merge field says so ([#1256](https://github.com/coreplanelabs/switchboard/issues/1256)) ([af97390](https://github.com/coreplanelabs/switchboard/commit/af973904c6b1c3d3edfa4a74d491176647fb089f))
+
+
+### Bug fixes
+
+* **deps:** the lockfile drops its invalid web/node_modules/@types/node entry, so a cold npm ci no longer re-resolves @types/node against the registry and breaks on every new 24.x publish ([#1262](https://github.com/coreplanelabs/switchboard/issues/1262)) ([856a433](https://github.com/coreplanelabs/switchboard/commit/856a433daa495711299f1bcbde1695acc28ed8ac))
+* **deps:** the lockfile pins @types/node 24.13.5 so npm ci stops re-resolving it ([#1261](https://github.com/coreplanelabs/switchboard/issues/1261)) ([d225421](https://github.com/coreplanelabs/switchboard/commit/d225421729a3a730c334e2df45e2b6b567ab8d56))
+* **dispatcher:** a request that names attach_file routes to the preset that holds the tool before the model is asked — a structural route in code, since the prompt rule lost five times in two days to a read-only preamble ([#1241](https://github.com/coreplanelabs/switchboard/issues/1241)) ([7406f4e](https://github.com/coreplanelabs/switchboard/commit/7406f4ee0b5732b5e2d687bfeebc24f31c47974b))
+* **harness:** a truncated provider stream is retried once before the run fails, and a failed run's reply links its run page ([#1224](https://github.com/coreplanelabs/switchboard/issues/1224)) ([a6d1dcf](https://github.com/coreplanelabs/switchboard/commit/a6d1dcf83aefb5333d6c5b43df6cf9be851abb38))
+* **resident:** the thread remembers the branches its runs pushed, so a follow-up rebinds onto its own pull request after the tree was released — the release hands the resident the pushed branches, and an evicted default-bound thread recreates its tree at the remembered branch ([#1257](https://github.com/coreplanelabs/switchboard/issues/1257)) ([dc8f4e6](https://github.com/coreplanelabs/switchboard/commit/dc8f4e64c5bfdee920ec5b028d8145ca9d2757be))
+* **sandbox:** a binary read refused by a full fleet or a silent runtime keeps its reason token, so the executor waits instead of reading a dead sandbox ([#1255](https://github.com/coreplanelabs/switchboard/issues/1255)) ([3f3c880](https://github.com/coreplanelabs/switchboard/commit/3f3c8803650d726a43f223f0d2eec644d132af1b))
+
+
+### Documentation
+
+* **dispatcher:** name what the seed's tail cut drops in the header comment of seed.ts ([#1250](https://github.com/coreplanelabs/switchboard/issues/1250)) ([691af00](https://github.com/coreplanelabs/switchboard/commit/691af002234706069e3f5c64c43597e640694bb4))
+* **docs:** execution plan for record 0037 — two pull requests, inert seams first ([#1252](https://github.com/coreplanelabs/switchboard/issues/1252)) ([e313dd7](https://github.com/coreplanelabs/switchboard/commit/e313dd7bd0c74ac42bb2bdd78129ae61be1ca74e))
+* **docs:** plan for record 0036 unit 2, every chat command through the front door as a derived tool with a receipt line, a hand-back set, a fixture fence and the regex path retired ([#1244](https://github.com/coreplanelabs/switchboard/issues/1244)) ([e9ab7e5](https://github.com/coreplanelabs/switchboard/commit/e9ab7e5604a4fff19acb714684b09d3f5d783811))
+* **docs:** record 0038 accepted — the second harness is wired as far as the interface test needs, a CodexHarness proven against a fake of Codex's protocol, with stage gates and the adversarial review each stage must survive so nothing ships early ([#1242](https://github.com/coreplanelabs/switchboard/issues/1242)) ([3226c2e](https://github.com/coreplanelabs/switchboard/commit/3226c2e850ff7c4bc6ee502e9d3df5862f4db5f4))
+* **docs:** record 0038 amended by appending — the second harness is proven with the real Codex binary, OpenRouter is the Responses route's first upstream, and decisions:check lets an accepted record grow by a dated re-evaluation ([#1258](https://github.com/coreplanelabs/switchboard/issues/1258)) ([1e2fec8](https://github.com/coreplanelabs/switchboard/commit/1e2fec8d62304c1a55e8ee57c7eef9760b870293))
+* **docs:** record 0039, the front door writes nothing from prose and never routes twice, with the commands plan amended to hand back every write by its effect and to reply instead of re-routing a failed command ([#1254](https://github.com/coreplanelabs/switchboard/issues/1254)) ([302231a](https://github.com/coreplanelabs/switchboard/commit/302231ae490eb12d5ac7ecb78a2a6dca1b53702a))
+
 ## [1.227.0](https://github.com/coreplanelabs/switchboard/compare/v1.226.1...v1.227.0) (2026-09-15)
 
 
