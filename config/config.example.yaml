@@ -363,6 +363,16 @@ workspaceDir: ./workspaces
 #   model: anthropic/claude-haiku-4-5
 #   answer: text
 
+# Linked threads (docs/decisions/0037-a-linked-thread-is-quoted-not-joined.md;
+# docs/reference/specs/routing-and-config.md item 22). Off by default. On, a
+# permalink in a request to a thread in another PUBLIC channel the bot is a
+# member of is quoted onto the request turn as an untrusted block — text only,
+# at most three per request, never a private channel from elsewhere, never a
+# DM or a Slack Connect channel — and the run's record and page show what was
+# quoted. A bot older than 1.228.0 refuses a config that carries this key.
+# references:
+#   enabled: true
+
 # Spend reporting: GET /costs (Access-gated). Optional. See docs/reference/specs/costs.md.
 # costs:
 #   cloudflareAccountId: <32-hex account id>
