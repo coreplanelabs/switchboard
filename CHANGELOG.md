@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.221.0](https://github.com/coreplanelabs/switchboard/compare/v1.220.1...v1.221.0) (2026-09-15)
+
+
+### Features
+
+* **dispatcher:** the thread's files are one catalogue read three ways — the re-pull, the prompt's FILES OF THIS THREAD block and recall {assets: true} all read the runs' artifact events, paged past the seed's eight runs, with whether the store still holds each ([#1163](https://github.com/coreplanelabs/switchboard/issues/1163)) ([733e7cf](https://github.com/coreplanelabs/switchboard/commit/733e7cf67c8fdc735a1da2ac1049431ab6269185))
+* **harness:** the research and conductor presets can run on pi as children of the bot, dark behind their harness keys, with the conductor waits relayed as polls that outlive any one request and its children seeded from the parent session log ([#1167](https://github.com/coreplanelabs/switchboard/issues/1167)) ([5bc9ac2](https://github.com/coreplanelabs/switchboard/commit/5bc9ac223fd2a954ef267da77ce4c0d0e204263c))
+
+
+### Bug fixes
+
+* **dispatcher:** a resumed run re-attaches the workspace its row recorded and never provisions again, so the resident keeps the run's own dirty tree instead of wiping it under a living pi, a workspace that cannot be re-attached restarts the run from its request instead of a silent cold sandbox, and the pi harness reads a pi in another container as elsewhere, never as dead ([#1169](https://github.com/coreplanelabs/switchboard/issues/1169)) ([b8b821b](https://github.com/coreplanelabs/switchboard/commit/b8b821bbd7bf56f44e6253f44a81d5bc4074f50e))
+* **dispatcher:** the router's attach rule gives the tool's name its own sentence — an ask that names attach_file routes to the attaching preset whatever it asks the tool to do ([#1170](https://github.com/coreplanelabs/switchboard/issues/1170)) ([6792502](https://github.com/coreplanelabs/switchboard/commit/6792502916b29ae8e27d1130b7275cf0ce3141f3))
+* **harness:** the resumed session's working directory is the container's answer, so a bot-host pi restarted after a bot restart finds its root ([#1168](https://github.com/coreplanelabs/switchboard/issues/1168)) ([1c3aa2c](https://github.com/coreplanelabs/switchboard/commit/1c3aa2ccc4cd47c17776a6d8e8fe63b9060c55bb))
+
+
+### Documentation
+
+* **costs:** criterion 13 becomes an agent-run check now that the LLM line is live in production ([#1162](https://github.com/coreplanelabs/switchboard/issues/1162)) ([fdf6598](https://github.com/coreplanelabs/switchboard/commit/fdf6598e219eb1a791c438425333dfb8d5f63a12))
+
 ## [1.220.1](https://github.com/coreplanelabs/switchboard/compare/v1.220.0...v1.220.1) (2026-09-15)
 
 
