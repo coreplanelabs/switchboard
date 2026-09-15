@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.217.0](https://github.com/coreplanelabs/switchboard/compare/v1.216.2...v1.217.0) (2026-09-14)
+
+
+### Features
+
+* **commands:** artifacts lifecycle and artifacts check manage the bucket's retention and privacy from the CLI ([#1123](https://github.com/coreplanelabs/switchboard/issues/1123)) ([35145e0](https://github.com/coreplanelabs/switchboard/commit/35145e06decf903e228d607fd3dc5cc946027d0d))
+* **runs:** a follow-up on the pi harness seeds from its session log — one read of the thread's newest runs yields the lineage, the sticky agent by transcript and the previous run; the seed is the log's tail within the budget, the lines since and the request, and the run's range begins at the tail ([#1119](https://github.com/coreplanelabs/switchboard/issues/1119)) ([b8bc5ff](https://github.com/coreplanelabs/switchboard/commit/b8bc5ff486958936c8e9549dd721bc2ebb5641a9))
+* **tools:** a channel without file uploads gets the stored file's own link from attach_file ([#1116](https://github.com/coreplanelabs/switchboard/issues/1116)) ([811edc2](https://github.com/coreplanelabs/switchboard/commit/811edc2e4a3904388b3f1d7f552c4f92757d6340))
+
+
+### Bug fixes
+
+* **harness:** a pi run's files live in one directory of the run's own directly under the sticky /tmp, made 700 by whoever runs the commands, so no parent shared by runs or by users can refuse a second pool user's mkdir ([#1124](https://github.com/coreplanelabs/switchboard/issues/1124)) ([a4e5e11](https://github.com/coreplanelabs/switchboard/commit/a4e5e11a1731e1d1d46c2868686f4ed1d6e2e9c1))
+
+
+### Documentation
+
+* **docs:** record 0033 reads accepted and the artifact store's live rows bind to their procedures ([#1121](https://github.com/coreplanelabs/switchboard/issues/1121)) ([0a5a679](https://github.com/coreplanelabs/switchboard/commit/0a5a6790e82f162a2fdeb038d0770994a4c24ce6))
+
 ## [1.216.2](https://github.com/coreplanelabs/switchboard/compare/v1.216.1...v1.216.2) (2026-09-14)
 
 
