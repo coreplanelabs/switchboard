@@ -11,46 +11,7 @@
 // reply in an existing thread: a message that starts a thread has no runs.
 import type { RunPullRequest } from "../runRecord.js";
 import type { RunView, RunsService } from "../runsService.js";
-import type { RunEvent } from "../runEvents.js";
 import type { PreviousRun } from "./seed.js";
-import { threadInboundArtifacts, type ThreadArtifact } from "./staging.js";
-
-/** The files the thread received before this run (record 0033), from the
- *  prior runs' records — the `artifact` events with `direction: "in"`, oldest
- *  run first, one entry per key. Each run's record is paged to its end: a
- *  file dropped on a steer lands wherever in the log the steer did, so no
- *  page cap could keep the catalogue complete. A run whose read fails or is
- *  refused part-way contributes what was read and the log says so, so a store
- *  hiccup costs a re-pull, never the request. */
-export async function readThreadArtifacts(
-  service: Pick<RunsService, "getRunEvents">,
-  thread: readonly RunView[],
-  warn: (line: string) => void = (line) => console.warn(line),
-): Promise<ThreadArtifact[]> {
-  const perRun: RunEvent[][] = [];
-  for (const run of [...thread].reverse()) {
-    const events: RunEvent[] = [];
-    let afterSeq: number | undefined;
-    try {
-      for (;;) {
-        const r = await service.getRunEvents(run.id, afterSeq === undefined ? {} : { afterSeq });
-        if (!r.ok) {
-          warn(`[thread] ${run.id}: reading its received files stopped after ${events.length} event(s) — ${r.error}`);
-          break;
-        }
-        events.push(...r.value.events);
-        if (r.value.nextAfterSeq === undefined) break;
-        afterSeq = r.value.nextAfterSeq;
-      }
-    } catch (err) {
-      warn(
-        `[thread] ${run.id}: reading its received files failed after ${events.length} event(s) — ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-    perRun.push(events);
-  }
-  return threadInboundArtifacts(perRun);
-}
 
 /** How many of the thread's newest runs one read brings back: enough to find
  *  the previous run of the resolved agent behind a few runs of another. */

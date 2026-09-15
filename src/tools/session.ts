@@ -14,7 +14,9 @@
 // a ship pipeline, a process with no ledger — the tools say they are not
 // available.
 import type { ChatMessage } from "../providers/types.js";
+import { safeBasename } from "../artifacts/keys.js";
 import { authorize } from "../core/authz/authorize.js";
+import { whereIs, type ThreadAsset } from "../core/dispatch/threadAssets.js";
 import { redactSecrets } from "../core/runEvents.js";
 import { NOTEPAD_MAX_BYTES } from "../core/runLedger/sessionLog.js";
 import type { FenceResult, Notepad, SessionHit } from "../core/runLedger/types.js";
@@ -33,13 +35,29 @@ export interface SessionCapability {
   readTurn(idx: number): Promise<ChatMessage | undefined>;
   readNotepad(): Promise<Notepad | null>;
   writeNotepad(text: string): Promise<FenceResult>;
+  /** The thread's files (record 0033): the catalogue its runs' records name —
+   *  received and produced, held by the store or not — read fresh on each call
+   *  so a file this run just received or attached is in it. Absent without a store. */
+  assets?: () => Promise<ThreadAsset[]>;
+  /** Where a file sits in THIS run's workspace when this run staged it
+   *  (`attachments/<index>-<basename>`); nothing for a file it did not pull. */
+  workspacePathOf?: (key: string) => string | undefined;
+}
+
+/** The thread's files as the dispatcher hands them to the capability: the
+ *  catalogue read and this run's workspace paths (`WorkspaceFiles`). */
+export interface SessionAssets {
+  read: () => Promise<ThreadAsset[]>;
+  pathOf: (key: string) => string | undefined;
 }
 
 /** The capability for a run with a session, over the write-through; nothing
- *  for a run without one. */
+ *  for a run without one. The thread's files join it when the deployment has
+ *  an artifact store. */
 export function sessionCapabilityFor(
   run: Pick<LedgerRun, "session"> | undefined,
   ledger: Pick<LedgerWriteThrough, "readSession" | "searchSession" | "readNotepad" | "writeNotepad">,
+  assets?: SessionAssets,
 ): SessionCapability | undefined {
   const session = run?.session;
   if (!session) return undefined;
@@ -49,8 +67,37 @@ export function sessionCapabilityFor(
     readTurn: async (idx) => (await ledger.readSession(session.key, idx, idx)).messages[0],
     readNotepad: () => ledger.readNotepad(session.key),
     writeNotepad: (text) => ledger.writeNotepad(session.key, text),
+    ...(assets ? { assets: assets.read, workspacePathOf: assets.pathOf } : {}),
   };
 }
+
+/** One file as `recall` answers it: what it is, which run recorded it, its key
+ *  and where it is for this run — the same clause the prompt's list carries. */
+function assetView(asset: ThreadAsset, path: string | undefined) {
+  return {
+    name: asset.name,
+    size: asset.size,
+    type: asset.contentType,
+    [asset.direction === "in" ? "received" : "produced"]: `run ${asset.runId}`,
+    key: asset.key,
+    where: whereIs(asset, path),
+  };
+}
+
+/** A turn that can name one of the thread's files: the attachments line a
+ *  staged turn ends with, or an `attach_file` call. Only such hits pay the
+ *  catalogue read. */
+const FILE_BEARING = /attachments\/|attach_file|attached files/i;
+
+/** The files a turn's text names, resolved against the catalogue by name at a
+ *  word boundary — `2-clip.mp4` in an attachments line names `clip.mp4`,
+ *  `myclip.mp4` does not — under the file's name as the person saw it and as
+ *  the workspace spells it (`safeBasename`). */
+export function filesNamedIn(text: string, catalogue: readonly ThreadAsset[]): ThreadAsset[] {
+  return catalogue.filter((a) => [a.name, safeBasename(a.name)].some((n) => nameAt(n).test(text)));
+}
+const nameAt = (name: string): RegExp =>
+  new RegExp(`(?<![A-Za-z0-9._])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9._-])`);
 
 const UNAVAILABLE = "the session tools are not available in this context: this run has no session log.";
 const DEFAULT_HITS = 5;
@@ -78,7 +125,9 @@ export const recallTool: RunnableTool = {
     "everything a compaction removed from your window — for words, and get the matching turns in relevance order " +
     "with their turn numbers and a snippet; or pass `turn` to read one turn whole (a tool result, a command, a " +
     "message). Use it when you need something said or seen earlier that is not in front of you: a failing test's " +
-    "name, a command's output, a decision. `limit` defaults to 5 (at most 50).",
+    "name, a command's output, a decision. `limit` defaults to 5 (at most 50). A hit that names a file of this " +
+    "thread carries the file's key and where it is for this run; `assets: true` lists every file the thread " +
+    "received or its runs produced instead of searching.",
   inputSchema: {
     type: "object",
     properties: {
@@ -88,6 +137,11 @@ export const recallTool: RunnableTool = {
         type: "integer",
         description: "A turn number from an earlier recall: returns that turn whole instead of searching",
       },
+      assets: {
+        type: "boolean",
+        description:
+          "List the thread's files — received on its messages or produced by its runs — with their keys and where each is for this run, instead of searching",
+      },
     },
   },
   sideEffectFree: true,
@@ -95,12 +149,29 @@ export const recallTool: RunnableTool = {
     if (!ctx.session) return UNAVAILABLE;
     const turn = typeof input.turn === "number" ? Math.trunc(input.turn) : undefined;
     const query = typeof input.query === "string" ? input.query.trim() : "";
-    if (turn === undefined && query.length === 0) return "recall needs a query or a turn number.";
-    if (!(await mayRead(ctx))) return JSON.stringify(turn !== undefined ? { turn, content: null } : { hits: [] });
+    const listAssets = input.assets === true;
+    if (turn === undefined && query.length === 0 && !listAssets)
+      return "recall needs a query, a turn number or assets: true.";
+    if (!(await mayRead(ctx))) {
+      return JSON.stringify(turn !== undefined ? { turn, content: null } : listAssets ? { assets: [] } : { hits: [] });
+    }
     if (turn !== undefined) {
       const message = turn >= 0 ? await ctx.session.readTurn(turn) : undefined;
       if (!message) return `no turn ${turn} in this session's log.`;
       return JSON.stringify({ turn, role: message.role, content: message.content });
+    }
+    if (listAssets) {
+      if (!ctx.session.assets) {
+        return JSON.stringify({
+          assets: [],
+          note: "this deployment has no artifact store: the thread's files are not catalogued",
+        });
+      }
+      const assets = await ctx.session.assets();
+      return JSON.stringify({
+        assets: assets.map((a) => assetView(a, ctx.session!.workspacePathOf?.(a.key))),
+        ...(assets.length === 0 ? { note: "no run of this thread has received or produced a file" } : {}),
+      });
     }
     const limit = Math.min(
       MAX_HITS,
@@ -111,12 +182,21 @@ export const recallTool: RunnableTool = {
     if (hits.length === 0)
       notes.push("no turn of this session's log matches; your notes (notes {}) may hold what you look for");
     if (ctx.session.session.seedFrom === 0) notes.push("this is the first run of its session: the log begins with it");
+    // A hit that names one of the thread's files — an attachments line, an
+    // attach_file call — carries the file's key and where it is for this run;
+    // the catalogue is read only when some hit can name one.
+    const catalogue =
+      ctx.session.assets && hits.some((h) => FILE_BEARING.test(h.text)) ? await ctx.session.assets() : [];
     return JSON.stringify({
-      hits: hits.map((h) => ({
-        turn: h.idx,
-        ...(h.role !== undefined ? { role: h.role } : {}),
-        snippet: snippetOf(h.text),
-      })),
+      hits: hits.map((h) => {
+        const files = filesNamedIn(h.text, catalogue);
+        return {
+          turn: h.idx,
+          ...(h.role !== undefined ? { role: h.role } : {}),
+          snippet: snippetOf(h.text),
+          ...(files.length > 0 ? { files: files.map((a) => assetView(a, ctx.session!.workspacePathOf?.(a.key))) } : {}),
+        };
+      }),
       ...(gaps.length
         ? {
             gaps: `the log has a gap at ${gaps.map((g) => `turn ${g}`).join(", ")}: a run before it detached from the ledger, so turns it saw after that point are not here`,
