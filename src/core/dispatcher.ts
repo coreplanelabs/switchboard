@@ -519,7 +519,6 @@ export async function dispatch(
             readReferences(deps, { msg, actor: resolveChatActor(msg, (id) => deps.config.grantsFor(id)) }),
           )
         : NO_REFERENCES;
-    if (references.refused.length > 0) await io.reply(REFERENCE_REFUSAL);
 
     // The provider behind the model ref, and the target repo/ref/PR resolution
     // STARTED here (dispatch/resolve.ts) so the GitHub round trip overlaps the
@@ -556,6 +555,12 @@ export async function dispatch(
     setupCard = card;
     setupShell = shell;
     setupHeartbeat = ack.heartbeat;
+    // The references step's one refusal line (record 0037), held from the step
+    // above until the card existed so it reads as the first line under the
+    // run, not a reply to nothing. Nothing between the step and the
+    // ack ends the dispatch, so it posts exactly once whenever anything was
+    // refused; the `[references]` log lines were written by the step itself.
+    if (references.refused.length > 0) await io.reply(REFERENCE_REFUSAL);
 
     // The repo/ref resolution started above (before the ack) lands here; the
     // gate below runs against it exactly as before.
