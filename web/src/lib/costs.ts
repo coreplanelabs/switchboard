@@ -35,12 +35,32 @@ export function valueOf(d: DailyCost, series: string): number {
   return d.containers[series]?.total ?? 0;
 }
 
+/** The month projection, cloud and LLM as separate run-rates added together:
+ *  cloud from the last seven full days, LLM from the closed days that have LLM
+ *  data (the workspace may be younger than the range) — and, while a rate has no
+ *  full day to stand on, from the open day scaled to a full one by the fraction
+ *  of the UTC day elapsed at `generatedAt`. A projection that ignored LLM on a
+ *  young workspace read an order of magnitude low. */
+export interface CostProjection {
+  monthUsd: number;
+  cloudRate: number;
+  llmRate: number;
+  cloudBasis: "full-days" | "today";
+  /** `none` = LLM unavailable, or no LLM data at all in range. */
+  llmBasis: "closed-days" | "today" | "none";
+  /** How many closed days the LLM rate averages (when `llmBasis` is `closed-days`). */
+  llmClosedDays: number;
+}
+
+export const DAYS_PER_MONTH_PROJECTION = 30.4;
+
 export interface CostTiles {
   yesterday?: { date: string; total: number };
   /** The open day (`partialLastDay`), so a one-day range has a figure to lead with. */
   today?: { date: string; total: number };
-  avg7: number;
-  projectedMonth: number;
+  /** Average total per full day over the last seven; absent when the range has no full day. */
+  avg7?: number;
+  projection: CostProjection;
   /** LLM dollars over the range, yesterday's, and the open day's (an estimate
    *  from the usage report when the cost report has not closed it). Not a
    *  share: LLM spend dwarfs the Cloudflare spend, so a percentage of the total
@@ -58,14 +78,14 @@ export function tilesOf(report: CostReport): CostTiles {
   const today = report.range.partialLastDay ? report.days[report.days.length - 1] : undefined;
   const yesterday = full[full.length - 1];
   const last7 = full.slice(-7);
-  const avg7 = last7.length ? last7.reduce((s, d) => s + d.total, 0) / last7.length : 0;
+  const avg7 = last7.length ? last7.reduce((s, d) => s + d.total, 0) / last7.length : undefined;
   const accountShare =
     report.account.cloudUsd > 0 ? Math.round((report.totals.cloudUsd / report.account.cloudUsd) * 100) : 0;
   return {
     ...(yesterday ? { yesterday: { date: yesterday.date, total: yesterday.total } } : {}),
     ...(today ? { today: { date: today.date, total: today.total } } : {}),
-    avg7,
-    projectedMonth: avg7 * 30.4,
+    ...(avg7 !== undefined ? { avg7 } : {}),
+    projection: projectionOf(report, full, today),
     llm: {
       range: report.totals.llmUsd,
       ...(yesterday ? { yesterday: yesterday.llmUsd } : {}),
@@ -74,6 +94,88 @@ export function tilesOf(report: CostReport): CostTiles {
     accountShare,
   };
 }
+
+const mean = (xs: number[]): number => xs.reduce((s, v) => s + v, 0) / xs.length;
+
+/** The fraction of the open UTC day elapsed at `generatedAt`, never below one
+ *  hour so a figure read just after midnight is not scaled to infinity. */
+function elapsedFractionOf(report: CostReport, today: DailyCost): number {
+  const dayStart = Date.parse(`${today.date}T00:00:00Z`);
+  const f = (report.generatedAt - dayStart) / 86_400_000;
+  return Math.min(1, Math.max(1 / 24, Number.isFinite(f) ? f : 1));
+}
+
+function projectionOf(report: CostReport, full: DailyCost[], today: DailyCost | undefined): CostProjection {
+  const frac = today ? elapsedFractionOf(report, today) : 1;
+  const last7 = full.slice(-7);
+  let cloudRate = 0;
+  let cloudBasis: CostProjection["cloudBasis"] = "full-days";
+  if (last7.length) cloudRate = mean(last7.map((d) => d.cloudUsd));
+  else if (today) {
+    cloudRate = today.cloudUsd / frac;
+    cloudBasis = "today";
+  }
+  let llmRate = 0;
+  let llmBasis: CostProjection["llmBasis"] = "none";
+  let llmClosedDays = 0;
+  if (report.llmAvailable) {
+    // The workspace may be younger than the range: average only from the first
+    // closed day that has LLM spend, so leading zero days do not dilute the rate.
+    const first = full.findIndex((d) => d.llmUsd > 0);
+    const closed = first === -1 ? [] : full.slice(first).slice(-7);
+    if (closed.length) {
+      llmRate = mean(closed.map((d) => d.llmUsd));
+      llmBasis = "closed-days";
+      llmClosedDays = closed.length;
+    } else if (today && today.llmUsd > 0) {
+      llmRate = today.llmUsd / frac;
+      llmBasis = "today";
+    }
+  }
+  return {
+    monthUsd: (cloudRate + llmRate) * DAYS_PER_MONTH_PROJECTION,
+    cloudRate,
+    llmRate,
+    cloudBasis,
+    llmBasis,
+    llmClosedDays,
+  };
+}
+
+/** Where each figure can be dug into: the Cloudflare dashboard pages for the
+ *  account and its billed products, and Anthropic's cost page for the LLM line. */
+export interface CostLinks {
+  account: string;
+  billing: string;
+  containers: string;
+  durableObjects: string;
+  workers: string;
+  r2: string;
+  workflows: string;
+  worker: (script: string) => string;
+  bucket: (name: string) => string;
+  anthropic: string;
+}
+
+export function linksOf(report: CostReport): CostLinks {
+  const dash = `https://dash.cloudflare.com/${report.account.id}`;
+  return {
+    account: dash,
+    billing: `${dash}/billing`,
+    containers: `${dash}/workers/containers`,
+    durableObjects: `${dash}/workers/durable-objects`,
+    workers: `${dash}/workers-and-pages`,
+    r2: `${dash}/r2/overview`,
+    workflows: `${dash}/workers/workflows`,
+    worker: (script) => `${dash}/workers/services/view/${encodeURIComponent(script)}/production/metrics`,
+    bucket: (name) => `${dash}/r2/default/buckets/${encodeURIComponent(name)}`,
+    anthropic: "https://platform.claude.com/cost",
+  };
+}
+
+/** The account as the page names it: the configured name, else the id's first eight hex. */
+export const accountLabelOf = (report: CostReport): string =>
+  report.account.name ?? `${report.account.id.slice(0, 8)}…`;
 
 /** The hover text for one day: every series and the total, one per line, the
  *  open day's LLM estimate said so. */

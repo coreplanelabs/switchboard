@@ -52,7 +52,8 @@ function report(over: Partial<CostReport> = {}): CostReport {
         workflows: 0,
       },
     },
-    account: { cloudUsd },
+    generatedAt: Date.parse("2026-08-29T12:00:00Z"),
+    account: { id: "acct-example", cloudUsd },
     attribution: {
       workers: ["switchboard"],
       containerApps: {},

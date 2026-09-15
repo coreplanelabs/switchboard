@@ -60,6 +60,9 @@ export interface CostGroupConfig {
 
 export interface CostsConfig {
   cloudflareAccountId: string;
+  /** How the page names the account beside its share (the dashboard's account
+   *  name, e.g. `acme-infra`); absent → the page prints the id's first eight hex. */
+  cloudflareAccountName?: string;
   /** Env var holding a Cloudflare API token with Account Analytics:Read. */
   cloudflareTokenEnv: string;
   /** Env var holding an Anthropic Admin API key (sk-ant-admin…). Optional feature. */
@@ -85,6 +88,8 @@ export function parseCostsConfig(raw: unknown): CostsConfig | undefined {
   const r = raw as Record<string, unknown>;
   if (typeof r.cloudflareAccountId !== "string" || !r.cloudflareAccountId)
     throw new Error("costs.cloudflareAccountId is required");
+  if (r.cloudflareAccountName !== undefined && typeof r.cloudflareAccountName !== "string")
+    throw new Error("costs.cloudflareAccountName must be a string when given");
   if (!r.groups || typeof r.groups !== "object")
     throw new Error("costs.groups must be a mapping of group → { workers, containerApps }");
   const groups: Record<string, CostGroupConfig> = {};
@@ -107,6 +112,9 @@ export function parseCostsConfig(raw: unknown): CostsConfig | undefined {
   }
   return {
     cloudflareAccountId: r.cloudflareAccountId,
+    ...(typeof r.cloudflareAccountName === "string" && r.cloudflareAccountName
+      ? { cloudflareAccountName: r.cloudflareAccountName }
+      : {}),
     cloudflareTokenEnv: typeof r.cloudflareTokenEnv === "string" ? r.cloudflareTokenEnv : DEFAULT_CF_TOKEN_ENV,
     anthropicAdminKeyEnv:
       typeof r.anthropicAdminKeyEnv === "string" ? r.anthropicAdminKeyEnv : DEFAULT_ANTHROPIC_ADMIN_ENV,
@@ -446,10 +454,25 @@ export interface CostReport {
     total: number;
     byResource: ResourceSplit;
   };
+  /** When the report was assembled (epoch ms): the page scales the open day's
+   *  figures to a full day by the fraction of the UTC day that had elapsed. */
+  generatedAt: number;
   /** The whole account, every row priced the same way, grouped or not — the
-   *  denominator of "our services vs everything else on this account". */
-  account: { cloudUsd: number };
+   *  denominator of "our services vs everything else on this account" — with
+   *  the id the page links to and the configured name it prints. */
+  account: { id: string; name?: string; cloudUsd: number };
   attribution: CostAttribution;
+}
+
+/** What the report carries beyond the priced rows: the account behind the
+ *  denominator and the clock the page scales the open day by. */
+export interface CostReportMeta {
+  /** The Cloudflare account the rows came from — required, since the page
+   *  links to it and an empty id would link to the bare dashboard. */
+  accountId: string;
+  accountName?: string;
+  /** Absent → the system clock, for callers that do not assemble a page. */
+  generatedAt?: number;
 }
 
 function addDays(iso: string, n: number): string {
@@ -486,6 +509,7 @@ export function buildCostReport(
   usage: CloudflareUsage,
   llm: LlmCostRow[] | null,
   range: DateRange,
+  meta: CostReportMeta,
 ): CostReport {
   const attribution = attributionOf(cfg, usage);
   const workers = new Set(cfg.workers);
@@ -617,7 +641,12 @@ export function buildCostReport(
     llmAvailable: llm !== null && !!cfg.anthropicWorkspaceId,
     days,
     totals: { cloudUsd, llmUsd, total: cloudUsd + llmUsd, byResource },
-    account: { cloudUsd: accountCloudUsd },
+    generatedAt: meta.generatedAt ?? systemClock(),
+    account: {
+      id: meta.accountId,
+      ...(meta.accountName ? { name: meta.accountName } : {}),
+      cloudUsd: accountCloudUsd,
+    },
     attribution,
   };
 }
@@ -1087,9 +1116,14 @@ export function createCostsService(
     async report(group, daysParam) {
       const g = cfg.groups[group];
       if (!g) throw new Error(`unknown cost group ${group}`);
-      const range = resolveRange(daysParam, now());
+      const at = now();
+      const range = resolveRange(daysParam, at);
       const [usage, llmRows] = await Promise.all([cloudflare.fetchUsage(range), llm.fetchDailyCost(range)]);
-      return buildCostReport(group, g, usage, llmRows, range);
+      return buildCostReport(group, g, usage, llmRows, range, {
+        accountId: cfg.cloudflareAccountId,
+        accountName: cfg.cloudflareAccountName,
+        generatedAt: at.getTime(),
+      });
     },
   };
 }

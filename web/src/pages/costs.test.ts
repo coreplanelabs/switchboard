@@ -49,7 +49,9 @@ function report(over: Partial<CostReport> = {}): CostReport {
         workflows: 0,
       },
     },
-    account: { cloudUsd: cloudUsd * 4 }, // three other tenants' worth on the same account
+    // The page is rendered at 12:00Z on the open day: half of it has elapsed.
+    generatedAt: Date.parse("2026-08-29T12:00:00Z"),
+    account: { id: "acct-example", name: "acme-infra", cloudUsd: cloudUsd * 4 }, // three other tenants' worth on the same account
     attribution: {
       workers: ["switchboard", "switchboard-resident"],
       containerApps: { "app-bot": "bot" },
@@ -89,6 +91,57 @@ describe("CostsPage", () => {
     expect(t).not.toContain("LLM share");
   });
 
+  it("projects the month from cloud and LLM run-rates added together, and says what each is based on", () => {
+    const w = mountApp(CostsPage, { seed: seed() });
+    const t = w.text();
+    // Cloud: the two full days average (0.6 + 1.6) / 2 = $1.10 a day. LLM: the
+    // two closed days with LLM data average (4 + 12.5) / 2 = $8.25 a day.
+    // (1.10 + 8.25) × 30.4 = $284.
+    expect(t).toContain("Projected month");
+    expect(t).toContain("$284");
+    expect(t).toContain("cloud $1.10/day + LLM $8.25/day");
+    expect(t).toContain("LLM from 2 closed days");
+  });
+
+  it("with no closed LLM day yet, the LLM run-rate is today's estimate scaled to a full day", () => {
+    const r = report();
+    const days = r.days.map((d, i) => (i < 2 ? { ...d, llmUsd: 0, total: d.cloudUsd } : d));
+    const w = mountApp(CostsPage, {
+      seed: seed({ ...r, days, totals: { ...r.totals, llmUsd: 3, total: days.reduce((s, d) => s + d.total, 0) } }),
+    });
+    const t = w.text();
+    // Today: $3 of LLM at 12:00Z → $6.00 a day. Cloud stays the full-day average $1.10.
+    // (1.10 + 6.00) × 30.4 = $216.
+    expect(t).toContain("$216");
+    expect(t).toContain("cloud $1.10/day + LLM $6.00/day");
+    expect(t).toContain("LLM from today so far");
+  });
+
+  it("names the Cloudflare account and links every figure to where it can be dug into", () => {
+    const w = mountApp(CostsPage, { seed: seed() });
+    const hrefs = w.findAll("a").map((a) => a.attributes("href") ?? "");
+    expect(w.text()).toContain("acme-infra");
+    expect(hrefs).toContain("https://dash.cloudflare.com/acct-example");
+    expect(hrefs).toContain("https://dash.cloudflare.com/acct-example/billing");
+    expect(hrefs).toContain("https://dash.cloudflare.com/acct-example/workers/containers");
+    expect(hrefs).toContain("https://dash.cloudflare.com/acct-example/workers/durable-objects");
+    expect(hrefs).toContain("https://dash.cloudflare.com/acct-example/r2/default/buckets/switchboard-resident-cache");
+    expect(hrefs).toContain(
+      "https://dash.cloudflare.com/acct-example/workers/services/view/switchboard-resident/production/metrics",
+    );
+    expect(hrefs).toContain("https://platform.claude.com/cost");
+    // External links open in a new tab without handing the opener over.
+    const ext = w.findAll('a[href^="https://dash.cloudflare.com"]');
+    expect(ext.length).toBeGreaterThan(0);
+    for (const a of ext) expect(a.attributes("rel")).toContain("noopener");
+  });
+
+  it("falls back to the account id when no account name is configured", () => {
+    const r = report();
+    const w = mountApp(CostsPage, { seed: seed({ ...r, account: { ...r.account, name: undefined } }) });
+    expect(w.text()).toContain("acct-exa…");
+  });
+
   it("with a one-day range the first tile is today so far, not an empty yesterday", () => {
     const r = report();
     const today = r.days[2];
@@ -104,6 +157,12 @@ describe("CostsPage", () => {
     expect(t).toContain("Today so far");
     expect(t).toContain("$4.20"); // 0.9 + 0.3 + 3
     expect(t).not.toContain("no full day in range");
+    // No full day: the average tile says so instead of $0.00, and the projection
+    // runs on today scaled: cloud 1.20/0.5 = 2.40, LLM 3/0.5 = 6.00 → 8.40 × 30.4 = $255.
+    expect(t).toContain("no full day yet");
+    expect(t).not.toContain("per day, full days only");
+    expect(t).toContain("$255");
+    expect(t).toContain("cloud $2.40/day + LLM $6.00/day");
   });
 
   it("lists the daily table newest first, the open day on top", () => {
@@ -123,10 +182,10 @@ describe("CostsPage", () => {
     const t = w.text();
     expect(t).toContain("Share of account");
     expect(t).toContain("25%"); // the group is a quarter of the account
-    expect(t).toContain("$3.40 of $13.60 Cloudflare spend in range");
+    expect(t).toContain("$3.40 of $13.60 on acme-infra");
     expect(t).toContain("switchboard, switchboard-resident");
     expect(t).toMatch(/namespace they host \(2\)/);
-    expect(t).toMatch(/named after them \(1\)/);
+    expect(t).toMatch(/named after them \(switchboard-resident-cache\)/);
   });
 
   it("stacks the small platform meters (Workers, SQLite rows and storage, R2) as one series and lists each in the split", () => {
@@ -134,8 +193,8 @@ describe("CostsPage", () => {
     expect(w.find(".legend").text()).toContain("Workers · storage · R2");
     const fullDay = report().days[1].date;
     const dayTitle = w
-      .findAll("rect.day title")
-      .map((n) => n.text())
+      .findAll("rect.day")
+      .map((n) => n.attributes("aria-label") ?? "")
       .find((t) => t.startsWith(fullDay));
     expect(dayTitle).toContain("Workers · storage · R2 $0.05");
     const t = w.text();
@@ -156,19 +215,38 @@ describe("CostsPage", () => {
     expect(w.findAll("rect.seg title").length).toBe(0);
   });
 
-  it("one hover target per day carries the whole day's breakdown — every series and the total", () => {
+  it("one hover target per day carries the whole day's breakdown — every series and the total — as its accessible label", () => {
     const w = mountApp(CostsPage, { seed: seed() });
     const days = w.findAll("rect.day");
     expect(days.length).toBe(3);
-    const titles = w.findAll("rect.day title").map((n) => n.text());
+    const labels = days.map((n) => n.attributes("aria-label") ?? "");
     const [, fullDay, openDay] = report().days;
-    const aug28 = titles.find((t) => t.startsWith(fullDay.date));
+    const aug28 = labels.find((t) => t.startsWith(fullDay.date));
     expect(aug28).toBeDefined();
     expect(aug28).toContain("total $14.10");
     expect(aug28).toContain("bot $1.30");
     expect(aug28).toContain("Durable Objects $0.25");
     expect(aug28).toContain("LLM (Anthropic) $12.50");
-    expect(titles.find((t) => t.startsWith(openDay.date))).toContain("estimate");
+    expect(labels.find((t) => t.startsWith(openDay.date))).toContain("estimate");
+    // No native <title>: the tooltip below is the one that shows, without the browser's delay.
+    expect(w.findAll("rect.day title").length).toBe(0);
+  });
+
+  it("hovering a day shows a tooltip panel with that day's breakdown, and leaving hides it", async () => {
+    const w = mountApp(CostsPage, { seed: seed() });
+    expect(w.find(".chart-tip").exists()).toBe(false);
+    const [, , openDay] = w.findAll("rect.day");
+    await openDay.trigger("pointerenter", { clientX: 700, clientY: 120 });
+    const tip = w.find(".chart-tip");
+    expect(tip.exists()).toBe(true);
+    expect(tip.attributes("role")).toBe("tooltip");
+    expect(tip.text()).toContain(report().days[2].date);
+    expect(tip.text()).toContain("total $4.20");
+    expect(tip.text()).toContain("LLM (Anthropic)");
+    expect(tip.text()).toContain("$3.00");
+    expect(tip.text()).toContain("estimate");
+    await openDay.trigger("pointerleave");
+    expect(w.find(".chart-tip").exists()).toBe(false);
   });
 
   it("includes a legend and a table view so identity is never color-alone; dates read human with the ISO on hover", () => {
