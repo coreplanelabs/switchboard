@@ -951,6 +951,9 @@ describe("explore agent (docs/reference/specs/agent-explore.md)", () => {
     // agent-explore.md item 2: no attach_file in the toolset, so the prompt says so — a reply
     // that promised "attached below" with nothing attached is the failure this line prevents.
     expect(sys).toMatch(/cannot attach or post files/);
+    // The router reads the description, not the prompt: it must say the same, so an ask that
+    // names a posted file has a reason on the table to go elsewhere.
+    expect(AGENTS.explore!.description).toMatch(/cannot attach or post files/i);
     expect(sys).toMatch(/never say a file is attached/i);
     expect(sys).not.toMatch(/attach_file/);
     expect(sys).toMatch(/never commit or push/i);

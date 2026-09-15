@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { AGENTS, COMPOUND_PRESET, presetDoor } from "../../agents/registry.js";
+import { TOOLSETS } from "../../tools/workspace.js";
 import { ConfigStore } from "../../config.js";
 import type { ProviderRegistry } from "../../providers/registry.js";
 import type { CompletionRequest, CompletionResult, Provider } from "../../providers/types.js";
@@ -113,6 +114,8 @@ describe("routablePresets — the table is the registry, never a copy", () => {
         machine: def.machine,
         identity: def.identity,
         maxMinutes: def.maxMinutes,
+        // Read off the toolset, never declared: the one preset whose toolset carries attach_file.
+        attaches: (TOOLSETS[def.toolset] ?? []).some((t) => t.name === "attach_file"),
       });
     }
   });
@@ -189,6 +192,22 @@ describe("buildRoutePrompt — the request as untrusted data, bounded", () => {
     expect(p.system).toMatch(/no machine before a machine/i);
     expect(p.system).toMatch(/web search, a shell or a sandbox/i);
     expect(p.system).toMatch(/answered from GitHub/i);
+  });
+
+  // Three misses in one day: an ask that names attach_file routed to `explore`, which has no such
+  // tool, because "no code changes" outweighed the tool's name. The rule names the presets that can
+  // post a file, read off the registry's toolsets — never a hand-kept list — so the model has a
+  // column-independent fact to route on.
+  it("names the presets that can attach or post a file, read off the registry's toolsets, and sends an ask for a posted file there whatever else it says", () => {
+    const p = buildRoutePrompt({
+      ...base,
+      text: "no code changes: poll for a file, then attach it here with attach_file",
+    });
+    expect(p.system).toMatch(/Only `coding` can attach or post a file into the thread \(the `attach_file` tool\)/);
+    expect(p.system).toMatch(/routes there, however read-only the rest of it sounds/);
+    expect(p.system).not.toMatch(/Only `coding`, `explore`/);
+    const attaching = presets.filter((x) => x.attaches).map((x) => x.name);
+    expect(attaching).toEqual(["coding"]);
   });
 
   it("names the thread's earlier directives, or none, and the table and the fallback preset", () => {

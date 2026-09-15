@@ -603,7 +603,7 @@ const WORK_PRESETS = {
   explore: {
     name: "explore",
     description:
-      "Long, read-only investigation of a repository in a cold sandbox: runs builds, suites and pipelines, searches the web, and reports a claim table with commands and numbers. Never opens a PR. Up to two hours.",
+      "Read-only investigation of a repository in a cold sandbox: runs builds, suites and pipelines, searches the web, and reports a claim table with commands and numbers. Never opens a PR; cannot attach or post files.",
     system: EXPLORE_SYSTEM,
     toolset: "explore",
     // Always a cold per-thread sandbox with the checkout, never the resident a
