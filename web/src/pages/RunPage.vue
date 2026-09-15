@@ -31,6 +31,7 @@ import {
   RunnerClockKey,
   ArtifactLinksKey,
   ReplyLandedKey,
+  quotedLines,
 } from "../lib/runPageModel";
 import { createPrReviewCollector } from "../lib/prReviewCollector";
 import { createReviewAbridge } from "../lib/reviewAbridge";
@@ -637,6 +638,49 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
         :when-title="fmtTimeTitle(state.reply.at)"
         :files="state.reply.files"
       />
+
+      <!-- Referenced threads (record 0037): the conversations the request
+           pointed at and the run quoted, as the model saw them — the same fold
+           grammar as the Context block below, one row per thread with its
+           channel, count and permalink, the quoted lines under it. -->
+      <details v-if="state.references.length > 0" id="references" class="group mb-4 px-(--sb-gutter)">
+        <summary
+          class="flex min-h-6 cursor-pointer list-none items-baseline gap-2.5 font-mono text-xs font-medium uppercase tracking-wider text-muted hover:text-toned [&::-webkit-details-marker]:hidden"
+        >
+          <span
+            class="chev select-none text-xs text-dimmed transition-transform group-open:rotate-90 motion-reduce:transition-none"
+            >❯</span
+          >
+          <span>Referenced thread{{ state.references.length === 1 ? "" : "s" }}</span>
+          <span class="count font-normal normal-case tracking-normal text-dimmed"
+            >· {{ state.references.length }} thread{{ state.references.length === 1 ? "" : "s" }}</span
+          >
+        </summary>
+        <div id="referencedthreads" class="pb-1 pl-5">
+          <div
+            v-for="thread in state.references"
+            :key="thread.key"
+            class="reference border-t border-default py-1.5 first-of-type:border-t-0"
+          >
+            <div class="flex items-baseline gap-2 font-mono text-xs text-dimmed">
+              <a
+                class="text-muted no-underline hover:text-primary hover:underline"
+                :href="thread.url"
+                target="_blank"
+                rel="noopener noreferrer"
+                >#{{ thread.channelName }}</a
+              >
+              <span>· {{ thread.messages }} message{{ thread.messages === 1 ? "" : "s" }}</span>
+              <span class="ts ml-auto shrink-0 select-none" :title="fmtTimeTitle(thread.at)">{{
+                fmtTime(thread.at)
+              }}</span>
+            </div>
+            <div class="quoted mt-1 whitespace-pre-wrap break-words font-mono text-xs opacity-85">
+              <div v-for="(line, i) in quotedLines(thread.text)" :key="i">{{ line }}</div>
+            </div>
+          </div>
+        </div>
+      </details>
 
       <!-- Earlier in this thread: the turns the model was given as context,
            collapsed by default. The chevron says "this opens" — the same fold

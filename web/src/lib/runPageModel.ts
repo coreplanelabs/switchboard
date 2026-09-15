@@ -240,6 +240,18 @@ export interface ContextTurnVm {
 /** One conversation the request pointed at and the run quoted (a `reference`
  *  event, record 0037): the block as the model saw it, the channel the
  *  classifier named and the permalink — the page's Referenced thread block. */
+/** The lines of a quoted block as the page shows them: the header line and
+ *  the untrusted fence (the preamble and the two markers) are the model's
+ *  framing, not the conversation, so they are dropped; what remains is one
+ *  `HH:MM · author: text` line per message, rendered as text, never markdown. */
+export function quotedLines(block: string): string[] {
+  const lines = block.split("\n");
+  const open = lines.indexOf("<<<UNTRUSTED");
+  const close = lines.lastIndexOf("UNTRUSTED>>>");
+  const body = open >= 0 && close > open ? lines.slice(open + 1, close) : lines.slice(1);
+  return body.filter((l) => l.length > 0);
+}
+
 export interface ReferenceVm {
   key: string;
   at?: number;
