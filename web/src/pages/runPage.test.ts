@@ -403,6 +403,45 @@ describe("RunPage — history mode", () => {
     expect(unknown.find(".conn .chip").text()).toBe("ended");
   });
 
+  // session-log.md item 10: the notepad is a document the agent keeps for the
+  // next run in the thread — it reads as one on the page (a Notes block with
+  // its Markdown rendered), never as the ⏱ warning line a lifecycle notice
+  // gets. The notepad is replaced whole on every write, so only the newest
+  // write stands open; an earlier one is folded under its clock.
+  it("a notes event renders as a Notes block with its markdown — not a ⏱ line — and only the newest write stands open", () => {
+    const first = "## Done\n- kept the **helper**\n\n## Next\n- prove the retry";
+    const second = "## Done\n- kept the helper\n- proved the retry at `abc1234`\n\n## Next\n- nothing";
+    const w = mountApp(RunPage, {
+      seed: historySeed(
+        [
+          input,
+          { type: "notes", text: first, at: 2000 },
+          { type: "run_note", kind: "wrap_up", summary: "~3 min left — signaling wrap-up", at: 3000 },
+          { type: "notes", text: second, at: 4000 },
+          { type: "answer", text: "done", at: 5000 },
+        ] as LiveFrame[],
+        { status: "completed", durationMs: 4000 },
+      ),
+    });
+    const notepads = w.findAll("#log .notepad");
+    expect(notepads).toHaveLength(2);
+    // The block, not a line: a heading that names it, the Markdown rendered by the one renderer.
+    expect(notepads[0].find("summary").text()).toContain("Notes");
+    expect(notepads[0].find("strong").text()).toBe("helper");
+    expect(notepads[0].findAll("h2").map((h) => h.text())).toEqual(["Done", "Next"]);
+    expect(notepads[0].text()).not.toContain("⏱");
+    // The clock on each write; the newest open, the earlier one folded.
+    expect(notepads[0].find(".ts").text()).toBe(formatClock(2000));
+    expect(notepads[1].find(".ts").text()).toBe(formatClock(4000));
+    expect((notepads[0].element as HTMLDetailsElement).open).toBe(false);
+    expect((notepads[1].element as HTMLDetailsElement).open).toBe(true);
+    expect(notepads[1].find("code").text()).toBe("abc1234");
+    // A lifecycle note is still the ⏱ line, and the notepad is not one of them.
+    const notes = w.findAll("#log .note");
+    expect(notes).toHaveLength(1);
+    expect(notes[0].text()).toContain("⏱ ~3 min left — signaling wrap-up");
+  });
+
   it("renders AE11 omission markers (replay notes) as quiet rows", () => {
     const w = mountApp(RunPage, { seed: historySeed([{ type: "replay_note", summary: "3 records omitted" }]) });
     expect(w.find("#log .note").text()).toContain("3 records omitted");

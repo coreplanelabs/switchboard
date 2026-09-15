@@ -618,6 +618,23 @@ describe("notes and stops", () => {
     expect(m.state.stopMode).toBe("soft");
   });
 
+  // session-log.md item 10: the notepad the `notes` tool wrote is a note row
+  // under its own kind, so the page can draw it as a document and not as a
+  // lifecycle notice; every run note keeps its kind on the row for the same reason.
+  it("a notes event is a note row of kind `notes` carrying the notepad whole; a run note carries its own kind", () => {
+    const m = model();
+    m.handle({ type: "notes", text: "## Done\n- kept the helper\n\n## Next\n- prove the retry", at: 5 });
+    m.handle({ type: "run_note", kind: "wrap_up", summary: "~3 min left — signaling wrap-up", at: 6 });
+    expect(m.state.log.map((i) => i.kind)).toEqual(["note", "note"]);
+    const [notepad, wrapUp] = m.state.log;
+    if (notepad.kind === "note") {
+      expect(notepad.noteKind).toBe("notes");
+      expect(notepad.text).toBe("## Done\n- kept the helper\n\n## Next\n- prove the retry");
+      expect(notepad.replay).toBe(false);
+    }
+    if (wrapUp.kind === "note") expect(wrapUp.noteKind).toBe("wrap_up");
+  });
+
   it("replay notes (transport notices) render as replay rows", () => {
     const m = model();
     m.handle({ type: "replay_note", summary: "3 records omitted" });

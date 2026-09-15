@@ -380,15 +380,48 @@ const HIST_EVENTS = [
     at: NOW - 753_900,
     seq: 28,
   },
+  // The notepad the run kept for the next run in its thread (docs/reference/specs/
+  // session-log.md item 10), written whole before the answer: the `notes` call,
+  // the notepad it published, its result. The page draws the notepad as a Notes
+  // block with its Markdown, open because it is the newest write.
+  { type: "tool_call", callId: "c8", tool: "notes", summary: "notes (12 lines)", at: NOW - 753_850, seq: 29 },
+  {
+    type: "notes",
+    text: [
+      "## Done",
+      "- `sendWebhook` retries with exponential backoff: 5 attempts, base 250 ms, ±20% jitter; a 4xx gives up at once",
+      "- tests: `webhooks.test.ts` (retries with backoff, gives up on 4xx, jitter bounds) — green at `7c1e2f9`",
+      "- callers in `src/jobs/` untouched (the signature stays, per the follow-up)",
+      "",
+      "## Next",
+      "- the give-up log line at `warn` carries the status code — not yet asserted in a test",
+      "- the metrics screenshot and the retry recording are on the thread and the PR",
+      "",
+      "## Facts",
+      "- `MAX_DELAY_MS` caps the delay after the jitter, on purpose: a capped delay must never exceed the cap",
+      "- pull request: acme/web#42 (edited, not opened, by this run)",
+    ].join("\n"),
+    at: NOW - 753_800,
+    seq: 30,
+  },
+  {
+    type: "tool_result",
+    callId: "c8",
+    tool: "notes",
+    ok: true,
+    summary: "notes saved (748 bytes)",
+    at: NOW - 753_750,
+    seq: 31,
+  },
   // The answer's own turn, on a DIFFERENT model than the run started on — not
   // something a run does today (it is pinned to one model), but the switch
   // treatment (`⇄ claude-opus-5` on the turn's head) has to be seen somewhere.
-  modelTurn("m3", NOW - 753_900, 3_000, 29, { stopReason: "end_turn", model: "anthropic/claude-opus-5" }),
+  modelTurn("m3", NOW - 753_750, 3_000, 32, { stopReason: "end_turn", model: "anthropic/claude-opus-5" }),
   {
     type: "answer",
     text: "Done — `sendWebhook` now retries with exponential backoff (5 attempts, 4xx gives up immediately). PR updated.",
     at: NOW - 750_000,
-    seq: 30,
+    seq: 33,
   },
   // The post-step edited the PR the run was on (docs/reference/specs/pr-description.md
   // item 5): the Reply's caption reads it as the run's PR fact.
@@ -398,7 +431,7 @@ const HIST_EVENTS = [
     number: 42,
     created: false,
     at: NOW - 750_200,
-    seq: 31,
+    seq: 34,
   },
 ];
 

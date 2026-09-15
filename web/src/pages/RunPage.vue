@@ -305,6 +305,16 @@ function toggleAll(): void {
 }
 /** The THIS RUN heading's count: the model's steps (one per narrated or tool-only turn). */
 const stepCount = computed(() => state.log.filter((i) => i.kind === "step").length);
+/** The newest notepad write (session-log.md item 10): the notepad is replaced
+ *  whole on every write, so this is the one that stands open; the earlier
+ *  writes are history, folded under their clocks. */
+const newestNotepadKey = computed(() => {
+  for (let i = state.log.length - 1; i >= 0; i--) {
+    const item = state.log[i];
+    if (item.kind === "note" && item.noteKind === "notes") return item.key;
+  }
+  return undefined;
+});
 
 // ---- follow the stream only when the viewer is already at the tail -------------
 const logEnd = ref<HTMLElement | null>(null);
@@ -852,6 +862,44 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
             <MarkdownText :text="item.input.text" />
             <!-- The files dropped with this follow-up (item 26). -->
             <MessageFiles v-if="item.input.files.length > 0" :files="item.input.files" />
+          </li>
+          <!-- The notepad the `notes` tool wrote (docs/reference/specs/session-log.md
+               item 10): the document the agent keeps for the next run in this
+               thread — what is done, in progress, next, and the facts — so it
+               reads as one, its Markdown rendered, under the clock of its
+               write. The notepad is replaced whole on every write: the newest
+               stands open, an earlier write folds as superseded. -->
+          <li v-else-if="item.noteKind === 'notes'" class="mt-5">
+            <details
+              class="notepad group rounded-lg border border-default bg-(--ui-bg-muted) px-(--sb-gutter) py-2"
+              :open="item.key === newestNotepadKey"
+            >
+              <summary
+                class="flex min-h-6 cursor-pointer list-none items-baseline gap-2.5 font-mono text-xs font-medium uppercase tracking-wider text-muted hover:text-toned [&::-webkit-details-marker]:hidden"
+              >
+                <span
+                  class="chev select-none text-xs text-dimmed transition-transform group-open:rotate-90 motion-reduce:transition-none"
+                  >❯</span
+                >
+                <span>📝 Notes for this thread</span>
+                <span v-if="item.key !== newestNotepadKey" class="font-normal normal-case tracking-normal text-dimmed"
+                  >· superseded</span
+                >
+                <span
+                  v-if="item.at !== undefined"
+                  class="ts ml-auto select-none font-normal normal-case tracking-normal text-dimmed"
+                  :title="formatLocalIso(item.at)"
+                  >{{ formatClock(item.at) }}</span
+                >
+              </summary>
+              <!-- The notepad's section headings in the page's label voice (the
+                   summary row's), not the prose scale: a heading here names a
+                   list, it is not a title. -->
+              <MarkdownText
+                :text="item.text"
+                class="mt-1 [&_h1]:mb-1.5 [&_h1]:mt-4 [&_h1]:font-mono [&_h1]:text-xs [&_h1]:font-medium [&_h1]:uppercase [&_h1]:tracking-wider [&_h1]:text-muted [&_h2]:mb-1.5 [&_h2]:mt-4 [&_h2]:font-mono [&_h2]:text-xs [&_h2]:font-medium [&_h2]:uppercase [&_h2]:tracking-wider [&_h2]:text-muted [&_h3]:mb-1.5 [&_h3]:mt-4 [&_h3]:font-mono [&_h3]:text-xs [&_h3]:font-medium [&_h3]:uppercase [&_h3]:tracking-wider [&_h3]:text-muted [&>:first-child]:mt-1"
+              />
+            </details>
           </li>
           <li
             v-else

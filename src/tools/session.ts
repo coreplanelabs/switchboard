@@ -217,10 +217,12 @@ export const recallTool: RunnableTool = {
 export const notesTool: RunnableTool = {
   name: "notes",
   description:
-    "Your notes for this thread — one document, replaced whole on every write, at most 8 KiB. Keep in it what " +
-    "must survive a compaction and reach the next run in this thread: decisions and their reasons, the names of " +
-    "things you found (files, tests, commits), what is not yet proven. They ride your system prompt at the start " +
-    "of every later run and reach you again right after a compaction. Call with `text` to write; with nothing to read.",
+    "Your notes for this thread — one Markdown document, replaced whole on every write, at most 8 KiB. Keep in it " +
+    "what must survive a compaction and reach the next run in this thread: decisions and their reasons, the names " +
+    "of things you found (files, tests, commits), what is not yet proven. A person reads them on the run's page: " +
+    "a `##` heading per section (Done, In progress, Next, Facts), one bullet per item, never one paragraph. They " +
+    "ride your system prompt at the start of every later run and reach you again right after a compaction. Call " +
+    "with `text` to write; with nothing to read.",
   inputSchema: {
     type: "object",
     properties: { text: { type: "string", description: "The whole notepad as it should read from now on" } },

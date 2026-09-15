@@ -215,6 +215,10 @@ describe("the workspace prompts name the image toolchain", () => {
       expect(sys, name).toContain("`notes`");
       expect(sys, name).toMatch(/at most 8 KiB/);
       expect(sys, name).toMatch(/survive a compaction/);
+      // The shape a person reads on the run page (session-log.md item 10): a
+      // Markdown document with a heading per section, never one paragraph.
+      expect(sys, name).toMatch(/Markdown, a `##` heading per section — `Done`, `In progress`, `Next`, `Facts`/);
+      expect(sys, name).toMatch(/one bullet per item, one line per bullet, no prose walls/);
       const m = sys.match(paragraph);
       expect(m, name).not.toBeNull();
       return m![0];
