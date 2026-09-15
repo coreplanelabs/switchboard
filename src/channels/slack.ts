@@ -1,6 +1,6 @@
 import { App, SocketModeReceiver, webApi } from "@slack/bolt";
 import { dispatch, type CoreDeps } from "../core/dispatcher.js";
-import { STATUS_PREFIXES } from "../core/dispatch/reply.js";
+import { type SlackThreadMessage, threadTurns } from "./slack/threadTurns.js";
 import {
   createStatusBudget,
   STATUS_EDITS_PER_MINUTE,
@@ -323,9 +323,6 @@ export function catchUpDelayNote(messageTs: string, nowMs: number): string {
   const late = mins < 1 ? "under a minute" : `${mins} min`;
   return `⏱ Picked up ${late} after it was posted: the bot was restarting (a deploy or platform move) and Slack does not queue events while it is down. Handling it now — no need to re-send.`;
 }
-
-/** One message as `conversations.replies` returns it — the fields history() reads. */
-type SlackThreadMessage = { bot_id?: string; user?: string; text?: string; ts?: string; files?: SlackFile[] };
 
 async function handle(deps: CoreDeps, { client, statusClient }: SlackClients, ev: SlackEvent): Promise<void> {
   // The request's root (docs/reference/specs/tracing.md): our process saw the message NOW,
@@ -717,22 +714,11 @@ export class SlackIO implements ChannelIO {
           })
         ).messages ??
         [];
-      const kept: { role: "user" | "assistant"; text: string; at?: number; files?: SlackFile[] }[] = [];
-      for (const m of thread) {
-        const mm = m as { bot_id?: string; text?: string; ts?: string; files?: SlackFile[] };
-        // Skip the triggering message itself; the dispatcher appends it
-        // (directive-stripped, images included) as the current turn.
-        if (mm.ts === this.ev.ts) continue;
-        const raw = mm.text ?? "";
-        const text = this.ev.botUserId ? raw.replaceAll(`<@${this.ev.botUserId}>`, "").trim() : raw;
-        if (STATUS_PREFIXES.some((p) => text.startsWith(p))) continue;
-        const files = mm.bot_id ? undefined : mm.files; // only user attachments go to the model
-        if (!text && !files?.length) continue;
-        // Slack's `ts` is seconds with a fractional part; the turn's time rides
-        // the item so a follow-up can cut the thread at a run's end.
-        const at = mm.ts !== undefined && Number.isFinite(Number(mm.ts)) ? Math.round(Number(mm.ts) * 1000) : undefined;
-        kept.push({ role: mm.bot_id ? "assistant" : "user", text, ...(at !== undefined ? { at } : {}), files });
-      }
+      // The mapping is `threadTurns` (slack/threadTurns.ts): the triggering
+      // message is skipped because the dispatcher appends it as the current
+      // turn, and the same rules read a linked thread for the conversation
+      // reader, so the two paths cannot drift.
+      const kept = threadTurns(thread, { skipTs: this.ev.ts, botUserId: this.ev.botUserId });
       // Download attachments newest-first so each thread-wide budget favors the
       // most recent files when a long thread overflows it. Images and documents
       // draw from independent budgets — one pool can't starve the other.

@@ -572,9 +572,17 @@ export const UNTRUSTED_PREAMBLE = "UNTRUSTED CONTENT — data recorded from a ru
 export const UNTRUSTED_OPEN = "<<<UNTRUSTED";
 export const UNTRUSTED_CLOSE = "UNTRUSTED>>>";
 
-/** Wrap stored free text before it leaves on a machine surface (MCP/CLI/HTTP). */
+/** Wrap free text the caller did not author before it reaches a model or a
+ *  machine surface (MCP/CLI/HTTP). The body cannot close the fence: every
+ *  marker it carries is broken with a space (`UNTRUSTED>> >`), so a message
+ *  that says the close marker stays quoted and the words stay readable. */
 export function wrapUntrusted(text: string): string {
-  return `${UNTRUSTED_PREAMBLE}\n${UNTRUSTED_OPEN}\n${text}\n${UNTRUSTED_CLOSE}`;
+  return `${UNTRUSTED_PREAMBLE}\n${UNTRUSTED_OPEN}\n${breakFenceMarkers(text)}\n${UNTRUSTED_CLOSE}`;
+}
+
+/** Every open or close marker inside `text`, split so it no longer matches. */
+export function breakFenceMarkers(text: string): string {
+  return text.replaceAll(UNTRUSTED_CLOSE, "UNTRUSTED>> >").replaceAll(UNTRUSTED_OPEN, "<< <UNTRUSTED");
 }
 
 // ---- compact text rendering (chat + CLI) -----------------------------------
