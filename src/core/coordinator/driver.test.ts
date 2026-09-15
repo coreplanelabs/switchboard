@@ -48,12 +48,13 @@ const answer = (body: object, at = T0, status = 200): BotAnswer => ({
   body: { ...(body as Record<string, unknown>), at },
 });
 
-/** The bot's `plan` answer for the given rows. */
-const planAnswer = (units: CoordinatorUnit[], at = T0): BotReply =>
+/** The bot's `plan` answer for the given rows: who merges is the instance's field, as the route answers it. */
+const planAnswer = (units: CoordinatorUnit[], at = T0, merge: "runner" | "person" = "runner"): BotReply =>
   ok(
     {
       ok: true,
       planId: "fixture",
+      merge,
       repo: "acme/api",
       base: "main",
       caps: { maxRounds: 2, maxMinutes: 45 },
@@ -305,10 +306,10 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(end.ending.report).toContain("GitHub refused the merge (HTTP 405): not mergeable");
     expect(end.ending.report).toContain("A person decides");
 
-    // A task unit: the ship branch is not a plan branch, so the merge is a person's.
+    // A task unit: the route answers the instance's field — `person` — so the merge is a person's.
     const t = steps({ "task/0/coding/wait/1": "event", "task/1/review/wait/1": "event" });
     const tb = bot({
-      plan: [planAnswer([row("task", { slug: "task", branch: "ship/warm-the-cache-abc123" })])],
+      plan: [planAnswer([row("task", { slug: "task", branch: "ship/warm-the-cache-abc123" })], T0, "person")],
       "unit-start": [started("task")],
       branch: [ok({ ok: true, branch: "ship/warm-the-cache-abc123", base: "main" })],
       spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
@@ -323,6 +324,46 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(task.outcome).toBe("completed");
     expect(tb.of("merge")).toEqual([]);
     expect(t.names().filter((n) => n.includes("merge"))).toEqual([]);
+  });
+
+  it("the instance's field decides, never the branch's name: a plan branch whose route answers merge: person ends merge_ready with no merge step asked, and a plan answer without the field is a person's merge the same way", async () => {
+    const script = (merge?: "runner" | "person") => {
+      const units = [row("U10")];
+      const plan =
+        merge === undefined
+          ? ok({
+              ok: true,
+              planId: "fixture",
+              repo: "acme/api",
+              base: "main",
+              caps: { maxRounds: 2, maxMinutes: 45 },
+              childMinutes: { coding: 45, review: 25 },
+              units,
+            })
+          : planAnswer(units, T0, merge);
+      return bot({
+        plan: [plan],
+        "unit-start": [started("U10")],
+        branch: [branched("U10")],
+        spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
+        "read-record": [codingDone("run-c0", T0 + 10 * MIN), reviewApproved("run-r1", T0 + 20 * MIN)],
+        "pr-check": [prNone(), prOpen(T0 + 10 * MIN)],
+        round: [acked(), acked(), acked(), acked()],
+        "unit-end": [acked()],
+        finish: [acked()],
+      });
+    };
+    const waits = { "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" } as const;
+    const person = script("person");
+    const p = steps(waits);
+    expect((await runPlan(p.runner, person.client, INSTANCE)).units).toEqual({ U10: "merge_ready" });
+    expect(person.of("merge")).toEqual([]);
+    expect(p.names().filter((n) => n.includes("merge"))).toEqual([]);
+    // A plan answer without the field — a record written before it existed — is a person's merge.
+    const absent = script(undefined);
+    const a = steps(waits);
+    expect((await runPlan(a.runner, absent.client, INSTANCE)).units).toEqual({ U10: "merge_ready" });
+    expect(absent.of("merge")).toEqual([]);
   });
 
   it("a lost event costs one chunk, not the budget: a wait that times out is confirmed by read-record like an event, a live child is waited on again under the next step name, a finished one advances; a spawn answered busy naming the run holding the thread waits on that run, one without a run id sleeps the busy retry", async () => {

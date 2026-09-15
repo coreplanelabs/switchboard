@@ -39,7 +39,6 @@ import {
   nextAction,
   openPlanCursor,
   openUnitPipeline,
-  parsePlanBranch,
   readyUnits,
   renderUnitReport,
   settleUnit,
@@ -157,6 +156,8 @@ class UnreadableAnswer extends Error {
 
 interface PlanFacts {
   planId?: string;
+  /** Who merges, as the instance's field has it: the plan route answers it, `person` when absent. */
+  merge: "runner" | "person";
   repo: string;
   base: string;
   caps: ShipCaps;
@@ -184,6 +185,7 @@ function readPlan(a: BotAnswer): PlanFacts {
   if (!Array.isArray(units) || !units.every(isCoordinatorUnit)) throw new UnreadableAnswer("plan", a, "units");
   return {
     ...(typeof b.planId === "string" ? { planId: b.planId } : {}),
+    merge: b.merge === "runner" ? "runner" : "person",
     repo: b.repo,
     base: b.base,
     caps: { maxRounds: b.caps.maxRounds, maxMinutes: b.caps.maxMinutes },
@@ -422,11 +424,11 @@ async function runUnit(
       base: plan.base,
       caps: plan.caps,
       childMinutes: plan.childMinutes,
-      // The branch decides who merges (record 0031's merge grant): a plan
-      // branch the runner opened is the runner's to squash once the review
-      // approved at its head and the checks are green; any other branch — a
-      // task string's ship branch — waits for a person.
-      merge: parsePlanBranch(node.branch) !== undefined ? "runner" : "person",
+      // The instance's field decides who merges (record 0031's merge grant),
+      // carried here by the plan route: the hand-off wrote `runner` on a
+      // seeded plan and `person` on a task, and the door re-checks it — the
+      // branch's name never decides.
+      merge: plan.merge,
       ...(resume !== undefined ? { resume } : {}),
     },
     start.at,

@@ -112,6 +112,11 @@ export interface CoordinatorInstance {
   createdAt: number;
   /** The plan the instance runs, when it runs one: its id (the file's name) and its path in the repository. */
   plan?: { id: string; path: string };
+  /** Who merges the units' pull requests: `runner` for a seeded plan (the
+   *  `merge` step under `plan:merge`), `person` for a task. Written by the
+   *  hand-off, answered by the plan route, checked at the merge door; absent
+   *  (a record written before the field existed) reads as `person`. */
+  merge?: "runner" | "person";
   /** The pipeline's caps as the profile gate clipped them: the rounds cap and the wall clock per unit. */
   caps?: { maxRounds: number; maxMinutes: number };
   /** The status card in the requesting thread, when the channel has one — what
@@ -191,6 +196,7 @@ export function isCoordinatorInstance(v: unknown): v is CoordinatorInstance {
   if (!isText(r.branch) || !isOptionalText(r.base)) return false;
   if (!isFinite(r.createdAt)) return false;
   if (r.plan !== undefined && !(isObject(r.plan) && isText(r.plan.id) && isText(r.plan.path, 1024))) return false;
+  if (r.merge !== undefined && r.merge !== "runner" && r.merge !== "person") return false;
   if (r.caps !== undefined && !(isObject(r.caps) && isFinite(r.caps.maxRounds) && isFinite(r.caps.maxMinutes)))
     return false;
   if (r.card !== undefined && !(isObject(r.card) && isText(r.card.channel) && isText(r.card.ts))) return false;

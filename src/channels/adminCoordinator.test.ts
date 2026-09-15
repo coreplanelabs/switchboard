@@ -780,6 +780,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     ...INSTANCE,
     id: "plan-fixture",
     plan: { id: "fixture", path: "docs/plans/fixture.md" },
+    merge: "runner",
     caps: { maxRounds: 2, maxMinutes: 45 },
     card: { channel: "C1", ts: "1.5" },
     runId: "run-parent",
@@ -830,13 +831,14 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     return h;
   }
 
-  it("plan answers the instance's units with where each stands, the caps as clipped, the base and the children's own budgets; an unknown instance is 404", async () => {
+  it("plan answers the instance's units with where each stands, who merges from the instance's field, the caps as clipped, the base and the children's own budgets; an instance without the field is a person's merge; an unknown instance is 404", async () => {
     const h = await planHarness();
     expect(await call(h, "plan", { parentInstanceId: PLAN_INSTANCE.id })).toEqual({
       status: 200,
       body: {
         ok: true,
         planId: "fixture",
+        merge: "runner",
         repo: "acme/api",
         base: "main",
         caps: { maxRounds: 2, maxMinutes: 45 },
@@ -850,7 +852,14 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     const task = harness();
     await task.instances.put(INSTANCE);
     const body = (await call(task, "plan", { parentInstanceId: INSTANCE.id })).body as Record<string, unknown>;
-    expect(body).toMatchObject({ ok: true, base: "main", caps: { maxRounds: 3, maxMinutes: 120 }, units: [] });
+    expect(body).toMatchObject({
+      ok: true,
+      base: "main",
+      // The record carries no `merge` field — written before it existed — so a person merges.
+      merge: "person",
+      caps: { maxRounds: 3, maxMinutes: 120 },
+      units: [],
+    });
     expect("planId" in body).toBe(false);
   });
 
@@ -1865,6 +1874,7 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     ...INSTANCE,
     id: "plan-fixture",
     plan: { id: "fixture", path: "docs/plans/fixture.md" },
+    merge: "runner",
     caps: { maxRounds: 2, maxMinutes: 45 },
     runId: "run-parent",
   };
@@ -1930,9 +1940,27 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     expect(h.merges).toEqual([]);
   });
 
-  it("the branch decides, never the requester: a task instance, a branch of another shape and a branch of another plan wait for a person; the release pull request is refused by name", async () => {
+  it("the instance's field decides, then the branch's shape as defense in depth: a task instance and an instance without the field wait for a person naming the field; a runner instance on a branch of another shape or another plan is refused naming the field and the branch; the release pull request is refused by name", async () => {
+    // A plan instance whose field says person — or says nothing — waits for a person, plan branch or not.
+    const person = harness({ prFacts: facts(), reviews: approving, checks: green });
+    await person.instances.put({ ...PLAN_INSTANCE, merge: "person" });
+    await person.instances.putUnits([row()]);
+    expect((await merge(person)).body).toMatchObject({
+      outcome: "refused",
+      reason: "the instance's `merge` field says person — waits for a person's merge",
+    });
+    expect(person.merges).toEqual([]);
+    const absent = harness({ prFacts: facts(), reviews: approving, checks: green });
+    const { merge: _dropped, ...withoutField } = PLAN_INSTANCE;
+    await absent.instances.put(withoutField);
+    await absent.instances.putUnits([row()]);
+    expect((await merge(absent)).body).toMatchObject({
+      outcome: "refused",
+      reason: "the instance's `merge` field says person — waits for a person's merge",
+    });
+    // A task instance whose record says runner anyway — defense in depth: the branch's shape refuses it.
     const task = harness({ prFacts: facts({ headRef: "ship/fix-x-abc123" }), reviews: approving, checks: green });
-    await task.instances.put(INSTANCE);
+    await task.instances.put({ ...INSTANCE, merge: "runner" });
     await task.instances.putUnits([
       {
         instanceId: INSTANCE.id,
@@ -1946,12 +1974,15 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     ]);
     expect((await merge(task, { ...body, parentInstanceId: INSTANCE.id, unit: "task" })).body).toMatchObject({
       outcome: "refused",
-      reason: "`ship/fix-x-abc123` is not a branch of plan `(none)` — waits for a person's merge",
+      reason:
+        "the instance's `merge` field says runner but `ship/fix-x-abc123` is not a branch of plan `(none)` — waits for a person's merge",
     });
+    expect(task.merges).toEqual([]);
     const other = await mergeHarness({}, { branch: "plan/other-plan/u10-warm" });
     expect((await merge(other)).body).toMatchObject({
       outcome: "refused",
-      reason: "`plan/other-plan/u10-warm` is not a branch of plan `fixture` — waits for a person's merge",
+      reason:
+        "the instance's `merge` field says runner but `plan/other-plan/u10-warm` is not a branch of plan `fixture` — waits for a person's merge",
     });
     expect(other.merges).toEqual([]);
     const release = await mergeHarness({
