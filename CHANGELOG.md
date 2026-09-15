@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.222.0](https://github.com/coreplanelabs/switchboard/compare/v1.221.1...v1.222.0) (2026-09-15)
+
+
+### Features
+
+* **costs:** the open day's LLM spend is the hourly usage report priced at list and marked as an estimate; the LLM tile is dollars, the table newest first, a day hover shows the whole breakdown, and the range switcher gains today ([#1178](https://github.com/coreplanelabs/switchboard/issues/1178)) ([0c31ec1](https://github.com/coreplanelabs/switchboard/commit/0c31ec145ad462815687e8a5c85ad881a52b27e2))
+
 ## [1.221.1](https://github.com/coreplanelabs/switchboard/compare/v1.221.0...v1.221.1) (2026-09-15)
 
 
