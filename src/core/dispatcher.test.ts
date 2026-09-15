@@ -11755,6 +11755,88 @@ describe("inbound staging (record 0033)", () => {
     expect(commands.some((c) => c.includes("attachments/"))).toBe(false);
     expect(lastUserText(provider)).not.toContain("attachments/");
   });
+
+  // The thread's earlier files: a later run in the thread finds the files dropped
+  // on earlier messages too — the prior runs' records name them by key, the store
+  // is asked by HEAD, nothing is copied again, and the new record carries them.
+  it("a later run in the thread pulls the files dropped on earlier messages: the prior record's `in` events name the keys, each is HEAD-checked and pulled before the message's own file, none is re-copied, the new record carries the event, and an expired key is named", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const provider = capturingProvider();
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    const store = storeWithSlack();
+    deps.artifacts = store;
+    const registry = new RunRegistry({ genId: () => "r1", genToken: () => "t1" });
+    deps.runRegistry = registry;
+    const earlierKey = "threads/slack-CX-1.0/in/1700000000.000100/1-earlier.mp4";
+    const goneKey = "threads/slack-CX-1.0/in/1700000000.000100/2-gone.mp4";
+    store.put(earlierKey, new Uint8Array(4_096), "video/mp4");
+    const priorEvents: RunEvent[] = [
+      {
+        type: "artifact",
+        direction: "in",
+        key: earlierKey,
+        name: "earlier.mp4",
+        size: 4_096,
+        contentType: "video/mp4",
+        at: 1,
+        seq: 1,
+      },
+      {
+        type: "artifact",
+        direction: "in",
+        key: goneKey,
+        name: "gone.mp4",
+        size: 8_192,
+        contentType: "video/mp4",
+        at: 2,
+        seq: 2,
+      },
+    ];
+    const runStore = new InMemoryRunStore();
+    await runStore.put({
+      id: "earlier-run",
+      agent: "coding",
+      channelId: "slack:CX",
+      userId: "slack:UADMIN",
+      threadKey: "slack:CX:1.0",
+      channelVisibility: "public",
+      startedAt: Date.now() - 5000,
+      finishedAt: Date.now() - 1000,
+      status: "completed",
+      eventCount: 2,
+      storedEventCount: 2,
+      truncated: false,
+      events: priorEvents as RunRecord["events"],
+      diagnosis: analyzeRunFriction(priorEvents),
+    });
+    deps.runStore = runStore;
+    const { commands, executor } = recordingExecutor();
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor });
+    const { io } = fakeIO([
+      { role: "user", text: "here is the clip" },
+      { role: "assistant", text: "got it" },
+    ]);
+    await dispatch(deps, { ...msg("agent:coding now cut a contact sheet", "slack:UADMIN"), staged: [clip] }, io);
+    // The message's own file takes 1- (its copy was asked for first), the thread's earlier file 2-;
+    // the expired key is never pulled.
+    expect(commands.filter((c) => c.includes("attachments/")).map((c) => /attachments\/([^']+)'/.exec(c)![1])).toEqual([
+      "1-clip.mp4",
+      "2-earlier.mp4",
+    ]);
+    // Only the message's own file is copied; the thread's earlier file is already in the store.
+    expect(store.copies.map((c) => c.key)).toEqual(["threads/slack-CX-1.0/in/1700000000.000200/1-clip.mp4"]);
+    const text = lastUserText(provider);
+    expect(text).toContain("1-clip.mp4 (3 KB, video/mp4)");
+    expect(text).toContain("2-earlier.mp4 (4 KB, video/mp4, from earlier in the thread)");
+    expect(text).toContain("gone.mp4 could not be staged: the store no longer holds it (its retention passed)");
+    // The new record names the earlier key as its own `in` event — the run page serves only keys the run
+    // names; the copy and the HEAD answer concurrently, so the two events' order is not fixed.
+    const mine = registry.snapshotById("r1")!.events.filter((e) => e.type === "artifact");
+    expect(mine.map((e) => (e.type === "artifact" ? e.key : "")).sort()).toEqual(
+      [earlierKey, "threads/slack-CX-1.0/in/1700000000.000200/1-clip.mp4"].sort(),
+    );
+  });
 });
 
 // docs/reference/specs/session-log.md item 9 (records 0034 and 0035): a

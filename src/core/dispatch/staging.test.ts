@@ -13,7 +13,9 @@ import {
   pullStaged,
   stagedBasename,
   stageIntoWorkspace,
+  stageThreadArtifacts,
   stagingIndex,
+  threadInboundArtifacts,
 } from "./staging.js";
 
 // Feature: docs/reference/specs/execution.md item 20 (record 0033) — inbound staging:
@@ -215,5 +217,74 @@ describe("staging — copy then pull", () => {
     expect(second.outcomes.map((o) => o.basename)).toEqual(["2-clip.mp4"]);
     expect(second.outcomes[0]!.key).toBe("threads/slack-C1-1700000000.000100/in/1700000000.000900/2-clip.mp4");
     expect(rec.commands.map((c) => /attachments\/([^']+)'/.exec(c.command)![1])).toEqual(["1-clip.mp4", "2-clip.mp4"]);
+  });
+});
+
+// A later run in the thread: the files dropped on earlier messages are in the
+// store under the thread's keys for the retention window, and the prior runs'
+// records name them (`artifact`, `direction: "in"`) — the record is the
+// catalogue. The new run pulls them beside its own message's files; nothing
+// is copied again and Slack is never asked.
+describe("staging — the thread's earlier files", () => {
+  const inEvent = (key: string, name: string, size: number): RunEvent => ({
+    type: "artifact",
+    direction: "in",
+    key,
+    name,
+    size,
+    contentType: "video/mp4",
+  });
+  const K1 = "threads/slack-C1-1700000000.000100/in/1700000000.000100/1-first.mp4";
+  const K2 = "threads/slack-C1-1700000000.000100/in/1700000000.000300/1-second.mp4";
+
+  it("the prior runs' `in` events, oldest run first and in event order, deduplicated by key; `out` events and other kinds are not files the thread received", () => {
+    const older: RunEvent[] = [
+      { type: "assistant", text: "hello" },
+      inEvent(K1, "first.mp4", 10),
+      {
+        type: "artifact",
+        direction: "out",
+        key: "runs/r1/out/1-sheet.png",
+        name: "sheet.png",
+        size: 5,
+        contentType: "image/png",
+      },
+    ];
+    const newer: RunEvent[] = [inEvent(K1, "first.mp4", 10), inEvent(K2, "second.mp4", 20)];
+    expect(threadInboundArtifacts([older, newer])).toEqual([
+      { key: K1, name: "first.mp4", size: 10, contentType: "video/mp4" },
+      { key: K2, name: "second.mp4", size: 20, contentType: "video/mp4" },
+    ]);
+    expect(threadInboundArtifacts([])).toEqual([]);
+  });
+
+  it("each key is checked by HEAD: a held one takes the run's next index and its own `in` event; one the store no longer holds is named as expired with no index and no event; nothing is copied", async () => {
+    const store = storeWithSlack();
+    store.put(K1, new Uint8Array(10), "video/mp4");
+    const events: RunEvent[] = [];
+    const nextIndex = stagingIndex();
+    nextIndex(); // the run already numbered one file
+    const outcomes = await stageThreadArtifacts(
+      [
+        { key: K1, name: "first.mp4", size: 10, contentType: "video/mp4" },
+        { key: K2, name: "second.mp4", size: 20, contentType: "video/mp4" },
+      ],
+      { store, nextIndex, publish: (e) => void events.push(e) },
+    );
+    expect(outcomes).toEqual([
+      { file: { name: "first.mp4", size: 10, type: "video/mp4" }, basename: "2-first.mp4", key: K1, earlier: true },
+      {
+        file: { name: "second.mp4", size: 20, type: "video/mp4" },
+        basename: "second.mp4", // no index taken: nothing lands for it
+        key: K2,
+        earlier: true,
+        error: "the store no longer holds it (its retention passed)",
+      },
+    ]);
+    expect(events).toEqual([inEvent(K1, "first.mp4", 10)]);
+    expect(store.copies).toEqual([]);
+    expect(attachmentsLine(outcomes)).toBe(
+      "Attached files are in ./attachments/: 2-first.mp4 (10 B, video/mp4, from earlier in the thread). second.mp4 could not be staged: the store no longer holds it (its retention passed)",
+    );
   });
 });

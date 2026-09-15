@@ -41,6 +41,7 @@ import {
   copyStaged,
   noWorkspaceLine,
   pullStaged,
+  stageThreadArtifacts,
   stagingIndex,
   type StagedOutcome,
 } from "./dispatch/staging.js";
@@ -69,7 +70,7 @@ import { prepareFreshTurn, settleThread, tellDropped } from "./dispatch/settle.j
 import { lineageOf, lineageParent, tellParent, type LineageHeard } from "./dispatch/lineage.js";
 import { sessionSeedFor } from "./dispatch/seed.js";
 import { sessionCapabilityFor } from "../tools/session.js";
-import { readThread, stickyAgentOf } from "./dispatch/thread.js";
+import { readThread, readThreadArtifacts, stickyAgentOf } from "./dispatch/thread.js";
 import { effectiveHarness } from "./harness/select.js";
 import { runToolCapabilities, type ParentRun } from "./dispatch/spawn.js";
 import { createRunsService } from "./runsService.js";
@@ -711,6 +712,24 @@ export async function dispatch(
             publish: (e) => registry.publish(runId, e),
           })
         : undefined;
+    // The thread's earlier files (record 0033): what prior runs' records name
+    // as received is still in the store for the retention window, so a later
+    // run pulls it too — HEAD-checked, never copied again. Started here, beside
+    // the message's own copies, so both overlap the workspace attach; the
+    // message's files took their indexes when `copyStaged` was called, so the
+    // earlier files number after them and the pull order is fixed: the
+    // message's own, then the thread's earlier ones, oldest first. A
+    // workspace-less agent gets nothing here, as for the message's own files.
+    const earlierStaged: Promise<StagedOutcome[]> | undefined =
+      !resume && deps.artifacts && agent.machine !== "none" && thread && thread.length > 0
+        ? readThreadArtifacts(runsService, thread).then((found) =>
+            stageThreadArtifacts(found, {
+              store: deps.artifacts!,
+              nextIndex: nextStagedIndex,
+              publish: (e) => registry.publish(runId, e),
+            }),
+          )
+        : undefined;
     const reservation = await reserveRun(deps, {
       msg,
       agent,
@@ -770,16 +789,20 @@ export async function dispatch(
     // request turn gains the line that names every file — landed or not — so a
     // failure carries its reason into the model's first read. A workspace-less
     // agent gets the line that says where the file can be worked with.
-    if (staged.length > 0) {
-      const line = stagedCopies
-        ? attachmentsLine(
-            await pullStaged(await stagedCopies, {
-              store: deps.artifacts!,
-              executor,
-              resident: resident !== undefined,
-            }),
-          )
-        : noWorkspaceLine(staged);
+    // Awaited only when it exists: a run with nothing to stage keeps its exact
+    // sequence of turns (a child's thread slot is released on the tick it was).
+    const earlier = earlierStaged ? await earlierStaged : [];
+    if (staged.length > 0 || earlier.length > 0) {
+      const line =
+        stagedCopies || earlier.length > 0
+          ? attachmentsLine(
+              await pullStaged([...(stagedCopies ? await stagedCopies : []), ...earlier], {
+                store: deps.artifacts!,
+                executor,
+                resident: resident !== undefined,
+              }),
+            )
+          : noWorkspaceLine(staged);
       const request = messages[messages.length - 1];
       if (request && request.role === "user" && line) {
         request.content = Array.isArray(request.content)
