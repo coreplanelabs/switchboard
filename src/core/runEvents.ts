@@ -116,6 +116,11 @@ export type RunNoteKind =
    *  bounded extra model turn to submit it (docs/reference/specs/pr-description.md
    *  item 5). Published by the dispatcher before that turn. */
   | "description_turn"
+  /** A review run's loop ended on a pull request without `submit_verdict`, and
+   *  the same run is being given one bounded extra model turn to call it
+   *  (docs/reference/specs/agent-review.md item 5; verdictTurn.ts). Published by
+   *  the dispatcher before that turn. */
+  | "verdict_turn"
   /** The run is on a cold per-thread sandbox instead of a warm resident, and
    *  the summary says why — the resident attach failed (its steps so far are
    *  grafted under the attach span), the resident was unreachable or not
@@ -193,6 +198,7 @@ export const RUN_NOTE_KINDS = [
   "resumed",
   "seed",
   "description_turn",
+  "verdict_turn",
   "cold_sandbox",
   "rebind_refused",
   "pr_not_opened",

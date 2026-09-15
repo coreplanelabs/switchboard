@@ -1836,7 +1836,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
     deps.postReviewComment = vi.fn(async () => {});
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
-    expect(provider.requests).toHaveLength(1); // the review ran
+    expect(provider.requests).toHaveLength(2); // the review ran, then its verdict turn (this fake submits no verdict)
     const system = provider.requests[0].system ?? "";
     expect(system).toContain(
       reviewTargetBlock({
@@ -1945,7 +1945,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
     deps.postReviewComment = post;
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
-    expect(provider.requests).toHaveLength(1); // the review ran
+    expect(provider.requests).toHaveLength(2); // the review ran, then its verdict turn (this fake submits no verdict)
     // The run's meta went out at the reservation with the head as resolved, and
     // again at the adoption with the head attached — readers take the latest,
     // so the record and the page name the head actually reviewed.
@@ -2180,6 +2180,62 @@ describe("review post-step", () => {
     expect(spy.calls).toEqual([
       { target: { repo: "acme/api", number: 42, commitId: PR_HEAD }, body: `${NO_VERDICT_LINE}\n\nanswer` },
     ]);
+  });
+
+  // agent-review.md item 5, verdictTurn.ts: a review whose loop ends with no
+  // submit_verdict is given ONE more turn asking for it; the verdict the turn
+  // submits builds the posted body's first line, the review's text stays the
+  // loop's write-up, and the turn's note and tool call are on the record.
+  it("a review whose loop ended without submit_verdict gets ONE verdict turn; the verdict it submits leads the posted body, the write-up stays the review's text", async () => {
+    let n = 0;
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        n++;
+        if (n === 1)
+          return {
+            content: [{ type: "text", text: "Verdict: approve — the change is sound." }],
+            stopReason: "end_turn",
+          };
+        if (n === 2)
+          return {
+            content: [
+              {
+                type: "tool_use",
+                id: "v2",
+                name: "submit_verdict",
+                input: { verdict: "approve", summary: "the change is sound", head: PR_HEAD },
+              },
+            ],
+            stopReason: "tool_use",
+          };
+        return { content: [{ type: "text", text: "Verdict submitted." }], stopReason: "end_turn" };
+      },
+    };
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
+    headExecutor(PR_HEAD);
+    const spy = postSpy();
+    deps.postReviewComment = spy.fn;
+    const registry = new RunRegistry({ genId: () => "rv1", genToken: () => "tv1" });
+    deps.runRegistry = registry;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+    // The verdict came from the turn: the body leads with LGTM over the loop's own write-up, never the turn's line.
+    expect(spy.calls).toEqual([
+      {
+        target: { repo: "acme/api", number: 42, commitId: PR_HEAD },
+        body: `LGTM: the change is sound\n\nVerdict: approve — the change is sound.`,
+      },
+    ]);
+    expect(replies.some((r) => r.includes("Verdict: approve — the change is sound."))).toBe(true);
+    expect(replies.some((r) => r.includes("Verdict submitted."))).toBe(false);
+    const events = registry.snapshot("rv1", "tv1")?.events ?? [];
+    const turnNotes = events.filter((e) => e.type === "run_note" && e.kind === "verdict_turn");
+    expect(turnNotes).toHaveLength(1);
+    if (turnNotes[0]?.type === "run_note") expect(turnNotes[0].summary).toContain("acme/api#42");
+    // the turn's own tool call is in the record like any other
+    expect(events.some((e) => e.type === "tool_call" && e.tool === "submit_verdict")).toBe(true);
   });
 
   // docs/reference/specs/agent-review.md item 10: a push that lands mid-run makes the
@@ -8497,7 +8553,9 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     await foldedIn(registry, "r1", "also check the migration");
     settle().answer("verdict draft");
     await run;
-    expect(requests).toHaveLength(2);
+    // The review turn, the folded follow-up's turn, then the verdict turn (this
+    // fake answered "verdict draft" without calling submit_verdict).
+    expect(requests).toHaveLength(3);
     const last = requests[1].messages.at(-1)!;
     expect(last.role).toBe("user");
     expect((last.content[0] as { text: string }).text).toContain("also check the migration");

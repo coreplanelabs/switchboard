@@ -7,9 +7,9 @@
 // truth; then the finish — the registry closed with the terminal status, the
 // friction diagnosis, the record registered for the drain — and the workspace
 // released on a failure. The run's pi session outlives the loop for the
-// settle's re-review and the description turn (harness-pi item 14) and is
-// ended here after them. The stage's claim and the tools' capabilities are
-// run.ts.
+// settle's re-review, the review's verdict turn and the description turn
+// (harness-pi item 14) and is ended here after them. The stage's claim and
+// the tools' capabilities are run.ts.
 import type { ResolvedRequest } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
 import type { CoordinatorTag } from "../coordinator/contract.js";
@@ -46,6 +46,8 @@ import { runReviewPostStep, settleReviewedHead, type ReviewPostOutcome, type Rou
 import { postReviewComment } from "../../execution/githubComments.js";
 import { observeCodingWorkspace, runCodingPrPostStep, trackPushedBranch } from "../codingPrPostStep.js";
 import { descriptionTurnTarget, runDescriptionTurn } from "../descriptionTurn.js";
+import { runVerdictTurn } from "../verdictTurn.js";
+import { reviewPostOptedOut } from "../reviewPost.js";
 import { startReviewReadingDiff } from "../readingDiff.js";
 import { startReviewDescription } from "../reviewDescription.js";
 import { isSpanRecord, type RunEvent } from "../runEvents.js";
@@ -752,6 +754,45 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
       reviewHead = settled.reviewHead;
       observedHead = settled.observedHead;
       carried = settled.carried;
+    }
+    // The verdict turn (agent-review item 5, verdictTurn.ts): the review prompt
+    // requires submit_verdict before the final message and the post step is
+    // fail-closed without it, but a prompt rule alone can be skipped — a run
+    // has approved in prose and never called the tool. So a review that will
+    // post to a pull request and still has NO verdict after the head settle
+    // (whose re-review turn asks for a fresh verdict itself, so a moved head
+    // is never nudged twice) gets ONE bounded extra model turn asking for the
+    // call, before the post step builds the body. The verdict arrives through
+    // the same onVerdict hook the loop fed (so the ledger row sees it) and is
+    // also returned. A hard stop asks nothing; a request that opted out of the
+    // GitHub post has no body to lead and asks nothing; a `finish` plan has no
+    // session and asks nothing — the body then carries the no-verdict line as
+    // before.
+    if (
+      isPrReview &&
+      repoCtx.repo &&
+      repoCtx.pr !== undefined &&
+      run.control.requested !== "hard" &&
+      postedBefore === undefined &&
+      verdict === undefined &&
+      !reviewPostOptedOut(ctx.requestText)
+    ) {
+      const reviewOf = { repo: repoCtx.repo, number: repoCtx.pr };
+      const turned = await root.span("run.verdict_turn", (span) =>
+        runVerdictTurn({
+          span,
+          target: reviewOf,
+          turn: {
+            agent,
+            toolContext,
+            onProgress,
+            onEvent,
+            ...(piSession ? { followUp: piSession.followUp } : {}),
+          },
+          logKey: msg.threadKey,
+        }),
+      );
+      if (turned.verdict !== undefined) verdict = turned.verdict;
     }
     // PR post-step observation (docs/reference/specs/pr-description.md item 5): for a
     // writable coding run, read the workspace's head branch — the one the

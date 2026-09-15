@@ -31,6 +31,7 @@ export const DISPLAY_NAMES = {
   "run.reading_diff": "reading the diff (in parallel)",
   "run.settle_reviewed_head": "re-checking the moved branch",
   "run.description_turn": "asking for the PR description",
+  "run.verdict_turn": "asking for the verdict",
   "run.observe_workspace": "checking the workspace",
   "run.pr_post_step": "posting the PR",
   "run.review_post_step": "posting the review",
