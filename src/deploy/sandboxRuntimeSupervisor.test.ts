@@ -10,11 +10,12 @@ const DOCKERFILE = resolve(ROOT, "deploy/cloudflare-sandbox/Dockerfile");
 
 // Feature: docs/reference/specs/execution.md item 21 — the cold sandbox's
 // container outlives its runtime. The SDK's container server exits on any
-// uncaught exception and used to be PID 1, so one such error ended the
-// container: workspace gone, every later command a 500. The image's PID 1 is
-// now this supervisor, which starts the server again when it exits. Static
-// checks read the script and the Dockerfile; the behavioural ones drive the
-// script with a fake runtime, since the real one only runs in the image.
+// uncaught exception and used to be tini's one child, so one such error
+// ended the container: workspace gone, every later command a failure. tini
+// now runs this supervisor, which starts the server again when it exits.
+// Static checks read the script and the Dockerfile; the behavioural ones
+// drive the script with a fake runtime, since the real one only runs in the
+// image.
 
 const supervisor = readFileSync(SUPERVISOR, "utf8");
 const dockerfile = readFileSync(DOCKERFILE, "utf8");
@@ -35,11 +36,11 @@ const code = supervisor
   .join("\n");
 
 describe("the sandbox image's PID 1", () => {
-  it("is the supervisor, installed at mode 755 and named by the image's one ENTRYPOINT", () => {
+  it("is tini running the supervisor, installed at mode 755, named by the image's one ENTRYPOINT", () => {
     const lines = instructions(dockerfile);
     expect(lines).toContain("COPY --chmod=0755 runtime-supervisor.sh /usr/local/bin/sandbox-runtime-supervisor");
     const entrypoints = lines.filter((l) => l.startsWith("ENTRYPOINT"));
-    expect(entrypoints).toEqual(['ENTRYPOINT ["/usr/local/bin/sandbox-runtime-supervisor"]']);
+    expect(entrypoints).toEqual(['ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/sandbox-runtime-supervisor"]']);
     // The base image's CMD is empty and stays so: the server takes no user command.
     expect(lines.some((l) => l.startsWith("CMD"))).toBe(false);
   });

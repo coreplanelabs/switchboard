@@ -1,15 +1,16 @@
 #!/bin/sh
-# PID 1 of the cold sandbox: keeps the container alive across a crash of the
-# SDK's container server (/container-server/sandbox). That server calls
-# process.exit(1) on any uncaught exception, and as the base image's
-# ENTRYPOINT it was PID 1 — so one uncaught error ended the whole container:
-# /workspace gone, a detached pi with it, every later /exec a 500 until the
-# platform noticed. Started here as a child instead, the server's exit is a
-# restart a second later; the disk, the detached processes and the Durable
-# Object's view of a running container all survive, and the SDK recreates its
-# session on the next command (docs/reference/specs/execution.md item 21).
+# The cold sandbox's process supervisor, run by tini (PID 1): keeps the
+# container alive across a crash of the SDK's container server
+# (/container-server/sandbox). That server calls process.exit(1) on any
+# uncaught exception, and the base image runs it as tini's one child — so one
+# uncaught error ended the whole container: /workspace gone, a detached pi
+# with it, every later /exec a failure until the platform noticed. Started
+# here as a child instead, the server's exit is a restart a second later; the
+# disk, the detached processes and the Durable Object's view of a running
+# container all survive, and the next command starts a fresh process on the
+# new server (docs/reference/specs/execution.md item 21).
 #
-# A stop from the platform is SIGTERM to PID 1: forwarded to the server, and
+# A stop from the platform is SIGTERM, which tini forwards here: forwarded to the server, and
 # nothing starts again — a stop that lands during the pause between two
 # starts, or before the new pid is known, still ends here — and the server's
 # own exit status becomes this script's. A terminal's INT is forwarded as

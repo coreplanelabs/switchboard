@@ -1,107 +1,23 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  EXEC_KEEPALIVE_INTERVAL_MS,
-  SANDBOX_SLEEP_AFTER,
-  isRecycleError,
-  parseSleepAfterMs,
-  recycledMidCommandMessage,
-  withActivityKeepalive,
-} from "./sandboxLifecycle.js";
+import { describe, expect, it } from "vitest";
+import { SANDBOX_SLEEP_AFTER, isRecycleError, recycledMidCommandMessage } from "./sandboxLifecycle.js";
 
-// Feature: docs/reference/specs/execution.md item 2 — one in-flight exec never outlives
-// the container's activity timeout. The Container base class renews its
-// activity clock once per proxied fetch, BEFORE the fetch; a command longer
-// than sleepAfter therefore expires the clock at exactly sleepAfter and the
-// alarm loop SIGTERMs the container under it. The keepalive renews the clock
-// every minute while a command
-// runs, which turns sleepAfter into a pure idle timeout.
+// Feature: docs/reference/specs/execution.md items 1, 2 and 9 — the per-thread
+// sandbox's idle lifetime, and the naming of a container whose runtime was
+// replaced or restarted under a command.
 
 const ROOT = resolve(import.meta.dirname, "../..");
 
-describe("withActivityKeepalive", () => {
-  beforeEach(() => vi.useFakeTimers());
-  afterEach(() => vi.useRealTimers());
-
-  it("makes zero renew calls for a command that finishes inside one interval", async () => {
-    const renew = vi.fn();
-    let settle!: (v: string) => void;
-    const p = withActivityKeepalive(renew, () => new Promise<string>((r) => (settle = r)), 1_000);
-    await vi.advanceTimersByTimeAsync(999);
-    settle("done");
-    await expect(p).resolves.toBe("done");
-    expect(renew).not.toHaveBeenCalled();
-  });
-
-  it("renews once per interval while the command is pending", async () => {
-    const renew = vi.fn();
-    let settle!: (v: number) => void;
-    const p = withActivityKeepalive(renew, () => new Promise<number>((r) => (settle = r)), 1_000);
-    await vi.advanceTimersByTimeAsync(3_500);
-    expect(renew).toHaveBeenCalledTimes(3);
-    settle(7);
-    await expect(p).resolves.toBe(7);
-  });
-
-  it("stops renewing once the command resolves", async () => {
-    const renew = vi.fn();
-    let settle!: (v: null) => void;
-    const p = withActivityKeepalive(renew, () => new Promise<null>((r) => (settle = r)), 1_000);
-    await vi.advanceTimersByTimeAsync(1_500);
-    settle(null);
-    await p;
-    await vi.advanceTimersByTimeAsync(10_000);
-    expect(renew).toHaveBeenCalledTimes(1);
-  });
-
-  it("stops renewing once the command rejects, and the rejection propagates untouched", async () => {
-    const renew = vi.fn();
-    let fail!: (e: unknown) => void;
-    const p = withActivityKeepalive(renew, () => new Promise<never>((_, rej) => (fail = rej)), 1_000);
-    const caught = p.catch((e: unknown) => e);
-    await vi.advanceTimersByTimeAsync(2_500);
-    fail(new Error("Session terminated"));
-    await expect(caught).resolves.toEqual(new Error("Session terminated"));
-    await vi.advanceTimersByTimeAsync(10_000);
-    expect(renew).toHaveBeenCalledTimes(2);
-  });
-
-  it("swallows a renew that throws or rejects — the command's own result still comes back", async () => {
-    const renew = vi
-      .fn<() => void | Promise<void>>()
-      .mockImplementationOnce(() => {
-        throw new Error("sync boom");
-      })
-      .mockImplementationOnce(() => Promise.reject(new Error("async boom")));
-    let settle!: (v: string) => void;
-    const p = withActivityKeepalive(renew, () => new Promise<string>((r) => (settle = r)), 1_000);
-    await vi.advanceTimersByTimeAsync(2_500);
-    expect(renew).toHaveBeenCalledTimes(2);
-    settle("ok");
-    await expect(p).resolves.toBe("ok");
-  });
-});
-
-describe("keepalive constants", () => {
-  it("parseSleepAfterMs reads the Container class's s/m/h grammar and rejects anything else", () => {
-    expect(parseSleepAfterMs("5m")).toBe(300_000);
-    expect(parseSleepAfterMs("90s")).toBe(90_000);
-    expect(parseSleepAfterMs("1h")).toBe(3_600_000);
-    expect(() => parseSleepAfterMs("5 minutes")).toThrow(/sleepAfter/);
-    expect(() => parseSleepAfterMs("")).toThrow(/sleepAfter/);
-  });
-
-  it("the keepalive interval fits inside sleepAfter with room to spare, so a renew always lands before expiry", () => {
-    expect(EXEC_KEEPALIVE_INTERVAL_MS).toBe(60_000);
+describe("the idle lifetime", () => {
+  it("is five minutes, in the Container class's own grammar", () => {
     expect(SANDBOX_SLEEP_AFTER).toBe("5m");
-    expect(EXEC_KEEPALIVE_INTERVAL_MS).toBeLessThan(parseSleepAfterMs(SANDBOX_SLEEP_AFTER));
-    expect(EXEC_KEEPALIVE_INTERVAL_MS * 2).toBeLessThanOrEqual(parseSleepAfterMs(SANDBOX_SLEEP_AFTER));
   });
 });
 
 describe("recycledMidCommandMessage", () => {
-  const RECYCLED = /^sandbox recycled mid-command after \d+s — the container was replaced and \/workspace is empty/;
+  const RECYCLED =
+    /^sandbox recycled mid-command after \d+s — the container's runtime was replaced or restarted under the command, which did not finish/;
 
   it("leaves an early failure with any message alone", () => {
     expect(recycledMidCommandMessage(5_000, "Session 'abc' not found")).toBe("Session 'abc' not found");
@@ -113,11 +29,13 @@ describe("recycledMidCommandMessage", () => {
     expect(recycledMidCommandMessage(60_000, "Session terminated")).toBe("Session terminated");
   });
 
-  it("names the recycle when a recycle-shaped failure arrives after more than a minute", () => {
+  it("names the recycle when a recycle-shaped failure arrives after more than a minute, and tells the model to look at /workspace before assuming either outcome", () => {
     const generic = recycledMidCommandMessage(61_000, "Command execution failed");
     expect(generic).toMatch(RECYCLED);
     expect(generic).toContain("after 61s");
-    expect(generic).toContain("re-clone before continuing");
+    expect(generic).toContain("check /workspace before continuing");
+    expect(generic).toContain("empty if the container was replaced (re-clone)");
+    expect(generic).toContain("intact if only its runtime restarted");
     expect(generic).toContain("(Command execution failed)");
     expect(recycledMidCommandMessage(1_200_000, "Session terminated")).toMatch(RECYCLED);
     expect(recycledMidCommandMessage(90_000, "Session 'sandbox-slack:C1:1.0' not found")).toMatch(RECYCLED);
@@ -148,7 +66,7 @@ describe("recycledMidCommandMessage", () => {
     );
   });
 
-  it("a typed recycle error (certain) is named at any elapsed time — the SDK is stating the container stopped", () => {
+  it("a typed recycle error (certain) is named at any elapsed time — the SDK is stating the runtime went away", () => {
     const msg = recycledMidCommandMessage(3_000, "Session 'x' shell exited (exit code: 143)", true);
     expect(msg).toMatch(RECYCLED);
     expect(msg).toContain("after 3s");
@@ -160,9 +78,11 @@ describe("recycledMidCommandMessage", () => {
 });
 
 describe("isRecycleError", () => {
-  it("takes the 0.12.x typed errors by NAME (the RPC boundary drops the prototype)", () => {
+  it("takes the SDK's typed errors by NAME across the 0.12 and 0.13 lines (the RPC boundary drops the prototype)", () => {
     expect(isRecycleError({ name: "SessionTerminatedError", message: "whatever the text" })).toBe(true);
     expect(isRecycleError({ name: "OperationInterruptedError", message: "…" })).toBe(true);
+    expect(isRecycleError({ name: "StaleProcessHandleError", message: "…" })).toBe(true);
+    expect(isRecycleError({ name: "RuntimeIdentityInactiveError", message: "…" })).toBe(true);
   });
 
   it("falls back to the recycle-shaped texts, and rejects everything else", () => {
@@ -184,15 +104,18 @@ describe("isRecycleError", () => {
 describe("sandbox Worker wiring (static)", () => {
   // The Worker cannot run under vitest (Durable Objects + a container), so
   // this mirrors scripts/check-sandbox-pair.mjs: read the source and require
-  // the seams to be wired. Drop the keepalive from the Worker and the suite
-  // goes red, not a review some months later.
+  // the seams to be wired. Drop one and the suite goes red, not a review some
+  // months later.
   const worker = readFileSync(resolve(ROOT, "deploy/cloudflare-sandbox/worker.ts"), "utf8");
 
-  it("the Durable Object's sleepAfter is the shared constant and exec runs under the keepalive", () => {
+  it("the Durable Object's sleepAfter is the shared constant, and a command is one supervised process started and collected inside the Durable Object", () => {
     expect(worker).toMatch(/sleepAfter\s*=\s*SANDBOX_SLEEP_AFTER/);
-    expect(worker).toContain("withActivityKeepalive(");
-    expect(worker).toContain("this.renewActivityTimeout()");
-    expect(worker).toContain("EXEC_KEEPALIVE_INTERVAL_MS");
+    expect(worker).toContain("createExtensionProcessSandbox(this).exec(");
+    expect(worker).toMatch(/proc\.output\(\{ encoding: "utf8"/);
+    // No session, no session fence, no keepalive: the 0.13 line has none of them.
+    expect(worker).not.toContain("resetDefaultSession");
+    expect(worker).not.toContain("withActivityKeepalive");
+    expect(worker).not.toContain("renewActivityTimeout");
   });
 
   // docs/reference/specs/execution.md item 2: every /exec runs under `timeout …
@@ -205,13 +128,16 @@ describe("sandbox Worker wiring (static)", () => {
     expect(worker).not.toContain("nohup");
   });
 
-  it("the /exec failure path names a mid-command recycle, typed errors first", () => {
+  it("the /exec failure path names a mid-command recycle by type inside the Durable Object and by name after the RPC boundary, a full fleet, and a silent control port", () => {
     expect(worker).toContain("recycledMidCommandMessage(");
     expect(worker).toContain("isRecycleError(");
     expect(worker).toContain("isFleetBusyError(");
+    expect(worker).toContain("isRuntimeUnreachableSignal(");
+    expect(worker).toContain("instanceof StaleProcessHandleError");
+    expect(worker).toContain("instanceof OperationInterruptedError");
   });
 
-  // The credential rides in the SDK's per-exec `env` option, so it never
+  // The credential rides in the SDK's per-process `env` option, so it never
   // appears in the command text the SDK logs. The 0.3.x base64 export prefix
   // put the live GH_TOKEN into every "Command executed" log line.
   it("the credential goes through the exec env option, never through the command text", () => {
@@ -240,17 +166,14 @@ describe("sandbox Worker wiring (static)", () => {
   });
 
   // docs/reference/specs/execution.md items 3 and 6: a failure text is never
-  // empty, and a container on a previous image is named. Both Worker catches
-  // go through `thrownText`; the bare `shape.message ?? String(err)` that
-  // kept the SDK's "" is gone.
+  // empty. Both Worker catches go through `thrownText`; the bare
+  // `shape.message ?? String(err)` that kept the SDK's "" is gone.
   it("every failure text goes through thrownText — the empty-string fallthrough is gone", () => {
     expect(worker).toContain("thrownText(");
     expect(worker).not.toContain(".message ?? String(err)");
   });
 
-  it("onStart logs the container/SDK version skew; exec is super.exec under the keepalive, with no retry of its own", () => {
-    expect(worker).toContain("getVersion(");
-    expect(worker).toMatch(/\(\) => super\.exec\(command, options\)/);
+  it("the Worker never destroys a container of its own accord", () => {
     expect(worker).not.toMatch(/this\.destroy\(/);
   });
 
