@@ -16,6 +16,9 @@ export interface McpServerSpec {
   url: string;
   /** Static bearer for PR1. Absent → no Authorization header. */
   auth?: { type: "bearer"; token: string };
+  /** Other request headers, values resolved (a Cloudflare Access service token
+   *  pair from `headersEnv`); never Authorization — that is `auth`'s. */
+  headers?: Record<string, string>;
   /** Agents whose runs may see this server's tools (default general + research). */
   agents: string[];
 }

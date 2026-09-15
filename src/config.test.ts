@@ -1302,7 +1302,7 @@ users:
     expect(shown).toMatch(/\*Your scope:\*.*mcp `vanta` `linear`/);
   });
 
-  it("validates every tier at load: slug names, http(s) + SSRF-safe URLs, known agents, auth kind, tokenEnv only with bearer, and self-serve agents only outside org", () => {
+  it("validates every tier at load: slug names, http(s) + SSRF-safe URLs, known agents, auth kind, tokenEnv only with bearer, headersEnv as HTTP header names → env var names (never Authorization), and self-serve agents only outside org", () => {
     const bad = (yaml: string) => () => store(yaml);
     expect(bad(withDefaults.replace("notion:", "Bad Name:"))).toThrow(
       /channels\.slack:CMCP\.mcpServers\.Bad Name: server names are slugs/,
@@ -1347,6 +1347,30 @@ users:
     );
     expect(bad(withDefaults.replace("auth: none }", "auth: none, tokenEnv: X }"))).toThrow(
       /tokenEnv only applies to auth: bearer/,
+    );
+    // headersEnv: static headers whose VALUES are bot env vars (a Cloudflare Access
+    // service token in front of a server). Header names are HTTP tokens; the
+    // Authorization header belongs to `auth`, never to headersEnv.
+    const access =
+      "auth: none, headersEnv: { CF-Access-Client-Id: MCP_ACCESS_CLIENT_ID, CF-Access-Client-Secret: MCP_ACCESS_CLIENT_SECRET } }";
+    expect(bad(withDefaults.replace("auth: none }", access))).not.toThrow();
+    expect(
+      store(withDefaults.replace("auth: none }", access)).config.channels?.["slack:CMCP"].mcpServers?.notion.headersEnv,
+    ).toEqual({
+      "CF-Access-Client-Id": "MCP_ACCESS_CLIENT_ID",
+      "CF-Access-Client-Secret": "MCP_ACCESS_CLIENT_SECRET",
+    });
+    expect(bad(withDefaults.replace("auth: none }", "auth: none, headersEnv: [X] }"))).toThrow(
+      /must be \{ url, auth: none\|bearer\|oauth, agents\?, tokenEnv\?, headersEnv\? \}/,
+    );
+    expect(bad(withDefaults.replace("auth: none }", "auth: none, headersEnv: { Authorization: MCP_X } }"))).toThrow(
+      /mcpServers\.notion\.headersEnv: the Authorization header is `auth`'s/,
+    );
+    expect(bad(withDefaults.replace("auth: none }", 'auth: none, headersEnv: { "Bad Header": MCP_X } }'))).toThrow(
+      /mcpServers\.notion\.headersEnv: "Bad Header" is not an HTTP header name/,
+    );
+    expect(bad(withDefaults.replace("auth: none }", 'auth: none, headersEnv: { X-Key: "" } }'))).toThrow(
+      /must be \{ url, auth: none\|bearer\|oauth, agents\?, tokenEnv\?, headersEnv\? \}/,
     );
     // The org tier may name any agent (coding above) — it loads.
     expect(store(withDefaults).config.defaults.mcpServers?.linear.agents).toEqual(["general", "coding"]);

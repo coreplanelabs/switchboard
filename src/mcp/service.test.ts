@@ -53,11 +53,12 @@ function harness(
     env?: Record<string, string>;
     oauth?: FakeAuthorizationServerOptions;
     fetch?: false;
+    yaml?: string;
   } = {},
 ) {
   const dir = mkdtempSync(join(tmpdir(), "swb-mcp-"));
   const cfg = join(dir, "config.yaml");
-  writeFileSync(cfg, YAML);
+  writeFileSync(cfg, opts.yaml ?? YAML);
   const backing = new InMemoryOverridesBacking();
   const config = new ConfigStore(cfg, { backing, initial: undefined });
   const secrets = new InMemoryMcpSecretStore();
@@ -231,6 +232,53 @@ describe("McpService — tiers and authorization (items 13–14)", () => {
       ok: false,
       error: "MCP_GITHUB_TOKEN is not set on the bot",
     });
+  });
+
+  it("a static server with `headersEnv` (a Cloudflare Access service token in front of it) reaches runs with the env values as request headers, lists as `static`, cannot be connected, and an unset variable is a named `unavailable`", async () => {
+    const yaml = YAML.replace(
+      "  mcpServers:\n    github:",
+      `  mcpServers:
+    lake: { url: "https://vega.example/mcp", auth: none, headersEnv: { CF-Access-Client-Id: MCP_ACCESS_CLIENT_ID, CF-Access-Client-Secret: MCP_ACCESS_CLIENT_SECRET }, agents: [general, research] }
+    github:`,
+    );
+    const env = {
+      MCP_GITHUB_TOKEN: "ghp_static",
+      MCP_ACCESS_CLIENT_ID: "id.access",
+      MCP_ACCESS_CLIENT_SECRET: "s3cret",
+    };
+    const h = harness({ yaml, env });
+    const run = await h.service.resolveForRun("research", { userId: alice.id, channelId: "slack:C1" });
+    expect(run).toEqual([
+      {
+        spec: {
+          id: "org/lake",
+          name: "lake",
+          url: "https://vega.example/mcp",
+          agents: ["general", "research"],
+          headers: { "CF-Access-Client-Id": "id.access", "CF-Access-Client-Secret": "s3cret" },
+        },
+      },
+    ]);
+    const listed = (await h.service.list(alice, "slack:C1")).find((s) => s.name === "lake");
+    expect(listed).toMatchObject({ state: "static", auth: "none", source: "config" });
+    expect(JSON.stringify(listed)).not.toContain("s3cret");
+    expect(await code(h.service.connect(admin, ORG, "lake"))).toBe("invalid_input");
+    // The probe reaches the server with the same headers.
+    await h.service.show(alice, ORG, "lake");
+    expect(h.clients.at(-1)?.spec.headers).toEqual({
+      "CF-Access-Client-Id": "id.access",
+      "CF-Access-Client-Secret": "s3cret",
+    });
+
+    const partial = harness({ yaml, env: { MCP_GITHUB_TOKEN: "ghp_static", MCP_ACCESS_CLIENT_ID: "id.access" } });
+    expect(await partial.service.resolveForRun("research", { userId: alice.id, channelId: "slack:C1" })).toEqual([
+      { name: "lake", unavailable: "MCP_ACCESS_CLIENT_SECRET is not set on the bot" },
+    ]);
+    expect((await partial.service.show(alice, ORG, "lake")).probe).toEqual({
+      ok: false,
+      error: "MCP_ACCESS_CLIENT_SECRET is not set on the bot",
+    });
+    expect(partial.clients.length).toBe(0); // never a half-authenticated request
   });
 });
 

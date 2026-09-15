@@ -255,7 +255,13 @@ export class McpService {
   /** A fresh connect link for a runtime bearer/oauth server (first connect, or a re-key). */
   async connect(actor: McpActor, target: McpTarget, name: string): Promise<AddResult> {
     const { scopeKey, entry, source } = this.owned(target, name);
-    if (entry.auth === "none") throw new McpServiceError("invalid_input", `"${name}" needs no credential (auth: none)`);
+    if (entry.auth === "none")
+      throw new McpServiceError(
+        "invalid_input",
+        entry.headersEnv
+          ? `"${name}" is pinned in config.yaml with headersEnv — its headers are environment variables on the bot, not a stored credential`
+          : `"${name}" needs no credential (auth: none)`,
+      );
     // A static bearer with `tokenEnv` has no stored credential to (re)key. A
     // static oauth entry does: its sign-in is completed at run time like a
     // runtime one — `source` alone is not the refusal.
@@ -821,6 +827,18 @@ export class McpService {
       url: r.entry.url,
       agents: r.entry.agents ?? [...MCP_SELF_SERVE_AGENTS],
     };
+    // `headersEnv` first: a gate in front of the server (Cloudflare Access) is
+    // checked before the server's own auth, and a half-authenticated request
+    // would only ever be refused — so a missing value is this run's outcome.
+    if (r.entry.headersEnv) {
+      const headers: Record<string, string> = {};
+      for (const [header, envVar] of Object.entries(r.entry.headersEnv)) {
+        const value = this.opts.bearers.named(envVar);
+        if (!value) return { name: r.name, unavailable: `${envVar} is not set on the bot` };
+        headers[header] = value.reveal();
+      }
+      base.headers = headers;
+    }
     if (r.entry.auth === "none") return { spec: base };
     if (r.entry.tokenEnv) {
       const token = this.opts.bearers.named(r.entry.tokenEnv);

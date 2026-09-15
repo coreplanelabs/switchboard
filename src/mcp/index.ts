@@ -136,6 +136,9 @@ export function httpMcpClientFactory(fetchImpl: FetchLike): McpClientFactory {
     new StreamableHttpMcpClient({
       url: server.url,
       fetch: fetchImpl,
-      ...(server.auth?.type === "bearer" ? { headers: { authorization: `Bearer ${server.auth.token}` } } : {}),
+      headers: {
+        ...server.headers,
+        ...(server.auth?.type === "bearer" ? { authorization: `Bearer ${server.auth.token}` } : {}),
+      },
     });
 }

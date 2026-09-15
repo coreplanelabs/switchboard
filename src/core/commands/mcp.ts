@@ -135,7 +135,7 @@ async function settleConnect(
 
 function renderServerLine(r: JsonObject): string {
   const state =
-    r.state === "connected" ? "✅ connected" : r.state === "static" ? "✅ static (tokenEnv)" : "⏳ awaiting credential";
+    r.state === "connected" ? "✅ connected" : r.state === "static" ? "✅ static (bot env)" : "⏳ awaiting credential";
   const agents = Array.isArray(r.agents) ? r.agents.join(", ") : "";
   const pinned = r.source === "config" ? " · pinned in config.yaml" : "";
   return `• \`${String(r.name)}\` (${String(r.scope)}) ${state} — ${String(r.url)} · agents: ${agents} · auth: ${String(r.auth)}${pinned}`;

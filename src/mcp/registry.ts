@@ -15,13 +15,19 @@ export type McpAuthKind = "none" | "bearer" | "oauth";
 
 /** One server as a scope carries it. `tokenEnv` is the static-config way to
  *  supply a bearer (an env var on the bot); without it a bearer server's token
- *  is the sealed credential the connect page stored. */
+ *  is the sealed credential the connect page stored. `headersEnv` is the
+ *  static-config way to supply any other request header — header name → the
+ *  bot env var holding its value — for a server behind a gate that is not the
+ *  server's own auth (a Cloudflare Access service token: `CF-Access-Client-Id`
+ *  + `CF-Access-Client-Secret`). It composes with every `auth` kind; the
+ *  Authorization header itself is `auth`'s and is refused here. */
 export interface McpServerEntry {
   url: string;
   /** Agents whose runs may see it (default general + research). */
   agents?: string[];
   auth: McpAuthKind;
   tokenEnv?: string;
+  headersEnv?: Record<string, string>;
   /** Who added it at run time (`slack:U…`, `cli:local`); absent for static config. */
   addedBy?: string;
   addedAt?: number;
@@ -126,6 +132,24 @@ export const MCP_SERVERS_PER_SCOPE_MAX = 32;
 const isStr = (v: unknown, max = 4_096): v is string => typeof v === "string" && v.length > 0 && v.length <= max;
 const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
+/** At most this many `headersEnv` entries on one server. */
+export const MCP_HEADERS_MAX = 8;
+/** An HTTP header field name (RFC 9110 token), ≤ 64 chars. */
+export const MCP_HEADER_NAME_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}$/;
+
+/** Shape only: a non-empty mapping of header name → env var name, each a
+ *  string (the config layer holds names to `MCP_HEADER_NAME_RE` and refuses
+ *  Authorization). */
+function isHeadersEnv(v: unknown): v is Record<string, string> {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+  const entries = Object.entries(v as Record<string, unknown>);
+  return (
+    entries.length > 0 &&
+    entries.length <= MCP_HEADERS_MAX &&
+    entries.every(([name, envVar]) => isStr(name, 64) && isStr(envVar, 128))
+  );
+}
+
 function isOutcome(v: unknown): v is NonNullable<McpTicket["outcome"]> {
   if (!v || typeof v !== "object" || Array.isArray(v)) return false;
   const o = v as Record<string, unknown>;
@@ -148,6 +172,7 @@ export function isMcpServerEntry(v: unknown): v is McpServerEntry {
         e.agents.every((a) => isStr(a, 32)))) &&
     (e.auth === "none" || e.auth === "bearer" || e.auth === "oauth") &&
     (e.tokenEnv === undefined || isStr(e.tokenEnv, 128)) &&
+    (e.headersEnv === undefined || isHeadersEnv(e.headersEnv)) &&
     (e.addedBy === undefined || isStr(e.addedBy, 260)) &&
     (e.addedAt === undefined || isNum(e.addedAt))
   );
@@ -194,9 +219,10 @@ export interface McpServerView {
   url: string;
   agents: string[];
   auth: McpAuthKind;
-  /** `static` = bearer from `tokenEnv` on the bot; `connected` = a sealed
-   *  credential is stored (or no credential is needed); `awaiting_credential`
-   *  = bearer, nothing stored yet. */
+  /** `static` = the credential is the bot's environment (`tokenEnv`, or
+   *  `headersEnv` on an `auth: none` server); `connected` = a sealed credential
+   *  is stored (or no credential is needed); `awaiting_credential` = bearer,
+   *  nothing stored yet. */
   state: "connected" | "awaiting_credential" | "static";
   source: "config" | "runtime";
   addedBy?: string;
@@ -212,7 +238,9 @@ export function serverView(
   const parsed = parseMcpScopeKey(scopeKey);
   const state: McpServerView["state"] =
     entry.auth === "none"
-      ? "connected"
+      ? entry.headersEnv
+        ? "static"
+        : "connected"
       : entry.tokenEnv
         ? "static"
         : opts.hasCredential

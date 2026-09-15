@@ -89,8 +89,9 @@ export interface Scope {
    * highest-trust tier (org > channel > user) — the opposite of the other
    * settings, because an org server is an admin's decision a user must not
    * shadow. Channel and user entries may name `general`/`research` only.
-   * Static entries supply a bearer via `tokenEnv`; runtime entries (added with
-   * `mcp add`) get their credential from the sealed secret store.
+   * Static entries supply a bearer via `tokenEnv`, or other headers (a
+   * Cloudflare Access service token) via `headersEnv`; runtime entries (added
+   * with `mcp add`) get their credential from the sealed secret store.
    */
   mcpServers?: Record<string, McpServerEntry>;
 }
