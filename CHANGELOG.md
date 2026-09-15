@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.230.0](https://github.com/coreplanelabs/switchboard/compare/v1.229.0...v1.230.0) (2026-09-15)
+
+
+### Features
+
+* **dispatcher:** the router knows the data sources a run can reach — the caller's MCP servers ride the prompt as facts naming the least capable preset that receives them (record 0040) ([#1295](https://github.com/coreplanelabs/switchboard/issues/1295)) ([d0ceb07](https://github.com/coreplanelabs/switchboard/commit/d0ceb076c6b2f652704f99904daac7c017405d55))
+* **runs:** a ship unit's runs in round order, a conductor's children and a session's search each read from one route ([#1304](https://github.com/coreplanelabs/switchboard/issues/1304)) ([d8b7ce8](https://github.com/coreplanelabs/switchboard/commit/d8b7ce8fd58bbd55e66e2c66ff47dca26c402afe))
+
+
+### Bug fixes
+
+* **costs:** the by-user tie-out compares only the days the workspace has a figure for and names the rest apart, and the Slack app asks for users:read.email so the me toggle can match the signed-in person ([#1297](https://github.com/coreplanelabs/switchboard/issues/1297)) ([1cfb826](https://github.com/coreplanelabs/switchboard/commit/1cfb826283cf8749eb5416c4ac6fcb2b15f92aa6))
+* **deps:** check:lockfile fails on an edge npm cannot honour or a record it cannot pin — the invalid nested @types/node that broke every cold npm ci was a workspace devDependency no gate looked at ([#1300](https://github.com/coreplanelabs/switchboard/issues/1300)) ([23df0e3](https://github.com/coreplanelabs/switchboard/commit/23df0e3db91d29a70790352bf061d108e9ab10e2))
+* **dispatcher:** a request the provider refused under its usage policy is left out of the thread's next seed, and the thread is told to rephrase it ([#1301](https://github.com/coreplanelabs/switchboard/issues/1301)) ([9ad7889](https://github.com/coreplanelabs/switchboard/commit/9ad788988073771c72b48a101db4a10fb6963517))
+* **dispatcher:** the references step's refusal line posts after the run's card opened instead of above it ([#1289](https://github.com/coreplanelabs/switchboard/issues/1289)) ([2207cb7](https://github.com/coreplanelabs/switchboard/commit/2207cb7ba3948abb4ac486d1d0ecd15471b0f3f0))
+* **docs:** decisions:check judges a branch against the merge-base with origin/main, not its tip, so a record accepted, amended or added on main after the branch was cut is no longer read as the branch's edit ([#1299](https://github.com/coreplanelabs/switchboard/issues/1299)) ([366d5d6](https://github.com/coreplanelabs/switchboard/commit/366d5d6159ded3e7a878144d0e037a4cad4a6794))
+* **harness:** a container replaced under a live pi run ends the run interrupted and its request is dispatched again — the floor of record 0038's survival clause; the relaunch stays stage A's ([#1294](https://github.com/coreplanelabs/switchboard/issues/1294)) ([da2a8bf](https://github.com/coreplanelabs/switchboard/commit/da2a8bf278c3cbb7c04e39efc4d0760173e20b6d))
+* **resident:** a dirty worktree already on its thread's pull request branch records the move, and a description resubmitted without a push edits that pull request from any branch ([#1303](https://github.com/coreplanelabs/switchboard/issues/1303)) ([59cf923](https://github.com/coreplanelabs/switchboard/commit/59cf923d45f02a8097edba1e5925aa2f0876ef71))
+* **review:** a review that ends without submit_verdict gets one bounded verdict turn before it posts, so a verdict written in prose is never posted as "No verdict submitted" ([#1302](https://github.com/coreplanelabs/switchboard/issues/1302)) ([6cd4cb0](https://github.com/coreplanelabs/switchboard/commit/6cd4cb0778fe64ca19a3ec00f944451a979124e0))
+* **slack:** a quoted thread's lines lose the Slack plugin's Sent using footer as the request text and history do ([#1290](https://github.com/coreplanelabs/switchboard/issues/1290)) ([16bfb6c](https://github.com/coreplanelabs/switchboard/commit/16bfb6c34c05c5f2980d6fbd9d748fd450258eac))
+* **slack:** a request an app posts for a person is that person's run — the requester is resolved from the message's sender, else the relay footer's thread or the thread the bot replied in, else the app by name, never unknown ([#1291](https://github.com/coreplanelabs/switchboard/issues/1291)) ([9d48339](https://github.com/coreplanelabs/switchboard/commit/9d483396cceb0153248683404e1eeac2cb68e497))
+
+
+### Documentation
+
+* **config:** the example config documents the references block ([#1286](https://github.com/coreplanelabs/switchboard/issues/1286)) ([d2224b0](https://github.com/coreplanelabs/switchboard/commit/d2224b0b69c688a7e59e78811cd38499039c8d92))
+* **docs:** record 0038's third amendment defers stage A, places hosted coding agents at the spawn seam and names the six code facts that must stay true; the stage A execution plan is filed, not scheduled ([#1296](https://github.com/coreplanelabs/switchboard/issues/1296)) ([4a94353](https://github.com/coreplanelabs/switchboard/commit/4a94353f4c2859d5a88800292e93337dabfd0058))
+* **docs:** stage A of record 0038 is unscheduled — U36 waits on it, U29 hands the container-roll issue on as closed by the floor, and the two spec sentences that named the relaunch stage A's say it is an unscheduled option ([#1298](https://github.com/coreplanelabs/switchboard/issues/1298)) ([67a8fa9](https://github.com/coreplanelabs/switchboard/commit/67a8fa90610c1bf586cc98d7769ff5f73cd083da))
+
 ## [1.229.0](https://github.com/coreplanelabs/switchboard/compare/v1.228.0...v1.229.0) (2026-09-15)
 
 
