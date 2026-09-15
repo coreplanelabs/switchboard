@@ -136,7 +136,7 @@ function toggle(): void {
         v-if="call.files && call.files.length > 0"
         class="mx-3.5 mb-2.5"
         :files="call.files"
-        :preview="!replyLanded"
+        :open-images="!replyLanded"
       />
     </div>
   </details>

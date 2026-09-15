@@ -732,7 +732,13 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
                 >{{ modelName(item.turn.model) }}</span
               >
               <span v-for="(f, i) in item.turn.facts" :key="i" class="fact">{{ f }}</span>
-              <span v-if="item.note" class="nonar font-sans italic">{{ item.note }}</span>
+              <a
+                v-if="item.note && item.noteHref"
+                class="nonar font-sans italic text-dimmed no-underline hover:text-primary hover:underline"
+                :href="item.noteHref"
+                >{{ item.note }}</a
+              >
+              <span v-else-if="item.note" class="nonar font-sans italic">{{ item.note }}</span>
               <span
                 v-if="item.turn.at !== undefined"
                 class="ts ml-auto select-none"

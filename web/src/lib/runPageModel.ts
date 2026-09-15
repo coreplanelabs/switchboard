@@ -119,6 +119,9 @@ export interface TurnRowVm {
   key: string;
   turn: TurnVm;
   note: string;
+  /** An in-page anchor the note points at — the Reply's card for the turn
+   *  that wrote it, which sits first on a finished page and last on a live one. */
+  noteHref?: string;
 }
 
 export interface NoteVm {
@@ -594,9 +597,15 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
 
   /** A turn with no step after it (the reply's own thinking, or the run
    *  ended mid-thought): its own row, `note` saying what came of it. */
-  function flushTurn(note: string): void {
+  function flushTurn(note: string, noteHref?: string): void {
     if (!pendingTurn) return;
-    state.log.push({ kind: "turn", key: key("turn"), turn: pendingTurn, note });
+    state.log.push({
+      kind: "turn",
+      key: key("turn"),
+      turn: pendingTurn,
+      note,
+      ...(noteHref !== undefined ? { noteHref } : {}),
+    });
     pendingTurn = null;
   }
 
@@ -760,7 +769,9 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
         return;
       }
       case "answer":
-        flushTurn("wrote the reply below"); // the reply's own thinking has no step to sit on
+        // The reply's own thinking has no step to sit on; the note points at the
+        // Reply's card, which sits first on a finished page and last on a live one.
+        flushTurn("wrote the reply", "#reply");
         state.reply = { text: change.text, at: change.at, files: sent };
         return;
     }
