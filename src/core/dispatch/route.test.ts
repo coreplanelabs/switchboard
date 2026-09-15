@@ -204,10 +204,30 @@ describe("buildRoutePrompt — the request as untrusted data, bounded", () => {
       text: "no code changes: poll for a file, then attach it here with attach_file",
     });
     expect(p.system).toMatch(/Only `coding` can attach or post a file into the thread \(the `attach_file` tool\)/);
-    expect(p.system).toMatch(/routes there, however read-only the rest of it sounds/);
+    expect(p.system).toMatch(/routes there too, however read-only the rest of it sounds/);
     expect(p.system).not.toMatch(/Only `coding`, `explore`/);
     const attaching = presets.filter((x) => x.attaches).map((x) => x.name);
     expect(attaching).toEqual(["coding"]);
+  });
+
+  // The fourth miss, a new shape: an ask that names attach_file but wants the tool EXERCISED (a
+  // probe on a missing path), not a file delivered, routed to `general` with the reason "no file
+  // posting needed despite mention of attach_file" — the name was weighed against the posting
+  // clause and lost. The name gets a sentence of its own, with nothing to weigh it against.
+  it("gives the tool's name its own sentence: an ask that names attach_file routes to the attaching preset whatever it asks the tool to do", () => {
+    const p = buildRoutePrompt({
+      ...base,
+      text: "in acme/widgets: no code changes — do not commit or push anything. Call attach_file once on the path out/does-not-exist.txt (do not create the file), quote the tool result verbatim in your reply, and stop.",
+    });
+    expect(p.system).toMatch(
+      /A request that names attach_file routes to `coding`, whatever it asks the tool to do — a probe, a test or a diagnostic of the tool is still a call to it\./,
+    );
+    // The posting clause stands on its own after it, still carrying the read-only override.
+    expect(p.system).toMatch(
+      /A request that asks for a file, a screenshot, a recording or an attachment to be posted, attached or sent back routes there too, however read-only the rest of it sounds/,
+    );
+    // The two triggers are no longer one sentence the model can weigh as a whole.
+    expect(p.system).not.toMatch(/— or that names attach_file —/);
   });
 
   it("names the thread's earlier directives, or none, and the table and the fallback preset", () => {
