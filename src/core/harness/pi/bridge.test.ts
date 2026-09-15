@@ -211,6 +211,27 @@ describe("the bridge's spans — one tool.<name> per call under run.agent, ended
     expect((result as { spanId?: string }).spanId).toBe(started.spanId);
   });
 
+  it("knows which calls are open, from a call's start to its end, so a relayed request can wait for the bridge to have seen its call", () => {
+    const { bridge } = harness();
+    expect(bridge.callOpen("call_0")).toBe(false);
+    bridge.observe({
+      type: "tool_execution_start",
+      toolCallId: "call_0",
+      toolName: "bash",
+      args: { command: COMMAND },
+    });
+    expect(bridge.callOpen("call_0")).toBe(true);
+    bridge.gateSaw("call_0");
+    bridge.observe({
+      type: "tool_execution_end",
+      toolCallId: "call_0",
+      toolName: "bash",
+      result: { content: [{ type: "text", text: RESULT }] },
+      isError: false,
+    });
+    expect(bridge.callOpen("call_0")).toBe(false);
+  });
+
   it("a stopped pi's open tool spans are closed as errors with a result naming why", () => {
     const { bridge, events, sink } = harness({ withSpans: true });
     bridge.observe({ type: "tool_execution_start", toolCallId: "c", toolName: "bash", args: { command: "sleep 300" } });

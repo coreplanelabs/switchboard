@@ -400,6 +400,12 @@ export class PiBridge {
     return this.openTools.get(callId)?.span;
   }
 
+  /** Whether the bridge has read the call's start off the log and not yet its
+   *  end: what a relayed request that arrived ahead of the poll waits for. */
+  callOpen(callId: string): boolean {
+    return this.openTools.has(callId);
+  }
+
   /** End whatever tool spans a stopped pi left open, so no span outlives the run. */
   closeOpenSpans(reason: string): void {
     for (const [callId, open] of this.openTools) {

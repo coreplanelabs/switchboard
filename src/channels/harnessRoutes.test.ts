@@ -60,7 +60,23 @@ function world() {
   harnesses.register(harness);
   const deps = { bearers, harnesses };
   const headers = (b = bearer) => ({ authorization: `Bearer ${b}` });
-  return { deps, bearer, other, headers, events, bearers };
+  return { deps, bearer, other, headers, events, bearers, harness };
+}
+
+/** A relayed tool that answers when the test releases it, counting its runs. */
+function slowTool() {
+  let release!: (text: string) => void;
+  let runs = 0;
+  const tool: RunnableTool = {
+    name: "slow",
+    description: "waits",
+    inputSchema: { type: "object", properties: {} },
+    run: () => {
+      runs++;
+      return new Promise<string>((r) => (release = r));
+    },
+  };
+  return { tool, release: (text: string) => release(text), runs: () => runs };
 }
 
 describe("handleHarnessRequest", () => {
@@ -135,6 +151,31 @@ describe("handleHarnessRequest", () => {
     ).toEqual({ status: 200, body: { content: [{ type: "text", text: "status updated: ○ x" }], isError: false } });
   });
 
+  // harness-pi item 7: a relayed call that outlives one request.
+  it("POST /harness/tool for a call still running after the window is 202 pending with the call id; the same id asked again joins the one run (never a second start) and reads the answer once it lands", async () => {
+    const { deps, headers, harness } = world();
+    const slow = slowTool();
+    harness.tools.push(slow.tool);
+    const ask = {
+      method: "POST",
+      path: HARNESS_TOOL_PATH,
+      headers: headers(),
+      body: { toolCallId: "c-slow", tool: "slow", input: {} },
+    };
+    const windowed = { ...deps, relayWindowMs: 5 };
+    expect(await handleHarnessRequest(windowed, ask)).toEqual({
+      status: 202,
+      body: { pending: true, toolCallId: "c-slow" },
+    });
+    const again = handleHarnessRequest(windowed, ask);
+    slow.release("finally");
+    expect(await again).toEqual({
+      status: 200,
+      body: { content: [{ type: "text", text: "finally" }], isError: false },
+    });
+    expect(slow.runs()).toBe(1);
+  });
+
   it("an unknown path is 404", async () => {
     const { deps, headers } = world();
     expect(await handleHarnessRequest(deps, { method: "GET", path: "/harness/nope", headers: headers() })).toEqual({
@@ -177,5 +218,27 @@ describe("createHarnessRoutesHandler — the node adapter", () => {
       body: JSON.stringify({ toolCallId: "c", tool: "update_status", input: { checklist: "hi" } }),
     });
     expect(await ok.json()).toEqual({ content: [{ type: "text", text: "status updated: hi" }], isError: false });
+  });
+
+  it("a call that outlives the window is answered 202 pending over HTTP, and the retry with the same id reads the result: a response is held for the window, never for the tool", async () => {
+    const { deps, headers, harness } = world();
+    const slow = slowTool();
+    harness.tools.push(slow.tool);
+    const base = await serve({ ...deps, relayWindowMs: 20 });
+    const post = () =>
+      fetch(`${base}${HARNESS_TOOL_PATH}`, {
+        method: "POST",
+        headers: { ...headers(), "content-type": "application/json" },
+        body: JSON.stringify({ toolCallId: "c-slow", tool: "slow", input: {} }),
+      });
+    const pending = await post();
+    expect(pending.status).toBe(202);
+    expect(await pending.json()).toEqual({ pending: true, toolCallId: "c-slow" });
+    const again = post();
+    slow.release("finally");
+    const answered = await again;
+    expect(answered.status).toBe(200);
+    expect(await answered.json()).toEqual({ content: [{ type: "text", text: "finally" }], isError: false });
+    expect(slow.runs()).toBe(1);
   });
 });

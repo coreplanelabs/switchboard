@@ -61,6 +61,7 @@ function capability(
     session: { key: "slack:C1:1.0:coding", seedFrom: over.seedFrom ?? 0, request: 2, range: { from: 3 } },
     search: vi.fn(async () => ({ hits: over.hits ?? [], gaps: over.gaps ?? [] })),
     readTurn: vi.fn(async (idx: number) => over.turns?.[idx]),
+    readConversation: vi.fn(async () => []),
     readNotepad: vi.fn(async () => over.notepad ?? null),
     writeNotepad: vi.fn(async (text: string): Promise<FenceResult> => {
       writes.push(text);
@@ -381,6 +382,9 @@ describe("sessionCapabilityFor — the capability the dispatcher builds for a ru
     const cap = sessionCapabilityFor({ session }, wt)!;
     expect(cap.session).toEqual(session);
     expect(await cap.readTurn(4)).toEqual(say("turn 4"));
+    // The run's conversation (agent-conductor item 3): every row from where its seed began to the log's tail.
+    expect(await cap.readConversation()).toEqual([say("turn 4")]);
+    expect(wt.readSession).toHaveBeenLastCalledWith("slack:C1:1.0:coding", 2);
     expect(wt.readSession).toHaveBeenCalledWith("slack:C1:1.0:coding", 4, 4);
     await cap.search("x", 3);
     expect(wt.searchSession).toHaveBeenCalledWith("slack:C1:1.0:coding", "x", 3);

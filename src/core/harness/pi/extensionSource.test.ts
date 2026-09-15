@@ -54,10 +54,15 @@ function fakeBot(answers: Record<string, unknown | ((body: unknown) => unknown)>
     const answer = answers[path];
     if (answer === undefined) return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
     const payload = typeof answer === "function" ? (answer as (b: unknown) => unknown)(body) : answer;
+    // A whole Response stands for an answer with a status of its own (the relay's 202).
+    if (payload instanceof Response) return payload;
     return new Response(JSON.stringify(payload), { status: 200 });
   });
   return { calls };
 }
+
+/** The bot's answer for a relayed call still running: 202 and the call id, as the route answers. */
+const pending = (toolCallId: string) => new Response(JSON.stringify({ pending: true, toolCallId }), { status: 202 });
 
 let dir: string;
 let load: () => Promise<(pi: unknown) => Promise<void>>;
@@ -233,5 +238,69 @@ describe("the harness extension", () => {
     await vi.advanceTimersByTimeAsync(2_000);
     await expect(recovered).resolves.toBeUndefined();
     expect(asked).toBeGreaterThanOrEqual(4);
+  });
+
+  // harness-pi item 7: a relayed call that outlives one request. The bot
+  // answers that the call is still running, and the extension asks again with
+  // the same call id until the answer lands.
+  it("a relayed tool whose bot says the call is still running asks again with the same call id until the bot answers, and hands pi the one result", async () => {
+    vi.useFakeTimers();
+    let asks = 0;
+    const { calls } = fakeBot({
+      "/harness/tools": TOOLS,
+      "/harness/tool": () =>
+        ++asks < 3 ? pending("c1") : { content: [{ type: "text", text: "done at last" }], isError: false },
+    });
+    const pi = fakePi();
+    await (
+      await load()
+    )(pi.api);
+    const result = pi.tools[0].execute("c1", { checklist: "x" });
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(result).resolves.toEqual({ content: [{ type: "text", text: "done at last" }], details: {} });
+    const posts = calls.filter((c) => c.path === "/harness/tool");
+    expect(posts).toHaveLength(3);
+    expect(posts.map((c) => (c.body as { toolCallId: string }).toolCallId)).toEqual(["c1", "c1", "c1"]);
+    expect(posts.map((c) => c.headers.authorization)).toEqual(Array(3).fill("Bearer sbr_run-7.s3cret"));
+  });
+
+  it("a bot that stops answering mid-wait is asked again every two seconds and the call fails after 90 s naming the tool; a refusal at the door fails it at once; pi's abort stops the asking", async () => {
+    vi.useFakeTimers();
+    fakeBot({ "/harness/tools": TOOLS });
+    const pi = fakePi();
+    await (
+      await load()
+    )(pi.api);
+    let mode: "pending" | "down" | "door" = "pending";
+    let asks = 0;
+    vi.stubGlobal("fetch", async () => {
+      asks++;
+      if (mode === "down") throw new TypeError("fetch failed");
+      if (mode === "door") return new Response(JSON.stringify({ error: "bearer_revoked" }), { status: 403 });
+      return pending("c1");
+    });
+    // Down for good after one pending answer: asked every two seconds, failed after the wait.
+    const failing = expect(pi.tools[0].execute("c1", {})).rejects.toThrow(
+      /^switchboard harness: the bot did not answer update_status for 90 s \(.*fetch failed\)$/,
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    mode = "down";
+    const before = asks;
+    await vi.advanceTimersByTimeAsync(92_000);
+    await failing;
+    expect(asks - before).toBeGreaterThanOrEqual(45);
+    // A 4xx at the door is a verdict: failed at once, never asked again.
+    mode = "door";
+    const atDoor = asks;
+    await expect(pi.tools[0].execute("c2", {})).rejects.toThrow(/answered 403: bearer_revoked/);
+    expect(asks - atDoor).toBe(1);
+    // pi's abort ends the asking while the bot still says the call is running.
+    mode = "pending";
+    const ac = new AbortController();
+    const aborted = expect(pi.tools[0].execute("c3", {}, ac.signal)).rejects.toThrow(/aborted/);
+    await vi.advanceTimersByTimeAsync(10);
+    ac.abort();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await aborted;
   });
 });

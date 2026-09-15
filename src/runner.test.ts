@@ -158,7 +158,8 @@ describe("runAgent budgets", () => {
       description: "records the conversation it was handed",
       inputSchema: { type: "object", properties: {} },
       run: async (_input, ctx) => {
-        live = ctx.conversation?.();
+        // The native runner's read is its own array, never a promise (the pi harness's is the awaited kind).
+        live = ctx.conversation?.() as readonly unknown[] | undefined;
         seen = live ? [...live] : undefined; // what the call saw, before the loop appends its results turn
         return "ok";
       },

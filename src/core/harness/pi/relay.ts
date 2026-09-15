@@ -6,12 +6,17 @@
 // refusal recorded as `tool_refused` on the run; `tool` — a relayed tool run in
 // the bot with the run's own context (the executor, the GitHub gate, the
 // dispatcher's recorders) under the span the bridge opened for the call, its
-// result in pi's shape. The registry says which runs are live: a bearer names
-// its run, and a run that is not driving a pi answers nothing.
+// result in pi's shape. A call may outlive one request (the conductor's
+// `await_runs` waits for minutes): the route answers within a window or says
+// the call is still running, and the extension asks again with the same call
+// id, which joins the one run (`RelayedCalls`) and never starts it twice. The
+// registry says which runs are live: a bearer names its run, and a run that is
+// not driving a pi answers nothing.
 
 import { TracingExecutor } from "../../../execution/tracingExecutor.js";
 import { capToolResultContent, type ToolDef, type ToolResultContent } from "../../../providers/types.js";
 import type { RunnableTool, ToolContext } from "../../../tools/workspace.js";
+import { sleepUnlessAborted } from "../../dispatch/awaitChildren.js";
 import type { Backend } from "../../trace/attrs.js";
 import { redactAndCap, type RunEvent } from "../../runEvents.js";
 import type { Span } from "../../trace/types.js";
@@ -35,6 +40,12 @@ export interface LiveHarness {
   gateSaw: (callId: string) => void;
   /** The reason every tool is refused right now — the write-up — or nothing. */
   toolsBlocked: () => string | undefined;
+  /** Resolves once the bridge has read the call's start off pi's log, or after
+   *  a short bound. The extension's request for a relayed tool can reach the
+   *  bot before the poll that reads the line announcing the call, and a tool
+   *  that reads the run's conversation (`spawn_run`, for its child's seed)
+   *  wants the mirror caught up to the turn that made the call. Absent, no wait. */
+  callSeen?: (callId: string) => Promise<void>;
 }
 
 export interface ToolCallAsk {
@@ -54,23 +65,101 @@ export interface RelayedToolAnswer {
 }
 
 export class HarnessRegistry {
-  private readonly live = new Map<string, LiveHarness>();
+  private readonly live = new Map<string, { harness: LiveHarness; calls: RelayedCalls }>();
 
-  /** The run drives a pi from here; the returned function forgets it. */
+  /** The run drives a pi from here, its relayed calls kept beside it; the
+   *  returned function forgets it and ends whatever call still runs. */
   register(harness: LiveHarness): () => void {
-    this.live.set(harness.runId, harness);
+    const entry = { harness, calls: new RelayedCalls() };
+    this.live.set(harness.runId, entry);
     return () => {
-      if (this.live.get(harness.runId) === harness) this.live.delete(harness.runId);
+      if (this.live.get(harness.runId) !== entry) return;
+      this.live.delete(harness.runId);
+      entry.calls.end();
     };
   }
 
   get(runId: string): LiveHarness | undefined {
-    return this.live.get(runId);
+    return this.live.get(runId)?.harness;
+  }
+
+  /** The run's relayed calls, for as long as it is registered. */
+  calls(runId: string): RelayedCalls | undefined {
+    return this.live.get(runId)?.calls;
   }
 
   size(): number {
     return this.live.size;
   }
+}
+
+/** How long one `POST /harness/tool` waits on a tool still running before
+ *  answering that it is pending (harness-pi item 7). A tool that answers in
+ *  seconds (every relayed tool but the conductor's waits) answers in one
+ *  request as it always did; a wait that runs for minutes is asked again after
+ *  every window instead of holding one request open past the timeouts on the
+ *  path: the extension gives up on one request after 60 s of its own and pi's
+ *  fetch on the headers after 300 s (undici's default), while the bot's server
+ *  bounds only the request's arrival (its header timeouts are 60 s and 300 s,
+ *  never neared by a body that arrives whole) and never the response. */
+export const RELAY_POLL_WINDOW_MS = 30_000;
+
+export type RelayProgress = { done: true; answer: RelayedToolAnswer } | { done: false };
+
+/** The relayed calls of one live run, by call id. A request for a call already
+ *  running joins it and never starts it twice, so a `spawn_run` asked again
+ *  after a lost response spawns once; an answered call keeps its answer until
+ *  the run ends, so the ask that comes after the answer landed reads it. When
+ *  the run ends, every call still running is told to stop through the context
+ *  signal it was run with. */
+export class RelayedCalls {
+  private readonly calls = new Map<string, Promise<RelayedToolAnswer>>();
+  private readonly ending = new AbortController();
+
+  get size(): number {
+    return this.calls.size;
+  }
+
+  /** Aborted when the run ends: the signal every call here runs under. */
+  get signal(): AbortSignal {
+    return this.ending.signal;
+  }
+
+  /** The call's answer as a promise: started by `start` on the first ask, the same promise after. */
+  join(callId: string, start: () => Promise<RelayedToolAnswer>): Promise<RelayedToolAnswer> {
+    let answer = this.calls.get(callId);
+    if (!answer) {
+      answer = start();
+      this.calls.set(callId, answer);
+    }
+    return answer;
+  }
+
+  end(): void {
+    this.ending.abort();
+    this.calls.clear();
+  }
+}
+
+/** One request's worth of a relayed call: the call is started on its first
+ *  ask and joined on every later one, and the request is answered with the
+ *  result when it lands inside the window, else with `pending` for the
+ *  extension to ask again. The window's timer ends with the request. */
+export async function relayToolCall(
+  harness: LiveHarness,
+  calls: RelayedCalls,
+  ask: ToolCallAsk,
+  opts: { windowMs?: number; sleep?: (ms: number, signal?: AbortSignal) => Promise<void> } = {},
+): Promise<RelayProgress> {
+  const answer = calls.join(ask.toolCallId, () => runRelayedTool(harness, ask, { signal: calls.signal }));
+  const window = new AbortController();
+  const sleep = opts.sleep ?? sleepUnlessAborted;
+  const progress = await Promise.race([
+    answer.then((a): RelayProgress => ({ done: true, answer: a })),
+    sleep(opts.windowMs ?? RELAY_POLL_WINDOW_MS, window.signal).then((): RelayProgress => ({ done: false })),
+  ]);
+  window.abort();
+  return progress;
 }
 
 /** The definitions the extension registers: name, description, schema — the native tool table's own. */
@@ -104,21 +193,35 @@ export function authorizeToolCall(harness: LiveHarness, ask: ToolCallAsk): Autho
 /** A relayed tool, run as the native loop runs it: the run's context, the
  *  call's span with a tracing executor and a publisher stamping the span, the
  *  result capped as the model would see it — and every failure a result,
- *  never a throw. An unknown tool is an error result naming it. */
-export async function runRelayedTool(harness: LiveHarness, ask: ToolCallAsk): Promise<RelayedToolAnswer> {
+ *  never a throw. An unknown tool is an error result naming it. The run's
+ *  conversation, when the context offers one, is read only once the bridge
+ *  has seen the call (`callSeen`), so the turn that made the call is in it;
+ *  `signal` is the run's end, for a call still running then. */
+export async function runRelayedTool(
+  harness: LiveHarness,
+  ask: ToolCallAsk,
+  opts: { signal?: AbortSignal } = {},
+): Promise<RelayedToolAnswer> {
   const tool = harness.tools.find((t) => t.name === ask.tool);
   if (!tool) return { content: [{ type: "text", text: `Unknown tool: ${ask.tool}` }], isError: true };
   const span = harness.toolSpan(ask.toolCallId);
   const base = harness.toolContext;
-  const ctx: ToolContext = span
-    ? {
-        ...base,
-        span,
-        executor: new TracingExecutor(base.executor, span, harness.backend),
-        publish: (e) => harness.emit(withSpanId(e, span.id)),
-        ...(base.github?.api.withSpan ? { github: { ...base.github, api: base.github.api.withSpan(span) } } : {}),
-      }
-    : { ...base, publish: (e) => harness.emit(e) };
+  const readConversation = base.conversation;
+  const ctx: ToolContext = {
+    ...(span
+      ? {
+          ...base,
+          span,
+          executor: new TracingExecutor(base.executor, span, harness.backend),
+          publish: (e) => harness.emit(withSpanId(e, span.id)),
+          ...(base.github?.api.withSpan ? { github: { ...base.github, api: base.github.api.withSpan(span) } } : {}),
+        }
+      : { ...base, publish: (e) => harness.emit(e) }),
+    ...(opts.signal && !base.signal ? { signal: opts.signal } : {}),
+    ...(readConversation && harness.callSeen
+      ? { conversation: () => harness.callSeen!(ask.toolCallId).then(() => readConversation()) }
+      : {}),
+  };
   try {
     const input = typeof ask.input === "object" && ask.input !== null ? (ask.input as Record<string, unknown>) : {};
     const output = await tool.run(input, ctx);

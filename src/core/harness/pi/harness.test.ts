@@ -17,8 +17,9 @@ import { RunControl } from "../../runRegistry/runControl.js";
 import { recordingSink } from "../../testing/recordingSink.js";
 import { FollowUpInbox } from "../../threadAdmission.js";
 import { createTracer } from "../../trace/tracer.js";
+import { textTurnsOf } from "../../dispatch/textTurns.js";
 import { HARNESS_URL_ENV, RUN_BEARER_ENV, piRunPaths, piRunPathsAt, type PiRunPaths } from "./process.js";
-import { HarnessRegistry, authorizeToolCall } from "./relay.js";
+import { HarnessRegistry, authorizeToolCall, runRelayedTool, type RelayedToolAnswer } from "./relay.js";
 import { judgeToolCall, type ToolRuleContext } from "./toolRules.js";
 import { FakePiContainer } from "./testing/fakeContainer.js";
 import {
@@ -1333,5 +1334,98 @@ describe("runPiHarness — a read-identity preset", () => {
     expect(rules).toEqual({ identity: "write", checkout: "/workspace/threads/t/main", protectedBranches: ["main"] });
     const args = w.container.starts[0].args;
     expect(args[args.indexOf("--tools") + 1]).toBe("read,bash,edit,write,grep,find,ls,update_status");
+  });
+});
+
+// Feature: docs/reference/specs/agent-conductor.md item 3: on pi the run's
+// conversation is what its session log holds. The harness hands its tools a
+// read of it, taken once the bridge has seen the call, so the assistant turn
+// that made the call is in it; a log that cannot be read is no conversation,
+// and a seed note says so.
+describe("runPiHarness: the run's conversation for a child's seed", () => {
+  /** A relayed tool that answers with the conversation the context offers, as text turns. */
+  const readConversation: RunnableTool = {
+    name: "read_conversation",
+    description: "what was said so far",
+    inputSchema: { type: "object", properties: {} },
+    run: async (_input, ctx) => {
+      const conversation = ctx.conversation ? await ctx.conversation() : undefined;
+      return JSON.stringify(conversation ? textTurnsOf(conversation) : null);
+    },
+  };
+  const CONVERSATION_TURN = "Storage first.";
+
+  /** One turn that calls the reader, relayed the moment pi announces it, as
+   *  the extension does: before the poll that reads the announcing lines. */
+  function conversationTurn(w: ReturnType<typeof world>, onRead: (answer: RelayedToolAnswer) => void) {
+    w.run.tools = [readConversation];
+    scriptedPi(w.container, (_n, c) => {
+      const msg = assistant([
+        { type: "text", text: CONVERSATION_TURN },
+        { type: "toolCall", id: "t1", name: "read_conversation", arguments: {} },
+      ]);
+      c.emit(
+        { type: "turn_start" },
+        { type: "message_start", message: { ...msg, content: [] } },
+        { type: "message_end", message: msg },
+        { type: "tool_execution_start", toolCallId: "t1", toolName: "read_conversation", args: {} },
+      );
+      const live = w.registry.get("run-7")!;
+      authorizeToolCall(live, { toolCallId: "t1", tool: "read_conversation", input: {} });
+      void runRelayedTool(live, { toolCallId: "t1", tool: "read_conversation", input: {} }).then((answer) => {
+        onRead(answer);
+        c.emit(
+          {
+            type: "tool_execution_end",
+            toolCallId: "t1",
+            toolName: "read_conversation",
+            result: { content: answer.content },
+            isError: answer.isError,
+          },
+          { type: "turn_end", message: msg, toolResults: [] },
+        );
+        finalTurn(c, "done");
+      });
+    });
+  }
+  const textOf = (answer: RelayedToolAnswer | undefined) =>
+    JSON.parse(answer!.content.map((c) => (c.type === "text" ? c.text : "")).join("")) as unknown;
+
+  it("hands its tools the conversation the log holds, read once the bridge has seen the call: the seed, then the assistant turn that made the call, as text turns", async () => {
+    const w = world();
+    w.run.conversation = async () => [...w.run.messages, ...w.steps.flatMap((s) => s.turns)];
+    let read: RelayedToolAnswer | undefined;
+    conversationTurn(w, (a) => (read = a));
+    expect(await w.start()).toBe("done");
+    expect(textOf(read)).toEqual([
+      { role: "user", text: "fix the failing test" },
+      { role: "assistant", text: CONVERSATION_TURN },
+    ]);
+    expect(w.events.filter((e) => e.type === "run_note" && e.kind === "seed")).toEqual([]);
+  });
+
+  it("a conversation the log cannot give is none: the tool reads nothing, a seed note names the failure, and the run answers", async () => {
+    const w = world();
+    w.run.conversation = async () => {
+      throw new Error("no such route");
+    };
+    let read: RelayedToolAnswer | undefined;
+    conversationTurn(w, (a) => (read = a));
+    expect(await w.start()).toBe("done");
+    expect(textOf(read)).toBeNull();
+    expect(w.events.filter((e) => e.type === "run_note" && e.kind === "seed")).toEqual([
+      expect.objectContaining({
+        summary:
+          "the conversation could not be read from the session log for a child's seed (no such route); a child spawned now starts from its own thread",
+      }),
+    ]);
+  });
+
+  it("a run without a session offers its tools no conversation", async () => {
+    const w = world();
+    let read: RelayedToolAnswer | undefined;
+    conversationTurn(w, (a) => (read = a));
+    expect(await w.start()).toBe("done");
+    expect(textOf(read)).toBeNull();
   });
 });

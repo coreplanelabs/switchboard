@@ -61,7 +61,8 @@ import { InMemoryRunLedger } from "./runLedger/inMemory.js";
 import { messageFromInbox } from "./runLedger/inboxMessage.js";
 import { createLedgerWriteThrough, NullLedgerWriteThrough } from "./runLedger/writeThrough.js";
 import { runPiHarness } from "./harness/pi/harness.js";
-import { HarnessRegistry } from "./harness/pi/relay.js";
+import { HarnessRegistry, authorizeToolCall, relayToolCall, type ToolCallAsk } from "./harness/pi/relay.js";
+import { FakePiContainer } from "./harness/pi/testing/fakeContainer.js";
 import { ThreadsElsewhere } from "./runLedger/threadsElsewhere.js";
 import type { LiveRunRow, StepRecord } from "./runLedger/types.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./runStoreWorker.js";
@@ -10861,7 +10862,11 @@ workspaceDir: __WORKDIR__
     return { parent, child, leads };
   }
   /** The deps of a tree: ids minted in order (the parent, then the child), a recording store, the process admission map. */
-  function treeDeps(provider: Provider, minted: readonly string[] = ["run-parent", "run-child", "run-third"]) {
+  function treeDeps(
+    provider: Provider,
+    minted: readonly string[] = ["run-parent", "run-child", "run-third"],
+    yaml: string = CONDUCTOR_YAML,
+  ) {
     const ids = [...minted];
     const registry = new RunRegistry({ genId: () => ids.shift() ?? "run-more", genToken: () => "tok" });
     const store = new InMemoryRunStore();
@@ -10872,7 +10877,7 @@ workspaceDir: __WORKDIR__
       sleep: async () => {},
     });
     const admission = new ThreadAdmission<DispatchFollowUp>();
-    const deps = makeDeps(CONDUCTOR_YAML, provider);
+    const deps = makeDeps(yaml, provider);
     deps.runRegistry = registry;
     deps.runHistoryWriter = writer;
     deps.admission = admission;
@@ -11063,6 +11068,155 @@ workspaceDir: __WORKDIR__
     ]);
     expect((await t.store.get("run-parent"))!.seed).toBe("channel");
     expect(agentsProvisioned()).toEqual(["conductor", "research"]);
+  });
+
+  // docs/reference/specs/harness-pi.md item 12; agent-conductor item 3: the
+  // conductor on pi. Its run tools are relays into the bot; the spawn relay
+  // reads the parent's conversation off its session log, so the child seeds
+  // from the parent's text turns exactly as a native conductor's child does,
+  // and a write preset's refusal reaches the tool result by name.
+  it("`harness: { conductor: pi }` runs the conductor on pi as a child of the bot: a `coding` spawn relayed through the bot is refused `spawn_identity` in the tool result and opens nothing; a `research` spawn reaches spawnChild with the parent's text turns read off its session log, so the child's record says `seed: parent` with the request and what the conductor said as its context; the relayed await_runs returns the child's reply; the parent's answer carries all three", async () => {
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        return { content: [{ type: "text", text: "A single-instance coordination point." }], stopReason: "end_turn" };
+      },
+    };
+    const t = treeDeps(provider, undefined, CONDUCTOR_YAML + "harness:\n  conductor: pi\n");
+    const ledger = new InMemoryRunLedger();
+    t.deps.runLedger = createLedgerWriteThrough({
+      ledger,
+      gen: "gen-P",
+      fallback: { put: async () => {} },
+      warn: () => {},
+    });
+    t.deps.runs = createRunsService({ registry: t.registry, store: t.store, ledger });
+    const container = new FakePiContainer();
+    const harnesses = new HarnessRegistry();
+    t.deps.harness = {
+      registry: harnesses,
+      harnessUrl: "https://bot.test",
+      loopbackUrl: "http://127.0.0.1:8080",
+      containerFor: () => container,
+    };
+    t.deps.runBearers = new RunBearerStore({ clock: Date.now });
+    const assistant = (content: Record<string, unknown>[], stopReason = "toolUse") => ({
+      role: "assistant",
+      content,
+      stopReason,
+    });
+    const results: string[] = [];
+    /** A scripted pi conductor: three relayed calls as the extension makes them, then the answer. */
+    container.onStdin = (line, c) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
+        c.emit({ id: cmd.id, type: "response", command: cmd.type, success: true, data: { sessionFile: "s.jsonl" } });
+      if (cmd.type !== "prompt") return;
+      c.emit({ id: cmd.id, type: "response", command: "prompt", success: true }, { type: "agent_start" });
+      const live = harnesses.get("run-parent")!;
+      const calls = harnesses.calls("run-parent")!;
+      const relay = async (ask: ToolCallAsk, text?: string) => {
+        const msg = assistant([
+          ...(text ? [{ type: "text", text }] : []),
+          { type: "toolCall", id: ask.toolCallId, name: ask.tool, arguments: ask.input },
+        ]);
+        c.emit(
+          { type: "message_end", message: msg },
+          { type: "tool_execution_start", toolCallId: ask.toolCallId, toolName: ask.tool, args: ask.input },
+        );
+        authorizeToolCall(live, ask);
+        let progress = await relayToolCall(live, calls, ask);
+        while (!progress.done) progress = await relayToolCall(live, calls, ask);
+        const answer = progress.answer;
+        results.push(answer.content.map((p) => (p.type === "text" ? p.text : "")).join(""));
+        c.emit(
+          {
+            type: "tool_execution_end",
+            toolCallId: ask.toolCallId,
+            toolName: ask.tool,
+            result: { content: answer.content },
+            isError: answer.isError,
+          },
+          {
+            type: "message_end",
+            message: { role: "toolResult", toolCallId: ask.toolCallId, toolName: ask.tool, content: answer.content },
+          },
+          { type: "turn_end", message: msg, toolResults: [] },
+        );
+      };
+      void (async () => {
+        await relay(
+          {
+            toolCallId: "t1",
+            tool: "spawn_run",
+            input: { preset: "coding", prompt: "fix the login test", repo: "acme/api" },
+          },
+          "Storage first: one research child.",
+        );
+        await relay({
+          toolCallId: "t2",
+          tool: "spawn_run",
+          input: { preset: "research", prompt: "what is a Durable Object?" },
+        });
+        const childId = /run: (\S+) in thread/.exec(results[1])?.[1] ?? "run-child";
+        await relay({ toolCallId: "t3", tool: "await_runs", input: { ids: [childId] } });
+        const done = assistant([{ type: "text", text: results.join("\n---\n") }], "stop");
+        c.emit(
+          { type: "message_end", message: done },
+          { type: "turn_end", message: done, toolResults: [] },
+          { type: "agent_settled" },
+        );
+      })();
+    };
+    const { parent, child, leads } = treeIO();
+    await dispatch(t.deps, inChannel("CX", "agent:conductor look into durable objects"), parent.io);
+    await vi.waitFor(() => expect(t.registry.getById("run-child")?.finished).toBe(true));
+    await t.writer.settled();
+    // The three relayed results, as the model read them.
+    expect(results[0]).toMatch(/^spawn refused \(spawn_identity\): `coding` runs as a `write` identity/);
+    expect(results[1]).toContain("spawned a research run: run-child in thread slack:CX:9.0");
+    expect(JSON.parse(results[2])).toMatchObject({
+      ended: "all_ended",
+      runs: [
+        {
+          id: "run-child",
+          status: "completed",
+          finalReply: expect.stringContaining("A single-instance coordination point."),
+        },
+      ],
+    });
+    expect(parent.replies).toEqual([results.join("\n---\n")]);
+    // The coding spawn opened nothing; the research child ran in its own thread as the requester.
+    expect(leads).toHaveLength(1);
+    expect(leads[0]).toContain("*research*");
+    expect(child.replies).toEqual(["A single-instance coordination point."]);
+    expect(agentsProvisioned()).toEqual(["conductor", "research"]);
+    // The child seeded from the parent's text turns, read off the parent's session log.
+    const childRecord = ledger.finished.get("run-child")!;
+    expect(childRecord).toMatchObject({
+      agent: "research",
+      parentRunId: "run-parent",
+      seed: "parent",
+      status: "completed",
+    });
+    expect(childRecord.events.filter((e) => e.type === "context").map((e) => (e as { text: string }).text)).toEqual([
+      "user: look into durable objects",
+      "assistant: Storage first: one research child.",
+    ]);
+    expect(childRecord.events.filter((e) => e.type === "input").map((e) => (e as { text: string }).text)).toEqual([
+      "what is a Durable Object?",
+    ]);
+    const parentRecord = ledger.finished.get("run-parent")!;
+    expect(parentRecord.seed).toBe("channel");
+    expect(parentRecord.events.filter((e) => e.type === "tool_call").map((e) => (e as { tool: string }).tool)).toEqual([
+      "spawn_run",
+      "spawn_run",
+      "await_runs",
+    ]);
+    // pi ran once, as a child of the bot, reaching it over loopback.
+    expect(container.starts).toHaveLength(1);
+    expect(container.starts[0].env.SWITCHBOARD_HARNESS_URL).toBe("http://127.0.0.1:8080");
+    expect(vi.mocked(runAgent).mock.calls.map((c) => c[0].agent.name)).toEqual(["research"]);
   });
 
   it("a child cannot spawn: a conductor child's own spawn_run is refused `spawn_depth`, and no grandchild exists", async () => {

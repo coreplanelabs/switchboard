@@ -33,6 +33,12 @@ export interface SessionCapability {
   search(query: string, limit: number): Promise<{ hits: SessionHit[]; gaps: number[] }>;
   /** One turn whole by its log index, or undefined when the log has none there. */
   readTurn(idx: number): Promise<ChatMessage | undefined>;
+  /** The run's conversation as its log holds it: every row from where its seed
+   *  began to the log's tail: the seed, then each step mirrored so far. What
+   *  a run on the pi harness offers `spawn_run` as the child's seed
+   *  (docs/reference/specs/agent-conductor.md item 3); a log that stops at a
+   *  gap gives the turns before it. */
+  readConversation(): Promise<ChatMessage[]>;
   readNotepad(): Promise<Notepad | null>;
   writeNotepad(text: string): Promise<FenceResult>;
   /** The thread's files (record 0033): the catalogue its runs' records name —
@@ -65,6 +71,7 @@ export function sessionCapabilityFor(
     session,
     search: (query, limit) => ledger.searchSession(session.key, query, limit),
     readTurn: async (idx) => (await ledger.readSession(session.key, idx, idx)).messages[0],
+    readConversation: async () => (await ledger.readSession(session.key, session.seedFrom)).messages,
     readNotepad: () => ledger.readNotepad(session.key),
     writeNotepad: (text) => ledger.writeNotepad(session.key, text),
     ...(assets ? { assets: assets.read, workspacePathOf: assets.pathOf } : {}),
