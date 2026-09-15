@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CLI_ACTOR, actorIdFor, resolveActor, resolveChatActor } from "./actor.js";
+import { effectiveGrants, principalOf } from "./authorize.js";
 import {
   ALL_GRANTS,
   CHAT_OPEN_ACTIONS,
@@ -213,6 +214,30 @@ describe("resolveChatActor — a chat message's namespaced user id chooses the s
       id: "schedule:self-improvement",
       grants: { channels: "all" },
     });
+  });
+
+  // authorization.md item 14 / slack-channel.md item 13: a request an app posted
+  // for a person is the app acting on the person's behalf — the person's
+  // identity, never more than the app's own grants.
+  it("a relayed message (postedBy set) is an agent actor: the app's id and grants, on behalf of the person named — so an admin named by forgeable text still yields only the intersection", () => {
+    const relayed = { ...msg("slack:UADMIN"), postedBy: "slack:bot:B0CLAUDE" };
+    const actor = resolveChatActor(relayed, lookup);
+    expect(actor).toMatchObject({ kind: "agent", id: "slack:bot:B0CLAUDE", origin: { channelId: "slack:C1" } });
+    // The app nobody listed holds only the Slack baseline; the person holds everything.
+    expect(actor.grants).toEqual(resolveChatActor(msg("slack:bot:B0CLAUDE"), lookup).grants);
+    expect(actor.onBehalfOf).toEqual(resolveChatActor(msg("slack:UADMIN"), lookup));
+    // Effective grants: baseline ∩ all = the baseline — never config:write, never the admin's channels.
+    const effective = effectiveGrants(actor);
+    expect(effective.actions).toEqual(new Set(CHAT_OPEN_ACTIONS));
+    expect(effective.channels).toEqual(set());
+    expect(principalOf(actor).id).toBe("slack:UADMIN");
+    // A relay for a plain user is bounded by that user too: baseline ∩ (baseline + coding) = baseline.
+    const forDev = resolveChatActor({ ...msg("slack:UDEV"), postedBy: "slack:bot:B0CLAUDE" }, lookup);
+    expect(effectiveGrants(forDev).actions).toEqual(new Set(CHAT_OPEN_ACTIONS));
+    // Config can widen a named relay app on purpose; the person still bounds it.
+    expect(resolveChatActor({ ...msg("slack:UMGR"), postedBy: "slack:bot:B0CLAUDE" }, lookup).onBehalfOf?.id).toBe(
+      "slack:UMGR",
+    );
   });
 
   it("an unknown namespace stays a user with the id as given and whatever grants config names for it — never a crash, never widened", () => {

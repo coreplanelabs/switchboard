@@ -76,6 +76,23 @@ describe("threadTurns — the thread-page-to-turns mapping", () => {
     ]);
   });
 
+  // slack-channel.md item 13: the relay footer a Claude Code session's post
+  // carries is chrome like the plugin footer — gone from every turn, so a
+  // quoted thread never reads the source channel and permalink as words.
+  it("strips the 'Sent by Claude in <#C…> · <permalink|thread>' relay footer from every kept turn, and only as a whole trailing footer", () => {
+    const footer =
+      "Sent by Claude in <#C0PROMPT|alice-prompting> · <https://acme.slack.com/archives/C0PROMPT/p1789504919942589?thread_ts=1789504919.942589&amp;cid=C0PROMPT|thread>";
+    const thread = [
+      { bot_id: "B0CLAUDE", text: `<@UBOT> agent:review <https://github.com/acme/api/pull/42>\n${footer}`, ts: "1.0" },
+      { bot_id: "B0CLAUDE", text: footer, ts: "2.0" },
+      { user: "UA", text: `${footer} — what does this footer mean?`, ts: "3.0" },
+    ];
+    expect(threadTurns(thread, { botUserId: "UBOT" }).map((t) => t.text)).toEqual([
+      "agent:review <https://github.com/acme/api/pull/42>",
+      `${footer} — what does this footer mean?`,
+    ]);
+  });
+
   it("keeps the author id on every turn so a reader can name the speaker", () => {
     const thread = [
       { user: "UA", text: "one", ts: "1.0" },

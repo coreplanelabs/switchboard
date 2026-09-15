@@ -1076,6 +1076,15 @@ describe("createCostsService.usersReport", () => {
         usage: { turns: 0, byModel: {} },
       },
       { userId: "http:ops", day: AUG_29, runs: 1, wallMs: 1_000, usage: { turns: 0, byModel: {} } },
+      // An app nobody was found behind (slack-channel.md item 13): a requester, never a viewer.
+      {
+        userId: "slack:bot:B0CLAUDE",
+        userName: "Claude [ci]",
+        day: AUG_29,
+        runs: 1,
+        wallMs: 1_000,
+        usage: { turns: 0, byModel: {} },
+      },
     ],
     pending: 1,
     earliestFinishedAt: Date.parse(midnight(AUG_1)),
@@ -1096,11 +1105,11 @@ describe("createCostsService.usersReport", () => {
     expect(asked).toEqual([{ sinceMs: Date.parse(midnight(AUG_28)), untilMs: Date.parse(midnight(AUG_31)) }]);
     expect(r.range).toEqual({ from: AUG_28, to: AUG_30, days: 3, partialLastDay: true });
     expect(r.coverage).toMatchObject({ from: AUG_28, historyOn: true, retentionDays: 30, clamped: false });
-    expect(r.users.map((u) => u.userId)).toEqual(["slack:UALICE", "slack:UBOB", "http:ops"]);
+    expect(r.users.map((u) => u.userId)).toEqual(["slack:UALICE", "slack:UBOB", "http:ops", "slack:bot:B0CLAUDE"]);
     expect(r.users[0].llmUsd).toBeCloseTo(1, 9); // 1M haiku input at $1/MTok
     expect(r.pending).toBe(1);
     expect(r.viewer).toEqual({ userIds: ["slack:UALICE"], matchedByEmail: true });
-    expect(looked.sort()).toEqual(["UALICE", "UBOB"]); // the HTTP subject is never looked up
+    expect(looked.sort()).toEqual(["UALICE", "UBOB"]); // the HTTP subject and the app (`slack:bot:…`) are never looked up
     // A second read looks up only the user whose email was unknown: a known
     // email is cached for the process, an unknown one is never pinned.
     emails.UBOB = "bob@example.com";

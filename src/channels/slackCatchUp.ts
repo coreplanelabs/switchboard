@@ -167,9 +167,11 @@ export interface FindMissedInput {
 }
 
 /** Pure selection: which fetched messages should have started a run and did
- *  not. Mirrors the live triggers exactly — a top-level message needs a
+ *  not. Mirrors the live triggers for people's messages — a top-level message needs a
  *  mention; a thread reply needs a mention OR a bot-participating thread;
- *  bot/subtyped (non-file_share) messages never count. A message counts as
+ *  bot/subtyped (non-file_share) messages never count (an app's relayed mention,
+ *  slack-channel.md item 13, is handled live only — a scan cannot resolve its
+ *  person after the fact). A message counts as
  *  handled when the bot replied after it (card or answer), or when it carries
  *  the bot's 👀 and is younger than `ACK_GRACE_MS` (its card is on the way);
  *  a 👀 alone on an older message is a run that died before its card.

@@ -143,6 +143,19 @@ describe("stripMention — Slack app 'Sent using' footer", () => {
       "Sent using <@UAPPFOOTER> is the footer\nplease explain",
     );
   });
+
+  // slack-channel.md item 13: the relay footer a Claude Code session's post
+  // carries is read for the requester, then removed like the app footer.
+  it("drops the trailing 'Sent by Claude in <#C…> · <permalink|thread>' relay footer, and only as a whole trailing footer", () => {
+    const footer =
+      "Sent by Claude in <#C0PROMPT|alice-prompting> · <https://acme.slack.com/archives/C0PROMPT/p1789504919942589?thread_ts=1789504919.942589&amp;cid=C0PROMPT|thread>";
+    expect(stripMention(`<@${BOT}> agent:review <https://github.com/acme/api/pull/42>\n${footer}`, BOT)).toBe(
+      "agent:review <https://github.com/acme/api/pull/42>",
+    );
+    expect(stripMention(`<@${BOT}> ${footer} — what does this footer mean?`, BOT)).toBe(
+      `${footer} — what does this footer mean?`,
+    );
+  });
 });
 
 // Feature: docs/reference/specs/slack-channel.md — a follow-up's thread page is fetched

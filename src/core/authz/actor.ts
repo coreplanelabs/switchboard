@@ -89,12 +89,30 @@ const CHAT_SURFACES: Readonly<Record<string, ActorSurface>> = {
  *  A namespace this module does not know stays a `user` with the id as given —
  *  its grants are whatever config names for that id, never a guess. */
 export function resolveChatActor(
-  msg: { userId: string; channelId: string; threadKey: string },
+  msg: { userId: string; channelId: string; threadKey: string; postedBy?: string },
   grantsFor: GrantsLookup,
 ): Actor {
-  const colon = msg.userId.indexOf(":");
-  const surface = colon > 0 ? CHAT_SURFACES[msg.userId.slice(0, colon)] : undefined;
-  const origin = { channelId: msg.channelId, threadKey: msg.threadKey };
-  if (surface === undefined) return { kind: "user", id: msg.userId, grants: grantsFor(msg.userId), origin };
-  return resolveActor({ surface, subjectId: msg.userId.slice(colon + 1), ...origin }, grantsFor);
+  const person = resolveNamespacedActor(msg.userId, msg, grantsFor);
+  if (msg.postedBy === undefined) return person;
+  // A request an app posted for a person (slack-channel.md item 13): the
+  // message text named the person, and text is forgeable, so the person's
+  // grants alone must never govern. The actor is the app, acting on the
+  // person's behalf — `effectiveGrants` is the intersection, so the run holds
+  // no more than the app holds (the surface baseline, plus whatever config
+  // grants that app id by name) and no more than the person holds. Identity
+  // (`userId`, the record, the costs page) is still the person's.
+  const app = resolveNamespacedActor(msg.postedBy, msg, grantsFor);
+  return { ...app, kind: "agent", onBehalfOf: person };
+}
+
+function resolveNamespacedActor(
+  userId: string,
+  origin: { channelId: string; threadKey: string },
+  grantsFor: GrantsLookup,
+): Actor {
+  const colon = userId.indexOf(":");
+  const surface = colon > 0 ? CHAT_SURFACES[userId.slice(0, colon)] : undefined;
+  const at = { channelId: origin.channelId, threadKey: origin.threadKey };
+  if (surface === undefined) return { kind: "user", id: userId, grants: grantsFor(userId), origin: at };
+  return resolveActor({ surface, subjectId: userId.slice(colon + 1), ...at }, grantsFor);
 }

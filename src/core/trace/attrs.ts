@@ -22,6 +22,8 @@ export interface AttrDomain {
   caughtUp: boolean;
   files: number;
   dedupe: "fresh" | "duplicate";
+  /** How the requester was found (slack-channel.md item 13): the sender, the relay footer's thread, the thread's parent, or the app itself. */
+  requester: "message" | "relay-footer" | "thread-parent" | "bot";
   // dispatch.* / run.* / post.*
   outcome: string;
   count: number;
@@ -151,6 +153,7 @@ const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
   caughtUp: "boolean",
   files: "number",
   dedupe: "string",
+  requester: "string",
   outcome: "string",
   count: "number",
   backend: "string",
