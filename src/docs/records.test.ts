@@ -180,6 +180,84 @@ describe("immutabilityProblems", () => {
     ]);
   });
 
+  it("an accepted record may grow by an appended dated `## Amended` section that carries a re-evaluation; anything else about the change is named", () => {
+    const original = "# A record\n\nThe decision.\n";
+    const amendment = (heading: string, text: string) => `${original}\n${heading}\n\n${text}\n`;
+    const amended = (body: string) =>
+      rec("docs/decisions/0001-x.md", { title: "X", status: "accepted", date: "d" }, body);
+    // The one allowed edit: the original text byte-identical, then a dated heading and its re-evaluation.
+    expect(
+      immutabilityProblems(
+        [
+          amended(
+            amendment(
+              "## Amended 1999-12-31 — the proof is the real binary",
+              "*Re-evaluation.* Checked against both grounds; the change strengthens the second.",
+            ),
+          ),
+        ],
+        base,
+      ),
+    ).toEqual([]);
+    // Two amendments appended at once, each with its re-evaluation, are fine too.
+    expect(
+      immutabilityProblems(
+        [
+          amended(
+            `${amendment("## Amended 1999-12-31 — first", "*Re-evaluation.* One.")}\n## Amended 1999-12-30 — second\n\nRe-evaluation: two.\n`,
+          ),
+        ],
+        base,
+      ),
+    ).toEqual([]);
+    // An appended section under any other heading is an edit.
+    expect(
+      immutabilityProblems([amended(amendment("## Addendum", "*Re-evaluation.* Text."))], base).map((p) => p.what),
+    ).toEqual([expect.stringContaining("its body changed")]);
+    // An amendment without a re-evaluation is an edit: the documentation rule requires one after acceptance.
+    expect(
+      immutabilityProblems(
+        [amended(amendment("## Amended 1999-12-31 — no reasoning", "We changed our minds."))],
+        base,
+      ).map((p) => p.what),
+    ).toEqual([expect.stringContaining("its body changed")]);
+    // A change above the amendment heading is an edit, however good the amendment.
+    expect(
+      immutabilityProblems(
+        [amended(`# A record\n\nA different decision.\n\n## Amended 1999-12-31 — x\n\n*Re-evaluation.* Text.\n`)],
+        base,
+      ).map((p) => p.what),
+    ).toEqual([expect.stringContaining("its body changed")]);
+    // A section under another heading smuggled inside an amendment is an edit too.
+    expect(
+      immutabilityProblems(
+        [amended(amendment("## Amended 1999-12-31 — x", "*Re-evaluation.* Text.\n\n## New policy\n\nSomething else."))],
+        base,
+      ).map((p) => p.what),
+    ).toEqual([expect.stringContaining("its body changed")]);
+    // The heading must open a line of its own: glued to a body without a trailing newline it is text.
+    const unterminated = rec(
+      "docs/decisions/0002-u.md",
+      { title: "U", status: "accepted", date: "d" },
+      "# U\n\nThe decision.",
+    );
+    const unterminatedBase = new Map([[unterminated.path, unterminated.text]]);
+    const grown = (tail: string) =>
+      rec("docs/decisions/0002-u.md", { title: "U", status: "accepted", date: "d" }, `# U\n\nThe decision.${tail}`);
+    expect(
+      immutabilityProblems([grown("## Amended 1999-12-31 — x\n\n*Re-evaluation.* Text.\n")], unterminatedBase).map(
+        (p) => p.what,
+      ),
+    ).toEqual([expect.stringContaining("its body changed")]);
+    expect(
+      immutabilityProblems([grown("\n\n## Amended 1999-12-31 — x\n\n*Re-evaluation.* Text.\n")], unterminatedBase),
+    ).toEqual([]);
+    // The remedy names both roads.
+    expect(immutabilityProblems([amended("# A record\n\nA different decision.\n")], base).map((p) => p.what)).toEqual([
+      expect.stringContaining("append a dated `## Amended <date>` section carrying a re-evaluation"),
+    ]);
+  });
+
   it("an accepted record that is gone from the tree (deleted or renamed) is named; a proposed one may go", () => {
     const proposed = rec("docs/plans/p.md", { status: "proposed", date: "d" });
     const b = new Map([

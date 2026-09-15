@@ -2,7 +2,7 @@
 
 One file per decision that shaped Switchboard. A record explains the context the decision was made in, what was decided, what it costs, the alternatives that were rejected, and the named pattern it instantiates, so a reader can map the code to a concept they already know.
 
-Records are written once. When a decision stops holding, write a new record and mark the old one `status: superseded` with `superseded_by:` pointing at the new file; never edit the body. `npm run decisions:check` holds that line against `origin/main`.
+Records are written once. When a decision stops holding, write a new record and mark the old one `status: superseded` with `superseded_by:` pointing at the new file; never edit the body. The one growth allowed after acceptance is an appended, dated `## Amended <date>` section that carries a re-evaluation: why the record was accepted, the change checked against that reasoning, what could regress. `npm run decisions:check` holds that line against `origin/main`.
 
 Frontmatter:
 
