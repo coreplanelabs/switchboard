@@ -43,9 +43,11 @@ export const NPM_FALLBACK_COMMANDS = {
 } as const;
 
 // Every manager this table can name is baked into the resident image
-// (`deploy/cloudflare-resident/Dockerfile`: npm + bun from the base, pnpm + yarn
-// installed at build time) — a detected install command must exist where it
-// runs, or detection only moves the failure.
+// (`deploy/cloudflare-resident/Dockerfile`: npm from the base; pnpm, yarn and
+// bun installed at build time at exact pins — bun's replacing the base's own,
+// because bun runs the version it is, not the one a repo pins) — a detected
+// install command must exist where it runs, or detection only moves the
+// failure.
 const LOCKFILE_TOOLCHAIN: ReadonlyArray<readonly [string, Toolchain]> = [
   ["pnpm-lock.yaml", "pnpm"],
   ["yarn.lock", "yarn"],
