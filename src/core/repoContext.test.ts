@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { PR_BODY_CAP, prCommitsSince, repoFromThread, resolveRepoContext } from "./repoContext.js";
+import { PR_BODY_CAP, ownPrOf, prCommitsSince, repoFromThread, resolveRepoContext } from "./repoContext.js";
 
 // Feature: docs/reference/specs/resident-repos.md item 29 — repo/ref resolution BEFORE the
 // model turn: explicit signals in the current message (owner/name slug,
@@ -1193,6 +1193,7 @@ describe("resolveRepoContext: the pull request the thread's own run opened binds
       ref: "fix/exact-match",
       refFromPr: true,
       pr: 40,
+      prFromRecord: true,
       headSha: SHA,
       baseRef: "main",
     });
@@ -1207,8 +1208,37 @@ describe("resolveRepoContext: the pull request the thread's own run opened binds
       undefined,
       records,
     );
-    expect(ctx).toMatchObject({ repo: "acme/api", ref: "hotfix/x", pr: 40, headSha: SHA, baseRef: "main" });
+    expect(ctx).toMatchObject({
+      repo: "acme/api",
+      ref: "hotfix/x",
+      pr: 40,
+      prFromRecord: true,
+      headSha: SHA,
+      baseRef: "main",
+    });
     expect(ctx.refFromPr).toBeUndefined();
+  });
+
+  // The resident may move a default-bound thread onto this branch (resident-repos
+  // item 16) — only for a PR the thread's own run opened, never one a person named.
+  it("ownPrOf: the record's PR with the ref bound from its head is the thread's own; a ref the message named, a PR a person named, or no PR is none", async () => {
+    openAt("fix/exact-match");
+    const own = await resolveRepoContext(msg("continue"), history, undefined, undefined, records);
+    expect(ownPrOf(own)).toEqual({ number: 40, ref: "fix/exact-match" });
+    openAt("fix/exact-match");
+    const named = await resolveRepoContext(
+      msg("on branch hotfix/x: do it there"),
+      history,
+      undefined,
+      undefined,
+      records,
+    );
+    expect(ownPrOf(named)).toBeUndefined();
+    openAt("p9");
+    const person = await resolveRepoContext(msg("now review acme/api#9"), history, undefined, undefined, records);
+    expect(person).toMatchObject({ pr: 9, ref: "p9", refFromPr: true, prFromMessage: true });
+    expect(ownPrOf(person)).toBeUndefined();
+    expect(ownPrOf({ repo: "acme/api" })).toBeUndefined();
   });
 
   it("fails closed like every inherited PR: a closed or unreachable PR binds no ref and no pr, and the context says why", async () => {

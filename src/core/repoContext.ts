@@ -112,6 +112,12 @@ export interface RepoContext {
    *  through to a fresh round 0) from the thread's own in-flight PR
    *  (inherited → still fail-closed when the PR's facts cannot be fetched). */
   prFromMessage?: boolean;
+  /** True when `pr` is the pull request the thread's OWN run opened — inherited
+   *  off the run record (`inheritedPr`'s `record` source), not named by a
+   *  person in the message or an earlier turn. With `refFromPr`, it is the one
+   *  reason the resident may move a default-bound thread onto that PR's head
+   *  branch (`ownPrOf`; docs/reference/specs/resident-repos.md item 16). */
+  prFromRecord?: boolean;
   /** True when `ref` was taken from a cited PR's head branch (the REST head
    *  fetch below), false/unset when `ref` came from message phrasing (`on X`,
    *  `/tree/<ref>`) or is absent. A consumer that does NOT bind that PR as its
@@ -615,9 +621,12 @@ export async function resolveRepoContext(
         // there, so its pushes land on the PR and its description edits it
         // — on the repo default the coding post-step could only refuse. A PR
         // a person named stays as before, and a ref in the message wins.
-        if (inherited.source === "record" && !ref && head.ref) {
-          out.ref = head.ref;
-          out.refFromPr = true;
+        if (inherited.source === "record") {
+          out.prFromRecord = true;
+          if (!ref && head.ref) {
+            out.ref = head.ref;
+            out.refFromPr = true;
+          }
         }
       } else {
         out.prUnpostable = { number: inherited.number, reason: head.reason };
@@ -625,6 +634,17 @@ export async function resolveRepoContext(
     }
   }
   return out;
+}
+
+/** The pull request the thread's own run opened, with the head branch the ref
+ *  was bound from — what the resident may move a default-bound thread onto
+ *  (docs/reference/specs/resident-repos.md item 16). Undefined whenever the
+ *  ref came from anywhere else: a branch the message named, a PR a person
+ *  named (in the message or an earlier turn), or no PR at all — none of those
+ *  is a reason to move a binding. */
+export function ownPrOf(ctx: RepoContext): { number: number; ref: string } | undefined {
+  if (!ctx.prFromRecord || !ctx.refFromPr || ctx.pr === undefined || ctx.ref === undefined) return undefined;
+  return { number: ctx.pr, ref: ctx.ref };
 }
 
 /** The thread's pull request when the message names none (item 29): the last

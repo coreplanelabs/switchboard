@@ -104,6 +104,9 @@ export async function attachRoundWorkspace(input: {
     repo?: string;
     ref?: string;
     headSha?: string;
+    /** The pull request the thread's own run opened, whose head `ref` is
+     *  (resident-repos item 16): the resident may move a default-bound thread onto it. */
+    ownPr?: { number: number; ref: string };
     /** A resumed run's recorded binding (run-history item 54): the factory
      *  re-attaches there and never provisions again. */
     reattach?: WorkspaceBinding;
@@ -123,6 +126,7 @@ export async function attachRoundWorkspace(input: {
       repo: input.round.repo,
       ref: input.round.ref,
       headSha: input.round.headSha,
+      ...(input.round.ownPr !== undefined ? { ownPr: input.round.ownPr } : {}),
       ...(input.round.reattach !== undefined ? { reattach: input.round.reattach } : {}),
     },
     input.span,

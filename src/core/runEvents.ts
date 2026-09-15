@@ -116,6 +116,14 @@ export type RunNoteKind =
    *  after the attach, before the first turn, so the run page explains a
    *  sandbox run that shows resident steps. */
   | "cold_sandbox"
+  /** The resident kept this thread's binding where it was instead of moving
+   *  it onto the branch the thread's own run opened a pull request on
+   *  (docs/reference/specs/resident-repos.md item 16): the summary names the
+   *  branch the run stays on, the PR, the reason and the resident's sentence.
+   *  The same word the card carries; published by the dispatcher after the
+   *  attach, before the first turn, so the run page explains a follow-up that
+   *  runs on the default instead of on its thread's PR. */
+  | "rebind_refused"
   /** A coding run submitted a PR description but the post-step opened no
    *  pull request because the branch it observed IS the base the pull
    *  request would target (docs/reference/specs/pr-description.md item 5) —
@@ -170,6 +178,7 @@ export const RUN_NOTE_KINDS = [
   "seed",
   "description_turn",
   "cold_sandbox",
+  "rebind_refused",
   "pr_not_opened",
   "review_not_posted",
   "compacted",
@@ -249,7 +258,7 @@ export function isSpanRecord(e: { type: string }): e is SpanStartEvent | SpanEnd
 
 /** The protected head (docs/reference/specs/tracing.md; live-view item 2) — is this event head material? The root's start, `slack.receive` and the
  *  `dispatch.*` span pairs, `input`, `context`, `run_meta`, `route`, and the
- *  `mcp_unavailable` / `spans_dropped` notes. */
+ *  `mcp_unavailable` / `spans_dropped` / `cold_sandbox` / `rebind_refused` notes. */
 export function isHeadMaterial(event: RunEvent): boolean {
   switch (event.type) {
     case "input":
@@ -258,7 +267,12 @@ export function isHeadMaterial(event: RunEvent): boolean {
     case "route":
       return true;
     case "run_note":
-      return event.kind === "mcp_unavailable" || event.kind === "spans_dropped" || event.kind === "cold_sandbox";
+      return (
+        event.kind === "mcp_unavailable" ||
+        event.kind === "spans_dropped" ||
+        event.kind === "cold_sandbox" ||
+        event.kind === "rebind_refused"
+      );
     case "span_start":
       return event.name === "request" || event.name === "slack.receive" || event.name.startsWith("dispatch.");
     case "span_end":

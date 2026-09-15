@@ -7,7 +7,9 @@ import { defineConfig } from "vitest/config";
 // in-flight count (instanceStep.test.ts), for the absence of any
 // lifecycle timer (lifecycle.test.ts), and for the runtime-unreachable
 // counter and its escalation ladder (runtimeUnreachable.test.ts), and for the
-// reuse-only attach path and the container identity (reuseAttach.test.ts);
+// reuse-only attach path and the container identity (reuseAttach.test.ts), and
+// for the in-place rebind onto the thread's own pull request branch
+// (rebindAttach.test.ts);
 // testing/sourceScan.ts is their helper.
 // worker.ts itself is covered by typecheck + the [agent] receipts in
 // docs/reference/specs/resident-repos.md. Also a project of the root
@@ -24,6 +26,7 @@ export default defineConfig({
       "lifecycle.test.ts",
       "runtimeUnreachable.test.ts",
       "reuseAttach.test.ts",
+      "rebindAttach.test.ts",
     ],
   },
 });

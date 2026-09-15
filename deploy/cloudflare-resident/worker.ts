@@ -86,6 +86,19 @@ import { busyAfterKillReason, planForceDetach } from "../../src/execution/reside
 import { parseReadonly, planReadonlyAttach } from "../../src/execution/residentReadonly.js";
 import { decideWorktree, parseReuse, type WorktreeFacts } from "../../src/execution/residentReuse.js";
 import {
+  boundByFor,
+  parseOwnPr,
+  parseRefByDefault,
+  rebindPlan,
+  rebindRefused,
+  rebindVerdict,
+  type BoundBy,
+  type OwnPr,
+  type Rebound,
+  type RebindRefused,
+  type RebindTreeFacts,
+} from "../../src/execution/residentRebind.js";
+import {
   depCacheScript,
   mutableCachePaths,
   mutableCacheSwapScript,
@@ -966,10 +979,21 @@ interface ResidentRecord {
 
 /** Per-thread binding: persisted in the resident DO keyed by
  *  threadKey; survives restarts and eviction. `user`/`evicted` describe the
- *  current allocation; `ref` is sticky for the thread's whole life. */
+ *  current allocation; `ref` is sticky for the thread's whole life, with one
+ *  exception — the branch the thread's own run opened a pull request on
+ *  (`rebound`, docs/reference/specs/resident-repos.md item 16). */
 interface ThreadBinding {
   threadKey: string;
   ref: string;
+  /** How `ref` was chosen when the binding was made: the repo default for want
+   *  of a named branch (item 30), or a branch someone named. Absent on a
+   *  binding made before the field: read as `default` iff `ref` is the default
+   *  branch. Only a `default` binding may ever move. */
+  boundBy?: BoundBy;
+  /** The one move a binding may make (item 16): from the default it was bound
+   *  to, onto the branch the thread's own run opened a pull request on. Set,
+   *  the binding never moves again. */
+  rebound?: Rebound;
   /** Allocated OS user (worker2..worker17); "" once evicted (pool released). */
   user: string;
   worktreePath: string;
@@ -1047,7 +1071,26 @@ interface AttachOk {
   /** Every command this attach ran, as offsets from its start (docs/reference/specs/
    *  tracing.md item 19): the bot grafts them under its attach span. */
   trace: ResidentStep[];
+  /** This attach moved the binding onto the branch the thread's own run opened
+   *  a pull request on (item 16): from where, to where, which PR. */
+  rebound?: Rebound;
+  /** The caller asked for that move and the binding stood: the branch, the PR
+   *  and why — so the bot can say where the follow-up runs and why. */
+  rebindRefused?: RebindRefused;
 }
+
+/** Why the caller's `refHint` is what it is (item 16), beside the hint itself:
+ *  `ownPr` — the pull request the thread's own run opened, whose head branch
+ *  the hint is (the one reason a binding may move; never a PR a person named);
+ *  `refByDefault` — the caller bound the resident's own default branch because
+ *  its message named none (item 30), recorded on a new binding as `boundBy`. */
+interface RefHintReason {
+  ownPr: OwnPr | null;
+  refByDefault: boolean;
+}
+
+/** The body every bot always sent: a hint with no reason attached. */
+const NO_REF_HINT_REASON: RefHintReason = { ownPr: null, refByDefault: false };
 
 /** Result of one /op test/build execution. `ok` is the command's
  *  verdict — a failing test run is a RESULT with ok:false, never an error. */
@@ -4286,6 +4329,8 @@ export class ResidentDO extends Sandbox<Env> {
     threadKey: string,
     ref: string,
     worktreePath: string,
+    /** How a NEW binding's ref was chosen (item 16); an existing binding keeps its own record. */
+    boundBy: BoundBy,
   ): Promise<{ binding: ThreadBinding; wrote: boolean } | ThreadErr> {
     const key = threadBindingKey(threadKey);
     const existing = await this.ctx.storage.get<ThreadBinding>(key);
@@ -4306,6 +4351,15 @@ export class ResidentDO extends Sandbox<Env> {
       boundAt: existing?.boundAt ?? now,
       lastAttachAt: now,
       evicted: false,
+      // An evicted binding's own history: how its ref was chosen (absent on
+      // one made before the field — never overwritten by this attach's flag)
+      // and the one move it may have made.
+      ...(existing
+        ? {
+            ...(existing.boundBy !== undefined ? { boundBy: existing.boundBy } : {}),
+            ...(existing.rebound !== undefined ? { rebound: existing.rebound } : {}),
+          }
+        : { boundBy }),
     };
     await this.ctx.storage.put(key, binding);
     return { binding, wrote: true };
@@ -4326,13 +4380,14 @@ export class ResidentDO extends Sandbox<Env> {
     reuse = false,
     record?: ResidentRecord,
     traceparent?: string,
+    reason: RefHintReason = NO_REF_HINT_REASON,
   ): Promise<AttachOk | ThreadErr> {
     // One step trace per attach (docs/reference/specs/tracing.md item 19): every command
     // the attach runs lands on it, and the answer carries it.
     const t0 = systemClock();
     const trace = createStepTrace(t0);
     const res = await this.stepTrace.run(trace, () =>
-      this.attachThreadTraced(threadKey, refHint, readonly, wantSha, reuse, record, t0),
+      this.attachThreadTraced(threadKey, refHint, readonly, wantSha, reuse, record, t0, reason),
     );
     // The same steps as the resident's own `resident.attach` root (item 22).
     emitStepRoot("resident.attach", t0, trace.steps(), traceparent, "error" in res ? refusalOutcome(res) : "ok");
@@ -4348,6 +4403,7 @@ export class ResidentDO extends Sandbox<Env> {
     reuse: boolean,
     record: ResidentRecord | undefined,
     t0: number,
+    reason: RefHintReason,
   ): Promise<AttachOk | ThreadErr> {
     try {
       await this.ensureHydrated();
@@ -4365,7 +4421,17 @@ export class ResidentDO extends Sandbox<Env> {
       // container under it (and isIdle never parks the cycle mid-attach).
       this.attachesInFlight++;
       try {
-        return await this.attachThreadBody(threadKey, refHint, readonly, wantSha, reuse, resourceId, t0, record);
+        return await this.attachThreadBody(
+          threadKey,
+          refHint,
+          readonly,
+          wantSha,
+          reuse,
+          resourceId,
+          t0,
+          record,
+          reason,
+        );
       } finally {
         this.attachesInFlight--;
       }
@@ -4399,7 +4465,8 @@ export class ResidentDO extends Sandbox<Env> {
     reuse: boolean,
     resourceId: string,
     t0: number,
-    recordFromRoute?: ResidentRecord,
+    recordFromRoute: ResidentRecord | undefined,
+    reason: RefHintReason,
   ): Promise<AttachOk | ThreadErr> {
     try {
       await this.refreshIfStale(resourceId);
@@ -4419,8 +4486,21 @@ export class ResidentDO extends Sandbox<Env> {
     const record = recordFromRoute ?? (await this.registry().getRecord(resource));
     if (!record || !facts) return { error: "not-serviceable: registry record or repo facts missing", status: 503 };
 
-    const prior = stored.get(threadBindingKey(threadKey)) as ThreadBinding | undefined;
-    const ref = prior?.ref ?? refHint; // the binding's ref wins for the thread's whole life
+    // The binding's ref wins for the thread's whole life, with one exception
+    // (item 16): a thread bound to the repo default for want of a named branch
+    // moves, once and in place, onto the branch its own run opened a pull
+    // request on — when that branch is a local branch of this thread's tree and
+    // the tree is clean. Decided here, before the ref is chosen, so the rest of
+    // the attach (fetch, stale check, deps, credentials) runs on the moved ref.
+    const rebind = await this.rebindToOwnPr(
+      stored.get(threadBindingKey(threadKey)) as ThreadBinding | undefined,
+      reason.ownPr,
+      reuse,
+      facts.defaultRef,
+    );
+    if ("error" in rebind) return rebind;
+    const prior = rebind.binding;
+    const ref = prior?.ref ?? refHint;
     if (!ref) {
       // Name the default branch so the bot can bind to it (loudly) instead of
       // asking the user when the message named no branch; the binding is still
@@ -4437,7 +4517,12 @@ export class ResidentDO extends Sandbox<Env> {
     // and the prior binding's mode — the tested pure helper is the shipped code.
     const mode = planReadonlyAttach({ readonly, prior, slug, mirrorDir: MIRROR_DIR });
 
-    const alloc = await this.allocateThreadUser(threadKey, ref, worktreePath);
+    const alloc = await this.allocateThreadUser(
+      threadKey,
+      ref,
+      worktreePath,
+      boundByFor({ refByDefault: reason.refByDefault, ref, defaultRef: facts.defaultRef }),
+    );
     if ("error" in alloc) return alloc;
     const binding = alloc.binding;
     // "Nothing created" on failure: a FRESH allocation (new binding or a
@@ -4468,10 +4553,128 @@ export class ResidentDO extends Sandbox<Env> {
         binding,
         mode,
         rollback,
+        ...(rebind.rebound !== undefined ? { rebound: rebind.rebound } : {}),
+        ...(rebind.rebindRefused !== undefined ? { rebindRefused: rebind.rebindRefused } : {}),
       });
     } finally {
       this.diskCommittedKiB -= admission.committedKiB;
     }
+  }
+
+  /** Item 16's one exception to the sticky binding: a thread bound to the repo
+   *  default for want of a named branch moves onto the branch its own run
+   *  opened a pull request on (`ownPr`), once, in place. The decision is the
+   *  pure `rebindPlan` / `rebindVerdict` of src/execution/residentRebind.ts;
+   *  this method measures the tree as the thread user and runs the verdict: a
+   *  `git checkout` inside the existing worktree — same path, same pool user,
+   *  no clone, no `rm -rf`, deps and snapshot lineage untouched — under the
+   *  mirror mutex so no other attach of the thread touches the tree meanwhile.
+   *  The rest of the attach then runs on the moved ref: the mirror fetch for
+   *  the PR head (item 51) and item 17's stale check, which keeps a tree whose
+   *  HEAD is the ref's tip or a descendant of it. The binding records the move
+   *  (`rebound`); the answer carries it, or the named refusal, so the bot can
+   *  say where the follow-up runs and why. A refusal never fails the attach. */
+  private async rebindToOwnPr(
+    prior: ThreadBinding | undefined,
+    ownPr: OwnPr | null,
+    reuse: boolean,
+    defaultRef: string,
+  ): Promise<{ binding: ThreadBinding | undefined; rebound?: Rebound; rebindRefused?: RebindRefused } | ThreadErr> {
+    const plan = rebindPlan({ ownPr, reuse, binding: prior, defaultRef });
+    if (plan.kind === "none" || prior === undefined) return { binding: prior };
+    if (plan.kind === "refuse") return { binding: prior, rebindRefused: plan.refused };
+    const key = threadBindingKey(prior.threadKey);
+    type Outcome =
+      | { kind: "none"; binding: ThreadBinding }
+      | { kind: "refuse"; refused: RebindRefused }
+      | { kind: "rebound"; moved: ThreadBinding; rebound: Rebound };
+    let outcome: Outcome;
+    try {
+      outcome = (
+        await this.withMirrorLock(async (): Promise<Outcome> => {
+          // The binding as it stands NOW, under the mutex — not the snapshot
+          // the plan read before the wait: the move is judged on, and written
+          // over, the row's current fields (its last attach time, its
+          // credential stamp), and a premise that changed while waiting —
+          // another attach already moved the ref — is re-judged, never
+          // overwritten.
+          const current = (await this.ctx.storage.get<ThreadBinding>(key)) ?? prior;
+          const again = rebindPlan({ ownPr, reuse, binding: current, defaultRef });
+          if (again.kind === "none") return { kind: "none", binding: current };
+          if (again.kind === "refuse") return again;
+          const wt = current.worktreePath;
+          // The facts, as the thread user in the thread's own tree: is the
+          // branch a local branch here (the physical trace of this thread's
+          // run having made it), and are the tracked files clean — judged
+          // only off a status git could read.
+          const tree: RebindTreeFacts = { exists: (await this.run(["test", "-d", `${wt}/.git`])).exitCode === 0 };
+          if (tree.exists) {
+            const branch = await this.threadRun(
+              current.user,
+              wt,
+              `git rev-parse --verify --quiet ${shellQuote(`refs/heads/${plan.to}`)}`,
+              DEFAULT_EXEC_TIMEOUT_MS,
+            );
+            tree.branchExists = branch.exitCode === 0;
+            const status = await this.threadRun(
+              current.user,
+              wt,
+              "git status --porcelain -uno",
+              DEFAULT_EXEC_TIMEOUT_MS,
+            );
+            tree.readable = status.exitCode === 0;
+            if (tree.readable) tree.dirty = status.stdout.trim() !== "";
+          }
+          const verdict = rebindVerdict(plan, tree);
+          if (verdict.kind !== "rebind") return verdict;
+          const startedAt = systemClock();
+          const checkout = await this.threadRun(
+            current.user,
+            wt,
+            `git checkout --quiet ${shellQuote(plan.to)}`,
+            DEFAULT_EXEC_TIMEOUT_MS,
+          );
+          this.stepTrace.getStore()?.record("rebind-checkout", {
+            startedAt,
+            endedAt: systemClock(),
+            exitCode: checkout.exitCode,
+            timedOut: checkout.timedOut,
+          });
+          if (checkout.exitCode !== 0) {
+            const detail =
+              checkout.stderr.trim().split("\n")[0]?.slice(0, 200) || `git checkout exited ${checkout.exitCode}`;
+            return { kind: "refuse", refused: rebindRefused(plan, "checkout-failed", detail) };
+          }
+          const rebound: Rebound = {
+            from: current.ref,
+            to: plan.to,
+            pr: plan.pr,
+            at: new Date(systemClock()).toISOString(),
+          };
+          const moved: ThreadBinding = { ...current, ref: plan.to, rebound };
+          await this.ctx.storage.put(key, moved);
+          return { kind: "rebound", moved, rebound };
+        }, ATTACH_MUTEX_WAIT_MS)
+      ).value;
+    } catch (err) {
+      if (err instanceof MirrorBusyError) {
+        const s = await this.getStatus();
+        return { error: errMsg(err), status: 503, state: s.state, reason: "mirror-busy" };
+      }
+      return { error: `attach-failed: ${errMsg(err)}`, status: 500 };
+    }
+    if (outcome.kind === "none") return { binding: outcome.binding };
+    if (outcome.kind === "refuse") {
+      console.log(
+        `attach ${prior.threadKey}: kept on ${prior.ref} — rebind to ${plan.to} refused (${outcome.refused.reason}: ${outcome.refused.why})`,
+      );
+      return { binding: prior, rebindRefused: outcome.refused };
+    }
+    const { moved, rebound } = outcome;
+    console.log(
+      `attach ${prior.threadKey}: rebound ${rebound.from} → ${rebound.to} (the thread's own pull request #${rebound.pr})`,
+    );
+    return { binding: moved, rebound };
   }
 
   /** The second half of an attach, past disk admission: mint, fetch + clone
@@ -4490,8 +4693,12 @@ export class ResidentDO extends Sandbox<Env> {
     binding: ThreadBinding;
     mode: ReturnType<typeof planReadonlyAttach>;
     rollback: () => Promise<void>;
+    /** What `rebindToOwnPr` decided (item 16), for the answer. */
+    rebound?: Rebound;
+    rebindRefused?: RebindRefused;
   }): Promise<AttachOk | ThreadErr> {
     const { threadKey, refHint, wantSha, reuse, slug, t0, facts, record, binding, mode, rollback } = input;
+    const { rebound, rebindRefused } = input;
 
     // Command-level token mint — before the lock so mint latency
     // never holds the mutex, and failure never blocks the attach.
@@ -4664,6 +4871,8 @@ export class ResidentDO extends Sandbox<Env> {
       mutexWaitMs: locked.waitedMs,
       attachMs: systemClock() - t0,
       trace: this.currentSteps(),
+      ...(rebound !== undefined ? { rebound } : {}),
+      ...(rebindRefused !== undefined ? { rebindRefused } : {}),
     };
   }
 
@@ -7540,13 +7749,34 @@ async function handleAttach(env: Env, body: Record<string, unknown>, traceparent
   if ("error" in want) return json({ error: want.error }, 400);
   const reuse = parseReuse(body.reuse);
   if ("error" in reuse) return json({ error: reuse.error }, 400);
+  // Why the hint is what it is (item 16): the thread's own pull request and
+  // its head branch — the branch checked against the one ref pattern like
+  // every ref, before it can become a git argument — and the bound-by-default flag.
+  const parsedOwnPr = parseOwnPr(body.ownPr);
+  if ("error" in parsedOwnPr) return json({ error: parsedOwnPr.error }, 400);
+  if (parsedOwnPr.ownPr !== null) {
+    const ownRef = parseRef(parsedOwnPr.ownPr.ref, "ownPr.ref");
+    if ("error" in ownRef) return json({ error: ownRef.error }, 400);
+  }
+  const refByDefault = parseRefByDefault(body.refByDefault);
+  if ("error" in refByDefault) return json({ error: refByDefault.error }, 400);
+  const reason: RefHintReason = { ownPr: parsedOwnPr.ownPr, refByDefault: refByDefault.refByDefault };
   // Post-validation, the answer streams like /exec (item 59): heartbeat
   // whitespace then ONE JSON document over HTTP 200, so an attach that waits
   // on a deps install (minutes) cannot lose the connection the way a plain
   // response does (`fetch failed` a few minutes in). A refusal
   // carries its `status` in the body; `ResidentExecutor.attach` reads it there.
   return streamHeartbeatJson(
-    ctx.stub.attachThread(ctx.threadKey, refHint, readonly.readonly, want.sha, reuse.reuse, ctx.record, traceparent),
+    ctx.stub.attachThread(
+      ctx.threadKey,
+      refHint,
+      readonly.readonly,
+      want.sha,
+      reuse.reuse,
+      ctx.record,
+      traceparent,
+      reason,
+    ),
     (result) => result,
     (err) => ({ error: errMsg(err), status: 500 }),
   );

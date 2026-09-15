@@ -86,6 +86,12 @@ export interface ExecutorContext {
   /** the commit `ref` is expected to be at (a resolved PR head) — the resident
    *  fetches a mirror whose tip lags it (docs/reference/specs/resident-repos.md item 51) */
   headSha?: string;
+  /** The pull request the thread's OWN run opened, whose head branch `ref` is
+   *  (`ownPrOf`; docs/reference/specs/resident-repos.md item 16): the one reason
+   *  the resident may move a default-bound thread onto `ref`. Never a PR a
+   *  person named. Absent for every other resolution, and never sent on a
+   *  resume (the tree stays exactly as the run left it). */
+  ownPr?: { number: number; ref: string };
   /** A resumed run's recorded binding (docs/reference/specs/run-history.md item 54):
    *  where the run's workspace is. Set, the factory re-attaches THERE and never
    *  provisions again: the recorded backend is the only one consulted, the
@@ -289,7 +295,8 @@ export async function makeExecutor(
         // (docs/reference/specs/resident-repos.md item 50).
         const readonly = ctx.profile.identity === "read" ? true : undefined;
         // The resolved PR head rides along so the resident fetches a mirror
-        // whose ref tip lags it (item 51) instead of cloning a stale tip.
+        // whose ref tip lags it (item 51) instead of cloning a stale tip; the
+        // thread's own PR rides along as the reason for the hint (item 16).
         return await openResident(
           {
             baseUrl: resident.baseUrl,
@@ -299,6 +306,7 @@ export async function makeExecutor(
             refHint: ctx.ref,
             readonly,
             sha: ctx.headSha,
+            ...(ctx.ownPr !== undefined ? { ownPr: ctx.ownPr } : {}),
           },
           nonWarm,
           span,
@@ -437,7 +445,10 @@ async function openResident(
   } catch (err) {
     if (!(err instanceof ResidentNeedsRefError) || !err.defaultRef) throw err;
     byDefault = true;
-    executor = new ResidentExecutor({ ...opts, refHint: err.defaultRef });
+    // Said to the resident too (`refByDefault`), so the binding it makes is
+    // recorded as bound by default — the one kind that may later move onto the
+    // thread's own PR branch (item 16).
+    executor = new ResidentExecutor({ ...opts, refHint: err.defaultRef, refByDefault: true });
     try {
       binding = await executor.attach(span);
     } catch (again) {
@@ -458,6 +469,7 @@ async function openResident(
   // sha nobody recognizes.
   const where = `${opts.resource.replace(/^repo:/, "")} · ${binding.ref}@${binding.sha.slice(0, 7)}`;
   const why = byDefault ? " (repo default — no branch named)" : "";
+  const moved = rebindLabel(binding);
   return {
     executor,
     resident: true,
@@ -466,9 +478,23 @@ async function openResident(
     ...(binding.attachMs !== undefined ? { attachMs: binding.attachMs } : {}),
     binding,
     note: nonWarm
-      ? `resident ${nonWarm} · ${where}${why} — attached to the last snapshot`
-      : `resident · ${where}${why}`,
+      ? `resident ${nonWarm} · ${where}${why}${moved} — attached to the last snapshot`
+      : `resident · ${where}${why}${moved}`,
   };
+}
+
+/** The card's word on the binding's move (docs/reference/specs/resident-repos.md
+ *  item 16), beside the binding line the way the repo-default note is said:
+ *  the resident moved the thread onto its own PR's branch, or kept the binding
+ *  and named why — so a follow-up running on the default instead of on the
+ *  thread's PR is readable from the card. Empty when neither happened. */
+export function rebindLabel(binding: Pick<ResidentBinding, "rebound" | "rebindRefused">): string {
+  if (binding.rebound) return ` · rebound to ${binding.rebound.to} (this thread's PR #${binding.rebound.pr})`;
+  if (binding.rebindRefused) {
+    const r = binding.rebindRefused;
+    return ` · rebind to ${r.to} (this thread's PR #${r.pr}) refused: ${r.reason}`;
+  }
+  return "";
 }
 
 /** The repo resolver's "is this slug an onboarded resident?" probe (the

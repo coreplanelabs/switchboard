@@ -295,7 +295,101 @@ describe("makeExecutor resident selection", () => {
     expect(note).toBe("resident · jshttp/vary · master@abc1234 (repo default — no branch named)");
     expect(calls).toEqual(["/status", "/attach", "/attach"]);
     expect(bodies[1]?.refHint).toBeUndefined(); // first attach: nothing named
+    expect(bodies[1]).not.toHaveProperty("refByDefault");
     expect(bodies[2]?.refHint).toBe("master"); // re-attach on the resident's default
+    // …and says so, so the resident records the binding as bound by default
+    // (docs/reference/specs/resident-repos.md item 16): the one kind that may later move.
+    expect(bodies[2]?.refByDefault).toBe(true);
+  });
+
+  // docs/reference/specs/resident-repos.md item 16: the thread's own pull request
+  // rides the attach body as the reason for the hint, and the card says what the
+  // resident did with it — the move beside the binding line, the way the
+  // repo-default note is said, or the refusal that kept the thread where it was.
+  describe("the thread's own pull request (ctx.ownPr) and the resident's answer to it", () => {
+    const SHA = "47c4230692cbc5961682532afb822e9c2f1f40b7";
+    const ownPr = { number: 7, ref: "fix/x" };
+    const attached = (over: Record<string, unknown>) => ({
+      body: {
+        workspace: "/workspace/threads/x/master",
+        ref: "master",
+        sha: SHA,
+        user: "worker2",
+        deps: "hardlink",
+        ...over,
+      },
+    });
+
+    it("ctx.ownPr is sent as the attach body's ownPr beside the hint and the head; a context without it sends none", async () => {
+      stubEnvs();
+      const { bodies } = stubFetch(
+        { body: { state: "warm", reason: "" } },
+        attached({ ref: "fix/x" }),
+        { body: { state: "warm", reason: "" } },
+        attached({}),
+      );
+      await makeExecutor(residentOpts(), { ...repoCtx(), ref: "fix/x", headSha: SHA, ownPr });
+      expect(bodies[1]).toEqual({
+        resource: "repo:jshttp/vary",
+        threadKey: "slack:CX:1.0",
+        refHint: "fix/x",
+        sha: SHA,
+        ownPr,
+      });
+      await makeExecutor(residentOpts(), repoCtx());
+      expect(bodies[3]).not.toHaveProperty("ownPr");
+    });
+
+    it("an answer that moved the binding names the move on the note beside the binding line, and the binding carries it", async () => {
+      stubEnvs();
+      stubFetch(
+        { body: { state: "warm", reason: "" } },
+        attached({
+          ref: "fix/x",
+          rebound: { from: "master", to: "fix/x", pr: 7, at: "2026-01-01T00:00:00.000Z" },
+        }),
+      );
+      const { note, binding } = await makeExecutor(residentOpts(), { ...repoCtx(), ref: "fix/x", headSha: SHA, ownPr });
+      expect(note).toBe("resident · jshttp/vary · fix/x@47c4230 · rebound to fix/x (this thread's PR #7)");
+      expect(binding?.rebound).toEqual({ from: "master", to: "fix/x", pr: 7 });
+    });
+
+    it("an answer that refused the move names the refusal on the note — the run stays where the binding is — and the binding carries why", async () => {
+      stubEnvs();
+      stubFetch(
+        { body: { state: "warm", reason: "" } },
+        attached({
+          rebindRefused: {
+            to: "fix/x",
+            pr: 7,
+            reason: "dirty",
+            why: "the worktree has uncommitted changes on the bound branch; the binding stands until they are committed or discarded",
+          },
+        }),
+      );
+      const { note, binding } = await makeExecutor(residentOpts(), { ...repoCtx(), ref: "fix/x", headSha: SHA, ownPr });
+      expect(note).toBe(
+        "resident · jshttp/vary · master@47c4230 · rebind to fix/x (this thread's PR #7) refused: dirty",
+      );
+      expect(binding?.rebindRefused).toEqual({
+        to: "fix/x",
+        pr: 7,
+        reason: "dirty",
+        why: "the worktree has uncommitted changes on the bound branch; the binding stands until they are committed or discarded",
+      });
+    });
+
+    it("a serviceable non-warm resident says the move before the snapshot note", async () => {
+      stubEnvs();
+      stubFetch(
+        { body: { state: "refreshing", reason: "" } },
+        attached({ ref: "fix/x", rebound: { from: "master", to: "fix/x", pr: 7, at: "2026-01-01T00:00:00.000Z" } }),
+      );
+      const { note } = await makeExecutor(residentOpts(), { ...repoCtx(), ref: "fix/x", headSha: SHA, ownPr });
+      expect(note).toBe(
+        "resident refreshing · jshttp/vary · fix/x@47c4230 · rebound to fix/x (this thread's PR #7) — attached to the last snapshot",
+      );
+    });
   });
 
   // docs/reference/specs/resident-repos.md item 50: the review agent (identity
@@ -609,6 +703,14 @@ describe("makeExecutor resident selection", () => {
       const { bodies } = stubFetch({ body: { state: "warm", reason: "" } }, attachOk());
       await makeExecutor(residentOpts(), repoCtx());
       expect(bodies[1]).not.toHaveProperty("reuse");
+    });
+
+    it("a resume never asks the resident to move the tree: the thread's own PR is not sent, whatever the context resolved (docs/reference/specs/resident-repos.md item 16)", async () => {
+      stubEnvs();
+      const { bodies } = stubFetch({ body: { state: "warm", reason: "" } }, attachOk());
+      await makeExecutor(residentOpts(), { ...repoCtx(), ownPr: { number: 7, ref: "fix/x" }, reattach: recorded });
+      expect(bodies[1]).toMatchObject({ reuse: true });
+      expect(bodies[1]).not.toHaveProperty("ownPr");
     });
 
     it("the resident refusing to reuse the tree (409 needs recreate) is a WorkspaceReattachRefusedError naming why; no sandbox is provisioned", async () => {
