@@ -4707,6 +4707,17 @@ describe("cross-session memory WRITE path", () => {
     expect(written.every((r) => typeof r.sourceRunId === "string" && r.sourceRunId.length > 0)).toBe(true);
   });
 
+  // Feature: docs/reference/specs/memory.md item 12 — a reflection's outcome is
+  // observable: one `[memory] <threadKey>` line on stdout says what it wrote,
+  // so the rate of rejections against successes can be read off the log.
+  it("each reflection's outcome is one `[memory] <threadKey>` info line on stdout", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await run(MEMORY_WRITE_YAML, [], { toolFirst: true });
+    const lines = log.mock.calls.map(([l]) => String(l)).filter((l) => l.startsWith("[memory] "));
+    log.mockRestore();
+    expect(lines).toEqual(["[memory] slack:CX:1.0 reflection wrote 1 fact(s), summary"]);
+  });
+
   // Feature: docs/reference/specs/memory.md item 11, harness-pi.md item 13 —
   // reflection's one call goes through pi's model library: the provider is
   // read off `completions` by the ref's name, never off the loop's `providers`.

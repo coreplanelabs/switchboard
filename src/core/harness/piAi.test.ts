@@ -71,14 +71,17 @@ const anthropicToolCallStream = (stopReason = "tool_use") =>
     'event: message_stop\ndata: {"type":"message_stop"}\n\n',
   ].join("");
 
-/** One Anthropic Messages stream answering in text. */
-const anthropicTextStream = (text: string) =>
+/** One Anthropic Messages stream answering in text — one text block per
+ *  element of `texts` — and stopping for the given reason. */
+const anthropicTextStream = (texts: string | string[], stopReason = "end_turn") =>
   [
     'event: message_start\ndata: {"type":"message_start","message":{"id":"m2","type":"message","role":"assistant","model":"claude-haiku-4-5","content":[],"stop_reason":null,"usage":{"input_tokens":5,"output_tokens":1}}}\n\n',
-    'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
-    `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":${JSON.stringify(text)}}}\n\n`,
-    'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
-    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":6}}\n\n',
+    ...(typeof texts === "string" ? [texts] : texts).flatMap((text, index) => [
+      `event: content_block_start\ndata: {"type":"content_block_start","index":${index},"content_block":{"type":"text","text":""}}\n\n`,
+      `event: content_block_delta\ndata: {"type":"content_block_delta","index":${index},"delta":{"type":"text_delta","text":${JSON.stringify(text)}}}\n\n`,
+      `event: content_block_stop\ndata: {"type":"content_block_stop","index":${index}}\n\n`,
+    ]),
+    `event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"${stopReason}","stop_sequence":null},"usage":{"output_tokens":6}}\n\n`,
     'event: message_stop\ndata: {"type":"message_stop"}\n\n',
   ].join("");
 
@@ -245,6 +248,25 @@ describe("complete — one request through pi's own adapter, on the wire", () =>
     const { fetchImpl } = fakeFetch(anthropicToolCallStream("max_tokens"));
     const table = new PiAiProviders(CONFIGS, { secrets: SECRETS, clock: CLOCK, fetch: fetchImpl });
     const result = await table.get("anthropic").complete(routeRequest());
+    expect(result.stopReason).toBe("max_tokens");
+  });
+
+  it("a text answer the cap cut — reflection's shape: its 1024 reaches the wire as max_tokens, the cut comes back as max_tokens, and every text block is its own part in order", async () => {
+    const { fetchImpl, calls } = fakeFetch(
+      anthropicTextStream(['```json\n{"facts":[', '{"text":"the deploy'], "max_tokens"),
+    );
+    const table = new PiAiProviders(CONFIGS, { secrets: SECRETS, clock: CLOCK, fetch: fetchImpl });
+    const result = await table.get("anthropic").complete({
+      model: "claude-haiku-4-5",
+      system: "You distill a finished assistant thread.",
+      messages: [{ role: "user", content: [{ type: "text", text: "THREAD: …" }] }],
+      maxTokens: 1024,
+    });
+    expect(calls[0].body.max_tokens).toBe(1024);
+    expect(result.content).toEqual([
+      { type: "text", text: '```json\n{"facts":[' },
+      { type: "text", text: '{"text":"the deploy' },
+    ]);
     expect(result.stopReason).toBe("max_tokens");
   });
 
