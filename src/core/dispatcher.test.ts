@@ -12559,6 +12559,48 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     expect(t.warnings).toEqual([]);
   });
 
+  // docs/reference/specs/routing-and-config.md item 21: a sticky-by-transcript
+  // follow-up in a routed thread carries the thread's route — the receipt on
+  // the card, the decision on the record — while the router stays unasked, no
+  // route event is published and `run_meta.agentSource` stays `sticky`.
+  it("a sticky follow-up in a routed thread carries the thread's route: the card's routed line and override footer, the record's route field with parts and collapse stripped, no route event, agentSource sticky, the router never asked", async () => {
+    const t = await threadWithSession(PI_YAML);
+    const prev = (await t.store.get("run-prev"))!;
+    await t.store.put({
+      ...prev,
+      route: {
+        preset: "coding",
+        reason: "an imperative ask in a repo thread",
+        model: "anthropic/fast",
+        collapsed: { presets: ["review", "coding"] },
+      },
+    });
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
+    vi.mocked(runPiHarnessOpen).mockImplementationOnce(async () => piAnswered("carried"));
+    const { io, statuses } = fakeIO(history);
+    await dispatch(t.deps, followUp, io);
+    await t.writer.settled();
+    // The card says why the preset was chosen, from the first paint, without the earlier run's collapse.
+    expect(statuses[0].title).toContain(
+      "*coding* on `anthropic/coding-model` · routed: an imperative ask in a repo thread",
+    );
+    expect(statuses[0].title).not.toContain("compound collapsed");
+    expect(statuses.at(-1)!.detail?.split("\n").at(-1)).toBe("reply agent:<preset> to run it another way");
+    // The router was never asked: the preset is the transcript's.
+    expect(t.provider.requests).toHaveLength(0);
+    // The record: the carried decision on `route`, no `route` event, `agentSource` sticky —
+    // so the NEXT follow-up reads the same receipt off this record.
+    const record = t.ledger.finished.get("run-next")!;
+    expect(record.route).toEqual({
+      preset: "coding",
+      reason: "an imperative ask in a repo thread",
+      model: "anthropic/fast",
+    });
+    expect(record.events.some((e) => e.type === "route")).toBe(false);
+    const meta = record.events.find((e) => e.type === "run_meta") as { agentSource?: string } | undefined;
+    expect(meta?.agentSource).toBe("sticky");
+  });
+
   it("the same thread with coding on the native loop resolves by the user turns and seeds from the channel, as before", async () => {
     const t = await threadWithSession(REMOTE_YAML_FIXTURE);
     const { io } = fakeIO(history);

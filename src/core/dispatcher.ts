@@ -73,7 +73,7 @@ import { workspaceBindingFor } from "../execution/factory.js";
 import { lineageOf, lineageParent, tellParent, type LineageHeard } from "./dispatch/lineage.js";
 import { sessionSeedFor } from "./dispatch/seed.js";
 import { sessionCapabilityFor } from "../tools/session.js";
-import { readThread, stickyAgentOf, threadPrOf } from "./dispatch/thread.js";
+import { readThread, stickyAgentOf, threadPrOf, threadRouteOf } from "./dispatch/thread.js";
 import { describeAsset, readThreadAssets, type ThreadAsset } from "./dispatch/threadAssets.js";
 import { effectiveHarness } from "./harness/select.js";
 import { runToolCapabilities, type ParentRun } from "./dispatch/spawn.js";
@@ -407,6 +407,15 @@ export async function dispatch(
       agentSource = "route";
     }
     const routeEvent = routing.kind === "routed" ? routing.route : routing.rejected;
+    // A sticky-by-transcript follow-up in a routed thread carries the thread's
+    // decision (routing-and-config item 21): the router was rightly not asked
+    // — the preset is the transcript's — but the card still says why the
+    // preset was chosen (` · routed: <reason>` and the override footer), the
+    // row's `meta.route` repaints it on a resume or reclaim, and the record's
+    // `route` field hands it to the next follow-up. No `route` event and
+    // `agentSource` stays `sticky`: the router made no new decision here.
+    if (routing.kind === "unrouted" && stickyAgent !== undefined && agentSource === "sticky" && thread)
+      route = threadRouteOf(thread, resolved.agentName);
     // A resume repaints the card as the first generation painted it: the row
     // carries the router's decision (run-history item 35), the resumed message
     // pins the preset by directive so the router is rightly never asked again,
@@ -999,6 +1008,7 @@ export async function dispatch(
       run,
       registry,
       resume,
+      ...(route !== undefined ? { route } : {}),
       parentRunId,
       coordinator,
       seed,
@@ -1105,6 +1115,7 @@ export async function dispatch(
       steer,
       wait,
       ...(sessionTools ? { session: sessionTools } : {}),
+      ...(route !== undefined ? { route } : {}),
       parentRunId,
       coordinator,
       seed,

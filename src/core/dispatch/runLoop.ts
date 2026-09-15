@@ -27,6 +27,7 @@ import {
 } from "../harness/pi/harness.js";
 import { piRunPathsAt } from "../harness/pi/process.js";
 import { loopEndingOf, reviewPostedBefore, type LoopEnding } from "../runLedger/resume.js";
+import type { RouteDecided } from "./route.js";
 import { fetchRepoShipInfo, findOpenPrByHead, openPullRequest } from "../../execution/githubPulls.js";
 import type { ChatMessage } from "../chatMessage.js";
 import type { McpToolsForRun } from "../../mcp/source.js";
@@ -158,6 +159,10 @@ export interface RunLoopContext {
   /** Where this run's staged files sit in its workspace (record 0033), shared
    *  with the dispatcher's staging so a steer's files resolve for `recall` too. */
   workspaceFiles?: WorkspaceFiles;
+  /** The route the run ran under (routing-and-config item 21) — the router's
+   *  decision or the thread's a sticky follow-up carried — for the finish
+   *  record; absent for a preset a person, a scope or the default chose. */
+  route?: RouteDecided;
   /** The run that spawned this one (run-history item 46), when it is a child. */
   parentRunId?: string;
   /** The coordinator's instance and key (item 48), when a coordinator spawned it. */
@@ -216,6 +221,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     steer,
     wait,
     session,
+    route,
     parentRunId,
     coordinator,
     seed,
@@ -1061,6 +1067,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
       ...(reviewHead !== undefined ? { reviewHead } : {}),
       ...(dispositions !== undefined ? { dispositions } : {}),
       ...(reviewPost !== undefined ? { reviewPost } : {}),
+      ...(route !== undefined ? { route } : {}),
       ...(parentRunId !== undefined ? { parentRunId } : {}),
       ...(coordinator !== undefined ? { coordinator } : {}),
       ...(seed !== undefined ? { seed } : {}),
