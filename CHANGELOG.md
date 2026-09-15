@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.221.1](https://github.com/coreplanelabs/switchboard/compare/v1.221.0...v1.221.1) (2026-09-15)
+
+
+### Bug fixes
+
+* **harness:** a message with no parts is not a turn — the mirror spends no log index on it and the bridge hands it no errored assistant, so a re-attach that catches up on a failed model call leaves a whole session log and the next reclaim resumes the run instead of closing it interrupted ([#1176](https://github.com/coreplanelabs/switchboard/issues/1176)) ([9e2d3a8](https://github.com/coreplanelabs/switchboard/commit/9e2d3a82f27f2ce12fef4acd77d6ed8b4fa9fe3c))
+* **runs:** the artifact store asks R2 for identity encoding on HEAD and GET — a text file of 48 bytes or more attaches again, because the edge no longer compresses its answer and drops the length the bot reads ([#1174](https://github.com/coreplanelabs/switchboard/issues/1174)) ([f752ebd](https://github.com/coreplanelabs/switchboard/commit/f752ebded7a36ee36980f5010a9fe2e07a7a44ed))
+
+
+### Documentation
+
+* **docs:** U29 status after PR B merged — A and B landed, C1 folded into B, the resume fixes A's restart receipt found, receipts owed on 1.221.0 ([#1175](https://github.com/coreplanelabs/switchboard/issues/1175)) ([f4d6686](https://github.com/coreplanelabs/switchboard/commit/f4d668605a35ed27f7724a41206bdd0b0c00785e))
+
 ## [1.221.0](https://github.com/coreplanelabs/switchboard/compare/v1.220.1...v1.221.0) (2026-09-15)
 
 
