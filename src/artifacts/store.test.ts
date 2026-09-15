@@ -173,6 +173,53 @@ describe("R2ArtifactStore.get with a range (item 20)", () => {
     expect(plain).toMatchObject({ size: 200 });
     expect(plain).not.toHaveProperty("part");
   });
+
+  // R2's S3 endpoint answers a start past the end with 416 and an XML
+  // InvalidRange body — and NO Content-Range, so the size the 416 must name is
+  // not on that answer. Live, every such request was a 500 until the store
+  // asked for the size itself.
+  it("a 416 with no Content-Range is still unsatisfiable: the store takes the size from one HEAD; a 416 that names the size needs no HEAD; a HEAD that finds nothing is null", async () => {
+    function r2Like(opts: { sizeOn416: boolean; headStatus: number }) {
+      const methods: string[] = [];
+      const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+        const req = input as Request;
+        methods.push(req.method);
+        if (req.method === "HEAD") {
+          return new Response(null, {
+            status: opts.headStatus,
+            headers: opts.headStatus === 200 ? { "content-length": "24854792", "content-type": "video/mp4" } : {},
+          });
+        }
+        return new Response("<Error><Code>InvalidRange</Code></Error>", {
+          status: 416,
+          headers: {
+            "content-type": "application/xml",
+            ...(opts.sizeOn416 ? { "content-range": "bytes */24854792" } : {}),
+          },
+        });
+      }) as unknown as typeof fetch;
+      return { methods, store: r2({ fetch: fetchImpl }) };
+    }
+
+    const bare = r2Like({ sizeOn416: false, headStatus: 200 });
+    expect(await bare.store.get("runs/r1/out/1-clip.mp4", { range: "bytes=99999999-" })).toEqual({
+      unsatisfiable: true,
+      size: 24854792,
+      contentType: "video/mp4", // the object's type from the HEAD, not the error body's application/xml
+    });
+    expect(bare.methods).toEqual(["GET", "HEAD"]); // exactly one HEAD, only on this path
+
+    const named = r2Like({ sizeOn416: true, headStatus: 200 });
+    expect(await named.store.get("runs/r1/out/1-clip.mp4", { range: "bytes=99999999-" })).toMatchObject({
+      unsatisfiable: true,
+      size: 24854792,
+    });
+    expect(named.methods).toEqual(["GET"]);
+
+    const gone = r2Like({ sizeOn416: false, headStatus: 404 });
+    expect(await gone.store.get("runs/r1/out/1-clip.mp4", { range: "bytes=99999999-" })).toBeNull();
+    expect(gone.methods).toEqual(["GET", "HEAD"]);
+  });
 });
 
 describe("R2ArtifactStore.copyFromUrl (item 20)", () => {

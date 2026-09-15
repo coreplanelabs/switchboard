@@ -2193,6 +2193,33 @@ describe("artifact route (item 26)", () => {
       expect([...multi.bytes()]).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
     });
 
+    // The R2 store answers `unsatisfiable` from a 416 that names the size or,
+    // when the endpoint's 416 carries none, from its own HEAD; either way the
+    // route sees the same shape and the answer is a 416 naming the size.
+    it("a store that answers unsatisfiable without a body streams a 416 naming the size, whatever the store read it from", async () => {
+      const h = harness();
+      const clip = artifact({
+        key: "runs/r1/out/6-big.mp4",
+        name: "big.mp4",
+        contentType: "video/mp4",
+        size: 24854792,
+      });
+      await h.runs.put(record("r1", [clip]));
+      const read = vi.spyOn(h.artifacts, "get").mockResolvedValue({
+        unsatisfiable: true,
+        size: 24854792,
+        contentType: "video/mp4",
+      });
+      const past = await get(h, `/runs/r1/artifacts/${clip.key}`, undefined, { range: "bytes=99999999-" });
+      expect(read).toHaveBeenCalledWith(clip.key, { range: "bytes=99999999-" });
+      expect([past.status, past.headers["content-range"], past.headers["accept-ranges"], past.body()]).toEqual([
+        416,
+        "bytes */24854792",
+        "bytes",
+        "",
+      ]);
+    });
+
     it("a key the events name whose object is gone answers 410 naming the retention window", async () => {
       const h = harness();
       seedObjects(h); // no zip object
