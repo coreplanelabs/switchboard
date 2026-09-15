@@ -13,7 +13,8 @@
 
 import { parseExitPrefix, redactAndCap } from "../../runEvents.js";
 import { shellQuote } from "../../../execution/shellQuote.js";
-import type { Executor } from "../../../execution/executor.js";
+import { ExecInfraError, type Executor } from "../../../execution/executor.js";
+import { isRuntimeUnreachableError } from "../../../execution/sandboxErrors.js";
 import { piRunPaths, type PiRunPaths } from "./process.js";
 
 export interface PiStart {
@@ -190,10 +191,50 @@ export function stdoutOf(operation: string, out: string): string {
  *  seconds; the start waits for the wrapper; the kill sleeps a second. */
 const OP_TIMEOUT_MS = 60_000;
 
+/** How often a read is asked again while the sandbox's runtime is being
+ *  started again, and for how long in all (harness-pi item 4). The image's
+ *  PID 1 has the server back within a couple of seconds; the budget covers a
+ *  slow boot several times over, and a runtime still gone after it is the
+ *  named failure it always was. */
+export const RUNTIME_RETRY_DELAY_MS = 3_000;
+export const RUNTIME_RETRY_BUDGET_MS = 30_000;
+
+export interface ExecPiContainerOptions {
+  /** The pause between two asks; the tests record instead of waiting. */
+  sleep?: (ms: number) => Promise<void>;
+  retryDelayMs?: number;
+  retryBudgetMs?: number;
+}
+
 export class ExecPiContainer implements PiContainer {
   private commandNo = 0;
 
-  constructor(private readonly executor: Executor) {}
+  constructor(
+    private readonly executor: Executor,
+    private readonly opts: ExecPiContainerOptions = {},
+  ) {}
+
+  /** A read that changes nothing — the log poll, the pid probe — asked again
+   *  while the executor answers `runtime-unreachable` (execution.md item 9):
+   *  the sandbox's server exited and the image's PID 1 is starting it again
+   *  (item 21), while pi, detached, keeps running. Nothing else is asked
+   *  again: a write may have landed before the server died. Any other failure,
+   *  and this one past the budget, is thrown as it came. */
+  private async retryingRead<T>(op: () => Promise<T>): Promise<T> {
+    const delay = this.opts.retryDelayMs ?? RUNTIME_RETRY_DELAY_MS;
+    const budget = this.opts.retryBudgetMs ?? RUNTIME_RETRY_BUDGET_MS;
+    const sleep = this.opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+    let waited = 0;
+    for (;;) {
+      try {
+        return await op();
+      } catch (err) {
+        if (!(err instanceof ExecInfraError) || !isRuntimeUnreachableError(err) || waited >= budget) throw err;
+        await sleep(delay);
+        waited += delay;
+      }
+    }
+  }
 
   /** The predictable root under the sticky /tmp: no command runs here, the
    *  write and start scripts make it at 700 as the thread's user (item 4). */
@@ -230,12 +271,15 @@ export class ExecPiContainer implements PiContainer {
   }
 
   async readLog(path: string, offset: number, maxBytes: number): Promise<Uint8Array> {
-    const b64 = stdoutOf("read", await this.exec(readLogScript(path, offset, maxBytes))).trim();
+    const b64 = stdoutOf(
+      "read",
+      await this.retryingRead(() => this.exec(readLogScript(path, offset, maxBytes))),
+    ).trim();
     return b64 ? new Uint8Array(Buffer.from(b64, "base64")) : new Uint8Array(0);
   }
 
   async alive(pid: number): Promise<boolean> {
-    return stdoutOf("alive", await this.exec(aliveScript(pid))).trim() === "alive";
+    return stdoutOf("alive", await this.retryingRead(() => this.exec(aliveScript(pid)))).trim() === "alive";
   }
 
   /** One word or nothing: an empty answer, a malformed one or a command the

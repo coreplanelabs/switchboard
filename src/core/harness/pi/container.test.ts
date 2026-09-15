@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
-import type { ExecOptions, Executor } from "../../../execution/executor.js";
+import { ExecInfraError, type ExecOptions, type Executor } from "../../../execution/executor.js";
 import {
   ExecPiContainer,
   INLINE_LINE_CHARS,
   PiContainerError,
+  RUNTIME_RETRY_BUDGET_MS,
+  RUNTIME_RETRY_DELAY_MS,
   WRITE_CHUNK_CHARS,
   aliveScript,
   identityScript,
@@ -300,5 +302,88 @@ describe("ExecPiContainer.cwd", () => {
     const { executor, calls } = recordingExecutor();
     expect(new ExecPiContainer(executor).cwd(paths, "/workspace/threads/t/main")).toBe("/workspace/threads/t/main");
     expect(calls).toEqual([]);
+  });
+});
+
+// Feature: docs/reference/specs/harness-pi.md item 4 — a poll rides out a
+// runtime restart. When the sandbox's server exits, the image's PID 1 starts
+// it again within seconds and pi, detached, keeps running; the executor
+// answers `runtime-unreachable` meanwhile (execution.md item 9). The two reads
+// that change nothing — the log poll and the pid probe — are asked again
+// instead of failing the run; every other operation fails at once, since a
+// write may have landed.
+describe("ExecPiContainer rides out a runtime restart", () => {
+  const UNREACHABLE =
+    "sandbox worker /exec: runtime-unreachable: the sandbox container's runtime did not answer (container c1, sandbox SDK 0.12.9; the platform reports the container running) — …";
+
+  /** An executor whose answers may be errors to throw; records the commands and the sleeps asked for. */
+  function flakyExecutor(answers: Array<string | Error>) {
+    const calls: string[] = [];
+    const sleeps: number[] = [];
+    const executor: Executor = {
+      exec: async (command) => {
+        calls.push(command);
+        const a = answers.shift() ?? "(no output)";
+        if (a instanceof Error) throw a;
+        return a;
+      },
+      readFile: async () => "",
+      writeFile: async () => "",
+    };
+    const container = new ExecPiContainer(executor, {
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+      retryBudgetMs: 9_000,
+      retryDelayMs: 3_000,
+    });
+    return { container, calls, sleeps };
+  }
+
+  it("readLog asks again every 3 s while the runtime is unreachable, then returns the eventual bytes", async () => {
+    const { container, calls, sleeps } = flakyExecutor([
+      new ExecInfraError(UNREACHABLE),
+      new ExecInfraError(UNREACHABLE),
+      Buffer.from("line\n").toString("base64"),
+    ]);
+    expect(Buffer.from(await container.readLog(paths.log, 0, 1024)).toString()).toBe("line\n");
+    expect(calls).toHaveLength(3);
+    expect(new Set(calls).size).toBe(1);
+    expect(sleeps).toEqual([3_000, 3_000]);
+  });
+
+  it("alive is asked again the same way", async () => {
+    const { container, calls, sleeps } = flakyExecutor([new ExecInfraError(UNREACHABLE), "alive\n"]);
+    expect(await container.alive(4242)).toBe(true);
+    expect(calls).toHaveLength(2);
+    expect(sleeps).toEqual([3_000]);
+  });
+
+  it("gives up once the budget is spent, with the last answer as the error", async () => {
+    const { container, calls, sleeps } = flakyExecutor([
+      new ExecInfraError(UNREACHABLE),
+      new ExecInfraError(UNREACHABLE),
+      new ExecInfraError(UNREACHABLE),
+      new ExecInfraError(UNREACHABLE),
+    ]);
+    await expect(container.readLog(paths.log, 0, 1024)).rejects.toThrow(/runtime-unreachable/);
+    expect(calls).toHaveLength(4);
+    expect(sleeps).toEqual([3_000, 3_000, 3_000]);
+  });
+
+  it("any other infra failure, and every non-read operation, fails at once", async () => {
+    const other = flakyExecutor([new ExecInfraError("sandbox worker /exec: Command execution failed")]);
+    await expect(other.container.readLog(paths.log, 0, 1024)).rejects.toThrow(/Command execution failed/);
+    expect(other.calls).toHaveLength(1);
+    expect(other.sleeps).toEqual([]);
+    const write = flakyExecutor([new ExecInfraError(UNREACHABLE)]);
+    await expect(write.container.writeLine(paths, '{"type":"prompt"}')).rejects.toThrow(/runtime-unreachable/);
+    expect(write.calls).toHaveLength(1);
+    expect(write.sleeps).toEqual([]);
+  });
+
+  it("the defaults: a 3 s pause, a 30 s budget", () => {
+    expect(RUNTIME_RETRY_DELAY_MS).toBe(3_000);
+    expect(RUNTIME_RETRY_BUDGET_MS).toBe(30_000);
   });
 });

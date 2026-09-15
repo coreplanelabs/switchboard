@@ -233,6 +233,9 @@ describe("the runtime-unreachable message and error", () => {
     expect(isRuntimeUnreachableError({ name: RUNTIME_UNREACHABLE_ERROR_NAME, message: "" })).toBe(true);
     expect(isRuntimeUnreachableError(new Error(err.message))).toBe(true);
     expect(isRuntimeUnreachableError("runtime-unreachable: the sandbox container's runtime did not answer")).toBe(true);
+    // The executor's text carries the route first; the harness reads that one.
+    expect(isRuntimeUnreachableError(new Error(`sandbox worker /exec: ${err.message}`))).toBe(true);
+    expect(isRuntimeUnreachableError(new Error("sandbox worker /read HTTP 503: runtime-unreachable: …"))).toBe(true);
   });
 
   it("is NOT a fleet-busy, a recycle, a stale session or an unrelated failure", () => {

@@ -227,10 +227,12 @@ export class SandboxRuntimeUnreachableError extends Error {
 }
 
 /** Name first, token second: the typed error after the RPC boundary, or any
- *  message that starts with the token (an executor reading a Worker's text). */
+ *  message carrying the token — the Worker's text starts with it, the
+ *  executor's `ExecInfraError` prefixes it with the route (`sandbox worker
+ *  /exec: runtime-unreachable: …`), and the harness reads the latter. */
 export function isRuntimeUnreachableError(err: unknown): boolean {
   const s = thrownShape(err);
-  return s.name === RUNTIME_UNREACHABLE_ERROR_NAME || !!s.message?.startsWith(`${RUNTIME_UNREACHABLE_REASON}:`);
+  return s.name === RUNTIME_UNREACHABLE_ERROR_NAME || !!s.message?.includes(`${RUNTIME_UNREACHABLE_REASON}:`);
 }
 
 /** The `/read` and `/write` answer (sent as HTTP 503): the named reason and the
