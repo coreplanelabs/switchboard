@@ -65,6 +65,66 @@ export function parseRefByDefault(value: unknown): ParsedRefByDefault {
   return { error: "refByDefault must be a boolean when present" };
 }
 
+/** A branch a run pushed and the pull request it heads — what the run's
+ *  release hands the resident (`/detach` body `pushed`), read off the run's
+ *  own `pr_opened` events. */
+export interface PushedBranch {
+  ref: string;
+  pr: number;
+}
+
+/** The same fact as the binding remembers it, with when it was told. */
+export interface OwnBranch extends PushedBranch {
+  at: string;
+}
+
+/** The most branches one release may hand over: a run pushes a handful at most. */
+export const PUSHED_MAX = 20;
+/** The most branches a binding remembers: the newest are kept. */
+export const OWN_BRANCHES_MAX = 50;
+
+export type ParsedPushed = { pushed: PushedBranch[] } | { error: string };
+
+const PUSHED_ERROR = "pushed must be a list of {ref: <branch>, pr: <positive integer>} when present";
+
+/** `/detach` body field `pushed`: absent → nothing (the body every bot always
+ *  sent); a list of up to `PUSHED_MAX` well-formed `{ref, pr}` → itself;
+ *  anything else → a 400-shaped error. Each ref's PATTERN is the Worker's to
+ *  check (`parseRef`), like every ref. */
+export function parsePushed(value: unknown): ParsedPushed {
+  if (value === undefined) return { pushed: [] };
+  if (!Array.isArray(value) || value.length > PUSHED_MAX) return { error: PUSHED_ERROR };
+  const pushed: PushedBranch[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) return { error: PUSHED_ERROR };
+    const { ref, pr } = entry as { ref?: unknown; pr?: unknown };
+    if (typeof ref !== "string" || ref.length === 0) return { error: PUSHED_ERROR };
+    if (typeof pr !== "number" || !Number.isSafeInteger(pr) || pr <= 0) return { error: PUSHED_ERROR };
+    pushed.push({ ref, pr });
+  }
+  return { pushed };
+}
+
+/** The binding's memory after a release: every branch handed over is
+ *  remembered once — a branch pushed again moves to the end with its current
+ *  pull request and time — and only the newest `OWN_BRANCHES_MAX` are kept.
+ *  Stored BEFORE any eviction decision, so the fact survives the tree. */
+export function rememberOwnBranches(
+  existing: readonly OwnBranch[] | undefined,
+  pushed: readonly PushedBranch[],
+  at: string,
+): OwnBranch[] {
+  const refs = new Set(pushed.map((p) => p.ref));
+  const kept = (existing ?? []).filter((b) => !refs.has(b.ref));
+  const added = pushed.map((p) => ({ ref: p.ref, pr: p.pr, at }));
+  return [...kept, ...added].slice(-OWN_BRANCHES_MAX);
+}
+
+/** Whether the thread's own runs pushed `ref`, as the binding remembers it. */
+export function isOwnBranch(binding: { ownBranches?: readonly OwnBranch[] }, ref: string): boolean {
+  return (binding.ownBranches ?? []).some((b) => b.ref === ref);
+}
+
 /** How a binding's ref was chosen: the repo default for want of a named
  *  branch, or a branch someone named. */
 export type BoundBy = "default" | "name";
@@ -109,6 +169,8 @@ export interface RebindableBinding {
   evicted?: boolean;
   boundBy?: BoundBy;
   rebound?: Rebound;
+  /** The branches the thread's own runs pushed, handed over at each release. */
+  ownBranches?: OwnBranch[];
 }
 
 export type RebindPlan =
@@ -117,8 +179,14 @@ export type RebindPlan =
   | { kind: "none" }
   /** The binding alone rules it out; nothing on disk is consulted. */
   | { kind: "refuse"; refused: RebindRefused }
-  /** The binding allows it; the tree decides (`rebindVerdict`). */
-  | { kind: "measure"; from: string; to: string; pr: number };
+  /** The binding allows it and has a live tree; the tree decides
+   *  (`rebindVerdict`). `own`: the thread's own runs pushed the branch, so a
+   *  tree that turns out missing may still be recreated at it. */
+  | { kind: "measure"; from: string; to: string; pr: number; own: boolean }
+  /** The binding allows it, its tree was evicted, and the thread's own runs
+   *  pushed the branch: the binding moves and the attach recreates the tree
+   *  at the branch — once the mirror is known to hold it. */
+  | { kind: "recreate"; from: string; to: string; pr: number };
 
 export function rebindRefused(plan: { to: string; pr: number }, reason: RebindRefusal, why: string): RebindRefused {
   return { to: plan.to, pr: plan.pr, reason, why };
@@ -157,17 +225,19 @@ export function rebindPlan(input: {
       ),
     };
   }
+  const own = isOwnBranch(binding, plan.to);
   if (binding.evicted || !binding.user) {
+    if (own) return { kind: "recreate", from: binding.ref, ...plan };
     return {
       kind: "refuse",
       refused: rebindRefused(
         plan,
         "branch-absent",
-        "the thread's worktree was evicted; the branch cannot be verified there",
+        `the thread's worktree was evicted and none of its runs pushed ${JSON.stringify(plan.to)}; only a branch this thread's own run pushed moves it`,
       ),
     };
   }
-  return { kind: "measure", from: binding.ref, ...plan };
+  return { kind: "measure", from: binding.ref, ...plan, own };
 }
 
 /** What the attach measured about the thread's tree, as the thread user. Each
@@ -185,17 +255,24 @@ export interface RebindTreeFacts {
   dirty?: boolean;
 }
 
-export type RebindVerdict = { kind: "rebind" } | { kind: "refuse"; refused: RebindRefused };
+export type RebindVerdict =
+  /** Check the branch out in the existing tree. */
+  | { kind: "rebind" }
+  /** The tree is gone (a slept container) and the thread's own runs pushed the
+   *  branch: move the binding and let the attach recreate the tree at it. */
+  | { kind: "recreate" }
+  | { kind: "refuse"; refused: RebindRefused };
 
 /** The tree's verdict on a measured plan. */
-export function rebindVerdict(plan: { to: string; pr: number }, tree: RebindTreeFacts): RebindVerdict {
+export function rebindVerdict(plan: { to: string; pr: number; own?: boolean }, tree: RebindTreeFacts): RebindVerdict {
   if (!tree.exists) {
+    if (plan.own === true) return { kind: "recreate" };
     return {
       kind: "refuse",
       refused: rebindRefused(
         plan,
         "branch-absent",
-        "the thread's worktree is missing; the branch cannot be verified there",
+        `the thread's worktree is missing and none of its runs pushed ${JSON.stringify(plan.to)}; the branch cannot be verified there`,
       ),
     };
   }

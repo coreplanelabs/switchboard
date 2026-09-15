@@ -574,7 +574,19 @@ export type RunEvent =
    *  dispatcher straight to the registry BEFORE the stream finishes, so the
    *  run record carries the PR URL as a fact of the run rather than only the
    *  channel reply's projection of it. Additive: unknown → ignored. */
-  | { type: "pr_opened"; url: string; number: number; created: boolean; seq?: number; at?: number }
+  | {
+      type: "pr_opened";
+      url: string;
+      number: number;
+      created: boolean;
+      /** The branch the run pushed, which the pull request is opened from —
+       *  the fact the run's release hands the resident so the thread remembers
+       *  its own branches past the tree (docs/reference/specs/resident-repos.md
+       *  item 16). Absent from an event a build before it recorded. */
+      head?: string;
+      seq?: number;
+      at?: number;
+    }
   /** The review post-step's outcome when the verdict landed
    *  (docs/reference/specs/agent-review.md item 18): the pull request it was
    *  posted to, the head it was pinned to (the carried head after a rebase,

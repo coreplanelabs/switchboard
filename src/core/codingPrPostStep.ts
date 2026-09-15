@@ -410,6 +410,7 @@ export async function runCodingPrPostStep(input: {
         url: opened.htmlUrl,
         number: opened.number,
         created: opened.created,
+        head: branch,
         at: systemClock(),
       });
       // The description as data, persisted at its source (reading-diff.md item
@@ -483,6 +484,7 @@ export async function runCodingPrPostStep(input: {
         url: existing.htmlUrl,
         number: existing.number,
         created: false,
+        head: branch,
         at: systemClock(),
       });
       const asked = input.descriptionTurnRan

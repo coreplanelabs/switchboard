@@ -18,6 +18,7 @@ import {
   normalizeDiagnosis,
   normalizeStored,
   prOfEvents,
+  pushedBranchesOf,
   routeOfEvents,
   storedEventSeqs,
   toVisibilityFilter,
@@ -808,6 +809,14 @@ describe("clampRetentionPolicy — the session log's byte policy", () => {
 });
 
 describe("the pull request on the record (docs/reference/specs/run-history.md item 2)", () => {
+  it("isRunRecord accepts the pull request's head branch as a non-empty string, and nothing else in its place", () => {
+    const pr = { number: 7, url: "https://github.com/acme/api/pull/7" };
+    expect(isRunRecord({ ...record(), pr: { ...pr, head: "fix/x" } })).toBe(true);
+    expect(isRunRecord({ ...record(), pr: { ...pr, head: "" } })).toBe(false);
+    expect(isRunRecord({ ...record(), pr: { ...pr, head: 3 } })).toBe(false);
+    expect(isRunRecord({ ...record(), pr: { ...pr, head: null } })).toBe(false);
+  });
+
   it("isRunRecord accepts the run's pull request as { number, url } and rejects any other shape", () => {
     expect(isRunRecord({ ...record(), pr: { number: 7, url: "https://github.com/acme/api/pull/7" } })).toBe(true);
     const bad: unknown[] = [
@@ -831,6 +840,25 @@ describe("the pull request on the record (docs/reference/specs/run-history.md it
       { type: "pr_opened", url: "https://github.com/acme/api/pull/2", number: 2, created: false },
     ];
     expect(prOfEvents(events)).toEqual({ number: 2, url: "https://github.com/acme/api/pull/2" });
+  });
+
+  // resident-repos item 16: the branch the PR is opened from is the fact the
+  // run's release hands the resident, so it rides the event and the record.
+  it("the pull request carries the head branch the run pushed when the event names it, and pushedBranchesOf lists every pushed branch with its PR, the last push to a branch winning", () => {
+    const events: RunEvent[] = [
+      { type: "pr_opened", url: "https://github.com/acme/api/pull/1", number: 1, created: true, head: "fix/a" },
+      { type: "pr_opened", url: "https://github.com/acme/api/pull/2", number: 2, created: false },
+      { type: "pr_opened", url: "https://github.com/acme/api/pull/3", number: 3, created: true, head: "fix/c" },
+      { type: "pr_opened", url: "https://github.com/acme/api/pull/4", number: 4, created: false, head: "fix/a" },
+    ];
+    expect(prOfEvents(events)).toEqual({ number: 4, url: "https://github.com/acme/api/pull/4", head: "fix/a" });
+    expect(prOfEvents(events.slice(0, 2))).toEqual({ number: 2, url: "https://github.com/acme/api/pull/2" });
+    expect(pushedBranchesOf(events)).toEqual([
+      { ref: "fix/c", pr: 3 },
+      { ref: "fix/a", pr: 4 },
+    ]);
+    expect(pushedBranchesOf(events.slice(1, 2))).toEqual([]);
+    expect(pushedBranchesOf([])).toEqual([]);
   });
 });
 

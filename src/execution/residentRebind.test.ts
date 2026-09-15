@@ -2,11 +2,15 @@ import { describe, expect, it } from "vitest";
 import {
   boundByFor,
   boundByOf,
+  OWN_BRANCHES_MAX,
   parseOwnPr,
+  parsePushed,
   parseRefByDefault,
+  PUSHED_MAX,
   rebindPlan,
   rebindRefused,
   rebindVerdict,
+  rememberOwnBranches,
   type RebindableBinding,
 } from "./residentRebind.js";
 
@@ -89,6 +93,7 @@ describe("rebindPlan: whether the binding may move, read off the binding alone",
       from: "main",
       to: "fix/exact-match",
       pr: 7,
+      own: false,
     });
     // A binding recorded as bound by default is measured whatever its ref.
     expect(
@@ -138,7 +143,7 @@ describe("rebindPlan: whether the binding may move, read off the binding alone",
     });
   });
 
-  it("an evicted binding has no tree to verify the branch in: refused as branch-absent", () => {
+  it("an evicted binding with no memory of the branch has no tree to verify it in: refused as branch-absent", () => {
     expect(
       rebindPlan({
         ownPr: OWN_PR,
@@ -152,7 +157,7 @@ describe("rebindPlan: whether the binding may move, read off the binding alone",
         to: "fix/exact-match",
         pr: 7,
         reason: "branch-absent",
-        why: "the thread's worktree was evicted; the branch cannot be verified there",
+        why: "the thread's worktree was evicted and none of its runs pushed \"fix/exact-match\"; only a branch this thread's own run pushed moves it",
       },
     });
   });
@@ -160,6 +165,163 @@ describe("rebindPlan: whether the binding may move, read off the binding alone",
   it("a resumed run's attach (reuse) never moves the tree under the run", () => {
     expect(rebindPlan({ ownPr: OWN_PR, reuse: true, binding: bound(), defaultRef: DEFAULT_REF })).toEqual({
       kind: "none",
+    });
+  });
+});
+
+// The thread remembers the branches its runs pushed (item 16): a clean tree is
+// released the moment a run ends, so on the happy path the thread's own
+// worktree never exists at the follow-up's attach and no local branch can be
+// verified there. The run's release hands the resident the exact fact —
+// `pushed: [{ref, pr}]` off its `pr_opened` events — and the binding keeps it
+// as `ownBranches`, which survives the eviction by construction. An evicted
+// (or tree-less) default-bound thread whose own branch is remembered moves and
+// recreates its tree at that branch; a live tree keeps today's checks.
+describe("parsePushed and rememberOwnBranches: the `pushed` detach body field and the binding's memory of it", () => {
+  const error = "pushed must be a list of {ref: <branch>, pr: <positive integer>} when present";
+
+  it("absent → an empty list (the body every bot always sent); a well-formed list → itself", () => {
+    expect(parsePushed(undefined)).toEqual({ pushed: [] });
+    expect(parsePushed([])).toEqual({ pushed: [] });
+    expect(parsePushed([{ ref: "fix/x", pr: 7 }])).toEqual({ pushed: [{ ref: "fix/x", pr: 7 }] });
+  });
+
+  it("anything else is a named 400-shaped error: a non-list, a malformed entry, or more than the cap", () => {
+    expect(parsePushed({ ref: "fix/x", pr: 7 })).toEqual({ error });
+    expect(parsePushed([{ ref: "", pr: 7 }])).toEqual({ error });
+    expect(parsePushed([{ ref: "fix/x", pr: 0 }])).toEqual({ error });
+    expect(parsePushed([{ ref: "fix/x" }])).toEqual({ error });
+    expect(parsePushed([null])).toEqual({ error });
+    expect(parsePushed(Array.from({ length: PUSHED_MAX + 1 }, (_, i) => ({ ref: `b${i}`, pr: i + 1 })))).toEqual({
+      error,
+    });
+  });
+
+  it("remembering appends new branches, replaces a re-pushed one in place (its PR and time move), and keeps the newest up to the cap", () => {
+    const first = rememberOwnBranches(undefined, [{ ref: "fix/x", pr: 7 }], "2026-01-01T00:00:00.000Z");
+    expect(first).toEqual([{ ref: "fix/x", pr: 7, at: "2026-01-01T00:00:00.000Z" }]);
+    const second = rememberOwnBranches(
+      first,
+      [
+        { ref: "fix/y", pr: 8 },
+        { ref: "fix/x", pr: 9 },
+      ],
+      "2026-01-02T00:00:00.000Z",
+    );
+    expect(second).toEqual([
+      { ref: "fix/y", pr: 8, at: "2026-01-02T00:00:00.000Z" },
+      { ref: "fix/x", pr: 9, at: "2026-01-02T00:00:00.000Z" },
+    ]);
+    const many = Array.from({ length: OWN_BRANCHES_MAX + 3 }, (_, i) => ({ ref: `b${i}`, pr: i + 1, at: "t" }));
+    const capped = rememberOwnBranches(many, [{ ref: "newest", pr: 999 }], "u");
+    expect(capped).toHaveLength(OWN_BRANCHES_MAX);
+    expect(capped.at(-1)).toEqual({ ref: "newest", pr: 999, at: "u" });
+    // 53 remembered + 1 new = 54; the oldest four fall off.
+    expect(capped[0]).toEqual({ ref: "b4", pr: 5, at: "t" });
+  });
+});
+
+describe("rebindPlan and rebindVerdict when the thread's tree is gone: the remembered branch decides", () => {
+  const own = [{ ref: OWN_PR.ref, pr: OWN_PR.number, at: "2026-01-01T00:00:00.000Z" }];
+
+  it("an evicted default-bound thread whose own run pushed the branch is recreated at it: the binding moves and the attach clones the branch", () => {
+    expect(
+      rebindPlan({
+        ownPr: OWN_PR,
+        reuse: false,
+        binding: bound({ evicted: true, user: "", ownBranches: own }),
+        defaultRef: DEFAULT_REF,
+      }),
+    ).toEqual({ kind: "recreate", from: "main", to: "fix/exact-match", pr: 7 });
+  });
+
+  it("an evicted thread whose runs never pushed the branch is refused branch-absent, and the sentence says why", () => {
+    expect(
+      rebindPlan({
+        ownPr: OWN_PR,
+        reuse: false,
+        binding: bound({ evicted: true, user: "", ownBranches: [{ ref: "other", pr: 3, at: "t" }] }),
+        defaultRef: DEFAULT_REF,
+      }),
+    ).toEqual({
+      kind: "refuse",
+      refused: {
+        to: "fix/exact-match",
+        pr: 7,
+        reason: "branch-absent",
+        why: "the thread's worktree was evicted and none of its runs pushed \"fix/exact-match\"; only a branch this thread's own run pushed moves it",
+      },
+    });
+  });
+
+  it("the memory never overrides the other guards: a named ref, a rebound thread and a resume stay put whatever was pushed", () => {
+    expect(
+      rebindPlan({
+        ownPr: OWN_PR,
+        reuse: false,
+        binding: bound({ evicted: true, user: "", boundBy: "name", ownBranches: own }),
+        defaultRef: DEFAULT_REF,
+      }),
+    ).toMatchObject({ kind: "refuse", refused: { reason: "named-ref" } });
+    expect(
+      rebindPlan({
+        ownPr: OWN_PR,
+        reuse: false,
+        binding: bound({
+          evicted: true,
+          user: "",
+          ownBranches: own,
+          rebound: { from: "main", to: "fix/first", pr: 5, at: "t" },
+          ref: "fix/first",
+          boundBy: "default",
+        }),
+        defaultRef: DEFAULT_REF,
+      }),
+    ).toMatchObject({ kind: "refuse", refused: { reason: "already-rebound" } });
+    expect(
+      rebindPlan({
+        ownPr: OWN_PR,
+        reuse: true,
+        binding: bound({ evicted: true, user: "", ownBranches: own }),
+        defaultRef: DEFAULT_REF,
+      }),
+    ).toEqual({ kind: "none" });
+  });
+
+  it("a live binding's plan carries whether the branch is remembered, so a tree that turns out missing (a slept container) can be recreated too", () => {
+    expect(
+      rebindPlan({ ownPr: OWN_PR, reuse: false, binding: bound({ ownBranches: own }), defaultRef: DEFAULT_REF }),
+    ).toEqual({
+      kind: "measure",
+      from: "main",
+      to: "fix/exact-match",
+      pr: 7,
+      own: true,
+    });
+    expect(rebindPlan({ ownPr: OWN_PR, reuse: false, binding: bound(), defaultRef: DEFAULT_REF })).toMatchObject({
+      kind: "measure",
+      own: false,
+    });
+    const plan = { to: OWN_PR.ref, pr: OWN_PR.number };
+    expect(rebindVerdict({ ...plan, own: true }, { exists: false })).toEqual({ kind: "recreate" });
+    expect(rebindVerdict({ ...plan, own: false }, { exists: false })).toEqual({
+      kind: "refuse",
+      refused: {
+        ...plan,
+        reason: "branch-absent",
+        why: 'the thread\'s worktree is missing and none of its runs pushed "fix/exact-match"; the branch cannot be verified there',
+      },
+    });
+    // A live tree keeps today's checks whatever was remembered: the branch must be local and the tree clean.
+    expect(rebindVerdict({ ...plan, own: true }, { exists: true, readable: true, branchExists: false })).toMatchObject({
+      kind: "refuse",
+      refused: { reason: "branch-absent" },
+    });
+    expect(
+      rebindVerdict({ ...plan, own: true }, { exists: true, readable: true, branchExists: true, dirty: true }),
+    ).toMatchObject({
+      kind: "refuse",
+      refused: { reason: "dirty" },
     });
   });
 });
@@ -184,7 +346,7 @@ describe("rebindVerdict: the tree decides a measured plan", () => {
       kind: "refuse",
       refused: {
         reason: "branch-absent",
-        why: "the thread's worktree is missing; the branch cannot be verified there",
+        why: 'the thread\'s worktree is missing and none of its runs pushed "fix/exact-match"; the branch cannot be verified there',
       },
     });
     // A tree git cannot read verifies nothing either — whatever rev-parse said.

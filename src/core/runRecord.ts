@@ -3,6 +3,7 @@ import type { BoundaryScope, Identity, MachineClass, RunProfile } from "../confi
 import type { RunEvent } from "./runEvents.js";
 import { isHeadMaterial, isSpanRecord } from "./runEvents.js";
 import { isRunUsage, type RunUsage } from "./runUsage.js";
+import type { PushedBranch } from "../execution/residentRebind.js";
 import { isHandoffShape, type Handoff } from "./ship/handoff.js";
 import {
   type FindingDisposition,
@@ -197,18 +198,37 @@ export interface RunRecord {
 }
 
 /** A pull request as the record names it (item 2): its number and its GitHub
- *  URL, both from the `pr_opened` event the coding post-step published. */
+ *  URL, both from the `pr_opened` event the coding post-step published, and
+ *  the head branch the run pushed when the event named it. */
 export interface RunPullRequest {
   number: number;
   url: string;
+  head?: string;
 }
 
 /** The pull request a run's events say it opened or edited — the last
  *  `pr_opened` wins, as an edit after an open names the same PR — or nothing. */
 export function prOfEvents(events: readonly RunEvent[]): RunPullRequest | undefined {
   let pr: RunPullRequest | undefined;
-  for (const e of events) if (e.type === "pr_opened") pr = { number: e.number, url: e.url };
+  for (const e of events) {
+    if (e.type === "pr_opened")
+      pr = { number: e.number, url: e.url, ...(e.head !== undefined ? { head: e.head } : {}) };
+  }
   return pr;
+}
+
+/** Every branch a run's events say it pushed, with the pull request each
+ *  heads — what the run's release hands the resident so the thread remembers
+ *  its own branches past the tree (resident-repos item 16). One entry per
+ *  branch, the last push to it winning; an event without a head names none. */
+export function pushedBranchesOf(events: readonly RunEvent[]): PushedBranch[] {
+  const byRef = new Map<string, number>();
+  for (const e of events) {
+    if (e.type !== "pr_opened" || e.head === undefined) continue;
+    byRef.delete(e.head);
+    byRef.set(e.head, e.number);
+  }
+  return [...byRef].map(([ref, pr]) => ({ ref, pr }));
 }
 
 /** The router's decision as a record carries it — the same fields the
@@ -268,7 +288,8 @@ function isRunPullRequestShape(v: unknown): v is RunPullRequest {
     Number.isInteger(p.number) &&
     p.number > 0 &&
     typeof p.url === "string" &&
-    p.url.length > 0
+    p.url.length > 0 &&
+    (p.head === undefined || (typeof p.head === "string" && p.head.length > 0))
   );
 }
 

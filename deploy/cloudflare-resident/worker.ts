@@ -88,12 +88,16 @@ import { decideWorktree, parseReuse, type WorktreeFacts } from "../../src/execut
 import {
   boundByFor,
   parseOwnPr,
+  parsePushed,
   parseRefByDefault,
   rebindPlan,
   rebindRefused,
   rebindVerdict,
+  rememberOwnBranches,
   type BoundBy,
+  type OwnBranch,
   type OwnPr,
+  type PushedBranch,
   type Rebound,
   type RebindRefused,
   type RebindTreeFacts,
@@ -994,6 +998,13 @@ interface ThreadBinding {
    *  to, onto the branch the thread's own run opened a pull request on. Set,
    *  the binding never moves again. */
   rebound?: Rebound;
+  /** The branches the thread's own runs pushed and the pull requests they
+   *  head, as each run's release handed them over (`/detach` `pushed`, item
+   *  16a) — written before any eviction decision, so the fact outlives the
+   *  tree: a clean tree is released the moment a run ends, and this is what
+   *  lets the follow-up's attach move onto the branch and recreate the tree
+   *  there. Newest last; the oldest fall off past `OWN_BRANCHES_MAX`. */
+  ownBranches?: OwnBranch[];
   /** Allocated OS user (worker2..worker17); "" once evicted (pool released). */
   user: string;
   worktreePath: string;
@@ -1091,6 +1102,15 @@ interface RefHintReason {
 
 /** The body every bot always sent: a hint with no reason attached. */
 const NO_REF_HINT_REASON: RefHintReason = { ownPr: null, refByDefault: false };
+
+/** What the rebind decided under the mutex (item 16): nothing to move (the
+ *  row is already on the branch), a named refusal, or the move — written on
+ *  the row, whether a checkout in the live tree or a ref the attach will
+ *  recreate the tree at. */
+type RebindOutcome =
+  | { kind: "none"; binding: ThreadBinding }
+  | { kind: "refuse"; refused: RebindRefused }
+  | { kind: "rebound"; moved: ThreadBinding; rebound: Rebound };
 
 /** Result of one /op test/build execution. `ok` is the command's
  *  verdict — a failing test run is a RESULT with ok:false, never an error. */
@@ -4358,6 +4378,7 @@ export class ResidentDO extends Sandbox<Env> {
         ? {
             ...(existing.boundBy !== undefined ? { boundBy: existing.boundBy } : {}),
             ...(existing.rebound !== undefined ? { rebound: existing.rebound } : {}),
+            ...(existing.ownBranches !== undefined ? { ownBranches: existing.ownBranches } : {}),
           }
         : { boundBy }),
     };
@@ -4497,6 +4518,7 @@ export class ResidentDO extends Sandbox<Env> {
       reason.ownPr,
       reuse,
       facts.defaultRef,
+      slug,
     );
     if ("error" in rebind) return rebind;
     const prior = rebind.binding;
@@ -4579,19 +4601,26 @@ export class ResidentDO extends Sandbox<Env> {
     ownPr: OwnPr | null,
     reuse: boolean,
     defaultRef: string,
+    slug: string,
   ): Promise<{ binding: ThreadBinding | undefined; rebound?: Rebound; rebindRefused?: RebindRefused } | ThreadErr> {
     const plan = rebindPlan({ ownPr, reuse, binding: prior, defaultRef });
     if (plan.kind === "none" || prior === undefined) return { binding: prior };
     if (plan.kind === "refuse") return { binding: prior, rebindRefused: plan.refused };
     const key = threadBindingKey(prior.threadKey);
-    type Outcome =
-      | { kind: "none"; binding: ThreadBinding }
-      | { kind: "refuse"; refused: RebindRefused }
-      | { kind: "rebound"; moved: ThreadBinding; rebound: Rebound };
-    let outcome: Outcome;
+    // A tree that is gone is recreated at the branch by the attach (item 16):
+    // the mirror must hold the branch first, and a branch pushed since the
+    // last refresh cycle is fetched for — with a token minted here, before
+    // the mutex, like the attach's own recovery fetch. Only when the binding
+    // allows a recreate at all: an evicted tree, or a live one whose runs
+    // pushed the branch (the tree may turn out missing).
+    const fetchToken =
+      (plan.kind === "recreate" || plan.own) && githubAppConfigured(this.env)
+        ? ((await mintRepoScopedToken(this.env, slug).catch(() => null))?.token ?? null)
+        : null;
+    let outcome: RebindOutcome;
     try {
       outcome = (
-        await this.withMirrorLock(async (): Promise<Outcome> => {
+        await this.withMirrorLock(async (): Promise<RebindOutcome> => {
           // The binding as it stands NOW, under the mutex — not the snapshot
           // the plan read before the wait: the move is judged on, and written
           // over, the row's current fields (its last attach time, its
@@ -4602,6 +4631,7 @@ export class ResidentDO extends Sandbox<Env> {
           const again = rebindPlan({ ownPr, reuse, binding: current, defaultRef });
           if (again.kind === "none") return { kind: "none", binding: current };
           if (again.kind === "refuse") return again;
+          if (again.kind === "recreate") return this.recreateAtOwnBranch(current, again, fetchToken);
           const wt = current.worktreePath;
           // The facts, as the thread user in the thread's own tree: is the
           // branch a local branch here (the physical trace of this thread's
@@ -4612,7 +4642,7 @@ export class ResidentDO extends Sandbox<Env> {
             const branch = await this.threadRun(
               current.user,
               wt,
-              `git rev-parse --verify --quiet ${shellQuote(`refs/heads/${plan.to}`)}`,
+              `git rev-parse --verify --quiet ${shellQuote(`refs/heads/${again.to}`)}`,
               DEFAULT_EXEC_TIMEOUT_MS,
             );
             tree.branchExists = branch.exitCode === 0;
@@ -4625,13 +4655,16 @@ export class ResidentDO extends Sandbox<Env> {
             tree.readable = status.exitCode === 0;
             if (tree.readable) tree.dirty = status.stdout.trim() !== "";
           }
-          const verdict = rebindVerdict(plan, tree);
+          // Judged on the re-read plan: it carries whether the branch is the
+          // thread's own, which the pre-lock plan lacks when it was a recreate.
+          const verdict = rebindVerdict(again, tree);
+          if (verdict.kind === "recreate") return this.recreateAtOwnBranch(current, again, fetchToken);
           if (verdict.kind !== "rebind") return verdict;
           const startedAt = systemClock();
           const checkout = await this.threadRun(
             current.user,
             wt,
-            `git checkout --quiet ${shellQuote(plan.to)}`,
+            `git checkout --quiet ${shellQuote(again.to)}`,
             DEFAULT_EXEC_TIMEOUT_MS,
           );
           this.stepTrace.getStore()?.record("rebind-checkout", {
@@ -4643,15 +4676,15 @@ export class ResidentDO extends Sandbox<Env> {
           if (checkout.exitCode !== 0) {
             const detail =
               checkout.stderr.trim().split("\n")[0]?.slice(0, 200) || `git checkout exited ${checkout.exitCode}`;
-            return { kind: "refuse", refused: rebindRefused(plan, "checkout-failed", detail) };
+            return { kind: "refuse", refused: rebindRefused(again, "checkout-failed", detail) };
           }
           const rebound: Rebound = {
             from: current.ref,
-            to: plan.to,
-            pr: plan.pr,
+            to: again.to,
+            pr: again.pr,
             at: new Date(systemClock()).toISOString(),
           };
-          const moved: ThreadBinding = { ...current, ref: plan.to, rebound };
+          const moved: ThreadBinding = { ...current, ref: again.to, rebound };
           await this.ctx.storage.put(key, moved);
           return { kind: "rebound", moved, rebound };
         }, ATTACH_MUTEX_WAIT_MS)
@@ -4675,6 +4708,77 @@ export class ResidentDO extends Sandbox<Env> {
       `attach ${prior.threadKey}: rebound ${rebound.from} → ${rebound.to} (the thread's own pull request #${rebound.pr})`,
     );
     return { binding: moved, rebound };
+  }
+
+  /** The move when the thread's tree is gone (item 16): the binding's ref
+   *  becomes the branch its own run pushed, and the attach that follows
+   *  recreates the tree at it — `ensureThreadWorktree` finds no tree and
+   *  clones the branch from the mirror. So the mirror must hold the branch:
+   *  one pushed since the last refresh cycle is fetched for here, under the
+   *  mutex; a branch still missing after the fetch (deleted after a merge, or
+   *  never pushed) is a `branch-absent` refusal and the binding stands — the
+   *  attach then goes on at the ref it had, never `unknown-ref`. Nothing on
+   *  disk is touched: no checkout (there is no tree), no clone (the attach's). */
+  private async recreateAtOwnBranch(
+    current: ThreadBinding,
+    plan: { to: string; pr: number },
+    fetchToken: string | null,
+  ): Promise<RebindOutcome> {
+    let present = await this.refExists(plan.to);
+    if (!present) {
+      // A fetch that fails — GitHub unreachable, no token for a private repo —
+      // is not the attach's failure: the branch is then simply not in the
+      // mirror, and the refusal below names it, so the binding stands and the
+      // run goes on at the ref it had instead of the attach ending 500.
+      try {
+        await this.gitWithCred(
+          fetchToken,
+          ["-C", MIRROR_DIR, "fetch", "--prune", "origin"],
+          "fetch",
+          GIT_NETWORK_TIMEOUT_MS,
+        );
+      } catch (err) {
+        console.log(
+          `attach ${current.threadKey}: the fetch for ${plan.to} failed (${errMsg(err)}) — the rebind is refused, the attach goes on`,
+        );
+      }
+      present = await this.refExists(plan.to);
+    }
+    if (!present) {
+      return {
+        kind: "refuse",
+        refused: rebindRefused(
+          plan,
+          "branch-absent",
+          `the thread's worktree is gone and the mirror does not hold ${JSON.stringify(plan.to)} (deleted after a merge, or never pushed); the tree cannot be recreated at it`,
+        ),
+      };
+    }
+    const rebound: Rebound = {
+      from: current.ref,
+      to: plan.to,
+      pr: plan.pr,
+      at: new Date(systemClock()).toISOString(),
+    };
+    const moved: ThreadBinding = { ...current, ref: plan.to, rebound };
+    await this.ctx.storage.put(threadBindingKey(current.threadKey), moved);
+    return { kind: "rebound", moved, rebound };
+  }
+
+  /** The release's word on what the run pushed (`/detach` `pushed`, item
+   *  16a), remembered on the binding BEFORE the detach decides anything: a
+   *  clean tree is evicted at once, a dirty one kept, an already-evicted
+   *  binding answered as such — and in every case the fact must outlive the
+   *  tree, since it is what a follow-up's rebind onto the thread's own pull
+   *  request branch reads once the tree is gone. No binding → nothing to
+   *  remember on (the detach answers its 404 next). */
+  private async rememberOwnBranches(threadKey: string, pushed: readonly PushedBranch[]): Promise<void> {
+    const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
+    if (!binding) return;
+    await this.ctx.storage.put(threadBindingKey(threadKey), {
+      ...binding,
+      ownBranches: rememberOwnBranches(binding.ownBranches, pushed, new Date(systemClock()).toISOString()),
+    } satisfies ThreadBinding);
   }
 
   /** The second half of an attach, past disk admission: mint, fetch + clone
@@ -5910,7 +6014,10 @@ export class ResidentDO extends Sandbox<Env> {
   async detachThread(
     threadKey: string,
     force: boolean,
+    /** What the ending run pushed (item 16a): remembered on the binding first, whatever the detach then decides. */
+    pushed: readonly PushedBranch[] = [],
   ): Promise<{ released: boolean; reason?: string; user?: string } | ThreadErr> {
+    if (pushed.length > 0) await this.rememberOwnBranches(threadKey, pushed);
     const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
     if (!binding) return { error: `no-binding: ${threadKey} has never attached to this resident`, status: 404 };
     if (binding.evicted || !binding.user) return { released: false, reason: "already-evicted" };
@@ -7785,7 +7892,15 @@ async function handleAttach(env: Env, body: Record<string, unknown>, traceparent
 async function handleDetach(env: Env, body: Record<string, unknown>): Promise<Response> {
   const ctx = await resolveThreadRoute(env, body);
   if (ctx instanceof Response) return ctx;
-  const result = await ctx.stub.detachThread(ctx.threadKey, body.force === true);
+  // What the run pushed (item 16a), each ref through the one ref pattern
+  // before it can be stored or become a git argument.
+  const pushed = parsePushed(body.pushed);
+  if ("error" in pushed) return json({ error: pushed.error }, 400);
+  for (const entry of pushed.pushed) {
+    const ref = parseRef(entry.ref, "pushed[].ref");
+    if ("error" in ref) return json({ error: ref.error }, 400);
+  }
+  const result = await ctx.stub.detachThread(ctx.threadKey, body.force === true, pushed.pushed);
   if ("error" in result) return threadErrResponse(result);
   return json(result);
 }
