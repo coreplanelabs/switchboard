@@ -645,24 +645,32 @@ export class McpService {
     return `${(this.opts.publicBaseUrl ?? "").replace(/\/+$/, "")}/mcp/oauth/callback`;
   }
 
-  /** In-flight refreshes by server id, so N concurrent runs refresh once. */
-  private readonly refreshing = new Map<string, Promise<OAuthCredential>>();
+  /** Refreshes by server id, keyed by the expiry of the credential that
+   *  triggered them, so N concurrent runs refresh once. A settled entry stays:
+   *  a run whose credential read raced the store write joins it instead of
+   *  refreshing again. A failed refresh is dropped so the next run retries; a
+   *  newer expiry (the refreshed set aging into the skew) starts a new one. */
+  private readonly refreshing = new Map<string, { seed: number; done: Promise<OAuthCredential> }>();
 
   /** A usable access token for the run: the stored one while it lives, else
    *  a refreshed set (stored back, the cached client dropped so it is rebuilt
    *  with the new header). */
   private freshOAuth(serverId: string, cred: OAuthCredential): Promise<OAuthCredential> {
     if (!needsRefresh(cred, this.now())) return Promise.resolve(cred);
-    let inflight = this.refreshing.get(serverId);
-    if (!inflight) {
-      inflight = (async () => {
-        const next = await refreshCredential(this.opts.fetch as FetchLike, cred, this.now());
-        await this.storeOAuth(serverId, next);
-        return next;
-      })().finally(() => this.refreshing.delete(serverId));
-      this.refreshing.set(serverId, inflight);
-    }
-    return inflight;
+    const seed = cred.expiresAt ?? 0; // no expiry never enters the skew; 0 keeps such a set from pinning the entry
+    const hit = this.refreshing.get(serverId);
+    if (hit && hit.seed >= seed) return hit.done;
+    const done = (async () => {
+      const next = await refreshCredential(this.opts.fetch as FetchLike, cred, this.now());
+      await this.storeOAuth(serverId, next);
+      return next;
+    })();
+    const entry = { seed, done };
+    this.refreshing.set(serverId, entry);
+    done.catch(() => {
+      if (this.refreshing.get(serverId) === entry) this.refreshing.delete(serverId);
+    });
+    return done;
   }
 
   // ---- the run-time view ----------------------------------------------------------
