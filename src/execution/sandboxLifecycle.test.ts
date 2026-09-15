@@ -8,7 +8,7 @@ import {
   parseSleepAfterMs,
   recycledMidCommandMessage,
   withActivityKeepalive,
-} from "./sandboxKeepalive.js";
+} from "./sandboxLifecycle.js";
 
 // Feature: docs/reference/specs/execution.md item 2 — one in-flight exec never outlives
 // the container's activity timeout. The Container base class renews its

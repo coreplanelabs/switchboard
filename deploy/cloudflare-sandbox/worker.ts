@@ -32,7 +32,7 @@ import {
   isRecycleError,
   recycledMidCommandMessage,
   withActivityKeepalive,
-} from "../../src/execution/sandboxKeepalive.js";
+} from "../../src/execution/sandboxLifecycle.js";
 import { envFromRequest } from "../../src/execution/sandboxEnv.js";
 import { shellQuote } from "../../src/execution/shellQuote.js";
 import {
