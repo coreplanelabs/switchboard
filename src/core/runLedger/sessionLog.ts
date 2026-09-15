@@ -62,6 +62,28 @@ export function rowKind(json: string): RowKind {
   }
 }
 
+/** Whose turn a stored row is: the role the row's JSON carries; a compaction
+ *  row or an unreadable one has none. What `recall` reports beside a hit. */
+export function roleOfStoredRow(json: string): "user" | "assistant" | undefined {
+  const stored = parseStored(json);
+  if (!stored || "compaction" in stored) return undefined;
+  const role = (stored as { role?: unknown }).role;
+  return role === "user" || role === "assistant" ? role : undefined;
+}
+
+/** The notepad's size (record 0035, "The notepad"): one document per session,
+ *  written whole, at most this many UTF-8 bytes; `notes` refuses over it naming
+ *  the size, and the object's write route does too. */
+export const NOTEPAD_MAX_BYTES = 8_192;
+
+/** The row a follow-up appends when the previous run's record says `broken`
+ *  (session-log item 9): a user text turn saying the log ends short of what
+ *  that run saw. Named here so the object can tell a gap row apart for
+ *  `recall`, which says when a search straddles one. */
+export const GAP_MARKER =
+  "[The log of this conversation ends short of what the previous run saw: its connection to the ledger broke, " +
+  "so its later turns and its final reply are not here.]";
+
 const textOfResultContent = (content: unknown): string => {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";

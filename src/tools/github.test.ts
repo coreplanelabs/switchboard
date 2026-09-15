@@ -232,9 +232,20 @@ describe("toolset wiring", () => {
   // reach — a shell and file reads, the web (search included), the skill tools
   // and the GitHub reads; nothing that writes a file, submits a verdict, a
   // description, dispositions or a handoff, or writes an issue.
-  it("explore holds bash, read_file, update_status, web_fetch, web_search, the skill tools and the GitHub reads — no write_file, no submit_*, no issue writes", () => {
+  it("explore holds bash, read_file, update_status, web_fetch, web_search, the skill tools, the session tools and the GitHub reads — no write_file, no submit_*, no issue writes", () => {
     expect(names("explore").sort()).toEqual(
-      ["bash", "read_file", "update_status", "web_fetch", "web_search", "list_skills", "use_skill", ...reads].sort(),
+      [
+        "bash",
+        "read_file",
+        "update_status",
+        "web_fetch",
+        "web_search",
+        "list_skills",
+        "use_skill",
+        "recall",
+        "notes",
+        ...reads,
+      ].sort(),
     );
     expect(names("explore").filter((n) => n.startsWith("submit_"))).toEqual([]);
   });

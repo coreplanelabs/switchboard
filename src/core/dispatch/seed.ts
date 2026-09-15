@@ -14,7 +14,7 @@
 // the newest one, and that entry's summary is handed back for the system
 // prompt, where the record keeps it a pointer to the log and never a loss.
 import type { ChatMessage, ContentPart } from "../../providers/types.js";
-import { sessionKey } from "../runLedger/sessionLog.js";
+import { GAP_MARKER, sessionKey } from "../runLedger/sessionLog.js";
 import type { AssembledTranscript } from "../runLedger/transcript.js";
 import type { LedgerWriteThrough } from "../runLedger/writeThrough.js";
 import type { RunView } from "../runsService.js";
@@ -54,13 +54,12 @@ export interface SessionSeed {
   /** The newest compaction entry's summary when the log has one: for the
    *  system prompt, never a row. */
   summary?: string;
+  /** The session's notepad as the `notes` tool last wrote it (item 10): for the
+   *  system prompt, never a row. Read by `sessionSeedFor`, absent when empty. */
+  notepad?: string;
   /** What the seed could not do, one line each, for the record's notes. */
   notes: string[];
 }
-
-const GAP_MARKER =
-  "[The log of this conversation ends short of what the previous run saw: its connection to the ledger broke, " +
-  "so its later turns and its final reply are not here.]";
 
 const settledResult = (toolName: string): string =>
   `The run that made this call ended before this ${toolName} call's result was recorded; its effects are unknown — ` +
@@ -159,7 +158,7 @@ export function sessionSeed(input: {
  * session: the run seeds from the channel, and the note says why.
  */
 export async function sessionSeedFor(input: {
-  ledger: Pick<LedgerWriteThrough, "readSessionTail">;
+  ledger: Pick<LedgerWriteThrough, "readSessionTail" | "readNotepad">;
   threadKey: string;
   agent: string;
   thread: readonly RunView[];
@@ -180,7 +179,17 @@ export async function sessionSeedFor(input: {
     history: input.history,
     request: input.request,
   });
-  return seed ? { seed, notes: seed.notes } : { notes: [] };
+  if (!seed) return { notes: [] };
+  // The notepad rides the prompt, never a row (item 10); a notepad that cannot
+  // be read is a note, and the seed stands.
+  try {
+    const notepad = await input.ledger.readNotepad(key);
+    if (notepad && notepad.text.trim().length > 0) seed.notepad = notepad.text;
+  } catch (err) {
+    const why = err instanceof Error ? err.message : String(err);
+    seed.notes.push(`session seed: the notepad of ${key} could not be read (${why}) — the run starts without it`);
+  }
+  return { seed, notes: seed.notes };
 }
 
 /** The message without its thinking blocks; an assistant turn of nothing but

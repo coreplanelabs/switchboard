@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../../providers/types.js";
 import type { RunRecord } from "../runRecord.js";
 import { InMemoryRunLedger } from "./inMemory.js";
-import { DEFAULT_SESSION_LOG_MAX_BYTES } from "./sessionLog.js";
+import { DEFAULT_SESSION_LOG_MAX_BYTES, GAP_MARKER } from "./sessionLog.js";
 import { ATTACHMENT_REF_BYTES, LEASE_MS, type ClaimRequest, type StepRecord } from "./types.js";
 
 // The reference ledger (docs/reference/specs/run-history.md items 28–31, 33): the whole
@@ -412,5 +412,46 @@ describe("InMemoryRunLedger", () => {
     // The budget defaults when the claim carries none.
     await ledger.claimSession("slack:C1:4.0:coding", "r4", "g1");
     expect(ledger.sessions.get("slack:C1:4.0:coding")!.maxBytes).toBe(DEFAULT_SESSION_LOG_MAX_BYTES);
+  });
+
+  // docs/reference/specs/session-log.md item 10: what `recall` and `notes` read and write.
+  it("the search answers hits in relevance order with turn, role and kind, names the gap markers between them, and nothing for a wordless query or an unknown log; the notepad is written whole under the owner's fence and read back", async () => {
+    const ledger = new InMemoryRunLedger(() => 7_000);
+    const key = "slack:C1:9.0:coding";
+    const say = (text: string): ChatMessage => ({ role: "user", content: [{ type: "text", text }] });
+    const reply = (text: string): ChatMessage => ({ role: "assistant", content: [{ type: "text", text }] });
+    const failed: ChatMessage = {
+      role: "user",
+      content: [{ type: "tool_result", toolUseId: "c1", content: "1 failed: lockfile.test.ts" }],
+    };
+    await ledger.claimSession(key, "r1", "g1");
+    await ledger.seed(
+      "r1",
+      "g1",
+      [
+        say("please fix the flaky lockfile test"),
+        reply("the lockfile is fine"),
+        say(GAP_MARKER),
+        failed,
+        say("unrelated remark"),
+      ].map((message, idx) => ({ idx, message })),
+      key,
+    );
+    const found = await ledger.searchSession(key, "flaky lockfile", 5);
+    expect(found.hits[0]).toMatchObject({ idx: 0, role: "user", kind: "text" });
+    expect(found.hits.slice(1).map((h) => [h.idx, h.role, h.kind])).toEqual([
+      [3, "user", "tool_result"],
+      [1, "assistant", "text"],
+    ]);
+    expect(found.gaps).toEqual([2]);
+    expect(await ledger.searchSession(key, "unrelated", 5)).toMatchObject({ hits: [{ idx: 4 }], gaps: [] });
+    expect((await ledger.searchSession(key, "flaky lockfile", 1)).hits).toHaveLength(1);
+    expect(await ledger.searchSession(key, "   ", 5)).toEqual({ hits: [], gaps: [] });
+    expect(await ledger.searchSession("slack:C1:none:coding", "flaky", 5)).toEqual({ hits: [], gaps: [] });
+    expect(await ledger.readNotepad(key)).toBeNull();
+    expect(await ledger.writeNotepad("slack:C1:none:coding", "g1", "x")).toEqual({ ok: false, reason: "unknown-run" });
+    expect(await ledger.writeNotepad(key, "g2", "zombie")).toEqual({ ok: false, reason: "fenced" });
+    expect(await ledger.writeNotepad(key, "g1", "decided: keep the helper")).toEqual({ ok: true });
+    expect(await ledger.readNotepad(key)).toEqual({ text: "decided: keep the helper", updatedAt: 7_000 });
   });
 });

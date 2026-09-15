@@ -841,6 +841,14 @@ describe("the session log — a run is a range of it", () => {
     expect(run.tracked()).toBe(true);
     expect(run.resumable).toBe(true);
     expect(warnings).toEqual([]);
+    // The run knows its place in the log (item 10: what the session tools read and write by),
+    // and the write-through reaches the log's search and notepad under this generation.
+    expect(run.session).toEqual({ key: KEY, seedFrom: 0, request: 2, range: { from: 0 } });
+    expect((await wt.searchSession(KEY, "earlier", 5)).hits.map((h) => h.idx)).toEqual([0]);
+    expect((await wt.readSession(KEY, 1, 1)).messages).toEqual([assistant("sure")]);
+    expect(await wt.readNotepad(KEY)).toBeNull();
+    expect(await wt.writeNotepad(KEY, "the helper stays")).toEqual({ ok: true });
+    expect(await wt.readNotepad(KEY)).toMatchObject({ text: "the helper stays" });
 
     await run.step(step());
     await run.step(

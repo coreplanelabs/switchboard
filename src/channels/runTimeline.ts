@@ -353,6 +353,10 @@ export function createRunTimeline(): RunTimeline {
       }
       case "context":
         return [{ kind: "context", text: str(e.text), at: num(e.at) }];
+      // The notepad as the `notes` tool last wrote it (session-log item 10):
+      // a note row on the page, its kind the tool's name.
+      case "notes":
+        return [{ kind: "note", text: str(e.text), noteKind: "notes", at: num(e.at) }];
       case "replay_note":
         return [{ kind: "replay_note", text: str(e.summary) }];
       case "run_note":

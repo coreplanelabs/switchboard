@@ -267,6 +267,10 @@ export function makeSystemComposer(input: {
    *  after the config block — the same category of fact-about-yourself. */
   blocks: {
     memory: string | undefined;
+    /** The agent's own notes for this thread and the summary its last
+     *  compaction wrote (docs/reference/specs/session-log.md item 10): advisory
+     *  context like memory, right after it — what this session already knows. */
+    notes?: string | undefined;
     config: string | undefined;
     about?: string | undefined;
     instructions: string | undefined;
@@ -307,7 +311,7 @@ export function makeSystemComposer(input: {
       .join("\n\n");
   };
   return (head) =>
-    [blocks.memory, blocks.config, blocks.about, blocks.instructions, agentSystem(head)]
+    [blocks.memory, blocks.notes, blocks.config, blocks.about, blocks.instructions, agentSystem(head)]
       .filter((part): part is string => Boolean(part))
       .join("\n\n");
 }

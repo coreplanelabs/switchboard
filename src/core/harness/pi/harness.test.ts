@@ -22,6 +22,7 @@ import { HarnessRegistry, authorizeToolCall } from "./relay.js";
 import { judgeToolCall, type ToolRuleContext } from "./toolRules.js";
 import { FakePiContainer } from "./testing/fakeContainer.js";
 import {
+  compactionSteer,
   promptOf,
   relayedTools,
   runPiHarness,
@@ -146,7 +147,15 @@ const finalTurn = (c: FakePiContainer, text: string) => {
   );
 };
 
-function world(opts: { clock?: { now: number }; agent?: Partial<AgentDef>; withSpans?: boolean } = {}) {
+function world(
+  opts: {
+    clock?: { now: number };
+    agent?: Partial<AgentDef>;
+    withSpans?: boolean;
+    /** The session's notepad the compaction steer reads (session-log item 10). */
+    notepad?: () => Promise<{ text: string; updatedAt: number } | null>;
+  } = {},
+) {
   const clock = opts.clock ?? { now: NOW };
   const container = new FakePiContainer();
   const registry = new HarnessRegistry();
@@ -184,6 +193,7 @@ function world(opts: { clock?: { now: number }; agent?: Partial<AgentDef>; withS
     tools: [updateStatus],
     toolContext: { executor },
     rules: { checkout: "/workspace/threads/t/main", protectedBranches: ["main"] },
+    ...(opts.notepad ? { notepad: opts.notepad } : {}),
     backend: "resident",
     span: root,
     control,
@@ -427,6 +437,77 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     ]);
     expect(w.events.filter((e) => e.type === "run_note" && e.kind === "follow_up")).toHaveLength(1);
     expect(w.steps.at(-1)!.inboxConsumedSeq).toBe(3);
+  });
+
+  // docs/reference/specs/session-log.md item 10: the notepad's second read point.
+  it("after every compaction pi is steered with the notepad as it stands and the reach recall gives; a run without a notepad is told its notes are empty and how to keep them; a failed compaction steers nothing", async () => {
+    const compaction = (c: FakePiContainer, summary: string) =>
+      c.emit({
+        type: "compaction_end",
+        reason: "threshold",
+        result: { summary, firstKeptEntryId: "e9", tokensBefore: 150_000, estimatedTokensAfter: 30_000 },
+        aborted: false,
+      });
+    const w = world({
+      notepad: async () => ({ text: "decided: keep the helper; head green at abc123", updatedAt: 1 }),
+    });
+    scriptedPi(w.container, (n, c) => {
+      bashTurn(w, "c1", "npm test", "1 failed");
+      compaction(c, "so far: one test failed");
+      bashTurn(w, "c2", "npm test", "ok");
+      compaction(c, "so far: fixed");
+      c.emit({ type: "compaction_end", reason: "overflow", result: null, aborted: false, errorMessage: "quota" });
+      finalTurn(c, "done");
+    });
+    await w.start();
+    const steers = w.container.commands().filter((c) => c.type === "steer");
+    expect(steers).toHaveLength(2);
+    for (const steer of steers) {
+      expect(String(steer.message)).toContain("decided: keep the helper; head green at abc123");
+      expect(String(steer.message)).toContain("`recall`");
+    }
+    expect(w.events.filter((e) => e.type === "run_note" && e.kind === "compacted")).toHaveLength(2);
+    // Without a notepad: told the notes are empty and how to keep them.
+    const bare = world();
+    scriptedPi(bare.container, (n, c) => {
+      bashTurn(bare, "c1", "ls", "files");
+      compaction(c, "so far");
+      finalTurn(c, "done");
+    });
+    await bare.start();
+    const [steer] = bare.container.commands().filter((c) => c.type === "steer");
+    expect(String(steer!.message)).toContain("Your notes for this thread are empty");
+    expect(String(steer!.message)).toContain("`notes`");
+    expect(compactionSteer(undefined)).toBe(String(steer!.message));
+  });
+
+  it("a notepad read that fails at compaction time costs the steer its notes, never the run: the steer says the notes could not be read, a harness_error note says why, and the run answers", async () => {
+    const w = world({
+      notepad: async () => {
+        throw new Error("ledger 503");
+      },
+    });
+    scriptedPi(w.container, (n, c) => {
+      bashTurn(w, "c1", "npm test", "1 failed");
+      c.emit({
+        type: "compaction_end",
+        reason: "threshold",
+        result: { summary: "so far", firstKeptEntryId: "e1", tokensBefore: 100_000, estimatedTokensAfter: 20_000 },
+        aborted: false,
+      });
+      finalTurn(c, "done anyway");
+    });
+    expect(await w.start()).toBe("done anyway");
+    const steers = w.container.commands().filter((c) => c.type === "steer");
+    expect(steers).toHaveLength(1);
+    expect(String(steers[0]!.message)).toContain("could not be read just now");
+    expect(String(steers[0]!.message)).toContain("`recall`");
+    expect(compactionSteer(undefined, { unavailable: true })).toBe(String(steers[0]!.message));
+    expect(
+      w.events
+        .filter((e) => e.type === "run_note" && e.kind === "harness_error")
+        .map((e) => (e as { summary: string }).summary),
+    ).toEqual([expect.stringContaining("the notepad could not be read for the compaction steer (ledger 503)")]);
   });
 
   it("the wrap-up warning is steered once as the deadline nears", async () => {

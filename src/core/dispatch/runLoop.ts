@@ -51,6 +51,7 @@ import type { LedgerRun } from "../runLedger/writeThrough.js";
 import type { RunsReadCapability, SteerCapability } from "../../tools/runs.js";
 import type { WaitCapability } from "./awaitChildren.js";
 import type { SpawnCapability } from "./spawn.js";
+import type { SessionCapability } from "../../tools/session.js";
 import { inFlightToolAfter, quietSuffix } from "../statusCardLabel.js";
 import type { CardShell } from "../statusCardFrame.js";
 import type { RunEnding } from "../runEnding.js";
@@ -136,6 +137,10 @@ export interface RunLoopContext {
   runs?: RunsReadCapability;
   steer?: SteerCapability;
   wait?: WaitCapability;
+  /** The run's reach into its own session log (docs/reference/specs/session-log.md
+   *  item 10) for the `recall` and `notes` tools and the notepad the pi harness
+   *  steers after a compaction; absent for a run without a session. */
+  session?: SessionCapability;
   /** The run's staging counter (record 0033), shared with the request's
    *  staging in the dispatcher so a steer's files never reuse a workspace
    *  path. Absent (a loop driven outside `dispatch()`) → a counter of its own. */
@@ -197,6 +202,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     runs,
     steer,
     wait,
+    session,
     parentRunId,
     coordinator,
     seed,
@@ -486,6 +492,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     ...(runs ? { runs } : {}),
     ...(steer ? { steer } : {}),
     ...(wait ? { wait } : {}),
+    ...(session ? { session } : {}),
     onVerdict,
     onDigest,
     onPrDescription,
@@ -547,6 +554,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
           messages,
           tools: relayedTools(mergeTools(TOOLSETS[agent.toolset] ?? [], mcpForRun?.tools)),
           toolContext,
+          ...(session ? { notepad: () => session.readNotepad() } : {}),
           rules: {
             checkout: binding?.workspace ?? "/workspace",
             ...(ownBranch !== undefined ? { branch: ownBranch } : {}),

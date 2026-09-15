@@ -63,6 +63,7 @@ function isRunEvent(v: unknown): v is RunEvent {
     case "input":
     case "assistant":
     case "context":
+    case "notes":
       return typeof o.text === "string"; // the narrative events carry text, not a summary
     case "run_meta":
       return typeof o.agent === "string" && (o.model === undefined || typeof o.model === "string");

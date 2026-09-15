@@ -68,6 +68,7 @@ import { withContractInFirstUserTurn } from "./ship/codingChild.js";
 import { prepareFreshTurn, settleThread, tellDropped } from "./dispatch/settle.js";
 import { lineageOf, lineageParent, tellParent, type LineageHeard } from "./dispatch/lineage.js";
 import { sessionSeedFor } from "./dispatch/seed.js";
+import { sessionCapabilityFor } from "../tools/session.js";
 import { readThread, stickyAgentOf } from "./dispatch/thread.js";
 import { effectiveHarness } from "./harness/select.js";
 import { runToolCapabilities, type ParentRun } from "./dispatch/spawn.js";
@@ -850,6 +851,16 @@ export async function dispatch(
       resume,
       root,
       ...(contractBlock !== undefined && agent.name === "review" ? { contract: contractBlock } : {}),
+      // What the session already knows (session-log item 10): the notepad and
+      // the newest compaction's summary the seed brought back, for the prompt.
+      ...(session && (session.notepad !== undefined || session.summary !== undefined)
+        ? {
+            session: {
+              ...(session.notepad !== undefined ? { notepad: session.notepad } : {}),
+              ...(session.summary !== undefined ? { summary: session.summary } : {}),
+            },
+          }
+        : {}),
     });
     const { mcpForRun, composeSystem, system } = prompt;
     // The PR head this run reviews — the resolved head, or the one adopted at
@@ -924,6 +935,11 @@ export async function dispatch(
       seed,
       ...(session ? { seedLog: session.log } : {}),
     });
+    // The run's reach into its own session log (session-log item 10): the
+    // `recall` and `notes` tools over the row's place in the log, once the
+    // claim set it; a run without a session (untracked, a ship pipeline, no
+    // ledger) has none and the tools say so.
+    const sessionTools = sessionCapabilityFor(ledgerRun, deps.runLedger);
     // What this run may do to other runs (dispatch/spawn.ts; docs/reference/specs/
     // agent-conductor.md): spawn a child as this run, read the runs its
     // REQUESTER may, steer a child through the inbox a thread reply takes, and
@@ -982,6 +998,7 @@ export async function dispatch(
       runs,
       steer,
       wait,
+      ...(sessionTools ? { session: sessionTools } : {}),
       parentRunId,
       coordinator,
       seed,

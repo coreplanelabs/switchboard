@@ -206,6 +206,34 @@ describe("WorkerRunLedger", () => {
     expect(w.calls[8].path).toBe("/runs/transcript/write");
   });
 
+  // session-log.md item 10: the routes `recall` and `notes` read and write through.
+  it("the search and notepad routes: search posts the key, query and limit and answers the hits and gaps as sent (nothing when the Worker sends none); the notepad read answers the text and time or null; the notepad write is fenced like a row write", async () => {
+    const hits = [{ idx: 4, part: 0, role: "user", kind: "text", text: "fix the lockfile" }];
+    const w = stubWorker((path) =>
+      path === "/runs/session/search"
+        ? { status: 200, data: { hits, gaps: [2] } }
+        : path === "/runs/session/notepad"
+          ? { status: 200, data: { notepad: { text: "keep the helper", updatedAt: 5_000 } } }
+          : path === "/runs/session/notepad/write"
+            ? { status: 409, data: { ok: false, reason: "fenced" } }
+            : { status: 200, data: {} },
+    );
+    const key = "slack:C1:1.0:coding";
+    expect(await w.ledger.searchSession(key, "lockfile", 5)).toEqual({ hits, gaps: [2] });
+    expect(w.calls[0]).toMatchObject({ path: "/runs/session/search", body: { key, query: "lockfile", limit: 5 } });
+    expect(await w.ledger.readNotepad(key)).toEqual({ text: "keep the helper", updatedAt: 5_000 });
+    expect(w.calls[1]).toMatchObject({ path: "/runs/session/notepad", body: { key } });
+    expect(await w.ledger.writeNotepad(key, "g1", "keep the helper")).toEqual({ ok: false, reason: "fenced" });
+    expect(w.calls[2]).toMatchObject({
+      path: "/runs/session/notepad/write",
+      body: { key, gen: "g1", text: "keep the helper" },
+    });
+    const bare = stubWorker(() => ({ status: 200, data: {} }));
+    expect(await bare.ledger.searchSession(key, "lockfile", 5)).toEqual({ hits: [], gaps: [] });
+    expect(await bare.ledger.readNotepad(key)).toBeNull();
+    await expect(w.ledger.searchSession("has space", "x", 1)).rejects.toBeInstanceOf(PermanentStoreError);
+  });
+
   it("errors: 404 is RouteMissingError, 5xx/429 TransientStoreError, other 4xx PermanentStoreError, a malformed run id never leaves the process", async () => {
     await expect(
       stubWorker(() => ({ status: 404, data: { error: "not found" } })).ledger.listLive(),

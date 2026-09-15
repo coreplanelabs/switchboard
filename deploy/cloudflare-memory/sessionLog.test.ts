@@ -1,5 +1,6 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { GAP_MARKER, NOTEPAD_MAX_BYTES } from "../../src/core/runLedger/sessionLog.ts";
 import type { SessionLogDO } from "./worker.ts";
 
 // Feature: docs/reference/specs/session-log.md — one SessionLogDO per thread and
@@ -408,5 +409,106 @@ describe("session log object — the byte policy and the drop", () => {
     expect((await post("/runs/session/read", { key, from: 0 })).data).toEqual({ rows: [], attachments: [] });
     expect(await runInDurableObject(stubOf(key), (inst: SessionLogDO) => inst.search("searching", 5))).toEqual([]);
     expect(await runInDurableObject(stubOf(key), (inst: SessionLogDO) => inst.bytes())).toBe(0);
+    expect((await post("/runs/session/notepad", { key })).data).toEqual({ notepad: null });
+  });
+});
+
+// docs/reference/specs/session-log.md item 10: what `recall` and `notes` read
+// and write — the search in relevance order with each hit's turn and role, the
+// gap rows a search straddles, and the notepad under the owner's fence.
+describe("session log object — the search recall reads and the notepad notes writes", () => {
+  it("the search route answers hits in relevance order — a row matching two of the query's words ahead of an older row matching one — each with its turn, part, role, kind and text", async () => {
+    const key = sessionKey();
+    await post("/runs/session/owner", { key, runId: "r1", gen: "g1" });
+    await post("/runs/session/write", {
+      key,
+      gen: "g1",
+      rows: [
+        text(0, 0, "please fix the flaky lockfile test"),
+        text(1, 0, "the lockfile itself is fine", "assistant"),
+        result(2, 0, "c1", "1 failed: lockfile.test.ts"),
+        text(3, 0, "unrelated remark"),
+      ],
+      attachments: [],
+    });
+    const { status, data } = await post("/runs/session/search", { key, query: "flaky lockfile", limit: 5 });
+    expect(status).toBe(200);
+    const hits = data.hits as Array<{ idx: number; part: number; role?: string; kind: string; text: string }>;
+    // The two-word match leads whatever its age; the two one-word matches follow in bm25's order, not the log's.
+    expect(hits[0]).toEqual({
+      idx: 0,
+      part: 0,
+      role: "user",
+      kind: "text",
+      text: "please fix the flaky lockfile test",
+    });
+    expect(
+      hits
+        .slice(1)
+        .map((h) => h.idx)
+        .sort(),
+    ).toEqual([1, 2]);
+    const byIdx = new Map(hits.map((h) => [h.idx, h]));
+    expect(byIdx.get(1)).toMatchObject({ role: "assistant", kind: "text" });
+    expect(byIdx.get(2)).toMatchObject({ role: "user", kind: "tool_result" });
+    expect(data.gaps).toEqual([]);
+    expect((await post("/runs/session/search", { key, query: "flaky lockfile", limit: 1 })).data.hits).toHaveLength(1);
+  });
+
+  it("a search that straddles a gap marker names the gap's turn; hits on one side of it name none", async () => {
+    const key = sessionKey();
+    await post("/runs/session/owner", { key, runId: "r1", gen: "g1" });
+    await post("/runs/session/write", {
+      key,
+      gen: "g1",
+      rows: [text(0, 0, "alpha one"), text(1, 0, GAP_MARKER), text(2, 0, "alpha two"), text(3, 0, "beta")],
+      attachments: [],
+    });
+    const straddling = (await post("/runs/session/search", { key, query: "alpha", limit: 5 })).data;
+    expect((straddling.hits as Array<{ idx: number }>).map((h) => h.idx).sort()).toEqual([0, 2]);
+    expect(straddling.gaps).toEqual([1]);
+    const oneSide = (await post("/runs/session/search", { key, query: "beta", limit: 5 })).data;
+    expect((oneSide.hits as Array<{ idx: number }>).map((h) => h.idx)).toEqual([3]);
+    expect(oneSide.gaps).toEqual([]);
+  });
+
+  it("the notepad is written whole under the owner's fence and read back with its time: unknown-run before an owner, fenced for another generation, 400 over the size naming it", async () => {
+    const key = sessionKey();
+    expect(await post("/runs/session/notepad/write", { key, gen: "g1", text: "first note" })).toEqual({
+      status: 409,
+      data: { ok: false, reason: "unknown-run" },
+    });
+    await post("/runs/session/owner", { key, runId: "r1", gen: "g1" });
+    expect((await post("/runs/session/notepad/write", { key, gen: "g1", text: "first note" })).data).toEqual({
+      ok: true,
+    });
+    const read = (await post("/runs/session/notepad", { key })).data as {
+      notepad: { text: string; updatedAt: number };
+    };
+    expect(read.notepad.text).toBe("first note");
+    expect(typeof read.notepad.updatedAt).toBe("number");
+    expect(await post("/runs/session/notepad/write", { key, gen: "g2", text: "zombie" })).toEqual({
+      status: 409,
+      data: { ok: false, reason: "fenced" },
+    });
+    expect((await post("/runs/session/notepad/write", { key, gen: "g1", text: "second note" })).data).toEqual({
+      ok: true,
+    });
+    expect(((await post("/runs/session/notepad", { key })).data as { notepad: { text: string } }).notepad.text).toBe(
+      "second note",
+    );
+    const over = await post("/runs/session/notepad/write", { key, gen: "g1", text: "x".repeat(NOTEPAD_MAX_BYTES + 1) });
+    expect(over.status).toBe(400);
+    expect(String(over.data.error)).toContain(String(NOTEPAD_MAX_BYTES));
+    expect(await runInDurableObject(stubOf(key), (inst: SessionLogDO) => inst.notepad())).toMatchObject({
+      text: "second note",
+    });
+  });
+
+  it("a search with no words, a non-integer limit and a notepad write without text are 400", async () => {
+    const key = sessionKey();
+    expect((await post("/runs/session/search", { key, query: "   ", limit: 5 })).status).toBe(400);
+    expect((await post("/runs/session/search", { key, query: "alpha", limit: 0 })).status).toBe(400);
+    expect((await post("/runs/session/notepad/write", { key, gen: "g1" })).status).toBe(400);
   });
 });

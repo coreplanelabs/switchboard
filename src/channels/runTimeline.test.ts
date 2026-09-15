@@ -662,4 +662,13 @@ describe("createRunTimeline — artifact", () => {
       t.push({ type: "artifact", direction: "in", key: "k", name: "", size: 1, contentType: "text/plain" }),
     ).toEqual([]);
   });
+
+  // docs/reference/specs/session-log.md item 10: the notepad as the `notes` tool
+  // last wrote it is a note row on the page, its kind the tool's name.
+  it("a notes event is a note row carrying the notepad's text under the kind `notes`", () => {
+    const t = createRunTimeline();
+    expect(t.push({ type: "notes", text: "decided: keep the helper", at: 5 })).toEqual([
+      { kind: "note", text: "decided: keep the helper", noteKind: "notes", mode: undefined, at: 5 },
+    ]);
+  });
 });

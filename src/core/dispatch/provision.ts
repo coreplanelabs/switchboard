@@ -735,6 +735,26 @@ export function mintRunBearer(deps: ProvisionDeps, ctx: MintBearerContext): stri
 /** The prompt as composed for the first turn: the MCP tools discovered for this
  *  run, the composer a re-review recomposes with (pinned to a head), the head
  *  this run reviews, and the system prompt itself. */
+/** The block a follow-up seeded from its session starts with (session-log item
+ *  10): the agent's own notes for this thread, then the summary its newest
+ *  compaction wrote — each only when there is one; undefined when neither. */
+export function sessionNotesBlock(session: { notepad?: string; summary?: string }): string | undefined {
+  const parts: string[] = [];
+  const notepad = session.notepad?.trim();
+  const summary = session.summary?.trim();
+  if (notepad)
+    parts.push(
+      "YOUR NOTES FOR THIS THREAD (kept with the `notes` tool — the one thing sure to survive a compaction and reach the next run here; replace them whole when they change):\n" +
+        notepad,
+    );
+  if (summary)
+    parts.push(
+      "SUMMARY OF THE EARLIER CONVERSATION (written when the context was compacted; every earlier turn is still reachable with `recall`):\n" +
+        summary,
+    );
+  return parts.length ? parts.join("\n\n") : undefined;
+}
+
 export interface ComposedPrompt {
   mcpForRun: McpToolsForRun;
   composeSystem: ReturnType<typeof makeSystemComposer>;
@@ -759,6 +779,11 @@ export interface PromptContext {
   verifiedAtAttach: boolean;
   resume: ResumeContext | undefined;
   root: Span;
+  /** What this session already knows (docs/reference/specs/session-log.md item
+   *  10), for a follow-up seeded from its session log: the agent's notepad as
+   *  the `notes` tool last wrote it, and the summary its newest compaction
+   *  wrote. Rendered as one block right after memory; absent on every other run. */
+  session?: { notepad?: string; summary?: string };
   /** A plan unit's rendered contract for a review child (agent-ship item 13):
    *  placed right after the REVIEW TARGET block, as the ship pipeline's review
    *  round places it. Absent on every other request. */
@@ -880,6 +905,7 @@ export async function composePrompt(deps: ProvisionDeps, ctx: PromptContext): Pr
   // The prompt waits on the memory read here: `dispatch.compose` is that wait
   // (the composition itself is synchronous).
   const memoryBlock = await root.span("dispatch.compose", () => memoryBlockP);
+  const notesBlock = ctx.session ? sessionNotesBlock(ctx.session) : undefined;
   const composeSystem = makeSystemComposer({
     agent,
     resident: resident === true,
@@ -898,6 +924,7 @@ export async function composePrompt(deps: ProvisionDeps, ctx: PromptContext): Pr
     ...(ctx.contract !== undefined ? { contract: ctx.contract } : {}),
     blocks: {
       memory: memoryBlock,
+      notes: notesBlock,
       config: configBlock,
       about: aboutBlock,
       instructions: instructionsBlock,

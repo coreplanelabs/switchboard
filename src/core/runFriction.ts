@@ -193,14 +193,16 @@ interface PendingCall {
 }
 
 /** The event types that tell the run's story rather than its steps — the
- *  narrative (`input`/`context`/`assistant`/`answer`) and what the run is about. */
-type NarrativeEvent = Extract<RunEvent, { type: "input" | "context" | "assistant" | "answer" | "run_meta" }>;
+ *  narrative (`input`/`context`/`assistant`/`answer`, the `notes` the agent
+ *  kept) and what the run is about. */
+type NarrativeEvent = Extract<RunEvent, { type: "input" | "context" | "assistant" | "answer" | "notes" | "run_meta" }>;
 function isNarrative(ev: RunEvent): ev is NarrativeEvent {
   return (
     ev.type === "input" ||
     ev.type === "context" ||
     ev.type === "assistant" ||
     ev.type === "answer" ||
+    ev.type === "notes" ||
     ev.type === "run_meta"
   );
 }

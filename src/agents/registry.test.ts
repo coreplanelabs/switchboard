@@ -212,6 +212,30 @@ describe("the workspace prompts name the image toolchain", () => {
     }
   });
 
+  // docs/reference/specs/session-log.md item 10 (record 0035, "The notepad"):
+  // every prompt that can run on the pi harness says what belongs in the
+  // notes and that recall reaches every earlier turn, identically.
+  it("every workspace prompt carries the notepad instruction verbatim — recall for the reach back, notes for what must survive a compaction — and the workspace-less prompts do not", () => {
+    const paragraph = /YOUR NOTES AND YOUR REACH BACK\.[\s\S]*?not only at the end\./;
+    const carried = Object.entries({ ...cold, ...resident }).map(([name, sys]) => {
+      expect(sys, name).toContain("`recall`");
+      expect(sys, name).toContain("`notes`");
+      expect(sys, name).toMatch(/at most 8 KiB/);
+      expect(sys, name).toMatch(/survive a compaction/);
+      const m = sys.match(paragraph);
+      expect(m, name).not.toBeNull();
+      return m![0];
+    });
+    expect(new Set(carried).size).toBe(1);
+    for (const [name, sys] of Object.entries({
+      general: AGENTS.general.system,
+      research: AGENTS.research.system,
+      conductor: AGENTS.conductor.system,
+    })) {
+      expect(sys, name).not.toContain("YOUR NOTES AND YOUR REACH BACK");
+    }
+  });
+
   // docs/reference/specs/agent-coding.md item 10: the one way a run's
   // screenshot reaches the person, said identically in both coding prompts.
   it("both coding prompts route files the person should see through attach_file — screenshots named, a link called not a picture; the review prompts do not", () => {
