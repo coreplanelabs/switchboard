@@ -85,6 +85,7 @@ import { residentAdminFromConfig } from "./core/residentAdmin.js";
 import { NO_FLEET, residentFleetWatcherFor, type ResidentFleetFacts } from "./core/residentFleet.js";
 import type { ChannelIO, OpenedThread, RunReceipt, StatusHandle, StatusUpdate } from "./core/types.js";
 import { ProviderRegistry } from "./providers/registry.js";
+import { PiAiProviders } from "./core/harness/piAi.js";
 import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 import { buildMcp } from "./mcp/index.js";
 import { NullMcpToolSource } from "./mcp/source.js";
@@ -612,6 +613,8 @@ async function main(): Promise<void> {
   globalThis.console = new Console({ stdout: process.stderr, stderr: process.stderr });
   const { config, runStore } = await bot();
   const providers = new ProviderRegistry(config.config.providers);
+  // The same table on pi's model library, for the router's and reflection's calls (harness-pi.md item 13).
+  const completions = new PiAiProviders(config.config.providers);
   const skills = new BundledSkillStore(DEFAULT_SKILLS_DIR);
   // What is on in this process (src/core/capabilities.ts): the CLI's `ask`
   // resolves it once from the same config the bot would, so a run started here
@@ -646,6 +649,7 @@ async function main(): Promise<void> {
   const deps: CoreDeps = {
     config,
     providers,
+    completions,
     capabilities,
     residentFleet,
     ...(artifacts ? { artifacts } : {}),

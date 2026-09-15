@@ -6,6 +6,7 @@ import { installationPath } from "./deploy/operatorRoot.js";
 import { openConfigStore } from "./config.js";
 import { capabilitiesFrom } from "./core/capabilities.js";
 import { ProviderRegistry } from "./providers/registry.js";
+import { PiAiProviders } from "./core/harness/piAi.js";
 import { createSlackApp } from "./channels/slack.js";
 import { SlackChannelDirectory } from "./channels/slackChannelDirectory.js";
 import { createIngressHandler, parseIngressTokens } from "./channels/http.js";
@@ -170,6 +171,9 @@ export async function runBot(): Promise<void> {
   });
   console.log(`[capabilities] ${JSON.stringify(capabilities)}`);
   const providers = new ProviderRegistry(config.config.providers);
+  // The same table on pi's model library, for the model calls made outside a
+  // run loop — the router's and reflection's (docs/reference/specs/harness-pi.md item 13).
+  const completions = new PiAiProviders(config.config.providers);
   // Bundled skills (docs/reference/specs/skills.md): loaded once from the seeded `skills/` dir and shared
   // across all channels via CoreDeps, so review/coding get their scoped skill
   // list in-prompt and can load bodies on demand with use_skill.
@@ -370,6 +374,7 @@ export async function runBot(): Promise<void> {
   const deps: CoreDeps = {
     config,
     providers,
+    completions,
     spanLog,
     runBearers,
     harness: {

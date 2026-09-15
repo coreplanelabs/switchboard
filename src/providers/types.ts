@@ -148,6 +148,9 @@ export interface ProviderConfig {
   baseUrl?: string;
 }
 
+/** The env var Anthropic's own SDK reads when an `anthropic` provider block names none. */
+export const ANTHROPIC_API_KEY_ENV = "ANTHROPIC_API_KEY";
+
 /** "anthropic/claude-opus-5" -> { provider: "anthropic", model: "claude-opus-5" } */
 export function parseModelRef(ref: string): { provider: string; model: string } {
   const i = ref.indexOf("/");

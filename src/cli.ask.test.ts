@@ -21,12 +21,37 @@ let script: Script = { kind: "answer", text: "four" };
 let dir: string;
 
 beforeAll(async () => {
+  // Two callers reach this fake in one `ask`: the run loop's compatible adapter
+  // asks for a whole completion, and the router — on pi's model library, which
+  // always streams Chat Completions (harness-pi.md item 13) — asks with
+  // `stream: true`. The same scripted answer is served in whichever form the
+  // request names, as the load harness's scripted provider serves it.
   server = createServer((req, res) => {
-    req.on("data", () => {});
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => {
       if (script.kind === "refuse") {
         res.writeHead(script.status, { "content-type": "application/json" });
         res.end(script.body);
+        return;
+      }
+      const { stream } = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { stream?: boolean };
+      if (stream === true) {
+        const chunk = (delta: Record<string, unknown>, finish: string | null, usage?: Record<string, number>) =>
+          `data: ${JSON.stringify({
+            id: "c1",
+            object: "chat.completion.chunk",
+            created: 1,
+            model: "m",
+            choices: [{ index: 0, delta, finish_reason: finish }],
+            ...(usage ? { usage } : {}),
+          })}\n\n`;
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.end(
+          chunk({ role: "assistant", content: script.text }, null) +
+            chunk({}, "stop", { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }) +
+            "data: [DONE]\n\n",
+        );
         return;
       }
       res.writeHead(200, { "content-type": "application/json" });

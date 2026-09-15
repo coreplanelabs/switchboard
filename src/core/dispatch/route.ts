@@ -5,12 +5,14 @@
 // otherwise be `defaults.agent` — a directive, the thread's sticky preset, a
 // user or channel `agent` each skip it — and unless the deployment turned it
 // off (`routing: { auto: false }`; on by default, `routingOn`).
-// It asks the deployment's fast model for one JSON object over the preset
-// table (rendered from the registry, never copied), the thread's last
-// directives and the request text quoted as untrusted data; anything but a
-// preset the requester may run is no route, and the request runs on
-// `defaults.agent` exactly as it would have. Whatever it picks meets the agent
-// gate and the profile gate like a typed directive: the router only proposes.
+// It asks the deployment's fast model — through pi's model library, the
+// bot's provider layer for a call made outside a run loop (harness-pi.md item
+// 13) — for one JSON object over the preset table (rendered from the
+// registry, never copied), the thread's last directives and the request text
+// quoted as untrusted data; anything but a preset the requester may run is no
+// route, and the request runs on `defaults.agent` exactly as it would have.
+// Whatever it picks meets the agent gate and the profile gate like a typed
+// directive: the router only proposes.
 // A routed preset dispatches at once — the owner's call in this stage's
 // review: a wrong route to coding costs a pull request, cheap to undo, and the
 // card's `routed:` reason is the affordance. `ship` is the exception,
@@ -29,8 +31,8 @@ import { TOOLSETS } from "../../tools/workspace.js";
 import { routingOn, type ConfigStore, type ResolvedRequest } from "../../config.js";
 import type { RouteAnswerMode } from "../../config/validate.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
-import type { ProviderRegistry } from "../../providers/registry.js";
 import { parseModelRef, type Provider, type ToolDef } from "../../providers/types.js";
+import type { ProviderTable } from "../harness/piAi.js";
 import { oneLine, redactAndCap } from "../redact.js";
 import { ROUTED_LABEL_PREFIX } from "../statusCardFrame.js";
 import type { AgentSource } from "../runEvents.js";
@@ -579,7 +581,10 @@ export interface RouteDecided {
  *  extends this; a caller's shape is unchanged. */
 export interface RouteDeps {
   config: ConfigStore;
-  providers: ProviderRegistry;
+  /** The provider table `config.yaml` names, on pi's model library
+   *  (`PiAiProviders`): where the router's one call — and reflection's — is
+   *  made, apart from the loop's own `providers` until the native loop retires. */
+  completions: ProviderTable;
   /** The router's model call. Default: the provider `routing.model` names,
    *  else the one behind `defaults.models.general`. Tests script one. */
   routeModel?: RouteModel;
@@ -668,7 +673,7 @@ export async function routeRequest(deps: RouteDeps, ctx: RouteStageContext): Pro
     if (deps.routeModel) model = deps.routeModel;
     else {
       const ref = parseModelRef(modelRef);
-      model = providerRouteModel(deps.providers.get(ref.provider), ref.model, {
+      model = providerRouteModel(deps.completions.get(ref.provider), ref.model, {
         ...(cfg.routing?.answer ? { answer: cfg.routing.answer } : {}),
       });
     }

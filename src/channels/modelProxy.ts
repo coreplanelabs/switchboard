@@ -19,9 +19,9 @@ import { once } from "node:events";
 import type { RunBearerGrant, RunBearerStore } from "../core/modelProxy/runBearers.js";
 import type { SpanAttrs } from "../core/trace/attrs.js";
 import type { Clock } from "../core/trace/types.js";
-import { ANTHROPIC_API_KEY_ENV, usageFromAnthropic } from "../providers/anthropic.js";
+import { usageFromAnthropic } from "../providers/anthropic.js";
 import { usageFromOpenAI } from "../providers/openaiCompat.js";
-import type { ProviderConfig, TokenUsage } from "../providers/types.js";
+import { ANTHROPIC_API_KEY_ENV, type ProviderConfig, type TokenUsage } from "../providers/types.js";
 import type { Secrets } from "../secrets.js";
 import { readBody } from "./http.js";
 

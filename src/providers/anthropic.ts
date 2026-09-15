@@ -1,21 +1,19 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { Effort } from "../effort.js";
 import { processSecrets, type Secret, type Secrets } from "../secrets.js";
-import type {
-  ChatMessage,
-  CompletionRequest,
-  CompletionResult,
-  ContentPart,
-  Provider,
-  ProviderConfig,
-  TokenUsage,
+import {
+  ANTHROPIC_API_KEY_ENV,
+  type ChatMessage,
+  type CompletionRequest,
+  type CompletionResult,
+  type ContentPart,
+  type Provider,
+  type ProviderConfig,
+  type TokenUsage,
 } from "./types.js";
 
 /** The slice of the SDK client the provider uses — injectable for tests. */
 export type AnthropicClientLike = Pick<Anthropic, "messages">;
-
-/** The env var the SDK itself reads when a provider block names none. */
-export const ANTHROPIC_API_KEY_ENV = "ANTHROPIC_API_KEY";
 
 /** The Anthropic credential this process spends — THE one getter. The
  *  provider's client reads its key here, and so does everything else that

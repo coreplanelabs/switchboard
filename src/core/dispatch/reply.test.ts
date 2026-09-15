@@ -390,7 +390,7 @@ describe("afterReply — the reflection pass", () => {
     const deps: ReplyDeps = {
       config,
       memory: new NullMemoryStore(),
-      providers: { get: () => ({}) as never } as never,
+      completions: { get: () => ({}) as never },
     };
     const registry = new RunRegistry({ genId: () => "run-a", genToken: () => "tok" });
     const run = registry.create(agentName, {

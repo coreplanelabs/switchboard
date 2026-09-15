@@ -27,6 +27,7 @@ import { resolveShipCaps, SHIP_DEFAULT_MAX_MINUTES, shipPresetFor } from "./core
 import { DEFAULT_MAX_CHILDREN, maxChildrenOf } from "./core/dispatch/spawn.js";
 import { OpenAICompatProvider } from "./providers/openaiCompat.js";
 import { ProviderRegistry } from "./providers/registry.js";
+import { PiAiProviders } from "./core/harness/piAi.js";
 
 // Feature: docs/reference/specs/routing-and-config.md — layered resolution & permission gates.
 
@@ -883,6 +884,33 @@ describe("the example config's commented provider blocks", () => {
     expect(slashed.config.providers.openrouter?.baseUrl).toBe("https://openrouter.ai/api/v1/");
     const fromSlashed = new ProviderRegistry(slashed.config.providers).get("openrouter");
     expect((fromSlashed as unknown as { baseUrl: string }).baseUrl).toBe("https://openrouter.ai/api/v1");
+  });
+
+  // Feature: docs/reference/specs/harness-pi.md item 13 — the same block is the
+  // one the router and reflection reach OpenRouter through, on pi's library.
+  it("the OpenRouter block, uncommented, is one openai-completions model on pi's library too — the same base, the trailing slash stripped, the key from the block's variable", () => {
+    const store = storeFrom(uncommented("openrouter"));
+    const provider = new PiAiProviders(store.config.providers, { secrets: secretsFrom({}) }).get("openrouter");
+    expect(provider).toMatchObject({
+      name: "openrouter",
+      api: "openai-completions",
+      baseUrl: "https://openrouter.ai/api/v1",
+    });
+    expect(provider.model("anthropic/claude-sonnet-4", 100)).toMatchObject({
+      id: "anthropic/claude-sonnet-4",
+      provider: "openrouter",
+      api: "openai-completions",
+      baseUrl: "https://openrouter.ai/api/v1",
+    });
+    const slashed = storeFrom(
+      uncommented("openrouter").replace(
+        "baseUrl: https://openrouter.ai/api/v1",
+        "baseUrl: https://openrouter.ai/api/v1/",
+      ),
+    );
+    expect(new PiAiProviders(slashed.config.providers, { secrets: secretsFrom({}) }).get("openrouter").baseUrl).toBe(
+      "https://openrouter.ai/api/v1",
+    );
   });
 });
 

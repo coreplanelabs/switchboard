@@ -46,6 +46,8 @@ Implement the `Provider` interface from `src/providers/types.ts` in a new file b
 
 An adapter turns one model call into a vendor's HTTP shape and back; it knows nothing about channels, permissions or where tools run. The contract is the [run loop](../reference/specs/run-loop.md) spec.
 
+Two calls are not the run loop's: the request router's and memory reflection's go through pi's model library (`@earendil-works/pi-ai`, `src/core/harness/piAi.ts`), which reads the same two `type`s — `anthropic` and `openai-compatible` — off the same block, so a new block needs nothing there; a new `type` would need its API named there too ([harness-pi.md](../reference/specs/harness-pi.md) item 13).
+
 ## Next
 
 - [Seams with two implementations](../decisions/0001-seams-with-two-implementations.md): why the boundary is an interface.
