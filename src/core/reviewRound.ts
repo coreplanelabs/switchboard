@@ -26,7 +26,7 @@ import {
   type ExecutorSelection,
   type WorkspaceBinding,
 } from "../execution/factory.js";
-import type { Executor, ReleaseMode } from "../execution/executor.js";
+import type { Executor, ReleaseMode, ReleaseOptions } from "../execution/executor.js";
 import type { RunnableTool, ToolContext } from "../tools/runnableTool.js";
 import type { Span } from "../core/trace/types.js";
 import type { Backend } from "../core/trace/attrs.js";
@@ -84,6 +84,10 @@ export interface RoundWorkspace {
     hardStopped: boolean;
     /** The `post.workspace_release` span: the executor's release becomes its child. */
     span?: Span;
+    /** The branches the run pushed and the pull requests they head (resident-repos
+     *  item 16a): handed to the workspace's owner so the thread remembers them
+     *  past the tree. Absent when the run pushed nothing. */
+    pushed?: ReleaseOptions["pushed"];
   }): Promise<void>;
 }
 
@@ -131,12 +135,20 @@ export async function attachRoundWorkspace(input: {
     },
     input.span,
   );
-  const release = async (opts: { hardStopped: boolean; span?: Span }): Promise<void> => {
+  const release = async (opts: {
+    hardStopped: boolean;
+    span?: Span;
+    pushed?: ReleaseOptions["pushed"];
+  }): Promise<void> => {
     const { executor } = selection;
     if (!executor.release) return;
     const mode = releaseModeFor(profile.identity, opts);
     try {
-      const r = await executor.release(mode, opts.span ? { span: opts.span } : undefined);
+      const releaseOpts: ReleaseOptions = {
+        ...(opts.span ? { span: opts.span } : {}),
+        ...(opts.pushed !== undefined && opts.pushed.length > 0 ? { pushed: opts.pushed } : {}),
+      };
+      const r = await executor.release(mode, Object.keys(releaseOpts).length > 0 ? releaseOpts : undefined);
       console.log(`[release] ${input.logKey} ${r.released ? "released" : "kept"}${r.reason ? ` (${r.reason})` : ""}`);
     } catch (err) {
       console.warn(`[release] ${input.logKey} failed: ${err instanceof Error ? err.message : String(err)}`);

@@ -56,7 +56,7 @@ import { startReviewDescription } from "../reviewDescription.js";
 import { isSpanRecord, type RunEvent } from "../runEvents.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "../runFriction.js";
 import { markdownOutput } from "../llmOutput/index.js";
-import type { RunSeed, RunStatus } from "../runRecord.js";
+import { pushedBranchesOf, type RunSeed, type RunStatus } from "../runRecord.js";
 import type { RunHandle, RunRegistry } from "../runRegistry.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
 import type { RunsReadCapability, SteerCapability } from "../../tools/runs.js";
@@ -475,8 +475,19 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
   // depends on it, so it must never sit between "answer ready" and the
   // thread. Hard-stop is read at CALL time — it may land during the run.
   // Under `post.workspace_release`: the release's own call is that span's child.
-  const releaseWorkspace = (span?: Span) =>
-    round.release({ hardStopped: run.control.requested === "hard", ...(span ? { span } : {}) });
+  // The release hands over what the run pushed (resident-repos item 16a) —
+  // the branches its `pr_opened` events name, read off the run's own backlog
+  // (the same read the finish makes) at CALL time so the post-step's event is
+  // in — so a resident thread remembers its own branches once the clean tree
+  // is gone and a follow-up can rebind onto them.
+  const releaseWorkspace = (span?: Span) => {
+    const pushed = pushedBranchesOf(registry.snapshot(run.id, run.token)?.events ?? []);
+    return round.release({
+      hardStopped: run.control.requested === "hard",
+      ...(span ? { span } : {}),
+      ...(pushed.length > 0 ? { pushed } : {}),
+    });
+  };
   // One tool context for the whole run: the first turn and any re-review
   // turn (settleReviewedHead) share it, so submit_pr_description and the
   // progress checklist keep flowing to the same hooks.

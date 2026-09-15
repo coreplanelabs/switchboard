@@ -31,7 +31,7 @@ import {
   type ReleaseMode,
   type ReleaseResult,
 } from "./executor.js";
-import type { ExecTraceOptions } from "./executor.js";
+import type { ExecTraceOptions, ReleaseOptions } from "./executor.js";
 
 // Remote execution against a resident repo environment — the always-warm
 // per-repo service behind the resident Worker (deploy/cloudflare-resident/).
@@ -532,15 +532,15 @@ export class ResidentExecutor implements Executor {
    *  lets the resident keep a worktree with uncommitted/unpushed work — the
    *  binding (ref) survives either way, so the next attach recreates
    *  the tree on the same ref. Best-effort by contract: never throws. */
-  async release(mode: ReleaseMode, opts?: ExecTraceOptions): Promise<ReleaseResult> {
+  async release(mode: ReleaseMode, opts?: ReleaseOptions): Promise<ReleaseResult> {
     try {
-      const { status, data } = await this.call(
-        "/detach",
-        { force: mode === "always" },
-        DETACH_TIMEOUT_MS,
-        undefined,
-        opts?.span,
-      );
+      // What the run pushed rides along when there is something to hand over
+      // (docs/reference/specs/resident-repos.md item 16a): the resident
+      // remembers it on the binding before the tree goes. Sent only then, so
+      // an older resident sees the body it always did.
+      const body: Record<string, unknown> = { force: mode === "always" };
+      if (opts?.pushed !== undefined && opts.pushed.length > 0) body.pushed = opts.pushed;
+      const { status, data } = await this.call("/detach", body, DETACH_TIMEOUT_MS, undefined, opts?.span);
       if (status !== 200) return { released: false, reason: `HTTP ${status}: ${String(data.error ?? "")}` };
       return { released: data.released === true, reason: typeof data.reason === "string" ? data.reason : undefined };
     } catch (err) {

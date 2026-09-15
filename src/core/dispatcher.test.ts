@@ -3277,6 +3277,38 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     expect(replies.some((r) => /PR opened/.test(r) && r.includes("`plan/p/u1` → `main`"))).toBe(true);
   });
 
+  // resident-repos item 16: the release hands the resident the branch the run
+  // pushed and the PR it heads — read off the run's own `pr_opened` event, so
+  // the thread remembers the branch after its clean tree is released and a
+  // follow-up can rebind onto it; a run that pushed nothing hands nothing.
+  it("a coding run that opened a pull request releases its workspace with `pushed` naming the branch and the PR; a run that opened none releases without it", async () => {
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    const { executor } = codingExecutor({ head: HEAD, branch: "fix/x", bindingRef: "main" });
+    const releases: Array<{ mode: string; pushed?: unknown }> = [];
+    Object.assign(executor, {
+      release: async (mode: string, opts?: { pushed?: unknown }) => {
+        releases.push({ mode, ...(opts?.pushed !== undefined ? { pushed: opts.pushed } : {}) });
+        return { released: true };
+      },
+    });
+    deps.openPullRequest = openSpy({ number: 41 }).fn;
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(releases).toEqual([{ mode: "if-clean", pushed: [{ ref: "fix/x", pr: 41 }] }]);
+
+    const none = codingDeps(describeThenAnswer(undefined));
+    const bare = codingExecutor({ head: HEAD, bindingRef: "main" }); // no branch, no push
+    const bareReleases: Array<{ mode: string; pushed?: unknown }> = [];
+    Object.assign(bare.executor, {
+      release: async (mode: string, opts?: { pushed?: unknown }) => {
+        bareReleases.push({ mode, ...(opts?.pushed !== undefined ? { pushed: opts.pushed } : {}) });
+        return { released: true };
+      },
+    });
+    await dispatch(none, msg("agent:coding fix it", "slack:UADMIN"), fakeIO().io);
+    expect(bareReleases).toEqual([{ mode: "if-clean" }]);
+  });
+
   it("the same child without a coordinator tag: the binding ref is the branch, so the branch is the base — no PR call, and instead of silence the record carries a `pr_not_opened` note and the reply says the branch is the base", async () => {
     const deps = codingDeps(describeThenAnswer(DESCRIPTION));
     codingExecutor({ head: HEAD, branch: "plan/p/u1", bindingRef: "plan/p/u1" });

@@ -406,6 +406,9 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
         url: "https://github.com/acme/api/pull/700",
         number: 700,
         created: false,
+        // The branch the push landed on rides the event (resident-repos item
+        // 16): the run's release hands it to the resident as the thread's own.
+        head: "dependabot/github_actions/actions-4c45254bbe",
       }),
     ]);
   });

@@ -6,6 +6,7 @@ import { BASH_TIMEOUT_MS, bashTimeoutNote, clampBashTimeout } from "./bashTimeou
 import { MAX_READ_BYTES, tooLargeMessage } from "./binaryRead.js";
 import type { Span } from "../core/trace/types.js";
 import { systemClock } from "../core/trace/clock.js";
+import type { PushedBranch } from "./residentRebind.js";
 import { publicEnv } from "../secrets.js";
 
 // The timeout policy (default/floor/ceiling + clamp) lives in bashTimeout.ts
@@ -23,6 +24,15 @@ export { BASH_TIMEOUT_MS, BASH_TIMEOUT_MAX_MS, EXEC_CALL_MARGIN_MS, clampBashTim
  *  21). Absent from a caller with no trace: the call is then a plain fetch. */
 export interface ExecTraceOptions {
   span?: Span;
+}
+
+/** What a release tells the workspace's owner beside the trace: the branches
+ *  the run pushed and the pull requests they head (docs/reference/specs/
+ *  resident-repos.md item 16a) — read off the run's own `pr_opened` events,
+ *  so the resident's thread remembers its own branches past the tree a clean
+ *  release removes. Absent, or empty, when the run pushed nothing. */
+export interface ReleaseOptions extends ExecTraceOptions {
+  pushed?: readonly PushedBranch[];
 }
 
 export interface Executor {
@@ -45,7 +55,7 @@ export interface Executor {
    *  (a resident's pool user + worktree). "always" — nothing to preserve
    *  (read-only agents); "if-clean" — keep the workspace if it has uncommitted
    *  or unpushed work. Best-effort: implementations report, never throw. */
-  release?(mode: ReleaseMode, opts?: ExecTraceOptions): Promise<ReleaseResult>;
+  release?(mode: ReleaseMode, opts?: ReleaseOptions): Promise<ReleaseResult>;
   /** Optional: bring the workspace to `sha` — the PR head that moved while a
    *  review ran (agent-review.md item 12) — fetching as needed, and answer the
    *  commit the workspace is now at (which may differ if the ref moved again).

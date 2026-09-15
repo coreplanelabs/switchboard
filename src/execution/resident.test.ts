@@ -936,6 +936,30 @@ describe("ResidentExecutor.release — return the thread's pool user when a run 
     expect(sentBody(calls[1])).toMatchObject({ force: false });
   });
 
+  // docs/reference/specs/resident-repos.md item 16: the release hands the
+  // resident what the run pushed — the exact fact the thread remembers past
+  // the tree's removal — and only when there is something to hand.
+  it("sends the run's pushed branches in the detach body only when given and non-empty", async () => {
+    const { calls } = stubFetch(
+      { body: ATTACH_OK },
+      { body: { released: true } },
+      { body: { released: true } },
+      { body: { released: true } },
+    );
+    const ex = await ResidentExecutor.open({ ...OPTS, refHint: "master" });
+    await ex.release("if-clean", { pushed: [{ ref: "fix/x", pr: 7 }] });
+    expect(sentBody(calls[1])).toEqual({
+      resource: "repo:jshttp/vary",
+      threadKey: "slack:CX:1.0",
+      force: false,
+      pushed: [{ ref: "fix/x", pr: 7 }],
+    });
+    await ex.release("if-clean", { pushed: [] });
+    expect(sentBody(calls[2])).not.toHaveProperty("pushed");
+    await ex.release("always");
+    expect(sentBody(calls[3])).not.toHaveProperty("pushed");
+  });
+
   it("bounds /detach with its own short AbortSignal (control-plane POST, not the exec ceiling)", async () => {
     const { calls } = stubFetch({ body: ATTACH_OK }, { body: { released: true } });
     const ex = await ResidentExecutor.open(OPTS);
