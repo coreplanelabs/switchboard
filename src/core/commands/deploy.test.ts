@@ -253,7 +253,7 @@ describe("deploy.plan", () => {
     if (!res.ok) throw new Error(res.message);
     expect((res.value as unknown as DeployPlan).checks.nodeModulesMissing).toEqual(["deploy/cloudflare-sandbox"]);
     expect(renderText(commands.get("deploy.plan")!, res.value)).toContain(
-      "node_modules missing in deploy/cloudflare-sandbox — the runner will `npm ci` there first",
+      "install missing for deploy/cloudflare-sandbox — the runner will `npm ci` at the checkout's root first",
     );
     const all = await neverRuns().commands.invoke("deploy.plan", {}, cli);
     if (!all.ok) throw new Error(all.message);

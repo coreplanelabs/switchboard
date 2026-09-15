@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute } from "node:path";
 import { startProcessRoot } from "../core/requestTrace.js";
 import { systemClock } from "../core/trace/clock.js";
 import { createLogSink } from "../core/trace/sinks.js";
@@ -37,7 +37,7 @@ import { baseConfigDocument, ConfigDocumentClient, STATE_WORKER_TOKEN_ENV } from
 import { BUILD_COMMIT_ENV } from "./buildStamp.js";
 import { cliVersionOnHost, ensureWorkAreaOnHost, OPERATOR_ROOT, packageSourceOnHost } from "./host.js";
 import { assetPath, installationPath, workPath, type OperatorRoot } from "./operatorRoot.js";
-import { imageBuiltOutsideDir, readWorkAreaState, type WorkAreaOutcome } from "./workArea.js";
+import { checkoutInstallHolds, imageBuiltOutsideDir, readWorkAreaState, type WorkAreaOutcome } from "./workArea.js";
 import { RENDERED_FILE } from "./wranglerTemplate.js";
 import { parseConfigSource, readConfigSource, type ConfigSourceIO } from "./configSource.js";
 import { publishedImagesFrom, type PublishedImages } from "./images.js";
@@ -267,10 +267,11 @@ function packageModeProblems(plan: DeployPlan): string[] {
   return problems;
 }
 
-/** The plan's `DeployHost.hasNodeModules`: in a checkout `<root>/<dir>/node_modules` exists; from the
- *  package the work area's stamp lists the Worker as installed (its install is hoisted, never in the dir). */
+/** The plan's `DeployHost.hasNodeModules`: in a checkout the Worker's `wrangler` resolves from its
+ *  directory — nested or hoisted to the root (`checkoutInstallHolds`); from the package the work area's
+ *  stamp lists the Worker as installed (its install is hoisted, never in the dir). */
 export function hasNodeModules(dir: string): boolean {
-  if (OPERATOR_ROOT.mode === "checkout") return existsSync(join(OPERATOR_ROOT.root, dir, "node_modules"));
+  if (OPERATOR_ROOT.mode === "checkout") return checkoutInstallHolds(OPERATOR_ROOT.root, dir, existsSync);
   const state = readWorkAreaState(OPERATOR_ROOT.workArea);
   return state.kind === "stamped" && state.stamp.installed.includes(dir);
 }
@@ -543,10 +544,14 @@ export async function pushConfigOnHost(opts: {
 }
 
 async function ensureNodeModules(step: DeployStep, io: DeployRunnerIO): Promise<boolean> {
-  const dir = workerDir(step.dir);
   if (hasNodeModules(step.dir)) return true;
-  io.log(`[deploy:all] ${step.name}: node_modules missing — npm ci`);
-  const r = await run("npm", ["ci", "--silent"], { cwd: dir });
+  // A checkout installs at its root: every Worker is an npm workspace of it, and an `npm ci` run
+  // inside a workspace directory prunes the tree to that workspace — the bundle then cannot resolve
+  // what `src/` imports (`zod` went missing that way on a release deploy). From the package the
+  // work area is installed per Worker by `ensureWorkAreaOnHost` before this; a miss here is its dir.
+  const cwd = OPERATOR_ROOT.mode === "checkout" ? OPERATOR_ROOT.root : workerDir(step.dir);
+  io.log(`[deploy:all] ${step.name}: install missing — npm ci in ${cwd}`);
+  const r = await run("npm", ["ci", "--silent"], { cwd });
   if (r.code !== 0) io.warn(r.output);
   return r.code === 0;
 }

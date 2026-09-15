@@ -15,6 +15,7 @@ import { TEST_PROFILE, TEST_PUBLISHED_IMAGES, TEST_REGISTRY_PROFILE } from "./te
 import { renderTemplate, templateView } from "./wranglerTemplate.js";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  checkoutInstallHolds,
   ensureWorkArea,
   imageBuiltOutsideDir,
   parseWorkAreaStamp,
@@ -117,6 +118,41 @@ describe("planWorkArea", () => {
       kind: "refuse",
       problem: `/srv/op/.switchboard exists but is not a work area this CLI made (no ${WORK_AREA_STAMP}) — move it aside; the deploy commands own that directory`,
     });
+  });
+});
+
+// release-and-deploy.md item 24: a checkout's install probe. The release deploy of 1.217.0 read
+// the bot's hoisted install as "missing" — the dependency bump had moved its `wrangler` from
+// `deploy/cloudflare/node_modules` to the root — ran `npm ci` inside the Worker directory, and
+// the workspace-scoped install took `zod` out from under the bundle ("Could not resolve zod").
+describe("checkoutInstallHolds", () => {
+  const root = "/repo";
+  const dir = "deploy/cloudflare";
+  const withPaths = (...present: string[]) => {
+    const set = new Set(present);
+    return (p: string) => set.has(p);
+  };
+
+  it("holds when the Worker's wrangler is nested under its directory, and when it is hoisted to the root", () => {
+    expect(checkoutInstallHolds(root, dir, withPaths("/repo/deploy/cloudflare/node_modules/wrangler"))).toBe(true);
+    expect(checkoutInstallHolds(root, dir, withPaths("/repo/node_modules/wrangler"))).toBe(true);
+    expect(
+      checkoutInstallHolds(
+        root,
+        dir,
+        withPaths("/repo/node_modules/wrangler", "/repo/deploy/cloudflare/node_modules/wrangler"),
+      ),
+    ).toBe(true);
+  });
+
+  it("does not hold on a bare node_modules directory without wrangler, or on nothing at all", () => {
+    expect(checkoutInstallHolds(root, dir, withPaths("/repo/deploy/cloudflare/node_modules"))).toBe(false);
+    expect(checkoutInstallHolds(root, dir, withPaths("/repo/node_modules"))).toBe(false);
+    expect(checkoutInstallHolds(root, dir, withPaths())).toBe(false);
+    // Another Worker's nested wrangler says nothing about this one.
+    expect(checkoutInstallHolds(root, dir, withPaths("/repo/deploy/cloudflare-memory/node_modules/wrangler"))).toBe(
+      false,
+    );
   });
 });
 

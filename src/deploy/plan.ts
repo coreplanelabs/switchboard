@@ -546,7 +546,7 @@ export function formatPlan(plan: DeployPlan): string {
     missing.length === 0
       ? "node_modules present in every dir"
       : checkout
-        ? `node_modules missing in ${missing.join(", ")} — the runner will \`npm ci\` there first`
+        ? `install missing for ${missing.join(", ")} — the runner will \`npm ci\` at the checkout's root first`
         : `${missing.join(", ")} not installed under ${WORK_AREA_DIR}/ — the runner will \`npm ci\` them there first`;
   const tree = checkout
     ? `${plan.checks.cleanTree ? "clean tree" : "tree unchecked"}; ${plan.checks.atOriginMain ? "HEAD == origin/main" : "any branch (--allow-branch)"}`
