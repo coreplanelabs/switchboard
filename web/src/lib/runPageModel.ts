@@ -130,6 +130,10 @@ export interface NoteVm {
   at?: number;
   replay: boolean;
   text: string;
+  /** The run note's kind (`wrap_up`, `stopped`, …), or `notes` for the notepad
+   *  the `notes` tool wrote (session-log.md item 10) — the one note the page
+   *  draws as a document rather than a lifecycle line. A replay row has none. */
+  noteKind?: string;
 }
 
 /** A streamed span that is a step of its own (docs/reference/specs/tracing.md): what it
@@ -742,7 +746,14 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
         // The follow-up's snippet note stays on the record for the card; on
         // the page the follow-up block that precedes it is the marker.
         if (change.noteKind === "follow_up") return;
-        state.log.push({ kind: "note", key: key("note"), at: change.at, replay: false, text: change.text });
+        state.log.push({
+          kind: "note",
+          key: key("note"),
+          at: change.at,
+          replay: false,
+          text: change.text,
+          noteKind: change.noteKind,
+        });
         if (
           (change.noteKind === "stop_requested" || change.noteKind === "stopped") &&
           (change.mode === "soft" || change.mode === "hard")
