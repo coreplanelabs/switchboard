@@ -71,6 +71,22 @@ RUN apt-get update \
 COPY --from=meat /go/bin/meat /usr/local/bin/meat
 RUN command -v meat >/dev/null && meat -h >/dev/null 2>&1
 
+# pi (docs/reference/specs/harness-pi.md item 12): the harness for a preset
+# without a workspace (general, research, conductor) runs pi as a child of
+# the bot itself, since such a run has no execution container. The same layer
+# as the execution images', on this image's Node (the same 24 tag), installed
+# globally as root before the switch to the bot's user, so `switchboard` finds
+# it on PATH and cannot alter it; at an EXACT pin held equal across the three
+# images by src/deploy/imagePiHarness.test.ts (the pnpm lesson: a floating tag
+# would move the harness's protocol with the build date). Proven by the layer,
+# so the BUILD fails, not a run. Dark until a deployment sets
+# `harness: { general: pi }`: nothing here starts pi on its own, and a run's
+# pi on this host holds none of pi's own shell or file tools.
+RUN npm install -g @earendil-works/pi-coding-agent@0.85.1 \
+  && npm cache clean --force \
+  && pi --version | grep -qx '0.85.1' \
+  && pi --help | grep -q -- '--mode <mode>'
+
 # Non-root user; agents run bash with this user's (container-scoped) permissions.
 RUN useradd -m -u 1001 switchboard
 WORKDIR /app

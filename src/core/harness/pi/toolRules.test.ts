@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CODING_REACH, PI_TOOL_BUNDLES, READ_REACH, judgeToolCall, reachFor } from "./toolRules.js";
+import { CODING_REACH, NONE_REACH, PI_TOOL_BUNDLES, READ_REACH, judgeToolCall, reachFor } from "./toolRules.js";
 
 // A preset's tool rules under pi (docs/reference/specs/harness-pi.md items 7
 // and 10): which calls are refused by name, and which name a reach the run's
@@ -31,13 +31,48 @@ describe("judgeToolCall — bundles", () => {
       reason: "powershell is not in any bundle the write identity reaches",
     });
   });
-  it("the reach is the identity's: write is the coding preset's, read and none hold no write bundle", () => {
+  it("the reach is the identity's: write is the coding preset's, read holds no write bundle, none holds no bundle of pi's own tools at all", () => {
     expect(reachFor("write")).toBe(CODING_REACH);
     expect(reachFor("read")).toBe(READ_REACH);
-    expect(reachFor("none")).toBe(READ_REACH);
+    expect(reachFor("none")).toBe(NONE_REACH);
     for (const bundle of ["write-files", "github-write", "pr"]) expect(READ_REACH.has(bundle), bundle).toBe(false);
     for (const bundle of ["shell", "files", "web", "search", "github-read", "verdict"])
       expect(READ_REACH.has(bundle), bundle).toBe(true);
+    expect(NONE_REACH.size).toBe(0);
+  });
+});
+
+// docs/reference/specs/harness-pi.md item 12: a run without a workspace
+// (identity none: the general, research and conductor presets) has none of
+// pi's own tools, so every one of them a pi somehow asks for is refused by
+// name, before any rule about what the call does is consulted: the run has
+// no checkout for a path to be inside of and no shell for a command to run in.
+describe("judgeToolCall: a run without a workspace (identity none)", () => {
+  const none = { identity: "none" as const, checkout: "/workspace" };
+  it("refuses every one of pi's own tools by name (the shell, the reads, the writes), whatever the call asks", () => {
+    for (const [tool, input] of [
+      ["bash", { command: "ls" }],
+      ["read", { path: "README.md" }],
+      ["grep", { pattern: "x" }],
+      ["find", {}],
+      ["ls", {}],
+      ["edit", { path: "src/x.ts" }],
+      ["write", { path: "src/x.ts", content: "" }],
+    ] as const) {
+      const bundle = PI_TOOL_BUNDLES[tool];
+      expect(judgeToolCall(tool, input, none), tool).toEqual({
+        verdict: "outside-profile",
+        reason: `${tool} is the \`${bundle}\` bundle: a run without a workspace (identity none) has none of pi's own tools`,
+      });
+    }
+  });
+  it("the load driver's terminal tools and an unknown tool are outside the profile too", () => {
+    expect(judgeToolCall("submit_verdict", { verdict: "approve" }, none).verdict).toBe("outside-profile");
+    expect(judgeToolCall("submit_pr_description", { title: "x" }, none).verdict).toBe("outside-profile");
+    expect(judgeToolCall("powershell", { command: "dir" }, none)).toEqual({
+      verdict: "outside-profile",
+      reason: "powershell is not in any bundle the none identity reaches",
+    });
   });
 });
 

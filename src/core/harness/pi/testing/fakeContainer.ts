@@ -5,7 +5,7 @@
 // run, a stop, a death, a dialog — is one recorded stream.
 
 import { PiContainerError, type PiContainer, type PiStart } from "../container.js";
-import type { PiRunPaths } from "../process.js";
+import { piRunPaths, type PiRunPaths } from "../process.js";
 
 export class FakePiContainer implements PiContainer {
   readonly files = new Map<string, string>();
@@ -51,6 +51,11 @@ export class FakePiContainer implements PiContainer {
       this.failNext = undefined;
       throw f.error;
     }
+  }
+
+  /** The predictable root, as the exec container answers; a test that wants a run filed elsewhere overrides this. */
+  async makeRoot(runId: string): Promise<PiRunPaths> {
+    return piRunPaths(runId);
   }
 
   async writeFile(path: string, content: string): Promise<void> {

@@ -45,6 +45,16 @@ const reviewSpec: PiLaunchSpec = {
   relayTools: ["update_status", "submit_verdict", "diff_digest"],
 };
 
+/** The general preset's launch: no identity and no workspace, the assistant toolset's relays. */
+const generalSpec: PiLaunchSpec = {
+  ...spec,
+  identity: "none",
+  effort: undefined,
+  harnessUrl: "http://127.0.0.1:8080",
+  system: "You are the general agent.\n",
+  relayTools: ["web_fetch", "update_status", "github_repos", "github_issue_create"],
+};
+
 describe("piRunPaths", () => {
   // The resident runs each thread's commands as that thread's pool user, and
   // a parent `mkdir -p` creates belongs to whichever user created it: any
@@ -113,13 +123,21 @@ describe("piLaunchArgs", () => {
     expect(PI_READ_TOOLS).toEqual(["read", "bash", "grep", "find", "ls"]);
     expect(piBuiltinToolsFor("write")).toBe(PI_BUILTIN_TOOLS);
     expect(piBuiltinToolsFor("read")).toBe(PI_READ_TOOLS);
-    expect(piBuiltinToolsFor("none")).toBe(PI_READ_TOOLS);
     const args = piLaunchArgs(reviewSpec);
     const tools = args[args.indexOf("--tools") + 1].split(",");
     expect(tools).toEqual(["read", "bash", "grep", "find", "ls", "update_status", "submit_verdict", "diff_digest"]);
     expect(tools).not.toContain("edit");
     expect(tools).not.toContain("write");
     expect(args[args.indexOf("--model") + 1]).toBe("claude-fable-5:medium");
+  });
+  // docs/reference/specs/harness-pi.md item 12: a preset without an identity
+  // has no workspace, so its pi holds none of pi's own tools: the allowlist is
+  // the relayed tools alone, and pi never has a shell or a file tool to call.
+  it("a run without a workspace (identity none) holds none of pi's own tools: the allowlist is the relayed tools alone", () => {
+    expect(piBuiltinToolsFor("none")).toEqual([]);
+    const args = piLaunchArgs(generalSpec);
+    expect(args[args.indexOf("--tools") + 1]).toBe("web_fetch,update_status,github_repos,github_issue_create");
+    for (const tool of PI_BUILTIN_TOOLS) expect(args[args.indexOf("--tools") + 1].split(",")).not.toContain(tool);
   });
   it("no effort leaves pi's default thinking level; a resume continues the session file instead of a directory", () => {
     expect(piLaunchArgs({ ...spec, effort: undefined })).toContain("claude-fable-5");
@@ -287,5 +305,22 @@ describe("piLaunchFiles", () => {
     expect(system.startsWith("You are the review agent.\n\nHARNESS NOTE:")).toBe(true);
     expect(system).toContain("no `edit` and no `write`");
     expect(system).not.toContain("`write_file` use `write`");
+  });
+  it("a run without a workspace is told it has none of pi's own tools and that a call to any is refused, names its relayed tools, and maps no native name onto one; models.json points at the loopback URL it was given", () => {
+    const note = harnessPromptNote(["web_fetch", "update_status"], "none");
+    expect(note).toContain("no workspace");
+    expect(note).toContain("none of pi's own tools");
+    expect(note).toContain("`read`, `bash`, `edit`, `write`, `grep`, `find` and `ls`");
+    expect(note).toContain("refused");
+    expect(note).not.toContain("`read_file` use `read`");
+    expect(note).not.toContain("`write_file` use `write`");
+    expect(note).toContain("`web_fetch`, `update_status`");
+    const files = piLaunchFiles(generalSpec);
+    const system = files.find((f) => f.path.endsWith("SYSTEM.md"))!.content;
+    expect(system.startsWith("You are the general agent.\n\nHARNESS NOTE:")).toBe(true);
+    expect(system).toContain("none of pi's own tools");
+    const models = JSON.parse(files.find((f) => f.path.endsWith("models.json"))!.content);
+    expect(models.providers[PROXY_PROVIDER].baseUrl).toBe("http://127.0.0.1:8080");
+    expect(piLaunchEnv(generalSpec, "sbr_x.y")[HARNESS_URL_ENV]).toBe("http://127.0.0.1:8080");
   });
 });

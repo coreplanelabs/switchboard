@@ -320,8 +320,10 @@ workspaceDir: ./workspaces
 # with the run's model-proxy bearer as its only key, every event bridged onto
 # the run's own record, our tools and tool rules as its extension. Every
 # preset declares `native` until the pi series moves it; a deployment moves a
-# preset early here. Only a preset with a workspace (coding, review, explore)
-# can run on pi. A preset the registry does not know, or a value that is
+# preset early here. A preset with a workspace (coding, review, explore) runs
+# pi in the run's container; a preset without one (general, research,
+# conductor) runs it as a child of the bot, with none of pi's own shell or
+# file tools. A preset the registry does not know, or a value that is
 # neither harness, fails the load by name.
 # harness:
 #   coding: pi

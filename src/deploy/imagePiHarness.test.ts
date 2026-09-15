@@ -9,15 +9,17 @@ const BOT = "Dockerfile";
 const SANDBOX = "deploy/cloudflare-sandbox/Dockerfile";
 const RESIDENT = "deploy/cloudflare-resident/Dockerfile";
 const EXECUTION_IMAGES = [SANDBOX, RESIDENT] as const;
+const ALL_IMAGES = [...EXECUTION_IMAGES, BOT] as const;
 
-// Feature: docs/reference/specs/harness-pi.md item 3 — both execution images
-// carry pi (`@earendil-works/pi-coding-agent`) at one exact pin, the harness
-// the bot can start inside a run's own container in place of its native loop.
-// Static, like imageToolchain.test.ts: the image is built by check:image, and
-// the pin is PROVEN at build time by the layer itself — the version on PATH is
-// the pin, and pi's own help names the RPC mode the harness drives. The bot
-// image never carries it: pi runs where the run's tools run, never on the bot
-// host, and the model key never travels with it either way.
+// Feature: docs/reference/specs/harness-pi.md items 3 and 12: every image
+// carries pi (`@earendil-works/pi-coding-agent`) at one exact pin: the two
+// execution images, where a preset with a workspace runs it inside the run's
+// own container, and the bot image, where a preset without a workspace runs
+// it as a child of the bot. Static, like imageToolchain.test.ts: the image is
+// built by check:image, and the pin is PROVEN at build time by the layer
+// itself: the version on PATH is the pin, and pi's own help names the RPC
+// mode the harness drives. The model key never travels with it either way:
+// the run bearer is pi's only key.
 
 export const PI_PACKAGE = "@earendil-works/pi-coding-agent";
 export const PI_VERSION = "0.85.1";
@@ -37,7 +39,7 @@ function piLayer(lines: string[]): string {
   return lines.find((l) => new RegExp(`^RUN\\b.*\\bnpm install -g ${PI_PACKAGE.replace("/", "\\/")}@`).test(l)) ?? "";
 }
 
-describe.each(EXECUTION_IMAGES)("%s", (path) => {
+describe.each(ALL_IMAGES)("%s", (path) => {
   const lines = instructions(read(path));
   const layer = piLayer(lines);
 
@@ -53,20 +55,23 @@ describe.each(EXECUTION_IMAGES)("%s", (path) => {
     expect(layer).toContain("pi --help | grep -q -- '--mode <mode>'");
   });
 
-  it("installs pi after Node was swapped for the repository's line, so the install runs on that Node and pi's engines floor holds", () => {
-    const nodeProof = lines.findIndex((l) => /^RUN\b.*node --version \| grep -qx 'v24\./.test(l));
-    expect(nodeProof).toBeGreaterThan(-1);
-    expect(lines.indexOf(layer)).toBeGreaterThan(nodeProof);
-  });
-
   it("drops npm's cache in the same layer", () => {
     expect(layer).toContain("npm cache clean --force");
   });
 });
 
-describe("the two execution images carry one pi", () => {
-  it("the same exact version in both, so a release ships one harness everywhere", () => {
-    const pins = EXECUTION_IMAGES.map((path) => imagePins(read(path)).find((p) => p.tool === PI_PACKAGE)?.spec);
+describe.each(EXECUTION_IMAGES)("%s", (path) => {
+  it("installs pi after Node was swapped for the repository's line, so the install runs on that Node and pi's engines floor holds", () => {
+    const lines = instructions(read(path));
+    const nodeProof = lines.findIndex((l) => /^RUN\b.*node --version \| grep -qx 'v24\./.test(l));
+    expect(nodeProof).toBeGreaterThan(-1);
+    expect(lines.indexOf(piLayer(lines))).toBeGreaterThan(nodeProof);
+  });
+});
+
+describe("the three images carry one pi", () => {
+  it("the same exact version in all of them, so a release ships one harness everywhere", () => {
+    const pins = ALL_IMAGES.map((path) => imagePins(read(path)).find((p) => p.tool === PI_PACKAGE)?.spec);
     expect(new Set(pins).size).toBe(1);
     expect(pins[0]).toBe(PI_VERSION);
   });
@@ -83,7 +88,14 @@ describe("the resident image proves pi as a thread user", () => {
 });
 
 describe("the bot image", () => {
-  it("does not install pi — the harness runs in the execution container, never on the bot host", () => {
-    expect(instructions(read(BOT)).some((l) => l.includes(PI_PACKAGE))).toBe(false);
+  const lines = instructions(read(BOT));
+  it("installs pi in the runtime stage as root, before the switch to the bot's user, so the bot's user finds it on PATH and cannot alter it", () => {
+    const runtime = Math.max(...lines.map((l, i) => (/^FROM node:\d+\.\d+\.\d+-slim$/.test(l) ? i : -1)));
+    const user = lines.findIndex((l) => /^USER switchboard$/.test(l));
+    const layer = lines.indexOf(piLayer(lines));
+    expect(runtime).toBeGreaterThan(-1);
+    expect(user).toBeGreaterThan(runtime);
+    expect(layer).toBeGreaterThan(runtime);
+    expect(layer).toBeLessThan(user);
   });
 });

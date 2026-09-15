@@ -15,7 +15,7 @@ import { mergeTools, runAgent } from "../../runner.js";
 import { parseModelRef } from "../../providers/types.js";
 import { TOOLSETS } from "../../tools/workspace.js";
 import { effectiveHarness } from "../harness/select.js";
-import { ExecPiContainer } from "../harness/pi/container.js";
+import { piContainerFor } from "../harness/pi/botHostContainer.js";
 import { piHarnessFactsOf, relayedTools, runPiHarness, type PiHarnessFacts } from "../harness/pi/harness.js";
 import { fetchRepoShipInfo, findOpenPrByHead, openPullRequest } from "../../execution/githubPulls.js";
 import type { ChatMessage, Provider } from "../../providers/types.js";
@@ -528,8 +528,19 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
       // the relayed tools running here under this same tool context.
       if (!deps.harness)
         throw new Error(`the ${agent.name} preset is on the pi harness, but this process has no harness deps`);
-      if (!deps.harness.harnessUrl)
-        throw new Error("the pi harness needs PUBLIC_BASE_URL: the run's container reaches the model proxy through it");
+      // Where pi runs and how it reaches the bot follow the run's machine class
+      // (harness-pi.md item 12): a class with a workspace has an executor to
+      // exec through, and pi reaches the bot at its public URL; `none` has no
+      // workspace, so pi is a child of the bot and reaches this process's own
+      // server over loopback.
+      const onBotHost = profile.machine === "none";
+      const harnessUrl = onBotHost ? deps.harness.loopbackUrl : deps.harness.harnessUrl;
+      if (!harnessUrl)
+        throw new Error(
+          onBotHost
+            ? "the pi harness needs PORT: a run without a workspace runs pi on the bot host, which reaches the model proxy over loopback"
+            : "the pi harness needs PUBLIC_BASE_URL: the run's container reaches the model proxy through it",
+        );
       if (ctx.bearer === undefined)
         throw new Error("the pi harness needs the run's model-proxy bearer, and this process minted none");
       const { provider: providerName, model: modelId } = parseModelRef(resolved.modelRef);
@@ -555,9 +566,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
       const facts = resume ? piHarnessFactsOf(resume.row.state.harness) : undefined;
       answer = await runPiHarness(
         {
-          container: deps.harness.containerFor?.(executor) ?? new ExecPiContainer(executor),
+          container:
+            deps.harness.containerFor?.(executor, profile.machine) ?? piContainerFor(executor, profile.machine),
           bearer: ctx.bearer,
-          harnessUrl: deps.harness.harnessUrl,
+          harnessUrl,
           registry: deps.harness.registry,
           ...(deps.runBearers ? { bearers: deps.runBearers } : {}),
           clock,
