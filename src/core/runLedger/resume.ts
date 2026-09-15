@@ -12,8 +12,18 @@
 // again; a tool that no longer exists after the deploy gets a synthetic result
 // saying so (D3). Every tool_use in the turn gets exactly one tool_result, so
 // the conversation the model sees next is valid.
+//
+// A transcript that ends on the model's final answer (a text-only assistant
+// turn, nothing in flight) is a loop that had ended: the plan is `finish`, the
+// answer that turn's text, and the run loop skips the model and runs the
+// post-steps with it. How the loop ended (a soft stop, a budget) is read back
+// from the run's notes (`loopEndingOf`), and a verdict a previous generation
+// already posted is read off its `review_posted` event (`reviewPostedBefore`)
+// so the post-step never posts twice.
 
 import type { ChatMessage, ContentPart } from "../../providers/types.js";
+import type { ReviewPost } from "../reviewVerdict.js";
+import type { RunEvent, RunNoteKind } from "../runEvents.js";
 import { transcriptCompleteness } from "./decisions.js";
 import type { AssembledCompaction, AssembledTranscript } from "./transcript.js";
 import type { LiveRunMeta, StepRecord } from "./types.js";
@@ -61,6 +71,22 @@ export type ResumePlan =
       turn: number;
       iteration: number;
       remainingMs: number;
+    }
+  | {
+      /** The model's loop had ended: the transcript's last turn is its final
+       *  answer (text alone, nothing in flight). No model call is owed, only
+       *  the post-steps and the reply, with that answer in hand. */
+      kind: "finish";
+      /** The conversation as the model left it, for a post-step that needs it (the settle's re-review turn). */
+      messages: ChatMessage[];
+      /** The final turn's text, unlabelled: the run loop puts the ending's label on it. */
+      answer: string;
+      /** The last record's inbox seq (item 40): follow-ups past it were never read by the loop. */
+      inboxConsumedSeq: number;
+      /** The final turn's step number and turn count, as the record has them or as an unrecorded step would. */
+      step: number;
+      turn: number;
+      remainingMs: number;
     };
 
 /** The built-in tools that are safe to run again although they are not
@@ -104,6 +130,64 @@ const toolUsesOf = (message: ChatMessage | undefined): ToolUsePart[] =>
     ? (message.content as ContentPart[]).filter((p): p is ToolUsePart => p.type === "tool_use")
     : [];
 
+/** The text of a turn as the runner collects an answer: the text parts joined by newlines, trimmed. */
+const textOf = (message: ChatMessage): string =>
+  (message.content as ContentPart[])
+    .filter((p): p is Extract<ContentPart, { type: "text" }> => p.type === "text")
+    .map((p) => p.text)
+    .join("\n")
+    .trim();
+
+/** How the model's loop ended, read back from the notes the previous
+ *  generation published (the new generation's `RunControl` knows no stop and
+ *  its deadline is not the run's): `answered` is a loop the model ended by
+ *  itself; `soft_stop` is an operator's soft stop, which the run loop restores
+ *  so the status and the label are the stop's; `written_up` is a forced
+ *  write-up whose note names why, for the label. A hard stop is no ending here:
+ *  it unwinds without a finale, so no answer turn ever follows it. */
+export type LoopEnding =
+  { kind: "answered" } | { kind: "soft_stop" } | { kind: "written_up"; note: WriteUpNote; summary: string };
+
+export type WriteUpNote = Extract<
+  RunNoteKind,
+  "time_budget_exhausted" | "turn_budget_exhausted" | "stuck_loop" | "sandbox_dead"
+>;
+const WRITE_UP_NOTES: ReadonlySet<string> = new Set<WriteUpNote>([
+  "time_budget_exhausted",
+  "turn_budget_exhausted",
+  "stuck_loop",
+  "sandbox_dead",
+]);
+
+/** The last ending note wins: the loop ends once, and the note before its finale is the one that ended it. */
+export function loopEndingOf(events: readonly RunEvent[]): LoopEnding {
+  let ending: LoopEnding = { kind: "answered" };
+  for (const e of events) {
+    if (e.type !== "run_note") continue;
+    if (e.kind === "stopped" && e.mode === "soft") ending = { kind: "soft_stop" };
+    else if (WRITE_UP_NOTES.has(e.kind))
+      ending = { kind: "written_up", note: e.kind as WriteUpNote, summary: e.summary };
+  }
+  return ending;
+}
+
+/** What a resumed review already posted (agent-review item 18): the last
+ *  `review_posted` event on the replayed events is the post-step's outcome,
+ *  so the post-step is not run again. Undefined when nothing was posted. */
+export function reviewPostedBefore(events: readonly RunEvent[]): Extract<ReviewPost, { posted: true }> | undefined {
+  let posted: Extract<ReviewPost, { posted: true }> | undefined;
+  for (const e of events) {
+    if (e.type !== "review_posted") continue;
+    posted = {
+      posted: true,
+      target: { repo: e.repo, number: e.number },
+      head: e.head,
+      ...(e.verdict !== undefined ? { verdict: e.verdict } : {}),
+    };
+  }
+  return posted;
+}
+
 export function planResume(input: {
   transcript: AssembledTranscript;
   lastStep: StepRecord | null;
@@ -128,12 +212,26 @@ export function planResume(input: {
     // The step's record landed, so its turns are all there; the calls named
     // in flight were dispatched and their results died with the process.
     if (lastStep.inFlight.length === 0) {
-      // Nothing dispatched: killed between steps (or after the seed). The
-      // conversation must end on a user turn for the model to continue.
-      if (last?.role !== "user") {
+      // Nothing dispatched: killed between steps (or after the seed), or after
+      // the model's final answer. A user turn (the seed, or a results turn) is
+      // where the model continues; a text-only assistant turn is the answer
+      // itself, the loop over and only the post-steps owed. An assistant turn
+      // WITH calls the record does not know is neither: corruption.
+      if (last?.role === "assistant") {
+        if (calls.length > 0) {
+          return {
+            kind: "interrupted",
+            why: "transcript ends with an assistant turn carrying tool calls but the last step recorded nothing in flight",
+          };
+        }
         return {
-          kind: "interrupted",
-          why: "transcript ends with an assistant turn but the last step recorded nothing in flight",
+          kind: "finish",
+          messages,
+          answer: textOf(last),
+          inboxConsumedSeq: lastStep.inboxConsumedSeq,
+          step: lastStep.step,
+          turn: lastStep.turn,
+          remainingMs: lastStep.remainingMs,
         };
       }
       return {
@@ -175,9 +273,22 @@ export function planResume(input: {
 
   // run-step-fresh: the next step's turns landed (the previous results and
   // this assistant turn) but its record did not, so nothing of it was
-  // dispatched — its tools simply run, all of them.
+  // dispatched — its tools simply run, all of them. A turn without calls is
+  // the final answer whose record never landed: the same finish, the counters
+  // advanced as for any unrecorded step.
   if (calls.length === 0) {
-    return { kind: "interrupted", why: "the next step's turns landed but its assistant turn has no tool calls" };
+    if (last?.role !== "assistant") {
+      return { kind: "interrupted", why: "the next step's turns landed but they do not end on an assistant turn" };
+    }
+    return {
+      kind: "finish",
+      messages,
+      answer: textOf(last),
+      inboxConsumedSeq: lastStep.inboxConsumedSeq,
+      step: lastStep.step + 1,
+      turn: lastStep.turn + 1,
+      remainingMs: lastStep.remainingMs,
+    };
   }
   const bookkeepingOnly = calls.every((c) => c.name === "update_status");
   return {

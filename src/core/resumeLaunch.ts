@@ -150,7 +150,9 @@ export async function launchResumes(
       repoCtx: repoContextOf(row),
     };
     log(
-      `[resume] ${row.runId} ${row.threadKey}: resuming (${plan.stepRecorded ? "settling" : "running fresh"} step ${plan.step}, ${plan.settlements.length} call(s), ${Math.round(plan.remainingMs / 60_000)} min left)`,
+      plan.kind === "finish"
+        ? `[resume] ${row.runId} ${row.threadKey}: finishing (the model had answered at step ${plan.step}; running the post-steps with its answer)`
+        : `[resume] ${row.runId} ${row.threadKey}: resuming (${plan.stepRecorded ? "settling" : "running fresh"} step ${plan.step}, ${plan.settlements.length} call(s), ${Math.round(plan.remainingMs / 60_000)} min left)`,
     );
     outcome.launched.push(row.runId);
     void dispatchFn(deps, resumeMessage(row, inputTextOf(run.events)), io, { resume: ctx }).catch((err: unknown) =>

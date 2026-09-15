@@ -145,8 +145,37 @@ describe("launchResumes", () => {
     expect(ctx.repoCtx).toEqual({ repo: "acme/api", ref: "feat/x", pr: 12, headSha: "a".repeat(40) });
     expect(ctx.inbox).toEqual([{ seq: 1, message: { text: "also the numbers", userId: "slack:UBOB" } }]); // item 40
     expect(ctx.plan).toMatchObject({ kind: "resume", stepRecorded: true, step: 1, remainingMs: 300_000 });
+    if (ctx.plan.kind !== "resume") throw new Error("unreachable");
     expect(ctx.plan.settlements.map((s) => [s.toolUse.id, s.action])).toEqual([["c1", "rerun"]]);
     expect(h.logs[0]).toMatch(/r1 slack:C1:1.0: resuming \(settling step 1, 1 call\(s\), 5 min left\)/);
+  });
+
+  // run-history item 37: a transcript ending on the model's answer is a `finish`
+  // plan, launched like any resume, never closed.
+  it("a run whose transcript ends on its final answer with nothing in flight is dispatched with a `finish` plan carrying that answer, and the log says the post-steps are what is left", async () => {
+    const answered = resumable({
+      lastStep: step({ step: 2, turnIndex: 4, inFlight: [], turn: 2, iteration: 1 }),
+      transcript: {
+        complete: true,
+        turns: 4,
+        messages: [
+          user("go"),
+          calling("c1", "read_file"),
+          { role: "user", content: [{ type: "tool_result", toolUseId: "c1", content: "ok" }] },
+          { role: "assistant", content: [text("LGTM: the change is sound.")] },
+        ],
+        compactions: [],
+      },
+    });
+    const h = harness();
+    expect(await h.run([answered])).toEqual({ launched: ["r1"], closed: [] });
+    expect(h.dispatched[0].opts.resume!.plan).toMatchObject({
+      kind: "finish",
+      answer: "LGTM: the change is sound.",
+      step: 2,
+      remainingMs: 300_000,
+    });
+    expect(h.logs[0]).toMatch(/r1 slack:C1:1.0: finishing \(the model had answered at step 2; running the post-steps/);
   });
 
   it("closes instead of dispatching when the plan says interrupted, the agent is unknown, or the channel cannot be resumed on — each with its reason", async () => {

@@ -31,6 +31,9 @@ import type { ResidentBinding } from "../../execution/resident.js";
 import { InMemoryArtifactStore, type ArtifactStore } from "../../artifacts/store.js";
 import type { ReviewCommentTarget } from "../../execution/githubComments.js";
 import type { RunEvent } from "../runEvents.js";
+import type { ChatMessage } from "../../providers/types.js";
+import type { ResumeContext } from "./admission.js";
+import type { AppendableEvent, LiveRunRow, StepRecord } from "../runLedger/types.js";
 
 // Feature: docs/reference/specs/run-loop.md, docs/reference/specs/run-history.md
 // items 20–22, docs/reference/specs/llm-output.md item 5 — the loop's own
@@ -1242,5 +1245,250 @@ describe("the harness seam: a preset without a workspace on pi, as a child of th
       bearer: "sbr_run-l.s3cret",
     });
     await expect(runLoop(s.deps, s.ctx)).rejects.toThrow(/PORT/);
+  });
+});
+
+// Feature: docs/reference/specs/run-history.md item 37, the `finish` plan: a
+// reclaimed run whose transcript ends on the model's final answer skips the
+// model loop and runs the post-steps with that answer, the ending read back
+// from its notes, a verdict already posted never posted twice.
+describe("a resume with the answer in hand (the `finish` plan)", () => {
+  const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+  const VERDICT = {
+    verdict: "approve",
+    summary: "looks correct",
+    head: HEAD,
+    findings: [{ id: "F1", severity: "nit", file: "src/x.ts", line: 3, title: "a name" }],
+  };
+  const prThread = {
+    repoCtx: { repo: "o/r", pr: 42, ref: "fix/the-pr-head", refFromPr: true, baseRef: "main" } as RepoContext,
+    binding: { ref: "fix/the-pr-head", sha: HEAD, workspace: "/srv/wt/pr-42" } as ResidentBinding,
+  };
+  /** A provider that must never be asked: the model had already answered. */
+  const neverCalled = (): Provider => ({
+    name: "fake",
+    async complete() {
+      throw new Error("the model was called on a run that had already answered");
+    },
+  });
+  const transcriptEndingOn = (answer: string): ChatMessage[] => [
+    { role: "user", content: [{ type: "text", text: "hello there" }] },
+    {
+      role: "assistant",
+      content: [
+        { type: "text", text: "looking" },
+        { type: "tool_use", id: "c1", name: "bash", input: { command: "git rev-parse HEAD" } },
+      ],
+    },
+    { role: "user", content: [{ type: "tool_result", toolUseId: "c1", content: HEAD }] },
+    { role: "assistant", content: [{ type: "text", text: answer }] },
+  ];
+  /** The reclaimed row and its plan, as the launcher would hand them over. */
+  function finishing(
+    answer: string,
+    opts: { agent?: string; events?: AppendableEvent[]; state?: Record<string, unknown>; repoCtx?: RepoContext } = {},
+  ): ResumeContext {
+    const messages = transcriptEndingOn(answer);
+    const events: AppendableEvent[] = opts.events ?? [{ type: "input", text: "hello there", at: 1, seq: 1 }];
+    const row: LiveRunRow = {
+      runId: "run-l",
+      threadKey: THREAD,
+      ownerGen: "gen-T",
+      leaseUntil: NOW + 30_000,
+      startedAt: NOW - 60_000,
+      phase: "live",
+      stop: null,
+      meta: { channelId: "slack:CX", userId: "slack:UX", threadKey: THREAD, agent: opts.agent ?? "general" },
+      card: null,
+      system: "the system prompt",
+      tools: [],
+      state: opts.state ?? {},
+    };
+    const lastStep: StepRecord = {
+      step: 2,
+      seq: events.at(-1)?.seq ?? 1,
+      turnIndex: 4,
+      inFlight: [],
+      inboxConsumedSeq: 0,
+      remainingMs: 240_000,
+      turn: 2,
+      iteration: 1,
+    };
+    return {
+      row,
+      lastStep,
+      plan: { kind: "finish", messages, answer, inboxConsumedSeq: 0, step: 2, turn: 2, remainingMs: 240_000 },
+      events,
+      lastSeq: lastStep.seq,
+      repoCtx: opts.repoCtx ?? {},
+      inbox: [],
+    };
+  }
+  const note = (kind: string, summary: string, seq: number, mode?: "soft" | "hard"): AppendableEvent => ({
+    type: "run_note",
+    kind: kind as "stopped",
+    summary,
+    ...(mode ? { mode } : {}),
+    at: seq,
+    seq,
+  });
+
+  it("the model is never called: the transcript's final turn is the answer, published and finished `completed`, and a `resumed` note on the stream says the loop had ended before the restart", async () => {
+    const s = setup("", { provider: neverCalled() });
+    const resume = finishing("The answer, written before the restart.");
+    const out = await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages });
+    expect(out.answer).toBe("The answer, written before the restart.");
+    expect(s.published).toEqual(["answer:The answer, written before the restart."]);
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+    s.ending.drain(true);
+    await s.writer.settled();
+    const rec = (await s.store.get("run-l"))!;
+    expect(rec.status).toBe("completed");
+    expect(rec.events.filter((e) => e.type === "run_note" && (e as { kind: string }).kind === "resumed")).toEqual([
+      expect.objectContaining({ kind: "resumed", summary: expect.stringMatching(/had already answered/) }),
+    ]);
+  });
+
+  it("the ending is read from the run's notes, not from this generation's control: a soft-stopped run's answer wears the ⏹ label and finishes `stopped_soft`; a run that hit its time budget wears the ⚠️ budget label and finishes `completed`", async () => {
+    const stopped = setup("", { provider: neverCalled() });
+    const softStop = finishing("What I found before the stop.", {
+      events: [
+        { type: "input", text: "hello there", at: 1, seq: 1 },
+        note("stop_requested", "soft stop requested", 2, "soft"),
+        note("stopped", "soft stop", 3, "soft"),
+      ],
+    });
+    const stoppedOut = await runLoop(stopped.deps, {
+      ...stopped.ctx,
+      resume: softStop,
+      messages: softStop.plan.messages,
+    });
+    expect(stoppedOut.answer).toMatch(/^⏹ _Stopped early by an operator \(soft stop\)/);
+    expect(stoppedOut.answer).toContain("What I found before the stop.");
+    expect(stopped.run.control.requested).toBe("soft");
+    expect(stopped.registry.getById("run-l")).toMatchObject({ finished: true, status: "stopped_soft" });
+
+    const budget = setup("", { provider: neverCalled() });
+    const timeBudget = finishing("What I found before the budget ran out.", {
+      events: [
+        { type: "input", text: "hello there", at: 1, seq: 1 },
+        note("time_budget_exhausted", "time budget exhausted", 2),
+      ],
+    });
+    const budgetOut = await runLoop(budget.deps, {
+      ...budget.ctx,
+      resume: timeBudget,
+      messages: timeBudget.plan.messages,
+    });
+    expect(budgetOut.answer).toMatch(/^⚠️ _Hit the \d+-minute budget before finishing/);
+    expect(budgetOut.answer).toContain("What I found before the budget ran out.");
+    expect(budget.run.control.requested).toBeUndefined();
+    expect(budget.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+  });
+
+  it("a review resumed with its answer in hand runs its post-steps: the verdict restored from the row is settled at the pinned head and posted, once", async () => {
+    const posts: Array<{ target: ReviewCommentTarget; body: string }> = [];
+    const s = setup("", {
+      agent: "review",
+      provider: neverCalled(),
+      ...prThread,
+      executor: { exec: async (command: string) => (command.includes("rev-parse") ? `${HEAD}\n` : "") },
+      review: { head: HEAD, post: async (target, body) => void posts.push({ target, body }) },
+    });
+    const resume = finishing("The review: one nit, F1.", {
+      agent: "review",
+      state: { verdict: VERDICT },
+      repoCtx: prThread.repoCtx,
+    });
+    const out = await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages });
+    expect(out.answer).toBe("The review: one nit, F1.");
+    expect(posts).toEqual([
+      {
+        target: { repo: "o/r", number: 42, commitId: HEAD },
+        body: `LGTM: looks correct\n- [nit] F1 src/x.ts:3 — a name\n\nThe review: one nit, F1.`,
+      },
+    ]);
+    s.ending.drain(true);
+    await s.writer.settled();
+    const rec = (await s.store.get("run-l"))!;
+    expect(rec.status).toBe("completed");
+    expect(rec.reviewPost).toEqual({
+      posted: true,
+      target: { repo: "o/r", number: 42 },
+      head: HEAD,
+      verdict: "approve",
+    });
+  });
+
+  it("a review whose verdict a previous generation already posted (a `review_posted` event among the replayed events) posts nothing again: the settle does not run, the outcome on the record is the event's, and the reviewed head is the event's", async () => {
+    const posts: Array<{ target: ReviewCommentTarget; body: string }> = [];
+    const execs: string[] = [];
+    const s = setup("", {
+      agent: "review",
+      provider: neverCalled(),
+      ...prThread,
+      executor: {
+        exec: async (command: string) => {
+          execs.push(command);
+          return command.includes("rev-parse") ? `${HEAD}\n` : "";
+        },
+      },
+      review: { head: HEAD, post: async (target, body) => void posts.push({ target, body }) },
+    });
+    const resume = finishing("The review: one nit, F1.", {
+      agent: "review",
+      state: { verdict: VERDICT },
+      repoCtx: prThread.repoCtx,
+      events: [
+        { type: "input", text: "hello there", at: 1, seq: 1 },
+        { type: "review_posted", repo: "o/r", number: 42, head: HEAD, verdict: "approve", at: 2, seq: 2 },
+      ],
+    });
+    const out = await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages });
+    expect(posts).toEqual([]);
+    expect(execs.filter((c) => c.includes("rev-parse"))).toEqual([]);
+    expect(out.reviewHead).toBe(HEAD);
+    s.ending.drain(true);
+    await s.writer.settled();
+    const rec = (await s.store.get("run-l"))!;
+    expect(rec.status).toBe("completed");
+    expect(rec.reviewPost).toEqual({
+      posted: true,
+      target: { repo: "o/r", number: 42 },
+      head: HEAD,
+      verdict: "approve",
+    });
+    // The replayed events are not on this loop's stream (the registry replays
+    // them at create); this generation published no review_posted of its own
+    // and no review_not_posted note.
+    expect(rec.events.filter((e) => e.type === "review_posted")).toHaveLength(0);
+    expect(rec.events.some((e) => e.type === "run_note" && (e as { kind: string }).kind === "review_not_posted")).toBe(
+      false,
+    );
+  });
+
+  it("on the pi harness no pi is started and the one the previous generation left is ended at its recorded pid and root (harness-pi item 8)", async () => {
+    const container = new FakePiContainer();
+    const s = setup("", {
+      agent: "coding",
+      provider: neverCalled(),
+      yaml: YAML + "harness:\n  coding: pi\n",
+      harness: {
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        containerFor: () => container,
+      },
+    });
+    const resume = finishing("Done: pushed the fix.", {
+      agent: "coding",
+      state: { harness: { pid: 777, logOffset: 10, root: "/tmp/switchboard-pi-old-build-run-l" } },
+    });
+    const out = await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages });
+    expect(out.answer).toBe("Done: pushed the fix.");
+    expect(container.starts).toEqual([]);
+    expect(container.stdin).toEqual([]);
+    expect(container.killed).toEqual([777]);
+    expect(container.removed).toEqual(["/tmp/switchboard-pi-old-build-run-l"]);
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
   });
 });
