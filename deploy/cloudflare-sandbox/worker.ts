@@ -156,10 +156,14 @@ export interface ExecFailure {
   exitCode: 127;
 }
 
-/** A file route's refusal, with the HTTP status the fetch handler answers. */
+/** A file route's refusal, with the HTTP status the fetch handler answers and,
+ *  when the refusal is a named condition the executor waits on (`fleet-busy`,
+ *  `runtime-unreachable`), its machine token — the executor reads the token,
+ *  never the text, so a refusal without it is a dead sandbox to it. */
 interface FileRefusal {
   error: string;
   status: number;
+  reason?: string;
 }
 
 export class SwitchboardSandbox extends Sandbox<Env> {
@@ -282,7 +286,12 @@ export class SwitchboardSandbox extends Sandbox<Env> {
    *  pass as the file. A file over the cap is refused by name inside a 200. */
   async readBase64(path: string): Promise<Base64ReadAnswer | FileRefusal> {
     const stat = await this.runCommand(statCommandFor(path), 60, {});
-    if ("error" in stat) return { error: stat.error, status: stat.reason ? 503 : 500 };
+    if ("error" in stat) {
+      // The stat's own named failure — a full fleet, a silent control port —
+      // is the read's, token included, so the executor waits as it would
+      // have for the text read.
+      return stat.reason ? { error: stat.error, status: 503, reason: stat.reason } : { error: stat.error, status: 500 };
+    }
     if (stat.exitCode !== 0) return { error: `read-failed: ${(stat.stderr || stat.stdout).trim()}`, status: 404 };
     const size = parseByteSize(stat.stdout);
     if (size === null) return { error: `read-failed: stat answered ${JSON.stringify(stat.stdout)}`, status: 500 };
@@ -394,11 +403,11 @@ export default {
           if (typeof encoding !== "string") return json({ error: encoding.error }, 400);
           const path = abs(String(body.path ?? ""));
           const answer = encoding === "base64" ? await sandbox.readBase64(path) : await sandbox.readText(path);
-          return "status" in answer ? json({ error: answer.error }, answer.status) : json(answer);
+          return "status" in answer ? refused(answer) : json(answer);
         }
         case "/write": {
           const answer = await sandbox.write(abs(String(body.path ?? "")), String(body.content ?? ""));
-          return "status" in answer ? json({ error: answer.error }, answer.status) : json(answer);
+          return "status" in answer ? refused(answer) : json(answer);
         }
         default:
           return json({ error: "unknown route" }, 404);
@@ -497,6 +506,13 @@ function streamExec(run: () => Promise<ExecAnswer | ExecFailure>, traceparent: s
     },
   });
   return new Response(stream, { headers: { "content-type": "application/json" } });
+}
+
+/** A file route's refusal as the fetch handler answers it: the text, and the
+ *  machine token when the Durable Object named one — the executor matches
+ *  `reason`, not the text (docs/reference/specs/execution.md items 9 and 14). */
+function refused(r: FileRefusal): Response {
+  return json(r.reason ? { error: r.error, reason: r.reason } : { error: r.error }, r.status);
 }
 
 function abs(p: string): string {
