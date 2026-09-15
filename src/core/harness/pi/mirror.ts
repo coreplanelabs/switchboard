@@ -5,11 +5,14 @@
 // the step's tools run, so `planResume` reads a pi run's row exactly as it
 // reads a native one. The way back: a pi that died with its container is
 // restarted on a session file rebuilt from that transcript, one linear branch
-// of pi's own entries, so the model continues from the last finished turn.
-// The same file is how a fresh run hands pi the thread's earlier turns (the
-// seed rule, item 9): the turns before the request become the session, the
-// request alone is the prompt.
+// of pi's own entries, so the model continues from the last finished turn;
+// a pi that outlived the bot is read again from the last record the ledger
+// holds, and the mirror knows the transcript's last row by sight so a row
+// read twice is written once. The same file is how a fresh run hands pi the
+// thread's earlier turns (the seed rule, item 9): the turns before the
+// request become the session, the request alone is the prompt.
 
+import { isDeepStrictEqual } from "node:util";
 import type { StepReport } from "../../../runner.js";
 import type { ChatMessage, ContentPart } from "../../../providers/types.js";
 import type { AssembledCompaction } from "../../runLedger/transcript.js";
@@ -67,12 +70,24 @@ export function chatMessageOf(message: Record<string, unknown>): ChatMessage | u
   }
 }
 
+/** One row of the ledger's transcript as the mirror writes it: an assistant turn, or pi's compaction entry. */
+export type LedgerTail = { turn: ChatMessage } | { compaction: CompactionEntry };
+
 export interface MirrorDeps {
   /** The ledger's step hook (`LedgerRun.step`); absent, nothing is mirrored. */
   onStep?: (report: StepReport) => Promise<void>;
-  /** How many turns the seed holds: the first user message pi echoes IS the seed. */
+  /** How many rows the transcript holds before the first step — the index it
+   *  takes; a resumed transcript's compaction rows count. The seed's own echo
+   *  (`expectSeedEcho`) is on the ledger already and is not written again. */
   seedLength: number;
   remainingMs: () => number;
+  /** The last row the ledger holds — an assistant turn, or the compaction
+   *  that closed the transcript — on a re-attach (harness-pi item 8): the
+   *  row's offset is saved after the ledger's write, so a bot that died
+   *  between the two left it one row behind, and that row is read again. The
+   *  first row the mirror is about to write that equals it is that row, and
+   *  is not written twice. */
+  mirroredTail?: LedgerTail;
 }
 
 /** Feeds pi's finished messages to the ledger as the runner would: every
@@ -81,13 +96,16 @@ export interface MirrorDeps {
 export class PiMirror {
   private idx: number;
   private pendingUser: ContentPart[] = [];
-  private seedEchoed = false;
+  /** pi is about to echo the seed's prompt as a user message (see `expectSeedEcho`). */
+  private seedEchoPending = false;
+  private mirroredTail: LedgerTail | undefined;
   private iteration = 0;
   /** The highest ledger inbox seq folded in so far (run-history item 40). */
   inboxConsumedSeq = 0;
 
   constructor(private readonly deps: MirrorDeps) {
     this.idx = deps.seedLength;
+    this.mirroredTail = deps.mirroredTail;
   }
 
   /** Whether a report is owed: the mirror is wired and something happened. */
@@ -95,24 +113,49 @@ export class PiMirror {
     return this.deps.onStep !== undefined;
   }
 
-  async onMessage(message: Record<string, unknown>, turn: number): Promise<void> {
-    if (!this.deps.onStep) return;
+  /** pi answered the seed's prompt: the first user message without results
+   *  that follows is its echo — the seed, on the ledger already — and is not
+   *  written twice. A continue prompt (harness-pi item 8) expects none: its
+   *  echo is a turn the model was told, folded in like a steer's text. */
+  expectSeedEcho(): void {
+    this.seedEchoPending = true;
+  }
+
+  /** The row about to be written, against the transcript's tail — compared
+   *  once, with the first row the mirror meets: equal means the ledger holds
+   *  it already (read again, harness-pi item 8), together with the results
+   *  pending before it, which were its step's user turn. */
+  private alreadyHeld(row: LedgerTail): boolean {
+    const tail = this.mirroredTail;
+    if (tail === undefined) return false;
+    this.mirroredTail = undefined;
+    if (!isDeepStrictEqual(row, tail)) return false;
+    this.pendingUser = [];
+    return true;
+  }
+
+  /** Feeds one finished message; answers whether the ledger now holds
+   *  everything up to it — a step written, or an assistant turn found already
+   *  there — so the harness can move the row's offset past it. A result or a
+   *  steer's text waits in memory for the next step, and the answer is no. */
+  async onMessage(message: Record<string, unknown>, turn: number): Promise<boolean> {
+    if (!this.deps.onStep) return false;
     const chat = chatMessageOf(message);
-    if (!chat) return;
+    if (!chat) return false;
     // A message with no parts is not a turn (session-log item 2, one index per
     // row): it would write no row and still spend a log index, and the next
     // reclaim would read the hole as an incomplete transcript. Nothing is
     // reported for it and the index stays; results pending ride the next turn.
-    if (chat.content.length === 0) return;
+    if (chat.content.length === 0) return false;
     if (chat.role === "user") {
-      // pi echoes the prompt it was sent as its first user message: that is the seed, already on the ledger.
-      if (!this.seedEchoed && !chat.content.some((p) => p.type === "tool_result")) {
-        this.seedEchoed = true;
-        return;
+      if (this.seedEchoPending && !chat.content.some((p) => p.type === "tool_result")) {
+        this.seedEchoPending = false;
+        return false;
       }
       this.pendingUser.push(...chat.content);
-      return;
+      return false;
     }
+    if (this.alreadyHeld({ turn: chat })) return true;
     const turns: ChatMessage[] = [];
     if (this.pendingUser.length > 0) turns.push({ role: "user", content: this.pendingUser });
     this.pendingUser = [];
@@ -131,14 +174,17 @@ export class PiMirror {
     };
     this.idx += turns.length;
     await this.deps.onStep(report);
+    return true;
   }
 
   /** pi compacted (session-log item 6): the results pending since the last
    *  assistant turn go as the user turn they would have been, the entry as the
    *  row after them — its own step with nothing in flight, so the log holds
-   *  the summary where pi wrote it and the index moves past it. */
-  async onCompaction(entry: CompactionEntry, turn: number): Promise<void> {
-    if (!this.deps.onStep) return;
+   *  the summary where pi wrote it and the index moves past it. Answers as
+   *  `onMessage` does: the ledger holds everything up to the entry. */
+  async onCompaction(entry: CompactionEntry, turn: number): Promise<boolean> {
+    if (!this.deps.onStep) return false;
+    if (this.alreadyHeld({ compaction: entry })) return true;
     const turns: ChatMessage[] = [];
     if (this.pendingUser.length > 0) turns.push({ role: "user", content: this.pendingUser });
     this.pendingUser = [];
@@ -154,6 +200,7 @@ export class PiMirror {
     };
     this.idx += turns.length + 1;
     await this.deps.onStep(report);
+    return true;
   }
 }
 

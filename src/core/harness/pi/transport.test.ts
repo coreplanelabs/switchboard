@@ -128,4 +128,31 @@ describe("PiRpcTransport", () => {
     const { t } = transport(c, { offset: skip });
     expect(await collect(t, 1)).toEqual(['{"type":"turn_start"}']);
   });
+
+  // The two positions the harness's re-attach fact needs kept apart (harness-pi
+  // item 8): the read position moves by whole chunks, the consumed boundary by
+  // the records a reader has actually been handed.
+  it("the consumed offset is the boundary after the record last handed out while the read position sits at the end of the bytes read; a partial record is read but not consumed; both start at the offset handed in", async () => {
+    const c = new FakePiContainer();
+    await c.start({ paths, args: [], env: {} });
+    const first = '{"type":"agent_start"}';
+    const second = '{"type":"turn_start"}';
+    c.emit(first, second);
+    c.emitRaw('{"type":"turn_en');
+    const { t } = transport(c);
+    expect(t.consumedOffset).toBe(0);
+    const lines = t.lines[Symbol.asyncIterator]();
+    expect((await lines.next()).value).toBe(first);
+    // One read took every byte pi had written; only the first record is in the reader's hands.
+    expect(t.offset).toBe(Buffer.byteLength(`${first}\n${second}\n{"type":"turn_en`));
+    expect(t.consumedOffset).toBe(Buffer.byteLength(`${first}\n`));
+    expect((await lines.next()).value).toBe(second);
+    expect(t.consumedOffset).toBe(Buffer.byteLength(`${first}\n${second}\n`));
+    expect(t.offset).toBe(Buffer.byteLength(`${first}\n${second}\n{"type":"turn_en`));
+    t.close();
+    const skip = Buffer.byteLength(`${first}\n`);
+    const handed = transport(c, { offset: skip }).t;
+    expect(handed.consumedOffset).toBe(skip);
+    expect(handed.offset).toBe(skip);
+  });
 });

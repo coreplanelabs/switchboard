@@ -184,6 +184,8 @@ function world(
     container?: FakePiContainer;
     /** The deployment's compaction thresholds for pi's settings (harness-pi item 4). */
     compaction?: { reserveTokens?: number; keepRecentTokens?: number };
+    /** The harness's sleep; a test that kills the bot mid-run hands one that stops answering. */
+    sleep?: (ms: number) => Promise<void>;
   } = {},
 ) {
   const clock = opts.clock ?? { now: NOW };
@@ -243,7 +245,7 @@ function world(
         bearers,
         ...(opts.compaction ? { compaction: opts.compaction } : {}),
         clock: () => clock.now,
-        sleep: () => new Promise((r) => setImmediate(r)),
+        sleep: opts.sleep ?? (() => new Promise((r) => setImmediate(r))),
         pollMs: 10,
         tickMs: 10,
         finaleTimeoutMs: 60_000,
@@ -328,7 +330,11 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     // The protocol: auto-retry off, the state asked, the first turn as the prompt.
     expect(w.container.commands().map((c) => c.type)).toEqual(["set_auto_retry", "get_state", "prompt"]);
     expect(w.container.commands()[0]).toMatchObject({ enabled: false });
-    expect(w.container.commands()[2]).toEqual({ id: "prompt", type: "prompt", message: "fix the failing test" });
+    expect(w.container.commands()[2]).toEqual({
+      id: expect.stringMatching(/^prompt:1700000000000-[0-9a-f]{8}$/),
+      type: "prompt",
+      message: "fix the failing test",
+    });
     // A seed of one turn (the seed rule): pi starts on a fresh session directory, no session file is written, the prompt is that turn entire.
     expect(started.args[started.args.indexOf("--session-dir") + 1]).toBe(paths.sessionDir);
     expect(started.args).not.toContain("--session");
@@ -407,7 +413,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(answer).toBe("Fixed.");
     // The prompt is the request — the last turn, with its image — and none of the earlier text.
     expect(w.container.commands()[2]).toEqual({
-      id: "prompt",
+      id: expect.stringMatching(/^prompt:1700000000000-[0-9a-f]{8}$/),
       type: "prompt",
       message: "fix the failing test",
       images: [{ type: "image", data: "AAA=", mimeType: "image/png" }],
@@ -1000,6 +1006,278 @@ describe("runPiHarness — after a bot restart", () => {
       /^resumed after a restart: pi still runs in the container \(pid 4242\); continuing its session with 20 min of budget left — 1 call\(s\) were in flight, each answered with a restart note if pi asks for it again$/,
     );
     expect(w.events.find((e) => e.type === "tool_result" && e.callId === "c0")).toMatchObject({ ok: false });
+  });
+
+  /** A container whose pi outlives the first generation's end: the bot died
+   *  before its finally ran, so the kill never reached pi and the log is what
+   *  pi wrote — the second generation finds pi where the first left it. */
+  class PiOutlivesTheBot extends FakePiContainer {
+    private deaths = 1;
+    override async kill(pid: number) {
+      if (this.deaths-- > 0) return;
+      await super.kill(pid);
+    }
+  }
+
+  // The defect: the row's offset named where the transport had READ to, saved
+  // at a turn's end — past the toolResult pi writes before it — so a bot that
+  // died during the next model call took the result with it: never read again,
+  // never written, the next assistant turn landing with no user turn before it.
+  it("a re-attach reads pi's log again from the last turn the ledger holds: the tool result the dead generation read but never wrote is the next step's user turn", async () => {
+    // Generation one: pi runs the first turn's command; the bot dies right after
+    // the row is saved past that turn's step, during the model call that follows.
+    let dead = false;
+    const w = world({
+      container: new PiOutlivesTheBot(),
+      sleep: () => (dead ? Promise.reject(new Error("the bot process is gone")) : new Promise((r) => setImmediate(r))),
+    });
+    const record = w.run.saveFacts!;
+    w.run.saveFacts = (f) => {
+      record(f);
+      if (w.steps.length > 0 && f.logOffset > 0) dead = true;
+    };
+    scriptedPi(w.container, () => bashTurn(w, "c1", "npm test", "1 passing"));
+    await expect(w.start()).rejects.toThrow("the bot process is gone");
+    expect(w.steps.map((s) => s.turns.map((t) => t.role))).toEqual([["assistant"]]);
+    expect(w.container.killed).toEqual([]);
+    const row = w.facts.at(-1)!;
+    // Generation two: the same container, pi alive at its pid, the row's facts and the ledger's transcript.
+    const transcript = [...w.run.messages, ...w.steps.flatMap((s) => s.turns)];
+    const w2 = world({ container: w.container, clock: { now: NOW + 30_000 } });
+    w2.run.resume = {
+      messages: transcript,
+      settlements: [
+        {
+          toolUse: { type: "tool_use", id: "c1", name: "bash", input: { command: "npm test" } },
+          action: "synthetic",
+          text: "The bot restarted while this bash call was in flight.",
+        },
+      ],
+      remainingMs: 20 * 60_000,
+      turn: 1,
+      inboxConsumedSeq: 0,
+      facts: row,
+    };
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "the tests pass"));
+    expect(await w2.start()).toBe("the tests pass");
+    expect(w.container.starts).toHaveLength(1); // no second pi
+    expect(w2.steps.map((s) => ({ firstIdx: s.firstIdx, turns: s.turns }))).toEqual([
+      {
+        firstIdx: transcript.length,
+        turns: [
+          { role: "user", content: [{ type: "tool_result", toolUseId: "c1", content: "1 passing" }] },
+          { role: "assistant", content: [{ type: "text", text: "the tests pass" }] },
+        ],
+      },
+    ]);
+    expect(w.container.killed).toEqual([4242]);
+  });
+
+  // The row's offset is saved after the ledger's write, so a bot that died
+  // between the two leaves it one turn behind: that turn is read again.
+  it("an assistant turn the ledger already holds, read again because the row's offset lagged the write, spends no second index: the results after it are the next step's user turn and the steps continue from the transcript", async () => {
+    const w = world();
+    await w.container.start({ paths, args: [], env: {} });
+    // The dead generation's log from the start: the turn the transcript ends with, its command's result, the turn's end.
+    const turn = assistant([{ type: "toolCall", id: "c0", name: "bash", arguments: { command: "npm test" } }]);
+    w.container.emit(
+      { type: "turn_start" },
+      { type: "message_end", message: turn },
+      { type: "tool_execution_start", toolCallId: "c0", toolName: "bash", args: { command: "npm test" } },
+      {
+        type: "tool_execution_end",
+        toolCallId: "c0",
+        toolName: "bash",
+        result: { content: [{ type: "text", text: "1 passing" }] },
+        isError: false,
+      },
+      {
+        type: "message_end",
+        message: {
+          role: "toolResult",
+          toolCallId: "c0",
+          toolName: "bash",
+          content: [{ type: "text", text: "1 passing" }],
+        },
+      },
+      { type: "turn_end", message: turn, toolResults: [] },
+    );
+    w.run.resume = resume({
+      pid: 4242,
+      logOffset: 0,
+      sessionFile: "s.jsonl",
+      root: paths.dir,
+      bearerHash: bearerHashOf(w.bearer),
+    });
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "green"));
+    expect(await w.start()).toBe("green");
+    expect(w.steps.map((s) => ({ firstIdx: s.firstIdx, turns: s.turns }))).toEqual([
+      {
+        firstIdx: transcript.length,
+        turns: [
+          { role: "user", content: [{ type: "tool_result", toolUseId: "c0", content: "1 passing" }] },
+          { role: "assistant", content: [{ type: "text", text: "green" }] },
+        ],
+      },
+    ]);
+  });
+
+  // Reading from the last turn the ledger holds can start before the dead
+  // generation's own commands were answered; those answers are pi's to it.
+  it("the answers pi gave a dead generation's commands, read again, are not taken for this generation's: the catch-up lasts until this generation's prompt is answered, so the model call that failed with the bot stays a note, and the dead generation's continue prompt is a turn the model was told", async () => {
+    const w = world();
+    await w.container.start({ paths, args: [], env: {} });
+    const earlier = NOW - 60_000;
+    w.container.emit(
+      { id: `retry:${earlier}-0badc0de`, type: "response", command: "set_auto_retry", success: true },
+      {
+        id: `state:${earlier}-0badc0de`,
+        type: "response",
+        command: "get_state",
+        success: true,
+        data: { sessionFile: "stale" },
+      },
+      { id: `prompt:${earlier}-0badc0de`, type: "response", command: "prompt", success: true },
+      { type: "agent_start" },
+      { type: "turn_start" },
+      {
+        type: "message_end",
+        message: { role: "user", content: [{ type: "text", text: "Continue where you left off." }] },
+      },
+      {
+        type: "message_end",
+        message: { role: "assistant", content: [], stopReason: "error", errorMessage: "fetch failed" },
+      },
+      { type: "turn_end" },
+      { type: "agent_end", messages: [], willRetry: false },
+      { type: "agent_settled" },
+    );
+    w.run.resume = resume({
+      pid: 4242,
+      logOffset: 0,
+      sessionFile: "s.jsonl",
+      root: paths.dir,
+      bearerHash: bearerHashOf(w.bearer),
+    });
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "continued"));
+    expect(await w.start()).toBe("continued");
+    expect(
+      w.events
+        .filter((e) => e.type === "run_note" && e.kind === "harness_error")
+        .map((e) => (e as { summary: string }).summary),
+    ).toEqual(["a model call failed while the bot was away (fetch failed); continuing"]);
+    expect(w.facts.at(-1)!.sessionFile).toBe(`${paths.sessionDir}/s.jsonl`); // this generation's answer, not the stale one
+    expect(w.steps.map((s) => s.turns)).toEqual([
+      [
+        { role: "user", content: [{ type: "text", text: "Continue where you left off." }] },
+        { role: "assistant", content: [{ type: "text", text: "continued" }] },
+      ],
+    ]);
+  });
+
+  it("this generation's command ids carry the moment it began and a nonce: two generations begun on the same clock reading share no id", async () => {
+    const a = world();
+    scriptedPi(a.container, (_n, c) => finalTurn(c, "one"));
+    await a.start();
+    const b = world();
+    scriptedPi(b.container, (_n, c) => finalTurn(c, "two"));
+    await b.start();
+    const ids = (w: { container: FakePiContainer }) => w.container.commands().map((c) => String(c.id));
+    for (const id of [...ids(a), ...ids(b)]) expect(id).toMatch(/^(retry|state|prompt):1700000000000-[0-9a-f]{8}$/);
+    expect(new Set([...ids(a), ...ids(b)]).size).toBe(6);
+  });
+
+  // The one-behind window exists for a compaction row too: the row's offset is
+  // saved after the ledger's write, so a bot that dies between the compaction
+  // step's write and the row's save leaves the offset before the compaction
+  // record, and the re-attach reads it again.
+  it("a compaction row the ledger already holds, read again because the bot died between its write and the row's save, is not written twice: the results before it went with it, and the next step lands after every row the transcript holds, the compaction row counted", async () => {
+    let dead = false;
+    const w = world({
+      container: new PiOutlivesTheBot(),
+      sleep: () => (dead ? Promise.reject(new Error("the bot process is gone")) : new Promise((r) => setImmediate(r))),
+    });
+    const record = w.run.saveFacts!;
+    w.run.saveFacts = (f) => {
+      // The save that follows the compaction's write never lands: the bot is gone.
+      if (w.steps.some((s) => s.compaction !== undefined)) {
+        dead = true;
+        return;
+      }
+      record(f);
+    };
+    const entry = { summary: "npm test passed", tokensBefore: 150_000, firstKeptEntryId: "e9" };
+    scriptedPi(w.container, (_n, c) => {
+      bashTurn(w, "c1", "npm test", "1 passing");
+      c.emit({
+        type: "compaction_end",
+        reason: "threshold",
+        result: { ...entry, estimatedTokensAfter: 30_000 },
+        aborted: false,
+      });
+    });
+    await expect(w.start()).rejects.toThrow("the bot process is gone");
+    expect(w.steps.map((s) => s.compaction)).toEqual([undefined, entry]);
+    const row = w.facts.at(-1)!;
+    // Generation two: the ledger's transcript ends on the compaction row.
+    const messages = [...w.run.messages, ...w.steps.flatMap((s) => s.turns)];
+    const w2 = world({ container: w.container, clock: { now: NOW + 30_000 } });
+    w2.run.resume = {
+      messages,
+      compactions: [{ before: messages.length, entry }],
+      settlements: [],
+      remainingMs: 20 * 60_000,
+      turn: 1,
+      inboxConsumedSeq: 0,
+      facts: row,
+    };
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "after the summary"));
+    expect(await w2.start()).toBe("after the summary");
+    expect(w2.steps.map((s) => ({ firstIdx: s.firstIdx, turns: s.turns, compaction: s.compaction }))).toEqual([
+      {
+        firstIdx: messages.length + 1,
+        turns: [{ role: "assistant", content: [{ type: "text", text: "after the summary" }] }],
+        compaction: undefined,
+      },
+    ]);
+  });
+
+  // Only the seed's prompt is on the ledger before pi echoes it; a re-attach
+  // sends no seed, so nothing it reads is that echo.
+  it("a steer's text the dead generation read but never wrote is the next step's user turn, not mistaken for the seed's echo; the continue prompt's own echo is a turn the model was told", async () => {
+    const w = world();
+    await w.container.start({ paths, args: [], env: {} });
+    w.container.emit({
+      type: "message_end",
+      message: { role: "user", content: [{ type: "text", text: wrapUpInstruction(3) }] },
+    });
+    w.run.resume = resume({
+      pid: 4242,
+      logOffset: 0,
+      sessionFile: "s.jsonl",
+      root: paths.dir,
+      bearerHash: bearerHashOf(w.bearer),
+    });
+    let continuePrompt = "";
+    scriptedPi(w.container, (_n, c) => {
+      continuePrompt = String(c.commands().at(-1)!.message);
+      c.emit({ type: "turn_start" }, { type: "message_end", message: { role: "user", content: continuePrompt } });
+      finalTurn(c, "wrapping up");
+    });
+    expect(await w.start()).toBe("wrapping up");
+    expect(continuePrompt).toMatch(/^Continue where you left off/);
+    expect(w.steps.map((s) => s.turns)).toEqual([
+      [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: wrapUpInstruction(3) },
+            { type: "text", text: continuePrompt },
+          ],
+        },
+        { role: "assistant", content: [{ type: "text", text: "wrapping up" }] },
+      ],
+    ]);
   });
 
   // The row's facts name the root pi was filed under, so the re-attach reads

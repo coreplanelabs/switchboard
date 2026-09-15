@@ -3,8 +3,11 @@
 // come back by polling pi's log from the last byte read — exact bytes, so a
 // record split across two reads is whole before it is parsed — and the stream
 // ends when the harness closes it or when pi is found dead with nothing more
-// to read. The same `PiTransport` shape the spike driver speaks over a child
-// process, so the bridge and the driver's accumulator never know which.
+// to read. Two positions are kept apart: where the reads have reached, by
+// whole chunks, and the boundary after the record last handed out, by records
+// — the one the harness's re-attach fact is made of (item 8). The same
+// `PiTransport` shape the spike driver speaks over a child process, so the
+// bridge and the driver's accumulator never know which.
 
 import { LOG_READ_BYTES, type PiContainer } from "./container.js";
 import type { PiRunPaths } from "./process.js";
@@ -26,8 +29,12 @@ export interface PiRpcTransportDeps {
 const NEWLINE = 0x0a;
 
 export class PiRpcTransport implements PiTransport {
-  /** The byte the next read starts at — the re-attach fact. */
+  /** The byte the next read starts at: the read position, moved by whole chunks. */
   offset: number;
+  /** The boundary after the record last handed out, moved by records: where a
+   *  reader that has seen everything so far continues from — the harness's
+   *  re-attach fact, taken when nothing handed out is left unwritten. */
+  consumedOffset: number;
   /** pi was found dead while the harness still listened. */
   exited = false;
   private closed = false;
@@ -38,6 +45,7 @@ export class PiRpcTransport implements PiTransport {
 
   constructor(private readonly deps: PiRpcTransportDeps) {
     this.offset = deps.offset ?? 0;
+    this.consumedOffset = this.offset;
     this.lines = this.read();
   }
 
@@ -93,11 +101,16 @@ export class PiRpcTransport implements PiTransport {
   /** Complete lines out of the buffered bytes; the partial tail waits for more. */
   private *split(chunk: Uint8Array): Generator<string> {
     this.buffer = Buffer.concat([this.buffer, Buffer.from(chunk)]);
+    // Where the buffer's first byte sits in the log: the read position, less what waits unparsed.
+    const base = this.offset - this.buffer.length;
     let start = 0;
     for (let i = this.buffer.indexOf(NEWLINE, start); i >= 0; i = this.buffer.indexOf(NEWLINE, start)) {
       let line = this.buffer.subarray(start, i).toString("utf8");
       if (line.endsWith("\r")) line = line.slice(0, -1);
-      if (line.length > 0) yield line;
+      if (line.length > 0) {
+        this.consumedOffset = base + i + 1;
+        yield line;
+      }
       start = i + 1;
     }
     this.buffer = this.buffer.subarray(start);

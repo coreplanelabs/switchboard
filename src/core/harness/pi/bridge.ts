@@ -79,9 +79,7 @@ export interface BridgeObservation {
   replies: Record<string, unknown>[];
   /** pi will not go on by itself: `agent_settled`. */
   settled: boolean;
-  /** A turn ended: the harness re-checks its budgets. */
-  turnEnded: boolean;
-  /** A `response` record — the harness's own request answered. */
+  /** A `response` record — a request of the harness's answered. */
   response?: PiEvent;
   /** A finished message, in order, for the transcript mirror. */
   message?: Record<string, unknown>;
@@ -179,7 +177,7 @@ export class PiBridge {
   }
 
   observe(event: PiEvent): BridgeObservation {
-    const out: BridgeObservation = { replies: [], settled: false, turnEnded: false };
+    const out: BridgeObservation = { replies: [], settled: false };
     const disposition = PI_EVENT_DISPOSITION[event.type];
     if (disposition === undefined) {
       this.note("harness_error", `pi emitted an event kind this build does not know: ${redactAndCap(event.type, 80)}`);
@@ -195,9 +193,6 @@ export class PiBridge {
         break;
       case "agent_settled":
         out.settled = true;
-        break;
-      case "turn_end":
-        out.turnEnded = true;
         break;
       case "message_start":
         if (isRecord(event.message) && event.message.role === "assistant") this.assistantStartedAt = this.deps.clock();
