@@ -154,6 +154,12 @@ One table per group, in registration order. "Surfaces" is where that command can
 |---|---|---|
 | `delivery report [--repo <string>] [--since <string>] [--weeks <integer>] [--fresh]` | Delivery indicators per week and per unit — issue-to-merge time, first-pass CI, review rounds, findings and the share resolved with no human edit — from the repository's snapshot of GitHub's facts (--fresh reads GitHub now) and the run history; nothing written. | every surface |
 
+### `costs`
+
+| Command | What it does | Surfaces |
+|---|---|---|
+| `costs snapshot` | Take the costs snapshot now: read both billing sources and the run history once over the page's widest range, store the result, and serve it to every reader of the costs page from then on. | every surface |
+
 ### `artifacts`
 
 | Command | What it does | Surfaces |

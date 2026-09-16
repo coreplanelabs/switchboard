@@ -12,7 +12,13 @@ Without the block, **Costs** is not in the header and `/costs` answers 503.
 
 ## Open the dashboard
 
-Open `/costs`: daily spend for every configured group, newest day first, with `today · 7d · 30d · 90d` ranges (UTC days; the cost sources have nothing finer). Each load prices live from Cloudflare's billing data and, with the admin key, Anthropic's; nothing is cached. One figure is an estimate and says so: the day Anthropic's cost report has not closed yet (today, and yesterday until a few hours after midnight UTC) is the hourly usage report priced at list.
+Open `/costs`: daily spend for every configured group, newest day first, with `today · 7d · 30d · 90d` ranges (UTC days; the cost sources have nothing finer). Every figure comes from a snapshot of Cloudflare's billing data and, with the admin key, Anthropic's — read once a day (`costs.snapshot.everyHours`, default 24) by the bot itself, never in a page load, so the page opens at once. The line under the range says which snapshot you are looking at, how old it is and when the next one is due; `today` on the page is the day the snapshot was taken. One figure is an estimate and says so: the day Anthropic's cost report has not closed yet (today, and yesterday until a few hours after midnight UTC) is the hourly usage report priced at list.
+
+Right after a fresh installation starts there is no snapshot yet: the page says so and the first one lands within a minute.
+
+## Take a snapshot now
+
+Ask the bot for `costs snapshot` in Slack, or run `switchboard costs snapshot` on the CLI. The take reads both billing sources and the run history once (a few seconds, half a minute in a bad one), stores the result, and the page shows it on the next load with your name on the status line. The command needs the `costs:write` grant — an admin's `all` or a `grants` entry that names it — because a take reads two providers and replaces what every viewer sees.
 
 ## Narrow to one group
 

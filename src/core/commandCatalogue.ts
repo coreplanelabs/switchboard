@@ -26,6 +26,8 @@ import type { IssueTracker } from "../execution/githubIssues.js";
 import { resolveGithubIdentity } from "../execution/githubApp.js";
 import { GithubDeliverySource } from "../execution/githubDelivery.js";
 import { ResidentOperations } from "../execution/resident.js";
+import { parseCostsConfig } from "./costs.js";
+import { costsFromConfig, NullCostsService, type CostsService } from "./costsService.js";
 import { createDeliveryService, NullDeliveryService, parseDeliveryConfig, type DeliveryService } from "./delivery.js";
 import { SnapshottingDeliverySource } from "./deliverySnapshot.js";
 import {
@@ -127,6 +129,10 @@ export interface CoreCommandWiring {
    *  `/delivery` page reads); default: GitHub over the App's read token with the
    *  `delivery:` config, or the Null Object when the process has no GitHub credential. */
   delivery?: () => DeliveryService;
+  /** The costs service behind `costs snapshot` (index.ts shares the one the `/costs`
+   *  page reads); default: both billing sources with the `costs:` config over the
+   *  snapshot store the state Worker holds, or the Null Object when cost reporting is off. */
+  costs?: () => CostsService;
   /** The channel directory behind `config show --channel` (authorization.md item
    *  4, the channelConfig read half): the target channel's visibility, read
    *  through the run stamp's bound (`channelVisibilityOf`). A getter, because the
@@ -260,6 +266,23 @@ export function buildCoreCommands(
       warn,
     }).service;
   });
+  // ONE costs service per binding: the page and `costs snapshot` serve and take
+  // the same snapshot. The CLI takes one against the same store the bot reads.
+  const costs = once(async (): Promise<CostsService> => {
+    if (wiring.costs) return wiring.costs();
+    if (wiring.capabilities && !wiring.capabilities.costs) return new NullCostsService();
+    const config = (await cfg()).config;
+    const costsCfg = parseCostsConfig(config.costs);
+    const store = await runStore();
+    const wired =
+      costsCfg &&
+      costsFromConfig(costsCfg, config, {
+        secrets: wiring.secrets,
+        ...(store ? { runStore: store } : {}),
+        warn: (m) => wiring.warn(`[costs] ${m}`),
+      });
+    return wired?.service ?? new NullCostsService();
+  });
   const deps: CoreCommandDeps = {
     help: {
       agents: () =>
@@ -333,6 +356,7 @@ export function buildCoreCommands(
     // `contract render` reads the paths the CLI caller names (CLI-only).
     contract: { readFile: readOptionalFile },
     delivery: { service: delivery },
+    costs: { service: costs },
   };
   return bindCommands(registry, deps);
 }

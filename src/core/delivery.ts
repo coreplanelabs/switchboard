@@ -1,3 +1,4 @@
+import { snapshotAgeText } from "./snapshotAge.js";
 import { systemClock } from "./trace/clock.js";
 
 // Delivery indicators: what the run history and the pull requests' own facts
@@ -553,17 +554,9 @@ function indicatorLines(x: DeliveryIndicators): string[] {
   ];
 }
 
-/** `just now`, `12 minutes ago`, `3 hours ago`, `2 days ago` — how old the snapshot is, for a footer or a head line. */
-export function snapshotAgeText(snapshotAt: string, nowMs: number): string {
-  const minutes = Math.max(0, Math.floor((nowMs - Date.parse(snapshotAt)) / 60_000));
-  if (!Number.isFinite(minutes)) return "";
-  const unit = (n: number, word: string): string => `${n} ${word}${n === 1 ? "" : "s"} ago`;
-  if (minutes < 1) return "just now";
-  if (minutes < 90) return unit(minutes, "minute");
-  const hours = Math.round(minutes / 60);
-  if (hours < 48) return unit(hours, "hour");
-  return unit(Math.round(hours / 24), "day");
-}
+/** `just now`, `12 minutes ago`, `3 hours ago`, `2 days ago` — how old the snapshot is, for a footer or a head line
+ *  (src/core/snapshotAge.ts, shared with the costs page). */
+export { snapshotAgeText };
 
 /** `<YYYY-MM-DD> <hh:mm> UTC` — an instant as the text spells one. */
 const clock = (iso: string): string => `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;

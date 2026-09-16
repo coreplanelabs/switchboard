@@ -1,5 +1,14 @@
 import { REPO_SLUG, type DeliveryRange, type PullRequestFacts } from "./delivery.js";
+import {
+  DEFAULT_STATE_WORKER_TOKEN_ENV,
+  STATE_WORKER_BLOCK_NAMES,
+  stateWorkerOf,
+  type SecretReader,
+  type StateWorkerBlocks,
+} from "./stateWorkerRef.js";
 import { errorSuffix } from "./workerError.js";
+
+export type { SecretReader, StateWorkerBlocks, StateWorkerRef } from "./stateWorkerRef.js";
 
 // Where a repository's delivery snapshot lives (docs/reference/specs/delivery.md item 10):
 // the merged pull requests' facts over the snapshot window, as GitHub gave
@@ -207,29 +216,6 @@ export class WorkerDeliverySnapshotStore implements DeliverySnapshotStore {
   }
 }
 
-/** A `{ baseUrl, tokenEnv? }` reference to the state Worker, as every `*.worker` config block spells it. */
-export interface StateWorkerRef {
-  baseUrl: string;
-  /** Env var holding the bearer; default MEMORY_TOKEN. */
-  tokenEnv?: string;
-}
-
-/** The config blocks that may name the state Worker — one Worker, referenced from each capability that uses it. */
-export interface StateWorkerBlocks {
-  runtimeOverrides?: { worker?: StateWorkerRef };
-  runHistory?: { worker?: StateWorkerRef };
-  schedules?: { worker?: StateWorkerRef };
-  memory?: { worker?: StateWorkerRef };
-}
-
-const DEFAULT_TOKEN_ENV = "MEMORY_TOKEN";
-
-/** The slice of the process's `Secrets` the builder reads (src/secrets.ts; named
- *  structurally so this module stays free of the bot's Node-only imports for the Worker). */
-export interface SecretReader {
-  named(name: string): { reveal(): string } | undefined;
-}
-
 /** Process-startup store selection (src/index.ts, the CLI): the Worker store
  *  behind whichever `*.worker` block names the state Worker — the snapshot is
  *  a cache, so it earns no block of its own — else the in-memory store with a
@@ -239,16 +225,14 @@ export function buildDeliverySnapshotStore(
   secrets: SecretReader,
   warn: (message: string) => void,
 ): DeliverySnapshotStore {
-  const worker = [config.runtimeOverrides, config.runHistory, config.schedules, config.memory].find(
-    (block) => block?.worker?.baseUrl,
-  )?.worker;
+  const worker = stateWorkerOf(config);
   if (!worker) {
     warn(
-      "delivery snapshots are kept in memory — a restart loses them and the first request after one reads GitHub live. Name the state Worker (runHistory.worker, runtimeOverrides.worker, schedules.worker or memory.worker) to keep them on it.",
+      `delivery snapshots are kept in memory — a restart loses them and the first request after one reads GitHub live. Name the state Worker (${STATE_WORKER_BLOCK_NAMES}) to keep them on it.`,
     );
     return new InMemoryDeliverySnapshotStore();
   }
-  const tokenEnv = worker.tokenEnv ?? DEFAULT_TOKEN_ENV;
+  const tokenEnv = worker.tokenEnv ?? DEFAULT_STATE_WORKER_TOKEN_ENV;
   const token = secrets.named(tokenEnv);
   if (!token) {
     warn(

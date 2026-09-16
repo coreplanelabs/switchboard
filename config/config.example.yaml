@@ -386,6 +386,9 @@ workspaceDir: ./workspaces
 #   cloudflareAccountName: acme-infra              # optional: how the page names the account beside its share (else the id's first hex)
 #   cloudflareTokenEnv: CF_ANALYTICS_TOKEN     # token with Account Analytics:Read
 #   anthropicAdminKeyEnv: ANTHROPIC_ADMIN_KEY  # optional: sk-ant-admin… for LLM spend
+#   snapshot:                                  # the page serves a snapshot of both billing sources, never a live read;
+#     everyHours: 24                           #   how often the bot reads them (1–168, default 24). `costs snapshot`
+#                                              #   takes one now. Kept on the state Worker any `*.worker` block names
 #   groups:
 #     myapp:
 #       label: My App

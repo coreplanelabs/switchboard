@@ -3,6 +3,7 @@ import CostsPage from "./CostsPage.vue";
 import { mountApp } from "../testing/mount";
 import type { CostReport } from "@core/core/costs.js";
 import type { UserCostReport } from "@core/core/costsByUser.js";
+import type { CostsSnapshotStatus } from "@core/core/costsSnapshot.js";
 import type { CostsSeed } from "@core/channels/webSeed.js";
 
 // Ported from the string-renderer suite (costsView.test.ts): the same page
@@ -64,11 +65,26 @@ function report(over: Partial<CostReport> = {}): CostReport {
   };
 }
 
-const seed = (r: CostReport = report(), groups: string[] = ["switchboard", "other"]): CostsSeed => ({
+/** The status a snapshot-serving page carries: taken on schedule three hours before the report's clock, the next one due a day after. */
+const STATUS: CostsSnapshotStatus = {
+  snapshot: { takenAt: "2026-08-29T21:00:00.000Z", takenBy: "schedule", durationMs: 31_000 },
+  inFlight: null,
+  everyHours: 24,
+  nextAt: "2026-08-30T21:00:00.000Z",
+  lastFailure: null,
+};
+
+const seed = (
+  r: CostReport | null = report(),
+  groups: string[] = ["switchboard", "other"],
+  snapshot: CostsSnapshotStatus = STATUS,
+): CostsSeed => ({
   page: "costs",
+  group: r?.group ?? "switchboard",
   report: r,
   groups,
   view: "daily",
+  snapshot,
 });
 
 /** The by-user report for the same three days: two Slack users, one of them the
@@ -396,6 +412,50 @@ describe("CostsPage", () => {
   it("names the JSON twin", () => {
     const w = mountApp(CostsPage, { seed: seed() });
     expect(w.text()).toContain("GET /costs/switchboard.json");
+  });
+
+  // costs.md item 6: every figure is as of the snapshot — the page says which,
+  // how old, who took it and when the next is due; a take in flight is said
+  // where the age is; before the first snapshot the status stands alone.
+  it("says which snapshot the figures are from, how old it is, that the loop took it and when the next is due; the method names the snapshot, not a live read", () => {
+    const w = mountApp(CostsPage, { seed: seed() });
+    const line = w.find("[data-snapshot-status]").text();
+    expect(line).toContain("Snapshot from Aug 29, 21:00 UTC");
+    expect(line).toMatch(/ago on schedule · next /);
+    expect(w.text()).toContain("costs snapshot");
+    expect(w.text()).not.toContain("nothing cached");
+  });
+
+  it("while a take is in flight the status line says so and who started it, with the figures of the current snapshot still shown", () => {
+    const w = mountApp(CostsPage, {
+      seed: seed(report(), ["switchboard"], {
+        ...STATUS,
+        inFlight: { startedAt: "2026-08-29T21:30:00Z", by: "casey" },
+      }),
+    });
+    const line = w.find("[data-snapshot-status]").text();
+    expect(line).toContain("Taking a snapshot now");
+    expect(line).toContain("by casey");
+    expect(line).toContain("showing the one from Aug 29, 21:00 UTC meanwhile");
+    expect(w.find("table.data").exists()).toBe(true);
+  });
+
+  it("before the first snapshot there is no report: the page names the group, keeps the group switcher, says no snapshot has landed and how to take one, and prices nothing", () => {
+    const none: CostsSnapshotStatus = {
+      snapshot: null,
+      inFlight: null,
+      everyHours: 24,
+      nextAt: null,
+      lastFailure: null,
+    };
+    const w = mountApp(CostsPage, { seed: seed(null, ["switchboard", "other"], none) });
+    expect(w.text()).toContain("Nothing to show yet");
+    expect(w.find("[data-snapshot-status]").text()).toContain("No snapshot yet");
+    expect(w.text()).toContain("costs snapshot");
+    expect(w.findAll("a").map((a) => a.attributes("href"))).toContain("/costs/other");
+    expect(w.find("table.data").exists()).toBe(false);
+    expect(w.find("rect.day").exists()).toBe(false);
+    expect(w.find('nav.site a[aria-current="page"]').attributes("href")).toBe("/costs");
   });
 
   it("offers Daily and By user as tabs above the tables; the daily tab shows the daily tables and no user table", () => {

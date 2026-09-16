@@ -4,6 +4,7 @@ import AppShell from "../components/AppShell.vue";
 import CostChart from "../components/costs/CostChart.vue";
 import CostsByUser from "../components/costs/CostsByUser.vue";
 import { useSeed } from "../lib/seed";
+import { useWallClock } from "../lib/wallClock";
 import {
   accountLabelOf,
   DO_LABEL,
@@ -13,18 +14,30 @@ import {
   resourceSplitOf,
   seriesOf,
   SERIES_SWATCH,
+  snapshotLineOf,
   tilesOf,
   usd,
   valueOf,
 } from "../lib/costs";
 
-// The spend dashboard: what a group of deployed pieces costs per day, read
-// live from both billing sources per request. Same shell and tokens as every
-// other page now (the old costs page was the one light/sans outlier).
+// The spend dashboard: what a group of deployed pieces costs per day, every
+// figure from the costs snapshot (costs.md item 6) — both billing sources read
+// on the snapshot's interval or on request, never in a page load. The status
+// line under the range names the snapshot the page shows, its age and when the
+// next is due; before the first one lands the page shows that line alone. Same
+// shell and tokens as every other page (the old costs page was the one
+// light/sans outlier).
 
 const seed = useSeed("costs");
 const report = computed(() => seed?.report ?? null);
 const groups = computed(() => seed?.groups ?? []);
+/** The group the page is for — from the seed even when there is no report yet to name it. */
+const group = computed(() => seed?.group ?? report.value?.group ?? "");
+/** The snapshot's status: its stamp, a take in flight, when the next is due. */
+const status = computed(() => seed?.snapshot ?? null);
+/** The snapshot's age ticks by the minute while the page is open. */
+const now = useWallClock(undefined, 60_000);
+const snapshotLine = computed(() => (status.value ? snapshotLineOf(status.value, now.value) : ""));
 /** Which tab is open: the daily tables, or cost by user (`?view=users`, the
  *  by-user report riding along in the seed). */
 const view = computed<"daily" | "users">(() => seed?.view ?? "daily");
@@ -156,6 +169,10 @@ function monthDay(date: string): string {
         >
           · today partial</template
         >
+      </p>
+      <!-- Every figure below is as of this snapshot: say which, how old, and when the next is due. -->
+      <p v-if="snapshotLine" class="basis-full font-mono text-xs tabular-nums text-dimmed" data-snapshot-status>
+        {{ snapshotLine }}
       </p>
     </div>
 
@@ -399,11 +416,15 @@ function monthDay(date: string): string {
         <summary class="cursor-pointer text-muted">How these numbers are computed</summary>
         <div class="mt-2 grid gap-1.5">
           <div>
-            <b>Live.</b> Both billing sources are read live from this page — nothing cached, nothing stored. Cloudflare
-            bills vCPU on active use only; memory and disk bill on the provisioned size for every second a container is
-            awake. LLM spend is the Anthropic Admin API cost report for this group's workspace (gross, USD); a day the
-            cost report has not closed is the Admin API usage report, hourly, priced at Anthropic list per model (input,
-            output, cache writes, cache reads) and marked as an estimate.
+            <b>Snapshot.</b> Both billing sources and the run history are read once over the widest range this page
+            offers and kept as a snapshot; every figure here, the JSON twins and the By user tab are arithmetic over it,
+            with <em>today</em> the day it was taken. The line under the range says when that was, how old it is and
+            when the next one is due (<code>costs.snapshot.everyHours</code>, daily by default);
+            <code>costs snapshot</code> takes one now. Cloudflare bills vCPU on active use only; memory and disk bill on
+            the provisioned size for every second a container is awake. LLM spend is the Anthropic Admin API cost report
+            for this group's workspace (gross, USD); a day the cost report has not closed is the Admin API usage report,
+            hourly, priced at Anthropic list per model (input, output, cache writes, cache reads) and marked as an
+            estimate.
           </div>
           <div>
             <b>Method.</b> Cloudflare GraphQL Analytics, every meter a Workers deployment is billed on:
@@ -464,5 +485,34 @@ function monthDay(date: string): string {
         </div>
       </details>
     </footer>
+  </AppShell>
+  <!-- Before the first snapshot lands there is nothing to price: the status line says so and what happens next. -->
+  <AppShell v-else :title="`${group} spend`" nav="costs">
+    <div class="mb-4 flex flex-wrap items-center gap-x-4 gap-y-2">
+      <nav v-if="groups.length > 1" class="flex items-center gap-1" aria-label="Cost groups">
+        <template v-for="g in groups" :key="g">
+          <span
+            v-if="g === group"
+            class="rounded-md bg-accented px-2.5 py-1 text-xs font-medium text-highlighted"
+            aria-current="page"
+            >{{ g }}</span
+          >
+          <a
+            v-else
+            class="rounded-md px-2.5 py-1 text-xs text-muted no-underline hover:bg-elevated hover:text-highlighted"
+            :href="`/costs/${g}`"
+            >{{ g }}</a
+          >
+        </template>
+      </nav>
+    </div>
+    <section class="mb-5 grid gap-2 rounded-lg border border-default bg-elevated px-5 py-4">
+      <h2 class="text-sm font-medium text-highlighted">Nothing to show yet</h2>
+      <p class="font-mono text-xs tabular-nums text-muted" data-snapshot-status>{{ snapshotLine }}</p>
+      <p class="text-xs text-dimmed">
+        The page prices a stored snapshot of both billing sources, never a live read; reload once one has been taken, or
+        take one now with <code>costs snapshot</code>.
+      </p>
+    </section>
   </AppShell>
 </template>

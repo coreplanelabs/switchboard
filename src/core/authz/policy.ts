@@ -81,6 +81,12 @@ export const POLICY: readonly Rule[] = [
   // `friction propose` files issues: the repo-management gate, now the `friction:write` grant.
   { action: "friction:write", resource: "command", when: [grant("friction:write")] },
 
+  // ── costs ────────────────────────────────────────────────────────────────
+  // `costs snapshot` reads both billing providers and replaces what every
+  // viewer of the costs page sees: the grant, never a baseline (the admins'
+  // `all` and a named `grants` entry hold it).
+  { action: "costs:write", resource: "command", when: [grant("costs:write")] },
+
   // ── repos ────────────────────────────────────────────────────────────────
   { action: "repo:read", resource: "command", when: [grant("repo:read")] },
   { action: "repo:write", resource: "repo", when: [grant("repo:write")] },

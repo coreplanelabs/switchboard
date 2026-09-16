@@ -10,6 +10,7 @@ import {
 } from "../../src/core/memory/engine.ts";
 import { tokenize } from "../../src/core/memory/scorer.ts";
 import { FIRING_DETAIL_MAX, isScheduleFiring, type ScheduleFiring } from "../../src/core/schedules.ts";
+import { isCostsSnapshot, type CostsSnapshot } from "../../src/core/costsSnapshotStore.ts";
 import { REPO_SLUG } from "../../src/core/delivery.ts";
 import {
   isDeliverySnapshot,
@@ -176,6 +177,8 @@ export interface Env {
   SESSION_LOGS: DurableObjectNamespace<SessionLogDO>;
   /** Delivery snapshots (delivery item 10): ONE DeliveryDO (named "delivery"), one snapshot per repository. */
   DELIVERY: DurableObjectNamespace<DeliveryDO>;
+  /** The costs snapshot (costs item 6): ONE CostsSnapshotDO (named "costs"), one snapshot per installation. */
+  COSTS: DurableObjectNamespace<CostsSnapshotDO>;
   /** The ship coordinator Workflow in the bot's shim Worker (run-history item
    *  47): where `RunHistoryDO.finish` sends `run-finished-<runId>` for a record
    *  carrying `parentInstanceId`. Optional: this Worker deploys without it (the
@@ -187,6 +190,9 @@ export interface Env {
 
 /** The single DeliveryDO's name — every repository's snapshot lives in one object. */
 const DELIVERY_OBJECT = "delivery";
+
+/** The single CostsSnapshotDO's name — the installation has one costs snapshot. */
+const COSTS_OBJECT = "costs";
 
 /** The single ConfigDO's name. */
 const CONFIG_OBJECT = "config";
@@ -925,6 +931,110 @@ async function handleDelivery(pathname: string, body: unknown, env: Env): Promis
       `[delivery/merge] ${b.patch.repo} <- ${b.patch.upsert.length} pull requests re-read, ${b.patch.drop.length} dropped, ${prs} stored as of ${b.patch.snapshotAt}`,
     );
     return json({ ok: true, prs });
+  }
+  return json({ error: "not found" }, 404);
+}
+
+// ---------------------------------------------------------------------------
+// The costs snapshot (docs/reference/specs/costs.md item 6)
+// ---------------------------------------------------------------------------
+
+/** The datasets a snapshot's `usage` carries, each stored as its own row. */
+const USAGE_PARTS = [
+  "containers",
+  "durableObjectRequests",
+  "durableObjectDays",
+  "durableObjectStorage",
+  "workers",
+  "r2Storage",
+  "r2Operations",
+  "workflows",
+] as const;
+
+/**
+ * The installation's one costs snapshot: both billing sources' rows over the
+ * page's widest range plus the run history's per-user usage, and when they
+ * were read (`CostsSnapshot`, the shape the bot validates too). Stored as one
+ * row per part — the meta, each usage dataset, the LLM rows, the run usage —
+ * so no single value nears the row limit as the window's rows grow; replaced
+ * whole on every put, in one transaction, and read back as one document.
+ */
+export class CostsSnapshotDO extends DurableObject<Env> {
+  private readonly sql: SqlStorage;
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.sql = ctx.storage.sql;
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS parts (
+        part TEXT PRIMARY KEY,
+        body TEXT NOT NULL
+      );
+    `);
+  }
+
+  /** Replace the snapshot whole: every part rewritten in one transaction. */
+  async put(snapshot: CostsSnapshot): Promise<void> {
+    const { usage, llm, runUsage, ...meta } = snapshot;
+    const rows: Array<[string, unknown]> = [
+      ["meta", meta],
+      ...USAGE_PARTS.map((name): [string, unknown] => [`usage.${name}`, usage[name]]),
+      ["llm", llm],
+      ["runUsage", runUsage],
+    ];
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec(`DELETE FROM parts`);
+      for (const [part, body] of rows)
+        this.sql.exec(`INSERT INTO parts (part, body) VALUES (?, ?)`, part, JSON.stringify(body));
+    });
+  }
+
+  /** The stored snapshot reassembled from its parts, or null when none was stored (or the parts do not make one). */
+  async get(): Promise<CostsSnapshot | null> {
+    const parts = new Map(
+      this.sql
+        .exec<{ part: string; body: string }>(`SELECT part, body FROM parts`)
+        .toArray()
+        .map((r) => [r.part, r.body]),
+    );
+    const meta = parts.get("meta");
+    if (meta === undefined) return null;
+    const read = (part: string): unknown => {
+      const body = parts.get(part);
+      return body === undefined ? undefined : (JSON.parse(body) as unknown);
+    };
+    const usage = Object.fromEntries(USAGE_PARTS.map((name) => [name, read(`usage.${name}`)]));
+    const snapshot = {
+      ...(JSON.parse(meta) as Record<string, unknown>),
+      usage,
+      llm: read("llm"),
+      runUsage: read("runUsage"),
+    };
+    return isCostsSnapshot(snapshot) ? snapshot : null;
+  }
+}
+
+const COSTS_ROUTES = new Set(["/costs/snapshot/get", "/costs/snapshot/put"]);
+
+async function handleCosts(pathname: string, body: unknown, env: Env): Promise<Response> {
+  const b = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
+  const dO = env.COSTS.get(env.COSTS.idFromName(COSTS_OBJECT));
+  if (pathname === "/costs/snapshot/get") {
+    const snapshot = await dO.get();
+    console.log(
+      `[costs/snapshot/get] -> ${snapshot ? `snapshot taken ${snapshot.takenAt} by ${snapshot.takenBy}` : "none"}`,
+    );
+    return json({ snapshot });
+  }
+  if (pathname === "/costs/snapshot/put") {
+    if (!isCostsSnapshot(b.snapshot))
+      return json(
+        { error: "snapshot must be a CostsSnapshot (takenAt, takenBy, durationMs, range, usage, llm, runUsage)" },
+        400,
+      );
+    await dO.put(b.snapshot);
+    console.log(`[costs/snapshot/put] <- snapshot taken ${b.snapshot.takenAt} by ${b.snapshot.takenBy}`);
+    return json({ ok: true });
   }
   return json({ error: "not found" }, 404);
 }
@@ -3229,6 +3339,8 @@ const MAX_SNAPSHOT_BODY_BYTES = 16 * 1024 * 1024;
 function bodyFenceFor(pathname: string): number {
   if (WIDE_BODY_ROUTES.has(pathname)) return MAX_RUN_PUT_BODY_BYTES;
   if (pathname === "/delivery/put" || pathname === "/delivery/merge") return MAX_SNAPSHOT_BODY_BYTES;
+  // A ninety-day costs snapshot is a few hundred KB today and grows with the account's rows.
+  if (pathname === "/costs/snapshot/put") return MAX_SNAPSHOT_BODY_BYTES;
   return MAX_BODY_BYTES;
 }
 
@@ -3707,6 +3819,7 @@ async function handleRuns(pathname: string, body: unknown, env: Env): Promise<Re
 const ROUTES = new Set([
   ...CONFIG_ROUTES,
   ...DELIVERY_ROUTES,
+  ...COSTS_ROUTES,
   "/retrieve",
   "/write",
   "/list",
@@ -3735,7 +3848,7 @@ interface Admission {
 async function handleRequest(request: Request, env: Env, admission: Admission): Promise<Response> {
   const url = new URL(request.url);
   if (url.pathname === "/healthz" && request.method === "GET")
-    return json({ ok: true, build: BUILD, features: ["memory", "schedules", "runs", "config", "delivery"] });
+    return json({ ok: true, build: BUILD, features: ["memory", "schedules", "runs", "config", "delivery", "costs"] });
   if (!admission.known) return json({ error: "not found" }, 404);
   if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
   if (!admission.authorized) return json({ error: "unauthorized" }, 401);
@@ -3787,6 +3900,7 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
   if (url.pathname.startsWith("/runs/")) return handleRuns(url.pathname, body, env);
   if (url.pathname.startsWith("/config/")) return handleConfig(url.pathname, body, env);
   if (url.pathname.startsWith("/delivery/")) return handleDelivery(url.pathname, body, env);
+  if (url.pathname.startsWith("/costs/")) return handleCosts(url.pathname, body, env);
 
   if (url.pathname === "/retrieve") {
     const parsed = parseRetrieve(body);

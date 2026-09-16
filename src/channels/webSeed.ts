@@ -3,6 +3,7 @@ import type { RunView } from "../core/runsService.js";
 import type { UnitFacts, UnitRun, UnitRunsView } from "../core/unitRuns.js";
 import type { CostReport } from "../core/costs.js";
 import type { UserCostReport } from "../core/costsByUser.js";
+import type { CostsSnapshotStatus } from "../core/costsSnapshot.js";
 import type { DeliveryReport } from "../core/delivery.js";
 import type { ScheduledRow } from "./scheduledPanel.js";
 import type { LiveFrame } from "./liveView/sse.js";
@@ -247,12 +248,17 @@ export interface ResidentDetailSeed {
 
 export interface CostsSeed {
   page: "costs";
-  report: CostReport;
+  /** The group the page is for — named even before the first snapshot, when there is no report to name it. */
+  group: string;
+  /** The group's daily report as of the snapshot; null before the first snapshot lands (the page shows the status instead). */
+  report: CostReport | null;
   groups: string[];
   /** Which tab the page opens on: the daily table, or cost by user (`?view=users`). */
   view: "daily" | "users";
-  /** Present when `view` is `users`: the by-user report for the same group and range. */
+  /** Present when `view` is `users` and there is a snapshot: the by-user report for the same group and range. */
   users?: UserCostReport;
+  /** The snapshot every figure on the page comes from: its stamp, the take in flight, when the next is due. */
+  snapshot: CostsSnapshotStatus;
 }
 
 export interface DeliverySeed {

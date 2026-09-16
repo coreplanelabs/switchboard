@@ -1,10 +1,44 @@
 import type { CostReport, DailyCost } from "@core/core/costs.js";
+import type { CostsSnapshotStatus } from "@core/core/costsSnapshot.js";
+import { snapshotAgeText, untilText } from "@core/core/snapshotAge.js";
+import { snapshotTime } from "./delivery";
 
 // The costs page's view model, ported from the string renderer: series
 // discovery, per-day values, the stat tiles, and the stacked-bar geometry.
 // Pure data in, pure data out — the component does layout only.
 
 export const DO_LABEL = "Durable Objects";
+
+/** Who a take is credited to in the status line: the loop's takes read `on schedule`, a person's `by <name>`. */
+const takerText = (by: string): string => (by === "schedule" ? "on schedule" : `by ${by}`);
+
+/**
+ * The one line the page shows about its snapshot (costs.md item 6): when it
+ * was taken and how long ago, who took it, when the next is due — or that one
+ * is being taken now, or that none has landed yet. The last failed take is
+ * named until one succeeds. Pure; `nowMs` is the ticking clock.
+ */
+export function snapshotLineOf(status: CostsSnapshotStatus, nowMs: number): string {
+  const parts: string[] = [];
+  if (status.inFlight) {
+    parts.push(
+      `Taking a snapshot now — started ${snapshotAgeText(status.inFlight.startedAt, nowMs)} ${takerText(status.inFlight.by)}`,
+    );
+    if (status.snapshot) parts.push(`showing the one from ${snapshotTime(status.snapshot.takenAt)} meanwhile`);
+  } else if (status.snapshot) {
+    parts.push(
+      `Snapshot from ${snapshotTime(status.snapshot.takenAt)}, ${snapshotAgeText(status.snapshot.takenAt, nowMs)} ${takerText(status.snapshot.takenBy)}`,
+    );
+    if (status.nextAt) parts.push(`next ${untilText(status.nextAt, nowMs)}`);
+  } else {
+    parts.push("No snapshot yet — the first one is taken within a minute of startup");
+  }
+  if (status.lastFailure && !status.inFlight)
+    parts.push(
+      `last attempt ${snapshotAgeText(status.lastFailure.at, nowMs)} failed: ${status.lastFailure.message.slice(0, 120)}`,
+    );
+  return parts.join(" · ");
+}
 /** Workers requests + CPU, SQLite rows + storage, R2, Workflows — the meters
  *  that are cents a day at today's volume, stacked as one series so the chart
  *  stays legible. */

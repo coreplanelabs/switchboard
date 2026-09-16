@@ -87,6 +87,8 @@ export interface UserCostReport {
   /** The run user ids that are the signed-in viewer, for the **me** toggle; empty when none could be matched. */
   viewer: { userIds: string[]; matchedByEmail: boolean };
   generatedAt: number;
+  /** The snapshot the report was built from (src/core/costsSnapshot.ts); absent on a report built straight from the sources. */
+  snapshot?: { takenAt: string; takenBy: string; durationMs: number };
 }
 
 const DAY_MS = 86_400_000;
