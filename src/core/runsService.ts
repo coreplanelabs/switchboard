@@ -108,6 +108,8 @@ export interface RunView {
   sourceUrl?: string;
   /** Who started it, resolved (`RunMeta.userName` / `RunRecord.userName`). */
   userName?: string;
+  /** The bound credential behind the person (`RunMeta.authenticatedAs` / `RunRecord.authenticatedAs`), when there was one. */
+  authenticatedAs?: string;
   /** The run that spawned this one (`RunMeta.parentRunId` / `RunRecord.parentRunId`,
    *  run-history item 46); absent on a run a person or a schedule started. */
   parentRunId?: string;
@@ -369,6 +371,7 @@ function ledgerView(row: LiveRunRow, events: readonly RunEvent[]): RunView {
     ...(activity !== undefined ? { activity } : {}),
     ...(m.sourceUrl !== undefined ? { sourceUrl: m.sourceUrl } : {}),
     ...(m.userName !== undefined ? { userName: m.userName } : {}),
+    ...(m.authenticatedAs !== undefined ? { authenticatedAs: m.authenticatedAs } : {}),
     ...(m.parentRunId !== undefined ? { parentRunId: m.parentRunId } : {}),
     ...(m.route !== undefined ? { route: m.route } : {}),
     ...(m.parentInstanceId !== undefined ? { parentInstanceId: m.parentInstanceId } : {}),
@@ -407,6 +410,7 @@ function liveView(s: RunSummary): RunView {
     ...(s.activity !== undefined ? { activity: s.activity } : {}),
     ...(s.sourceUrl !== undefined ? { sourceUrl: s.sourceUrl } : {}),
     ...(s.userName !== undefined ? { userName: s.userName } : {}),
+    ...(s.authenticatedAs !== undefined ? { authenticatedAs: s.authenticatedAs } : {}),
     ...(s.parentRunId !== undefined ? { parentRunId: s.parentRunId } : {}),
     ...(s.parentInstanceId !== undefined ? { parentInstanceId: s.parentInstanceId } : {}),
     ...(s.idempotencyKey !== undefined ? { idempotencyKey: s.idempotencyKey } : {}),

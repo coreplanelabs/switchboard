@@ -76,6 +76,24 @@ export function resolveActor(input: ActorInput, grantsFor: GrantsLookup): Actor 
   return { kind: kindFor(input.surface), id, grants: grantsFor(id), ...(origin ? { origin } : {}) };
 }
 
+/** The identity fields a bound credential's message carries (`IncomingMessage`). */
+interface BoundFields {
+  /** The credential's actor id when the sender is the person it is bound to. */
+  authenticatedAs?: string;
+  userName?: string;
+}
+
+/** The actor id whose grants govern a chat message: the credential that
+ *  authenticated it when it was bound to a person (`authenticatedAs`), else
+ *  the sender. Every `canRunAgent` / `canUseRepo` / `canManageRepos` /
+ *  `canEditChannelConfig` question in the dispatch path asks about THIS id,
+ *  never `msg.userId`: naming the person on a run must not lend the run the
+ *  person's grants (authorization.md item 15). A relayed message (`postedBy`)
+ *  is out of scope here — its gates are item 14's. */
+export function grantsSubject(msg: { userId: string; authenticatedAs?: string }): string {
+  return msg.authenticatedAs ?? msg.userId;
+}
+
 const CHAT_SURFACES: Readonly<Record<string, ActorSurface>> = {
   slack: "slack",
   http: "http",
@@ -89,11 +107,24 @@ const CHAT_SURFACES: Readonly<Record<string, ActorSurface>> = {
  *  A namespace this module does not know stays a `user` with the id as given —
  *  its grants are whatever config names for that id, never a guess. */
 export function resolveChatActor(
-  msg: { userId: string; channelId: string; threadKey: string; postedBy?: string },
+  msg: { userId: string; channelId: string; threadKey: string; postedBy?: string } & BoundFields,
   grantsFor: GrantsLookup,
 ): Actor {
   const person = resolveNamespacedActor(msg.userId, msg, grantsFor);
-  if (msg.postedBy === undefined) return person;
+  if (msg.postedBy === undefined) {
+    if (msg.authenticatedAs === undefined || msg.authenticatedAs === msg.userId) return person;
+    // A credential bound to a person (authorization.md item 15): the adapter
+    // proved the credential and config bound it to the person, so the actor IS
+    // the credential — its kind, its id, its grants, exactly as an unbound
+    // token's — and the person is its `self` and `asUser`, the same
+    // identity-not-authority link a dashboard session carries (record 0042).
+    const credential = resolveNamespacedActor(msg.authenticatedAs, msg, grantsFor);
+    return {
+      ...credential,
+      self: [credential.id, msg.userId],
+      asUser: { id: msg.userId, ...(msg.userName !== undefined ? { name: msg.userName } : {}) },
+    };
+  }
   // A request an app posted for a person (slack-channel.md item 13): the
   // message text named the person, and text is forgeable, so the person's
   // grants alone must never govern. The actor is the app, acting on the

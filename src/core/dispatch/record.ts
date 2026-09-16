@@ -148,6 +148,7 @@ export function interruptedRunRecord(summary: RunSummary, snap: RunSnapshot, fin
       threadKey: summary.threadKey ?? "",
       sourceUrl: summary.sourceUrl,
       userName: summary.userName,
+      authenticatedAs: summary.authenticatedAs,
     },
     channelVisibility: summary.channelVisibility ?? "unknown",
     repo: summary.repo,
@@ -198,6 +199,7 @@ export function reclaimedRunRecord(input: {
       threadKey: row.threadKey,
       sourceUrl: row.meta.sourceUrl,
       userName: row.meta.userName,
+      authenticatedAs: row.meta.authenticatedAs,
     },
     channelVisibility: row.meta.channelVisibility ?? "unknown",
     repo: row.meta.repo,
@@ -276,7 +278,10 @@ export function assembleRunRecord(input: {
   snap: RunSnapshot | null;
   agent?: string;
   model?: string;
-  msg: Pick<IncomingMessage, "channelId" | "userId" | "threadKey" | "sourceUrl" | "userName" | "relayedBy">;
+  msg: Pick<
+    IncomingMessage,
+    "channelId" | "userId" | "threadKey" | "sourceUrl" | "userName" | "relayedBy" | "authenticatedAs"
+  >;
   /** The stamp taken at create (`channelVisibilityOf`) — the record carries what the run was stamped with. */
   channelVisibility: ChannelVisibility;
   repo?: string;
@@ -344,6 +349,7 @@ export function assembleRunRecord(input: {
     channelId: msg.channelId,
     userId: msg.userId,
     ...(msg.relayedBy !== undefined ? { relayedBy: msg.relayedBy } : {}),
+    ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
     threadKey: msg.threadKey,
     channelVisibility: input.channelVisibility,
     ...(input.repo !== undefined ? { repo: input.repo } : {}),

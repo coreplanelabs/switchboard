@@ -29,13 +29,14 @@ describe("parseIngressTokenMap", () => {
     expect(parseIngressTokenMap("null")).toEqual({ ok: false, reason: "must be a JSON object", tokens: {} });
   });
 
-  it("skips malformed entries (empty token, non-object, missing/blank subject, non-string channel) and keeps the rest", () => {
+  it("skips malformed entries (empty token, non-object, missing/blank subject, non-string channel or email) and keeps the rest", () => {
     const parsed = parseIngressTokenMap(
       JSON.stringify({
         good: { subject: "alice" },
         noSubject: { channel: "ops" },
         blankSubject: { subject: "" },
         badChannel: { subject: "x", channel: 5 },
+        badEmail: { subject: "y", email: ["a@b.c"] },
         notObject: "nope",
         "": { subject: "empty-token" },
       }),
@@ -43,7 +44,27 @@ describe("parseIngressTokenMap", () => {
     expect(parsed).toEqual({ ok: true, tokens: { good: { subject: "alice" } } });
   });
 
-  it("an identity is exactly { subject, channel? }: any other field in an entry (`scopes`, a typo) is ignored — nothing in the token map can widen what the grants entry says", () => {
+  // authorization.md item 15: `email` binds the credential to a person — who the
+  // run is for, never what it may do.
+  it("keeps `email` lower-cased and trimmed when it looks like one; a string without an `@` drops the field, never the entry", () => {
+    const parsed = parseIngressTokenMap(
+      JSON.stringify({
+        bound: { subject: "alice-ingress", email: " Alice@Example.com " },
+        junk: { subject: "bob-ingress", email: "not-an-email" },
+        blank: { subject: "carol-ingress", email: "" },
+      }),
+    );
+    expect(parsed).toEqual({
+      ok: true,
+      tokens: {
+        bound: { subject: "alice-ingress", email: "alice@example.com" },
+        junk: { subject: "bob-ingress" },
+        blank: { subject: "carol-ingress" },
+      },
+    });
+  });
+
+  it("an identity is exactly { subject, channel?, email? }: any other field in an entry (`scopes`, a typo) is ignored — nothing in the token map can widen what the grants entry says", () => {
     const parsed = parseIngressTokenMap(
       JSON.stringify({
         plain: { subject: "a" },

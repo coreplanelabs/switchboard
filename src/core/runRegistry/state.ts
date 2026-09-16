@@ -33,6 +33,9 @@ export interface RunMeta {
   /** Resolved display name of who started it (`IncomingMessage.userName`) — the
    *  source mark's hover says `via Slack · alice`, never a raw member id. */
   userName?: string;
+  /** The credential that authenticated the request when it was bound to the
+   *  person `userId` names (`IncomingMessage.authenticatedAs`, authorization.md item 15). */
+  authenticatedAs?: string;
   /** Our process saw the message that started this run (docs/reference/specs/tracing.md);
    *  the run's duration opens here, falling back to `startedAt` when absent. */
   receivedAt?: number;

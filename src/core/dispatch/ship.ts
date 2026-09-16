@@ -10,6 +10,7 @@
 // this branch and a bot death under a pipeline interrupts a child, never the
 // pipeline. The branch reads the run slice plus the seams only ship needs.
 import type { AgentDef } from "../../agents/registry.js";
+import { grantsSubject } from "../authz/actor.js";
 import type { RunProfile } from "../../config/profile.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
@@ -149,7 +150,10 @@ export async function runShipBranch(
       threadKey: msg.threadKey,
       requestText: directives.text,
       repoCtx,
-      gates: { canRunAgent: (a) => deps.config.canRunAgent(msg.userId, a), adminsHint: () => deps.config.adminsHint() },
+      gates: {
+        canRunAgent: (a) => deps.config.canRunAgent(grantsSubject(msg), a),
+        adminsHint: () => deps.config.adminsHint(),
+      },
       repoInfo: deps.fetchRepoShipInfo ?? fetchRepoShipInfo,
       prFacts: deps.fetchPrFacts ?? fetchPullRequestFacts,
       runsBase: process.env.PUBLIC_BASE_URL,
@@ -192,6 +196,7 @@ export async function runShipBranch(
       ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
       ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
       ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+      ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
     },
   );
   io.runStarted?.({ id: run.id });
@@ -280,6 +285,7 @@ export async function runShipBranch(
         ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
         ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
         ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+        ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
         ...(entry.resume !== undefined ? { pr: entry.resume.pr } : {}),
         profile,
       },
@@ -329,7 +335,7 @@ export async function runShipBranch(
     outcome = await root.span("dispatch.ship_hand_off", () =>
       handOffToCoordinator(
         {
-          readFile: (repo, path, ref) => githubCapabilityFor(deps, msg.userId).api.readFile(repo, path, ref),
+          readFile: (repo, path, ref) => githubCapabilityFor(deps, grantsSubject(msg)).api.readFile(repo, path, ref),
           instances: deps.coordinatorInstances ?? new NullCoordinatorInstanceStore(),
           create: deps.createCoordinatorInstance ?? ((id) => createInstanceViaShim(shim(), id)),
           status: deps.fetchCoordinatorInstanceStatus ?? ((id) => fetchInstanceStatusViaShim(shim(), id)),

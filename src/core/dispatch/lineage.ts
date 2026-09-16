@@ -119,6 +119,7 @@ export async function tellParent(
     {
       userId: msg.userId,
       ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+      ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
       channelId: msg.channelId,
       ...(msg.channelName !== undefined ? { channelName: msg.channelName } : {}),
       ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),

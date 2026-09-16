@@ -65,6 +65,7 @@ export function resumeMessage(row: LiveRunRow, inputText: string): IncomingMessa
     threadKey: row.threadKey,
     text: `${directives} ${inputText}`.trim(),
     ...(row.meta.userName !== undefined ? { userName: row.meta.userName } : {}),
+    ...(row.meta.authenticatedAs !== undefined ? { authenticatedAs: row.meta.authenticatedAs } : {}),
     ...(row.meta.sourceUrl !== undefined ? { sourceUrl: row.meta.sourceUrl } : {}),
   };
 }

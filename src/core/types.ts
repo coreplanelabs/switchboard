@@ -87,6 +87,18 @@ export interface IncomingMessage {
    * the app and the person both hold (authorization.md item 14).
    */
   postedBy?: string;
+  /**
+   * The credential that authenticated the request, as a platform-namespaced
+   * actor id (`http:<subject>`, `mcp:<subject>`, `cli:local`), when the
+   * adapter resolved it to the PERSON it is bound to and named them in
+   * `userId` (authorization.md item 15: an ingress token entry's `email`, the
+   * CLI's `SWITCHBOARD_CLI_EMAIL`). Identity, never authority: the run, its
+   * record and its costs are the person's; what the run may do is exactly what
+   * config grants this credential — `grantsSubject(msg)` is what every gate
+   * asks about. Absent when the sender and the credential are one (Slack, an
+   * unbound token) or when the request was relayed (`postedBy`).
+   */
+  authenticatedAs?: string;
   /** Images attached to the triggering message, if any. */
   images?: ImageAttachment[];
   /** Non-image files (PDFs, text/code/CSV/logs) on the triggering message, if any. */

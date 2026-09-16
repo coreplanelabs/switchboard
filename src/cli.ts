@@ -97,7 +97,22 @@ import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 import { buildMcp } from "./mcp/index.js";
 import { NullMcpToolSource } from "./mcp/source.js";
 import { claimEntry } from "./invokedAsScript.js";
-import { processSecrets, publicEnv, type EnvRecord, type Secrets } from "./secrets.js";
+import { processSecrets, publicEnv, type EnvRecord, type Secret, type Secrets } from "./secrets.js";
+import { boundRequester, type Requester } from "./channels/requester.js";
+import { resolvePersonByEmail } from "./channels/slack/lookups.js";
+
+/** Who an `ask` is for (authorization.md item 15): the Slack person
+ *  `SWITCHBOARD_CLI_EMAIL` names when the bot token can look them up —
+ *  `userId` theirs, `authenticatedAs: cli:local`, the CLI's every grant kept —
+ *  else `cli:local` itself, exactly as before the variable existed. The
+ *  lookup client is built here and nowhere else in the CLI: `ask` is the one
+ *  built-in that speaks as a person. */
+async function cliRequester(email: string | undefined, botToken: Secret | undefined): Promise<Requester> {
+  if (!email || !botToken) return { userId: CLI_ACTOR.id };
+  const { webApi } = await import("@slack/bolt");
+  const client = new webApi.WebClient(botToken.reveal());
+  return boundRequester(CLI_ACTOR.id, email, (e) => resolvePersonByEmail(client, e));
+}
 
 // The installation's files live under the operator root (src/deploy/operatorRoot.ts): the checkout,
 // or from the package SWITCHBOARD_HOME / a cwd that holds one / ~/.switchboard — so `init`, `ask`,
@@ -139,6 +154,8 @@ export function startHelpText(program: string): string {
     "one; else ~/.switchboard — a checkout is always its own):",
     "  .env                  the credentials; SLACK_BOT_TOKEN and SLACK_APP_TOKEN are required, and a",
     "                        variable the shell already exports wins over the file",
+    "  SWITCHBOARD_CLI_EMAIL your email: `ask` runs are then yours (the Slack person it names), authenticated",
+    "                        as cli:local; unset, they are cli:local's own",
     "  config/config.yaml    the config (or the file SWITCHBOARD_CONFIG names)",
     "  data/                 runtime overrides and, with `runHistory: { store: file }`, the run records",
     "  skills/               the bundled skills, when the directory exists (or SWITCHBOARD_SKILLS_DIR)",
@@ -698,7 +715,13 @@ async function main(): Promise<void> {
   const io = new ConsoleIO(process.stdout, parsed.threadKey);
   await dispatch(
     deps,
-    { channelId: "cli:local", userId: "cli:local", threadKey: parsed.threadKey, text: parsed.text, receivedAt },
+    {
+      ...(await cliRequester(publicEnv().SWITCHBOARD_CLI_EMAIL, processSecrets.get("SLACK_BOT_TOKEN"))),
+      channelId: "cli:local",
+      threadKey: parsed.threadKey,
+      text: parsed.text,
+      receivedAt,
+    },
     io,
     { trace },
   );

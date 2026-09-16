@@ -58,6 +58,8 @@ export interface RunSummary {
   sourceUrl?: string;
   /** `RunMeta.userName`: who started it, resolved. */
   userName?: string;
+  /** `RunMeta.authenticatedAs`: the bound credential behind the person, when there was one. */
+  authenticatedAs?: string;
   /** `RunMeta.parentRunId`: the run that spawned this one (run-history item 46). */
   parentRunId?: string;
   /** `RunMeta.parentInstanceId` / `RunMeta.idempotencyKey`: the coordinator
@@ -135,6 +137,7 @@ export function summaryOf(run: RunState): RunSummary {
     ...(m?.repo !== undefined ? { repo: m.repo } : {}),
     ...(m?.sourceUrl !== undefined ? { sourceUrl: m.sourceUrl } : {}),
     ...(m?.userName !== undefined ? { userName: m.userName } : {}),
+    ...(m?.authenticatedAs !== undefined ? { authenticatedAs: m.authenticatedAs } : {}),
     ...(m?.parentRunId !== undefined ? { parentRunId: m.parentRunId } : {}),
     ...(m?.parentInstanceId !== undefined ? { parentInstanceId: m.parentInstanceId } : {}),
     ...(m?.idempotencyKey !== undefined ? { idempotencyKey: m.idempotencyKey } : {}),

@@ -140,6 +140,76 @@ describe("handleIngressRequest (transport gating + dispatch)", () => {
     expect(d.calls[0].msg.threadKey).toBe("http:locked:default");
   });
 
+  // authorization.md item 15: a token entry's `email` binds the credential to a person.
+  it("a token bound to a person by email → the message is the person's (userId, userName) and names the credential as authenticatedAs; the dispatch gate still asks about the credential", async () => {
+    const d = fakeDispatch();
+    const bound = authConfig({ tok: { subject: "alice-ingress", email: "alice@example.com" } });
+    const asked: string[] = [];
+    const res = await handleIngressRequest(
+      { method: "POST", headers: bearer("tok"), body: JSON.stringify({ text: "hi", channel: "ops" }) },
+      deps,
+      {
+        auth: bound,
+        dispatch: d.fn,
+        personByEmail: async (email) => {
+          asked.push(email);
+          return { id: "slack:U0ALICE", name: "alice" };
+        },
+      },
+    );
+    expect(res.status).toBe(200);
+    expect(asked).toEqual(["alice@example.com"]);
+    expect(d.calls[0].msg).toEqual({
+      userId: "slack:U0ALICE",
+      userName: "alice",
+      authenticatedAs: "http:alice-ingress",
+      channelId: "http:ops",
+      threadKey: "http:ops:default",
+      text: "hi",
+      receivedAt: expect.any(Number),
+    });
+    // The person named holds nothing: the grant that admitted the dispatch is the credential's.
+    expect(GRANTS.has("slack:U0ALICE")).toBe(false);
+  });
+
+  it("a bound token whose person cannot be found (no lookup, no match, a failing lookup) sends as the credential, exactly as an unbound one", async () => {
+    const bound = authConfig({ tok: { subject: "alice-ingress", email: "alice@example.com" } });
+    const asIs = {
+      userId: "http:alice-ingress",
+      channelId: "http:default",
+      threadKey: "http:default:default",
+      text: "hi",
+    };
+    for (const personByEmail of [
+      undefined,
+      async () => undefined,
+      async () => {
+        throw new Error("slack down");
+      },
+    ]) {
+      const d = fakeDispatch();
+      await handleIngressRequest(
+        { method: "POST", headers: bearer("tok"), body: JSON.stringify({ text: "hi" }) },
+        deps,
+        { auth: bound, dispatch: d.fn, personByEmail },
+      );
+      expect(d.calls[0].msg).toEqual({ ...asIs, receivedAt: expect.any(Number) });
+    }
+    // An unbound token never asks.
+    const d = fakeDispatch();
+    let asked = 0;
+    await handleIngressRequest({ method: "POST", headers: bearer("tok"), body: JSON.stringify({ text: "hi" }) }, deps, {
+      auth: good,
+      dispatch: d.fn,
+      personByEmail: async () => {
+        asked++;
+        return { id: "slack:U0ALICE" };
+      },
+    });
+    expect(asked).toBe(0);
+    expect(d.calls[0].msg.userId).toBe("http:alice");
+  });
+
   it("no tokens configured → 503 disabled, dispatch never called (fail-closed)", async () => {
     const d = fakeDispatch();
     const res = await handleIngressRequest(

@@ -105,6 +105,24 @@ describe("the pure pieces", () => {
       threadKey: "http:api:1",
       text: "agent:general",
     });
+    // A bound credential's run resumes as the same person under the same
+    // credential (authorization.md item 15): the row carries both.
+    const bound = row({
+      threadKey: "http:api:2",
+      meta: {
+        channelId: "http:api",
+        userId: "slack:U0ALICE",
+        userName: "alice",
+        authenticatedAs: "http:alice-ingress",
+        threadKey: "http:api:2",
+        agent: "general",
+      },
+    });
+    expect(resumeMessage(bound, "")).toMatchObject({
+      userId: "slack:U0ALICE",
+      userName: "alice",
+      authenticatedAs: "http:alice-ingress",
+    });
   });
 
   it("repoContextOf carries repo/ref/pr/headSha and nothing else", () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CLI_ACTOR, actorIdFor, resolveActor, resolveChatActor } from "./actor.js";
+import { CLI_ACTOR, actorIdFor, grantsSubject, resolveActor, resolveChatActor } from "./actor.js";
 import { effectiveGrants, principalOf } from "./authorize.js";
 import {
   ALL_GRANTS,
@@ -238,6 +238,41 @@ describe("resolveChatActor — a chat message's namespaced user id chooses the s
     expect(resolveChatActor({ ...msg("slack:UMGR"), postedBy: "slack:bot:B0CLAUDE" }, lookup).onBehalfOf?.id).toBe(
       "slack:UMGR",
     );
+  });
+
+  // authorization.md item 15: a credential bound to a person. The person is who
+  // the run is for; the credential is what the run may do.
+  it("a bound credential (authenticatedAs set) is the credential's actor — kind, id, grants untouched — with the person as self and asUser", () => {
+    const bound = { ...msg("slack:UADMIN", "http:ops"), userName: "ada", authenticatedAs: "http:alice" };
+    const actor = resolveChatActor(bound, lookup);
+    // Exactly the unbound token's actor…
+    const unbound = resolveChatActor(msg("http:alice", "http:ops"), lookup);
+    expect(actor).toMatchObject({ kind: "service", id: "http:alice", grants: unbound.grants, origin: unbound.origin });
+    expect(actor.grants).toEqual(unbound.grants);
+    expect(effectiveGrants(actor)).toEqual(effectiveGrants(unbound));
+    expect(actor.onBehalfOf).toBeUndefined();
+    // …plus the person as identity: `self` for "mine"/`is-self`, `asUser` for display and the audit line.
+    expect(actor.self).toEqual(["http:alice", "slack:UADMIN"]);
+    expect(actor.asUser).toEqual({ id: "slack:UADMIN", name: "ada" });
+    // Naming an admin never lends the token the admin's grants: the token holds two actions and one channel.
+    expect(effectiveGrants(actor).actions).toEqual(set("dispatch", "runs:read"));
+    expect(effectiveGrants(actor).channels).toEqual(set("http:ops"));
+    // A person narrower than the credential never narrows it either (the restart bearer keeps `deploy:write`).
+    const forDev = resolveChatActor({ ...msg("slack:UDEV", "mcp:ops"), authenticatedAs: "mcp:alice" }, lookup);
+    expect(forDev.grants).toEqual(resolveChatActor(msg("mcp:alice", "mcp:ops"), lookup).grants);
+    // The CLI bound to a person stays the CLI: every grant, `self` names both.
+    const cli = resolveChatActor({ ...msg("slack:UDEV", "cli:local"), authenticatedAs: "cli:local" }, lookup);
+    expect(cli).toMatchObject({ kind: "user", id: "cli:local", grants: ALL_GRANTS, self: ["cli:local", "slack:UDEV"] });
+    // A no-op binding (the credential names itself) is the plain actor, no self set.
+    expect(resolveChatActor({ ...msg("http:alice", "http:ops"), authenticatedAs: "http:alice" }, lookup)).toEqual(
+      unbound,
+    );
+  });
+
+  it("grantsSubject: the credential when bound, else the sender — the id every dispatch gate asks about", () => {
+    expect(grantsSubject({ userId: "slack:UADMIN", authenticatedAs: "http:alice" })).toBe("http:alice");
+    expect(grantsSubject({ userId: "slack:UADMIN" })).toBe("slack:UADMIN");
+    expect(grantsSubject({ userId: "http:ci" })).toBe("http:ci");
   });
 
   it("an unknown namespace stays a user with the id as given and whatever grants config names for it — never a crash, never widened", () => {

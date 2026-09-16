@@ -57,9 +57,14 @@ restrict:
 `;
 
 function configStore(): ConfigStore {
+  return configStoreWith("");
+}
+
+/** The fixture config plus extra `grants` lines (indented two spaces, as the block is). */
+function configStoreWith(extraGrants: string): ConfigStore {
   const dir = mkdtempSync(join(tmpdir(), "swb-authorize-"));
   const path = join(dir, "config.yaml");
-  writeFileSync(path, YAML);
+  writeFileSync(path, extraGrants ? YAML.replace("restrict:", `${extraGrants}\nrestrict:`) : YAML);
   return new ConfigStore(path, join(dir, "overrides.json"));
 }
 
@@ -125,6 +130,22 @@ describe("authorizeAgent — the agent gate, against the resolved agent", () => 
     expect(excluded.replies[0]).toMatch(
       /^🚫 You're not on the allowlist for the `coding` agent\. Ask .+ for access\.$/,
     );
+  });
+
+  // authorization.md item 15: the gate asks about the credential, never the person it is bound to.
+  it("a message from a credential bound to a person is gated by the credential's grants: naming an admin lends nothing, and a granted credential is not narrowed by an ungranted person", async () => {
+    // The token holds nothing; the person it names holds everything → refused.
+    const lent = setup({ user: "slack:UADMIN" });
+    lent.gate.msg = { ...lent.message, authenticatedAs: "http:nobody-ingress" };
+    expect(await authorizeAgent(lent.deps, { ...lent.gate, agentName: "coding" })).toEqual({
+      kind: "refused",
+      reason: "agent_allowlist",
+    });
+    // The token is granted the agent; the person it names is not → allowed.
+    const held = setup({ user: "slack:UX" });
+    held.deps.config = configStoreWith(`  "http:dev-ingress": { actions: ["agent:run:coding"] }`);
+    held.gate.msg = { ...held.message, authenticatedAs: "http:dev-ingress" };
+    expect(await authorizeAgent(held.deps, { ...held.gate, agentName: "coding" })).toEqual({ kind: "allowed" });
   });
 });
 

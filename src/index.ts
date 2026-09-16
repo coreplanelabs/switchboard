@@ -569,8 +569,10 @@ export async function runBot(): Promise<void> {
   // streamable-HTTP (JSON-RPC 2.0). With no tokens configured BOTH are
   // fail-closed disabled.
   if (process.env.PORT) {
-    const ingress = createIngressHandler(deps, { auth, publicBaseUrl: process.env.PUBLIC_BASE_URL });
-    const mcp = createMcpHandler(deps, { auth, commands, grantsFor: (id) => config.grantsFor(id) });
+    // A token entry's `email` binds it to a person (authorization.md item 15):
+    // the same cached reverse lookup the dashboard link uses.
+    const ingress = createIngressHandler(deps, { auth, publicBaseUrl: process.env.PUBLIC_BASE_URL, personByEmail });
+    const mcp = createMcpHandler(deps, { auth, commands, grantsFor: (id) => config.grantsFor(id), personByEmail });
     // The model proxy (docs/reference/specs/model-proxy.md): a run's bearer buys
     // model calls through this process — pinned to its preset's model and caps,
     // metered as its own `model.turn` spans, forwarded to the real provider with

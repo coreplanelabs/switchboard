@@ -124,6 +124,39 @@ describe("handleMcpRequest — tools/call", () => {
     });
   });
 
+  // authorization.md item 15: the same binding the HTTP ingress applies, in the mcp: namespace.
+  it("a token bound to a person by email sends as the person with the mcp: credential as authenticatedAs; an unfound person → the credential alone", async () => {
+    const bound = authConfig({ tok: { subject: "alice-mcp", email: "alice@example.com" } });
+    const d = fakeDispatch();
+    await handleMcpRequest(rpc("tools/call", { name: "dispatch", arguments: { text: "hi" } }), deps, {
+      auth: bound,
+      dispatch: d.fn,
+      personByEmail: async () => ({ id: "slack:U0ALICE", name: "alice" }),
+    });
+    expect(d.calls[0].msg).toEqual({
+      userId: "slack:U0ALICE",
+      userName: "alice",
+      authenticatedAs: "mcp:alice-mcp",
+      channelId: "mcp:default",
+      threadKey: "mcp:default:default",
+      text: "hi",
+      receivedAt: expect.any(Number),
+    });
+    const miss = fakeDispatch();
+    await handleMcpRequest(rpc("tools/call", { name: "dispatch", arguments: { text: "hi" } }), deps, {
+      auth: bound,
+      dispatch: miss.fn,
+      personByEmail: async () => undefined,
+    });
+    expect(miss.calls[0].msg).toEqual({
+      userId: "mcp:alice-mcp",
+      channelId: "mcp:default",
+      threadKey: "mcp:default:default",
+      text: "hi",
+      receivedAt: expect.any(Number),
+    });
+  });
+
   it("defaults channel/thread when the arguments omit them", async () => {
     const d = fakeDispatch();
     await handleMcpRequest(rpc("tools/call", { name: "dispatch", arguments: { text: "hi" } }), deps, {

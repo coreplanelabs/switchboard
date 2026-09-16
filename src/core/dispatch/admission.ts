@@ -12,6 +12,7 @@
 import type { ConfigStore } from "../../config.js";
 import type { CoordinatorTag } from "../coordinator/contract.js";
 import type { AgentDef } from "../../agents/registry.js";
+import { grantsSubject } from "../authz/actor.js";
 import type { RequestDirectives } from "../../directives.js";
 import type { LedgerRun, LedgerWriteThrough } from "../runLedger/writeThrough.js";
 import type { AppendableEvent, InboxItem, LiveRunRow, StepRecord } from "../runLedger/types.js";
@@ -336,7 +337,7 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
     // follow-up is read by the LIVE agent, so its sender must be allowed to
     // run that one too (invariant 3 — no path runs an agent for a user the
     // allowlist excludes, and "run" includes "is heard by").
-    if (!deps.config.canRunAgent(msg.userId, claim.live.agent)) {
+    if (!deps.config.canRunAgent(grantsSubject(msg), claim.live.agent)) {
       await refuse("live_agent_allowlist", () =>
         io.reply(
           `🚫 You're not on the allowlist for the \`${claim.live.agent}\` agent, whose run is in flight in this thread. Ask ${deps.config.adminsHint()} for access.`,
@@ -430,7 +431,7 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
       startedAt: elsewhere.startedAt,
       runId: elsewhere.runId,
     };
-    if (!deps.config.canRunAgent(msg.userId, far.agent)) {
+    if (!deps.config.canRunAgent(grantsSubject(msg), far.agent)) {
       await io.reply(
         `🚫 You're not on the allowlist for the \`${far.agent}\` agent, whose run is in flight in this thread. Ask ${deps.config.adminsHint()} for access.`,
       );
@@ -486,6 +487,8 @@ export interface SteerTarget {
 export interface SteerSender {
   userId: string;
   userName?: string;
+  /** The bound credential behind the person (authorization.md item 15); the steer's gate asks about it. */
+  authenticatedAs?: string;
   channelId: string;
   channelName?: string;
   sourceUrl?: string;
@@ -527,12 +530,14 @@ export async function steerRun(
   target: SteerTarget,
   text: string,
 ): Promise<SteerOutcome> {
-  if (!deps.config.canRunAgent(sender.userId, target.agent)) return { kind: "refused", reason: "live_agent_allowlist" };
+  if (!deps.config.canRunAgent(grantsSubject(sender), target.agent))
+    return { kind: "refused", reason: "live_agent_allowlist" };
   const at = (deps.clock ?? systemClock)();
   const msg: IncomingMessage = {
     channelId: sender.channelId,
     userId: sender.userId,
     ...(sender.userName !== undefined ? { userName: sender.userName } : {}),
+    ...(sender.authenticatedAs !== undefined ? { authenticatedAs: sender.authenticatedAs } : {}),
     ...(sender.channelName !== undefined ? { channelName: sender.channelName } : {}),
     threadKey: target.threadKey,
     text,
