@@ -13,6 +13,9 @@ const KNOWN_REASONS = [
   "needs-ref",
   "not-attached",
   "rate-limited",
+  "seed-missing",
+  "seed-failed",
+  "seed-unconfigured",
 ] as const;
 
 export type KnownReason = (typeof KNOWN_REASONS)[number] | "timeout" | "unknown";

@@ -39,8 +39,9 @@ export const GENERATED_HEADER: readonly string[] = [
 
 /** What a Worker's template may name: `{{account}}`, `{{zone}}`, `{{script}}`, `{{hostname}}`,
  *  `{{image}}` (a Worker with a container), `{{urls.publicBaseUrl}}`, `{{urls.stateWorkerUrl}}`
- *  (inside an `{{#if urls.stateWorkerUrl}}` block — the state Worker is optional), and inside an
- *  `{{#if access}}` block `{{access.teamDomain}}` / `{{access.aud}}`. */
+ *  (inside an `{{#if urls.stateWorkerUrl}}` block — the state Worker is optional), inside an
+ *  `{{#if access}}` block `{{access.teamDomain}}` / `{{access.aud}}`, and inside an
+ *  `{{#if resident}}` block `{{resident.script}}` (the resident is optional too). */
 export interface TemplateView {
   account: string;
   zone: string;
@@ -68,6 +69,11 @@ export interface TemplateView {
    *  state Worker binds the bot's `ShipCoordinator` Workflow across scripts by the bot's
    *  script name (`{{bot.script}}`), and a Workflow's name carries its script's. */
   bot: { script: string };
+  /** The resident Worker, when the profile has one, as the sandbox's template names it: the seed
+   *  (docs/reference/specs/execution.md item 25) restores from the resident's cache bucket,
+   *  `<resident script>-cache`, so the sandbox binds and names that bucket inside an
+   *  `{{#if resident}}` block — a profile without a resident renders no seed bindings. */
+  resident: { script: string } | undefined;
 }
 
 const hasImage = (kind: WorkerKind): kind is ImageKind => (IMAGE_KINDS as readonly string[]).includes(kind);
@@ -93,6 +99,7 @@ export function templateView(
     access: profile.access,
     artifacts: profile.artifacts,
     bot: { script: profile.workers.bot.script },
+    resident: profile.workers.resident ? { script: profile.workers.resident.script } : undefined,
   };
 }
 

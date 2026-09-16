@@ -2,9 +2,12 @@
 // client, each running a trivial command then the CPU burn on a loop. In
 // Phase 0 this proves the current cold path end to end and measures what the
 // fleet does past `max_instances` (`fleet-busy` waits, docs/reference/specs/execution.md
-// item 14); Phase 3 adds `--seed` for the snapshot-seeded restore. Sandboxes
-// are not released explicitly — the Worker sleeps them after their idle window.
+// item 14); with `--seed-from` each thread first restores the resident's
+// snapshot through `POST /seed` (execution.md item 25), recording the seed
+// and the Worker's own step timings — the numbers D4's gate reads. Sandboxes
+// are not released explicitly — the Worker destroys them after their idle window.
 
+import type { SandboxSeed, SeedAnswer } from "../execution/seedPlan.js";
 import type { Sample } from "./aggregate.js";
 import { reasonOf, timed } from "./reasons.js";
 import { runThreads, type RunThreadsResult } from "./runLoop.js";
@@ -12,6 +15,8 @@ import { cpuBurnCommand } from "./scriptedProvider.js";
 
 export interface SandboxThreadClient {
   exec(command: string, opts?: { timeoutMs?: number }): Promise<string>;
+  /** The bot's client has it; a stub without it cannot run a seeded load. */
+  seed?(seed: SandboxSeed): Promise<SeedAnswer>;
 }
 
 export interface SandboxLoadDeps {
@@ -31,7 +36,13 @@ export interface SandboxLoadParams {
   maxThreads?: number;
   override?: boolean;
   pauseMs?: number;
+  /** The resident's snapshot handle every thread seeds from first (`load:seeded`). */
+  seed?: SandboxSeed;
 }
+
+/** The Worker's step timings as their own ops, so the receipt shows where a
+ *  seed's time went: the checkout restore, the deps restore, the fix-up. */
+export const SEED_STEP_OPS = { restore: "seed-restore", deps: "seed-deps", fixup: "seed-fixup" } as const;
 
 /** The cold fleet's `max_instances` at the time of writing; past it every
  *  command waits for a seat, which is a measurement worth taking on purpose. */
@@ -75,7 +86,25 @@ export async function runSandboxLoad(
     signal: deps.signal,
     setup: async (i) => {
       const client = deps.openClient(sandboxThreadKeyFor(params.runId, i));
-      // The first command is what creates the container: its latency is the cold start (or the fleet wait).
+      if (params.seed) {
+        // The seed carries the container's start (the Worker waits it out
+        // like any route), the restores and the fix-up; a refused seed ends
+        // the thread with its token, so the receipt counts it by reason.
+        const seed = params.seed;
+        if (!client.seed) throw new Error("this client cannot seed: no POST /seed");
+        const seedAt = now();
+        const answer = await record("seed", i, async () => {
+          const a = await client.seed!(seed);
+          if (!a.seeded) throw new Error(`${a.reason}: ${a.detail}`);
+          return a;
+        });
+        for (const [step, op] of Object.entries(SEED_STEP_OPS) as Array<[keyof typeof SEED_STEP_OPS, string]>) {
+          const ms = answer.steps[step];
+          if (ms !== null) samples.push({ op, thread: i, startedAt: seedAt, ms, ok: true });
+        }
+      }
+      // The first command is what creates the container (or, seeded, what
+      // proves it is up): its latency is the cold start or the fleet wait.
       await record("first-exec", i, () => client.exec("echo ok"));
       return client;
     },

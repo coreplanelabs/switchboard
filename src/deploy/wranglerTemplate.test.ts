@@ -41,6 +41,7 @@ describe("templateView", () => {
       },
       access: undefined,
       bot: { script: "switchboard" },
+      resident: { script: "switchboard-resident" },
     });
   });
 

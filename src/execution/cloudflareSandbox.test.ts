@@ -769,3 +769,47 @@ describe("CloudflareSandboxExecutor sandbox-starting wait", () => {
     expect(calls).toHaveLength(3);
   });
 });
+
+// Feature: docs/reference/specs/execution.md item 25 — POST /seed forwards the
+// resident's handle with the run's env, under the seed's own budget, and reads
+// the Worker's verdict; an answer without one is infra, never a silent cold run.
+describe("CloudflareSandboxExecutor seed", () => {
+  const seed = {
+    slug: "acme/widgets",
+    checkoutBackupId: "3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b",
+    ref: "main",
+    sha: "0123456789abcdef0123456789abcdef01234567",
+    fetchRef: "feat/x",
+  };
+
+  it("posts the handle and the env to /seed and returns the Worker's answer as it came", async () => {
+    const answer = {
+      seeded: true,
+      cached: false,
+      slug: seed.slug,
+      ref: "feat/x",
+      sha: "89abcdef0123456789abcdef0123456789abcdef",
+      from: { ref: "main", sha: seed.sha, checkoutBackupId: seed.checkoutBackupId },
+      steps: { restore: 18_000, deps: null, fixup: 3_000 },
+      ms: 21_500,
+    };
+    const { calls } = stubFetch(answer);
+    const ex = new CloudflareSandboxExecutor({ ...OPTS, resolveEnvs: async () => ({ GH_TOKEN: "ghs_x" }) });
+    await expect(ex.seed(seed)).resolves.toEqual(answer);
+    expect(calls[0].url).toBe("https://sandbox.example/seed");
+    expect(sentBody(calls[0])).toEqual({ seed, env: { GH_TOKEN: "ghs_x" } });
+  });
+
+  it("a refusal is an answer, not a throw: the caller decides on the reason", async () => {
+    stubFetch({ seeded: false, reason: "seed-missing", detail: "restore: Backup not found: 3f2a…", step: "restore" });
+    await expect(new CloudflareSandboxExecutor(OPTS).seed(seed)).resolves.toMatchObject({
+      seeded: false,
+      reason: "seed-missing",
+    });
+  });
+
+  it("an answer without a verdict is infra", async () => {
+    stubFetch({ ok: true });
+    await expect(new CloudflareSandboxExecutor(OPTS).seed(seed)).rejects.toThrow(/\/seed answered without a verdict/);
+  });
+});

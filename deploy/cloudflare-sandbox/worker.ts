@@ -25,6 +25,7 @@ import {
   Sandbox,
   StaleProcessHandleError,
   getSandbox,
+  type DirectoryBackup,
   type SandboxCommand,
 } from "@cloudflare/sandbox";
 import { createExtensionProcessSandbox } from "@cloudflare/sandbox/extensions";
@@ -63,6 +64,34 @@ import {
   thrownText,
 } from "../../src/execution/sandboxErrors.js";
 import { injectedBuildStamp } from "../../src/deploy/buildStamp.js";
+import { backupTransferMode } from "../../src/execution/residentBackupTransfer.js";
+import {
+  judgeRestoreProgress,
+  RESTORE_POLL_MS,
+  restoreArchivePath,
+  type RestoreSample,
+} from "../../src/execution/residentRefresh.js";
+import {
+  extractRestoreScript,
+  restoreMountDir,
+  unmountAllRestoresScript,
+} from "../../src/execution/residentRestoreExtract.js";
+import {
+  isBackupMissing,
+  parseSeed,
+  SEED_CHECKOUT_DIR,
+  SEED_DEPS_STAGING_DIR,
+  SEED_FIXUP_TIMEOUT_MS,
+  SEED_MARKER,
+  SEED_RESTORE_MAX_MS,
+  SEED_ABANDONED_RESTORE_WAIT_MS,
+  seedFixupScript,
+  seedMarkerText,
+  type SandboxSeed,
+  type SeedAnswer,
+  type SeedStep,
+} from "../../src/execution/seedPlan.js";
+import { shellQuote } from "../../src/execution/shellQuote.js";
 import { classifyError } from "../../src/core/trace/classify.js";
 import { systemClock } from "../../src/core/trace/clock.js";
 import { createTracer } from "../../src/core/trace/tracer.js";
@@ -361,6 +390,201 @@ export class SwitchboardSandbox extends Sandbox<Env> {
     }
   }
 
+  /** The seed (docs/reference/specs/execution.md item 25): the resident's
+   *  checkout snapshot — and the deps-store entry for its lockfile key — restored
+   *  into this container before the run's first command, then the fix-up
+   *  (ownership, origin, the deps view in place, the thread's ref checked out).
+   *  Inside the idle ledger and behind the start gate like every route: the
+   *  container's start is waited out by the executor, never carried here. */
+  async seed(seed: SandboxSeed, envVars: Record<string, string>): Promise<SeedAnswer | WaitAnswer> {
+    return this.idle.served(() =>
+      this.gate.through(
+        () => this.seedNow(seed, envVars),
+        (cause) => sandboxStartingAnswer(cause),
+      ),
+    );
+  }
+
+  private async seedNow(seed: SandboxSeed, envVars: Record<string, string>): Promise<SeedAnswer> {
+    const t0 = systemClock();
+    const from = {
+      ref: seed.ref,
+      sha: seed.sha,
+      checkoutBackupId: seed.checkoutBackupId,
+      ...(seed.depsBackupId ? { depsBackupId: seed.depsBackupId } : {}),
+    };
+    // Presigned only: the container downloads the archive over a URL this
+    // object signs. In local-bucket mode the isolate would pump the bytes and
+    // a checkout restore runs to gigabytes (resident-repos item 61).
+    const transfer = backupTransferMode(this.env as unknown as Record<string, unknown>);
+    if (transfer.mode !== "presigned") {
+      return {
+        seeded: false,
+        reason: "seed-unconfigured",
+        detail: `presigned R2 transfer needs ${transfer.missing.join(", ")}`,
+      };
+    }
+    // The marker names the seed this container carries — the handle and the
+    // ref and head checked out: the same seed again is the run's second
+    // request (a retry, a re-attach), and a restore over the live tree would
+    // destroy the run's work; a seed naming another ref is a new seed.
+    const marker = await this.runRoot(["cat", SEED_MARKER], 30_000);
+    if (marker.exitCode === 0 && marker.stdout.trim() === seedMarkerText(seed)) {
+      const head = await this.runRoot(["git", "-C", SEED_CHECKOUT_DIR, "rev-parse", "HEAD"], 30_000);
+      return {
+        seeded: true,
+        cached: true,
+        slug: seed.slug,
+        ref: seed.fetchRef ?? seed.ref,
+        sha: head.exitCode === 0 ? head.stdout.trim() : seed.sha,
+        from,
+        steps: { restore: 0, deps: null, fixup: 0 },
+        ms: systemClock() - t0,
+      };
+    }
+    const deadline = t0 + SEED_RESTORE_MAX_MS;
+    const steps = { restore: 0, deps: null as number | null, fixup: 0 };
+    let step: SeedStep = "restore";
+    try {
+      // Nothing of an earlier attempt survives: its mounts, a half tree, a
+      // marker for another handle.
+      await this.runRoot(["sh", "-c", `${unmountAllRestoresScript()}\n${this.seedSweep()}`], 60_000);
+      let t = systemClock();
+      await this.restoreSeedInto(seed.checkoutBackupId, SEED_CHECKOUT_DIR, deadline, "checkout");
+      steps.restore = systemClock() - t;
+      if (seed.depsBackupId) {
+        step = "deps";
+        t = systemClock();
+        await this.restoreSeedInto(seed.depsBackupId, SEED_DEPS_STAGING_DIR, deadline, "deps");
+        steps.deps = systemClock() - t;
+      }
+      step = "fixup";
+      t = systemClock();
+      const script = seedFixupScript({
+        slug: seed.slug,
+        ref: seed.ref,
+        ...(seed.fetchRef ? { fetchRef: seed.fetchRef } : {}),
+        ...(seed.fetchSha ? { fetchSha: seed.fetchSha } : {}),
+        checkoutDir: SEED_CHECKOUT_DIR,
+        ...(seed.depsBackupId ? { depsDir: SEED_DEPS_STAGING_DIR } : {}),
+      });
+      // The fix-up's fetch authenticates through the image's credential helper
+      // with the exec env's GH_TOKEN — the same channel every command uses.
+      const fix = await this.runRoot(["bash", "-c", script], SEED_FIXUP_TIMEOUT_MS, envVars);
+      if (fix.exitCode !== 0) throw new Error(`fix-up exited ${fix.exitCode}: ${tail(fix.stderr || fix.stdout)}`);
+      steps.fixup = systemClock() - t;
+      const sha = fix.stdout.trim().split("\n").at(-1) ?? seed.sha;
+      await this.runRoot(
+        ["sh", "-c", `printf %s ${shellQuote(seedMarkerText(seed))} > ${shellQuote(SEED_MARKER)}`],
+        30_000,
+      );
+      const ms = systemClock() - t0;
+      console.log(
+        JSON.stringify({ event: "sandbox.seeded", slug: seed.slug, ref: seed.fetchRef ?? seed.ref, sha, steps, ms }),
+      );
+      return { seeded: true, cached: false, slug: seed.slug, ref: seed.fetchRef ?? seed.ref, sha, from, steps, ms };
+    } catch (err) {
+      const shape = thrownShape(err);
+      // A half seed never survives either: the run that follows goes cold
+      // and clones into an empty workspace. A restore the verdict gave up on
+      // keeps streaming (the SDK's call cannot be cancelled): it is waited
+      // for, bounded, before the sweep runs over its directory.
+      await this.settlePendingRestores(SEED_ABANDONED_RESTORE_WAIT_MS);
+      await this.runRoot(["sh", "-c", `${unmountAllRestoresScript()}\n${this.seedSweep()}`], 60_000).catch(() => {});
+      const reason = isBackupMissing(shape) ? "seed-missing" : "seed-failed";
+      const detail = `${step}: ${thrownText(shape)}`;
+      console.log(
+        JSON.stringify({ event: "sandbox.seed-failed", slug: seed.slug, reason, step, detail, ms: systemClock() - t0 }),
+      );
+      return { seeded: false, reason, detail, step };
+    }
+  }
+
+  /** Remove what a seed writes: the checkout, the deps staging tree, the marker. */
+  private seedSweep(): string {
+    return `rm -rf ${shellQuote(SEED_CHECKOUT_DIR)} ${shellQuote(SEED_DEPS_STAGING_DIR)} ${shellQuote(SEED_MARKER)}`;
+  }
+
+  /** One presigned restore INTO `targetDir` as a plain directory, the way the
+   *  resident does it (resident-repos item 61): the SDK mounts the archive at
+   *  a staging sibling, the wait is judged by bytes arriving (the SDK's call
+   *  takes no timeout) against the seed's one deadline, then the extract
+   *  script puts a real tree in place and the target appears last. */
+  private async restoreSeedInto(id: string, targetDir: string, deadlineMs: number, what: string): Promise<void> {
+    const attempt = crypto.randomUUID().slice(0, 8);
+    const mountDir = restoreMountDir(targetDir, attempt);
+    const backup: DirectoryBackup = { id, dir: mountDir };
+    const startedMs = systemClock();
+    const restore = this.restoreBackup(backup);
+    // Judged below by bytes; a rejection after the judge gave up is never
+    // unhandled, and the promise is remembered until it settles so a failure
+    // sweep waits for it (bounded) before touching its directory.
+    this.pendingRestores.add(restore);
+    restore.then(
+      () => this.pendingRestores.delete(restore),
+      () => this.pendingRestores.delete(restore),
+    );
+    const samples: RestoreSample[] = [];
+    for (;;) {
+      const outcome = await Promise.race([
+        restore.then(() => "done" as const),
+        new Promise<"tick">((r) => setTimeout(() => r("tick"), RESTORE_POLL_MS)),
+      ]);
+      if (outcome === "done") break;
+      samples.push({ atMs: systemClock(), kiB: await this.duKiB([restoreArchivePath(id), mountDir]) });
+      const verdict = judgeRestoreProgress({ startedMs, nowMs: systemClock(), samples, deadlineMs });
+      if (verdict.verdict !== "wait") throw new Error(`${what} restore ${verdict.verdict}: ${verdict.detail}`);
+    }
+    const r = await this.runRoot(
+      ["sh", "-c", extractRestoreScript({ mountDir, backupId: id, archivePath: restoreArchivePath(id), targetDir })],
+      Math.max(60_000, deadlineMs - systemClock()),
+    );
+    if (r.exitCode !== 0) throw new Error(`${what} extract exited ${r.exitCode}: ${tail(r.stderr || r.stdout)}`);
+  }
+
+  /** Restores this object started that have not settled: what a failure
+   *  sweep must not race. */
+  private readonly pendingRestores = new Set<Promise<unknown>>();
+
+  /** Wait for every pending restore to settle, at most `maxMs`: a restore the
+   *  judge called stalled may still finish, and `rm -rf` under a streaming
+   *  extraction leaves debris the next seed's own sweep has to clear. */
+  private async settlePendingRestores(maxMs: number): Promise<void> {
+    if (this.pendingRestores.size === 0) return;
+    const settled = Promise.allSettled([...this.pendingRestores]);
+    await Promise.race([settled, new Promise<void>((r) => setTimeout(r, maxMs))]);
+  }
+
+  /** `du -sk` over the paths, summed, in KiB; null when nothing could be measured. */
+  private async duKiB(paths: string[]): Promise<number | null> {
+    const r = await this.runRoot(["du", "-sk", ...paths], 30_000);
+    let total = 0;
+    let seen = false;
+    for (const line of r.stdout.split("\n")) {
+      const m = /^(\d+)\s/.exec(line);
+      if (m) {
+        total += Number(m[1]);
+        seen = true;
+      }
+    }
+    return seen ? total : null;
+  }
+
+  /** One process as root, collected inside this object — the seed's own
+   *  commands, outside the /exec shape (no shell-level `timeout`, no WORKDIR). */
+  private async runRoot(
+    argv: SandboxCommand,
+    timeoutMs: number,
+    env: Record<string, string> = {},
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const proc = await createExtensionProcessSandbox(this).exec(argv, {
+      env,
+      timeout: timeoutMs + SDK_BACKSTOP_MARGIN_MS,
+    });
+    const out = await proc.output({ encoding: "utf8", timeout: timeoutMs + OUTPUT_WAIT_AFTER_DEADLINE_MS });
+    return { stdout: out.stdout, stderr: out.stderr, exitCode: out.timedOut ? 124 : out.exitCode };
+  }
+
   /** The named failures, as `/exec` data; anything else is thrown as it came. */
   private execFailure(err: unknown, startedAt: number): ExecFailure {
     const raw = thrownText(thrownShape(err));
@@ -471,6 +695,11 @@ export class SwitchboardSandbox extends Sandbox<Env> {
   }
 }
 
+/** The last part of a step's output, for a failure's detail. */
+function tail(text: string): string {
+  return text.trim().slice(-400);
+}
+
 /** The stderr line an exit 124 carries: the limit, the knob, and the way to
  *  outlive a command (`setsid -f`: every /exec runs under `timeout … bash -c`,
  *  whose process group is reaped when the command returns, so a plain
@@ -486,6 +715,16 @@ function timeoutNote(execTimeoutSecs: number): string {
 interface Env {
   Sandbox: DurableObjectNamespace<SwitchboardSandbox>;
   SANDBOX_TOKEN: string;
+  // The seed (docs/reference/specs/execution.md item 25): the resident's cache
+  // bucket and the four values the SDK's presigned restore reads — rendered
+  // only when the profile has a resident (wrangler.template.jsonc), the keys
+  // provisioned by `deploy secrets sandbox`. Any absent → `seed-unconfigured`:
+  // a gigabyte restore never goes through the isolate (resident-repos item 61).
+  BACKUP_BUCKET?: R2Bucket;
+  CLOUDFLARE_ACCOUNT_ID?: string;
+  BACKUP_BUCKET_NAME?: string;
+  R2_ACCESS_KEY_ID?: string;
+  R2_SECRET_ACCESS_KEY?: string;
 }
 
 /** The commit this bundle was built from, injected by the deploy
@@ -513,7 +752,12 @@ export default {
     // stamp (docs/reference/specs/execution.md item 13). It needs no thread, so it answers
     // before the X-Thread-Key check — and it is the one GET here.
     if (request.method === "GET" && new URL(request.url).pathname === "/healthz") {
-      return json({ ok: true, build: BUILD });
+      // `backupTransfer` says whether a seed can run here (presigned) or not (local).
+      return json({
+        ok: true,
+        build: BUILD,
+        backupTransfer: backupTransferMode(env as unknown as Record<string, unknown>).mode,
+      });
     }
     if (request.method !== "POST") return json({ error: "POST only" }, 405);
 
@@ -553,6 +797,16 @@ export default {
             () => sandbox.runCommand(String(body.command ?? ""), execTimeoutSecs, envVars),
             request.headers.get("traceparent") ?? undefined,
           );
+        }
+        case "/seed": {
+          // The seed (docs/reference/specs/execution.md item 25): the resident's
+          // snapshot restored into this thread's sandbox before the run's first
+          // command. Streamed like /exec — a restore takes minutes — and every
+          // outcome is named in the body, so the executor never reads a seed
+          // that did not happen as a dead sandbox.
+          const parsed = parseSeed(body.seed);
+          if (!parsed.ok) return json({ error: parsed.error }, 400);
+          return streamSeed(() => sandbox.seed(parsed.seed, envVars), request.headers.get("traceparent") ?? undefined);
         }
         case "/read": {
           const encoding = readEncodingOf(body);
@@ -597,9 +851,15 @@ export default {
  *  gone by the time the result is known): a completed command as {stdout,
  *  stderr, exitCode}, a sandbox-enforced timeout as exit 124, and any other
  *  failure as {error} (docs/reference/specs/execution.md item 3). */
-function streamExec(run: () => Promise<ExecAnswer | ExecFailure>, traceparent: string | undefined): Response {
+/** HTTP 200 at once, a whitespace heartbeat every 15 s, then exactly one JSON
+ *  document (docs/reference/specs/execution.md item 3): the shape every long
+ *  route shares, so no hop ever sees an idle connection. `settle` turns the
+ *  run's outcome — an answer, or a throw — into that one document. */
+function heartbeatJson(
+  run: () => Promise<object>,
+  settle: { answered: (answer: object) => object; threw: (err: unknown) => object },
+): Response {
   const encoder = new TextEncoder();
-  const startedAt = systemClock();
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       const beat = setInterval(() => {
@@ -618,51 +878,84 @@ function streamExec(run: () => Promise<ExecAnswer | ExecFailure>, traceparent: s
           // stream already errored/cancelled — nothing left to deliver to
         }
       };
-      run()
-        .then((answer) => {
-          if ("error" in answer) {
-            // A command the sandbox never answered for, named by the Durable
-            // Object: an infra failure, classified, no message on the span.
-            const root = execRoot(startedAt, traceparent);
-            root.fail(classifyError(new Error("sandbox exec failed"), { kind: "infra" }));
-            root.end("error");
-            finish(answer);
-            return;
-          }
-          // The command as the Worker's own root (docs/reference/specs/tracing.md item 22).
-          execRoot(startedAt, traceparent).end(answer.exitCode === 0 ? "ok" : "error", {
-            exitCode: answer.exitCode,
-            ...(answer.exitCode === 124 ? { timedOut: true } : {}),
-          });
-          finish(answer);
-        })
-        .catch((err: unknown) => {
-          // The Durable Object threw: a failure its own classification did
-          // not name, seen here after the RPC boundary (name and message kept,
-          // prototype dropped), so the shared classifiers read the shape.
-          const root = execRoot(startedAt, traceparent);
-          root.fail(classifyError(new Error("sandbox exec failed"), { kind: "infra" }));
-          root.end("error");
-          const shape = thrownShape(err);
-          const raw = thrownText(shape);
-          if (isRuntimeUnreachableError(err)) {
-            finish(runtimeUnreachableExecAnswer(raw));
-            return;
-          }
-          if (isFleetBusyError(err)) {
-            finish(fleetBusyExecAnswer(raw));
-            return;
-          }
-          // A recycle the Durable Object did not catch by type: by name, or
-          // a recycle-shaped text minutes into the attempt (item 9).
-          const certain = shape.name !== undefined && isRecycleError({ name: shape.name });
-          const msg = recycledMidCommandMessage(systemClock() - startedAt, raw, certain);
-          finish({ error: msg, stdout: "", stderr: msg, exitCode: 127 } satisfies ExecFailure);
-        });
+      run().then(
+        (answer) => finish(settle.answered(answer)),
+        (err: unknown) => finish(settle.threw(err)),
+      );
     },
   });
   return new Response(stream, { headers: { "content-type": "application/json" } });
 }
+
+function streamExec(run: () => Promise<ExecAnswer | ExecFailure>, traceparent: string | undefined): Response {
+  const startedAt = systemClock();
+  return heartbeatJson(run, {
+    answered: (a) => {
+      const answer = a as ExecAnswer | ExecFailure;
+      if ("error" in answer) {
+        // A command the sandbox never answered for, named by the Durable
+        // Object: an infra failure, classified, no message on the span.
+        const root = execRoot(startedAt, traceparent);
+        root.fail(classifyError(new Error("sandbox exec failed"), { kind: "infra" }));
+        root.end("error");
+        return answer;
+      }
+      // The command as the Worker's own root (docs/reference/specs/tracing.md item 22).
+      execRoot(startedAt, traceparent).end(answer.exitCode === 0 ? "ok" : "error", {
+        exitCode: answer.exitCode,
+        ...(answer.exitCode === 124 ? { timedOut: true } : {}),
+      });
+      return answer;
+    },
+    threw: (err) => {
+      // The Durable Object threw: a failure its own classification did
+      // not name, seen here after the RPC boundary (name and message kept,
+      // prototype dropped), so the shared classifiers read the shape.
+      const root = execRoot(startedAt, traceparent);
+      root.fail(classifyError(new Error("sandbox exec failed"), { kind: "infra" }));
+      root.end("error");
+      const shape = thrownShape(err);
+      const raw = thrownText(shape);
+      if (isRuntimeUnreachableError(err)) return runtimeUnreachableExecAnswer(raw);
+      if (isFleetBusyError(err)) return fleetBusyExecAnswer(raw);
+      // A recycle the Durable Object did not catch by type: by name, or
+      // a recycle-shaped text minutes into the attempt (item 9).
+      const certain = shape.name !== undefined && isRecycleError({ name: shape.name });
+      const msg = recycledMidCommandMessage(systemClock() - startedAt, raw, certain);
+      return { error: msg, stdout: "", stderr: msg, exitCode: 127 } satisfies ExecFailure;
+    },
+  });
+}
+
+/** `POST /seed`'s answer over the same heartbeat stream, as its own
+ *  `sandbox.seed` root. A start or a full fleet met at the warm-up keeps its
+ *  wait token (items 14, 23); a silent control port its name (item 9); any
+ *  other throw is a `seed-failed` with the text — never a dead sandbox. */
+function streamSeed(run: () => Promise<SeedAnswer | WaitAnswer>, traceparent: string | undefined): Response {
+  const startedAt = systemClock();
+  const root = () => startAdoptedRoot(tracer, "sandbox.seed", { sinks: traceSinks, startedAt, traceparent });
+  return heartbeatJson(run, {
+    answered: (a) => {
+      const answer = a as SeedAnswer | WaitAnswer;
+      if ("seeded" in answer)
+        root().end(answer.seeded ? "ok" : "error", { outcome: answer.seeded ? "seeded" : answer.reason });
+      return answer;
+    },
+    threw: (err) => {
+      const r = root();
+      r.fail(classifyError(new Error("sandbox seed failed"), { kind: "infra" }));
+      r.end("error");
+      const raw = thrownText(thrownShape(err));
+      if (isRuntimeUnreachableError(err)) return runtimeUnreachableAnswer(raw);
+      if (isFleetBusyError(err)) return fleetBusyAnswer(raw);
+      return { seeded: false, reason: "seed-failed", detail: raw } satisfies SeedAnswer;
+    },
+  });
+}
+
+/** A route's answer while the container starts or the fleet is full: the
+ *  text and the machine token the executor waits on. */
+type WaitAnswer = ReturnType<typeof sandboxStartingAnswer> | ReturnType<typeof fleetBusyAnswer>;
 
 /** A file route's refusal as the fetch handler answers it: the text, and the
  *  machine token when the Durable Object named one — the executor matches

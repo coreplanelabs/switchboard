@@ -12,6 +12,14 @@ describe("reasonOf — the machine token inside a client's error", () => {
     expect(reasonOf(new Error("resident attach failed for repo:x: disk-pressure: need 555 MB"))).toBe("disk-pressure");
   });
 
+  it("finds the seed's tokens — the handle gone, a step failed, a Worker without presigned transfer", () => {
+    expect(reasonOf(new Error("seed-missing: restore: Backup not found: 3f2a…"))).toBe("seed-missing");
+    expect(reasonOf(new Error("seed-failed: fixup: fix-up exited 128"))).toBe("seed-failed");
+    expect(reasonOf(new Error("seed-unconfigured: presigned R2 transfer needs R2_ACCESS_KEY_ID"))).toBe(
+      "seed-unconfigured",
+    );
+  });
+
   it("maps the sandbox capacity error and the not-onboarded answer to their tokens", () => {
     expect(reasonOf(new Error("sandbox fleet busy — no free per-thread sandbox after waiting 300s"))).toBe(
       "fleet-busy",

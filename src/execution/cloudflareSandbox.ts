@@ -20,6 +20,7 @@ import {
   startWaitExhaustedMessage,
   type WaitReason,
 } from "./sandboxErrors.js";
+import { SEED_BUDGET_MS, type SandboxSeed, type SeedAnswer } from "./seedPlan.js";
 import { tracedFetch } from "../core/trace/tracedFetch.js";
 import type { Span } from "../core/trace/types.js";
 
@@ -303,6 +304,23 @@ export class CloudflareSandboxExecutor implements Executor {
     const exitCode = Number(r.exitCode ?? 0);
     if (exitCode !== 0) return truncate(`exit ${exitCode}:\n${parts}`);
     return truncate(parts || "(no output)");
+  }
+
+  /** `POST /seed` (docs/reference/specs/execution.md item 25): the resident's
+   *  snapshot handle, restored into this thread's sandbox before the run's
+   *  first command. The Worker streams the answer under SEED_BUDGET_MS — a
+   *  restore takes minutes — and names every outcome in the body: `seeded`,
+   *  or a reason the caller decides on (`seed-missing` → re-read `/status`
+   *  once and retry; anything else → the run goes cold, with the note). The
+   *  env rides along as on every route: the fix-up's fetch authenticates with
+   *  it. A container still starting or a full fleet is waited out here like
+   *  any other route. */
+  async seed(seed: SandboxSeed, opts?: { signal?: AbortSignal; span?: Span }): Promise<SeedAnswer> {
+    const r = await this.call("/seed", { seed }, opts?.signal, SEED_BUDGET_MS, opts?.span);
+    if (typeof r.seeded !== "boolean") {
+      throw new ExecInfraError(`sandbox worker /seed answered without a verdict: ${JSON.stringify(r).slice(0, 200)}`);
+    }
+    return r as unknown as SeedAnswer;
   }
 
   async readFile(path: string, opts?: ExecTraceOptions): Promise<string> {

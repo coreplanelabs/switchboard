@@ -7013,6 +7013,11 @@ export class ResidentDO extends Sandbox<Env> {
             createdAt: snap.createdAt,
             mirrorBackupId: snap.mirror.id,
             checkoutBackupId: snap.checkout.id,
+            // The seed handle's other half (docs/reference/specs/execution.md item 25):
+            // the deps-store entry archive for the snapshot's own lockfile key,
+            // when one has been taken (item 61) — a seeded sandbox restores it
+            // beside the checkout and skips the install.
+            depsBackupId: (await this.depsBackupRecord(snap.lockfileHash))?.backup.id ?? null,
           }
         : null,
       // The provisioning schedules, the one timer a resident has (item 3).

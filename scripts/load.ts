@@ -3,6 +3,7 @@
 //   npm run load -- history                       peak concurrency from the run store
 //   npm run load -- resident --resource repo:owner/name --threads 16 --hold 600
 //   npm run load -- sandbox  -- --threads 8 --hold 300
+//   npm run load -- sandbox  -- --seed-from repo:owner/name --threads 24 --hold 60   (load:seeded — the D4 gate)
 //   npm run load -- e2e      -- --ingress-url http://127.0.0.1:8080/ingress --text "agent:coding in owner/name: load" --threads 50
 //   npm run load -- cards    -- --cards 50 --hold 600 --channels 5
 //   npm run load -- provider --port 8089 --profile coding --cpu-seconds 60
@@ -112,6 +113,7 @@ import { WorkerRunStore } from "../src/core/runStoreWorker.js";
 import { PiAiProviders } from "../src/core/harness/piAi.js";
 import { parsePrDescription } from "../src/core/prDescription.js";
 import { CloudflareSandboxExecutor } from "../src/execution/cloudflareSandbox.js";
+import { parseSeed, type SandboxSeed } from "../src/execution/seedPlan.js";
 import { ResidentExecutor } from "../src/execution/resident.js";
 import { systemClock } from "../src/core/trace/clock.js";
 
@@ -129,6 +131,9 @@ commands
   sandbox    N per-thread cold sandboxes
              --threads N  --hold S  --stagger S  --cpu-seconds S  --override
              env: SWITCHBOARD_SANDBOX_URL, SANDBOX_TOKEN (or --sandbox-url)
+             --seed-from repo:<slug>: every thread first restores that resident's snapshot
+             (POST /seed; env: SWITCHBOARD_RESIDENT_URL, RESIDENT_OPERATOR_TOKEN); --seed-ref <branch>
+             checks the thread out on that branch instead of the snapshot's
   e2e        N runs through a bot's POST /ingress (synchronous mode)
              --ingress-url URL  --healthz-url URL  --text "agent:coding in owner/name: load"  --threads N  --hold S  --stagger S
              env: SWITCHBOARD_LOAD_INGRESS_TOKEN (or --token-env)
@@ -180,6 +185,8 @@ function flags(argv: string[]): Flags {
       "healthz-url": { type: "string" },
       "resident-url": { type: "string" },
       "sandbox-url": { type: "string" },
+      "seed-from": { type: "string" },
+      "seed-ref": { type: "string" },
       "state-url": { type: "string" },
       "token-env": { type: "string" },
       "per-app-per-minute": { type: "string" },
@@ -280,6 +287,15 @@ const SANDBOX_SLO: SloSpec = {
     { op: "exec", p: 95, maxMs: 3_000 },
   ],
   zeroReasons: ["fleet-busy"],
+};
+// The seeded tier's gate (the fifty-concurrent-runs plan, D4): the seed —
+// restore, deps, fix-up, the container's start included — p95 ≤ 90 s at N = 24
+// on the largest repository; every seed lands (no handle gone, no step failed,
+// no unconfigured Worker). The half-of-cold comparison is read by hand against
+// the same repository's cold clone-and-install.
+const SEEDED_SANDBOX_SLO: SloSpec = {
+  latencyMs: [...(SANDBOX_SLO.latencyMs ?? []), { op: "seed", p: 95, maxMs: 90_000 }],
+  zeroReasons: ["fleet-busy", "seed-missing", "seed-failed", "seed-unconfigured"],
 };
 // Structural, not an enumerated reason list: a run's failure reason is its
 // terminal status or an HTTP status, and an unanticipated one (`http-401`)
@@ -404,6 +420,7 @@ async function sandbox(f: Flags): Promise<boolean> {
   const startedAt = new Date(systemClock()).toISOString();
   const url = str(f, "sandbox-url", process.env.SWITCHBOARD_SANDBOX_URL).replace(/\/$/, "");
   const token = bearer("SANDBOX_TOKEN");
+  const seed = typeof f["seed-from"] === "string" ? await seedHandle(f, f["seed-from"]) : undefined;
   const params = {
     runId: id,
     threads: num(f, "threads", 4),
@@ -411,6 +428,7 @@ async function sandbox(f: Flags): Promise<boolean> {
     holdMs: num(f, "hold", 300) * 1000,
     cpuSeconds: num(f, "cpu-seconds", 60),
     override: f.override === true,
+    ...(seed ? { seed } : {}),
   };
   const ac = new AbortController();
   process.once("SIGINT", () => ac.abort());
@@ -419,12 +437,17 @@ async function sandbox(f: Flags): Promise<boolean> {
     openClient: (threadKey) => new CloudflareSandboxExecutor({ url, token, threadKey, resolveEnvs: async () => ({}) }),
   });
   const summary = summarize(out.samples);
-  const checks = evaluateSlo(summary, SANDBOX_SLO);
+  const checks = evaluateSlo(summary, seed ? SEEDED_SANDBOX_SLO : SANDBOX_SLO);
   const notes = [
     `threads started ${out.result.started}, setup failures ${out.result.setupFailures}, iterations ${out.result.iterations}, iteration errors ${out.result.errors}`,
+    ...(seed
+      ? [
+          `seeded from ${seed.slug} ${seed.ref}@${seed.sha.slice(0, 7)} (checkout ${seed.checkoutBackupId.slice(0, 8)}, deps ${seed.depsBackupId ? seed.depsBackupId.slice(0, 8) : "none"})${seed.fetchRef ? `, checked out on ${seed.fetchRef}` : ""}`,
+        ]
+      : []),
   ];
   return writeResults(
-    "sandbox",
+    seed ? "seeded" : "sandbox",
     id,
     startedAt,
     { ...params, url },
@@ -433,6 +456,26 @@ async function sandbox(f: Flags): Promise<boolean> {
     { samples: out.samples, result: out.result },
     notes,
   );
+}
+
+/** The seed handle as the resident publishes it: one operator `GET /status`
+ *  for the resource, the snapshot's checkout and deps ids with its stamp, the
+ *  thread's branch from `--seed-ref` when given. A resident with no snapshot
+ *  (not onboarded, never refreshed) is a refusal here, not a cold fallback: a
+ *  seeded load measures the seed. */
+async function seedHandle(f: Flags, resource: string): Promise<SandboxSeed> {
+  const m = /^repo:([^/\s]+\/[^/\s]+)$/.exec(resource);
+  if (!m) throw new Error(`--seed-from must be repo:<owner/name>, got ${JSON.stringify(resource)}`);
+  const baseUrl = str(f, "resident-url", process.env.SWITCHBOARD_RESIDENT_URL).replace(/\/$/, "");
+  const operator = bearer("RESIDENT_OPERATOR_TOKEN");
+  // The bot's own probe: it carries the handle when the resident has one.
+  const probe = await ResidentExecutor.probeStatus(baseUrl, operator, resource, 10_000);
+  if (probe.kind === "unreachable") throw new Error(`resident /status for ${resource}: ${probe.error}`);
+  if (!probe.seed) throw new Error(`${resource} has no snapshot to seed from (state ${probe.state})`);
+  const fetchRef = typeof f["seed-ref"] === "string" ? f["seed-ref"] : undefined;
+  const parsed = parseSeed({ slug: m[1], ...probe.seed, ...(fetchRef ? { fetchRef } : {}) });
+  if (!parsed.ok) throw new Error(`resident /status published a handle the seed refuses: ${parsed.error}`);
+  return parsed.seed;
 }
 
 async function e2e(f: Flags): Promise<boolean> {

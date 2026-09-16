@@ -64,3 +64,97 @@ describe("runSandboxLoad", () => {
     ).rejects.toThrow(/--override/);
   });
 });
+
+// `load:seeded` (docs/reference/specs/load-harness.md item 11, execution.md
+// item 25): every thread seeds first; the seed and the Worker's step timings
+// are ops of their own, and a refused seed ends the thread under its token.
+describe("runSandboxLoad — seeded", () => {
+  const seed = {
+    slug: "acme/widgets",
+    checkoutBackupId: "3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b",
+    depsBackupId: "aa11bb22-cc33-dd44-ee55-ff6677889900",
+    ref: "main",
+    sha: "0123456789abcdef0123456789abcdef01234567",
+  };
+
+  function seededFleet(answer: (thread: number) => { seeded: true } | { reason: string; detail: string }) {
+    let t = 0;
+    let opened = 0;
+    const seeds: unknown[] = [];
+    return {
+      seeds,
+      now: () => t,
+      sleep: async (ms: number) => {
+        t += ms;
+      },
+      openClient: () => {
+        const thread = opened++;
+        return {
+          async seed(s: unknown) {
+            seeds.push(s);
+            t += 30_000;
+            const a = answer(thread);
+            if ("seeded" in a) {
+              return {
+                seeded: true as const,
+                cached: false,
+                slug: seed.slug,
+                ref: seed.ref,
+                sha: seed.sha,
+                from: { ref: seed.ref, sha: seed.sha, checkoutBackupId: seed.checkoutBackupId },
+                steps: { restore: 18_000, deps: 9_000, fixup: 3_000 },
+                ms: 30_000,
+              };
+            }
+            return { seeded: false as const, reason: a.reason as "seed-missing", detail: a.detail };
+          },
+          async exec() {
+            t += 100;
+            return "ok";
+          },
+        };
+      },
+    };
+  }
+
+  it("seeds before the first command and records the seed plus the Worker's restore, deps and fix-up timings as their own ops", async () => {
+    const fleet = seededFleet(() => ({ seeded: true }));
+    const out = await runSandboxLoad(
+      { runId: "s4", threads: 2, staggerMs: 0, holdMs: 1_000, cpuSeconds: 1, pauseMs: 0, seed },
+      fleet,
+    );
+    const s = summarize(out.samples);
+    expect(s.ops.map((o) => o.op)).toEqual([
+      "seed",
+      "seed-restore",
+      "seed-deps",
+      "seed-fixup",
+      "first-exec",
+      "exec",
+      "exec-cpu",
+    ]);
+    expect(s.ops.find((o) => o.op === "seed")).toMatchObject({ count: 2, ok: 2, p50: 30_000 });
+    expect(s.ops.find((o) => o.op === "seed-restore")).toMatchObject({ count: 2, p50: 18_000 });
+    expect(fleet.seeds).toEqual([seed, seed]);
+  });
+
+  it("a refused seed ends its thread under the Worker's token — the handle gone is `seed-missing`", async () => {
+    const out = await runSandboxLoad(
+      { runId: "s5", threads: 2, staggerMs: 0, holdMs: 1_000, cpuSeconds: 1, pauseMs: 0, seed },
+      seededFleet((thread) =>
+        thread === 0 ? { seeded: true } : { reason: "seed-missing", detail: "restore: Backup not found" },
+      ),
+    );
+    expect(summarize(out.samples).refusals).toEqual({ "seed-missing": 1 });
+    expect(out.result.setupFailures).toBe(1);
+  });
+
+  it("a client without POST /seed cannot run a seeded load", async () => {
+    const out = await runSandboxLoad(
+      { runId: "s6", threads: 1, staggerMs: 0, holdMs: 1, cpuSeconds: 1, pauseMs: 0, seed },
+      fleet(25),
+    );
+    expect(out.result.setupFailures).toBe(1);
+    expect(out.samples).toEqual([]);
+  });
+});
