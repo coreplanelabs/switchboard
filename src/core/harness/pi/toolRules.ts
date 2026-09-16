@@ -132,6 +132,40 @@ const CURL_GITHUB_WRITE = new RegExp(
   `\\bcurl\\b(?=[^;&|]*api\\.github\\.com)(?=[^;&|]*(?:\\s(?:-X|--request)[\\s=]*${WRITE_METHOD}\\b|\\s(?:-d|--data(?:-\\w+)?|--json|-T|--upload-file)[\\s=]))`,
 );
 
+/** OpenCode's permission actions in pi's tool words, so `judgeToolCall` — which
+ *  keys on pi's own tool names (`PI_TOOL_BUNDLES`) — judges an OpenCode ask by
+ *  the same rules pi's calls are judged by (docs/reference/specs/harness.md
+ *  item 4). OpenCode's built-in tools each assert one action: `shell` is
+ *  the run's bash; `edit`, `write` and `patch` all assert `edit`
+ *  (`packages/core/src/tool/plugin/{edit,write,patch}.ts`), the write-files
+ *  bundle; `read` is `read`; `glob` asserts `glob` and `grep` asserts `grep`
+ *  (over a pattern, judged as pi's `find`/`grep`); `webfetch`/`websearch` are
+ *  denied for every identity and so never ask. `external_directory` is not
+ *  here — the bridge judges its directory resources as paths. An MCP tool
+ *  asserts `<server>_<tool>`; its word is the tool half. */
+export const OPENCODE_ACTION_TO_TOOL_WORD: Readonly<Record<string, string>> = {
+  shell: "bash",
+  edit: "edit",
+  write: "write",
+  patch: "edit",
+  read: "read",
+  glob: "find",
+  grep: "grep",
+  webfetch: "web_fetch",
+  websearch: "web_search",
+};
+
+/** One OpenCode permission action as pi's tool word: a named built-in maps by
+ *  the table; an MCP tool's `<server>_<tool>` action drops its server prefix to
+ *  the tool half; anything else is the action itself, which `judgeToolCall`
+ *  reads as a tool outside every bundle (refused, `outside-profile`). */
+export function openCodeToolWord(action: string): string {
+  const mapped = OPENCODE_ACTION_TO_TOOL_WORD[action];
+  if (mapped !== undefined) return mapped;
+  const underscore = action.indexOf("_");
+  return underscore > 0 ? action.slice(underscore + 1) : action;
+}
+
 export function judgeToolCall(tool: string, input: unknown, ctx: ToolRuleContext): ToolVerdict {
   const bundle = PI_TOOL_BUNDLES[tool];
   if (bundle === undefined) return outside(`${tool} is not in any bundle the ${ctx.identity} identity reaches`);
