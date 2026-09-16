@@ -1,5 +1,5 @@
 ---
-title: Harness contract stage A, the seam, the conformance suite and the real Codex proof - Plan
+title: Harness contract stage A, the seam, the conformance suite and OpenCode as the second harness - Plan
 type: feat
 date: 2026-09-15
 status: proposed
@@ -10,16 +10,16 @@ product_contract_source: record-0038
 execution: code
 ---
 
-# Harness contract stage A, the seam, the conformance suite and the real Codex proof - Plan
+# Harness contract stage A, the seam, the conformance suite and OpenCode as the second harness - Plan
 
 ## Goal Capsule
 
-- **Objective:** carve the six-clause harness contract of record 0038 out of the pi harness as a typed seam, hold pi to it with one conformance table, and prove the contract against the real Codex binary with the two bot-side pieces that proof needs (a Responses route at the model proxy, an MCP relay endpoint), shipping nothing to users.
-- **Scheduling:** not scheduled. The maintainer deferred stage A on 2026-09-15 after the design review: the record's purpose, pressure-testing that Switchboard is not locked to pi and that the seam is sound, was served by the research this plan records. The plan keeps the shape for later; the deferral and the facts that must stay true are recorded in record 0038's third amendment.
-- **Authority:** record 0038 (its body as overridden by its appended amendments) governs product behaviour; this plan governs how it is built; the living specs `harness-pi.md`, `model-proxy.md`, `mcp-tools.md`, `load-harness.md` and the new `harness.md` bind every behaviour change in the same PR as its code.
-- **Stop conditions:** a clause that only pi's in-process hook can satisfy (the clause is pi-shaped; stop and amend the record); the Codex sandbox cannot start on the test host and no preflight can prove it (the Codex rows are not run, never faked); the mid-run workspace re-attach spike fails (the relaunch ceiling shrinks to the settle-and-close floor); an invalidating finding against a settled decision.
-- **Execution profile:** one unit landed as a `gh stack` series in the order of the Implementation Units, each PR green and reviewed; the seam and pi's rows first, Codex last, the relaunch ceiling after Codex.
-- **Tail ownership:** the implementer runs the PR loop per the repository's rules; live receipts (the OpenRouter row, the resident-roll relaunch) are posted on the tracker's receipts issue, not in the plan.
+- **Objective:** carve the six-clause harness contract of record 0038 out of the pi harness as a typed seam, hold pi to it with one conformance table, and add `OpenCodeHarness`, OpenCode's v2 line driven over its server API, as a second production harness that passes the same table: pinned in the images, selectable per preset by configuration, receipted on a live coding task.
+- **Scheduling:** scheduled on 2026-09-16 by the maintainer's direction ("lets do opencode/openapi instead of codex and actually wire it up"), superseding the deferral of 2026-09-15. Ownership: the orchestration-primitives session runs the build agents against this plan, the seam and pi's rows first; the session that wrote record 0038 reviews the seam PRs.
+- **Authority:** record 0038, its body as overridden by its four amendments, governs product behaviour; this plan governs how it is built; the living specs `harness-pi.md`, `model-proxy.md`, `execution.md`, `load-harness.md` and the new `harness.md` bind every behaviour change in the same PR as its code. The OpenCode facts come from the spike of 2026-09-15/16 (two source checkouts, `dev` at 1.18.31 and tag `v2.0.3`), not from prose docs.
+- **Stop conditions:** a clause only pi's in-process hook can satisfy (amend the record); an unverified item of the spike that turns out false in a way that voids a clause (v2 import rejecting authored assistant turns; `permission.asked` not raised for a built-in); the maintainer choosing the v1 line, which changes the survival word and removes the steer (the plan carries both rows).
+- **Execution profile:** one unit landed as a `gh stack` series in the order of the Implementation Units, each PR green and reviewed; nothing defaults a preset to OpenCode.
+- **Tail ownership:** the implementer runs the PR loop per the repository's rules; live receipts are posted on the tracker's receipts issue.
 
 ---
 
@@ -27,69 +27,72 @@ execution: code
 
 ### Summary
 
-Record 0038 says a harness owes the bot six things: credential, gate, relay, record, conversation, survival. pi is the one implementation and the seam is, after the native loop's deletion at `146f9287`, one hand-built call. Stage A makes the seam a type, holds pi to it with a scenario table, and runs the same table against the real `codex app-server` binary driven by a `CodexHarness`, with a scripted Responses-API model or OpenRouter behind the proxy. The proof needs a `/v1/responses` route at the model proxy and an MCP streamable-HTTP relay endpoint, so both are in scope; Codex in an image or on a preset is not.
+Record 0038 says a harness owes the bot six things: credential, gate, relay, record, conversation, survival. pi is the one implementation and the seam, after the native loop's deletion, is one hand-built call. Stage A makes the seam a type, holds pi to it with a scenario table, and adds OpenCode as a second implementation that meets all six clauses from outside its process: its provider layer speaks the proxy's existing dialects, its permission rules make every tool ask over HTTP, its server imports an authored session, its inbox steers mid-turn, and its tools run unsandboxed as the process user, which is pi's shape. Codex, the probe that found the contract's honest cannots, stays documented and builds nothing.
 
-Product Contract preservation: unchanged. The record's clauses, its stage gates and its validation rows are carried as written; where the flow analysis found the record's wording cannot hold (the harness "counts its own turns"; the record's "another container" trigger on a shared kernel), the plan records the evidence under Key Technical Decisions for a later amendment and does not rewrite the record.
+Product Contract preservation: unchanged in meaning. The Codex-specific requirements of the first version of this plan (a Responses route, an MCP relay endpoint, a sandbox preflight) are withdrawn because OpenCode does not need them; their R-IDs are retired, not renumbered.
 
 ### Problem Frame
 
-After `146f9287` every preset runs on pi and nothing in the tree says what a harness owes: the run loop hands twenty-one fields to `runPiHarnessOpen`, the container seam is named `PiContainer` and is pi-shaped beneath the name, the row's facts parse as pi's or as nothing, and the proxy binds each route to one provider type. The row's facts changed four times in two days with no sentence to check the changes against. A second implementation that differs from pi on every clause is the only way to tell a clause from an accident of pi, and a fake of its protocol would prove only our reading of its documentation.
+After `146f9287` every preset runs on pi and nothing in the tree says what a harness owes: the run loop hands twenty-one fields to `runPiHarnessOpen`, the container seam is named `PiContainer` and is pi-shaped beneath the name, the row's facts parse as pi's or as nothing, and the bearer store cannot rotate a credential without resetting the meter. A second harness that runs in production is the only proof that the seam is real, and the only way a deployment can leave pi should pi's pricing, license or maintenance change.
 
 ### Requirements
 
 **The seam**
 
 - R1. A `Harness` interface with a `HarnessFacts` row type exists in `src/core/harness/contract.ts`; `PiHarness` implements it over the code that exists; the run loop calls the harness object handed in through `deps.harness` and compares no string.
-- R2. `PiContainer` is renamed `HarnessContainer`, and `start` takes the binary, its arguments, the stdout filter and the run directory layout as inputs, so a second harness can use the seam without a second container implementation.
-- R3. A row's facts are read by the harness the row names; a row written before the discriminator existed is read as pi's; facts of another harness are refused, and the run closes `interrupted`.
+- R2. `PiContainer` is renamed `HarnessContainer`; `start` takes the binary, its arguments, the stdout filter and the run directory layout as inputs and returns `{ pid, port? }`; the seam gains `request(paths, { method, path, headers, body })` into the container over `/exec curl` on the exec classes and `fetch` on the bot-host class, rethrowing the container-gone error.
+- R3. `HarnessFacts` is a discriminated union on `harness`; a row's facts are read by the harness the row names; a row without the discriminator is pi's; facts of another harness are refused and the run closes `interrupted`.
 
 **The conformance suite**
 
-- R4. One scenario table, whose rows are record 0038's validation criteria plus the parity rows in this plan, runs against pi (through the existing fake container and scripted provider) and against Codex (through the real binary).
-- R5. A row Codex cannot pass is a named failure the table asserts, never a skip and never a pass.
-- R6. Removing one clause's behaviour from `CodexHarness` fails the suite, once per clause.
+- R4. One scenario table, whose rows are record 0038's validation criteria plus the parity rows below, runs through one driver interface against every harness: pi over the existing fake container and scripted provider, OpenCode over a fake `serve` and over the real binary. A harness never gets a table of its own.
+- R5. A row a harness cannot pass is a named failure the table asserts, never a skip and never a pass.
+- R6. Removing one clause's behaviour from `OpenCodeHarness` fails the suite, once per clause.
 
-**The relay over MCP**
+**OpenCode: process and credential**
 
-- R7. `/harness/mcp` serves the run's relayed tools over MCP streamable HTTP behind the run bearer: `tools/list` equals `GET /harness/tools` field for field for every toolset; `tools/call` admits, decides (including the write-up refusal), joins and runs the call exactly as `POST /harness/tool` does.
-- R8. A relayed call that outlives one request is held open with keepalives; a client's `notifications/cancelled` aborts that call; a second `spawn_run` naming the same child while the first still runs is refused by name; a tool never runs twice for one model decision.
+- R7. Both execution images and the bot image pin `@opencode/cli@2.0.3`, proven by `opencode --version` as root and as the thread user, under one pin the image test holds equal across images.
+- R8. A run's `opencode serve` starts on loopback in the run's container with a per-run password, per-run XDG roots under the run's directory, an in-memory database, every phone-home switched off, and a configuration naming the model proxy as its one provider with the run bearer as the key; the child's environment carries no provider key.
+- R9. Retired.
+- R10. Retired.
 
-**The Responses route**
+**OpenCode: gate, relay, record**
 
-- R9. `POST /v1/responses` on the model proxy pins `model` and `max_output_tokens`, deletes a stray `max_tokens` or `max_completion_tokens`, strips `store` and `previous_response_id`, forwards to the provider table's upstream and meters usage once, on the terminal event of a stream or on the buffered body, with `response.failed` ending the span in error.
-- R10. A provider type serves a set of wires; `openai-compatible` serves chat completions and Responses, `anthropic` serves messages; a harness whose wire the run's provider does not serve is refused by name before it starts.
+- R11. Every tool call, the read-only built-ins included, asks the bot before it runs: the session's rules end in `{ action: "*", resource: "*", effect: "ask" }`, the ask is answered `once` or `reject` with the rule's reason, never `always`, within the bot's 90-second wait; a tool success whose call never asked fails the run closed.
+- R12. Switchboard's tools reach OpenCode through a local plugin custom tool speaking pi's `/harness/tool` protocol from inside the OpenCode process; the MCP client over loopback is the fallback road.
+- R13. Every event type OpenCode emits has a disposition onto the run stream in pi's tool words; the transcript is mirrored into ledger steps per tool call, from the server's store at each step end; an in-container tailer writes the event stream and the store's feeds to one JSONL file the harness reads through the existing log transport.
 
-**Codex**
+**OpenCode: conversation and survival**
 
-- R11. `CodexHarness` drives `@openai/codex@0.154.0` as a child process from a per-run `CODEX_HOME` holding `config.toml` (the bot's proxy as the only model provider with the run bearer as its key, the relay as the only MCP server, `sandbox_mode = "read-only"`, granular approvals, `web_search = "disabled"`); the child's environment carries no provider key.
-- R12. Every server-to-client request is answered: command and file-change approvals from `judgeToolCall` with `accept` or `decline`, permissions and elicitations refused, unknown methods with a JSON-RPC error.
-- R13. Codex's items map onto the record's vocabulary in pi's tool words, mirrored per item into ledger steps so `planResume` and the friction analyzer read a Codex run as they read a pi run.
-- R14. Before any Codex row runs, a preflight proves the sandbox started (a write inside `read-only` is denied); a host where it cannot start fails the Codex rows by name.
-- R15. Codex under identity `none` is refused before it spawns, with the reason that its shell cannot be disabled.
+- R14. A fresh run seeds by importing the thread's turns as an authored session; the request is a prompt; the wrap-up and follow-ups are steers; the hard stop is an interrupt; the post-turns are one more prompt after the session is idle; the effort tier maps onto the model's variants.
+- R15. A preset without a workspace runs OpenCode with its shell and file tools hidden by deny rules; the read identity hides the write tools; the gate judges the rest.
+- R16. A container replaced under a living bot relaunches the harness from the record in the container the run holds, with the workspace re-attached or refused by name, the bearer rotated, at most two relaunches; for OpenCode the rebuild is an import.
 
-**Survival**
+**Configuration and receipt**
 
-- R16. A container replaced under a living bot relaunches the harness from the record in the container the run holds, with the workspace re-attached or refused by name, the bearer rotated, and at most two relaunches; the third finding closes the run `interrupted` and re-dispatches the request.
+- R17. The `harness:` configuration word accepts `pi` and `opencode` per preset, mapping to a harness object in the wiring roster; no preset defaults to OpenCode.
+- R18. Stage A closes on a live receipt: a coding run on OpenCode in a scratch repository on the resident, its record complete on the run page, one refused command visible, its egress showing only the proxy and loopback.
 
 ### Acceptance Examples
 
-- AE1. **Covers R8.** Given a conductor run on Codex and a `spawn_run` held past Codex's tool timeout, when Codex's client abandons the request and the model re-issues the call, then exactly one child exists, the second call answers "already running as call <id>", and the record holds one `tool_call` and one `tool_result`.
-- AE2. **Covers R5, R12.** Given a scripted model that issues `stat README` under `sandbox_mode = "read-only"` with no `.rules` prefix naming `stat`, when the command completes with no approval request, then the run fails closed with `GateBypassed` naming `stat`, and the table's row asserts that exact failure.
-- AE3. **Covers R9.** Given a streamed Responses answer ending in `response.completed` with a `function_call` output item, when the proxy forwards it, then usage is read once from that event, the span's stop reason is `tool_use` and the span ends ok; given `response.failed`, the span ends in error.
-- AE4. **Covers R16.** Given a pi run on the resident whose container is replaced mid tool call, when the next container command fails with `ExecSandboxRestartedError`, then nothing is killed or removed in the new container, the workspace is re-attached, the bearer is rotated with the old hash refused at the proxy and the door, pi is relaunched on the ledger's transcript, and the record shows one `resumed` note and `relaunches = 1` on the row.
+- AE1. **Covers R11.** Given a scripted model that runs `grep` then `rm -rf build` under the switchboard agent, when OpenCode raises `permission.asked` for each, then the bot answers `once` for `grep` and `reject` with the rule's reason for `rm`, the record shows a `tool_refused` note, and the model reads the reason.
+- AE2. **Covers R11, R5.** Given a tool success for a call id that never appeared in `permission.asked`, when the bridge sees it, then the run fails closed naming the tool, exactly as pi's `GateBypassed`.
+- AE3. **Covers R14, R16.** Given a pi-shaped ledger of three turns and one call in flight, when the harness imports it and prompts the settlement, then OpenCode's store holds the turns as settled messages, the settlement as a completed tool content, and the next model call continues from it.
+- AE4. **Covers R13.** Given the event stream closes mid-turn, when the tailer reconnects, then no turn is lost because the transcript is refilled from the message route at the next step end and the run page shows one run.
 
 ### Scope Boundaries
 
-- No Codex in any container image (`src/deploy/imagePins.test.ts` and `imagePiHarness.test.ts` refuse it); no preset runs on Codex; production configuration does not change.
-- Hosted coding agents (Devin, Codex Cloud, Copilot's coding agent, Jules, Cursor's background agents) are not harnesses: they hold their own keys, run tools with no per-call ask, keep their own transcript. They belong to a future remote executor class at the spawn seam, observed through their API and through GitHub as the shared record. Nothing here reaches for them.
-- External MCP servers are never configured in Codex directly; their tools reach Codex only through the bot's relay, so credentials and the per-run call cap stay in the bot.
-- **Deferred to follow-up work:** an MCP analogue of `202 pending` (resumable streams) if the held stream fails its p99 in practice; a reason-carrying decline for Codex if `turn/steer` after a decline proves insufficient; Codex on a preset with a real model behind the proxy (record 0038's stage B, a new record).
+- Codex is documented in record 0038's Appendix B as the probe and builds nothing.
+- No preset defaults to OpenCode; no production configuration changes; the switch is a deployment's per preset.
+- Hosted coding agents are a remote executor at the spawn seam (record 0038's third amendment), not a harness.
+- The v1 line (`opencode-ai@1.18.31`) is the fallback if v2's churn bites: own store and no steer; the table carries its row as prose until it is needed.
+- **Deferred to follow-up work:** the MCP relay endpoint on the bot (the fallback relay road); `run_meta.harness` as a queryable field (additive, when the run page or friction tooling needs it); a resident-side event stream if the tailer file proves too slow.
 
 ### Dependencies
 
-- Record 0038 stage gates (its "Stage gates and the review each must survive" table) gate each unit below.
-- The #1219 floor (settle the call, close `interrupted`, re-dispatch), landing from the orchestration-primitives session on a branch off `146f9287`; U9 rebases on it.
-- `@openai/codex@0.154.0` on npm with `optionalDependencies` per platform and no postinstall (verified 2026-09-15).
+- Record 0038's stage gates (its "Stage gates and the review each must survive" table, as overridden by the fourth amendment) gate each unit.
+- The container-roll floor merged (#1294, #1321): the typed error from any container operation, no kill or remove in the replacement, `interrupted` and re-dispatch.
+- `@opencode/cli@2.0.3` and `@opencode/protocol@2.0.3` on npm; the spike's fourteen unverified items closed on the build's first day.
 
 ---
 
@@ -97,235 +100,208 @@ After `146f9287` every preset runs on pi and nothing in the tree says what a har
 
 ### Key Technical Decisions
 
-- KTD1. **The harness is an object handed in, never a word compared.** `deps.harness` gains the `Harness` instance (`PiHarness` in production); `runLoop.ts` calls `harness.open(...)` and reads `harness.find(facts, container)`. `src/core/harness/oneHarness.test.ts`, which asserts `runPiHarnessOpen(` and forbids a string compare, is re-pointed in the same PR. (session-settled: user-directed — chosen over a `harness:` word in the registry: record 0032 retired the word with the native loop.)
-- KTD2. **The second implementation is the real binary.** `CodexHarness` drives `@openai/codex@0.154.0` as a pinned devDependency, the shape E used for pi, so `node_modules/.bin/codex` is on the test PATH; `check:lockfile`'s `REQUIRED_VARIANTS` gains `"@openai/codex-": ["linux-x64", "darwin-arm64"]` so a laptop refresh cannot drop the Linux binary. (session-settled: user-directed — chosen over a fake of Codex's protocol: a fake proves our reading of the documentation, the binary proves Codex.)
-- KTD3. **OpenRouter is the Responses route's first upstream, a pass-through.** The route forwards to the provider table's upstream for the run's model; OpenRouter serves the Responses dialect at `/api/v1/responses`, rejecting `store: true` and a non-null `previous_response_id` with 400, so the pin strips both. (session-settled: user-directed — chosen over waiting for a separate OpenRouter unit: none exists beyond the documented example.)
-- KTD4. **Nothing enters an image.** The binary lives in devDependencies and on developer machines. (session-settled: user-directed — chosen over building Codex for real now: "don't build too much too early".)
-- KTD5. **Per-run `CODEX_HOME`, never per-thread config.** Provider and MCP wiring go into `CODEX_HOME/config.toml` written per run, because openai/codex#45361 (open at 0.154.0) hangs the next turn after any per-thread `config` override on `thread/start`. The environment handed to the child carries no `OPENAI_API_KEY` or `CODEX_API_KEY`, and `requires_openai_auth = false` keeps the login out; a smoke test confirms the headless start.
-- KTD6. **The bot emits the relayed tool's `tool_call` and `tool_result`.** Under MCP the request carries a JSON-RPC id and Codex's `mcpToolCall` item carries another; rather than correlate them, the relay handler emits the pair at `tools/call` and the disposition table files `mcpToolCall` as `structure`. Bypass detection for relayed calls is then trivial: every one passed the door.
-- KTD7. **Codex's items are filed in pi's tool words.** `commandExecution` becomes `tool: "bash"` with `summary: "$ <cmd>"`, `command` and `exitCode`; `fileChange` becomes `edit` or `write`; `reasoning` is dropped as pi's thinking is; `contextCompaction` is a compaction row even with an empty summary. Consumers (`runFriction.ts`, `resumeLaunch.ts`'s `knownToolsFor`, the run page) keep one vocabulary.
-- KTD8. **A per-item mirror, not a turn assembler.** On `item/started` for a tool-bearing item the Codex bridge reports the assistant turn so far with that `tool_use` (id = item id) in flight; on `item/completed` it queues the `tool_result`. `planResume` requires the last step's in-flight ids to equal the last assistant turn's `tool_use` ids, so a turn-end assembler would leave a death mid-turn unrecorded.
-- KTD9. **The gate for Codex's own tools rides the approval requests, with one rule for every command if Codex allows it.** `sandbox_mode = "read-only"` raises `item/commandExecution/requestApproval` for every write and network call and `item/fileChange/requestApproval` for every edit; `judgeBash` and `judgePath` answer `accept` or `decline`, never `acceptForSession`. The first thing U7 verifies is whether Codex issues commands as `["bash", "-lc", <cmd>]`: if so, one `prefix_rule(pattern = ["bash", "-lc"], decision = "prompt")` makes every shell command ask, and the record's read-only cannot disappears; otherwise a checked-in `.rules` fixture names the read prefixes and the long tail fails closed by the record's rule.
-- KTD10. **Every Codex question is answered.** `mcpServer/elicitation/request` never times out; permissions and skill approvals are refused even though configuration turns them off; an unknown request method gets a JSON-RPC error; `mcp_servers.switchboard.default_tools_approval_mode = "auto"` is set explicitly so no relayed call raises an approval nobody answers.
-- KTD11. **A sandbox preflight guards the Codex rows.** Codex's Linux sandbox is bubblewrap over unprivileged user namespaces, which default Docker and Ubuntu 24.04 AppArmor block; whether it then fails or silently runs unsandboxed is unverified. Before the Codex rows, one scripted write turn under `read-only` must be denied, else the rows fail with "sandbox unavailable on <platform>"; `features.use_legacy_landlock = true` is the likely runner answer and is verified, never assumed.
-- KTD12. **The relay holds a long call open and honours cancellation.** MCP has no re-ask by id; the response stream stays open with SSE comment keepalives (progress notifications only when the request carried a progress token), `mcp_servers.switchboard.tool_timeout_sec` is set at or above the preset's wall clock, `notifications/cancelled` aborts the call through a per-call `AbortController`, and a second `spawn_run` for the same child while the first runs is refused by name.
-- KTD13. **The proxy's route shape decouples from the provider type.** `ProxyShape = ProviderConfig["type"]` becomes a `wire` a provider type serves (`openai-compatible`: chat completions and Responses; `anthropic`: messages); `upstreamFor`, `handleAdmitted`'s `wrong_shape`, `adminModelProxy`'s probe path and `model-proxy.md` item 1 follow; `Harness.wire ∩ wiresOf(provider.type) = ∅` refuses a harness before it starts (record row 8).
-- KTD14. **The Responses meter reads terminal events only.** `usageFromResponses` beside the two existing readers; a third `SseMeter` branch reading `response.completed`, `response.incomplete` and `response.failed`; stop reason from `incomplete_details.reason` (`max_output_tokens` → `max_tokens`) or a `function_call` in the output (→ `tool_use`); the buffered branch picks the reader by wire, not by provider type.
-- KTD15. **The turn count is the proxy's.** Codex's own compactions and retries call the model through the same bearer and are counted by `consumeTurn`; the wrap-up steer on Codex reads `grantOf(runId).turns`, and at the cap the proxy's `403 turn_budget_exhausted` is read by the bridge as the budget stop. Evidence against the record's "counts its own turns", for a later amendment.
-- KTD16. **Rotation keeps the meter and is ordered for a bot death.** `RunBearerStore.rotate(runId)` mints a new secret, drops the old hashes and keeps `turns`, `expiresAt` and `span` (`mint` resets them). Order: write the new hash to the row, start the new process, drop the old hashes, so a generation that dies between steps adopts the new hash, never the orphan's. Rotation happens only with a relaunch; a re-attach adopts.
-- KTD17. **The relaunch is the run loop's, with a mid-run `interrupted` path.** The harness reports its process not alive here (the liveness probe, `ExecSandboxRestartedError` from any container operation including a failed write, an identity word that changed); the loop re-attaches the workspace through `attachWorkspace` split from its gate context, or refuses by name and returns an `interrupted` outcome variant the dispatcher re-dispatches; `HarnessRegistry.replace` keeps `RelayedCalls` so relayed calls in flight are awaited up to the relay window and then settled as "still running in the bot", never marked lost.
-- KTD18. **The identity word is more than the kernel's boot id.** `/proc/sys/kernel/random/boot_id` is the kernel's and survives a container replaced on a shared kernel; the word becomes boot id plus `/proc/1`'s start time from the same command, and `identity()` rethrows `ExecSandboxRestartedError` instead of answering `undefined`.
-- KTD19. **`HarnessFacts` is a discriminated union keyed by the harness's name.** `PiHarnessFacts` extends it with today's six fields plus `relaunches`; a row without the discriminator is pi's; the parser keeps unknown keys so the bound survives a bot generation.
-- KTD20. **`run_meta` gains an additive `harness` field.** The run page, `runs get` and the friction proposer can then tell a Codex row from a pi row; the web treats it generically, no frontend work.
-- KTD21. **One unit, landed as a `gh stack` series.** Each Implementation Unit below is one PR in the stack, reviewed on its own, so the seam lands before the relay, the relay before the route, the route before Codex, and the relaunch last where it can slip without blocking the proof.
+- KTD1. **The harness is an object handed in, never a word compared.** `deps.harness` carries the roster; `runLoop.ts` calls `harness.open(...)` and `harness.find(...)`; `src/core/harness/oneHarness.test.ts` is re-pointed. (session-settled: user-directed — chosen over a string in the registry: record 0032 retired the word.)
+- KTD2. **OpenCode is the second harness, built for real.** (session-settled: user-directed — chosen over Codex, which stays the probe: OpenCode meets all six clauses from outside its process where Codex met four, and it speaks the proxy's dialects.)
+- KTD3. **The v2 line, pinned at 2.0.3, with a client generated from `@opencode/protocol@2.0.3`.** v2 alone has an authored session over HTTP, a steer with a durable inbox, per-session permission rules and structured compaction messages; its API groups are experimental and its docs pages absent, so the client is generated, not written from prose, and the pin moves only by a change to this plan. The v1 row is documented as the fallback. Revisable by the maintainer.
+- KTD4. **Nothing defaults to OpenCode.** Images carry it; configuration selects it per preset; production configuration does not change in stage A. (session-settled: user-directed — "don't build too much too early".)
+- KTD5. **Per-run roots, in-memory store, phone-home off.** `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_STATE_HOME` and `HOME` under the run's directory; `OPENCODE_DB=:memory:`; `OPENCODE_CONFIG` the per-run file with both project-config-disable variables set; `OPENCODE_DISABLE_MODELS_FETCH=1`, `OPENCODE_DISABLE_AUTOUPDATE=1`, `update: "disable"`, `share: "disabled"`, `snapshots: false`; a per-run `OPENCODE_PASSWORD`. The store is a cache because the ledger is the record and a rebuild is an import.
+- KTD6. **The gate rides the HTTP ask.** The session's rules are the agent's policy, the identity's denies, then `{ action: "*", resource: "*", effect: "ask" }`; `permission.asked` names the tool call; `judgeToolCall` answers `once` or `reject` with the reason as the message, never `always` (it persists project rules); a `session.tool.success` or `failed` whose call never asked fails the run closed. The plugin `permission.evaluate` hook is not used for the decision: its predecessor in the v1 line went dead across versions.
+- KTD7. **The relay is a plugin custom tool speaking pi's protocol.** A local plugin file written into the run's configuration directory registers the run's relayed tools from `GET /harness/tools` and runs each through `POST /harness/authorize` and `POST /harness/tool` with the call id, the `202 pending` re-ask and the 90-second wait exactly as pi's extension does, so the relay's idempotency by the caller's call id holds and the bot gains no MCP endpoint. Verified first: v2 loads a local plugin file without a package install. Fallback: `mcp.servers.switchboard` over loopback with the bearer in its headers.
+- KTD8. **The transport is a file the harness tails, as pi's is.** A per-run tailer process started beside `serve` subscribes to `GET /api/event` inside the container, appends each event to one JSONL file, and at every step end appends the pending permission list and only the messages that changed since its previous refill (it keeps the last list in memory and diffs by message id), so the file grows with the work and not with the session; the harness reads that file through the existing log transport (`readLog`, `logOffset`), upserting mirrored turns by message id, so pi's forward-only transport code, its re-attach offset and its bot-death survival carry over unchanged. `request()` serves only the writes (prompt, reply, interrupt, import) and the readiness probe. One exec per tick on the resident, not four.
+- KTD9. **Dispositions in pi's tool words, mirrored per tool call.** `session.tool.called/success/failed` become `tool_call`/`tool_result` with `shell → bash`, `edit`, `read`, `glob → find`, `grep`, `webfetch`, `<server>_<tool> → <tool>`; `session.text.*` and `session.reasoning.*` as messages with reasoning dropped; `session.step.*` and `session.usage.updated` as structure; `*.delta`, `session.step.streamed`, `session.tool.progress` folded; `session.compaction.ended { text }` a compaction row; `permission.*`, `session.retry.scheduled`, `session.execution.failed` notes; `session.shell.*`, `session.revert.*`, `session.moved/forked/renamed`, `session.agent/model.selected` impossible; an unknown type a `harness_error` note. The ledger step is reported at `session.tool.called` with the call in flight, its result queued at `success`/`failed`, so `planResume` reads OpenCode rows as it reads pi's.
+- KTD10. **Seed and rebuild are an import.** The ledger's turns become `user` and `assistant` messages with `time.completed`, each compaction a `compaction` message with the stored summary, a settled call a completed tool content carrying the settlement note; `POST /api/session/import` into a fresh store, then `POST …/prompt`. The survival word for OpenCode is authored-session.
+- KTD11. **Conversation verbs.** `prompt { delivery: "queue" }` for the request and the post-turns (after `POST …/wait`), `prompt { delivery: "steer" }` for the wrap-up and follow-ups, `interrupt` for the hard stop; the system prompt is the custom agent's `system`; the effort tier maps onto the model's declared variants.
+- KTD12. **Identity by deny rules.** A custom agent `switchboard` with `default_agent` set; identity `none` denies `read`, `edit`, `shell`, `glob`, `grep`, `webfetch`, `websearch`, `subagent`, `skill`, `question`, `external_directory` and the meta-tool, keeping the relayed tools on `ask`; `read` denies `edit`; `write` denies nothing. A deny as the last matching rule hides the tool from the model.
+- KTD13. **The turn count is the proxy's.** OpenCode's compactions and retries call the model through the bearer and are counted by `consumeTurn`; the wrap-up steer reads `grantOf(runId).turns`.
+- KTD14. **Rotation keeps the meter and is ordered for a bot death; the relaunch is the run loop's.** `RunBearerStore.rotate` keeps `turns`, `expiresAt` and `span`; the new hash reaches the row before the old ones are dropped; a re-attach adopts, a relaunch rotates; the run loop gains a mid-run `interrupted` outcome and the workspace re-attach callable mid-run; the identity word is the typed container-gone error first and the boot id only as corroboration.
+- KTD15. **Images pin the wrapper with its install script allowed.** `npm install -g --allow-scripts=@opencode/cli @opencode/cli@2.0.3`, cache cleaned, `opencode --version` proven as root and as the thread user; `src/deploy/imageOpenCodeHarness.test.ts` holds the pin equal across images as `imagePiHarness.test.ts` does for pi; a `check:lockfile` entry is not needed because the images, not the lockfile, carry the binary. Cost about 206 MB unpacked per image.
+- KTD16. **The configuration word returns with two values.** `harness: { <preset>: pi | opencode }` validates against the roster's names; the roster lives in `src/index.ts` wiring, not in `agents/registry.ts`, so the source scan still forbids a word in the registry.
+- KTD17. **One unit, landed as a `gh stack` series.** Each Implementation Unit is one PR, the seam first, OpenCode's process before its bridge, the relaunch last.
 
 ### High-Level Technical Design
 
-The seam and the two roads a tool call takes under Codex:
+A tool call under OpenCode, on the resident: the ask, the relay and the record.
 
 ```mermaid
 sequenceDiagram
-  participant L as Run loop
-  participant H as CodexHarness
-  participant C as codex app-server (child)
-  participant M as /harness/mcp (bot)
-  participant G as judgeToolCall (bot)
-  participant P as /v1/responses (bot)
+  participant L as Run loop (bot)
+  participant H as OpenCodeHarness (bot)
+  participant S as opencode serve (container, loopback)
+  participant P as plugin tool (in serve)
+  participant T as tailer (container)
+  participant B as /harness/* and judgeToolCall (bot)
   L->>H: open(deps, run)
-  H->>C: initialize, thread/start, turn/start
-  C->>P: model call with the run bearer
-  P-->>C: pinned, metered answer
-  C->>M: tools/call spawn_run (relayed tool)
-  M->>G: authorize (write-up refusal, allow by name)
-  M-->>C: result held open until the child settles
-  C->>H: item/commandExecution/requestApproval
-  H->>G: judgeBash(command)
-  H-->>C: accept or decline
-  C-->>H: item/completed, turn/completed
-  H->>L: mirrored steps, run events, facts on the row
+  H->>S: request: POST /api/session/import, POST /api/session/:id/prompt
+  S->>B: model call through the proxy with the run bearer
+  S-->>T: /api/event: permission.asked (shell rm -rf build)
+  T-->>H: JSONL line via readLog at logOffset
+  H->>B: judgeToolCall(bash, "rm -rf build")
+  H->>S: request: POST /api/session/:id/permission/:rid/reply {reject, message}
+  S->>P: tool call switchboard_update_status
+  P->>B: POST /harness/authorize, POST /harness/tool (pi's protocol)
+  S-->>T: session.step.ended; T appends GET /api/session/:id/message
+  T-->>H: the step's messages; the mirror writes the ledger step
 ```
 
-The survival lifecycle the relaunch adds:
+The survival lifecycle, now with an import as the rebuild:
 
 ```mermaid
 stateDiagram-v2
   [*] --> Running
-  Running --> Found: container op fails with ExecSandboxRestartedError, or probe says dead, or identity changed
+  Running --> Found: container op fails with the typed error, or health probe fails, or facts name another harness
   Found --> Reattached: attachWorkspace(reattach) ok
-  Found --> Interrupted: reattach refused by name, or relaunches == 2, or facts belong to another harness
-  Reattached --> Rotated: rotate(runId) after the new hash is on the row
-  Rotated --> Running: harness.open(resume) in the container the run holds
+  Found --> Interrupted: reattach refused by name, or relaunches == 2, or another harness's facts
+  Reattached --> Rotated: new hash on the row, rotate, old hashes dropped
+  Rotated --> Running: serve started, session imported from the ledger, settlement prompted
   Interrupted --> [*]: request re-dispatched as a new run
 ```
 
 ### Assumptions
 
-- Codex 0.154.0 issues shell commands as `["bash", "-lc", <cmd>]` (unverified; KTD9's first check).
-- A Depot `ubuntu-24.04` runner can start Codex's sandbox with `features.use_legacy_landlock = true` (unverified; KTD11).
-- `requires_openai_auth = false` with `env_key` starts Codex headless with no `auth.json` (corroborated by third-party sources only).
-- OpenRouter tolerates the extra fields Codex sends (`include`, `reasoning`, `prompt_cache_key`); a 400 here fails the first live turn.
+- v2's `import` accepts authored assistant messages without provider state and validates `projectID` against the location (spike item 10).
+- v2 loads a local plugin file without a package install, and a failing `execute.before` blocks a call (spike item 9).
+- `serve` accepts the `--port` we pass and Basic auth from the bot's client; the readiness line or `GET /api/health` bounds the start (spike item 3).
+- Effort tiers map onto model `variants` (spike item 11); if not, effort is passed as a model option or dropped with a note.
+- `curl` is present in all three images (confirmed on `origin/main`).
 
 ---
 
 ## Implementation Units
 
+Units U4 to U7 of this plan's first version were Codex-specific and are retired; their numbers are not reused.
+
 ### U1. The seam: `contract.ts`, `PiHarness`, the object in `deps.harness`
 
-- **Goal:** the run loop calls a `Harness` it was handed; pi's code stands behind it unchanged in behaviour.
-- **Requirements:** R1, R3; KTD1, KTD19, KTD20.
+- **Goal:** the run loop calls a `Harness` it was handed; pi's behaviour is unchanged.
+- **Requirements:** R1, R3; KTD1.
 - **Dependencies:** none.
-- **Files:** `src/core/harness/contract.ts` (new: `Harness`, `HarnessRun`, `HarnessDeps`, `HarnessSession`, `HarnessFacts`, `Disposition`), `src/core/harness/pi/harness.ts` (`PiHarness` implementing it; `piHarnessFactsOf` keeps unknown keys and reads the discriminator), `src/core/dispatch/run.ts` (`HarnessDeps.harness: Harness`), `src/core/dispatch/runLoop.ts` (the call site and the finish branch), `src/index.ts` (wires `PiHarness`), `src/core/dispatch/provision.ts` (`run_meta.harness`), `src/core/runEvents.ts`; tests `src/core/harness/contract.test.ts` (new), `src/core/harness/oneHarness.test.ts`, `src/core/dispatch/runLoop.test.ts`, `src/core/harness/pi/harness.test.ts`.
-- **Approach:**
-  1. Lift `OpenPiSession` to `HarnessSession` and `PiHarnessRun`/`PiHarnessDeps` to `HarnessRun`/`HarnessDeps`, moving the pi-only fields (`compaction`, the root layout) behind `PiHarness`.
-  2. `Harness.find(facts, container)` answers `alive-here | another-container | dead`; the run loop's finish and live branches call it in place of the inline identity and pid logic.
-  3. The disposition table becomes a `Harness` property; the bridge reads it.
-  4. `run_meta` carries `harness: harness.name`.
-- **Patterns to follow:** `src/core/dispatch/run.ts` `HarnessDeps`; `src/core/harness/pi/testing/providerPi.ts` for driving the real bridge from a scripted provider.
+- **Files:** `src/core/harness/contract.ts` (new: `Harness`, `HarnessRun`, `HarnessDeps`, `HarnessSession`, `HarnessFacts` as a discriminated union, `Disposition`), `src/core/harness/pi/harness.ts` (`PiHarness`; `piHarnessFactsOf` reads the discriminator and keeps unknown keys), `src/core/dispatch/run.ts`, `src/core/dispatch/runLoop.ts`, `src/index.ts`; tests `src/core/harness/contract.test.ts` (new), `src/core/harness/oneHarness.test.ts`, `src/core/dispatch/runLoop.test.ts`, `src/core/harness/pi/harness.test.ts`.
+- **Approach:** lift `OpenPiSession` to `HarnessSession` and the two pi types to `HarnessRun`/`HarnessDeps` with pi-only fields behind `PiHarness`; `find(facts, container)` answers `alive-here | another-container | dead | another-harness`; the disposition table becomes a `Harness` property.
 - **Test scenarios:**
-  - `PiHarness.open` over `FakePiContainer` produces the same run events and ledger steps as `runPiHarnessOpen` did for the scripted-provider fixtures (a literal comparison of the two streams).
-  - A row with `{ harness: "pi", pid, logOffset, ... }` parses as pi's facts; a row with no `harness` key parses as pi's; a row with `{ harness: "codex", ... }` handed to `PiHarness.find` answers "another harness" and the loop closes the run `interrupted`.
-  - `relaunches` on the row survives a parse-and-rewrite round trip.
-  - `run_meta` on a pi run carries `harness: "pi"`; the run page model ignores the field without change.
-  - `oneHarness.test.ts` asserts `harness.open(` in the run loop and still forbids a string compare, `HARNESSES` and `select.ts`.
-- **Verification:** `npm test` green with every existing pi test unchanged in outcome; harness-pi.md items 1, 2, 8 re-pointed to the contract's rows; `harness.md` created with the six clauses as rows.
+  - `PiHarness.open` over `FakePiContainer` yields the same run events and ledger steps as `runPiHarnessOpen` did for the scripted-provider fixtures.
+  - Facts with `harness: "pi"`, facts without the key, and facts with `harness: "opencode"` parse as pi's, pi's, and another harness's; the loop closes the run `interrupted` on the last.
+  - `relaunches` survives a parse-and-rewrite round trip.
+  - `oneHarness.test.ts` asserts `harness.open(` and still forbids a string compare, `HARNESSES` and `select.ts`.
+- **Verification:** every existing pi test unchanged in outcome; harness-pi.md items 1, 2, 8 re-pointed; `harness.md` created with the six clauses as rows.
 
-### U2. `HarnessContainer`: the binary, the filter and the layout as inputs of `start`
+### U2. `HarnessContainer`: the binary, the layout, a port and an HTTP verb
 
-- **Goal:** the container seam is harness-neutral in fact, not only in name.
+- **Goal:** the container seam is harness-neutral in fact.
 - **Requirements:** R2.
 - **Dependencies:** U1.
-- **Files:** `src/core/harness/pi/container.ts` → `src/core/harness/container.ts` (`HarnessContainer`, `HarnessStart { paths, command, args, env, stdoutFilter? }`), `src/core/harness/pi/botHostContainer.ts`, `src/core/harness/pi/process.ts` (pi's layout becomes pi's `HarnessLayout`), `src/core/harness/pi/transport.ts`, `src/core/harness/pi/testing/fakeContainer.ts`; every importer listed in the research (run.ts, harness.ts, mirror.ts comment, tests); docs `docs/reference/specs/harness-pi.md` rows 4, 8, 12 and Code header, `docs/reference/code-map.md`, `docs/reference/specs/README.md`.
-- **Approach:** `startScript` takes the command and filter from `HarnessStart` (pi passes `pi` and the `message_update` grep; Codex passes `codex app-server` and no filter, filtering deltas through `optOutNotificationMethods` at initialize); `kill` takes the process group; `identity()` rethrows `ExecSandboxRestartedError` and returns boot id plus `/proc/1` start time (KTD18).
+- **Files:** `src/core/harness/pi/container.ts` → `src/core/harness/container.ts` (`HarnessContainer`, `HarnessStart { paths, command, args, env, stdoutFilter? }`, `start → { pid, port? }`, `request`), `src/core/harness/pi/botHostContainer.ts`, `src/core/harness/pi/process.ts` (pi's layout as pi's), `src/core/harness/pi/transport.ts`, `src/core/harness/pi/testing/fakeContainer.ts`; every importer; docs `harness-pi.md` rows 4, 8, 12 and Code header, `code-map.md`, `specs/README.md`.
+- **Approach:** `startScript` takes the command and filter (pi passes `pi` and the `message_update` grep, byte-identical to today's script); `request` is `/exec curl -sS -X <method> -H … --data-binary @- <loopback>` on the exec classes and `fetch` on the bot-host class, both rethrowing the container-gone error; `kill` takes the process group; `identity()` rethrows the typed error.
 - **Test scenarios:**
-  - `startScript({ command: "pi", ... })` equals today's script byte for byte; `startScript({ command: "codex", args: ["app-server"], stdoutFilter: undefined })` carries no grep.
-  - `identity()` over a recording executor whose exec rejects with `ExecSandboxRestartedError` rethrows it; over a plain failure answers `undefined` as today.
-  - Two containers on the same kernel with different `/proc/1` start times answer different words.
-  - `BotHostPiContainer.start` spawns the given command, not `PI_BIN`.
+  - `startScript({ command: "pi", … })` equals today's script byte for byte.
+  - `request` over a recording executor produces the curl script with the body on stdin and parses status and body; a container-gone exec rethrows the typed error.
+  - `BotHostPiContainer.start` spawns the given command; `request` on it fetches loopback.
 - **Verification:** container and bot-host tests green; `specs:check` resolves every renamed path.
 
 ### U3. The conformance suite over pi
 
-- **Goal:** one scenario table, pi passing every row, ready to take a second harness.
+- **Goal:** one scenario table, pi passing every row, ready for a second harness.
 - **Requirements:** R4, R5, R6.
 - **Dependencies:** U1, U2.
-- **Files:** `src/core/harness/conformance.test.ts` (new; `describe.each` over the harness drivers), `src/core/harness/testing/scenarios.ts` (new; the table), `src/core/harness/pi/testing/providerPi.ts`; `docs/reference/specs/harness.md` validation rows bound to the table's titles.
-- **Approach:** rows are the record's validation criteria 1–11 (as overridden) plus the parity rows of this plan's Verification Contract; a row is a function of a harness driver so the same code runs pi now and Codex in U7; a lint over the table rejects a row that asserts nothing on the record.
-- **Patterns to follow:** `src/core/commandConformance.test.ts` (catalogue × surfaces × policy, new entries fail loudly); `src/core/authz/policy.test.ts` (an allow and a deny per row).
+- **Files:** `src/core/harness/conformance.test.ts` (new; `describe.each` over harness drivers), `src/core/harness/testing/scenarios.ts` (new), `src/core/harness/pi/testing/providerPi.ts`; `harness.md` validation rows bound to the table's titles.
+- **Approach:** rows are the record's validation criteria plus the parity rows in the Verification Contract; a row is a function of a `HarnessDriver` (start a run, feed one scripted model turn, read the run events and ledger steps, end), so the fake-`serve` driver of U11, the real-binary driver of U12 and pi's fake-container driver plug into the same table and the live receipt of U13 walks the same rows by hand; a lint over the table rejects a row that asserts nothing on the record; a matrix printer like `scripts/command-conformance-matrix.ts`.
 - **Test scenarios:**
-  - Every record row passes on pi with its existing proof re-pointed (`relay.test.ts`, `bridge.test.ts`, `mirror.test.ts`, `runLoop.test.ts` rows named in the table).
-  - A row with no assertion on run events or ledger steps is rejected by the table lint.
-  - The table prints a matrix (harness × row) like `scripts/command-conformance-matrix.ts`.
-- **Verification:** the matrix shows pi green on every row and Codex absent.
+  - Every record row passes on pi with its existing proof re-pointed.
+  - The credential row that replaces the record's retired row 11: the model proxy serves exactly the two dialects it serves today and answers a third path with a refusal, proven in `src/channels/modelProxy.test.ts`.
+  - A row with no assertion on run events or ledger steps is rejected by the lint.
+- **Verification:** the matrix shows pi green on every row.
 
-### U4. `/harness/mcp`: the relay over MCP streamable HTTP
+### U10. The OpenCode process: image pin, per-run configuration, tailer, readiness
 
-- **Goal:** the run's tools served over MCP behind the run bearer, proven with Switchboard's own client.
-- **Requirements:** R7, R8; KTD6, KTD12.
-- **Dependencies:** U1.
-- **Files:** `src/channels/harnessRoutes.ts` (`HARNESS_PATHS` gains `/harness/mcp`; the door reused; the MCP handler), `src/channels/harnessMcp.ts` (new: `initialize`, `tools/list`, `tools/call`, `notifications/cancelled`, `ping`; SSE hold with comment keepalives), `src/core/harness/pi/relay.ts` (per-call `AbortController`; the duplicate-spawn refusal; the emitted `tool_call`/`tool_result` pair), `src/index.ts` (route order: not swallowed by `/mcp`), `src/core/trace/workerTrace.ts` (route word), `deploy/cloudflare/worker.ts` (the shim's path list) with `modelProxyForwarding.test.ts`; tests `src/channels/harnessMcp.test.ts` (new, driving `StreamableHttpMcpClient` from `src/mcp/client.ts` with a raised timeout), `src/channels/harnessRoutes.test.ts`, `src/core/harness/pi/relay.test.ts`; docs `harness-pi.md` item 7 and the route-word rows, `http-ingress.md` item 10, `mcp-ingress.md` (the bot's second MCP server).
+- **Goal:** `opencode serve` runs per run in the container with the proxy as its only provider and nothing else reachable.
+- **Requirements:** R7, R8; KTD5, KTD8, KTD15.
+- **Dependencies:** U2.
+- **Files:** `Dockerfile`, `deploy/cloudflare-resident/Dockerfile`, `deploy/cloudflare-sandbox/Dockerfile` (the pinned install line and the version proofs), `src/deploy/imageOpenCodeHarness.test.ts` (new), `src/core/harness/opencode/process.ts` (new: layout under `/tmp/switchboard-oc-<runId>/` with `xdg/{data,config,cache,state}`, `opencode.json`, `plugins/`, `serve.log`, `serve.err`, `feed.jsonl`, `pid`; the environment; the configuration writer; the tailer script), `src/core/harness/opencode/client.ts` (new: generated from `@opencode/protocol@2.0.3`, thin), `package.json` (`@opencode/protocol` devDependency for generation only); tests `src/core/harness/opencode/process.test.ts`; docs `harness.md`, `execution.md` (the image rows).
 - **Approach:**
-  1. Door: `admitHarnessRequest`; a boot hold answers `503` with `Retry-After` (an MCP client treats it as a failed request; a live Codex never spans a bot generation in stage A); GET and DELETE answer 405; a foreign `Origin` answers 403; notifications answer 202 empty.
-  2. `tools/list` = `relayedToolDefinitions(harness)`; every schema carries `type: "object"`; names stay within 64 characters.
-  3. `tools/call` = `authorizeToolCall` (write-up refusal included) → `RelayedCalls.join` → `runRelayedTool`, the bot emitting the `tool_call` and `tool_result` events; the response is JSON when the call settles inside a short window, else an SSE stream held open with comment keepalives until it settles.
-  4. `notifications/cancelled { requestId }` aborts that call's controller; a `spawn_run` naming a child already running in this run answers `isError` "already running as call <id>".
+  1. The image line: `npm install -g --allow-scripts=@opencode/cli @opencode/cli@2.0.3 && npm cache clean --force && opencode --version | grep -qx '2.0.3'`, plus the thread-user proof the resident image runs for pi.
+  2. The configuration writer emits `providers.switchboard` (`package: "aisdk:@ai-sdk/anthropic"` or `"aisdk:@ai-sdk/openai-compatible"` by the run's provider type, `settings.baseURL` the proxy, `settings.apiKey: "{env:SWITCHBOARD_RUN_BEARER}"`, the model with zero cost), `model`, `default_agent: "switchboard"`, `agents.switchboard` (`mode: "primary"`, `system`, `permissions` per KTD6 and KTD12), `plugins: ["./plugins/switchboard.js"]`, `update`, `share`, `snapshots`, and the compaction thresholds when the deployment sets them.
+  3. Launch `opencode serve --hostname 127.0.0.1 --port <free>` with the environment of KTD5 and the two bearer variables; readiness is `GET /api/health` answering `{ healthy: true, version: "2.0.3" }` within a bound; the port goes on the row.
+  4. The tailer: a small script started with `setsid -f` beside `serve` that streams `GET /api/event` with Basic auth into `feed.jsonl` one event per line, reconnects with backoff, and on every `session.step.ended` appends the pending permission list and the messages changed since its previous refill (diffed by id against the list it keeps in memory) as two more records.
+- **Execution note:** close spike items 2, 3, 4, 5 and 14 in a local container before writing the configuration writer; they decide the exact keys and variables.
 - **Test scenarios:**
-  - For every key of `TOOLSETS` plus one bridged MCP tool, `tools/list` equals `GET /harness/tools` field for field.
-  - `spawn_run` held twice the client timeout; the client aborts and re-issues with a new id: one child, the second answers by name, one `tool_call`/`tool_result` pair.
-  - `await_runs` then `notifications/cancelled`: the tool's signal aborts within a tick; no response frame for that id.
-  - The write-up begins while a call runs: that call completes; the next `tools/call` answers `isError` with the write-up reason and a `tool_refused` note.
-  - Door: no bearer 401, revoked 403, unknown run 404, GET 405, foreign Origin 403, `notifications/initialized` 202, boot hold 503 with Retry-After.
-  - Our client with `timeoutMs` above the hold reads a 90 s held call's result; keepalive bytes stay under the client's 2 MiB cap.
-  - A rotated bearer's old hash is refused at `/harness/mcp` and `/v1/responses` in the same test; a held call under the old bearer still finishes.
-  - Identity parity through the relay: conductor `spawn_run` naming `coding` is refused `spawn_identity`; research `web_fetch` of an internal address is refused before any fetch; readonly `submit_verdict` is served with the head-requiring schema.
-- **Verification:** `harnessMcp.test.ts` green; `workerTrace.test.ts::shimRoute` and `harnessRoutes.test.ts` name four paths.
+  - The configuration writer's output validates against the v2 schema for both provider dialects and both identities.
+  - The environment handed to `serve` contains no `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` when the parent has them.
+  - Readiness fails loudly when `/api/health` never answers within the bound; the row records the port when it does.
+  - The tailer's file, replayed through the pi log transport, yields the same records in the same order as the events it was fed (a fake `serve` in tests); two step ends around one unchanged message append that message once.
+- **Verification:** both images build and prove the version as root and as `worker1`; a run on a staging bot-host container shows egress to the proxy and loopback only.
 
-### U5. `/v1/responses` on the model proxy, and the wire roster
+### U11. `OpenCodeBridge`: the gate and the record
 
-- **Goal:** the proxy speaks the Responses dialect with the same pin, meter and refusals, forwarding to OpenRouter or OpenAI.
-- **Requirements:** R9, R10; KTD3, KTD13, KTD14.
-- **Dependencies:** U1.
-- **Files:** `src/channels/modelProxy.ts` (`RESPONSES_PATH`, `wiresOf(providerType)`, `pinRequest` for `max_output_tokens`, the strip of `store`/`previous_response_id`, a third `SseMeter` branch, the buffered reader by wire), `src/core/modelProxy/usage.ts` (`usageFromResponses`), `src/core/modelProxy/runBearers.ts` (the grant carries the wire), `src/channels/adminModelProxy.ts`, `src/core/provider.ts`; tests `src/channels/modelProxy.test.ts` (the "two shapes and nothing else" test becomes "three wires, by provider type"), `src/core/modelProxy/usage.test.ts`; docs `model-proxy.md` items 1, 4, 6 rewritten in the same PR.
-- **Approach:** a wire is a request dialect a provider type serves; the door refuses a wire the run's provider does not serve as `wrong_shape`; pinning sets `model` and `max_output_tokens` and deletes `max_tokens`, `max_completion_tokens`, `store`, `previous_response_id`; metering reads usage once on `response.completed`, `response.incomplete` or `response.failed`, the last ending the span in error; stop reason per KTD14; refusals in the OpenAI error envelope.
+- **Goal:** every tool call decided in the bot; every event on the record in pi's words.
+- **Requirements:** R11, R13, R5; KTD6, KTD9, KTD13.
+- **Dependencies:** U3, U10.
+- **Files:** `src/core/harness/opencode/bridge.ts` (new: the disposition table, the per-call mirror, the ask handler, bypass detection), `src/core/harness/opencode/dispositions.ts` (new), `src/core/harness/pi/toolRules.ts` (the action-to-tool-word map), tests `src/core/harness/opencode/bridge.test.ts`, `src/core/harness/conformance.test.ts` (the OpenCode driver over a fake `serve`); docs `harness.md` gate and record rows.
+- **Approach:** read `feed.jsonl` through the log transport; on `permission.asked` map `action`/`resources` onto pi's tool words and call `judgeToolCall` with the run's identity and rules; reply through `request`; on `session.tool.called` report the assistant turn so far with the call in flight; on `success`/`failed` queue the result; on the appended message delta at a step end, upsert the mirrored turn by message id against the store; a success for a call that never asked fails the run closed; the wrap-up steer fires when `grantOf(runId).turns` nears the cap; a `session.execution.failed` carrying the proxy's `403` is the budget stop.
 - **Test scenarios:**
-  - Streamed answer ending `response.completed` with a `function_call` item: usage read once, `stopReason = tool_use`, span ok; `response.incomplete { max_output_tokens }` → `max_tokens`; `response.failed` → span error, usage if present.
-  - Buffered `stream: false` body: usage metered (today silently none).
-  - A request carrying `store: true`, `previous_response_id` and `max_tokens` is forwarded with `max_output_tokens` pinned and the three keys absent, `model` replaced by the grant's.
-  - The turn at the cap answers `403 turn_budget_exhausted` in the OpenAI envelope and publishes the run note.
-  - An `anthropic` provider asked for the Responses wire is refused `wrong_shape`; an `openai-compatible` provider serves both chat completions and Responses.
-- **Verification:** `modelProxy.test.ts` green; `model-proxy.md` items 1, 4, 6 bound to the new titles.
+  - AE1 and AE2 against a fake `serve` that emits the documented event shapes.
+  - Every event type in the catalogue has a disposition; an unknown type lands as `harness_error` naming it.
+  - A `session.compaction.ended` with text becomes a compaction row and a `compacted` note; without text a note alone.
+  - The stream drops mid-turn: the step-end refill restores the turn and no ledger step is duplicated.
+  - `planResume` over the mirrored rows yields the same plan kind as over pi's rows for the same scripted turns; `analyzeRunFriction` classifies `$ cmd` summaries alike.
+- **Verification:** the conformance matrix shows OpenCode green on the gate and record rows against the fake `serve`.
 
-### U6. The scripted Responses model server in the load suite
+### U12. The relay plugin, the conversation, the authored session
 
-- **Goal:** a deterministic, free model behind the proxy for the Codex rows and the load suite.
-- **Requirements:** R11 (its test double).
-- **Dependencies:** U5.
-- **Files:** `src/load/scriptedResponses.ts` (new, beside `scriptedProvider.ts`), `scripts/load.ts` (a `--shape responses` value), tests `src/load/scriptedResponses.test.ts`; docs `load-harness.md`.
-- **Approach:** the same `Step | Script` shape keyed on the count of `function_call_output` items in `input`; emits `response.created`, `response.output_item.added`/`done`, `response.function_call_arguments.done` and `response.completed` with usage; a buffered mode for `stream: false`; records every request for the credential row.
-- **Test scenarios:**
-  - A three-step script yields a text answer, then a function call, then a final answer, with usage on each `response.completed`.
-  - A `refuse` step answers 401 in the OpenAI envelope.
-  - The server records `Authorization` headers so a row can assert every call carried the run bearer.
-- **Verification:** the load suite's `provider` subcommand runs a Responses script through the proxy end to end.
-
-### U7. `CodexHarness`
-
-- **Goal:** the real binary passes the conformance table's rows, with every cannot named.
-- **Requirements:** R11, R12, R13, R14, R15, R5; KTD2, KTD5, KTD7, KTD8, KTD9, KTD10, KTD11, KTD15.
-- **Dependencies:** U3, U4, U5, U6.
-- **Files:** `src/core/harness/codex/harness.ts` (new: `CodexHarness`), `src/core/harness/codex/protocol.ts` (JSON-RPC over stdio, the request table), `src/core/harness/codex/bridge.ts` (dispositions in pi's words, the per-item mirror), `src/core/harness/codex/home.ts` (the per-run `CODEX_HOME` writer: `config.toml`, `.rules`), `src/core/harness/codex/preflight.ts`, `src/core/harness/codex/testing/`; `package.json` (`@openai/codex` devDependency), `scripts/check-lockfile.mjs` (`REQUIRED_VARIANTS`), `project.json` if a script is added; tests `src/core/harness/codex/*.test.ts`, `src/core/harness/conformance.test.ts` (the Codex driver); docs `harness.md` (Codex's row), `harness-pi.md` untouched.
+- **Goal:** OpenCode passes the relay, conversation and survival rows against the real binary.
+- **Requirements:** R12, R14, R15, R16 (its OpenCode half), R6; KTD7, KTD10, KTD11, KTD12.
+- **Dependencies:** U10, U11.
+- **Files:** `src/core/harness/opencode/harness.ts` (new: `OpenCodeHarness` implementing `Harness`), `src/core/harness/opencode/pluginSource.ts` (new: the plugin file text, the sibling of `extensionSource.ts`), `src/core/harness/opencode/session.ts` (new: ledger → import body; settlement as a completed tool content), tests `src/core/harness/opencode/harness.test.ts`, `src/core/harness/opencode/pluginSource.test.ts`, `src/core/harness/conformance.test.ts` (the real-binary driver, run where the binary is on the PATH: a devDependency pin of `@opencode/cli@2.0.3` for tests, mirroring pi's); docs `harness.md` relay, conversation and survival rows.
 - **Approach:**
-  1. First verification, before any other code: does Codex issue `commandExecution` as `["bash", "-lc", <cmd>]`? If yes, `.rules` carries one `prefix_rule(["bash", "-lc"], decision = "prompt")`; if no, the checked-in read-prefix list.
-  2. `home.ts` writes `config.toml`: `model_providers.switchboard` (`base_url` the proxy, `env_key = "SWITCHBOARD_RUN_BEARER"`, `wire_api = "responses"`, `requires_openai_auth = false`), `mcp_servers.switchboard` (`url`, `bearer_token_env_var`, `tool_timeout_sec` ≥ the wall clock, `default_tools_approval_mode = "auto"`), `approval_policy = { granular = { sandbox_approval = true, rules = true, mcp_elicitations = false, request_permissions = false, skill_approval = false } }`, `sandbox_mode = "read-only"`, `web_search = "disabled"`, `tools.view_image = false`, and `features.use_legacy_landlock` where the preflight needs it.
-  3. `open`: refuse identity `none` and a provider that does not serve the Responses wire by name; strip provider keys from the child env; spawn through `HarnessContainer.start`; `initialize` with `optOutNotificationMethods: ["item/agentMessage/delta"]`; `thread/start { cwd, approvalPolicy, sandbox }` without `config`; the seed quoted into the first `turn/start`; steers as `turn/steer { expectedTurnId }` and, on a mismatch, `turn/start`; the wrap-up steer when `grantOf(runId).turns` nears the cap; `turn/interrupt` on the hard stop.
-  4. The request table: command and file-change approvals through `judgeToolCall` (commands joined with shell quoting; each changed path through `judgePath`), `decline` followed by a `turn/steer` carrying the reason; permissions and elicitations refused; unknown methods a JSON-RPC error; `availableDecisions` checked.
-  5. The bridge: dispositions per KTD7, the per-item mirror per KTD8, `GateBypassed` on any completed command with no decision, `turn/completed { status: "failed", httpStatusCode: 403 }` read as the budget stop, `contextCompaction` as a row.
-  6. Facts `{ harness: "codex", pid, threadId, root, bearerHash, container, relaunches }`; `find` answers `alive-here` (reconnect), `dead` with the store present (`thread/resume threadId` in a new process, open items closed as lost), `another-container` or store gone (the own-store rule: `interrupted`, re-dispatch).
-- **Execution note:** run the preflight and the `bash -lc` check on a developer machine before writing the bridge; both decide the shape of the gate.
+  1. The plugin registers the tools from `GET /harness/tools` at load through the v2 `tool.transform` editor and runs each through `/harness/authorize` and `/harness/tool` with pi's re-ask and wait.
+  2. `open`: write the layout and configuration, start `serve` and the tailer, import the seed (or the rebuild) and prompt; steers as `delivery: "steer"`; the hard stop as `interrupt`; post-turns as `wait` then `prompt`; `end` kills the process group and removes the root.
+  3. Facts `{ harness: "opencode", pid, port, sessionID, root, bearerHash, container, relaunches }`; `find` is `GET /api/health` and `GET /api/session/:id` on the recorded port through `request`.
+  4. Identity rules per KTD12; the effort tier onto variants.
+- **Execution note:** close spike items 9, 10 and 11 first; each decides a mechanism in this unit.
 - **Test scenarios:**
-  - The scripted model issues `echo x > f` under `read-only`: an approval request arrives, `judgeBash` declines, the record shows `tool_refused`, the file does not exist.
-  - `cat README` (prefix-named) asks and is accepted; `stat README` (unnamed, when no shell-prefix rule exists) completes with no request and the run fails closed with `GateBypassed` naming `stat`: the cannot row, asserting that exact failure.
-  - Injected `item/permissions/requestApproval` and `mcpServer/elicitation/request` are both answered fail-closed; an unknown method gets a JSON-RPC error; nothing is left pending.
-  - The preflight: a write is denied inside the sandbox, or the rows fail "sandbox unavailable on <platform>"; a control run with `danger-full-access` fails the preflight.
-  - `open` under identity `none` is refused before spawn; under an `anthropic` provider is refused for the wire.
-  - The parent env carries `OPENAI_API_KEY=bogus`: the child env lacks it, `CODEX_HOME` is the run root, and the scripted server saw every model call (count equals `grantOf(runId).turns`).
-  - `default_tools_approval_mode = "prompt"` as a control shows a relayed call's approval that nobody answers; the row fails, proving the setting is load-bearing.
-  - A run with two commands and one relayed call: `StepReport`s with in-flight ids equal to the transcript's `tool_use` ids; `planResume` over the rows yields `finish`; `analyzeRunFriction` classifies the `$ cmd` summaries as it does pi's.
-  - `contextCompaction` with no summary: a compaction row, counted by `seedLength`, rendered by the run page model.
-  - The process dies mid-turn with `CODEX_HOME` present: `thread/resume` and a continue prompt; store deleted: `interrupted` and re-dispatch; `thread/resume` of an id the row does not name is refused.
-  - Mutation rows: each of six clause switches in `CodexHarness` off in turn fails the suite once.
-  - A live OpenRouter row (developer machine, `OPENROUTER_API_KEY`): passes fully under the shell-prefix rule, or fails closed on the first unnamed read-only command naming it; the row asserts whichever the U7 check established.
-- **Verification:** the conformance matrix shows Codex green on every row but the named cannots; `check:lockfile` records both platform variants; no Dockerfile changed.
+  - Roster parity: the tools the model was offered (`GET /api/session/:id/context`, or the plugin's registration log) equal `GET /harness/tools` for every toolset.
+  - Identity parity through the plugin: conductor `spawn_run` naming `coding` refused `spawn_identity`; research `web_fetch` of an internal address refused before any fetch; readonly `submit_verdict` served with the head-requiring schema.
+  - A relayed `await_runs` outliving one request re-asks by the same call id and runs once (pi's proof `relay.test.ts:533`).
+  - AE3; a steer sent mid-turn is consumed at the next step (`session.inbox.delivered` then `session.step.started`).
+  - Identity `none`: the model's tool list holds only relayed tools; a scripted `shell` call never appears.
+  - Mutation rows: each of six clause switches off in turn fails the suite once.
+- **Verification:** the matrix shows OpenCode green on every row against the real binary with the load suite's scripted Anthropic-shape model behind the proxy.
+
+### U13. The configuration word, the roster, the live receipt
+
+- **Goal:** a deployment can put a preset on OpenCode; stage A is receipted live.
+- **Requirements:** R17, R18.
+- **Dependencies:** U12.
+- **Files:** `src/config.ts` (`harness?: Record<string, "pi" | "opencode">`), `src/config/validate.ts`, `src/index.ts` (the roster), `src/core/dispatch/runLoop.ts` (pick from the roster by the preset's word), `config/config.example.yaml`; tests `src/config.test.ts`, `src/core/dispatch/runLoop.test.ts`; docs `harness-pi.md` item 1, `harness.md`, `docs/reference/code-map.md`, `docs/reference/specs/README.md`, `docs/how-to/` (one page: putting a preset on OpenCode).
+- **Test scenarios:**
+  - `harness: { coding: opencode }` selects `OpenCodeHarness` for coding runs and `PiHarness` for the rest; `harness: { coding: codex }` is refused by name.
+  - The source scan still forbids a harness word in `agents/registry.ts`.
+- **Verification:** human-gated live receipt on staging: a coding run on OpenCode in a scratch repository on the resident, its record complete on the run page, one refused command visible as `tool_refused`, the egress log showing only the proxy and loopback; posted on the tracker.
 
 ### U8. `RunBearerStore.rotate` and the mid-run `interrupted` path
 
-- **Goal:** the two shared-code pieces the relaunch needs, landed and tested before the relaunch itself.
-- **Requirements:** R16 (its prerequisites); KTD16, KTD17.
+- **Goal:** the two shared-code pieces the relaunch needs, landed before the relaunch.
+- **Requirements:** R16 (prerequisites); KTD14.
 - **Dependencies:** U1.
-- **Files:** `src/core/modelProxy/runBearers.ts` (`rotate`), `src/core/dispatch/runLoop.ts` (an `interrupted` outcome variant; `closeLiveRun` snapshotting the registry backlog), `src/core/dispatcher.ts` (re-dispatch on the variant), `src/core/dispatch/provision.ts` (`attachWorkspace` callable without a gate context), `src/core/dispatch/reattach.ts`, `src/core/harness/pi/relay.ts` (`HarnessRegistry.replace`); tests `runBearers.test.ts`, `runLoop.test.ts`, `dispatcher.test.ts`, `relay.test.ts`; docs `model-proxy.md` item 2, `run-history.md` item 54, `harness-pi.md` item 8.
-- **Approach:** `rotate` keeps `turns`, `expiresAt` and `span`, drops every old hash including an operator's issued probe bearer (said so in the spec); the loop's `finally` learns a fifth status; `HarnessRegistry.replace(runId, live)` swaps the live entry without ending `RelayedCalls`.
+- **Files:** `src/core/modelProxy/runBearers.ts`, `src/core/dispatch/runLoop.ts`, `src/core/dispatcher.ts`, `src/core/dispatch/provision.ts`, `src/core/dispatch/reattach.ts`, `src/core/harness/pi/relay.ts` (`HarnessRegistry.replace`); tests beside each; docs `model-proxy.md` item 2, `run-history.md` item 54, `harness-pi.md` item 8.
 - **Test scenarios:**
-  - `rotate` then `verify(old)` answers `unknown_bearer`; `verify(new)` answers the same grant with the same `turns`; `consumeTurn` continues the count.
-  - The loop returns `interrupted` with a note; the dispatcher re-dispatches the request once; the record and the registry agree on the status.
-  - `attachWorkspace` re-attaches a recorded binding mid-run without a gate context; a refused binding yields the refusal by name.
-  - `replace` keeps a held relayed call running; the old entry's hooks are gone.
-- **Verification:** all four test files green; no production behaviour change until U9 uses them.
+  - `rotate` then `verify(old)` answers `unknown_bearer`; `verify(new)` answers the same grant with the same `turns`.
+  - The loop returns `interrupted` with a note; the dispatcher re-dispatches once.
+  - `attachWorkspace` re-attaches a recorded binding mid-run without a gate context.
+  - `replace` keeps a held relayed call running.
+- **Verification:** the four test files green; no behaviour change until U9.
 
 ### U9. The relaunch ceiling
 
-- **Goal:** a replaced container costs a run at most one model call and never a tool's effects.
-- **Requirements:** R16; KTD17, KTD18, KTD16.
-- **Dependencies:** U2, U8, the #1219 floor merged.
-- **Files:** `src/core/harness/pi/harness.ts` (the relaunch in place of the floor's close, behind the record's two gates), `src/core/dispatch/runLoop.ts`; tests `harness.test.ts`, `runLoop.test.ts`; docs `harness-pi.md` gap row (the #1219 row) closed, `harness.md` survival rows.
-- **Approach:** on a "not alive here" finding under a living bot: no kill or remove in the new container; `attachWorkspace(reattach)` or refuse by name; write the new hash to the row, `rotate`, drop the old; rebuild the session from the ledger with settlements only for container-side calls, relayed calls in flight awaited up to the relay window and then settled as still running; `relaunches` incremented on the row; the third finding closes `interrupted`.
-- **Execution note:** the mid-run re-attach spike is the record's first gate; if it fails, this unit is not landed and the floor stays the behaviour.
+- **Goal:** a replaced container costs a run at most one model call and never a tool's effects, on both harnesses.
+- **Requirements:** R16; KTD10, KTD14.
+- **Dependencies:** U8, U12, the floor (#1294, #1321).
+- **Files:** `src/core/harness/pi/harness.ts`, `src/core/harness/opencode/harness.ts`, `src/core/dispatch/runLoop.ts`; tests beside each; docs `harness-pi.md` gap row closed, `harness.md` survival rows.
+- **Approach:** on the typed error under a living bot: no kill or remove in the new container; re-attach or refuse by name; new hash on the row, `rotate`, old hashes dropped; pi rebuilds its session file, OpenCode imports the ledger; relayed calls in flight awaited up to the relay window then settled as still running; `relaunches` incremented; the third finding closes `interrupted`.
+- **Execution note:** the mid-run re-attach spike is the record's first gate; if it fails, this unit is withheld and the floor stays the behaviour.
 - **Test scenarios:**
-  - A living bot, `readLog` throws the typed error, identity now B: no kill or remove in B, workspace re-attached, `rotate` with turns preserved, one `resumed` note, `relaunches = 1`.
+  - A living bot, the typed error from `readLog`: no kill or remove in the new container, workspace re-attached, rotation with turns preserved, one `resumed` note, `relaunches = 1`, on pi and on OpenCode.
   - The worktree refused by name: `interrupted`, one re-dispatch.
-  - The identity flips twice more: `interrupted` naming the bound; no fourth start.
-  - A row with `relaunches = 2` resumed by a new generation: the first finding closes the run.
-  - `identity()` throwing the typed error is the third trigger, not "no identity"; the pid is never probed.
-  - A relayed `await_runs` in flight at the relaunch keeps running and is settled as "still running in the bot", never lost; its late result lands once.
-- **Verification:** human-gated live receipt on staging: a resident roll under a review run, the successor to #1219, posted on the tracker.
+  - The third finding: `interrupted` naming the bound; no fourth start.
+- **Verification:** human-gated live receipt on staging: a resident roll under a run on each harness.
 
 ---
 
@@ -334,30 +310,28 @@ stateDiagram-v2
 | Gate | Command | Applies to |
 |---|---|---|
 | Unit and table rows | `npm test` (four CI shards); `npx vitest run src/core/harness` for the seam and the suite | every unit |
-| Consistency | `npm run check:consistency` (`check:lockfile` with the Codex variants, `specs:check` bindings, `hygiene:check`, `agents:check`, `decisions:check`) | every PR |
+| Consistency | `npm run check:consistency` (`specs:check` bindings, `hygiene:check`, `agents:check`, `decisions:check`, `check:lockfile`) | every PR |
 | Type, lint, format | `npm run typecheck && npm run lint && npm run format:check` | every PR |
-| Spec coverage | `npm run specs:coverage -- --changed origin/main...HEAD --test-guard` | every PR; removed or re-pointed pi tests need their spec row changed in the same PR |
-| Title | `npm run check:pr-title` with scope `harness`, `providers`, `http`, `load` or `docs` per PR | every PR |
-| Conformance matrix | the table's matrix printer, pi green on every row; Codex green on every row but the named cannots | U3, U7 |
-| Live receipts | the OpenRouter row on a developer machine; the resident-roll relaunch on staging | U7, U9; human-gated |
-| Never | a Dockerfile change; a skipped Codex row; a Codex row passing under `danger-full-access` | U7 |
+| Spec coverage | `npm run specs:coverage -- --changed origin/main...HEAD --test-guard` | every PR |
+| Images | `npm run verify -w deploy/cloudflare-resident` and `-w deploy/cloudflare-sandbox`; `src/deploy/imageOpenCodeHarness.test.ts` | U10 |
+| Title | `npm run check:pr-title` with scope `harness`, `providers`, `dispatcher`, `docs` or `process` per PR | every PR |
+| Conformance matrix | pi green on every row; OpenCode green on every row against the fake `serve` (U11) and the real binary (U12) | U3, U11, U12 |
+| Live receipts | the scratch coding run (U13); the resident roll on each harness (U9) | human-gated |
+| Never | a preset defaulting to OpenCode; an `always` reply; a skipped row; a Codex build | all |
 
-Hygiene traps for this work: tracker numbers in code comments, dates outside records, 32-hex fixtures (boot ids, thread ids), `U1` to `U9` tokens in prose under `src/` or `docs/reference/`.
+Hygiene traps: tracker numbers in code comments, dates outside records, 32-hex fixtures, `U1` to `U13` tokens in prose under `src/` or `docs/reference/`.
 
 ---
 
 ## Definition of Done
 
-- Global: every unit's PR merged in stack order; the conformance matrix printed in the last PR's body; `harness.md` in `docs/reference/specs/README.md` and the code map; record 0038's validation rows 1 to 11 re-pointed from `[gap]` to the table's titles by a dated amendment; no abandoned-attempt code left in the tree.
-- U1: pi's behaviour unchanged by literal comparison; `oneHarness.test.ts` re-pointed.
-- U2: `startScript` for pi byte-identical; the identity word changes across a replaced container in the fake.
-- U3: pi green on every row; the table lint rejects an assertion-free row.
-- U4: roster parity for every toolset; the duplicate-spawn and cancellation rows green; four paths in every route table.
-- U5: three wires by provider type; the terminal-event meter; `model-proxy.md` items 1, 4, 6 bound.
-- U6: the load suite runs a Responses script through the proxy.
-- U7: Codex green on every row but the named cannots; the preflight refuses a control run; `@openai/codex` pinned with both lockfile variants; no Dockerfile touched.
-- U8: `rotate` keeps the meter; the loop returns `interrupted`; the dispatcher re-dispatches once.
-- U9: the six relaunch rows green; the live receipt posted or the unit withheld behind its gate.
+- Global: every unit's PR merged in stack order; the conformance matrix in the last PR's body; `harness.md` in the specs index and the code map; record 0038's validation rows re-pointed from `[gap]` to the table's titles by a dated amendment; the spike's fourteen items each closed with a fact or a row; no abandoned-attempt code in the tree.
+- U1, U2, U3: pi's behaviour unchanged by literal comparison; the matrix green for pi; `request` proven over a recording executor and on the bot host.
+- U10: both images prove the version as root and thread user; a staging run's egress shows only the proxy and loopback; the tailer's replay equals its feed.
+- U11: OpenCode green on the gate and record rows against the fake `serve`; the bypass row fails closed.
+- U12: OpenCode green on every row against the real binary; the six mutation rows fail once each.
+- U13: the configuration word selects per preset; the live receipt posted.
+- U8, U9: rotation keeps the meter; the relaunch rows green on both harnesses or the unit withheld behind its gate.
 
 ---
 
@@ -365,19 +339,20 @@ Hygiene traps for this work: tracker numbers in code comments, dates outside rec
 
 | Question | Owner | Resolves it | Blocking? |
 |---|---|---|---|
-| Does Codex issue commands as `["bash", "-lc", <cmd>]`, so one prompt rule covers every shell command? | the implementer of U7 | one scripted turn against the binary, read from the approval request's `command` | deferred: decides the `.rules` fixture, not the unit's existence |
-| Can Codex's sandbox start on the Depot runner with `use_legacy_landlock`? | the implementer of U7 | the preflight on the runner | deferred: decides where the Codex rows run, never whether they are faked |
-| Does `decline` reach the model with a reason, or only after the `turn/steer`? | the implementer of U7 | one declined command against the binary | deferred |
-| Does Codex retry a 403 from the model? | the implementer of U7 | the cap row | deferred |
-| The `thread/tokenUsage/updated` payload's field casing | the implementer of U7 | one captured event | deferred: folded, not read |
+| v2 pinned or v1 as the line to build? | the maintainer | one answer; the plan carries both rows | blocking for U10 only; the seam and pi's rows do not depend on it |
+| Does v2 load a local plugin file without a package install, and does a failing `execute.before` block? | the implementer of U12 | one local `serve` with the plugin file (spike item 9) | deferred: decides plugin versus MCP relay |
+| Does `import` accept authored assistant turns and validate `projectID`? | the implementer of U12 | one import against the binary (spike item 10) | deferred: decides authored-session versus own-store for the survival row |
+| Effort tiers onto model variants? | the implementer of U12 | the schema and one run (spike item 11) | deferred |
+| `serve` port, auth scheme, config-disable variable, provider key path, `--version` text | the implementer of U10 | a local container (spike items 2 to 5, 14) | deferred: decide exact keys |
+| Does `GET /api/session/:id/context` list the offered tools? | the implementer of U12 | one call (spike item 13) | deferred: decides the roster-parity row's source |
+| `serve` memory under one run; `timeout.execution` semantics | the implementer of U12 | the live receipt (spike item 12) | deferred |
 
 ---
 
 ## Sources
 
-- Record 0038 with its two appended amendments; records 0032 (and its amendment of 2026-09-15), 0034, 0035, 0037, 0007, 0009, 0019.
-- Living specs `harness-pi.md` (items 1, 2, 4, 7, 8, 12, 14, 15; the #1219 gap row), `model-proxy.md` (1, 2, 4, 5, 6), `mcp-tools.md`, `mcp-ingress.md`, `load-harness.md` (13, 14, 15, 18), `http-ingress.md` (10), `run-history.md` (54), `session-log.md`.
-- Repository at `146f9287`: `src/core/dispatch/runLoop.ts`, `run.ts`, `provision.ts`, `reattach.ts`; `src/core/harness/pi/*`; `src/channels/harnessRoutes.ts`, `modelProxy.ts`, `mcp.ts`; `src/core/modelProxy/runBearers.ts`, `usage.ts`; `src/mcp/client.ts`, `fake.ts`, `bridge.ts`; `src/load/scriptedProvider.ts`, `piRpc.ts`, `piProcess.ts`; `src/core/harness/oneHarness.test.ts`; `scripts/check-lockfile.mjs`; `scripts/public-hygiene.mjs`.
-- Codex: the `app-server` protocol page, configuration reference, MCP page and sandboxing concepts on its documentation site; `codex-rs/app-server-protocol/src/protocol/v2/{thread,turn}.rs`, `codex-rs/execpolicy/README.md`, `codex-rs/linux-sandbox/README.md`; `@openai/codex@0.154.0` `package.json` and `bin/codex.js`; openai/codex#45361. Read 2026-09-15.
-- OpenAI Responses API reference and streaming guide; OpenRouter Responses API overview (beta, stateless). Read 2026-09-15.
-- Model Context Protocol: streamable HTTP transport (2025-03-26), progress and authorization utilities (2025-06-18); `@modelcontextprotocol/sdk` server transport. Read 2026-09-15.
+- Record 0038 with its four appended amendments; records 0032 (and its amendment), 0034, 0035, 0037, 0007, 0009, 0019.
+- Living specs `harness-pi.md` (items 1, 2, 4, 7, 8, 12, 14, 15; the container-roll gap row), `model-proxy.md` (1, 2, 4, 5, 6), `execution.md`, `load-harness.md`, `run-history.md` (54), `session-log.md`.
+- Repository at `81c51c4f`: `src/core/dispatch/runLoop.ts`, `run.ts`, `provision.ts`, `reattach.ts`; `src/core/harness/pi/*`; `src/channels/harnessRoutes.ts`, `modelProxy.ts`; `src/core/modelProxy/runBearers.ts`; `src/load/scriptedProvider.ts`, `piProcess.ts`; `src/core/harness/oneHarness.test.ts`; `src/deploy/imagePins.ts`, `imagePiHarness.test.ts`; `src/config.ts`, `src/config/validate.ts`.
+- The OpenCode spike of 2026-09-15/16 (sections 1 to 11): two source checkouts of `anomalyco/opencode`, `dev` at 1.18.31 and tag `v2.0.3`; `@opencode/cli`, `@opencode/protocol`, `@opencode/plugin` 2.0.3 and `opencode-ai`, `@opencode-ai/sdk`, `@opencode-ai/plugin` 1.18.31 on npm; `opencode.ai/docs` and `opencode.ai/v2/docs`; the open-issue list for the headless server.
+- The Codex research of 2026-09-15, kept as the probe's record in record 0038's Appendix B.
