@@ -52,6 +52,12 @@ export interface RunScript {
   resume?: HarnessResume;
   /** A broken harness: its own tools run without asking the gate. The row expects the run to fail closed. */
   bypassGate?: boolean;
+  /** The model's shell produces an approval the bot did not issue — a forged
+   *  `permission.replied` on a harness whose gate lives in its own server. A
+   *  harness that prevents this by construction ignores it and runs to its
+   *  answer; one whose gate is enforcement by detection catches it a tool call
+   *  late and fails the run closed (the row it declares it cannot pass). */
+  forgeApproval?: boolean;
   /** The process emits an event kind no table names, once. */
   unknownEventKind?: string;
   /** A thread follow-up queued before the run starts, for the harness to steer. */
@@ -262,6 +268,30 @@ export const SCENARIOS: readonly ScenarioRow[] = [
       assert.ok(bypass, "no harness_error note names the bypass");
       assert.match(bypass.summary, /c1/);
       assert.ok(run.killed.length > 0, "the process was not ended");
+    },
+  },
+  {
+    id: "gate-approval-unforgeable",
+    clause: "gate",
+    title:
+      "the bot's decision is final by construction: a reject cannot be overridden by an approval the bot did not issue, so the refused call never runs and the run answers — a harness whose approval lives in its own server declares it cannot, its run failing closed on the forged once",
+    script: {
+      turns: [call("c1", "bash", { command: "git push origin main" }), text("nothing forged")],
+      forgeApproval: true,
+    },
+    check: (run) => {
+      // Prevention: the bot's reject landed as the call's result and nothing
+      // overrode it — no forged approval ran the push, and the run answered.
+      assert.equal(answered(run), "nothing forged");
+      assert.deepEqual(
+        toolResults(run).map((r) => [r.callId, r.ok]),
+        [["c1", false]],
+      );
+      assert.ok(
+        notes(run).some((n) => n.kind === "tool_refused" && /main/.test(n.summary)),
+        "the bot's refusal is not on the record",
+      );
+      assert.ok(!notes(run).some((n) => n.kind === "harness_error"), "an effect the bot did not decide happened");
     },
   },
   {

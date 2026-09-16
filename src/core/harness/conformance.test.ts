@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, expect, it } from "vitest";
 import { harnessDrivers } from "./testing/drivers.js";
+import { openCodeDriver } from "./opencode/testing/driver.js";
 import {
   assertReadsRecord,
   buildHarnessConformanceMatrix,
@@ -10,6 +11,7 @@ import {
   SCENARIOS,
   type DrivenRun,
   type HarnessDriver,
+  type RowOutcome,
   type ScenarioRow,
 } from "./testing/scenarios.js";
 
@@ -152,5 +154,42 @@ describe("the table", () => {
     expect(rendered).toContain("| record | `needs-nothing` — reads the record and asks nothing of it | ✅ |");
     expect(rendered).toContain("✖ pi cannot `needs-a-step`: this harness writes no ledger steps");
     expect(rendered.split("\n")[0]).toContain("✖ cannot (declared, asserted)");
+  });
+});
+
+// U11 (record 0038's fourth and fifth amendments): the OpenCode harness enters
+// the same table as a driver over a fake `serve`. This unit greens the gate and
+// the record rows; U12 adds the driver to `harnessDrivers()` and greens every
+// row against the real binary. The gate's honest cannot — a forged approval
+// caught by detection, never prevented by construction — is the one declared
+// cell (`gate-approval-unforgeable`).
+describe("conformance — opencode (fake serve, gate and record)", () => {
+  const driver = openCodeDriver();
+  const rows = SCENARIOS.filter((r) => r.clause === "gate" || r.clause === "record");
+
+  for (const row of rows) {
+    const declared = driver.cannot?.[row.id];
+    if (declared === undefined) {
+      it(`${row.clause}: ${row.title}`, async () => {
+        await runRow(driver, row);
+      });
+    } else {
+      it(`${row.clause}: ${row.title} — declared cannot (${declared}): the run fails as declared`, async () => {
+        expect((await rowVerdict(driver, row)).outcome).toBe("cannot");
+      });
+    }
+  }
+
+  it("the matrix shows OpenCode green on every gate and record row against the fake serve, with the one declared cannot cell", async () => {
+    const verdicts: Record<string, RowOutcome> = {};
+    for (const row of rows) verdicts[row.id] = (await rowVerdict(driver, row)).outcome;
+    for (const row of rows) expect(verdicts[row.id]).toBe(row.id === "gate-approval-unforgeable" ? "cannot" : "pass");
+    const rendered = renderHarnessConformanceMatrix(
+      [{ harness: "opencode", rows: verdicts, ...(driver.cannot ? { cannot: driver.cannot } : {}) }],
+      ["opencode"],
+      rows,
+    );
+    expect(rendered).toContain("| ✖ |");
+    expect(rendered).toContain("✖ opencode cannot `gate-approval-unforgeable`:");
   });
 });
