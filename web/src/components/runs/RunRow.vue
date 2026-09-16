@@ -25,6 +25,7 @@ import {
   stopLabel,
   surfaceOf,
   whenTip,
+  whoText,
   type IndexRow,
   countTip,
   countText,
@@ -47,6 +48,7 @@ const repo = computed(() => repoOf(props.run, parts.value.scope));
 const tone = computed(() => statusDot(props.run));
 const href = computed(() => runHref(props.run));
 const src = computed(() => surfaceOf(props.run));
+const who = computed(() => whoText(props.run));
 const sourceUrl = computed(() => safeSourceUrl(props.run));
 const expires = computed(() => expiresAt(props.run, props.retentionMs));
 const leaving = computed(() => expires.value !== undefined && expires.value - props.now <= LEAVING_WINDOW_MS);
@@ -160,6 +162,16 @@ function onRowClick(ev: MouseEvent): void {
         >
           {{ formatRelative(run.startedAt, now) }}
         </span>
+      </UTooltip>
+      <!-- Who asked (record 0042, runs page): the resolved name, always visible — the
+           source mark's hover kept saying it only to a pointer. -->
+      <UTooltip v-if="who" :text="sourceTip(run)">
+        <span
+          class="who pointer-events-auto min-w-0 shrink-0 truncate text-[0.8rem] max-sm:order-7 max-sm:text-xs sm:max-w-[9em]"
+          :class="run.finished ? 'text-dimmed' : 'text-muted'"
+          :data-user-id="run.userId"
+          >{{ who }}</span
+        >
       </UTooltip>
       <span
         v-if="parts.agent"

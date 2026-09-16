@@ -30,6 +30,7 @@ const done = (id: string, over: Partial<RunIndexRowSeed> = {}): RunIndexRowSeed 
 const seed = (rows: RunIndexRowSeed[], over: Partial<RunsIndexSeed> = {}): RunsIndexSeed => ({
   page: "runs",
   all: false,
+  mine: false,
   retentionDays: null,
   now: 1_252_000,
   rows,
@@ -80,6 +81,43 @@ describe("RunsIndexPage — toolbar, states, pager", () => {
     expect(nav).toHaveBeenCalledWith("/runs?all=1");
     const all = mountIndex(seed([], { all: true }));
     expect((all.wrapper.find("#showdone").element as HTMLInputElement).checked).toBe(true);
+  });
+
+  it("Show mine (record 0042): offered to a session linked to its Slack person — checked on ?mine=1, a change navigates keeping the other toggle, the feed and the pager stay in the view; an unlinked session sees it disabled with the reason", async () => {
+    const nav = vi.spyOn(browser, "navigate").mockImplementation(() => {});
+    const ann = { id: "slack:UA", name: "ann" };
+    const linked = mountIndex(seed([], { asUser: ann }));
+    const box = linked.wrapper.find("#showmine");
+    expect((box.element as HTMLInputElement).checked).toBe(false);
+    expect((box.element as HTMLInputElement).disabled).toBe(false);
+    expect(linked.wrapper.find("#minehint").text()).toBe("Only the runs ann requested");
+    (box.element as HTMLInputElement).checked = true;
+    await box.trigger("change");
+    expect(nav).toHaveBeenLastCalledWith("/runs?mine=1");
+    // Both on: each toggle keeps the other; off again returns to the bare view.
+    const both = mountIndex(seed([], { all: true, mine: true, asUser: ann, olderThan: 1_000_000 }));
+    expect((both.wrapper.find("#showmine").element as HTMLInputElement).checked).toBe(true);
+    expect(both.es().url).toBe("/runs?stream=1&all=1&mine=1");
+    expect(both.wrapper.find("#empty").text()).toBe("No runs of yours.");
+    expect(both.wrapper.find("nav.pager a").attributes("href")).toBe("/runs?all=1&mine=1");
+    const done = both.wrapper.find("#showdone");
+    (done.element as HTMLInputElement).checked = false;
+    await done.trigger("change");
+    expect(nav).toHaveBeenLastCalledWith("/runs?mine=1");
+    const mineBox = both.wrapper.find("#showmine");
+    (mineBox.element as HTMLInputElement).checked = false;
+    await mineBox.trigger("change");
+    expect(nav).toHaveBeenLastCalledWith("/runs?all=1");
+    expect(
+      mountIndex(seed([], { mine: true, asUser: ann }))
+        .wrapper.find("#empty")
+        .text(),
+    ).toBe("No active runs of yours.");
+    // Unlinked: the box is there, disabled, and says why.
+    const unlinked = mountIndex(seed([]));
+    expect((unlinked.wrapper.find("#showmine").element as HTMLInputElement).disabled).toBe(true);
+    expect(unlinked.wrapper.find("#minehint").text()).toContain("not linked to a Slack user");
+    expect(unlinked.es().url).toBe("/runs?stream=1");
   });
 
   it("shows the empty sentinel per view, and the store-degraded banner when the seed carries one", () => {

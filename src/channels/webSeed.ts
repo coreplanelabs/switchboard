@@ -31,6 +31,13 @@ export interface RunsIndexSeed {
   page: "runs";
   /** `?all=1`: finished + persisted rows included; the feed keeps finished rows. */
   all: boolean;
+  /** `?mine=1`: only the viewer's own runs (`ownedBy` ANDed onto the viewer's
+   *  predicate, server side — the feed is narrowed the same way). */
+  mine: boolean;
+  /** The Slack person this dashboard session acts as (record 0042), when its
+   *  email named one; absent, "Show mine" is offered disabled — no run is ever
+   *  requested as an unlinked session. */
+  asUser?: { id: string; name?: string };
   /** Configured run-history retention; null when history is off. */
   retentionDays: number | null;
   /** The server clock the initial relative times/stopwatches paint from. */

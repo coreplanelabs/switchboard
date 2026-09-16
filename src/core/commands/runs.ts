@@ -1,10 +1,11 @@
 import { z } from "zod";
 import { authorize } from "../authz/authorize.js";
-import { predicateFor } from "../authz/predicate.js";
+import { allOf, ownedBy, predicateFor } from "../authz/predicate.js";
 import type { Action, Actor } from "../authz/types.js";
 import {
   CommandError,
   commandDefiner,
+  flag,
   renderCompact,
   renderRunLine,
   wrapUntrusted,
@@ -164,15 +165,21 @@ export const runsList = defineCommand({
       .optional()
       .describe("page cursor: runs finished before this epoch ms"),
     beforeId: runId.optional().describe("page cursor tie-breaker: the last id of the previous page"),
+    mine: flag
+      .optional()
+      .describe("only the runs you requested — for a dashboard session, the Slack user its email names (record 0042)"),
   }),
   action: "runs:read",
   effect: "read",
   describe: "List runs (live and persisted, newest first) — metadata only, never message text.",
   handler: async ({ options, caller, deps }) => {
     // The policy, compiled for this actor, is the store's filter; the
-    // `channel` option is a plain filter the caller asked for on top of it.
-    const visibleTo = predicateFor(caller.actor, "runs:read", "run");
-    const { thread, parent, ...rest } = options;
+    // `channel` option is a plain filter the caller asked for on top of it, and
+    // `--mine` narrows it to the caller's own runs (`ownedBy`: every id the
+    // caller means by "me") — a narrowing only, never a widening.
+    const { thread, parent, mine, ...rest } = options;
+    const readable = predicateFor(caller.actor, "runs:read", "run");
+    const visibleTo = mine ? allOf([readable, ownedBy(caller.actor)]) : readable;
     return asJson(
       await (
         await deps.runs()

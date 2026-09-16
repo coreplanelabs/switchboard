@@ -8,6 +8,7 @@ The header lists only the surfaces this installation has: **Residents** appears 
 |---|---|---|
 | `GET /runs` | Active runs, newest first | Default view excludes finished runs; each row's link carries that run's capability token — the index itself is gated specifically because of this |
 | `GET /runs?all=1` | Active **and** finished runs | Only meaningful with `runHistory` configured — otherwise there's nothing finished to show |
+| `GET /runs?mine=1` | Only the runs you requested (combines with `all=1`) | "You" is the Slack user your sign-in email names; a session with no linked Slack user has no runs of its own, and the toolbar's **Show mine** is disabled for it |
 | `GET /runs/<id>` | One run: request → steps (tool calls, results) → answer | Live via SSE while the run is active; served as a static page, no token needed, once it's in history |
 | `GET /runs/<id>/events` | Raw SSE event stream for that run | What the run page itself consumes; resumable via `Last-Event-ID` |
 | `GET /runs/<id>/friction` | Why a finished run was slow, if it was | Read-only diagnosis, no side effects |
