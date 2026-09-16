@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.232.0](https://github.com/coreplanelabs/switchboard/compare/v1.231.1...v1.232.0) (2026-09-16)
+
+
+### Features
+
+* **ship:** a ship task adopts its thread's open pull request, a bare reference resumes any author's, and the report names the pull request's own auto-merge ([#1322](https://github.com/coreplanelabs/switchboard/issues/1322)) ([57e37ee](https://github.com/coreplanelabs/switchboard/commit/57e37ee76f42ec9e5bc7f80390a70646b1969746))
+
+
+### Bug fixes
+
+* **harness:** the resident's answers that its container is gone under a run are the typed restart the pi harness keys on, at once ([#1321](https://github.com/coreplanelabs/switchboard/issues/1321)) ([d78adcb](https://github.com/coreplanelabs/switchboard/commit/d78adcb4fd9ae9091b62b349175bd8894cb95d45))
+* **resident:** a thread rebound onto its own pull request keeps its uncommitted work through the attach, and a description resubmitted after that pull request merged still edits it ([#1327](https://github.com/coreplanelabs/switchboard/issues/1327)) ([81c51c4](https://github.com/coreplanelabs/switchboard/commit/81c51c4fcf8de453bb3ac76143e4d7777bc3eb8e))
+
+
+### Documentation
+
+* **docs:** known limits names the runtime error a plan runner logs when it outlives a bot deploy ([#1330](https://github.com/coreplanelabs/switchboard/issues/1330)) ([0c48221](https://github.com/coreplanelabs/switchboard/commit/0c482217300c85e4a3d35dd4e7816b5bd98c7342))
+* **docs:** record 0038's fourth amendment makes OpenCode the second harness, built for real, and the stage A plan is rewritten for it ([#1331](https://github.com/coreplanelabs/switchboard/issues/1331)) ([3f9a21e](https://github.com/coreplanelabs/switchboard/commit/3f9a21e316fc6fa6759078f1ec25a8723930282a))
+
 ## [1.231.1](https://github.com/coreplanelabs/switchboard/compare/v1.231.0...v1.231.1) (2026-09-16)
 
 
