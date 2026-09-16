@@ -57,6 +57,10 @@ export const ROUTE_TIMEOUT_MS = 8_000;
 export const ROUTE_PART_TEXT_CAP = 1000;
 /** The most of a part's text the card's line shows. */
 export const ROUTE_PART_LINE_CAP = 100;
+/** The chars budgeted per value of an offered tool's answer when its schema
+ *  declares no `maxLength` — the output cap's per-value assumption for the
+ *  command tools the menu offers (record 0036, unit 2). */
+export const ROUTE_COMMAND_VALUE_CAP = 200;
 /** The line that opens the parts block of a routed conductor's brief; the
  *  conductor's prompt (`CONDUCTOR_SYSTEM`) names the same words. */
 export const COMPOUND_BRIEF_HEADING = "Routed as a compound request";
@@ -189,14 +193,30 @@ export interface RoutePrompt {
  *  below `ROUTE_MIN_OUTPUT_TOKENS`. Only what the model generates is billed, so
  *  a cap above the shape costs nothing; a cap below it would cut legal answers
  *  (the compound form's parts once could not fit under the single-route cap). */
-export function routeMaxOutputTokens(compound?: CompoundOffer): number {
-  const PART_JSON_OVERHEAD = 40; // `{"preset": "…", "text": "…"}, ` around a part
-  const ANSWER_JSON_OVERHEAD = 80; // the object, the keys, the preset name
-  const chars =
+export function routeMaxOutputTokens(compound?: CompoundOffer, tools?: readonly ToolDef[]): number {
+  const routeChars =
     ANSWER_JSON_OVERHEAD +
     ROUTE_REASON_CAP +
     (compound ? compound.maxParts * (ROUTE_PART_TEXT_CAP + PART_JSON_OVERHEAD) : 0);
+  const chars = Math.max(routeChars, ...(tools ?? []).map(toolAnswerChars));
   return Math.max(ROUTE_MIN_OUTPUT_TOKENS, Math.ceil(chars / 3));
+}
+
+const PART_JSON_OVERHEAD = 40; // `{"preset": "…", "text": "…"}, ` around a part
+const ANSWER_JSON_OVERHEAD = 80; // the object, the keys, the preset name
+const FIELD_JSON_OVERHEAD = 8; // the quotes, the colon, the comma around one field
+
+/** The largest answer one offered tool's schema accepts, in characters: per
+ *  property its declared `maxLength` where one exists and
+ *  `ROUTE_COMMAND_VALUE_CAP` otherwise, plus the JSON around them. */
+function toolAnswerChars(tool: ToolDef): number {
+  const properties = (tool.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
+  let chars = ANSWER_JSON_OVERHEAD;
+  for (const [key, schema] of Object.entries(properties)) {
+    const max = (schema as { maxLength?: unknown }).maxLength;
+    chars += key.length + FIELD_JSON_OVERHEAD + (typeof max === "number" ? max : ROUTE_COMMAND_VALUE_CAP);
+  }
+  return chars;
 }
 
 /** The answer as a tool the model is forced to call (`CompletionRequest.toolChoice`):
@@ -282,9 +302,21 @@ export interface CollapsedCompound {
   presets: string[];
 }
 
-/** The one seam to the model: the prompt in, the model's text out. Production
- *  wraps a provider (`providerRouteModel`); tests script one. */
-export type RouteModel = (prompt: RoutePrompt, opts: { maxTokens: number; signal: AbortSignal }) => Promise<string>;
+/** The one tool call a forced answer carries, as the seam hands it back: the
+ *  tool's name and its input — the answer itself when the tool is the route
+ *  tool, a command decision once the menu is offered (record 0036, unit 2). */
+export interface RouteToolCall {
+  tool: string;
+  input: unknown;
+}
+
+/** The one seam to the model: the prompt in, the model's one tool call —
+ *  `{ tool, input }` — or its text out. Production wraps a provider
+ *  (`providerRouteModel`); tests script one. */
+export type RouteModel = (
+  prompt: RoutePrompt,
+  opts: { maxTokens: number; signal: AbortSignal },
+) => Promise<RouteToolCall | string>;
 
 /** The request text quoted as data: a tag the text carries is bent so it
  *  cannot close the quote, and the text is cut at the cap with a note. */
@@ -599,10 +631,19 @@ export async function route(
   const prompt = buildRoutePrompt({ ...rest, presets: offered, ...(compound ? { compound } : {}) });
   let raw: string;
   try {
-    raw = await model(prompt, {
+    const answer = await model(prompt, {
       maxTokens: routeMaxOutputTokens(compound),
       signal: AbortSignal.timeout(opts.timeoutMs ?? ROUTE_TIMEOUT_MS),
     });
+    if (typeof answer === "string") {
+      raw = answer;
+    } else if (answer.tool === ROUTE_TOOL_NAME) {
+      raw = JSON.stringify(answer.input);
+    } else {
+      // A call to another tool is a command decision once the menu is offered
+      // (record 0036, unit 2); until then no other tool rides the request.
+      return { preset: undefined, reason: tidyReason(`router called tool "${answer.tool}", not the route tool`) };
+    }
   } catch (err) {
     return {
       preset: undefined,
@@ -672,11 +713,13 @@ export function providerRouteModel(
       ...(forced ? { tools: [prompt.tool], toolChoice: { type: "tool", name: prompt.tool.name } } : {}),
     });
     if (result.stopReason === "max_tokens") throw new Error(`answer cut at the output cap (${call.maxTokens} tokens)`);
-    const answer = result.content.find(
-      (p): p is { type: "tool_use"; id: string; name: string; input: unknown } =>
-        p.type === "tool_use" && p.name === prompt.tool.name,
+    const calls = result.content.filter(
+      (p): p is { type: "tool_use"; id: string; name: string; input: unknown } => p.type === "tool_use",
     );
-    if (answer) return JSON.stringify(answer.input);
+    // Parallel calls are switched off on the wire (piStreamOptions' payload
+    // hook); a provider that sends two anyway did not answer the question.
+    if (calls.length > 1) throw new Error(`answer carried ${calls.length} tool calls; the route is one call`);
+    if (calls.length === 1) return { tool: calls[0]!.name, input: calls[0]!.input };
     return result.content
       .filter((p): p is { type: "text"; text: string } => p.type === "text")
       .map((p) => p.text)

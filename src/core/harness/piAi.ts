@@ -196,7 +196,12 @@ export class PiAiProvider implements Provider {
  *  request's TTL asks for (`1h` → long; else pi's default, short), and the
  *  forced tool call as each API spells it — Anthropic's `tool_choice: {type:
  *  "tool", name}`, Chat Completions' `{type: "function", function: {name}}`
- *  — the same two spellings the native adapters sent. */
+ *  — the same two spellings the native adapters sent — or, for `{type: "any"}`
+ *  (one tool of many, the router's menu), each API's own word for it —
+ *  Anthropic's `"any"`, Chat Completions' `"required"` — with an `onPayload`
+ *  hook that switches parallel calls off on the wire
+ *  (`tool_choice.disable_parallel_tool_use: true` / `parallel_tool_calls:
+ *  false`), so a forced answer is exactly one call. */
 export function piStreamOptions(
   api: PiApi,
   req: CompletionRequest,
@@ -209,9 +214,30 @@ export function piStreamOptions(
     cacheRetention: req.cacheTtl === "1h" ? ("long" as const) : ("short" as const),
   };
   if (!req.toolChoice) return shared;
+  if (req.toolChoice.type === "any") {
+    return api === "anthropic-messages"
+      ? { ...shared, toolChoice: "any", onPayload: anthropicParallelOff }
+      : { ...shared, toolChoice: "required", onPayload: openAiParallelOff };
+  }
   return api === "anthropic-messages"
     ? { ...shared, toolChoice: { type: "tool", name: req.toolChoice.name } }
     : { ...shared, toolChoice: { type: "function", function: { name: req.toolChoice.name } } };
+}
+
+/** The wire payload with Anthropic's parallel switch off: `disable_parallel_tool_use`
+ *  rides inside `tool_choice`, beside the `any` pi already put there. */
+function anthropicParallelOff(payload: unknown): unknown {
+  const p = payload as { tool_choice?: Record<string, unknown> };
+  return {
+    ...(payload as Record<string, unknown>),
+    tool_choice: { ...p.tool_choice, disable_parallel_tool_use: true },
+  };
+}
+
+/** The same switch in Chat Completions' dialect: `parallel_tool_calls: false`
+ *  beside the `required` choice. */
+function openAiParallelOff(payload: unknown): unknown {
+  return { ...(payload as Record<string, unknown>), parallel_tool_calls: false };
 }
 
 /** The completion vocabulary in pi's shape: the system prompt, every turn as
