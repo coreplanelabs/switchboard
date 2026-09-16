@@ -28,6 +28,7 @@ import {
   type CompoundExample,
   type ReplayRequest,
   type ReplayResult,
+  typedLabels,
 } from "./routeReplay.js";
 
 // `load:route` (docs/reference/specs/load-harness.md item 17): the router
@@ -827,6 +828,26 @@ describe("the imperative set through route() over a scripted model", () => {
 // The checks the receipt's verdict is made of (load-harness item 17): the
 // accuracy bar, every request answered, record 0026's read-only-to-write
 // clause as a row of its own, the compound bars and the imperative bars.
+describe("typedLabels — the table's requests are the ones whose preset was typed for the message", () => {
+  const req = (id: string, labelSource: ReplayRequest["labelSource"]): ReplayRequest => ({
+    id,
+    label: "review",
+    text: "look at PR 9",
+    labelSource,
+  });
+
+  it("keeps a directive label and drops a sticky or unstamped one: a sticky label is the thread's preset carried onto a later message, not the message's own", () => {
+    const kept = typedLabels([
+      req("d", "directive"),
+      req("s", "sticky"),
+      req("u", "unstamped"),
+      req("d2", "directive"),
+    ]);
+    expect(kept.map((r) => r.id)).toEqual(["d", "d2"]);
+    expect(typedLabels([])).toEqual([]);
+  });
+});
+
 describe("readToWriteRoutes + routeChecks — the verdict's rows", () => {
   const result = (
     label: string,
@@ -869,7 +890,7 @@ describe("readToWriteRoutes + routeChecks — the verdict's rows", () => {
       writePreset: "coding",
     });
     expect(checks.map((c) => c.name)).toEqual([
-      "routing accuracy ≥ 95% against the presets people typed (record 0026's bar)",
+      "routing accuracy ≥ 95% against the presets people typed for the message (directive labels; record 0026's bar)",
       "every request answered with a preset",
       "read-only labels routed to a write preset: 0 (record 0026's clause)",
       "compound detected on ≥ 90% of the checked-in compound asks",

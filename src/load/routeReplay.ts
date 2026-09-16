@@ -35,9 +35,21 @@ export interface ReplayRequest {
    *  on a preset other than the deployment's default: the requester may have
    *  typed it, the thread may have carried it, or a channel or user scope's
    *  `agent` may have set it, and the record cannot say which (its `input` is
-   *  directive-stripped). Replayed, but reported apart from the accuracy table
-   *  and its bar. */
+   *  directive-stripped). Only a `directive` label was typed for the message
+   *  itself (`typedLabels`): a `sticky` one is the thread's preset carried onto
+   *  a later message, so it and `unstamped` are replayed but reported apart
+   *  from the accuracy table, its bar and the read-only-to-write clause. */
   labelSource: "directive" | "sticky" | "unstamped";
+}
+
+/** The requests the confusion table and record 0026's clause are scored on:
+ *  the ones whose preset was typed for that message (`directive`). A sticky
+ *  label is the thread's earlier choice riding a later message — "in one short
+ *  paragraph, say what this thread changed" labelled `ship` — so it says
+ *  nothing about the router; the replay that moved the write door to `ship`
+ *  scored directive labels 246/249 and sticky ones 30/51. */
+export function typedLabels<T extends { labelSource: ReplayRequest["labelSource"] }>(requests: readonly T[]): T[] {
+  return requests.filter((r) => r.labelSource === "directive");
 }
 
 /** Why a record was not a labelled request. */
@@ -582,7 +594,7 @@ export function renderImperative(
 
 /** What the receipt's verdict is made of. */
 export interface RouteCheckInput {
-  /** The confusion table over the stamped labels (directive and sticky). */
+  /** The confusion table over the directive labels (`typedLabels`). */
   table: ConfusionTable;
   /** How many of those the router answered with a preset. */
   answered: number;
@@ -610,7 +622,7 @@ export function routeChecks(input: RouteCheckInput): SloCheck[] {
   const breaks = readToWriteRoutes(table.misroutes).map((r) => r.id);
   return [
     {
-      name: "routing accuracy ≥ 95% against the presets people typed (record 0026's bar)",
+      name: "routing accuracy ≥ 95% against the presets people typed for the message (directive labels; record 0026's bar)",
       pass: table.accuracy >= 0.95,
       actual: Number.isFinite(table.accuracy) ? pct(table.accuracy) : "no labelled requests",
       limit: "≥ 95%",
