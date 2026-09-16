@@ -185,3 +185,83 @@ export function isBackupMissing(shape: { name?: string; message?: string }): boo
   if (shape.name === "BackupNotFoundError") return true;
   return /Backup (?:archive )?not found/i.test(shape.message ?? "");
 }
+
+// -- the bot's half: from the resident's handle to a selection -----------------
+
+/** The seed handle as the resident's `/status` publishes it (the bot's probe
+ *  carries it as `seed`, [resident.ts](./resident.ts)). */
+export interface SeedHandle {
+  checkoutBackupId: string;
+  depsBackupId?: string;
+  ref: string;
+  sha: string;
+}
+
+/** The seed for one thread: the resident's handle plus the thread's own ref
+ *  and resolved head when it has them — a thread bound to a branch is checked
+ *  out on it, a thread with none stays on the snapshot's. */
+export function seedForThread(
+  handle: SeedHandle,
+  thread: { slug: string; ref?: string; headSha?: string },
+): SandboxSeed {
+  return {
+    slug: thread.slug,
+    checkoutBackupId: handle.checkoutBackupId,
+    ...(handle.depsBackupId ? { depsBackupId: handle.depsBackupId } : {}),
+    ref: handle.ref,
+    sha: handle.sha,
+    ...(thread.ref ? { fetchRef: thread.ref } : {}),
+    ...(thread.ref && thread.headSha ? { fetchSha: thread.headSha } : {}),
+  };
+}
+
+/** What a seeded sandbox is, on the selection: where the checkout is and what
+ *  it is on, for the prompt and the card. */
+export interface SeededSandbox {
+  slug: string;
+  ref: string;
+  sha: string;
+  /** The checkout's path inside the sandbox — the run's working tree. */
+  workspace: string;
+  /** The container already carried this seed: nothing was restored. */
+  cached: boolean;
+  ms: number;
+}
+
+/** After a refused seed: retry once with a fresh handle when the handle's
+ *  objects were gone and the resident has since published another (a rotation
+ *  took the first); otherwise the run goes cold, and the reason says why. */
+export type SeedRetry = { action: "retry"; seed: SandboxSeed } | { action: "cold"; why: string };
+
+export function seedRetryDecision(input: {
+  answer: Extract<SeedAnswer, { seeded: false }>;
+  attempted: SandboxSeed;
+  fresh: SeedHandle | undefined;
+  alreadyRetried: boolean;
+}): SeedRetry {
+  const { answer, attempted, fresh } = input;
+  if (answer.reason === "seed-missing" && !input.alreadyRetried) {
+    if (fresh && fresh.checkoutBackupId !== attempted.checkoutBackupId) {
+      return {
+        action: "retry",
+        seed: seedForThread(fresh, {
+          slug: attempted.slug,
+          ...(attempted.fetchRef ? { ref: attempted.fetchRef } : {}),
+          ...(attempted.fetchSha ? { headSha: attempted.fetchSha } : {}),
+        }),
+      };
+    }
+    return { action: "cold", why: `seed missing (${answer.detail}) and the resident published no newer handle` };
+  }
+  return { action: "cold", why: `${answer.reason.replace("seed-", "seed ")} (${answer.detail})` };
+}
+
+/** The card's one line for a seeded sandbox, after the reason the resident
+ *  was not used: what it was seeded from, so a reader tells the three paths
+ *  — resident, seeded, cold — apart from Slack alone. */
+export function seededSandboxNote(
+  reason: string,
+  seeded: Pick<SeededSandbox, "slug" | "ref" | "sha" | "cached">,
+): string {
+  return `${reason} — seeded sandbox · from resident snapshot${seeded.cached ? " (already seeded)" : ""} · ${seeded.slug} · ${seeded.ref}@${seeded.sha.slice(0, 7)}`;
+}

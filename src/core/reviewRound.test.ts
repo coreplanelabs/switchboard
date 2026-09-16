@@ -3,6 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AGENTS } from "../agents/registry.js";
+import { reviewTargetBlock } from "./reviewTarget.js";
 import { declaredProfile } from "../config/profile.js";
 import { resetResidentProbeCache } from "../execution/factory.js";
 import type { Executor } from "../execution/executor.js";
@@ -838,5 +839,78 @@ describe("settleReviewedHead — the head-move re-review", () => {
       carried: undefined,
     });
     expect(w.input.messages).toHaveLength(1); // nothing appended: no turn was asked
+  });
+});
+
+// Feature: docs/reference/specs/execution.md item 26 — a seeded sandbox gets the
+// agent's seeded variant naming the checkout, and a review's REVIEW TARGET
+// block its seeded branch; a resident run is never seeded, and resident wins.
+describe("makeSystemComposer — the seeded sandbox", () => {
+  const blocks = { memory: undefined, config: undefined, instructions: undefined, skills: undefined };
+
+  it("swaps in the seeded variant and names the checkout and the repository", () => {
+    const compose = makeSystemComposer({
+      agent: AGENTS.coding,
+      resident: false,
+      repo: "acme/api",
+      workspace: undefined,
+      seeded: { workspace: "/workspace/checkout" },
+      prTarget: undefined,
+      blocks,
+    });
+    const system = compose({ sha: undefined, verified: false });
+    expect(system.startsWith(AGENTS.coding.seededSystem!)).toBe(true);
+    expect(system).toContain("Target repository: acme/api.");
+    expect(system).toContain("cd /workspace/checkout");
+    expect(system).not.toContain(AGENTS.coding.system);
+  });
+
+  it("a seeded review carries the REVIEW TARGET block's seeded branch — no clone, the checkout named, the head check first", () => {
+    const compose = makeSystemComposer({
+      agent: AGENTS.review,
+      resident: false,
+      repo: "acme/api",
+      workspace: undefined,
+      seeded: { workspace: "/workspace/checkout" },
+      prTarget: { repo: "acme/api", pr: 42, ref: "patch-1", baseRef: "main" },
+      blocks,
+    });
+    const system = compose({ sha: "e".repeat(40), verified: false });
+    expect(system).toContain(AGENTS.review.seededSystem!);
+    expect(system).toContain(
+      reviewTargetBlock({
+        repo: "acme/api",
+        pr: 42,
+        ref: "patch-1",
+        baseRef: "main",
+        headSha: "e".repeat(40),
+        resident: false,
+        seeded: { workspace: "/workspace/checkout" },
+      }),
+    );
+    expect(system).not.toContain("gh pr checkout");
+  });
+
+  it("resident wins: a seeded flag beside resident is ignored, and without a seeded variant the agent's own prompt stands", () => {
+    const both = makeSystemComposer({
+      agent: AGENTS.coding,
+      resident: true,
+      repo: "acme/api",
+      workspace: "/workspace/threads/t/main",
+      seeded: { workspace: "/workspace/checkout" },
+      prTarget: undefined,
+      blocks,
+    })({ sha: undefined, verified: false });
+    expect(both.startsWith(AGENTS.coding.residentSystem!)).toBe(true);
+    const general = makeSystemComposer({
+      agent: AGENTS.general,
+      resident: false,
+      repo: undefined,
+      workspace: undefined,
+      seeded: { workspace: "/workspace/checkout" },
+      prTarget: undefined,
+      blocks,
+    })({ sha: undefined, verified: false });
+    expect(general).toBe(AGENTS.general.system);
   });
 });

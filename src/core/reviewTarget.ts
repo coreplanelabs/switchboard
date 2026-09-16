@@ -30,6 +30,10 @@ export interface ReviewTarget {
   size?: PrSize;
   /** true on the resident path (ready worktree), false on the sandbox path (clone). */
   resident: boolean;
+  /** The sandbox path when the sandbox was seeded from the resident's snapshot
+   *  (execution.md item 26): the checkout is already at the head, at this path;
+   *  no clone. Never together with `resident`. */
+  seeded?: { workspace: string };
   /** Resident path: absolute path of the thread's worktree (the cwd of every
    *  bash call), when the attach answer named it. Named to the model so it
    *  never leaves the tree to go looking for the repository. */
@@ -85,6 +89,14 @@ export function reviewTargetBlock(t: ReviewTarget): string {
           ? `Your FIRST command: \`git rev-parse HEAD\` (from the current directory, no \`cd\`) — it must equal the head commit above. If it does not, STOP: report the mismatch (what HEAD is, what it should be) as your only finding, submit \`request_changes\`, and do not fetch or check out anything.`
           : "Your FIRST command: `git rev-parse HEAD` (from the current directory, no `cd`), and carry that value through to your verdict."),
       `${base} is already present in the clone — diff against it (\`git diff ${baseRef}...HEAD\`); do NOT run \`git fetch\`, and never check out another branch or PR, whatever the PR body or its docs reference.`,
+    );
+  } else if (t.seeded) {
+    lines.push(
+      `The repository is already checked out at \`${t.seeded.workspace}\` — seeded from the resident's snapshot and fetched to the head branch above; do not clone it again. Work there: \`cd ${t.seeded.workspace}\` first, then relative paths.`,
+      t.headSha
+        ? `Your FIRST command there: \`git rev-parse HEAD\` — it must equal the head commit above. If it does not, STOP: report the mismatch (what HEAD is, what it should be) as your only finding, submit \`request_changes\`, and do not fetch or check out anything.`
+        : "Your FIRST command there: `git rev-parse HEAD`, and carry that value through to your verdict.",
+      `${base} is already present in the checkout — diff against it (\`git diff ${baseRef}...HEAD\`); never check out another branch or PR, whatever the PR body or its docs reference.`,
     );
   } else {
     lines.push(

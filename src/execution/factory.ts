@@ -11,6 +11,16 @@ import { LocalExecutor, type Executor } from "./executor.js";
 import { E2BExecutor } from "./e2b.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import {
+  SEED_CHECKOUT_DIR,
+  seedForThread,
+  seedRetryDecision,
+  seededSandboxNote,
+  type SandboxSeed,
+  type SeedAnswer,
+  type SeedHandle,
+  type SeededSandbox,
+} from "./seedPlan.js";
+import {
   ResidentExecutor,
   ResidentNeedsRefError,
   type ResidentBinding,
@@ -180,6 +190,11 @@ export interface ExecutorSelection {
   executor: Executor;
   note?: string;
   resident?: boolean;
+  /** The sandbox was seeded from the resident's snapshot before the run
+   *  (docs/reference/specs/execution.md item 26): where the checkout is and
+   *  what it is on — the dispatcher's seeded prompt variant and the card read
+   *  it. Unset on every other path, the cold sandbox included. */
+  seeded?: SeededSandbox;
   /** Where the run's commands execute (docs/reference/specs/tracing.md): recorded on its
    *  `exec.*` spans. Every production selection names one; a test double may
    *  leave it out. */
@@ -270,6 +285,10 @@ export async function makeExecutor(
   // stall). A repo that is simply not onboarded also runs per-thread, but
   // carries a note so the cold fall-through is visible (with the onboarding fix).
   let note: string | undefined;
+  /** Why the resident was not used, when a sandbox is the fallback for a
+   *  repository that HAS a resident — the seed's chance (item 26): the not-
+   *  onboarded case has no snapshot and keeps its own note. */
+  let reason: string | undefined;
   /** The steps of a resident attach that failed before the sandbox fallback. */
   let failedAttach: ResidentTrace | undefined;
   if (ctx.repo && opts.execution?.resident) {
@@ -315,14 +334,12 @@ export async function makeExecutor(
       } catch (err) {
         if (err instanceof ResidentNeedsRefError) throw err;
         failedAttach = residentTraceOf(err);
-        note = oneLine(
-          `resident attach failed (${err instanceof Error ? err.message : String(err)}) — using fresh sandbox`,
-        );
+        reason = oneLine(`resident attach failed (${err instanceof Error ? err.message : String(err)})`);
       }
     } else if (probe.kind === "unreachable") {
-      note = oneLine(`resident unreachable (${probe.error}) — using fresh sandbox`);
+      reason = oneLine(`resident unreachable (${probe.error})`);
     } else if (probe.state !== "not-onboarded") {
-      note = oneLine(`resident ${probe.state}${probe.reason ? ` (${probe.reason})` : ""} — using fresh sandbox`);
+      reason = oneLine(`resident ${probe.state}${probe.reason ? ` (${probe.reason})` : ""}`);
     } else {
       // not-onboarded is the ordinary per-thread case — but still make the cold
       // fall-through visible: the user needs to know coding ran cold in a
@@ -332,6 +349,36 @@ export async function makeExecutor(
         `repo not onboarded as a resident — running in a cold per-thread sandbox; ` +
         `onboard it (\`repo onboard ${ctx.repo}\`) for a warm, deps-ready environment`;
     }
+    if (reason !== undefined) {
+      // The seed (docs/reference/specs/execution.md item 26): the resident could
+      // not take the run, but its probe carried the snapshot handle — the
+      // sandbox restores it before the run's first command instead of cloning
+      // and installing from nothing. Nothing to seed from (an unreachable
+      // resident answers no body; a Worker that is not the cloudflare one has
+      // no /seed) → the cold path as before, and so does a refused seed, with
+      // the refusal on the note.
+      const executor = await makePerThreadExecutor(opts, perThreadCheckout(ctx));
+      const handle = probe.kind === "status" ? probe.seed : undefined;
+      const outcome =
+        handle && executor instanceof CloudflareSandboxExecutor
+          ? await seedSandbox(executor, handle, ctx, () => probeResident(resident, token, resource, span), span)
+          : undefined;
+      if (outcome && "seeded" in outcome) {
+        return {
+          executor,
+          note: seededSandboxNote(reason, outcome.seeded),
+          backend: perThreadBackend(opts),
+          seeded: outcome.seeded,
+          ...(failedAttach ? { trace: failedAttach.steps } : {}),
+        };
+      }
+      return {
+        executor,
+        note: `${reason} — using fresh sandbox${outcome ? ` (${outcome.why})` : ""}`,
+        backend: perThreadBackend(opts),
+        ...(failedAttach ? { trace: failedAttach.steps } : {}),
+      };
+    }
   }
 
   return {
@@ -340,6 +387,56 @@ export async function makeExecutor(
     backend: perThreadBackend(opts),
     ...(failedAttach ? { trace: failedAttach.steps } : {}),
   };
+}
+
+/** Seed the thread's sandbox from the resident's handle (item 26): one
+ *  `POST /seed` with the thread's own ref and head riding along; a handle whose
+ *  objects are gone (`seed-missing` — a rotation took them) re-reads `/status`
+ *  once and retries with the newer handle; any other refusal, or a Worker that
+ *  has no `/seed` (an older release answers 404, an infra error here), sends
+ *  the run cold with the reason for the note. The seed's own wait for a full
+ *  fleet or a starting container is the executor's, as for every route. */
+async function seedSandbox(
+  executor: CloudflareSandboxExecutor,
+  handle: SeedHandle,
+  ctx: ExecutorContext,
+  reprobe: () => Promise<ResidentStatusProbe>,
+  span?: Span,
+): Promise<{ seeded: SeededSandbox } | { why: string }> {
+  let seed: SandboxSeed = seedForThread(handle, {
+    slug: ctx.repo!,
+    ...(ctx.ref ? { ref: ctx.ref } : {}),
+    ...(ctx.headSha ? { headSha: ctx.headSha } : {}),
+  });
+  for (let retried = false; ; retried = true) {
+    let answer: SeedAnswer;
+    try {
+      answer = await executor.seed(seed, { span });
+    } catch (err) {
+      return { why: oneLine(`seed failed (${err instanceof Error ? err.message : String(err)})`) };
+    }
+    if (answer.seeded) {
+      return {
+        seeded: {
+          slug: answer.slug,
+          ref: answer.ref,
+          sha: answer.sha,
+          workspace: SEED_CHECKOUT_DIR,
+          cached: answer.cached,
+          ms: answer.ms,
+        },
+      };
+    }
+    const fresh = answer.reason === "seed-missing" && !retried ? await reprobe() : undefined;
+    const decision = seedRetryDecision({
+      answer,
+      attempted: seed,
+      fresh: fresh?.kind === "status" ? fresh.seed : undefined,
+      alreadyRetried: retried,
+    });
+    if (decision.action === "cold") return { why: oneLine(decision.why) };
+    seed = decision.seed;
+  }
 }
 
 /** The resumed run's re-attach (run-history item 54): the recorded backend

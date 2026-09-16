@@ -12,7 +12,10 @@ import {
   SEED_RESTORE_MAX_MS,
   SEED_ABANDONED_RESTORE_WAIT_MS,
   seedFixupScript,
+  seedForThread,
   seedMarkerText,
+  seedRetryDecision,
+  seededSandboxNote,
   type SandboxSeed,
 } from "./seedPlan.js";
 
@@ -236,5 +239,119 @@ describe("seedMarkerText", () => {
       `${seed.checkoutBackupId} feat/x 89abcdef0123456789abcdef0123456789abcdef`,
     );
     expect(seedMarkerText({ ...seed, fetchRef: "feat/y" })).not.toBe(seedMarkerText({ ...seed, fetchRef: "feat/x" }));
+  });
+});
+
+// The bot's half of the plan (docs/reference/specs/execution.md item 26): the
+// thread's seed from the resident's handle, the retry-then-cold decision after
+// a refusal, the card's line.
+describe("seedForThread", () => {
+  const handle = {
+    checkoutBackupId: seed.checkoutBackupId,
+    depsBackupId: seed.depsBackupId!,
+    ref: "main",
+    sha: seed.sha,
+  };
+  it("carries the handle and the thread's ref and head; a thread without a ref stays on the snapshot's branch", () => {
+    expect(
+      seedForThread(handle, {
+        slug: "acme/widgets",
+        ref: "feat/x",
+        headSha: "89abcdef0123456789abcdef0123456789abcdef",
+      }),
+    ).toEqual({
+      ...seed,
+      fetchRef: "feat/x",
+      fetchSha: "89abcdef0123456789abcdef0123456789abcdef",
+    });
+    expect(seedForThread(handle, { slug: "acme/widgets" })).toEqual(seed);
+    // a head without a ref is nothing to check out
+    expect(
+      seedForThread(handle, { slug: "acme/widgets", headSha: "89abcdef0123456789abcdef0123456789abcdef" }),
+    ).toEqual(seed);
+  });
+  it("a handle without a deps entry seeds the checkout alone", () => {
+    const { depsBackupId: _d, ...bare } = handle;
+    expect(seedForThread(bare, { slug: "acme/widgets" })).not.toHaveProperty("depsBackupId");
+  });
+});
+
+describe("seedRetryDecision", () => {
+  const attempted = { ...seed, fetchRef: "feat/x" };
+  const missing = {
+    seeded: false as const,
+    reason: "seed-missing" as const,
+    detail: "restore: Backup not found: 3f2a",
+  };
+  it("the handle's objects gone and a newer handle published → retry once with it, on the same thread ref", () => {
+    const fresh = {
+      checkoutBackupId: "9999aaaa-bbbb-cccc-dddd-eeeeffff0000",
+      ref: "main",
+      sha: "89abcdef0123456789abcdef0123456789abcdef",
+    };
+    expect(seedRetryDecision({ answer: missing, attempted, fresh, alreadyRetried: false })).toEqual({
+      action: "retry",
+      seed: {
+        slug: seed.slug,
+        checkoutBackupId: fresh.checkoutBackupId,
+        ref: "main",
+        sha: fresh.sha,
+        fetchRef: "feat/x",
+      },
+    });
+  });
+  it("the same handle again, or none, or a second miss → cold, saying why", () => {
+    const same = { checkoutBackupId: seed.checkoutBackupId, ref: "main", sha: seed.sha };
+    expect(seedRetryDecision({ answer: missing, attempted, fresh: same, alreadyRetried: false })).toEqual({
+      action: "cold",
+      why: "seed missing (restore: Backup not found: 3f2a) and the resident published no newer handle",
+    });
+    expect(seedRetryDecision({ answer: missing, attempted, fresh: undefined, alreadyRetried: false }).action).toBe(
+      "cold",
+    );
+    expect(
+      seedRetryDecision({
+        answer: missing,
+        attempted,
+        fresh: { ...same, checkoutBackupId: "9999aaaa-bbbb-cccc-dddd-eeeeffff0000" },
+        alreadyRetried: true,
+      }).action,
+    ).toBe("cold");
+  });
+  it("a failed or unconfigured seed is never retried", () => {
+    expect(
+      seedRetryDecision({
+        answer: { seeded: false, reason: "seed-failed", detail: "fixup: fix-up exited 128", step: "fixup" },
+        attempted,
+        fresh: { checkoutBackupId: "9999aaaa-bbbb-cccc-dddd-eeeeffff0000", ref: "main", sha: seed.sha },
+        alreadyRetried: false,
+      }),
+    ).toEqual({ action: "cold", why: "seed failed (fixup: fix-up exited 128)" });
+    expect(
+      seedRetryDecision({
+        answer: { seeded: false, reason: "seed-unconfigured", detail: "presigned R2 transfer needs R2_ACCESS_KEY_ID" },
+        attempted,
+        fresh: undefined,
+        alreadyRetried: false,
+      }),
+    ).toEqual({ action: "cold", why: "seed unconfigured (presigned R2 transfer needs R2_ACCESS_KEY_ID)" });
+  });
+});
+
+describe("seededSandboxNote", () => {
+  it("names the reason the resident was not used, then what the sandbox was seeded from — ref@sha7", () => {
+    expect(
+      seededSandboxNote("resident degraded (disk-pressure)", {
+        slug: "acme/widgets",
+        ref: "feat/x",
+        sha: "89abcdef0123456789abcdef0123456789abcdef",
+        cached: false,
+      }),
+    ).toBe(
+      "resident degraded (disk-pressure) — seeded sandbox · from resident snapshot · acme/widgets · feat/x@89abcde",
+    );
+    expect(
+      seededSandboxNote("resident restoring", { slug: "a/b", ref: "main", sha: seed.sha, cached: true }),
+    ).toContain("(already seeded)");
   });
 });
