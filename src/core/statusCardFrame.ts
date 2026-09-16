@@ -33,7 +33,10 @@ export const ROUTED_LABEL_PREFIX = "routed:";
  *  path, only the pointer. A close and never a live frame: while the run is
  *  live the same reply is refused as a rival (thread-admission item 1). Plain
  *  text, no backticks: the Slack card's body is literal rich text. */
-export const ROUTED_CARD_FOOTER = "reply agent:<preset> to run it another way";
+export const ROUTED_CARD_FOOTER = "wrong preset? reply agent:<preset> to run it another way";
+// The line opens with a question so it reads as an offer to someone who did not
+// type a directive; the earlier "reply agent:<preset> to run it another way" was
+// read as the bot demanding a well-formed command.
 
 /** How a card closes. `done` is a run that ran (any outcome; the icon says
  *  which) and carries the run's duration, checklist and link. The other three
