@@ -1,5 +1,37 @@
 # Changelog
 
+## [1.237.0](https://github.com/coreplanelabs/switchboard/compare/v1.236.0...v1.237.0) (2026-09-16)
+
+
+### Features
+
+* **authz:** a dashboard session acts as the Slack user its email names, so its own runs, scope and MCP tier are me and nothing else changes ([#1395](https://github.com/coreplanelabs/switchboard/issues/1395)) ([87eafda](https://github.com/coreplanelabs/switchboard/commit/87eafdacdbd498eb47ac288240055fbc2243a52c))
+* **harness:** a container replaced under a living bot relaunches pi in the new container — the workspace re-attached or refused by name, the bearer rotated with its meter, relayed calls awaited, at most two relaunches ([#1384](https://github.com/coreplanelabs/switchboard/issues/1384)) ([9cd492c](https://github.com/coreplanelabs/switchboard/commit/9cd492c33d3b3070bb10659c2f7d393864623839))
+* **load:** the route replay scores every offered command's binding on checked-in fixtures a conformance fence keeps complete ([#1406](https://github.com/coreplanelabs/switchboard/issues/1406)) ([5acdbef](https://github.com/coreplanelabs/switchboard/commit/5acdbef2dce6fef459fb161ff7de1523e76a149b))
+* **resident:** a resident's fold reads one row per tree — the run, the worktree it holds as a monospace block beside it, the clock at the right — words in the proportional face, identifiers in monospace, provenance demoted to a sub-line ([#1394](https://github.com/coreplanelabs/switchboard/issues/1394)) ([f8422cb](https://github.com/coreplanelabs/switchboard/commit/f8422cb7fa6cf51960428f4472c115b27e94d324))
+* **resident:** under disk pressure the deps store's spares go before any tree — an attach that does not fit evicts every unreferenced entry first, with its backup, and re-probes df before a tree is considered or refused ([#1408](https://github.com/coreplanelabs/switchboard/issues/1408)) ([74aa392](https://github.com/coreplanelabs/switchboard/commit/74aa3923b543707de9fb0931363508fda667faae))
+* **runs:** every run row says who asked for it, and Show mine (runs list --mine, /runs?mine=1) narrows the page to your own runs ([#1399](https://github.com/coreplanelabs/switchboard/issues/1399)) ([942e922](https://github.com/coreplanelabs/switchboard/commit/942e922129fe06f0503fc91cacbe21f4db62dd76))
+* **web:** a settings cog in every page's header is the way to /settings, and settings leaves the section nav ([#1387](https://github.com/coreplanelabs/switchboard/issues/1387)) ([b992a6c](https://github.com/coreplanelabs/switchboard/commit/b992a6caa8b52aa9c55b2394338306a357d1b62e))
+
+
+### Bug fixes
+
+* **dispatcher:** a coordinator's spawned child is never the thread's sticky agent, so a plain-words re-review in a ship thread routes to review ([#1388](https://github.com/coreplanelabs/switchboard/issues/1388)) ([741e4b5](https://github.com/coreplanelabs/switchboard/commit/741e4b591a4dce4c0e8ac4c9f80064044d0cb754))
+* **resident:** a thread whose own branch is gone returns to the default branch, whether a rebind or a ship unit put it there ([#1396](https://github.com/coreplanelabs/switchboard/issues/1396)) ([b7bab08](https://github.com/coreplanelabs/switchboard/commit/b7bab0817bc77a7b18903a24097cdab9b758d9f3))
+* **resident:** a thread's own or rebound branch is verified at the origin on every attach, so its deletion returns the thread to the default at the next follow-up, not the next refresh cycle ([#1407](https://github.com/coreplanelabs/switchboard/issues/1407)) ([cb79630](https://github.com/coreplanelabs/switchboard/commit/cb79630469e93489b9c97278d27de30b54203e51))
+* **resident:** the disk budget's staging reserve counts the archives the cycle stages — mirror and checkout, never the deps, and the deps-store entry's archive only while its backup is in flight ([#1405](https://github.com/coreplanelabs/switchboard/issues/1405)) ([dfd5842](https://github.com/coreplanelabs/switchboard/commit/dfd584254f5079a5fd675f8e358a433d27c3ed7e))
+* **sandbox:** a command's output ends when the command does — the detached wrapper's stdio goes to /dev/null, and an exited process whose output a child still holds is answered by its exit code inside the executor's margin ([#1393](https://github.com/coreplanelabs/switchboard/issues/1393)) ([735274d](https://github.com/coreplanelabs/switchboard/commit/735274d9029ca84b2f041e518e8c380f8ff4e48b))
+* **ship:** a unit branch of ship's own is never a fresh task's base, so a task re-issued in a thread bound at an earlier plan's unit starts off the default branch ([#1391](https://github.com/coreplanelabs/switchboard/issues/1391)) ([1546268](https://github.com/coreplanelabs/switchboard/commit/1546268599d07637b5123700d8d054f728c3e7e0))
+* **ship:** a unit whose pull request merged after the approval ends merged by other, never merge_refused ([#1401](https://github.com/coreplanelabs/switchboard/issues/1401)) ([3a30915](https://github.com/coreplanelabs/switchboard/commit/3a309159653ee07b7cd80e1dbfd2ffbd7724607f))
+
+
+### Documentation
+
+* **docs:** drop the shipped ship-unit page from known limits ([#1385](https://github.com/coreplanelabs/switchboard/issues/1385)) ([958974a](https://github.com/coreplanelabs/switchboard/commit/958974a026e7a598da818f4cbf3197f731e1dc0b))
+* **docs:** record 0042 decides that a dashboard session is the person its email names, as identity and never authority ([#1392](https://github.com/coreplanelabs/switchboard/issues/1392)) ([050a3e8](https://github.com/coreplanelabs/switchboard/commit/050a3e887b1c070c9ab8b6938db5227490e1fe82))
+* **docs:** record 0043 decides that the home page is a chat over a fifth channel adapter, a turn is a run and the conversation is the thread's records ([#1398](https://github.com/coreplanelabs/switchboard/issues/1398)) ([15b7a47](https://github.com/coreplanelabs/switchboard/commit/15b7a47b706d01ea7cf2d986bf65ab89882ef26e))
+* **docs:** the program plan records U7 receipted on 1.236.0's roll, stage A's rotation, bridge and pi relaunch merged under the gate decision, and the tree rule's last gap closed ([#1404](https://github.com/coreplanelabs/switchboard/issues/1404)) ([d9c8377](https://github.com/coreplanelabs/switchboard/commit/d9c83771a4d3cf1dd2c902b174a8e9e4faa80876))
+
 ## [1.236.0](https://github.com/coreplanelabs/switchboard/compare/v1.235.0...v1.236.0) (2026-09-16)
 
 
