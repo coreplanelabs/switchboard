@@ -80,6 +80,7 @@ const GATES: Record<string, (c: Capabilities) => boolean> = {
   "mcp.connect": (c) => c.mcp,
   "mcp.show": (c) => c.mcp,
   "mcp.remove": (c) => c.mcp,
+  "mcp.promote": (c) => c.mcp,
   "schedule.list": (c) => c.schedules,
   "delivery.report": (c) => c.github,
 };

@@ -59,6 +59,12 @@ const canWriteRow = (s: McpServerView) =>
       : props.asUser !== undefined && s.scopeKey === `user:${props.asUser.id}`;
 const isMine = (s: McpServerView) =>
   s.addedBy === props.viewer || (props.asUser !== undefined && s.addedBy === props.asUser.id);
+/** Whose a user-tier row is: the id after `user:` in its scope key. */
+const ownerOf = (s: McpServerView): string => (s.scope === "user" ? s.scopeKey.slice("user:".length) : "");
+/** Who added it, as the service could name them; the id otherwise (record 0042). */
+const addedBy = (s: McpServerView): string => (isMine(s) ? "you" : (s.addedByName ?? s.addedBy ?? ""));
+/** Promote (record 0042): a person's runtime server re-issued in the org tier by an org admin. */
+const canPromote = (s: McpServerView) => s.scope === "user" && s.source === "runtime" && props.mcps.canWrite.org;
 
 const STATE_LABEL: Record<McpServerView["state"], string> = {
   connected: "connected",
@@ -140,6 +146,32 @@ async function remove(s: McpServerView): Promise<void> {
   browser.reload();
 }
 
+async function promote(s: McpServerView): Promise<void> {
+  if (
+    !browser.confirm(
+      `Promote ${s.name} to the org tier? The org gets its own copy — ${ownerOf(s)}'s credential is never copied; a bearer or oauth server needs you to connect it.`,
+    )
+  )
+    return;
+  busy.value = true;
+  notice.value = null;
+  const answer = await postCommand(fetchFn, "mcp.promote", { name: s.name, from: ownerOf(s) });
+  busy.value = false;
+  if (!answer.ok) {
+    notice.value = { kind: "error", text: answer.failure.message };
+    return;
+  }
+  const v = answer.value as { connectUrl?: string };
+  notice.value = v.connectUrl
+    ? {
+        kind: "ok",
+        text: `${s.name} is now an org server awaiting your credential. Open the one-time link to connect it (10 minutes; only you can complete it).`,
+        connectUrl: v.connectUrl,
+      }
+    : { kind: "ok", text: `${s.name} is now an org server.` };
+  if (!v.connectUrl) browser.reload();
+}
+
 async function probe(s: McpServerView): Promise<void> {
   probes[s.name] = "probing…";
   const answer = await getCommand(fetchFn, "mcp.show", {
@@ -167,6 +199,11 @@ async function probe(s: McpServerView): Promise<void> {
         ><strong>me</strong> reaches the runs you ask for as {{ asUser.name ?? asUser.id }}.</template
       ><template v-else
         >personal servers are added in chat (<code>mcp add</code>), where your runs are requested as you.</template
+      >
+      <template v-if="mcps.allTiers">
+        As an admin you see every tier — every channel's and every person's — and may <strong>promote</strong> a
+        person's server to the org: the org gets its own copy under the same name, connected by you; their credential is
+        never copied.</template
       >
     </p>
 
@@ -197,12 +234,13 @@ async function probe(s: McpServerView): Promise<void> {
             <th class="px-4 py-2.5 font-medium">Agents</th>
             <th class="px-4 py-2.5 font-medium">Auth</th>
             <th class="px-4 py-2.5 font-medium">State</th>
+            <th class="px-4 py-2.5 font-medium">Added by</th>
             <th class="px-4 py-2.5 font-medium"><span class="sr-only">Actions</span></th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="mcps.servers.length === 0">
-            <td colspan="7" class="empty px-4 py-6 text-center text-muted">
+            <td colspan="8" class="empty px-4 py-6 text-center text-muted">
               No MCP server reaches runs here yet. Add one below.
             </td>
           </tr>
@@ -217,7 +255,10 @@ async function probe(s: McpServerView): Promise<void> {
               {{ s.name }}
               <span v-if="isMine(s)" class="ml-1 text-[0.625rem] font-normal text-dimmed">· added by you</span>
             </td>
-            <td class="px-4 py-2 font-mono text-xs">{{ s.scope }}</td>
+            <td class="px-4 py-2 font-mono text-xs">
+              {{ s.scope
+              }}<span v-if="ownerOf(s)" class="owner block text-[0.6875rem] text-dimmed">{{ ownerOf(s) }}</span>
+            </td>
             <td class="max-w-[18rem] truncate px-4 py-2 font-mono text-xs text-muted" :title="s.url">{{ s.url }}</td>
             <td class="px-4 py-2 font-mono text-xs">{{ s.agents.join(", ") }}</td>
             <td class="px-4 py-2 font-mono text-xs">{{ s.auth }}</td>
@@ -235,8 +276,23 @@ async function probe(s: McpServerView): Promise<void> {
               >
               <div v-if="probes[s.name]" class="probe mt-1 text-dimmed">{{ probes[s.name] }}</div>
             </td>
+            <td class="addedby max-w-[10rem] truncate px-4 py-2 text-xs text-muted" :title="s.addedBy">
+              {{ addedBy(s)
+              }}<span v-if="s.promotedFrom" class="block text-[0.6875rem] text-dimmed"
+                >promoted from {{ s.promotedFrom }}</span
+              >
+            </td>
             <td class="px-4 py-1.5 text-right whitespace-nowrap">
               <UButton size="xs" color="neutral" variant="ghost" :disabled="busy" @click="probe(s)">Probe</UButton>
+              <UButton
+                v-if="canPromote(s)"
+                size="xs"
+                color="primary"
+                variant="ghost"
+                :disabled="busy"
+                @click="promote(s)"
+                >Promote</UButton
+              >
               <UButton
                 v-if="s.source === 'runtime' && s.auth !== 'none'"
                 size="xs"

@@ -31,6 +31,8 @@ export interface McpServerEntry {
   /** Who added it at run time (`slack:U…`, `cli:local`); absent for static config. */
   addedBy?: string;
   addedAt?: number;
+  /** An org entry `mcp promote` copied from a person's tier: that person (record 0042). */
+  promotedFrom?: string;
 }
 
 /** The three tiers a server can live in, in precedence order for a name clash. */
@@ -174,7 +176,8 @@ export function isMcpServerEntry(v: unknown): v is McpServerEntry {
     (e.tokenEnv === undefined || isStr(e.tokenEnv, 128)) &&
     (e.headersEnv === undefined || isHeadersEnv(e.headersEnv)) &&
     (e.addedBy === undefined || isStr(e.addedBy, 260)) &&
-    (e.addedAt === undefined || isNum(e.addedAt))
+    (e.addedAt === undefined || isNum(e.addedAt)) &&
+    (e.promotedFrom === undefined || isStr(e.promotedFrom, 260))
   );
 }
 
@@ -226,7 +229,11 @@ export interface McpServerView {
   state: "connected" | "awaiting_credential" | "static";
   source: "config" | "runtime";
   addedBy?: string;
+  /** `addedBy` as a display name, when the service could resolve one (record 0042: the same cached
+   *  lookup the runs index uses); absent → the surfaces show the id. */
+  addedByName?: string;
   addedAt?: number;
+  promotedFrom?: string;
 }
 
 export function serverView(
@@ -257,6 +264,7 @@ export function serverView(
     source: opts.source,
     ...(entry.addedBy ? { addedBy: entry.addedBy } : {}),
     ...(entry.addedAt !== undefined ? { addedAt: entry.addedAt } : {}),
+    ...(entry.promotedFrom ? { promotedFrom: entry.promotedFrom } : {}),
   };
 }
 

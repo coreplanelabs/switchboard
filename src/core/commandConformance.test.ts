@@ -166,10 +166,20 @@ import {
   SURFACES,
   surfacesFor,
   type Fixture,
+  CALLER_IDS,
 } from "./testing/conformanceFixture.js";
 // ---- 7. the regression fences -------------------------------------------------------------------------
 
 const here = dirname(fileURLToPath(import.meta.url));
+
+/** The cross-surface fold: this caller's id → the token; for a command whose output names every
+ *  fixture caller (`COMMAND_FIXTURES[id].folds === "every-caller"`, e.g. `mcp list --all`), every
+ *  caller's id — the rows are the same set on every surface once nobody is spelled. */
+function foldCallers<T>(cmd: { id: string }, value: T, callerId: string): T {
+  return COMMAND_FIXTURES[cmd.id]?.folds === "every-caller"
+    ? CALLER_IDS.reduce((v, id) => withCallerToken(v, id), value)
+    : withCallerToken(value, callerId);
+}
 
 describe("command conformance — catalogue fences", () => {
   it("the suite tests the catalogue the bot and the CLI bind (buildCoreCommands ≡ registerCoreCommands)", async () => {
@@ -652,7 +662,7 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
         if (surface.meta.machine) {
           expect(out.json, `${where}: invoke JSON`).toEqual(ref.value);
           assertUntrusted(out.json, where);
-          const normalized = withCallerToken(out.json, caller.id);
+          const normalized = foldCallers(cmd, out.json, caller.id);
           firstJson ??= normalized;
           expect(
             normalized,

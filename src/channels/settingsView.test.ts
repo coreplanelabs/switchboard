@@ -228,11 +228,53 @@ describe("the settings view", () => {
       vocabulary: VOCABULARY,
       mcps: { channel: "slack:C1", servers: [SERVER], canWrite: { org: true, channel: true } },
     });
-    expect(commands.calls).toEqual([
-      { id: "mcp.list", input: { options: { channel: "slack:C1" } }, caller: "access:admin-sub" },
-    ]);
+    // An admin's list is every tier (record 0042): `mcp list --all`, one call.
+    expect(commands.calls).toEqual([{ id: "mcp.list", input: { options: { all: true } }, caller: "access:admin-sub" }]);
+    expect(seed.mcps?.allTiers).toBe(true);
     expect(seed.channels).toBeUndefined();
     expect(seed.installation).toBeUndefined();
+  });
+
+  it("MCPs (record 0042): a viewer without org rights lists the org's, the open channel's and their own, plus the channel tiers of every channel whose config they may read — config overrides decides which, one mcp list per channel", async () => {
+    const OTHER: McpServerView = {
+      ...SERVER,
+      name: "hub",
+      scope: "channel",
+      scopeKey: "channel:slack:C2",
+      source: "runtime",
+    };
+    const { view, commands } = handler((id, input) => {
+      switch (id) {
+        case "mcp.list":
+          return ok({
+            servers:
+              (input as { options?: { channel?: string } }).options?.channel === "slack:C2"
+                ? [SERVER, OTHER]
+                : [SERVER],
+          });
+        case "config.overrides":
+          return ok({
+            channels: [
+              { channelId: "slack:C1", settings: ["agent", "mcpServers"], source: "runtime" },
+              { channelId: "slack:C2", settings: ["mcpServers"], source: "runtime" },
+              { channelId: "slack:C3", settings: ["agent"], source: "config" }, // no tier to list
+            ],
+          });
+        default:
+          return refused(`no such command ${id}`);
+      }
+    });
+    const seed = seedOf((await get(view, "/settings/mcps?channel=slack:C1", MEMBER)).body);
+    expect(seed.mcps).toEqual({
+      channel: "slack:C1",
+      servers: [SERVER, OTHER],
+      canWrite: { org: false, channel: false },
+    });
+    expect(commands.calls.map((c) => [c.id, c.input])).toEqual([
+      ["mcp.list", { options: { channel: "slack:C1" } }],
+      ["config.overrides", {}],
+      ["mcp.list", { options: { channel: "slack:C2" } }],
+    ]);
   });
 
   it("MCPs: a viewer without the grants sees the same rows read-only; without a channel the channel right is false", async () => {
@@ -241,6 +283,7 @@ describe("the settings view", () => {
     expect(seed.mcps).toEqual({ servers: [SERVER], canWrite: { org: false, channel: false } });
     const admin = seedOf((await get(view, "/settings/mcps", ADMIN)).body);
     expect(admin.mcps?.canWrite).toEqual({ org: true, channel: false });
+    expect(admin.mcps?.allTiers).toBe(true);
   });
 
   it("MCPs: `mcp list` refusing (MCP off, no read) puts its sentence on the seed in place of rows", async () => {

@@ -63,7 +63,7 @@ A command under two capabilities is on when either gives it a backend.
 | `memory` | `memory list`, `memory forget` |
 | `runHistory` | `review abridge`, `friction report`, `friction propose` |
 | `runLedger` | — |
-| `mcp` | `mcp list`, `mcp add`, `mcp connect`, `mcp show`, `mcp remove` |
+| `mcp` | `mcp list`, `mcp add`, `mcp connect`, `mcp show`, `mcp remove`, `mcp promote` |
 | `costs` | — |
 | `schedules` | `schedule list` |
 | `github` | `delivery report` |

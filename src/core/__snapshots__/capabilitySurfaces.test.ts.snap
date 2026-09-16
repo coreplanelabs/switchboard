@@ -20,6 +20,9 @@ exports[`capability axis — a capability turning on changes exactly the command
   "mcp.list": [
     "mcp",
   ],
+  "mcp.promote": [
+    "mcp",
+  ],
   "mcp.remove": [
     "mcp",
   ],
@@ -103,11 +106,12 @@ commands:
   repo build           — Run the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
   memory list          — Your own memory records and the shared org / repo / channel records, with ids — what influences your runs.
   memory forget        — Soft-delete one memory record so it no longer influences any run (yours freely; shared org/repo/channel records need repo-management rights).
-  mcp list             — External MCP servers your runs in this channel can use — org-wide, this channel's, and your own — with state and agents; never a credential.
+  mcp list             — External MCP servers your runs in this channel can use — org-wide, this channel's, and your own — with state and agents; never a credential. \`--all\` (admins): every tier.
   mcp add              — Register an external MCP server for yourself, this channel, or the org — auth is detected from the server; sign-in or a token happens on a one-time link, never in chat.
   mcp connect          — A fresh one-time link to sign in to an OAuth server or enter (or replace) a bearer server's token — only you can complete it; it expires in 10 minutes.
   mcp show             — One MCP server's entry plus a live probe of the tools it offers (names, read-only flags); never a credential.
   mcp remove           — Remove an MCP server you added and its stored credential (yours freely; channel ones need channel-config rights, org-wide ones admin rights).
+  mcp promote          — Re-issue a person's MCP server in the org tier (admins): the same name, URL and auth, added by you; a bearer/oauth server gets a fresh org connect link for you to complete — the person's credential is never copied.
   schedule list        — Every scheduled job (cron, UTC), which Worker fires it, its next firing, and what its last firing did.
   deploy plan          — The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why.
   deploy all           — Deploy production in the one supported order (memory → bot → resident → sandbox), waiting out preflights and each live gate — the bot's drain, the sandbox's image rollout and an \`echo ok\` probe — until the new containers are live. In \`registry\` mode it first copies the release's images its Workers lack into the account registry (what \`deploy images\` does). --affected deploys only the Workers whose inputs changed since what they serve — the release deploy.
@@ -140,6 +144,7 @@ exports[`capability surfaces — cloud-full > HTTP catalogue: the /api/<id> rout
   "mcp.add",
   "mcp.connect",
   "mcp.list",
+  "mcp.promote",
   "mcp.remove",
   "mcp.show",
   "memory.forget",
@@ -182,6 +187,7 @@ exports[`capability surfaces — cloud-full > MCP tools/list names 1`] = `
   "mcp_add",
   "mcp_connect",
   "mcp_list",
+  "mcp_promote",
   "mcp_remove",
   "mcp_show",
   "memory_forget",
@@ -245,11 +251,12 @@ exports[`capability surfaces — cloud-full > help commands on chat 1`] = `
 • \`memory list\` — Your own memory records and the shared org / repo / channel records, with ids — what influences your runs.
 • \`memory forget\` — Soft-delete one memory record so it no longer influences any run (yours freely; shared org/repo/channel records need repo-management rights).
 *mcp*
-• \`mcp list\` — External MCP servers your runs in this channel can use — org-wide, this channel's, and your own — with state and agents; never a credential.
+• \`mcp list\` — External MCP servers your runs in this channel can use — org-wide, this channel's, and your own — with state and agents; never a credential. \`--all\` (admins): every tier.
 • \`mcp add\` — Register an external MCP server for yourself, this channel, or the org — auth is detected from the server; sign-in or a token happens on a one-time link, never in chat.
 • \`mcp connect\` — A fresh one-time link to sign in to an OAuth server or enter (or replace) a bearer server's token — only you can complete it; it expires in 10 minutes.
 • \`mcp show\` — One MCP server's entry plus a live probe of the tools it offers (names, read-only flags); never a credential.
 • \`mcp remove\` — Remove an MCP server you added and its stored credential (yours freely; channel ones need channel-config rights, org-wide ones admin rights).
+• \`mcp promote\` — Re-issue a person's MCP server in the org tier (admins): the same name, URL and auth, added by you; a bearer/oauth server gets a fresh org connect link for you to complete — the person's credential is never copied.
 *schedule*
 • \`schedule list\` — Every scheduled job (cron, UTC), which Worker fires it, its next firing, and what its last firing did.
 *deploy*
@@ -329,11 +336,12 @@ commands:
   repo build           — Run the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
   memory list          — Your own memory records and the shared org / repo / channel records, with ids — what influences your runs.
   memory forget        — Soft-delete one memory record so it no longer influences any run (yours freely; shared org/repo/channel records need repo-management rights).
-  mcp list             — External MCP servers your runs in this channel can use — org-wide, this channel's, and your own — with state and agents; never a credential.
+  mcp list             — External MCP servers your runs in this channel can use — org-wide, this channel's, and your own — with state and agents; never a credential. \`--all\` (admins): every tier.
   mcp add              — Register an external MCP server for yourself, this channel, or the org — auth is detected from the server; sign-in or a token happens on a one-time link, never in chat.
   mcp connect          — A fresh one-time link to sign in to an OAuth server or enter (or replace) a bearer server's token — only you can complete it; it expires in 10 minutes.
   mcp show             — One MCP server's entry plus a live probe of the tools it offers (names, read-only flags); never a credential.
   mcp remove           — Remove an MCP server you added and its stored credential (yours freely; channel ones need channel-config rights, org-wide ones admin rights).
+  mcp promote          — Re-issue a person's MCP server in the org tier (admins): the same name, URL and auth, added by you; a bearer/oauth server gets a fresh org connect link for you to complete — the person's credential is never copied.
   deploy plan          — The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why.
   deploy all           — Deploy production in the one supported order (memory → bot → resident → sandbox), waiting out preflights and each live gate — the bot's drain, the sandbox's image rollout and an \`echo ok\` probe — until the new containers are live. In \`registry\` mode it first copies the release's images its Workers lack into the account registry (what \`deploy images\` does). --affected deploys only the Workers whose inputs changed since what they serve — the release deploy.
   deploy restart       — Restart the bot container without an image build — how a rotated bot secret goes live (~30 s): runs in flight hand off to the next container; done once /healthz answers with a later startedAt.
@@ -365,6 +373,7 @@ exports[`capability surfaces — local-full > HTTP catalogue: the /api/<id> rout
   "mcp.add",
   "mcp.connect",
   "mcp.list",
+  "mcp.promote",
   "mcp.remove",
   "mcp.show",
   "memory.forget",
@@ -400,6 +409,7 @@ exports[`capability surfaces — local-full > MCP tools/list names 1`] = `
   "mcp_add",
   "mcp_connect",
   "mcp_list",
+  "mcp_promote",
   "mcp_remove",
   "mcp_show",
   "memory_forget",
@@ -449,11 +459,12 @@ exports[`capability surfaces — local-full > help commands on chat 1`] = `
 • \`memory list\` — Your own memory records and the shared org / repo / channel records, with ids — what influences your runs.
 • \`memory forget\` — Soft-delete one memory record so it no longer influences any run (yours freely; shared org/repo/channel records need repo-management rights).
 *mcp*
-• \`mcp list\` — External MCP servers your runs in this channel can use — org-wide, this channel's, and your own — with state and agents; never a credential.
+• \`mcp list\` — External MCP servers your runs in this channel can use — org-wide, this channel's, and your own — with state and agents; never a credential. \`--all\` (admins): every tier.
 • \`mcp add\` — Register an external MCP server for yourself, this channel, or the org — auth is detected from the server; sign-in or a token happens on a one-time link, never in chat.
 • \`mcp connect\` — A fresh one-time link to sign in to an OAuth server or enter (or replace) a bearer server's token — only you can complete it; it expires in 10 minutes.
 • \`mcp show\` — One MCP server's entry plus a live probe of the tools it offers (names, read-only flags); never a credential.
 • \`mcp remove\` — Remove an MCP server you added and its stored credential (yours freely; channel ones need channel-config rights, org-wide ones admin rights).
+• \`mcp promote\` — Re-issue a person's MCP server in the org tier (admins): the same name, URL and auth, added by you; a bearer/oauth server gets a fresh org connect link for you to complete — the person's credential is never copied.
 *deploy*
 • \`deploy plan\` — The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why.
 *delivery*

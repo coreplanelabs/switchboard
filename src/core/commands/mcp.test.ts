@@ -99,11 +99,32 @@ async function text(
 }
 
 describe("mcp.* commands", () => {
-  it("registers five commands on the typed model", () => {
-    expect(MCP_COMMANDS.map((c) => c.id)).toEqual(["mcp.list", "mcp.add", "mcp.connect", "mcp.show", "mcp.remove"]);
-    expect(MCP_COMMANDS.map((c) => c.action)).toEqual(["mcp:read", "mcp:write", "mcp:write", "mcp:read", "mcp:write"]);
-    // The tiers are the handler's question about `config-scope`; the command itself names no resource.
-    expect(MCP_COMMANDS.every((c) => c.resource === undefined)).toBe(true);
+  it("registers six commands on the typed model", () => {
+    expect(MCP_COMMANDS.map((c) => c.id)).toEqual([
+      "mcp.list",
+      "mcp.add",
+      "mcp.connect",
+      "mcp.show",
+      "mcp.remove",
+      "mcp.promote",
+    ]);
+    expect(MCP_COMMANDS.map((c) => c.action)).toEqual([
+      "mcp:read",
+      "mcp:write",
+      "mcp:write",
+      "mcp:read",
+      "mcp:write",
+      "mcp:write",
+    ]);
+    // The tiers are the handler's question about `config-scope`; the command itself names no
+    // resource — except `promote`, org-only by definition, whose gate is the table's at the door.
+    expect(MCP_COMMANDS.filter((c) => c.resource === undefined).map((c) => c.id)).toEqual([
+      "mcp.list",
+      "mcp.add",
+      "mcp.connect",
+      "mcp.show",
+      "mcp.remove",
+    ]);
   });
 
   it("MCP off → `unavailable` with the standard sentence on every command", async () => {
@@ -114,6 +135,7 @@ describe("mcp.* commands", () => {
       ["mcp.connect", { args: ["a"] }],
       ["mcp.show", { args: ["a"] }],
       ["mcp.remove", { args: ["a"] }],
+      ["mcp.promote", { args: ["a"], options: { from: "slack:UX" } }],
     ] as const) {
       expect(await inv.invoke(id, input, cli)).toMatchObject({
         ok: false,
@@ -384,5 +406,72 @@ describe("mcp `me` for a linked dashboard session (record 0042)", () => {
       ok: false,
       error: "unauthorized",
     });
+  });
+});
+
+describe("mcp list --all and mcp promote (record 0042)", () => {
+  it("`mcp list --all` is every tier with its owner and who added it, admins only; the plain list is unchanged", async () => {
+    const { svc } = service();
+    const inv = bind(svc);
+    await inv.invoke(
+      "mcp.add",
+      { args: ["vanta"], options: { url: "https://mcp.vanta.com/mcp", auth: "none" } },
+      chat(ALICE),
+    );
+    await inv.invoke(
+      "mcp.add",
+      { args: ["hub"], options: { url: "https://hub.example/mcp", auth: "none", scope: "channel" } },
+      chat(ALICE),
+    );
+    const all = await text(inv, "mcp.list", { options: { all: true } }, chat(ADMIN));
+    expect(all).toContain("`hub` (channel) ✅ connected — https://hub.example/mcp");
+    expect(all).toContain("`vanta` (user) ✅ connected — https://mcp.vanta.com/mcp");
+    expect(all).toContain(`added by ${ALICE} · tier of ${ALICE}`);
+    const denied = await inv.invoke("mcp.list", { options: { all: true } }, chat(NOBODY, { configWrite: false }));
+    expect(denied).toMatchObject({ ok: false, error: "unauthorized", decidedBy: "handler" });
+    // Text surfaces spell the flag as `--all`; the plain list still shows nobody else's tier.
+    expect(await inv.invoke("mcp.list", { options: { all: "true" } }, cli)).toMatchObject({ ok: true });
+    expect(await text(inv, "mcp.list", {}, chat(NOBODY, { configWrite: false }))).not.toContain("vanta");
+  });
+
+  it("`mcp promote <name> --from <user>` re-issues the server in the org tier for an admin and hands back the org connect link; a non-admin is refused; the person's entry stays", async () => {
+    const { svc, backing } = service();
+    const inv = bind(svc);
+    await inv.invoke("mcp.add", { args: ["vanta"], options: { url: "https://mcp.vanta.com/mcp" } }, chat(ALICE)); // bearer
+    // Org-only by definition: the table refuses a non-admin at the door (config-scope org), before the handler.
+    expect(await inv.invoke("mcp.promote", { args: ["vanta"], options: { from: ALICE } }, chat(ALICE))).toMatchObject({
+      ok: false,
+      error: "unauthorized",
+      decidedBy: "registry",
+    });
+    const promoted = await text(inv, "mcp.promote", { args: ["vanta"], options: { from: ALICE } }, chat(ADMIN));
+    expect(promoted).toContain("`vanta` (org) ⏳ awaiting credential — https://mcp.vanta.com/mcp");
+    expect(promoted).toContain(`added by ${ADMIN} · promoted from ${ALICE}`);
+    expect(promoted).toContain("open this link and paste the server's token");
+    expect(backing.document?.org?.mcpServers?.vanta).toMatchObject({ addedBy: ADMIN, promotedFrom: ALICE });
+    expect(backing.document?.users[ALICE]?.mcpServers?.vanta).toBeDefined();
+    expect(await inv.invoke("mcp.promote", { args: ["vanta"], options: { from: ALICE } }, chat(ADMIN))).toMatchObject({
+      ok: false,
+      error: "conflict",
+    });
+    expect(
+      await inv.invoke("mcp.promote", { args: ["vanta"], options: { from: "not-an-id" } }, chat(ADMIN)),
+    ).toMatchObject({ ok: false, error: "invalid_input" });
+  });
+
+  it("a dashboard session's ticket binds to the session's own email, linked or not (the caller carries it; the service asks no lookup first)", async () => {
+    const { svc } = service();
+    const inv = bind(svc);
+    const base = callerWith("access", "access:sub-7", "all");
+    const session: Caller = { ...base, email: "Admin@Example.test" };
+    const added = await inv.invoke(
+      "mcp.add",
+      { args: ["vanta"], options: { url: "https://mcp.vanta.com/mcp", scope: "org" } },
+      session,
+    );
+    expect(added).toMatchObject({ ok: true });
+    const url = (added as unknown as { value: { connectUrl: string } }).value.connectUrl;
+    const ticket = await svc.secrets.getTicket(url.slice(url.lastIndexOf("/") + 1));
+    expect(ticket).toMatchObject({ requesterId: "access:sub-7", requesterEmail: "admin@example.test" });
   });
 });

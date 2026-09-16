@@ -162,7 +162,12 @@ export async function callerFor(
   identity: AccessIdentity,
   opts: Pick<CommandHttpOptions, "grantsFor" | "personByEmail">,
 ): Promise<Caller> {
-  return { kind: "access", id: callerIdFor(identity), actor: await resolveAccessActor(identity, opts) };
+  return {
+    kind: "access",
+    id: callerIdFor(identity),
+    actor: await resolveAccessActor(identity, opts),
+    ...(identity.email && !isServiceToken(identity) ? { email: identity.email } : {}),
+  };
 }
 
 function hostOf(url: string | undefined): string | undefined {

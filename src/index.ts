@@ -40,7 +40,7 @@ import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 import { buildMcp } from "./mcp/index.js";
 import { NullMcpToolSource } from "./mcp/source.js";
 import { createMcpConnectViewHandler, isConnectPath } from "./channels/mcpConnectView.js";
-import { resolvePersonByEmail, resolveUserEmail } from "./channels/slack/lookups.js";
+import { resolvePersonByEmail, resolveUserEmail, resolveUserName } from "./channels/slack/lookups.js";
 import { mdToMrkdwn } from "./channels/mrkdwn.js";
 import { buildMemoryStore, NullMemoryStore, pendingReflectionCount } from "./core/memory/index.js";
 import { healthPayload, readBuildInfo } from "./channels/health.js";
@@ -201,12 +201,15 @@ export async function runBot(): Promise<void> {
   // Access-gated connect page work off ONE service, and its servers are the
   // per-run tool source. Requester emails come from Slack once the app exists.
   let slackEmailLookup: ((userId: string) => Promise<string | undefined>) | undefined;
+  let slackNameLookup: ((userId: string) => Promise<string | undefined>) | undefined;
   let slackPersonByEmail: PersonLookup | undefined;
   const personByEmail: PersonLookup = (email) =>
     slackPersonByEmail ? slackPersonByEmail(email) : Promise.resolve(undefined);
   const mcpWiring = buildMcp(config, processSecrets, {
     publicBaseUrl: process.env.PUBLIC_BASE_URL,
     resolveEmail: (userId) => (slackEmailLookup ? slackEmailLookup(userId) : Promise.resolve(undefined)),
+    // `addedBy` as a name on the MCP lists (record 0042): the cached lookup the runs index uses.
+    resolveName: (userId) => (slackNameLookup ? slackNameLookup(userId) : Promise.resolve(undefined)),
     warn: (m) => console.warn(`[mcp] ${m}`),
   });
   // Every optional subsystem below is wired as a real implementation or its
@@ -534,6 +537,10 @@ export async function runBot(): Promise<void> {
   slackEmailLookup = (userId) =>
     userId.startsWith("slack:")
       ? resolveUserEmail(app.client, userId.slice("slack:".length))
+      : Promise.resolve(undefined);
+  slackNameLookup = (userId) =>
+    userId.startsWith("slack:")
+      ? resolveUserName(app.client, userId.slice("slack:".length))
       : Promise.resolve(undefined);
   // The dashboard link (record 0042): a browser session's Access email names
   // its Slack person, resolved once per gate pass through a cached reverse

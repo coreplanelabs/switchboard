@@ -93,6 +93,9 @@ export interface McpServiceOptions {
   bearers: Secrets;
   /** Resolve a chat user's email so a ticket binds to it; undefined → bind-on-first-open. */
   resolveEmail?: (userId: string) => Promise<string | undefined>;
+  /** Resolve a user id to a display name for `addedBy` (record 0042: the cached lookup the runs
+   *  index uses); undefined → the surfaces show the id. */
+  resolveName?: (userId: string) => Promise<string | undefined>;
   now?: () => number;
   nonce?: () => string;
   cacheTtlMs?: number;
@@ -101,6 +104,9 @@ export interface McpServiceOptions {
 /** Who is asking, as the command adapter resolved it (never what the request claimed). */
 export interface McpActor {
   id: string;
+  /** The email the caller's session is signed in with (a dashboard session, record 0042): a
+   *  ticket this actor mints binds to it, linked or not — never a lookup by `id` first. */
+  email?: string;
   /** May manage ORG servers: `cli:local`, a machine token with `mcp:write`, a chat caller the repo-management gate admits. */
   orgAdmin: boolean;
   /** May manage CHANNEL servers: the `config:write` grant (never a baseline), like `config set channel`. */
@@ -130,6 +136,9 @@ export interface AddResult {
   expiresAt?: number;
   expiresInMinutes?: number;
 }
+
+/** `mcp promote`: the new org entry, the person it came from, and — for bearer/oauth — the admin's fresh ticket. */
+export type PromoteResult = AddResult & { promotedFrom: string };
 
 /** What the connect page gets back from `startOAuth`. */
 export type StartOAuthResult =
@@ -202,6 +211,26 @@ export class McpService {
     const resolved = this.opts.config.mcpServersFor(channelId ?? `none:${actor.id}`, actor.id);
     const out: McpServerView[] = [];
     for (const r of resolved) out.push(await this.view(r));
+    return out;
+  }
+
+  /** Every tier there is — the org, every channel, every user (static and runtime) — for an
+   *  actor with org rights; anyone else is refused (record 0042: a non-admin never sees another
+   *  person's tier). Each row carries `addedByName` when the lookup answers. */
+  async listAll(actor: McpActor): Promise<McpServerView[]> {
+    if (!actor.orgAdmin)
+      throw new McpServiceError(
+        "unauthorized",
+        "listing every tier's MCP servers takes admin rights (repo-management rights). `mcp list` shows the org's, this channel's and your own.",
+      );
+    const { channels, users } = this.opts.config.mcpTierIds();
+    const targets: McpTarget[] = [
+      { kind: "org" },
+      ...channels.map((id): McpTarget => ({ kind: "channel", id })),
+      ...users.map((id): McpTarget => ({ kind: "user", id })),
+    ];
+    const out: McpServerView[] = [];
+    for (const target of targets) for (const r of this.tierEntries(target)) out.push(await this.view(r));
     return out;
   }
 
@@ -348,6 +377,56 @@ export class McpService {
     } catch (err) {
       return { ...view, probe: { ok: false, error: (err instanceof Error ? err.message : String(err)).slice(0, 300) } };
     }
+  }
+
+  /** `mcp promote <name> --from <user>` (record 0042): copy a person's runtime entry — `url`,
+   *  `auth`, `agents` (widened only when the admin passes some) — into the org tier under the
+   *  same name, `addedBy` the admin and `promotedFrom` the person, and for bearer/oauth mint a
+   *  fresh ORG connect ticket exactly as `mcp add --scope org` would. The person's sealed
+   *  credential is never read, unsealed or written: it is theirs, and the org's calls must not
+   *  run as them. The personal entry stays (shadowed by the org tier at run time). */
+  async promote(actor: McpActor, name: string, from: string, opts: { agents?: string[] } = {}): Promise<PromoteResult> {
+    const org = this.target(actor, "org", undefined);
+    const source = this.tierEntries({ kind: "user", id: from }).find((r) => r.name === name);
+    if (!source)
+      throw new McpServiceError(
+        "not_found",
+        `no MCP server named "${name}" in the user scope of ${from} (see \`mcp list --all\`)`,
+      );
+    if (source.source === "config")
+      throw new McpServiceError(
+        "conflict",
+        `"${name}" is pinned in config.yaml under users.${from} — move it to defaults.mcpServers there`,
+      );
+    const runtime = this.opts.config.runtimeScope("org");
+    if (runtime.mcpServers?.[name] || this.opts.config.isStaticMcpServer("org", undefined, name))
+      throw new McpServiceError(
+        "conflict",
+        `an org MCP server named "${name}" already exists — remove it first or pick another name`,
+      );
+    if (Object.keys(runtime.mcpServers ?? {}).length >= MCP_SERVERS_PER_SCOPE_MAX)
+      throw new McpServiceError("invalid_input", `the org scope already has ${MCP_SERVERS_PER_SCOPE_MAX} servers`);
+    const agents = this.checkAgents("org", opts.agents ?? source.entry.agents);
+    if (source.entry.auth !== "none") this.requireCredentialSupport(source.entry.auth);
+    const entry: McpServerEntry = {
+      url: source.entry.url,
+      agents,
+      auth: source.entry.auth,
+      addedBy: actor.id,
+      addedAt: this.now(),
+      promotedFrom: from,
+    };
+    await this.writeServers(org, { ...runtime.mcpServers, [name]: entry });
+    const view = serverView("org", name, entry, { hasCredential: false, source: "runtime" });
+    if (entry.auth === "none") return { server: view, promotedFrom: from };
+    const ticket = await this.mintTicket(mcpCredentialKey("org", name), actor);
+    return {
+      server: view,
+      promotedFrom: from,
+      connectUrl: this.connectUrl(ticket),
+      expiresAt: ticket.expiresAt,
+      expiresInMinutes: TICKET_MINUTES,
+    };
   }
 
   // ---- the connect page ----------------------------------------------------------
@@ -776,7 +855,11 @@ export class McpService {
   }
 
   private async mintTicket(serverId: string, actor: McpActor): Promise<McpTicket> {
-    const email = this.opts.resolveEmail ? await this.opts.resolveEmail(actor.id).catch(() => undefined) : undefined;
+    // A session's own email first (a dashboard mint, record 0042: bound to the person at the
+    // keyboard, linked or not); a chat user's is looked up.
+    const email =
+      actor.email ??
+      (this.opts.resolveEmail ? await this.opts.resolveEmail(actor.id).catch(() => undefined) : undefined);
     const ticket = newTicket({
       nonce: this.nonce(),
       serverId,
@@ -846,7 +929,12 @@ export class McpService {
       r.entry.auth !== "none" && !r.entry.tokenEnv
         ? (await this.viaSecrets(() => this.opts.secrets.getCredential(mcpCredentialKey(r.scopeKey, r.name)))) !== null
         : false;
-    return serverView(r.scopeKey, r.name, r.entry, { hasCredential, source: r.source });
+    const view = serverView(r.scopeKey, r.name, r.entry, { hasCredential, source: r.source });
+    const name =
+      view.addedBy && this.opts.resolveName
+        ? await this.opts.resolveName(view.addedBy).catch(() => undefined)
+        : undefined;
+    return name ? { ...view, addedByName: name } : view;
   }
 
   private async specFor(r: ResolvedMcpServer): Promise<ResolvedServer> {

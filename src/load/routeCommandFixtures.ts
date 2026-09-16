@@ -145,6 +145,14 @@ export const ROUTE_COMMAND_FIXTURES: readonly RouteCommandFixture[] = [
     args: ["tools"],
     options: {},
   }),
+  f("c33h", "happy", "promote the crm mcp server of slack:U0ACME01 to the org", "mcp.promote", {
+    args: ["crm"],
+    options: { from: "slack:U0ACME01" },
+  }),
+  f("c33p", "paraphrase", "make slack:U0ACME02's personal tools server an org-wide one", "mcp.promote", {
+    args: ["tools"],
+    options: { from: "slack:U0ACME02" },
+  }),
   f("c30h", "happy", "list the scheduled jobs", "schedule.list"),
   f("c30p", "paraphrase", "what cron jobs are there and when do they fire next?", "schedule.list"),
   f("c31h", "happy", "show the deploy plan", "deploy.plan"),
@@ -191,6 +199,7 @@ export const ROUTE_COMMAND_DECOYS: readonly RouteCommandDecoy[] = [
   d("c27d", "why does the crm server keep disconnecting?", "mcp.connect"),
   d("c28d", "is the crm server safe to let runs use?", "mcp.show"),
   d("c29d", "should we drop the crm server?", "mcp.remove"),
+  d("c33d", "is the crm server worth making org-wide, or should people keep their own?", "mcp.promote"),
   d("c30d", "is the refresh schedule too aggressive?", "schedule.list"),
   d("c31d", "should we deploy today or wait for the fix?", "deploy.plan"),
   d("c32d", "are we shipping fast enough this quarter?", "delivery.report", ["delivery.report"]),

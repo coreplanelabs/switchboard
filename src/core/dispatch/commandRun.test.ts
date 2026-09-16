@@ -83,6 +83,8 @@ const ROUTE: RouteEventFields = {
 describe("runChatCommand — the machinery moved from the fast path", () => {
   it("records an inline run for a command that does work (`repo.test`) and none for one that answers from local state (`config.show`) — exactly as the fast path did", async () => {
     expect(isInlineRunCommand("repo.test")).toBe(true);
+    expect(isInlineRunCommand("mcp.promote")).toBe(true); // a promote does work: an org entry and a ticket
+    expect(isInlineRunCommand("mcp.list")).toBe(false);
     expect(isInlineRunCommand("config.show")).toBe(false);
     const d = deps();
     const { message, io, ending, trace } = request("config show", d);
