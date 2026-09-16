@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.231.0](https://github.com/coreplanelabs/switchboard/compare/v1.230.0...v1.231.0) (2026-09-16)
+
+
+### Features
+
+* **ship:** a task request becomes a generated one-unit plan instance marked on the record ([#1305](https://github.com/coreplanelabs/switchboard/issues/1305)) ([92ebcec](https://github.com/coreplanelabs/switchboard/commit/92ebcec7599175ee1b47d016a845ac859c4d4ce5))
+
+
+### Bug fixes
+
+* **costs:** the me toggle's email lookup gets the whole slack:U… id, so the signed-in person is matched; a compared range that attributes more than the workspace shows says so in words, never as a negative dollar ([#1308](https://github.com/coreplanelabs/switchboard/issues/1308)) ([1bd696a](https://github.com/coreplanelabs/switchboard/commit/1bd696a8fea3f0b05c7ddac7dee9e0aefd1078bc))
+* **dispatcher:** the routed card's footer reads as an offer, not a demand — "wrong preset? reply agent:&lt;preset&gt; to run it another way" ([#1312](https://github.com/coreplanelabs/switchboard/issues/1312)) ([208c605](https://github.com/coreplanelabs/switchboard/commit/208c605d1e43e4731b7739a5478dc69e8cb8a051))
+* **runs:** a Range past an artifact's end answers 416, not 500 — R2's InvalidRange carries no size, so the store reads it from one HEAD instead of throwing ([#1310](https://github.com/coreplanelabs/switchboard/issues/1310)) ([9272949](https://github.com/coreplanelabs/switchboard/commit/92729497f4c374e2bd725770c629509ead1d5630))
+
+
+### Documentation
+
+* **docs:** known limits names the unbuilt ship unit page ([#1307](https://github.com/coreplanelabs/switchboard/issues/1307)) ([e4294ef](https://github.com/coreplanelabs/switchboard/commit/e4294ef0fb13a35a79bf6dd6346494ae3b1ab565))
+
 ## [1.230.0](https://github.com/coreplanelabs/switchboard/compare/v1.229.0...v1.230.0) (2026-09-15)
 
 
