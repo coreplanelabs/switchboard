@@ -95,17 +95,20 @@ export async function abandonLostWorkspace(ctx: LostWorkspaceContext): Promise<I
 
 /** The fresh dispatch a restart runs as: its own root, the request as the row
  *  carried it, with the follow-ups the resumed run never consumed appended as
- *  the fresh turn appends them. */
+ *  the fresh turn appends them — and the run it restarts named, so admission
+ *  never steers the request into that run's row (thread-admission item 5):
+ *  the row is closing, its finish in flight, and the boot-gap map may still
+ *  list it. */
 export interface RestartTurn {
   msg: IncomingMessage;
-  opts: { trace: RequestTrace };
+  opts: { trace: RequestTrace; restartOf?: string };
 }
 
 export function prepareRestartTurn(
   deps: RequestTraceDeps,
-  ctx: { request: IncomingMessage; pending: PersonFollowUp[]; clock: Clock },
+  ctx: { request: IncomingMessage; pending: PersonFollowUp[]; clock: Clock; restartOf?: string },
 ): RestartTurn {
-  const { request, pending, clock } = ctx;
+  const { request, pending, clock, restartOf } = ctx;
   const merged = mergeFollowUps(pending);
   const receivedAt = clock();
   const msg: IncomingMessage = {
@@ -124,5 +127,5 @@ export function prepareRestartTurn(
     originAt: undefined,
   };
   const trace = startRequestRoot(deps, { channel: channelOf(msg.channelId), receivedAt });
-  return { msg, opts: { trace } };
+  return { msg, opts: { trace, ...(restartOf !== undefined ? { restartOf } : {}) } };
 }

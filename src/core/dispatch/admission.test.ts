@@ -145,6 +145,8 @@ function setup(
     elsewhere?: ThreadsElsewhere;
     resume?: ResumeContext;
     restart?: RestartContext;
+    /** The run this request restarts (`DispatchOptions.restartOf`): a restart from the request. */
+    restartOf?: string;
   } = {},
 ) {
   const message = msg(text, over.user);
@@ -169,6 +171,7 @@ function setup(
     resume: over.resume,
     restart: over.restart,
     carriedRow,
+    ...(over.restartOf !== undefined ? { restartOf: over.restartOf } : {}),
     clock: () => NOW,
     root: trace.root,
     refuse: async (outcome, fn) => {
@@ -473,6 +476,53 @@ describe("admit — the thread admission claim", () => {
       expect((await admit(deps, ctx)).kind).toBe("proceed");
       expect(ledger.pushes).toEqual([]);
     });
+
+    // harness-pi item 16 / run-history item 54: the restart from the request is
+    // an ordinary fresh dispatch admitted right after the settle freed the
+    // thread, while the closed row's finish is still in flight — so a push to
+    // that row would be taken. The dispatch names the run it restarts, and an
+    // entry naming that run is not a live run.
+    it("a restart from the request is never steered into the row it closed: an entry naming the run it restarts (`restartOf`) is dropped and the request proceeds fresh, nothing pushed — the same message without `restartOf` still steers", async () => {
+      const elsewhere = far("coding");
+      const ledger = new RecordingLedger({ pushSeq: () => 3 });
+      const { deps, ctx, admission, replies } = setup("agent:coding fix it", {
+        user: "slack:UADMIN",
+        agentName: "coding",
+        ledger,
+        elsewhere,
+        restartOf: "run-far",
+      });
+      const outcome = await admit(deps, ctx);
+      expect(outcome.kind).toBe("proceed");
+      if (outcome.kind !== "proceed") return;
+      expect(admission.get(THREAD)).toBe(outcome.admitted);
+      expect(ledger.pushes).toEqual([]);
+      expect(replies).toEqual([]);
+      expect(elsewhere.get(THREAD)).toBeUndefined();
+
+      // No run to restart: today's steer, unchanged.
+      const plain = setup("agent:coding fix it", {
+        user: "slack:UADMIN",
+        agentName: "coding",
+        ledger: new RecordingLedger({ pushSeq: () => 3 }),
+        elsewhere: far("coding"),
+      });
+      expect(await admit(plain.deps, plain.ctx)).toEqual({ kind: "steered", where: "elsewhere" });
+      expect(plain.ledger.pushes.map((p) => p.runId)).toEqual(["run-far"]);
+    });
+
+    it("an entry naming ANOTHER run than the one a restart restarts is a live run as for any request: the restart steers into it", async () => {
+      const ledger = new RecordingLedger({ pushSeq: () => 3 });
+      const { deps, ctx } = setup("agent:coding fix it", {
+        user: "slack:UADMIN",
+        agentName: "coding",
+        ledger,
+        elsewhere: far("coding"),
+        restartOf: "run-closed",
+      });
+      expect(await admit(deps, ctx)).toEqual({ kind: "steered", where: "elsewhere" });
+      expect(ledger.pushes.map((p) => p.runId)).toEqual(["run-far"]);
+    });
   });
 });
 
@@ -529,6 +579,32 @@ describe("adoptCarriedRun — taking up a resumed or restarted run's row", () =>
     });
     expect(ledger.adopted).toEqual([]);
     expect(ledger.reserved).toEqual([]);
+  });
+
+  // thread-admission item 5: the boot-gap map lists the rows the reclaim handed
+  // to the launcher; nothing but the adopt takes one out again (a sweep with
+  // nothing to reclaim never replaces the map), so a run live here would stay
+  // "elsewhere" for as long as the process lived.
+  it("a run this generation adopted is not elsewhere: the adopt forgets the thread on the boot-gap map — for a resume and for a restart; a fresh request leaves the map alone", async () => {
+    const elsewhere = new ThreadsElsewhere();
+    const listed = (runId: string) =>
+      elsewhere.replace([{ threadKey: THREAD, runId, startedAt: 5_000, meta: { agent: "general" } }]);
+
+    listed("run-old");
+    const resumed = setup("(resume)", { ledger: new RecordingLedger(), elsewhere, resume: await resumeOf("run-old") });
+    await adoptCarriedRun(resumed.deps, resumed.ctx);
+    expect(elsewhere.get(THREAD)).toBeUndefined();
+
+    listed("run-reserved");
+    const row = await rowOf("run-reserved", { request: durableInboxMessage(msg("hello there"), "hello there", 5_000) });
+    const restarted = setup("(restart)", { ledger: new RecordingLedger(), elsewhere, restart: { row, inbox: [] } });
+    await adoptCarriedRun(restarted.deps, restarted.ctx);
+    expect(elsewhere.get(THREAD)).toBeUndefined();
+
+    listed("run-far");
+    const fresh = setup("hello there", { ledger: new RecordingLedger(), elsewhere });
+    await adoptCarriedRun(fresh.deps, fresh.ctx);
+    expect(elsewhere.get(THREAD)?.runId).toBe("run-far");
   });
 });
 

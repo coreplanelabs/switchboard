@@ -14,7 +14,9 @@ import type { ChatMessage } from "./chatMessage.js";
 import type { CompletionRequest, CompletionResult, Provider } from "./provider.js";
 import { AGENTS, getAgent } from "../agents/registry.js";
 import { planResume } from "./runLedger/resume.js";
-import { knownToolsFor, resumeMessage } from "./resumeLaunch.js";
+import { knownToolsFor, launchResumes, resumeMessage } from "./resumeLaunch.js";
+import { reclaimRuns } from "./boot.js";
+import { piRunPaths } from "./harness/pi/process.js";
 import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
 import { makeExecutor } from "../execution/factory.js";
 import { InMemoryArtifactStore } from "../artifacts/store.js";
@@ -72,8 +74,8 @@ import { HarnessRegistry, authorizeToolCall, relayToolCall, type ToolCallAsk } f
 import { FakePiContainer } from "./harness/pi/testing/fakeContainer.js";
 import { scriptPiFromProvider } from "./harness/pi/testing/providerPi.js";
 import { SOFT_STOP_INSTRUCTION } from "./harness/pi/windDown.js";
-import { ThreadsElsewhere } from "./runLedger/threadsElsewhere.js";
-import type { LiveRunRow, StepRecord } from "./runLedger/types.js";
+import { ThreadsElsewhere, type ThreadElsewhere } from "./runLedger/threadsElsewhere.js";
+import type { ClaimRequest, LiveRunRow, StepRecord } from "./runLedger/types.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./runStoreWorker.js";
 import { buildCoreCommands, defaultOperations } from "./commandCatalogue.js";
 import { capabilitiesFrom } from "./capabilities.js";
@@ -10237,16 +10239,20 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(ledger.live.has("run-old")).toBe(false);
   });
 
-  // Feature: docs/reference/specs/harness-pi.md item 16 — a container replaced
-  // under a live pi run ends the way a refused re-attach does (item 54): the
-  // row closes `interrupted` with the note that says why, no failure reply,
-  // and the request runs again as a new run once the thread is free.
-  it("a live pi run whose resident container is replaced under it closes interrupted with the sandbox_restarted note and no ❌, and its request runs again as a new run once the thread is free — the outcome a refused re-attach has (item 54)", async () => {
+  /**
+   * The world of a pi run whose resident container is replaced under it
+   * (harness-pi item 16): a resident thread, the ledger as `ledger` shows it
+   * (a proxy may hold or watch its writes), and two containers — the first
+   * run's pi opens one bash call and dies with its container, which names
+   * itself anew; the restarted run's pi is scripted from the provider.
+   * `onCallOpen` runs once the first run's pi has opened its call: the run is
+   * live on the ledger, the map may be filled to name it.
+   */
+  function replacedContainerWorld(ledger: InMemoryRunLedger, hooks: { onCallOpen?: () => void } = {}) {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
     vi.stubEnv("GITHUB_APP_ID", "");
     const { calls } = residentFetchStub();
-    const ledger = new InMemoryRunLedger(() => 10_000);
     const provider = capturingProvider("started over and done");
     let n = 0;
     const registry = new RunRegistry({ genId: () => `run-${++n}`, genToken: () => `tok-${n}` });
@@ -10270,7 +10276,6 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     const harnesses = new HarnessRegistry();
     const bearers = new RunBearerStore({ clock: Date.now });
     deps.runBearers = bearers;
-    /** The first run's pi opens one bash call and dies with its container, which names itself anew; the restarted run's pi is scripted from the provider. */
     const containers: FakePiContainer[] = [];
     deps.harness = {
       harness: piHarness,
@@ -10316,6 +10321,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
             tool: "bash",
             input: { command: "npm test" },
           });
+          hooks.onCallOpen?.();
           // The resident's container rolls under the run: the executor waits for the wake, re-attaches to the
           // replacement — which names itself anew — and hands the probe back as the restart (resident-repos item 65).
           c.vm = "vm-new";
@@ -10329,6 +10335,16 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       tickMs: 5,
       sleep: realSleep,
     };
+    return { deps, provider, registry, writer, containers, calls };
+  }
+
+  // Feature: docs/reference/specs/harness-pi.md item 16 — a container replaced
+  // under a live pi run ends the way a refused re-attach does (item 54): the
+  // row closes `interrupted` with the note that says why, no failure reply,
+  // and the request runs again as a new run once the thread is free.
+  it("a live pi run whose resident container is replaced under it closes interrupted with the sandbox_restarted note and no ❌, and its request runs again as a new run once the thread is free — the outcome a refused re-attach has (item 54)", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const { deps, provider, registry, writer, containers, calls } = replacedContainerWorld(ledger);
     const { io, replies } = ioWithCard();
     const outcome = await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
     await writer.settled();
@@ -10365,6 +10381,380 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(ledger.live.has("run-1")).toBe(false);
     expect(registry.getById("run-1")).toMatchObject({ finished: true, status: "interrupted" });
     expect(registry.getById("run-2")).toMatchObject({ finished: true, status: "completed" });
+  });
+
+  // Feature: docs/reference/specs/thread-admission.md item 5 and harness-pi.md
+  // item 16 — the restart from the request is admitted milliseconds after the
+  // settle freed the thread, while the closed row's finish write is still in
+  // flight: the ledger would take a push into that row. If the boot-gap map
+  // names the run — the state a run resumed across a generation was left in
+  // before the adopt forgot it, and the state any later change that lists a
+  // run of this generation would leave — the restart must still run fresh:
+  // the run it restarts is not a live run.
+  it("a restart from the request never steers into the row it closed: with the boot-gap map naming the replaced run and the row's finish landing only after the restart began, the request still runs as a new run in the thread — the first record carrying sandbox_restarted — and the map forgets the run", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const elsewhere = new ThreadsElsewhere();
+    const order: string[] = [];
+    let restartBegan!: () => void;
+    const begun = new Promise<void>((r) => (restartBegan = r));
+    let finishLanded!: () => void;
+    const landed = new Promise<void>((r) => (finishLanded = r));
+    // The closed row's finish is held until the restart has begun — a push into
+    // the row (the bug) or the restart's own reservation — and lands before the
+    // reservation goes through, so the restarted run is tracked as it was live.
+    const ledger = new Proxy(inner, {
+      get(target, prop) {
+        if (prop === "finish")
+          return async (runId: string, gen: string, record: RunRecord) => {
+            if (runId === "run-1") await begun;
+            order.push(`finish ${runId}`);
+            const result = await target.finish(runId, gen, record);
+            if (runId === "run-1") finishLanded();
+            return result;
+          };
+        if (prop === "pushInbox")
+          return async (runId: string, message: Record<string, unknown>) => {
+            order.push(`push ${runId}`);
+            const result = await target.pushInbox(runId, message);
+            restartBegan();
+            return result;
+          };
+        if (prop === "claim")
+          return async (req: ClaimRequest) => {
+            if (req.runId !== "run-1") {
+              order.push(`claim ${req.runId}`);
+              restartBegan();
+              await Promise.race([landed, realSleep(2_000)]);
+            }
+            return target.claim(req);
+          };
+        const v = Reflect.get(target, prop) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    }) as InMemoryRunLedger;
+    const { deps, provider, registry, writer, containers } = replacedContainerWorld(ledger, {
+      // The map names the run while it runs: what a stale entry for its thread looks like.
+      onCallOpen: () =>
+        elsewhere.replace([{ threadKey: "slack:CX:1.0", runId: "run-1", startedAt: 5_000, meta: { agent: "coding" } }]),
+    });
+    deps.threadsElsewhere = elsewhere;
+    deps.admission = new ThreadAdmission();
+    const { io, replies } = ioWithCard();
+    const outcome = await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    await writer.settled();
+    expect(outcome).toEqual({ status: "refused", refusal: "container_replaced" });
+    const closed = inner.finished.get("run-1");
+    expect(closed?.status).toBe("interrupted");
+    expect(closed?.events.find((e) => e.type === "run_note")).toMatchObject({ kind: "sandbox_restarted" });
+    // Never a push into the closed row, no steer ack in the thread; the map forgot the run.
+    expect(order.filter((o) => o.startsWith("push"))).toEqual([]);
+    expect(replies.filter((r) => r.startsWith("↪"))).toEqual([]);
+    expect(elsewhere.get("slack:CX:1.0")).toBeUndefined();
+    // The request ran again as a new run in the thread, reserved before the closed row's finish landed and tracked once it had.
+    expect(order[0]).toBe("claim run-2");
+    expect(order).toContain("finish run-1");
+    expect(containers).toHaveLength(2);
+    expect(provider.requests).toHaveLength(1);
+    expect(textTurnsOf(provider.requests[0]!.messages).at(-1)).toMatchObject({
+      role: "user",
+      text: expect.stringContaining("fix it"),
+    });
+    expect(replies.at(-1)).toBe("started over and done");
+    expect(inner.finished.get("run-2")).toMatchObject({ status: "completed", threadKey: "slack:CX:1.0" });
+    expect(registry.getById("run-2")).toMatchObject({ finished: true, status: "completed" });
+  });
+
+  // Feature: docs/reference/specs/thread-admission.md item 5 and harness-pi.md
+  // item 16 — the roll order every image-changing deploy has: the bot rolls
+  // first (the run is handed to the next generation and resumed there, pi
+  // still alive in the resident's container), the resident's container rolls
+  // minutes later (the platform's own rollout). The row the new generation
+  // reclaimed sits on its boot-gap map from the reclaim on, and nothing but
+  // the adopt takes it out; the restart from the request is then admitted
+  // while the closed row's finish write is still in flight. Without the
+  // adopt's forget the restart is steered into the row it closed and the
+  // request is never run again (seen live on 1.233.0); the exclusion by id
+  // is pinned above and in admission.test.ts.
+  it("the roll order every deploy has: a pi run handed to the next generation is resumed there with pi alive — the row named on the boot-gap map until the adopt forgets it — then its container is replaced: the first record ends interrupted with sandbox_restarted, and a second run starts from the same request in the same thread, never steered into the row it closed, the closed row's finish landing after the restart began (thread-admission item 5, harness-pi item 16)", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    residentFetchStub();
+    const THREAD = "slack:CX:1.0";
+    const PID = 4242;
+    const root = piRunPaths("run-old");
+    const inner = new InMemoryRunLedger(() => 10_000);
+
+    // The resident's container, where pi runs the whole time: what pi wrote up
+    // to the boundary the row records (the turn the mirror wrote as step 1),
+    // then the call's start — pi is inside `sleep 240`, waiting on nothing
+    // the bot has to answer.
+    const container = new FakePiContainer();
+    container.pid = PID;
+    const call = {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "sleep 240" } }],
+      stopReason: "toolUse",
+    };
+    const mirrored = [{ type: "agent_start" }, { type: "message_end", message: call }];
+    container.emit(...mirrored);
+    const logOffset = Buffer.byteLength(mirrored.map((e) => `${JSON.stringify(e)}\n`).join(""), "utf8");
+    container.emit({
+      type: "tool_execution_start",
+      toolCallId: "c1",
+      toolName: "bash",
+      args: { command: "sleep 240" },
+    });
+    let replaced = false;
+    container.alive = async (pid) => {
+      if (replaced) throw new ExecSandboxRestartedError("the sandbox restarted under the run (waited 42 s)", 42_000);
+      return pid === PID;
+    };
+    container.onStdin = (line, c) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
+        c.emit({ id: cmd.id, type: "response", command: cmd.type, success: true, data: { sessionFile: "s.jsonl" } });
+      if (cmd.type !== "prompt") return;
+      // pi, inside its call, queues the continue and says so; then the
+      // resident's container rolls under the run (resident-repos item 65).
+      c.emit({ id: cmd.id, type: "response", command: "prompt", success: true });
+      c.vm = "vm-new";
+      replaced = true;
+    };
+
+    // Generation A: the run's row as its write-through left it — the request's
+    // identity, the resident binding, the harness facts naming pi's pid,
+    // container and log boundary; seeded; one step recorded with the bash
+    // call in flight; the request as the `input` event.
+    const transcript: ChatMessage[] = [
+      { role: "user", content: [{ type: "text", text: "fix it" }] },
+      { role: "assistant", content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "sleep 240" } }] },
+    ];
+    await inner.claim({
+      runId: "run-old",
+      threadKey: THREAD,
+      gen: "gen-A",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      meta: {
+        channelId: "slack:CX",
+        userId: "slack:UADMIN",
+        threadKey: THREAD,
+        agent: "coding",
+        model: "anthropic/coding-model",
+        repo: "acme/api",
+        ref: "main",
+      },
+      card: { channel: "CX", ts: "1.2" },
+      system: "sys",
+      tools: [],
+      state: {
+        binding: { backend: "resident", workspace: "/workspace/threads/t/main", user: "worker2", container: "vm-1" },
+        harness: {
+          harness: "pi",
+          pid: PID,
+          logOffset,
+          root: root.dir,
+          container: "vm-fake",
+          bearerHash: "ab".repeat(32),
+          relaunches: 0,
+        },
+      },
+    });
+    await inner.seed("run-old", "gen-A", [{ idx: 0, message: transcript[0]! }]);
+    await inner.step(
+      "run-old",
+      "gen-A",
+      { step: 0, seq: 0, turnIndex: 1, inFlight: [], inboxConsumedSeq: 0, remainingMs: 300_000, turn: 0, iteration: 0 },
+      [],
+    );
+    await inner.step(
+      "run-old",
+      "gen-A",
+      {
+        step: 1,
+        seq: 1,
+        turnIndex: 2,
+        inFlight: [{ callId: "c1", tool: "bash" }],
+        inboxConsumedSeq: 0,
+        remainingMs: 240_000,
+        turn: 1,
+        iteration: 0,
+      },
+      [{ idx: 1, message: transcript[1]! }],
+    );
+    await inner.append("run-old", "gen-A", [{ type: "input", messageId: "m1", text: "fix it", at: 1, seq: 1 }]);
+    // The drain (run-history item 39): generation A hands the row to the next generation and exits.
+    expect(await inner.handoff("gen-A", ["run-old"])).toEqual({ marked: ["run-old"] });
+
+    // Generation B's view of the ledger. The closed row's finish is held until
+    // the restart has begun — in production the finish is an HTTP write in
+    // flight while the restart is admitted milliseconds after the settle — and
+    // lands before the restart reserves a row of its own, as it did live. A
+    // push into the closed row (the bug) releases it too, so a regression
+    // fails on the assertions below rather than on the clock.
+    const order: string[] = [];
+    let restartBegan!: () => void;
+    const begun = new Promise<void>((r) => (restartBegan = r));
+    let finishLanded!: () => void;
+    const landed = new Promise<void>((r) => (finishLanded = r));
+    const ledger = new Proxy(inner, {
+      get(target, prop) {
+        if (prop === "finish")
+          return async (runId: string, gen: string, record: RunRecord) => {
+            if (runId === "run-old") await begun;
+            order.push(`finish ${runId}`);
+            const result = await target.finish(runId, gen, record);
+            if (runId === "run-old") finishLanded();
+            return result;
+          };
+        if (prop === "pushInbox")
+          return async (runId: string, message: Record<string, unknown>) => {
+            order.push(`push ${runId}`);
+            const result = await target.pushInbox(runId, message);
+            restartBegan();
+            return result;
+          };
+        if (prop === "claim")
+          return async (req: ClaimRequest) => {
+            if (req.runId !== "run-old") {
+              order.push(`claim ${req.runId}`);
+              restartBegan();
+              await Promise.race([landed, realSleep(2_000)]);
+            }
+            return target.claim(req);
+          };
+        const v = Reflect.get(target, prop) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    }) as InMemoryRunLedger;
+
+    const provider = capturingProvider("started over and done");
+    let n = 0;
+    const registry = new RunRegistry({ genId: () => `run-${++n}`, genToken: () => `tok-${n}` });
+    const store = new InMemoryRunStore();
+    const writer = createRunHistoryWriter({
+      store,
+      warn: () => {},
+      onPersisted: (id) => registry.markPersisted(id),
+      sleep: async () => {},
+    });
+    const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.runHistoryWriter = writer;
+    deps.runLedger = createLedgerWriteThrough({
+      ledger,
+      gen: "gen-B",
+      fallback: { put: async () => {} },
+      warn: () => {},
+    });
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
+    deps.admission = new ThreadAdmission();
+    const elsewhere = new ThreadsElsewhere();
+    deps.threadsElsewhere = elsewhere;
+    const harnesses = new HarnessRegistry();
+    const bearers = new RunBearerStore({ clock: Date.now });
+    deps.runBearers = bearers;
+    /** What the boot-gap map said of the thread when the resumed run attached its workspace — after the adopt, before pi was probed. */
+    let elsewhereAtAttach: ThreadElsewhere | undefined | "never attached" = "never attached";
+    const containers: FakePiContainer[] = [];
+    deps.harness = {
+      harness: piHarness,
+      registry: harnesses,
+      harnessUrl: "https://bot.test",
+      loopbackUrl: "http://127.0.0.1:8080",
+      containerFor: () => {
+        if (containers.length === 0) {
+          // The resumed run is handed the container pi still runs in.
+          elsewhereAtAttach = elsewhere.get(THREAD);
+          containers.push(container);
+          return container;
+        }
+        // The restarted run's pi, scripted from the provider as a fresh run's is.
+        const fresh = new FakePiContainer();
+        scriptPiFromProvider(fresh, { provider, registry: harnesses, bearers, beforeModelCall: () => realSleep(10) });
+        containers.push(fresh);
+        return fresh;
+      },
+      pollMs: 1,
+      tickMs: 5,
+      sleep: realSleep,
+    };
+
+    // Generation B boots: the reclaim takes the handed-off row, the boot-gap
+    // map is filled as src/index.ts fills it (the rows live elsewhere plus the
+    // rows just taken for the launcher), and the launcher resumes the run.
+    const reclaimed = await reclaimRuns({ ledger, gen: "gen-B", now: () => 10_000 });
+    expect(reclaimed.resumable.map((r) => r.row.runId)).toEqual(["run-old"]);
+    elsewhere.replace([...reclaimed.liveElsewhere, ...reclaimed.resumable.map((r) => r.row)]);
+    expect(elsewhere.get(THREAD)?.runId).toBe("run-old");
+    const { io, replies } = ioWithCard();
+    let resumeOver!: () => void;
+    const resumeDone = new Promise<void>((r) => (resumeOver = r));
+    const launched = await launchResumes(deps, reclaimed.resumable, {
+      ioFor: () => io,
+      close: async (run, why) => {
+        throw new Error(`${run.row.runId} was resumable; nothing to close here (${why})`);
+      },
+      agentFor: (name) => (name ? getAgent(name) : undefined),
+      onDone: () => resumeOver(),
+    });
+    expect(launched).toEqual({ launched: ["run-old"], closed: [] });
+    // The restart is dispatched inside the resumed dispatch's finally, so the resume is over once the restart is.
+    await resumeDone;
+    await writer.settled();
+
+    // The boot gap closed at the adopt: by the time the resumed run attached
+    // its workspace, the map no longer named the thread.
+    expect(elsewhereAtAttach).toBeUndefined();
+    // The resumed run found pi alive and continued it, then its container was
+    // replaced: the first record ends interrupted with the sandbox_restarted
+    // note, the call in flight settled with the restart note; nothing killed.
+    const closed = inner.finished.get("run-old");
+    expect(closed?.status).toBe("interrupted");
+    const notes = (closed?.events ?? []).filter((e) => e.type === "run_note") as Array<{
+      kind: string;
+      summary: string;
+    }>;
+    expect(notes.find((e) => e.kind === "resumed")?.summary).toMatch(
+      /^resumed after a restart: pi still runs in the container \(pid 4242\)/,
+    );
+    expect(notes.find((e) => e.kind === "sandbox_restarted")?.summary).toBe(
+      "the container running pi was replaced (vm-fake → vm-new; the executor said: the sandbox restarted under the run (waited 42 s)); the run restarts from its request",
+    );
+    expect(closed?.events.find((e) => e.type === "tool_result")).toMatchObject({
+      tool: "bash",
+      ok: false,
+      callId: "c1",
+    });
+    expect(container.killed).toEqual([]);
+    expect(container.starts).toEqual([]); // the previous generation's pi, continued
+    // The restart was never steered into the row it closed…
+    expect(order.filter((o) => o.startsWith("push"))).toEqual([]);
+    expect(replies.filter((r) => r.startsWith("↪"))).toEqual([]);
+    expect(replies.some((r) => r.startsWith("❌"))).toBe(false);
+    // …and ran as a new run in the thread from the same request, tracked on the
+    // ledger under its own id, its reservation made before the closed row's
+    // finish landed and accepted once it had.
+    const restarted = [...inner.finished.keys()].filter((id) => id !== "run-old");
+    expect(restarted).toHaveLength(1);
+    const freshId = restarted[0]!;
+    expect(order[0]).toBe(`claim ${freshId}`);
+    expect(order).toContain("finish run-old");
+    const fresh = inner.finished.get(freshId);
+    expect(fresh).toMatchObject({ status: "completed", threadKey: THREAD, agent: "coding" });
+    expect((fresh?.events.find((e) => e.type === "input") as { text?: string } | undefined)?.text).toContain("fix it");
+    expect(provider.requests).toHaveLength(1);
+    expect(textTurnsOf(provider.requests[0]!.messages).at(-1)).toMatchObject({
+      role: "user",
+      text: expect.stringContaining("fix it"),
+    });
+    expect(replies.at(-1)).toBe("started over and done");
+    expect(containers).toHaveLength(2);
+    expect(inner.live.size).toBe(0);
+    expect(elsewhere.get(THREAD)).toBeUndefined();
+    expect(registry.getById("run-old")).toMatchObject({ finished: true, status: "interrupted" });
+    expect(registry.getById(freshId)).toMatchObject({ finished: true, status: "completed" });
   });
 
   it("a steered follow-up is written to the run's durable inbox with its seq, and the next step record says the run consumed it (thread-admission item 5, run-history item 40)", async () => {

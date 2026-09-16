@@ -199,6 +199,11 @@ export interface AdmissionContext {
   restart: RestartContext | undefined;
   /** A resume's or restart's ledger row; undefined for a fresh request. */
   carriedRow: LiveRunRow | undefined;
+  /** Set when this request is a run's request dispatched again as a new run
+   *  (`DispatchOptions.restartOf`; harness-pi item 16, run-history item 54):
+   *  the run it restarts, which the dispatch handing it on has closed. That
+   *  run is not a live run to steer into, whatever the boot-gap map says of it. */
+  restartOf?: string;
   /** Set when a coordinator spawned this request (`DispatchOptions.coordinator`,
    *  item 8): a run in flight on the thread refuses it by name instead of
    *  taking its text as a steer — the spawn route answers the coordinator from
@@ -380,7 +385,23 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
   // ledger refuses means the row is gone — the map is stale — so the message
   // runs fresh and the thread is forgotten until the next sweep.
   // (A restart's own row is in that map: it is not steered into itself.)
-  const elsewhere = resume || restart ? undefined : deps.threadsElsewhere.get(msg.threadKey);
+  let elsewhere = resume || restart ? undefined : deps.threadsElsewhere.get(msg.threadKey);
+  if (elsewhere !== undefined && elsewhere.runId === ctx.restartOf) {
+    // The map names the run this request restarts (harness-pi item 16;
+    // run-history item 54). The dispatch handing the request on closed that
+    // run a moment ago, and its finish write is still in flight through the
+    // writer — the ledger would take a push into its inbox, and the request
+    // would vanish with the row. A closed run is not a live one: the entry
+    // goes, and the request runs fresh, as a new run in the thread. The adopt
+    // forgets the thread when it takes the row up (`adoptCarriedRun`), so no
+    // known path leaves the entry here; this is the guard that keeps the
+    // restart's outcome from resting on that.
+    console.log(
+      `[dispatch] ${msg.threadKey} run ${elsewhere.runId} is the run this request restarts — not steered into it; running fresh`,
+    );
+    deps.threadsElsewhere.forget(msg.threadKey);
+    elsewhere = undefined;
+  }
   const farAgent = elsewhere?.agent;
   if (elsewhere && ctx.coordinator) {
     // The same refusal for a run live on another generation (item 8): the slot
@@ -587,6 +608,15 @@ export async function adoptCarriedRun(deps: AdmissionDeps, ctx: AdmissionContext
       }),
     );
   }
+  // A run live here is not live elsewhere (thread-admission item 5): the
+  // reclaim listed this row on the boot-gap map as one taken for the launcher,
+  // and from the claim above in-process admission holds the thread — a
+  // follow-up now steers into this run's slot. Nothing else takes the entry
+  // out: a sweep with nothing to reclaim never replaces the map, so the entry
+  // would outlive the run and a later request on the thread — the run's own
+  // restart from its request, once its container was replaced — would be
+  // steered into a row that was closing.
+  if (resume || restart) deps.threadsElsewhere.forget(msg.threadKey);
   return carried;
 }
 
