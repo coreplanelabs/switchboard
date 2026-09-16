@@ -10,17 +10,96 @@ interface TeamUrlClient {
 
 /** The slice of the Slack Web API the name resolvers use — declared structurally
  *  so both the real WebClient and a test mock satisfy it. */
-interface NameLookupClient {
+interface SlackUserRecord {
+  id?: string;
+  name?: string;
+  real_name?: string;
+  deleted?: boolean;
+  is_bot?: boolean;
+  is_app_user?: boolean;
+  profile?: { display_name?: string; real_name?: string; email?: string };
+}
+
+export interface NameLookupClient {
   conversations: { info(args: { channel: string }): Promise<{ channel?: { name?: string } }> };
   users: {
-    info(args: { user: string }): Promise<{
-      user?: {
-        name?: string;
-        real_name?: string;
-        profile?: { display_name?: string; real_name?: string; email?: string };
-      };
-    }>;
+    info(args: { user: string }): Promise<{ user?: SlackUserRecord }>;
+    /** The reverse lookup the dashboard link uses (record 0042); the same `users:read.email` scope as `info`. */
+    lookupByEmail?(args: { email: string }): Promise<{ user?: SlackUserRecord }>;
   };
+}
+
+/** The person a verified email names, as the dashboard link resolves it (record 0042). */
+export interface LinkedPerson {
+  /** Platform-namespaced: `slack:U…`. */
+  id: string;
+  name?: string;
+}
+
+/** How long a person link (a hit or a miss) is held before Slack is asked again. */
+export const PERSON_LINK_TTL_MS = 10 * 60_000;
+/** The longest a gate pass waits on the reverse lookup; past it the session is unlinked for that request. */
+export const PERSON_LINK_TIMEOUT_MS = 1500;
+
+const personByEmailCache = new Map<string, { person: LinkedPerson | undefined; expiresAt: number }>();
+const personByEmailInFlight = new Map<string, Promise<LinkedPerson | undefined>>();
+
+const displayNameOf = (u: SlackUserRecord | undefined): string | undefined =>
+  u?.profile?.display_name || u?.profile?.real_name || u?.real_name || u?.name || undefined;
+
+/**
+ * The Slack person whose profile email is `email` (lower-cased, exact), or
+ * undefined: no `lookupByEmail` on the client, no such user, a deleted user, a
+ * bot or app user, an API failure, or a lookup slower than the timeout. Cached
+ * per process for `PERSON_LINK_TTL_MS`, hits and misses alike, and
+ * single-flighted, so a page's fan-out (HTML, stream, `/api` calls) costs one
+ * lookup per email per window. Never throws.
+ */
+export function resolvePersonByEmail(
+  client: NameLookupClient,
+  email: string,
+  opts: { now?: () => number; timeoutMs?: number } = {},
+): Promise<LinkedPerson | undefined> {
+  const key = email.trim().toLowerCase();
+  if (!key.includes("@") || typeof client.users.lookupByEmail !== "function") return Promise.resolve(undefined);
+  const now = opts.now ?? Date.now;
+  const cached = personByEmailCache.get(key);
+  if (cached && cached.expiresAt > now()) return Promise.resolve(cached.person);
+  const inFlight = personByEmailInFlight.get(key);
+  if (inFlight) return inFlight;
+  const lookup = (async (): Promise<LinkedPerson | undefined> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const call = client.users.lookupByEmail!({ email: key }).then(
+        (r) => r.user,
+        () => undefined,
+      );
+      const timedOut = Symbol("person lookup timed out");
+      const answer = await Promise.race([
+        call,
+        new Promise<typeof timedOut>((resolve) => {
+          timer = setTimeout(() => resolve(timedOut), opts.timeoutMs ?? PERSON_LINK_TIMEOUT_MS);
+        }),
+      ]);
+      if (answer === timedOut) return undefined; // not cached: the next request asks again
+      const u = answer;
+      const person =
+        u?.id && !u.deleted && !u.is_bot && !u.is_app_user
+          ? { id: `slack:${u.id}`, ...(displayNameOf(u) ? { name: displayNameOf(u) } : {}) }
+          : undefined;
+      personByEmailCache.set(key, { person, expiresAt: now() + PERSON_LINK_TTL_MS });
+      if (personByEmailCache.size > NAME_CACHE_MAX) {
+        const oldest = personByEmailCache.keys().next().value;
+        if (oldest !== undefined) personByEmailCache.delete(oldest);
+      }
+      return person;
+    } finally {
+      if (timer) clearTimeout(timer);
+      personByEmailInFlight.delete(key);
+    }
+  })();
+  personByEmailInFlight.set(key, lookup);
+  return lookup;
 }
 
 // Bounded so a long-lived process can't grow them without limit. On overflow the
@@ -85,10 +164,12 @@ export async function resolveUserEmail(client: NameLookupClient, user: string): 
   }
 }
 
-/** Clear both name caches — for tests, so cache-hit assertions start clean. */
+/** Clear the name caches and the person-link cache — for tests, so cache-hit assertions start clean. */
 export function resetSlackNameCaches(): void {
   channelNameCache.clear();
   userNameCache.clear();
+  personByEmailCache.clear();
+  personByEmailInFlight.clear();
 }
 
 /** The permalink Slack itself would mint for a message: `<team url>archives/

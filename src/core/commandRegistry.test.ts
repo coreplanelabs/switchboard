@@ -919,3 +919,30 @@ describe("enabledWhen — a capability that is off hides the command (item 28)",
     expect(CommandRegistry.enabledFor(gated, { ...NO_CAPABILITIES, memory: true })).toBe(true);
   });
 });
+
+// Feature: docs/decisions/0042 — a dashboard session linked to its person audits as both.
+describe("CommandRegistry audit line — the linked person", () => {
+  it("carries `asUser` beside `callerId` when the caller's actor is linked to a person, and no field otherwise", async () => {
+    const { registry, audit, deps } = setup();
+    const linked = {
+      ...cli,
+      kind: "access" as const,
+      id: "access:a1",
+      actor: {
+        ...cli.actor,
+        id: "access:a1",
+        self: ["access:a1", "slack:UALICE"],
+        asUser: { id: "slack:UALICE", name: "alice" },
+      },
+    };
+    await registry.invoke("demo.echo", opts({ status: "all" }), linked, deps);
+    await registry.invoke("demo.echo", opts({ status: "all" }), cli, deps);
+    expect(audit.mock.calls[0]?.[0]).toMatchObject({
+      callerKind: "access",
+      callerId: "access:a1",
+      asUser: "slack:UALICE",
+      outcome: "ok",
+    });
+    expect(audit.mock.calls[1]?.[0]).not.toHaveProperty("asUser");
+  });
+});

@@ -36,6 +36,11 @@ import { MAX_BODY_BYTES, readBody } from "./http.js";
 // cannot read a cross-site response either. Every response is `no-store`.
 // Authorization happens before the body is buffered (readBody with a cap).
 
+/** The person a verified email names (record 0042): `slack:U…` and a display
+ *  name, or undefined when nobody, a bot, a deleted user, or a lookup that
+ *  failed or timed out — the Slack adapter's `resolvePersonByEmail`. */
+export type PersonLookup = (email: string) => Promise<{ id: string; name?: string } | undefined>;
+
 export interface CommandHttpOptions {
   /** Grants by actor id (`ConfigStore.grantsFor`) for the `Caller.actor` every
    *  `/api` call carries — `access:<sub>` (a browser session: every group's
@@ -43,6 +48,11 @@ export interface CommandHttpOptions {
    *  `access:svc:<common_name>` (exactly its `grants` entry, nothing implicit).
    *  The table is config's; the adapter only names the id. */
   grantsFor: GrantsLookup;
+  /** The dashboard link (record 0042): a browser session whose email names a
+   *  Slack person carries that person as a second `self` id. Absent (no Slack
+   *  app up, the `token`/`none` strategies' identities have no email) → every
+   *  session is unlinked, exactly as before the link existed. */
+  personByEmail?: PersonLookup;
   /** `PUBLIC_BASE_URL`, when set: the origin writes must come from. */
   publicBaseUrl?: string;
   maxBodyBytes?: number;
@@ -124,10 +134,35 @@ export function serviceTokenAllowed(pathname: string, identity: AccessIdentity):
   return !isServiceToken(identity) || isCommandPath(pathname);
 }
 
+/**
+ * `accessActor` plus the dashboard link (record 0042): a browser session with
+ * an email that names one active Slack person gets that person as a second
+ * `self` id and as `asUser` — identity, never authority: `id` and `grants` are
+ * exactly `accessActor`'s. A service token, a session without an email, no
+ * lookup, no match, or a lookup that fails: the unlinked actor, as today.
+ */
+export async function resolveAccessActor(
+  identity: AccessIdentity,
+  opts: Pick<CommandHttpOptions, "grantsFor" | "personByEmail">,
+): Promise<Actor> {
+  const actor = accessActor(identity, opts.grantsFor);
+  if (isServiceToken(identity) || !identity.email || !opts.personByEmail) return actor;
+  const person = await opts.personByEmail(identity.email).catch(() => undefined);
+  if (!person || !person.id.startsWith("slack:")) return actor;
+  return {
+    ...actor,
+    self: [actor.id, person.id],
+    asUser: { id: person.id, ...(person.name ? { name: person.name } : {}) },
+  };
+}
+
 /** The `/api` Caller for an Access identity: its caller id and the `Actor`
- *  the policy table decides on (`accessActor`). */
-export function callerFor(identity: AccessIdentity, opts: Pick<CommandHttpOptions, "grantsFor">): Caller {
-  return { kind: "access", id: callerIdFor(identity), actor: accessActor(identity, opts.grantsFor) };
+ *  the policy table decides on (`resolveAccessActor`: linked to its person when the email names one). */
+export async function callerFor(
+  identity: AccessIdentity,
+  opts: Pick<CommandHttpOptions, "grantsFor" | "personByEmail">,
+): Promise<Caller> {
+  return { kind: "access", id: callerIdFor(identity), actor: await resolveAccessActor(identity, opts) };
 }
 
 function hostOf(url: string | undefined): string | undefined {
@@ -230,7 +265,7 @@ export function createCommandHttpHandler(commands: CommandInvoker, opts: Command
     // Refuse BEFORE buffering where the table can decide without the input
     // (write safety). `invoke` re-checks in every case; this only spares an
     // unauthorized caller's body from being read.
-    const caller = callerFor(identity, opts);
+    const caller = await callerFor(identity, opts);
     if (CommandRegistry.refuses(cmd, caller)) {
       refuse(res, ERROR_STATUS.unauthorized, "unauthorized", `${caller.id} is not allowed to run ${cmd.id}`);
       return;

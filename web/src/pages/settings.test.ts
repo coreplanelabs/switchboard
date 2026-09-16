@@ -11,8 +11,9 @@ import { ALL_ON, mountApp } from "../testing/mount";
 // Feature: docs/reference/specs/settings-page.md items 5–8 — the settings page
 // paints one tab per seed, offers MCPs only where the capability is on, and
 // every write it composes is one POST to /api/<group>.<verb> naming the org or
-// channel tier — never `me` (record 0041). A refusal is the handler's own
-// sentence, shown as is; `canWrite` disables controls and decides nothing.
+// channel tier — and `me` only for a session linked to its person (records
+// 0041, 0042). A refusal is the handler's own sentence, shown as is;
+// `canWrite` disables controls and decides nothing.
 
 const VOCABULARY = {
   agents: ["general", "review", "coding"],
@@ -390,5 +391,57 @@ describe("ChannelsPanel", () => {
     await wrapper.find("#channel-open").trigger("submit");
     await flush();
     expect(navigate).toHaveBeenCalledWith("/settings/channels/slack%3AC7");
+  });
+});
+
+// Feature: docs/decisions/0042 — a session linked to its person gets the `me` tier on the MCPs tab.
+describe("McpServersPanel for a linked session (record 0042)", () => {
+  const MINE: McpServerView = {
+    name: "mine",
+    scope: "user",
+    scopeKey: "user:slack:UME",
+    url: "https://mcp.mine.example/mcp",
+    agents: ["general", "research"],
+    auth: "none",
+    state: "connected",
+    source: "runtime",
+    addedBy: "slack:UME",
+  };
+  const seed = { servers: [LAKE, MINE], canWrite: { org: false, channel: false } };
+
+  it("offers and defaults to the me tier, marks the person's row as mine and writable, and Add posts scope me", async () => {
+    const { fetchFn, calls } = fakeFetch({ body: { server: { name: "notes" } } });
+    const wrapper = mountApp(McpServersPanel, {
+      props: {
+        mcps: seed,
+        vocabulary: VOCABULARY,
+        viewer: "access:me",
+        asUser: { id: "slack:UME", name: "me" },
+        fetch: fetchFn,
+      },
+    });
+    expect((wrapper.find("#mcp-scope").element as HTMLSelectElement).value).toBe("me");
+    const mine = wrapper.findAll("tr.server")[1];
+    expect(mine.text()).toContain("added by you");
+    expect(mine.findAll("button").filter((b) => (b.element as HTMLButtonElement).disabled)).toHaveLength(0);
+    await wrapper.find("#mcp-name").setValue("notes");
+    await wrapper.find("#mcp-url").setValue("https://mcp.notes.example/mcp");
+    await wrapper.find("form.add").trigger("submit");
+    await flush();
+    expect(calls[0].body).toEqual({
+      name: "notes",
+      url: "https://mcp.notes.example/mcp",
+      scope: "me",
+      agents: "general,research",
+    });
+  });
+
+  it("an unlinked session sees the person's row read-only and cannot pick me", () => {
+    const wrapper = mountApp(McpServersPanel, { props: { mcps: seed, vocabulary: VOCABULARY, viewer: "access:x" } });
+    expect((wrapper.find("#mcp-scope").element as HTMLSelectElement).value).toBe("org");
+    expect((wrapper.find('#mcp-scope option[value="me"]').element as HTMLOptionElement).disabled).toBe(true);
+    const row = wrapper.findAll("tr.server")[1];
+    expect(row.text()).not.toContain("added by you");
+    expect(row.findAll("button").filter((b) => (b.element as HTMLButtonElement).disabled).length).toBeGreaterThan(0);
   });
 });

@@ -93,6 +93,7 @@ import {
   AUTHZ_INGRESS_TOKENS,
   AUTHZ_ROLES,
   carriedBy,
+  LINKED_ROLE,
   exposedOn,
   FIXTURE,
   forCaller,
@@ -1037,6 +1038,8 @@ export const httpCaller = (who: Who) => ({
 export const httpOptions = (f: Fixture) => ({
   grantsFor: (id: string) => f.config.grantsFor(id),
   devBypassActive: false,
+  // The dashboard link (record 0042): the one email the suite knows names the linked role's person.
+  personByEmail: async (email: string) => (email === LINKED_ROLE.email ? LINKED_ROLE.person : undefined),
 });
 export const httpHandler = (f: Fixture) => createCommandHttpHandler(f.commands, httpOptions(f));
 
@@ -1159,10 +1162,10 @@ expect(SURFACES.map((s) => s.meta.key)).toEqual(SURFACE_METAS.map((m) => m.key))
 // ---- the fixed actor set, driven through the surface that carries each id ------------------
 
 /** The Access identity an `access:` role authenticates as: a service token by common_name, else a browser sub. */
-export function httpIdentityOf(role: AuthzRole): { sub: string; commonName?: string } {
-  return role.id.startsWith("access:svc:")
-    ? { sub: "", commonName: role.id.slice("access:svc:".length) }
-    : { sub: role.id.slice("access:".length) };
+export function httpIdentityOf(role: AuthzRole): { sub: string; email?: string; commonName?: string } {
+  if (role.id.startsWith("access:svc:")) return { sub: "", commonName: role.id.slice("access:svc:".length) };
+  const sub = role.id.slice("access:".length);
+  return role.id === LINKED_ROLE.id ? { sub, email: LINKED_ROLE.email } : { sub };
 }
 
 /** Drive `cmd` with `named` as `role` on the surface its id is carried by. */

@@ -24,6 +24,7 @@ const tab = computed(() => seed?.tab ?? "channels");
       :mcps="seed.mcps"
       :vocabulary="seed.vocabulary"
       :viewer="seed.viewer"
+      :as-user="seed.asUser"
     />
     <ChannelsPanel
       v-else-if="tab === 'channels' && seed.channels"

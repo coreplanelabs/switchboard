@@ -117,7 +117,7 @@ function handler(
   const view = createSettingsViewHandler(
     {
       commands,
-      callerFor: (identity) => callerWith("access", `access:${identity.sub}`, grants(identity.sub)),
+      callerFor: async (identity) => callerWith("access", `access:${identity.sub}`, grants(identity.sub)),
       installation: () => INSTALLATION,
       vocabulary: VOCABULARY,
       capabilities: opts.capabilities ?? ALL_CAPABILITIES,
@@ -295,7 +295,7 @@ describe("the settings view", () => {
     const view = createSettingsViewHandler(
       {
         commands,
-        callerFor: (identity) => callerWith("access", `access:${identity.sub}`, "all"),
+        callerFor: async (identity) => callerWith("access", `access:${identity.sub}`, "all"),
         installation: () => INSTALLATION,
         vocabulary: VOCABULARY,
         capabilities: ALL_CAPABILITIES,

@@ -68,8 +68,8 @@ export function parseSettingsRoute(pathname: string, search = ""): SettingsRoute
 export interface SettingsViewDeps {
   /** The bound registry: the page reads through the same commands the CLI runs. */
   commands: CommandInvoker;
-  /** The `/api` caller for the gate's identity (commandHttp's `callerFor`). */
-  callerFor(identity: AccessIdentity): Caller;
+  /** The `/api` caller for the gate's identity (commandHttp's `callerFor`), linked to its person when the email names one. */
+  callerFor(identity: AccessIdentity): Promise<Caller>;
   /** The Installation tab's rows: the running config projected by allow-list. */
   installation(): InstallationView;
   vocabulary: SettingsVocabulary;
@@ -156,9 +156,7 @@ export function createSettingsViewHandler(
       plain(res, 405, "method not allowed", { allow: "GET" });
       return true;
     }
-    const caller = deps.callerFor(ctx.identity);
     const tab: SettingsTab = route.tab === "home" ? homeTab(deps.capabilities) : route.tab;
-    const base: SettingsSeed = { page: "settings", tab, viewer: caller.id, vocabulary: deps.vocabulary };
     const failed = (err: unknown) => {
       const reason = (err instanceof Error ? err.message : String(err)).slice(0, UPSTREAM_REASON_MAX);
       // A failure after the 200 was written (the shell threw mid-render) can
@@ -176,25 +174,35 @@ export function createSettingsViewHandler(
       res.end(shell("Settings", seed));
     };
     const channel = "channel" in route ? route.channel : undefined;
-    if (tab === "installation") {
-      // The projection is the process's own config, not a command: gated on the
-      // read every browser session holds and a credential must be granted.
-      if (!authorize(caller.actor, "config:read", { type: "command", id: "config.show" }).allow) {
-        plain(res, 403, "forbidden");
-        return true;
-      }
-      render({ ...base, installation: deps.installation() });
-      return true;
-    }
-    const build = tab === "mcps" ? mcpsSeed(caller, channel) : channelsSeed(caller, channel);
-    build
-      .then((part) =>
+    // The caller is resolved once per request, linked to its person when the
+    // session's email names one (record 0042) — the same resolution `/api` makes.
+    deps
+      .callerFor(ctx.identity)
+      .then(async (caller) => {
+        const base: SettingsSeed = {
+          page: "settings",
+          tab,
+          viewer: caller.id,
+          ...(caller.actor.asUser ? { asUser: caller.actor.asUser } : {}),
+          vocabulary: deps.vocabulary,
+        };
+        if (tab === "installation") {
+          // The projection is the process's own config, not a command: gated on the
+          // read every browser session holds and a credential must be granted.
+          if (!authorize(caller.actor, "config:read", { type: "command", id: "config.show" }).allow) {
+            plain(res, 403, "forbidden");
+            return;
+          }
+          render({ ...base, installation: deps.installation() });
+          return;
+        }
+        const part = tab === "mcps" ? await mcpsSeed(caller, channel) : await channelsSeed(caller, channel);
         render(
           tab === "mcps"
             ? { ...base, mcps: part as SettingsSeed["mcps"] }
             : { ...base, channels: part as SettingsSeed["channels"] },
-        ),
-      )
+        );
+      })
       .catch(failed);
     return true;
   };

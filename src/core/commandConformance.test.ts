@@ -242,7 +242,7 @@ describe("command conformance — catalogue fences", () => {
     const f = await fixture(() => {}, "authz");
     for (const role of AUTHZ_ROLES) {
       const expected = roleActor(role);
-      const resolved = (() => {
+      const resolved = await (async () => {
         switch (carriedBy(role.id)) {
           case "chat":
             return resolveChatActor(
@@ -250,17 +250,22 @@ describe("command conformance — catalogue fences", () => {
               (id) => f.config.grantsFor(id),
             );
           case "access":
-            return callerFor(httpIdentityOf(role), httpOptions(f)).actor;
+            return (await callerFor(httpIdentityOf(role), httpOptions(f))).actor;
           case "mcp":
             return toCaller(AUTHZ_INGRESS_TOKENS[role.id.slice("mcp:".length)]!, (id) => f.config.grantsFor(id)).actor;
           case "cli":
             return CLI_CALLER.actor;
         }
       })();
-      expect({ kind: resolved.kind, id: resolved.id, grants: resolved.grants }, role.column).toEqual({
+      expect(
+        { kind: resolved.kind, id: resolved.id, grants: resolved.grants, self: resolved.self, asUser: resolved.asUser },
+        role.column,
+      ).toEqual({
         kind: expected.kind,
         id: expected.id,
         grants: expected.grants,
+        self: expected.self,
+        asUser: expected.asUser,
       });
     }
   });
