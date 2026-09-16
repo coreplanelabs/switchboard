@@ -901,11 +901,31 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     // resubmitted without a push lands even from a workspace on the base or
     // on that pull request's own head branch (pr-description.md item 5).
     const ownPr = recordPrOf(repoCtx);
+    // The plan's base for a coordinator's child (run-history item 48a): the
+    // tag's — the spawn's own, or the one the `coordinator_tag` event carried
+    // across a roll — and, when the tag lost it, the second guard: the parent
+    // instance's record in the coordinator store, read by `parentInstanceId`.
+    // Still unknown after both, the base is LOST, not resolvable: the binding
+    // ref is the unit branch itself and the repo default is not the plan's
+    // base, so neither may stand in — the post-step says so with a
+    // `pr_not_opened` note instead of opening against the wrong branch.
+    let coordinatorBase = coordinator?.base;
+    if (isCodingPrRun && coordinator !== undefined && coordinatorBase === undefined && repoCtx.baseRef === undefined) {
+      try {
+        coordinatorBase = (await deps.coordinatorInstances?.get(coordinator.parentInstanceId))?.base;
+      } catch (err) {
+        console.warn(
+          `[pr-post] ${msg.threadKey} coordinator store lookup failed for ${coordinator.parentInstanceId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    const planBaseLost = coordinator !== undefined && repoCtx.baseRef === undefined && coordinatorBase === undefined;
     const prTarget = {
       repo: repoCtx.repo,
-      baseRef: repoCtx.baseRef ?? coordinator?.base,
+      baseRef: repoCtx.baseRef ?? coordinatorBase,
       bindingRef: binding?.ref,
       resolvedRef: repoCtx.ref,
+      ...(planBaseLost ? { planBaseLost: true } : {}),
       ...(ownPr !== undefined ? { ownPr } : {}),
     };
     if (isCodingPrRun && run.control.requested !== "hard") await observeWorkspaceNow();

@@ -9,7 +9,8 @@
 import type { ConfigStore, ResolvedRequest } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
 import type { RouteDecided } from "./route.js";
-import { coordinatorFields, type CoordinatorTag } from "../coordinator/contract.js";
+import { coordinatorFields, unitOfIdempotencyKey, type CoordinatorTag } from "../coordinator/contract.js";
+import type { CoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import type { RunProfile } from "../../config/profile.js";
 import { mergeTools, TOOLSETS } from "../../tools/toolsets.js";
 import { makeWebCapability } from "../../tools/web.js";
@@ -101,6 +102,15 @@ export interface RunDeps
    * item 16: a Null Object, never a branch), so the lookup simply finds nothing.
    */
   runStore: RunStore;
+  /**
+   * The coordinator's instance records (run-history item 49) — the PR
+   * post-step's second guard: a coordinator child whose tag lost the plan's
+   * base across a roll reads `instance.base` by `parentInstanceId` before
+   * building its PR target, rather than letting the binding ref (the unit
+   * branch itself) stand in. Absent → no lookup, and a base still unknown is
+   * reported as lost.
+   */
+  coordinatorInstances?: CoordinatorInstanceStore;
   /**
    * The runs service behind the `list_runs` / `get_run_status` tools
    * (docs/reference/specs/agent-conductor.md item 4): the ONE service every
@@ -331,6 +341,22 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
         ...REPLAY_EVERYTHING,
       });
     }
+  }
+  // The coordinator tag as a fact of the run (run-history item 48a): published
+  // once at dispatch — after the claim's subscription, so the ledger row
+  // carries it — so a run re-attached after a bot roll, whose spawn's dispatch
+  // options are gone with the process, reads the plan's base back off its own
+  // events (carriedCoordinatorTag, dispatch/reattach.ts). A resume republishes
+  // nothing: the event is on the adopted row already.
+  if (!resume && coordinator) {
+    const unit = unitOfIdempotencyKey(coordinator.idempotencyKey);
+    registry.publish(run.id, {
+      type: "coordinator_tag",
+      parentInstanceId: coordinator.parentInstanceId,
+      ...(unit !== undefined ? { unit } : {}),
+      ...(coordinator.base !== undefined ? { base: coordinator.base } : {}),
+      at: clock(),
+    });
   }
   if (resume && ledgerRun) {
     // The events before the restart are on the ledger already (and in the
