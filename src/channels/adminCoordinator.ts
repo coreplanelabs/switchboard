@@ -855,6 +855,9 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
         prNumber: open.number,
         url: open.htmlUrl,
         ...(open.headSha !== undefined ? { headSha: open.headSha } : {}),
+        // The pull request's own auto-merge fact (agent-ship item 9), so a
+        // merge_ready ending can name it at the approved head.
+        ...(open.autoMergeEnabled !== undefined ? { autoMergeEnabled: open.autoMergeEnabled } : {}),
         at,
       });
     }

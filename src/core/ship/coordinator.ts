@@ -443,7 +443,7 @@ export type ChildFacts =
  *  with no open one — a merged one, `sha` the merge commit on the base. */
 export type PrCheck =
   | { state: "none" }
-  | { state: "open"; prNumber: number; url: string; headSha?: string }
+  | { state: "open"; prNumber: number; url: string; headSha?: string; autoMergeEnabled?: boolean }
   | { state: "merged"; prNumber: number; url: string; sha: string; mergedAt: string };
 
 /** What a step answered. Every bot answer carries `at`, the bot's clock — the machine's time. */
@@ -1159,7 +1159,17 @@ function splitReport(s: UnitPipelineState): string {
 
 /** The thread's report for a unit's ending — the ship pipeline's own words
  *  for the endings it has, and the merge's for the ones it gains. */
-export function renderUnitReport(s: UnitPipelineState): string {
+/** What the driver read at the approved head when it composed a `merge_ready`
+ *  ending (agent-ship item 9): the pull request's own auto-merge fact, or the
+ *  merge that already happened — auto-merge or a person can merge between the
+ *  approval and the ending, and the report must describe the pull request as
+ *  it is, never a gate that has already passed. */
+export interface MergeReadyFacts {
+  autoMergeEnabled?: boolean;
+  merged?: { sha: string; mergedAt: string };
+}
+
+export function renderUnitReport(s: UnitPipelineState, facts?: MergeReadyFacts): string {
   const e = s.ending;
   if (!e) return "";
   const rounds = `${e.reviewRounds} review round${e.reviewRounds === 1 ? "" : "s"}`;
@@ -1189,7 +1199,14 @@ export function renderUnitReport(s: UnitPipelineState): string {
         `✅ Merge-ready after ${rounds}: ${e.pr.url}`,
         verdictLine,
         declinedLine,
-        "Remaining gate: a person's merge — the runner merges only when the instance's `merge` field says runner, and ship never approves.",
+        // What the driver read at the approved head when it composed this
+        // ending (agent-ship item 9): a merge that already happened is named
+        // as such, else the pull request's own auto-merge fact, else the gate.
+        facts?.merged
+          ? `Already merged: ${e.pr.url} (merge commit \`${facts.merged.sha.slice(0, 7)}\`, merged ${facts.merged.mergedAt}) — auto-merge or a person merged it after the approval; the runner merged nothing.`
+          : facts?.autoMergeEnabled
+            ? "Auto-merge is on for this pull request: the approval merges it once checks pass."
+            : "Remaining gate: a person's merge — the runner merges only when the instance's `merge` field says runner, and ship never approves.",
       ].join("\n");
     case "merge_refused":
       return join([

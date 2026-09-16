@@ -94,7 +94,8 @@ const reviewApproved = (runId: string, at: number) =>
     },
     at,
   );
-const prOpen = (at = T0): BotReply => ok({ ok: true, state: "open", prNumber: 7, url: PR_URL, headSha: HEAD }, at);
+const prOpen = (at = T0, over: Record<string, unknown> = {}): BotReply =>
+  ok({ ok: true, state: "open", prNumber: 7, url: PR_URL, headSha: HEAD, ...over }, at);
 const prNone = (at = T0): BotReply => ok({ ok: true, state: "none" }, at);
 const prMerged = (at = T0, mergedAt = "2026-09-13T23:55:59Z"): BotReply =>
   ok({ ok: true, state: "merged", prNumber: 7, url: PR_URL, sha: MERGED, mergedAt }, at);
@@ -824,6 +825,9 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
       "unit-start": [ok({ ok: true, threadKey: "slack:C1:1.0", branch: "ship/fix-the-login-abc123", base: "main" })],
       spawn: [spawned("run-r1")],
       "read-record": [reviewApproved("run-r1", T0 + 5 * MIN)],
+      // The merge_ready ending reads the facts once more AT THE APPROVED HEAD
+      // (agent-ship item 9): auto-merge was off at entry and is on now.
+      "pr-check": [prOpen(T0 + 5 * MIN, { autoMergeEnabled: true })],
       round: [acked(), acked()],
       "unit-end": [ok({ ok: true, told: true }, T0 + 5 * MIN)],
       finish: [ok({ ok: true, runId: "run-parent" }, T0 + 5 * MIN)],
@@ -838,10 +842,13 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
       "task/1/review/wait/1",
       "task/1/review/read/1",
       "task/note/2",
+      "task/end/pr-facts",
       "task/end",
       "finish",
     ]);
-    expect(b.of("pr-check")).toEqual([]);
+    // The one pr-check is the ending's facts read at the approved head — no
+    // pre-check ran (the resume path skips it).
+    expect(b.of("pr-check")).toEqual([{ parentInstanceId: "ship-run-s", unit: "task" }]);
     expect(b.of("branch")).toEqual([]);
     expect(b.of("spawn")).toEqual([
       {
@@ -860,8 +867,52 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
     }>;
     expect(end.ending.kind).toBe("merge_ready");
     expect(end.ending.report).toContain(`✅ Merge-ready after 1 review round: ${PR_URL}`);
+    expect(end.ending.report).toContain(
+      "Auto-merge is on for this pull request: the approval merges it once checks pass.",
+    );
+    expect(end.ending.report).not.toContain("Remaining gate");
     expect(end.pr).toEqual({ number: 7, url: PR_URL });
     expect(end.codingRunId).toBeUndefined();
+  });
+
+  it("the ending's facts read can find the pull request already merged — auto-merge fired, or a person merged, between the approval and the ending: the unit still ends merge_ready (the machine's ending stands) and the report names the merge by commit and time instead of a gate that has passed", async () => {
+    const s = steps({ "task/1/review/wait/1": "event" });
+    const b = bot({
+      plan: [
+        ok({
+          ok: true,
+          repo: "acme/api",
+          base: "main",
+          caps: { maxRounds: 2, maxMinutes: 45 },
+          childMinutes: { coding: 45, review: 25 },
+          units: [
+            row("task", {
+              slug: "task",
+              branch: "ship/fix-the-login-abc123",
+              resume: { pr: 7, headSha: HEAD, url: PR_URL },
+            }),
+          ],
+        }),
+      ],
+      "unit-start": [ok({ ok: true, threadKey: "slack:C1:1.0", branch: "ship/fix-the-login-abc123", base: "main" })],
+      spawn: [spawned("run-r1")],
+      "read-record": [reviewApproved("run-r1", T0 + 5 * MIN)],
+      "pr-check": [prMerged(T0 + 5 * MIN, "2026-09-16T00:46:19Z")],
+      round: [acked(), acked()],
+      "unit-end": [ok({ ok: true, told: true }, T0 + 5 * MIN)],
+      finish: [ok({ ok: true, runId: "run-parent" }, T0 + 5 * MIN)],
+    });
+    const summary = await runPlan(s.runner, b.client, "ship-run-s");
+    expect(summary).toEqual({ instance: "ship-run-s", units: { task: "merge_ready" }, outcome: "completed" });
+    expect(s.names()).toContain("task/end/pr-facts");
+    const [end] = b.of("unit-end") as Array<{ ending: { kind: string; report: string } }>;
+    expect(end.ending.kind).toBe("merge_ready");
+    expect(end.ending.report).toContain(`✅ Merge-ready after 1 review round: ${PR_URL}`);
+    expect(end.ending.report).toContain(
+      `Already merged: ${PR_URL} (merge commit \`${MERGED.slice(0, 7)}\`, merged 2026-09-16T00:46:19Z) — auto-merge or a person merged it after the approval; the runner merged nothing.`,
+    );
+    expect(end.ending.report).not.toContain("Remaining gate");
+    expect(end.ending.report).not.toContain("Auto-merge is on");
   });
 });
 

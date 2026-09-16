@@ -410,6 +410,26 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect(report).toContain("a person's merge");
     // The gate is the instance's field, not a branch-name derivation.
     expect(report).toContain("the runner merges only when the instance's `merge` field says runner");
+    // The pull request's own auto-merge fact at the approved head (agent-ship
+    // item 9): when the facts carry it, the report names it in place of the
+    // pending-person gate; without it (or with it off) the report is unchanged.
+    const withAutoMerge = renderUnitReport(d.state, { autoMergeEnabled: true });
+    expect(withAutoMerge).toContain("Auto-merge is on for this pull request: the approval merges it once checks pass.");
+    expect(withAutoMerge).not.toContain("Remaining gate");
+    expect(renderUnitReport(d.state, { autoMergeEnabled: false })).toBe(report);
+    expect(renderUnitReport(d.state, {})).toBe(report);
+    // Auto-merge (or a person) can fire between the approval and the ending:
+    // the facts then say `merged`, and the report names the merge instead of a
+    // gate that has already passed — whatever the auto-merge flag said.
+    const merged = renderUnitReport(d.state, {
+      merged: { sha: "abcdef0123456789abcdef0123456789abcdef01", mergedAt: "2026-09-16T00:46:19Z" },
+    });
+    expect(merged).toContain("✅ Merge-ready after 1 review round");
+    expect(merged).toContain(
+      "Already merged: https://github.com/acme/api/pull/7 (merge commit `abcdef0`, merged 2026-09-16T00:46:19Z) — auto-merge or a person merged it after the approval; the runner merged nothing.",
+    );
+    expect(merged).not.toContain("Remaining gate");
+    expect(merged).not.toContain("Auto-merge is on");
     expect(report).not.toContain("only a plan branch");
   });
 

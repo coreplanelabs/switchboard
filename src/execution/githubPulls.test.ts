@@ -340,13 +340,13 @@ describe("githubPulls", () => {
     });
   });
 
-  describe("fetchRepoShipInfo (ship auto-merge gate)", () => {
-    it("parses allow_auto_merge and default_branch", async () => {
+  describe("fetchRepoShipInfo (the default branch, the PR base of last resort)", () => {
+    it("parses default_branch and carries no allowAutoMerge — auto-merge is the pull request's own fact, never the repository's", async () => {
       stubToken();
       const calls = stubFetch(
         () => new Response(JSON.stringify({ allow_auto_merge: true, default_branch: "main" }), { status: 200 }),
       );
-      expect(await fetchRepoShipInfo("acme/api")).toEqual({ allowAutoMerge: true, defaultBranch: "main" });
+      expect(await fetchRepoShipInfo("acme/api")).toEqual({ defaultBranch: "main" });
       expect(calls[0].url).toBe("https://api.github.com/repos/acme/api");
 
       vi.stubGlobal(
@@ -356,13 +356,7 @@ describe("githubPulls", () => {
             new Response(JSON.stringify({ allow_auto_merge: false, default_branch: "develop" }), { status: 200 }),
         ),
       );
-      expect(await fetchRepoShipInfo("acme/api")).toEqual({ allowAutoMerge: false, defaultBranch: "develop" });
-    });
-
-    it("a response without the field leaves allowAutoMerge absent (the caller fail-closes on unknown)", async () => {
-      stubToken();
-      stubFetch(() => new Response(JSON.stringify({ default_branch: "main" }), { status: 200 }));
-      expect(await fetchRepoShipInfo("acme/api")).toEqual({ defaultBranch: "main" });
+      expect(await fetchRepoShipInfo("acme/api")).toEqual({ defaultBranch: "develop" });
     });
 
     it("non-2xx, malformed JSON, or a missing credential → undefined, never a throw", async () => {
@@ -404,6 +398,30 @@ describe("githubPulls", () => {
         htmlUrl: "https://github.com/acme/api/pull/7",
       });
       expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/pulls/7");
+    });
+
+    it("autoMergeEnabled is true for a non-null auto_merge, false for null, absent when the field is missing (agent-ship item 9)", async () => {
+      stubToken();
+      stubFetch(
+        () =>
+          new Response(JSON.stringify({ ...openPr, auto_merge: { merge_method: "squash" } }), {
+            status: 200,
+          }),
+      );
+      expect((await fetchPullRequestFacts({ repo: "acme/api", number: 7 }))?.autoMergeEnabled).toBe(true);
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(JSON.stringify({ ...openPr, auto_merge: null }), { status: 200 })),
+      );
+      expect((await fetchPullRequestFacts({ repo: "acme/api", number: 7 }))?.autoMergeEnabled).toBe(false);
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(JSON.stringify(openPr), { status: 200 })),
+      );
+      const absent = await fetchPullRequestFacts({ repo: "acme/api", number: 7 });
+      expect(absent && "autoMergeEnabled" in absent).toBe(false);
     });
 
     // The coordinator's `read-record` asks whether the bot's own verdict stands

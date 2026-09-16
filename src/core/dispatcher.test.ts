@@ -7849,9 +7849,8 @@ workspaceDir: __WORKDIR__
     const deps = makeDeps(yaml, provider);
     deps.resolveRepoContext = () => ({ repo: "acme/api" });
     deps.statusUpdateMinMs = 0;
-    deps.fetchRepoShipInfo = vi.fn(async () => ({ allowAutoMerge: false, defaultBranch: "main" }));
+    deps.fetchRepoShipInfo = vi.fn(async () => ({ defaultBranch: "main" }));
     deps.fetchPrFacts = vi.fn(async () => openBotPr());
-    deps.fetchSelfIdentity = vi.fn(async () => SHIP_BOT);
     const instances = new InMemoryCoordinatorInstanceStore();
     const created: string[] = [];
     deps.coordinatorInstances = instances;
@@ -7939,18 +7938,15 @@ workspaceDir: __WORKDIR__
     expect(created).toEqual([]);
   });
 
-  it("auto-merge repo → refused before anything is handed over; an unverifiable setting refuses fail-closed too", async () => {
+  it("a failed repository lookup refuses nothing — no auto-merge gate remains; a fresh task with no base lands on the hand-off's own 'no base branch is known' refusal", async () => {
     const { deps, provider, created } = shipDeps();
-    deps.fetchRepoShipInfo = vi.fn(async () => ({ allowAutoMerge: true, defaultBranch: "main" }));
-    const first = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), first.io);
-    expect(first.replies).toHaveLength(1);
-    expect(first.replies[0]).toContain("auto-merge is enabled");
-
     deps.fetchRepoShipInfo = vi.fn(async () => undefined);
-    const second = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), second.io);
-    expect(second.replies[0]).toContain("could not verify");
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).not.toContain("auto-merge");
+    expect(replies[0]).not.toContain("could not verify");
+    expect(replies[0]).toContain("no base branch is known");
     expect(provider.requests).toHaveLength(0);
     expect(created).toEqual([]);
   });
@@ -8063,7 +8059,7 @@ workspaceDir: __WORKDIR__
     expect((await handed(instances, "run-shipr")).instance?.base).toBe("main"); // never the slug
   });
 
-  it("thread with user-named, bot-authored open PR and no new task text → a resume at review: the runner is handed the one task unit with the pull request, its head and url on the row, on the pull request's own head branch", async () => {
+  it("thread with user-named open PR and no new task text → a resume at review: the runner is handed the one task unit with the pull request, its head and url on the row, on the pull request's own head branch", async () => {
     const { deps, instances, created } = shipDeps();
     deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 7, headSha: HEAD_A, baseRef: "main", ref: SHIP_BRANCH });
     const registry = new RunRegistry({ genId: () => "run-shipres", genToken: () => "tok" });
@@ -8077,37 +8073,68 @@ workspaceDir: __WORKDIR__
     expect(replies[replies.length - 1]).toContain(`the review loop of ${PR_URL} resumes at its next review round`);
   });
 
-  it("the bot's own GitHub identity unresolvable → an open PR's authorship cannot be judged → refused fail-closed, nothing handed over", async () => {
-    const { deps, created } = shipDeps();
-    deps.fetchSelfIdentity = vi.fn(async () => undefined);
+  it("a bare reference to a person's open PR resumes at review — the bot-authorship check is gone (agent-ship item 10)", async () => {
+    const { deps, instances } = shipDeps();
     deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 7, headSha: HEAD_A, baseRef: "main", ref: SHIP_BRANCH });
+    deps.fetchPrFacts = vi.fn(async () => openBotPr({ author: { login: "alice", id: 42 } }));
+    const registry = new RunRegistry({ genId: () => "run-shiphres", genToken: () => "tok" });
+    deps.runRegistry = registry;
     const { io, replies } = fakeIO();
     await dispatch(deps, msg(`agent:ship ${PR_URL}`, "slack:UADMIN"), io);
-    expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("🚫");
-    expect(replies[0]).toContain("identity this bot acts as");
-    expect(replies[0]).toContain("acme/api#7");
-    expect(created).toEqual([]);
-    // The refusal names the resolved identity when it IS known and the author is someone else.
-    deps.fetchSelfIdentity = vi.fn(async () => SHIP_BOT);
-    deps.fetchPrFacts = vi.fn(async () => openBotPr({ author: { login: "someone", id: 1 } }));
-    const second = fakeIO();
-    await dispatch(deps, msg(`agent:ship ${PR_URL}`, "slack:UADMIN"), second.io);
-    expect(second.replies[0]).toContain("was not authored by `acme-switchboard[bot]`");
-    expect(created).toEqual([]);
+    const { instance, unit } = await handed(instances, "run-shiphres");
+    expect(instance).toMatchObject({ branch: SHIP_BRANCH, base: "main" });
+    expect(unit?.resume).toEqual({ pr: 7, headSha: HEAD_A, url: PR_URL });
+    expect(replies[replies.length - 1]).toContain(`the review loop of ${PR_URL} resumes at its next review round`);
+    expect(replies[replies.length - 1]).not.toContain("not ship's to drive");
   });
 
-  it("thread PR open + new task text → refusal naming the open PR, nothing handed over", async () => {
-    const { deps, provider, created } = shipDeps();
+  it("thread PR open + new task text → the generated plan ADOPTS the pull request: the one unit row's branch is the PR's head, the base its own, the reply names the PR and no new branch", async () => {
+    const { deps, instances, created } = shipDeps();
     deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 7, headSha: HEAD_A, baseRef: "main", ref: SHIP_BRANCH });
+    deps.fetchPrFacts = vi.fn(async () => openBotPr({ baseRef: "release/1.x" }));
+    const registry = new RunRegistry({ genId: () => "run-shipadopt", genToken: () => "tok" });
+    deps.runRegistry = registry;
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:ship also add rate limiting", "slack:UADMIN"), io);
-    expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("🚫");
-    expect(replies[0]).toContain("acme/api#7");
-    expect(replies[0]).toContain("still open");
-    expect(provider.requests).toHaveLength(0);
-    expect(created).toEqual([]);
+    expect(created).toHaveLength(1);
+    const { instance, unit } = await handed(instances, "run-shipadopt");
+    expect(instance).toMatchObject({ branch: SHIP_BRANCH, base: "release/1.x" });
+    expect(unit).toMatchObject({ branch: SHIP_BRANCH });
+    expect("resume" in unit!).toBe(false);
+    expect(replies[replies.length - 1]).toContain(`adopts ${PR_URL}`);
+    expect(replies[replies.length - 1]).toContain("no new branch");
+    expect(replies[replies.length - 1]).not.toContain("still open");
+  });
+
+  it("an adopted person-authored PR behaves identically, and the reply names auto-merge when the PR carries it (agent-ship item 9)", async () => {
+    const { deps, instances } = shipDeps();
+    deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 7, headSha: HEAD_A, baseRef: "main", ref: SHIP_BRANCH });
+    deps.fetchPrFacts = vi.fn(async () => openBotPr({ author: { login: "alice", id: 42 }, autoMergeEnabled: true }));
+    const registry = new RunRegistry({ genId: () => "run-shipadopt2", genToken: () => "tok" });
+    deps.runRegistry = registry;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:ship also add rate limiting", "slack:UADMIN"), io);
+    const { instance } = await handed(instances, "run-shipadopt2");
+    expect(instance).toMatchObject({ branch: SHIP_BRANCH, base: "main" });
+    expect(replies[replies.length - 1]).toContain(
+      "Auto-merge is on for this pull request: the approval merges it once checks pass.",
+    );
+  });
+
+  it("a seeded plan request in the same pull-request thread stays seeded: the rows keep the graph plan branches, the PR is context", async () => {
+    const { deps, instances } = shipDeps();
+    deps.githubApi = new InMemoryGithubApi({
+      "acme/api": { files: { "docs/plans/fixture.md": "### U10. First unit\n- **Dependencies**: none\n" } },
+    });
+    deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 7, headSha: HEAD_A, baseRef: "main", ref: SHIP_BRANCH });
+    const registry = new RunRegistry({ genId: () => "run-shipseed", genToken: () => "tok" });
+    deps.runRegistry = registry;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:ship in acme/api: plan docs/plans/fixture.md", "slack:UADMIN"), io);
+    const { instance, unit } = await handed(instances, "run-shipseed");
+    expect(instance).toMatchObject({ plan: { id: "fixture", path: "docs/plans/fixture.md" }, merge: "runner" });
+    expect(unit?.branch).toBe("plan/fixture/u10-first-unit");
+    expect(replies[replies.length - 1]).not.toContain("adopts");
   });
 
   it("a resume prefers the PR's OWN base ref over the repo default (non-default-base ship PR): the runner is handed that base", async () => {
@@ -8224,14 +8251,16 @@ workspaceDir: __WORKDIR__
     expect(created).toEqual([]);
   });
 
-  it("thread PR authored by a human → refusal (not ship's to drive), nothing handed over", async () => {
+  it("a fork-head PR is refused on adopt and on resume (the fork check runs on both)", async () => {
     const { deps, provider, created } = shipDeps();
     deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 7, headSha: HEAD_A, baseRef: "main", ref: SHIP_BRANCH });
-    deps.fetchPrFacts = vi.fn(async () => openBotPr({ author: { login: "alice", id: 42 } }));
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg(`agent:ship ${PR_URL}`, "slack:UADMIN"), io);
-    expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("not ship's to drive");
+    deps.fetchPrFacts = vi.fn(async () => openBotPr({ sameRepoHead: false }));
+    const bare = fakeIO();
+    await dispatch(deps, msg(`agent:ship ${PR_URL}`, "slack:UADMIN"), bare.io);
+    expect(bare.replies[0]).toContain("lives on a fork");
+    const adopt = fakeIO();
+    await dispatch(deps, msg("agent:ship also add rate limiting", "slack:UADMIN"), adopt.io);
+    expect(adopt.replies[0]).toContain("lives on a fork");
     expect(provider.requests).toHaveLength(0);
     expect(created).toEqual([]);
   });

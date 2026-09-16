@@ -81,9 +81,8 @@ function setup(userId: string, over: { text?: string; repoCtx?: Record<string, u
     runStore: new NullRunStore(),
     githubApi: new InMemoryGithubApi(),
     clock: () => NOW,
-    fetchRepoShipInfo: async () => ({ allowAutoMerge: false, defaultBranch: "main" }),
+    fetchRepoShipInfo: async () => ({ defaultBranch: "main" }),
     fetchPrFacts: async () => undefined,
-    fetchSelfIdentity: async () => SHIP_BOT,
     coordinatorInstances: instances,
     createCoordinatorInstance: async (id) => {
       created.push(id);
@@ -222,7 +221,7 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
   // request of ship's own with no new task text — is handed to the runner as
   // the one task unit with the pull request on its row, so the runner opens the
   // pipeline at its review round. Nothing runs in this process either way.
-  it("a resume at review: the bot-authored open pull request the requester named rides the generated `U1` row as `resume` with its head, the branch is the pull request's own, and the reply says the review resumes", async () => {
+  it("a resume at review: the open pull request the requester named rides the generated `U1` row as `resume` with its head, the branch is the pull request's own, and the reply says the review resumes", async () => {
     const s = setup("slack:UADMIN", {
       text: `agent:ship ${PR_URL}`,
       repoCtx: { pr: 7, headSha: HEAD_A, baseRef: "main", ref: "ship/fix-the-login-redirect-abc123" },

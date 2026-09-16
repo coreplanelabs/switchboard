@@ -150,12 +150,12 @@ export interface RunDeps
    */
   updatePullRequest?: (repo: string, number: number, patch: { title: string; body: string }) => Promise<void>;
   /**
-   * Repo facts for the agent:ship gate (docs/reference/specs/agent-ship.md item 9): the
-   * `allow_auto_merge` flag — ship refuses when it is enabled OR unknown
-   * (fail-closed: an LGTM into auto-merge would merge with no human) — and
-   * the repo's default branch, the PR base of last resort. Default: one REST
-   * GET via githubPulls' `fetchRepoShipInfo` (App token, never `gh`).
-   * Injectable so tests assert the refusal without a network call.
+   * Repo facts for the agent:ship entry (docs/reference/specs/agent-ship.md items 9
+   * and 10): the repo's default branch, the PR base of last resort — a failed
+   * lookup proceeds with none; auto-merge is the pull request's own fact, read
+   * with the PR facts and named, never refused. Default: one REST GET via
+   * githubPulls' `fetchRepoShipInfo` (App token, never `gh`). Injectable so
+   * tests assert the entry without a network call.
    */
   fetchRepoShipInfo?: (repo: string) => Promise<RepoShipInfo | undefined>;
   /**
