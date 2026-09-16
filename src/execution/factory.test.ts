@@ -379,9 +379,11 @@ describe("makeExecutor resident selection", () => {
       });
     });
 
-    // Item 16's second movement: the branch a rebind moved the thread onto is
-    // gone from the mirror, so the resident moved the binding back to the
-    // default and provisioned the tree there — the card says so.
+    // Item 16's second movement: the thread's branch — one a rebind moved it
+    // onto, or one its own run pushed under the name it was bound to — is gone
+    // from the mirror, so the resident moved the binding back to the default
+    // and provisioned the tree there — the card says so, naming the pull
+    // request whose branch it was when the resident named one.
     it("an answer that returned the binding to the default names the move back on the note, and the binding carries it", async () => {
       stubEnvs();
       stubFetch(
@@ -394,6 +396,19 @@ describe("makeExecutor resident selection", () => {
       );
       expect(binding?.returned).toEqual({ from: "fix/x", to: "master", pr: 7 });
       expect(binding?.rebound).toBeUndefined();
+    });
+
+    it("a return that names no pull request says the branch itself is gone — the card never invents a number", async () => {
+      stubEnvs();
+      stubFetch(
+        { body: { state: "warm", reason: "" } },
+        attached({ ref: "master", returned: { from: "plan/slug/u1", to: "master", at: "t" } }),
+      );
+      const { note, binding } = await makeExecutor(residentOpts(), { ...repoCtx(), ref: "plan/slug/u1", headSha: SHA });
+      expect(note).toBe(
+        "resident · jshttp/vary · master@47c4230 · returned to master (this thread's branch plan/slug/u1 is gone)",
+      );
+      expect(binding?.returned).toEqual({ from: "plan/slug/u1", to: "master" });
     });
 
     it("a serviceable non-warm resident says the move before the snapshot note", async () => {

@@ -1002,10 +1002,11 @@ interface ResidentRecord {
 interface ThreadBinding {
   threadKey: string;
   ref: string;
-  /** How `ref` was chosen when the binding was made: the repo default for want
-   *  of a named branch (item 30), or a branch someone named. Absent on a
-   *  binding made before the field: read as `default` iff `ref` is the default
-   *  branch. Only a `default` binding may ever move. */
+  /** How `ref` was chosen: the repo default for want of a named branch — when
+   *  the binding was made (item 30), or when a return put it there because the
+   *  branch it was on is gone (`returned`) — or a branch someone named. Absent
+   *  on a binding made before the field: read as `default` iff `ref` is the
+   *  default branch. Only a `default` binding may ever move onto a branch. */
   boundBy?: BoundBy;
   /** The move a binding may make (item 16): from the default it was bound to,
    *  onto the branch the thread's own run opened a pull request on. Set, the
@@ -1013,6 +1014,12 @@ interface ThreadBinding {
    *  branch was gone from the mirror and the binding went back to the
    *  default), and then for the next own pull request. */
   rebound?: Rebound;
+  /** The binding's last move back to the default (item 16's second movement):
+   *  the branch it was on — one a rebind moved it onto, or one this thread's
+   *  own runs pushed (`ownBranches`) and bound by name, a ship unit's — was
+   *  gone from the mirror at an attach. From where, to where, which pull
+   *  request's branch it was, when. */
+  returned?: Returned;
   /** The branches the thread's own runs pushed and the pull requests they
    *  head, as each run's release handed them over (`/detach` `pushed`, item
    *  16a) — written before any eviction decision, so the fact outlives the
@@ -1122,9 +1129,10 @@ interface AttachOk {
    *  and why — so the bot can say where the follow-up runs and why. */
   rebindRefused?: RebindRefused;
   /** This attach moved the binding BACK to the default branch (item 16's
-   *  second movement): the branch a rebind had moved it onto is gone from the
-   *  mirror, so the tree was provisioned on the default instead of the attach
-   *  failing `unknown-ref`. From where, to where, which PR's branch it was. */
+   *  second movement): the branch it was on — a rebind's, or one this thread
+   *  itself pushed — is gone from the mirror, so the tree was provisioned on
+   *  the default instead of the attach failing `unknown-ref`. From where, to
+   *  where, which PR's branch it was. */
   returned?: Returned;
 }
 
@@ -4461,12 +4469,13 @@ export class ResidentDO extends Sandbox<Env> {
       lastAttachAt: now,
       evicted: false,
       // An evicted binding's own history: how its ref was chosen (absent on
-      // one made before the field — never overwritten by this attach's flag)
-      // and the one move it may have made.
+      // one made before the field — never overwritten by this attach's flag),
+      // the one move it may have made and its last move back.
       ...(existing
         ? {
             ...(existing.boundBy !== undefined ? { boundBy: existing.boundBy } : {}),
             ...(existing.rebound !== undefined ? { rebound: existing.rebound } : {}),
+            ...(existing.returned !== undefined ? { returned: existing.returned } : {}),
             ...(existing.ownBranches !== undefined ? { ownBranches: existing.ownBranches } : {}),
           }
         : { boundBy }),
@@ -4819,27 +4828,27 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** Item 16's second movement, decided where the fact is established — under
    *  the mirror mutex, after the attach's fetch found the bound ref gone: a
-   *  binding a rebind moved onto its own pull request's branch, that branch
-   *  now deleted (its pull request merged), goes back to the default it was
-   *  bound to, so the run starts clean there (item 17) instead of the thread
-   *  failing `unknown-ref` for the rest of its life. The row as it stands is
-   *  re-read and re-judged (`canReturnToDefault`: a ref a person named never
-   *  returns — that branch is theirs to sort out), the move stamped returned
-   *  so the thread may follow its next pull request, and the answer carries
-   *  the move back for the card. A row that no longer qualifies — another
-   *  attach moved it meanwhile — is answered as it stands, nothing written. */
+   *  binding on a branch that is now deleted (its pull request merged) goes
+   *  back to the default, so the run starts clean there (item 17) instead of
+   *  the thread failing `unknown-ref` for the rest of its life — when the
+   *  branch is one a rebind moved it onto, or one this thread's own runs
+   *  pushed as the binding remembers it (`ownBranches`): a ship unit's coding
+   *  child binds its unit branch by name and pushes it, and the merge deletes
+   *  it. The row as it stands is re-read and re-judged (the pure
+   *  `returnToDefault`, which writes nothing for a row `canReturnToDefault`
+   *  does not admit: a ref a person named that the thread never pushed never
+   *  returns — that branch is theirs to sort out), the move recorded so the
+   *  thread may follow its next pull request, and the answer carries the move
+   *  back for the card. A row that no longer qualifies — another attach moved
+   *  it meanwhile — is answered as it stands, nothing written. */
   private async returnBindingToDefault(
     binding: ThreadBinding,
     defaultRef: string,
   ): Promise<{ binding: ThreadBinding; returned?: Returned }> {
     const key = threadBindingKey(binding.threadKey);
     const current = (await this.ctx.storage.get<ThreadBinding>(key)) ?? binding;
-    if (current.rebound === undefined || !canReturnToDefault(current, defaultRef)) return { binding: current };
-    const back = returnToDefault(
-      { ...current, rebound: current.rebound },
-      defaultRef,
-      new Date(systemClock()).toISOString(),
-    );
+    const back = returnToDefault(current, defaultRef, new Date(systemClock()).toISOString());
+    if (back === undefined) return { binding: current };
     await this.ctx.storage.put(key, back.binding);
     console.log(
       `attach ${binding.threadKey}: ${back.returned.from} is gone from the mirror (the thread's own pull request #${back.returned.pr}) — returned to ${back.returned.to}; the tree is provisioned there`,
@@ -4957,8 +4966,9 @@ export class ResidentDO extends Sandbox<Env> {
           commitInMirror: !refExists && want !== null && (await this.commitInMirror(want)),
         });
         if (target.kind === "unknown-ref" && canReturnToDefault(binding, facts.defaultRef)) {
-          // The branch a rebind moved this thread onto is gone even after the
-          // fetch — deleted once its pull request merged. The binding goes
+          // The thread's branch — one a rebind moved it onto, or one its own
+          // runs pushed and it was bound to by name — is gone even after the
+          // fetch: deleted once its pull request merged. The binding goes
           // back to the default (item 16's second movement) and the attach
           // goes on there: the default is always in the mirror, and the
           // worktree step below provisions the tree at its tip.

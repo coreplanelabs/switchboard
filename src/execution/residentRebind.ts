@@ -35,15 +35,21 @@
  *  Every refusal is named in the attach answer so the bot can say why the
  *  follow-up runs where it does.
  *
- *  The second movement: a rebound binding names a branch that can die — the
- *  pull request merges and the branch is deleted. A binding left on it would
- *  fail every later attach (`unknown-ref`) for the thread's whole life. So a
- *  binding a rebind moved, whose branch the mirror no longer holds after a
- *  fetch, goes back to the default it was bound to (`canReturnToDefault`,
- *  `returnToDefault`); the attach provisions the tree there, clean, and the
- *  thread is default-bound again, so a later own pull request may move it once
- *  more. A ref a person named that vanished keeps the `unknown-ref` refusal:
- *  that branch is the person's to sort out. */
+ *  The second movement: a binding can sit on a branch that dies — the pull
+ *  request merges and the branch is deleted. A binding left on it would fail
+ *  every later attach (`unknown-ref`) for the thread's whole life. So a
+ *  binding whose ref the mirror no longer holds after a fetch goes back to the
+ *  default (`canReturnToDefault`, `returnToDefault`) when the gone ref is
+ *  EITHER the branch a rebind moved it onto OR one of the thread's own
+ *  branches — a branch this thread's runs pushed (`ownBranches`), whatever
+ *  `boundBy` says: a ship unit's coding child binds its unit branch by name,
+ *  pushes it and opens the pull request, and the unit's merge deletes it. The
+ *  attach provisions the tree at the default, clean, and the thread is
+ *  default-bound again (`boundBy: default` — the default was chosen for want
+ *  of the branch it was on), so a later own pull request may move it once
+ *  more. A ref a person named that the thread never pushed keeps the
+ *  `unknown-ref` refusal: a person's branch that is gone is not this thread's
+ *  finished work, and the resident never swaps it for the default unasked. */
 
 /** The pull request the thread's own run opened, and its head branch — the
  *  reason a caller's refHint is that branch. */
@@ -136,9 +142,15 @@ export function rememberOwnBranches(
   return [...kept, ...added].slice(-OWN_BRANCHES_MAX);
 }
 
+/** The binding's memory of `ref` as a branch the thread's own runs pushed —
+ *  the pull request it heads and when it was told — or none. */
+export function ownBranchOf(binding: { ownBranches?: readonly OwnBranch[] }, ref: string): OwnBranch | undefined {
+  return (binding.ownBranches ?? []).find((b) => b.ref === ref);
+}
+
 /** Whether the thread's own runs pushed `ref`, as the binding remembers it. */
 export function isOwnBranch(binding: { ownBranches?: readonly OwnBranch[] }, ref: string): boolean {
-  return (binding.ownBranches ?? []).some((b) => b.ref === ref);
+  return ownBranchOf(binding, ref) !== undefined;
 }
 
 /** How a binding's ref was chosen: the repo default for want of a named
@@ -171,8 +183,12 @@ export interface Rebound {
   returnedAt?: string;
 }
 
-/** The move back, in the attach answer: from the branch that is gone, to the
- *  default, for the pull request whose branch it was, when. */
+/** The move back (the second movement), on the binding and in the attach
+ *  answer: from the branch that is gone, to the default, for the pull request
+ *  whose branch it was — the rebind's, or the one the binding remembers the
+ *  branch heading — when. On the binding it is the LAST move back: a rebind's
+ *  own record keeps its `returnedAt` beside it, and a binding never rebound
+ *  (its unit branch bound by name and pushed) has only this. */
 export interface Returned {
   from: string;
   to: string;
@@ -199,6 +215,8 @@ export interface RebindableBinding {
   evicted?: boolean;
   boundBy?: BoundBy;
   rebound?: Rebound;
+  /** The binding's last move back to the default (the second movement). */
+  returned?: Returned;
   /** The branches the thread's own runs pushed, handed over at each release. */
   ownBranches?: OwnBranch[];
 }
@@ -320,29 +338,68 @@ export function rebindVerdict(plan: { to: string; pr: number; own?: boolean }, t
   return { kind: "rebind" };
 }
 
-/** Whether a binding whose ref the mirror no longer holds goes back to the
- *  default branch (the second movement): only a binding a rebind moved onto
- *  its own pull request's branch — bound by default in the first place, still
- *  on that branch, the move not yet returned. Anything else keeps the
- *  attach's `unknown-ref` refusal: a ref a person named is that person's to
- *  sort out, and a binding on the default cannot lose its ref. */
-export function canReturnToDefault(
-  binding: { ref: string; boundBy?: BoundBy; rebound?: Rebound },
+/** What the second movement reads off a binding. */
+export type ReturnableBinding = Pick<RebindableBinding, "ref" | "boundBy" | "rebound" | "ownBranches">;
+
+/** The way back a binding whose ref is gone may take, if any — the one place
+ *  the second movement is decided, so the predicate and the move cannot
+ *  disagree: `rebind` — a rebind moved the binding onto the branch (bound by
+ *  default in the first place, still on that branch, the move not yet
+ *  returned); `own` — the branch is one this thread's own runs pushed, as the
+ *  binding remembers it, whatever `boundBy` says. A binding on the default
+ *  cannot lose its ref, and a ref a person named that the thread never pushed
+ *  has no way back: that branch is the person's to sort out. */
+function wayBack(
+  binding: ReturnableBinding,
   defaultRef: string,
-): boolean {
+): { kind: "rebind"; rebound: Rebound } | { kind: "own"; branch: OwnBranch } | undefined {
+  if (binding.ref === defaultRef) return undefined;
   const r = binding.rebound;
-  if (r === undefined || r.returnedAt !== undefined || binding.ref !== r.to) return false;
-  return binding.ref !== defaultRef && boundByOf(binding, defaultRef) === "default";
+  if (
+    r !== undefined &&
+    r.returnedAt === undefined &&
+    binding.ref === r.to &&
+    boundByOf(binding, defaultRef) === "default"
+  ) {
+    return { kind: "rebind", rebound: r };
+  }
+  const branch = ownBranchOf(binding, binding.ref);
+  return branch === undefined ? undefined : { kind: "own", branch };
 }
 
-/** The move back: the binding's ref becomes the default and the move that
- *  brought it here is stamped returned, so the thread may move again. Only
- *  ever applied to a binding `canReturnToDefault` admitted. */
-export function returnToDefault<B extends { ref: string; rebound?: Rebound }>(
-  binding: B & { rebound: Rebound },
+/** Whether a binding whose ref the mirror no longer holds goes back to the
+ *  default branch (the second movement): a binding a rebind moved onto its
+ *  own pull request's branch, or one on a branch this thread itself pushed.
+ *  Anything else keeps the attach's `unknown-ref` refusal. */
+export function canReturnToDefault(binding: ReturnableBinding, defaultRef: string): boolean {
+  return wayBack(binding, defaultRef) !== undefined;
+}
+
+/** The move back: the binding's ref becomes the default, the binding reads as
+ *  bound by default (the default was chosen for want of the branch it was on,
+ *  so its next own pull request may move it — a binding that named its unit
+ *  branch included), a rebind's move is stamped returned, and the last move
+ *  back is recorded. The pull request named is the rebind's, else the one the
+ *  binding remembers the gone branch heading. Undefined for a binding
+ *  `canReturnToDefault` does not admit: nothing to write. */
+export function returnToDefault<B extends ReturnableBinding>(
+  binding: B,
   defaultRef: string,
   at: string,
-): { binding: B; returned: Returned } {
-  const returned: Returned = { from: binding.ref, to: defaultRef, pr: binding.rebound.pr, at };
-  return { binding: { ...binding, ref: defaultRef, rebound: { ...binding.rebound, returnedAt: at } }, returned };
+): { binding: B; returned: Returned } | undefined {
+  const way = wayBack(binding, defaultRef);
+  if (way === undefined) return undefined;
+  const pr = way.kind === "rebind" ? way.rebound.pr : way.branch.pr;
+  const returned: Returned = { from: binding.ref, to: defaultRef, pr, at };
+  const rebound = way.kind === "rebind" ? { ...way.rebound, returnedAt: at } : binding.rebound;
+  return {
+    binding: {
+      ...binding,
+      ref: defaultRef,
+      boundBy: "default",
+      ...(rebound !== undefined ? { rebound } : {}),
+      returned,
+    },
+    returned,
+  };
 }
