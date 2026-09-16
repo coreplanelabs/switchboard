@@ -124,7 +124,18 @@ describe("RunRow", () => {
     expect(unnamed.find(".who .name").text()).toBe("UACME1");
     expect(unnamed.html()).not.toContain(">slack:UACME1<");
     const nobody = mountRow(row({ userId: undefined, channelId: undefined }));
-    expect(nobody.find(".who").exists()).toBe(false);
+    expect(nobody.find(".who").exists()).toBe(true); // the empty cell keeps the columns aligned
+    expect(nobody.find(".who").text()).toBe("");
+  });
+
+  it("the requester cell is a fixed-width column from sm (item 29): a long name truncates in the same 12em every row gets, and the full name is the hover; a nameless row keeps the same width", () => {
+    const long = mountRow(row({ userName: "Aleksandr Diamantopoulos" })).find(".who");
+    expect(long.find(".name").text()).toBe("Aleksandr Diamantopoulos");
+    expect(long.classes()).toContain("sm:w-[12em]");
+    expect(long.classes()).toContain("truncate");
+    expect(long.classes()).not.toContain("sm:max-w-[9em]"); // no longer content-sized
+    const nobody = mountRow(row({ userId: undefined, channelId: undefined })).find(".who");
+    expect(nobody.classes()).toContain("sm:w-[12em]");
   });
 
   // authorization.md item 15: one person arrives over several credentials; the
@@ -191,42 +202,60 @@ describe("RunRow", () => {
     expect(live.classes()).toContain("text-ok");
   });
 
-  it("the actions cell is always present (fixed width); the buttons appear only while the run is stoppable", () => {
+  /** The row's ⋮ actions menu (the one Stop/Kill control at every width) and its items. */
+  type MenuItem = { label: string; to?: string; disabled?: boolean; onSelect?: () => void };
+  const menu = (w: ReturnType<typeof mountRow>) => w.findComponent({ name: "DropdownMenu" });
+  const menuItems = (w: ReturnType<typeof mountRow>) =>
+    menu(w).exists() ? (menu(w).props("items") as MenuItem[]) : [];
+  const item = (w: ReturnType<typeof mountRow>, label: string) => menuItems(w).find((i) => i.label === label);
+
+  it("the actions cell is always present (fixed width) and never a pair of buttons; Stop/Kill are items of the one ⋮ menu, offered only while the run is stoppable; the menu is absent when it would be empty", () => {
     const live = mountRow(row({ token: "tok-1" }));
     expect(live.find(".actions").exists()).toBe(true);
-    expect(live.findAll(".actions button")).toHaveLength(2);
+    expect(live.find(".actions").classes()).toContain("sm:w-[2em]");
+    expect(live.find('.actions button[aria-label="Run actions"]').exists()).toBe(true);
+    expect(live.find('.actions button[aria-label="Run actions"]').classes()).not.toContain("sm:hidden");
+    expect(live.findAll(".actions button")).toHaveLength(1);
+    expect(menuItems(live).map((i) => i.label)).toEqual(["Stop (soft)", "Kill (hard)"]);
     const done = mountRow(finished("completed"));
     expect(done.find(".actions").exists()).toBe(true);
     expect(done.findAll(".actions button")).toHaveLength(0);
+    expect(menu(done).exists()).toBe(false);
     const stopping = mountRow(row({ stop: { mode: "soft", state: "stopping" } }));
-    expect(stopping.findAll(".actions button")).toHaveLength(0);
+    expect(menu(stopping).exists()).toBe(false);
+    const doneWithThread = mountRow(finished("completed", { sourceUrl: "https://acme.slack.com/archives/C1/p1" }));
+    expect(menuItems(doneWithThread).map((i) => i.label)).toEqual(["Open Slack thread"]);
+    expect(item(doneWithThread, "Open Slack thread")?.to).toBe("https://acme.slack.com/archives/C1/p1");
   });
 
-  it("Stop POSTs the token-scoped soft stop; the button disables while in flight", async () => {
+  it("Stop POSTs the token-scoped soft stop; the item disables while in flight", async () => {
     const w = mountRow(row({ token: "tok-1" }));
-    const stop = w.findAll(".actions button")[0];
-    await stop.trigger("click");
+    expect(item(w, "Stop (soft)")?.disabled).toBe(false);
+    item(w, "Stop (soft)")!.onSelect!();
+    await w.vm.$nextTick();
     expect(fetchMock).toHaveBeenCalledWith("/runs/run-1/stop?t=tok-1&mode=soft", {
       method: "POST",
       credentials: "same-origin",
     });
-    expect((stop.element as HTMLButtonElement).disabled).toBe(true);
+    expect(item(w, "Stop (soft)")?.disabled).toBe(true);
+    expect(item(w, "Kill (hard)")?.disabled).toBe(false);
   });
 
-  it("Kill confirms first (destructive), POSTs mode=hard on yes, does nothing on no; a failed POST re-enables the button", async () => {
+  it("Kill confirms first (destructive), POSTs mode=hard on yes, does nothing on no; a failed POST re-enables the item", async () => {
     const confirmSpy = vi.spyOn(browser, "confirm").mockReturnValue(false);
     const w = mountRow(row({ token: "tok-1" }));
-    const kill = w.findAll(".actions button")[1];
-    await kill.trigger("click");
+    item(w, "Kill (hard)")!.onSelect!();
     expect(fetchMock).not.toHaveBeenCalled();
     confirmSpy.mockReturnValue(true);
     fetchMock.mockResolvedValueOnce({ ok: false, status: 500 });
-    await kill.trigger("click");
+    item(w, "Kill (hard)")!.onSelect!();
+    await w.vm.$nextTick();
     expect(fetchMock).toHaveBeenCalledWith("/runs/run-1/stop?t=tok-1&mode=hard", {
       method: "POST",
       credentials: "same-origin",
     });
-    await vi.waitFor(() => expect((kill.element as HTMLButtonElement).disabled).toBe(false));
+    expect(item(w, "Kill (hard)")?.disabled).toBe(true);
+    await vi.waitFor(() => expect(item(w, "Kill (hard)")?.disabled).toBe(false));
   });
 
   it("a click on a tooltip cell (not a link or button) goes where the row goes", async () => {

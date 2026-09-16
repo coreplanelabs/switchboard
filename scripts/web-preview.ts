@@ -117,7 +117,7 @@ const INDEX_ROWS: RunIndexRowSeed[] = [
     finishedAt: NOW - 3 * 3_600_000 + 252_000,
     status: "completed",
     eventCount: 27,
-    userName: "sam",
+    userName: "Aleksandr Diamantopoulos",
   }),
   row({
     id: "hist-2",
