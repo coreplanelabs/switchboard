@@ -1022,3 +1022,28 @@ export function renderConformanceMatrix(matrix: ConformanceMatrix): string {
   out.push("");
   return out.join("\n");
 }
+
+// ---- the routing-fixture fence (record 0036, unit 3) --------------------------------------------
+
+import {
+  ROUTE_COMMAND_DECOYS,
+  ROUTE_COMMAND_FIXTURES,
+  type RouteCommandDecoy,
+  type RouteCommandFixture,
+} from "../../load/routeCommandFixtures.js";
+
+/** The three routing fixtures one offered command must carry (load-harness
+ *  item 17; command-registry item 25): the happy path, the paraphrase and the
+ *  decoy, read off the checked-in sets. A kind the sets do not carry for the
+ *  command comes back undefined — the fence names the command and the kind. */
+export function fixturesFor(cmd: Pick<CommandDef<unknown>, "id">): {
+  happy: RouteCommandFixture | undefined;
+  paraphrase: RouteCommandFixture | undefined;
+  decoy: RouteCommandDecoy | undefined;
+} {
+  return {
+    happy: ROUTE_COMMAND_FIXTURES.find((f) => f.command === cmd.id && f.kind === "happy"),
+    paraphrase: ROUTE_COMMAND_FIXTURES.find((f) => f.command === cmd.id && f.kind === "paraphrase"),
+    decoy: ROUTE_COMMAND_DECOYS.find((d) => d.command === cmd.id),
+  };
+}

@@ -1,9 +1,26 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
+import { CommandRegistry, type CommandDef, type CommandInput } from "../core/commandRegistry.js";
+import { registerCoreCommands, type CoreCommandDeps } from "../core/commands/all.js";
+import { mcpToolName } from "../core/commandSurface.js";
+import type { Provider } from "../core/provider.js";
 import { AGENTS } from "../agents/registry.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunRecord } from "../core/runRecord.js";
 import type { RunEvent } from "../core/runEvents.js";
-import { routablePresets, route, type RouteDecision, type RouteModel } from "../core/dispatch/route.js";
+import {
+  routableCommands,
+  routablePresets,
+  route,
+  type RouteDecision,
+  type RouteModel,
+} from "../core/dispatch/route.js";
+import {
+  ROUTE_COMMAND_DECOYS,
+  ROUTE_COMMAND_EXAMPLES,
+  ROUTE_COMMAND_FIXTURES,
+  type RouteCommandExample,
+} from "./routeCommandFixtures.js";
 import { ROUTE_COMPOUND_FIXTURES, type RouteCompoundFixture } from "./routeCompoundFixtures.js";
 import { ROUTE_IMPERATIVE_FIXTURES } from "./routeImperativeFixtures.js";
 import { ROUTE_ATTACH_FIXTURES } from "./routeAttachFixtures.js";
@@ -20,11 +37,17 @@ import {
   renderCompound,
   renderConfusion,
   renderImperative,
+  commandScore,
+  emptyCounters,
+  renderCommands,
+  renderCounters,
+  replayCommands,
   replayCompound,
   replayImperative,
   replayRoutes,
   routeChecks,
   tableWritePreset,
+  tallyingProvider,
   type CompoundExample,
   type ReplayRequest,
   type ReplayResult,
@@ -1026,5 +1049,236 @@ describe("readToWriteRoutes + routeChecks — the verdict's rows", () => {
       limit: "0",
     });
     expect(checks.every((c) => c.pass)).toBe(false);
+  });
+});
+
+// The command half (load-harness item 17; record 0036, unit 3): the checked-in
+// set through the real `route()` parse over a scripted model — the command
+// named, the input bound and compared after `parseInput`, nothing invoked.
+describe("the checked-in command set through route() over a scripted model", () => {
+  const registry = new CommandRegistry<CoreCommandDeps>({ audit: () => {} });
+  registerCoreCommands(registry);
+  const menu = routableCommands(registry);
+  const defs = menu.map((c) => c.def);
+  const byId = new Map(menu.map((c) => [c.id, c]));
+  const presets = routablePresets();
+  const allowed = presets.map((p) => p.name);
+  const byText = new Map(ROUTE_COMMAND_EXAMPLES.map((e) => [e.text, e]));
+  const textOf = (prompt: { user: string }) => /<request>\n([\s\S]*)\n<\/request>/.exec(prompt.user)![1];
+  const decideWith =
+    (model: RouteModel) =>
+    (text: string, threadRepo?: string): Promise<RouteDecision> =>
+      route(
+        {
+          text,
+          recentDirectives: {},
+          presets,
+          allowed,
+          fallback: "general",
+          commands: menu,
+          ...(threadRepo ? { threadRepo } : {}),
+        },
+        model,
+      );
+
+  /** The fixture's expected input spelled the way a tool call carries it:
+   *  one object, argument names beside camelCase options. */
+  const namedOf = (commandId: string, input: CommandInput): Record<string, unknown> => {
+    const def = byId.get(commandId)!.def;
+    const named: Record<string, unknown> = { ...(input.options ?? {}) };
+    (def.args ?? []).forEach((arg, i) => {
+      const v = (input.args ?? [])[i];
+      if (v !== undefined) named[arg.name] = v;
+    });
+    return named;
+  };
+
+  /** A router that reads every fixture right: the command's tool with the
+   *  expected input for a fixture, a plain route for a decoy. */
+  const knowing: RouteModel = async (prompt) => {
+    const example = byText.get(textOf(prompt))!;
+    if (example.kind === "decoy") return JSON.stringify({ preset: "general", reason: "a judgement, not a command" });
+    return { tool: mcpToolName(example.command), input: namedOf(example.command, example.input) };
+  };
+
+  it("a knowing router: the command row passes at 100 percent, the input row at 100 percent, and nothing is invoked", async () => {
+    const invoke = vi.spyOn(registry, "invoke");
+    const results = await replayCommands(ROUTE_COMMAND_EXAMPLES, decideWith(knowing), { now: () => 0 }, defs);
+    const score = commandScore(results);
+    expect(score.fixtures).toBe(ROUTE_COMMAND_FIXTURES.length);
+    expect(score.decoys).toBe(ROUTE_COMMAND_DECOYS.length);
+    expect(score.commandHits).toBe(score.fixtures);
+    expect(score.inputHits).toBe(score.fixtures);
+    expect(score.decoysBound).toBe(0);
+    expect(score.commandRate).toBe(1);
+    expect(score.inputRate).toBe(1);
+    expect(score.misses).toEqual([]);
+    expect(invoke).not.toHaveBeenCalled();
+    expect(renderCommands(score)[0]).toContain("bound right 64/64");
+  });
+
+  it("one wrong command fails the command row (bar 1.0); the miss carries the bound and the expected input", async () => {
+    const oneWrong: RouteModel = async (prompt) => {
+      const example = byText.get(textOf(prompt))!;
+      if (example.id === "c09h") return { tool: mcpToolName("repo.list"), input: {} };
+      return knowing(prompt, { maxTokens: 1, signal: new AbortController().signal });
+    };
+    const results = await replayCommands(ROUTE_COMMAND_EXAMPLES, decideWith(oneWrong), { now: () => 0 }, defs);
+    const score = commandScore(results);
+    expect(score.commandHits).toBe(score.fixtures - 1);
+    expect(score.commandRate).toBeLessThan(1);
+    expect(score.misses.map((m) => m.id)).toEqual(["c09h"]);
+    const rows = routeChecks({
+      table: confusionTable([], allowed),
+      answered: 0,
+      readToWrite: 0,
+      compound: compoundScore([]),
+      compoundBar: { detection: 0.9 },
+      imperative: imperativeScore([]),
+      imperativeBar: { hit: 0.9 },
+      writePreset: "ship",
+      command: { score, bars: { command: 1.0, input: 0.9 } },
+    });
+    const commandRow = rows.find((r) => r.name.startsWith("command named right"))!;
+    expect(commandRow.pass).toBe(false);
+    // The wrong command is also an input miss, but 63/64 stays above the 0.9 bar:
+    // one wrong command fails the command row alone.
+    const inputRow = rows.find((r) => r.name.startsWith("bound input equals"))!;
+    expect(inputRow.pass).toBe(true);
+    const line = renderCommands(score).find((l) => l.startsWith("- c09h"))!;
+    expect(line).toContain("expected runs.list");
+    expect(line).toContain("bound repo.list");
+  });
+
+  it("a decoy bound to any command is a miss — unless its allow list names the command", async () => {
+    const tempted: RouteModel = async (prompt) => {
+      const example = byText.get(textOf(prompt))!;
+      if (example.id === "c09d") return { tool: mcpToolName("runs.list"), input: {} }; // no allow: a miss
+      if (example.id === "c23d") return { tool: mcpToolName("memory.list"), input: {} }; // allowed
+      return knowing(prompt, { maxTokens: 1, signal: new AbortController().signal });
+    };
+    const results = await replayCommands(ROUTE_COMMAND_EXAMPLES, decideWith(tempted), { now: () => 0 }, defs);
+    const score = commandScore(results);
+    expect(score.decoysBound).toBe(1);
+    expect(score.misses.map((m) => m.id)).toEqual(["c09d"]);
+    expect(score.commandRate).toBeLessThan(1);
+  });
+
+  it("a right command with a wrong post-parse input is an input miss, not a command miss", async () => {
+    const sloppy: RouteModel = async (prompt) => {
+      const example = byText.get(textOf(prompt))!;
+      if (example.id === "c10h") return { tool: mcpToolName("runs.stop"), input: { id: "r-123", mode: "hard" } };
+      return knowing(prompt, { maxTokens: 1, signal: new AbortController().signal });
+    };
+    const results = await replayCommands(ROUTE_COMMAND_EXAMPLES, decideWith(sloppy), { now: () => 0 }, defs);
+    const score = commandScore(results);
+    expect(score.commandHits).toBe(score.fixtures);
+    expect(score.inputHits).toBe(score.fixtures - 1);
+    expect(score.misses.map((m) => m.id)).toEqual(["c10h"]);
+  });
+
+  it("the input row compares after parseInput, so a coerced number equals its string", async () => {
+    const coercing: CommandDef<unknown> = {
+      id: "demo.count",
+      action: "demo:read",
+      effect: "read",
+      describe: "a demo command with a coercing numeric argument",
+      args: [{ name: "n", schema: z.coerce.number(), describe: "a count" }],
+      handler: async () => ({}),
+    } as CommandDef<unknown>;
+    const example: RouteCommandExample = {
+      id: "x01",
+      kind: "happy",
+      text: "count to seven",
+      command: "demo.count",
+      input: { args: [7], options: {} },
+    };
+    const results = await replayCommands(
+      [example],
+      async () => ({
+        preset: undefined,
+        reason: "command demo.count",
+        command: { id: "demo.count", input: { args: ["7"], options: {} } },
+      }),
+      { now: () => 0 },
+      [coercing],
+    );
+    expect(results[0]!.commandHit).toBe(true);
+    expect(results[0]!.inputHit).toBe(true);
+  });
+
+  it("a fixture's threadRepo reaches the router's user turn as the thread's repository", async () => {
+    const seen: string[] = [];
+    const watching: RouteModel = async (prompt) => {
+      seen.push(prompt.user);
+      return knowing(prompt, { maxTokens: 1, signal: new AbortController().signal });
+    };
+    const withRepo = ROUTE_COMMAND_FIXTURES.find((f) => f.id === "c21h")!;
+    await replayCommands([withRepo], decideWith(watching), { now: () => 0 }, defs);
+    expect(seen[0]).toContain("The thread's repository: acme/api");
+  });
+
+  it("repo.test and repo.build each carry a threadRepo form", () => {
+    for (const command of ["repo.test", "repo.build"]) {
+      const forms = ROUTE_COMMAND_FIXTURES.filter((f) => f.command === command);
+      expect(
+        forms.some((f) => f.threadRepo !== undefined),
+        command,
+      ).toBe(true);
+    }
+  });
+});
+
+describe("the counters line — cost, caching and the two-call refusals", () => {
+  const completion = (
+    usage: { inputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number },
+    tools = 1,
+  ) => ({
+    content: Array.from({ length: tools }, (_, i) => ({
+      type: "tool_use" as const,
+      id: `t${i}`,
+      name: "route",
+      input: {},
+    })),
+    stopReason: "tool_use" as const,
+    usage: { outputTokens: 5, ...usage },
+  });
+
+  it("sums the three usage fields over the calls, counts a two-call answer, and renders the means and the refusal count", async () => {
+    const counters = emptyCounters();
+    const inner: Provider = {
+      name: "fake",
+      complete: vi
+        .fn()
+        .mockResolvedValueOnce(completion({ inputTokens: 100, cacheWriteTokens: 90 }))
+        .mockResolvedValueOnce(completion({ inputTokens: 100, cacheReadTokens: 80 }))
+        .mockResolvedValueOnce(completion({ inputTokens: 40 }, 2)),
+    };
+    const tallied = tallyingProvider(inner, counters);
+    const req = { model: "m", messages: [], maxTokens: 1 } as never;
+    await tallied.complete(req);
+    await tallied.complete(req);
+    await tallied.complete(req);
+    expect(counters).toEqual({
+      calls: 3,
+      inputTokens: 240,
+      cacheReadTokens: 80,
+      cacheWriteTokens: 90,
+      twoCallAnswers: 1,
+    });
+    expect(renderCounters(counters)).toBe(
+      "model calls: 3; mean input tokens 80, cache read 27, cache write 30; two-call answers refused: 1",
+    );
+  });
+
+  it("a provider reporting no usage still counts the call; no calls renders dashes", async () => {
+    const counters = emptyCounters();
+    const inner: Provider = {
+      name: "fake",
+      complete: async () => ({ content: [], stopReason: "end_turn" as const }),
+    };
+    await tallyingProvider(inner, counters).complete({ model: "m", messages: [], maxTokens: 1 } as never);
+    expect(counters).toEqual({ calls: 1, inputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, twoCallAnswers: 0 });
+    expect(renderCounters(emptyCounters())).toContain("mean input tokens —");
   });
 });
