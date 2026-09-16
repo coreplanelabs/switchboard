@@ -3439,6 +3439,41 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     expect(replies.some((r) => /base branch/.test(r))).toBe(false);
   });
 
+  // The second movement's follow-up (resident-repos item 16): the pull request
+  // closed and its branch deleted, the thread returned to the default, and the
+  // run pushed nothing — its tree on the default at the remote's tip, which
+  // the observation cannot tell from a pushed branch. The default is not the
+  // pull request's head, so nothing was "pushed past" it: the description
+  // edits the closed body, and the reply speaks of no push and offers no
+  // compare URL.
+  it("a description resubmitted after the thread returned to the default, its own pull request closed and nothing pushed → that PR is edited by number and the reply says it is closed; never 'pushed past', no compare URL, no open call", async () => {
+    const PR_HEAD = "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432";
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION, "Resubmitted."));
+    deps.resolveRepoContext = () => ({
+      repo: "acme/api",
+      prUnpostable: { number: 41, reason: "closed" },
+      closedRecordPr: { number: 41, headSha: PR_HEAD, headRef: "fix/login", merged: false },
+    });
+    codingExecutor({ head: HEAD, branch: "main", bindingRef: "main" });
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const updated: Array<{ number: number; body: string }> = [];
+    deps.updatePullRequest = vi.fn(async (_repo: string, number: number, patch: { title: string; body: string }) => {
+      updated.push({ number, body: patch.body });
+    });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding add the tests' names to the PR description", "slack:UADMIN"), io);
+    expect(spy.calls).toHaveLength(0);
+    expect(updated).toHaveLength(1);
+    expect(updated[0].number).toBe(41);
+    expect(updated[0].body).toContain(`/blob/${PR_HEAD}/src/login.ts#L10-L20`);
+    const updatedReply = replies.find((r) => r.includes("PR updated:"));
+    expect(updatedReply).toBeDefined();
+    expect(updatedReply).toMatch(/\/pull\/41(?!\d)/);
+    expect(updatedReply).toContain("the pull request is closed");
+    expect(replies.some((r) => /pushed|\/compare\//.test(r))).toBe(false);
+  });
+
   it("the pushed branch is gone from the remote while the checkout moved on → the note names BOTH branches, no PR call", async () => {
     const deps = codingDeps(
       bashThenDescribe(["git push -u origin feat/login-fix", "git checkout -b chore/other"], DESCRIPTION),

@@ -162,11 +162,15 @@ export interface RepoContext {
    *  closed pull request, and no ref is bound to its branch), but a
    *  description a follow-up resubmits without pushing past that head still
    *  edits ITS body by number (docs/reference/specs/pr-description.md item 5):
-   *  merged or not, the body is the record of the change. Unset for a PR a
+   *  merged or not, the body is the record of the change. `headRef` is the
+   *  head branch GitHub names for it, when the head lives on this repository —
+   *  what tells the coding post-step whether a workspace branch IS that pull
+   *  request's branch (a push past its head) or another one (the base after
+   *  the thread returned to the default, a new branch). Unset for a PR a
    *  person named (the message or a turn), for an unreachable one, and for a
    *  closed one whose head GitHub did not report. Set beside `prUnpostable`,
    *  never beside `pr`. */
-  closedRecordPr?: { number: number; headSha: string; merged: boolean };
+  closedRecordPr?: { number: number; headSha: string; headRef?: string; merged: boolean };
   /** Set when NO repo could be bound and the reason is that every bare
    *  `owner/name` candidate the resolver consulted (this message's slug, the
    *  thread's weakly-bound repo, an `on <slug>` mention) was refused by the
@@ -647,7 +651,12 @@ export async function resolveRepoContext(
         // and no review post, but its body still takes the thread's own
         // description — when GitHub still names a head to render it at.
         if (inherited.source === "record" && head.reason === "closed" && head.sha !== undefined) {
-          out.closedRecordPr = { number: inherited.number, headSha: head.sha, merged: head.merged };
+          out.closedRecordPr = {
+            number: inherited.number,
+            headSha: head.sha,
+            ...(head.ref !== undefined ? { headRef: head.ref } : {}),
+            merged: head.merged,
+          };
         }
       }
     }
@@ -667,25 +676,39 @@ export function ownPrOf(ctx: RepoContext): { number: number; ref: string } | und
 }
 
 /** The pull request the thread's own run opened, with the head commit the
- *  resolver fetched and whether it is still open — where the coding post-step
- *  lands a description resubmitted by a run that pushed nothing, whatever
- *  branch its workspace sits on (docs/reference/specs/pr-description.md item 5).
- *  Unlike `ownPrOf` it does not need the ref to have come from the PR: a
- *  follow-up phrasing `on main` is still in its own thread, and its
- *  description is still for its own pull request. Nor does it need the PR to
- *  be open: one merged or closed since (`closedRecordPr`) binds nothing and
- *  takes no review post, but its body is still the thread's to describe.
- *  Undefined for a PR a person named, for none, and for a record PR with no
- *  head commit (nothing to render the body at). */
+ *  resolver fetched, its head branch when the resolver learned it, and whether
+ *  it is still open — where the coding post-step lands a description
+ *  resubmitted by a run that pushed nothing, whatever branch its workspace
+ *  sits on (docs/reference/specs/pr-description.md item 5). Unlike `ownPrOf`
+ *  it does not need the ref to have come from the PR: a follow-up phrasing
+ *  `on main` is still in its own thread, and its description is still for its
+ *  own pull request. Nor does it need the PR to be open: one merged or closed
+ *  since (`closedRecordPr`) binds nothing and takes no review post, but its
+ *  body is still the thread's to describe. `headBranch` is the branch GitHub
+ *  names as the pull request's head — the ref bound from an open one, the
+ *  `headRef` recorded for a closed one — and absent when a message's own ref
+ *  replaced it or the head lives on another repository. Undefined for a PR a
+ *  person named, for none, and for a record PR with no head commit (nothing to
+ *  render the body at). */
 export function recordPrOf(
   ctx: RepoContext,
-): { number: number; headSha: string; state: "open" | "merged" | "closed" } | undefined {
+): { number: number; headSha: string; headBranch?: string; state: "open" | "merged" | "closed" } | undefined {
   if (ctx.prFromRecord && ctx.pr !== undefined && ctx.headSha !== undefined) {
-    return { number: ctx.pr, headSha: ctx.headSha, state: "open" };
+    return {
+      number: ctx.pr,
+      headSha: ctx.headSha,
+      ...(ctx.refFromPr && ctx.ref !== undefined ? { headBranch: ctx.ref } : {}),
+      state: "open",
+    };
   }
   if (ctx.closedRecordPr !== undefined) {
-    const { number, headSha, merged } = ctx.closedRecordPr;
-    return { number, headSha, state: merged ? "merged" : "closed" };
+    const { number, headSha, headRef, merged } = ctx.closedRecordPr;
+    return {
+      number,
+      headSha,
+      ...(headRef !== undefined ? { headBranch: headRef } : {}),
+      state: merged ? "merged" : "closed",
+    };
   }
   return undefined;
 }
@@ -717,20 +740,28 @@ function inheritedPr(
  *  is fetched now, is `open`, and the SHA is well-formed; otherwise the reason
  *  it is unusable — `closed` (closed/merged) or `unreachable` (failed fetch,
  *  malformed SHA, unknown state). A closed answer still carries the head
- *  commit GitHub names for the PR and whether it was merged: nothing binds to
- *  it, but the thread's own pull request can still take a description edit
- *  there (`closedRecordPr`). Never throws. */
+ *  commit GitHub names for the PR, its head branch when that lives on this
+ *  repository, and whether it was merged: nothing binds to it, but the
+ *  thread's own pull request can still take a description edit there
+ *  (`closedRecordPr`), and the branch tells a push past its head from a
+ *  workspace on another branch. Never throws. */
 async function openPrHeadSha(pr: {
   repo: string;
   number: number;
 }): Promise<
   | { sha: string; ref?: string; base?: string; size?: PrSize; facts?: PrFacts }
-  | { reason: "closed"; sha?: string; merged: boolean }
+  | { reason: "closed"; sha?: string; ref?: string; merged: boolean }
   | { reason: "unreachable" }
 > {
   const head = await prHead(pr).catch(() => undefined);
-  if (head?.state === "closed")
-    return { reason: "closed", ...(head.sha ? { sha: head.sha } : {}), merged: head.merged };
+  if (head?.state === "closed") {
+    return {
+      reason: "closed",
+      ...(head.sha ? { sha: head.sha } : {}),
+      ...(head.ref ? { ref: head.ref } : {}),
+      merged: head.merged,
+    };
+  }
   if (head?.state === "open" && head.sha) {
     return {
       sha: head.sha,

@@ -1244,7 +1244,7 @@ describe("resolveRepoContext: the pull request the thread's own run opened binds
   it("recordPrOf: the record's PR with its head commit is where a description resubmitted without a push lands — whatever ref the message phrased; a PR a person named, or no PR, is none", async () => {
     openAt("fix/exact-match");
     const own = await resolveRepoContext(msg("continue"), history, undefined, undefined, records);
-    expect(recordPrOf(own)).toEqual({ number: 40, headSha: SHA, state: "open" });
+    expect(recordPrOf(own)).toEqual({ number: 40, headSha: SHA, headBranch: "fix/exact-match", state: "open" });
     // The message phrased a ref of its own: the ref is not the PR's, but the thread is still its own.
     openAt("fix/exact-match");
     const named = await resolveRepoContext(
@@ -1279,9 +1279,9 @@ describe("resolveRepoContext: the pull request the thread's own run opened binds
     expect(merged).toEqual({
       repo: "acme/api",
       prUnpostable: { number: 40, reason: "closed" },
-      closedRecordPr: { number: 40, headSha: SHA, merged: true },
+      closedRecordPr: { number: 40, headSha: SHA, headRef: "fix/exact-match", merged: true },
     });
-    expect(recordPrOf(merged)).toEqual({ number: 40, headSha: SHA, state: "merged" });
+    expect(recordPrOf(merged)).toEqual({ number: 40, headSha: SHA, headBranch: "fix/exact-match", state: "merged" });
     // Closed without a merge reads `closed`.
     stubFetch({
       body: {
@@ -1291,8 +1291,21 @@ describe("resolveRepoContext: the pull request the thread's own run opened binds
       },
     });
     const closed = await resolveRepoContext(msg("continue"), history, undefined, undefined, records);
-    expect(closed).toMatchObject({ closedRecordPr: { number: 40, headSha: SHA, merged: false } });
-    expect(recordPrOf(closed)).toEqual({ number: 40, headSha: SHA, state: "closed" });
+    expect(closed).toMatchObject({
+      closedRecordPr: { number: 40, headSha: SHA, headRef: "fix/exact-match", merged: false },
+    });
+    expect(recordPrOf(closed)).toEqual({ number: 40, headSha: SHA, headBranch: "fix/exact-match", state: "closed" });
+    // A head on another repository names no branch of this one: the head commit still renders the body, the branch stays unknown.
+    stubFetch({
+      body: {
+        state: "closed",
+        merged: false,
+        head: { ref: "fix/exact-match", sha: SHA, repo: { full_name: "fork-owner/api" } },
+      },
+    });
+    const forked = await resolveRepoContext(msg("continue"), history, undefined, undefined, records);
+    expect(forked.closedRecordPr).toEqual({ number: 40, headSha: SHA, merged: false });
+    expect(recordPrOf(forked)).toEqual({ number: 40, headSha: SHA, state: "closed" });
     // A closed PR whose head GitHub does not report (a malformed sha) is unpostable and nothing more: no target to render at.
     stubFetch({ body: { state: "closed", merged: true, head: { sha: "not-a-sha", repo: { full_name: "acme/api" } } } });
     const headless = await resolveRepoContext(msg("continue"), history, undefined, undefined, records);
@@ -1320,8 +1333,8 @@ describe("resolveRepoContext: the pull request the thread's own run opened binds
       { body: { object: { type: "commit", sha: MOVED } } },
     );
     const merged = await resolveRepoContext(msg("continue"), history, undefined, undefined, records);
-    expect(merged.closedRecordPr).toEqual({ number: 40, headSha: SHA, merged: true });
-    expect(recordPrOf(merged)).toEqual({ number: 40, headSha: SHA, state: "merged" });
+    expect(merged.closedRecordPr).toEqual({ number: 40, headSha: SHA, headRef: "fix/exact-match", merged: true });
+    expect(recordPrOf(merged)).toEqual({ number: 40, headSha: SHA, headBranch: "fix/exact-match", state: "merged" });
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/pulls/40");
   });
