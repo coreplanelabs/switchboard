@@ -55,6 +55,18 @@ export function parseUnitKey(key: string): { instanceId: string; unit: string } 
   return { instanceId: key.slice(0, at), unit: key.slice(at + 1) };
 }
 
+/** The unit an idempotency key names — the head of its step
+ *  (`<instance>:<unit>/<round>/<kind>` for the plan runner), or undefined for
+ *  a key whose step carries no unit prefix the unit pattern accepts. What the
+ *  `coordinator_tag` run event stamps as `unit`, so a run's stream names the
+ *  unit it ran for without parsing the key back. */
+export function unitOfIdempotencyKey(key: string): string | undefined {
+  if (!IDEMPOTENCY_KEY_PATTERN.test(key)) return undefined;
+  const step = key.slice(key.indexOf(":") + 1);
+  const head = step.split("/")[0];
+  return UNIT_PATTERN.test(head) ? head : undefined;
+}
+
 /** The event a child's terminal record sends its parent: the type carries the
  *  run id, so each `waitForEvent` matches its own child and a duplicate is
  *  buffered harmlessly. An event type is the platform's alphabet — letters,
@@ -85,10 +97,12 @@ export interface CoordinatorTag {
    *  (`CoordinatorInstance.base`), set by the spawn when the instance knows it.
    *  A coordinator's child is dispatched AT its unit branch so the resident
    *  attaches there, which makes the binding ref the branch itself — no base
-   *  the post-step could resolve from the thread — so the spawn says it. An
-   *  instruction to the run like `DispatchOptions.contract`, not a fact about
-   *  it: the fact the record keeps is the `pr_opened` it leads to, and
-   *  `coordinatorFields` leaves it off the rows. */
+   *  the post-step could resolve from the thread — so the spawn says it.
+   *  Published as the run's own `coordinator_tag` event at dispatch
+   *  (run-history item 48a), so a run re-attached after a bot roll — whose
+   *  dispatch options are gone with the process that spawned it — reads it
+   *  back off its ledger events; `coordinatorFields` still leaves it off the
+   *  rows, so rows and records keep the shape written before it existed. */
   base?: string;
 }
 

@@ -7,7 +7,13 @@ import { RunRegistry } from "../runRegistry.js";
 import { createCardShell } from "../statusCardFrame.js";
 import type { IncomingMessage, StatusUpdate } from "../types.js";
 import type { ResumeContext } from "./admission.js";
-import { abandonLostWorkspace, carriedWorkspaceBinding, lostWorkspaceNote, prepareRestartTurn } from "./reattach.js";
+import {
+  abandonLostWorkspace,
+  carriedCoordinatorTag,
+  carriedWorkspaceBinding,
+  lostWorkspaceNote,
+  prepareRestartTurn,
+} from "./reattach.js";
 import type { PersonFollowUp } from "./settle.js";
 
 // Feature: docs/reference/specs/run-history.md item 54: a resumed run re-attaches
@@ -90,6 +96,36 @@ describe("carriedWorkspaceBinding: where the row says the run's workspace is", (
     expect(carriedWorkspaceBinding(row({}, { selection: "none" }))).toBeUndefined();
     expect(carriedWorkspaceBinding(row())).toBeUndefined();
     expect(carriedWorkspaceBinding(row({ state: { binding: { backend: "mainframe" } } }))).toBeUndefined();
+  });
+});
+
+// Feature: docs/reference/specs/run-history.md item 48a: the
+// coordinator tag is a fact of the run — a resumed child rebuilds it from the
+// row's meta and the `coordinator_tag` event its spawning dispatch published,
+// so the plan's base survives a bot roll instead of living only in the
+// spawning process's dispatch options.
+describe("carriedCoordinatorTag: the tag a resumed run carries forward", () => {
+  const tagged = row({}, { parentInstanceId: "plan-p-2", idempotencyKey: "plan-p-2:U16/1/coding" });
+
+  it("rebuilds the tag from the row's meta with the base the coordinator_tag event carried", () => {
+    const tag = carriedCoordinatorTag(tagged, [
+      { type: "input", messageId: "m1", text: "go", at: 1 },
+      { type: "coordinator_tag", parentInstanceId: "plan-p-2", unit: "U16", base: "feat/trunk", at: 2 },
+    ]);
+    expect(tag).toEqual({ parentInstanceId: "plan-p-2", idempotencyKey: "plan-p-2:U16/1/coding", base: "feat/trunk" });
+  });
+
+  it("a row written before the event existed carries the two meta fields and no base — the store guard's case", () => {
+    expect(carriedCoordinatorTag(tagged, [{ type: "input", messageId: "m1", text: "go", at: 1 }])).toEqual({
+      parentInstanceId: "plan-p-2",
+      idempotencyKey: "plan-p-2:U16/1/coding",
+    });
+  });
+
+  it("a run no coordinator spawned carries nothing, even when an event is present", () => {
+    expect(
+      carriedCoordinatorTag(row(), [{ type: "coordinator_tag", parentInstanceId: "plan-p-2", base: "main", at: 2 }]),
+    ).toBeUndefined();
   });
 });
 

@@ -260,6 +260,25 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // `maxMinutes`) — a copy, never the shared registry entry.
   const agent = budgetedAgent(ctx.agent, profile);
   const { executor, binding } = round.selection;
+  // The plan's base for a coordinator's child (run-history item 48a): the
+  // tag's — the spawn's own, or the one the `coordinator_tag` event carried
+  // across a roll — else, when the tag lost it, the second guard: the parent
+  // instance's record in the coordinator store, read by `parentInstanceId`.
+  // Resolved once and shared by the gate's push rules (the base a child may
+  // never push to — judged before the session opens, whatever the run's
+  // post-steps) and the PR post-step (the base its pull request targets).
+  const coordinatorBase: Promise<string | undefined> = (async () => {
+    if (coordinator === undefined) return undefined;
+    if (coordinator.base !== undefined || repoCtx.baseRef !== undefined) return coordinator.base;
+    try {
+      return (await deps.coordinatorInstances?.get(coordinator.parentInstanceId))?.base;
+    } catch (err) {
+      console.warn(
+        `[pr-post] ${msg.threadKey} coordinator store lookup failed for ${coordinator.parentInstanceId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return undefined;
+    }
+  })();
   let reviewHead = ctx.reviewHead;
   let lastActivityAt = ctx.loopStartedAt;
   // The card body is the agent's own checklist (via the update_status tool)
@@ -719,8 +738,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       // child is dispatched at its unit branch — so that branch is the one
       // push target and the base its pull request targets is protected;
       // otherwise the binding IS that base, protected, and the run pushes a
-      // branch of its own making.
-      const prBase = repoCtx.baseRef ?? coordinator?.base;
+      // branch of its own making. The plan's base is resolved here, once —
+      // the tag's, else the coordinator store's (run-history item 48a) — so a
+      // child resumed from a row written before the tag carried a base still
+      // has its base protected, not its own unit branch.
+      const prBase = repoCtx.baseRef ?? (await coordinatorBase);
       const ownBranch = prBase !== undefined ? (binding?.ref ?? repoCtx.ref) : undefined;
       const protectedBranches = [
         ...new Set(
@@ -927,11 +949,22 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // resubmitted without a push lands even from a workspace on the base or
     // on that pull request's own head branch (pr-description.md item 5).
     const ownPr = recordPrOf(repoCtx);
+    // The plan's base for a coordinator's child (run-history item 48a),
+    // resolved once above before the harness session opened. Still unknown
+    // after the tag and the store, the base is LOST, not resolvable: the
+    // binding ref is the unit branch itself and the repo default is not the
+    // plan's base, so neither may stand in — the post-step says so with a
+    // `pr_not_opened` note instead of opening against the wrong branch. The
+    // flag rides only a coding PR run's target, the one the post-step reads.
+    const planBase = await coordinatorBase;
+    const planBaseLost =
+      isCodingPrRun && coordinator !== undefined && repoCtx.baseRef === undefined && planBase === undefined;
     const prTarget = {
       repo: repoCtx.repo,
-      baseRef: repoCtx.baseRef ?? coordinator?.base,
+      baseRef: repoCtx.baseRef ?? planBase,
       bindingRef: binding?.ref,
       resolvedRef: repoCtx.ref,
+      ...(planBaseLost ? { planBaseLost: true } : {}),
       ...(ownPr !== undefined ? { ownPr } : {}),
     };
     if (isCodingPrRun && run.control.requested !== "hard") await observeWorkspaceNow();
