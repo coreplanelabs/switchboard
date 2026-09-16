@@ -1,6 +1,6 @@
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { Writable } from "node:stream";
@@ -322,6 +322,23 @@ describe("BotHostHarnessContainer: the seam is harness-neutral in fact", () => {
       await vi.waitFor(async () => {
         const log = Buffer.from(await container.readLog(paths.log, 0, 4096)).toString("utf8");
         expect(log).toBe(JSON.stringify({ type: "message_update", ignored: true }) + "\n");
+      });
+    } finally {
+      await container.kill(pid);
+    }
+  });
+
+  it("keepLog: a start over a log that already has bytes appends after them instead of refusing or truncating — the tailer's feed survives a restart of its writer", async () => {
+    const { spawn } = scripted(FAKE_PI);
+    const container = new BotHostHarnessContainer({ spawn, env: { PATH: process.env.PATH! } });
+    const paths = await rootOf(container);
+    writeFileSync(paths.log, "kept\n");
+    writeFileSync(paths.errLog, "earlier\n");
+    const { pid } = await container.start({ paths, command: "opencode", args: ["serve"], env: {}, keepLog: true });
+    try {
+      await vi.waitFor(async () => {
+        const log = Buffer.from(await container.readLog(paths.log, 0, 4096)).toString("utf8");
+        expect(log).toBe("kept\n" + JSON.stringify({ type: "message_update", ignored: true }) + "\n");
       });
     } finally {
       await container.kill(pid);

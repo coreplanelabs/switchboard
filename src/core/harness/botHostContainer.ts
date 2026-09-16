@@ -149,8 +149,9 @@ export class BotHostHarnessContainer implements HarnessContainer {
     const { paths } = start;
     try {
       for (const dir of paths.dirs) await mkdir(dir, { recursive: true, mode: 0o700 });
-      await writeFile(paths.log, "", { mode: 0o600, flag: "wx" });
-      await writeFile(paths.errLog, "", { mode: 0o600, flag: "wx" });
+      // `keepLog`: create when missing, never truncate (the tailer's feed is read by offset and its writer may restart).
+      await writeFile(paths.log, "", { mode: 0o600, flag: start.keepLog ? "a" : "wx" });
+      await writeFile(paths.errLog, "", { mode: 0o600, flag: start.keepLog ? "a" : "wx" });
     } catch (err) {
       throw new HarnessContainerError("start", message(err));
     }

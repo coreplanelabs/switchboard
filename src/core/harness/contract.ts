@@ -87,6 +87,12 @@ export interface OpenCodeHarnessFacts {
   harness: "opencode";
   pid: number;
   port: number;
+  /** The tailer beside the server (`tailer.js`, whose stdout is the feed): a
+   *  second process that can die alone, so a generation that comes back probes
+   *  it too and restarts only it when only it is gone, instead of starting a
+   *  second one over the same feed. Absent on a row written before it was
+   *  recorded: the tailer is then judged by the feed alone. */
+  tailerPid?: number;
   /** The byte the next generation reads the run's feed from — the JSONL the
    *  in-container tailer writes and the harness reads through the log
    *  transport — the boundary after the last record whose effect the ledger
@@ -152,7 +158,19 @@ function piFactsOf(v: Record<string, unknown>): PiHarnessFacts | undefined {
 }
 
 function openCodeFactsOf(v: Record<string, unknown>): OpenCodeHarnessFacts | undefined {
-  const { harness: _harness, pid, port, logOffset, sessionID, root, bearerHash, container, relaunches, ...rest } = v;
+  const {
+    harness: _harness,
+    pid,
+    port,
+    tailerPid,
+    logOffset,
+    sessionID,
+    root,
+    bearerHash,
+    container,
+    relaunches,
+    ...rest
+  } = v;
   if (typeof pid !== "number" || typeof port !== "number" || typeof logOffset !== "number") return undefined;
   if (typeof sessionID !== "string" || typeof root !== "string") return undefined;
   return {
@@ -164,6 +182,7 @@ function openCodeFactsOf(v: Record<string, unknown>): OpenCodeHarnessFacts | und
     sessionID,
     root,
     relaunches: relaunchesOf(relaunches),
+    ...(typeof tailerPid === "number" ? { tailerPid } : {}),
     ...(typeof bearerHash === "string" ? { bearerHash } : {}),
     ...(typeof container === "string" ? { container } : {}),
   };

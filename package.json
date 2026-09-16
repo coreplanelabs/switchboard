@@ -91,7 +91,10 @@
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.85.1",
     "@eslint/js": "^10.0.1",
+    "@opencode/protocol": "2.0.3",
+    "@opencode/schema": "2.0.3",
     "@types/node": "^24.0.0",
+    "effect": "4.0.0-rc.112",
     "eslint": "^10.10.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-vue": "^10.11.0",

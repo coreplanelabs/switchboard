@@ -91,6 +91,7 @@ const OPENCODE_FACTS: OpenCodeHarnessFacts = {
   harness: "opencode",
   pid: 9,
   port: 41000,
+  tailerPid: 10,
   logOffset: 512,
   sessionID: "ses_1",
   root: "/tmp/switchboard-oc-run-7",
@@ -225,6 +226,9 @@ describe("harnessFactsOf — a row's facts, read by the harness that wrote them"
     const { bearerHash: _h, container: _c, ...bare } = OPENCODE_FACTS;
     expect(harnessFactsOf(bare)).toEqual(bare);
     expect(harnessFactsOf({ ...OPENCODE_FACTS, container: 1, bearerHash: 2 })).toEqual(bare);
+    const { tailerPid: _t, ...noTailer } = OPENCODE_FACTS;
+    expect(harnessFactsOf(noTailer)).toEqual(noTailer);
+    expect(harnessFactsOf({ ...OPENCODE_FACTS, tailerPid: "10" })).toEqual(noTailer);
     expect(harnessFactsOf({ ...OPENCODE_FACTS, port: "41000" })).toBeUndefined();
     expect(harnessFactsOf({ ...OPENCODE_FACTS, logOffset: undefined })).toBeUndefined();
     expect(harnessFactsOf({ ...OPENCODE_FACTS, sessionID: undefined })).toBeUndefined();
