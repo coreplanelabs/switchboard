@@ -639,91 +639,142 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
   return undefined;
 }
 
-/** How the attach ended: the round's workspace (executor, selection, release);
- *  the ask-once refusal (no branch is bound and none was named); or a resumed
- *  run's workspace that could not be re-attached where its row says it ran
- *  (run-history item 54): nothing else was provisioned, and the caller
- *  restarts the run from its request, saying why. */
-export type WorkspaceAttach =
-  | { kind: "attached"; round: RoundWorkspace }
-  | { kind: "refused"; reason: "which_branch" }
-  | { kind: "reattach_refused"; why: string };
+/** What the attach itself reads, with or without the dispatch-time gate: the
+ *  thread, the round's agent and effective profile, the repository context,
+ *  the span the attach hangs under and the clock that clips the resident's
+ *  steps to it. */
+export interface AttachContext {
+  threadKey: string;
+  agent: AgentDef;
+  profile: RunProfile;
+  repoCtx: RepoContext;
+  /** The span the `dispatch.workspace.attach` span opens under: the request
+   *  root at dispatch; the run's own span for a re-attach mid-run. */
+  root: Span;
+  clock: Clock;
+  /** A run's recorded binding (run-history item 54): the attach reuses that
+   *  workspace and never provisions again. Absent for a fresh run, and for a
+   *  resumed row that recorded none. */
+  reattach?: WorkspaceBinding;
+}
+
+/** How a recorded workspace's re-attach ended: the round's workspace
+ *  (executor, selection, release), or the factory's refusal by name (run-history
+ *  item 54): nothing else was provisioned, and the caller closes the run
+ *  `interrupted` saying why and runs its request again. */
+export type WorkspaceReattach = { kind: "attached"; round: RoundWorkspace } | { kind: "reattach_refused"; why: string };
+
+/** How the dispatch-time attach ended: a re-attach's two answers, or the
+ *  ask-once refusal (no branch is bound and none was named). */
+export type WorkspaceAttach = WorkspaceReattach | { kind: "refused"; reason: "which_branch" };
 
 /**
- * The workspace attach — the setup step that takes minutes on a cold clone —
- * paired with its release on the round's agent (reviewRound.ts). The one
- * refusal it decides is ask-once: a resident with no ref binding for this
- * thread, no branch named, no default to bind to → one clarifying question, no
- * model turn. Every other failure propagates.
+ * The attach itself, under its `dispatch.workspace.attach` span naming the
+ * backend (docs/reference/specs/tracing.md) — the setup step that takes minutes on
+ * a cold clone — paired with its release on the round's profile
+ * (reviewRound.ts): a `read` identity → readonly worktree + release("always");
+ * any other → release("if-idle"). The factory is handed the EFFECTIVE profile
+ * — what is provisioned and as whom is read from it, never from the preset.
+ * Every failure propagates: the callers read the ones they decide by name.
+ */
+async function attachRound(
+  deps: Pick<ProvisionDeps, "config" | "dataDir">,
+  ctx: AttachContext,
+): Promise<RoundWorkspace> {
+  const { threadKey, agent, profile, repoCtx, root, clock, reattach } = ctx;
+  const ownPr = ownPrOf(repoCtx);
+  return root.span("dispatch.workspace.attach", async (span) => {
+    // The resident's own steps (clone, install, the mutex wait…) graft under
+    // this span, rebased to its start (docs/reference/specs/tracing.md item 19) — on a
+    // failed attach too, where the trace says which step blew the budget.
+    const graft = (steps: readonly ResidentStep[], residentTotalMs?: number) =>
+      graftResidentSteps(steps, {
+        parent: span,
+        prefix: "dispatch.workspace.attach",
+        baseAt: span.record().startedAt,
+        clipAt: clock(),
+        ...(residentTotalMs !== undefined ? { residentTotalMs } : {}),
+      });
+    let attached: Awaited<ReturnType<typeof attachRoundWorkspace>>;
+    try {
+      attached = await attachRoundWorkspace({
+        factory: {
+          execution: deps.config.config.execution,
+          workspaceDir: deps.config.config.workspaceDir ?? "./workspaces",
+          dataDir: deps.dataDir ?? "./data",
+        },
+        round: {
+          threadKey,
+          agent,
+          profile,
+          repo: repoCtx.repo,
+          ref: repoCtx.ref,
+          headSha: repoCtx.headSha,
+          // The thread's own pull request, when the ref is its head (resident-
+          // repos item 16): the one reason the resident may move a binding.
+          ...(ownPr !== undefined ? { ownPr } : {}),
+          ...(reattach !== undefined ? { reattach } : {}),
+        },
+        logKey: threadKey,
+        span,
+      });
+    } catch (err) {
+      const failed = residentTraceOf(err);
+      if (failed) graft(failed.steps, failed.residentMs);
+      throw err;
+    }
+    if (attached.selection.backend) span.setAttrs({ backend: attached.selection.backend });
+    if (attached.selection.trace) graft(attached.selection.trace, attached.selection.attachMs);
+    return attached;
+  });
+}
+
+/**
+ * A run's recorded workspace, re-attached where its row says it ran
+ * (run-history item 54) with no gate: the factory reuses that workspace and
+ * provisions nothing else, and its refusal is answered by name for the caller
+ * to close the run saying why. Callable mid-run — a process relaunched in a
+ * replacement container re-attaches the run's binding before it starts — as
+ * well as from the dispatch-time attach below, which adds the gate. Every
+ * other failure propagates.
+ */
+export async function reattachWorkspace(
+  deps: Pick<ProvisionDeps, "config" | "dataDir">,
+  ctx: AttachContext & { reattach: WorkspaceBinding },
+): Promise<WorkspaceReattach> {
+  try {
+    return { kind: "attached", round: await attachRound(deps, ctx) };
+  } catch (err) {
+    // The run's workspace is where its row says or nowhere (item 54): the
+    // factory tried that backend alone and refused by name.
+    if (err instanceof WorkspaceReattachRefusedError) return { kind: "reattach_refused", why: err.why };
+    throw err;
+  }
+}
+
+/**
+ * The dispatch-time workspace attach: the attach itself (`attachRound`), and
+ * the one refusal the stage decides — ask-once: a resident with no ref binding
+ * for this thread, no branch named, no default to bind to → one clarifying
+ * question on the card and in the thread, no model turn. A resumed run's
+ * recorded binding is re-attached as `reattachWorkspace` does, its refusal
+ * answered the same way. Every other failure propagates.
  */
 export async function attachWorkspace(
   deps: ProvisionDeps,
-  ctx: GateContext &
-    GateCard & {
-      agent: AgentDef;
-      profile: RunProfile;
-      repoCtx: RepoContext;
-      root: Span;
-      /** A resumed run's recorded binding (run-history item 54): the attach
-       *  reuses that workspace and never provisions again. Absent for a fresh
-       *  run, and for a resumed row that recorded none. */
-      reattach?: WorkspaceBinding;
-    },
+  ctx: GateContext & GateCard & Omit<AttachContext, "threadKey">,
 ): Promise<WorkspaceAttach> {
   const { msg, io, refuse, card, shell, closeLines, clock, agent, profile, repoCtx, root, reattach } = ctx;
-  const ownPr = ownPrOf(repoCtx);
-  // The workspace attach is paired with its release on the round's profile
-  // (reviewRound.ts): a `read` identity → readonly worktree +
-  // release("always"); any other → release("if-idle"). The factory is handed
-  // the EFFECTIVE profile — what is provisioned and as whom is read from it,
-  // never from the preset.
   let round: RoundWorkspace;
   try {
-    // The attach is one `dispatch.workspace.attach` span naming its backend
-    // (docs/reference/specs/tracing.md): the setup step that takes minutes on a cold clone.
-    round = await root.span("dispatch.workspace.attach", async (span) => {
-      // The resident's own steps (clone, install, the mutex wait…) graft under
-      // this span, rebased to its start (docs/reference/specs/tracing.md item 19) — on a
-      // failed attach too, where the trace says which step blew the budget.
-      const graft = (steps: readonly ResidentStep[], residentTotalMs?: number) =>
-        graftResidentSteps(steps, {
-          parent: span,
-          prefix: "dispatch.workspace.attach",
-          baseAt: span.record().startedAt,
-          clipAt: clock(),
-          ...(residentTotalMs !== undefined ? { residentTotalMs } : {}),
-        });
-      let attached: Awaited<ReturnType<typeof attachRoundWorkspace>>;
-      try {
-        attached = await attachRoundWorkspace({
-          factory: {
-            execution: deps.config.config.execution,
-            workspaceDir: deps.config.config.workspaceDir ?? "./workspaces",
-            dataDir: deps.dataDir ?? "./data",
-          },
-          round: {
-            threadKey: msg.threadKey,
-            agent,
-            profile,
-            repo: repoCtx.repo,
-            ref: repoCtx.ref,
-            headSha: repoCtx.headSha,
-            // The thread's own pull request, when the ref is its head (resident-
-            // repos item 16): the one reason the resident may move a binding.
-            ...(ownPr !== undefined ? { ownPr } : {}),
-            ...(reattach !== undefined ? { reattach } : {}),
-          },
-          logKey: msg.threadKey,
-          span,
-        });
-      } catch (err) {
-        const failed = residentTraceOf(err);
-        if (failed) graft(failed.steps, failed.residentMs);
-        throw err;
-      }
-      if (attached.selection.backend) span.setAttrs({ backend: attached.selection.backend });
-      if (attached.selection.trace) graft(attached.selection.trace, attached.selection.attachMs);
-      return attached;
+    round = await attachRound(deps, {
+      threadKey: msg.threadKey,
+      agent,
+      profile,
+      repoCtx,
+      root,
+      clock,
+      ...(reattach !== undefined ? { reattach } : {}),
     });
   } catch (err) {
     // Ask-once: the resident has no ref binding for this thread, the

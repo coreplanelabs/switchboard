@@ -21,7 +21,13 @@ import type { DispatchFollowUp } from "./admission.js";
 import { buildMessages } from "./messages.js";
 import { resolveRun } from "./resolve.js";
 import type { HarnessProcessDeps, RunDeps } from "./run.js";
-import { runLoop } from "./runLoop.js";
+import { runLoop, type RunLoopOutcome, type RunOutcome } from "./runLoop.js";
+
+/** The loop's answered outcome; an interruption fails the test naming its note. */
+function answered(out: RunLoopOutcome): RunOutcome {
+  if (out.kind !== "answered") throw new Error(`the loop was interrupted: ${out.note}`);
+  return out;
+}
 import {
   HarnessRegistry,
   RelayedCalls,
@@ -34,8 +40,7 @@ import {
 } from "../harness/pi/relay.js";
 import { spawnCapabilityFor, type SpawnCapability, type SpawnDeps } from "./spawn.js";
 import type { SessionCapability } from "../../tools/session.js";
-import { HarnessInterruptedError, HarnessMismatchError } from "../harness/contract.js";
-import { ModelPolicyRefusedError, PiContainerReplacedError } from "../harness/pi/harness.js";
+import { ModelPolicyRefusedError } from "../harness/pi/harness.js";
 import { PiHarness } from "../harness/pi/piHarness.js";
 import { FakeHarnessContainer } from "../harness/testing/fakeContainer.js";
 import { scriptPiFromProvider } from "../harness/pi/testing/providerPi.js";
@@ -297,7 +302,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       const rec = (await s.store.get("run-l"))!;
       return JSON.stringify(rec.events.filter((e) => e.type === "tool_result"));
     };
-    const out = await runLoop(withUpload.deps, withUpload.ctx);
+    const out = answered(await runLoop(withUpload.deps, withUpload.ctx));
     expect(out.toolCalls).toBe(1);
     expect(files).toEqual(["shot.png:3:the page"]);
     expect(await toolResults(withUpload)).toContain("attached shot.png (3 bytes) to the conversation");
@@ -416,7 +421,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
 
   it("a completed run: the answer comes back through the typed-output boundary and is published, the registry is finished `completed`, the record is registered for the drain, the workspace is NOT released here", async () => {
     const s = setup("the answer");
-    const out = await runLoop(s.deps, s.ctx);
+    const out = answered(await runLoop(s.deps, s.ctx));
     expect(out.answer).toBe("the answer");
     expect(out.toolCalls).toBe(0);
     expect(out.runDiagnosis).toBeDefined();
@@ -598,7 +603,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       artifacts: store,
     });
     s.ctx.admitted.inbox.push(steered());
-    const out = await runLoop(s.deps, s.ctx);
+    const out = answered(await runLoop(s.deps, s.ctx));
     expect(out.answer).toBe("sheet cut");
     expect(store.copies.map((c) => c.key)).toEqual(["threads/slack-CX-1.0/in/1700000000.000300/1-clip.mp4"]);
     expect(commands).toEqual([
@@ -645,7 +650,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       },
     });
     s.ctx.admitted.inbox.push(steered());
-    const out = await runLoop(s.deps, s.ctx);
+    const out = answered(await runLoop(s.deps, s.ctx));
     expect(out.answer).toBe("done");
     expect(commands).toEqual([]);
     expect(steers).toHaveLength(1);
@@ -677,7 +682,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       },
       bearer: "sbr_run-l.s3cret",
     });
-    const out = await runLoop(s.deps, s.ctx);
+    const out = answered(await runLoop(s.deps, s.ctx));
     expect(out.answer).toBe("pi says done");
     expect(out.toolCalls).toBe(1);
     expect(providerCalls).toBe(0);
@@ -801,7 +806,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       return { number: 700, htmlUrl: "https://github.com/acme/api/pull/700", created: false };
     };
     s.deps.fetchRepoShipInfo = async () => ({ defaultBranch: "main" });
-    const out = await runLoop(s.deps, s.ctx);
+    const out = answered(await runLoop(s.deps, s.ctx));
     // one pi, two prompts on it — alive at the second — the follow-up naming the PR and the pushed head
     expect(container.starts).toHaveLength(1);
     expect(prompts).toBe(2);
@@ -850,7 +855,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       bearer: "sbr_run-l.s3cret",
       binding: { ref: "main", sha: "abc", workspace: "/workspace/threads/t/main", user: "worker2" },
     });
-    const out = await runLoop(s.deps, s.ctx);
+    const out = answered(await runLoop(s.deps, s.ctx));
     expect(out.answer).toBe("pi says done");
     expect(container.starts[0].paths.dir).toBe("/tmp/switchboard-pi-run-l");
     expect(container.files.get("/tmp/switchboard-pi-run-l/agent/SYSTEM.md")).toContain("the system prompt");
@@ -960,7 +965,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
 // the terminal shape a refused re-attach leaves (run-history item 54), so the
 // dispatcher runs the request again as a new run.
 describe("the pi harness — the container replaced under a live run", () => {
-  it("a run whose pi container is replaced under it ends `interrupted`, not failed: the replaced-container error propagates for the dispatcher's restart, the registry and the record say interrupted with the sandbox_restarted note and the settled call, the workspace is released, and the card closes 🔁 saying the run restarts from its request — never ❌", async () => {
+  it("a run whose pi container is replaced under it ends `interrupted`, not failed: the loop answers the interrupted outcome for the dispatcher's restart — the card's reason, the refusal by name, the note's words and the request to run again as a new run — the registry and the record say interrupted with the sandbox_restarted note and the settled call, the workspace is released, and the card closes 🔁 saying the run restarts from its request — never ❌", async () => {
     const registry = new HarnessRegistry();
     const container = new FakeHarnessContainer();
     container.onStdin = (line, c) => {
@@ -1001,13 +1006,16 @@ describe("the pi harness — the container replaced under a live run", () => {
         tickMs: 5,
       },
     });
-    const err = await runLoop(s.deps, s.ctx).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(PiContainerReplacedError);
-    // The seam's interruption vocabulary (harness.md item 7): the loop and the dispatcher read the reason and the refusal off it.
-    expect(err).toBeInstanceOf(HarnessInterruptedError);
-    expect(err).toMatchObject({
+    // The seam's interruption vocabulary (harness.md item 7), as the loop's own
+    // outcome: the dispatcher reads the refusal and the request to run again
+    // off it, never an exception. The note's words are the record's.
+    const out = await runLoop(s.deps, s.ctx);
+    expect(out).toEqual({
+      kind: "interrupted",
       reason: "container replaced under the run; restarting from the request",
       refusal: "container_replaced",
+      note: "the container running pi was replaced (vm-fake → vm-new; the executor said: the sandbox restarted under the run (waited 42 s)); the run restarts from its request",
+      restart: { request: s.ctx.msg, restartOf: "run-l" },
     });
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "interrupted" });
     expect(s.releases).toEqual(["paired"]);
@@ -1154,7 +1162,7 @@ describe("the pi harness — the review preset", () => {
       ...prThread,
       review: { head: HEAD, post: async (target, body) => void posts.push({ target, body }) },
     });
-    const out = await runLoop(s.deps, s.ctx);
+    const out = answered(await runLoop(s.deps, s.ctx));
     expect(out.answer).toBe("The review: one nit, F1.");
     expect(providerCalls).toBe(0);
     // The process: pi's allowlist for a read identity, the readonly toolset's relays, the bearer, the framing.
@@ -1294,7 +1302,7 @@ describe("the pi harness — the review preset", () => {
         commits: (sha) => (sha === HEAD ? list(["feat: the change"]) : list(["feat: the change", "fix: review nits"])),
       },
     });
-    const out = await runLoop(s.deps, s.ctx);
+    const out = answered(await runLoop(s.deps, s.ctx));
     // one pi, two prompts on it — pi still alive at the second — and the worktree moved before it
     expect(container.starts).toHaveLength(1);
     expect(prompts).toBe(2);
@@ -1438,7 +1446,7 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
       },
       bearer: "sbr_run-l.s3cret",
     });
-    const out = await runLoop(s.deps, s.ctx);
+    const out = answered(await runLoop(s.deps, s.ctx));
     expect(out.answer).toBe("General says done.");
     expect(providerCalls).toBe(0);
     expect(asked).toEqual(["none"]);
@@ -1622,7 +1630,7 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
       },
       bearer: "sbr_run-l.s3cret",
     });
-    const out = await runLoop(s.deps, s.ctx);
+    const out = answered(await runLoop(s.deps, s.ctx));
     expect(out.answer).toMatch(/^Research says: web_fetch refused: /);
     expect(asked).toEqual(["none"]);
     expect(container.starts).toHaveLength(1);
@@ -1758,7 +1766,7 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
       spawn,
       session: sessionWith(async () => conductorLog),
     });
-    const out = await runLoop(s.deps, s.ctx);
+    const out = answered(await runLoop(s.deps, s.ctx));
     expect(asked).toEqual(["none"]);
     const start = container.starts[0];
     expect(start.env.SWITCHBOARD_HARNESS_URL).toBe("http://127.0.0.1:8080");
@@ -1943,7 +1951,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
   it("the model is never called: the transcript's final turn is the answer, published and finished `completed`, and a `resumed` note on the stream says the loop had ended before the restart", async () => {
     const s = setup("", { provider: neverCalled() });
     const resume = finishing("The answer, written before the restart.");
-    const out = await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages });
+    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
     expect(out.answer).toBe("The answer, written before the restart.");
     expect(s.published).toEqual(["answer:The answer, written before the restart."]);
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
@@ -1965,11 +1973,13 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         note("stopped", "soft stop", 3, "soft"),
       ],
     });
-    const stoppedOut = await runLoop(stopped.deps, {
-      ...stopped.ctx,
-      resume: softStop,
-      messages: softStop.plan.messages,
-    });
+    const stoppedOut = answered(
+      await runLoop(stopped.deps, {
+        ...stopped.ctx,
+        resume: softStop,
+        messages: softStop.plan.messages,
+      }),
+    );
     expect(stoppedOut.answer).toMatch(/^⏹ _Stopped early by an operator \(soft stop\)/);
     expect(stoppedOut.answer).toContain("What I found before the stop.");
     expect(stopped.run.control.requested).toBe("soft");
@@ -1982,11 +1992,13 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         note("time_budget_exhausted", "time budget exhausted", 2),
       ],
     });
-    const budgetOut = await runLoop(budget.deps, {
-      ...budget.ctx,
-      resume: timeBudget,
-      messages: timeBudget.plan.messages,
-    });
+    const budgetOut = answered(
+      await runLoop(budget.deps, {
+        ...budget.ctx,
+        resume: timeBudget,
+        messages: timeBudget.plan.messages,
+      }),
+    );
     expect(budgetOut.answer).toMatch(/^⚠️ _Hit the \d+-minute budget before finishing/);
     expect(budgetOut.answer).toContain("What I found before the budget ran out.");
     expect(budget.run.control.requested).toBeUndefined();
@@ -2007,7 +2019,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       state: { verdict: VERDICT },
       repoCtx: prThread.repoCtx,
     });
-    const out = await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages });
+    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
     expect(out.answer).toBe("The review: one nit, F1.");
     expect(posts).toEqual([
       {
@@ -2051,7 +2063,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         { type: "review_posted", repo: "o/r", number: 42, head: HEAD, verdict: "approve", at: 2, seq: 2 },
       ],
     });
-    const out = await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages });
+    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
     expect(posts).toEqual([]);
     expect(execs.filter((c) => c.includes("rev-parse"))).toEqual([]);
     expect(out.reviewHead).toBe(HEAD);
@@ -2091,7 +2103,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       agent: "coding",
       state: { harness: { pid: 777, logOffset: 10, root: "/tmp/switchboard-pi-old-build-run-l" } },
     });
-    const out = await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages });
+    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
     expect(out.answer).toBe("Done: pushed the fix.");
     expect(container.starts).toEqual([]);
     expect(container.stdin).toEqual([]);
@@ -2122,7 +2134,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       agent: "coding",
       state: { harness: { pid: 777, logOffset: 10, root: "/tmp/switchboard-pi-run-l", container: "vm-old" } },
     });
-    const out = await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages });
+    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
     expect(out.answer).toBe("Done: pushed the fix.");
     expect(container.killed).toEqual([]);
     expect(container.removed).toEqual([]);
@@ -2153,7 +2165,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       agent: "coding",
       state: { harness: { pid: 777, logOffset: 10, root: "/tmp/switchboard-pi-run-l", container: "vm-old" } },
     });
-    const out = await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages });
+    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
     expect(out.answer).toBe("Done: pushed the fix.");
     expect(container.killed).toEqual([]);
     expect(container.removed).toEqual([]);
@@ -2196,7 +2208,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       },
     });
     const resume = finishing("Done: pushed the fix.", { agent: "coding", state: { harness: OPENCODE_ROW } });
-    const out = await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages });
+    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
     expect(out.answer).toBe("Done: pushed the fix.");
     expect(container.killed).toEqual([]);
     expect(container.removed).toEqual([]);
@@ -2211,7 +2223,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
   });
 
-  it("a resume mid-loop whose row carries another harness's facts closes the run `interrupted`, not failed: the loop refuses before any harness opens, HarnessMismatchError propagates for the dispatcher's restart, nothing is filed, started, killed or removed, the record carries the harness_error note once, the workspace is released, and the card closes 🔁 naming both harnesses — never ❌", async () => {
+  it("a resume mid-loop whose row carries another harness's facts closes the run `interrupted`, not failed: the loop refuses before any harness opens and answers the interrupted outcome naming both harnesses for the dispatcher's restart, nothing is filed, started, killed or removed, the record carries the harness_error note once, the workspace is released, and the card closes 🔁 naming both harnesses — never ❌", async () => {
     const container = new FakeHarnessContainer();
     const opened: string[] = [];
     const watching = new PiHarness();
@@ -2235,10 +2247,14 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     });
     s.deps.harness = { ...s.deps.harness!, harness: watching };
     const resume = reentering({ harness: OPENCODE_ROW });
-    const err = await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(HarnessMismatchError);
-    expect(err).toBeInstanceOf(HarnessInterruptedError);
-    expect(err).toMatchObject({ expected: "pi", found: "opencode", refusal: "harness_mismatch" });
+    const out = await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages });
+    expect(out).toEqual({
+      kind: "interrupted",
+      reason: "the row's harness facts are opencode's, not pi's; restarting from the request",
+      refusal: "harness_mismatch",
+      note: "the run's row carries opencode harness facts and this run is driven by pi: nothing of that process is judged or ended here; the run restarts from its request",
+      restart: { request: s.ctx.msg, restartOf: "run-l" },
+    });
     expect(opened).toEqual([]); // the loop refused; no harness was opened
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "interrupted" });
     expect(container.files.size).toBe(0);

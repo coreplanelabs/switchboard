@@ -240,3 +240,95 @@ describe("RunBearerStore — a bearer across generations (docs/reference/specs/h
     expect(next.store.verify(theirs)).toEqual({ ok: false, reason: "unknown_bearer", runId: "run-1" });
   });
 });
+
+// Feature: docs/reference/specs/model-proxy.md item 2 — the rotation a relaunch
+// asks for: a new secret for the same run on the same grant, its hash handed
+// to the row before the old secrets stop verifying, the meter untouched.
+describe("RunBearerStore — rotate: a relaunch's new bearer on the run's own meter", () => {
+  it("rotate mints a new bearer for the run and drops the old: the old answers unknown_bearer, the new verifies to the same grant with the same turns, expiry and span, and the row's hash is the new secret's", () => {
+    const h = harness();
+    const old = h.store.mint(h.grant("run-1", { maxTurns: 5 }));
+    const adopted = harness().store.mint(harness().grant("run-1"));
+    expect(h.store.adopt("run-1", bearerHashOf(adopted)!)).toBe(true);
+    expect(h.store.consumeTurn("run-1")).toEqual({ ok: true, turn: 1 });
+    expect(h.store.consumeTurn("run-1")).toEqual({ ok: true, turn: 2 });
+    const agentSpan = h.grant("run-1").span.start("run.agent");
+    expect(h.store.reparent("run-1", agentSpan)).toBe(true);
+    const before = h.store.grantOf("run-1")!;
+    const recorded: string[] = [];
+    const rotated = h.store.rotate("run-1", (secretHash) => void recorded.push(secretHash));
+    expect(rotated.ok).toBe(true);
+    if (!rotated.ok) throw new Error("expected ok");
+    expect(rotated.token.startsWith(`${BEARER_PREFIX}run-1.`)).toBe(true);
+    expect(rotated.token).not.toBe(old);
+    expect(rotated.expiresAt).toBe(before.expiresAt);
+    // The row was handed exactly the new secret's hash, once.
+    expect(recorded).toEqual([bearerHashOf(rotated.token)]);
+    // Every earlier secret — the mint's and the adopted one — stops buying calls; the new one buys them under the unchanged meter.
+    expect(h.store.verify(old)).toEqual({ ok: false, reason: "unknown_bearer", runId: "run-1" });
+    expect(h.store.verify(adopted)).toEqual({ ok: false, reason: "unknown_bearer", runId: "run-1" });
+    const verdict = h.store.verify(rotated.token);
+    expect(verdict.ok).toBe(true);
+    if (!verdict.ok) throw new Error("expected ok");
+    expect(verdict.turns).toBe(2);
+    expect(verdict.grant.maxTurns).toBe(5);
+    expect(verdict.grant.expiresAt).toBe(before.expiresAt);
+    expect(verdict.grant.span).toBe(agentSpan);
+    expect(h.store.spanOf("run-1")).toBe(agentSpan);
+    expect(h.store.grantOf("run-1")).toEqual({ ...before, bearers: 1 });
+    expect(h.store.consumeTurn("run-1")).toEqual({ ok: true, turn: 3 });
+  });
+
+  it("rotate refuses by name a run this store never minted, one that ended and one past its expiry, hands the row nothing, and changes nothing", () => {
+    const h = harness();
+    const recorded: string[] = [];
+    const record = (secretHash: string) => void recorded.push(secretHash);
+    expect(h.store.rotate("run-1", record)).toEqual({ ok: false, reason: "unknown_run" });
+    const token = h.store.mint(h.grant("run-1"));
+    h.clock.now = START + 45 * 60_000 + BEARER_MARGIN_MS;
+    expect(h.store.rotate("run-1", record)).toEqual({ ok: false, reason: "expired" });
+    h.clock.now = START;
+    expect(h.store.verify(token).ok).toBe(true);
+    h.store.revoke("run-1");
+    expect(h.store.rotate("run-1", record)).toEqual({ ok: false, reason: "revoked" });
+    expect(h.store.verify(token)).toEqual({ ok: false, reason: "revoked", runId: "run-1" });
+    expect(recorded).toEqual([]);
+  });
+
+  it("the order is for a bot death: the new hash is stored and handed to the row BEFORE the old secrets are dropped, so a row write that fails leaves both buying calls — never neither — and the old still verifies", () => {
+    const h = harness();
+    const old = h.store.mint(h.grant("run-1"));
+    expect(h.store.consumeTurn("run-1")).toEqual({ ok: true, turn: 1 });
+    const recorded: string[] = [];
+    expect(() =>
+      h.store.rotate("run-1", (secretHash) => {
+        recorded.push(secretHash);
+        throw new Error("the ledger is unreachable");
+      }),
+    ).toThrow("the ledger is unreachable");
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]).toMatch(/^[0-9a-f]{64}$/);
+    expect(recorded[0]).not.toBe(bearerHashOf(old));
+    // The old bearer still buys calls: the drop never ran. The new secret is
+    // in the store beside it — two bearers on the run, not one and not none.
+    expect(h.store.verify(old)).toMatchObject({ ok: true, turns: 1 });
+    expect(h.store.grantOf("run-1")).toMatchObject({ turns: 1, bearers: 2, revoked: false });
+    // A rotation that completes afterwards leaves the one bearer it minted.
+    const again = h.store.rotate("run-1", () => {});
+    expect(again.ok).toBe(true);
+    expect(h.store.verify(old)).toEqual({ ok: false, reason: "unknown_bearer", runId: "run-1" });
+    expect(h.store.grantOf("run-1")).toMatchObject({ turns: 1, bearers: 1 });
+  });
+
+  it("grantOf counts the secrets that buy the run's calls: one from the mint, one more per issue and adopt, one after a rotate", () => {
+    const h = harness();
+    h.store.mint(h.grant("run-1"));
+    expect(h.store.grantOf("run-1")?.bearers).toBe(1);
+    expect(h.store.issue("run-1")).toBeDefined();
+    expect(h.store.grantOf("run-1")?.bearers).toBe(2);
+    expect(h.store.adopt("run-1", bearerHashOf(harness().store.mint(harness().grant("run-1")))!)).toBe(true);
+    expect(h.store.grantOf("run-1")?.bearers).toBe(3);
+    expect(h.store.rotate("run-1", () => {}).ok).toBe(true);
+    expect(h.store.grantOf("run-1")?.bearers).toBe(1);
+  });
+});

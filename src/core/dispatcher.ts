@@ -65,7 +65,6 @@ import {
 import type { FrictionDiagnosis } from "./runFriction.js";
 import { claimRun, type RunDeps } from "./dispatch/run.js";
 import { runLoop } from "./dispatch/runLoop.js";
-import { HarnessInterruptedError } from "./harness/contract.js";
 import { afterReply, deliverAnswer, type ReplyDeps } from "./dispatch/reply.js";
 import { writeTombstone } from "./dispatch/record.js";
 import { runShipBranch, type ShipDeps } from "./dispatch/ship.js";
@@ -1179,6 +1178,21 @@ export async function dispatch(
       seed,
       ...(bearer !== undefined ? { bearer } : {}),
     });
+    if (ran.kind === "interrupted") {
+      // The run was interrupted, not failed (harness.md item 7): the harness's
+      // container was replaced under the live run (harness-pi item 16), or the
+      // resumed row's harness facts were another harness's. The run loop
+      // closed the run `interrupted` with the note that says why and its card
+      // says it restarts, so no failure reply lands here. Its request runs
+      // again as a new run once the outer finally frees the thread — the path
+      // a refused re-attach takes (item 54), and the same outcome for the
+      // request: the interruption's refusal by name, never a failure.
+      refused = true;
+      ended.refusal ??= ran.refusal;
+      restartRequest = ran.restart;
+      console.log(`[dispatch] ${msg.threadKey} run ${run.id} restarts from its request: ${ran.note}`);
+      return ended;
+    }
     const { answer, prNote, toolCalls, runDiagnosis, checklistAsLeft, checklistCheckedOff, releaseWorkspace } = ran;
 
     // The card's final icon tells the stop apart from a normal finish: ⏹ soft
@@ -1228,21 +1242,6 @@ export async function dispatch(
     });
     return ended;
   } catch (err) {
-    if (err instanceof HarnessInterruptedError) {
-      // The run was interrupted, not failed (harness.md item 7): the harness's
-      // container was replaced under the live run (harness-pi item 16), or the
-      // resumed row's harness facts were another harness's. The run loop
-      // closed the run `interrupted` with the note that says why and its card
-      // says it restarts, so no failure reply lands here. Its request runs
-      // again as a new run once the outer finally frees the thread — the path
-      // a refused re-attach takes (item 54), and the same outcome for the
-      // request: the interruption's refusal by name, never a failure.
-      refused = true;
-      ended.refusal ??= err.refusal;
-      restartRequest = { request: msg, ...(registered ? { restartOf: registered.id } : {}) };
-      console.log(`[dispatch] ${msg.threadKey} run ${registered?.id ?? "?"} restarts from its request: ${err.message}`);
-      return ended;
-    }
     caught = true;
     const errMsg = err instanceof Error ? err.message : String(err);
     // A card left spinning after a setup failure looks like a hang; close it.

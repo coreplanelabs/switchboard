@@ -6,6 +6,7 @@ import { ConfigStore } from "../../config.js";
 import { getAgent } from "../../agents/registry.js";
 import { declaredProfile } from "../../config/profile.js";
 import { parseDirectives } from "../../directives.js";
+import { WorkspaceReattachRefusedError, type WorkspaceBinding } from "../../execution/factory.js";
 import { ResidentNeedsRefError } from "../../execution/resident.js";
 import { NullMemoryStore } from "../memory/index.js";
 import { NullRunHistoryWriter } from "../runHistoryWriter.js";
@@ -39,6 +40,7 @@ import {
   sessionNotesBlock,
   mintRunBearer,
   openAckCard,
+  reattachWorkspace,
   registerRun,
   reserveRun,
   startMemoryRead,
@@ -49,13 +51,28 @@ import { BEARER_MARGIN_MS, RunBearerStore } from "../modelProxy/runBearers.js";
 // The attach itself is the executor factory's (src/execution/factory.ts); the
 // one refusal the stage decides — ask-once, when the resident has no ref
 // binding and none was named — is reached by making the attach throw it.
-const attachState = vi.hoisted(() => ({ needsRef: undefined as string | undefined }));
+// A recorded binding's re-attach (run-history item 54) is the factory's too:
+// the stage hands the binding through and reads the factory's refusal, so the
+// attach is answered from `attachState` — the round it would bind, or the
+// refusal — and the round input the factory was handed is kept for the test.
+const attachState = vi.hoisted(() => ({
+  needsRef: undefined as string | undefined,
+  reattached: undefined as import("../reviewRound.js").RoundWorkspace | undefined,
+  refuseReattach: undefined as string | undefined,
+  rounds: [] as Array<Parameters<typeof import("../reviewRound.js").attachRoundWorkspace>[0]["round"]>,
+}));
 vi.mock("../reviewRound.js", async (importOriginal) => {
   const mod = await importOriginal<typeof import("../reviewRound.js")>();
   return {
     ...mod,
     attachRoundWorkspace: async (input: Parameters<typeof mod.attachRoundWorkspace>[0]) => {
+      attachState.rounds.push(input.round);
       if (attachState.needsRef !== undefined) throw new ResidentNeedsRefError(attachState.needsRef);
+      if (input.round.reattach !== undefined) {
+        if (attachState.refuseReattach !== undefined)
+          throw new WorkspaceReattachRefusedError(input.round.reattach, attachState.refuseReattach);
+        if (attachState.reattached !== undefined) return attachState.reattached;
+      }
       return mod.attachRoundWorkspace(input);
     },
   };
@@ -242,6 +259,9 @@ async function resumeOf(runId: string, system?: string): Promise<ResumeContext> 
 beforeEach(() => {
   vi.stubEnv("PUBLIC_BASE_URL", "");
   attachState.needsRef = undefined;
+  attachState.reattached = undefined;
+  attachState.refuseReattach = undefined;
+  attachState.rounds = [];
 });
 afterEach(() => vi.unstubAllEnvs());
 
@@ -645,6 +665,114 @@ describe("attachWorkspace — the workspace attach and the ask-once refusal", ()
     expect(r.refusals).toEqual(["which_branch"]);
     expect(JSON.stringify(closes)).toContain("which branch?");
     expect(replies[0]).toMatch(/^🌿 Which branch of `acme\/api` should this thread work on\?/);
+  });
+});
+
+// Feature: docs/reference/specs/run-history.md item 54 — the re-attach of a
+// run's recorded workspace is one step the dispatch-time attach and a mid-run
+// caller share: the binding handed to the factory under the attach span, the
+// factory's refusal read by name. The gate — the ask-once question, the card,
+// the reply — is the dispatch-time caller's alone.
+describe("reattachWorkspace — the run's recorded workspace re-attached without the gate", () => {
+  const binding: WorkspaceBinding = {
+    backend: "resident",
+    workspace: "/workspace/threads/t/main",
+    user: "worker2",
+    container: "vm-1",
+  };
+  const round = (): import("../reviewRound.js").RoundWorkspace => ({
+    selection: {
+      executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "" },
+      resident: true,
+      backend: "resident",
+      binding: { ...binding, ref: "main", sha: "0123456" },
+    },
+    release: async () => {},
+  });
+
+  it("re-attaches a recorded binding mid-run with no gate context — no message, no card, no refusal wrap — and hands back the round the dispatch-time attach hands back for the same binding: the factory sees the same round input with the binding, under a dispatch.workspace.attach span each time", async () => {
+    const d = deps();
+    const r = request(d, "agent:coding fix it", "coding");
+    const repoCtx: RepoContext = { repo: "acme/api", ref: "main" };
+    const bound = round();
+    attachState.reattached = bound;
+    const mid = await reattachWorkspace(d, {
+      threadKey: THREAD,
+      agent: r.agent,
+      profile: r.profile,
+      repoCtx,
+      root: r.root,
+      clock: () => NOW,
+      reattach: binding,
+    });
+    expect(mid).toEqual({ kind: "attached", round: bound });
+    const closes: StatusUpdate[] = [];
+    const { io, replies } = fakeIO();
+    const gated = await attachWorkspace(d, {
+      msg: r.message,
+      io,
+      refuse: r.refuse,
+      card: { update: () => {}, done: async (f) => void closes.push(f) },
+      shell: r.shell,
+      closeLines: () => ({}),
+      clock: () => NOW,
+      agent: r.agent,
+      profile: r.profile,
+      repoCtx,
+      root: r.root,
+      reattach: binding,
+    });
+    expect(gated).toEqual({ kind: "attached", round: bound });
+    expect(attachState.rounds).toHaveLength(2);
+    expect(attachState.rounds[0]).toEqual(attachState.rounds[1]);
+    expect(attachState.rounds[0]).toMatchObject({
+      threadKey: THREAD,
+      repo: "acme/api",
+      ref: "main",
+      reattach: binding,
+    });
+    expect(r.trace.spansSoFar().filter((s) => s.name === "dispatch.workspace.attach")).toHaveLength(2);
+    expect(r.refusals).toEqual([]);
+    expect(closes).toEqual([]);
+    expect(replies).toEqual([]);
+  });
+
+  it("a recorded workspace the factory refuses is reattach_refused with the factory's why on both paths — nothing else provisioned, no card closed, no reply, no refusal wrap: the caller closes the run saying why", async () => {
+    const d = deps();
+    const r = request(d, "agent:coding fix it", "coding");
+    const repoCtx: RepoContext = { repo: "acme/api", ref: "main" };
+    attachState.refuseReattach = "resident reuse-refused (the worktree is gone)";
+    const mid = await reattachWorkspace(d, {
+      threadKey: THREAD,
+      agent: r.agent,
+      profile: r.profile,
+      repoCtx,
+      root: r.root,
+      clock: () => NOW,
+      reattach: binding,
+    });
+    expect(mid).toEqual({ kind: "reattach_refused", why: "resident reuse-refused (the worktree is gone)" });
+    const closes: StatusUpdate[] = [];
+    const { io, replies } = fakeIO();
+    const gated = await attachWorkspace(d, {
+      msg: r.message,
+      io,
+      refuse: r.refuse,
+      card: { update: () => {}, done: async (f) => void closes.push(f) },
+      shell: r.shell,
+      closeLines: () => ({}),
+      clock: () => NOW,
+      agent: r.agent,
+      profile: r.profile,
+      repoCtx,
+      root: r.root,
+      reattach: binding,
+    });
+    expect(gated).toEqual({ kind: "reattach_refused", why: "resident reuse-refused (the worktree is gone)" });
+    expect(attachState.rounds).toHaveLength(2);
+    expect(r.refusals).toEqual([]);
+    expect(closes).toEqual([]);
+    expect(replies).toEqual([]);
   });
 });
 

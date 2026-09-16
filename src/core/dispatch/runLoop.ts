@@ -88,13 +88,14 @@ import { activityLine, artifactLink } from "./reply.js";
 import { stageIntoWorkspace, stagingIndex, type WorkspaceFiles } from "./staging.js";
 import { githubCapabilityFor, shutdownNotice, webCapability, type RunDeps } from "./run.js";
 
-/** What the loop hands back once the run has finished: the answer as
+/** What the loop hands back once the run has answered: the answer as
  *  canonicalized for every projection, the head the review settled on, the
  *  coding post-step's note, the finish-site diagnosis the done card carries,
  *  the checklist views for the closed card, and the workspace release the
  *  reply stage calls after the answer landed. The review post-step runs
  *  inside the loop (agent-review.md item 18), so its inputs stay here. */
 export interface RunOutcome {
+  kind: "answered";
   answer: string;
   reviewHead: string | undefined;
   prNote: string | undefined;
@@ -107,6 +108,29 @@ export interface RunOutcome {
   checklistCheckedOff: () => string | undefined;
   releaseWorkspace: (span?: Span) => Promise<void>;
 }
+
+/** The run was interrupted rather than answered (harness.md item 7; the floor
+ *  of record 0038's survival clause): its container was replaced under it, or
+ *  its row's facts were another harness's. The loop has finished the run
+ *  `interrupted`, ended the harness's process, released the workspace and
+ *  closed the card 🔁 with `reason`; what is left is the dispatcher's — the
+ *  request's outcome by name, and the request run again as a new run in the
+ *  thread once the thread is free, the path a refused workspace re-attach
+ *  takes (run-history item 54). */
+export interface RunInterrupted {
+  kind: "interrupted";
+  /** The closed card's one line: why the run restarts from its request. */
+  reason: string;
+  /** The request's outcome by name — the dispatcher's refusal token. */
+  refusal: string;
+  /** The interruption's words, as the record's note carries them. */
+  note: string;
+  /** The request to run again as a new run, and the run it restarts — the
+   *  one just closed, which admission must never steer the request into. */
+  restart: { request: IncomingMessage; restartOf: string };
+}
+
+export type RunLoopOutcome = RunOutcome | RunInterrupted;
 
 /** What `runLoop` reads off the dispatch. */
 export interface RunLoopContext {
@@ -190,10 +214,11 @@ export interface RunLoopContext {
  * coding PR post-step, the answer published as the record's source of truth;
  * then the finish — the registry closed with the terminal status, the
  * diagnosis, the record registered for the drain, a failed run's card closed.
- * A throw propagates after the workspace is released, as before; the caller's
- * outer catch replies.
+ * A run interrupted rather than failed is the loop's own outcome, finished
+ * and closed here for the dispatcher to run again. A throw propagates after
+ * the workspace is released, as before; the caller's outer catch replies.
  */
-export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOutcome> {
+export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLoopOutcome> {
   const {
     msg,
     io,
@@ -469,10 +494,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
   let failure: RunFailure | undefined;
   // The verdict that the run is interrupted, not failed (harness.md item 7):
   // the harness's container was replaced under the run (harness-pi item 16),
-  // or the row's facts were written by another harness. The loop threw, but
-  // its card says the run restarts, and the dispatcher runs the request again
-  // once the thread is free, the path a refused re-attach takes (run-history
-  // item 54).
+  // or the row's facts were written by another harness. The harness threw it;
+  // the loop finishes the run on it and answers it as its own outcome
+  // (`RunInterrupted`): the card says the run restarts, and the dispatcher
+  // runs the request again once the thread is free, the path a refused
+  // re-attach takes (run-history item 54).
   let interrupted: HarnessInterruptedError | undefined;
   let runDiagnosis: FrictionDiagnosis | undefined; // the finish-site diagnosis: the done card's shape line
   // The run keeps its harness process alive past the loop (harness-pi item
@@ -1098,7 +1124,16 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     // pi first: it runs in the workspace released next (a no-op once ended).
     await harnessSession?.end();
     await root.span("post.workspace_release", (span) => releaseWorkspace(span));
-    throw err;
+    if (!interrupted) throw err;
+    // The interruption is the loop's own outcome: answered from here, the
+    // finally below finishing the run `interrupted` and closing its card first.
+    return {
+      kind: "interrupted",
+      reason: interrupted.reason,
+      refusal: interrupted.refusal,
+      note: interrupted.message,
+      restart: { request: msg, restartOf: run.id },
+    };
   } finally {
     clearInterval(heartbeat);
     const stopped = run.control.requested;
@@ -1195,6 +1230,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     }
   }
   return {
+    kind: "answered",
     answer,
     reviewHead,
     prNote,
