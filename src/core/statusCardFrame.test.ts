@@ -36,6 +36,19 @@ describe("createCardShell — every paint comes from one builder", () => {
     expect(shell.live().title.startsWith("◐ ")).toBe(true); // wraps
   });
 
+  it("a live frame carries the typed activity beside the detail; a frame without one has no activity key; a close never carries it", () => {
+    const shell = shellAt(1_000);
+    const activity = { kind: "command" as const, tool: "bash", command: "git diff --stat" };
+    expect(shell.live({ detail: ["✱ reading"], activity })).toEqual({
+      title: `◐ ${LABEL} · 1s`,
+      detail: "✱ reading",
+      activity,
+      link: undefined,
+    });
+    expect("activity" in shell.live({ detail: ["✱ reading"] })).toBe(false);
+    expect("activity" in shell.close({ kind: "done", icon: "✅", detail: "✓ read" })).toBe(false);
+  });
+
   it("lead lines (a routed conductor's parts) open the ack's and every live frame's detail, ahead of the run's own lines; a close carries none", () => {
     let now = 1_000_000;
     const shell = createCardShell({

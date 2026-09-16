@@ -1,4 +1,9 @@
-import type { StatusHandle, StatusUpdate } from "./types.js";
+import type { StatusActivity, StatusHandle, StatusUpdate } from "./types.js";
+
+/** The activity's identity for the frame key: its kind and its text, so a
+ *  command replacing a line of the same words is still a change. */
+const activityKey = (a: StatusActivity | undefined) =>
+  a === undefined ? "" : a.kind === "command" ? `command:${a.tool}:${a.command}` : `line:${a.text}`;
 
 /**
  * Rate-limit a channel's status card to at most one edit per `minIntervalMs`,
@@ -29,7 +34,8 @@ export function coalesceStatus(
   let timer: { unref?(): void } | undefined;
   let closed = false;
 
-  const key = (f: StatusUpdate) => `${f.title}\n${f.detail ?? ""}\n${f.link?.url ?? ""}\n${f.link?.label ?? ""}`;
+  const key = (f: StatusUpdate) =>
+    `${f.title}\n${f.detail ?? ""}\n${activityKey(f.activity)}\n${f.link?.url ?? ""}\n${f.link?.label ?? ""}`;
   const flush = () => {
     timer = undefined;
     if (!pending || closed) return;

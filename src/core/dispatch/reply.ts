@@ -27,7 +27,7 @@ import type { LedgerRun } from "../runLedger/writeThrough.js";
 import type { RunEnding } from "../runEnding.js";
 import type { CardShell } from "../statusCardFrame.js";
 import type { Span } from "../trace/types.js";
-import type { HistoryItem, IncomingMessage, StatusHandle } from "../types.js";
+import type { HistoryItem, IncomingMessage, StatusActivity, StatusHandle } from "../types.js";
 import type { ProvisionDeps } from "./provision.js";
 import type { RouteDeps } from "./route.js";
 
@@ -286,6 +286,18 @@ export function activityLine(e: RunEvent): string {
     case "span_end":
       return ""; // timing, not activity (docs/reference/specs/tracing.md): the card's activity line never shows a span
   }
+}
+
+/**
+ * The card's activity for a run event, with its structure kept: a bash call
+ * that carries its `command` is a `command` part — the full command, not the
+ * 200-char summary — which the Slack card draws as a code block; every other
+ * event is its `activityLine` as a `line` part. No channel ever re-parses the
+ * summary text to find the command (docs/reference/specs/run-visibility.md item 2).
+ */
+export function cardActivity(e: RunEvent): StatusActivity {
+  if (e.type === "tool_call" && e.command !== undefined) return { kind: "command", tool: e.tool, command: e.command };
+  return { kind: "line", text: activityLine(e) };
 }
 
 /**

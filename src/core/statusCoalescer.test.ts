@@ -76,6 +76,18 @@ describe("coalesceStatus", () => {
     expect(h.sent).toHaveLength(2);
   });
 
+  it("a frame whose only change is the activity part is NOT skipped as identical", () => {
+    const h = harness();
+    h.handle.update({ title: "same", detail: "d", activity: { kind: "command", tool: "bash", command: "ls" } });
+    h.advance(5000);
+    h.handle.update({ title: "same", detail: "d", activity: { kind: "command", tool: "bash", command: "ls -a" } });
+    h.advance(5000);
+    h.handle.update({ title: "same", detail: "d", activity: { kind: "line", text: "✓ bash: ok" } });
+    h.advance(5000);
+    h.handle.update({ title: "same", detail: "d", activity: { kind: "line", text: "✓ bash: ok" } });
+    expect(h.sent).toHaveLength(3);
+  });
+
   it("done writes its frame immediately and a stale trailing flush never follows it", async () => {
     const h = harness();
     h.handle.update({ title: "1" });
