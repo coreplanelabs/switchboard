@@ -46,13 +46,23 @@ export function continuable(run: RunView): run is RunView & { agent: string } {
   return run.finished && run.session !== undefined && run.agent !== undefined;
 }
 
+/** A run a person addressed to the thread — not one a coordinator spawned
+ *  into it (`parentInstanceId`, run-history item 48). A generated plan's unit
+ *  runs in the requesting thread (agent-ship item 16), so its coding and
+ *  review children sit newest on the page; they are the runner's turns, and a
+ *  person's follow-up is not a continuation of them. */
+const addressed = (run: RunView): boolean => run.parentInstanceId === undefined;
+
 /** The thread's sticky agent by transcript (routing-and-config item 3): the
- *  agent of the thread's newest run when that run can be continued. A newest
- *  run that cannot be — live, refused at a gate, from before the log — leaves
- *  no sticky agent: the request resolves through the config scopes (and the
- *  router, for a plain message) as a fresh thread's would. */
+ *  agent of the thread's newest run a person addressed, when that run can be
+ *  continued. A newest run that cannot be — live, refused at a gate, from
+ *  before the log — leaves no sticky agent: the request resolves through the
+ *  config scopes (and the router, for a plain message) as a fresh thread's
+ *  would. A coordinator's child is skipped, never the sticky agent: a
+ *  plain-words re-review typed into a ship thread routes to review instead of
+ *  continuing the coding child's session. */
 export function stickyAgentOf(runs: readonly RunView[]): string | undefined {
-  const newest = runs[0];
+  const newest = runs.find(addressed);
   if (newest === undefined || !continuable(newest)) return undefined;
   return newest.agent;
 }
@@ -69,7 +79,7 @@ export function threadRouteOf(
   runs: readonly RunView[],
   agent: string,
 ): { preset: string; reason: string; model: string } | undefined {
-  const newest = runs[0];
+  const newest = runs.find(addressed);
   if (newest === undefined || !continuable(newest) || newest.agent !== agent || newest.route === undefined)
     return undefined;
   const { preset, reason, model } = newest.route;
