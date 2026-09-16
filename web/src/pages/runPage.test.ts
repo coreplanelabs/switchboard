@@ -387,6 +387,121 @@ describe("RunPage — history mode", () => {
     expect(w.find("a.back").attributes("href")).toBe("/runs");
   });
 
+  // live-view.md item 28: what a run is the parent of.
+  it("a conductor's page lists the runs it spawned in the seed's order as rows that open to their own timeline — a live child linking with its token — and the pipeline's record lists its instance's units, each opening its unit page; a run with neither shows neither block", async () => {
+    const child = (id: string, over: Record<string, unknown> = {}) => ({
+      id,
+      label: `research · acme/api · "${id}"`,
+      agent: "research",
+      channelId: "slack:C1",
+      userId: "slack:UA",
+      threadKey: `slack:C1:${id}`,
+      parentRunId: "run-1",
+      finished: true,
+      startedAt: 2000,
+      finishedAt: 32_000,
+      sealedAt: 33_000,
+      status: "completed",
+      eventCount: 4,
+      persisted: true,
+      ...over,
+    });
+    const conductor = mountApp(RunPage, {
+      seed: historySeed([input, { type: "answer", text: "compiled", at: 61_000 }] as LiveFrame[], {
+        status: "completed",
+        durationMs: 60_000,
+        children: [
+          child("kid-a"),
+          child("kid-b", {
+            finished: false,
+            finishedAt: undefined,
+            sealedAt: undefined,
+            status: undefined,
+            persisted: undefined,
+            startedAt: 40_000,
+            token: "tok-kid-b",
+          }),
+        ] as never,
+      }),
+    });
+    const block = conductor.find("#children");
+    expect(block.find("h2").text()).toContain("Spawned runs");
+    expect(block.find(".count").text()).toContain("2 runs");
+    const rows = block.findAll("li.fold");
+    expect(rows.map((li) => li.attributes("data-run-id"))).toEqual(["kid-a", "kid-b"]);
+    expect(rows[0].find("details").exists()).toBe(true); // a finished child folds open to its timeline
+    expect(rows[0].find(".round").exists()).toBe(false); // a child wears no round or thread
+    expect(rows[0].find("a.open").attributes("href")).toBe("/runs/kid-a");
+    expect(rows[1].find("details").exists()).toBe(false); // a live child links to its live page
+    expect(rows[1].find("a.open").attributes("href")).toBe("/runs/kid-b?t=tok-kid-b");
+    expect(conductor.find("#units").exists()).toBe(false);
+    // Opening a child reads its replay through the run page's one fold.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response("retry: 3000\n\nevent: end\ndata: {}\n\n", { status: 200 })),
+    );
+    const details = rows[0].find("details");
+    (details.element as HTMLDetailsElement).open = true;
+    await details.trigger("toggle");
+    await conductor.vm.$nextTick();
+    expect((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe("/runs/kid-a/events");
+
+    const ship = mountApp(RunPage, {
+      seed: historySeed([input, { type: "answer", text: "✅ U16 — merge_ready", at: 61_000 }] as LiveFrame[], {
+        status: "completed",
+        durationMs: 60_000,
+        units: [
+          {
+            unit: "plan-p-1:U16",
+            instanceId: "plan-p-1",
+            id: "U16",
+            title: "The unit page",
+            branch: "plan/p/u1",
+            threads: { coding: "slack:C1:u1", review: "slack:C1:u1r" },
+            sourceUrls: {},
+            pr: { number: 42, url: "https://github.com/acme/api/pull/42" },
+            rounds: [{ index: 2, agent: "review", outcome: "approve", at: 50_000 }],
+            ending: { kind: "merge_ready", report: "ok", at: 50_000 },
+          },
+          {
+            unit: "plan-p-1:U17",
+            instanceId: "plan-p-1",
+            id: "U17",
+            branch: "plan/p/u2",
+            threads: { coding: "slack:C1:u2" },
+            sourceUrls: {},
+            rounds: [{ index: 1, agent: "review", outcome: "started", at: 55_000 }],
+          },
+          {
+            unit: "plan-p-1:U18",
+            instanceId: "plan-p-1",
+            id: "U18",
+            branch: "plan/p/u3",
+            threads: {},
+            sourceUrls: {},
+            rounds: [],
+          },
+        ],
+      }),
+    });
+    const units = ship.findAll("#units li.unit");
+    expect(units.map((li) => li.find("a.key").text())).toEqual(["U16", "U17", "U18"]);
+    expect(units.map((li) => li.find("a.key").attributes("href"))).toEqual([
+      "/runs/unit/plan-p-1%3AU16",
+      "/runs/unit/plan-p-1%3AU17",
+      "/runs/unit/plan-p-1%3AU18",
+    ]);
+    expect(units[0].find("a.title").text()).toBe("The unit page");
+    expect(units[1].find("a.title").text()).toBe("plan/p/u2"); // no title: the branch names it
+    expect(units.map((li) => li.find(".standing").text())).toEqual(["merge_ready", "round 1 · review", "not started"]);
+    expect(units[0].find("a.prlink").attributes("href")).toBe("https://github.com/acme/api/pull/42");
+    expect(ship.find("#children").exists()).toBe(false);
+
+    const plain = mountApp(RunPage, { seed: historySeed([input] as LiveFrame[], { status: "completed" }) });
+    expect(plain.find("#children").exists()).toBe(false);
+    expect(plain.find("#units").exists()).toBe(false);
+  });
+
   it("heads with the outcome chip + duration (item 22): ✓ for success, red failed/killed, amber stopped early, grey ended for a status-less record", () => {
     const ok = mountApp(RunPage, { seed: historySeed([], { status: "completed", durationMs: 147_000 }) });
     expect(ok.find(".conn .ok").attributes("aria-label")).toBe("succeeded");

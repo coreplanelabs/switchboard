@@ -1,4 +1,4 @@
-import type { CoordinatorUnit } from "./coordinator/contract.js";
+import { unitKeyOf, type CoordinatorInstance, type CoordinatorUnit } from "./coordinator/contract.js";
 import type { RunView } from "./runsService.js";
 
 // The unit is the reading unit (docs/reference/specs/agent-ship.md item 17;
@@ -17,15 +17,89 @@ export type UnitThread = "coding" | "review";
  *  runner had entered when it started and the thread it ran in. */
 export type UnitRun = RunView & { round: number; thread: UnitThread };
 
-/** What `runs unit <key>` answers: the unit's identity and threads, the round
- *  boundaries as the row records them, and its runs in time order. */
-export interface UnitRunsView {
+/** A unit row's readable facts — what a page states about the unit beside its
+ *  runs, without the row's machine fields (its dependencies, its resume). One
+ *  projection, so the unit page's header and the parent record's unit list
+ *  agree on every word. */
+export interface UnitFacts {
   /** `<instanceId>:<unit>` (`unitKeyOf`). */
   unit: string;
   instanceId: string;
+  /** The unit's id as the plan spells it (`U16`), or `task` for a generated plan's one unit. */
+  id: string;
+  /** The plan's one-line title for the unit, when the plan gave one. */
+  title?: string;
+  branch: string;
   threads: { coding?: string; review?: string };
+  /** Where each thread opens, when the channel has a permalink for it. */
+  sourceUrls: { coding?: string; review?: string };
+  pr?: { number: number; url: string };
+  issue?: number;
   rounds: CoordinatorUnit["rounds"];
+  ending?: CoordinatorUnit["ending"];
+  startedAt?: number;
+}
+
+/** The instance a unit belongs to, as the unit page names it: the repository
+ *  and the plan the pipeline runs, which attempt this is, and the run record
+ *  the pipeline's story is written under (the parent record's page). Never
+ *  the requester's ids — the runs carry those, under the predicate. */
+export interface InstanceFacts {
+  id: string;
+  repo: string;
+  base?: string;
+  plan?: CoordinatorInstance["plan"];
+  attempt?: number;
+  label?: string;
+  runId?: string;
+  sourceUrl?: string;
+  createdAt: number;
+}
+
+/** What `runs unit <key>` answers: the unit's facts, its instance's, and its
+ *  runs in time order. */
+export interface UnitRunsView extends UnitFacts {
+  instance: InstanceFacts;
   runs: UnitRun[];
+}
+
+/** The row's readable facts (`UnitFacts`), each optional field present only when the row has it. */
+export function unitFactsOf(unit: CoordinatorUnit): UnitFacts {
+  return {
+    unit: unitKeyOf(unit),
+    instanceId: unit.instanceId,
+    id: unit.unit,
+    ...(unit.title !== undefined ? { title: unit.title } : {}),
+    branch: unit.branch,
+    threads: {
+      ...(unit.threadKey !== undefined ? { coding: unit.threadKey } : {}),
+      ...(unit.reviewThread !== undefined ? { review: unit.reviewThread.threadKey } : {}),
+    },
+    sourceUrls: {
+      ...(unit.sourceUrl !== undefined ? { coding: unit.sourceUrl } : {}),
+      ...(unit.reviewThread?.sourceUrl !== undefined ? { review: unit.reviewThread.sourceUrl } : {}),
+    },
+    ...(unit.pr !== undefined ? { pr: unit.pr } : {}),
+    ...(unit.issue !== undefined ? { issue: unit.issue } : {}),
+    rounds: unit.rounds,
+    ...(unit.ending !== undefined ? { ending: unit.ending } : {}),
+    ...(unit.startedAt !== undefined ? { startedAt: unit.startedAt } : {}),
+  };
+}
+
+/** The instance's readable facts (`InstanceFacts`). */
+export function instanceFactsOf(instance: CoordinatorInstance): InstanceFacts {
+  return {
+    id: instance.id,
+    repo: instance.repo,
+    ...(instance.base !== undefined ? { base: instance.base } : {}),
+    ...(instance.plan !== undefined ? { plan: instance.plan } : {}),
+    ...(instance.attempt !== undefined ? { attempt: instance.attempt } : {}),
+    ...(instance.label !== undefined ? { label: instance.label } : {}),
+    ...(instance.runId !== undefined ? { runId: instance.runId } : {}),
+    ...(instance.sourceUrl !== undefined ? { sourceUrl: instance.sourceUrl } : {}),
+    createdAt: instance.createdAt,
+  };
 }
 
 /** Where each round of one thread begins: the earliest entry the row records

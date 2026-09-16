@@ -58,6 +58,17 @@ export function agentHue(agent: string): "coding" | "review" | "research" | "gen
   return agent === "coding" || agent === "review" || agent === "research" || agent === "general" ? agent : "other";
 }
 
+/** The agent chip's classes per hue — one map for every row that wears the
+ *  chip (the index row, a unit's or a conductor's run row), so an agent reads
+ *  the same colour wherever a run is listed. */
+export const AGENT_HUE: Record<ReturnType<typeof agentHue>, string> = {
+  coding: "text-ok bg-ok/8 border-ok/25",
+  review: "text-review bg-review/8 border-review/25",
+  research: "text-research bg-research/8 border-research/25",
+  general: "text-info bg-info/8 border-info/25",
+  other: "text-toned bg-accented/60 border-accented",
+};
+
 /** The count cell (live-view item 18; tracing.md): the content-event count
  *  when the row carries it — span records excluded — else the published total,
  *  under the word the cell always used. */

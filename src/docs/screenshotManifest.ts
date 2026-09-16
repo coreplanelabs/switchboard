@@ -24,6 +24,22 @@ export const SURFACES = [
   { name: "costs", path: "/costs", what: "the spend page" },
   { name: "costs-users", path: "/costs?view=users", what: "the spend page's By user tab" },
   { name: "scheduled", path: "/runs/scheduled", what: "the scheduled runs tab" },
+  {
+    name: "unit-page",
+    path: "/runs/unit/plan-acme-3:U13?open=unit-c1",
+    what: "a ship unit through two review rounds, both threads, one run's timeline open",
+  },
+  {
+    name: "unit-page-coding-only",
+    path: "/runs/unit/plan-acme-3:U14",
+    what: "a unit whose review thread does not exist yet, its coding round in flight",
+  },
+  {
+    name: "unit-search",
+    path: "/runs/unit/plan-acme-3:U13?session=coding&q=lockfile",
+    what: "the unit page's search over the coding thread's log, hits placed in their runs",
+  },
+  { name: "conductor-page", path: "/runs/cond-1", what: "a finished conductor's page listing the runs it spawned" },
 ] as const;
 
 export const THEMES = ["light", "dark"] as const;

@@ -6,6 +6,7 @@ import { browser } from "../../lib/browser";
 import { durationTone, heatStyle } from "../../lib/durationTone";
 import { formatDateTime, formatLocalIso, formatRelative, splitRunLabel } from "../../lib/format";
 import {
+  AGENT_HUE,
   agentHue,
   dotTip,
   SURFACE_NAME,
@@ -70,14 +71,6 @@ const outcome = computed(() =>
 const stopBadge = computed(() =>
   props.run.stop && !(props.run.finished && props.run.status) ? stopLabel(props.run.stop) : "",
 );
-
-const AGENT_HUE: Record<ReturnType<typeof agentHue>, string> = {
-  coding: "text-ok bg-ok/8 border-ok/25",
-  review: "text-review bg-review/8 border-review/25",
-  research: "text-research bg-research/8 border-research/25",
-  general: "text-info bg-info/8 border-info/25",
-  other: "text-toned bg-accented/60 border-accented",
-};
 
 const disabled = reactive({ soft: false, hard: false });
 

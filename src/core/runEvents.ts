@@ -501,6 +501,11 @@ export type RunEvent =
       ref?: string;
       pr?: number;
       headSha?: string;
+      /** The plan runner instance whose story this record is (agent-ship item
+       *  17): written on the pipeline's own record alone, so its page can list
+       *  the instance's units. A child's instance rides the record's
+       *  `parentInstanceId`, never here. */
+      instanceId?: string;
       seq?: number;
       at?: number;
     }

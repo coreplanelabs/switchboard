@@ -1865,6 +1865,9 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       "answer",
     ]);
     expect(rec.events.map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 6]);
+    // The record names the instance whose story it is (agent-ship item 17), so its page can list the units.
+    expect(rec.events[0]).toMatchObject({ type: "run_meta", agent: "ship", instanceId: PLAN_INSTANCE.id });
+    expect(rec.parentInstanceId).toBeUndefined(); // the pipeline's own record is nobody's child
     const summary = rec.events.at(-1);
     expect(summary?.type === "answer" ? summary.text : "").toBe(
       "✅ U10 — merge_ready — https://github.com/acme/api/pull/7\n• U11 — not started",
