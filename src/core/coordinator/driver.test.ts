@@ -273,6 +273,77 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "completed" }]);
   });
 
+  it("an interrupted coding child settles the round through its run-finished event and the confirming read-record; the recover pr-check names the dead run, and the pull request the bot opened from the pushed branch carries the round on to review — the round ends with the interruption's reason, never the budget clip", async () => {
+    const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
+      "read-record": [
+        record({ id: "run-c0", finished: true, status: "interrupted" }, T0 + 5 * MIN),
+        reviewApproved("run-r1", T0 + 20 * MIN),
+      ],
+      "pr-check": [prNone(), prOpen(T0 + 6 * MIN)],
+      round: [acked(), acked(), acked(), acked()],
+      merge: [ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 21 * MIN)],
+      "unit-end": [ok({ ok: true, told: true }, T0 + 21 * MIN)],
+      finish: [ok({ ok: true, runId: "run-parent" }, T0 + 21 * MIN)],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    // The event woke the one wait chunk; the recover pr-check carried the run,
+    // and the recovered pull request took the unit on to review and the merge.
+    expect(summary.units).toEqual({ U10: "merged" });
+    expect(s.taken.filter((t) => t.kind === "wait").map((t) => t.name)).toEqual([
+      "U10/0/coding/wait/1",
+      "U10/1/review/wait/1",
+    ]);
+    expect(b.of("pr-check")).toEqual([
+      { parentInstanceId: INSTANCE, unit: "U10" },
+      { parentInstanceId: INSTANCE, unit: "U10", recover: { runId: "run-c0" } },
+    ]);
+  });
+
+  it("an interrupted coding child whose recover pr-check finds nothing pushed ends the unit interrupted — with the reason, never the budget clip", async () => {
+    const s = steps({ "U10/0/coding/wait/1": "event" });
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0")],
+      "read-record": [record({ id: "run-c0", finished: true, status: "interrupted" }, T0 + 5 * MIN)],
+      "pr-check": [prNone(), prNone(T0 + 6 * MIN)],
+      round: [acked(), acked()],
+      "unit-end": [ok({ ok: true, told: true }, T0 + 6 * MIN)],
+      finish: [ok({ ok: true, runId: "run-parent" }, T0 + 6 * MIN)],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary.units).toEqual({ U10: "interrupted" });
+    const [end] = b.of("unit-end") as Array<{ ending: { kind: string; report: string } }>;
+    expect(end.ending.kind).toBe("interrupted");
+    expect(end.ending.report).toContain("the pipeline stopped");
+  });
+
+  it("a failed coding child whose recover pr-check answers none with a reason carries that reason into the abort — the parse keeps `unrecovered`", async () => {
+    const s = steps({ "U10/0/coding/wait/1": "event" });
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0")],
+      "read-record": [record({ id: "run-c0", finished: true, status: "failed" }, T0 + 5 * MIN)],
+      "pr-check": [prNone(), ok({ ok: true, state: "none", unrecovered: "no_base" }, T0 + 6 * MIN)],
+      round: [acked(), acked()],
+      "unit-end": [ok({ ok: true, told: true }, T0 + 6 * MIN)],
+      finish: [ok({ ok: true, runId: "run-parent" }, T0 + 6 * MIN)],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary.units).toEqual({ U10: "aborted" });
+    const [end] = b.of("unit-end") as Array<{ ending: { kind: string; report: string } }>;
+    expect(end.ending.kind).toBe("aborted");
+    expect(end.ending.report).toContain("names no base branch");
+  });
+
   it("the merge's pending poll: checks still running answer pending, the runner sleeps the poll and asks again under the next step name, and a merge GitHub refuses ends the unit merge_refused with the refusal in its report; a task string's ship branch is a person's merge — the machine ends merge-ready and never asks", async () => {
     const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
     const b = bot({

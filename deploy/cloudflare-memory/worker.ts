@@ -1807,6 +1807,18 @@ export class RunHistoryDO extends DurableObject<Env> {
     this.ctx.storage.transactionSync(() => {
       result = this.upsertInTransaction(record, proposal);
     });
+    // A coordinator child closed OUTSIDE the ledger's finish — the run loop or
+    // a reclaim writing an `interrupted` record, the pi harness's typed restart,
+    // a resume abandoning a lost workspace — still wakes its parent's wait at
+    // once (run-history item 47): the same `run-finished-<runId>` event rides
+    // this commit. The tombstone a run writes at its start is excluded (its
+    // `finishedAt` equals `startedAt`); the parent confirms by `read-record`
+    // before it acts, so a duplicate send is harmless.
+    if (result.stored && record.parentInstanceId !== undefined && record.finishedAt > record.startedAt) {
+      const event = await sendRunFinished(this.env.SHIP_COORDINATOR, record);
+      if (event.kind === "failed")
+        console.warn(`[runs/put] ${record.id} → ${event.type} not delivered to ${event.instance}: ${event.reason}`);
+    }
     if ((await this.ctx.storage.getAlarm()) === null)
       await this.ctx.storage.setAlarm(systemClock() + RUN_SWEEP_INTERVAL_MS);
     return result;
