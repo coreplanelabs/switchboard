@@ -102,11 +102,13 @@ describe("diskFullReason / isDiskFullReason — the degraded reason and its pref
   });
 });
 
-describe("planDiskFullRecovery — recycle the cache disk only when nothing live would be lost, at most once per cooldown", () => {
+describe("planDiskFullRecovery — recycle the cache disk when no run is using it, at most once per cooldown", () => {
   const now = 1_800_000_000_000;
-  const clear = { now, inFlight: 0, treesClean: true };
+  // The disk may go away when no run is using it, never for what the trees
+  // hold (item 17): the plan has no input about the trees at all.
+  const clear = { now, inFlight: 0, recentlyUsed: false, idleFloorS: 60 * 60 };
 
-  it("nothing in flight, every live tree clean, never recycled → recycle", () => {
+  it("nothing in flight, no live binding used within the floor, never recycled → recycle — whatever the trees hold", () => {
     expect(planDiskFullRecovery(clear)).toEqual({ action: "recycle" });
     expect(planDiskFullRecovery({ ...clear, lastRecycleAt: now - DISK_FULL_RECYCLE_COOLDOWN_MS - 1 })).toEqual({
       action: "recycle",
@@ -126,14 +128,21 @@ describe("planDiskFullRecovery — recycle the cache disk only when nothing live
     expect(plan).toEqual({ action: "wait", why: "2 operation(s) in flight — a recycle would kill them" });
   });
 
-  it("a dirty or unreadable live tree keeps the container — a recycle would destroy uncommitted work", () => {
-    const plan = planDiskFullRecovery({ ...clear, treesClean: false });
-    expect(plan.action).toBe("wait");
-    expect(plan.action === "wait" && plan.why).toMatch(/uncommitted or unpushed work/);
+  it("a live binding used within the floor keeps the container even with every tree clean — a run may be between two tool calls; the why names the floor, never dirt", () => {
+    const plan = planDiskFullRecovery({ ...clear, recentlyUsed: true });
+    expect(plan).toEqual({
+      action: "wait",
+      why: "a live worktree was attached to or used within the last 60 min — a run may be mid-flight between two tool calls, and a recycle would destroy its tree",
+    });
+    const shorter = planDiskFullRecovery({ ...clear, recentlyUsed: true, idleFloorS: 10 * 60 });
+    expect(shorter.action === "wait" && shorter.why).toMatch(/within the last 10 min/);
+    expect(shorter.action === "wait" && shorter.why).not.toMatch(/dirty|uncommitted|unpushed/);
   });
 
-  it("the cooldown is checked first: a refused recycle names the cooldown even when a tree is dirty too", () => {
-    const plan = planDiskFullRecovery({ ...clear, lastRecycleAt: now - 60_000, treesClean: false });
-    expect(plan.action === "wait" && plan.why).toMatch(/recycled 1 min ago/);
+  it("the order stands: the cooldown is named before an op in flight, and an op in flight before recent use", () => {
+    const cooldown = planDiskFullRecovery({ ...clear, lastRecycleAt: now - 60_000, inFlight: 1, recentlyUsed: true });
+    expect(cooldown.action === "wait" && cooldown.why).toMatch(/recycled 1 min ago/);
+    const busy = planDiskFullRecovery({ ...clear, inFlight: 1, recentlyUsed: true });
+    expect(busy.action === "wait" && busy.why).toMatch(/1 operation\(s\) in flight/);
   });
 });

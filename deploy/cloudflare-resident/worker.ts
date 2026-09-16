@@ -505,16 +505,18 @@ const FORCE_DETACH_KILL_TIMEOUT_MS = 2_000;
  *  binding record is KEPT so the next attach recreates with the same
  *  ref. Overridable per resident via the onboard-time `worktreeTtlDays`. */
 const WORKTREE_TTL_DAYS_DEFAULT = 7;
-/** A live binding whose last attach is older than this AND whose tree is clean
- *  (no uncommitted/unpushed work) is released by the sweep step (every refresh
- *  instance runs one) — runs that ended before /detach existed, or whose
- *  release call was lost. Dirty trees keep to the TTL. */
+/** A live binding whose last attach is older than this and has no op in
+ *  flight is released by the sweep step (every refresh instance runs one),
+ *  whatever its tree holds (item 17) — runs that ended before /detach existed,
+ *  or whose release call was lost. */
 const CLEAN_IDLE_RELEASE_S = 60 * 60;
-/** Idle sleep: when no thread has attached within this window and no live
- *  tree is dirty, the refresh cycle skips the fetch and the cron holds the
- *  next instance to the idle cadence, so the container can actually sleep
- *  (SLEEP_AFTER); the next attach refreshes first if the mirror is stale
- *  (refresh-on-attach). */
+/** Idle sleep: when no live binding was attached to or used within this
+ *  window and nothing is in flight, the refresh cycle skips the fetch and the
+ *  cron holds the next instance to the idle cadence, so the container can
+ *  actually sleep (SLEEP_AFTER); the next attach refreshes first if the mirror
+ *  is stale (refresh-on-attach). The disk-full recycle (item 54) reads the
+ *  same window through the same predicate (`recentlyUsed`): a sleep and a
+ *  recycle destroy the same disk, so one rule says when it may go away. */
 const IDLE_AFTER_S = 60 * 60;
 /** LRU eviction floor: an over-cap onboard with `evictColdest:true` may
  *  offboard the coldest eligible warm resident, but never one whose last
@@ -1037,6 +1039,15 @@ interface ThreadBinding {
   /** Why the tree could not be measured before that eviction (git could not
    *  read it) — so an unreadable tree is never recorded as clean. */
   evictedUnmeasured?: string;
+  /** What the tree held when the last disk-full recycle (item 54) discarded
+   *  it with the disk — the same measurement as `evictedLeftBehind`, under its
+   *  own name because the binding is not evicted: its user is kept and the
+   *  next attach recreates the tree (`worktree-missing`). Both rewritten on
+   *  every recycle; absent when the tree was clean or already gone. */
+  recycledLeftBehind?: LeftBehind;
+  /** Why the tree could not be measured before that recycle (git could not
+   *  read it) — still discarded with the disk, never recorded as clean. */
+  recycledUnmeasured?: string;
   /** How deps were last materialized (evidence that the per-branch reconciliation ran). */
   deps?: ThreadDepsMechanism;
   /** Commit the worktree was last attached at (the ref's tip in the mirror
@@ -2945,12 +2956,11 @@ export class ResidentDO extends Sandbox<Env> {
       throw new CycleRestartError("image-stale-restart");
     }
 
-    // Idle sleep: nobody has attached for IDLE_AFTER_S and no live tree is
-    // dirty → skip this fetch; the cron holds the next instance to the idle
+    // Idle sleep: no live binding used within IDLE_AFTER_S and nothing in
+    // flight → skip this fetch; the cron holds the next instance to the idle
     // cadence, so SLEEP_AFTER can elapse. Staleness is repaid at the next
-    // attach (refreshIfStale). A
-    // dirty live tree pins the container awake: sleep destroys the disk and
-    // uncommitted work is not snapshotted.
+    // attach (refreshIfStale). What a live tree holds is not asked (item 17):
+    // sleep destroys the disk, and a tree no run is using protects nothing.
     // Only a SETTLED resident may park: a cycle that finds `refreshing`/
     // `restoring` at entry is looking at a marker left by a cycle that died
     // mid-flight (a deploy evicting the DO: stuck `refreshing` + parked →
@@ -3002,7 +3012,7 @@ export class ResidentDO extends Sandbox<Env> {
       await this.ctx.storage.delete(DEGRADED_STREAK_KEY);
     }
     if (settled && (await this.isIdle())) {
-      // isIdle awaited (git status per live tree) — re-read before writing.
+      // isIdle awaited (the bindings listing) — re-read before writing.
       const now = (await this.ctx.storage.get<RepoFacts>(FACTS_KEY)) ?? facts;
       if (!now.idleSince)
         await this.ctx.storage.put(FACTS_KEY, {
@@ -3798,15 +3808,24 @@ export class ResidentDO extends Sandbox<Env> {
     });
   }
 
-  /** Idle = no live binding attached within IDLE_AFTER_S and nothing in
-   *  flight. What a live tree holds is not asked (item 17): a dirty tree no
-   *  run is using protects nothing — the next attach wipes it — so it is
-   *  never a reason to keep the container awake; the sweep's release records
-   *  what it held. Bindings are storage, so this needs no container. */
-  private async isIdle(): Promise<boolean> {
-    const live = await this.liveBindings();
+  /** Whether a run may be using this disk: a live binding attached to or
+   *  used (an exec bumps `lastAttachAt` too, item 21) within IDLE_AFTER_S.
+   *  The op counter is 0 between a run's tool calls, so this floor is what
+   *  stands for a run mid-flight. The one predicate behind "the disk may go
+   *  away": the idle-sleep gate (item 16b — a platform sleep destroys the
+   *  disk) and the disk-full recycle (item 54) both read it, and neither asks
+   *  what a tree holds (item 17): a dirty tree no run is using protects
+   *  nothing — the next attach wipes it. Bindings are storage, so this needs
+   *  no container. */
+  private recentlyUsed(live: ThreadBinding[]): boolean {
     const recent = systemClock() - IDLE_AFTER_S * 1000;
-    if (live.some((b) => Date.parse(b.lastAttachAt) >= recent)) return false;
+    return live.some((b) => Date.parse(b.lastAttachAt) >= recent);
+  }
+
+  /** Idle = no live binding used within the floor and nothing in flight; the
+   *  sweep's release records what an idle tree held. */
+  private async isIdle(): Promise<boolean> {
+    if (this.recentlyUsed(await this.liveBindings())) return false;
     return this.inFlightCount() === 0;
   }
 
@@ -3814,17 +3833,6 @@ export class ResidentDO extends Sandbox<Env> {
   private async liveBindings(): Promise<ThreadBinding[]> {
     const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
     return [...all.values()].filter((b) => !b.evicted && b.user);
-  }
-
-  /** The disk-full recycle's tree guard (item 54), its one reader: true when
-   *  every live tree is clean as its thread user, or the runtime is already
-   *  down — a sleep has destroyed the disk, so there is nothing left to lose. */
-  private async liveTreesClean(live: ThreadBinding[]): Promise<boolean> {
-    if (!(await this.isRuntimeActive().catch(() => false))) return true;
-    // Concurrent: each check touches only its own (disjoint) tree, and one
-    // spawn each — no serial 3-probe round-trip per live binding.
-    const checks = await Promise.all(live.map((b) => this.worktreeCleanliness(b)));
-    return checks.every((c) => c.clean); // any dirty or unknown → not clean
   }
 
   // -- disk-full (docs/reference/specs/resident-repos.md item 54) ---------------------------
@@ -3852,33 +3860,80 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** The disk is a cache: stop the container so the next cycle attempt
    *  restores mirror + checkout from R2 onto an empty disk — the same wake
-   *  path as a platform sleep. Only when the pure plan allows it: nothing in
-   *  flight (`selfInFlight` excludes the calling refresh cycle from the
-   *  count), every live tree clean, and no recycle within the cooldown. A
-   *  refused recycle is written to `lastRefreshError` with its why, so
-   *  `/residents` says what an operator must do; the `degraded` reason stays
-   *  the clean `disk-full: …`. Answers whether the container was recycled. */
+   *  path as a platform sleep. Only when the pure plan allows it: no recycle
+   *  within the cooldown, nothing in flight (`selfInFlight` excludes the
+   *  calling refresh cycle from the count) and no live binding used within
+   *  the idle floor — the idle-sleep gate's own predicate (`recentlyUsed`),
+   *  because a sleep and a recycle destroy the same disk: it may go away when
+   *  no run is using it, never for what the trees hold (item 17). A recycle
+   *  discards every live tree the way an eviction does, so each is measured
+   *  first, as its thread user, and its binding records what went
+   *  (`recordRecycledTree`); the plan is decided again after those awaits,
+   *  right before the stop. A refused recycle is written to
+   *  `lastRefreshError` with its why, so `/residents` says what an operator
+   *  must do; the `degraded` reason stays the clean `disk-full: …`. Answers
+   *  whether the container was recycled. */
   private async recoverFromDiskFull(reason: string, selfInFlight: number): Promise<boolean> {
     const lastRecycleAt = await this.ctx.storage.get<number>(DISK_FULL_RECYCLE_KEY);
-    const plan = planDiskFullRecovery({
-      now: systemClock(),
-      lastRecycleAt,
-      inFlight: this.inFlightCount() - selfInFlight,
-      treesClean: await this.liveTreesClean(await this.liveBindings()),
-    });
-    if (plan.action === "wait") {
-      console.log(`disk-full: container kept — ${plan.why}`);
-      await this.recordRefreshError(`${reason} — container kept: ${plan.why}`);
+    const plan = (live: ThreadBinding[]) =>
+      planDiskFullRecovery({
+        now: systemClock(),
+        lastRecycleAt,
+        inFlight: this.inFlightCount() - selfInFlight,
+        recentlyUsed: this.recentlyUsed(live),
+        idleFloorS: IDLE_AFTER_S,
+      });
+    const kept = async (why: string) => {
+      console.log(`disk-full: container kept — ${why}`);
+      await this.recordRefreshError(`${reason} — container kept: ${why}`);
       return false;
-    }
+    };
+    const live = await this.liveBindings();
+    const first = plan(live);
+    if (first.action === "wait") return kept(first.why);
+    // What each live tree holds, for its record — never a reason to keep the
+    // container. Concurrent: each probe touches only its own tree, one spawn
+    // each. Runtime down: the disk, and every tree with it, is already gone.
+    const active = await this.isRuntimeActive().catch(() => false);
+    const trees = active
+      ? await Promise.all(
+          live.map(async (binding) => [binding, await this.measureTreeBeforeEviction(binding)] as const),
+        )
+      : live.map((binding) => [binding, undefined] as const);
+    // The measurement awaited (the DO yields at each await): decide again over
+    // fresh facts — an attach or an op that landed meanwhile keeps the container.
+    const verdict = plan(await this.liveBindings());
+    if (verdict.action === "wait") return kept(verdict.why);
     console.log(
       `disk-full: recycling the container — the next cycle restores mirror + checkout from R2 onto an empty disk (${reason})`,
     );
+    for (const [binding, tree] of trees) await this.recordRecycledTree(binding, tree);
     await this.ctx.storage.put(DISK_FULL_RECYCLE_KEY, systemClock());
     await this.recordRefreshError(`${reason} — container recycled; restoring from R2 on the next cycle`);
     this.swapIncarnation(); // deliberate incarnation swap
     await this.stop().catch((err) => console.log(`disk-full: stop failed: ${errMsg(err)}`));
     return true;
+  }
+
+  /** The disk-full recycle's record for one live tree (item 54), written the
+   *  way `evictBinding` writes an eviction's — but the binding stays live, its
+   *  pool user kept and its tree recreated on the next attach, so this is not
+   *  an eviction and the record sits under its own name beside
+   *  `evictedLeftBehind`: the counts when something was there, the probe's
+   *  first error line when git could not read the tree, both rewritten on
+   *  every recycle so nothing lingers from an earlier one, and one log line
+   *  when the tree held something. Re-read first: a binding evicted or
+   *  re-attached during the measurement is left as is. */
+  private async recordRecycledTree(binding: ThreadBinding, tree: EvictedTree | undefined): Promise<void> {
+    const now = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(binding.threadKey));
+    if (!now || now.evicted || now.lastAttachAt !== binding.lastAttachAt) return;
+    await this.ctx.storage.put(threadBindingKey(binding.threadKey), {
+      ...now,
+      recycledLeftBehind: tree && "leftBehind" in tree ? tree.leftBehind : undefined,
+      recycledUnmeasured: tree && "unmeasured" in tree ? tree.unmeasured : undefined,
+    } satisfies ThreadBinding);
+    if (tree)
+      console.log(`disk-full: ${binding.threadKey} tree discarded with the disk — ${evictedTreeSentence(tree)}`);
   }
 
   // -- disk budget (docs/reference/specs/resident-repos.md item 55) -------------------------
@@ -6202,11 +6257,10 @@ export class ResidentDO extends Sandbox<Env> {
    *  (su), never as root: the worktree is thread-owned, so root git in it
    *  would be refused by safe.directory and would be the exact repo-local-
    *  config execution vector safe.directory exists to block. Read by
-   *  `measureTreeBeforeEviction` for the eviction's record — never a reason
-   *  to keep a tree (item 17) — and by the disk-full recycle's guard (item
-   *  54), where unknown (git failed) counts as NOT clean. A tree that no
-   *  longer exists (disk recycled by a sleep/wake) is clean with nothing
-   *  measured: there was nothing to discard.
+   *  `measureTreeBeforeEviction` alone, for the record of an eviction or of
+   *  the disk-full recycle — never a reason to keep a tree or a container
+   *  (item 17). A tree that no longer exists (disk recycled by a sleep/wake)
+   *  is clean with nothing measured: there was nothing to discard.
    *
    *  ONE spawn: the presence test and both git probes fold
    *  into the pure `worktreeCleanlinessScript` (test -d as root, both git
@@ -6222,7 +6276,8 @@ export class ResidentDO extends Sandbox<Env> {
     return parseWorktreeCleanliness(r);
   }
 
-  /** What a tree holds right before its eviction, for the record and the log
+  /** What a tree holds right before its eviction — or before the disk-full
+   *  recycle discards it with the disk (item 54) — for the record and the log
    *  (item 17): the one-spawn probe as the thread user, read once into
    *  `evictedTreeOf` — never into a keep decision. Callers skip it when the
    *  runtime is down: the disk, and the tree with it, is already gone. */
@@ -6782,6 +6837,8 @@ export class ResidentDO extends Sandbox<Env> {
           evictedWhy,
           evictedLeftBehind,
           evictedUnmeasured,
+          recycledLeftBehind,
+          recycledUnmeasured,
         }) => ({
           threadKey,
           ref,
@@ -6795,6 +6852,8 @@ export class ResidentDO extends Sandbox<Env> {
           evictedWhy: evictedWhy ?? null,
           evictedLeftBehind: evictedLeftBehind ?? null,
           evictedUnmeasured: evictedUnmeasured ?? null,
+          recycledLeftBehind: recycledLeftBehind ?? null,
+          recycledUnmeasured: recycledUnmeasured ?? null,
         }),
       );
     return {

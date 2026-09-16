@@ -10,7 +10,11 @@ import { methodOf, readSource } from "./testing/sourceScan";
 // without the clean check, and every eviction records what the tree it
 // removed held — the counts, or that git could not read it — on the binding
 // beside `evictedWhy` and in one log line, so nothing is discarded silently.
-// Plain Node, the entry read as text, never loaded — like releaseAtRunEnd.test.ts.
+// The disk-full recycle (item 54) destroys every tree at once, as a platform
+// sleep does, so it reads the idle gate's own predicate — a live binding used
+// within the floor — and never the trees: the disk may go away when no run is
+// using it. Plain Node, the entry read as text, never loaded — like
+// releaseAtRunEnd.test.ts.
 
 const source = readSource("worker.ts");
 const gc = readSource("gc.ts");
@@ -25,15 +29,85 @@ function method(name: string): string {
 describe("the idle-sleep gate asks about attaches and ops, never about dirt", () => {
   const isIdle = method("isIdle");
 
-  it("isIdle is recent attaches and the in-flight count alone — a dirty live tree never pins the container awake", () => {
-    expect(isIdle).toMatch(/if \(live\.some\(\(b\) => Date\.parse\(b\.lastAttachAt\) >= recent\)\) return false;/);
+  it("isIdle is recent use and the in-flight count alone — a dirty live tree never pins the container awake", () => {
+    expect(isIdle).toMatch(/if \(this\.recentlyUsed\(await this\.liveBindings\(\)\)\) return false;/);
     expect(isIdle).toMatch(/return this\.inFlightCount\(\) === 0;/);
     expect(isIdle).not.toMatch(/liveTreesClean|worktreeCleanliness|isRuntimeActive|measureTreeBeforeEviction/);
   });
 
-  it("the clean check over every live tree has one reader left, the disk-full recycle", () => {
-    expect([...residentDO.matchAll(/this\.liveTreesClean\(/g)]).toHaveLength(1);
-    expect(method("recoverFromDiskFull")).toMatch(/treesClean: await this\.liveTreesClean\(/);
+  it("the recent-use arithmetic lives once, in the predicate both the idle gate and the disk-full recycle read", () => {
+    const recentlyUsed = method("recentlyUsed");
+    expect(recentlyUsed).toMatch(/const recent = systemClock\(\) - IDLE_AFTER_S \* 1000;/);
+    expect(recentlyUsed).toMatch(/return live\.some\(\(b\) => Date\.parse\(b\.lastAttachAt\) >= recent\);/);
+    expect([...residentDO.matchAll(/IDLE_AFTER_S \* 1000/g)]).toHaveLength(1);
+    expect([...residentDO.matchAll(/this\.recentlyUsed\(/g)]).toHaveLength(2);
+  });
+
+  it("the clean check over every live tree is gone — no reader of the trees decides whether the container stays", () => {
+    expect(source).not.toMatch(/liveTreesClean|treesClean/);
+  });
+});
+
+describe("the disk-full recycle goes by liveness, never by dirt", () => {
+  const recover = method("recoverFromDiskFull");
+  const disk = readSource("../../src/execution/residentDisk.ts");
+
+  it("the pure plan takes the cooldown, the in-flight count and recent use — no input about the trees", () => {
+    const input = /export function planDiskFullRecovery\(input: \{[\s\S]*?\n\}\): DiskFullRecovery \{/.exec(disk);
+    expect(input, "residentDisk.ts declares planDiskFullRecovery").not.toBeNull();
+    expect(input![0]).toMatch(/inFlight: number;/);
+    expect(input![0]).toMatch(/recentlyUsed: boolean;/);
+    expect(input![0]).toMatch(/idleFloorS: number;/);
+    expect(input![0]).not.toMatch(/clean|dirty|tree/i);
+    expect(disk).not.toMatch(/treesClean|dirty|uncommitted|unpushed/i);
+  });
+
+  it("the Worker feeds the plan the idle gate's own predicate at its floor, the calling cycle excluded from the in-flight count", () => {
+    expect(recover).toMatch(/inFlight: this\.inFlightCount\(\) - selfInFlight,/);
+    expect(recover).toMatch(/recentlyUsed: this\.recentlyUsed\(live\),/);
+    expect(recover).toMatch(/idleFloorS: IDLE_AFTER_S,/);
+    expect(recover).not.toMatch(/treesClean|liveTreesClean|worktreeCleanliness|\.clean\b/);
+  });
+
+  it("a recycle discards every live tree like an eviction: each is measured first (runtime up), the plan is decided again over fresh facts, the record is written, then the container stops", () => {
+    const plan = recover.indexOf('if (first.action === "wait") return kept(first.why);');
+    const active = recover.indexOf("const active = await this.isRuntimeActive().catch(() => false);");
+    const measure = recover.indexOf("await this.measureTreeBeforeEviction(binding)");
+    const verdict = recover.indexOf("const verdict = plan(await this.liveBindings());");
+    const refuse = recover.indexOf('if (verdict.action === "wait") return kept(verdict.why);');
+    const record = recover.indexOf("await this.recordRecycledTree(binding, tree);");
+    const stamp = recover.indexOf("await this.ctx.storage.put(DISK_FULL_RECYCLE_KEY, systemClock());");
+    const stop = recover.indexOf("await this.stop().catch(");
+    expect(plan).toBeGreaterThan(-1);
+    expect(active).toBeGreaterThan(plan);
+    expect(measure).toBeGreaterThan(active);
+    expect(verdict).toBeGreaterThan(measure);
+    expect(refuse).toBeGreaterThan(verdict);
+    expect(record).toBeGreaterThan(refuse);
+    expect(stamp).toBeGreaterThan(record);
+    expect(stop).toBeGreaterThan(stamp);
+  });
+
+  it("the record sits on the live binding under the recycle's own name — the binding is not evicted, its user kept, the tree recreated on the next attach — both fields rewritten, one log line when something was there", () => {
+    const record = method("recordRecycledTree");
+    expect(record).toMatch(/if \(!now \|\| now\.evicted \|\| now\.lastAttachAt !== binding\.lastAttachAt\) return;/);
+    expect(record).toMatch(
+      /recycledLeftBehind: tree && "leftBehind" in tree \? tree\.leftBehind : undefined,\s*recycledUnmeasured: tree && "unmeasured" in tree \? tree\.unmeasured : undefined,\s*\} satisfies ThreadBinding\);/,
+    );
+    expect(record).not.toMatch(/evicted: true|evictedWhy|evictedLeftBehind|evictedUnmeasured|user: ""/);
+    const put = record.indexOf("recycledLeftBehind:");
+    const log = record.search(
+      /if \(tree\)\s*console\.log\(`disk-full: \$\{binding\.threadKey\} tree discarded with the disk — \$\{evictedTreeSentence\(tree\)\}`\);/,
+    );
+    expect(put).toBeGreaterThan(-1);
+    expect(log).toBeGreaterThan(put);
+    const binding = /interface ThreadBinding \{[\s\S]*?\n\}/.exec(source);
+    expect(binding, "worker.ts declares ThreadBinding").not.toBeNull();
+    expect(binding![0]).toMatch(/recycledLeftBehind\?: LeftBehind;/);
+    expect(binding![0]).toMatch(/recycledUnmeasured\?: string;/);
+    expect(method("getResidentInfo")).toMatch(
+      /recycledLeftBehind: recycledLeftBehind \?\? null,\s*recycledUnmeasured: recycledUnmeasured \?\? null,/,
+    );
   });
 });
 
@@ -109,9 +183,9 @@ describe("every eviction records what the tree held", () => {
     expect(source).toMatch(
       /import \{[^}]*evictedTreeOf,\s*evictedTreeSentence,[^}]*type EvictedTree,[^}]*\} from "\.\.\/\.\.\/src\/execution\/residentCleanliness\.js";/,
     );
-    // The probe itself is read by the measurement and by the disk-full recycle's tree check, never by a keep decision.
+    // The probe itself is read by the measurement alone — never by a keep decision, not even the disk-full recycle's.
     const readers = [...residentDO.matchAll(/this\.worktreeCleanliness\(/g)];
-    expect(readers).toHaveLength(2);
+    expect(readers).toHaveLength(1);
   });
 
   it("evictBinding takes the measurement and stamps the counts, or the probe's failure, beside evictedWhy — both absent for a clean tree", () => {
