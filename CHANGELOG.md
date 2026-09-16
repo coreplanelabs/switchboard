@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.233.0](https://github.com/coreplanelabs/switchboard/compare/v1.232.0...v1.233.0) (2026-09-16)
+
+
+### Features
+
+* **config:** OpenRouter is a first-class upstream — the example block ships live, setup init carries it with its key, any preset's model reaches it by one ref (U36) ([#1334](https://github.com/coreplanelabs/switchboard/issues/1334)) ([68b3b17](https://github.com/coreplanelabs/switchboard/commit/68b3b177373729228136e331ff2436e54dee5cc9))
+
+
+### Documentation
+
+* **docs:** U37 the second harness is OpenCode — the program plan takes record 0038's fourth amendment, and U36 drops the Responses route and its stage A wait ([#1332](https://github.com/coreplanelabs/switchboard/issues/1332)) ([a0187a3](https://github.com/coreplanelabs/switchboard/commit/a0187a39d0c151ebcf51e585c74aec5cf72ff787))
+
 ## [1.232.0](https://github.com/coreplanelabs/switchboard/compare/v1.231.1...v1.232.0) (2026-09-16)
 
 
