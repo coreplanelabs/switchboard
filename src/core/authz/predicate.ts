@@ -52,6 +52,37 @@ function anyOf(alternatives: readonly Predicate[]): Predicate {
   return { kind: "or", of: flat };
 }
 
+/** AND parts with nested `and`s flattened; `all`s dropped, one `none` sinks it. */
+export function allOf(parts: readonly Predicate[]): Predicate {
+  const flat: Predicate[] = [];
+  for (const p of parts) {
+    if (p.kind === "none") return NONE;
+    if (p.kind === "all") continue;
+    if (p.kind === "and") flat.push(...p.of);
+    else flat.push(p);
+  }
+  if (flat.length === 0) return ALL;
+  if (flat.length === 1) return flat[0]!;
+  return { kind: "and", of: flat };
+}
+
+/** One `user-is` per self id, ORed (record 0042): an unlinked actor is the single
+ *  equality it always was, a linked dashboard session its own id or its person's —
+ *  the store predicate vocabulary is unchanged, so every translator (file store,
+ *  state Worker) runs it as is. */
+function selfPredicate(selfIds: readonly string[]): Predicate {
+  return anyOf(selfIds.map((userId): Predicate => ({ kind: "user-is", userId })));
+}
+
+/** The records that are the actor's OWN — requested by any id the actor means by
+ *  "me" (`selfIdsOf`). The "mine" filter every list surface ANDs onto the viewer's
+ *  predicate (`allOf([visibleTo, ownedBy(actor)])`): it only ever narrows, so a
+ *  run the policy hides stays hidden, and an unlinked dashboard session (no run is
+ *  ever requested as `access:<sub>`) matches nothing — honestly empty. */
+export function ownedBy(actor: Actor): Predicate {
+  return selfPredicate(selfIdsOf(actor));
+}
+
 function compileCondition(condition: Condition, grants: Grants, selfIds: readonly string[]): Predicate {
   switch (condition.kind) {
     case "has-grant": {
@@ -64,11 +95,7 @@ function compileCondition(condition: Condition, grants: Grants, selfIds: readonl
       if (grants.channels === "all") return ALL;
       return anyOf([grants.channels.size === 0 ? NONE : { kind: "channels-in", channelIds: grants.channels }, PUBLIC]);
     case "is-self":
-      // One `user-is` per self id, ORed (record 0042): an unlinked actor
-      // compiles to the single equality it always did, a linked dashboard
-      // session to its own id or its person's — the store predicate vocabulary
-      // is unchanged, so every translator (file store, state Worker) runs it as is.
-      return anyOf(selfIds.map((userId): Predicate => ({ kind: "user-is", userId })));
+      return selfPredicate(selfIds);
     case "acts-as-person":
       return actsAsPerson(selfIds) ? ALL : NONE;
     case "owner-of":
@@ -82,15 +109,7 @@ function compileCondition(condition: Condition, grants: Grants, selfIds: readonl
 
 function compileRule(rule: Rule, grants: Grants, selfIds: readonly string[]): Predicate {
   if (rule.originVisibility) return NONE;
-  const parts: Predicate[] = [];
-  for (const condition of rule.when) {
-    const part = compileCondition(condition, grants, selfIds);
-    if (part.kind === "none") return NONE;
-    if (part.kind !== "all") parts.push(part);
-  }
-  if (parts.length === 0) return ALL;
-  if (parts.length === 1) return parts[0]!;
-  return { kind: "and", of: parts };
+  return allOf(rule.when.map((condition) => compileCondition(condition, grants, selfIds)));
 }
 
 /** `predicateFor` over an explicit (validated) table; production code calls `predicateFor`. */

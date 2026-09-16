@@ -1281,6 +1281,11 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "required": false,
         "type": "string",
       },
+      {
+        "name": "mine",
+        "required": false,
+        "type": "boolean",
+      },
     ],
     "resource": "command",
     "surfaces": [

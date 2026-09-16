@@ -1854,6 +1854,8 @@ function page(
       seed: {
         page: "runs",
         all,
+        mine: false,
+        asUser: { id: "slack:UALICE", name: "alice" },
         retentionDays: 30,
         now: NOW,
         rows: all ? INDEX_ROWS : INDEX_ROWS.filter((r) => !r.finished),

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { authorize, authorizeWith } from "./authorize.js";
-import { matchesPredicate, predicateFor, predicateWith } from "./predicate.js";
+import { allOf, matchesPredicate, ownedBy, predicateFor, predicateWith } from "./predicate.js";
 import { attributesOf } from "./resource.js";
 import {
   ACTORS,
@@ -296,5 +296,47 @@ describe("record 0042 — the self set in a store predicate", () => {
     expect(kinds(linked).filter((k) => k === "user-is")).toHaveLength(2);
     expect(kinds(unlinked).filter((k) => k === "user-is")).toHaveLength(1);
     expect(new Set(kinds(linked))).toEqual(new Set(kinds(unlinked)));
+  });
+});
+
+describe('ownedBy — the "mine" filter is the self set, ANDed onto what the viewer may read', () => {
+  const own = { channelId: CHANNELS.priv.id, userId: "slack:UHANK", channelVisibility: "private" as const };
+  const theirs = { channelId: CHANNELS.pub1.id, userId: "slack:UERIN", channelVisibility: "public" as const };
+
+  it("a chat user's own runs are the one equality; a linked session's are its own id or its person's; an unlinked session's is its own id alone", () => {
+    expect(ownedBy(A.noGrants)).toEqual({ kind: "user-is", userId: "slack:UERIN" });
+    expect(ownedBy(A.linkedBrowser)).toEqual({
+      kind: "or",
+      of: [
+        { kind: "user-is", userId: "access:linked" },
+        { kind: "user-is", userId: "slack:UHANK" },
+      ],
+    });
+    expect(ownedBy(A.browser)).toEqual({ kind: "user-is", userId: "access:viewer" });
+  });
+
+  it("ANDed onto the readable predicate it only narrows: the linked session keeps its person's private run and loses the public run of someone else; the unlinked session and the fleet admin match nothing of their own", () => {
+    const mine = (actor: Actor) => allOf([predicateFor(actor, "runs:read", "run"), ownedBy(actor)]);
+    expect(matchesPredicate(mine(A.linkedBrowser), own)).toBe(true);
+    expect(matchesPredicate(mine(A.linkedBrowser), theirs)).toBe(false);
+    expect(matchesPredicate(predicateFor(A.linkedBrowser, "runs:read", "run"), theirs)).toBe(true); // readable, not mine
+    expect(matchesPredicate(mine(A.browser), own)).toBe(false);
+    expect(matchesPredicate(mine(A.browser), theirs)).toBe(false);
+    // Every channel compiles to `all`; ANDed with the admin's own id the fleet narrows to their runs alone.
+    expect(mine(A.admin)).toEqual({ kind: "user-is", userId: A.admin.id });
+    // A run the policy hides stays hidden even when it is the viewer's own id on the record.
+    const hidden = { channelId: CHANNELS.priv.id, userId: "access:viewer", channelVisibility: "private" as const };
+    expect(matchesPredicate(mine(A.browser), hidden)).toBe(
+      matchesPredicate(predicateFor(A.browser, "runs:read", "run"), hidden),
+    );
+  });
+
+  it("allOf: an `all` drops out, a `none` sinks it, nested ands flatten, one part is itself", () => {
+    const u = { kind: "user-is", userId: "x" } as const;
+    const c = { kind: "channels-in", channelIds: new Set(["slack:C1"]) } as const;
+    expect(allOf([{ kind: "all" }, u])).toEqual(u);
+    expect(allOf([{ kind: "none" }, u])).toEqual({ kind: "none" });
+    expect(allOf([{ kind: "and", of: [u, c] }, u])).toEqual({ kind: "and", of: [u, c, u] });
+    expect(allOf([])).toEqual({ kind: "all" });
   });
 });

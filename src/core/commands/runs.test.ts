@@ -870,3 +870,86 @@ describe("runs unit / runs children / runs search — the unit is the reading un
     ).toMatchObject({ ok: false, error: "not_found" });
   });
 });
+
+describe("runs.list --mine (record 0042, the runs page): the caller's own runs, a narrowing of what they may read", () => {
+  /** A Slack person who may read every channel: `--mine` drops everything they did not request. */
+  const ivy: Caller = {
+    kind: "chat",
+    id: "slack:UIVY",
+    actor: actor("user", "slack:UIVY", set("runs:read"), "all"),
+  };
+  /** A dashboard session linked to ivy (identity, not authority): the same runs as ivy's own. */
+  const linkedIvy: Caller = {
+    kind: "access",
+    id: "access:ivy",
+    actor: {
+      ...actor("user", "access:ivy", set("runs:read"), set()),
+      self: ["access:ivy", "slack:UIVY"],
+      asUser: { id: "slack:UIVY" },
+    },
+  };
+  /** The same session unlinked: no run is ever requested as `access:<sub>`, so nothing is theirs. */
+  const unlinked: Caller = {
+    kind: "access",
+    id: "access:ivy",
+    actor: actor("user", "access:ivy", set("runs:read"), set()),
+  };
+
+  it("lists only the runs the caller requested, private ones included, and nothing of anyone else's", async () => {
+    const { registry, deps } = await setup();
+    expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, ivy, deps))).toEqual([
+      "fin-x",
+      "fin-y",
+      "fin-priv",
+      "fin-pub",
+    ]);
+    expect(ids(await registry.invoke("runs.list", { options: { status: "all", mine: true } }, ivy, deps))).toEqual([
+      "fin-priv",
+      "fin-pub",
+    ]);
+    expect(
+      ids(await registry.invoke("runs.list", { options: { status: "all", mine: true } }, linkedIvy, deps)),
+    ).toEqual(["fin-priv", "fin-pub"]);
+    expect(ids(await registry.invoke("runs.list", { options: { status: "all", mine: true } }, unlinked, deps))).toEqual(
+      [],
+    );
+    // The fleet reader (a service token) requested nothing either — `--mine` never widens.
+    expect(ids(await registry.invoke("runs.list", { options: { status: "all", mine: true } }, reader, deps))).toEqual(
+      [],
+    );
+  });
+
+  it("is a store predicate, not a filter after loading: the store is asked with the readable predicate ANDed with the caller's self set; a text surface's `--mine` (\"true\") is the same ask", async () => {
+    const { store, registry, deps } = await setup();
+    const list = vi.spyOn(store, "list");
+    await registry.invoke("runs.list", { options: { status: "all", mine: true } }, linkedIvy, deps);
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(list.mock.calls[0][0].visibleTo).toEqual({
+      kind: "and",
+      of: [
+        {
+          kind: "or",
+          of: [
+            { kind: "visibility-in", visibilities: ["public"] },
+            { kind: "user-is", userId: "access:ivy" },
+            { kind: "user-is", userId: "slack:UIVY" },
+          ],
+        },
+        {
+          kind: "or",
+          of: [
+            { kind: "user-is", userId: "access:ivy" },
+            { kind: "user-is", userId: "slack:UIVY" },
+          ],
+        },
+      ],
+    });
+    list.mockClear();
+    // An all-channels person: the readable half is no constraint, so the store's filter is the self set alone.
+    await registry.invoke("runs.list", { options: { status: "all", mine: "true" } }, ivy, deps);
+    expect(list.mock.calls[0][0].visibleTo).toEqual({ kind: "user-is", userId: "slack:UIVY" });
+    expect(jsonSchemaFor(runsCommands.find((c) => c.id === "runs.list")!)).toMatchObject({
+      properties: { mine: expect.anything() },
+    });
+  });
+});

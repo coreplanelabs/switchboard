@@ -115,6 +115,18 @@ describe("RunRow", () => {
     ).toBe(false);
   });
 
+  it("says who asked, always visible (record 0042, the runs page): the resolved name, else the id suffix, never a raw platform id; its hover is the source mark's sentence", () => {
+    const named = mountRow(row({ userName: "alice" }));
+    expect(named.find(".who").text()).toBe("alice");
+    expect(named.find(".who").attributes("data-user-id")).toBe("slack:UACME1");
+    expect(named.find(".who").classes()).not.toContain("opacity-0"); // not a hover reveal
+    const unnamed = mountRow(row());
+    expect(unnamed.find(".who").text()).toBe("UACME1");
+    expect(unnamed.html()).not.toContain(">slack:UACME1<");
+    const nobody = mountRow(row({ userId: undefined, channelId: undefined }));
+    expect(nobody.find(".who").exists()).toBe(false);
+  });
+
   it("the source mark is the ↗ link for a run with a thread, the surface glyph otherwise; a javascript: url never links", () => {
     const linked = mountRow(row({ sourceUrl: "https://acme.slack.com/archives/C1/p1", userName: "alice" }));
     const a = linked.find("a.source");

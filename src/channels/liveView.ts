@@ -2,8 +2,10 @@ import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { runDurationMs } from "../core/runDuration.js";
 import { normalizeSpans, SPAN_SCHEMA } from "../core/normalizeSpans.js";
 import {
+  allOf,
   authorize,
   matchesPredicate,
+  ownedBy,
   type Actor,
   type Decision,
   type Predicate,
@@ -258,9 +260,9 @@ export function parseIndexCursor(params: URLSearchParams): { before: number; bef
   return { before, beforeId };
 }
 
-/** The `?all=1` href for the page after a full one. */
-export function olderRunsHref(cursor: RunListCursor): string {
-  return `/runs?all=1&before=${cursor.finishedAt}&beforeId=${encodeURIComponent(cursor.id)}`;
+/** The `?all=1` href for the page after a full one; `mine` rides along so the pager stays in the view. */
+export function olderRunsHref(cursor: RunListCursor, opts: { mine?: boolean } = {}): string {
+  return `/runs?all=1${opts.mine ? "&mine=1" : ""}&before=${cursor.finishedAt}&beforeId=${encodeURIComponent(cursor.id)}`;
 }
 
 /** Per-request context the server passes in after the Access gate: the viewer
@@ -483,6 +485,7 @@ export function createLiveViewHandler(
     live: readonly RunSummary[],
     visibleTo: Predicate,
     cursor?: { before: number; beforeId: string },
+    view: { mine?: boolean } = {},
   ): Promise<IndexPage> => {
     const tokens = new Map(live.map((s) => [s.id, s.token] as const));
     // The viewer's predicate is the store's own filter: the service hands
@@ -503,7 +506,7 @@ export function createLiveViewHandler(
     return {
       rows,
       ...(storeUnavailable ? { storeUnavailable: true } : {}),
-      ...(nextBefore ? { olderHref: olderRunsHref(nextBefore) } : {}),
+      ...(nextBefore ? { olderHref: olderRunsHref(nextBefore, view) } : {}),
       ...(cursor ? { olderThan: cursor.before } : {}),
     };
   };
@@ -532,7 +535,13 @@ export function createLiveViewHandler(
     // live rows' token hrefs.
     if (route.kind === "index") {
       const all = url.searchParams.get("all") === "1";
-      const visibleTo = readableRuns(ctx.actor);
+      // `?mine=1` narrows the viewer's predicate to their own runs (`ownedBy`:
+      // every id the viewer means by "me", record 0042) — the seed, the feed and
+      // the pager all through the ONE narrowed predicate, so nothing the policy
+      // hides appears and nothing shown is someone else's.
+      const mine = url.searchParams.get("mine") === "1";
+      const readable = readableRuns(ctx.actor);
+      const visibleTo = mine ? allOf([readable, ownedBy(ctx.actor)]) : readable;
       if (url.searchParams.get("stream") === "1") {
         serveIndexEvents(
           visibleIndexFeed((onEvent) => index.subscribeIndex(onEvent), visibleTo),
@@ -550,6 +559,8 @@ export function createLiveViewHandler(
         const seed: RunsIndexSeed = {
           page: "runs",
           all,
+          mine,
+          ...(ctx.actor.asUser ? { asUser: ctx.actor.asUser } : {}),
           retentionDays: deps.retention ? deps.retention.retentionDays : null,
           now: now(),
           rows: [...page.rows],
@@ -569,7 +580,7 @@ export function createLiveViewHandler(
         );
         return true;
       }
-      run(res, async () => render(await mergedRows(live, visibleTo, parseIndexCursor(url.searchParams))));
+      run(res, async () => render(await mergedRows(live, visibleTo, parseIndexCursor(url.searchParams), { mine })));
       return true;
     }
 

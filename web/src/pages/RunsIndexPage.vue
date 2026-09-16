@@ -20,6 +20,20 @@ import { FAVICON_IDLE, FAVICON_LIVE } from "@core/channels/favicon.js";
 
 const seed = useSeed("runs");
 const showAll = seed?.all ?? false;
+// `?mine=1` is a server view like `?all=1`: the viewer's predicate is narrowed
+// to their own runs before anything is loaded. It is offered only to a session
+// linked to its Slack person (record 0042) — no run is ever requested as an
+// unlinked session, so "mine" would be an honest but useless empty list.
+const showMine = seed?.mine ?? false;
+const linked = seed?.asUser !== undefined;
+const mineHint = linked
+  ? `Only the runs ${seed?.asUser?.name ?? "you"} requested`
+  : "Your session is not linked to a Slack user, so no run here is yours. Sign in with the email of your Slack account.";
+/** The index href for a view: `/runs`, `?all=1`, `?mine=1`, or both. */
+function viewHref(all: boolean, mine: boolean): string {
+  const q = [all ? "all=1" : "", mine ? "mine=1" : ""].filter(Boolean).join("&");
+  return q ? `/runs?${q}` : "/runs";
+}
 const paged = seed?.olderThan !== undefined;
 const retentionDays = seed?.retentionDays ?? null;
 const retentionMs = retentionDays !== null ? retentionDays * 86_400_000 : undefined;
@@ -63,8 +77,11 @@ watch(
 );
 
 function onToggleCompleted(ev: Event): void {
-  // The completed toggle switches the server view: a change navigates.
-  browser.navigate((ev.target as HTMLInputElement).checked ? "/runs?all=1" : "/runs");
+  // The toggles switch the server view: a change navigates, keeping the other toggle.
+  browser.navigate(viewHref((ev.target as HTMLInputElement).checked, showMine));
+}
+function onToggleMine(ev: Event): void {
+  browser.navigate(viewHref(showAll, (ev.target as HTMLInputElement).checked));
 }
 
 const olderThanLabel = computed(() => (seed?.olderThan !== undefined ? formatDateTime(seed.olderThan, now.value) : ""));
@@ -73,7 +90,7 @@ const makeEventSource = useEventSourceFactory();
 let es: EventSourceLike | null = null;
 
 onMounted(() => {
-  es = makeEventSource(showAll ? "/runs?stream=1&all=1" : "/runs?stream=1");
+  es = makeEventSource(`/runs?stream=1${showAll ? "&all=1" : ""}${showMine ? "&mine=1" : ""}`);
   // A RE-connect means the backend may have restarted: rows this page holds
   // may no longer exist there, and nothing will ever send their `removed`
   // events. Reload for a fresh server snapshot instead of drifting.
@@ -126,7 +143,25 @@ onUnmounted(() => {
 
     <div class="toolbar mb-1.5 flex items-center gap-4 px-2 text-xs text-muted">
       <span id="livecount" class="count font-mono tabular-nums">{{ liveCount }} running</span>
-      <span class="filter ml-auto inline-flex items-center gap-1.5">
+      <span class="filter ml-auto inline-flex items-center gap-4">
+        <UTooltip :text="mineHint">
+          <label
+            class="toggle inline-flex select-none items-center gap-1.5"
+            :class="linked ? 'cursor-pointer text-toned hover:text-highlighted' : 'cursor-not-allowed text-dimmed'"
+          >
+            <input
+              id="showmine"
+              type="checkbox"
+              class="accent-(--ui-bg-inverted)"
+              :checked="showMine"
+              :disabled="!linked"
+              aria-describedby="minehint"
+              @change="onToggleMine"
+            />
+            Show mine
+          </label>
+        </UTooltip>
+        <span id="minehint" class="sr-only">{{ mineHint }}</span>
         <label
           class="toggle inline-flex cursor-pointer select-none items-center gap-1.5 text-toned hover:text-highlighted"
         >
@@ -173,7 +208,15 @@ onUnmounted(() => {
       </li>
       <RunRow v-for="run in afterDivider" :key="run.id" :run="run" :now="now" :retention-ms="retentionMs" />
       <li v-if="ordered.length === 0" id="empty" class="empty px-2 py-2 text-muted">
-        {{ showAll ? "No runs." : "No active runs." }}
+        {{
+          showMine
+            ? showAll
+              ? "No runs of yours."
+              : "No active runs of yours."
+            : showAll
+              ? "No runs."
+              : "No active runs."
+        }}
       </li>
     </ul>
 
@@ -183,7 +226,7 @@ onUnmounted(() => {
       aria-label="Completed runs pages"
     >
       <template v-if="seed?.olderThan !== undefined">
-        <a class="text-primary hover:underline" href="/runs?all=1">← Newest runs</a>
+        <a class="text-primary hover:underline" :href="viewHref(true, showMine)">← Newest runs</a>
         <span class="range font-mono tabular-nums text-dimmed">· runs finished before {{ olderThanLabel }}</span>
       </template>
       <a v-if="seed?.olderHref" class="older ml-auto text-primary hover:underline" :href="seed.olderHref"

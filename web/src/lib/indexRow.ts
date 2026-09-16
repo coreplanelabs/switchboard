@@ -157,6 +157,13 @@ export function sourceTip(run: IndexRow): string {
   return `via ${SURFACE_NAME[s.kind] ?? s.kind}${s.identity ? ` · ${s.identity}` : ""}`;
 }
 
+/** The requester cell: who asked for the run — the resolved name (or the id
+ *  suffix), always visible, so a page of rows says whose runs they are without
+ *  a hover. Its tooltip is the source mark's sentence. */
+export function whoText(run: IndexRow): string {
+  return surfaceOf(run).identity;
+}
+
 /** The repo the row tags: `RunView.repo`, or a repo-shaped label scope. */
 export function repoOf(run: IndexRow, labelScope: string): string {
   return run.repo ?? (/^[\w.-]+\/[\w.-]+$/.test(labelScope) ? labelScope : "");

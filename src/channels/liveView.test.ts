@@ -30,7 +30,7 @@ import { InMemoryCoordinatorInstanceStore } from "../core/coordinator/instanceSt
 import type { CoordinatorInstance, CoordinatorUnit } from "../core/coordinator/contract.js";
 import { accessActor } from "./commandHttp.js";
 import { ALL_GRANTS, grantsFor, type GrantsSource } from "../core/authz/grants.js";
-import { NO_GRANTS, predicateFor } from "../core/authz/index.js";
+import { NO_GRANTS, predicateFor, type Predicate } from "../core/authz/index.js";
 import { RunRegistry, type RunRegistryOptions } from "../core/runRegistry.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import { normalizeSpans, SPAN_SCHEMA } from "../core/normalizeSpans.js";
@@ -1838,6 +1838,12 @@ describe("live view on RunsService: history pages + index toggle", () => {
       threadKey,
     });
 
+    /** readable ∧ own, as `allOf` spells it for these fixtures (the readable half is an `or`, never `all`). */
+    const predicateAnd = (readable: Predicate, own: Predicate[]): Predicate => ({
+      kind: "and",
+      of: [readable, { kind: "or", of: own }],
+    });
+
     async function index(h: ReturnType<typeof harness>, url: string, ctx: LiveViewContext) {
       const t = fakeReqRes("GET", url);
       h.handler(t.req, t.res, ctx);
@@ -1939,6 +1945,48 @@ describe("live view on RunsService: history pages + index toggle", () => {
         { route: "page", runId: "priv", identity: "access:admin" },
         { route: "stop", identity: "access:bob", denied: "missing-grant" },
       ]);
+    });
+
+    it("`?mine=1` (record 0042): a session linked to its Slack person lists that person's runs alone — a private one included, a public one of someone else's not; the unlinked session and the fleet admin list nothing of their own; the seed carries the view and the person; the feed and the pager stay in the view", async () => {
+      const h = harness({ indexPageSize: 1 });
+      const linked: LiveViewContext = {
+        actor: { ...alice.actor, self: ["access:alice", "slack:UA"], asUser: { id: "slack:UA", name: "ann" } },
+      };
+      await h.store!.put(record("mine-priv", { ...PRIVATE, userId: "slack:UA", finishedAt: NOW - 10_000 }));
+      await h.store!.put(record("mine-pub", { ...PUBLIC, userId: "slack:UA", finishedAt: NOW - 20_000 }));
+      await h.store!.put(record("theirs-pub", { ...PUBLIC, userId: "slack:UB", finishedAt: NOW - 5_000 }));
+      const list = vi.spyOn(h.service, "listRuns");
+      // Readable without the filter: the public runs (alice is a member of nothing else) plus her person's private one.
+      expect((await index(h, "/runs?all=1", linked)).ids).toEqual(["theirs-pub"]); // page size 1: the newest readable
+      const mine = await index(h, "/runs?all=1&mine=1", linked);
+      expect(mine.ids).toEqual(["mine-priv"]);
+      const seed = indexSeedOf(mine.body);
+      expect([seed.all, seed.mine, seed.asUser]).toEqual([true, true, { id: "slack:UA", name: "ann" }]);
+      expect(seed.olderHref).toBe("/runs?all=1&mine=1&before=" + (NOW - 10_000) + "&beforeId=mine-priv");
+      expect((await index(h, seed.olderHref!, linked)).ids).toEqual(["mine-pub"]);
+      // The narrowing is the store's own filter: readable ∧ own, never a filter after loading.
+      expect(list.mock.calls[1][0].visibleTo).toEqual(
+        predicateAnd(predicateFor(linked.actor, "runs:read", "run"), [
+          { kind: "user-is", userId: "access:alice" },
+          { kind: "user-is", userId: "slack:UA" },
+        ]),
+      );
+      // Unlinked: no run is requested as `access:alice`; the admin reads the fleet but requested none of it.
+      const unlinked = await index(h, "/runs?all=1&mine=1", alice);
+      expect(unlinked.ids).toEqual([]);
+      expect(indexSeedOf(unlinked.body).asUser).toBeUndefined();
+      expect((await index(h, "/runs?all=1&mine=1", admin)).ids).toEqual([]);
+      expect((await index(h, "/runs?all=1", admin)).ids).toEqual(["theirs-pub"]);
+      // The default view and its feed narrow the live registry the same way.
+      const own = h.registry.create("own live", { ...PUBLIC, userId: "slack:UA", threadKey: "t1" });
+      const other = h.registry.create("other live", { ...PUBLIC, userId: "slack:UB", threadKey: "t2" });
+      expect((await index(h, "/runs?mine=1", linked)).ids).toEqual([own.id]);
+      expect((await index(h, "/runs", linked)).ids).toEqual([other.id, own.id].sort());
+      const feed = fakeReqRes("GET", "/runs?stream=1&mine=1");
+      h.handler(feed.req, feed.res, linked);
+      expect(feed.body()).toContain(`"id":"${own.id}"`);
+      expect(feed.body()).not.toContain(`"id":"${other.id}"`);
+      feed.fireClose();
     });
 
     it("a viewer without the `runs:read` grant at all — what `/api/runs.*` refuses outright — sees an empty index and a 404 on every tokenless route even for a PUBLIC run; a capability token still opens the live page, stream and stop (the token IS the capability)", async () => {
