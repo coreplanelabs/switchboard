@@ -327,13 +327,20 @@ workspaceDir: ./workspaces
 #                     # a finding at or above it sends the round into a fix step instead of merge-ready.
 #                     # Per channel/user: config set … --ship.addressSeverity; per run: severity:<level>.
 
-# `harness` is a retired key (docs/reference/specs/harness-pi.md item 1). It
-# moved the presets onto pi one at a time; every preset runs on pi now — the pi
-# coding agent started inside the run's own execution container (or as a child
-# of the bot for a preset without a workspace) with the run's model-proxy
-# bearer as its only key — and there is no other loop. A block written during
-# the series still loads when every value is `pi`; `native` names the deleted
-# loop and fails the load by name, as does an unknown preset. Remove the block.
+# Which harness each preset's runs are driven by (docs/reference/specs/harness.md
+# item 8): a mapping of preset to a harness's name. Two exist — `pi` (the pi
+# coding agent, the default for every preset) and `opencode` (OpenCode's server,
+# `opencode serve`) — each started inside the run's own execution container (or
+# as a child of the bot for a preset without a workspace) with the run's
+# model-proxy bearer as its only key, every tool call decided in the bot, every
+# event on the run's record. A preset the block does not name runs on pi;
+# nothing defaults to OpenCode. A run keeps the harness it started on, so
+# changing a word moves the next run, never one in flight. Any other word
+# (`native`, the deleted loop; `codex`) fails the load naming the two, as does
+# an unknown preset. How-to: docs/how-to/put-a-preset-on-opencode.md.
+# harness:
+#   coding: opencode   # coding runs on OpenCode
+#   review: pi         # the default, written out
 
 # What the harness writes into pi's per-run settings for every run on pi
 # (docs/reference/specs/harness-pi.md item 4): pi's compaction thresholds, in
@@ -348,6 +355,18 @@ workspaceDir: ./workspaces
 #   compaction:
 #     reserveTokens: 150000
 #     keepRecentTokens: 8000
+
+# What the harness writes into OpenCode's per-run configuration for every run
+# on OpenCode (docs/reference/specs/harness.md item 8): OpenCode's compaction
+# thresholds, in tokens, under OpenCode's own names — `buffer`, the tokens kept
+# free of the model's window before a compaction runs; `keepTokens`, how much
+# of the newest turns it keeps. Unset, OpenCode's defaults stand and the file
+# names no compaction. The OpenCode twin of the `pi` block above; positive
+# integers only, any other shape or key fails the load by name.
+# opencode:
+#   compaction:
+#     buffer: 20000
+#     keepTokens: 8000
 
 # The fan-out cap a spawning run meets (docs/reference/specs/agent-conductor.md).
 # `agent:conductor` starts child runs as the person who asked — each an

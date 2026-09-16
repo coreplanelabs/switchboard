@@ -20,6 +20,7 @@
 
 - [Add a model provider](add-a-provider.md): a config block, or an adapter.
 - [Add an agent](add-an-agent.md): a prompt, a toolset and budgets, on every surface.
+- [Put a preset on OpenCode](put-a-preset-on-opencode.md): one config line, the rollback, what changes on the run page.
 
 ## Run it in production
 

@@ -88,6 +88,8 @@ import { activityText } from "./core/statusCardFrame.js";
 import type { ChannelIO, OpenedThread, RunReceipt, StatusHandle, StatusUpdate } from "./core/types.js";
 import { PiAiProviders } from "./core/harness/piAi.js";
 import { PiHarness } from "./core/harness/pi/piHarness.js";
+import { OpenCodeHarness } from "./core/harness/opencode/harness.js";
+import type { HarnessRoster } from "./core/harness/roster.js";
 import { HarnessRegistry } from "./core/harness/pi/relay.js";
 import { LedgerTakeover } from "./core/runLedger/takeover.js";
 import { RunBearerStore } from "./core/modelProxy/runBearers.js";
@@ -676,21 +678,29 @@ async function main(): Promise<void> {
   const artifacts = buildArtifactStore(config.config.artifacts, processSecrets, {
     copyBaseUrl: process.env.PUBLIC_BASE_URL,
   });
-  // The run's pi needs what the bot's HTTP server gives it: the model proxy
-  // its bearer buys calls through and the three harness routes its extension
-  // asks (docs/reference/specs/harness-pi.md item 12). A one-shot process has
-  // no PORT, so `ask` opens a loopback server on a free port for the length of
-  // the run — pi reaches it over 127.0.0.1 whether it runs as a child of this
-  // process (no workspace) or in the local workspace (a coding run here).
+  // The run's harness process needs what the bot's HTTP server gives it: the
+  // model proxy its bearer buys calls through and the three harness routes its
+  // relay asks (docs/reference/specs/harness-pi.md item 12). A one-shot process
+  // has no PORT, so `ask` opens a loopback server on a free port for the length
+  // of the run — the process reaches it over 127.0.0.1 whether it runs as a
+  // child of this process (no workspace) or in the local workspace (a coding
+  // run here). The roster is the same two objects the bot wires (harness.md
+  // item 8), so a preset's configuration word means the same thing here.
   const runBearers = new RunBearerStore({ clock: systemClock });
   const harnesses = new HarnessRegistry();
   const loopback = await askLoopbackServer({ bearers: runBearers, harnesses, config });
+  const roster: HarnessRoster = {
+    pi: new PiHarness(config.config.pi?.compaction ? { compaction: config.config.pi.compaction } : {}),
+    opencode: new OpenCodeHarness(
+      config.config.opencode?.compaction ? { compaction: config.config.opencode.compaction } : {},
+    ),
+  };
   const deps: CoreDeps = {
     config,
     completions,
     runBearers,
     harness: {
-      harness: new PiHarness(config.config.pi?.compaction ? { compaction: config.config.pi.compaction } : {}),
+      harnesses: roster,
       registry: harnesses,
       harnessUrl: loopback.url,
       loopbackUrl: loopback.url,

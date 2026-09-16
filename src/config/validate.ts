@@ -13,6 +13,8 @@ import { validateArtifacts } from "../artifacts/config.js";
 import { parseGrantsConfig, parseRestrictConfig, type Restriction } from "../core/authz/grants.js";
 import type { Grants } from "../core/authz/types.js";
 import { AGENTS, IDENTITIES, MACHINE_CLASSES, type Identity, type MachineClass } from "../agents/registry.js";
+import { HARNESS_NAMES, isHarnessName } from "../core/harness/roster.js";
+import type { OpenCodeCompactionConfig } from "../core/harness/opencode/process.js";
 import type { Boundary } from "./profile.js";
 import { assertUrlAllowed } from "../tools/web.js";
 import {
@@ -25,6 +27,7 @@ import {
 } from "../mcp/registry.js";
 import type {
   AppConfig,
+  OpenCodeConfig,
   PiCompactionConfig,
   PiConfig,
   ReferencesConfig,
@@ -64,6 +67,7 @@ const CONFIG_KEYS: Record<keyof AppConfig, true> = {
   references: true,
   harness: true,
   pi: true,
+  opencode: true,
   slack: true,
   runHistory: true,
   runtimeOverrides: true,
@@ -311,6 +315,7 @@ export function validateConfig(cfg: AppConfig): void {
   if (cfg.artifacts !== undefined) validateArtifacts(cfg.artifacts);
   if (cfg.harness !== undefined) validateHarness(cfg.harness);
   if (cfg.pi !== undefined) validatePi(cfg.pi);
+  if (cfg.opencode !== undefined) validateOpenCode(cfg.opencode);
   validateDashboardConfig(cfg.dashboard);
 }
 
@@ -341,22 +346,53 @@ function validatePi(pi: unknown): void {
   }
 }
 
-/** `harness` (docs/reference/specs/harness-pi.md item 1), a retired key: the
- *  block a deployment set while the presets moved onto pi one at a time. It
- *  selects nothing now — there is one harness — and is accepted so such a
- *  config still loads: a mapping of registered presets to `pi`. A value of
- *  `native` names a loop that no longer exists and fails the load by name — a
- *  setting that read as "this preset runs the native loop" while nothing did
- *  would be the worst kind of silent. */
+/** The roster's words as the messages name them: `pi and opencode`, `pi or opencode`. */
+const harnessWords = (joiner: string): string => HARNESS_NAMES.join(joiner);
+
+/** `harness` (docs/reference/specs/harness.md item 8): a mapping of registered
+ *  presets to a harness's name — the words the roster has (`HARNESS_NAMES`),
+ *  read here so the validator spells no list of its own. A preset the registry
+ *  does not know, and any value that is not one of those words — `codex`,
+ *  `native` (the loop that no longer exists), a case slip, a non-string —
+ *  fail the load by name, naming the words that exist: a setting that read as
+ *  "this preset runs on X" while nothing did would be the worst kind of silent. */
 function validateHarness(harness: unknown): void {
   if (typeof harness !== "object" || harness === null || Array.isArray(harness))
-    throw new Error("config.yaml: harness must be a mapping of preset to pi (a retired key; remove it)");
+    throw new Error(`config.yaml: harness must be a mapping of preset to a harness name (${harnessWords(" or ")})`);
   for (const [preset, value] of Object.entries(harness)) {
     if (!Object.hasOwn(AGENTS, preset)) throw new Error(`config.yaml: harness.${preset} is not a known agent`);
-    if (value !== "pi")
+    if (!isHarnessName(value))
       throw new Error(
-        `config.yaml: harness.${preset} must be pi — the native loop is deleted and every preset runs on pi; remove the harness block`,
+        `config.yaml: harness.${preset}: ${typeof value === "string" ? value : JSON.stringify(value)} is not a harness; the harnesses are ${harnessWords(" and ")}`,
       );
+  }
+}
+
+/** The `opencode` block's keys and its `compaction` block's, held equal to the types the way pi's are. */
+const OPENCODE_KEYS: Record<keyof OpenCodeConfig, true> = { compaction: true };
+const OPENCODE_COMPACTION_KEYS: Record<keyof OpenCodeCompactionConfig, true> = { buffer: true, keepTokens: true };
+
+/** `opencode` (docs/reference/specs/harness.md item 8): a mapping whose only
+ *  key today is `compaction`, itself a mapping of `buffer` and `keepTokens` to
+ *  positive integers — OpenCode's own words, in tokens. The same shape rules
+ *  as `pi`, for the same reason: a threshold that silently read as "OpenCode's
+ *  default" would leave a receipt waiting on a compaction that never comes,
+ *  and pi's words under this block are a mistake, not a synonym. */
+function validateOpenCode(opencode: unknown): void {
+  if (typeof opencode !== "object" || opencode === null || Array.isArray(opencode))
+    throw new Error("config.yaml: opencode must be a mapping");
+  for (const key of unknownKeys(opencode, OPENCODE_KEYS))
+    throw new Error(`config.yaml: opencode.${key} is not a known key`);
+  const { compaction } = opencode as OpenCodeConfig;
+  if (compaction === undefined) return;
+  if (typeof compaction !== "object" || compaction === null || Array.isArray(compaction))
+    throw new Error("config.yaml: opencode.compaction must be a mapping");
+  for (const key of unknownKeys(compaction, OPENCODE_COMPACTION_KEYS))
+    throw new Error(`config.yaml: opencode.compaction.${key} is not a known key`);
+  for (const key of Object.keys(OPENCODE_COMPACTION_KEYS) as Array<keyof OpenCodeCompactionConfig>) {
+    const value = compaction[key];
+    if (value !== undefined && (typeof value !== "number" || !Number.isInteger(value) || value <= 0))
+      throw new Error(`config.yaml: opencode.compaction.${key} must be a positive integer (tokens)`);
   }
 }
 

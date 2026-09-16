@@ -38,6 +38,8 @@ import {
   validateScopeEfforts,
   type RouteAnswerMode,
 } from "./config/validate.js";
+import type { HarnessName } from "./core/harness/contract.js";
+import type { OpenCodeCompactionConfig } from "./core/harness/opencode/process.js";
 import {
   intersectBoundaries,
   type Boundary,
@@ -133,6 +135,16 @@ export interface PiConfig {
    *  what a receipt or a test of the compaction path needs; production leaves
    *  it unset and pi compacts as it would on its own. */
   compaction?: PiCompactionConfig;
+}
+
+/** The `opencode` block (`AppConfig.opencode`): what the harness writes into
+ *  OpenCode's per-run configuration for every run on it, deployment-wide — the
+ *  compaction thresholds under OpenCode's own words (`buffer`, `keepTokens`;
+ *  docs/reference/specs/harness.md item 8), the way the `pi` block feeds pi. */
+export interface OpenCodeConfig {
+  /** Unset, OpenCode's defaults stand and the configuration file names no
+   *  compaction at all. */
+  compaction?: OpenCodeCompactionConfig;
 }
 
 /** Whether the request router runs (docs/reference/specs/routing-and-config.md
@@ -296,14 +308,16 @@ export interface AppConfig {
    */
   references?: ReferencesConfig;
   /**
-   * Retired (docs/reference/specs/harness-pi.md item 1): the block a deployment
-   * set while record 0032's series moved the presets onto pi one at a time.
-   * There is one harness now, so the block selects nothing; it is still
-   * accepted — every value `pi`, every key a preset — so a config written
-   * during the series loads, and refused by name when a value says `native`,
-   * the loop that no longer exists. Remove it.
+   * Which harness each preset's runs are driven by (docs/reference/specs/harness.md
+   * item 8): a mapping of preset to a harness's name — `pi` or `opencode`, the
+   * roster's words, which are the names the harness objects declare. A preset
+   * the block does not name runs on pi; nothing defaults to OpenCode. A run
+   * keeps the harness it started on — its row's facts name it across restarts
+   * — so changing a preset's word moves the next run, never one in flight.
+   * Validated at load against the roster's names: any other word fails by
+   * name, as does a preset the registry does not know.
    */
-  harness?: Record<string, "pi">;
+  harness?: Record<string, HarnessName>;
   /**
    * What the harness writes into pi's per-run settings for every run on pi
    * (docs/reference/specs/harness-pi.md item 4): today the compaction
@@ -311,6 +325,13 @@ export interface AppConfig {
    * to before the block existed. Validated at load.
    */
   pi?: PiConfig;
+  /**
+   * What the harness writes into OpenCode's per-run configuration for every
+   * run on OpenCode (docs/reference/specs/harness.md item 8): the compaction
+   * thresholds under OpenCode's own words. Absent → OpenCode's own defaults.
+   * Validated at load like `pi`.
+   */
+  opencode?: OpenCodeConfig;
   /** Slack adapter behavior that is not pure transport. */
   slack?: SlackConfig;
   /**
