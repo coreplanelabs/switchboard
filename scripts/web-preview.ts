@@ -3,7 +3,15 @@ import { createServer } from "node:http";
 import { join } from "node:path";
 import { loadWebAssets } from "../src/channels/webAssets.js";
 import { makeShellRenderer, WEB_HTML_HEADERS } from "../src/channels/webShell.js";
-import type { PageSeed, RunIndexRowSeed, SettingsSeed, UnitRunRowSeed, UnitSeed } from "../src/channels/webSeed.js";
+import type {
+  HomeSeed,
+  HomeTurnSeed,
+  PageSeed,
+  RunIndexRowSeed,
+  SettingsSeed,
+  UnitRunRowSeed,
+  UnitSeed,
+} from "../src/channels/webSeed.js";
 import { parseAppConfigText } from "../src/config.js";
 import { installationSettings } from "../src/core/installationSettings.js";
 import { CLOUD_FULL } from "../src/core/testing/capabilityFixtures.js";
@@ -37,6 +45,11 @@ import { READING_DIFF_GIT, READING_DIFF_MEAT, READING_DIFF_SUMMARY } from "./web
 //   /runs/unit/plan-acme-3:U14   a unit whose review thread does not exist yet — the coding thread alone
 //   /runs/cond-1                a finished conductor listing the runs it spawned
 //   /runs/ship-1                the pipeline's own record listing its instance's units
+//   /chats                      the home page's empty state (docs/reference/specs/web-chat.md); `/` redirects here
+//   /chats/conv-1               a finished conversation of three runs, each folding open to its work
+//   /chats/conv-live            a conversation whose newest run is live (the scripted stream)
+//   POST /chats/<id>/send       202 → the live stream; "use …" → a hand-back; "help" → the inline catalogue;
+//                               a conversation with a run in flight → a steer ack
 //
 // SWITCHBOARD_PREVIEW_CAPABILITIES=minimal serves the same fixtures with every
 // optional capability off (the nav shrinks to Runs, no Scheduled tab, no docs).
@@ -1819,6 +1832,145 @@ function settingsSeed(pathname: string, search: string): SettingsSeed | null {
   };
 }
 
+// ---- the home page (docs/reference/specs/web-chat.md; record 0043) ---------------
+// A conversation is the runs of one `web:` thread. Each finished turn's replay
+// is a fixture stream shifted onto the turn's clock (as the unit page's rows
+// are), so its work folds open to the real shape; the live turn is the
+// scripted stream above. The seed's lists are what the bot would derive: the
+// onboarded repositories, the chat commands, the viewer's recent asks.
+const homeTurn = (
+  id: string,
+  receivedAt: number,
+  thread: "coding" | "review",
+  over: Partial<HomeTurnSeed> & Pick<HomeTurnSeed, "request">,
+): HomeTurnSeed => {
+  const review = thread === "review";
+  const deltaMs = receivedAt - (review ? REVIEW_RECEIVED_AT : RECEIVED_AT);
+  UNIT_REPLAYS.set(id, shiftStream(review ? REVIEW_STREAM : HIST_STREAM, deltaMs));
+  const finishedAt = (review ? REVIEW_FINISHED_AT : HIST_FINISHED_AT) + deltaMs;
+  return {
+    id,
+    agent: thread,
+    model: "anthropic/claude-fable-5",
+    channelId: "web:a1",
+    userId: "access:a1",
+    userName: "alice",
+    threadKey: "web:a1:conv-1",
+    channelVisibility: "dm",
+    finished: true,
+    startedAt: receivedAt + (review ? 0 : 5_000),
+    receivedAt,
+    finishedAt,
+    sealedAt: finishedAt + 1_200,
+    replyOk: true,
+    status: "completed",
+    eventCount: review ? REVIEW_STREAM.length : HIST_STREAM.length + 3,
+    stepCount: review ? 14 : 23,
+    schema: 2,
+    ...over,
+  };
+};
+const HOME_TURNS: HomeTurnSeed[] = [
+  homeTurn("home-r1", NOW - 52 * 60_000, "review", {
+    request: "review https://github.com/acme/api/pull/61 — the retry-queue change",
+    route: { preset: "review", reason: "a pull request link" },
+    answer:
+      "**LGTM:** the retry queue is sound. Two nits, both in the tests: the backoff table asserts wall-clock seconds (use the fake timer), and the `describe` titles repeat the file name.\n\nBoth left inline on the pull request.",
+  }),
+  homeTurn("home-r2", NOW - 31 * 60_000, "coding", {
+    request: "add retry logic to the webhook sender in acme/web, exponential backoff capped at five attempts",
+    route: { preset: "ship", reason: "an imperative to change code in a named repository" },
+    answer:
+      "Opened [acme/web#88](https://github.com/acme/web/pull/88): `sendWebhook` retries on 5xx and network errors with 250 ms to 4 s backoff, five attempts, then surfaces the last error. Tests cover the cap and the jitter bounds. Review round 1 approved; a person merges.",
+  }),
+  homeTurn("home-r3", NOW - 6 * 60_000, "review", {
+    request: "what did the last deploy change?",
+    agent: "general",
+    route: { preset: "general", reason: "a question about this installation's own history" },
+    answer:
+      "1.236.0 rolled 42 minutes ago with three changes: the settings cog in every header, the ship base-branch fix, and the coordinator sticky-agent fix. No migration, no config change.",
+    finishedAt: NOW - 6 * 60_000 + 21_000,
+    stepCount: 3,
+  }),
+];
+const HOME_CONVERSATIONS = [
+  {
+    id: "conv-1",
+    title: "review https://github.com/acme/api/pull/61 — the retry-queue…",
+    lastAt: NOW - 6 * 60_000 + 21_000,
+    runs: 3,
+    live: false,
+  },
+  { id: "conv-live", title: "re-review after the repush", lastAt: NOW - 252_000, runs: 2, live: true },
+  { id: "conv-2", title: "why did the deploy roll back?", lastAt: NOW - 26 * 3_600_000, runs: 1, live: false },
+  { id: "conv-3", title: "bump the SDK", lastAt: NOW - 29.5 * 86_400_000, runs: 1, live: false },
+];
+// What Switchboard does well, one chip each, and one that asks what it can do.
+const HOME_SUGGESTIONS = [
+  "review the open PR on acme/api",
+  "ship a fix for the flaky webhook test in acme/web",
+  "why did this morning's run fail?",
+  "set this channel's agent to review",
+  "connect an MCP server for Notion",
+  "What can Switchboard do?",
+];
+// The `/` palette's rows: the chat commands as the registry exposes them, in
+// chat form with each command's own `describe` (the bot derives this list).
+const HOME_COMMANDS = [
+  { chat: "help", describe: "What Switchboard can do, and how to ask" },
+  { chat: "help commands", describe: "Every command, with its arguments" },
+  { chat: "config show", describe: "The agent, model, effort and boundary a run here gets" },
+  { chat: "config set", describe: "Set a scope's agent, model, effort or boundary (channel, me)" },
+  { chat: "repo list", describe: "The repositories with a resident environment" },
+  { chat: "repo test", describe: "Run a repository's tests in its resident" },
+  { chat: "runs list", describe: "The runs you can see, live first" },
+  { chat: "runs stop", describe: "Stop a live run, softly or hard" },
+  { chat: "mcp list", describe: "The MCP servers your runs can reach, by tier" },
+  { chat: "mcp add", describe: "Add an MCP server to a tier" },
+  { chat: "memory recall", describe: "Search what Switchboard remembers" },
+  { chat: "memory remember", describe: "Save a fact for later runs" },
+];
+/** The conversations this preview answered a `202` to: their next message is a steer (the fixture's one live run never ends). */
+const LIVE_CONVERSATIONS = new Set<string>();
+const homeSeed = (conversation: string, turns: HomeTurnSeed[]): HomeSeed => ({
+  page: "home",
+  conversation,
+  turns,
+  conversations: HOME_CONVERSATIONS,
+  viewer: { name: "alice" },
+  sendUrl: `/chats/${conversation}/send`,
+  now: NOW,
+  retentionDays: 30,
+  suggestions: HOME_SUGGESTIONS,
+  commands: HOME_COMMANDS,
+});
+/** The live conversation: one finished turn, then the scripted live stream as its newest run. */
+const HOME_LIVE_TURNS: HomeTurnSeed[] = [
+  homeTurn("home-l1", NOW - 40 * 60_000, "review", {
+    request: "review https://github.com/acme/api/pull/61",
+    route: { preset: "review", reason: "a pull request link" },
+    answer:
+      "Two findings, one major: the retry queue drops a job when the process exits mid-backoff. Details on the pull request.",
+  }),
+  {
+    id: "live-1",
+    token: "tok-live-1",
+    request: "re-review after the repush",
+    route: { preset: "review", reason: "a re-review ask in a thread bound to a pull request" },
+    agent: "review",
+    model: "anthropic/claude-fable-5",
+    channelId: "web:a1",
+    userId: "access:a1",
+    userName: "alice",
+    threadKey: "web:a1:conv-live",
+    channelVisibility: "dm",
+    finished: false,
+    startedAt: NOW - 252_000,
+    receivedAt: NOW - 253_000,
+    eventCount: 17,
+  },
+];
+
 function page(
   pathname: string,
   all: boolean,
@@ -1865,6 +2017,9 @@ function page(
         units: SHIP_UNITS,
       },
     };
+  if (pathname === "/chats") return { title: "Switchboard", seed: homeSeed("conv-new", []) };
+  if (pathname === "/chats/conv-1") return { title: "Chats", seed: homeSeed("conv-1", HOME_TURNS) };
+  if (pathname === "/chats/conv-live") return { title: "(1) Chats", seed: homeSeed("conv-live", HOME_LIVE_TURNS) };
   if (pathname === "/runs")
     return {
       title: all ? "All runs" : "(2) Live runs",
@@ -2058,9 +2213,52 @@ createServer((req, res) => {
     res.end(JSON.stringify({ state: "stopping" }));
     return;
   }
+  // The web adapter's one route (record 0043), as the bot will answer it: a run
+  // started → 202 with the run's view path (the scripted live stream here); a
+  // message opening "use " → the front door's hand-back (record 0039); a message
+  // while conv-live's run is in flight → the steer acknowledgement, no run.
   if (url.pathname === "/") {
-    res.writeHead(302, { location: "/runs" });
+    // The bot's `/` redirects to the chat (record 0043, amended): one prefix for the Access rule.
+    res.writeHead(302, { location: "/chats" });
     res.end();
+    return;
+  }
+  const send = /^\/chats\/([^/]+)\/send$/.exec(url.pathname);
+  if (send && req.method === "POST") {
+    const conversation = decodeURIComponent(send[1]);
+    let raw = "";
+    req.on("data", (chunk: Buffer) => (raw += chunk.toString("utf8")));
+    req.on("end", () => {
+      let text = "";
+      try {
+        text = String((JSON.parse(raw) as { text?: unknown }).text ?? "");
+      } catch {
+        /* an empty body is an empty text */
+      }
+      const json = (status: number, body: unknown) => {
+        res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+        res.end(JSON.stringify(body));
+      };
+      if (text.trim() === "") return json(400, { error: "`text` is required and must be a non-empty string" });
+      if (/^use\b/i.test(text.trim()))
+        return json(200, { reply: "To run this: config set me --models.coding anthropic/claude-opus-5" });
+      // `help` is a fast-path command: an inline reply, no run (the bot's chat catalogue);
+      // the plain question routes to `general`, which answers from the self-description.
+      if (/^help\b/i.test(text.trim()) || /^what can switchboard do/i.test(text.trim()))
+        return json(200, {
+          reply:
+            "**Commands** — `help commands` lists every one.\n\n- `config show` · `config set channel|me …`\n- `repo list` · `repo test <owner/name>`\n- `runs list` · `runs stop <id>`\n- `mcp list` · `mcp add …`\n- `memory recall <words>`\n\nOr just say what you need: a review, an investigation, a change.",
+        });
+      // One live run per thread (thread-admission.md item 1): a conversation whose
+      // run this preview started, and conv-live, answer a second message with the steer.
+      if (conversation === "conv-live" || LIVE_CONVERSATIONS.has(conversation))
+        return json(200, {
+          reply:
+            "↪ Folded into the *review* run already in flight in this thread (4m 12s in) — it picks this up at its next step.",
+        });
+      LIVE_CONVERSATIONS.add(conversation);
+      return json(202, { runId: "live-1", viewPath: "/runs/live-1?t=tok-live-1", threadKey: `web:a1:${conversation}` });
+    });
     return;
   }
   // Phone-viewport harness (preview only): fixed-width iframes so responsive

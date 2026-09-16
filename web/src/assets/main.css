@@ -225,3 +225,247 @@
     cursor: pointer;
   }
 }
+
+/*
+ * The home page's motion (docs/reference/specs/web-chat.md, rules 1–6; record
+ * 0043). One vocabulary, four moves, each opacity plus at most 8px of travel
+ * between 120 and 200 ms on an ease-out curve — the only motion the chat adds
+ * to the system — and under prefers-reduced-motion every one of them keeps
+ * its opacity and drops its travel. Nothing here moves what the person did not
+ * cause: the pending row's pulse (`animate-pulse`) and the clocks tick on their
+ * own; everything else is a response to an arrival or a keypress.
+ *
+ *   sb-rise   a turn, a chip, a reply arriving: fades in and lifts 6px
+ *   sb-fade   a hint appearing or leaving: opacity alone
+ *   sb-move   the TransitionGroup move: the sent message travelling from the
+ *             composer's place to the transcript (rule 3, FLIP by Vue)
+ *   sb-stagger the empty state's chips: each 40 ms after the last (rule 7)
+ */
+.sb-rise-enter-active,
+.sb-rise-leave-active {
+  transition:
+    opacity 160ms ease-out,
+    transform 160ms ease-out;
+}
+.sb-rise-enter-from,
+.sb-rise-leave-to {
+  opacity: 0;
+  transform: translateY(6px);
+}
+.sb-fade-enter-active,
+.sb-fade-leave-active {
+  transition: opacity 120ms ease-out;
+}
+.sb-fade-enter-from,
+.sb-fade-leave-to {
+  opacity: 0;
+}
+.sb-move-move {
+  transition: transform 180ms ease-out;
+}
+.sb-stagger {
+  animation: sb-rise-in 160ms ease-out both;
+  animation-delay: calc(var(--sb-i, 0) * 40ms);
+}
+@keyframes sb-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+/* The mark draws its route once (rule 6): the green path and its three stops,
+   600 ms, then rests. */
+.mark-draw .route {
+  stroke-dasharray: 60;
+  stroke-dashoffset: 60;
+  animation: sb-route-draw 600ms ease-out 120ms forwards;
+}
+.mark-draw circle {
+  opacity: 0;
+  animation: sb-stop-in 200ms ease-out 560ms forwards;
+}
+@keyframes sb-route-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+@keyframes sb-stop-in {
+  to {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sb-rise-enter-active,
+  .sb-rise-leave-active {
+    transition: opacity 160ms ease-out;
+  }
+  .sb-rise-enter-from,
+  .sb-rise-leave-to,
+  .sb-stagger {
+    transform: none;
+  }
+  .sb-move-move {
+    transition: none;
+  }
+  .sb-stagger {
+    animation-name: sb-fade-in;
+  }
+  .mark-draw .route {
+    stroke-dasharray: none;
+    stroke-dashoffset: 0;
+    animation: none;
+  }
+  .mark-draw circle {
+    opacity: 1;
+    animation: none;
+  }
+}
+@keyframes sb-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/*
+ * The composer's ring sweep (web-chat.md rule 8): on focus, and once as the
+ * page lands, a light travels one turn around the box's hairline — a rotating
+ * conic gradient masked to a 1px ring, 700 ms, then gone. Nothing moves; the
+ * ring is the only thing that changes. The second and last exception to the
+ * 8px rule, beside the mark's draw. Off under prefers-reduced-motion.
+ */
+@property --sb-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+.ring::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  background: conic-gradient(
+    from var(--sb-angle),
+    transparent 0deg,
+    transparent 250deg,
+    var(--ui-primary) 320deg,
+    transparent 360deg
+  );
+  -webkit-mask:
+    linear-gradient(black 0 0) content-box,
+    linear-gradient(black 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(black 0 0) content-box,
+    linear-gradient(black 0 0);
+  mask-composite: exclude;
+  opacity: 0;
+  pointer-events: none;
+}
+.ring-sweep::before {
+  animation: sb-ring-sweep 700ms ease-out forwards;
+}
+@keyframes sb-ring-sweep {
+  0% {
+    --sb-angle: 0deg;
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+  }
+  85% {
+    opacity: 1;
+  }
+  100% {
+    --sb-angle: 360deg;
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ring-sweep::before {
+    animation: none;
+  }
+}
+
+/*
+ * The mark's life (web-chat.md rule 6). `mark-idle`: a slow float, the way a
+ * resting thing breathes — 1px of travel over 4.6 s, borrowed from the sibling
+ * product's companion. `mark-pulse`: a bright dash travels the route once on
+ * every send (700 ms) — the message entering the top plane and reaching the
+ * lanes, which is the mark's story and the thing the page just did. Both off
+ * under prefers-reduced-motion.
+ */
+.mark-idle {
+  animation: sb-mark-float 4.6s ease-in-out infinite;
+}
+@keyframes sb-mark-float {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    transform: translateY(-1px) scale(1.02);
+  }
+}
+.mark .pulse {
+  stroke-dasharray: 6 60;
+  stroke-dashoffset: 6;
+  opacity: 0;
+  stroke-width: 2.5;
+}
+.mark-pulse .pulse {
+  animation: sb-mark-pulse 700ms ease-in-out forwards;
+}
+@keyframes sb-mark-pulse {
+  0% {
+    stroke-dashoffset: 6;
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  90% {
+    opacity: 1;
+  }
+  100% {
+    stroke-dashoffset: -40;
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mark-idle,
+  .mark-pulse .pulse {
+    animation: none;
+  }
+}
+
+/*
+ * Touch (web-chat.md item 7): where the pointer is a finger, every control on
+ * the chat page is at least 44px tall — the chips, the rail's rows and its
+ * filter, the palette's rows, the composer's control — and the hover lifts are
+ * off, since there is no hover. Layout, not motion: outside the motion rule.
+ */
+@media (pointer: coarse) {
+  .chip,
+  .rail .row,
+  .rail .new,
+  .rail .filter,
+  .palette .item {
+    min-height: 2.75rem;
+  }
+  .composer .control {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
+  .chip:hover,
+  .rail .new:hover {
+    transform: none;
+  }
+}
