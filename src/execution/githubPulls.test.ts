@@ -424,6 +424,39 @@ describe("githubPulls", () => {
       expect(absent && "autoMergeEnabled" in absent).toBe(false);
     });
 
+    it("mergeable and mergeable_state ride the facts — null mergeable means still computing, both absent when the fields are missing (agent-ship item 9)", async () => {
+      stubToken();
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          async () =>
+            new Response(JSON.stringify({ ...openPr, mergeable: false, mergeable_state: "dirty" }), { status: 200 }),
+        ),
+      );
+      const dirty = await fetchPullRequestFacts({ repo: "acme/api", number: 7 });
+      expect(dirty?.mergeable).toBe(false);
+      expect(dirty?.mergeableState).toBe("dirty");
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          async () =>
+            new Response(JSON.stringify({ ...openPr, mergeable: null, mergeable_state: "unknown" }), { status: 200 }),
+        ),
+      );
+      const computing = await fetchPullRequestFacts({ repo: "acme/api", number: 7 });
+      expect(computing?.mergeable).toBeNull();
+      expect(computing?.mergeableState).toBe("unknown");
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(JSON.stringify(openPr), { status: 200 })),
+      );
+      const absent = await fetchPullRequestFacts({ repo: "acme/api", number: 7 });
+      expect(absent && "mergeable" in absent).toBe(false);
+      expect(absent && "mergeableState" in absent).toBe(false);
+    });
+
     // The coordinator's `read-record` asks whether the bot's own verdict stands
     // on the pull request at the reviewed head (agent-ship.md item 9).
     it("fetchPullRequestReviews lists the reviews with author, state, pinned head and body; a failed fetch or a non-list answer is undefined, never a throw", async () => {

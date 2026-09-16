@@ -1359,6 +1359,14 @@ async function merge(
     return refused(
       `the head of ${where} moved: \`${facts.headSha?.slice(0, 7) ?? "?"}\` is not the approved \`${headSha.slice(0, 7)}\``,
     );
+  // A conflicting pull request is refused at once, BEFORE the checks are read
+  // (spec item 9): zero checks stays pending only on a mergeable pull request.
+  // The refusal names the pull request's own base — a stacked unit rebases
+  // onto its parent, not onto the default branch.
+  if (facts.mergeableState === "dirty")
+    return refused(
+      `${where} conflicts with \`${facts.baseRef ?? "its base"}\` at \`${headSha.slice(0, 7)}\`, rebase and re-issue`,
+    );
   const approved = await reviewPostedAt(deps, pr, "approve", headSha);
   if (approved === undefined)
     return json(502, {

@@ -338,6 +338,13 @@ export interface PullRequestFacts {
    *  absent when the response did not carry the field. Named at entry and at
    *  the approved head (spec item 9), never refused. */
   autoMergeEnabled?: boolean;
+  /** GitHub's own `mergeable`: true/false once computed, null while GitHub is
+   *  still computing it; absent when the response did not carry the field. */
+  mergeable?: boolean | null;
+  /** GitHub's `mergeable_state` (e.g. `clean`, `dirty`, `unknown`) — `dirty`
+   *  is a conflict with the base, refused at the merge door before the checks
+   *  are read (spec item 9). */
+  mergeableState?: string;
 }
 
 /**
@@ -433,6 +440,8 @@ export async function fetchPullRequestFacts(pr: {
     head?: { ref?: unknown; sha?: unknown; repo?: { full_name?: unknown } };
     base?: { ref?: unknown };
     auto_merge?: unknown;
+    mergeable?: unknown;
+    mergeable_state?: unknown;
   } | null;
   if (!data || (data.state !== "open" && data.state !== "closed")) return undefined;
   const headRepo = typeof data.head?.repo?.full_name === "string" ? data.head.repo.full_name.toLowerCase() : undefined;
@@ -463,6 +472,10 @@ export async function fetchPullRequestFacts(pr: {
     ...(typeof data.html_url === "string" ? { htmlUrl: data.html_url } : {}),
     ...(typeof data.title === "string" && data.title ? { title: data.title } : {}),
     ...("auto_merge" in data ? { autoMergeEnabled: data.auto_merge !== null } : {}),
+    ...("mergeable" in data ? { mergeable: data.mergeable === null ? null : data.mergeable === true } : {}),
+    ...(typeof data.mergeable_state === "string" && data.mergeable_state
+      ? { mergeableState: data.mergeable_state }
+      : {}),
   };
 }
 
