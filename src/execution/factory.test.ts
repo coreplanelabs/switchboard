@@ -1138,3 +1138,190 @@ describe("the workspace binding on the row", () => {
     expect(workspaceBindingOf("resident")).toBeUndefined();
   });
 });
+
+// Feature: docs/reference/specs/execution.md item 26 — a repository whose
+// resident cannot take the run, but whose probe carried the snapshot handle,
+// gets a sandbox seeded from that snapshot before the run's first command:
+// one POST /seed with the thread's ref and head riding along, the seeded
+// facts on the selection, the reason and the seed on the note. A handle whose
+// objects are gone is retried once with a fresh probe; any other refusal, or
+// a resident with nothing to seed from, is the cold path as before.
+describe("makeExecutor seeded sandbox", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    resetResidentProbeCache();
+  });
+
+  const residentOpts = (): ExecutorFactoryOptions => ({
+    execution: {
+      type: "cloudflare",
+      url: "https://sandbox.example",
+      resident: { baseUrl: "https://resident.example" },
+    },
+    ...dirs(),
+  });
+  const repoCtx = () => ({ ...ctxOf(AGENTS.coding), repo: "jshttp/vary", ref: "master" });
+  const stubEnvs = () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+  };
+  function stubFetch(...responses: Array<{ status?: number; body?: unknown; reject?: string }>) {
+    const calls: string[] = [];
+    const bodies: Array<Record<string, unknown> | undefined> = [];
+    const fn = vi.fn(async (url: unknown, init?: RequestInit) => {
+      calls.push(new URL(String(url)).pathname);
+      bodies.push(init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined);
+      const next = responses.shift();
+      if (!next) throw new Error(`unexpected fetch: ${String(url)}`);
+      if (next.reject) throw new TypeError(next.reject);
+      return new Response(JSON.stringify(next.body ?? {}), { status: next.status ?? 200 });
+    });
+    vi.stubGlobal("fetch", fn);
+    return { fn, calls, bodies };
+  }
+  const SHA = "0123456789abcdef0123456789abcdef01234567";
+  const HEAD = "89abcdef0123456789abcdef0123456789abcdef";
+  const snapshot = (checkoutBackupId: string) => ({
+    ref: "master",
+    sha: SHA,
+    lockfileHash: "l",
+    createdAt: "t",
+    mirrorBackupId: "11111111-1111-1111-1111-111111111111",
+    checkoutBackupId,
+    depsBackupId: "dddddddd-dddd-dddd-dddd-dddddddddddd",
+  });
+  const C1 = "3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b";
+  const C2 = "9999aaaa-bbbb-cccc-dddd-eeeeffff0000";
+  const degraded = (id: string) => ({
+    body: { state: "degraded", reason: "disk-pressure: need 2.1 GiB", snapshot: snapshot(id) },
+  });
+  const seededAnswer = (id: string) => ({
+    body: {
+      seeded: true,
+      cached: false,
+      slug: "jshttp/vary",
+      ref: "master",
+      sha: HEAD,
+      from: { ref: "master", sha: SHA, checkoutBackupId: id },
+      steps: { restore: 18_000, deps: 9_000, fixup: 3_000 },
+      ms: 30_500,
+    },
+  });
+
+  it("a refused resident with a snapshot → one POST /seed with the thread's ref, the seeded facts on the selection, the reason and the seed on the note", async () => {
+    stubEnvs();
+    const { calls, bodies } = stubFetch(degraded(C1), seededAnswer(C1));
+    const sel = await makeExecutor(residentOpts(), repoCtx());
+    expect(sel.executor).toBeInstanceOf(CloudflareSandboxExecutor);
+    expect(calls).toEqual(["/status", "/seed"]);
+    expect(bodies[1]?.seed).toEqual({
+      slug: "jshttp/vary",
+      checkoutBackupId: C1,
+      depsBackupId: "dddddddd-dddd-dddd-dddd-dddddddddddd",
+      ref: "master",
+      sha: SHA,
+      fetchRef: "master",
+    });
+    expect(sel.backend).toBe("sandbox");
+    expect(sel.resident).toBeFalsy();
+    expect(sel.seeded).toEqual({
+      slug: "jshttp/vary",
+      ref: "master",
+      sha: HEAD,
+      workspace: "/workspace/checkout",
+      cached: false,
+      ms: 30_500,
+    });
+    expect(sel.note).toBe(
+      `resident degraded (disk-pressure: need 2.1 GiB) — seeded sandbox · from resident snapshot · jshttp/vary · master@${HEAD.slice(0, 7)}`,
+    );
+  });
+
+  it("the thread's resolved head rides along as fetchSha", async () => {
+    stubEnvs();
+    const { bodies } = stubFetch(degraded(C1), seededAnswer(C1));
+    await makeExecutor(residentOpts(), { ...repoCtx(), headSha: HEAD });
+    expect(bodies[1]?.seed).toMatchObject({ fetchRef: "master", fetchSha: HEAD });
+  });
+
+  it("a handle whose objects are gone → one fresh probe; a newer handle is seeded from, the same handle sends the run cold", async () => {
+    stubEnvs();
+    const missing = {
+      body: { seeded: false, reason: "seed-missing", detail: "restore: Backup not found", step: "restore" },
+    };
+    const { calls, bodies } = stubFetch(degraded(C1), missing, degraded(C2), seededAnswer(C2));
+    const sel = await makeExecutor(residentOpts(), repoCtx());
+    expect(calls).toEqual(["/status", "/seed", "/status", "/seed"]);
+    expect(bodies[3]?.seed).toMatchObject({ checkoutBackupId: C2, fetchRef: "master" });
+    expect(sel.seeded).toMatchObject({ slug: "jshttp/vary" });
+
+    resetResidentProbeCache();
+    const again = stubFetch(degraded(C1), missing, degraded(C1));
+    const cold = await makeExecutor(residentOpts(), repoCtx());
+    expect(again.calls).toEqual(["/status", "/seed", "/status"]);
+    expect(cold.seeded).toBeUndefined();
+    expect(cold.note).toBe(
+      "resident degraded (disk-pressure: need 2.1 GiB) — using fresh sandbox (seed missing (restore: Backup not found) and the resident published no newer handle)",
+    );
+  });
+
+  it("a failed or unconfigured seed is never retried: the cold path, the refusal on the note", async () => {
+    stubEnvs();
+    const { calls } = stubFetch(degraded(C1), {
+      body: { seeded: false, reason: "seed-failed", detail: "fixup: fix-up exited 128", step: "fixup" },
+    });
+    const sel = await makeExecutor(residentOpts(), repoCtx());
+    expect(calls).toEqual(["/status", "/seed"]);
+    expect(sel.executor).toBeInstanceOf(CloudflareSandboxExecutor);
+    expect(sel.seeded).toBeUndefined();
+    expect(sel.note).toBe(
+      "resident degraded (disk-pressure: need 2.1 GiB) — using fresh sandbox (seed failed (fixup: fix-up exited 128))",
+    );
+  });
+
+  it("a Worker without /seed (an older release answers 404) sends the run cold with the reason — never a dead run", async () => {
+    stubEnvs();
+    stubFetch(
+      degraded(C1),
+      { status: 404, body: { error: "unknown route" } },
+      { status: 404, body: { error: "unknown route" } },
+      { status: 404, body: { error: "unknown route" } },
+      { status: 404, body: { error: "unknown route" } },
+    );
+    const sel = await makeExecutor(residentOpts(), repoCtx());
+    expect(sel.executor).toBeInstanceOf(CloudflareSandboxExecutor);
+    expect(sel.seeded).toBeUndefined();
+    expect(sel.note).toMatch(
+      /^resident degraded \(disk-pressure: need 2.1 GiB\) — using fresh sandbox \(seed failed \(/,
+    );
+  });
+
+  it("nothing to seed from: a probe without a snapshot, an unreachable resident, a repository not onboarded — the cold path, no /seed", async () => {
+    stubEnvs();
+    const noSnapshot = stubFetch({ body: { state: "restoring", reason: "rehydrating", snapshot: null } });
+    const a = await makeExecutor(residentOpts(), repoCtx());
+    expect(noSnapshot.calls).toEqual(["/status"]);
+    expect(a.note).toBe("resident restoring (rehydrating) — using fresh sandbox");
+    expect(a.seeded).toBeUndefined();
+
+    resetResidentProbeCache();
+    const gone = stubFetch({ status: 404, body: { error: "unknown resource" } });
+    const b = await makeExecutor(residentOpts(), repoCtx());
+    expect(gone.calls).toEqual(["/status"]);
+    expect(b.note).toMatch(/^repo not onboarded as a resident/);
+  });
+
+  it("a local execution type seeds nothing: the resident's handle needs a sandbox Worker", async () => {
+    stubEnvs();
+    const { calls } = stubFetch(degraded(C1));
+    const sel = await makeExecutor(
+      { execution: { type: "local", resident: { baseUrl: "https://resident.example" } }, ...dirs() },
+      repoCtx(),
+    );
+    expect(calls).toEqual(["/status"]);
+    expect(sel.executor).toBeInstanceOf(LocalExecutor);
+    expect(sel.seeded).toBeUndefined();
+  });
+});

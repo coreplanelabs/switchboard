@@ -287,6 +287,9 @@ export function makeSystemComposer(input: {
   repo: string | undefined;
   /** The attached worktree path, when the attach answered one. */
   workspace: string | undefined;
+  /** The sandbox was seeded from the resident's snapshot (execution.md item 26):
+   *  swaps in the agent's seeded variant, naming the checkout. Never with `resident`. */
+  seeded?: { workspace: string } | undefined;
   /** Set for a PR review round: the REVIEW TARGET block's coordinates. */
   prTarget:
     { repo: string; pr: number; ref: string | undefined; baseRef: string | undefined; size?: PrSize } | undefined;
@@ -311,13 +314,20 @@ export function makeSystemComposer(input: {
     mcp?: string | undefined;
   };
 }): (head: HeadPin) => string {
-  const { agent, resident, workspace, prTarget, blocks } = input;
+  const { agent, resident, workspace, prTarget, blocks, seeded } = input;
   const residentSystem =
     resident && agent.residentSystem
       ? `${agent.residentSystem}\n\nTarget repository: ${input.repo}. ` +
         (workspace
           ? `Your shell starts in the worktree \`${workspace}\` on every bash call; it is already on this thread's bound branch (confirm with \`git branch --show-current\` from there — no \`cd\`).`
           : "The worktree is already on this thread's bound branch (confirm with `git branch --show-current`).")
+      : undefined;
+  // The seeded variant names the checkout the seed left, the way the resident
+  // variant names its worktree; a run that is both is impossible (a seed
+  // happens only when no resident took the run), and resident wins if it were.
+  const seededSystem =
+    !resident && seeded && agent.seededSystem
+      ? `${agent.seededSystem}\n\nTarget repository: ${input.repo}. The repository is checked out at \`${seeded.workspace}\`; your shell starts in \`/workspace\`, so \`cd ${seeded.workspace}\` first (confirm the branch with \`git branch --show-current\` there).`
       : undefined;
   const targetBlock = (head: HeadPin): string | undefined =>
     prTarget
@@ -330,6 +340,7 @@ export function makeSystemComposer(input: {
           ...(prTarget.size ? { size: prTarget.size } : {}),
           resident,
           ...(workspace ? { workspace } : {}),
+          ...(!resident && seeded ? { seeded: { workspace: seeded.workspace } } : {}),
           ...(head.verified ? { verifiedAtAttach: true } : {}),
         })
       : undefined;
@@ -339,7 +350,13 @@ export function makeSystemComposer(input: {
     // skills, then the external MCP servers (docs/reference/specs/mcp-tools.md item 9)
     // — both are about the agent's tools, not advisory context like the
     // memory block up front.
-    return [residentSystem ?? agent.system, targetBlock(head), input.contract, blocks.skills, blocks.mcp]
+    return [
+      residentSystem ?? seededSystem ?? agent.system,
+      targetBlock(head),
+      input.contract,
+      blocks.skills,
+      blocks.mcp,
+    ]
       .filter((b): b is string => Boolean(b))
       .join("\n\n");
   };

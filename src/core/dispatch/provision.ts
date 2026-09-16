@@ -944,7 +944,7 @@ export async function composePrompt(deps: ProvisionDeps, ctx: PromptContext): Pr
     resume,
     root,
   } = ctx;
-  const { resident, binding } = selection;
+  const { resident, binding, seeded } = selection;
   // Progressive disclosure: the calling agent's scoped skill
   // name+description list trails the agent's own instructions (it is
   // guidance about the agent's tools, not advisory context like the memory
@@ -1041,6 +1041,7 @@ export async function composePrompt(deps: ProvisionDeps, ctx: PromptContext): Pr
     resident: resident === true,
     repo: repoCtx.repo,
     workspace: binding?.workspace,
+    ...(seeded ? { seeded: { workspace: seeded.workspace } } : {}),
     prTarget:
       isPrReview && repoCtx.repo && repoCtx.pr !== undefined
         ? {

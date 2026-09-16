@@ -45,6 +45,7 @@ flowchart TB
     RUN <-->|"complete"| A & O
     RUN <-->|"bash · read · write"| LX & EX & RX
     RX -->|"bearer"| RW
+    EX -.->|"seed: the snapshot, restored from R2"| RW
     D -->|"memory · run record after the reply · overrides"| SW
     CR -.->|"reads"| SW
 ```
@@ -77,7 +78,8 @@ flowchart TB
     SDO -->|"git push · GH_TOKEN in the sandbox"| GH
 ```
 
-- **The bot holds no repository-write credential** once execution is sandboxed or resident; the Worker doing the checkout holds it, per repository and per attach ([Execution and trust](execution-and-trust.md)).
+- **The bot holds no long-lived repository credential.** On the resident path the resident mints its own, per repository and per attach; on the sandbox path the bot mints a short-lived, toolset-scoped installation token per call and forwards it in the command's body — the sandbox Worker stores nothing ([Execution and trust](execution-and-trust.md)).
+- **A cold sandbox is seeded from the resident's snapshot** when the resident cannot take a run: the bot forwards the handle its `/status` probe carried, and the sandbox Worker restores the checkout and its dependency view from the resident's R2 bucket before the run's first command, so the run starts where a resident's would ([execution items 25–26](../reference/specs/execution.md)). A repository with no resident, or a resident with no snapshot yet, runs cold as before.
 - **The resident's GitHub credential is a second domain**: its own App key and its own short-lived tokens, unaffected by rotating the bot's ([decision 0009](../decisions/0009-residents-second-credential-domain.md)).
 - **The state Worker makes bot restarts free.** Conversation context rebuilds from Slack; everything else durable lives here, so a redeploy keeps runs in flight.
 - **A resident redeploy is different**: it swaps the isolate under active threads, so it is preflighted and refuses while work is in flight ([Operate production](../how-to/operate-production.md)).

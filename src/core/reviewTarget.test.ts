@@ -110,3 +110,25 @@ describe("reviewTargetBlock", () => {
     expect(reviewTargetBlock({ ...full, resident: true })).toBe(reviewTargetBlock({ ...full, resident: true }));
   });
 });
+
+// docs/reference/specs/execution.md item 26: the seeded sandbox path — the
+// checkout is already at the head at a named path; no clone, the same HEAD check.
+describe("reviewTargetBlock — the seeded sandbox", () => {
+  const t = { repo: "acme/api", pr: 42, ref: "patch-1", headSha: "e".repeat(40), baseRef: "main", resident: false };
+  it("names the seeded checkout, forbids a second clone, pins the first command to the HEAD check there, and diffs against the base already present", () => {
+    const block = reviewTargetBlock({ ...t, seeded: { workspace: "/workspace/checkout" } });
+    expect(block).toContain("already checked out at `/workspace/checkout`");
+    expect(block).toContain("do not clone it again");
+    expect(block).toContain("cd /workspace/checkout");
+    expect(block).toMatch(/FIRST command there: `git rev-parse HEAD` — it must equal the head commit above/);
+    expect(block).toContain("`origin/main` is already present in the checkout");
+    expect(block).not.toContain("gh pr checkout");
+    expect(block).not.toContain("worktree");
+  });
+  it("without a head commit the seeded branch asks for the HEAD and carries it, no STOP rule", () => {
+    const { headSha: _h, ...noHead } = t;
+    const block = reviewTargetBlock({ ...noHead, seeded: { workspace: "/workspace/checkout" } });
+    expect(block).toContain("carry that value through to your verdict");
+    expect(block).not.toContain("STOP");
+  });
+});
