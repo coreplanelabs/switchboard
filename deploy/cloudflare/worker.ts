@@ -47,6 +47,7 @@ import { systemClock } from "../../src/core/trace/clock.ts";
 import { createTracer } from "../../src/core/trace/tracer.ts";
 import { shimRoute, stripTraceContext, withTraceContext, workerLogSink } from "../../src/core/trace/workerTrace.ts";
 import { COPY_PATH, handleArtifactsCopy } from "./artifactsCopy.ts";
+import { withKnownLength } from "./knownLength.ts";
 import type { ShipCoordinatorParams } from "./coordinator";
 import { INSTANCE, INTERNAL } from "./shared";
 
@@ -414,6 +415,13 @@ async function recordFiring(env: Env, firing: ScheduleFiring): Promise<void> {
   if (!res.ok) console.error(`[schedule] ${firing.schedule}: recording the firing failed — ${res.reason}`);
 }
 
+/** The container's answer with the length it named declared to the runtime
+ *  (knownLength.ts): live, a whole-object artifact `200` lost its
+ *  `Content-Length` between the container and the browser while the `206`s
+ *  kept theirs, and a player that falls back to a plain read of a stream it
+ *  cannot size never finds an index at the end of the file. */
+const withLength = (res: Response): Response => withKnownLength(res, (size) => new FixedLengthStream(size));
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const pathname = new URL(request.url).pathname;
@@ -425,7 +433,7 @@ export default {
     // authorize call below); a caller cannot be allowed to speak it.
     const inbound = stripRestartSubject(stripTraceContext(request));
     const route = shimRoute(pathname);
-    if (route === undefined) return getContainer(env.SWITCHBOARD, INSTANCE).fetch(inbound);
+    if (route === undefined) return withLength(await getContainer(env.SWITCHBOARD, INSTANCE).fetch(inbound));
     const root = tracer.start("bot-shim.fetch", { sinks: traceSinks, attrs: { route } });
     try {
       const forwarded = withTraceContext(inbound, root);
@@ -454,7 +462,7 @@ export default {
                     fetch: (input, init) => fetch(input, init),
                     lengthPipe: (size) => new FixedLengthStream(size),
                   })
-                : await getContainer(env.SWITCHBOARD, INSTANCE).fetch(forwarded);
+                : withLength(await getContainer(env.SWITCHBOARD, INSTANCE).fetch(forwarded));
       root.end(res.status >= 500 ? "error" : "ok", { httpStatus: res.status });
       return res;
     } catch (err) {
