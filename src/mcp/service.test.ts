@@ -48,6 +48,7 @@ function harness(
     key?: boolean;
     publicBaseUrl?: string;
     email?: Record<string, string>;
+    names?: Record<string, string>;
     rejectTokens?: string[];
     serverDown?: boolean;
     env?: Record<string, string>;
@@ -76,6 +77,7 @@ function harness(
     ...(opts.fetch === false ? {} : { fetch: as.fetch }),
     bearers: secretsFrom(opts.env ?? { MCP_GITHUB_TOKEN: "ghp_static" }),
     resolveEmail: opts.email ? async (id) => opts.email![id] : undefined,
+    resolveName: opts.names ? async (id) => opts.names![id] : undefined,
     now: () => t,
     nonce: () => `nonce-${String(++n).padStart(20, "0")}`,
     factory: (spec) => {
@@ -835,5 +837,125 @@ describe("McpService — the connect follow-up (item 19)", () => {
     const t = (await cold.secrets.getTicket(NONCE1))!;
     await cold.secrets.putTicket({ ...t, state: "cancelled" });
     expect(await cold.service.awaitTicket(NONCE1, noSleep)).toEqual({ kind: "cancelled" });
+  });
+});
+
+describe("McpService — record 0042: every tier for an admin, promotion by re-issue, the session's email on a ticket", () => {
+  it("listAll walks the org, every channel and every user (static and runtime) for an admin, names addedBy when the lookup answers, and refuses everyone else", async () => {
+    const h = harness({ names: { "slack:UALICE": "Alice" } });
+    await h.service.add(alice, ME(alice), { name: "vanta", url: "https://mcp.vanta.com/mcp", auth: "none" });
+    await h.service.add(bob, ME(bob), { name: "secretive", url: "https://s.example/mcp", auth: "none" });
+    await h.service.add(alice, CH("slack:COTHER"), { name: "hub", url: "https://hub.example/mcp", auth: "none" });
+    const all = await h.service.listAll(admin);
+    expect(all.map((s) => `${s.scopeKey}/${s.name}`)).toEqual([
+      "org/github",
+      "channel:slack:COTHER/hub",
+      "channel:slack:CSTATIC/notion",
+      "channel:slack:CSTATIC/compliance",
+      "user:slack:UALICE/vanta",
+      "user:slack:UBOB/secretive",
+    ]);
+    expect(all.find((s) => s.name === "vanta")).toMatchObject({ addedBy: "slack:UALICE", addedByName: "Alice" });
+    expect(all.find((s) => s.name === "secretive")).toMatchObject({ addedBy: "slack:UBOB" });
+    expect(all.find((s) => s.name === "secretive")?.addedByName).toBeUndefined(); // no name resolved → the id stands
+    expect(await code(h.service.listAll(alice))).toBe("unauthorized");
+    expect(await code(h.service.listAll(bob))).toBe("unauthorized");
+    // The plain list is unchanged in shape and still never shows another user's tier.
+    expect((await h.service.list(bob, "slack:COTHER")).map((s) => s.name)).toEqual(["github", "hub", "secretive"]);
+  });
+
+  it("promote copies a person's runtime entry into the org tier — same name, url and auth, addedBy the admin, promotedFrom the person — never touching their credential; bearer/oauth mint a fresh ORG ticket; the personal entry stays and is shadowed", async () => {
+    const h = harness({ email: { "slack:UADMIN": "admin@example.com" } });
+    const added = await h.service.add(alice, ME(alice), {
+      name: "vanta",
+      url: "https://mcp.vanta.com/mcp",
+      auth: "bearer",
+    });
+    // Alice completes her own connect: her sealed credential lives under user:slack:UALICE/vanta.
+    const nonce = added.connectUrl!.slice(added.connectUrl!.lastIndexOf("/") + 1);
+    await h.service.openTicket(nonce, { sub: "cf-alice", email: "alice@example.com" });
+    await h.service.completeTicket(nonce, { sub: "cf-alice", email: "alice@example.com" }, "alice-secret-token");
+    const before = await h.secrets.getCredential("user:slack:UALICE/vanta");
+    expect(before).not.toBeNull();
+
+    const promoted = await h.service.promote(admin, "vanta", "slack:UALICE");
+    expect(promoted.server).toMatchObject({
+      name: "vanta",
+      scope: "org",
+      scopeKey: "org",
+      auth: "bearer",
+      state: "awaiting_credential",
+      addedBy: "slack:UADMIN",
+      promotedFrom: "slack:UALICE",
+    });
+    expect(promoted.promotedFrom).toBe("slack:UALICE");
+    expect(promoted.connectUrl).toMatch(/\/mcp\/connect\/nonce-/);
+    expect(h.backing.document?.org?.mcpServers?.vanta).toMatchObject({
+      url: "https://mcp.vanta.com/mcp",
+      auth: "bearer",
+      agents: ["general", "research"],
+      addedBy: "slack:UADMIN",
+      promotedFrom: "slack:UALICE",
+    });
+    // Never a credential moved: the org has none, alice's is byte-identical.
+    expect(await h.secrets.getCredential("org/vanta")).toBeNull();
+    expect(await h.secrets.getCredential("user:slack:UALICE/vanta")).toEqual(before);
+    // The org ticket is the admin's: bound to their email, for the org credential key.
+    const orgNonce = promoted.connectUrl!.slice(promoted.connectUrl!.lastIndexOf("/") + 1);
+    expect(await h.secrets.getTicket(orgNonce)).toMatchObject({
+      serverId: "org/vanta",
+      requesterId: "slack:UADMIN",
+      requesterEmail: "admin@example.com",
+      state: "pending",
+    });
+    // The personal entry stays and the run-time view marks it shadowed by the org.
+    expect(h.backing.document?.users["slack:UALICE"]?.mcpServers?.vanta).toBeDefined();
+    const forAlice = h.config.mcpServersFor("slack:COTHER", "slack:UALICE").filter((r) => r.name === "vanta");
+    expect(forAlice.map((r) => `${r.kind}:${r.shadowedBy ?? "-"}`)).toEqual(["org:-", "user:org"]);
+  });
+
+  it("promote refusals: not an admin; no such personal server; the org already holds the name; a pinned personal entry; agents widened only when the admin asks, under the org's rule", async () => {
+    const h = harness();
+    await h.service.add(alice, ME(alice), { name: "vanta", url: "https://mcp.vanta.com/mcp", auth: "none" });
+    expect(await code(h.service.promote(alice, "vanta", "slack:UALICE"))).toBe("unauthorized");
+    expect(await code(h.service.promote(admin, "nope", "slack:UALICE"))).toBe("not_found");
+    expect(await code(h.service.promote(admin, "vanta", "slack:UBOB"))).toBe("not_found");
+    expect(await code(h.service.promote(admin, "github", "slack:UALICE"))).toBe("not_found"); // org-only name, not alice's
+    // Widened agents: the org may name coding; an unknown agent is refused before anything is written.
+    expect(await code(h.service.promote(admin, "vanta", "slack:UALICE", { agents: ["general", "bogus"] }))).toBe(
+      "invalid_input",
+    );
+    expect(h.backing.document?.org?.mcpServers?.vanta).toBeUndefined();
+    const done = await h.service.promote(admin, "vanta", "slack:UALICE", { agents: ["general", "coding"] });
+    expect(done.server.agents).toEqual(["general", "coding"]);
+    expect(done.connectUrl).toBeUndefined(); // auth none: promoted and connected at once
+    expect(done.server.state).toBe("connected");
+    // Now the org holds the name: promoting again (or adding it) conflicts.
+    expect(await code(h.service.promote(admin, "vanta", "slack:UALICE"))).toBe("conflict");
+    // A personal entry pinned in config.yaml is not the service's to move.
+    const pinned = harness({
+      yaml:
+        YAML +
+        `users:\n  "slack:UALICE":\n    mcpServers:\n      pinned: { url: "https://p.example/mcp", auth: none }\n`,
+    });
+    expect(await code(pinned.service.promote(admin, "pinned", "slack:UALICE"))).toBe("conflict");
+  });
+
+  it("a ticket minted by an actor carrying its session email binds to that email, linked or not — before any lookup by id", async () => {
+    const h = harness({ email: { "access:sub-9": "looked-up@example.com" } });
+    const session: McpActor = {
+      id: "access:sub-9",
+      email: "At-Keyboard@Example.com",
+      orgAdmin: true,
+      channelAdmin: true,
+    };
+    const r = await h.service.add(session, ORG, { name: "vanta", url: "https://mcp.vanta.com/mcp", auth: "bearer" });
+    const nonce = r.connectUrl!.slice(r.connectUrl!.lastIndexOf("/") + 1);
+    expect(await h.secrets.getTicket(nonce)).toMatchObject({ requesterEmail: "at-keyboard@example.com" });
+    // Without a session email the lookup by id decides, as before.
+    const chatty: McpActor = { id: "access:sub-9", orgAdmin: true, channelAdmin: true };
+    const r2 = await h.service.connect(chatty, ORG, "vanta");
+    const nonce2 = r2.connectUrl!.slice(r2.connectUrl!.lastIndexOf("/") + 1);
+    expect(await h.secrets.getTicket(nonce2)).toMatchObject({ requesterEmail: "looked-up@example.com" });
   });
 });

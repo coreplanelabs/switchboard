@@ -241,6 +241,10 @@ export interface SettingsSeed {
   mcps?: {
     /** The channel whose tier is listed beside org and own (`?channel=`); absent → org + own only. */
     channel?: string;
+    /** `mcp list --all` answered: every tier there is (an admin). Otherwise the rows are the
+     *  org's, the open channel's, the viewer's own, and the tiers of the channels whose config
+     *  the viewer may read (record 0042). */
+    allTiers?: boolean;
     servers: McpServerView[];
     /** `mcp list` refused or MCP is off: the reason, in place of the rows. */
     unavailable?: string;

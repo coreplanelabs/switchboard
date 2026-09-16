@@ -116,15 +116,36 @@ export function createSettingsViewHandler(
       kind === "org" ? { type: "config-scope", kind: "org" } : { type: "config-scope", kind: "channel", id: id ?? "" },
     ).allow;
 
+  const serversOf = (answer: InvokeResult): McpServerView[] =>
+    answer.ok ? (((answer.value as { servers?: McpServerView[] }).servers ?? []) as McpServerView[]) : [];
+
+  /** The rows (record 0042): an admin sees every tier (`mcp list --all`); anyone else sees
+   *  the org's, the open channel's and their own, plus the channel tiers of every channel whose
+   *  config they may read — the same per-channel question `config overrides` answers — the
+   *  honest cut until membership exists. */
   async function mcpsSeed(caller: Caller, channel: string | undefined): Promise<NonNullable<SettingsSeed["mcps"]>> {
-    const listed = await deps.commands.invoke("mcp.list", channel ? { options: { channel } } : {}, caller);
     const write = {
       org: canWrite(caller, "mcp:write", "org"),
       channel: channel !== undefined && canWrite(caller, "mcp:write", "channel", channel),
     };
+    const listed = await deps.commands.invoke(
+      "mcp.list",
+      write.org ? { options: { all: true } } : channel ? { options: { channel } } : {},
+      caller,
+    );
     if (!listed.ok)
       return { ...(channel ? { channel } : {}), servers: [], unavailable: failureText(listed), canWrite: write };
-    const servers = ((listed.value as { servers?: McpServerView[] }).servers ?? []) as McpServerView[];
+    if (write.org)
+      return { ...(channel ? { channel } : {}), allTiers: true, servers: serversOf(listed), canWrite: write };
+    const servers = serversOf(listed);
+    const readable = await deps.commands.invoke("config.overrides", {}, caller);
+    const others = (readable.ok ? ((readable.value as { channels?: ChannelScopeIndexRow[] }).channels ?? []) : [])
+      .filter((r) => r.channelId !== channel && r.settings.includes("mcpServers"))
+      .map((r) => r.channelId);
+    const tiers = await Promise.all(
+      others.map((id) => deps.commands.invoke("mcp.list", { options: { channel: id } }, caller)),
+    );
+    for (const answer of tiers) for (const s of serversOf(answer)) if (s.scope === "channel") servers.push(s);
     return { ...(channel ? { channel } : {}), servers, canWrite: write };
   }
 

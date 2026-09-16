@@ -523,7 +523,7 @@ describe("callerIdFor — one Access identity → caller id mapping for /api and
     expect(callerIdFor(readerBot)).not.toBe("access:");
   });
 
-  it("callerFor carries the identity as the Actor the table decides on: browser sub → user access:<sub>, service token → service access:svc:<cn>, grants from the lookup — nothing else", async () => {
+  it("callerFor carries the identity as the Actor the table decides on: browser sub → user access:<sub>, service token → service access:svc:<cn>, grants from the lookup — and the browser session's email beside it, read by no gate", async () => {
     const opts: Pick<CommandHttpOptions, "grantsFor"> = {
       grantsFor: (id) =>
         grantsFor(id, {
@@ -554,7 +554,11 @@ describe("callerIdFor — one Access identity → caller id mapping for /api and
       kind: "access",
       id: "access:user-1",
       actor: (await callerFor(browser, opts)).actor,
+      email: "u@example.com",
     });
+    // A service token has no email; a session without one carries none.
+    expect(await callerFor(readerBot, opts)).not.toHaveProperty("email");
+    expect(await callerFor({ sub: "op-1" }, opts)).not.toHaveProperty("email");
     // No lookup knowledge → no grants (fail-closed).
     expect((await callerFor(browser, { grantsFor: () => NO_GRANTS })).actor.grants).toBe(NO_GRANTS);
   });

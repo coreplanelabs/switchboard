@@ -518,10 +518,16 @@ const MCP_ME_ON_ACCESS: SurfaceRefusal = {
 
 /** Commands the generic fixture cannot drive on its own: `hints` override a
  *  field-name hint for this command; `baseline` options are present in EVERY
- *  variant; `refusal` is a surface-bound refusal the data decides. Each entry
- *  says why the generic sample is not enough. */
+ *  variant; `refusal` is a surface-bound refusal the data decides; `folds:
+ *  "every-caller"` says the output legitimately names EVERY fixture caller (a
+ *  list of every tier), so the cross-surface comparison folds every caller's id
+ *  to the token, not only the asking caller's. Each entry says why the generic
+ *  sample is not enough. */
 export const COMMAND_FIXTURES: Readonly<
-  Record<string, { hints?: SampleHints; baseline?: Named; refusal?: SurfaceRefusal; why: string }>
+  Record<
+    string,
+    { hints?: SampleHints; baseline?: Named; refusal?: SurfaceRefusal; folds?: "every-caller"; why: string }
+  >
 > = {
   "config.show": {
     baseline: { channel: FIXTURE.channel },
@@ -580,7 +586,17 @@ export const COMMAND_FIXTURES: Readonly<
   },
   "mcp.show": { baseline: { channel: FIXTURE.channel }, why: "as mcp.connect" },
   "mcp.remove": { baseline: { channel: FIXTURE.channel }, refusal: MCP_ME_ON_ACCESS, why: "as mcp.connect" },
-  "mcp.list": { baseline: { channel: FIXTURE.channel }, why: "a machine caller has no origin channel" },
+  "mcp.list": {
+    baseline: { channel: FIXTURE.channel },
+    // `--all` lists EVERY caller's own tier (record 0042), and each surface is a different caller:
+    // the shape is one only once every caller's id is folded, not just the asking one's.
+    folds: "every-caller",
+    why: "a machine caller has no origin channel; `--all` names every caller's tier",
+  },
+  "mcp.promote": {
+    hints: { name: "personal", from: "slack:UPROMO" },
+    why: "the personal server must exist in the named user's tier and not in the org's — the seeded `linear` is in every tier already (`conflict`)",
+  },
   "setup.init": {
     baseline: {
       organization: "acme",

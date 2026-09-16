@@ -49,7 +49,7 @@ export function isInlineRunCommand(id: string): boolean {
     id.startsWith("friction.") ||
     id === "memory.forget" ||
     /^repo\.(onboard|offboard|rebuild|reconfigure|test|build)$/.test(id) ||
-    /^mcp\.(add|connect|remove)$/.test(id)
+    /^mcp\.(add|connect|remove|promote)$/.test(id)
   );
 }
 

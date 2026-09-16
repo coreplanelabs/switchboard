@@ -744,8 +744,44 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "required": false,
         "type": "string",
       },
+      {
+        "name": "all",
+        "required": false,
+        "type": "boolean",
+      },
     ],
     "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "mcp:write",
+    "args": [
+      {
+        "name": "name",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "write",
+    "id": "mcp.promote",
+    "options": [
+      {
+        "name": "from",
+        "required": true,
+        "type": "string",
+      },
+      {
+        "name": "agents",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "resource": "config-scope/org",
     "surfaces": [
       "chat",
       "cli",

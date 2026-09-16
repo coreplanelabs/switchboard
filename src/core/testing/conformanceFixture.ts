@@ -476,7 +476,21 @@ export function fakeMcpService(): McpService {
   const doc: Overrides = {
     org: { mcpServers: { linear: linear("slack:USEED") } },
     channels: { [FIXTURE.channel]: { mcpServers: { linear: linear("slack:USEED") } } },
-    users: Object.fromEntries(CALLER_IDS.map((id) => [id, { mcpServers: { linear: linear(id) } }])),
+    users: {
+      ...Object.fromEntries(CALLER_IDS.map((id) => [id, { mcpServers: { linear: linear(id) } }])),
+      // A person's own server no other tier holds: what `mcp promote` re-issues in the org tier.
+      "slack:UPROMO": {
+        mcpServers: {
+          personal: {
+            url: "https://mcp.personal.example/mcp",
+            auth: "none",
+            agents: ["general"],
+            addedBy: "slack:UPROMO",
+            addedAt: NOW - 60_000,
+          },
+        },
+      },
+    },
   };
   const backing = new InMemoryOverridesBacking(doc);
   const config = new ConfigStore(join(CONFIG_DIR, "config.yaml"), { backing, initial: structuredClone(doc) });

@@ -100,11 +100,12 @@ Combine freely: `agent:ship model:anthropic/claude-opus-5 effort:high in acme/ap
 
 | Command | What it does | Who can run it |
 |---|---|---|
-| `mcp list [--channel <string>]` | External MCP servers your runs in this channel can use — org-wide, this channel's, and your own — with state and agents; never a credential. | anyone |
+| `mcp list [--channel <string>] [--all]` | External MCP servers your runs in this channel can use — org-wide, this channel's, and your own — with state and agents; never a credential. `--all` (admins): every tier. | anyone |
 | `mcp add <name> --url <string> [--scope <me\|channel\|org>] [--agents <string>] [--auth <oauth\|bearer\|none>] [--channel <string>]` | Register an external MCP server for yourself, this channel, or the org — auth is detected from the server; sign-in or a token happens on a one-time link, never in chat. | anyone |
 | `mcp connect <name> [--scope <me\|channel\|org>] [--channel <string>]` | A fresh one-time link to sign in to an OAuth server or enter (or replace) a bearer server's token — only you can complete it; it expires in 10 minutes. | anyone |
 | `mcp show <name> [--scope <me\|channel\|org>] [--channel <string>]` | One MCP server's entry plus a live probe of the tools it offers (names, read-only flags); never a credential. | anyone |
 | `mcp remove <name> [--scope <me\|channel\|org>] [--channel <string>]` | Remove an MCP server you added and its stored credential (yours freely; channel ones need channel-config rights, org-wide ones admin rights). | anyone |
+| `mcp promote <name> --from <string> [--agents <string>]` | Re-issue a person's MCP server in the org tier (admins): the same name, URL and auth, added by you; a bearer/oauth server gets a fresh org connect link for you to complete — the person's credential is never copied. | repo managers (`repo:write`) |
 
 ### `schedule`
 

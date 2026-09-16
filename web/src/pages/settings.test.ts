@@ -240,6 +240,64 @@ describe("McpServersPanel", () => {
     expect(reload).toHaveBeenCalled();
   });
 
+  it("Added by names the person when the service could, the id otherwise, `you` for the viewer's own; an admin sees Promote on a person's runtime row, asks first, posts mcp.promote with the owner and shows the org's connect link (record 0042)", async () => {
+    vi.spyOn(browser, "confirm").mockReturnValue(true);
+    const HERS: McpServerView = {
+      name: "vanta",
+      scope: "user",
+      scopeKey: "user:slack:UHER",
+      url: "https://mcp.vanta.com/mcp",
+      agents: ["general", "research"],
+      auth: "bearer",
+      state: "connected",
+      source: "runtime",
+      addedBy: "slack:UHER",
+      addedByName: "Hana",
+    };
+    const HIS: McpServerView = {
+      ...HERS,
+      name: "notes",
+      scopeKey: "user:slack:UHIS",
+      addedBy: "slack:UHIS",
+      addedByName: undefined,
+    };
+    const { fetchFn, calls } = fakeFetch({
+      body: { connectUrl: "https://sb.example/mcp/connect/n9", promotedFrom: "slack:UHER" },
+    });
+    const wrapper = mountApp(McpServersPanel, {
+      props: {
+        mcps: mcps({ servers: [LAKE, NOTION, HERS, HIS], allTiers: true }),
+        vocabulary: VOCABULARY,
+        viewer: "access:me",
+        fetch: fetchFn,
+      },
+    });
+    expect(wrapper.text()).toContain("every tier");
+    const rows = wrapper.findAll("tr.server");
+    expect(rows.map((r) => r.find("td.addedby").text())).toEqual(["", "you", "Hana", "slack:UHIS"]);
+    expect(rows[2].find("span.owner").text()).toBe("slack:UHER");
+    expect(rows[0].text()).not.toContain("Promote"); // an org row is not promotable
+    expect(rows[1].text()).not.toContain("Promote"); // nor a channel row
+    await rows[2]
+      .findAll("button")
+      .find((b) => b.text() === "Promote")!
+      .trigger("click");
+    await flush();
+    expect(browser.confirm).toHaveBeenCalledWith(expect.stringContaining("credential is never copied"));
+    expect(calls[0]).toMatchObject({ url: "/api/mcp.promote", body: { name: "vanta", from: "slack:UHER" } });
+    expect(wrapper.find("p.notice").text()).toContain("org server awaiting your credential");
+    expect(wrapper.find("p.notice a.connect").attributes("href")).toBe("https://sb.example/mcp/connect/n9");
+    // Without the org right there is no Promote to press.
+    const member = mountApp(McpServersPanel, {
+      props: {
+        mcps: mcps({ servers: [LAKE, HERS], canWrite: { org: false, channel: false } }),
+        vocabulary: VOCABULARY,
+        viewer: "access:me",
+      },
+    });
+    expect(member.text()).not.toContain("Promote");
+  });
+
   it("MCP off: the reason in place of the table and no form", () => {
     const wrapper = mountApp(McpServersPanel, {
       props: {

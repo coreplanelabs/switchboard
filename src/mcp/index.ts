@@ -88,6 +88,7 @@ export function buildMcp(
     publicBaseUrl?: string;
     secretsPath?: string;
     resolveEmail?: (userId: string) => Promise<string | undefined>;
+    resolveName?: (userId: string) => Promise<string | undefined>;
     warn?: (m: string) => void;
     fetch?: typeof fetch;
   } = {},
@@ -125,6 +126,7 @@ export function buildMcp(
     publicBaseUrl: opts.publicBaseUrl,
     bearers: secrets,
     resolveEmail: opts.resolveEmail,
+    resolveName: opts.resolveName,
   });
   return { source: service.source, service };
 }

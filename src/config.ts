@@ -825,6 +825,17 @@ export class ConfigStore {
    * caller's right to read each channel is decided; `config show --channel`
    * is the read that carries the values.
    */
+  /** Every channel and every user with a tier of its own — a static block or a
+   *  runtime override — sorted: what `mcp list --all` walks (record 0042). */
+  mcpTierIds(): { channels: string[]; users: string[] } {
+    const ids = (stat: Record<string, Scope> | undefined, runtime: Record<string, Scope>): string[] =>
+      [...new Set([...Object.keys(stat ?? {}), ...Object.keys(runtime)])].sort();
+    return {
+      channels: ids(this.config.channels, this.overrides.channels),
+      users: ids(this.config.users, this.overrides.users),
+    };
+  }
+
   channelsWithScope(): ChannelScopeIndexRow[] {
     const ids = new Set([...Object.keys(this.config.channels ?? {}), ...Object.keys(this.overrides.channels)]);
     const rows: ChannelScopeIndexRow[] = [];

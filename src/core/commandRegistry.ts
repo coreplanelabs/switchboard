@@ -79,6 +79,10 @@ export interface Caller {
    *  Context, NOT authority (authorization.md item 1). Absent for machine
    *  surfaces. */
   origin?: { channelId: string; threadKey: string; repo?: () => Promise<string | undefined> };
+  /** The email a browser session is signed in with (`access` callers with an identity email
+   *  only): what a connect ticket the session mints binds to, linked to a person or not
+   *  (record 0042). Identity, NOT authority — read by no gate. */
+  email?: string;
 }
 
 /** One positional argument: `name` addresses it on the JSON surfaces (HTTP

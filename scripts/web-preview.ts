@@ -1739,6 +1739,19 @@ const SETTINGS_SERVERS: NonNullable<SettingsSeed["mcps"]>["servers"] = [
     addedBy: "access:admin",
     addedAt: NOW - 20 * 60_000,
   },
+  {
+    name: "vanta",
+    scope: "user",
+    scopeKey: "user:slack:UACME0PRIYA",
+    url: "https://mcp.vanta.example/mcp",
+    agents: ["general", "research"],
+    auth: "bearer",
+    state: "connected",
+    source: "runtime",
+    addedBy: "slack:UACME0PRIYA",
+    addedByName: "priya",
+    addedAt: NOW - 2 * 24 * 3_600_000,
+  },
 ];
 
 const SETTINGS_INDEX: NonNullable<SettingsSeed["channels"]>["index"] = [
@@ -1789,7 +1802,11 @@ function settingsSeed(pathname: string, search: string): SettingsSeed | null {
   if (tab === "installation") return { ...base, tab, installation: SETTINGS_INSTALLATION };
   if (tab === "mcps") {
     const channel = new URLSearchParams(search).get("channel") ?? SETTINGS_CHANNEL;
-    return { ...base, tab, mcps: { channel, servers: SETTINGS_SERVERS, canWrite: { org: true, channel: true } } };
+    return {
+      ...base,
+      tab,
+      mcps: { channel, allTiers: true, servers: SETTINGS_SERVERS, canWrite: { org: true, channel: true } },
+    };
   }
   const selected = m[2] ? decodeURIComponent(m[2]) : undefined;
   return {

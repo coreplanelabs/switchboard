@@ -6,6 +6,7 @@ import { meIdOf } from "./config.js";
 import {
   CommandError,
   commandDefiner,
+  flag,
   type Caller,
   type CommandDef,
   type CommandRegistry,
@@ -19,7 +20,8 @@ export { MCP_OFF_MESSAGE };
 // self-serve MCP server surface on the typed model — thin writes into the
 // config layers (`Scope.mcpServers`), the way `config instructions` is a thin
 // write into `Scope.instructions`.
-//   mcp list [--channel <id>]
+//   mcp list [--channel <id>] [--all]                  — `--all`: every tier, admins (record 0042)
+//   mcp promote <name> --from <slack:U…> [--agents a,b] — a person's server re-issued in the org tier (admins)
 //   mcp add <name> --url <url> [--scope <me|channel|org>] [--agents a,b] [--auth <oauth|bearer|none>] [--channel <id>]
 //                                                      — auth omitted → detected from the server (item 18)
 //   mcp connect <name> [--scope …] [--channel <id>]   — a fresh one-time credential/sign-in link
@@ -60,6 +62,8 @@ const channelOption = z
   .optional()
   .describe("target channel for `--scope channel` and for `list` (default: the channel you are speaking in)");
 const nameArg = { name: "name", schema: serverName, describe: "the server's name (see `mcp list`)" } as const;
+/** A platform-namespaced user id (AGENTS.md invariant 4): `slack:U…`, `cli:local`, `access:<sub>`. */
+const USER_ID_PATTERN = /^[a-z]+:[A-Za-z0-9_.@-]{1,200}$/;
 
 async function serviceOf(deps: McpCommandDeps): Promise<McpService> {
   const svc = await deps.mcp.service();
@@ -78,6 +82,8 @@ function actorOf(caller: Caller, channel: string | undefined): McpActor {
     // The person, for a dashboard session linked to one (record 0042): its
     // own tier, `addedBy` and the connect ticket's email are the person's.
     id: meIdOf(caller) ?? caller.id,
+    // A dashboard session's own email binds the tickets it mints, linked or not.
+    ...(caller.email ? { email: caller.email } : {}),
     orgAdmin: authorize(caller.actor, "mcp:write", { type: "config-scope", kind: "org" }).allow,
     channelAdmin: authorize(caller.actor, "mcp:write", { type: "config-scope", kind: "channel", id: channel ?? "" })
       .allow,
@@ -164,7 +170,14 @@ function renderServerLine(r: JsonObject): string {
     r.state === "connected" ? "✅ connected" : r.state === "static" ? "✅ static (bot env)" : "⏳ awaiting credential";
   const agents = Array.isArray(r.agents) ? r.agents.join(", ") : "";
   const pinned = r.source === "config" ? " · pinned in config.yaml" : "";
-  return `• \`${String(r.name)}\` (${String(r.scope)}) ${state} — ${String(r.url)} · agents: ${agents} · auth: ${String(r.auth)}${pinned}`;
+  // Whose (record 0042): who added it — a name when the lookup answered, the id otherwise —
+  // where it came from, and for a user server whose tier it is.
+  const by =
+    typeof r.addedBy === "string" ? ` · added by ${typeof r.addedByName === "string" ? r.addedByName : r.addedBy}` : "";
+  const from = typeof r.promotedFrom === "string" ? ` · promoted from ${r.promotedFrom}` : "";
+  const owner =
+    r.scope === "user" && typeof r.scopeKey === "string" ? ` · tier of ${r.scopeKey.slice("user:".length)}` : "";
+  return `• \`${String(r.name)}\` (${String(r.scope)}) ${state} — ${String(r.url)} · agents: ${agents} · auth: ${String(r.auth)}${pinned}${by}${from}${owner}`;
 }
 
 function renderList(output: JsonValue): string {
@@ -205,17 +218,59 @@ function renderShow(output: JsonValue): string {
 export const mcpList = defineCommand({
   id: "mcp.list",
   enabledWhen: (caps) => caps.mcp,
-  options: z.object({ channel: channelOption }),
+  options: z.object({
+    channel: channelOption,
+    all: flag.optional().describe("every tier there is — the org's, every channel's, every user's (admins)"),
+  }),
   action: "mcp:read",
   effect: "read",
   describe:
-    "External MCP servers your runs in this channel can use — org-wide, this channel's, and your own — with state and agents; never a credential.",
+    "External MCP servers your runs in this channel can use — org-wide, this channel's, and your own — with state and agents; never a credential. `--all` (admins): every tier.",
   render: renderList,
   handler: async ({ options, caller, deps }) => {
     const svc = await serviceOf(deps);
     const channel = channelOf(caller, options.channel);
-    const servers = await via(() => svc.list(actorOf(caller, channel), channel));
+    const actor = actorOf(caller, channel);
+    const servers = await via(() => (options.all ? svc.listAll(actor) : svc.list(actor, channel)));
     return { servers } as unknown as JsonObject;
+  },
+});
+
+export const mcpPromote = defineCommand({
+  id: "mcp.promote",
+  enabledWhen: (caps) => caps.mcp,
+  args: [nameArg],
+  options: z.object({
+    from: z
+      .string()
+      .refine((s) => USER_ID_PATTERN.test(s), "expected a platform-namespaced user id (slack:U…)")
+      .describe("whose personal server to promote (`slack:U…`, as `mcp list --all` shows it)"),
+    agents: z
+      .string()
+      .transform((s) =>
+        s
+          .split(",")
+          .map((a) => a.trim())
+          .filter(Boolean),
+      )
+      .optional()
+      .describe("widen the agents (default: the personal entry's); an org server may name coding/review/ship"),
+  }),
+  action: "mcp:write",
+  // Org-only by definition (there is no `me` alternative to point at), so the gate is the
+  // table's, at the door: the same `mcp:write` on `config-scope { org }` that `mcp add --scope org` asks.
+  resource: () => ({ type: "config-scope", kind: "org" }),
+  effect: "write",
+  describe:
+    "Re-issue a person's MCP server in the org tier (admins): the same name, URL and auth, added by you; a bearer/oauth server gets a fresh org connect link for you to complete — the person's credential is never copied.",
+  render: renderAdd,
+  settle: (output, { deps }) => settleConnect(deps, output),
+  handler: async ({ args, options, caller, deps }) => {
+    const svc = await serviceOf(deps);
+    const actor = actorOf(caller, channelOf(caller, undefined));
+    return (await via(() =>
+      svc.promote(actor, args.name, options.from, options.agents ? { agents: options.agents } : {}),
+    )) as unknown as JsonObject;
   },
 });
 
@@ -341,7 +396,7 @@ export const mcpRemove = defineCommand({
   },
 });
 
-export const MCP_COMMANDS: CommandDef<McpCommandDeps>[] = [mcpList, mcpAdd, mcpConnect, mcpShow, mcpRemove];
+export const MCP_COMMANDS: CommandDef<McpCommandDeps>[] = [mcpList, mcpAdd, mcpConnect, mcpShow, mcpRemove, mcpPromote];
 
 export function registerMcpCommands(registry: CommandRegistry<McpCommandDeps>): void {
   for (const cmd of MCP_COMMANDS) registry.register(cmd);
