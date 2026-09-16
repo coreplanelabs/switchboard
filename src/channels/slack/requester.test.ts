@@ -1,5 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { parseRelayFooter, resetRelayParentCache, resolveSlackRequester, type RequesterClient } from "./requester.js";
+import {
+  parseRelayFooter,
+  rawTextOf,
+  resetRelayParentCache,
+  resolveSlackRequester,
+  textOfBlocks,
+  type RequesterClient,
+} from "./requester.js";
 import { RELAY_FOOTER_RE, type SlackThreadMessage } from "./threadTurns.js";
 
 // Feature: docs/reference/specs/slack-channel.md item 13 — who asked. An app's
@@ -39,6 +46,15 @@ describe("parseRelayFooter", () => {
     expect(parseRelayFooter(RELAY)).toEqual({ channel: "C0PROMPT", threadTs: "1789504919.942589" });
   });
 
+  it("the current footer names the person — on behalf of <@U…>, with or without a display name — and that is read alongside the thread", () => {
+    expect(
+      parseRelayFooter(
+        "x\nSent by Claude in <#C0PROMPT|alice-prompting> on behalf of <@U0ALICE|alice> · <https://acme.slack.com/archives/C0PROMPT/p1789504919942589|thread>",
+      ),
+    ).toEqual({ channel: "C0PROMPT", threadTs: "1789504919.942589", onBehalfOf: "U0ALICE" });
+    expect(parseRelayFooter(RELAY)).not.toHaveProperty("onBehalfOf");
+  });
+
   it("a bare p<ts> permalink names the thread's parent itself", () => {
     const text =
       "hi\nSent by Claude in <#C0PROMPT> · <https://acme.slack.com/archives/C0PROMPT/p1789504919942589|thread>";
@@ -71,7 +87,79 @@ describe("parseRelayFooter", () => {
   });
 });
 
+// The footer as Slack really delivers it (read off a live relayed request in
+// September 2026): `text` holds the request alone; a `rich_text` block repeats it and
+// a `context` block carries the footer, which names the person outright.
+const LIVE_TEXT = "<@U0BOT> agent:review <https://github.com/acme/api/pull/42> — retry after the exec timeout";
+const LIVE_BLOCKS = [
+  {
+    type: "rich_text",
+    elements: [
+      {
+        type: "rich_text_section",
+        elements: [
+          { type: "user", user_id: "U0BOT" },
+          { type: "text", text: " agent:review " },
+          { type: "link", url: "https://github.com/acme/api/pull/42", text: "github.com/acme/api/pull/42" },
+          { type: "text", text: " — retry after the exec timeout" },
+        ],
+      },
+    ],
+  },
+  {
+    type: "context",
+    elements: [
+      {
+        type: "mrkdwn",
+        text: "Sent by Claude in <#C0PROMPT> on behalf of <@U0B0RIS> · <https://acme.slack.com/archives/C0PROMPT/p1789506812453899?thread_ts=1789506812.453899&amp;cid=C0PROMPT|thread>",
+      },
+    ],
+  },
+];
+
+describe("textOfBlocks / rawTextOf", () => {
+  it("flattens section, context and rich_text blocks to their texts, one line per block; unknown shapes add nothing", () => {
+    expect(textOfBlocks(LIVE_BLOCKS)).toBe(
+      " agent:review github.com/acme/api/pull/42 — retry after the exec timeout\n" +
+        "Sent by Claude in <#C0PROMPT> on behalf of <@U0B0RIS> · <https://acme.slack.com/archives/C0PROMPT/p1789506812453899?thread_ts=1789506812.453899&amp;cid=C0PROMPT|thread>",
+    );
+    expect(textOfBlocks([{ type: "section", text: { type: "mrkdwn", text: "hi" } }, { type: "divider" }])).toBe("hi");
+    expect(textOfBlocks(undefined)).toBe("");
+  });
+
+  it("the raw text is the message text plus the block lines the text lacks — the footer — never the request twice", () => {
+    const raw = rawTextOf(LIVE_TEXT, LIVE_BLOCKS);
+    expect(raw.startsWith(LIVE_TEXT)).toBe(true);
+    expect(raw.split("\n")).toHaveLength(3); // the text, the rich_text line it does not literally contain, the footer
+    expect(raw).toContain("Sent by Claude in <#C0PROMPT> on behalf of <@U0B0RIS>");
+    expect(rawTextOf("plain", undefined)).toBe("plain");
+    expect(rawTextOf("hi", [{ type: "section", text: { text: "hi" } }])).toBe("hi");
+    expect(parseRelayFooter(raw)).toEqual({
+      channel: "C0PROMPT",
+      threadTs: "1789506812.453899",
+      onBehalfOf: "U0B0RIS",
+    });
+  });
+});
+
 describe("resolveSlackRequester", () => {
+  it("a footer that names the person resolves to them with no API call — the live shape", async () => {
+    const c = client(() => new Error("never"));
+    const r = await resolveSlackRequester(c, {
+      ...base,
+      text: rawTextOf(LIVE_TEXT, LIVE_BLOCKS),
+      poster: { botId: "B0CLAUDE", name: "Claude [coming-soon interest grid]" },
+    });
+    expect(r).toEqual({
+      userId: "slack:U0B0RIS",
+      slackUserId: "U0B0RIS",
+      relayedBy: "Claude [coming-soon interest grid]",
+      postedBy: "slack:bot:B0CLAUDE",
+      resolvedBy: "relay-footer",
+    });
+    expect(c.calls).toEqual([]);
+  });
+
   it("a person's own message is the requester, with no API call and no relay", async () => {
     const c = client(() => new Error("never"));
     const r = await resolveSlackRequester(c, { ...base, user: "U0ALICE", text: "hi", poster: { botId: "B1" } });

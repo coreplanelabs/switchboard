@@ -54,12 +54,16 @@ export interface ThreadTurnsOptions {
 const APP_FOOTER_RE = /(?:^|\s)(?:\*Sent using\*|Sent using)\s+<@[A-Z0-9]+(?:\|[^>]*)?>(?:\s*\[[^\]\n]*\])?\s*$/;
 
 /** The other footer the Claude Slack app appends — to a message it posts from
- *  a Claude Code session: the source channel, a separator, the permalink of the
- *  person's own thread (`Sent by Claude in <#C…|name> · <permalink|thread>`).
- *  Chrome of the same kind, anchored to the end of the text the same way; the
- *  requester resolver (`slack/requester.ts`) reads it before it is stripped. */
+ *  a Claude Code session: the source channel, the person when the app names
+ *  them, a separator, the permalink of the person's own thread
+ *  (`Sent by Claude in <#C…|name> on behalf of <@U…> · <permalink|thread>`; the
+ *  `on behalf of` part is absent on older posts). Slack delivers it in a
+ *  `context` block, not in the message's `text`, so the adapter flattens the
+ *  blocks into the text it reads (`rawTextOf`). Chrome of the same kind,
+ *  anchored to the end of the text the same way; the requester resolver
+ *  (`slack/requester.ts`) reads it before it is stripped. */
 export const RELAY_FOOTER_RE =
-  /(?:^|\s)Sent by Claude in <#([CGD][A-Z0-9_]+)(?:\|[^>]*)?>\s*(?:·|•|-|—)\s*<(https?:\/\/[^|>\s]+)(?:\|[^>]*)?>\s*$/;
+  /(?:^|\s)Sent by Claude in <#([CGD][A-Z0-9_]+)(?:\|[^>]*)?>(?:\s+on behalf of <@([A-Z0-9]+)(?:\|[^>]*)?>)?\s*(?:·|•|-|—)\s*<(https?:\/\/[^|>\s]+)(?:\|[^>]*)?>\s*$/;
 
 /**
  * Remove the app footer(s) from the end of a message's text and trim it.
