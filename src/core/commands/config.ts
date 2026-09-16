@@ -9,6 +9,7 @@ import { boundaryProblem, MAX_INSTRUCTIONS_LENGTH, MIN_BOUNDARY_MINUTES } from "
 import type { Boundary } from "../../config/profile.js";
 import { IDENTITIES, MACHINE_CLASSES, type MachineClass } from "../../agents/registry.js";
 import { EFFORT_LEVELS, type Effort } from "../../effort.js";
+import { ADDRESS_SEVERITIES } from "../shipPipeline.js";
 import { authorize } from "../authz/authorize.js";
 import { pointingActor } from "../authz/pointingActor.js";
 import type { ChannelVisibility } from "../authz/types.js";
@@ -255,6 +256,14 @@ export const configSet = defineCommand({
     effort: effort.optional().describe(`force a model effort ${effortLevels}`),
     efforts: z.record(z.string(), effort).optional().describe(`per-agent effort: --efforts.<agent> ${effortLevels}`),
     boundary: boundaryOption,
+    ship: z
+      .object({
+        addressSeverity: z
+          .enum(ADDRESS_SEVERITIES)
+          .optional()
+          .describe("the severity agent:ship addresses before an approve stands (--ship.addressSeverity <level>)"),
+      })
+      .optional(),
     channel: channelOption,
   }),
   action: "config:write",
@@ -289,6 +298,7 @@ export const configSet = defineCommand({
     if (options.models) patch.models = options.models;
     if (options.effort !== undefined) patch.effort = options.effort as Effort;
     if (options.efforts) patch.efforts = options.efforts as Record<string, Effort>;
+    if (options.ship?.addressSeverity !== undefined) patch.ship = { addressSeverity: options.ship.addressSeverity };
     if (options.boundary) {
       // The list arrives as one comma-separated token; the boundary is then
       // held to the load-time rule, so a typo is refused by name here exactly

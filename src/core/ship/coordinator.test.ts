@@ -1562,3 +1562,72 @@ describe("the unit pipeline — a pull request already merged: a re-issued plan,
     expect(fix.rounds().at(-1)).toBe("1 coding completed");
   });
 });
+
+describe("the severity gate — an approve's findings held to the level in force", () => {
+  const F = (id: string, severity: "blocking" | "major" | "minor" | "nit", title = "t") => ({
+    id,
+    severity,
+    file: "src/a.ts",
+    title,
+  });
+
+  it("an approve carrying a finding at the level (default minor) opens the gate: the round continues into the findings step exactly as request_changes does", () => {
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughRoundZero(d);
+    const a = runChild(
+      d,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "approve", summary: "minor nits remain", findings: [F("F1", "minor")] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    expect(a).toMatchObject({ type: "spawn", round: { index: 1, kind: "findings" }, preset: "coding" });
+  });
+
+  it("an approve whose findings all sit below the level ends merge_ready, and the report names the level, its source and the skipped findings", () => {
+    const d = fresh(
+      input({ merge: "person", generated: true, addressSeverity: "major", addressSeveritySource: "user" }),
+    );
+    throughRoundZero(d);
+    runChild(
+      d,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: {
+          verdict: "approve",
+          summary: "clean enough",
+          findings: [F("F1", "minor", "naming"), F("F2", "nit")],
+        },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "merge_ready" } });
+    const report = renderUnitReport(d.state);
+    expect(report).toContain("Severity addressed: major and above (set by user).");
+    expect(report).toContain("Findings below major, left as-is: F1 (minor) — naming; F2 (nit) — t");
+  });
+
+  it("maxRounds still caps the loop: an approve at the round cap carrying a gated finding ends round_cap, never a silent merge_ready", () => {
+    const d = fresh(input({ merge: "person", generated: true, caps: { maxRounds: 1, maxMinutes: 120 } }));
+    throughRoundZero(d);
+    runChild(
+      d,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "approve", findings: [F("F1", "blocking")] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "round_cap", maxRounds: 1 } });
+  });
+});

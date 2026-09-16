@@ -46,6 +46,9 @@ import {
   type ChildFacts,
   type MergeReadyFacts,
   type CoordinatorAction,
+  isAddressSeverity,
+  type AddressSeverity,
+  type AddressSeveritySource,
   type PlanGraph,
   type PlanUnitNode,
   type ShipCaps,
@@ -159,6 +162,9 @@ interface PlanFacts {
   planId?: string;
   /** Who merges, as the instance's field has it: the plan route answers it, `person` when absent. */
   merge: "runner" | "person";
+  /** The severity to address, beside `merge`: the level an approve's findings are held to, and which layer set it. */
+  addressSeverity: AddressSeverity;
+  addressSeveritySource: AddressSeveritySource;
   /** The instance's mark as the plan route answers it: a generated one-unit plan (a `plan` with no `path`). */
   generated: boolean;
   repo: string;
@@ -189,6 +195,11 @@ function readPlan(a: BotAnswer): PlanFacts {
   return {
     ...(typeof b.planId === "string" ? { planId: b.planId } : {}),
     merge: b.merge === "runner" ? "runner" : "person",
+    addressSeverity: isAddressSeverity(b.addressSeverity) ? b.addressSeverity : "minor",
+    addressSeveritySource:
+      b.addressSeveritySource === "run" || b.addressSeveritySource === "user" || b.addressSeveritySource === "channel"
+        ? b.addressSeveritySource
+        : "org",
     generated: b.generated === true,
     repo: b.repo,
     base: b.base,
@@ -465,6 +476,8 @@ async function runUnit(
       // seeded plan and `person` on a task, and the door re-checks it — the
       // branch's name never decides.
       merge: plan.merge,
+      addressSeverity: plan.addressSeverity,
+      addressSeveritySource: plan.addressSeveritySource,
       generated: plan.generated,
       ...(resume !== undefined ? { resume } : {}),
       ...(lastPush !== undefined ? { lastPush } : {}),

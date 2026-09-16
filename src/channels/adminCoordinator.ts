@@ -73,7 +73,13 @@ import type { RunsService, RunView } from "../core/runsService.js";
 import { parsePlanBranch, type Brief } from "../core/ship/coordinator.js";
 import { isHandoffShape, renderHandoffComment, type Handoff } from "../core/ship/handoff.js";
 import { normalizeHead, sameCommit } from "../core/reviewedHead.js";
-import { resolveShipCaps, shipRoundHeader } from "../core/shipPipeline.js";
+import {
+  DEFAULT_ADDRESS_SEVERITY,
+  resolveShipCaps,
+  shipRoundHeader,
+  type AddressSeverity,
+  type AddressSeveritySource,
+} from "../core/shipPipeline.js";
 import { createCardShell } from "../core/statusCardFrame.js";
 import { systemClock } from "../core/trace/clock.js";
 import type { ChannelIO, IncomingMessage } from "../core/types.js";
@@ -989,6 +995,9 @@ async function plan(body: Record<string, unknown>, deps: AdminCoordinatorDeps): 
     ...(instance.plan !== undefined ? { planId: instance.plan.id } : {}),
     // Who merges: the instance's field; a record written before it existed is a person's merge.
     merge: instance.merge ?? "person",
+    // The severity to address, beside `merge`: one value the machine reads.
+    addressSeverity: instance.addressSeverity ?? "minor",
+    addressSeveritySource: instance.addressSeveritySource ?? "org",
     // The mark (item 16): the machine's report keys its re-issue line on it.
     generated: isGenerated(instance),
     repo: instance.repo,
@@ -1119,14 +1128,20 @@ const ROUND_OUTCOMES: readonly ShipRoundOutcome[] = [
 ];
 
 /** One line per unit on the parent's card: the round in flight or how the unit
- *  ended — the task wording (no unit id) for a generated plan's one unit. */
-function unitLines(units: readonly CoordinatorUnit[], generated: boolean): string[] {
+ *  ended — the task wording (no unit id) for a generated plan's one unit. The
+ *  round header names the severity in force and its source (agent-ship item
+ *  6), the instance's value beside `merge`. */
+function unitLines(
+  units: readonly CoordinatorUnit[],
+  generated: boolean,
+  severity: { level: AddressSeverity; source: AddressSeveritySource },
+): string[] {
   return units.map((u) => {
     const last = u.rounds.at(-1);
     const state = u.ending
       ? u.ending.kind
       : last
-        ? `${shipRoundHeader({ index: last.index, agent: last.agent })} · ${last.outcome}`
+        ? `${shipRoundHeader({ index: last.index, agent: last.agent }, severity)} · ${last.outcome}`
         : u.threadKey
           ? "starting"
           : "waiting";
@@ -1148,7 +1163,10 @@ async function drawCard(
   if (!io) return;
   const clock = deps.clock ?? systemClock;
   const shell = createCardShell({ label: instance.label ?? "*ship*", startedAt: instance.createdAt, now: clock });
-  const detail = unitLines(units, isGenerated(instance));
+  const detail = unitLines(units, isGenerated(instance), {
+    level: instance.addressSeverity ?? DEFAULT_ADDRESS_SEVERITY,
+    source: instance.addressSeveritySource ?? "org",
+  });
   if (!close) {
     await io.status(shell.live({ detail }));
     return;

@@ -1,6 +1,7 @@
 import { AGENTS } from "./agents/registry.js";
 import { MIN_BOUNDARY_MINUTES } from "./config/validate.js";
 import { EFFORT_LEVELS_HINT, isEffort, type Effort } from "./effort.js";
+import { ADDRESS_SEVERITIES, isAddressSeverity, type AddressSeverity } from "./core/shipPipeline.js";
 
 // Per-request directives are inline tokens at the start (or anywhere) in the
 // message:  "@switchboard agent:review model:openai/gpt-5 effort:low budget:30 look at the failing test"
@@ -16,6 +17,10 @@ export interface RequestDirectives {
    *  minimum; never sticky — a thread that wants a lower budget on every turn
    *  sets a user boundary instead. */
   budget?: number;
+  /** `severity:<level>` — the severity agent:ship must address before an
+   *  approve stands. One request's, like `budget:`; resolved by
+   *  the ship hand-off over the channel/user scopes and the org default. */
+  severity?: AddressSeverity;
   /** message text with directive tokens removed */
   text: string;
 }
@@ -32,7 +37,7 @@ export interface ThreadDirectives {
   effort?: Effort;
 }
 
-const DIRECTIVE_RE = /(?:^|\s)(agent|model|effort|budget)[:=](\S+)/g;
+const DIRECTIVE_RE = /(?:^|\s)(agent|model|effort|budget|severity)[:=](\S+)/g;
 
 /** `budget:<minutes>` takes a whole number of minutes, at least the boundary
  *  minimum (the bash tool keeps a 60-second reserve, so a shorter run could
@@ -108,6 +113,13 @@ export function parseDirectives(input: string): RequestDirectives {
         );
       }
       out.budget = minutes;
+    } else if (f.key === "severity") {
+      if (!isAddressSeverity(f.value)) {
+        throw new Error(
+          `Unknown severity "${f.value}". severity:<level> takes one of ${ADDRESS_SEVERITIES.join(", ")} — the level agent:ship addresses before an approve stands.`,
+        );
+      }
+      out.severity = f.value;
     }
     text = text.replace(f.match, " ");
   }

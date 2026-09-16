@@ -323,6 +323,9 @@ workspaceDir: ./workspaces
 # ship:
 #   maxRounds: 3      # review rounds per unit
 #   maxMinutes: 120   # the ship preset's wall-clock budget in minutes (the registry's default)
+#   addressSeverity: minor  # the severity an approve's findings are held to (blocking|major|minor|nit);
+#                     # a finding at or above it sends the round into a fix step instead of merge-ready.
+#                     # Per channel/user: config set … --ship.addressSeverity; per run: severity:<level>.
 
 # `harness` is a retired key (docs/reference/specs/harness-pi.md item 1). It
 # moved the presets onto pi one at a time; every preset runs on pi now — the pi

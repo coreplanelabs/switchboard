@@ -26,6 +26,12 @@ export interface ShipConfig {
   /** The ship preset's declared wall-clock budget in minutes (>= 1). Default:
    *  the registry's `AGENTS.ship.maxMinutes` (120). */
   maxMinutes?: number;
+  /** The severity ship must address before an approve stands:
+   *  an approve carrying a finding at or above this level continues into the
+   *  findings step exactly as a request_changes does. Default `minor`;
+   *  overridable per channel and per user (`config set … --ship.addressSeverity`)
+   *  and per run by a `severity:<level>` directive. */
+  addressSeverity?: AddressSeverity;
 }
 
 import { SHIP_LOOP_RESERVE_MS, SHIP_MIN_MAX_MINUTES, shipInterruptedNote, type ShipCaps } from "./ship/coordinator.js";
@@ -34,6 +40,36 @@ import { SHIP_LOOP_RESERVE_MS, SHIP_MIN_MAX_MINUTES, shipInterruptedNote, type S
 // review rounds and one merge poll) on the pipeline's clock, and `validateShip`
 // holds `ship.maxMinutes` to at least `SHIP_MIN_MAX_MINUTES` so the clip can hold.
 export { SHIP_LOOP_RESERVE_MS, SHIP_MIN_MAX_MINUTES, shipInterruptedNote, type ShipCaps };
+import {
+  ADDRESS_SEVERITIES,
+  DEFAULT_ADDRESS_SEVERITY,
+  isAddressSeverity,
+  type AddressSeverity,
+  type AddressSeveritySource,
+} from "./ship/coordinator.js";
+export {
+  ADDRESS_SEVERITIES,
+  DEFAULT_ADDRESS_SEVERITY,
+  isAddressSeverity,
+  type AddressSeverity,
+  type AddressSeveritySource,
+};
+
+/** The level in force and the layer that set it: the request's
+ *  `severity:` directive wins, then the user's scope, the channel's, the org's
+ *  `ship.addressSeverity` — the default counts as the org's. Resolved once by
+ *  the hand-off and written on the instance beside `merge`. */
+export function resolveAddressSeverity(layers: {
+  org?: AddressSeverity;
+  channel?: AddressSeverity;
+  user?: AddressSeverity;
+  run?: AddressSeverity;
+}): { level: AddressSeverity; source: AddressSeveritySource } {
+  if (layers.run !== undefined) return { level: layers.run, source: "run" };
+  if (layers.user !== undefined) return { level: layers.user, source: "user" };
+  if (layers.channel !== undefined) return { level: layers.channel, source: "channel" };
+  return { level: layers.org ?? DEFAULT_ADDRESS_SEVERITY, source: "org" };
+}
 
 export const SHIP_DEFAULT_MAX_ROUNDS = 3;
 /** One number: the ship preset's own declared budget is the default the knob replaces. */
@@ -62,7 +98,11 @@ export function shipPresetFor(cfg: ShipConfig | undefined): AgentDef {
  *  shares its review round's index; a coding round above index 0 IS a fix
  *  round). The runner's `round` route draws it on the parent's card from the
  *  boundaries the machine reports. */
-export function shipRoundHeader(round: { index: number; agent: string }): string {
+export function shipRoundHeader(
+  round: { index: number; agent: string },
+  severity?: { level: AddressSeverity; source: AddressSeveritySource },
+): string {
   const phase = round.agent === "review" ? "review" : round.index === 0 ? "coding" : "fix";
-  return `Round ${round.index} — ${phase}`;
+  const gate = severity ? ` · addressing ${severity.level}+ (${severity.source})` : "";
+  return `Round ${round.index} — ${phase}${gate}`;
 }

@@ -8,6 +8,8 @@
 // parent record the spawn route reads the requester from, and the names the
 // routes decide on.
 //
+import type { AddressSeverity, AddressSeveritySource } from "../ship/coordinator.js";
+
 // A coordinator is a Workflow instance in the shim Worker whose children are
 // ordinary `dispatch()` runs as the requesting user. It holds no credential of
 // its own: every step is a call into the bot with the `coordinator` bearer,
@@ -156,6 +158,11 @@ export interface CoordinatorInstance {
    *  hand-off, answered by the plan route, checked at the merge door; absent
    *  (a record written before the field existed) reads as `person`. */
   merge?: "runner" | "person";
+  /** The severity to address: resolved once by the hand-off
+   *  (directive > user > channel > org) and written here beside `merge`, so
+   *  the machine reads one value; absent reads as the default (`minor`, org). */
+  addressSeverity?: AddressSeverity;
+  addressSeveritySource?: AddressSeveritySource;
   /** The pipeline's caps as the profile gate clipped them: the rounds cap and the wall clock per unit. */
   caps?: { maxRounds: number; maxMinutes: number };
   /** The status card in the requesting thread, when the channel has one — what
