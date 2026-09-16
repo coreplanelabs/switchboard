@@ -73,7 +73,7 @@ import { PiHarness } from "./harness/pi/piHarness.js";
 import { HarnessRegistry, authorizeToolCall, relayToolCall, type ToolCallAsk } from "./harness/pi/relay.js";
 import { FakeHarnessContainer } from "./harness/testing/fakeContainer.js";
 import { scriptPiFromProvider } from "./harness/pi/testing/providerPi.js";
-import { SOFT_STOP_INSTRUCTION } from "./harness/pi/windDown.js";
+import { SOFT_STOP_INSTRUCTION } from "./harness/windDown.js";
 import { ThreadsElsewhere, type ThreadElsewhere } from "./runLedger/threadsElsewhere.js";
 import type { ClaimRequest, LiveRunRow, StepRecord } from "./runLedger/types.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./runStoreWorker.js";

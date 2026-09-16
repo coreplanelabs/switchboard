@@ -14,7 +14,9 @@ import {
   HarnessMismatchError,
   harnessFactsOf,
   isPiFacts,
+  openThroughSeam,
   type HarnessDeps,
+  type Harness,
   type HarnessFacts,
   type HarnessRun,
   type OpenCodeHarnessFacts,
@@ -417,5 +419,68 @@ describe("PiHarness — pi as the contract's object", () => {
     await t.end();
     expect(restart.container.starts).toHaveLength(1);
     expect(restart.facts[0]).toMatchObject({ harness: "pi", pid: 4242, logOffset: 0, relaunches: 1 });
+  });
+});
+
+describe("openThroughSeam — the seam's door", () => {
+  /** A harness of nothing but a recording `open`: the door's own behaviour is what is under test. */
+  function stubHarness(open: Harness["open"]): Harness {
+    return {
+      name: "pi",
+      history: "authored-session",
+      dispositions: {},
+      effort: () => undefined,
+      builtinTools: () => [],
+      open,
+      find: async () => "dead",
+      end: async () => {},
+    };
+  }
+
+  it("refuses a resume whose facts another harness wrote before the harness is asked anything: a harness_error note and a progress line say so, HarnessMismatchError names both harnesses, and open is never called", async () => {
+    const opened: HarnessRun[] = [];
+    const harness = stubHarness(async (_deps, run) => {
+      opened.push(run);
+      throw new Error("unreachable: the door must refuse first");
+    });
+    const w = world({
+      resume: {
+        messages: [],
+        settlements: [],
+        remainingMs: 60_000,
+        turn: 0,
+        inboxConsumedSeq: 0,
+        facts: OPENCODE_FACTS,
+      },
+    });
+    const err = await openThroughSeam(harness, w.deps, w.run).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HarnessMismatchError);
+    expect(err).toMatchObject({ expected: "pi", found: "opencode" });
+    expect(opened).toEqual([]);
+    const message = (err as Error).message;
+    expect(w.events).toEqual([{ type: "run_note", kind: "harness_error", summary: message }]);
+    expect(w.notes).toEqual([message]);
+    expect(w.container.starts).toEqual([]);
+  });
+
+  it("opens the run on the harness otherwise, handing deps and run through untouched, a resume of the harness's own facts included", async () => {
+    const seen: [HarnessDeps, HarnessRun][] = [];
+    const session = { answer: "opened", followUp: async () => "", end: async () => {} };
+    const harness = stubHarness(async (deps, run) => {
+      seen.push([deps, run]);
+      return session;
+    });
+    const fresh = world();
+    expect(await openThroughSeam(harness, fresh.deps, fresh.run)).toBe(session);
+    const own = world({
+      resume: { messages: [], settlements: [], remainingMs: 60_000, turn: 0, inboxConsumedSeq: 0, facts: piFactsIn() },
+    });
+    expect(await openThroughSeam(harness, own.deps, own.run)).toBe(session);
+    expect(seen).toEqual([
+      [fresh.deps, fresh.run],
+      [own.deps, own.run],
+    ]);
+    expect(fresh.events).toEqual([]);
+    expect(own.events).toEqual([]);
   });
 });

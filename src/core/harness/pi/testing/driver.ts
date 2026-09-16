@@ -13,7 +13,7 @@ import type { RunEvent } from "../../../runEvents.js";
 import type { StepReport } from "../../../runLedger/stepReport.js";
 import { RunControl } from "../../../runRegistry/runControl.js";
 import { FollowUpInbox } from "../../../threadAdmission.js";
-import type { HarnessDeps, HarnessFacts, HarnessRun } from "../../contract.js";
+import { openThroughSeam, type HarnessDeps, type HarnessFacts, type HarnessRun } from "../../contract.js";
 import { FakeHarnessContainer } from "../../testing/fakeContainer.js";
 import type { DrivenRun, HarnessDriver, RunScript } from "../../testing/scenarios.js";
 import { PiHarness } from "../piHarness.js";
@@ -25,6 +25,22 @@ const RUN_ID = "run-c";
 /** The bearer every conformance run is started with: the proxy's shape, a secret a row can look for. */
 const BEARER = "sbr_run-c.conformance-secret-no-row-may-carry";
 const CONTAINER_WORD = "vm-conformance";
+/** The bot's own provider-key variables, planted with a sentinel for the run's
+ *  duration: a harness that forwards the bot's key to its process forwards the
+ *  sentinel, and the credential row finds it in the process's environment. */
+const PROVIDER_KEY_ENVS = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"] as const;
+const PROVIDER_KEY_SENTINEL = "provider-key-sentinel-no-harness-may-forward";
+
+/** Plants the sentinel; the answer restores what was there. */
+function plantProviderKeys(): () => void {
+  const saved = PROVIDER_KEY_ENVS.map((k) => [k, process.env[k]] as const);
+  for (const k of PROVIDER_KEY_ENVS) process.env[k] = PROVIDER_KEY_SENTINEL;
+  return () => {
+    for (const [k, v] of saved)
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+  };
+}
 const NOW = 1_700_000_000_000;
 
 const agentFor = (identity: Identity): AgentDef => ({
@@ -69,6 +85,7 @@ export function piDriver(): HarnessDriver {
     object,
     bearer: BEARER,
     containerWord: CONTAINER_WORD,
+    providerKeySentinel: PROVIDER_KEY_SENTINEL,
     facts: (partial) => ({
       harness: "pi",
       pid: partial.pid,
@@ -143,12 +160,17 @@ export function piDriver(): HarnessDriver {
         finaleTimeoutMs: 60_000,
       };
       let outcome: DrivenRun["outcome"];
+      const restore = plantProviderKeys();
       try {
-        const session = await object.open(deps, run);
+        // The seam's door, as the run loop opens every run: the refusal of a
+        // foreign row is the seam's, not the object's.
+        const session = await openThroughSeam(object, deps, run);
         outcome = { kind: "answered", answer: session.answer };
         await session.end();
       } catch (err) {
         outcome = { kind: "failed", error: err instanceof Error ? err : new Error(String(err)) };
+      } finally {
+        restore();
       }
       return {
         harness: "pi",
