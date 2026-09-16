@@ -26,6 +26,7 @@ import {
   relayToolCall,
   relayedToolDefinitions,
   runRelayedTool,
+  stillRunningNote,
   type LiveHarness,
   type RelayedToolAnswer,
 } from "./relay.js";
@@ -840,5 +841,130 @@ describe("runRelayedTool: the conductor's spawn_run on pi", () => {
     });
     expect(w.dispatched).toHaveLength(1);
     expect(w.dispatched[0].opts).toEqual({ parent: { runId: "run-7", depth: 1, remainingMs: 30 * 60_000 } });
+  });
+});
+
+// Feature: docs/reference/specs/harness-pi.md item 8 — a process relaunched
+// under the same run (a replaced container, a rotated bearer) takes the run's
+// registration over and keeps its relayed calls: a call in flight keeps
+// running in the bot, is awaited up to the relay window with the others, and
+// past it is the rebuilt session's still-running note — never lost.
+describe("HarnessRegistry.replace and RelayedCalls.awaitInFlight — a relaunched process keeps the run's relayed calls", () => {
+  afterEach(() => vi.useRealTimers());
+
+  /** A tool that answers when the test releases it, counting its runs. */
+  function gated(name: string) {
+    let release!: (text: string) => void;
+    const answered = new Promise<string>((r) => (release = r));
+    let runs = 0;
+    const tool: RunnableTool = {
+      name,
+      description: "waits",
+      inputSchema: { type: "object", properties: {} },
+      run: async () => {
+        runs++;
+        return answered;
+      },
+    };
+    return { tool, release, runs: () => runs };
+  }
+
+  it("replace hands the run's registration to the relaunched process and keeps its calls: the held call runs once, the earlier registration's forget is a no-op, the answer reaches an ask through the new registration, and the new forget ends the calls", async () => {
+    vi.useFakeTimers();
+    const g = gated("slow");
+    const registry = new HarnessRegistry();
+    const first = live();
+    first.harness.tools = [g.tool];
+    const forgetFirst = registry.register(first.harness);
+    const calls = registry.calls("run-7")!;
+    const ask = { toolCallId: "c-held", tool: "slow", input: {} };
+    const held = relayToolCall(first.harness, calls, ask, { windowMs: 1_000 });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(await held).toEqual({ done: false });
+    const next = live();
+    next.harness.tools = [g.tool];
+    const forgetNext = registry.replace(next.harness);
+    expect(registry.get("run-7")).toBe(next.harness);
+    expect(registry.calls("run-7")).toBe(calls);
+    expect(registry.size()).toBe(1);
+    forgetFirst();
+    expect(registry.get("run-7")).toBe(next.harness);
+    expect(calls.signal.aborted).toBe(false);
+    expect(calls.inFlight()).toEqual(["c-held"]);
+    g.release("done at last");
+    expect(await relayToolCall(next.harness, registry.calls("run-7")!, ask, { windowMs: 1_000 })).toEqual(
+      answerOf("done at last"),
+    );
+    expect(g.runs()).toBe(1);
+    expect(calls.inFlight()).toEqual([]);
+    forgetNext();
+    expect(registry.get("run-7")).toBeUndefined();
+    expect(registry.calls("run-7")).toBeUndefined();
+    expect(calls.signal.aborted).toBe(true);
+  });
+
+  it("replace refuses by name a run that is not registered: nothing to hand over", () => {
+    const registry = new HarnessRegistry();
+    const { harness } = live();
+    expect(() => registry.replace(harness)).toThrow("run run-7 is not registered on the relay: nothing to replace");
+    expect(registry.size()).toBe(0);
+  });
+
+  it("awaitInFlight awaits every call still running up to one window: one that answers inside it is done with its answer, one still running after it is not done and keeps running — its result kept for an ask by the same id, never lost — and the rebuilt session's words for it are the still-running note; with nothing in flight it answers at once", async () => {
+    vi.useFakeTimers();
+    const quick = gated("quick");
+    const slow = gated("slow");
+    const { harness } = live();
+    harness.tools = [quick.tool, slow.tool];
+    const calls = new RelayedCalls();
+    expect(await calls.awaitInFlight({ windowMs: 1_000 })).toEqual([]);
+    void relayToolCall(harness, calls, { toolCallId: "c-q", tool: "quick", input: {} }, { windowMs: 1_000 });
+    void relayToolCall(harness, calls, { toolCallId: "c-s", tool: "slow", input: {} }, { windowMs: 1_000 });
+    expect(calls.inFlight()).toEqual(["c-q", "c-s"]);
+    const awaited = calls.awaitInFlight({ windowMs: 1_000 });
+    await vi.advanceTimersByTimeAsync(200);
+    quick.release("quick done");
+    await vi.advanceTimersByTimeAsync(800);
+    expect(await awaited).toEqual([
+      { callId: "c-q", ...answerOf("quick done") },
+      { callId: "c-s", done: false },
+    ]);
+    expect(calls.inFlight()).toEqual(["c-s"]);
+    expect(slow.runs()).toBe(1);
+    expect(calls.signal.aborted).toBe(false);
+    expect(stillRunningNote("slow")).toBe(
+      "This slow call is still running in the bot: the process that made it was relaunched while the call was in flight, and the call keeps running there rather than being re-run — do not run it again; its result is kept on the relay under the same call id.",
+    );
+    slow.release("slow done");
+    expect(
+      await relayToolCall(harness, calls, { toolCallId: "c-s", tool: "slow", input: {} }, { windowMs: 1_000 }),
+    ).toEqual(answerOf("slow done"));
+    expect(slow.runs()).toBe(1);
+    // A settled call was never running: the record's answer is not awaited.
+    calls.settle("c-settled", { content: [{ type: "text", text: "from the record" }], isError: false });
+    expect(calls.inFlight()).toEqual([]);
+  });
+
+  it("a call whose start rejects is done with an error answer carrying the message, and the others' answers are still read: one straggler's exception never fails the wait", async () => {
+    vi.useFakeTimers();
+    const quick = gated("quick");
+    const { harness } = live();
+    harness.tools = [quick.tool];
+    const calls = new RelayedCalls();
+    void relayToolCall(harness, calls, { toolCallId: "c-q", tool: "quick", input: {} }, { windowMs: 1_000 });
+    calls.join("c-throws", () => Promise.reject(new Error("the tool's promise blew up"))).catch(() => {});
+    expect(calls.inFlight()).toEqual(["c-q", "c-throws"]);
+    const awaited = calls.awaitInFlight({ windowMs: 1_000 });
+    quick.release("quick done");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(await awaited).toEqual([
+      { callId: "c-q", ...answerOf("quick done") },
+      {
+        callId: "c-throws",
+        done: true,
+        answer: { content: [{ type: "text", text: "Error: the tool's promise blew up" }], isError: true },
+      },
+    ]);
+    expect(calls.inFlight()).toEqual([]);
   });
 });

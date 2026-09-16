@@ -9,8 +9,11 @@
 // the bot still holds the bearer the previous generation revealed to it, so
 // the run's ledger row carries that bearer's secret HASH and the generation
 // that re-attaches adopts it onto the run's fresh entry (`adopt`;
-// docs/reference/specs/harness-pi.md item 8). Nothing here logs, and a token
-// never appears in a message: `verify` answers a reason, never the material.
+// docs/reference/specs/harness-pi.md item 8). A process relaunched under a
+// living bot gets a new secret on the same entry instead (`rotate`): the meter
+// stays the run's, and every earlier secret stops buying calls once the row
+// carries the new one. Nothing here logs, and a token never appears in a
+// message: `verify` answers a reason, never the material.
 //
 // The token names its run — `sbr_<runId>.<secret>` — so the proxy can tell an
 // unknown run (404) from a wrong secret for a known one (401) without a second
@@ -65,8 +68,21 @@ export type TurnVerdict =
   | { ok: false; reason: "ended" }
   | { ok: false; reason: "budget"; turns: number; maxTurns: number };
 
-/** A run's grant as an operator may read it: the caps, the turns so far, whether it ended — never a secret. */
-export type RunBearerFacts = Omit<RunBearerGrant, "span" | "publish"> & { turns: number; revoked: boolean };
+/** How a rotation ended: the run's new bearer on its unchanged expiry, or the
+ *  refusal by name — a run this store never minted, one that ended, one past
+ *  its expiry (the runs `issue` mints nothing for). */
+export type RotateVerdict =
+  { ok: true; token: string; expiresAt: number } | { ok: false; reason: "unknown_run" | "revoked" | "expired" };
+
+/** A run's grant as an operator may read it: the caps, the turns so far, how
+ *  many secrets buy its calls, whether it ended — never a secret. */
+export type RunBearerFacts = Omit<RunBearerGrant, "span" | "publish"> & {
+  turns: number;
+  /** The secrets that verify for the run right now: the mint's, plus one per
+   *  `issue` and `adopt`; exactly one after a `rotate` completes. */
+  bearers: number;
+  revoked: boolean;
+};
 
 interface Entry {
   grant: RunBearerGrant;
@@ -121,6 +137,36 @@ export class RunBearerStore {
     if (!/^[0-9a-f]{64}$/.test(secretHash)) return false;
     entry.hashes.push(Buffer.from(secretHash, "hex"));
     return true;
+  }
+
+  /** A new secret for a run whose process is relaunched under a living bot
+   *  (docs/reference/specs/harness-pi.md item 8: a re-attach adopts, a relaunch
+   *  rotates): the same entry, so the turns spent, the expiry and the span are
+   *  exactly what they were — `mint` would reset them and hand each relaunch a
+   *  fresh budget. Ordered for a bot death: the new hash joins the entry and is
+   *  handed to `record` — the caller's write of the run's row — BEFORE every
+   *  earlier hash is dropped, so a generation that dies between the two steps
+   *  leaves a row naming the secret this relaunch was minted, never the
+   *  orphan's; a `record` that throws propagates with both still verifying
+   *  and the old secrets never dropped. `record` must ISSUE the row's write
+   *  synchronously — the run's `saveFacts`, which queues on the ledger's
+   *  write-through — and nothing may write the facts between it and this
+   *  method's return: what the store orders is the queue position of that
+   *  write, which the write-through flushes in order, so a facts write queued
+   *  after `record` returned would carry the old hash ahead of the new one.
+   *  Refuses by name the runs `issue` mints nothing for, and hands `record`
+   *  nothing then. */
+  rotate(runId: string, record: (secretHash: string) => void): RotateVerdict {
+    const entry = this.entries.get(runId);
+    if (!entry) return { ok: false, reason: "unknown_run" };
+    if (entry.revoked) return { ok: false, reason: "revoked" };
+    if (this.opts.clock() >= entry.grant.expiresAt) return { ok: false, reason: "expired" };
+    const secret = randomBytes(SECRET_BYTES);
+    const hash = hashOf(secret);
+    entry.hashes.push(hash);
+    record(hash.toString("hex"));
+    entry.hashes = [hash];
+    return { ok: true, token: token(runId, secret), expiresAt: entry.grant.expiresAt };
   }
 
   /** WHO a presented token is, by reason: malformed, an unknown run, a wrong
@@ -189,7 +235,7 @@ export class RunBearerStore {
     const entry = this.entries.get(runId);
     if (!entry) return undefined;
     const { span: _span, publish: _publish, ...facts } = entry.grant;
-    return { ...facts, turns: entry.turns, revoked: entry.revoked };
+    return { ...facts, turns: entry.turns, bearers: entry.hashes.length, revoked: entry.revoked };
   }
 
   /** Drop every entry past its expiry (revoked or not). Returns how many went. */

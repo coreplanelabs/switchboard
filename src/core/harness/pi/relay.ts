@@ -11,7 +11,11 @@
 // the call is still running, and the extension asks again with the same call
 // id, which joins the one run (`RelayedCalls`) and never starts it twice. The
 // registry says which runs are live: a bearer names its run, and a run that is
-// not driving a pi answers nothing.
+// not driving a pi answers nothing. A process relaunched under the same run
+// takes the registration over (`replace`) and its calls stay: a call in
+// flight keeps running in the bot, awaited up to the window with the others
+// (`awaitInFlight`), and past it the rebuilt session reads the still-running
+// note in the result's place — never a lost call.
 
 import { TracingExecutor } from "../../../execution/tracingExecutor.js";
 import { capToolResultContent, type ToolResultContent } from "../../chatMessage.js";
@@ -69,17 +73,38 @@ export interface RelayedToolAnswer {
   isError: boolean;
 }
 
+interface Registration {
+  harness: LiveHarness;
+  calls: RelayedCalls;
+}
+
 export class HarnessRegistry {
-  private readonly live = new Map<string, { harness: LiveHarness; calls: RelayedCalls }>();
+  private readonly live = new Map<string, Registration>();
 
   /** The run drives a pi from here, its relayed calls kept beside it; the
    *  returned function forgets it and ends whatever call still runs. */
   register(harness: LiveHarness): () => void {
-    const entry = { harness, calls: new RelayedCalls() };
-    this.live.set(harness.runId, entry);
+    return this.hold({ harness, calls: new RelayedCalls() });
+  }
+
+  /** A process relaunched under the same run — in a replacement container,
+   *  with a rotated bearer (harness-pi item 8) — takes the run's registration
+   *  over, and the run's relayed calls stay: a call in flight keeps running
+   *  under the same end signal, and an ask by its id through the new
+   *  registration joins it and reads its answer. The earlier registration's
+   *  forget is a no-op from here; the returned one forgets the run and ends
+   *  the calls. Refuses by name a run that is not registered. */
+  replace(harness: LiveHarness): () => void {
+    const previous = this.live.get(harness.runId);
+    if (!previous) throw new Error(`run ${harness.runId} is not registered on the relay: nothing to replace`);
+    return this.hold({ harness, calls: previous.calls });
+  }
+
+  private hold(entry: Registration): () => void {
+    this.live.set(entry.harness.runId, entry);
     return () => {
-      if (this.live.get(harness.runId) !== entry) return;
-      this.live.delete(harness.runId);
+      if (this.live.get(entry.harness.runId) !== entry) return;
+      this.live.delete(entry.harness.runId);
       entry.calls.end();
     };
   }
@@ -111,16 +136,24 @@ export const RELAY_POLL_WINDOW_MS = 30_000;
 
 export type RelayProgress = { done: true; answer: RelayedToolAnswer } | { done: false };
 
+/** One call still running when `awaitInFlight` was asked: answered inside the window, or not yet. */
+export type InFlightProgress = { callId: string } & RelayProgress;
+
 /** The relayed calls of one live run, by call id. A request for a call already
  *  running joins it and never starts it twice, so a `spawn_run` asked again
  *  after a lost response spawns once; an answered call keeps its answer until
  *  the run ends, so the ask that comes after the answer landed reads it. A
  *  call the run's record settled before pi asked — one in flight when the
  *  previous bot generation died — is answered from the record and never run
- *  here (`settle`). When the run ends, every call still running is told to
- *  stop through the context signal it was run with. */
+ *  here (`settle`). The calls outlive the process that made them (the
+ *  registry hands them to a relaunched one, `HarnessRegistry.replace`), so a
+ *  call in flight at a relaunch keeps running and is read by `awaitInFlight`.
+ *  When the run ends, every call still running is told to stop through the
+ *  context signal it was run with. */
 export class RelayedCalls {
   private readonly calls = new Map<string, Promise<RelayedToolAnswer>>();
+  /** The ids whose call is still running: joined by `join`, forgotten as each answers. */
+  private readonly running = new Set<string>();
   private readonly ending = new AbortController();
 
   get size(): number {
@@ -138,8 +171,49 @@ export class RelayedCalls {
     if (!answer) {
       answer = start();
       this.calls.set(callId, answer);
+      this.running.add(callId);
+      const done = () => void this.running.delete(callId);
+      answer.then(done, done);
     }
     return answer;
+  }
+
+  /** The ids of the calls still running, in the order they were started. */
+  inFlight(): string[] {
+    return [...this.running];
+  }
+
+  /** Every call still running, awaited together up to one window — the relay
+   *  window a request waits, by default — for a relaunch that rebuilds the
+   *  process's session (harness-pi item 8): a call that answers inside it is
+   *  `done` with its answer, the result the rebuilt session carries; one still
+   *  running after it is not, keeps running here for an ask by the same id,
+   *  and the rebuilt session carries the still-running note in its place
+   *  (`stillRunningNote`). A call whose `start` rejected is `done` with an
+   *  error answer, as `runRelayedTool` answers its own throws, so one
+   *  straggler's exception never loses the others' answers. Nothing is ended
+   *  or re-run. Answers at once with nothing in flight. */
+  async awaitInFlight(
+    opts: { windowMs?: number; sleep?: (ms: number, signal?: AbortSignal) => Promise<void> } = {},
+  ): Promise<InFlightProgress[]> {
+    const ids = this.inFlight();
+    if (ids.length === 0) return [];
+    const window = new AbortController();
+    const sleep = opts.sleep ?? sleepUnlessAborted;
+    const closed = sleep(opts.windowMs ?? RELAY_POLL_WINDOW_MS, window.signal).then((): RelayProgress => ({
+      done: false,
+    }));
+    const progress = await Promise.all(
+      ids.map(async (callId): Promise<InFlightProgress> => {
+        const answered = this.calls.get(callId)!.then(
+          (answer): RelayProgress => ({ done: true, answer }),
+          (err: unknown): RelayProgress => ({ done: true, answer: errorAnswerOf(err) }),
+        );
+        return { callId, ...(await Promise.race([answered, closed])) };
+      }),
+    );
+    window.abort();
+    return progress;
   }
 
   /** The call's answer is known before it is asked (harness-pi item 8): the
@@ -153,7 +227,20 @@ export class RelayedCalls {
   end(): void {
     this.ending.abort();
     this.calls.clear();
+    this.running.clear();
   }
+}
+
+/** The result a rebuilt session carries for a relayed call still running in
+ *  the bot past the window a relaunch waited (`RelayedCalls.awaitInFlight`):
+ *  the call was not lost and is not run again — it keeps running here under
+ *  the run's own end signal, its answer kept for an ask by the same id. */
+export function stillRunningNote(tool: string): string {
+  return (
+    `This ${tool} call is still running in the bot: the process that made it was relaunched while the call was ` +
+    `in flight, and the call keeps running there rather than being re-run — do not run it again; its result is ` +
+    `kept on the relay under the same call id.`
+  );
 }
 
 /** One request's worth of a relayed call: the call is started on its first
@@ -244,9 +331,14 @@ export async function runRelayedTool(
     const output = await tool.run(input, ctx);
     return { content: piContentOf(capToolResultContent(output)), isError: false };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return { content: piContentOf(capToolResultContent(`Error: ${message}`)), isError: true };
+    return errorAnswerOf(err);
   }
+}
+
+/** A throw as the model reads it: an error answer carrying the message, capped like any result. */
+function errorAnswerOf(err: unknown): RelayedToolAnswer {
+  const message = err instanceof Error ? err.message : String(err);
+  return { content: piContentOf(capToolResultContent(`Error: ${message}`)), isError: true };
 }
 
 /** The runner's tool result in pi's content shape: text and images as blocks, a document as its descriptor. */
