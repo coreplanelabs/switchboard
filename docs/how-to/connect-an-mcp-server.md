@@ -72,6 +72,10 @@ Mint the service token in the guarding account (Zero Trust → Access → Servic
 
 Removes the entry and its stored credential; a channel entry needs `config:write`, an org entry admin rights.
 
+## From the dashboard
+
+Open **Settings → MCPs** on the dashboard (`/settings/mcps`). It lists every server your runs can reach, by tier, and adds one for the whole org or for one channel (type the channel's id in the field at the top): the same `mcp add`, with the one-time link shown on the page. Personal servers stay in chat, where your runs are requested as you; the dashboard refuses a `me` write and says so.
+
 ## Next
 
 - [Slack commands](../reference/slack-commands.md#mcp): every `mcp` flag.

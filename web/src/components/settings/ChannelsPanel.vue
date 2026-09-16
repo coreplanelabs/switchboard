@@ -1,0 +1,334 @@
+<script setup lang="ts">
+import { computed, reactive, ref } from "vue";
+import type { SettingsSeed, SettingsVocabulary } from "@core/channels/webSeed.js";
+import { browser } from "../../lib/browser";
+import { INPUT_CLASS, postCommand, SELECT_CLASS, type FetchLike } from "../../lib/settingsApi";
+
+// The Channels tab: the index of configured channels (`config overrides`),
+// then one channel's scope (`config show --channel`) as a form whose Save is
+// `config set channel`, whose instructions box is `config instructions channel`
+// and whose Clear is `config clear channel` — each one `POST /api/config.*`
+// with `--channel` named (record 0041). `config set` PATCHES: a filled field is
+// set, an empty one leaves the stored value alone; Clear drops every runtime
+// override so the static config.yaml values show through again.
+
+const props = defineProps<{
+  channels: NonNullable<SettingsSeed["channels"]>;
+  vocabulary: SettingsVocabulary;
+  fetch?: FetchLike;
+}>();
+
+const fetchFn: FetchLike = (input, init) => (props.fetch ?? ((i, o) => globalThis.fetch(i, o)))(input, init);
+
+const selected = computed(() => props.channels.selected ?? null);
+const scope = computed(() => selected.value?.scope?.channel ?? null);
+
+const openField = ref("");
+function open(): void {
+  const id = openField.value.trim();
+  if (id) browser.navigate(`/settings/channels/${encodeURIComponent(id)}`);
+}
+
+const form = reactive({
+  agent: scope.value?.agent ?? "",
+  model: scope.value?.model ?? "",
+  models: Object.fromEntries(props.vocabulary.agents.map((a) => [a, scope.value?.models?.[a] ?? ""])) as Record<
+    string,
+    string
+  >,
+  effort: scope.value?.effort ?? "",
+  efforts: Object.fromEntries(props.vocabulary.agents.map((a) => [a, scope.value?.efforts?.[a] ?? ""])) as Record<
+    string,
+    string
+  >,
+  maxMinutes: scope.value?.boundary?.maxMinutes?.toString() ?? "",
+  maxIdentity: scope.value?.boundary?.maxIdentity ?? "",
+  machines: new Set<string>(scope.value?.boundary?.machines ?? []),
+  instructions: scope.value?.instructions ?? "",
+});
+const busy = ref(false);
+const notice = ref<{ kind: "ok" | "error"; text: string } | null>(null);
+
+const canWrite = computed(() => selected.value?.canWrite === true);
+
+function toggleMachine(m: string, on: boolean): void {
+  if (on) form.machines.add(m);
+  else form.machines.delete(m);
+}
+
+/** The filled fields, by the command's option names; nothing for an empty field. */
+function patch(): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (form.agent) out.agent = form.agent;
+  if (form.model.trim()) out.model = form.model.trim();
+  const models = Object.fromEntries(Object.entries(form.models).filter(([, v]) => v.trim()));
+  if (Object.keys(models).length) out.models = models;
+  if (form.effort) out.effort = form.effort;
+  const efforts = Object.fromEntries(Object.entries(form.efforts).filter(([, v]) => v));
+  if (Object.keys(efforts).length) out.efforts = efforts;
+  const boundary: Record<string, unknown> = {};
+  if (form.maxMinutes.trim()) boundary.maxMinutes = Number(form.maxMinutes);
+  if (form.maxIdentity) boundary.maxIdentity = form.maxIdentity;
+  if (form.machines.size) boundary.machines = [...form.machines].join(",");
+  if (Object.keys(boundary).length) out.boundary = boundary;
+  return out;
+}
+
+async function run(id: string, body: Record<string, unknown>, okText: string): Promise<void> {
+  if (!selected.value) return;
+  busy.value = true;
+  notice.value = null;
+  const answer = await postCommand(fetchFn, id, { scope: "channel", channel: selected.value.channelId, ...body });
+  busy.value = false;
+  if (!answer.ok) {
+    notice.value = { kind: "error", text: answer.failure.message };
+    return;
+  }
+  notice.value = { kind: "ok", text: okText };
+  browser.reload();
+}
+
+const save = () => run("config.set", patch(), "Saved.");
+const saveInstructions = () => run("config.instructions", { text: form.instructions.trim() }, "Instructions saved.");
+const clearInstructions = () => run("config.instructions", { text: "" }, "Instructions cleared.");
+async function clearAll(): Promise<void> {
+  if (!selected.value) return;
+  if (
+    !browser.confirm(
+      `Drop every runtime override of ${selected.value.channelId}? Static config.yaml values show through again.`,
+    )
+  )
+    return;
+  await run("config.clear", {}, "Cleared.");
+}
+
+const SOURCE_LABEL = { config: "config.yaml", runtime: "runtime", both: "config.yaml + runtime" } as const;
+</script>
+
+<template>
+  <section class="grid gap-4">
+    <p class="text-sm text-muted">
+      A channel's scope sets which agent, model and effort its runs get, caps every run there, and adds advisory
+      instructions. It layers over the installation defaults; a person's own settings (<code>config set me</code> in
+      chat) layer over it.
+    </p>
+
+    <div class="grid gap-3 lg:grid-cols-[minmax(16rem,22rem)_1fr]">
+      <aside class="grid content-start gap-3">
+        <div class="overflow-hidden rounded-lg border border-default bg-elevated">
+          <h2
+            class="border-b border-muted px-4 py-2 font-mono text-[0.6875rem] font-medium uppercase tracking-widest text-dimmed"
+          >
+            Configured channels
+          </h2>
+          <p v-if="channels.unavailable" class="unavailable px-4 py-3 text-sm text-warn">{{ channels.unavailable }}</p>
+          <p v-else-if="channels.index.length === 0" class="empty px-4 py-3 text-sm text-muted">
+            No channel carries a scope yet.
+          </p>
+          <ul v-else class="index text-sm">
+            <li
+              v-for="row in channels.index"
+              :key="row.channelId"
+              class="border-b border-muted last:border-0"
+              :data-channel="row.channelId"
+            >
+              <a
+                class="grid gap-0.5 px-4 py-2 no-underline hover:bg-(--ui-bg-muted)"
+                :href="`/settings/channels/${encodeURIComponent(row.channelId)}`"
+                :aria-current="selected?.channelId === row.channelId ? 'page' : undefined"
+              >
+                <span class="font-mono text-xs font-medium text-highlighted">{{ row.channelId }}</span>
+                <span class="text-xs text-muted">{{ row.settings.join(", ") }} · {{ SOURCE_LABEL[row.source] }}</span>
+              </a>
+            </li>
+          </ul>
+        </div>
+        <form class="flex items-center gap-2" @submit.prevent="open">
+          <input
+            id="channel-open"
+            v-model="openField"
+            :class="INPUT_CLASS"
+            class="flex-1 font-mono text-xs"
+            placeholder="slack:C0123… — a channel with no scope yet"
+            aria-label="channel id to open"
+          />
+          <UButton type="submit" size="xs" color="neutral" variant="outline">Open</UButton>
+        </form>
+      </aside>
+
+      <div
+        v-if="!selected"
+        class="placeholder rounded-lg border border-dashed border-default px-5 py-8 text-center text-sm text-muted"
+      >
+        Pick a channel to see and change its scope.
+      </div>
+
+      <div v-else-if="selected.refused" class="refused rounded-lg border border-warn/30 bg-warn/10 px-5 py-4 text-sm">
+        <span class="font-mono text-xs">{{ selected.channelId }}</span> · {{ selected.refused }}
+      </div>
+
+      <div v-else-if="scope && selected.scope" class="scope grid gap-4">
+        <div class="flex flex-wrap items-baseline justify-between gap-2">
+          <h2 class="font-mono text-sm font-medium text-highlighted">{{ selected.channelId }}</h2>
+          <p class="effective text-xs text-muted">
+            Runs here get agent <code>{{ selected.scope.effective.agent }}</code
+            >, model <code>{{ selected.scope.effective.model }}</code
+            ><template v-if="selected.scope.effective.effort"
+              >, effort <code>{{ selected.scope.effective.effort }}</code></template
+            >
+          </p>
+        </div>
+        <p v-if="!canWrite" class="restricted text-xs text-muted">
+          Read-only: channel config changes need the channel-config right. {{ selected.scope.adminsHint }}
+        </p>
+
+        <form
+          class="agent-form grid gap-3 rounded-lg border border-default bg-elevated px-5 py-4"
+          @submit.prevent="save"
+        >
+          <h3 class="font-mono text-xs font-medium uppercase tracking-wider text-muted">Agent, model, effort</h3>
+          <div class="grid gap-3 sm:grid-cols-[9rem_1fr]">
+            <label class="text-sm text-muted" for="ch-agent">Agent</label>
+            <select id="ch-agent" v-model="form.agent" :class="SELECT_CLASS" :disabled="!canWrite">
+              <option value="">— the default ({{ selected.scope.defaults.agent }}), or the router —</option>
+              <option
+                v-for="a in vocabulary.agents"
+                :key="a"
+                :value="a"
+                :disabled="selected.scope.restrictedAgents.includes(a)"
+              >
+                {{ a }}{{ selected.scope.restrictedAgents.includes(a) ? " (restricted)" : "" }}
+              </option>
+            </select>
+            <label class="text-sm text-muted" for="ch-model">Model, any agent</label>
+            <input
+              id="ch-model"
+              v-model="form.model"
+              :class="INPUT_CLASS"
+              class="font-mono text-xs"
+              placeholder="provider/model — forces every run's model"
+              :disabled="!canWrite"
+            />
+            <span class="text-sm text-muted">Model per agent</span>
+            <div class="grid gap-1.5">
+              <label
+                v-for="a in vocabulary.agents"
+                :key="a"
+                class="grid grid-cols-[6rem_1fr] items-center gap-2 font-mono text-xs"
+              >
+                <span class="text-muted">{{ a }}</span>
+                <input
+                  v-model="form.models[a]"
+                  :name="`models.${a}`"
+                  :class="INPUT_CLASS"
+                  class="font-mono text-xs"
+                  :placeholder="selected.scope.defaults.models[a] ?? 'default'"
+                  :disabled="!canWrite"
+                />
+              </label>
+            </div>
+            <label class="text-sm text-muted" for="ch-effort">Effort, any agent</label>
+            <select id="ch-effort" v-model="form.effort" :class="SELECT_CLASS" :disabled="!canWrite">
+              <option value="">— unset —</option>
+              <option v-for="e in vocabulary.efforts" :key="e" :value="e">{{ e }}</option>
+            </select>
+            <span class="text-sm text-muted">Effort per agent</span>
+            <div class="grid gap-1.5">
+              <label
+                v-for="a in vocabulary.agents"
+                :key="a"
+                class="grid grid-cols-[6rem_1fr] items-center gap-2 font-mono text-xs"
+              >
+                <span class="text-muted">{{ a }}</span>
+                <select v-model="form.efforts[a]" :name="`efforts.${a}`" :class="SELECT_CLASS" :disabled="!canWrite">
+                  <option value="">— unset —</option>
+                  <option v-for="e in vocabulary.efforts" :key="e" :value="e">{{ e }}</option>
+                </select>
+              </label>
+            </div>
+          </div>
+
+          <h3 class="mt-2 font-mono text-xs font-medium uppercase tracking-wider text-muted">
+            Boundary · caps every run here, never grants
+          </h3>
+          <div class="grid gap-3 sm:grid-cols-[9rem_1fr]">
+            <label class="text-sm text-muted" for="ch-minutes">Max minutes</label>
+            <input
+              id="ch-minutes"
+              v-model="form.maxMinutes"
+              :class="INPUT_CLASS"
+              class="w-28 font-mono text-xs tabular-nums"
+              type="number"
+              min="2"
+              placeholder="uncapped"
+              :disabled="!canWrite"
+            />
+            <label class="text-sm text-muted" for="ch-identity">Max identity</label>
+            <select id="ch-identity" v-model="form.maxIdentity" :class="SELECT_CLASS" :disabled="!canWrite">
+              <option value="">— uncapped —</option>
+              <option v-for="i in vocabulary.identities" :key="i" :value="i">{{ i }}</option>
+            </select>
+            <span class="text-sm text-muted">Machines</span>
+            <div class="flex flex-wrap gap-x-4 gap-y-1">
+              <label
+                v-for="m in vocabulary.machines"
+                :key="m"
+                class="inline-flex items-center gap-1.5 font-mono text-xs"
+              >
+                <input
+                  type="checkbox"
+                  :name="`machine-${m}`"
+                  :checked="form.machines.has(m)"
+                  :disabled="!canWrite"
+                  @change="toggleMachine(m, ($event.target as HTMLInputElement).checked)"
+                />
+                {{ m }}
+              </label>
+            </div>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-3">
+            <UButton type="submit" size="sm" color="neutral" :disabled="!canWrite || busy">Save</UButton>
+            <UButton size="sm" color="error" variant="ghost" :disabled="!canWrite || busy" @click="clearAll"
+              >Clear every override</UButton
+            >
+            <span class="text-xs text-dimmed">Save sets the filled fields and leaves the rest as they are.</span>
+          </div>
+        </form>
+
+        <form
+          class="instructions-form grid gap-3 rounded-lg border border-default bg-elevated px-5 py-4"
+          @submit.prevent="saveInstructions"
+        >
+          <h3 class="font-mono text-xs font-medium uppercase tracking-wider text-muted">
+            Custom instructions · advisory, on every run here
+          </h3>
+          <textarea
+            id="ch-instructions"
+            v-model="form.instructions"
+            :class="INPUT_CLASS"
+            class="min-h-28 w-full"
+            maxlength="2000"
+            placeholder="Always reply in bullet points."
+            :disabled="!canWrite"
+          />
+          <div class="flex flex-wrap items-center gap-3">
+            <UButton type="submit" size="sm" color="neutral" :disabled="!canWrite || busy">Save instructions</UButton>
+            <UButton size="sm" color="neutral" variant="ghost" :disabled="!canWrite || busy" @click="clearInstructions"
+              >Clear instructions</UButton
+            >
+            <span class="text-xs text-dimmed tabular-nums">{{ form.instructions.length }} / 2000</span>
+          </div>
+        </form>
+
+        <p
+          v-if="notice"
+          class="notice rounded-md px-3 py-2 text-sm"
+          :class="notice.kind === 'error' ? 'border border-err/30 bg-err/10' : 'border border-ok/30 bg-ok/10'"
+        >
+          {{ notice.text }}
+        </p>
+      </div>
+    </div>
+  </section>
+</template>

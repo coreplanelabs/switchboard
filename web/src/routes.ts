@@ -21,5 +21,7 @@ export const routes: RouteRecordRaw[] = [
   },
   { path: "/costs/:group?", component: () => import("./pages/CostsPage.vue") },
   { path: "/delivery/:owner?/:name?", component: () => import("./pages/DeliveryPage.vue") },
+  // The settings page and its tabs; `/settings/channels/<id>` carries the channel id (the seed decides the tab).
+  { path: "/settings/:tab?/:channel?", component: () => import("./pages/SettingsPage.vue") },
   { path: "/:pathMatch(.*)*", component: () => import("./pages/NotFoundPage.vue") },
 ];

@@ -45,6 +45,21 @@ export const SURFACES = [
     what: "a search hit landed on its step: the run's fold open at the step the turn lives in, drawn as the run page draws it",
   },
   { name: "conductor-page", path: "/runs/cond-1", what: "a finished conductor's page listing the runs it spawned" },
+  {
+    name: "settings-mcps",
+    path: "/settings/mcps",
+    what: "the settings page's MCPs tab: three tiers of servers and the add form",
+  },
+  {
+    name: "settings-channel",
+    path: "/settings/channels/slack:CACME0001",
+    what: "the settings page's Channels tab with one channel's scope open as a form",
+  },
+  {
+    name: "settings-installation",
+    path: "/settings/installation",
+    what: "the settings page's Installation tab: the running config's knobs and the capabilities that are on",
+  },
 ] as const;
 
 export const THEMES = ["light", "dark"] as const;

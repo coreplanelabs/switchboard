@@ -3,7 +3,10 @@ import { createServer } from "node:http";
 import { join } from "node:path";
 import { loadWebAssets } from "../src/channels/webAssets.js";
 import { makeShellRenderer, WEB_HTML_HEADERS } from "../src/channels/webShell.js";
-import type { PageSeed, RunIndexRowSeed, UnitRunRowSeed, UnitSeed } from "../src/channels/webSeed.js";
+import type { PageSeed, RunIndexRowSeed, SettingsSeed, UnitRunRowSeed, UnitSeed } from "../src/channels/webSeed.js";
+import { parseAppConfigText } from "../src/config.js";
+import { installationSettings } from "../src/core/installationSettings.js";
+import { CLOUD_FULL } from "../src/core/testing/capabilityFixtures.js";
 import { nodeSseSink, serveHistoryEvents } from "../src/channels/liveView/sse.js";
 import { wrapUntrusted } from "../src/core/untrusted.js";
 import type { UnitFacts } from "../src/core/unitRuns.js";
@@ -1686,6 +1689,113 @@ const SHIP_UNITS: UnitFacts[] = [
   },
 ];
 
+// ---- settings -----------------------------------------------------------------------------
+// The three tabs as an admin sees them in the cloud-full shape: two org
+// servers (one pinned in config.yaml, one added at run time and connected), a
+// channel's OAuth server still awaiting its sign-in, two configured channels
+// with one open, and the running config projected by allow-list.
+
+const SETTINGS_VOCABULARY = {
+  agents: ["general", "coding", "review", "ship", "research", "explore", "conductor"],
+  efforts: ["low", "medium", "high", "xhigh", "max"],
+  identities: ["none", "read", "write"],
+  machines: ["none", "blank", "repo-cold", "repo-resident"],
+};
+
+const SETTINGS_CHANNEL = "slack:CACME0001";
+
+const SETTINGS_SERVERS: NonNullable<SettingsSeed["mcps"]>["servers"] = [
+  {
+    name: "lake",
+    scope: "org",
+    scopeKey: "org",
+    url: "https://vega.example.test/mcp",
+    agents: ["general", "research", "coding", "review"],
+    auth: "none",
+    state: "static",
+    source: "config",
+  },
+  {
+    name: "github",
+    scope: "org",
+    scopeKey: "org",
+    url: "https://api.githubcopilot.example/mcp/",
+    agents: ["general", "research", "coding"],
+    auth: "bearer",
+    state: "connected",
+    source: "runtime",
+    addedBy: "access:admin",
+    addedAt: NOW - 3 * 24 * 3_600_000,
+  },
+  {
+    name: "notion",
+    scope: "channel",
+    scopeKey: `channel:${SETTINGS_CHANNEL}`,
+    url: "https://mcp.notion.example/mcp",
+    agents: ["general", "research"],
+    auth: "oauth",
+    state: "awaiting_credential",
+    source: "runtime",
+    addedBy: "access:admin",
+    addedAt: NOW - 20 * 60_000,
+  },
+];
+
+const SETTINGS_INDEX: NonNullable<SettingsSeed["channels"]>["index"] = [
+  { channelId: SETTINGS_CHANNEL, settings: ["agent", "boundary", "instructions", "mcpServers"], source: "both" },
+  { channelId: "slack:CACME0002", settings: ["models"], source: "config" },
+];
+
+const SETTINGS_SCOPE: NonNullable<NonNullable<SettingsSeed["channels"]>["selected"]>["scope"] = {
+  effective: {
+    agent: "review",
+    model: "anthropic/claude-opus-5",
+    effort: "medium",
+    boundary: { maxMinutes: { value: 45, scope: "channel" }, maxIdentity: { value: "read", scope: "channel" } },
+  },
+  defaults: {
+    agent: "general",
+    models: {
+      general: "anthropic/claude-haiku-4-5",
+      coding: "anthropic/claude-opus-5",
+      review: "anthropic/claude-opus-5",
+    },
+  },
+  channel: {
+    agent: "review",
+    boundary: { maxMinutes: 45, maxIdentity: "read" },
+    instructions:
+      "Reviews in this channel cover the payments service. Name the invariant a change touches before the nit.",
+  },
+  org: {},
+  restrictedAgents: ["coding", "conductor"],
+  channelConfigRestricted: false,
+  adminsHint: "Admins: ask in #switchboard-admins.",
+};
+
+const SETTINGS_INSTALLATION = installationSettings(parseAppConfigText(CLOUD_FULL.yaml), CAPABILITIES);
+
+function settingsSeed(pathname: string, search: string): SettingsSeed | null {
+  const base = { page: "settings" as const, viewer: "access:admin", vocabulary: SETTINGS_VOCABULARY };
+  const m = /^\/settings(?:\/(mcps|channels|installation))?(?:\/([^/]+))?\/?$/.exec(pathname);
+  if (!m) return null;
+  const tab = m[1] ?? (CAPABILITIES.mcp ? "mcps" : "channels");
+  if (tab === "installation") return { ...base, tab, installation: SETTINGS_INSTALLATION };
+  if (tab === "mcps") {
+    const channel = new URLSearchParams(search).get("channel") ?? SETTINGS_CHANNEL;
+    return { ...base, tab, mcps: { channel, servers: SETTINGS_SERVERS, canWrite: { org: true, channel: true } } };
+  }
+  const selected = m[2] ? decodeURIComponent(m[2]) : undefined;
+  return {
+    ...base,
+    tab: "channels",
+    channels: {
+      index: SETTINGS_INDEX,
+      ...(selected ? { selected: { channelId: selected, scope: SETTINGS_SCOPE, canWrite: true } } : {}),
+    },
+  };
+}
+
 function page(
   pathname: string,
   all: boolean,
@@ -1827,6 +1937,10 @@ function page(
         ? { page: "costs", report: COSTS, groups: ["api", "web"], view: "users", users: COSTS_USERS }
         : { page: "costs", report: COSTS, groups: ["api", "web"], view: "daily" },
     };
+  }
+  if (pathname.startsWith("/settings")) {
+    const settings = settingsSeed(pathname, search);
+    return settings ? { title: "Settings", seed: settings } : null;
   }
   if (pathname.startsWith("/delivery"))
     return {
