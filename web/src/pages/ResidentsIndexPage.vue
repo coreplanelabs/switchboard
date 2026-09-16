@@ -123,8 +123,8 @@ onUnmounted(() => {
 
     <template v-if="rows.length > 0">
       <p class="mb-2 text-xs text-muted">
-        {{ count }}/{{ cap }} resident slots in use ·
-        <span id="running" class="font-mono tabular-nums">{{ running }} running</span>
+        {{ `${count}/${cap} resident slots in use · `
+        }}<span id="running" class="font-mono tabular-nums">{{ running }} running</span>
       </p>
       <ul id="residents" class="m-0 list-none p-0">
         <ResidentRow

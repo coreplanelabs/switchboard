@@ -206,14 +206,18 @@ describe("ResidentsIndexPage", () => {
   it("item 55: a measured resident's row carries the disk gauge (used/total, pct) with the sample time on hover; an unmeasured one shows no disk", () => {
     const { wrapper: w } = mountIndex(indexSeed([MEASURED, DOWN], 5, 2));
     expect(w.text()).toContain("disk 4.06 GiB/14.4 GiB (28%)");
-    expect(w.find('[title="measured 2026-09-07T15:30:00.000Z"]').exists()).toBe(true);
+    expect(w.find('li.resident[data-slug="jshttp/vary"] summary .facts').attributes("title")).toContain(
+      "disk measured 2026-09-07T15:30:00.000Z",
+    );
     const rows = w.findAll("li.resident summary");
     expect(rows[1].text()).not.toContain("disk");
   });
 });
 
 describe("ResidentsIndexPage — the fold (item 42: what is on this resident)", () => {
-  it("counts the runs on each resident in its row and in the toolbar, and lists them in the fold with agent, request, stopwatch, run link, and the worktree the thread key joins them to", () => {
+  const norm = (s: string) => s.replace(/\s+/g, " ").trim();
+
+  it("counts the runs on each resident in its row and in the toolbar, and lists them in the fold as one grid — agent, request, who and thread, worktree, user, deps, size, stopwatch, run link — joined to the worktree by thread key", () => {
     const { wrapper: w } = mountIndex(
       indexSeed([MEASURED, DOWN], 5, 2, [run("r1"), run("other", { repo: "acme/web", threadKey: "slack:C9:1" })]),
     );
@@ -221,29 +225,35 @@ describe("ResidentsIndexPage — the fold (item 42: what is on this resident)", 
     const vary = w.find('li.resident[data-slug="jshttp/vary"]');
     expect(vary.attributes("data-running")).toBe("1");
     expect(vary.find("summary .running").text()).toBe("1 running");
+    expect(norm(vary.find("summary .facts").text())).toBe(
+      "ref master · 01234567 · refreshed Aug 28 · disk 4.06 GiB/14.4 GiB (28%)",
+    );
     const line = vary.find('li.run[data-run-id="r1"]');
     expect(line.exists()).toBe(true);
     expect(line.find(".agent").text()).toBe("coding");
     expect(line.find(".text").text()).toBe("add the residents fold");
-    expect(line.find(".elapsed").text()).toBe("4m 12s");
-    expect(line.find("a.open").attributes("href")).toBe("/runs/r1?t=tok-r1");
-    const tree = line.find(".tree").text().replace(/\s+/g, " ");
-    expect(tree).toContain("worktree feat/residents-dash @ abcdef12 · worker3 · deps hardlink · 0.52 GiB on disk");
-    expect(tree).toContain("started 4 minutes ago by alice");
+    expect(norm(line.find(".who").text())).toBe("by alice · Slack thread ↗");
+    expect(line.find(".who a[target='_blank']").attributes("href")).toBe(
+      "https://example.slack.com/archives/CACME0001/p1787954209398379",
+    );
+    expect(norm(line.find(".tree").text())).toBe("feat/residents-dash @ abcdef12");
     expect(
       line
         .find(".tree a[href='https://github.com/jshttp/vary/commit/abcdef1234567890abcdef1234567890abcdef12']")
         .exists(),
     ).toBe(true);
-    expect(line.find(".tree a[target='_blank']").attributes("href")).toBe(
-      "https://example.slack.com/archives/CACME0001/p1787954209398379",
-    );
+    expect(line.find(".user").text()).toBe("worker3");
+    expect(line.find(".deps").text()).toBe("hardlink");
+    expect(line.find(".size").text()).toBe("0.52 GiB");
+    expect(line.find(".elapsed").text()).toBe("4m 12s");
+    expect(line.find(".elapsed").attributes("title")).toContain("started 4 minutes ago");
+    expect(line.find("a.open").attributes("href")).toBe("/runs/r1?t=tok-r1");
     // the resident with nothing on it says so
-    expect(w.find('li.resident[data-slug="acme/api"] .fold').text()).toContain("nothing running on this resident");
+    expect(w.find('li.resident[data-slug="acme/api"] .fold').text()).toContain("nothing on this resident");
     expect(w.find('li.resident[data-slug="acme/api"] summary .running').exists()).toBe(false);
   });
 
-  it("a run whose attach has not completed has no worktree yet; a run without a thread link says where it came from", () => {
+  it("a run whose attach has not completed has no worktree yet; a run without a thread link names its surface", () => {
     const { wrapper: w } = mountIndex(
       indexSeed([WARM], 5, 1, [
         run("r2", {
@@ -255,33 +265,37 @@ describe("ResidentsIndexPage — the fold (item 42: what is on this resident)", 
         }),
       ]),
     );
-    const tree = w.find('li.run[data-run-id="r2"] .tree').text().replace(/\s+/g, " ");
-    expect(tree).toContain("no worktree bound yet");
-    expect(tree).toContain("by alice");
-    expect(tree).toContain("via CLI");
-    expect(w.find('li.run[data-run-id="r2"] .tree a[target="_blank"]').exists()).toBe(false);
+    const line = w.find('li.run[data-run-id="r2"]');
+    expect(line.find(".tree").text()).toContain("no worktree bound yet");
+    expect(norm(line.find(".who").text())).toBe("by alice · via CLI");
+    expect(line.find(".who a").exists()).toBe(false);
+    expect(line.find(".size").exists()).toBe(false); // no tree, no size
   });
 
-  it("lists the live worktrees no run is using as idle, with their size and last use, never an evicted one; the disk line carries the gauge, free space, the room in trees and the sample age", () => {
+  it("lists the live worktrees no run is using as idle rows with their size and last use, never an evicted one; the disk line carries free space, the room in trees and the sample age", () => {
     const { wrapper: w } = mountIndex(indexSeed([MEASURED], 5, 1));
     const fold = w.find('li.resident[data-slug="jshttp/vary"] .fold');
-    expect(fold.text()).toContain("idle worktrees 1");
-    const idle = fold.find("li.idle");
-    expect(idle.attributes("data-thread")).toBe("slack:CACME0001:1787954209.398379");
-    expect(idle.text().replace(/\s+/g, " ")).toContain(
-      "feat/residents-dash @ abcdef12 · worker3 · deps hardlink · 0.52 GiB on disk · last used Aug 28",
-    );
-    expect(fold.findAll("li.idle")).toHaveLength(1); // the evicted binding is not a tree
-    expect(fold.find(".disk").text().replace(/\s+/g, " ").trim()).toBe(
-      "disk 4.06 GiB/14.4 GiB (28%) · 10.3 GiB free · room for 17 more trees · measured 15 minutes ago",
-    );
+    const idle = fold.findAll("li.idle");
+    expect(idle).toHaveLength(1); // the evicted binding is not a tree
+    expect(idle[0].attributes("data-thread")).toBe("slack:CACME0001:1787954209.398379");
+    expect(idle[0].find(".text").text()).toBe("idle");
+    expect(idle[0].find(".who").text()).toBe("last used Aug 28");
+    expect(norm(idle[0].find(".tree").text())).toBe("feat/residents-dash @ abcdef12");
+    expect(idle[0].find(".user").text()).toBe("worker3");
+    expect(idle[0].find(".deps").text()).toBe("hardlink");
+    expect(idle[0].find(".size").text()).toBe("0.52 GiB");
+    expect(idle[0].find(".elapsed").exists()).toBe(false);
+    expect(idle[0].find("a.open").exists()).toBe(false);
+    expect(fold.find(".disk").attributes("data-idle")).toBe("1");
+    expect(norm(fold.find(".disk").text())).toBe("10.3 GiB free · room for 17 more trees · measured 15 minutes ago");
   });
 
-  it("an idle worktree becomes a run's the moment a run on its thread appears; an unmeasured resident says so", () => {
+  it("an idle worktree becomes a run's the moment a run on its thread appears; an unmeasured resident says so in the size cell and the disk line", () => {
     const { wrapper: w } = mountIndex(indexSeed([WARM], 5, 1, [run("r1")]));
     const fold = w.find('li.resident[data-slug="jshttp/vary"] .fold');
-    expect(fold.text()).not.toContain("idle worktrees");
-    expect(fold.find(".tree").text()).toContain("size not measured yet");
+    expect(fold.findAll("li.idle")).toHaveLength(0);
+    expect(fold.find('li.run[data-run-id="r1"] .size').text()).toBe("—");
+    expect(fold.find('li.run[data-run-id="r1"] .size').attributes("title")).toBe("size not measured yet");
     expect(fold.find(".disk").text()).toContain("disk not measured yet");
   });
 
@@ -373,7 +387,7 @@ describe("ResidentsIndexPage — live over the feed", () => {
     expect(w.text()).toContain("2/6 resident slots in use");
     expect(w.findAll("li.resident")).toHaveLength(2);
     expect(w.find('li.resident[data-slug="jshttp/vary"] summary').text()).toContain("refreshing");
-    expect(w.find('li.run[data-run-id="r1"] .tree').text()).toContain("0.52 GiB on disk");
+    expect(w.find('li.run[data-run-id="r1"] .size').text()).toBe("0.52 GiB");
     expect(setFavicon).toHaveBeenLastCalledWith(FAVICON_BY_TONE.red);
     es().emitMessage({ type: "upsert", run: run("r1", { finished: true }) });
     await nextTick();
