@@ -302,6 +302,11 @@ export interface AuditEntry {
    *  here, on the audit line, never in the reply. A handler's
    *  own `unauthorized` carries none. */
   reason?: string;
+  /** The door the call came through when it was not the surface's own grammar
+   *  (`TraceOptions.source`): `route` for a command the request router bound
+   *  from prose. Absent for a typed command, so a reader of the audit log can
+   *  count the door's calls apart from the grammar's. */
+  source?: "route";
 }
 
 export interface CommandRegistryOptions {
@@ -385,6 +390,7 @@ export class CommandRegistry<D> {
         callerId: caller.id,
         effect: cmd?.effect ?? "read",
         outcome: "not_found",
+        ...(trace?.source === undefined ? {} : { source: trace.source }),
       });
       return fail("not_found", `unknown command: ${id}`);
     }
@@ -396,6 +402,7 @@ export class CommandRegistry<D> {
         effect: cmd.effect,
         outcome: res.ok ? "ok" : res.error,
         ...(reason === undefined ? {} : { reason }),
+        ...(trace?.source === undefined ? {} : { source: trace.source }),
       });
       return res;
     };

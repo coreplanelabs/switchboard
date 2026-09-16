@@ -2,7 +2,10 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 import { AGENTS, COMPOUND_PRESET, presetDoor } from "../../agents/registry.js";
+import { commandDefiner, type CommandDef } from "../commandRegistry.js";
+import { jsonSchemaFor } from "../commandSurface.js";
 import { TOOLSETS } from "../../tools/toolsets.js";
 import { ROUTE_ATTACH_FIXTURES } from "../../load/routeAttachFixtures.js";
 import { ConfigStore } from "../../config.js";
@@ -31,6 +34,8 @@ import {
   ROUTE_TOOL_NAME,
   ROUTE_COMMAND_VALUE_CAP,
   routeMaxOutputTokens,
+  routableCommands,
+  redactedInput,
   structuralRoute,
   routeTool,
   routeSources,
@@ -1504,5 +1509,197 @@ describe("routeRequest — the stage over the dispatcher's dependencies", () => 
     await routeRequest({ config, completions, routeModel: plain }, ctx());
     expect(plain.prompts[0].user).not.toContain("Connected data sources");
     expect(plain.prompts[0].system).not.toContain("Connected data sources");
+  });
+});
+
+describe("the command menu — every chat command as a tool beside route (record 0036, unit 2)", () => {
+  const define = commandDefiner<undefined>();
+  const list = define({
+    id: "runs.list",
+    options: z.object({ status: z.enum(["live", "finished"]).optional().describe("which runs") }),
+    action: "runs:read",
+    effect: "read",
+    describe: "List runs.",
+    handler: async () => ({}),
+  });
+  const set = define({
+    id: "config.set",
+    args: [{ name: "scope", schema: z.enum(["me", "channel"]), describe: "whose config" }],
+    options: z.object({ models: z.object({ coding: z.string().optional() }).optional() }),
+    action: "config:write",
+    effect: "write",
+    describe: "Set config.",
+    handler: async () => ({}),
+  });
+  const hidden = define({
+    id: "runs.get",
+    args: [{ name: "id", schema: z.string(), describe: "the run" }],
+    action: "runs:read",
+    effect: "read",
+    surfaces: { chat: false },
+    describe: "One run.",
+    handler: async () => ({}),
+  });
+  const catalogue = { list: () => [list, set, hidden] as CommandDef<unknown>[] };
+  const menu = routableCommands(catalogue);
+  const base = { recentDirectives: {}, presets, fallback: "general", text: "x" };
+
+  it("lists every chat-exposed command as a tool — the MCP name, the description, the derived schema, the effect — and a command that opted out of chat is absent", () => {
+    expect(menu.map((c) => c.id)).toEqual(["runs.list", "config.set"]);
+    expect(menu.map((c) => c.effect)).toEqual(["read", "write"]);
+    expect(menu[0]!.tool).toEqual({ name: "runs_list", description: "List runs.", inputSchema: jsonSchemaFor(list) });
+    expect(menu[1]!.tool.name).toBe("config_set");
+    expect(menu.some((c) => c.id === "runs.get")).toBe(false);
+  });
+
+  it("the prompt offers the tools beside route and states the rule; without commands neither appears; the thread's repository rides the user turn only when given", () => {
+    const withMenu = buildRoutePrompt({ ...base, commands: menu, threadRepo: "acme/api" });
+    expect(withMenu.tools).toEqual(menu.map((c) => c.tool));
+    expect(withMenu.tool.name).toBe(ROUTE_TOOL_NAME);
+    expect(withMenu.system).toMatch(/Commands: beside `route` you are offered one tool per command/);
+    expect(withMenu.system).toContain("2 of them");
+    expect(withMenu.user).toContain("The thread's repository: acme/api");
+    const bare = buildRoutePrompt(base);
+    expect(bare.tools).toBeUndefined();
+    expect(bare.system).not.toMatch(/Commands:/);
+    expect(bare.user).not.toContain("thread's repository");
+    // The rule names no command: the tools carry their own descriptions.
+    expect(withMenu.system).not.toMatch(/runs_list|config_set/);
+  });
+
+  it("route(): a call to an offered command is a command decision — the input bound to the registry's { args, options } shape, no side effect — under an output cap that covers the offered tools", async () => {
+    let seen: number | undefined;
+    const model: RouteModel = async (_prompt, opts) => {
+      seen = opts.maxTokens;
+      return { tool: "config_set", input: { scope: "channel", models: { coding: "anthropic/claude-opus-5" } } };
+    };
+    const d = await route({ ...base, text: "use opus for coding", allowed: allNames, commands: menu }, model);
+    expect(d).toEqual({
+      preset: undefined,
+      reason: "command config.set",
+      command: {
+        id: "config.set",
+        input: { args: ["channel"], options: { models: { coding: "anthropic/claude-opus-5" } } },
+      },
+    });
+    expect(seen).toBe(
+      routeMaxOutputTokens(
+        undefined,
+        menu.map((c) => c.tool),
+      ),
+    );
+  });
+
+  it("a call to a name the menu did not offer is no route naming it — a chat-hidden command included — and so is a call whose input nests a scalar and an object under one key", async () => {
+    const input = { ...base, allowed: allNames, commands: menu };
+    const hiddenCall = await route(input, async () => ({ tool: "runs_get", input: { id: "r1" } }));
+    expect(hiddenCall.preset).toBeUndefined();
+    expect(hiddenCall).not.toHaveProperty("command");
+    expect(hiddenCall.reason).toMatch(/runs_get.*not offered/);
+    const unknown = await route(input, async () => ({ tool: "repo_test", input: {} }));
+    expect(unknown.reason).toMatch(/repo_test.*not offered/);
+    const nested = await route(input, async () => ({
+      tool: "config_set",
+      input: { scope: "me", models: "x", "models.coding": "y" },
+    }));
+    expect(nested.preset).toBeUndefined();
+    expect(nested).not.toHaveProperty("command");
+    expect(nested.reason).toMatch(/config\.set with option/);
+  });
+
+  it("a command call with no input at all is still a decision: the registry's own parse names what is missing at invoke, never the router", async () => {
+    const d = await route({ ...base, allowed: allNames, commands: menu }, async () => ({
+      tool: "config_set",
+      input: undefined,
+    }));
+    expect(d).toEqual({
+      preset: undefined,
+      reason: "command config.set",
+      command: { id: "config.set", input: { args: [undefined], options: {} } },
+    });
+  });
+
+  it("with no commands offered a call to another tool is no route as before the menu", async () => {
+    const d = await route({ ...base, allowed: allNames }, async () => ({ tool: "config_set", input: { scope: "me" } }));
+    expect(d.preset).toBeUndefined();
+    expect(d).not.toHaveProperty("command");
+    expect(d.reason).toMatch(/config_set.*not offered/);
+  });
+
+  describe("the provider seam with the menu", () => {
+    const fake = (result: CompletionResult) => {
+      const requests: CompletionRequest[] = [];
+      const provider: Provider = {
+        name: "fake",
+        async complete(req) {
+          requests.push(req);
+          return result;
+        },
+      };
+      return { provider, requests };
+    };
+    const opts = () => ({ maxTokens: 50, signal: new AbortController().signal });
+
+    it("sends the route tool and every command tool and forces one of them (`any`); with no commands the single forced call stands as before", async () => {
+      const { provider, requests } = fake({
+        content: [{ type: "tool_use", id: "t1", name: "runs_list", input: { status: "live" } }],
+        stopReason: "tool_use",
+      });
+      const withMenu = buildRoutePrompt({ ...base, commands: menu });
+      const answer = await providerRouteModel(provider, "fast-model")(withMenu, opts());
+      expect(answer).toEqual({ tool: "runs_list", input: { status: "live" } });
+      expect(requests[0]!.tools?.map((t) => t.name)).toEqual([ROUTE_TOOL_NAME, "runs_list", "config_set"]);
+      expect(requests[0]!.toolChoice).toEqual({ type: "any" });
+      const bare = buildRoutePrompt(base);
+      await providerRouteModel(provider, "fast-model")(bare, opts());
+      expect(requests[1]!.tools?.map((t) => t.name)).toEqual([ROUTE_TOOL_NAME]);
+      expect(requests[1]!.toolChoice).toEqual({ type: "tool", name: ROUTE_TOOL_NAME });
+    });
+
+    it("answer: text sends no tools even with the menu — the escape hatch stays whole", async () => {
+      const { provider, requests } = fake({
+        content: [{ type: "text", text: answer("general") }],
+        stopReason: "end_turn",
+      });
+      await providerRouteModel(provider, "fast-model", { answer: "text" })(
+        buildRoutePrompt({ ...base, commands: menu }),
+        opts(),
+      );
+      expect(requests[0]!.tools).toBeUndefined();
+      expect(requests[0]!.toolChoice).toBeUndefined();
+    });
+  });
+});
+
+describe("redactedInput — the bound input as the record may carry it (record 0036, unit 2)", () => {
+  it("every string is redacted and capped, JSON scalars ride as they are, an undefined option is dropped, and args stay a flat list", () => {
+    const long = "x".repeat(ROUTE_COMMAND_VALUE_CAP + 50);
+    const out = redactedInput({
+      args: ["acme/api", 7, null, "token ghp_abcdefghijklmnopqrstuvwxyz0123456789"],
+      options: { limit: 3, live: true, none: null, note: long, skipped: undefined },
+    });
+    expect(out.args).toEqual(["acme/api", 7, null, "token «redacted-github-token»"]);
+    const options = out.options as Record<string, unknown>;
+    expect(options.limit).toBe(3);
+    expect(options.live).toBe(true);
+    expect(options.none).toBeNull();
+    expect(options.note).toBe(`${"x".repeat(ROUTE_COMMAND_VALUE_CAP)}…`);
+    expect("skipped" in options).toBe(false);
+  });
+
+  it("options nest three objects deep as objects; a fourth level and a non-JSON value are stored as JSON text", () => {
+    const out = redactedInput({
+      options: {
+        models: { coding: "anthropic/claude-opus-5", tags: ["a", "b"] },
+        a: { b: { c: "leaf", d: { e: "too deep", id: "sk-ant-abcdefghijklmnopqrstuvwxyz" } } },
+        when: new Date(0),
+      },
+    });
+    expect(out.options).toEqual({
+      models: { coding: "anthropic/claude-opus-5", tags: ["a", "b"] },
+      a: { b: { c: "leaf", d: '{"e":"too deep","id":"«redacted-anthropic-key»"}' } },
+      when: '"1970-01-01T00:00:00.000Z"',
+    });
+    expect(redactedInput({})).toEqual({});
   });
 });

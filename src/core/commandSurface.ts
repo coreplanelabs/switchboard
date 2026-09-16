@@ -428,3 +428,99 @@ export function chatHelpText(cmd: CommandShape): string {
 export function commandsInGroup(cmds: readonly CommandShape[], group: string): CommandShape[] {
   return cmds.filter((c) => cliWords(c.id)[0] === group);
 }
+
+// ---- spelling a by-name input as chat text -------------------------------------------------------
+// One spelling for a bound input: the conformance suite spells every variant
+// through these to prove the grammar reads them back, and the request router's
+// receipt line spells the command it bound from prose the same way
+// (record 0036, unit 2), so a person can paste the receipt and get the same call.
+
+/** A by-name input: argument and option values keyed by their declared names,
+ *  nested option objects as nested records (`{ models: { coding: "…" } }`). */
+export type Named = Record<string, unknown>;
+
+/** Flatten nested option objects to dotted keys (`models.coding`). */
+export function flattenNamed(named: Named, prefix = ""): [string, unknown][] {
+  return Object.entries(named).flatMap(([k, v]) => {
+    const key = `${prefix}${k}`;
+    if (typeof v === "object" && v !== null && !Array.isArray(v)) return flattenNamed(v as Named, `${key}.`);
+    return [[key, v] as [string, unknown]];
+  });
+}
+
+/** A text surface carries strings only. */
+export function asText(v: unknown): string {
+  return typeof v === "string" ? v : JSON.stringify(v);
+}
+
+/**
+ * CLI argv / chat tokens: positionals in declared order (a `rest` argument is
+ * split back into words so the grammar re-joins it), then `--kebab value`,
+ * `--flag` for true, `--no-flag` for false, `--a.b value` for nested keys.
+ */
+export function toArgv(cmd: Pick<CommandDef<unknown>, "args" | "options">, named: Named): string[] {
+  const args = cmd.args ?? [];
+  const argNames = new Set(args.map((a) => a.name));
+  const positional = args.flatMap((a) => {
+    const v = named[a.name];
+    if (v === undefined) return [];
+    return a.rest ? asText(v).split(" ") : [asText(v)];
+  });
+  const shape = (cmd.options?.shape ?? {}) as Record<string, z.ZodType>;
+  const flags = flattenNamed(Object.fromEntries(Object.entries(named).filter(([k]) => !argNames.has(k)))).flatMap(
+    ([k, v]) => {
+      const flag = `--${k.split(".").map(camelToKebab).join(".")}`;
+      const top = shape[k.split(".")[0]];
+      if (top && !k.includes(".") && isBooleanSchema(top)) {
+        // A boolean flag never consumes the next token, so a non-boolean value
+        // (the type-mismatch case) rides inline: `--dry-run=<value>`.
+        if (typeof v === "boolean") return v ? [flag] : [`--no-${k.split(".").map(camelToKebab).join(".")}`];
+        return [`${flag}=${asText(v)}`];
+      }
+      return [flag, asText(v)];
+    },
+  );
+  return [...positional, ...flags];
+}
+
+/**
+ * One argv token as chat text, so that `tokenize` hands back exactly `t`. The
+ * tokenizer has no backslash escape: a `"…"` or `'…'` span ends at its own
+ * quote character, and adjacent spans concatenate into one token
+ * (`--repo="acme/api"`). So a token needs quoting when it is empty or holds
+ * whitespace or a quote character; a token with no `"` is one `"…"` span, one
+ * with `"` but no `'` is one `'…'` span, and one with both alternates spans:
+ * `a"b'c` → `"a"'"'"b'c"`.
+ */
+export function quoteChatToken(t: string): string {
+  if (t !== "" && !/[\s"']/.test(t)) return t;
+  if (!t.includes('"')) return `"${t}"`;
+  if (!t.includes("'")) return `'${t}'`;
+  return t
+    .split('"')
+    .map((piece) => (piece === "" ? "" : `"${piece}"`))
+    .join(`'"'`);
+}
+
+/** Chat text: `<group> <verb>` + the argv tokens, each quoted as the tokenizer needs (`quoteChatToken`). */
+export function toChatText(chatWords: readonly string[], argv: readonly string[]): string {
+  return [...chatWords, ...argv.map(quoteChatToken)].join(" ");
+}
+
+/**
+ * The chat form of one bound input — `<group> <verb> <args…> --flag value…` —
+ * spelled so that `parseInvocation` reads back the same `{ args, options }`:
+ * the receipt line a routed command's reply leads with, and the line a
+ * routed write is handed back as (record 0036, unit 2: every `effect: write`
+ * command is handed back as the line to paste, never run from prose).
+ * Positionals ride in declared order; a missing trailing positional is left
+ * out; options spell as `toArgv` does, nested keys dotted.
+ */
+export function chatInvocation(cmd: CommandShape, input: CommandInput): string {
+  const named: Named = { ...(input.options ?? {}) };
+  (cmd.args ?? []).forEach((a, i) => {
+    const v = input.args?.[i];
+    if (v !== undefined) named[a.name] = v;
+  });
+  return toChatText(cliWords(cmd.id), toArgv(cmd, named));
+}

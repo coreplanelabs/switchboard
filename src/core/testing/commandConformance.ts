@@ -8,7 +8,15 @@ import { targetOfResource } from "../authz/resource.js";
 import type { Actor } from "../authz/types.js";
 import { dependsOn, type CapabilityKey } from "../capabilityGating.js";
 import { acceptsUndefined, resourceOf, type Caller, type CommandDef, type SurfaceName } from "../commandRegistry.js";
-import { camelToKebab, cliFlag, isBooleanSchema, jsonSchemaFor, namedToInput } from "../commandSurface.js";
+import {
+  asText,
+  camelToKebab,
+  cliFlag,
+  flattenNamed,
+  isBooleanSchema,
+  jsonSchemaFor,
+  namedToInput,
+} from "../commandSurface.js";
 import { coreCommandGroups } from "../commands/all.js";
 import { callerWith } from "./callers.js";
 import { TEST_PROFILE } from "../../deploy/testing/profile.js";
@@ -296,78 +304,19 @@ export function exhaustiveVariants(
 }
 
 // ---- spelling a by-name input the way each surface does ---------------------------------------
+// The chat and CLI spellings live on the surface module (`toArgv`, `quoteChatToken`,
+// `toChatText`, `chatInvocation` in src/core/commandSurface.ts) since the request
+// router's receipt line spells a bound command the same way (record 0036, unit 2);
+// re-exported here so the suite reads as before.
 
-/** Flatten nested option objects to dotted keys (`models.coding`). */
-function flatten(named: Named, prefix = ""): [string, unknown][] {
-  return Object.entries(named).flatMap(([k, v]) => {
-    const key = `${prefix}${k}`;
-    if (typeof v === "object" && v !== null && !Array.isArray(v)) return flatten(v as Named, `${key}.`);
-    return [[key, v] as [string, unknown]];
-  });
-}
-
-/** A text surface carries strings only. */
-function asText(v: unknown): string {
-  return typeof v === "string" ? v : JSON.stringify(v);
-}
+import { toArgv, quoteChatToken, toChatText } from "../commandSurface.js";
+export { toArgv, quoteChatToken, toChatText };
 
 /** HTTP GET: kebab-case query keys, dotted for nested, scalars as text. */
 export function toKebabQuery(named: Named): URLSearchParams {
-  return new URLSearchParams(flatten(named).map(([k, v]) => [k.split(".").map(camelToKebab).join("."), asText(v)]));
-}
-
-/**
- * CLI argv / chat tokens: positionals in declared order (a `rest` argument is
- * split back into words so the grammar re-joins it), then `--kebab value`,
- * `--flag` for true, `--no-flag` for false, `--a.b value` for nested keys.
- */
-export function toArgv(cmd: Pick<CommandDef<unknown>, "args" | "options">, named: Named): string[] {
-  const args = cmd.args ?? [];
-  const argNames = new Set(args.map((a) => a.name));
-  const positional = args.flatMap((a) => {
-    const v = named[a.name];
-    if (v === undefined) return [];
-    return a.rest ? asText(v).split(" ") : [asText(v)];
-  });
-  const shape = (cmd.options?.shape ?? {}) as Record<string, z.ZodType>;
-  const flags = flatten(Object.fromEntries(Object.entries(named).filter(([k]) => !argNames.has(k)))).flatMap(
-    ([k, v]) => {
-      const flag = `--${k.split(".").map(camelToKebab).join(".")}`;
-      const top = shape[k.split(".")[0]];
-      if (top && !k.includes(".") && isBooleanSchema(top)) {
-        // A boolean flag never consumes the next token, so a non-boolean value
-        // (the type-mismatch case) rides inline: `--dry-run=<value>`.
-        if (typeof v === "boolean") return v ? [flag] : [`--no-${k.split(".").map(camelToKebab).join(".")}`];
-        return [`${flag}=${asText(v)}`];
-      }
-      return [flag, asText(v)];
-    },
+  return new URLSearchParams(
+    flattenNamed(named).map(([k, v]) => [k.split(".").map(camelToKebab).join("."), asText(v)]),
   );
-  return [...positional, ...flags];
-}
-
-/**
- * One argv token as chat text, so that `tokenize` hands back exactly `t`. The
- * tokenizer has no backslash escape: a `"…"` or `'…'` span ends at its own
- * quote character, and adjacent spans concatenate into one token
- * (`--repo="acme/api"`). So a token needs quoting when it is empty or holds
- * whitespace or a quote character; a token with no `"` is one `"…"` span, one
- * with `"` but no `'` is one `'…'` span, and one with both alternates spans:
- * `a"b'c` → `"a"'"'"b'c"`.
- */
-export function quoteChatToken(t: string): string {
-  if (t !== "" && !/[\s"']/.test(t)) return t;
-  if (!t.includes('"')) return `"${t}"`;
-  if (!t.includes("'")) return `'${t}'`;
-  return t
-    .split('"')
-    .map((piece) => (piece === "" ? "" : `"${piece}"`))
-    .join(`'"'`);
-}
-
-/** Chat text: `<group> <verb>` + the argv tokens, each quoted as the tokenizer needs (`quoteChatToken`). */
-export function toChatText(chatWords: readonly string[], argv: readonly string[]): string {
-  return [...chatWords, ...argv.map(quoteChatToken)].join(" ");
 }
 
 // ---- the regression fence -----------------------------------------------------------------------

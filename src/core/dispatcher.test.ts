@@ -78,6 +78,8 @@ import { ThreadsElsewhere, type ThreadElsewhere } from "./runLedger/threadsElsew
 import type { ClaimRequest, LiveRunRow, StepRecord } from "./runLedger/types.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./runStoreWorker.js";
 import { buildCoreCommands, defaultOperations } from "./commandCatalogue.js";
+import { cliWords, mcpToolName } from "./commandSurface.js";
+import { ROUTE_RECEIPT_CAP, type RouteModel, type RoutePrompt } from "./dispatch/route.js";
 import { capabilitiesFrom } from "./capabilities.js";
 import { NO_FLEET } from "./residentFleet.js";
 import { InMemoryCoordinatorInstanceStore } from "./coordinator/instanceStore.js";
@@ -14004,5 +14006,202 @@ describe("the references step in dispatch (record 0037)", () => {
     expect(order.indexOf(`reply:${REFERENCE_REFUSAL}`)).toBeGreaterThan(order.indexOf("status"));
     expect(provider.requests).toHaveLength(1);
     expect(lastUserTexts(provider.requests[0])).toEqual([`what did we conclude? ${PERMALINK}`]);
+  });
+});
+
+// Feature: docs/reference/specs/routing-and-config.md item 21 (the command menu),
+// docs/reference/specs/command-registry.md item 18, record 0036 unit 2 and
+// record 0039 — the door through dispatch(): a command the router bound from
+// prose is handed back when it writes, run through the registry when it reads,
+// answered with the receipt first, and ended on any failure with the command's
+// own line and the override footer; one model call, never a second route.
+describe("the command menu through dispatch() (record 0036 unit 2; record 0039)", () => {
+  const ROUTED = YAML_FIXTURE.replace("routing: { auto: false }\n", "routing: { auto: true }\n");
+  const FOOTER = "wrong preset? reply agent:<preset> to run it another way";
+  /** A scripted router that calls one command tool with one input. */
+  const call = (tool: string, input: unknown) => vi.fn<RouteModel>(async () => ({ tool, input }));
+  const wired = (yaml = ROUTED) => {
+    const registry = new RunRegistry({ genId: () => "r1", genToken: () => "t" });
+    const provider = capturingProvider();
+    const deps = makeDeps(yaml, provider);
+    deps.runRegistry = registry;
+    deps.admission = new ThreadAdmission();
+    return { deps, registry, provider };
+  };
+
+  it("a routed write is handed back as the line to paste: nothing invoked, no card, no thread claim, no run, no agent turn", async () => {
+    const { deps, registry, provider } = wired();
+    deps.routeModel = call("config_set", { scope: "channel", models: { coding: "anthropic/claude-opus-5" } });
+    const { io, replies, statuses } = fakeIO();
+    await dispatch(deps, msg("use opus for coding in this channel", "slack:UADMIN"), io);
+    expect(deps.routeModel).toHaveBeenCalledTimes(1);
+    expect(replies).toEqual(["To run this: config set channel --models.coding anthropic/claude-opus-5"]);
+    expect(deps.invoked).toEqual([]);
+    expect(statuses).toEqual([]);
+    expect(provider.requests).toEqual([]);
+    expect(registry.snapshotById("r1")).toBeNull();
+    expect(deps.admission!.size).toBe(0);
+    // Nothing was written: the channel's config is as the fixture left it.
+    expect(
+      deps.config.resolve({ channelId: "slack:CX", userId: "slack:UADMIN", request: { agent: "coding" } }).modelRef,
+    ).not.toBe("anthropic/claude-opus-5");
+  });
+
+  it("a routed read runs through the registry as the message's user and the reply leads with the receipt line — a log-only command makes no run; the audit line carries source: route", async () => {
+    const { deps, registry, provider } = wired();
+    deps.routeModel = call("config_show", {});
+    const { io, replies, statuses } = fakeIO();
+    await dispatch(deps, msg("show me the config for this channel", "slack:UADMIN"), io);
+    expect(deps.routeModel).toHaveBeenCalledTimes(1);
+    expect(deps.invoked).toEqual(["config.show"]);
+    expect(replies).toHaveLength(1);
+    const [first, ...rest] = replies[0]!.split("\n");
+    expect(first).toBe("routed: config show");
+    expect(rest.join("\n")).toContain("agent");
+    expect(replies[0]).not.toContain(FOOTER);
+    expect(statuses).toEqual([]);
+    expect(provider.requests).toEqual([]);
+    expect(registry.snapshotById("r1")).toBeNull();
+  });
+
+  it("the text the router binds from has Slack's link wrapping undone, so a URL binds bare", async () => {
+    const { deps } = wired();
+    const router = call("config_show", {});
+    deps.routeModel = router;
+    const { io } = fakeIO();
+    await dispatch(
+      deps,
+      msg("what does <https://acme.test/x|acme.test/x> say about this channel's config", "slack:UADMIN"),
+      io,
+    );
+    const prompt: RoutePrompt = router.mock.calls[0]![0];
+    expect(prompt.user).toContain("https://acme.test/x");
+    expect(prompt.user).not.toContain("<https://");
+  });
+
+  it("every effect: write command in the catalogue is handed back and nothing is invoked; every effect: read command is invoked", async () => {
+    const { deps } = wired();
+    const chatExposed = deps.commands!.list().filter((c) => c.surfaces?.chat !== false);
+    const writes = chatExposed.filter((c) => c.effect === "write");
+    const reads = chatExposed.filter((c) => c.effect === "read");
+    expect(writes.length).toBeGreaterThan(5);
+    expect(reads.length).toBeGreaterThan(5);
+    for (const cmd of writes) {
+      deps.routeModel = call(mcpToolName(cmd.id), {});
+      const { io, replies } = fakeIO();
+      await dispatch(deps, msg(`please ${cmd.id}`, "slack:UADMIN"), io);
+      expect(replies, cmd.id).toHaveLength(1);
+      expect(replies[0], cmd.id).toMatch(/^To run this: /);
+      expect(replies[0], cmd.id).toContain(cliWords(cmd.id).join(" "));
+    }
+    expect(deps.invoked).toEqual([]);
+    for (const cmd of reads) {
+      deps.routeModel = call(mcpToolName(cmd.id), {});
+      const { io, replies } = fakeIO();
+      await dispatch(deps, msg(`please ${cmd.id}`, "slack:UADMIN"), io);
+      expect(replies, cmd.id).toHaveLength(1);
+      expect(replies[0]!.split("\n")[0], cmd.id).toBe(`routed: ${cliWords(cmd.id).join(" ")}`);
+    }
+    expect([...new Set(deps.invoked)].sort()).toEqual(reads.map((c) => c.id).sort());
+  });
+
+  it("a routed read that does work (friction_report) runs as an inline command run carrying the route event right after run_meta, and the reply is the receipt then the command's own text — no footer, no card, no agent turn", async () => {
+    const { deps, registry, provider } = wired();
+    deps.routeModel = call("friction_report", { limit: 5 });
+    const { io, replies, statuses } = fakeIO();
+    await dispatch(deps, msg("what friction keeps coming back in the last five runs", "slack:UADMIN"), io);
+    expect(deps.routeModel).toHaveBeenCalledTimes(1);
+    expect(deps.invoked).toEqual(["friction.report"]);
+    expect(replies).toHaveLength(1);
+    const lines = replies[0]!.split("\n");
+    expect(lines[0]).toBe("routed: friction report --limit 5");
+    expect(lines[1]).toContain("runs analyzed");
+    expect(replies[0]).not.toContain(FOOTER);
+    expect(statuses).toEqual([]);
+    expect(provider.requests).toEqual([]);
+    const snap = registry.snapshotById("r1");
+    expect(snap?.finished).toBe(true);
+    const types = (snap?.events ?? []).map((e) => e.type);
+    expect(types.indexOf("route")).toBe(types.indexOf("run_meta") + 1);
+    expect(snap?.events.find((e) => e.type === "route")).toMatchObject({
+      preset: "command",
+      command: "friction.report",
+      input: { args: [], options: { limit: 5 } },
+      receipt: "friction report --limit 5",
+      model: "anthropic/general-model",
+    });
+    expect(snap?.events.filter((e) => e.type === "answer")).toHaveLength(1);
+  });
+
+  it("a routed read whose invoke fails (a value the schema refuses) seals one failed command run and replies the receipt, the command's own error line and the override footer — one model call, no second route, no agent run", async () => {
+    const { deps, registry, provider } = wired();
+    deps.routeModel = call("friction_report", { limit: "lots" });
+    const { io, replies, statuses } = fakeIO();
+    await dispatch(deps, msg("what friction keeps coming back, lots of runs please", "slack:UADMIN"), io);
+    expect(deps.routeModel).toHaveBeenCalledTimes(1);
+    expect(deps.invoked).toEqual(["friction.report"]);
+    expect(replies).toHaveLength(1);
+    const lines = replies[0]!.split("\n");
+    expect(lines[0]).toBe("routed: friction report --limit lots");
+    expect(lines[1]).toMatch(/^⚠️ `friction report`/);
+    expect(lines.at(-1)).toBe(FOOTER);
+    expect(statuses).toEqual([]);
+    expect(provider.requests).toEqual([]);
+    const snap = registry.snapshotById("r1");
+    expect(snap?.finished).toBe(true);
+    expect(snap?.events.filter((e) => e.type === "answer")).toHaveLength(1);
+    expect(snap?.events.find((e) => e.type === "route")).toMatchObject({ command: "friction.report" });
+  });
+
+  it("a bound value carrying a token-shaped string is redacted from the receipt, and the receipt is cut at its cap — on a hand-back too", async () => {
+    const { deps } = wired();
+    const token = `ghp_${"a".repeat(36)}`;
+    const long = "x".repeat(400);
+    deps.routeModel = call("config_set", { scope: "channel", models: { coding: `${token}-${long}` } });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("use that model for coding here", "slack:UADMIN"), io);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatch(/^To run this: config set channel --models\.coding /);
+    expect(replies[0]).not.toContain(token);
+    expect(replies[0]!.length).toBeLessThanOrEqual("To run this: ".length + ROUTE_RECEIPT_CAP + 1);
+    expect(deps.invoked).toEqual([]);
+  });
+
+  it("a thread naming a repository puts it in the router's user turn as a fact", async () => {
+    const { deps } = wired();
+    const router = call("config_show", {});
+    deps.routeModel = router;
+    const { io } = fakeIO([
+      { role: "user", text: "<@bot> review https://github.com/acme/api/pull/7", at: 1 },
+      { role: "assistant", text: "done", at: 2 },
+    ]);
+    await dispatch(deps, msg("exercise the suite at main please", "slack:UADMIN"), io);
+    const prompt: RoutePrompt = router.mock.calls[0]![0];
+    expect(prompt.user).toContain("The thread's repository: acme/api");
+  });
+
+  it("a live thread and a directive are not routed to a command: the router is never asked", async () => {
+    const { deps } = wired();
+    deps.routeModel = call("config_show", {});
+    deps.admission!.claim("slack:CX:1.0", { agent: "general" });
+    const { io } = fakeIO();
+    await dispatch(deps, msg("show me the config", "slack:UADMIN"), io);
+    expect(deps.routeModel).not.toHaveBeenCalled();
+    deps.admission = new ThreadAdmission();
+    const second = fakeIO();
+    await dispatch(deps, msg("agent:general show me the config", "slack:UADMIN"), second.io);
+    expect(deps.routeModel).not.toHaveBeenCalled();
+  });
+
+  it("the typed `config show` still answers inline through stage A with no model call — the grammar stays the exact path, the door is the natural-language one", async () => {
+    const { deps, provider } = wired();
+    deps.routeModel = call("config_show", {});
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("config show", "slack:UADMIN"), io);
+    expect(deps.routeModel).not.toHaveBeenCalled();
+    expect(provider.requests).toEqual([]);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).not.toMatch(/^routed:/);
+    expect(deps.invoked).toEqual(["config.show"]);
   });
 });

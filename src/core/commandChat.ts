@@ -152,6 +152,10 @@ export interface HandleChatCommandArgs {
   /** The span the dispatcher runs the command's body under (`run.command`);
    *  the registry hands it to the handler (docs/reference/specs/tracing.md item 24). */
   span?: Span;
+  /** The door the command came through when it was not the chat grammar:
+   *  `route` for a command the request router bound from prose (record 0036).
+   *  Copied onto the registry's audit line (`TraceOptions.source`). */
+  source?: "route";
 }
 
 /** The `Caller` a chat message resolves to: the message's user as the id and
@@ -231,11 +235,13 @@ export async function invokeChatCommand({
   resolveRepo,
   now,
   span,
+  source,
 }: HandleChatCommandArgs): Promise<ChatCommandResult> {
   if (parsed.kind === "reply")
     return { ok: false, text: parsed.text, ...(parsed.error ? { error: parsed.error } : {}) };
   const caller = chatCallerFor(msg, config, resolveRepo);
-  const res = await commands.invoke(parsed.id, parsed.input, caller, span ? { span } : undefined);
+  const trace = span || source ? { ...(span ? { span } : {}), ...(source ? { source } : {}) } : undefined;
+  const res = await commands.invoke(parsed.id, parsed.input, caller, trace);
   if (res.ok) {
     const text = renderText(commands.get(parsed.id) ?? { id: parsed.id }, res.value, {
       surface: "chat",
