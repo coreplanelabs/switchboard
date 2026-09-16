@@ -58,7 +58,7 @@ After `146f9287` every preset runs on pi and nothing in the tree says what a har
 
 **OpenCode: gate, relay, record**
 
-- R11. Every tool call, the read-only built-ins included, asks the bot before it runs: the session's rules end in `{ action: "*", resource: "*", effect: "ask" }`, the ask is answered `once` or `reject` with the rule's reason, never `always`, within the bot's 90-second wait; a tool success whose call never asked fails the run closed.
+- R11. Every tool call, the read-only built-ins included, asks the bot before it runs: the session's rules end in `{ action: "*", resource: "*", effect: "ask" }`, the ask is answered `once` or `reject` with the rule's reason, never `always`, within the bot's 90-second wait; a tool success whose call never asked fails the run closed, and so does a tool success whose ask was answered by a reply the bot did not send (the gate on OpenCode is enforcement by detection: the approval lives in the server and the model's shell can reach the server's password, so a forged reply is possible and is detected, never prevented).
 - R12. Switchboard's tools reach OpenCode through a local plugin custom tool speaking pi's `/harness/tool` protocol from inside the OpenCode process; the MCP client over loopback is the fallback road.
 - R13. Every event type OpenCode emits has a disposition onto the run stream in pi's tool words; the transcript is mirrored into ledger steps per tool call, from the server's store at each step end; an in-container tailer writes the event stream and the store's feeds to one JSONL file the harness reads through the existing log transport.
 
@@ -71,7 +71,7 @@ After `146f9287` every preset runs on pi and nothing in the tree says what a har
 **Configuration and receipt**
 
 - R17. The `harness:` configuration word accepts `pi` and `opencode` per preset, mapping to a harness object in the wiring roster; no preset defaults to OpenCode.
-- R18. Stage A closes on a live receipt: a coding run on OpenCode in a scratch repository on the resident, its record complete on the run page, one refused command visible, its egress showing only the proxy and loopback.
+- R18. Stage A closes on a live receipt: a coding run on OpenCode in a scratch repository on the resident, its record complete on the run page, one refused command visible on its record.
 
 ### Acceptance Examples
 
@@ -89,6 +89,8 @@ After `146f9287` every preset runs on pi and nothing in the tree says what a har
 - **Deferred to follow-up work:** the MCP relay endpoint on the bot (the fallback relay road); `run_meta.harness` as a queryable field (additive, when the run page or friction tooling needs it); a resident-side event stream if the tailer file proves too slow.
 
 ### Dependencies
+
+*Amended 2026-09-16: no egress allowlist and no egress receipt, by the maintainer's decision (coding runs need open egress and the platform gives no per-container egress policy); credential scoping per run and harness/shell secret separation are P2 (record 0038's fifth amendment). The live receipts are the record, the refused command and the run page.*
 
 - Record 0038's stage gates (its "Stage gates and the review each must survive" table, as overridden by the fourth amendment) gate each unit.
 - The container-roll floor merged (#1294, #1321): the typed error from any container operation, no kill or remove in the replacement, `interrupted` and re-dispatch. The re-dispatch half is receipted failed on the 1.233.0 deploy: a run resumed across a bot roll and then interrupted by a container roll had its restart-from-request steered into its own dying row (#1340); every deploy rolls in that order, so #1340 lands before U8 and U9, which sit on the same restart path.
@@ -227,7 +229,7 @@ Units U4 to U7 of this plan's first version were Codex-specific and are retired;
   - The environment handed to `serve` contains no `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` when the parent has them.
   - Readiness fails loudly when `/api/health` never answers within the bound; the row records the port when it does.
   - The tailer's file, replayed through the pi log transport, yields the same records in the same order as the events it was fed (a fake `serve` in tests); two step ends around one unchanged message append that message once.
-- **Verification:** both images build and prove the version as root and as `worker1`; a run on a staging bot-host container shows egress to the proxy and loopback only.
+- **Verification:** both images build and prove the version as root and as `worker1`; a run on a staging bot-host container starts the server through the seam and answers its health.
 
 ### U11. `OpenCodeBridge`: the gate and the record
 
@@ -235,7 +237,7 @@ Units U4 to U7 of this plan's first version were Codex-specific and are retired;
 - **Requirements:** R11, R13, R5; KTD6, KTD9, KTD13.
 - **Dependencies:** U3, U10.
 - **Files:** `src/core/harness/opencode/bridge.ts` (new: the disposition table, the per-call mirror, the ask handler, bypass detection), `src/core/harness/opencode/dispositions.ts` (new), `src/core/harness/pi/toolRules.ts` (the action-to-tool-word map), tests `src/core/harness/opencode/bridge.test.ts`, `src/core/harness/conformance.test.ts` (the OpenCode driver over a fake `serve`); docs `harness.md` gate and record rows.
-- **Approach:** read `feed.jsonl` through the log transport; on `permission.asked` map `action`/`resources` onto pi's tool words and call `judgeToolCall` with the run's identity and rules; reply through `request`; on `session.tool.called` report the assistant turn so far with the call in flight; on `success`/`failed` queue the result; on the appended message delta at a step end, upsert the mirrored turn by message id against the store; a success for a call that never asked fails the run closed; the wrap-up steer fires when `grantOf(runId).turns` nears the cap; a `session.execution.failed` carrying the proxy's `403` is the budget stop.
+- **Approach:** read `feed.jsonl` through the log transport; on `permission.asked` map `action`/`resources` onto pi's tool words and call `judgeToolCall` with the run's identity and rules; reply through `request`; on `session.tool.called` report the assistant turn so far with the call in flight; on `success`/`failed` queue the result; on the appended message delta at a step end, upsert the mirrored turn by message id against the store; a success for a call that never asked fails the run closed, and a `permission.replied` the bot did not send is `GateBypassed` the same way; the wrap-up steer fires when `grantOf(runId).turns` nears the cap; a `session.execution.failed` carrying the proxy's `403` is the budget stop.
 - **Test scenarios:**
   - AE1 and AE2 against a fake `serve` that emits the documented event shapes.
   - Every event type in the catalogue has a disposition; an unknown type lands as `harness_error` naming it.
@@ -274,7 +276,7 @@ Units U4 to U7 of this plan's first version were Codex-specific and are retired;
 - **Test scenarios:**
   - `harness: { coding: opencode }` selects `OpenCodeHarness` for coding runs and `PiHarness` for the rest; `harness: { coding: codex }` is refused by name.
   - The source scan still forbids a harness word in `agents/registry.ts`.
-- **Verification:** human-gated live receipt on staging: a coding run on OpenCode in a scratch repository on the resident, its record complete on the run page, one refused command visible as `tool_refused`, the egress log showing only the proxy and loopback; posted on the tracker.
+- **Verification:** human-gated live receipt on staging: a coding run on OpenCode in a scratch repository on the resident, its record complete on the run page, one refused command visible as `tool_refused`; posted on the tracker.
 
 ### U8. `RunBearerStore.rotate` and the mid-run `interrupted` path
 
@@ -327,7 +329,7 @@ Hygiene traps: tracker numbers in code comments, dates outside records, 32-hex f
 
 - Global: every unit's PR merged in stack order; the conformance matrix in the last PR's body; `harness.md` in the specs index and the code map; record 0038's validation rows re-pointed from `[gap]` to the table's titles by a dated amendment; the spike's fourteen items each closed with a fact or a row; no abandoned-attempt code in the tree.
 - U1, U2, U3: pi's behaviour unchanged by literal comparison; the matrix green for pi; `request` proven over a recording executor and on the bot host.
-- U10: both images prove the version as root and thread user; a staging run's egress shows only the proxy and loopback; the tailer's replay equals its feed.
+- U10: both images prove the version as root and thread user; a staging run starts the server through the seam; the tailer's replay equals its feed.
 - U11: OpenCode green on the gate and record rows against the fake `serve`; the bypass row fails closed.
 - U12: OpenCode green on every row against the real binary; the six mutation rows fail once each.
 - U13: the configuration word selects per preset; the live receipt posted.
