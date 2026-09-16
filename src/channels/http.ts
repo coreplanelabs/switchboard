@@ -9,6 +9,7 @@ import type { GrantsLookup } from "../core/authz/actor.js";
 import type { Grants } from "../core/authz/types.js";
 import type { Secrets } from "../secrets.js";
 import type { ChannelIO, HistoryItem, IncomingMessage, RunReceipt, StatusHandle, StatusUpdate } from "../core/types.js";
+import { boundRequester, type PersonLookup } from "./requester.js";
 
 // HTTP channel adapter: adapter #3. Like Slack and the CLI, it is pure
 // transport — it turns an inbound HTTP POST into an IncomingMessage, calls the
@@ -49,6 +50,10 @@ export interface IngressOptions {
   auth: IngressConfig;
   /** Defaults to the real core dispatch(); overridden in tests. */
   dispatch?: DispatchFn;
+  /** The person an entry's `email` names (authorization.md item 15): the
+   *  Slack adapter's cached reverse lookup. Absent (no Slack app up) → every
+   *  token is its own requester, exactly as before the binding existed. */
+  personByEmail?: PersonLookup;
   /** Max body size in bytes (node wrapper enforces at read time). */
   maxBodyBytes?: number;
   /** Base URL for the run's live page in async acknowledgements (from
@@ -100,15 +105,21 @@ interface IngressBody {
 }
 
 /** Build the namespaced IncomingMessage from an authed identity + the body.
- *  Mirrors the Slack adapter's namespacing (invariant 4): userId "http:<sub>",
- *  channelId "http:<channel>", threadKey "http:<channel>:<thread>". A token's
- *  pinned channel wins over the body's; otherwise the body chooses, else the
- *  default scope. */
-function toIncomingMessage(identity: IngressIdentity, body: IngressBody): IncomingMessage {
+ *  Mirrors the Slack adapter's namespacing (invariant 4): the credential is
+ *  "http:<sub>", channelId "http:<channel>", threadKey "http:<channel>:<thread>".
+ *  A token's pinned channel wins over the body's; otherwise the body chooses,
+ *  else the default scope. The requester is the person the entry's `email`
+ *  names when the lookup finds one (`boundRequester`: `userId` the person,
+ *  `authenticatedAs` the credential), else the credential itself. */
+async function toIncomingMessage(
+  identity: IngressIdentity,
+  body: IngressBody,
+  personByEmail: PersonLookup | undefined,
+): Promise<IncomingMessage> {
   const channel = identity.channel ?? body.channel ?? DEFAULT_CHANNEL;
   const thread = body.thread ?? DEFAULT_THREAD;
   return {
-    userId: `${PLATFORM}:${identity.subject}`,
+    ...(await boundRequester(`${PLATFORM}:${identity.subject}`, identity.email, personByEmail)),
     channelId: `${PLATFORM}:${channel}`,
     threadKey: `${PLATFORM}:${channel}:${thread}`,
     text: body.text,
@@ -298,7 +309,10 @@ async function handleAuthorized(
   // identity is established and the body parsed; `dispatch()` ends it.
   const receivedAt = systemClock();
   const trace = startRequestRoot(deps, { channel: "http", receivedAt });
-  const msg: IncomingMessage = { ...toIncomingMessage(identity, parsed.body), receivedAt };
+  const msg: IncomingMessage = {
+    ...(await toIncomingMessage(identity, parsed.body, options.personByEmail)),
+    receivedAt,
+  };
   const io = new HttpIO(parsed.body.history);
   const dispatchFn = options.dispatch ?? realDispatch;
   if (parsed.body.async) {

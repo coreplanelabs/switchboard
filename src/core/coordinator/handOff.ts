@@ -43,6 +43,7 @@ export interface HandOffInput {
     channelName?: string;
     userId: string;
     userName?: string;
+    authenticatedAs?: string;
     threadKey: string;
     sourceUrl?: string;
   };
@@ -126,6 +127,7 @@ async function plan(
     kind: "ship",
     userId: msg.userId,
     ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+    ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
     channelId: msg.channelId,
     ...(msg.channelName !== undefined ? { channelName: msg.channelName } : {}),
     threadKey: msg.threadKey,

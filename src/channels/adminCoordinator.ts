@@ -594,6 +594,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
     channelId: instance.channelId,
     userId: instance.userId,
     ...(instance.userName !== undefined ? { userName: instance.userName } : {}),
+    ...(instance.authenticatedAs !== undefined ? { authenticatedAs: instance.authenticatedAs } : {}),
     ...(instance.channelName !== undefined ? { channelName: instance.channelName } : {}),
     threadKey,
     ...(thread.sourceUrl !== undefined ? { sourceUrl: thread.sourceUrl } : {}),
@@ -1487,6 +1488,7 @@ export function parentRunRecord(
     events,
     diagnosis: analyzeRunFriction(events, { finished: true, truncated: false }),
     ...(instance.userName !== undefined ? { userName: instance.userName } : {}),
+    ...(instance.authenticatedAs !== undefined ? { authenticatedAs: instance.authenticatedAs } : {}),
     ...(instance.sourceUrl !== undefined ? { sourceUrl: instance.sourceUrl } : {}),
   };
 }

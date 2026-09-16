@@ -9,6 +9,7 @@ import {
   AGENT_HUE,
   agentHue,
   dotTip,
+  SURFACE_GLYPH,
   SURFACE_NAME,
   elapsedText,
   expiresAt,
@@ -164,13 +165,19 @@ function onRowClick(ev: MouseEvent): void {
         </span>
       </UTooltip>
       <!-- Who asked (record 0042, runs page): the resolved name, always visible — the
-           source mark's hover kept saying it only to a pointer. -->
+           source mark's hover kept saying it only to a pointer — led by the surface's
+           glyph, so a person's Slack, HTTP and CLI runs read apart without a hover
+           (authorization.md item 15: one person, several credentials). -->
       <UTooltip v-if="who" :text="sourceTip(run)">
         <span
-          class="who pointer-events-auto min-w-0 shrink-0 truncate text-[0.8rem] max-sm:order-7 max-sm:text-xs sm:max-w-[9em]"
+          class="who pointer-events-auto min-w-0 shrink-0 truncate text-[0.8rem] max-sm:order-7 max-sm:text-xs sm:max-w-[10em]"
           :class="run.finished ? 'text-dimmed' : 'text-muted'"
           :data-user-id="run.userId"
-          >{{ who }}</span
+          :data-surface="src.kind"
+          ><span class="glyph mr-1 text-dimmed" :class="src.kind === 'cli' ? 'text-[0.7rem]' : ''" aria-hidden="true">{{
+            SURFACE_GLYPH[src.kind] ?? "○"
+          }}</span
+          ><span class="name">{{ who }}</span></span
         >
       </UTooltip>
       <span

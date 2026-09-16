@@ -69,12 +69,18 @@ export interface RunRecord {
   model?: string;
   /** Platform-namespaced ids (AGENTS.md invariant 4). */
   channelId: string;
-  /** The person the run was for — the message's sender, or the person an app
-   *  relayed it for (slack-channel.md item 13); `slack:bot:<id>` only when no
-   *  person could be found behind an app's post. */
+  /** The person the run was for — the message's sender, the person an app
+   *  relayed it for (slack-channel.md item 13), or the person a bound
+   *  credential belongs to (authorization.md item 15); `slack:bot:<id>` only
+   *  when no person could be found behind an app's post. */
   userId: string;
   /** The app that posted the request for `userId`, by display name, when it was not their own message. */
   relayedBy?: string;
+  /** The credential that authenticated the request (`http:<subject>`,
+   *  `mcp:<subject>`, `cli:local`) when it was bound to the person `userId`
+   *  names — the run is theirs, the grants were the credential's. Absent when
+   *  the sender and the credential are one. */
+  authenticatedAs?: string;
   threadKey: string;
   /** How the run's channel may travel (authorization): stamped at dispatch
    *  from the `ChannelDirectory`, read by `member-of` (a `public` run is
@@ -767,6 +773,7 @@ export function isRunRecord(v: unknown): v is RunRecord {
     return false;
   if (typeof r.channelId !== "string" || typeof r.userId !== "string" || typeof r.threadKey !== "string") return false;
   if (r.relayedBy !== undefined && typeof r.relayedBy !== "string") return false;
+  if (r.authenticatedAs !== undefined && typeof r.authenticatedAs !== "string") return false;
   // Absent on records written before the stamp existed (read as `unknown`); present → a known value.
   if (r.channelVisibility !== undefined && !CHANNEL_VISIBILITIES.includes(r.channelVisibility as ChannelVisibility))
     return false;

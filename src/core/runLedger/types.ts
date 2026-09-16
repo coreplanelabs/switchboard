@@ -53,6 +53,9 @@ export interface LiveRunMeta {
   repo?: string;
   sourceUrl?: string;
   userName?: string;
+  /** The bound credential behind the person (authorization.md item 15): a
+   *  resume or restart dispatches under ITS grants again, never the person's. */
+  authenticatedAs?: string;
   effort?: string;
   ref?: string;
   headSha?: string;

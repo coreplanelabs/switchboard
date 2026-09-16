@@ -454,6 +454,9 @@ describe("isRunRecord", () => {
     // The relaying app's name (slack-channel.md item 13): optional, a string when present.
     expect(isRunRecord({ ...record(), relayedBy: "Claude [ci]" })).toBe(true);
     expect(isRunRecord({ ...record(), relayedBy: 7 })).toBe(false);
+    // The bound credential behind the person (authorization.md item 15): optional, a string when present.
+    expect(isRunRecord({ ...record(), authenticatedAs: "http:alice-ingress" })).toBe(true);
+    expect(isRunRecord({ ...record(), authenticatedAs: 7 })).toBe(false);
   });
 
   it("isRunListItem accepts a record minus events (with or without numeric bytes) and rejects a bad bytes or a bad row", () => {

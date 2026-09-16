@@ -159,6 +159,8 @@ export async function runInlineCommandRun<
       threadKey: msg.threadKey,
       channelVisibility,
       receivedAt: trace.receivedAt,
+      ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+      ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
     },
   );
   // The command run rides the request's trace like an agent run: the setup

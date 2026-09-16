@@ -36,10 +36,10 @@ import { MAX_BODY_BYTES, readBody } from "./http.js";
 // cannot read a cross-site response either. Every response is `no-store`.
 // Authorization happens before the body is buffered (readBody with a cap).
 
-/** The person a verified email names (record 0042): `slack:U…` and a display
- *  name, or undefined when nobody, a bot, a deleted user, or a lookup that
- *  failed or timed out — the Slack adapter's `resolvePersonByEmail`. */
-export type PersonLookup = (email: string) => Promise<{ id: string; name?: string } | undefined>;
+/** The person a verified email names (record 0042) — declared beside the
+ *  bound-credential requester it also serves (`./requester.ts`). */
+import type { PersonLookup } from "./requester.js";
+export type { PersonLookup };
 
 export interface CommandHttpOptions {
   /** Grants by actor id (`ConfigStore.grantsFor`) for the `Caller.actor` every

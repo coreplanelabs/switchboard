@@ -358,6 +358,21 @@ describe("assembleRunRecord — the handoff on the record", () => {
     expect("relayedBy" in assembleRunRecord(base())).toBe(false);
   });
 
+  // authorization.md item 15: the record names the person; the credential rides beside them.
+  it("carries authenticatedAs when a bound credential sent the request, and the record still validates; a sender who is their own credential → no key", () => {
+    const b = base();
+    const bound = assembleRunRecord({
+      ...b,
+      msg: { ...b.msg, userId: "slack:U0ALICE", userName: "alice", authenticatedAs: "http:alice-ingress" },
+    });
+    expect(bound.userId).toBe("slack:U0ALICE");
+    expect(bound.userName).toBe("alice");
+    expect(bound.authenticatedAs).toBe("http:alice-ingress");
+    expect(isRunRecord(bound)).toBe(true);
+    expect(isRunRecord(JSON.parse(JSON.stringify(bound)))).toBe(true);
+    expect("authenticatedAs" in assembleRunRecord(base())).toBe(false);
+  });
+
   it("the drain deadline's interrupted record carries the parent the registry row names (a child abandoned mid-flight still points at its parent)", () => {
     const registry = new RunRegistry({ genId: () => "run-child", genToken: () => "tok", now: () => 1000 });
     const run = registry.create("research · child", {

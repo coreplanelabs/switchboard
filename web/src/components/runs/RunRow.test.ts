@@ -117,14 +117,39 @@ describe("RunRow", () => {
 
   it("says who asked, always visible (record 0042, the runs page): the resolved name, else the id suffix, never a raw platform id; its hover is the source mark's sentence", () => {
     const named = mountRow(row({ userName: "alice" }));
-    expect(named.find(".who").text()).toBe("alice");
+    expect(named.find(".who .name").text()).toBe("alice");
     expect(named.find(".who").attributes("data-user-id")).toBe("slack:UACME1");
     expect(named.find(".who").classes()).not.toContain("opacity-0"); // not a hover reveal
     const unnamed = mountRow(row());
-    expect(unnamed.find(".who").text()).toBe("UACME1");
+    expect(unnamed.find(".who .name").text()).toBe("UACME1");
     expect(unnamed.html()).not.toContain(">slack:UACME1<");
     const nobody = mountRow(row({ userId: undefined, channelId: undefined }));
     expect(nobody.find(".who").exists()).toBe(false);
+  });
+
+  // authorization.md item 15: one person arrives over several credentials; the
+  // surface glyph leads the requester cell so their rows read apart without a hover.
+  it("leads the requester with the surface's glyph, always visible and decorative (the tooltip says the surface in words), so the same person's Slack, HTTP and CLI runs read apart", () => {
+    const slack = mountRow(row({ userName: "ada" }));
+    expect(slack.find(".who .glyph").text()).toBe("⁙");
+    expect(slack.find(".who .glyph").attributes("aria-hidden")).toBe("true");
+    expect(slack.find(".who").attributes("data-surface")).toBe("slack");
+    expect(slack.find(".who .glyph").classes()).not.toContain("opacity-0");
+    const http = mountRow(
+      row({
+        userName: "ada",
+        channelId: "http:default",
+        userId: "slack:UACME1",
+        authenticatedAs: "http:ada-ingress",
+      }),
+    );
+    expect(http.find(".who .glyph").text()).toBe("⌁");
+    expect(http.find(".who .name").text()).toBe("ada");
+    expect(http.find(".who").attributes("data-surface")).toBe("http");
+    const cli = mountRow(row({ userName: "ada", channelId: "cli:local" }));
+    expect(cli.find(".who .glyph").text()).toBe(">_");
+    const odd = mountRow(row({ channelId: "weird" }));
+    expect(odd.find(".who .glyph").text()).toBe("○");
   });
 
   it("the source mark is the ↗ link for a run with a thread, the surface glyph otherwise; a javascript: url never links", () => {

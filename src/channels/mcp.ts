@@ -12,6 +12,7 @@ import { dispatch as realDispatch, type CoreDeps } from "../core/dispatcher.js";
 import { startRequestRoot } from "../core/requestTrace.js";
 import { systemClock } from "../core/trace/clock.js";
 import type { ChannelIO, HistoryItem, IncomingMessage, StatusHandle, StatusUpdate } from "../core/types.js";
+import { boundRequester, type PersonLookup } from "./requester.js";
 import {
   authorizeRequest,
   hasDispatch,
@@ -95,6 +96,9 @@ export interface McpOptions {
   /** Grants by actor id for the `Caller.actor` a tool call carries and for the
    *  `dispatch` gate. Absent → `deps.config.grantsFor` (the bot's store). */
   grantsFor?: GrantsLookup;
+  /** The person an entry's `email` names (authorization.md item 15), as the
+   *  HTTP ingress takes it. Absent → every token is its own requester. */
+  personByEmail?: PersonLookup;
 }
 
 /** `runs.list` → tool `runs_list`; `inputSchema` = the command's
@@ -187,17 +191,21 @@ export class McpIO implements ChannelIO {
 
 /** Build the `mcp:`-namespaced IncomingMessage from an authed identity + the
  *  tool arguments. Mirrors http.ts's namespacing (invariant 4) but with the
- *  `mcp:` prefix so MCP and HTTP callers are distinct scopes. A token's pinned
- *  channel wins over the arguments'; otherwise the arguments choose, else the
- *  default scope. */
-function toIncomingMessage(
+ *  `mcp:` prefix so MCP and HTTP credentials are distinct actors. A token's
+ *  pinned channel wins over the arguments'; otherwise the arguments choose,
+ *  else the default scope. */
+async function toIncomingMessage(
   identity: IngressIdentity,
   args: { text: string; channel?: string; thread?: string },
-): IncomingMessage {
+  personByEmail: PersonLookup | undefined,
+): Promise<IncomingMessage> {
   const channel = identity.channel ?? args.channel ?? DEFAULT_CHANNEL;
   const thread = args.thread ?? DEFAULT_THREAD;
   return {
-    userId: `${PLATFORM}:${identity.subject}`,
+    // The requester is the person the entry's `email` names when the lookup
+    // finds one (`userId` the person, `authenticatedAs` the credential), else
+    // the credential itself — the HTTP ingress's rule (authorization.md item 15).
+    ...(await boundRequester(`${PLATFORM}:${identity.subject}`, identity.email, personByEmail)),
     channelId: `${PLATFORM}:${channel}`,
     threadKey: `${PLATFORM}:${channel}:${thread}`,
     text: args.text,
@@ -301,11 +309,15 @@ async function route(
       const receivedAt = systemClock();
       const trace = startRequestRoot(deps, { channel: "mcp", receivedAt });
       const msg: IncomingMessage = {
-        ...toIncomingMessage(identity, {
-          text: args.text,
-          channel: args.channel as string | undefined,
-          thread: args.thread as string | undefined,
-        }),
+        ...(await toIncomingMessage(
+          identity,
+          {
+            text: args.text,
+            channel: args.channel as string | undefined,
+            thread: args.thread as string | undefined,
+          },
+          options.personByEmail,
+        )),
         receivedAt,
       };
       const io = new McpIO();

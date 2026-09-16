@@ -126,9 +126,12 @@ export function coordinatorFields(tag: CoordinatorTag | undefined): {
 export interface CoordinatorInstance {
   id: string;
   kind: "ship";
-  /** The requesting user (platform-namespaced), whose grants every child is authorized under. */
+  /** The requesting person (platform-namespaced); every child is dispatched as them. */
   userId: string;
   userName?: string;
+  /** The bound credential behind the person (authorization.md item 15), when
+   *  there was one: every child is authorized under ITS grants, as the request was. */
+  authenticatedAs?: string;
   channelId: string;
   channelName?: string;
   /** The requesting thread: where the card lives and where a generated plan's
@@ -234,6 +237,7 @@ export function isCoordinatorInstance(v: unknown): v is CoordinatorInstance {
   if (r.kind !== "ship") return false;
   if (!isText(r.userId) || !isText(r.channelId) || !isText(r.threadKey)) return false;
   if (!isOptionalText(r.userName) || !isOptionalText(r.channelName) || !isOptionalText(r.sourceUrl)) return false;
+  if (!isOptionalText(r.authenticatedAs)) return false;
   if (typeof r.repo !== "string" || !REPO_SLUG.test(r.repo)) return false;
   if (!isText(r.branch) || !isOptionalText(r.base)) return false;
   if (!isFinite(r.createdAt)) return false;

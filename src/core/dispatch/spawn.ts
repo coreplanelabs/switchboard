@@ -285,6 +285,7 @@ export async function spawnChild<D extends SpawnCoreDeps>(
     channelId: parent.msg.channelId,
     userId: parent.msg.userId,
     ...(parent.msg.userName !== undefined ? { userName: parent.msg.userName } : {}),
+    ...(parent.msg.authenticatedAs !== undefined ? { authenticatedAs: parent.msg.authenticatedAs } : {}),
     ...(parent.msg.channelName !== undefined ? { channelName: parent.msg.channelName } : {}),
     threadKey: opened.thread.threadKey,
     ...(opened.thread.sourceUrl !== undefined ? { sourceUrl: opened.thread.sourceUrl } : {}),
@@ -443,6 +444,7 @@ export function runToolCapabilities<D extends SpawnCoreDeps>(
           {
             userId: run.msg.userId,
             ...(run.msg.userName !== undefined ? { userName: run.msg.userName } : {}),
+            ...(run.msg.authenticatedAs !== undefined ? { authenticatedAs: run.msg.authenticatedAs } : {}),
             channelId: run.msg.channelId,
             ...(run.msg.channelName !== undefined ? { channelName: run.msg.channelName } : {}),
             ...(run.msg.sourceUrl !== undefined ? { sourceUrl: run.msg.sourceUrl } : {}),

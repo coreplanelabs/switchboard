@@ -58,4 +58,18 @@ describe("durable inbox — staged references (record 0033)", () => {
     const row = { ...durableInboxMessage(base, base.text, 1), staged: [{ name: "x" }, 7, clip] };
     expect(messageFromInbox(row, 0)?.msg.staged).toEqual([clip]);
   });
+
+  // authorization.md item 15: the credential behind a bound person survives the
+  // row, so a restart dispatches under its grants, not the person's.
+  it("a bound credential's `authenticatedAs` rides the row and reads back; a message without one reads back without the key", () => {
+    const bound = { ...base, userId: "slack:U0ALICE", authenticatedAs: "http:alice-ingress" };
+    const row = durableInboxMessage(bound, bound.text, 1);
+    expect(row.authenticatedAs).toBe("http:alice-ingress");
+    expect(messageFromInbox(row, 0)?.msg).toMatchObject({
+      userId: "slack:U0ALICE",
+      authenticatedAs: "http:alice-ingress",
+    });
+    expect("authenticatedAs" in durableInboxMessage(base, base.text, 1)).toBe(false);
+    expect("authenticatedAs" in (messageFromInbox(durableInboxMessage(base, base.text, 1), 0)?.msg ?? {})).toBe(false);
+  });
 });
