@@ -123,20 +123,45 @@ export function render(frame: StatusUpdate): { text: string; blocks: object[] } 
   const title = escapeMrkdwn(frame.title);
   const blocks: object[] = [{ type: "context", elements: [{ type: "mrkdwn", text: title }] }];
   const elements: object[] = [];
+  // Each text piece after the first opens on its own line.
+  const line = (text: string) => elements.push({ type: "text", text: elements.length > 0 ? `\n${text}` : text });
   // The run link is a typed link element: one rendered line, and its 100+-char
   // capability URL lives in the `url` field where it has no width at all.
   if (frame.link) elements.push({ type: "link", url: frame.link.url, text: frame.link.label });
-  if (frame.detail) {
-    // The cap cut can land mid-astral-char; a lone high surrogate is invalid
-    // JSON text and Slack rejects the payload, so drop it from the cut edge.
-    const detail = frame.detail.slice(0, RENDER_DETAIL_RAW_MAX).replace(/[\uD800-\uDBFF]$/u, "");
-    elements.push({ type: "text", text: frame.link ? `\n${detail}` : detail });
-  }
-  if (elements.length > 0) {
-    blocks.push({
-      type: "rich_text",
-      elements: [{ type: "rich_text_section", elements }],
-    });
-  }
+  // The cap cut can land mid-astral-char; a lone high surrogate is invalid
+  // JSON text and Slack rejects the payload, so drop it from the cut edge.
+  if (frame.detail) line(frame.detail.slice(0, RENDER_DETAIL_RAW_MAX).replace(/[\uD800-\uDBFF]$/u, ""));
+  // The activity is typed (run-visibility item 2): a command draws as a caption
+  // naming the tool and a `rich_text_preformatted` code block beside the
+  // section — a sibling element of the same rich_text block, so the no-fold
+  // property holds — never a command re-parsed out of the text. A line is one
+  // more line of the section.
+  const activity = frame.activity;
+  if (activity?.kind === "line") line(activity.text);
+  if (activity?.kind === "command") line(`→ ${activity.tool}`);
+  const body: object[] = [];
+  if (elements.length > 0) body.push({ type: "rich_text_section", elements });
+  if (activity?.kind === "command")
+    body.push({ type: "rich_text_preformatted", elements: [{ type: "text", text: clipCommand(activity.command) }] });
+  if (body.length > 0) blocks.push({ type: "rich_text", elements: body });
   return { text: title, blocks };
+}
+
+/** Lines of a command the card shows before counting the rest. */
+const COMMAND_LINES_MAX = 6;
+/** Characters of a command the card shows, whatever its line count. */
+const COMMAND_CHARS_MAX = 600;
+
+/** A command cut by structure, not by pattern: the first `COMMAND_LINES_MAX`
+ *  lines kept and the rest counted (`… +N lines`), then the character cap with
+ *  the same lone-surrogate guard the detail has — so a heredoc-fed script
+ *  reads as its opening lines and a one-line monster cannot widen the card. */
+export function clipCommand(command: string): string {
+  const lines = command.split("\n");
+  const kept =
+    lines.length > COMMAND_LINES_MAX
+      ? [...lines.slice(0, COMMAND_LINES_MAX), `… +${lines.length - COMMAND_LINES_MAX} lines`].join("\n")
+      : command;
+  if (kept.length <= COMMAND_CHARS_MAX) return kept;
+  return `${kept.slice(0, COMMAND_CHARS_MAX - 1).replace(/[\uD800-\uDBFF]$/u, "")}…`;
 }

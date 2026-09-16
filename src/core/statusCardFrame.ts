@@ -1,4 +1,4 @@
-import type { StatusUpdate } from "./types.js";
+import type { StatusActivity, StatusUpdate } from "./types.js";
 import { formatDuration } from "./time/formatDuration.js";
 
 // The status card's one frame builder (docs/reference/specs/run-visibility.md item 2;
@@ -57,6 +57,15 @@ export type CardClose = (
   queued?: string;
 };
 
+/** An activity flattened for a text-only surface (the CLI, the `[tool]` log
+ *  line, the load simulator): a command on one line behind the `→ $` prefix
+ *  the trace has always used, a line verbatim. */
+export function activityText(activity: StatusActivity | undefined): string | undefined {
+  if (!activity) return undefined;
+  if (activity.kind === "line") return activity.text;
+  return `→ $ ${activity.command.replace(/\s+/g, " ").trim()}`;
+}
+
 export interface LiveFrameParts {
   /** Appended to the title after the elapsed time (the quiet-wait suffix). */
   suffix?: string;
@@ -64,6 +73,8 @@ export interface LiveFrameParts {
   notice?: string;
   /** Detail lines in order; empty entries are dropped and the rest joined with newlines. */
   detail?: ReadonlyArray<string | undefined>;
+  /** What the run is doing now, typed (`StatusActivity`); live frames only. */
+  activity?: StatusActivity;
 }
 
 export interface CardShell {
@@ -152,6 +163,7 @@ export function createCardShell(opts: CardShellOptions): CardShell {
           (parts.suffix ?? "") +
           (parts.notice ? ` · ${parts.notice}` : ""),
         detail: detail || undefined,
+        ...(parts.activity ? { activity: parts.activity } : {}),
         link,
       };
     },

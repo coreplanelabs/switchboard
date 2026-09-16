@@ -4,6 +4,7 @@ import {
   afterReply,
   artifactLink,
   attachmentSuffix,
+  cardActivity,
   composeRunLabel,
   deliverAnswer,
   LONG_COMMAND_REPLY_CHARS,
@@ -24,7 +25,7 @@ import { createRunEnding } from "../runEnding.js";
 import type { StopMode } from "../runEvents.js";
 import { RunRegistry } from "../runRegistry.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
-import { createCardShell } from "../statusCardFrame.js";
+import { activityText, createCardShell } from "../statusCardFrame.js";
 import type { StatusUpdate } from "../types.js";
 
 // docs/reference/specs/command-registry.md item 27 / mcp-tools.md item 19: a command reply
@@ -119,6 +120,52 @@ describe("replyCommandOutput", () => {
 // snippet of the request, capped to a sane length.
 // Feature: docs/reference/specs/live-view.md item 12 — the one-line attachment note the
 // dispatcher appends to the `input` event's text.
+// run-visibility item 2: the card's activity keeps the event's structure — a
+// bash call with its command is a `command` part the Slack card draws as a code
+// block; everything else is the one-line trace as before.
+describe("cardActivity", () => {
+  it("a bash tool_call carrying its command becomes a command part with the full command, not the capped summary", () => {
+    const command = "python3 - <<'EOF'\nprint(1)\nEOF";
+    expect(
+      cardActivity({ type: "tool_call", tool: "bash", summary: "$ python3 - <<'EOF' print(1) EOF", command }),
+    ).toEqual({
+      kind: "command",
+      tool: "bash",
+      command,
+    });
+  });
+
+  it("a tool_call without a command (a non-bash tool, or an event from before the field) is the `→ summary` line", () => {
+    expect(cardActivity({ type: "tool_call", tool: "read", summary: "read src/a.ts" })).toEqual({
+      kind: "line",
+      text: "→ read src/a.ts",
+    });
+    expect(cardActivity({ type: "tool_call", tool: "bash", summary: "$ ls" })).toEqual({
+      kind: "line",
+      text: "→ $ ls",
+    });
+  });
+
+  it("every other event is its activityLine as a line part", () => {
+    expect(cardActivity({ type: "tool_result", tool: "bash", ok: true, summary: "exit 0" })).toEqual({
+      kind: "line",
+      text: "✓ bash: exit 0",
+    });
+    expect(cardActivity({ type: "run_note", kind: "wrap_up", summary: "note" })).toEqual({
+      kind: "line",
+      text: "⏱ note",
+    });
+  });
+
+  it("activityText flattens a part for a text-only surface: the command on one line behind the `→ $` prefix, a line verbatim", () => {
+    expect(activityText({ kind: "command", tool: "bash", command: "cd a &&\n  make   test" })).toBe(
+      "→ $ cd a && make test",
+    );
+    expect(activityText({ kind: "line", text: "✓ bash: ok" })).toBe("✓ bash: ok");
+    expect(activityText(undefined)).toBeUndefined();
+  });
+});
+
 describe("attachmentSuffix", () => {
   const img = { name: "a.png", mediaType: "image/png" as const, data: "" };
   const doc = { name: "a.txt", mediaType: "text/plain" as const, data: "" };

@@ -195,4 +195,70 @@ describe("render (status card rich_text body)", () => {
     expect(text.text!.length).toBe(899);
     expect(text.text!).not.toMatch(/[\uD800-\uDBFF]$/u);
   });
+
+  // run-visibility item 2: the activity is typed, so a command draws as a code
+  // block — a rich_text_preformatted element beside the section, never a
+  // command re-parsed out of the detail text.
+  describe("activity", () => {
+    const command = "cd /workspace/app && python3 - <<'EOF'\np='docs/x.md'\ns=open(p).read()\nEOF";
+
+    it("a command activity draws as a caption in the section and the command verbatim in a rich_text_preformatted element", () => {
+      const out = render({
+        title: "run",
+        link: { url: "https://bot.example/runs/abc?t=x", label: "Live run" },
+        detail: "✓ a\n✱ b",
+        activity: { kind: "command", tool: "bash", command },
+      });
+      expect(body(out).elements).toEqual([
+        {
+          type: "rich_text_section",
+          elements: [
+            { type: "link", url: "https://bot.example/runs/abc?t=x", text: "Live run" },
+            { type: "text", text: "\n✓ a\n✱ b" },
+            { type: "text", text: "\n→ bash" },
+          ],
+        },
+        { type: "rich_text_preformatted", elements: [{ type: "text", text: command }] },
+      ]);
+    });
+
+    it("a line activity is appended to the section text like any detail line", () => {
+      const out = render({ title: "run", detail: "✓ a", activity: { kind: "line", text: "✓ bash: ok" } });
+      expect(body(out).elements).toEqual([
+        {
+          type: "rich_text_section",
+          elements: [
+            { type: "text", text: "✓ a" },
+            { type: "text", text: "\n✓ bash: ok" },
+          ],
+        },
+      ]);
+    });
+
+    it("a command activity alone (no link, no detail) still gets its caption and code block", () => {
+      const out = render({ title: "run", activity: { kind: "command", tool: "bash", command: "ls" } });
+      expect(body(out).elements).toEqual([
+        { type: "rich_text_section", elements: [{ type: "text", text: "→ bash" }] },
+        { type: "rich_text_preformatted", elements: [{ type: "text", text: "ls" }] },
+      ]);
+    });
+
+    it("a long script is cut by structure — the first lines kept, the rest counted — so a heredoc never balloons the card", () => {
+      const lines = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`);
+      const out = render({ title: "run", activity: { kind: "command", tool: "bash", command: lines.join("\n") } });
+      const pre = body(out).elements[1]!;
+      expect(pre.type).toBe("rich_text_preformatted");
+      expect(pre.elements[0]!.text).toBe([...lines.slice(0, 6), "… +14 lines"].join("\n"));
+    });
+
+    it("a single overlong line is capped by characters without leaving a lone surrogate", () => {
+      const out = render({
+        title: "run",
+        activity: { kind: "command", tool: "bash", command: "x".repeat(599) + "🎉" + "y".repeat(100) },
+      });
+      const text = body(out).elements[1]!.elements[0]!.text!;
+      expect(text.length).toBeLessThanOrEqual(600);
+      expect(text).not.toMatch(/[\uD800-\uDBFF]$/u);
+    });
+  });
 });

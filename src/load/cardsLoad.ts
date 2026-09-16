@@ -11,6 +11,7 @@
 // policy, kept as the baseline the budget is measured against. Deterministic,
 // instant, no I/O.
 
+import { activityText } from "../core/statusCardFrame.js";
 import { coalesceStatus } from "../core/statusCoalescer.js";
 import { createStatusBudget, STATUS_EDITS_PER_MINUTE, TERMINAL_RESENDS } from "../core/statusBudget.js";
 import type { StatusHandle, StatusUpdate } from "../core/types.js";
@@ -126,7 +127,12 @@ export function simulateCards(params: CardsLoadParams): CardsLoadOutcome {
     if (!posted.ok) continue;
     const ts = posted.ts;
     const update = (frame: StatusUpdate) =>
-      slack.update({ channel, ts, text: `${frame.title}\n${frame.detail ?? ""}`, frameAt: producedAt.get(frame) ?? t });
+      slack.update({
+        channel,
+        ts,
+        text: [frame.title, frame.detail, activityText(frame.activity)].filter(Boolean).join("\n"),
+        frameAt: producedAt.get(frame) ?? t,
+      });
 
     let inner: StatusHandle;
     if (model === "budgeted") {

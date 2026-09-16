@@ -78,17 +78,17 @@ import type { WaitCapability } from "./awaitChildren.js";
 import type { SpawnCapability } from "./spawn.js";
 import type { SessionCapability } from "../../tools/session.js";
 import { inFlightToolAfter, quietSuffix } from "../statusCardLabel.js";
-import type { CardShell } from "../statusCardFrame.js";
+import { activityText, type CardShell } from "../statusCardFrame.js";
 import type { RunEnding } from "../runEnding.js";
 import type { LiveThread } from "../threadAdmission.js";
 import type { ChannelVisibility } from "../authz/types.js";
 import type { Clock, Span } from "../trace/types.js";
 import { publicEnv } from "../../secrets.js";
-import type { ChannelIO, IncomingMessage, StagedFile, StatusHandle } from "../types.js";
+import type { ChannelIO, IncomingMessage, StagedFile, StatusActivity, StatusHandle } from "../types.js";
 import type { DispatchFollowUp, ResumeContext } from "./admission.js";
 import type { RegisteredRun } from "./provision.js";
 import { registerFinishRecord } from "./record.js";
-import { activityLine, artifactLink } from "./reply.js";
+import { artifactLink, cardActivity } from "./reply.js";
 import { stageIntoWorkspace, stagingIndex, type WorkspaceFiles } from "./staging.js";
 import { githubCapabilityFor, shutdownNotice, webCapability, type RunDeps } from "./run.js";
 
@@ -300,7 +300,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // the branch already pushed.
   const restored = resume?.row.state ?? {};
   let checklist: string | undefined = typeof restored.checklist === "string" ? restored.checklist : undefined;
-  let lastActivity: string | undefined;
+  // Typed (`StatusActivity`): a bash call rides as its full command, which
+  // the Slack card draws as a code block; everything else as its one line.
+  let lastActivity: StatusActivity | undefined;
   // The tool whose call has no result yet — the title says the wait is the
   // tool's (`running bash (Ns)`), not the model's (`thinking …`).
   let inFlightTool: string | undefined;
@@ -310,7 +312,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     shell.live({
       suffix: quietSuffix(clock() - lastActivityAt, inFlightTool),
       notice: shutdownNotice(),
-      detail: [checklist, lastActivity],
+      detail: [checklist],
+      activity: lastActivity,
     });
   // The closed card keeps the run link (the run page outlives the run and
   // shows the final answer) and the agent's checklist; only the transient
@@ -326,7 +329,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   const onProgress = (note: string) => {
     console.log(`[note] ${msg.threadKey} ${note}`);
     lastActivityAt = clock();
-    lastActivity = note;
+    lastActivity = { kind: "line", text: note };
     card.update(currentFrame());
   };
   // Live run-visibility (Area 2): each tool call/result refreshes the card
@@ -356,8 +359,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     }
     inFlightTool = inFlightToolAfter(inFlightTool, e);
     lastActivityAt = clock();
-    lastActivity = activityLine(e);
-    console.log(`[tool] ${msg.threadKey} ${lastActivity}`);
+    lastActivity = cardActivity(e);
+    console.log(`[tool] ${msg.threadKey} ${activityText(lastActivity)}`);
     card.update(currentFrame());
   };
   // A configured MCP server that did not answer discovery is a fact of the

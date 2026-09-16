@@ -135,12 +135,23 @@ export interface HistoryItem {
   documents?: DocumentAttachment[];
 }
 
+/** What the run is doing right now, typed so each channel draws it in its
+ *  own dialect and none re-parses text to find a command
+ *  (docs/reference/specs/run-visibility.md item 2). `command` is a shell call
+ *  with the command it was given — Slack draws it as a code block; a text
+ *  surface flattens it to one `→ $ …` line. `line` is the one-line trace
+ *  every other event makes (`→ read src/a.ts`, `✓ bash: exit 0`, `💭 thought
+ *  for 5.1s`). */
+export type StatusActivity = { kind: "command"; tool: string; command: string } | { kind: "line"; text: string };
+
 /** A structured progress frame; adapters decide how to render it. */
 export interface StatusUpdate {
   /** one-line headline, e.g. "⚡ review on anthropic/claude-fable-5 · 42s" */
   title: string;
-  /** recent activity, shown as preformatted text (e.g. last tool commands) */
+  /** the agent's checklist and any lead lines, one per line */
   detail?: string;
+  /** the current activity, live frames only — a close never carries it */
+  activity?: StatusActivity;
   /**
    * The run's live page, rendered by each channel in its own short form
    * (Slack: a one-line `<url|label>` hyperlink; CLI: the bare URL). Kept out of

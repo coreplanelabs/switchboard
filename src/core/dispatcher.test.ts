@@ -29,6 +29,7 @@ import { durableInboxMessage, type DispatchFollowUp } from "./dispatch/admission
 import { CUSTOM_INSTRUCTIONS_HEADER } from "./customInstructions.js";
 import { RunRegistry } from "./runRegistry.js";
 import { activityOfEvents } from "./runRegistry/activity.js";
+import { activityText } from "./statusCardFrame.js";
 import type { IndexEvent } from "./runRegistry/indexFeed.js";
 import { RunControl } from "./runRegistry/runControl.js";
 import { createTracer } from "./trace/tracer.js";
@@ -4681,7 +4682,7 @@ describe("live run-view wiring (Area 2)", () => {
     deps.statusUpdateMinMs = 0; // every frame reaches the channel; the 💬 one is superseded within ms otherwise
     const { io, statuses } = fakeIO();
     await dispatch(deps, msg("hello there"), io);
-    const trace = statuses.map((s) => s.detail ?? "").find((d) => d.includes("💬"));
+    const trace = statuses.map((s) => activityText(s.activity) ?? "").find((d) => d.includes("💬"));
     expect(trace).toBeDefined();
     expect(trace).toContain("💬 Let me look at the failing test first.");
     expect(trace).toContain("…");
@@ -4788,6 +4789,40 @@ describe("closed-card checklist and review verdict run link", () => {
     const last = statuses[statuses.length - 1];
     expect(last.title).toContain("✅");
     expect(last.detail).toBe("✓ Read the diff\n✓ Run tests");
+  });
+
+  it("a bash call paints the card with a typed command activity — the full command, beside the checklist — and the close drops it", async () => {
+    const command = "cd /workspace/api && python3 - <<'EOF'\np='docs/x.md'\nprint(open(p).read())\nEOF";
+    let n = 0;
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        const i = n++;
+        if (i === 0)
+          return {
+            content: [{ type: "tool_use", id: "s0", name: "update_status", input: { checklist: "✱ Read the diff" } }],
+            stopReason: "tool_use",
+          };
+        if (i === 1)
+          return {
+            content: [{ type: "tool_use", id: "b1", name: "bash", input: { command } }],
+            stopReason: "tool_use",
+          };
+        return { content: [{ type: "text", text: "answer" }], stopReason: "end_turn" };
+      },
+    };
+    const deps = reviewRunDeps(provider);
+    deps.statusUpdateMinMs = 0; // every frame reaches the channel; the command frame is superseded within ms otherwise
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+    const painted = statuses.find((s) => s.activity?.kind === "command");
+    expect(painted).toBeDefined();
+    expect(painted!.activity).toEqual({ kind: "command", tool: "bash", command });
+    expect(painted!.detail).toBe("✱ Read the diff");
+    for (const s of statuses) expect(s.detail ?? "").not.toContain("→ $");
+    const last = statuses[statuses.length - 1];
+    expect(last.title).toContain("✅");
+    expect(last.activity).toBeUndefined();
   });
 
   it("an empty update_status never erases the checklist — the closed card keeps the last real one", async () => {

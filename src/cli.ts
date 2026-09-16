@@ -84,6 +84,7 @@ import { ThreadsElsewhere } from "./core/runLedger/threadsElsewhere.js";
 import { buildMemoryStore, NullMemoryStore } from "./core/memory/index.js";
 import { residentAdminFromConfig } from "./core/residentAdmin.js";
 import { NO_FLEET, residentFleetWatcherFor, type ResidentFleetFacts } from "./core/residentFleet.js";
+import { activityText } from "./core/statusCardFrame.js";
 import type { ChannelIO, OpenedThread, RunReceipt, StatusHandle, StatusUpdate } from "./core/types.js";
 import { PiAiProviders } from "./core/harness/piAi.js";
 import { PiHarness } from "./core/harness/pi/piHarness.js";
@@ -373,7 +374,12 @@ export class ConsoleIO implements ChannelIO {
     return {
       update: (f) =>
         console.error(
-          this.prefix + [f.title, f.link?.url, f.detail].filter(Boolean).join(" | ").split("\n").join(" | "),
+          this.prefix +
+            [f.title, f.link?.url, f.detail, activityText(f.activity)]
+              .filter(Boolean)
+              .join(" | ")
+              .split("\n")
+              .join(" | "),
         ),
       done: async (f) => console.error(this.prefix + f.title),
     };
