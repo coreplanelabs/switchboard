@@ -389,3 +389,21 @@ export interface Harness {
    *  they name: idempotent, best-effort; another harness's facts are left alone. */
   end(facts: HarnessFacts, container: HarnessContainer): Promise<void>;
 }
+
+/** The seam's door to a harness: the run loop and every conformance driver
+ *  open a run here, never on the object directly, so the refusal of a row
+ *  another harness wrote is the seam's once (`factsBelongTo`) and no
+ *  implementation has to repeat it. A foreign row is said on the record as a
+ *  `harness_error` note and on the card as a progress line, then thrown as
+ *  `HarnessMismatchError` before the harness is asked anything; otherwise the
+ *  harness opens the run with deps and run handed through untouched. */
+export function openThroughSeam(harness: Harness, deps: HarnessDeps, run: HarnessRun): Promise<HarnessSession> {
+  const facts = run.resume?.facts;
+  if (facts !== undefined && !factsBelongTo(harness, facts)) {
+    const mismatch = new HarnessMismatchError(harness.name, facts.harness);
+    run.onProgress?.(mismatch.message);
+    run.onEvent?.({ type: "run_note", kind: "harness_error", summary: mismatch.message });
+    return Promise.reject(mismatch);
+  }
+  return harness.open(deps, run);
+}

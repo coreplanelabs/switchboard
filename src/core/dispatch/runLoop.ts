@@ -17,17 +17,16 @@ import { budgetedAgent, type RunProfile } from "../../config/profile.js";
 import { parseModelRef } from "../provider.js";
 import { mergeTools, TOOLSETS } from "../../tools/toolsets.js";
 import {
-  factsBelongTo,
   HarnessInterruptedError,
-  HarnessMismatchError,
   harnessFactsOf,
+  openThroughSeam,
   type HarnessFacts,
   type HarnessSession,
 } from "../harness/contract.js";
 import { harnessContainerFor } from "../harness/botHostContainer.js";
 import { isContainerGone } from "../harness/container.js";
 import { ModelPolicyRefusedError } from "../harness/pi/harness.js";
-import { softStopAnswer, timeBudgetAnswer } from "../harness/pi/windDown.js";
+import { softStopAnswer, timeBudgetAnswer } from "../harness/windDown.js";
 import { loopEndingOf, reviewPostedBefore, type LoopEnding } from "../runLedger/resume.js";
 import type { RouteDecided } from "./route.js";
 import {
@@ -680,16 +679,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
       if (ctx.bearer === undefined)
         throw new Error("the pi harness needs the run's model-proxy bearer, and this process minted none");
       // The row's facts are read by the harness that wrote them (harness.md
-      // item 7): a row another harness wrote names a process this harness can
-      // neither judge nor end, so the run is interrupted here, before any
-      // harness opens — said on the record first, then thrown for the finally
-      // and the dispatcher's restart. The seam's one comparison (`factsBelongTo`).
-      if (facts !== undefined && !factsBelongTo(harnessDeps.harness, facts)) {
-        const mismatch = new HarnessMismatchError(harnessDeps.harness.name, facts.harness);
-        onProgress(mismatch.message);
-        onEvent({ type: "run_note", kind: "harness_error", summary: mismatch.message });
-        throw mismatch;
-      }
+      // item 7): a row another harness wrote is refused by the seam's door
+      // (`openThroughSeam`, below) before the harness is asked anything — said
+      // on the record first, then thrown for the finally and the dispatcher's
+      // restart — so no harness repeats the check.
       const { provider: providerName, model: modelId } = parseModelRef(resolved.modelRef);
       const providerCfg = deps.config.config.providers[providerName];
       if (!providerCfg) throw new Error(`the pi harness found no provider named ${providerName} in the config`);
@@ -710,7 +703,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
           ),
         ),
       ];
-      harnessSession = await harnessDeps.harness.open(
+      harnessSession = await openThroughSeam(
+        harnessDeps.harness,
         {
           container:
             harnessDeps.containerFor?.(executor, profile.machine) ?? harnessContainerFor(executor, profile.machine),

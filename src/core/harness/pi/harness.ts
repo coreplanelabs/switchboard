@@ -46,7 +46,7 @@ import {
   turnGuardPace,
   wrapUpInstruction,
   wrapUpNote,
-} from "./windDown.js";
+} from "../windDown.js";
 import { bearerHashOf } from "../../modelProxy/runBearers.js";
 import { redactAndCap, redactSecrets, type RunEvent, type RunNoteKind, type StopMode } from "../../runEvents.js";
 import type { Settlement } from "../../runLedger/resume.js";

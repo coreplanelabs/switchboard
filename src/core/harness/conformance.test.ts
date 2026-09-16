@@ -5,6 +5,7 @@ import {
   assertReadsRecord,
   buildHarnessConformanceMatrix,
   renderHarnessConformanceMatrix,
+  rowVerdict,
   runRow,
   SCENARIOS,
   type DrivenRun,
@@ -24,9 +25,18 @@ const drivers = harnessDrivers();
 
 describe.each(drivers.map((d) => [d.harness, d] as const))("conformance — %s", (_name, driver) => {
   for (const row of SCENARIOS) {
-    it(`${row.clause}: ${row.title}`, async () => {
-      await runRow(driver, row);
-    });
+    const declared = driver.cannot?.[row.id];
+    if (declared === undefined) {
+      it(`${row.clause}: ${row.title}`, async () => {
+        await runRow(driver, row);
+      });
+    } else {
+      // A limit the harness declares is asserted, never skipped: the row must
+      // fail as declared, so a declaration the harness has outgrown goes red.
+      it(`${row.clause}: ${row.title} — declared cannot (${declared}): the run fails as declared`, async () => {
+        expect((await rowVerdict(driver, row)).outcome).toBe("cannot");
+      });
+    }
   }
 });
 
@@ -80,5 +90,67 @@ describe("the table", () => {
     const body = lines.slice(4).filter((l) => l.startsWith("|"));
     expect(body).toHaveLength(SCENARIOS.length);
     for (const line of body) expect(line.endsWith("| ✅ | — |")).toBe(true);
+  });
+
+  it("a declared cannot is asserted, never skipped: a declared row whose run fails is the verdict cannot, a declared row that passes is a failure naming the stale declaration, an undeclared failure is fail, and the matrix prints the declared cell with its reason beneath the table", async () => {
+    // A driver that fails one row for real (its check finds an empty record) and passes another.
+    const failing: DrivenRun = {
+      harness: "pi",
+      outcome: { kind: "answered", answer: "ok" },
+      events: [],
+      steps: [],
+      facts: [],
+      progress: [],
+      starts: [],
+      killed: [],
+      requests: [],
+      modelCalls: [],
+      statusReports: [],
+    };
+    const rowThatFails: ScenarioRow = {
+      id: "needs-a-step",
+      clause: "record",
+      title: "needs one ledger step",
+      script: { turns: [] },
+      check: (run) => assert.equal(run.steps.length, 1),
+    };
+    const rowThatPasses: ScenarioRow = {
+      id: "needs-nothing",
+      clause: "record",
+      title: "reads the record and asks nothing of it",
+      script: { turns: [] },
+      check: (run) => assert.deepEqual(run.steps, []),
+    };
+    const undeclared: HarnessDriver = { ...drivers[0], run: async () => failing };
+    const declared: HarnessDriver = {
+      ...undeclared,
+      cannot: { "needs-a-step": "this harness writes no ledger steps", "needs-nothing": "stale: it passes now" },
+    };
+    expect((await rowVerdict(undeclared, rowThatFails)).outcome).toBe("fail");
+    expect((await rowVerdict(undeclared, rowThatPasses)).outcome).toBe("pass");
+    const asDeclared = await rowVerdict(declared, rowThatFails);
+    expect(asDeclared.outcome).toBe("cannot");
+    expect(asDeclared.error?.message).toMatch(/Expected values to be strictly equal|steps/);
+    const stale = await rowVerdict(declared, rowThatPasses);
+    expect(stale.outcome).toBe("fail");
+    expect(stale.error?.message).toMatch(
+      /needs-nothing passes for pi, but the driver declares it cannot: stale: it passes now/,
+    );
+    // The matrix: the declared cell is its own mark, with the reason beneath the table.
+    const rendered = renderHarnessConformanceMatrix(
+      [
+        {
+          harness: "pi",
+          rows: { "needs-a-step": "cannot", "needs-nothing": "pass" },
+          cannot: { "needs-a-step": "this harness writes no ledger steps" },
+        },
+      ],
+      ["pi"],
+      [rowThatFails, rowThatPasses],
+    );
+    expect(rendered).toContain("| record | `needs-a-step` — needs one ledger step | ✖ |");
+    expect(rendered).toContain("| record | `needs-nothing` — reads the record and asks nothing of it | ✅ |");
+    expect(rendered).toContain("✖ pi cannot `needs-a-step`: this harness writes no ledger steps");
+    expect(rendered.split("\n")[0]).toContain("✖ cannot (declared, asserted)");
   });
 });

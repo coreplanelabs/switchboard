@@ -9,7 +9,7 @@ import {
   timeBudgetInstruction,
   turnGuardInstruction,
   wrapUpInstruction,
-} from "./windDown.js";
+} from "../windDown.js";
 import type { StepReport } from "../../runLedger/stepReport.js";
 import type { RunnableTool } from "../../../tools/runnableTool.js";
 import { bearerHashOf, RunBearerStore } from "../../modelProxy/runBearers.js";

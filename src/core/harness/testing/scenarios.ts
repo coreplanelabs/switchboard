@@ -28,7 +28,7 @@ import {
   type HarnessName,
   type HarnessResume,
 } from "../contract.js";
-import { HARD_STOP_MESSAGE } from "../pi/windDown.js";
+import { HARD_STOP_MESSAGE } from "../windDown.js";
 
 /** One answer of the scripted model: the content parts and how it stopped. */
 export interface ModelTurn {
@@ -95,6 +95,18 @@ export interface HarnessDriver {
   readonly bearer: string;
   /** The container word the driver's container answers when the script names none. */
   readonly containerWord: string;
+  /** The value the driver plants under the bot's own provider-key variables
+   *  for the run's duration: a harness that forwards the bot's key to its
+   *  process forwards this, and the credential row finds it in the process's
+   *  environment. */
+  readonly providerKeySentinel: string;
+  /** The rows this harness cannot pass, by row id, each with why (record
+   *  0038: a named failure the table asserts, never a skip). The suite's test
+   *  for a declared row requires the run to fail as declared, so a limit the
+   *  harness has outgrown goes red; the matrix prints the declaration as its
+   *  own cell with the reason. Absent or empty for a harness that meets every
+   *  row. */
+  readonly cannot?: Readonly<Record<string, string>>;
   /** This harness's row facts for the pieces a row cares about. */
   facts(partial: { pid: number; container?: string; root?: string; bearerHash?: string }): HarnessFacts;
   run(script: RunScript): Promise<DrivenRun>;
@@ -186,8 +198,11 @@ export const SCENARIOS: readonly ScenarioRow[] = [
       assert.equal(run.starts.length, 1);
       const env = run.starts[0].env;
       assert.ok(Object.values(env).includes(driver.bearer), "the bearer is not in the process's environment");
-      const keys = Object.keys(env).filter((k) => /API_KEY|_TOKEN$|SECRET/i.test(k) && env[k] !== driver.bearer);
-      assert.deepEqual(keys, [], `a provider key reached the process: ${keys.join(", ")}`);
+      // The driver plants a sentinel under the bot's provider-key variables for the run: a harness that forwards one forwards the sentinel.
+      const leaked = Object.entries(env)
+        .filter(([, v]) => v.includes(driver.providerKeySentinel))
+        .map(([k]) => k);
+      assert.deepEqual(leaked, [], `a provider key reached the process's environment under: ${leaked.join(", ")}`);
       const secret = driver.bearer.slice(driver.bearer.indexOf(".") + 1);
       assert.ok(!JSON.stringify(run.events).includes(secret), "a run event carries the bearer");
       assert.ok(!JSON.stringify(run.steps).includes(secret), "a ledger step carries the bearer");
@@ -514,50 +529,77 @@ export function assertReadsRecord(row: Pick<ScenarioRow, "id">, reads: ReadonlyS
   );
 }
 
-export type RowOutcome = "pass" | "fail" | "absent";
+/** A row's verdict for one harness: `pass`; `cannot` — the driver declares the
+ *  row and the run failed as declared (record 0038: a named failure the table
+ *  asserts, never a skip); `fail` — the check failed undeclared, or a declared
+ *  row passed after all (a stale declaration); `absent` — no driver. */
+export type RowOutcome = "pass" | "fail" | "cannot" | "absent";
+
+/** One row against one driver as the suite and the matrix judge it, with the
+ *  failure behind a `fail` or `cannot`. */
+export async function rowVerdict(
+  driver: HarnessDriver,
+  row: ScenarioRow,
+): Promise<{ outcome: RowOutcome; error?: Error }> {
+  const declared = driver.cannot?.[row.id];
+  try {
+    await runRow(driver, row);
+  } catch (err) {
+    const error = err instanceof Error ? err : new Error(String(err));
+    return { outcome: declared === undefined ? "fail" : "cannot", error };
+  }
+  if (declared === undefined) return { outcome: "pass" };
+  return {
+    outcome: "fail",
+    error: new Error(`row ${row.id} passes for ${driver.harness}, but the driver declares it cannot: ${declared}`),
+  };
+}
 
 export interface MatrixColumn {
   harness: HarnessName;
   rows: Record<string, RowOutcome>;
+  /** The driver's declared limits, for the reasons beneath the table. */
+  cannot?: Readonly<Record<string, string>>;
 }
 
-/** Every row against every driver, each outcome caught, for the printer. */
+/** Every row against every driver, each verdict caught, for the printer. */
 export async function buildHarnessConformanceMatrix(drivers: readonly HarnessDriver[]): Promise<MatrixColumn[]> {
   const columns: MatrixColumn[] = [];
   for (const driver of drivers) {
     const rows: Record<string, RowOutcome> = {};
-    for (const row of SCENARIOS) {
-      try {
-        await runRow(driver, row);
-        rows[row.id] = "pass";
-      } catch {
-        rows[row.id] = "fail";
-      }
-    }
-    columns.push({ harness: driver.harness, rows });
+    for (const row of SCENARIOS) rows[row.id] = (await rowVerdict(driver, row)).outcome;
+    columns.push({ harness: driver.harness, rows, ...(driver.cannot ? { cannot: driver.cannot } : {}) });
   }
   return columns;
 }
 
-const CELL: Record<RowOutcome, string> = { pass: "✅", fail: "❌", absent: "—" };
+const CELL: Record<RowOutcome, string> = { pass: "✅", fail: "❌", cannot: "✖", absent: "—" };
 
 /** The matrix as Markdown: one row per scenario, one column per harness, a
- *  harness with no driver shown absent. */
+ *  harness with no driver shown absent, a declared limit its own mark with
+ *  the reason beneath the table. */
 export function renderHarnessConformanceMatrix(
   columns: readonly MatrixColumn[],
   harnesses?: readonly HarnessName[],
+  rows: readonly ScenarioRow[] = SCENARIOS,
 ): string {
   const names = harnesses ?? columns.map((c) => c.harness);
   const out: string[] = [
-    `**${SCENARIOS.length} rows × ${names.length} harness(es)** — record 0038's six clauses and the parity rows, one table for every harness; ✅ passes, ❌ fails, — no driver.`,
+    `**${rows.length} rows × ${names.length} harness(es)** — record 0038's six clauses and the parity rows, one table for every harness; ✅ passes, ❌ fails, ✖ cannot (declared, asserted), — no driver.`,
     "",
     `| Clause | Row | ${names.join(" | ")} |`,
     `|---|---|${names.map(() => ":-:").join("|")}|`,
   ];
-  for (const row of SCENARIOS) {
+  for (const row of rows) {
     const cells = names.map((n) => CELL[columns.find((c) => c.harness === n)?.rows[row.id] ?? "absent"]);
     out.push(`| ${row.clause} | \`${row.id}\` — ${row.title} | ${cells.join(" | ")} |`);
   }
+  const declared = columns.flatMap((c) =>
+    Object.entries(c.cannot ?? {})
+      .filter(([id]) => c.rows[id] === "cannot")
+      .map(([id, why]) => `✖ ${c.harness} cannot \`${id}\`: ${why}`),
+  );
+  if (declared.length > 0) out.push("", ...declared);
   out.push("");
   return out.join("\n");
 }
