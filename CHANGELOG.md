@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.238.0](https://github.com/coreplanelabs/switchboard/compare/v1.237.0...v1.238.0) (2026-09-16)
+
+
+### Features
+
+* **mcp:** admins see every MCP tier and promote a person's server to the org by re-issue, never by moving a credential; a dashboard-minted ticket binds to the session's email ([#1409](https://github.com/coreplanelabs/switchboard/issues/1409)) ([f4f539b](https://github.com/coreplanelabs/switchboard/commit/f4f539b26b03c4f65073d5cfe07abb1066dde23b))
+* **resident:** a resident keeps two snapshot generations — the refresh retires the pair it replaced and deletes the one retired before it, so a handle read from /status still restores for a cycle ([#1414](https://github.com/coreplanelabs/switchboard/issues/1414)) ([e3ad00a](https://github.com/coreplanelabs/switchboard/commit/e3ad00a6c0cbcab81d7c614237820b2cf27dbdfb))
+
+
+### Bug fixes
+
+* **coding:** a description resubmitted from the default branch edits the thread's closed pull request instead of calling the default pushed past it ([#1413](https://github.com/coreplanelabs/switchboard/issues/1413)) ([9c0e336](https://github.com/coreplanelabs/switchboard/commit/9c0e3367f86c4b990097cf545b8c63510368c081))
+
+
+### Documentation
+
+* **docs:** the fifty-concurrent-runs plan reopens D4 — the seeded sandbox tier is taken on, with the day's signals, the met preconditions and the order of work ([#1411](https://github.com/coreplanelabs/switchboard/issues/1411)) ([f2b42a7](https://github.com/coreplanelabs/switchboard/commit/f2b42a7cbb926064ff7fbfd9cbf4c52328bc6480))
+
 ## [1.237.0](https://github.com/coreplanelabs/switchboard/compare/v1.236.0...v1.237.0) (2026-09-16)
 
 
