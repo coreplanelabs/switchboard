@@ -12,7 +12,7 @@ import type { FinishedFrame, SealedFrame, Unsubscribe } from "../../core/runRegi
 
 /** SSE response headers. `no-transform` + `x-accel-buffering: no` keep proxies
  *  from buffering the stream, so events arrive as they are written. */
-const SSE_HEADERS: Record<string, string> = {
+export const SSE_HEADERS: Record<string, string> = {
   "content-type": "text/event-stream; charset=utf-8",
   "cache-control": "no-cache, no-transform",
   connection: "keep-alive",
@@ -95,7 +95,9 @@ function sseEnd(frame?: SealedFrame): string {
  *  `onopen`). A lone `retry:` directive is valid SSE, is ignored as data by
  *  EventSource (it only sets the reconnect backoff), and gives the proxy a byte
  *  to forward. */
-const SSE_PRELUDE = "retry: 3000\n\n";
+/** The first bytes of every stream: the reconnect delay, and a flushed head so
+ *  `onopen` fires before any event arrives. */
+export const SSE_PRELUDE = "retry: 3000\n\n";
 
 /** Idle keepalive interval (ms). Cloudflare (and most proxies) drop a connection
  *  with no bytes for ~100s; a run-less index or an idle run would otherwise be

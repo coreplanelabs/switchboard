@@ -72,9 +72,9 @@ ${css}
 
 /** Pages with a state to claim wear the dot: run-state pages start idle (the
  *  app repaints it green/gray by id as the feed moves); the residents index
- *  wears the fleet's worst tone straight from the seed (a snapshot page — no
- *  feed to repaint from, so this render is the truth). Every other page wears
- *  the neutral mark — a dot there would claim a state the page does not have. */
+ *  wears the fleet's worst tone from the seed on this first paint (the app
+ *  repaints it from each listing its feed pushes). Every other page wears the
+ *  neutral mark — a dot there would claim a state the page does not have. */
 function pageFavicon(seed: WebSeed): string {
   switch (seed.page) {
     case "runs":

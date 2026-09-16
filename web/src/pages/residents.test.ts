@@ -1,8 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { nextTick } from "vue";
 import ResidentsIndexPage from "./ResidentsIndexPage.vue";
 import ResidentDetailPage from "./ResidentDetailPage.vue";
 import { mountApp } from "../testing/mount";
-import type { ResidentDetailSeed, ResidentsIndexSeed } from "@core/channels/webSeed.js";
+import { browser } from "../lib/browser";
+import { fakeEventSourceFactory } from "../testing/fakeEventSource";
+import type { ResidentDetailSeed, ResidentsIndexSeed, RunIndexRowSeed } from "@core/channels/webSeed.js";
+import { FAVICON_BY_TONE } from "@core/channels/favicon.js";
 
 // Ported from the string-renderer suite (residentsView.test.ts): the same
 // behaviors, asserted against the mounted Vue pages. Escaping assertions
@@ -100,35 +104,85 @@ const DISK = {
 };
 const MEASURED = { ...WARM, live: { ...WARM.live, disk: DISK } };
 
-const indexSeed = (residents: unknown[], cap: unknown = 5, count: unknown = residents.length): ResidentsIndexSeed => ({
+// The seed's clock: 15 minutes after MEASURED's disk sample, ten days after
+// WARM's live thread last attached.
+const NOW = Date.parse("2026-09-07T15:45:00.000Z");
+
+const run = (id: string, over: Partial<RunIndexRowSeed> = {}): RunIndexRowSeed => ({
+  id,
+  label: 'coding · jshttp/vary · "add the residents fold"',
+  channelId: "slack:CACME0001",
+  userId: "slack:UACME1",
+  userName: "alice",
+  threadKey: "slack:CACME0001:1787954209.398379",
+  repo: "jshttp/vary",
+  sourceUrl: "https://example.slack.com/archives/CACME0001/p1787954209398379",
+  finished: false,
+  startedAt: NOW - 4 * 60_000 - 12_000,
+  eventCount: 17,
+  token: `tok-${id}`,
+  ...over,
+});
+
+const indexSeed = (
+  residents: unknown[],
+  cap: unknown = 5,
+  count: unknown = residents.length,
+  runs: RunIndexRowSeed[] = [],
+): ResidentsIndexSeed => ({
   page: "residents",
   cap,
   count,
   residents,
+  now: NOW,
+  runs,
 });
 
 const detailSeed = (record: unknown, slug = "jshttp/vary"): ResidentDetailSeed => ({ page: "resident", slug, record });
 
+function mountIndex(s: ResidentsIndexSeed) {
+  const { created, factory } = fakeEventSourceFactory();
+  const wrapper = mountApp(ResidentsIndexPage, { seed: s, eventSource: factory });
+  return { wrapper, es: () => created[0] };
+}
+
+let setTitle: ReturnType<typeof vi.spyOn>;
+let setFavicon: ReturnType<typeof vi.spyOn>;
+beforeEach(() => {
+  setTitle = vi.spyOn(browser, "setTitle").mockImplementation(() => {});
+  setFavicon = vi.spyOn(browser, "setFavicon").mockImplementation(() => {});
+  window.history.replaceState(null, "", "/residents");
+});
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 describe("ResidentsIndexPage", () => {
-  it("renders one full-row link per resident to its detail page, with state, reason, ref and short sha", () => {
-    const w = mountApp(ResidentsIndexPage, { seed: indexSeed([WARM, DOWN], 5, 2) });
-    const hrefs = w.findAll("a.row").map((a) => a.attributes("href"));
-    expect(hrefs).toEqual(["/residents/jshttp/vary", "/residents/acme/api"]);
+  it("renders one fold per resident with state, reason, ref, short sha and a detail link, and opens the feed", () => {
+    const { wrapper: w, es } = mountIndex(indexSeed([WARM, DOWN], 5, 2));
+    expect(w.findAll("li.resident").map((li) => li.attributes("data-slug"))).toEqual(["jshttp/vary", "acme/api"]);
+    expect(w.findAll("a.detail").map((a) => a.attributes("href"))).toEqual([
+      "/residents/jshttp/vary",
+      "/residents/acme/api",
+    ]);
     expect(w.text()).toContain("2/5 resident slots in use");
-    expect(w.text()).toContain("live registry read, not cached");
+    expect(w.find("#running").text()).toBe("0 running");
     expect(w.text()).toContain("warm");
     expect(w.text()).toContain("01234567");
     expect(w.text()).toContain("ref master");
     expect(w.text()).toContain("provision-failed at clone");
     expect(w.find('[data-tone="green"]').exists()).toBe(true);
     expect(w.find('[data-tone="red"]').exists()).toBe(true);
+    expect(es().url).toBe("/residents?stream=1");
+    // closed by default: the fold's body is not rendered as open
+    expect(w.find("li.resident details").attributes("open")).toBeUndefined();
   });
 
   it("shows an empty state naming the onboard command when nothing is onboarded", () => {
-    const w = mountApp(ResidentsIndexPage, { seed: indexSeed([], 5, 0) });
+    const { wrapper: w } = mountIndex(indexSeed([], 5, 0));
     expect(w.text()).toContain("No repos onboarded");
     expect(w.text()).toContain("repo onboard");
-    expect(w.find("a.row").exists()).toBe(false);
+    expect(w.find("li.resident").exists()).toBe(false);
   });
 
   it("renders hostile records as text — markup never becomes elements, non-slugs never link", () => {
@@ -137,24 +191,208 @@ describe("ResidentsIndexPage", () => {
       resource: "repo:evil/<img src=x onerror=alert(1)>",
       live: { ...DOWN.live, reason: '"><script>alert(1)</script>' },
     };
-    const w = mountApp(ResidentsIndexPage, { seed: indexSeed([hostile], 5, 1) });
+    const { wrapper: w } = mountIndex(indexSeed([hostile], 5, 1));
     expect(w.find("img").exists()).toBe(false);
     expect(w.text()).toContain("<img src=x");
     expect(w.text()).toContain("<script>alert(1)</script>");
-    expect(w.find("a.row").exists()).toBe(false);
+    expect(w.find("a.detail").exists()).toBe(false);
   });
 
   it("marks Residents current in the shared nav", () => {
-    const w = mountApp(ResidentsIndexPage, { seed: indexSeed([WARM]) });
+    const { wrapper: w } = mountIndex(indexSeed([WARM]));
     expect(w.find('nav.site a[aria-current="page"]').attributes("href")).toBe("/residents");
   });
 
   it("item 55: a measured resident's row carries the disk gauge (used/total, pct) with the sample time on hover; an unmeasured one shows no disk", () => {
-    const w = mountApp(ResidentsIndexPage, { seed: indexSeed([MEASURED, DOWN], 5, 2) });
+    const { wrapper: w } = mountIndex(indexSeed([MEASURED, DOWN], 5, 2));
     expect(w.text()).toContain("disk 4.06 GiB/14.4 GiB (28%)");
     expect(w.find('[title="measured 2026-09-07T15:30:00.000Z"]').exists()).toBe(true);
-    const rows = w.findAll("a.row");
+    const rows = w.findAll("li.resident summary");
     expect(rows[1].text()).not.toContain("disk");
+  });
+});
+
+describe("ResidentsIndexPage — the fold (item 42: what is on this resident)", () => {
+  it("counts the runs on each resident in its row and in the toolbar, and lists them in the fold with agent, request, stopwatch, run link, and the worktree the thread key joins them to", () => {
+    const { wrapper: w } = mountIndex(
+      indexSeed([MEASURED, DOWN], 5, 2, [run("r1"), run("other", { repo: "acme/web", threadKey: "slack:C9:1" })]),
+    );
+    expect(w.find("#running").text()).toBe("1 running"); // the acme/web run is on no listed resident
+    const vary = w.find('li.resident[data-slug="jshttp/vary"]');
+    expect(vary.attributes("data-running")).toBe("1");
+    expect(vary.find("summary .running").text()).toBe("1 running");
+    const line = vary.find('li.run[data-run-id="r1"]');
+    expect(line.exists()).toBe(true);
+    expect(line.find(".agent").text()).toBe("coding");
+    expect(line.find(".text").text()).toBe("add the residents fold");
+    expect(line.find(".elapsed").text()).toBe("4m 12s");
+    expect(line.find("a.open").attributes("href")).toBe("/runs/r1?t=tok-r1");
+    const tree = line.find(".tree").text().replace(/\s+/g, " ");
+    expect(tree).toContain("worktree feat/residents-dash @ abcdef12 · worker3 · deps hardlink · 0.52 GiB on disk");
+    expect(tree).toContain("started 4 minutes ago by alice");
+    expect(
+      line
+        .find(".tree a[href='https://github.com/jshttp/vary/commit/abcdef1234567890abcdef1234567890abcdef12']")
+        .exists(),
+    ).toBe(true);
+    expect(line.find(".tree a[target='_blank']").attributes("href")).toBe(
+      "https://example.slack.com/archives/CACME0001/p1787954209398379",
+    );
+    // the resident with nothing on it says so
+    expect(w.find('li.resident[data-slug="acme/api"] .fold').text()).toContain("nothing running on this resident");
+    expect(w.find('li.resident[data-slug="acme/api"] summary .running').exists()).toBe(false);
+  });
+
+  it("a run whose attach has not completed has no worktree yet; a run without a thread link says where it came from", () => {
+    const { wrapper: w } = mountIndex(
+      indexSeed([WARM], 5, 1, [
+        run("r2", {
+          threadKey: "slack:CACME0001:9.9",
+          sourceUrl: undefined,
+          channelId: "cli:local",
+          userId: "cli:alice",
+          userName: undefined,
+        }),
+      ]),
+    );
+    const tree = w.find('li.run[data-run-id="r2"] .tree').text().replace(/\s+/g, " ");
+    expect(tree).toContain("no worktree bound yet");
+    expect(tree).toContain("by alice");
+    expect(tree).toContain("via CLI");
+    expect(w.find('li.run[data-run-id="r2"] .tree a[target="_blank"]').exists()).toBe(false);
+  });
+
+  it("lists the live worktrees no run is using as idle, with their size and last use, never an evicted one; the disk line carries the gauge, free space, the room in trees and the sample age", () => {
+    const { wrapper: w } = mountIndex(indexSeed([MEASURED], 5, 1));
+    const fold = w.find('li.resident[data-slug="jshttp/vary"] .fold');
+    expect(fold.text()).toContain("idle worktrees 1");
+    const idle = fold.find("li.idle");
+    expect(idle.attributes("data-thread")).toBe("slack:CACME0001:1787954209.398379");
+    expect(idle.text().replace(/\s+/g, " ")).toContain(
+      "feat/residents-dash @ abcdef12 · worker3 · deps hardlink · 0.52 GiB on disk · last used Aug 28",
+    );
+    expect(fold.findAll("li.idle")).toHaveLength(1); // the evicted binding is not a tree
+    expect(fold.find(".disk").text().replace(/\s+/g, " ").trim()).toBe(
+      "disk 4.06 GiB/14.4 GiB (28%) · 10.3 GiB free · room for 17 more trees · measured 15 minutes ago",
+    );
+  });
+
+  it("an idle worktree becomes a run's the moment a run on its thread appears; an unmeasured resident says so", () => {
+    const { wrapper: w } = mountIndex(indexSeed([WARM], 5, 1, [run("r1")]));
+    const fold = w.find('li.resident[data-slug="jshttp/vary"] .fold');
+    expect(fold.text()).not.toContain("idle worktrees");
+    expect(fold.find(".tree").text()).toContain("size not measured yet");
+    expect(fold.find(".disk").text()).toContain("disk not measured yet");
+  });
+
+  it("`?open=<slug>` opens that resident's fold on first paint", () => {
+    window.history.replaceState(null, "", "/residents?open=acme/api");
+    const { wrapper: w } = mountIndex(indexSeed([WARM, DOWN], 5, 2));
+    expect(w.find('li.resident[data-slug="jshttp/vary"] details').attributes("open")).toBeUndefined();
+    expect(w.find('li.resident[data-slug="acme/api"] details').attributes("open")).toBeDefined();
+  });
+
+  it("hostile thread fields in the fold render as text, and a non-hex sha never links", () => {
+    const hostile = {
+      ...WARM,
+      live: {
+        ...WARM.live,
+        threads: [
+          {
+            threadKey: "slack:CACME0001:1787954209.398379",
+            ref: "<b>r</b>",
+            sha: "zz",
+            user: "<i>u</i>",
+            deps: "x",
+            lastAttachAt: "t",
+          },
+        ],
+      },
+    };
+    const { wrapper: w } = mountIndex(
+      indexSeed([hostile], 5, 1, [run("r1", { label: 'coding · jshttp/vary · "<img src=x>"' })]),
+    );
+    const fold = w.find(".fold");
+    expect(fold.find("b").exists()).toBe(false);
+    expect(fold.find("img").exists()).toBe(false);
+    expect(fold.text()).toContain("<b>r</b>");
+    expect(fold.text()).toContain("<img src=x>");
+    expect(
+      fold
+        .findAll("a")
+        .map((a) => a.attributes("href"))
+        .join(" "),
+    ).not.toContain("/commit/zz");
+  });
+});
+
+describe("ResidentsIndexPage — live over the feed", () => {
+  it("shows the connection state: connecting, then live on open, disconnected on a closed error", async () => {
+    const { wrapper: w, es } = mountIndex(indexSeed([WARM]));
+    expect(w.find("#state").text()).toBe("connecting…");
+    es().emitOpen();
+    await nextTick();
+    expect(w.find("#state").text()).toBe("live");
+    es().emitError(true);
+    await nextTick();
+    expect(w.find("#state").text()).toBe("disconnected");
+  });
+
+  it("an upsert adds a run to its resident's fold and its stopwatch ticks; a finished upsert and a removed take it out", async () => {
+    const { wrapper: w, es } = mountIndex(indexSeed([WARM], 5, 1));
+    es().emitOpen();
+    es().emitMessage({ type: "upsert", run: run("r1") });
+    await nextTick();
+    expect(w.find("#running").text()).toBe("1 running");
+    expect(w.find('li.run[data-run-id="r1"] .elapsed').text()).toBe("4m 12s");
+    es().emitMessage({ type: "upsert", run: run("r1", { finished: true, finishedAt: NOW }) });
+    await nextTick();
+    expect(w.find('li.run[data-run-id="r1"]').exists()).toBe(false);
+    expect(w.find("#running").text()).toBe("0 running");
+    es().emitMessage({ type: "upsert", run: run("r3") });
+    es().emitMessage({ type: "removed", id: "r3" });
+    await nextTick();
+    expect(w.find('li.run[data-run-id="r3"]').exists()).toBe(false);
+    es().emitMessage("not json");
+    await nextTick();
+    expect(w.find("#running").text()).toBe("0 running");
+  });
+
+  it("a residents frame replaces the listing — state, bindings, disk, count — and the tab's title and favicon follow the runs and the fleet tone", async () => {
+    const { wrapper: w, es } = mountIndex(indexSeed([WARM], 5, 1, [run("r1")]));
+    expect(setTitle).toHaveBeenLastCalledWith("(1) Resident repos");
+    expect(setFavicon).toHaveBeenLastCalledWith(FAVICON_BY_TONE.green);
+    es().emitOpen();
+    es().emitMessage({
+      type: "residents",
+      cap: 6,
+      count: 2,
+      residents: [{ ...MEASURED, live: { ...MEASURED.live, state: "refreshing" } }, DOWN],
+    });
+    await nextTick();
+    expect(w.text()).toContain("2/6 resident slots in use");
+    expect(w.findAll("li.resident")).toHaveLength(2);
+    expect(w.find('li.resident[data-slug="jshttp/vary"] summary').text()).toContain("refreshing");
+    expect(w.find('li.run[data-run-id="r1"] .tree').text()).toContain("0.52 GiB on disk");
+    expect(setFavicon).toHaveBeenLastCalledWith(FAVICON_BY_TONE.red);
+    es().emitMessage({ type: "upsert", run: run("r1", { finished: true }) });
+    await nextTick();
+    expect(setTitle).toHaveBeenLastCalledWith("Resident repos");
+  });
+
+  it("a reconnect reloads the page for a fresh snapshot instead of drifting", () => {
+    const reload = vi.spyOn(browser, "reload").mockImplementation(() => {});
+    const { es } = mountIndex(indexSeed([WARM]));
+    es().emitOpen();
+    expect(reload).not.toHaveBeenCalled();
+    es().emitOpen();
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes the stream on unmount", () => {
+    const { wrapper: w, es } = mountIndex(indexSeed([WARM]));
+    w.unmount();
+    expect(es().closed).toBe(true);
   });
 });
 

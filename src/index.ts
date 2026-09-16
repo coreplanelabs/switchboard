@@ -619,7 +619,14 @@ export async function runBot(): Promise<void> {
     // client answers every route 503 with the reason, and so does the page.
     // Access-gated below alongside /runs — it lists every onboarded repo and
     // its build commands, so it must never be exposed without SSO.
-    const residentsView = createResidentsViewHandler(residentAdminClient, shell, { config, spanLog });
+    // The index folds each resident open to the runs on it: the registry's
+    // live rows seed it and its `?stream=1` feed keeps it current.
+    const residentsView = createResidentsViewHandler({
+      client: residentAdminClient,
+      shell,
+      runs: defaultRunRegistry,
+      trace: { config, spanLog },
+    });
     const residentsState =
       residentAdminClient instanceof NullResidentAdminClient
         ? `GET /residents (503 — ${residentAdminClient.reason})`
@@ -879,7 +886,7 @@ export async function runBot(): Promise<void> {
             if (liveView(req, res, { actor })) return;
             // --- /mcp/connect/<nonce>: the credential page, identity-bound. ---
             if (mcpConnectView(req, res, gate.identity)) return;
-            if (residentsView(req, res)) return;
+            if (residentsView(req, res, { actor })) return;
             if (costsView(req, res, { identity: gate.identity })) return;
             if (deliveryView(req, res, { actor })) return;
             res.writeHead(200, { "content-type": "text/plain" });

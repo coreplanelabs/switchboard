@@ -10,15 +10,28 @@ import {
   residentsFleetTone,
   residentStateTone,
   type ResidentListing,
+  type ResidentsViewContext,
+  type ResidentsViewDeps,
 } from "./residentsView.js";
 import { makeShellRenderer } from "./webShell.js";
 import { ALL_CAPABILITIES } from "../core/capabilities.js";
 import { recordingSink } from "../core/testing/recordingSink.js";
-import { SEED_ELEMENT_ID, type ResidentDetailSeed, type ResidentsIndexSeed } from "./webSeed.js";
+import {
+  SEED_ELEMENT_ID,
+  type ResidentDetailSeed,
+  type ResidentsFeedFrame,
+  type ResidentsIndexSeed,
+} from "./webSeed.js";
+import { RunRegistry } from "../core/runRegistry.js";
+import { accessActor } from "./commandHttp.js";
+import { ALL_GRANTS, grantsFor, type GrantsSource } from "../core/authz/grants.js";
+import { NO_GRANTS } from "../core/authz/index.js";
+import { ATTACH_SPAN } from "./residentsFeed.js";
 
 // The residents dash handler: routing, the live-per-request registry read, the
-// error statuses, and the seeds the shell carries. Rendering is tested in
-// web/src/pages/residents.test.ts.
+// error statuses, the seeds the shell carries, the runs the index seeds under
+// the viewer's predicate, and the `?stream=1` feed route. Rendering is tested
+// in web/src/pages/residents.test.ts; the feed's own rules in residentsFeed.test.ts.
 
 // ---- fixtures ---------------------------------------------------------------
 
@@ -50,6 +63,22 @@ const DOWN = {
 const LISTING: ResidentListing = { cap: 5, count: 2, residents: [WARM, DOWN] };
 
 const shell = makeShellRenderer({ js: "/assets/main-test.js", css: [] }, ALL_CAPABILITIES);
+
+/** The viewer every call below reads as unless a test says otherwise: a fleet
+ *  admin resolved through the real Access resolver (the path index.ts takes). */
+const ADMIN: ResidentsViewContext = {
+  actor: accessActor({ sub: "admin" }, (id) => grantsFor(id, { grants: new Map([["access:admin", ALL_GRANTS]]) })),
+};
+
+/** `createResidentsViewHandler` over an empty registry unless one is given. */
+function handler(
+  client: ResidentAdminClient,
+  trace?: ResidentsViewDeps["trace"],
+  runs: ResidentsViewDeps["runs"] = new RunRegistry(),
+  now?: () => number,
+) {
+  return createResidentsViewHandler({ client, shell, runs, ...(trace ? { trace } : {}), ...(now ? { now } : {}) });
+}
 
 function seedOf(html: string): ResidentsIndexSeed | ResidentDetailSeed {
   const m = new RegExp(`<script type="application/json" id="${SEED_ELEMENT_ID}">([\\s\\S]*?)</script>`).exec(html);
@@ -158,27 +187,23 @@ describe("residentsFleetTone", () => {
 
 describe("createResidentsViewHandler", () => {
   it("ignores non-/residents paths (returns false, writes nothing)", () => {
-    const h = createResidentsViewHandler(
-      fakeClient(() => Promise.resolve(ok(LISTING as never))),
-      shell,
-    );
+    const h = handler(fakeClient(() => Promise.resolve(ok(LISTING as never))));
     const io = fakeReqRes("GET", "/runs");
-    expect(h(io.req, io.res)).toBe(false);
+    expect(h(io.req, io.res, ADMIN)).toBe(false);
     expect(io.status).toBe(0);
   });
 
   it("serves the index shell from a LIVE registry read on every request (never cached), the listing passed through as the seed", async () => {
     let calls = 0;
-    const h = createResidentsViewHandler(
+    const h = handler(
       fakeClient(() => {
         calls++;
         return Promise.resolve(ok(LISTING as never));
       }),
-      shell,
     );
     for (let i = 0; i < 2; i++) {
       const io = fakeReqRes("GET", "/residents");
-      const claimed = h(io.req, io.res);
+      const claimed = h(io.req, io.res, ADMIN);
       expect(claimed).toBe(true);
       await new Promise((r) => setTimeout(r, 0));
       expect(io.status).toBe(200);
@@ -197,12 +222,9 @@ describe("createResidentsViewHandler", () => {
 
   it("a hostile record is inert in the page (the seed island escapes every angle bracket) and survives as data", async () => {
     const hostile = { ...DOWN, live: { ...DOWN.live, reason: '"><script>alert(1)</script>' } };
-    const h = createResidentsViewHandler(
-      fakeClient(() => Promise.resolve(ok({ cap: 5, count: 1, residents: [hostile] }))),
-      shell,
-    );
+    const h = handler(fakeClient(() => Promise.resolve(ok({ cap: 5, count: 1, residents: [hostile] }))));
     const io = fakeReqRes("GET", "/residents");
-    h(io.req, io.res);
+    h(io.req, io.res, ADMIN);
     await new Promise((r) => setTimeout(r, 0));
     expect(io.body()).not.toContain("<script>alert(1)</script>");
     expect(io.body().match(/<\/script>/g)).toHaveLength(2); // the shell's own two script elements only
@@ -211,12 +233,9 @@ describe("createResidentsViewHandler", () => {
   });
 
   it("serves a detail page for an onboarded slug (the record as the seed) and 404s an unknown one", async () => {
-    const h = createResidentsViewHandler(
-      fakeClient(() => Promise.resolve(ok(LISTING as never))),
-      shell,
-    );
+    const h = handler(fakeClient(() => Promise.resolve(ok(LISTING as never))));
     const hit = fakeReqRes("GET", "/residents/jshttp/vary");
-    h(hit.req, hit.res);
+    h(hit.req, hit.res, ADMIN);
     await new Promise((r) => setTimeout(r, 0));
     expect(hit.status).toBe(200);
     const seed = seedOf(hit.body()) as ResidentDetailSeed;
@@ -225,27 +244,24 @@ describe("createResidentsViewHandler", () => {
     expect(seed.record).toEqual(WARM);
 
     const miss = fakeReqRes("GET", "/residents/nobody/here");
-    h(miss.req, miss.res);
+    h(miss.req, miss.res, ADMIN);
     await new Promise((r) => setTimeout(r, 0));
     expect(miss.status).toBe(404);
     expect(miss.body()).toContain("not onboarded");
   });
 
   it("405s non-GET methods", () => {
-    const h = createResidentsViewHandler(
-      fakeClient(() => Promise.resolve(ok(LISTING as never))),
-      shell,
-    );
+    const h = handler(fakeClient(() => Promise.resolve(ok(LISTING as never))));
     const io = fakeReqRes("POST", "/residents");
-    expect(h(io.req, io.res)).toBe(true);
+    expect(h(io.req, io.res, ADMIN)).toBe(true);
     expect(io.status).toBe(405);
     expect(io.headers.allow).toBe("GET");
   });
 
   it("503s with a plain explanation when the process has no residents (the null admin client carries the reason)", async () => {
-    const h = createResidentsViewHandler(new NullResidentAdminClient(), shell);
+    const h = handler(new NullResidentAdminClient());
     const io = fakeReqRes("GET", "/residents");
-    expect(h(io.req, io.res)).toBe(true);
+    expect(h(io.req, io.res, ADMIN)).toBe(true);
     await new Promise((r) => setTimeout(r, 0));
     expect(io.status).toBe(503);
     expect(io.body()).toContain("execution.resident");
@@ -253,43 +269,33 @@ describe("createResidentsViewHandler", () => {
   });
 
   it("502s (never a 500 with a stack) when the resident Worker answers non-200 or the request throws", async () => {
-    const bad = createResidentsViewHandler(
-      fakeClient(() => Promise.resolve({ status: 401, data: { error: "unauthorized" } })),
-      shell,
-    );
+    const bad = handler(fakeClient(() => Promise.resolve({ status: 401, data: { error: "unauthorized" } })));
     const a = fakeReqRes("GET", "/residents");
-    bad(a.req, a.res);
+    bad(a.req, a.res, ADMIN);
     await new Promise((r) => setTimeout(r, 0));
     expect(a.status).toBe(502);
     expect(a.body()).toContain("401");
     expect(a.body()).toContain("unauthorized");
 
-    const huge = createResidentsViewHandler(
-      fakeClient(() => Promise.resolve({ status: 500, data: { blob: "x".repeat(10_000) } })),
-      shell,
-    );
+    const huge = handler(fakeClient(() => Promise.resolve({ status: 500, data: { blob: "x".repeat(10_000) } })));
     const c = fakeReqRes("GET", "/residents");
-    huge(c.req, c.res);
+    huge(c.req, c.res, ADMIN);
     await new Promise((r) => setTimeout(r, 0));
     expect(c.status).toBe(502);
     expect(c.body().length).toBeLessThan(700);
 
-    const hugeErr = createResidentsViewHandler(
-      fakeClient(() => Promise.reject(new Error("x".repeat(10_000)))),
-      shell,
-    );
+    const hugeErr = handler(fakeClient(() => Promise.reject(new Error("x".repeat(10_000)))));
     const e = fakeReqRes("GET", "/residents");
-    hugeErr(e.req, e.res);
+    hugeErr(e.req, e.res, ADMIN);
     await new Promise((r) => setTimeout(r, 0));
     expect(e.status).toBe(502);
     expect(e.body().length).toBeLessThan(700);
 
-    const throwing = createResidentsViewHandler(
+    const throwing = handler(
       fakeClient(() => Promise.reject(new Error("resident admin /residents request failed (ECONNREFUSED)"))),
-      shell,
     );
     const b = fakeReqRes("GET", "/residents/jshttp/vary");
-    throwing(b.req, b.res);
+    throwing(b.req, b.res, ADMIN);
     await new Promise((r) => setTimeout(r, 0));
     expect(b.status).toBe(502);
     expect(b.body()).toContain("ECONNREFUSED");
@@ -312,17 +318,16 @@ describe("createResidentsViewHandler — each page request is a root (docs/refer
   it("each page request runs under a dashboard.residents root handed to the client, with the route and the status; a 200 ends ok, a 404 ends error", async () => {
     const sink = recordingSink();
     const bound: string[] = [];
-    const h = createResidentsViewHandler(
+    const h = handler(
       tracedClient(() => Promise.resolve(ok(LISTING as never)), bound),
-      shell,
       { sinks: [sink] },
     );
     const index = fakeReqRes("GET", "/residents");
-    expect(h(index.req, index.res)).toBe(true);
+    expect(h(index.req, index.res, ADMIN)).toBe(true);
     await new Promise((r) => setTimeout(r, 0));
     expect(index.status).toBe(200);
     const detail = fakeReqRes("GET", "/residents/acme/unknown");
-    expect(h(detail.req, detail.res)).toBe(true);
+    expect(h(detail.req, detail.res, ADMIN)).toBe(true);
     await new Promise((r) => setTimeout(r, 0));
     expect(detail.status).toBe(404);
 
@@ -336,13 +341,12 @@ describe("createResidentsViewHandler — each page request is a root (docs/refer
 
   it("a throwing client ends the root error with the 502 it answered", async () => {
     const sink = recordingSink();
-    const h = createResidentsViewHandler(
+    const h = handler(
       tracedClient(() => Promise.reject(new Error("boom")), []),
-      shell,
       { sinks: [sink] },
     );
     const io = fakeReqRes("GET", "/residents");
-    h(io.req, io.res);
+    h(io.req, io.res, ADMIN);
     await new Promise((r) => setTimeout(r, 0));
     expect(io.status).toBe(502);
     expect(sink.ended("dashboard.residents")).toMatchObject({
@@ -353,14 +357,140 @@ describe("createResidentsViewHandler — each page request is a root (docs/refer
 
   it("without trace deps a request is untraced and the client is used unbound", async () => {
     const bound: string[] = [];
-    const h = createResidentsViewHandler(
-      tracedClient(() => Promise.resolve(ok(LISTING as never)), bound),
-      shell,
-    );
+    const h = handler(tracedClient(() => Promise.resolve(ok(LISTING as never)), bound));
     const io = fakeReqRes("GET", "/residents");
-    h(io.req, io.res);
+    h(io.req, io.res, ADMIN);
     await new Promise((r) => setTimeout(r, 0));
     expect(io.status).toBe(200);
     expect(bound).toEqual([]);
+  });
+});
+
+describe("createResidentsViewHandler — the runs on residents and the live feed (resident-repos item 42)", () => {
+  const PUBLIC = { channelId: "slack:C_PUB", channelVisibility: "public" } as const;
+  const PRIVATE = { channelId: "slack:G_PRIV", channelVisibility: "private" } as const;
+  const meta = (channel: typeof PUBLIC | typeof PRIVATE, threadKey: string, repo?: string) => ({
+    ...channel,
+    userId: "slack:UA",
+    threadKey,
+    ...(repo ? { repo } : {}),
+  });
+  // alice is an unlisted browser session (every group's read, no channel
+  // grants); nobody is a viewer config names nothing for.
+  const SOURCE: GrantsSource = { grants: new Map([["access:admin", ALL_GRANTS]]), commandGroups: ["runs"] };
+  const alice: ResidentsViewContext = { actor: accessActor({ sub: "alice" }, (id) => grantsFor(id, SOURCE)) };
+  const nobody: ResidentsViewContext = { actor: accessActor({ sub: "nobody" }, () => NO_GRANTS) };
+
+  function fleet() {
+    const registry = new RunRegistry();
+    const pub = registry.create("coding · jshttp/vary", meta(PUBLIC, "slack:C_PUB:1", "jshttp/vary"));
+    const priv = registry.create("review · acme/api", meta(PRIVATE, "slack:G_PRIV:1", "acme/api"));
+    const noRepo = registry.create("general · #dev", meta(PUBLIC, "slack:C_PUB:2"));
+    const done = registry.create("coding · jshttp/vary", meta(PUBLIC, "slack:C_PUB:3", "jshttp/vary"));
+    registry.finish(done.id, "completed");
+    return { registry, pub, priv, noRepo, done };
+  }
+
+  it("seeds the live repo runs the viewer may read, each with its token, and the server clock; never a finished run or one without a repo", async () => {
+    const f = fleet();
+    const h = handler(
+      fakeClient(() => Promise.resolve(ok(LISTING as never))),
+      undefined,
+      f.registry,
+      () => 4242,
+    );
+    const admin = fakeReqRes("GET", "/residents");
+    h(admin.req, admin.res, ADMIN);
+    await new Promise((r) => setTimeout(r, 0));
+    const seed = seedOf(admin.body()) as ResidentsIndexSeed;
+    expect(seed.now).toBe(4242);
+    expect(seed.runs.map((r) => [r.id, r.repo, r.token]).sort()).toEqual(
+      [
+        [f.pub.id, "jshttp/vary", f.pub.token],
+        [f.priv.id, "acme/api", f.priv.token],
+      ].sort(),
+    );
+
+    const viewer = fakeReqRes("GET", "/residents");
+    h(viewer.req, viewer.res, alice);
+    await new Promise((r) => setTimeout(r, 0));
+    expect((seedOf(viewer.body()) as ResidentsIndexSeed).runs.map((r) => r.id)).toEqual([f.pub.id]);
+
+    const none = fakeReqRes("GET", "/residents");
+    h(none.req, none.res, nobody);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(none.status).toBe(200); // the residents themselves are the Access gate's to show
+    expect((seedOf(none.body()) as ResidentsIndexSeed).runs).toEqual([]);
+  });
+
+  it("`?stream=1` is the feed: an SSE head, the viewer's repo runs replayed, live upserts, and a fresh listing when a run's attach span ends", async () => {
+    const f = fleet();
+    let reads = 0;
+    const h = handler(
+      fakeClient(() => {
+        reads++;
+        return Promise.resolve(ok(LISTING as never));
+      }),
+      undefined,
+      f.registry,
+    );
+    const io = fakeReqRes("GET", "/residents?stream=1");
+    expect(h(io.req, io.res, alice)).toBe(true);
+    expect(io.status).toBe(200);
+    expect(io.headers["content-type"]).toContain("text/event-stream");
+    expect(reads).toBe(0); // the feed opens on the registry alone; the page already has the seed's listing
+    const frames = () =>
+      io
+        .body()
+        .split("\n\n")
+        .filter((c) => c.startsWith("data: "))
+        .map((c) => JSON.parse(c.slice(6)) as ResidentsFeedFrame);
+    const ids = (fs: ResidentsFeedFrame[]) =>
+      fs.map((fr) => (fr.type === "upsert" ? `${fr.run.id}:${fr.run.finished}` : fr.type));
+    // The replay is the registry's live set as the viewer sees it: alice's
+    // public repo runs — the live one and the finished one still inside its
+    // TTL (the page drops a finished row; the runs index feed carries it the
+    // same way) — never the private run or the one without a repo.
+    expect(ids(frames()).sort()).toEqual([`${f.done.id}:true`, `${f.pub.id}:false`].sort());
+
+    const late = f.registry.create("coding · jshttp/vary", meta(PUBLIC, "slack:C_PUB:9", "jshttp/vary"));
+    f.registry.create("review · acme/api", meta(PRIVATE, "slack:G_PRIV:9", "acme/api")); // not alice's to see
+    f.registry.publish(late.id, {
+      type: "span_end",
+      spanId: "s1",
+      name: ATTACH_SPAN,
+      startedAt: 1,
+      durationMs: 2,
+      status: "ok",
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(reads).toBe(1);
+    const after = frames();
+    // the create's upsert (a span record never repaints the index), then the listing the attach end caused
+    expect(ids(after).slice(2)).toEqual([`${late.id}:false`, "residents"]);
+    expect(after.at(-1)).toEqual({ type: "residents", cap: 5, count: 2, residents: [WARM, DOWN] });
+  });
+
+  it("the feed's listing reads run under their own `dashboard.residents` root (route `feed`), one per read", async () => {
+    const f = fleet();
+    const sink = recordingSink();
+    const h = handler(
+      fakeClient(() => Promise.resolve(ok(LISTING as never))),
+      { sinks: [sink] },
+      f.registry,
+    );
+    const io = fakeReqRes("GET", "/residents?stream=1");
+    h(io.req, io.res, ADMIN);
+    f.registry.publish(f.pub.id, {
+      type: "span_end",
+      spanId: "s1",
+      name: ATTACH_SPAN,
+      startedAt: 1,
+      durationMs: 2,
+      status: "ok",
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    const roots = sink.ends.filter((e) => e.name === "dashboard.residents");
+    expect(roots.map((r) => [r.status, r.attrs.route, r.attrs.httpStatus])).toEqual([["ok", "feed", 200]]);
   });
 });
