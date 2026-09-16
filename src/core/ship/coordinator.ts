@@ -504,6 +504,9 @@ export type StepReturn =
   | { type: "read-record"; step: string; run: ChildFacts; at: number }
   | { type: "pr-check"; step: string; pr: PrCheck; at: number }
   | { type: "merge"; step: string; outcome: "merged"; sha: string; at: number }
+  // The door found the pull request already merged after the approval — auto-merge
+  // fired, or a person merged — so the runner merged nothing (`by: other`).
+  | { type: "merge"; step: string; outcome: "merged"; by: "other"; sha: string; mergedAt: string; at: number }
   | { type: "merge"; step: string; outcome: "pending" | "refused"; reason: string; at: number }
   | { type: "sleep"; step: string };
 
@@ -1268,7 +1271,18 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
     case "merge": {
       const r = ret as Extract<StepReturn, { type: "merge" }>;
       if (r.outcome === "merged")
-        return end(clocked, { kind: "merged", by: "runner", pr: p.pr, sha: r.sha, reviewRounds: s.reviewRounds });
+        // Found already merged at the door — auto-merge or a person, after the
+        // approval: the unit is done, the runner merged nothing (`by: other`).
+        return "by" in r
+          ? end(clocked, {
+              kind: "merged",
+              by: "other",
+              pr: p.pr,
+              sha: r.sha,
+              mergedAt: r.mergedAt,
+              reviewRounds: s.reviewRounds,
+            })
+          : end(clocked, { kind: "merged", by: "runner", pr: p.pr, sha: r.sha, reviewRounds: s.reviewRounds });
       if (r.outcome === "refused")
         return end(clocked, { kind: "merge_refused", pr: p.pr, reason: r.reason, reviewRounds: s.reviewRounds });
       const waited = r.at - p.since;

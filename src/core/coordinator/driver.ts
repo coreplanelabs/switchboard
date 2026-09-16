@@ -314,7 +314,11 @@ function prCheckReturn(step: string, a: BotAnswer): StepReturn {
 }
 
 function mergeReturn(step: string, a: BotAnswer): StepReturn {
-  const { ok, outcome, sha, reason, at } = a.body;
+  const { ok, outcome, by, sha, mergedAt, reason, at } = a.body;
+  // The door found the pull request already merged after the approval: the
+  // merge commit and the time ride the answer, and the unit ends `by: other`.
+  if (ok === true && outcome === "merged" && by === "other" && typeof sha === "string" && typeof mergedAt === "string")
+    return { type: "merge", step, outcome: "merged", by: "other", sha, mergedAt, at };
   if (ok === true && outcome === "merged" && typeof sha === "string")
     return { type: "merge", step, outcome: "merged", sha, at };
   if (ok === true && (outcome === "pending" || outcome === "refused") && typeof reason === "string")

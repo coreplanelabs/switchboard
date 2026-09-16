@@ -275,6 +275,31 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "completed" }]);
   });
 
+  it("a merge door answering merged by other — the pull request was merged after the approval — completes the plan: the unit ends merged and the report reads the Already-merged sentence", async () => {
+    const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
+      "read-record": [codingDone("run-c0", T0 + 10 * MIN), reviewApproved("run-r1", T0 + 20 * MIN)],
+      "pr-check": [prNone(), prOpen(T0 + 10 * MIN)],
+      round: [acked(), acked(), acked(), acked()],
+      merge: [
+        ok({ ok: true, outcome: "merged", by: "other", sha: MERGED, mergedAt: "2026-09-16T00:46:19Z" }, T0 + 21 * MIN),
+      ],
+      "unit-end": [ok({ ok: true, told: true }, T0 + 21 * MIN)],
+      finish: [ok({ ok: true, runId: "run-parent" }, T0 + 21 * MIN)],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary.units).toEqual({ U10: "merged" });
+    expect(summary.outcome).toBe("completed");
+    const [end] = b.of("unit-end") as Array<{ ending: { kind: string; report: string } }>;
+    expect(end.ending.kind).toBe("merged");
+    expect(end.ending.report).toContain(`✅ Already merged: ${PR_URL} (merge commit \`${MERGED.slice(0, 7)}\``);
+    expect(end.ending.report).toContain("the runner merged nothing");
+  });
+
   it("an interrupted coding child settles the round through its run-finished event and the confirming read-record; the recover pr-check names the dead run, and the pull request the bot opened from the pushed branch carries the round on to review — the round ends with the interruption's reason, never the budget clip", async () => {
     const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
     const b = bot({
