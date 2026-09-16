@@ -44,6 +44,7 @@ import {
   settleUnit,
   startUnit,
   type ChildFacts,
+  type MergeReadyFacts,
   type CoordinatorAction,
   type PlanGraph,
   type PlanUnitNode,
@@ -278,7 +279,13 @@ function prCheckReturn(step: string, a: BotAnswer): StepReturn {
     return {
       type: "pr-check",
       step,
-      pr: { state: "open", prNumber, url, ...(typeof headSha === "string" ? { headSha } : {}) },
+      pr: {
+        state: "open",
+        prNumber,
+        url,
+        ...(typeof headSha === "string" ? { headSha } : {}),
+        ...(typeof a.body.autoMergeEnabled === "boolean" ? { autoMergeEnabled: a.body.autoMergeEnabled } : {}),
+      },
       at,
     };
   // A merged pull request is read whole or not at all: the merge commit and
@@ -448,12 +455,36 @@ async function runUnit(
         const body = { ...tag, index: note.index, agent: note.agent, outcome: note.outcome };
         await step.do(`${unit}/note/${++notes}`, STEP_CONFIG, () => call(bot, "round", body));
       } else {
+        // A merge_ready ending names the pull request as it is at the APPROVED
+        // head (agent-ship item 9): one more pr-check reads the facts fresh —
+        // auto-merge may have been switched on since the round's check, or it
+        // may already have fired, in which case the answer is `merged` and the
+        // report says so rather than naming a gate that has passed. An
+        // unreadable answer just leaves the facts out.
+        let endFacts: MergeReadyFacts | undefined;
+        if (note.ending.kind === "merge_ready") {
+          try {
+            const check = prCheckReturn(
+              `${unit}/end/pr-facts`,
+              answerOf(
+                "pr-check",
+                await step.do(`${unit}/end/pr-facts`, STEP_CONFIG, () => call(bot, "pr-check", tag)),
+              ),
+            );
+            if (check.type === "pr-check" && check.pr.state === "merged")
+              endFacts = { merged: { sha: check.pr.sha, mergedAt: check.pr.mergedAt } };
+            else if (check.type === "pr-check" && check.pr.state === "open" && check.pr.autoMergeEnabled !== undefined)
+              endFacts = { autoMergeEnabled: check.pr.autoMergeEnabled };
+          } catch {
+            // the report simply omits the fact
+          }
+        }
         // The last coding child's run is named so the bot can put its handoff
         // — the deviations it recorded — on the unit's board issue beside the
         // ending (agent-ship item 14).
         const body = {
           ...tag,
-          ending: { kind: note.ending.kind, report: renderUnitReport(state) },
+          ending: { kind: note.ending.kind, report: renderUnitReport(state, endFacts) },
           ...(state.pr !== undefined ? { pr: state.pr } : {}),
           ...(state.lastCodingRunId !== undefined ? { codingRunId: state.lastCodingRunId } : {}),
         };

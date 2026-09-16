@@ -90,8 +90,13 @@ type Planned = {
   merge: "runner" | "person";
   /** A resume at review rides the generated unit's row, on the pull request's own head branch. */
   resume?: { pr: number; headSha?: string; url?: string };
-  /** The entry's branch (a resume's pull request head) overrides the graph's on the one generated unit. */
+  /** The thread's open pull request a generated task adopts: round 0 runs on
+   *  its head branch and the pre-check finds it (agent-ship item 10). */
+  adopt?: { pr: number; url?: string };
+  /** The entry's branch (an adopted or resumed pull request's head) overrides the graph's on the one generated unit. */
   entryBranch?: string;
+  /** The pull request's own auto-merge fact at entry (agent-ship item 9): named in the reply, never refused. */
+  autoMergeEnabled?: boolean;
 };
 
 const refused = (reply: string): HandOffOutcome => ({ status: "aborted", reply });
@@ -152,7 +157,9 @@ async function plan(
         identity,
         merge: "person",
         ...(entry.resume !== undefined ? { resume: entry.resume } : {}),
+        ...(entry.adopt !== undefined ? { adopt: entry.adopt } : {}),
         ...(entry.branch !== undefined ? { entryBranch: entry.branch } : {}),
+        ...(entry.autoMergeEnabled !== undefined ? { autoMergeEnabled: entry.autoMergeEnabled } : {}),
       },
     };
   }
@@ -219,13 +226,19 @@ function planWhere(p: Planned, units: readonly CoordinatorUnit[], mergedBefore: 
   if (p.path !== undefined)
     return `${head} Each unit runs in a thread of its own in this channel under your grants; this card follows the plan and its summary lands in this thread.`;
   const branch = units[0]?.branch ?? "";
-  const prUrl =
-    p.resume?.url ?? (p.resume !== undefined ? `https://github.com/${p.identity.repo}/pull/${p.resume.pr}` : undefined);
+  const url = (of: { pr: number; url?: string } | undefined) =>
+    of?.url ?? (of !== undefined ? `https://github.com/${p.identity.repo}/pull/${of.pr}` : undefined);
   const runs =
     p.resume !== undefined
-      ? `the review loop of ${prUrl} resumes at its next review round on \`${branch}\` in this thread under your grants — no new coding round first`
-      : `the unit runs on \`${branch}\` in this thread under your grants`;
-  return `${head} ${runs}; this card follows it and the report lands here.`;
+      ? `the review loop of ${url(p.resume)} resumes at its next review round on \`${branch}\` in this thread under your grants — no new coding round first`
+      : p.adopt !== undefined
+        ? `the unit adopts ${url(p.adopt)}: it runs on \`${branch}\` — the pull request's own head — in this thread under your grants, no new branch`
+        : `the unit runs on \`${branch}\` in this thread under your grants`;
+  // The pull request's own auto-merge fact, named at entry (agent-ship item 9).
+  const autoMerge = p.autoMergeEnabled
+    ? " Auto-merge is on for this pull request: the approval merges it once checks pass."
+    : "";
+  return `${head} ${runs}; this card follows it and the report lands here.${autoMerge}`;
 }
 
 /**

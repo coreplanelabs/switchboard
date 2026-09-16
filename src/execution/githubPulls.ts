@@ -44,6 +44,9 @@ export interface OpenPrRef {
   htmlUrl: string;
   /** Head sha as GitHub reported it, when present in the listing. */
   headSha?: string;
+  /** Whether the pull request has auto-merge set (`auto_merge !== null`);
+   *  absent when the listing did not carry the field. */
+  autoMergeEnabled?: boolean;
 }
 
 export interface OpenedPullRequest {
@@ -75,13 +78,19 @@ export async function findOpenPrByHead(repo: string, branch: string): Promise<Op
     const text = await res.text().catch(() => "");
     throw new Error(`PR lookup failed: HTTP ${res.status} ${redactAndCap(text, 300)}`);
   }
-  const rows = (await res.json()) as Array<{ number: number; html_url: string; head?: { sha?: string } }>;
+  const rows = (await res.json()) as Array<{
+    number: number;
+    html_url: string;
+    head?: { sha?: string };
+    auto_merge?: unknown;
+  }>;
   if (!Array.isArray(rows) || rows.length === 0) return null;
   const first = rows[0];
   return {
     number: first.number,
     htmlUrl: first.html_url,
     ...(first.head?.sha ? { headSha: first.head.sha } : {}),
+    ...("auto_merge" in first ? { autoMergeEnabled: first.auto_merge !== null } : {}),
   };
 }
 
@@ -245,19 +254,17 @@ export async function createBranchRef(repo: string, branch: string, fromRef: str
 // return undefined on any failure instead of throwing.
 
 /** What the ship preflight needs to know about a repository before round 0:
- *  whether auto-merge is enabled (spec item 9 — unknown counts as enabled),
- *  and the default branch (the PR base of last resort). */
+ *  the default branch (the PR base of last resort). A failed lookup leaves it
+ *  undefined and refuses nothing — auto-merge is the pull request's own fact
+ *  (`PullRequestFacts.autoMergeEnabled`), never the repository's (spec item 9). */
 export interface RepoShipInfo {
-  /** `allow_auto_merge` as GitHub reports it; absent when the response did not
-   *  carry the field (a token without enough scope) — the caller fail-closes. */
-  allowAutoMerge?: boolean;
   defaultBranch?: string;
 }
 
 /** The PR base of last resort: explicit candidates in priority order, else the
  *  repo's own default branch. Pure/sync — for a caller that already holds a
  *  RepoShipInfo for another reason (agent:ship's preflight fetches it
- *  unconditionally for the auto-merge gate, spec item 9). `resolveBaseRefLazy`
+ *  unconditionally for the base of last resort). `resolveBaseRefLazy`
  *  below is for a caller with no other reason to fetch one. Shared so "ask
  *  GitHub for the default branch" stays one mechanism, not one per caller. */
 export function resolveBaseRef(
@@ -299,10 +306,9 @@ export async function fetchRepoShipInfo(repo: string): Promise<RepoShipInfo | un
     return undefined;
   }
   if (!res.ok) return undefined;
-  const data = (await res.json().catch(() => null)) as { allow_auto_merge?: unknown; default_branch?: unknown } | null;
+  const data = (await res.json().catch(() => null)) as { default_branch?: unknown } | null;
   if (!data || typeof data !== "object") return undefined;
   return {
-    ...(typeof data.allow_auto_merge === "boolean" ? { allowAutoMerge: data.allow_auto_merge } : {}),
     ...(typeof data.default_branch === "string" && data.default_branch ? { defaultBranch: data.default_branch } : {}),
   };
 }
@@ -328,6 +334,10 @@ export interface PullRequestFacts {
   htmlUrl?: string;
   /** The pull request's title as GitHub has it — the squash commit's title when the runner merges. */
   title?: string;
+  /** Whether the pull request itself has auto-merge set (`auto_merge !== null`);
+   *  absent when the response did not carry the field. Named at entry and at
+   *  the approved head (spec item 9), never refused. */
+  autoMergeEnabled?: boolean;
 }
 
 /**
@@ -422,6 +432,7 @@ export async function fetchPullRequestFacts(pr: {
     user?: { login?: unknown; id?: unknown };
     head?: { ref?: unknown; sha?: unknown; repo?: { full_name?: unknown } };
     base?: { ref?: unknown };
+    auto_merge?: unknown;
   } | null;
   if (!data || (data.state !== "open" && data.state !== "closed")) return undefined;
   const headRepo = typeof data.head?.repo?.full_name === "string" ? data.head.repo.full_name.toLowerCase() : undefined;
@@ -451,6 +462,7 @@ export async function fetchPullRequestFacts(pr: {
     ...(typeof data.base?.ref === "string" && data.base.ref ? { baseRef: data.base.ref } : {}),
     ...(typeof data.html_url === "string" ? { htmlUrl: data.html_url } : {}),
     ...(typeof data.title === "string" && data.title ? { title: data.title } : {}),
+    ...("auto_merge" in data ? { autoMergeEnabled: data.auto_merge !== null } : {}),
   };
 }
 

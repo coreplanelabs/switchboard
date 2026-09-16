@@ -18,7 +18,6 @@ import type { RunOwner } from "../trace/streamSpans.js";
 import type { RequestTrace } from "../requestTrace.js";
 import type { RepoContext } from "../repoContext.js";
 import { fetchPullRequestFacts, fetchRepoShipInfo, type PullRequestFacts } from "../../execution/githubPulls.js";
-import { resolveGithubIdentity, type GithubIdentity } from "../../execution/githubApp.js";
 import { processSecrets } from "../../secrets.js";
 import { handOffToCoordinator, type HandOffOutcome } from "../coordinator/handOff.js";
 import { createInstanceViaShim, fetchInstanceStatusViaShim } from "../coordinator/instancesClient.js";
@@ -48,18 +47,11 @@ import { messageIdOf, type ChannelIO, type HistoryItem, type IncomingMessage, ty
  *  runner's records and shim. */
 export interface ShipDeps extends RunDeps, Pick<FastPathDeps, "clock" | "runRegistry"> {
   /**
-   * One PR's entry-check facts for agent:ship (item 10): open/closed, author
-   * identity (login + immutable numeric id), same-repo head, head ref/sha —
-   * the resume-at-review checks. Default: githubPulls' `fetchPullRequestFacts`.
-   * Injectable for tests.
+   * One PR's entry-check facts for agent:ship (item 10): open/closed, same-repo
+   * head, head ref/sha, base, the auto-merge fact — the adopt and resume checks.
+   * Default: githubPulls' `fetchPullRequestFacts`. Injectable for tests.
    */
   fetchPrFacts?: (pr: { repo: string; number: number }) => Promise<PullRequestFacts | undefined>;
-  /**
-   * The GitHub identity this process acts as (agent-ship.md item 10): the App's
-   * bot user, or the static token's user — what ship's own PRs are authored by.
-   * Default: githubApp's `resolveGithubIdentity`. Injectable for tests.
-   */
-  fetchSelfIdentity?: () => Promise<GithubIdentity | undefined>;
   /**
    * The coordinator's instance records and unit rows on the state Worker
    * (run-history items 49 and 50) — what the hand-off writes before it asks
@@ -160,7 +152,6 @@ export async function runShipBranch(
       gates: { canRunAgent: (a) => deps.config.canRunAgent(msg.userId, a), adminsHint: () => deps.config.adminsHint() },
       repoInfo: deps.fetchRepoShipInfo ?? fetchRepoShipInfo,
       prFacts: deps.fetchPrFacts ?? fetchPullRequestFacts,
-      selfIdentity: deps.fetchSelfIdentity ?? resolveGithubIdentity,
       runsBase: process.env.PUBLIC_BASE_URL,
     }),
   );
