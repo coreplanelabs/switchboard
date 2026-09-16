@@ -342,10 +342,12 @@ describe("diskPressureReason — the refusal names free, reserve, projected, wha
     const s = sample({ usedKiB: 12 * GIB, freeKiB: 3 * GIB });
     const v = checkDiskAdmission({ sample: s, kind: "reconcile" });
     if (v.fits) throw new Error("fixture must not fit");
+    // The keep tokens are the pure order's plus the Worker's two — a tree is
+    // never kept for its dirt (item 17), so no token names one.
     const text = diskPressureReason({
       verdict: v,
       evicted: [{ freedKiB: 450_000 }],
-      kept: [{ why: "busy" }, { why: "dirty" }, { why: "other" }],
+      kept: [{ why: "busy" }, { why: "recent" }, { why: "other" }],
     });
     // 430 MB + 0.25 × 2100 MB = 955 MB (0.93 GiB) projected; reserve = 0.6 × 2890 MB + 1 GiB = 1734 MB + 1024 MB = 2.69 GiB; 3 − 2.69 = 0.31 left; short 0.63.
     expect(text).toMatch(
@@ -353,7 +355,7 @@ describe("diskPressureReason — the refusal names free, reserve, projected, wha
     );
     expect(text).not.toContain("cap"); // no diskBudgetMb → no cap named
     expect(text).toContain("evicted 1 idle tree(s) (0.43 GiB back)");
-    expect(text).toContain("kept 3 (busy 1, dirty 1, other 1)");
+    expect(text).toContain("kept 3 (busy 1, recent 1, other 1)");
     // Item 62: the refusal reaches the requesting thread's card, so it names
     // counts and tokens only — never another thread's key or its free text.
     // The type no longer admits a key or a detail, so the refusal cannot carry one.

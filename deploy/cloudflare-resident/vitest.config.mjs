@@ -9,8 +9,11 @@ import { defineConfig } from "vitest/config";
 // counter and its escalation ladder (runtimeUnreachable.test.ts), and for the
 // reuse-only attach path and the container identity (reuseAttach.test.ts), and
 // for the in-place rebind onto the thread's own pull request branch
-// (rebindAttach.test.ts);
-// testing/sourceScan.ts is their helper.
+// (rebindAttach.test.ts), for the release at a run's end
+// (releaseAtRunEnd.test.ts) and for the rule that dirt never keeps a tree
+// (dirtNeverKeeps.test.ts); testing/sourceScan.ts is their helper. Every
+// test file of this directory is listed here — src/vitestWorkspace.test.ts
+// holds that.
 // worker.ts itself is covered by typecheck + the [agent] receipts in
 // docs/reference/specs/resident-repos.md. Also a project of the root
 // vitest.config.ts (`--project worker-resident`).
@@ -27,6 +30,8 @@ export default defineConfig({
       "runtimeUnreachable.test.ts",
       "reuseAttach.test.ts",
       "rebindAttach.test.ts",
+      "releaseAtRunEnd.test.ts",
+      "dirtNeverKeeps.test.ts",
     ],
   },
 });

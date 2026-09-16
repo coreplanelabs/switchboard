@@ -6,10 +6,11 @@ import { methodOf, readSource } from "./testing/sourceScan";
 // from a clean tree, so nothing uncommitted or unpushed outlives the run —
 // what a run wants kept, it commits and pushes. `detachThread` therefore has
 // one reason to keep a tree, an op still in flight in it, and one duty
-// besides releasing: to name what the release discards (`leftBehind`, the
-// pure `leftBehindOf` of src/execution/residentCleanliness.ts), so the loss is
-// never silent. The clean-idle sweep releases on idleness alone for the same
-// reason. Plain Node, the entry read as text, never loaded.
+// besides releasing: to name what the release discards (`leftBehind`, from the
+// one measurement `evictedTreeOf` of src/execution/residentCleanliness.ts also
+// writes onto the binding), so the loss is never silent. The clean-idle sweep
+// releases on idleness alone for the same reason. Plain Node, the entry read
+// as text, never loaded.
 
 const source = readSource("worker.ts");
 const residentDO = source.slice(source.indexOf("export class ResidentDO"));
@@ -23,19 +24,14 @@ function method(name: string): string {
 describe("detachThread releases the tree whatever it holds, and names what it discards", () => {
   const detach = method("detachThread");
 
-  it("no path keeps a tree for its dirt: the one measurement feeds the answer, never a `released: false`", () => {
-    expect(source).toMatch(
-      /import \{[^}]*leftBehindOf[^}]*\} from "\.\.\/\.\.\/src\/execution\/residentCleanliness\.js";/,
-    );
-    expect(detach).toMatch(
-      /const measured = await this\.worktreeCleanliness\(binding\);\s*leftBehind = leftBehindOf\(measured\);/,
-    );
+  it("no path keeps a tree for its dirt: the one measurement feeds the answer and the record, never a `released: false`", () => {
+    expect(detach).toMatch(/if \(!force && active\) tree = await this\.measureTreeBeforeEviction\(binding\);/);
     expect(detach).not.toMatch(/kept", user: binding\.user \};\s*\}\s*\}/);
     expect(detach).not.toMatch(/\$\{c\.reason\} — kept/);
     expect(detach).not.toMatch(/if \(!c\.clean\)/);
-    // A probe that failed names nothing and is a log line, never a keep.
-    expect(detach).toMatch(/if \(!measured\.clean && leftBehind === undefined\)\s*console\.log\(/);
-    expect(detach).toMatch(/the tree could not be measured before its release/);
+    expect(detach).not.toMatch(/worktreeCleanliness/);
+    // A probe that failed names nothing in the answer; the eviction records it (dirtNeverKeeps.test.ts).
+    expect(detach).toMatch(/const leftBehind = tree && "leftBehind" in tree \? tree\.leftBehind : undefined;/);
   });
 
   it("the answer carries `leftBehind` on a release that discarded something, and the type declares it", () => {
@@ -44,15 +40,11 @@ describe("detachThread releases the tree whatever it holds, and names what it di
     expect(detach).toMatch(
       /return \{ released: true, user, \.\.\.\(leftBehind !== undefined \? \{ leftBehind \} : \{\}\) \};/,
     );
-    // The release is logged with the counts, so the operator's tail says what went.
-    expect(detach).toMatch(
-      /released — left behind \$\{leftBehind\.uncommittedChanges\} uncommitted change\(s\) and \$\{leftBehind\.unpushedCommits\} unpushed commit\(s\), discarded with the tree/,
-    );
   });
 
   it("the measurement is a non-force release's alone — a read-only tree holds nothing, a hard stop's tree is whatever the killed command left — and runs only with the runtime up", () => {
-    expect(detach).toMatch(/let leftBehind: LeftBehind \| undefined;\s*if \(!force && active\) \{/);
-    const measure = detach.indexOf("const measured = await this.worktreeCleanliness(binding);");
+    expect(detach).toMatch(/let tree: EvictedTree \| undefined;\s*if \(!force && active\) tree = await/);
+    const measure = detach.indexOf("tree = await this.measureTreeBeforeEviction(binding);");
     const kill = detach.indexOf("await this.killThreadUserProcesses(plan.user);");
     const drain = detach.indexOf("const left = await this.waitForThreadDrain(threadKey);");
     expect(kill).toBeGreaterThan(-1);
@@ -70,12 +62,12 @@ describe("detachThread releases the tree whatever it holds, and names what it di
       /if \(left > 0\) return \{ released: false, reason: busyAfterKillReason\(left\), user: binding\.user \};/,
     );
     // The measurement awaited: an op that started meanwhile, or a re-attach, keeps the tree — never rm under a live command or a fresh tree.
-    const measure = detach.indexOf("const measured = await this.worktreeCleanliness(binding);");
+    const measure = detach.indexOf("tree = await this.measureTreeBeforeEviction(binding);");
     const busyNow = detach.indexOf("const busyNow = this.threadOpsInFlight.get(threadKey) ?? 0;");
     const reread = detach.indexOf(
       "const current = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));",
     );
-    const evict = detach.indexOf('await this.evictBinding(current, activeNow, `detach`, "detach")');
+    const evict = detach.indexOf('await this.evictBinding(current, activeNow, `detach`, "detach", tree)');
     expect(busyNow).toBeGreaterThan(measure);
     expect(reread).toBeGreaterThan(busyNow);
     expect(evict).toBeGreaterThan(reread);
@@ -91,8 +83,10 @@ describe("the clean-idle sweep releases on idleness alone", () => {
     expect(sweep).toMatch(
       /const busy = this\.threadOpsInFlight\.get\(binding\.threadKey\) \?\? 0;\s*if \(last >= idleCutoff \|\| busy > 0\) \{\s*kept\+\+;\s*continue;\s*\}/,
     );
+    // The tree is measured for the eviction's record (dirtNeverKeeps.test.ts), never for a keep.
     expect(sweep).not.toMatch(/worktreeCleanliness/);
     expect(sweep).not.toMatch(/cleanIdle/);
+    expect(sweep).not.toMatch(/if \(tree/);
   });
 
   it("the re-read guards before the eviction stand: a re-attach since the listing keeps its fresh tree, and the runtime is re-read per binding", () => {

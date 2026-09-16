@@ -116,10 +116,13 @@ import {
   type ThreadDepsMechanism,
 } from "../../src/execution/residentDepCache.js";
 import {
-  leftBehindOf,
+  evictedTreeOf,
+  evictedTreeSentence,
   parseWorktreeCleanliness,
   worktreeCleanlinessScript,
+  type EvictedTree,
   type LeftBehind,
+  type WorktreeCleanliness,
 } from "../../src/execution/residentCleanliness.js";
 import {
   base64LengthOf,
@@ -1023,8 +1026,17 @@ interface ThreadBinding {
   evicted?: boolean;
   evictedAt?: string;
   /** Why the last eviction happened (the audit trail): `ttl`, `clean-idle`,
-   *  `detach`, or a reclamation fate — `merged #N` / `closed #N` / `gone`. */
+   *  `detach`, `disk-pressure`, or a reclamation fate — `merged #N` /
+   *  `closed #N` / `gone`. */
   evictedWhy?: string;
+  /** What the tree held when that eviction removed it (item 17: never a
+   *  reason to keep the tree, never discarded silently): the tracked changes
+   *  and unpushed commits measured as the thread user. Absent when the tree
+   *  was clean, already gone with the disk, or not measured (a force detach). */
+  evictedLeftBehind?: LeftBehind;
+  /** Why the tree could not be measured before that eviction (git could not
+   *  read it) — so an unreadable tree is never recorded as clean. */
+  evictedUnmeasured?: string;
   /** How deps were last materialized (evidence that the per-branch reconciliation ran). */
   deps?: ThreadDepsMechanism;
   /** Commit the worktree was last attached at (the ref's tip in the mirror
@@ -3786,15 +3798,16 @@ export class ResidentDO extends Sandbox<Env> {
     });
   }
 
-  /** Idle = no live binding attached within IDLE_AFTER_S AND (when the
-   *  runtime is up) no live tree is dirty. Bindings are storage; dirtiness
-   *  needs the container — if it is already asleep there is nothing to lose. */
+  /** Idle = no live binding attached within IDLE_AFTER_S and nothing in
+   *  flight. What a live tree holds is not asked (item 17): a dirty tree no
+   *  run is using protects nothing — the next attach wipes it — so it is
+   *  never a reason to keep the container awake; the sweep's release records
+   *  what it held. Bindings are storage, so this needs no container. */
   private async isIdle(): Promise<boolean> {
     const live = await this.liveBindings();
     const recent = systemClock() - IDLE_AFTER_S * 1000;
     if (live.some((b) => Date.parse(b.lastAttachAt) >= recent)) return false;
-    if (this.inFlightCount() > 0) return false;
-    return this.liveTreesClean(live);
+    return this.inFlightCount() === 0;
   }
 
   /** Bindings that hold a pool user and a tree on disk (not evicted). */
@@ -3803,14 +3816,13 @@ export class ResidentDO extends Sandbox<Env> {
     return [...all.values()].filter((b) => !b.evicted && b.user);
   }
 
-  /** True when no live tree holds work a lost disk would destroy: every one
-   *  is clean (as its thread user), or the runtime is already down — a sleep
-   *  has destroyed the disk, so there is nothing left to lose. */
+  /** The disk-full recycle's tree guard (item 54), its one reader: true when
+   *  every live tree is clean as its thread user, or the runtime is already
+   *  down — a sleep has destroyed the disk, so there is nothing left to lose. */
   private async liveTreesClean(live: ThreadBinding[]): Promise<boolean> {
     if (!(await this.isRuntimeActive().catch(() => false))) return true;
     // Concurrent: each check touches only its own (disjoint) tree, and one
-    // spawn each — the idle gate does not pay a serial
-    // 3-probe round-trip per live binding.
+    // spawn each — no serial 3-probe round-trip per live binding.
     const checks = await Promise.all(live.map((b) => this.worktreeCleanliness(b)));
     return checks.every((c) => c.clean); // any dirty or unknown → not clean
   }
@@ -3948,10 +3960,11 @@ export class ResidentDO extends Sandbox<Env> {
    *  already on disk is `reuse` (0 — a dirty/stale recreate frees the old one
    *  first). A ref not yet in the mirror (fetched under the lock, moments later)
    *  is projected as `hardlink`, the common case. When it does not fit, the
-   *  coldest clean idle trees go first (`orderEvictionCandidates`: never the
+   *  coldest idle trees go first (`orderEvictionCandidates`: never the
    *  requesting thread, a busy tree, the default branch, or one attached within
-   *  DISK_EVICT_MIN_IDLE_MS; cleanliness checked as the thread user, dirty or
-   *  unreadable kept — the sweep's rules), `df` re-probed after each; still
+   *  DISK_EVICT_MIN_IDLE_MS), whatever they hold — item 17: dirt never keeps a
+   *  tree; each is measured as its thread user for the eviction's record —
+   *  `df` re-probed after each; still
    *  short → `503 {reason:"disk-pressure"}` with the whole math in `error`, the
    *  same shape as `mirror-busy`, so the bot falls back cold legibly. Never a
    *  lifecycle flip: the checkout is intact and every existing tree keeps
@@ -4021,12 +4034,10 @@ export class ResidentDO extends Sandbox<Env> {
         if (verdict.fits) break;
         const binding = live.find((b) => b.threadKey === c.threadKey);
         if (!binding) continue;
-        const clean = await this.worktreeCleanliness(binding);
-        if (!clean.clean) {
-          kept.push({ threadKey: c.threadKey, why: "dirty" });
-          continue;
-        }
-        // Same re-read guards as the sweep: the clean check awaited.
+        // What the tree holds goes on the eviction's record (item 17), never
+        // into a keep; the runtime is up — this attach is running on it.
+        const tree = await this.measureTreeBeforeEviction(binding);
+        // Same re-read guards as the sweep: the measurement awaited.
         const current = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(c.threadKey));
         if (
           !current ||
@@ -4037,7 +4048,7 @@ export class ResidentDO extends Sandbox<Env> {
           kept.push({ threadKey: c.threadKey, why: "busy" });
           continue;
         }
-        if (!(await this.evictBinding(current, true, "disk-pressure", DISK_PRESSURE_REASON))) {
+        if (!(await this.evictBinding(current, true, "disk-pressure", DISK_PRESSURE_REASON, tree))) {
           kept.push({ threadKey: c.threadKey, why: "other" });
           continue;
         }
@@ -6022,13 +6033,21 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** Remove a thread's worktree (when the runtime is up — a slept container
    *  already lost it) and release its pool user; the binding is KEPT, marked
-   *  evicted, so the ref stays sticky and the next attach recreates the tree
-   *  with it. Shared by the inactivity sweep and /detach. */
+   *  evicted with the cause (`evictedWhy`) and with what the tree held
+   *  (`evictedLeftBehind`, or `evictedUnmeasured` when git could not read it
+   *  — item 17: never a reason to keep the tree, never discarded silently), so
+   *  the ref stays sticky and the next attach recreates the tree with it.
+   *  Shared by the inactivity sweep, the reclamation pass, the disk-pressure
+   *  path and /detach. */
   private async evictBinding(
     binding: ThreadBinding,
     runtimeActive: boolean,
     logCtx: string,
     why: string,
+    /** What the caller measured in the tree first (`measureTreeBeforeEviction`,
+     *  as the thread user with the runtime up); absent when the tree was clean,
+     *  already gone with the disk, or not measured (a force detach). */
+    tree?: EvictedTree,
   ): Promise<boolean> {
     const threadDir = parentDir(binding.worktreePath);
     if (runtimeActive && threadDir.startsWith(`${THREADS_DIR}/`)) {
@@ -6064,7 +6083,10 @@ export class ResidentDO extends Sandbox<Env> {
       evicted: true,
       evictedAt: new Date(systemClock()).toISOString(),
       evictedWhy: why,
+      evictedLeftBehind: tree && "leftBehind" in tree ? tree.leftBehind : undefined,
+      evictedUnmeasured: tree && "unmeasured" in tree ? tree.unmeasured : undefined,
     } satisfies ThreadBinding);
+    if (tree) console.log(`${logCtx}: ${binding.threadKey} evicted (${why}) — ${evictedTreeSentence(tree)}`);
     return true;
   }
 
@@ -6105,17 +6127,13 @@ export class ResidentDO extends Sandbox<Env> {
       if (left > 0) return { released: false, reason: busyAfterKillReason(left), user: binding.user };
     }
     const active = await this.isRuntimeActive().catch(() => false);
-    // What the tree still holds, for the answer — never a reason to keep it.
-    // Not measured on a force release: a read-only tree holds nothing, and a
-    // hard stop's tree is whatever the killed command left. A probe that
-    // fails names nothing (never a guess) and is a log line.
-    let leftBehind: LeftBehind | undefined;
-    if (!force && active) {
-      const measured = await this.worktreeCleanliness(binding);
-      leftBehind = leftBehindOf(measured);
-      if (!measured.clean && leftBehind === undefined)
-        console.log(`detach: ${threadKey}: the tree could not be measured before its release (${measured.reason})`);
-    }
+    // What the tree still holds, for the answer and the eviction's record —
+    // never a reason to keep it. Not measured on a force release: a read-only
+    // tree holds nothing, and a hard stop's tree is whatever the killed
+    // command left. A probe that fails names nothing in the answer (never a
+    // guess); the record and the log say it could not be measured.
+    let tree: EvictedTree | undefined;
+    if (!force && active) tree = await this.measureTreeBeforeEviction(binding);
     // Re-check right before removal: the measurement above awaited (the DO
     // yields at each await), so an exec that arrived mid-detach would otherwise
     // have its tree removed under it.
@@ -6136,16 +6154,12 @@ export class ResidentDO extends Sandbox<Env> {
     // Same as the sweep: `active` was read before the measurement's awaits; a
     // container that woke meanwhile must get the rm, not an orphaned tree.
     const activeNow = await this.isRuntimeActive().catch(() => false);
-    if (!(await this.evictBinding(current, activeNow, `detach`, "detach"))) {
+    if (!(await this.evictBinding(current, activeNow, `detach`, "detach", tree))) {
       return { released: false, reason: "re-attached during eviction — kept", user };
-    }
-    if (leftBehind) {
-      console.log(
-        `detach: ${threadKey} released — left behind ${leftBehind.uncommittedChanges} uncommitted change(s) and ${leftBehind.unpushedCommits} unpushed commit(s), discarded with the tree`,
-      );
     }
     // Item 55: the tree is gone; the gauge catches up at the next refresh
     // instance's `measure` step, and the admission's `df` sees the space now.
+    const leftBehind = tree && "leftBehind" in tree ? tree.leftBehind : undefined;
     return { released: true, user, ...(leftBehind !== undefined ? { leftBehind } : {}) };
   }
 
@@ -6183,20 +6197,22 @@ export class ResidentDO extends Sandbox<Env> {
     }
   }
 
-  /** Is this thread's tree safe to destroy? The git probes run AS THE THREAD
-   *  USER (su), never as root: the worktree is thread-owned, so root git in
-   *  it would be refused by safe.directory and would be the exact repo-local-
-   *  config execution vector safe.directory exists to block. Unknown (git
-   *  failed) counts as NOT clean — never destroy work on a guess. A tree
-   *  that no longer exists (disk recycled by a sleep/wake) has nothing to
-   *  preserve: releasable, so a post-wake binding does not hold a pool user
-   *  for 7 days on behalf of files that are already gone.
+  /** What this thread's tree holds: the tracked changes and unpushed commits,
+   *  or that git could not read it. The git probes run AS THE THREAD USER
+   *  (su), never as root: the worktree is thread-owned, so root git in it
+   *  would be refused by safe.directory and would be the exact repo-local-
+   *  config execution vector safe.directory exists to block. Read by
+   *  `measureTreeBeforeEviction` for the eviction's record — never a reason
+   *  to keep a tree (item 17) — and by the disk-full recycle's guard (item
+   *  54), where unknown (git failed) counts as NOT clean. A tree that no
+   *  longer exists (disk recycled by a sleep/wake) is clean with nothing
+   *  measured: there was nothing to discard.
    *
    *  ONE spawn: the presence test and both git probes fold
    *  into the pure `worktreeCleanlinessScript` (test -d as root, both git
    *  commands inside a single privilege-dropped `su`, tagged lines out);
    *  `parseWorktreeCleanliness` encodes the exact decision table above. */
-  private async worktreeCleanliness(binding: ThreadBinding): Promise<{ clean: boolean; reason?: string }> {
+  private async worktreeCleanliness(binding: ThreadBinding): Promise<WorktreeCleanliness> {
     const injected = { GIT_TERMINAL_PROMPT: "0" }; // same injection as threadRun — fail fast, never prompt
     validateEnvNames(injected);
     const r = await this.run(["sh", "-c", worktreeCleanlinessScript(binding.worktreePath, binding.user)], {
@@ -6204,6 +6220,14 @@ export class ResidentDO extends Sandbox<Env> {
       env: injected,
     });
     return parseWorktreeCleanliness(r);
+  }
+
+  /** What a tree holds right before its eviction, for the record and the log
+   *  (item 17): the one-spawn probe as the thread user, read once into
+   *  `evictedTreeOf` — never into a keep decision. Callers skip it when the
+   *  runtime is down: the disk, and the tree with it, is already gone. */
+  private async measureTreeBeforeEviction(binding: ThreadBinding): Promise<EvictedTree | undefined> {
+    return evictedTreeOf(await this.worktreeCleanliness(binding));
   }
 
   /** Anything that must not be interrupted by a container stop or counted
@@ -6278,8 +6302,17 @@ export class ResidentDO extends Sandbox<Env> {
       // attach), and an eviction decided on a stale "inactive" would skip the
       // rm and orphan a real tree.
       const activeNow = await this.isRuntimeActive().catch(() => false);
+      // What the tree holds goes on the eviction's record (item 17), measured
+      // while the runtime is up; a slept container has no tree to measure.
+      const tree = activeNow ? await this.measureTreeBeforeEviction(current) : undefined;
       if (
-        await this.evictBinding(current, activeNow, `worktree-sweep ${resource}`, last >= cutoff ? "clean-idle" : "ttl")
+        await this.evictBinding(
+          current,
+          activeNow,
+          `worktree-sweep ${resource}`,
+          last >= cutoff ? "clean-idle" : "ttl",
+          tree,
+        )
       )
         evicted.push(binding.threadKey);
       else kept++;
@@ -6537,9 +6570,11 @@ export class ResidentDO extends Sandbox<Env> {
    *  mirror (the refresh cycle's `fetch --prune` just ran) or its PR was
    *  merged/closed. Runs inside the refresh cycle — a poll on the existing
    *  cadence, since the GitHub App has webhooks off — and via /debug
-   *  reclaim-now. Never touches the default branch, a busy thread, or a dirty
-   *  tree (reclaimDecision); every keep is named. The eviction itself is the
-   *  sweep's `evictBinding` with the same re-read guards. */
+   *  reclaim-now. Never touches the default branch or a busy thread
+   *  (reclaimDecision); every keep is named. What the tree holds is never a
+   *  reason to keep it (item 17) — it is measured once as the thread user and
+   *  recorded by the eviction, the sweep's `evictBinding` with the same
+   *  re-read guards. */
   async reclaimFinishedRefs(
     resource: string,
     defaultRef: string,
@@ -6599,21 +6634,16 @@ export class ResidentDO extends Sandbox<Env> {
       // by name), so its fate is never looked up.
       const { fate, detail } = (!isDefaultRef && fates.get(binding.ref)) || { fate: "unknown" as RefFate, detail: "" };
       const busy = this.threadOpsInFlight.get(binding.threadKey) ?? 0;
-      // The clean check runs as the thread user and only when it can decide
-      // anything: a finished ref, nothing running, runtime up (down → the tree
-      // is already gone with the disk → null).
-      const finished = fate === "gone" || fate === "merged" || fate === "closed";
-      const clean = !active
-        ? null
-        : finished && !isDefaultRef && busy === 0
-          ? (await this.worktreeCleanliness(binding)).clean
-          : null;
-      const decision = reclaimDecision({ fate, isDefaultRef, busy, clean });
+      const decision = reclaimDecision({ fate, isDefaultRef, busy });
       if (!decision.reclaim) {
         kept.push({ threadKey: binding.threadKey, ref: binding.ref, why: decision.why });
         continue;
       }
-      // Same guards as the sweep: the clean check awaited, so re-read the
+      // What the tree holds goes on the eviction's record (item 17), never
+      // into the decision: measured as the thread user while the runtime is
+      // up; down → the tree is already gone with the disk.
+      const tree = active ? await this.measureTreeBeforeEviction(binding) : undefined;
+      // Same guards as the sweep: the measurement awaited, so re-read the
       // binding (a re-attach means a fresh tree) and the op counter.
       const busyNow = this.threadOpsInFlight.get(binding.threadKey) ?? 0;
       const current = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(binding.threadKey));
@@ -6627,7 +6657,7 @@ export class ResidentDO extends Sandbox<Env> {
       }
       const activeNow = await this.isRuntimeActive().catch(() => false);
       const why = `${decision.why}${detail}`;
-      if (await this.evictBinding(current, activeNow, `reclaim ${resource}`, why)) {
+      if (await this.evictBinding(current, activeNow, `reclaim ${resource}`, why, tree)) {
         reclaimed.push({ threadKey: binding.threadKey, ref: binding.ref, why });
         console.log(`reclaim ${resource}: evicted ${binding.threadKey} on ${binding.ref} — ${why}`);
       } else kept.push({ threadKey: binding.threadKey, ref: binding.ref, why: "re-attached" });
@@ -6738,18 +6768,35 @@ export class ResidentDO extends Sandbox<Env> {
     // left out; nothing here is secret (credential files are never persisted).
     const threads = [...bindings.values()]
       .sort((a, b) => b.lastAttachAt.localeCompare(a.lastAttachAt))
-      .map(({ threadKey, ref, sha, user, deps, boundAt, lastAttachAt, evicted, evictedAt, evictedWhy }) => ({
-        threadKey,
-        ref,
-        sha: sha ?? null,
-        user,
-        deps: deps ?? null,
-        boundAt,
-        lastAttachAt,
-        evicted: evicted ?? false,
-        evictedAt: evictedAt ?? null,
-        evictedWhy: evictedWhy ?? null,
-      }));
+      .map(
+        ({
+          threadKey,
+          ref,
+          sha,
+          user,
+          deps,
+          boundAt,
+          lastAttachAt,
+          evicted,
+          evictedAt,
+          evictedWhy,
+          evictedLeftBehind,
+          evictedUnmeasured,
+        }) => ({
+          threadKey,
+          ref,
+          sha: sha ?? null,
+          user,
+          deps: deps ?? null,
+          boundAt,
+          lastAttachAt,
+          evicted: evicted ?? false,
+          evictedAt: evictedAt ?? null,
+          evictedWhy: evictedWhy ?? null,
+          evictedLeftBehind: evictedLeftBehind ?? null,
+          evictedUnmeasured: evictedUnmeasured ?? null,
+        }),
+      );
     return {
       resource: map.get(RESOURCE_KEY) ?? null,
       state: map.get(STATE_KEY) ?? "down",
