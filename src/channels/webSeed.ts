@@ -1,5 +1,6 @@
 import type { RunStatus } from "../core/runRecord.js";
 import type { RunView } from "../core/runsService.js";
+import type { UnitFacts, UnitRun, UnitRunsView } from "../core/unitRuns.js";
 import type { CostReport } from "../core/costs.js";
 import type { UserCostReport } from "../core/costsByUser.js";
 import type { DeliveryReport } from "../core/delivery.js";
@@ -83,6 +84,10 @@ export interface RunLiveSeed {
   finishedAt?: number;
   sealedAt?: number;
   replyOk?: boolean;
+  /** The runs this run spawned that the registry holds (agent-conductor item
+   *  11) — the live path reads no store — oldest started first, each live child
+   *  with its own token. Present only when there are any. */
+  children?: UnitRunRowSeed[];
 }
 
 /** The history run page: the stored events (with AE11 omission markers already
@@ -109,10 +114,36 @@ export interface RunHistorySeed {
   untimed?: true;
   /** Tokenless: a finished run's files are served under the same Access decision as the page. */
   artifacts?: ArtifactsSeed;
+  /** The runs this run spawned (agent-conductor item 11: `runs children`),
+   *  oldest started first, under the viewer's predicate — a live child with
+   *  its token, as an index row carries it. Present only when there are any. */
+  children?: UnitRunRowSeed[];
+  /** The units of the plan runner instance whose story this record is
+   *  (agent-ship item 17; the record's `run_meta.instanceId`), in the plan's
+   *  order. Present only on the pipeline's own record, and only when the
+   *  viewer may see the instance. */
+  units?: UnitFacts[];
 }
 
 export interface RunNotFoundSeed {
   page: "runNotFound";
+  retentionDays: number | null;
+}
+
+/** One run in a unit's or a conductor's listing: the view `runs unit` and
+ *  `runs children` answer plus, for a LIVE row only, its capability token —
+ *  the same rule as an index row (`RunIndexRowSeed`). A conductor's child
+ *  carries no round or thread. */
+export type UnitRunRowSeed = RunView & Partial<Pick<UnitRun, "round" | "thread">> & { token?: string };
+
+/** The unit page (agent-ship item 17, "the unit is the reading unit"): what
+ *  `runs unit <key>` answers, its live rows carrying their tokens, and the
+ *  clock the relative times paint from. A unit the viewer may not see, or one
+ *  that does not exist, is served the run 404 (`RunNotFoundSeed`) instead. */
+export interface UnitSeed {
+  page: "unit";
+  view: Omit<UnitRunsView, "runs"> & { runs: UnitRunRowSeed[] };
+  now: number;
   retentionDays: number | null;
 }
 
@@ -156,6 +187,7 @@ export type PageSeed =
   | RunLiveSeed
   | RunHistorySeed
   | RunNotFoundSeed
+  | UnitSeed
   | ResidentsIndexSeed
   | ResidentDetailSeed
   | CostsSeed

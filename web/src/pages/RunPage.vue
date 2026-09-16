@@ -10,6 +10,8 @@ import SpanRow from "../components/run/SpanRow.vue";
 import TimelineSection from "../components/run/TimelineSection.vue";
 import ReplyBlock from "../components/run/ReplyBlock.vue";
 import MessageFiles from "../components/run/MessageFiles.vue";
+import RunUnitsBlock from "../components/run/RunUnitsBlock.vue";
+import RunChildrenBlock from "../components/run/RunChildrenBlock.vue";
 import { buildTimeline, type TimelinePhase } from "../lib/timelineVm";
 import { runOwnerOf } from "@core/core/runOwner.js";
 import { useSeed } from "../lib/seed";
@@ -60,6 +62,10 @@ const title = isHistory ? "Run" : "Live run";
 const replyFirst = isHistory;
 /** Where the run's files are served from (item 26); null → no store, rows are text. */
 const artifactLinks = seed?.artifacts ?? null;
+/** What this run is the parent of (item 28): the runs it spawned, and — on the
+ *  pipeline's own record — the units of the instance it stands for. */
+const children = seed?.children ?? [];
+const units = (seed?.mode === "history" ? seed.units : undefined) ?? [];
 
 const openParam = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("open") : null;
 const model = createRunPageModel({
@@ -648,6 +654,12 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
         :when-title="fmtTimeTitle(state.reply.at)"
         :files="state.reply.files"
       />
+
+      <!-- What this run is the parent of (item 28): a ship record's units, each
+           opening its unit page; a conductor's spawned runs, each opening to
+           its own timeline here — in the plan's order and in start order. -->
+      <RunUnitsBlock v-if="units.length > 0" :units="units" />
+      <RunChildrenBlock v-if="children.length > 0" :children="children" :now="nowWall" />
 
       <!-- Referenced threads (record 0037): the conversations the request
            pointed at and the run quoted, as the model saw them — the same fold

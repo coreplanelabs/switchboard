@@ -3,7 +3,10 @@ import { createServer } from "node:http";
 import { join } from "node:path";
 import { loadWebAssets } from "../src/channels/webAssets.js";
 import { makeShellRenderer, WEB_HTML_HEADERS } from "../src/channels/webShell.js";
-import type { PageSeed, RunIndexRowSeed } from "../src/channels/webSeed.js";
+import type { PageSeed, RunIndexRowSeed, UnitRunRowSeed, UnitSeed } from "../src/channels/webSeed.js";
+import { nodeSseSink, serveHistoryEvents } from "../src/channels/liveView/sse.js";
+import { wrapUntrusted } from "../src/core/untrusted.js";
+import type { UnitFacts } from "../src/core/unitRuns.js";
 import { ALL_CAPABILITIES, NO_CAPABILITIES } from "../src/core/capabilities.js";
 import type { CostReport, DailyCost } from "../src/core/costs.js";
 import { buildUserCostReport } from "../src/core/costsByUser.js";
@@ -26,6 +29,11 @@ import { READING_DIFF_GIT, READING_DIFF_MEAT, READING_DIFF_SUMMARY } from "./web
 //   /runs/review-1   a finished PR review carrying both reading diffs (the panel)
 //   /runs/hist-4     a finished PR review with a request_changes verdict as the Reply
 //   /runs/scheduled  the Scheduled tab                     /residents   /costs   /costs?view=users   /delivery
+//   /runs/unit/plan-acme-3:U13   a ship unit through two review rounds, both threads (`?open=<run id>` opens a
+//                               row's timeline; `?session=coding&q=lockfile` runs the search on first paint)
+//   /runs/unit/plan-acme-3:U14   a unit whose review thread does not exist yet — the coding thread alone
+//   /runs/cond-1                a finished conductor listing the runs it spawned
+//   /runs/ship-1                the pipeline's own record listing its instance's units
 //
 // SWITCHBOARD_PREVIEW_CAPABILITIES=minimal serves the same fixtures with every
 // optional capability off (the nav shrinks to Runs, no Scheduled tab, no docs).
@@ -1242,11 +1250,393 @@ const SCHEDULED = {
   ],
 };
 
+// ---- the unit page and what a run is the parent of (live-view item 28) ----------
+// One ship unit of a seeded plan through two review rounds: coding 0 opened the
+// pull request, review 1 asked for changes, coding 1 (the findings step) fixed
+// them, review 2 approved. Each run's replay is the finished coding run's or
+// the review's stream above, served from `/runs/<id>/events` the way the bot
+// serves a stored record, so a row's timeline folds the real shape.
+const UNIT_T0 = NOW - 3 * 3_600_000;
+const UNIT_REPLAYS = new Map<string, RunEvent[]>();
+/** A fixture stream moved onto another run's clock: every stamp shifted by `deltaMs`, nothing else touched. */
+const shiftStream = (events: readonly RunEvent[], deltaMs: number): RunEvent[] =>
+  events.map((e) => {
+    const shifted: Record<string, unknown> = { ...e };
+    if (typeof shifted.at === "number") shifted.at += deltaMs;
+    if (typeof shifted.startedAt === "number") shifted.startedAt += deltaMs;
+    return shifted as RunEvent;
+  });
+/** A finished run of a unit (or a conductor's child) whose replay is the coding
+ *  stream's or the review's, shifted so its stamps fall inside the row's own
+ *  window exactly as a real record's do — the row's stamps are the stream's. */
+const unitRun = (
+  id: string,
+  round: number,
+  thread: "coding" | "review",
+  receivedAt: number,
+  over: Partial<UnitRunRowSeed> = {},
+): UnitRunRowSeed => {
+  const review = thread === "review";
+  const deltaMs = receivedAt - (review ? REVIEW_RECEIVED_AT : RECEIVED_AT);
+  UNIT_REPLAYS.set(id, shiftStream(review ? REVIEW_STREAM : HIST_STREAM, deltaMs));
+  const finishedAt = (review ? REVIEW_FINISHED_AT : HIST_FINISHED_AT) + deltaMs;
+  return {
+    id,
+    label: review
+      ? `review · acme/api · "review https://github.com/acme/api/pull/61"`
+      : `coding · acme/api · "U13 — the unit page composes both threads at the round boundaries"`,
+    agent: thread,
+    channelId: "slack:C1",
+    userId: "slack:UALICE",
+    userName: "alice",
+    threadKey: review ? "slack:C1:1700000300.000100" : "slack:C1:1700000200.000100",
+    channelVisibility: "public",
+    repo: "acme/api",
+    finished: true,
+    // The coding stream's run started five seconds after its request was received; the review's at once.
+    startedAt: receivedAt + (review ? 0 : 5_000),
+    receivedAt,
+    finishedAt,
+    sealedAt: finishedAt + 1_800,
+    replyOk: true,
+    status: "completed",
+    eventCount: review ? REVIEW_STREAM.length : HIST_STREAM.length + 3,
+    stepCount: review ? 14 : 23,
+    persisted: true,
+    schema: 2,
+    round,
+    thread,
+    session: {
+      key: `${review ? "slack:C1:1700000300.000100" : "slack:C1:1700000200.000100"}:${thread}`,
+      seedFrom: round * 40,
+      request: round * 40 + 2,
+      range: { from: round * 40 + 2, to: round * 40 + 39 },
+    },
+    ...over,
+  };
+};
+/** The coding stream runs 27.6 minutes received to finish, the review's 6.9 — the rounds are laid out around them. */
+const CODING_MS = HIST_FINISHED_AT - RECEIVED_AT;
+const REVIEW_MS = REVIEW_FINISHED_AT - REVIEW_RECEIVED_AT;
+const R1_AT = UNIT_T0 + CODING_MS + 90_000;
+const C1_AT = R1_AT + REVIEW_MS + 120_000;
+const R2_AT = C1_AT + CODING_MS + 90_000;
+const UNIT_RUNS: UnitRunRowSeed[] = [
+  unitRun("unit-c0", 0, "coding", UNIT_T0),
+  unitRun("unit-r1", 1, "review", R1_AT),
+  unitRun("unit-c1", 1, "coding", C1_AT),
+  unitRun("unit-r2", 2, "review", R2_AT),
+];
+const UNIT_ENDED_AT = R2_AT + REVIEW_MS + 3_000;
+const UNIT_ROUNDS: UnitSeed["view"]["rounds"] = [
+  { index: 0, agent: "coding", outcome: "started", at: UNIT_T0 - 2_000 },
+  { index: 0, agent: "coding", outcome: "pr_opened", at: UNIT_T0 + CODING_MS + 3_000 },
+  { index: 1, agent: "review", outcome: "started", at: R1_AT - 2_000 },
+  { index: 1, agent: "review", outcome: "request_changes", at: R1_AT + REVIEW_MS + 3_000 },
+  { index: 1, agent: "coding", outcome: "started", at: C1_AT - 2_000 },
+  { index: 1, agent: "coding", outcome: "completed", at: C1_AT + CODING_MS + 3_000 },
+  { index: 2, agent: "review", outcome: "started", at: R2_AT - 2_000 },
+  { index: 2, agent: "review", outcome: "approve", at: UNIT_ENDED_AT },
+];
+const UNIT_INSTANCE: UnitSeed["view"]["instance"] = {
+  id: "plan-acme-3",
+  repo: "acme/api",
+  base: "main",
+  plan: { id: "acme-3", path: "docs/plans/acme-3-the-runs-dashboard.md" },
+  label: "*ship* · acme/api · the runs dashboard plan",
+  runId: "ship-1",
+  createdAt: UNIT_T0 - 60_000,
+};
+const UNIT_U3: UnitSeed["view"] = {
+  unit: "plan-acme-3:U13",
+  instanceId: "plan-acme-3",
+  id: "U13",
+  title: "The unit page composes the coding thread's runs and the review thread's at the round boundaries",
+  branch: "plan/acme-3/the-unit-page",
+  threads: { coding: "slack:C1:1700000200.000100", review: "slack:C1:1700000300.000100" },
+  sourceUrls: {
+    coding: "https://example.slack.com/archives/C1/p1700000200000100",
+    review: "https://example.slack.com/archives/C1/p1700000300000100",
+  },
+  pr: { number: 61, url: "https://github.com/acme/api/pull/61" },
+  issue: 58,
+  rounds: UNIT_ROUNDS,
+  ending: {
+    kind: "merge_ready",
+    report: "✅ Merge-ready after 2 review rounds: https://github.com/acme/api/pull/61",
+    at: UNIT_ENDED_AT,
+  },
+  startedAt: UNIT_T0 - 2_000,
+  instance: UNIT_INSTANCE,
+  runs: UNIT_RUNS,
+};
+// A unit the runner has just reached: round 0 in flight, no review thread yet.
+const UNIT_U4: UnitSeed["view"] = {
+  unit: "plan-acme-3:U14",
+  instanceId: "plan-acme-3",
+  id: "U14",
+  title: "The parent record's page links its units and a conductor's page lists its children",
+  branch: "plan/acme-3/the-parent-lists-its-units",
+  threads: { coding: "slack:C1:1700000400.000100" },
+  sourceUrls: { coding: "https://example.slack.com/archives/C1/p1700000400000100" },
+  rounds: [{ index: 0, agent: "coding", outcome: "started", at: NOW - 9 * 60_000 }],
+  startedAt: NOW - 9 * 60_000,
+  instance: UNIT_INSTANCE,
+  runs: [
+    unitRun("unit-u4-c0", 0, "coding", NOW - 9 * 60_000 + 2_000, {
+      label: `coding · acme/api · "U14 — the parent record's page links its units"`,
+      threadKey: "slack:C1:1700000400.000100",
+      finished: false,
+      finishedAt: undefined,
+      sealedAt: undefined,
+      replyOk: undefined,
+      status: undefined,
+      persisted: undefined,
+      eventCount: 31,
+      stepCount: undefined,
+      activity: "$ npm test -w web",
+      token: "tok-unit-u4",
+      session: undefined,
+    }),
+  ],
+};
+/** What the search box gets back for `lockfile` over the fixture unit's coding session, wrapped as the route wraps it. */
+const UNIT_SEARCH_HITS = {
+  session: "slack:C1:1700000200.000100:coding",
+  hits: [
+    {
+      turn: 57,
+      role: "assistant",
+      snippet: wrapUntrusted("The lockfile drifted after `npm ci` — the nested @types/node record was never pinned."),
+      runId: "unit-c1",
+    },
+    {
+      turn: 12,
+      role: "user",
+      snippet: wrapUntrusted("check:lockfile fails on an edge npm cannot honour — start there"),
+      runId: "unit-c0",
+    },
+    {
+      turn: 74,
+      role: "assistant",
+      snippet: wrapUntrusted("Summary of the earlier turns: the lockfile check is green, the review asked for a test."),
+      runId: "unit-c1",
+      gap: 62,
+    },
+  ],
+  gaps: [62],
+};
+// A finished conductor's children: three read-only children, one still going.
+const CONDUCTOR_T0 = NOW - 40 * 60_000;
+const CONDUCTOR_KIDS: UnitRunRowSeed[] = [
+  unitRun("kid-1", 0, "coding", CONDUCTOR_T0 + 5_000, {
+    label: `research · acme/api · "what does the retry queue do on a 5xx today?"`,
+    agent: "research",
+    threadKey: "slack:C1:1700000500.000100",
+    parentRunId: "cond-1",
+    round: undefined,
+    thread: undefined,
+    session: undefined,
+  }),
+  unitRun("kid-2", 0, "review", CONDUCTOR_T0 + 6_000, {
+    label: `review · acme/api · "review https://github.com/acme/api/pull/57"`,
+    threadKey: "slack:C1:1700000500.000200",
+    parentRunId: "cond-1",
+    round: undefined,
+    thread: undefined,
+    session: undefined,
+  }),
+  unitRun("kid-3", 0, "coding", CONDUCTOR_T0 + 7_000, {
+    label: `general · #dev · alice · "summarize the two answers for the channel"`,
+    agent: "general",
+    threadKey: "slack:C1:1700000500.000300",
+    parentRunId: "cond-1",
+    finished: false,
+    finishedAt: undefined,
+    sealedAt: undefined,
+    replyOk: undefined,
+    status: undefined,
+    persisted: undefined,
+    eventCount: 6,
+    stepCount: undefined,
+    activity: "reading the two write-ups",
+    token: "tok-kid-3",
+    round: undefined,
+    thread: undefined,
+    session: undefined,
+  }),
+];
+const CONDUCTOR_STREAM = normalizeSpans([
+  {
+    type: "span_start",
+    spanId: "root",
+    name: "request",
+    attrs: { channel: "slack", queuedBeforeMs: 0 },
+    at: CONDUCTOR_T0,
+  },
+  spanEnd("recv", "slack.receive", CONDUCTOR_T0, CONDUCTOR_T0 + 800, "root"),
+  {
+    type: "input",
+    messageId: "1700000500.000050",
+    text: "research what the retry queue does on a 5xx today, and review https://github.com/acme/api/pull/57 — then give the channel one summary",
+    at: CONDUCTOR_T0,
+    seq: 1,
+    source: { channel: "dev", user: "alice", url: "https://example.slack.com/archives/C1/p1700000500000050" },
+  },
+  {
+    type: "run_meta",
+    agent: "conductor",
+    model: "anthropic/claude-fable-5",
+    repo: "acme/api",
+    at: CONDUCTOR_T0 + 900,
+    seq: 2,
+  },
+  { type: "span_start", spanId: "agent", parentSpanId: "root", name: "run.agent", at: CONDUCTOR_T0 + 1_000 },
+  spanEnd("t1", "model.turn", CONDUCTOR_T0 + 1_000, CONDUCTOR_T0 + 4_000, "agent", { stopReason: "tool_use" }),
+  {
+    type: "tool_call",
+    callId: "s1",
+    tool: "spawn_run",
+    summary: "spawn_run research: what does the retry queue do on a 5xx today?",
+    at: CONDUCTOR_T0 + 4_000,
+    seq: 3,
+  },
+  {
+    type: "tool_result",
+    callId: "s1",
+    tool: "spawn_run",
+    ok: true,
+    summary: "run kid-1 started",
+    at: CONDUCTOR_T0 + 5_000,
+    seq: 4,
+  },
+  {
+    type: "tool_call",
+    callId: "s2",
+    tool: "spawn_run",
+    summary: "spawn_run review: https://github.com/acme/api/pull/57",
+    at: CONDUCTOR_T0 + 5_500,
+    seq: 5,
+  },
+  {
+    type: "tool_result",
+    callId: "s2",
+    tool: "spawn_run",
+    ok: true,
+    summary: "run kid-2 started",
+    at: CONDUCTOR_T0 + 6_000,
+    seq: 6,
+  },
+  {
+    type: "tool_call",
+    callId: "w1",
+    tool: "await_runs",
+    summary: "await_runs kid-1, kid-2",
+    at: CONDUCTOR_T0 + 6_500,
+    seq: 7,
+  },
+  {
+    type: "tool_result",
+    callId: "w1",
+    tool: "await_runs",
+    ok: true,
+    summary: "2 finished",
+    at: CONDUCTOR_T0 + 9 * 60_000 + 6_000,
+    seq: 8,
+  },
+  spanEnd("t2", "model.turn", CONDUCTOR_T0 + 9 * 60_000 + 6_000, CONDUCTOR_T0 + 9 * 60_000 + 30_000, "agent", {
+    stopReason: "end_turn",
+  }),
+  {
+    type: "answer",
+    text: "**On a 5xx** the queue retries five times with exponential backoff, capped at a minute since pull request 61.\n\n**PR 57** is merge-ready after one round; the one finding (the 4xx check after the counter) is fixed.",
+    at: CONDUCTOR_T0 + 9 * 60_000 + 30_000,
+    seq: 9,
+  },
+  spanEnd("agent", "run.agent", CONDUCTOR_T0 + 1_000, CONDUCTOR_T0 + 9 * 60_000 + 30_000, "root"),
+] as RunEvent[]);
+const CONDUCTOR_FINISHED_AT = CONDUCTOR_T0 + 9 * 60_000 + 31_000;
+// The pipeline's own record: the plan's rounds and its summary, naming its instance.
+const SHIP_STREAM: RunEvent[] = [
+  { type: "run_meta", agent: "ship", repo: "acme/api", instanceId: "plan-acme-3", at: UNIT_INSTANCE.createdAt, seq: 1 },
+  ...UNIT_ROUNDS.map((r, i): RunEvent => ({
+    type: "ship_round",
+    index: r.index,
+    agent: r.agent,
+    outcome: r.outcome as never,
+    at: r.at,
+    seq: i + 2,
+  })),
+  {
+    type: "answer",
+    text: "✅ U13 — merge_ready — https://github.com/acme/api/pull/61\n• U14 — unfinished\n• U15 — not started",
+    at: NOW - 60_000,
+    seq: UNIT_ROUNDS.length + 2,
+  },
+];
+/** A unit page's view as the parent record lists it: the row's facts without its runs and instance. */
+const factsOf = ({ runs: _runs, instance: _instance, ...facts }: UnitSeed["view"]): UnitFacts => facts;
+const SHIP_UNITS: UnitFacts[] = [
+  factsOf(UNIT_U3),
+  factsOf(UNIT_U4),
+  {
+    unit: "plan-acme-3:U15",
+    instanceId: "plan-acme-3",
+    id: "U15",
+    title: "The /runs index draws the tree",
+    branch: "plan/acme-3/the-index-draws-the-tree",
+    threads: {},
+    sourceUrls: {},
+    rounds: [],
+  },
+];
+
 function page(
   pathname: string,
   all: boolean,
   search: string,
 ): { title: string; seed: PageSeed; status?: number } | null {
+  if (pathname === "/runs/unit/plan-acme-3:U13" || pathname === "/runs/unit/plan-acme-3%3AU13")
+    return { title: "Unit U13", seed: { page: "unit", view: UNIT_U3, now: NOW, retentionDays: 30 } };
+  if (pathname === "/runs/unit/plan-acme-3:U14" || pathname === "/runs/unit/plan-acme-3%3AU14")
+    return { title: "Unit U14", seed: { page: "unit", view: UNIT_U4, now: NOW, retentionDays: 30 } };
+  if (pathname.startsWith("/runs/unit/"))
+    return { title: "Run not found", seed: { page: "runNotFound", retentionDays: 30 }, status: 404 };
+  if (pathname === "/runs/cond-1")
+    return {
+      title: "Run",
+      seed: {
+        page: "run",
+        mode: "history",
+        id: "cond-1",
+        events: CONDUCTOR_STREAM as never,
+        status: "completed",
+        eventCount: CONDUCTOR_STREAM.length,
+        receivedAt: CONDUCTOR_T0,
+        startedAt: CONDUCTOR_T0 + 800,
+        finishedAt: CONDUCTOR_FINISHED_AT,
+        sealedAt: CONDUCTOR_FINISHED_AT + 1_200,
+        replyOk: true,
+        durationMs: CONDUCTOR_FINISHED_AT - CONDUCTOR_T0,
+        children: CONDUCTOR_KIDS,
+      },
+    };
+  if (pathname === "/runs/ship-1")
+    return {
+      title: "Run",
+      seed: {
+        page: "run",
+        mode: "history",
+        id: "ship-1",
+        events: SHIP_STREAM as never,
+        status: "completed",
+        eventCount: SHIP_STREAM.length,
+        startedAt: UNIT_INSTANCE.createdAt,
+        finishedAt: NOW - 60_000,
+        durationMs: NOW - 60_000 - UNIT_INSTANCE.createdAt,
+        units: SHIP_UNITS,
+      },
+    };
   if (pathname === "/runs")
     return {
       title: all ? "All runs" : "(2) Live runs",
@@ -1370,6 +1760,22 @@ createServer((req, res) => {
     return;
   }
   if (url.pathname === "/runs/live-1/events") return serveLiveStream(res);
+  // A listed run's stored replay (live-view item 28), as the bot's tokenless
+  // events route writes a finished record: what a row's timeline folds.
+  const replay = /^\/runs\/([^/]+)\/events$/.exec(url.pathname);
+  if (replay && UNIT_REPLAYS.has(decodeURIComponent(replay[1]))) {
+    const events = UNIT_REPLAYS.get(decodeURIComponent(replay[1]))!;
+    serveHistoryEvents(events, events.length, nodeSseSink(req, res));
+    return;
+  }
+  // The unit page's search over one session's log: the route's answer for the fixture's words.
+  if (url.pathname === "/api/runs.search") {
+    const session = url.searchParams.get("session");
+    const hits = session === UNIT_SEARCH_HITS.session && /lockfile/i.test(url.searchParams.get("query") ?? "");
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+    res.end(JSON.stringify(hits ? UNIT_SEARCH_HITS : { session, hits: [], gaps: [] }));
+    return;
+  }
   // The finished run's files (docs/reference/specs/live-view.md item 26), as the bot's
   // proxy route serves them: the fixture's PNG is a real dashboard picture
   // (the spend page's own screenshot), inline with the hardening headers; the

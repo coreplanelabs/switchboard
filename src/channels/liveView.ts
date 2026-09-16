@@ -26,7 +26,7 @@ import { STORE_UNAVAILABLE_BANNER } from "../core/commandRegistry.js";
 import { buildScheduledRows, type FiringsState } from "./scheduledPanel.js";
 import type { ShellRenderer } from "./webShell.js";
 import { WEB_HTML_HEADERS } from "./webShell.js";
-import type { RunIndexRowSeed, RunsIndexSeed, ScheduledSeed } from "./webSeed.js";
+import type { RunIndexRowSeed, RunsIndexSeed, ScheduledSeed, UnitRunRowSeed, UnitSeed } from "./webSeed.js";
 export { FAVICON_ICO_SVG, FAVICON_IDLE, FAVICON_LIVE, faviconSvg } from "./favicon.js";
 import {
   nodeSseSink,
@@ -91,11 +91,14 @@ export type RunRoute =
   | { kind: "scheduled" }
   | { id: string; kind: "page" | "events" | "friction" | "stop" }
   /** `/runs/:id/artifacts/<key>` (item 26): `key` is everything after `/artifacts/`, decoded. */
-  | { id: string; kind: "artifact"; key: string };
+  | { id: string; kind: "artifact"; key: string }
+  /** `/runs/unit/<key>` (item 28): a ship unit's page, `key` the unit key `<instance>:<unit>`, decoded. */
+  | { kind: "unit"; key: string };
 
-/** Path words that are never a run id (ids are UUIDs): the Scheduled tab and
- *  the artifacts prefix. `/runs/artifacts` and `/runs/artifacts/x` route nowhere. */
-const RESERVED_IDS = new Set(["scheduled", "artifacts"]);
+/** Path words that are never a run id (ids are UUIDs): the Scheduled tab, the
+ *  artifacts prefix and the unit pages' prefix. `/runs/artifacts`,
+ *  `/runs/artifacts/x` and a bare `/runs/unit` route nowhere. */
+const RESERVED_IDS = new Set(["scheduled", "artifacts", "unit"]);
 
 /** Match the bare index (`/runs`, `/runs/`), the Scheduled tab
  *  (`/runs/scheduled`, item 18 — a reserved path word, never a run id: ids are
@@ -109,6 +112,11 @@ const RESERVED_IDS = new Set(["scheduled", "artifacts"]);
 export function parseRunRoute(pathname: string): RunRoute | null {
   if (pathname === "/runs" || pathname === "/runs/") return { kind: "index" };
   if (pathname === "/runs/scheduled" || pathname === "/runs/scheduled/") return { kind: "scheduled" };
+  const u = /^\/runs\/unit\/([^/]+)\/?$/.exec(pathname);
+  if (u) {
+    const key = decodeSegment(u[1]);
+    return key === null || key === "" ? null : { kind: "unit", key };
+  }
   const a = /^\/runs\/([^/]+)\/artifacts\/(.+)$/.exec(pathname);
   if (a) {
     const id = decodeSegment(a[1]);
@@ -476,6 +484,28 @@ export function createLiveViewHandler(
     olderHref?: string;
     olderThan?: number;
   }
+  /** A row with its capability token re-attached for its href — only an
+   *  UNFINISHED row gets one: the seed is data the page ships verbatim, and a
+   *  finished row must never carry a token (the registry may still hold one for
+   *  a recently finished run). */
+  const withLiveToken = <T extends RunView>(v: T, tokens: ReadonlyMap<string, string>): T & { token?: string } => {
+    const token = v.finished ? undefined : tokens.get(v.id);
+    return token === undefined ? v : { ...v, token };
+  };
+  /** The live registry's tokens by run id — what every listing re-attaches from. */
+  const liveTokens = (): Map<string, string> => new Map(index.listActive().map((s) => [s.id, s.token]));
+  /** The run 404 as a page (item 19): one non-revealing message for an unknown
+   *  id, an expired one, a wrong token, a deny — and a unit the viewer may not
+   *  see (item 28) — with the way back. */
+  const notFoundPage = (res: ServerResponse): void => {
+    res.writeHead(404, WEB_HTML_HEADERS);
+    res.end(
+      deps.shell("Run not found", {
+        page: "runNotFound",
+        retentionDays: deps.retention ? deps.retention.retentionDays : null,
+      }),
+    );
+  };
   /** `?all=1`: one full page of the service's live ∪ finished ∪ persisted rows
    *  the viewer may see (the service's cap, never its 50-row default), with the
    *  live rows' capability tokens re-attached for their hrefs (finished rows
@@ -485,7 +515,7 @@ export function createLiveViewHandler(
     visibleTo: Predicate,
     cursor?: { before: number; beforeId: string },
   ): Promise<IndexPage> => {
-    const tokens = new Map(live.map((s) => [s.id, s.token]));
+    const tokens = new Map(live.map((s) => [s.id, s.token] as const));
     // The viewer's predicate is the store's own filter: the service hands
     // it down and nothing is loaded to be dropped afterwards.
     const { runs, nextBefore, storeUnavailable } = await service.listRuns({
@@ -499,10 +529,7 @@ export function createLiveViewHandler(
     // Only an UNFINISHED row gets its capability token: the seed is data
     // the page ships verbatim, and a finished row must never carry one — the
     // registry may still hold a token for a recently finished run.
-    const rows = runs.map((v) => {
-      const token = v.finished ? undefined : tokens.get(v.id);
-      return token === undefined ? v : { ...v, token };
-    });
+    const rows = runs.map((v) => withLiveToken(v, tokens));
     // The service degraded to live rows: the page says so (a banner), never a silently short list.
     return {
       rows,
@@ -615,6 +642,34 @@ export function createLiveViewHandler(
       return true;
     }
 
+    // The unit page (item 28; agent-ship item 17): the unit's runs in round
+    // order from the one read `runs unit` makes, under the viewer's predicate,
+    // a live row keeping its capability token as an index row does. A unit
+    // that does not exist and one the viewer may see nothing of are the run
+    // 404 — the page reveals no more than the route. Same Access gate as the
+    // index, no token, GET-only, no feed; no store read is audited here, as
+    // the index audits none: the seed is run metadata, never content.
+    if (route.kind === "unit") {
+      const visibleTo = readableRuns(ctx.actor);
+      run(res, async () => {
+        const found = await service.listUnitRuns(route.key, visibleTo);
+        if (!found.ok) {
+          notFoundPage(res);
+          return;
+        }
+        const tokens = liveTokens();
+        const seed: UnitSeed = {
+          page: "unit",
+          view: { ...found.value, runs: found.value.runs.map((r) => withLiveToken(r, tokens)) },
+          now: now(),
+          retentionDays: deps.retention ? deps.retention.retentionDays : null,
+        };
+        res.writeHead(200, WEB_HTML_HEADERS);
+        res.end(deps.shell(`Unit ${found.value.id}`, seed));
+      });
+      return true;
+    }
+
     const token = url.searchParams.get("t") ?? "";
     const access = token ? service.authorizeLive(route.id, token) : null;
 
@@ -623,12 +678,25 @@ export function createLiveViewHandler(
     if (access) {
       if (route.kind === "page") {
         const snap = access.snapshot();
+        // A live conductor's children (item 28) from the registry alone — the
+        // live path never reads the store — in start order, live rows with
+        // their tokens: the token that opened the parent's page opens no child,
+        // so each child's row carries its own.
+        const children: UnitRunRowSeed[] = index
+          .listActive()
+          .filter((s) => s.parentRunId === route.id)
+          .sort((a, b) => a.startedAt - b.startedAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+          .map((s): UnitRunRowSeed => {
+            const { token: own, ...row } = s;
+            return s.finished ? row : { ...row, token: own };
+          });
         res.writeHead(200, WEB_HTML_HEADERS);
         res.end(
           deps.shell("Live run", {
             page: "run",
             mode: "live",
             id: route.id,
+            ...(children.length > 0 ? { children } : {}),
             // Stop control: same token, POST-only; `&mode=` is appended client-side.
             eventsUrl: `/runs/${encodeURIComponent(route.id)}/events?t=${encodeURIComponent(token)}`,
             stopUrl: `/runs/${encodeURIComponent(route.id)}/stop?t=${encodeURIComponent(token)}`,
@@ -780,13 +848,7 @@ export function createLiveViewHandler(
         } else if (route.kind === "page") {
           // A person landed here: the same 404 (existence never revealed), as a
           // page with the way back (item 19). Machine routes keep the text body.
-          res.writeHead(404, WEB_HTML_HEADERS);
-          res.end(
-            deps.shell("Run not found", {
-              page: "runNotFound",
-              retentionDays: deps.retention ? deps.retention.retentionDays : null,
-            }),
-          );
+          notFoundPage(res);
         } else text(res, 404, NOT_FOUND);
         return;
       }
@@ -807,12 +869,26 @@ export function createLiveViewHandler(
         // such a record reads as untimed here.
         const timed = (view.schema ?? 0) >= SPAN_SCHEMA;
         const events = view.events ?? [];
+        // What this run is the parent of (item 28): the runs it spawned, and —
+        // on the pipeline's own record, whose `run_meta` names its instance —
+        // the instance's units. Both under the viewer's predicate; a live
+        // child keeps its token as an index row does.
+        const visibleTo = readableRuns(actor);
+        const meta = events.find((e) => e.type === "run_meta");
+        const instanceId = meta?.type === "run_meta" ? meta.instanceId : undefined;
+        const [children, units] = await Promise.all([
+          service.listChildren(route.id, visibleTo),
+          instanceId !== undefined ? service.listInstanceUnits(instanceId, visibleTo) : Promise.resolve([]),
+        ]);
+        const tokens = liveTokens();
         res.writeHead(200, WEB_HTML_HEADERS);
         res.end(
           deps.shell("Run", {
             page: "run",
             mode: "history",
             id: route.id,
+            ...(children.length > 0 ? { children: children.map((c) => withLiveToken(c, tokens)) } : {}),
+            ...(units.length > 0 ? { units } : {}),
             // The stored stream with the truncation made visible (AE11): the
             // seed IS the stream on a history page — normalized first on a
             // span-schema record, so a pair whose twin the budget dropped gets

@@ -1399,6 +1399,61 @@ describe("RunsService.listUnitRuns — a unit's runs in round order", () => {
     expectNoToken(res.value);
   });
 
+  it("the view carries the row's readable facts and its instance's — the plan's title, branch, pull request, where the threads open, how it ended; the instance's repository, plan, attempt and parent record — and never the requester's ids", async () => {
+    const withFacts: CoordinatorUnit = {
+      ...u1,
+      title: "The unit page",
+      sourceUrl: "https://example.slack.com/archives/C1/p10",
+      reviewThread: { threadKey: "slack:C1:u1r", sourceUrl: "https://example.slack.com/archives/C1/p11" },
+      pr: { number: 42, url: "https://github.com/acme/api/pull/42" },
+      issue: 7,
+      ending: { kind: "merge_ready", report: "✅ Merge-ready after 2 review rounds", at: T0 + 40_000 },
+      startedAt: T0,
+    };
+    const { svc, instances } = await world([withFacts, u2]);
+    await instances.replace({
+      ...instance,
+      plan: { id: "p", path: "docs/plans/p.md" },
+      attempt: 2,
+      label: "*ship* · acme/api · the plan",
+      runId: "parent-run",
+      base: "main",
+    });
+    await instances.putUnits([withFacts, u2]);
+    const res = await svc.listUnitRuns("plan-p-1:U16", ALL);
+    if (!res.ok) throw new Error("expected the listing");
+    const { runs, ...facts } = res.value;
+    expect(runs).toHaveLength(5);
+    expect(facts).toEqual({
+      unit: "plan-p-1:U16",
+      instanceId: "plan-p-1",
+      id: "U16",
+      title: "The unit page",
+      branch: "plan/p/u1",
+      threads: { coding: "slack:C1:u1", review: "slack:C1:u1r" },
+      sourceUrls: {
+        coding: "https://example.slack.com/archives/C1/p10",
+        review: "https://example.slack.com/archives/C1/p11",
+      },
+      pr: { number: 42, url: "https://github.com/acme/api/pull/42" },
+      issue: 7,
+      rounds,
+      ending: { kind: "merge_ready", report: "✅ Merge-ready after 2 review rounds", at: T0 + 40_000 },
+      startedAt: T0,
+      instance: {
+        id: "plan-p-1",
+        repo: "acme/api",
+        base: "main",
+        plan: { id: "p", path: "docs/plans/p.md" },
+        attempt: 2,
+        label: "*ship* · acme/api · the plan",
+        runId: "parent-run",
+        createdAt: T0 - 1_000,
+      },
+    });
+    expect(JSON.stringify(facts)).not.toContain("UALICE");
+  });
+
   it("a unit whose review thread does not exist yet lists the coding thread alone, and names no review thread", async () => {
     const { svc } = await world([{ ...u1, reviewThread: undefined, rounds: rounds.slice(0, 2) }]);
     const res = await svc.listUnitRuns("plan-p-1:U16", ALL);
@@ -1415,7 +1470,17 @@ describe("RunsService.listUnitRuns — a unit's runs in round order", () => {
     const { svc, store } = await world();
     expect(await svc.listUnitRuns("plan-p-1:U17", ALL)).toEqual({
       ok: true,
-      value: { unit: "plan-p-1:U17", instanceId: "plan-p-1", threads: {}, rounds: [], runs: [] },
+      value: {
+        unit: "plan-p-1:U17",
+        instanceId: "plan-p-1",
+        id: "U17",
+        branch: "plan/p/u2",
+        threads: {},
+        sourceUrls: {},
+        rounds: [],
+        instance: { id: "plan-p-1", repo: "acme/api", createdAt: T0 - 1_000 },
+        runs: [],
+      },
     });
     expect(await svc.listUnitRuns("plan-p-1:U77", ALL)).toEqual({ ok: false, error: "not_found" });
     expect(await svc.listUnitRuns("plan-p-9:U16", ALL)).toEqual({ ok: false, error: "not_found" });
@@ -1444,6 +1509,32 @@ describe("RunsService.listUnitRuns — a unit's runs in round order", () => {
     expect((await svc.listUnitRuns("plan-p-1:U17", CHANNEL_C1)).ok).toBe(true);
     expect(await svc.listUnitRuns("plan-p-1:U17", CHANNEL_C2)).toEqual({ ok: false, error: "not_found" });
     expect(await svc.listUnitRuns("plan-p-1:U17", PUBLIC)).toEqual({ ok: false, error: "not_found" });
+  });
+
+  // agent-ship item 17: the parent record's page lists the instance's units.
+  it("listInstanceUnits answers the instance's unit rows as their facts in the plan's order for a reader its requester's channel admits, and nothing for another channel's reader, an unknown instance, a `none` predicate or a process without the coordinator's records", async () => {
+    const { svc, store } = await world();
+    const facts = await svc.listInstanceUnits("plan-p-1", ALL);
+    expect(facts.map((f) => [f.unit, f.id, f.branch, f.threads])).toEqual([
+      ["plan-p-1:U16", "U16", "plan/p/u1", { coding: "slack:C1:u1", review: "slack:C1:u1r" }],
+      ["plan-p-1:U17", "U17", "plan/p/u2", {}],
+    ]);
+    expect(facts[0]).toEqual({
+      unit: "plan-p-1:U16",
+      instanceId: "plan-p-1",
+      id: "U16",
+      branch: "plan/p/u1",
+      threads: { coding: "slack:C1:u1", review: "slack:C1:u1r" },
+      sourceUrls: {},
+      rounds,
+    });
+    expect((await svc.listInstanceUnits("plan-p-1", CHANNEL_C1)).map((f) => f.id)).toEqual(["U16", "U17"]);
+    expect(await svc.listInstanceUnits("plan-p-1", CHANNEL_C2)).toEqual([]);
+    expect(await svc.listInstanceUnits("plan-p-1", PUBLIC)).toEqual([]);
+    expect(await svc.listInstanceUnits("plan-p-1", { kind: "none" })).toEqual([]);
+    expect(await svc.listInstanceUnits("plan-p-9", ALL)).toEqual([]);
+    const { reg } = testRegistry();
+    expect(await createRunsService({ registry: reg, store }).listInstanceUnits("plan-p-1", ALL)).toEqual([]);
   });
 });
 

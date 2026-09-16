@@ -9,6 +9,8 @@ import type { RouteRecordRaw } from "vue-router";
 export const routes: RouteRecordRaw[] = [
   { path: "/runs", component: () => import("./pages/RunsIndexPage.vue") },
   { path: "/runs/scheduled", component: () => import("./pages/ScheduledPage.vue") },
+  // A ship unit's page (or the run 404 — the seed decides, see UnitRoutePage).
+  { path: "/runs/unit/:key", component: () => import("./pages/UnitRoutePage.vue") },
   // The seed decides between the run page and the non-revealing 404 (the
   // server serves both from this path — see RunRoutePage).
   { path: "/runs/:id", component: () => import("./pages/RunRoutePage.vue") },

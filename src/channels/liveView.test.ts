@@ -23,8 +23,11 @@ import {
   type RunNotFoundSeed,
   type RunsIndexSeed,
   type ScheduledSeed,
+  type UnitSeed,
   type WebSeed,
 } from "./webSeed.js";
+import { InMemoryCoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
+import type { CoordinatorInstance, CoordinatorUnit } from "../core/coordinator/contract.js";
 import { accessActor } from "./commandHttp.js";
 import { ALL_GRANTS, grantsFor, type GrantsSource } from "../core/authz/grants.js";
 import { NO_GRANTS, predicateFor } from "../core/authz/index.js";
@@ -244,6 +247,16 @@ describe("parseRunRoute", () => {
     expect(parseRunRoute("/runs/r1/artifacts/")).toBeNull();
     expect(parseRunRoute("/runs/r1/artifacts/a//b")).toBeNull();
     expect(parseRunRoute("/runs/r1/artifacts/%zz")).toBeNull();
+  });
+  // live-view.md item 28 — the unit page: `/runs/unit/<key>`, the key decoded;
+  // `unit` is a reserved word like `scheduled`, never a run id.
+  it("matches the unit route with its decoded key; a bare `/runs/unit` and a malformed key are not routes", () => {
+    expect(parseRunRoute("/runs/unit/plan-p-1:U16")).toEqual({ kind: "unit", key: "plan-p-1:U16" });
+    expect(parseRunRoute("/runs/unit/plan-p-1%3AU16/")).toEqual({ kind: "unit", key: "plan-p-1:U16" });
+    expect(parseRunRoute("/runs/unit")).toBeNull();
+    expect(parseRunRoute("/runs/unit/")).toBeNull();
+    expect(parseRunRoute("/runs/unit/%zz")).toBeNull();
+    expect(parseRunRoute("/runs/unit/a/b")).toBeNull();
   });
 });
 
@@ -2406,5 +2419,230 @@ describe("artifact route (item 26)", () => {
       expect(s.ended).toBe(false);
       expect(src.cancelled).toBe(true);
     });
+  });
+});
+
+// Feature: docs/reference/specs/live-view.md item 28 — the unit is the reading
+// unit: `GET /runs/unit/<key>` seeds the unit page from the one read `runs
+// unit` makes; a run page seeds the runs its run spawned and, on the
+// pipeline's own record, the instance's units. Rendering is tested in web/.
+describe("the unit page and what a run is the parent of (item 28)", () => {
+  const NOW = 1_700_000_000_000;
+  const T0 = NOW - 100_000;
+  const instance: CoordinatorInstance = {
+    id: "plan-p-1",
+    kind: "ship",
+    userId: "slack:UALICE",
+    channelId: "slack:C1",
+    threadKey: "slack:C1:parent",
+    repo: "acme/api",
+    branch: "plan/p/u1",
+    createdAt: T0 - 1_000,
+    plan: { id: "p", path: "docs/plans/p.md" },
+    runId: "ship-parent",
+  };
+  const rounds: CoordinatorUnit["rounds"] = [
+    { index: 0, agent: "coding", outcome: "started", at: T0 },
+    { index: 1, agent: "review", outcome: "started", at: T0 + 11_000 },
+  ];
+  const u1: CoordinatorUnit = {
+    instanceId: "plan-p-1",
+    unit: "U16",
+    slug: "u1",
+    title: "The unit page",
+    branch: "plan/p/u1",
+    dependsOn: [],
+    threadKey: "slack:C1:u1",
+    reviewThread: { threadKey: "slack:C1:u1r" },
+    pr: { number: 42, url: "https://github.com/acme/api/pull/42" },
+    rounds,
+  };
+  const u2: CoordinatorUnit = {
+    instanceId: "plan-p-1",
+    unit: "U17",
+    slug: "u2",
+    branch: "plan/p/u2",
+    dependsOn: ["U16"],
+    rounds: [],
+  };
+
+  function record(id: string, over: Partial<RunRecord>): RunRecord {
+    const events: RunEvent[] = over.events ?? [{ type: "input", text: "go", seq: 1 } as RunEvent];
+    return {
+      id,
+      label: `coding · acme/${id}`,
+      agent: "coding",
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:u1",
+      channelVisibility: "private",
+      startedAt: T0 + 1_000,
+      finishedAt: T0 + 6_000,
+      status: "completed",
+      eventCount: events.length,
+      storedEventCount: events.length,
+      truncated: false,
+      events,
+      diagnosis: analyzeRunFriction(events),
+      ...over,
+    };
+  }
+
+  async function harness(opts: { units?: boolean } = {}) {
+    let n = 0;
+    const registry = new RunRegistry({ genId: () => `run-${++n}`, genToken: () => `tok-${n}`, now: () => NOW });
+    const store = new InMemoryRunStore({ now: () => NOW });
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await instances.put(instance);
+    await instances.putUnits([u1, u2]);
+    await store.put(record("c0", { threadKey: "slack:C1:u1", agent: "coding", startedAt: T0 + 1_000 }));
+    await store.put(record("r1", { threadKey: "slack:C1:u1r", agent: "review", startedAt: T0 + 12_000 }));
+    const service = createRunsService({ registry, store, ...(opts.units === false ? {} : { units: instances }) });
+    const handler = adminByDefault(
+      createLiveViewHandler({ shell, service, index: registry, now: () => NOW, retention: { retentionDays: 30 } }),
+    );
+    const get = async (url: string, ctx?: LiveViewContext) => {
+      const t = fakeReqRes("GET", url);
+      handler(t.req, t.res, ctx);
+      await t.finished;
+      return t;
+    };
+    return { registry, store, instances, handler, get };
+  }
+  const unitSeedOf = (html: string) => seedOf(html) as UnitSeed;
+
+  it("seeds the unit page from the unit's read — its facts, its instance, both threads' runs in round order — with a live row's token re-attached and no token on a finished row; the title names the unit", async () => {
+    const h = await harness();
+    const live = h.registry.create("coding · live", {
+      agent: "coding",
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:u1",
+      channelVisibility: "private",
+    });
+    const t = await h.get("/runs/unit/plan-p-1:U16");
+    expect(t.status).toBe(200);
+    expect(t.headers["cache-control"]).toBe("no-store");
+    expect(t.body()).toContain("<title>Unit U16</title>");
+    const seed = unitSeedOf(t.body());
+    expect(seed).toMatchObject({ page: "unit", now: NOW, retentionDays: 30 });
+    expect(seed.view).toMatchObject({
+      unit: "plan-p-1:U16",
+      id: "U16",
+      title: "The unit page",
+      threads: { coding: "slack:C1:u1", review: "slack:C1:u1r" },
+      pr: { number: 42, url: "https://github.com/acme/api/pull/42" },
+      instance: { id: "plan-p-1", repo: "acme/api", plan: { id: "p", path: "docs/plans/p.md" }, runId: "ship-parent" },
+    });
+    expect(seed.view.runs.map((r) => [r.id, r.round, r.thread, r.finished, r.token])).toEqual([
+      ["c0", 0, "coding", true, undefined],
+      ["r1", 1, "review", true, undefined],
+      [live.id, 0, "coding", false, live.token],
+    ]);
+  });
+
+  it("an unknown unit, a malformed key, a process without the coordinator's records and a viewer outside the predicate are the run 404 page — byte-identical, revealing nothing; the route is GET-only", async () => {
+    const h = await harness();
+    const unknown = await h.get("/runs/unit/plan-p-1:U99");
+    expect(unknown.status).toBe(404);
+    expect((seedOf(unknown.body()) as RunNotFoundSeed).page).toBe("runNotFound");
+    const malformed = await h.get("/runs/unit/nonsense");
+    expect(malformed.status).toBe(404);
+    expect(malformed.body()).toBe(unknown.body());
+    const noRecords = await (await harness({ units: false })).get("/runs/unit/plan-p-1:U16");
+    expect(noRecords.status).toBe(404);
+    // A viewer whose grants name another channel: nothing of the unit is theirs.
+    const elsewhere: LiveViewContext = {
+      actor: accessActor({ sub: "eve" }, (id) =>
+        grantsFor(id, {
+          grants: new Map([
+            ["access:eve", { actions: new Set(["runs:read"]), channels: new Set(["slack:C9"]), repos: new Set() }],
+          ]),
+          commandGroups: ["runs"],
+        }),
+      ),
+    };
+    const denied = await h.get("/runs/unit/plan-p-1:U16", elsewhere);
+    expect(denied.status).toBe(404);
+    expect(denied.body()).toBe(unknown.body());
+    // Nothing at all for an actor with no grants: the same page.
+    const nobody: LiveViewContext = { actor: accessActor({ sub: "nobody" }, () => NO_GRANTS) };
+    expect((await h.get("/runs/unit/plan-p-1:U16", nobody)).status).toBe(404);
+    const post = fakeReqRes("POST", "/runs/unit/plan-p-1:U16");
+    expect(h.handler(post.req, post.res)).toBe(true);
+    expect(post.status).toBe(405);
+    expect(post.headers.allow).toBe("GET");
+  });
+
+  it("a history page seeds the runs its run spawned in start order — a live child with its token — and the pipeline's own record seeds its instance's units; a run with neither seeds neither key", async () => {
+    const h = await harness();
+    await h.store.put(
+      record("kid-late", { parentRunId: "conductor", threadKey: "slack:C1:k1", startedAt: T0 + 9_000 }),
+    );
+    await h.store.put(
+      record("kid-early", { parentRunId: "conductor", threadKey: "slack:C1:k2", startedAt: T0 + 2_000 }),
+    );
+    await h.store.put(record("conductor", { agent: "conductor", threadKey: "slack:C1:cond" }));
+    const liveKid = h.registry.create("research · kid", {
+      agent: "research",
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:k3",
+      channelVisibility: "private",
+      parentRunId: "conductor",
+    });
+    const page = await h.get("/runs/conductor");
+    expect(page.status).toBe(200);
+    const seed = runSeedOf(page.body()) as RunHistorySeed;
+    expect(seed.children?.map((c) => [c.id, c.token])).toEqual([
+      ["kid-early", undefined],
+      ["kid-late", undefined],
+      [liveKid.id, liveKid.token],
+    ]);
+    expect(seed.units).toBeUndefined();
+
+    await h.store.put(
+      record("ship-parent", {
+        agent: "ship",
+        threadKey: "slack:C1:parent",
+        events: [
+          { type: "run_meta", agent: "ship", repo: "acme/api", instanceId: "plan-p-1", seq: 1 },
+          { type: "answer", text: "✅ U16 — merge_ready", seq: 2 },
+        ] as RunEvent[],
+      }),
+    );
+    const parent = runSeedOf((await h.get("/runs/ship-parent")).body()) as RunHistorySeed;
+    expect(parent.units?.map((u) => [u.unit, u.id, u.title, u.pr?.number])).toEqual([
+      ["plan-p-1:U16", "U16", "The unit page", 42],
+      ["plan-p-1:U17", "U17", undefined, undefined],
+    ]);
+    expect(parent.children).toBeUndefined();
+
+    const plain = runSeedOf((await h.get("/runs/c0")).body()) as RunHistorySeed;
+    expect(plain.children).toBeUndefined();
+    expect(plain.units).toBeUndefined();
+  });
+
+  it("a live page seeds the children the registry holds for it, each live child with its own token — the parent's token opens no child", async () => {
+    const h = await harness();
+    const parent = h.registry.create("conductor · fan-out", {
+      agent: "conductor",
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:cond",
+    });
+    const kid = h.registry.create("research · kid", {
+      agent: "research",
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:k1",
+      parentRunId: parent.id,
+    });
+    const t = await h.get(`/runs/${parent.id}?t=${parent.token}`);
+    expect(t.status).toBe(200);
+    const seed = runSeedOf(t.body()) as RunLiveSeed;
+    expect(seed.children?.map((c) => [c.id, c.parentRunId, c.token])).toEqual([[kid.id, parent.id, kid.token]]);
+    const kidPage = runSeedOf((await h.get(`/runs/${kid.id}?t=${kid.token}`)).body()) as RunLiveSeed;
+    expect(kidPage.children).toBeUndefined();
   });
 });

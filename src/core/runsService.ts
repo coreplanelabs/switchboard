@@ -23,7 +23,8 @@ import { snippetOf } from "./runLedger/sessionLog.js";
 import { activityOfEvents } from "./runRegistry/activity.js";
 import { parseUnitKey } from "./coordinator/contract.js";
 import type { CoordinatorInstanceStore } from "./coordinator/instanceStore.js";
-import { unitRunsOf, type UnitRunsView } from "./unitRuns.js";
+import type { CoordinatorInstance } from "./coordinator/contract.js";
+import { instanceFactsOf, unitFactsOf, unitRunsOf, type UnitFacts, type UnitRunsView } from "./unitRuns.js";
 
 /** How long one ledger listing serves the service's reads (item 41): a page
  *  view is a run read, an events read and a friction read within a second, and
@@ -170,6 +171,19 @@ export function runResource(view: RunView): Resource {
   };
 }
 
+/** Whether a run of the instance's requester in its channel would be admitted
+ *  under `visibleTo` — the rule a unit not started yet and an instance's unit
+ *  list are read by. The visibility stamp is `unknown` on purpose: a reader
+ *  admitted by channel visibility alone waits for the first run to carry it. */
+function instanceAdmits(instance: CoordinatorInstance, visibleTo: Predicate): boolean {
+  return matchesPredicate(visibleTo, {
+    channelId: instance.channelId,
+    userId: instance.userId,
+    repo: instance.repo,
+    channelVisibility: "unknown",
+  });
+}
+
 export type RunListStatus = "active" | "finished" | "all";
 
 export interface ListRunsOptions {
@@ -281,6 +295,13 @@ export interface RunsService {
    *  key that names no unit — and for a unit the reader may see nothing of,
    *  byte-identical, as a point read on a run is. */
   listUnitRuns(unitKey: string, visibleTo: Predicate): Promise<Result<UnitRunsView>>;
+  /** An instance's unit rows as their readable facts, in the plan's order —
+   *  what the parent record's page lists. Empty for an unknown instance, a
+   *  process without the coordinator's records, and a reader a run of the
+   *  instance's requester in its channel would not be admitted to (the same
+   *  rule `listUnitRuns` applies to a unit not started): existence is never
+   *  revealed across a channel. */
+  listInstanceUnits(instanceId: string, visibleTo: Predicate): Promise<UnitFacts[]>;
   /** The runs that name `parentRunId` as their parent — a conductor's
    *  children, live and finished — in start order, under `visibleTo`. Who may
    *  see the parent is the caller's point read to make first. */
@@ -783,8 +804,9 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     async listUnitRuns(unitKey, visibleTo) {
       const key = parseUnitKey(unitKey);
       if (!key || !units || visibleTo.kind === "none") return notFound;
-      const unit = (await units.listUnits(key.instanceId)).find((u) => u.unit === key.unit);
-      if (!unit) return notFound;
+      const [rows, instance] = await Promise.all([units.listUnits(key.instanceId), units.get(key.instanceId)]);
+      const unit = rows.find((u) => u.unit === key.unit);
+      if (!unit || !instance) return notFound;
       const [coding, review] = await Promise.all([
         threadRuns(unit.threadKey, visibleTo),
         threadRuns(unit.reviewThread?.threadKey, visibleTo),
@@ -794,30 +816,15 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       // requester in its channel would be — a unit not started yet, read by
       // its own channel; never a unit of another channel, whose thread keys
       // and round outcomes would otherwise say a ship happened there.
-      if (runs.length === 0) {
-        const instance = await units.get(key.instanceId);
-        if (!instance) return notFound;
-        const identity = {
-          channelId: instance.channelId,
-          userId: instance.userId,
-          ...(instance.repo !== undefined ? { repo: instance.repo } : {}),
-          channelVisibility: "unknown" as const,
-        };
-        if (!matchesPredicate(visibleTo, identity)) return notFound;
-      }
-      return {
-        ok: true,
-        value: {
-          unit: unitKey,
-          instanceId: unit.instanceId,
-          threads: {
-            ...(unit.threadKey !== undefined ? { coding: unit.threadKey } : {}),
-            ...(unit.reviewThread !== undefined ? { review: unit.reviewThread.threadKey } : {}),
-          },
-          rounds: unit.rounds,
-          runs,
-        },
-      };
+      if (runs.length === 0 && !instanceAdmits(instance, visibleTo)) return notFound;
+      return { ok: true, value: { ...unitFactsOf(unit), instance: instanceFactsOf(instance), runs } };
+    },
+
+    async listInstanceUnits(instanceId, visibleTo) {
+      if (!units || visibleTo.kind === "none") return [];
+      const instance = await units.get(instanceId);
+      if (!instance || !instanceAdmits(instance, visibleTo)) return [];
+      return (await units.listUnits(instanceId)).map(unitFactsOf);
     },
 
     async listChildren(parentRunId, visibleTo) {

@@ -1336,7 +1336,9 @@ export function parentRunRecord(
   finishedAt: number,
 ): RunRecord {
   const events: RunEvent[] = [
-    { type: "run_meta", agent: "ship", repo: instance.repo, at: instance.createdAt },
+    // The instance the record is the story of (agent-ship item 17): the run
+    // page reads it to list the instance's units.
+    { type: "run_meta", agent: "ship", repo: instance.repo, instanceId: instance.id, at: instance.createdAt },
     ...units.flatMap((u) =>
       u.rounds.map((r): RunEvent => ({
         type: "ship_round",

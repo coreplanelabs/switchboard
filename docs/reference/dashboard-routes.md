@@ -11,6 +11,7 @@ The header lists only the surfaces this installation has: **Residents** appears 
 | `GET /runs/<id>` | One run: request → steps (tool calls, results) → answer | Live via SSE while the run is active; served as a static page, no token needed, once it's in history |
 | `GET /runs/<id>/events` | Raw SSE event stream for that run | What the run page itself consumes; resumable via `Last-Event-ID` |
 | `GET /runs/<id>/friction` | Why a finished run was slow, if it was | Read-only diagnosis, no side effects |
+| `GET /runs/unit/<instance>:<unit>` | One ship unit's story: its coding thread's runs and its review thread's in round order, each opening to its timeline, with a search over one thread's conversation | What `runs unit` answers, as a page; a unit you may not see is the same 404 an unknown run gives. The pipeline's own run page lists its units, and a conductor's run page lists the runs it spawned |
 | `POST /runs/<id>/stop?mode=soft\|hard` | — | Stops a live run; `soft` lets it wrap up and answer, `hard` aborts in-flight |
 | `GET /residents` | Every onboarded repo, its lifecycle state, and its disk gauge (used/total) | The dashboard twin of `repo list` |
 | `GET /residents/<owner>/<name>` | One repo's resident: mirror status, warm checkout, active thread worktrees, and its disk — used/total, free, the reserve it keeps back, headroom in "more trees", and every component (mirror, deps, checkout, each thread tree, leftover caches) | The same numbers the resident's attach admission decides on — see [onboard a repo → Disk](../how-to/onboard-a-repo.md#disk) |
