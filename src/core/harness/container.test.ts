@@ -27,6 +27,7 @@ import {
   writeFileScripts,
   writeLineScript,
   type HarnessRequest,
+  DETACHED_STDIO,
 } from "./container.js";
 import { PI_STDOUT_FILTER, piRunPaths } from "./pi/process.js";
 
@@ -80,10 +81,12 @@ describe("the container scripts", () => {
   });
 
   // The golden is the script the seam wrote before the program, the filter
-  // and the layout became inputs: pi's start is byte for byte what it was.
-  it("pi's start is byte-identical to the script the seam wrote before the program, the filter and the layout were inputs", () => {
+  // and the layout became inputs, plus the one change since: the detached
+  // wrapper's stdio goes to /dev/null, so the exec that forked it owns none of
+  // its descriptors (execution.md item 24).
+  it("pi's start is the script the seam wrote before the program, the filter and the layout were inputs, with the wrapper's stdio redirected away from the exec's pipes", () => {
     expect(startScript(piStart(["--mode", "rpc", "-e", paths.extension], { X: "1" }))).toBe(
-      "(umask 077 && mkdir -p '/tmp/switchboard-pi-run-7' '/tmp/switchboard-pi-run-7/agent/sessions' '/tmp/switchboard-pi-run-7/cmd') && rm -f '/tmp/switchboard-pi-run-7/rpc.in' && mkfifo -m 600 '/tmp/switchboard-pi-run-7/rpc.in' && : > '/tmp/switchboard-pi-run-7/rpc.log' && : > '/tmp/switchboard-pi-run-7/rpc.err' && setsid -f sh -c 'exec 3<>'\\''/tmp/switchboard-pi-run-7/rpc.in'\\''; echo $$ > '\\''/tmp/switchboard-pi-run-7/pi.pid'\\''; pi '\\''--mode'\\'' '\\''rpc'\\'' '\\''-e'\\'' '\\''/tmp/switchboard-pi-run-7/extension.js'\\'' <&3 2>>'\\''/tmp/switchboard-pi-run-7/rpc.err'\\'' | grep --line-buffered -v '\\''\"type\":\"message_update\"'\\'' >> '\\''/tmp/switchboard-pi-run-7/rpc.log'\\''' && sleep 0.3 && cat '/tmp/switchboard-pi-run-7/pi.pid'",
+      "(umask 077 && mkdir -p '/tmp/switchboard-pi-run-7' '/tmp/switchboard-pi-run-7/agent/sessions' '/tmp/switchboard-pi-run-7/cmd') && rm -f '/tmp/switchboard-pi-run-7/rpc.in' && mkfifo -m 600 '/tmp/switchboard-pi-run-7/rpc.in' && : > '/tmp/switchboard-pi-run-7/rpc.log' && : > '/tmp/switchboard-pi-run-7/rpc.err' && setsid -f sh -c 'exec 3<>'\\''/tmp/switchboard-pi-run-7/rpc.in'\\''; echo $$ > '\\''/tmp/switchboard-pi-run-7/pi.pid'\\''; pi '\\''--mode'\\'' '\\''rpc'\\'' '\\''-e'\\'' '\\''/tmp/switchboard-pi-run-7/extension.js'\\'' <&3 2>>'\\''/tmp/switchboard-pi-run-7/rpc.err'\\'' | grep --line-buffered -v '\\''\"type\":\"message_update\"'\\'' >> '\\''/tmp/switchboard-pi-run-7/rpc.log'\\''' </dev/null >/dev/null 2>&1 && sleep 0.3 && cat '/tmp/switchboard-pi-run-7/pi.pid'",
     );
   });
 
@@ -95,6 +98,10 @@ describe("the container scripts", () => {
     ).toBe(true);
     expect(script).toContain(`mkfifo -m 600 '${paths.fifo}'`);
     expect(script).toContain("setsid -f sh -c ");
+    // The wrapper's stdio to /dev/null: the exec's own stdout and stderr close
+    // when the exec's shell exits, whatever the detached process holds.
+    expect(script).toMatch(/setsid -f sh -c '(?:[^']|'\\'')*' <\/dev\/null >\/dev\/null 2>&1 && sleep 0\.3/);
+    expect(script).toContain(DETACHED_STDIO);
     expect(script).toContain("exec 3<>");
     expect(script).toContain("echo $$ > ");
     expect(script).toContain("<&3 2>>");

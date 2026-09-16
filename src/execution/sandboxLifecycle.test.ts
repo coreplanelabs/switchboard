@@ -1,7 +1,17 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { SANDBOX_SLEEP_AFTER, isRecycleError, recycledMidCommandMessage } from "./sandboxLifecycle.js";
+import {
+  DETACH_HINT,
+  DETACH_REDIRECTS,
+  OUTPUT_AFTER_EXIT_MS,
+  SANDBOX_SLEEP_AFTER,
+  heldOutputNote,
+  isRecycleError,
+  recycledMidCommandMessage,
+} from "./sandboxLifecycle.js";
+import { EXEC_CALL_MARGIN_MS } from "./bashTimeout.js";
+import { DETACHED_STDIO } from "../core/harness/container.js";
 
 // Feature: docs/reference/specs/execution.md items 1, 2 and 9 — the per-thread
 // sandbox's idle lifetime, and the naming of a container whose runtime was
@@ -101,6 +111,33 @@ describe("isRecycleError", () => {
   });
 });
 
+// Feature: docs/reference/specs/execution.md item 24 — a command's output ends
+// when the command does. A detached child that inherited the exec's stdout and
+// stderr held the runtime's output stream open past the executor's deadline;
+// the seam redirects its wrapper's stdio, the hint tells the model to do the
+// same, and the Worker answers an exited process whose output never ended.
+describe("held output pipes", () => {
+  it("the detach redirects are one string, shared by the harness seam's start and the exit-124 hint", () => {
+    expect(DETACH_REDIRECTS).toBe("</dev/null >/dev/null 2>&1");
+    expect(DETACHED_STDIO).toBe(DETACH_REDIRECTS);
+    expect(DETACH_HINT).toBe("setsid -f sh -c '<command> > /tmp/job.log 2>&1' </dev/null >/dev/null 2>&1");
+  });
+
+  it("the Worker's wait for the output to end past the command's deadline stays inside the executor's per-send margin", () => {
+    expect(OUTPUT_AFTER_EXIT_MS).toBe(20_000);
+    expect(OUTPUT_AFTER_EXIT_MS).toBeLessThan(EXEC_CALL_MARGIN_MS);
+  });
+
+  it("the held-output note names the exit code, says the output is lost to this call and the job runs on, and spells the detach", () => {
+    const note = heldOutputNote(0);
+    expect(note).toContain("the command exited (code 0)");
+    expect(note).toContain("still holds its stdout or stderr open");
+    expect(note).toContain("its output is lost to this call, the job itself is still running");
+    expect(note).toContain(`detach with \`${DETACH_HINT}\``);
+    expect(heldOutputNote(3)).toContain("(code 3)");
+  });
+});
+
 describe("sandbox Worker wiring (static)", () => {
   // The Worker cannot run under vitest (Durable Objects + a container), so
   // this mirrors scripts/check-sandbox-pair.mjs: read the source and require
@@ -123,9 +160,24 @@ describe("sandbox Worker wiring (static)", () => {
   // `nohup … &` job dies with the command that started it while a `setsid -f`
   // job outlives it. The hint the model reads on an exit 124 must name the
   // tool that works and never the one that does not.
-  it("the timeout hint tells the model to detach a long job with setsid -f, and never names nohup", () => {
-    expect(worker).toContain("setsid -f");
+  it("the timeout hint tells the model to detach a long job with setsid -f and the wrapper's stdio redirected, and never names nohup", () => {
+    expect(worker).toMatch(/start it detached with \\`\$\{DETACH_HINT\}\\`/);
     expect(worker).not.toContain("nohup");
+  });
+
+  // item 24: the output wait past the command's deadline is the shared
+  // constant, and a wait that runs out asks the runtime — an exited process
+  // is answered with its code and the held-output note, a running one is
+  // killed and answered as the shell-level timeout.
+  it("an output that never ends is told apart by the process's status: exited → its code and the held-output note, running → kill and exit 124", () => {
+    expect(worker).toMatch(
+      /proc\.output\(\{\s*encoding: "utf8",\s*timeout: execTimeoutSecs \* 1000 \+ OUTPUT_WAIT_AFTER_DEADLINE_MS,?\s*\}\)/,
+    );
+    expect(worker).toMatch(/const OUTPUT_WAIT_AFTER_DEADLINE_MS = OUTPUT_AFTER_EXIT_MS;/);
+    expect(worker).toMatch(
+      /const status = await proc\.status\(\)\.catch\(\(\) => null\);\s*if \(status\?\.state === "exited"\) \{\s*return \{\s*stdout: "",\s*stderr: heldOutputNote\(status\.exit\.code\),\s*exitCode: status\.exit\.code,/,
+    );
+    expect(worker).toMatch(/await proc\.kill\(9\)\.catch\(\(\) => \{\}\);/);
   });
 
   it("the /exec failure path names a mid-command recycle by type inside the Durable Object and by name after the RPC boundary, a full fleet, and a silent control port", () => {

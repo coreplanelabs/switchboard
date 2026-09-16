@@ -76,3 +76,36 @@ export function recycledMidCommandMessage(elapsedMs: number, msg: string, certai
     `check /workspace before continuing: it is empty if the container was replaced (re-clone), intact if only its runtime restarted (${msg})`
   );
 }
+
+/** The redirects a detached job's wrapper must carry so the command that
+ *  forked it owns none of its descriptors — the same string the harness seam
+ *  uses for its own start (`DETACHED_STDIO` in src/core/harness/container.ts;
+ *  a test holds the two equal). Without them the runtime waits for an end of
+ *  output the detached child never gives (item 24). */
+export const DETACH_REDIRECTS = "</dev/null >/dev/null 2>&1";
+
+/** The way a command detaches a job that must outlive it, as the exit-124
+ *  hint and the docs spell it: the job's own output into a file, the
+ *  wrapper's stdio to /dev/null. */
+export const DETACH_HINT = `setsid -f sh -c '<command> > /tmp/job.log 2>&1' ${DETACH_REDIRECTS}`;
+
+/** How long past the process's exit the Durable Object waits for its output
+ *  stream to end before it answers with the exit code alone. The runtime
+ *  reports the stream's end only when every holder of the command's stdout
+ *  and stderr is gone; a detached child that inherited them holds it open
+ *  for its own lifetime. Twenty seconds covers coreutils `timeout -k 10`'s
+ *  SIGKILL follow-up and the runtime's teardown, and stays inside the
+ *  executor's per-send margin (EXEC_CALL_MARGIN_MS, 30 s) so this answer
+ *  reaches the bot before it gives the command up. */
+export const OUTPUT_AFTER_EXIT_MS = 20_000;
+
+/** The stderr line an exec answers with when its process exited but its
+ *  output never ended: what happened, why the output is missing, and how to
+ *  detach a job so it does not happen again. */
+export function heldOutputNote(exitCode: number): string {
+  return (
+    `the command exited (code ${exitCode}) but its output could not be collected: a process it started still holds its stdout or stderr open ` +
+    `(a background job started without redirecting the wrapper's own stdio); its output is lost to this call, the job itself is still running — ` +
+    `detach with \`${DETACH_HINT}\` so the command's descriptors close when it does`
+  );
+}
