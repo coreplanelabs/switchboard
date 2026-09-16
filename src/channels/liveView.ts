@@ -4,21 +4,20 @@ import { normalizeSpans, SPAN_SCHEMA } from "../core/normalizeSpans.js";
 import {
   authorize,
   matchesPredicate,
-  predicateFor,
   type Actor,
   type Decision,
   type Predicate,
   type Resource,
 } from "../core/authz/index.js";
+import { readableRuns, visibleIndexFeed } from "./liveView/viewer.js";
+export { readableRuns, visibleIndexFeed } from "./liveView/viewer.js";
 import type { RunEvent, StopMode } from "../core/runEvents.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { ArtifactStore } from "../artifacts/store.js";
 import { INLINE_IMAGE_TYPES } from "../artifacts/contentType.js";
 import { safeBasename } from "../artifacts/keys.js";
 import type { RunRegistry } from "../core/runRegistry.js";
-import type { IndexSubscriber } from "../core/runRegistry/indexFeed.js";
 import type { RunSummary } from "../core/runRegistry/projections.js";
-import type { Unsubscribe } from "../core/runRegistry/state.js";
 import { runResource, type RunListCursor, type RunsService, type RunView } from "../core/runsService.js";
 import type { ScheduleDef } from "../core/schedules.js";
 import type { ScheduleStore } from "../core/scheduleStore.js";
@@ -274,19 +273,12 @@ export interface LiveViewContext {
 }
 
 /** The command rows the `/api` twins of these routes are admitted by first
- *  (`runs.list` for the index, `runs.get` for a run read): the actor must hold
- *  `runs:read` at all before any run row is consulted, so the HTML surface is
- *  never wider than `/api/runs.*` for the same identity. */
-const RUNS_LIST: Resource = { type: "command", id: "runs.list" };
+ *  (`runs.get` for a run read, `runs.stop` for a stop; the index's `runs.list`
+ *  lives with `readableRuns` in liveView/viewer.ts): the actor must hold the
+ *  right at all before any run row is consulted, so the HTML surface is never
+ *  wider than `/api/runs.*` for the same identity. */
 const RUNS_GET: Resource = { type: "command", id: "runs.get" };
 const RUNS_STOP: Resource = { type: "command", id: "runs.stop" };
-const NONE: Predicate = { kind: "none" };
-
-/** What the viewer may list (authorization.md item 6): nothing unless the actor
- *  is admitted to run reads, else the store predicate over its channels. */
-function readableRuns(actor: Actor): Predicate {
-  return authorize(actor, "runs:read", RUNS_LIST).allow ? predicateFor(actor, "runs:read", "run") : NONE;
-}
 
 /** The table's decision on ONE finished run the viewer asked for tokenless
  *  (authorization.md item 5): admitted to run reads, and allowed this run by
@@ -305,29 +297,6 @@ function readDecision(actor: Actor, view: RunView): Decision {
 function stopDecision(actor: Actor, view: RunView): Decision {
   const admitted = authorize(actor, "runs:write", RUNS_STOP);
   return admitted.allow ? authorize(actor, "runs:write", runResource(view)) : admitted;
-}
-
-/**
- * The runs-index feed as ONE viewer may see it: an `upsert` for a run outside
- * the predicate is dropped, and so is that run's later `removed` — the page
- * never learns the id of a run it was not shown. Every live run is stamped at
- * `create()`, so one decision per run holds for its whole life; `shown` is
- * bounded by the registry's live set (an id leaves it with its `removed`).
- */
-export function visibleIndexFeed(
-  subscribeIndex: (onEvent: IndexSubscriber) => Unsubscribe,
-  visibleTo: Predicate,
-): (onEvent: IndexSubscriber) => Unsubscribe {
-  return (onEvent) => {
-    const shown = new Set<string>();
-    return subscribeIndex((ev) => {
-      if (ev.type === "upsert") {
-        if (!matchesPredicate(visibleTo, ev.run)) return;
-        shown.add(ev.run.id);
-      } else if (!shown.delete(ev.id)) return;
-      onEvent(ev);
-    });
-  };
 }
 
 const NOT_FOUND = "run not found";
