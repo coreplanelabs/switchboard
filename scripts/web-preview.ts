@@ -214,7 +214,19 @@ const HIST_EVENTS = [
     at: NOW - 2_389_000,
     seq: 5,
   },
-  { type: "tool_call", callId: "c1", tool: "bash", summary: "$ rg -n 'sendWebhook' src", at: NOW - 2_388_000, seq: 6 },
+  // Each tool event names the session-log row its turn landed on (run-history
+  // item 53): a call's the assistant turn it rode in, a result's the user turn
+  // the batch's results make — counted from a seed of two reused rows and the
+  // request at row 2, so a search hit's turn finds its step in a fold.
+  {
+    type: "tool_call",
+    callId: "c1",
+    tool: "bash",
+    summary: "$ rg -n 'sendWebhook' src",
+    logIndex: 3,
+    at: NOW - 2_388_000,
+    seq: 6,
+  },
   {
     type: "tool_result",
     callId: "c1",
@@ -222,10 +234,19 @@ const HIST_EVENTS = [
     ok: true,
     summary: "(3 chars, 2 lines)",
     output: "src/webhooks.ts:41:export async function sendWebhook(",
+    logIndex: 4,
     at: NOW - 2_387_000,
     seq: 7,
   },
-  { type: "tool_call", callId: "c2", tool: "bash", summary: "$ npm test -- webhooks", at: NOW - 2_386_000, seq: 8 },
+  {
+    type: "tool_call",
+    callId: "c2",
+    tool: "bash",
+    summary: "$ npm test -- webhooks",
+    logIndex: 3,
+    at: NOW - 2_386_000,
+    seq: 8,
+  },
   {
     type: "tool_result",
     callId: "c2",
@@ -234,6 +255,7 @@ const HIST_EVENTS = [
     exitCode: 1,
     summary: "(120 chars, 9 lines)",
     output: "FAIL webhooks.test.ts\n  ✗ retries with backoff (new)\n  expected 5 attempts, got 1",
+    logIndex: 4,
     at: NOW - 2_350_000,
     seq: 9,
   },
@@ -288,10 +310,20 @@ const HIST_EVENTS = [
     callId: "c3",
     tool: "update_status",
     summary: "update_status implementing backoff",
+    logIndex: 5,
     at: NOW - 2_329_000,
     seq: 14,
   },
-  { type: "tool_result", callId: "c3", tool: "update_status", ok: true, summary: "", at: NOW - 2_329_000, seq: 15 },
+  {
+    type: "tool_result",
+    callId: "c3",
+    tool: "update_status",
+    ok: true,
+    summary: "",
+    logIndex: 6,
+    at: NOW - 2_329_000,
+    seq: 15,
+  },
   // The slow middle of the run (item 24): a five-minute think, a typegen the
   // sandbox killed at its 15-minute deadline, and a 3.5-minute type check —
   // the durations that should read warm and over budget on the page.
@@ -302,7 +334,15 @@ const HIST_EVENTS = [
     cacheReadTokens: 40_200,
   }),
   { type: "assistant", text: "Regenerating the generated types before the type check.", at: NOW - 2_019_000, seq: 17 },
-  { type: "tool_call", callId: "c5", tool: "bash", summary: "$ pnpm typegen", at: NOW - 2_018_000, seq: 18 },
+  {
+    type: "tool_call",
+    callId: "c5",
+    tool: "bash",
+    summary: "$ pnpm typegen",
+    logIndex: 7,
+    at: NOW - 2_018_000,
+    seq: 18,
+  },
   {
     type: "tool_result",
     callId: "c5",
@@ -311,10 +351,19 @@ const HIST_EVENTS = [
     exitCode: 124,
     summary: "(63 chars, 2 lines)",
     output: "generating types for 148 workers…\ncommand timed out after 15m 00s",
+    logIndex: 8,
     at: NOW - 1_118_000,
     seq: 19,
   },
-  { type: "tool_call", callId: "c6", tool: "bash", summary: "$ pnpm tsgo --noEmit", at: NOW - 1_115_000, seq: 20 },
+  {
+    type: "tool_call",
+    callId: "c6",
+    tool: "bash",
+    summary: "$ pnpm tsgo --noEmit",
+    logIndex: 7,
+    at: NOW - 1_115_000,
+    seq: 20,
+  },
   {
     type: "tool_result",
     callId: "c6",
@@ -322,10 +371,11 @@ const HIST_EVENTS = [
     ok: true,
     summary: "(0 chars)",
     output: "",
+    logIndex: 8,
     at: NOW - 901_000,
     seq: 21,
   },
-  { type: "tool_call", callId: "c4", tool: "bash", summary: "$ npm test", at: NOW - 800_000, seq: 22 },
+  { type: "tool_call", callId: "c4", tool: "bash", summary: "$ npm test", logIndex: 7, at: NOW - 800_000, seq: 22 },
   {
     type: "tool_result",
     callId: "c4",
@@ -333,6 +383,7 @@ const HIST_EVENTS = [
     ok: true,
     summary: "(400 chars, 31 lines)",
     output: "PASS webhooks.test.ts (12 tests)",
+    logIndex: 8,
     at: NOW - 760_000,
     seq: 23,
   },
@@ -353,6 +404,7 @@ const HIST_EVENTS = [
     callId: "c7",
     tool: "attach_file",
     summary: "attach_file metrics-dashboard.png",
+    logIndex: 9,
     at: NOW - 755_500,
     seq: 26,
   },
@@ -385,6 +437,7 @@ const HIST_EVENTS = [
     tool: "attach_file",
     ok: true,
     summary: "attached metrics-dashboard.png (3.0 MB) to the thread and the PR",
+    logIndex: 10,
     at: NOW - 753_900,
     seq: 28,
   },
@@ -392,7 +445,15 @@ const HIST_EVENTS = [
   // session-log.md item 10), written whole before the answer: the `notes` call,
   // the notepad it published, its result. The page draws the notepad as a Notes
   // block with its Markdown, open because it is the newest write.
-  { type: "tool_call", callId: "c8", tool: "notes", summary: "notes (12 lines)", at: NOW - 753_850, seq: 29 },
+  {
+    type: "tool_call",
+    callId: "c8",
+    tool: "notes",
+    summary: "notes (12 lines)",
+    logIndex: 9,
+    at: NOW - 753_850,
+    seq: 29,
+  },
   {
     type: "notes",
     text: [
@@ -418,6 +479,7 @@ const HIST_EVENTS = [
     tool: "notes",
     ok: true,
     summary: "notes saved (748 bytes)",
+    logIndex: 10,
     at: NOW - 753_750,
     seq: 31,
   },
@@ -656,6 +718,7 @@ const REVIEW_STREAM = normalizeSpans([
     callId: "r-c1",
     tool: "bash",
     summary: "$ git diff --stat origin/main...HEAD",
+    logIndex: 3,
     at: REVIEW_RECEIVED_AT + 18_500,
     seq: 7,
   },
@@ -667,6 +730,7 @@ const REVIEW_STREAM = normalizeSpans([
     summary: " 19 files changed, 214 insertions(+), 31 deletions(-)",
     output: " 19 files changed, 214 insertions(+), 31 deletions(-)",
     durationMs: 140,
+    logIndex: 4,
     at: REVIEW_RECEIVED_AT + 18_700,
     seq: 8,
   },
@@ -1258,12 +1322,16 @@ const SCHEDULED = {
 // serves a stored record, so a row's timeline folds the real shape.
 const UNIT_T0 = NOW - 3 * 3_600_000;
 const UNIT_REPLAYS = new Map<string, RunEvent[]>();
-/** A fixture stream moved onto another run's clock: every stamp shifted by `deltaMs`, nothing else touched. */
-const shiftStream = (events: readonly RunEvent[], deltaMs: number): RunEvent[] =>
+/** A fixture stream moved onto another run's clock and place in its session log:
+ *  every stamp shifted by `deltaMs`, every tool event's log row by `deltaRows`
+ *  (the row the run's seed begins at, as a real record's `seedFrom` shifts them),
+ *  nothing else touched. */
+const shiftStream = (events: readonly RunEvent[], deltaMs: number, deltaRows = 0): RunEvent[] =>
   events.map((e) => {
     const shifted: Record<string, unknown> = { ...e };
     if (typeof shifted.at === "number") shifted.at += deltaMs;
     if (typeof shifted.startedAt === "number") shifted.startedAt += deltaMs;
+    if (typeof shifted.logIndex === "number") shifted.logIndex += deltaRows;
     return shifted as RunEvent;
   });
 /** A finished run of a unit (or a conductor's child) whose replay is the coding
@@ -1278,7 +1346,10 @@ const unitRun = (
 ): UnitRunRowSeed => {
   const review = thread === "review";
   const deltaMs = receivedAt - (review ? REVIEW_RECEIVED_AT : RECEIVED_AT);
-  UNIT_REPLAYS.set(id, shiftStream(review ? REVIEW_STREAM : HIST_STREAM, deltaMs));
+  // Each round's run seeds from row 40 × round of its session's log; the stream's
+  // rows (two reused, the request at 2, the steps after) shift with it.
+  const seedFrom = round * 40;
+  UNIT_REPLAYS.set(id, shiftStream(review ? REVIEW_STREAM : HIST_STREAM, deltaMs, seedFrom));
   const finishedAt = (review ? REVIEW_FINISHED_AT : HIST_FINISHED_AT) + deltaMs;
   return {
     id,
@@ -1306,11 +1377,13 @@ const unitRun = (
     schema: 2,
     round,
     thread,
+    // The range ends at the reply's row: the coding stream's last step is its
+    // answer at row 11, the review's at row 5 (the streams' rows above).
     session: {
       key: `${review ? "slack:C1:1700000300.000100" : "slack:C1:1700000200.000100"}:${thread}`,
-      seedFrom: round * 40,
-      request: round * 40 + 2,
-      range: { from: round * 40 + 2, to: round * 40 + 39 },
+      seedFrom,
+      request: seedFrom + 2,
+      range: { from: seedFrom + 2, to: seedFrom + (review ? 5 : 11) },
     },
     ...over,
   };
@@ -1400,31 +1473,36 @@ const UNIT_U4: UnitSeed["view"] = {
     }),
   ],
 };
-/** What the search box gets back for `lockfile` over the fixture unit's coding session, wrapped as the route wraps it. */
+/** What the search box gets back for `lockfile` over the fixture unit's coding
+ *  session, wrapped as the route wraps it. The turns are rows of the streams
+ *  above: round 1's typegen step (row 47), round 0's failing-test results (row
+ *  4) and round 1's reply (row 51) — so a hit lands on a step, a card and the reply. */
 const UNIT_SEARCH_HITS = {
   session: "slack:C1:1700000200.000100:coding",
   hits: [
     {
-      turn: 57,
+      turn: 47,
       role: "assistant",
-      snippet: wrapUntrusted("The lockfile drifted after `npm ci` — the nested @types/node record was never pinned."),
+      snippet: wrapUntrusted(
+        "The lockfile drifted after `npm ci` — regenerating the types, then the type check and the tests.",
+      ),
       runId: "unit-c1",
     },
     {
-      turn: 12,
+      turn: 4,
       role: "user",
-      snippet: wrapUntrusted("check:lockfile fails on an edge npm cannot honour — start there"),
+      snippet: wrapUntrusted("FAIL webhooks.test.ts — check:lockfile fails on an edge npm cannot honour; start there"),
       runId: "unit-c0",
     },
     {
-      turn: 74,
+      turn: 51,
       role: "assistant",
-      snippet: wrapUntrusted("Summary of the earlier turns: the lockfile check is green, the review asked for a test."),
+      snippet: wrapUntrusted("Done — the lockfile check is green, the review asked for a test; PR updated."),
       runId: "unit-c1",
-      gap: 62,
+      gap: 48,
     },
   ],
-  gaps: [62],
+  gaps: [48],
 };
 // A finished conductor's children: three read-only children, one still going.
 const CONDUCTOR_T0 = NOW - 40 * 60_000;

@@ -748,6 +748,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
           ...(ledgerRun
             ? {
                 onStep: ledgerRun.step.bind(ledgerRun),
+                logIndexOf: ledgerRun.logIndexOf.bind(ledgerRun),
                 saveFacts: (h: HarnessFacts) => ledgerRun.setState({ harness: h }),
               }
             : {}),

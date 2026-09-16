@@ -100,6 +100,28 @@ describe("PiMirror — step records as the runner writes them", () => {
     ]);
   });
 
+  // run-history item 53: the rows the harness stamps its tool events with — a
+  // call's the assistant turn it rode in, a result's the user turn the batch's
+  // results make — read off the mirror as the rows are written.
+  it("names the row the calls under way ride in (the last assistant turn written) and the row the pending results will make (the next row), before any assistant turn nothing for the calls; a compaction moves the results' row past its entry", async () => {
+    const { m } = mirror();
+    expect(m.rowOfCalls).toBeUndefined();
+    expect(m.rowOfResults).toBe(1);
+    m.expectSeedEcho();
+    await m.onMessage({ role: "user", content: "go" }, 0);
+    await m.onMessage(bashCall, 1); // row 1
+    expect(m.rowOfCalls).toBe(1);
+    expect(m.rowOfResults).toBe(2); // where call_0's result lands
+    await m.onMessage(bashResult, 1);
+    expect(m.rowOfResults).toBe(2); // a result pending changes nothing: it is that row
+    await m.onCompaction({ summary: "so far", tokensBefore: 10 }, 1); // rows 2 (the results) and 3 (the entry)
+    expect(m.rowOfCalls).toBe(1);
+    expect(m.rowOfResults).toBe(4);
+    await m.onMessage(bashCall, 2); // row 4
+    expect(m.rowOfCalls).toBe(4);
+    expect(m.rowOfResults).toBe(5);
+  });
+
   // session-log item 2, one index per row: a message that carries no parts would
   // write no row and still spend an index, and the next reclaim would read the
   // hole as an incomplete transcript — so it is not a turn at all.
@@ -193,8 +215,11 @@ describe("PiMirror — step records as the runner writes them", () => {
       mirroredTail: { turn: transcript.at(-1)! },
     });
     await m.onMessage({ role: "user", content: "an earlier steer" }, 1); // before the turn read again: was its step's user turn
+    expect(m.rowOfCalls).toBeUndefined(); // the transcript's turn is not yet known to be the one met
     expect(await m.onMessage(bashCall, 1)).toBe(true);
     expect(reports).toEqual([]);
+    expect(m.rowOfCalls).toBe(1); // the turn met again is the transcript's last row: its calls, read again, are placed there
+    expect(m.rowOfResults).toBe(2);
     await m.onMessage(bashResult, 1);
     await m.onMessage({ role: "user", content: "Continue where you left off." }, 1);
     await m.onMessage(final, 2);

@@ -367,6 +367,11 @@ export type RunEvent =
    *  past the summary cap. The status card and friction analyzer keep reading
    *  `summary`. */
   /** `spanId` (docs/reference/specs/tracing.md): the `tool.*` span this call ran under, once the runner emits spans. */
+  /** `logIndex` (docs/reference/specs/run-history.md item 53): the row of the run's
+   *  session log holding the assistant turn this call rode in — on a `tool_result`,
+   *  the user turn its batch's results make. How a search hit's turn finds its
+   *  step on the page. Absent for a run without a session, a record from before
+   *  the field, and a call the mirror could not place. */
   | {
       type: "tool_call";
       tool: string;
@@ -374,6 +379,7 @@ export type RunEvent =
       command?: string;
       callId?: string;
       spanId?: string;
+      logIndex?: number;
       seq?: number;
       at?: number;
     }
@@ -393,6 +399,7 @@ export type RunEvent =
       output?: string;
       infra?: true;
       spanId?: string;
+      logIndex?: number;
       seq?: number;
       at?: number;
     }

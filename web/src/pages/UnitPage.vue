@@ -38,6 +38,11 @@ const opened = reactive(
       .filter(Boolean),
   ),
 );
+/** The session-log turn each opened fold lands on (session-log item 11): a search
+ *  hit's, or `?turn=<n>` beside a single `?open=<id>` — a shareable link to a step. */
+const landing = reactive(new Map<string, number>());
+const turnParam = params.get("turn");
+if (turnParam !== null && /^\d+$/.test(turnParam) && opened.size === 1) landing.set([...opened][0], Number(turnParam));
 const initialSearch = { thread: params.get("session") ?? undefined, q: params.get("q") ?? undefined };
 
 const title = computed(() => (view ? `Unit ${view.id}` : "Unit"));
@@ -93,8 +98,10 @@ const sessions = computed<SearchSession[]>(() => {
   return out;
 });
 
-/** A search hit opens its run's fold and brings the row into view. */
-function openRun(runId: string): void {
+/** A search hit opens its run's fold and brings the row into view; the fold
+ *  then lands on the hit's turn once the record is read. */
+function openRun(runId: string, turn?: number): void {
+  if (turn !== undefined) landing.set(runId, turn);
   opened.add(runId);
   void nextTick().then(() => {
     const el = document.getElementById(`run-${runId}`);
@@ -264,6 +271,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
           :now="now"
           :label="`round ${run.round} · ${run.thread}`"
           :open="opened.has(run.id)"
+          :land="landing.get(run.id)"
         />
         <li v-if="view.runs.length === 0" id="empty" class="empty px-2 py-2 text-sm text-muted">
           No runs yet — the runner has not started this unit.

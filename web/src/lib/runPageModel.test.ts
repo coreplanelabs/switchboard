@@ -868,6 +868,46 @@ describe("reveal — a Longest-steps link opens what folds its row", () => {
   });
 });
 
+describe("landing — the step a session-log turn lives in (session-log item 11)", () => {
+  const stamped = (ev: Record<string, unknown>, logIndex: number) => ({ ...ev, logIndex });
+
+  it("a stamped row is its event's step at the run page's anchor — the turn's span, else the first card; a row no event names is the step that wrote the newest stamped row before it; a row before every stamp lands nowhere", () => {
+    const m = model();
+    m.handle(input);
+    m.handle(modelTurn({ durationMs: 500, at: 900 }));
+    m.handle(stamped(call("c1", "$ a", 1001), 3)); // the assistant turn's row
+    m.handle(stamped(call("c2", "$ b", 1002), 3));
+    m.handle(stamped(result("c1", { at: 1_500 }), 4)); // the results' row
+    m.handle(stamped(result("c2", { at: 1_600 }), 4));
+    m.handle(assistant("then a quiet step", 1_900)); // a step with no model turn recorded: anchored by its card
+    m.handle(stamped(call("c3", "update_status done", 2_000, "update_status"), 5)); // quiet: no card, the step open is its step
+    m.handle(stamped(call("c4", "$ c", 2_001), 5));
+    m.handle(stamped(result("c3", { at: 2_100, tool: "update_status" }), 6));
+    const first = step(m, 0);
+    const second = step(m, 1);
+    expect(m.landing(3)).toEqual({ step: first, anchor: "span-turn-900" });
+    expect(m.landing(4)).toEqual({ step: first, anchor: "span-turn-900" });
+    expect(m.landing(5)).toEqual({ step: second, anchor: "call-c4" });
+    expect(m.landing(6)).toEqual({ step: second, anchor: "call-c4" });
+    // A row nothing names — a steer's text, a compaction entry, a turn without calls — follows the step before it.
+    expect(m.landing(7)).toEqual({ step: second, anchor: "call-c4" });
+    expect(m.landing(70)).toEqual({ step: second, anchor: "call-c4" });
+    expect(m.landing(2)).toBeUndefined();
+    expect(m.landing(0)).toBeUndefined();
+  });
+
+  it("a record whose events carry no rows — one from before the stamp — lands nowhere at any turn", () => {
+    const m = model();
+    m.handle(input);
+    m.handle(modelTurn({ durationMs: 500, at: 900 }));
+    m.handle(call("c1", "$ a", 1001));
+    m.handle(result("c1", { at: 1_500 }));
+    expect(m.landing(0)).toBeUndefined();
+    expect(m.landing(3)).toBeUndefined();
+    expect(m.landing(99)).toBeUndefined();
+  });
+});
+
 describe("the model badge — named once, and on every switch", () => {
   it("the first head names the model; later heads on the same model do not; a switch does (the ⇄ chip) and the head after a switch stays quiet again", () => {
     const m = model();

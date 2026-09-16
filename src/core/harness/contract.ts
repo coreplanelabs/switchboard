@@ -328,6 +328,11 @@ export interface HarnessRun {
   onEvent?: (event: RunEvent) => void;
   onProgress?: (note: string) => void;
   onStep?: (report: StepReport) => Promise<void>;
+  /** The ledger run's `logIndexOf` (run-history item 53): the session-log row
+   *  a local index of the conversation lands on, what the harness stamps its
+   *  `tool_call` and `tool_result` events with. Absent — no ledger, or a run
+   *  without a session — the events carry no row. */
+  logIndexOf?: (localIndex: number) => number | undefined;
   /** The row's write for the harness facts (`ledgerRun.setState({ harness })`). */
   saveFacts?: (facts: HarnessFacts) => void;
   resume?: HarnessResume;
