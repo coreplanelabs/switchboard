@@ -145,6 +145,14 @@ export function unitBranch(planId: string, slug: string): string {
   return `plan/${planId}/${slug}`;
 }
 
+/** Whether `ref` is a unit branch of ship's own — `plan/<plan-id>/<unit-slug>`.
+ *  A thread keeps the binding its last run opened a pull request on, so after
+ *  a plan's unit it sits at that unit branch; a fresh task there must not take
+ *  it as the base (the pull request would target the earlier unit). */
+export function isUnitBranch(ref: string): boolean {
+  return /^plan\/[^/]+\/[^/]+$/.test(ref);
+}
+
 /** The plan and unit a head branch names, or undefined for any other branch — the merge grant's line. */
 export function parsePlanBranch(branch: string): { planId: string; unitSlug: string } | undefined {
   const m = PLAN_BRANCH.exec(branch);

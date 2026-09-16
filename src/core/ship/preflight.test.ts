@@ -108,6 +108,23 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
     expect(fork).toEqual({ ok: true, entry: { repo: "acme/api", base: "main" } });
   });
 
+  it("a unit branch of ship's own is never a fresh task's base: a thread an earlier plan left bound at `plan/<id>/<slug>` starts the next generated plan off the default branch, while a person's own `on <ref>` still wins", async () => {
+    // The shape two re-issued plans were born with today: the earlier plan's coding
+    // child bound the thread at its unit branch; a plain-words re-issue then
+    // made a new generated plan whose base became that unit branch.
+    const rebound = await shipPreflight(
+      input({
+        requestText: "in acme/api: fix the login redirect, start from the pushed head",
+        repoCtx: { repo: "acme/api", ref: "plan/fix-the-login-redirect-a1b2c3/u1" },
+      }),
+    );
+    expect(rebound).toEqual({ ok: true, entry: { repo: "acme/api", base: "main" } });
+    const named = await shipPreflight(
+      input({ requestText: "in acme/api: fix the login redirect", repoCtx: { repo: "acme/api", ref: "feat/trunk" } }),
+    );
+    expect(named).toEqual({ ok: true, entry: { repo: "acme/api", base: "feat/trunk" } });
+  });
+
   it("seeded: a `plan <path>.md` request in a pull-request thread keeps the graph's branches — the PR is context, the entry names no branch", async () => {
     const prFacts = vi.fn(async () => openPr());
     const res = await shipPreflight(
