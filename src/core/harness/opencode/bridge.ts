@@ -37,17 +37,20 @@ import {
 } from "../../runEvents.js";
 import type { ChatMessage, ContentPart } from "../../chatMessage.js";
 import type { CompactionEntry } from "../../runLedger/types.js";
+import type { AssembledCompaction } from "../../runLedger/transcript.js";
 import type { StepReport } from "../../runLedger/stepReport.js";
 import type { Clock, Span } from "../../trace/types.js";
-import type { HarnessDeps, HarnessRun } from "../contract.js";
+import { HarnessContainerReplacedError, type HarnessDeps, type HarnessRecord, type HarnessRun } from "../contract.js";
 import type { ProxyRefusalCode } from "../../../channels/modelProxy.js";
 import type { HarnessContainer } from "../container.js";
+import { saysContainerReplaced } from "../pi/harness.js";
 import { describePiToolCall, piBashExit } from "../pi/bridge.js";
 import { PiMirror } from "../pi/mirror.js";
 import { PiRpcTransport } from "../pi/transport.js";
 import { judgeToolCall, openCodeToolWord, type ToolRuleContext } from "../pi/toolRules.js";
 import {
   HARD_STOP_MESSAGE,
+  hardStopNote,
   timeBudgetAnswer,
   timeBudgetInstruction,
   timeBudgetNote,
@@ -70,7 +73,8 @@ import {
   type OpenCodePermissionRequest,
 } from "./client.js";
 import { openCodeDispositionOf } from "./dispositions.js";
-import type { OpenCodeRunPaths } from "./process.js";
+import { openCodeReplacedCallNote, openCodeSettlementNote } from "./session.js";
+import { openCodeBuiltinToolsFor, type OpenCodeRunPaths } from "./process.js";
 
 /** A tool call the model ran to its end with no ask the bot answered, or an
  *  approval the bot did not send: the gate was bypassed and the run fails
@@ -101,6 +105,30 @@ export class OpenCodeReplyFailedError extends Error {
       }): the ask stays unanswered, so the run stops rather than hang`,
     );
     this.name = "OpenCodeReplyFailedError";
+  }
+}
+
+/** The container OpenCode ran in was replaced under the live run (the survival
+ *  clause's ceiling; harness.md item 6): the executor said so on a container
+ *  command (the tailer's feed read), so OpenCode and the tool it was running
+ *  died with the old container's disk, and the record holds everything the run
+ *  had. The seam's word (`HarnessContainerReplacedError`), carrying the record
+ *  the bridge mirrored so the run loop relaunches OpenCode in the container the
+ *  run holds now — the ceiling — or closes the run `interrupted` for a restart
+ *  from its request, the floor, when the relaunch is refused. `said` is the
+ *  executor's word, the condition; `was`/`now` are the two containers' words,
+ *  corroboration for the record and never the condition. */
+export class OpenCodeContainerReplacedError extends HarnessContainerReplacedError {
+  constructor(said: string, was: string | undefined, now: string | undefined, record: HarnessRecord) {
+    super(
+      `the container running OpenCode was replaced (${was ?? "unknown"} → ${now ?? "unknown"}; the executor said: ` +
+        `${redactAndCap(said.replace(/\s+/g, " ").trim(), 240)})`,
+      said,
+      was,
+      now,
+      record,
+    );
+    this.name = "OpenCodeContainerReplacedError";
   }
 }
 
@@ -274,6 +302,69 @@ export class OpenCodeBridge {
     return this.mirrorChain;
   }
 
+  /** The settlement turn a rebuilt process's session starts on (the rebuild is
+   *  an import): the calls in flight at the death, each a tool result — the
+   *  settlement note — primed as the next step's pending user content, so the
+   *  ledger's first step after the rebuild is `[user(settlements), assistant]`
+   *  from the seed index, and OpenCode's store rows (the settlement is a
+   *  completed tool content in the imported record) project to the same turn.
+   *  The record then rebuilds a transcript with a result for every call. */
+  prime(parts: readonly ContentPart[]): void {
+    this.mirror.prime(parts);
+  }
+
+  /** Settle every call still open when the container went under a running call
+   *  (the replaced verdict): each open span ends `error` and its call is put on
+   *  the record as a failed `tool_result` carrying `reason` — the restart note,
+   *  said of the container — so no span outlives the run and the record holds a
+   *  result for every call at the death, exactly as pi's `closeOpenSpans` does. */
+  closeOpenSpans(reason: (open: { callId: string; tool: string }) => string): void {
+    for (const [callId, open] of this.openTools) {
+      open.span?.end("error", { callId, ok: false });
+      this.emit({
+        type: "tool_result",
+        tool: open.tool,
+        ok: false,
+        callId,
+        summary: redactAndCap(reason({ callId, tool: open.tool }), COMMAND_CAP),
+      });
+    }
+    this.openTools.clear();
+  }
+
+  /** The record as this generation holds it (`HarnessRecord`; harness.md item
+   *  6): the base — the seed with its request, or the resumed transcript — and
+   *  the mirror's rows, every call of the last turn settled with the replaced
+   *  note, so the run loop can relaunch OpenCode from it. Mirrors pi's
+   *  `recordNow`. */
+  record(
+    base: { messages: readonly ChatMessage[]; compactions: readonly AssembledCompaction[] },
+    deadline: number,
+  ): HarnessRecord {
+    const written = this.mirror.written;
+    const messages = [...base.messages, ...written.messages];
+    const last = messages.at(-1);
+    const calls =
+      last?.role === "assistant"
+        ? last.content.filter((p): p is Extract<ContentPart, { type: "tool_use" }> => p.type === "tool_use")
+        : [];
+    return {
+      messages,
+      compactions: [
+        ...base.compactions,
+        ...written.compactions.map((c) => ({ ...c, before: base.messages.length + c.before })),
+      ],
+      settlements: calls.map((toolUse) => ({
+        toolUse,
+        action: "synthetic" as const,
+        text: openCodeReplacedCallNote(toolUse.name),
+      })),
+      turn: this.turns,
+      inboxConsumedSeq: this.mirror.inboxConsumedSeq,
+      deadline,
+    };
+  }
+
   private note(kind: RunNoteKind, summary: string): void {
     this.deps.onProgress?.(summary);
     this.emit({ type: "run_note", kind, summary });
@@ -417,14 +508,47 @@ export class OpenCodeBridge {
       ...(open?.span ? { spanId: open.span.id } : {}),
     });
     open?.span?.end(settledOk ? "ok" : "error", { callId, ok: settledOk });
+    // A relayed tool is not OpenCode's to gate: the plugin registers it and its
+    // execute runs `POST /harness/authorize` then `POST /harness/tool` in the
+    // bot, so it raises no `permission.asked` (proven against the real binary:
+    // its `session.tool.called` has no matching ask) and runs under the bot's
+    // own gates in the bot, never in the container. So its settlement is neither
+    // a bypass nor a refusal — the gate's coverage below is OpenCode's own
+    // tools, whose effects run in the container.
+    // A call id with no name recorded is treated as a non-relayed tool (`?? ""`
+    // is in no roster), the safe direction: an unknown call falls to the gate's
+    // coverage below rather than being waved through as a relayed one.
+    if (this.deps.relayedToolNames.has(this.toolNames.get(callId) ?? "")) return;
     // The gate's coverage (harness.md item 2), two of the four effects the bot
     // did not decide: a call that settled with no ask the bot answered, and a
     // success for a call the bot rejected (the reject landing is a failure the
     // server raises with the bot's feedback; a success means the tool ran
     // against it). On OpenCode the model's shell can forge either. The run
-    // fails closed on the first one.
+    // fails closed on the first one. But a call that RAN with no ask (a real
+    // effect, `executed: true`) is the bypass; a call the identity hid, which
+    // OpenCode failed with no ask because the tool was never there
+    // (`executed: false` — the model reached for a tool the deny rules removed),
+    // is a refusal the record shows, not a bypass: nothing ran, the walls held.
+    const executed = data.executed === true;
     const decision = this.answered.get(callId);
-    if (decision === undefined) {
+    if (decision === undefined && !executed) {
+      // What the facts prove: no ask, nothing ran. The deny rules are named
+      // only when the tool is in fact absent from the identity's own tools;
+      // any other failure before execution — a tool erroring before it runs —
+      // is said as that, never dressed as a refusal the gate made.
+      const name = this.toolNames.get(callId);
+      const absent = name !== undefined && !openCodeBuiltinToolsFor(this.deps.rules.identity).includes(name);
+      if (absent)
+        this.note(
+          "tool_refused",
+          `${tool} refused: the run's identity has no ${tool} tool (the deny rules removed it), so the call ran nothing`,
+        );
+      else
+        this.note(
+          "harness_error",
+          `OpenCode settled ${tool} (call ${callId}) before it ran, with no ask the bot answered${text ? `: ${redactAndCap(text, 200)}` : ""}`,
+        );
+    } else if (decision === undefined) {
       this.bypass(out, `OpenCode ran ${tool} (call ${callId}) with no ask the bot answered — a call with no ask`);
     } else if (decision === "reject" && ok) {
       this.bypass(
@@ -651,6 +775,12 @@ export interface OpenCodeConnection {
   feedOffset: number;
   /** The pid the feed transport polls for liveness (the tailer's). */
   tailerPid: number;
+  /** The container's word at launch, for the replaced verdict's `was`; absent on a container that cannot name itself. */
+  containerWord?: string;
+  /** The relay's write-up gate: the bridge sets `blocked` to the reason while
+   *  the run winds down, and the LiveHarness's `toolsBlocked` reads it, so a
+   *  relayed tool is refused at the door during the write-up as pi's are. */
+  writeUp?: { blocked?: string };
 }
 
 /** The run: the request prompted, the feed read to the answer, every tool call
@@ -683,10 +813,28 @@ export async function driveOpenCode(
     rules: { ...run.rules, identity: run.agent.identity },
     relayedToolNames: new Set(run.tools.map((t) => t.name)),
     ...(run.onStep ? { onStep: run.onStep } : {}),
-    seedLength: run.messages.length,
+    // The mirror skips the seed's rows: a fresh run's is the thread's turns plus
+    // the request (`run.messages`); a rebuild's is the record it imported (its
+    // transcript and every compaction row), which the store holds and the
+    // request-prompt appends past.
+    seedLength: run.resume ? run.resume.messages.length + (run.resume.compactions?.length ?? 0) : run.messages.length,
     remainingMs: () => deadline - now(),
     textFailing: new Set(run.tools.filter((t) => t.failsInText).map((t) => t.name)),
   });
+  // A rebuild starts on the settlement turn: each call in flight at the death a
+  // tool result carrying its note, primed as the ledger's first step's user
+  // turn (`OpenCodeBridge.prime`), the same turn the imported record's completed
+  // tool content projects to — so the ledger, the store and the record agree.
+  if (run.resume && run.resume.settlements.length > 0) {
+    bridge.prime(
+      run.resume.settlements.map((s) => ({
+        type: "tool_result" as const,
+        toolUseId: s.toolUse.id,
+        content: openCodeSettlementNote(s),
+        isError: true as const,
+      })),
+    );
+  }
 
   const auth = { Authorization: openCodeAuthHeader(conn.password) };
   const sessionRoutes = openCodeSessionRoutes(conn.sessionID);
@@ -696,7 +844,7 @@ export async function driveOpenCode(
       port: conn.port,
       path: route.path,
       secretHeaders: auth,
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      ...(body !== undefined ? { headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {}),
     });
   const transport = new PiRpcTransport({
     container: conn.container,
@@ -714,9 +862,24 @@ export async function driveOpenCode(
   let replyFailed: OpenCodeReplyFailedError | undefined;
   let providerError: string | undefined;
   let settled = false;
+  /** The container was replaced under the run: the executor's word on the feed read (the survival clause's ceiling). */
+  let containerSaid: Error | undefined;
+  // The base of the record a relaunch rebuilds from: the seed with its request,
+  // or the resumed transcript, which the mirror's rows follow.
+  const recordBase = {
+    messages: run.resume?.messages ?? run.messages,
+    compactions: run.resume?.compactions ?? [],
+  };
 
   const startWriteUp = (w: NonNullable<typeof writeUp>, instruction: string) => {
     writeUp = w;
+    // The relay's door refuses new tool calls while the run writes up (the
+    // minor the review named), as pi's `toolsBlocked` does.
+    if (conn.writeUp)
+      conn.writeUp.blocked =
+        w.kind === "time"
+          ? "the run has reached its time budget: no more tool calls — the run is writing its final answer"
+          : "the run has hit its turn guard: no more tool calls — the run is writing its final answer";
     void request(sessionRoutes["session.prompt"], { text: instruction, delivery: "steer" }).catch(() => {});
   };
   const turnCount = () => deps.bearers?.grantOf(run.runId)?.turns ?? bridge.turns;
@@ -724,6 +887,10 @@ export async function driveOpenCode(
     if (run.control?.requested === "hard") {
       if (!hardStopped) {
         hardStopped = true;
+        // The hard stop on the record (the record clause): a `stopped` note in
+        // mode `hard`, said once, then the interrupt that ends the session.
+        run.onProgress?.(hardStopNote());
+        emit({ type: "run_note", kind: "stopped", summary: hardStopNote(), mode: "hard" });
         void request(sessionRoutes["session.interrupt"]).catch(() => {});
       }
       return;
@@ -758,9 +925,17 @@ export async function driveOpenCode(
     for (;;) {
       pending ??= iterator.next();
       const tick = deps.sleep(deps.tickMs ?? 1000).then(() => "tick" as const);
-      // A read that fails because the container is gone (or any other reason)
-      // propagates to the finally below, which closes the transport.
-      const next: IteratorResult<string> | "tick" = await Promise.race([pending, tick]);
+      // A read that fails because the container was replaced under the run is
+      // the verdict below (the survival clause's ceiling); any other failure
+      // propagates to the finally, which closes the transport, as before.
+      let next: IteratorResult<string> | "tick";
+      try {
+        next = await Promise.race([pending, tick]);
+      } catch (err) {
+        if (!(err instanceof Error && saysContainerReplaced(err))) throw err;
+        containerSaid = err;
+        break;
+      }
       if (next === "tick") {
         check();
         if (hardStopped) break;
@@ -814,9 +989,23 @@ export async function driveOpenCode(
     }
   } finally {
     transport.close();
-    agentSpan?.end(hardStopped || bypass || replyFailed ? "error" : "ok");
+    agentSpan?.end(hardStopped || bypass || replyFailed || containerSaid ? "error" : "ok");
   }
 
+  // The container was replaced under the run (the survival clause's ceiling):
+  // the last turn's calls are settled with the replaced note, the record holds
+  // everything the run had, and the run loop relaunches OpenCode from it in the
+  // container the run holds now — or closes the run `interrupted` for a restart
+  // when the relaunch is refused. Nothing of the old process is in the container
+  // that answers now, so the caller ends and removes nothing there.
+  if (containerSaid !== undefined) {
+    const record = bridge.record(recordBase, deadline);
+    bridge.closeOpenSpans((open) => openCodeReplacedCallNote(open.tool));
+    const now2 = await conn.container.identity().catch(() => undefined);
+    const replaced = new OpenCodeContainerReplacedError(containerSaid.message, conn.containerWord, now2, record);
+    note("sandbox_restarted", replaced.message);
+    throw replaced;
+  }
   if (bypass) throw bypass;
   if (replyFailed) throw replyFailed;
   if (hardStopped) return { answer: HARD_STOP_MESSAGE };

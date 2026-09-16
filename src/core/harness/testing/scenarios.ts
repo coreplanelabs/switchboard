@@ -20,6 +20,7 @@ import type { RunEvent } from "../../runEvents.js";
 import type { StepReport } from "../../runLedger/stepReport.js";
 import type { HarnessRequest, HarnessStart } from "../container.js";
 import {
+  HarnessContainerReplacedError,
   HarnessMismatchError,
   harnessFactsOf,
   type Finding,
@@ -64,6 +65,17 @@ export interface RunScript {
   followUp?: string;
   /** A hard stop requested before the model call of this 1-based number. */
   hardStopBeforeModelCall?: number;
+  /** The container the harness's process ran in is replaced under the run
+   *  before the model call of this 1-based number: the driver arms the next
+   *  feed read to fail with the executor's runtime-replaced word, and the
+   *  container renames itself, so the harness reads the survival clause's
+   *  ceiling with the words to corroborate it. */
+  containerReplacedBeforeModelCall?: number;
+  /** The row's process (named by the resume's facts) is still alive in this same
+   *  container on the resume — the survival clause's alive-here: `open` finds it
+   *  before anything is started and reconciles with it (re-attaches to it, or
+   *  ends it before a fresh start). */
+  processAliveOnResume?: boolean;
   /** The container's word for itself; `null` for a container that cannot name itself. */
   containerWord?: string | null;
 }
@@ -84,6 +96,8 @@ export interface DrivenRun {
   starts: HarnessStart[];
   /** The pids the container was asked to end. */
   killed: number[];
+  /** The run directories the container was asked to remove. */
+  removed: string[];
   /** Every request the harness made into the container's loopback server, in order; none for a harness that has no server. */
   requests: HarnessRequest[];
   /** What the model was asked, per call: the conversation it saw and the tools it was offered. */
@@ -182,6 +196,9 @@ export function foreignFactsFor(name: HarnessName): HarnessFacts {
         relaunches: 0,
       };
 }
+
+/** The root a dead process's row records — another than the one a fresh start is filed under, so its removal is seen. */
+const DEAD_ROW_ROOT = "/tmp/switchboard-run-c-before";
 
 const resumeOf = (facts: HarnessFacts): HarnessResume => ({
   messages: [{ role: "user", content: [{ type: "text", text: "carry on" }] }],
@@ -508,6 +525,124 @@ export const SCENARIOS: readonly ScenarioRow[] = [
       ]);
       assert.deepEqual(view[2], settled, "the model's view of the settlement turn is not the ledger's row");
       assert.equal(view.length, 3);
+    },
+  },
+  {
+    id: "survival-alive-here",
+    clause: "survival",
+    title:
+      "a resume whose facts name this same container reconciles with the process still alive here before a fresh one is placed: the run answers, a resumed note records whether it re-attached to the process or ended it for a fresh start, and no second process is started on a re-attach",
+    script: (driver) => ({
+      turns: [text("resumed here")],
+      processAliveOnResume: true,
+      resume: resumeOf(driver.facts({ pid: 999, container: driver.containerWord })),
+    }),
+    check: (run) => {
+      assert.equal(answered(run), "resumed here");
+      const resumed = notes(run).find((n) => n.kind === "resumed");
+      assert.ok(resumed, "no resumed note for the alive-here reconciliation");
+      // Two honest reconciliations: a re-attach to the living process — no fresh
+      // start, the process not ended — or an end of it before a fresh start.
+      const reAttached = run.starts.length === 0;
+      if (reAttached) {
+        assert.ok(!run.killed.includes(999), "a re-attach ended the live process");
+        assert.match(resumed.summary, /still (runs|answers)/);
+      } else {
+        assert.equal(run.starts.length, 1, "one fresh process was started on the record");
+        assert.ok(run.killed.includes(999), "the live process was not ended before the fresh start");
+        assert.match(resumed.summary, /ended|restart|start/);
+      }
+      assert.ok(!notes(run).some((n) => n.kind === "harness_error"), "a harness_error on a clean resume");
+    },
+  },
+  {
+    id: "survival-dead-here",
+    clause: "survival",
+    title:
+      "a resume whose facts name this same container but whose process no longer answers here takes the dead-process path exactly: the dead pid is not ended, its recorded root — another than the fresh start's — is removed from this container's disk, one fresh process starts on the record, the run answers, and the one resumed note is the fresh start's, never the alive path's",
+    script: (driver) => ({
+      turns: [text("resumed fresh")],
+      processAliveOnResume: false,
+      resume: resumeOf(driver.facts({ pid: 999, container: driver.containerWord, root: DEAD_ROW_ROOT })),
+    }),
+    check: (run) => {
+      assert.equal(answered(run), "resumed fresh");
+      assert.equal(run.starts.length, 1, "one fresh process was started on the record");
+      // A pid that does not answer is nobody's here: never ended. Its root on
+      // this container's disk is dead files: removed before the fresh start.
+      assert.ok(!run.killed.includes(999), "the dead pid was ended");
+      assert.ok(run.removed.includes(DEAD_ROW_ROOT), "the dead process's recorded root was not removed");
+      const resumed = notes(run).filter((n) => n.kind === "resumed");
+      assert.equal(resumed.length, 1, "not exactly one resumed note");
+      assert.doesNotMatch(resumed[0].summary, /still (runs|answers)|ended it/, "the note took the alive path");
+      assert.ok(!notes(run).some((n) => n.kind === "harness_error"), "a harness_error on a clean resume");
+    },
+  },
+  {
+    id: "survival-container-replaced",
+    clause: "survival",
+    title:
+      "the container is replaced with a tool call in flight: the run fails with the seam's container-replaced verdict carrying the record the loop's relaunch rebuilds from — the mirrored transcript with the in-flight call settled by the replaced note — a sandbox_restarted note names both containers' words, the in-flight call is on the record as a failed tool_result carrying the note, and nothing is killed or removed in the container that answers now",
+    script: {
+      turns: [call("c1", "bash", { command: "echo one" }), text("never")],
+      containerReplacedBeforeModelCall: 2,
+    },
+    check: (run) => {
+      const error = failed(run);
+      if (!(error instanceof HarnessContainerReplacedError))
+        return assert.fail(`not the seam's container-replaced verdict: ${error.constructor.name} — ${error.message}`);
+      // The verdict's words: the executor's condition, the two distinct container words.
+      assert.ok(error.said.length > 0, "the verdict carries no executor word");
+      assert.ok(error.was !== undefined && error.now !== undefined, "the verdict names neither container");
+      assert.notEqual(error.was, error.now, "the container did not rename itself");
+      const restarted = notes(run).find((n) => n.kind === "sandbox_restarted");
+      assert.ok(restarted, "no sandbox_restarted note");
+      assert.ok(
+        restarted.summary.includes(error.was) && restarted.summary.includes(error.now),
+        "the note does not name both containers' words",
+      );
+      // The record the relaunch rebuilds from is the mirrored transcript: the
+      // base plus the rows the run wrote (the ledger's steps), ending on the
+      // assistant turn whose call is in flight; the settlements name exactly
+      // that turn's calls.
+      const rec = error.record;
+      const stepTurns = run.steps.flatMap((s) => s.turns);
+      assert.ok(stepTurns.length > 0, "the run wrote no steps");
+      assert.deepEqual(
+        rec.messages.slice(rec.messages.length - stepTurns.length),
+        stepTurns,
+        "the record's rows are not the mirrored steps",
+      );
+      const lastAssistant = [...rec.messages].reverse().find((m) => m.role === "assistant");
+      assert.ok(lastAssistant, "the record's last turn is not an assistant turn");
+      const inFlight = lastAssistant.content
+        .filter((p): p is Extract<ContentPart, { type: "tool_use" }> => p.type === "tool_use")
+        .map((p) => p.id);
+      assert.deepEqual(inFlight, ["c1"], "the in-flight call is not the last assistant turn's call");
+      assert.deepEqual(
+        rec.settlements.map((s) => s.toolUse.id),
+        inFlight,
+        "the settlements do not name exactly the last assistant turn's calls",
+      );
+      // The in-flight call's settlement carries the replaced note — the result
+      // the rebuilt transcript reads in its place, so the next model call sees a
+      // result for every call at the death. The row asserts the record's
+      // settlement, not a `tool_result` event, because the drivers differ on
+      // whether the call's span is open at the replacement: the fake serve holds
+      // the call open at the replacement (the strong case — it plays the ask and
+      // the bot's reply, then stops before the result), while pi's scripted
+      // double completes each call before the next model call, so on pi this row
+      // is the between-calls case and the in-flight settlement is proven in pi's
+      // own harness tests. What both settle identically is the RECORD — the last
+      // assistant turn's calls, the note in the result's place — which is what
+      // `prepareRelaunch` rebuilds the transcript from, so that is what this
+      // neutral row asserts.
+      const settlement = rec.settlements[0];
+      assert.ok(settlement.action === "synthetic", "the settlement is not the synthetic replaced note");
+      assert.match(settlement.text, /replaced|in flight|lost/, "the settlement does not carry the replaced note");
+      // Nothing of the old process is in the container that answers now.
+      assert.deepEqual(run.killed, [], "a pid was ended in the replacement");
+      assert.deepEqual(run.removed, [], "a root was removed in the replacement");
     },
   },
   {

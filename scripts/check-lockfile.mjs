@@ -58,6 +58,10 @@ export const REQUIRED_VARIANTS = {
   "@tailwindcss/oxide-": ["linux-x64-gnu", "darwin-arm64"],
   "lightningcss-": ["linux-x64-gnu", "darwin-arm64"],
   "@esbuild/": ["linux-x64", "darwin-arm64"],
+  // @opencode/cli (the second harness's binary, a devDependency the conformance
+  // suite runs against the real binary with): CI runs linux-x64, the laptops
+  // darwin-arm64, so both platform packages must be recorded.
+  "@opencode/cli-": ["linux-x64", "darwin-arm64"],
 };
 
 /** Pure: the missing `{ family, variant }` pairs for a lockfile's package list. */

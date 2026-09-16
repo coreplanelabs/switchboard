@@ -146,7 +146,9 @@ const CURL_GITHUB_WRITE = new RegExp(
 export const OPENCODE_ACTION_TO_TOOL_WORD: Readonly<Record<string, string>> = {
   shell: "bash",
   edit: "edit",
-  write: "write",
+  // OpenCode's `write` and `patch` tools both assert the `edit` action (their
+  // `permission: "edit"`), so `write` is never an action here; a call to the
+  // write tool arrives as `edit`.
   patch: "edit",
   read: "read",
   glob: "find",

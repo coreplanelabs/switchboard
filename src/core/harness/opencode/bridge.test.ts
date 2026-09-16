@@ -16,6 +16,8 @@ import {
   type OpenCodeBridgeObservation,
 } from "./bridge.js";
 import { OPENCODE_EVENT_DISPOSITION, openCodeDispositionCounts, openCodeDispositionOf } from "./dispositions.js";
+import { openCodeReplacedCallNote } from "./session.js";
+import { openCodeRunPaths } from "./process.js";
 import { openCodeDriver } from "./testing/driver.js";
 
 // Feature: docs/reference/specs/harness.md items 2 and 4 — OpenCode's gate and
@@ -298,6 +300,57 @@ describe("the gate's honest cannot, the compaction row, the budget stop, the unk
   });
 });
 
+const inputStarted = (callId: string, name: string) =>
+  ev("session.tool.input.started", { sessionID: "ses_c", assistantMessageID: "msg_a0", id: callId, name });
+const called = (callId: string) =>
+  ev("session.tool.called", {
+    sessionID: "ses_c",
+    assistantMessageID: "msg_a0",
+    id: callId,
+    input: {},
+    executed: false,
+  });
+
+describe("a pre-execution settlement is narrated by what the facts prove (F2), and a call open when the container is replaced is settled on the record", () => {
+  it("a tool the identity's deny rules removed — absent from its own tools — settled with no ask is a tool_refused note naming the deny rules; a tool that is on the roster but errors before it runs is a harness_error, never dressed as a refusal", () => {
+    // Under identity read, `write` is not one of the run's own tools: OpenCode
+    // failed it with no ask because the tool was never there — the deny rules.
+    const removed = harness({ identity: "read" });
+    removed.bridge.observe(inputStarted("c1", "write"));
+    removed.bridge.observe(called("c1"));
+    removed.bridge.observe(settled("session.tool.failed", "c1"));
+    const refusedNote = notes(removed.events).find((n) => n.kind === "tool_refused");
+    expect(refusedNote?.summary).toMatch(/deny rules removed it/);
+    expect(notes(removed.events).some((n) => n.kind === "harness_error")).toBe(false);
+
+    // `read` IS on the run's own tools under identity read: a settlement with no
+    // ask and nothing run is some other pre-execution failure, said as that —
+    // never the deny rules, which did not remove `read`.
+    const errored = harness({ identity: "read" });
+    errored.bridge.observe(inputStarted("c2", "read"));
+    errored.bridge.observe(called("c2"));
+    errored.bridge.observe(settled("session.tool.failed", "c2"));
+    const errNote = notes(errored.events).find((n) => n.kind === "harness_error");
+    expect(errNote?.summary).toMatch(/before it ran, with no ask/);
+    expect(notes(errored.events).some((n) => n.kind === "tool_refused")).toBe(false);
+  });
+
+  it("closeOpenSpans settles every call still open with the replaced note: each is a failed tool_result on the record carrying the note, and none is left open", () => {
+    const { bridge, events } = harness();
+    bridge.observe(inputStarted("c1", "shell"));
+    bridge.observe(called("c1"));
+    // The call is open (no success/failed): the container was replaced under it.
+    bridge.closeOpenSpans((open) => openCodeReplacedCallNote(open.tool));
+    const results = events.filter((e): e is Extract<RunEvent, { type: "tool_result" }> => e.type === "tool_result");
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ tool: "bash", ok: false, callId: "c1" });
+    expect(results[0].summary).toBe(openCodeReplacedCallNote("bash"));
+    // Idempotent: a second close settles nothing more (no span left open).
+    bridge.closeOpenSpans((open) => openCodeReplacedCallNote(open.tool));
+    expect(events.filter((e) => e.type === "tool_result")).toHaveLength(1);
+  });
+});
+
 /** One end-to-end run through the fake serve. */
 async function run(script: RunScript): Promise<DrivenRun> {
   return openCodeDriver().run(script);
@@ -473,6 +526,87 @@ describe("the loop — a reply that cannot be posted, and the narration's timing
       )
       .map((e) => (e.type === "assistant" ? `assistant:${e.text}` : `tool_call:${e.callId}`));
     expect(order).toEqual(["assistant:checking the tree", "tool_call:c1", "assistant:one more look", "tool_call:c2"]);
+  });
+});
+
+describe("wind-down parity, an undelivered follow-up, and the alive-here reconciliation", () => {
+  it("F1: a steer the server never took is recorded as undelivered and handed back to the inbox, never as folded in, and no input event carries it", async () => {
+    const r = await openCodeDriver({ steerPostFails: true }).run({
+      turns: [
+        {
+          content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "echo hi" } }],
+          stopReason: "tool_use",
+        },
+        { content: [{ type: "text", text: "done" }], stopReason: "end_turn" },
+      ],
+      followUp: "also check the docs",
+    });
+    expect(answered(r)).toBe("done");
+    const follow = notes(r.events).filter((n) => n.kind === "follow_up");
+    expect(follow.some((n) => /not delivered/.test(n.summary))).toBe(true);
+    expect(follow.some((n) => /folded in/.test(n.summary))).toBe(false);
+    // The follow-up never reached the model: no input event carries it.
+    expect(r.events.some((e) => e.type === "input")).toBe(false);
+  });
+
+  it("MINOR: a relayed tool asked during the write-up is refused with the write-up's words, so OpenCode and pi refuse alike", async () => {
+    // No budget left: the first check opens the write-up, and the relayed tool
+    // asked in it is refused at the plugin's authorize, its side effect never run.
+    // (The row's server does not answer here, so the resume starts fresh.)
+    const driver = openCodeDriver();
+    const r = await driver.run({
+      turns: [
+        {
+          content: [{ type: "tool_use", id: "c1", name: "update_status", input: { checklist: "○ step" } }],
+          stopReason: "tool_use",
+        },
+        { content: [{ type: "text", text: "wrapped up" }], stopReason: "end_turn" },
+      ],
+      resume: {
+        messages: [{ role: "user", content: [{ type: "text", text: "carry on" }] }],
+        settlements: [],
+        remainingMs: 0,
+        turn: 0,
+        inboxConsumedSeq: 0,
+        facts: driver.facts({ pid: 31, container: driver.containerWord }),
+      },
+    });
+    const refused = notes(r.events).find((n) => n.kind === "tool_refused" && /update_status/.test(n.summary));
+    expect(refused, "the relayed tool was not refused during the write-up").toBeDefined();
+    expect(refused?.summary).toMatch(/time budget|no more tool calls/);
+    // The relay never ran: its side effect (the status report) did not land.
+    expect(r.statusReports).toEqual([]);
+  });
+
+  it("MAJOR 2: a resume naming this container whose server still answers ends it and its tailer before a fresh start, removes nothing else, and says so", async () => {
+    const root = openCodeRunPaths("run-c").dir;
+    const driver = openCodeDriver();
+    const rowFacts = { ...driver.facts({ pid: 999, container: driver.containerWord }), tailerPid: 888 };
+    const r = await driver.run({
+      turns: [{ content: [{ type: "text", text: "resumed" }], stopReason: "end_turn" }],
+      processAliveOnResume: true,
+      resume: {
+        messages: [{ role: "user", content: [{ type: "text", text: "carry on" }] }],
+        settlements: [],
+        remainingMs: 300_000,
+        turn: 0,
+        inboxConsumedSeq: 0,
+        facts: rowFacts,
+      },
+    });
+    expect(answered(r)).toBe("resumed");
+    // The row's server was found on its recorded port — another than the fresh launch's — before anything was ended.
+    const recordedPort = rowFacts.harness === "opencode" ? rowFacts.port : -1;
+    expect(r.requests.filter((q) => q.port === recordedPort).map((q) => q.path)).toEqual(["/api/health"]);
+    // Both the row's server and its tailer are ended before the fresh start.
+    expect(r.killed).toContain(999);
+    expect(r.killed).toContain(888);
+    expect(r.removed).toContain(root);
+    // Exactly one fresh OpenCode is started on the record.
+    expect(r.starts).toHaveLength(1);
+    const resumed = notes(r.events).find((n) => n.kind === "resumed");
+    expect(resumed?.summary).toMatch(/still answers/);
+    expect(resumed?.summary).toMatch(/ended it and its tailer/);
   });
 });
 

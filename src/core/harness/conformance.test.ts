@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, expect, it } from "vitest";
 import { harnessDrivers } from "./testing/drivers.js";
-import { openCodeDriver } from "./opencode/testing/driver.js";
+import { openCodeDriver, type MutatedClause } from "./opencode/testing/driver.js";
 import {
   assertReadsRecord,
   buildHarnessConformanceMatrix,
@@ -61,6 +61,7 @@ describe("the table", () => {
       progress: [],
       starts: [],
       killed: [],
+      removed: [],
       requests: [],
       modelCalls: [],
       statusReports: [],
@@ -80,18 +81,26 @@ describe("the table", () => {
     expect(() => assertReadsRecord({ id: "x" }, new Set(["facts", "outcome"]))).toThrow(/neither events nor steps/);
   });
 
-  it("the matrix prints every harness × row, pi green on every row, and a harness without a driver as absent", async () => {
+  it("the matrix prints every harness × row: pi green on every row, OpenCode green on every row but its one declared cannot, over the fake serve", async () => {
     const columns = await buildHarnessConformanceMatrix(drivers);
-    expect(columns.map((c) => c.harness)).toEqual(["pi"]);
-    expect(Object.values(columns[0].rows).every((o) => o === "pass")).toBe(true);
-    expect(Object.keys(columns[0].rows)).toEqual(SCENARIOS.map((r) => r.id));
+    expect(columns.map((c) => c.harness)).toEqual(["pi", "opencode"]);
+    const [pi, opencode] = columns;
+    // pi passes every row (it prevents a forged approval by construction).
+    expect(Object.values(pi.rows).every((o) => o === "pass")).toBe(true);
+    // OpenCode passes every row but the permanent gate-approval-unforgeable cannot.
+    for (const row of SCENARIOS)
+      expect(opencode.rows[row.id]).toBe(row.id === "gate-approval-unforgeable" ? "cannot" : "pass");
+    expect(Object.keys(pi.rows)).toEqual(SCENARIOS.map((r) => r.id));
     const rendered = renderHarnessConformanceMatrix(columns, ["pi", "opencode"]);
     const lines = rendered.split("\n");
     expect(lines[0]).toContain(`${SCENARIOS.length} rows × 2 harness(es)`);
     expect(lines[2]).toBe("| Clause | Row | pi | opencode |");
-    const body = lines.slice(4).filter((l) => l.startsWith("|"));
-    expect(body).toHaveLength(SCENARIOS.length);
-    for (const line of body) expect(line.endsWith("| ✅ | — |")).toBe(true);
+    const body = lines.slice(4).filter((l) => l.startsWith("|") && !l.startsWith("| Clause") && !l.startsWith("|---"));
+    expect(body.filter((l) => l.includes("`gate-approval-unforgeable`"))[0].endsWith("| ✅ | ✖ |")).toBe(true);
+    for (const line of body.filter((l) => !l.includes("`gate-approval-unforgeable`")))
+      expect(line.endsWith("| ✅ | ✅ |")).toBe(true);
+    // The declared cannot's reason is printed beneath the table.
+    expect(rendered).toContain("✖ opencode cannot `gate-approval-unforgeable`:");
   });
 
   it("a declared cannot is asserted, never skipped: a declared row whose run fails is the verdict cannot, a declared row that passes is a failure naming the stale declaration, an undeclared failure is fail, and the matrix prints the declared cell with its reason beneath the table", async () => {
@@ -105,6 +114,7 @@ describe("the table", () => {
       progress: [],
       starts: [],
       killed: [],
+      removed: [],
       requests: [],
       modelCalls: [],
       statusReports: [],
@@ -192,4 +202,27 @@ describe("conformance — opencode (fake serve, gate and record)", () => {
     expect(rendered).toContain("| ✖ |");
     expect(rendered).toContain("✖ opencode cannot `gate-approval-unforgeable`:");
   });
+});
+
+// The mutation requirement (record 0038): removing one clause's behaviour from OpenCode fails the
+// suite, once per clause. The fake serve can switch a clause off
+// (`MutatedClause`), and the clause's own row — green with the clause on — goes
+// red with it off, so a regression in any clause cannot pass the table.
+describe("conformance — opencode: the six mutation rows (each clause switched off fails its row)", () => {
+  const cases: Array<{ clause: MutatedClause; row: string }> = [
+    { clause: "credential", row: "credential-bearer-only" },
+    { clause: "gate", row: "gate-decides-every-call" },
+    { clause: "relay", row: "relay-runs-in-bot" },
+    { clause: "record", row: "record-vocabulary-and-steps" },
+    { clause: "conversation", row: "conversation-seed-then-prompt" },
+    { clause: "survival", row: "survival-facts-on-row" },
+  ];
+
+  for (const { clause, row: rowId } of cases) {
+    const row = SCENARIOS.find((r) => r.id === rowId)!;
+    it(`${clause}: on, the row passes; off, the row fails`, async () => {
+      expect((await rowVerdict(openCodeDriver(), row)).outcome).toBe("pass");
+      expect((await rowVerdict(openCodeDriver({ mutate: clause }), row)).outcome).toBe("fail");
+    });
+  }
 });

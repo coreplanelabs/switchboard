@@ -1,56 +1,69 @@
 // OpenCode's driver for the conformance table (docs/reference/specs/harness.md
-// item 11): a run driven through the real `OpenCodeBridge` and `driveOpenCode`
-// over a fake `serve` — an in-process scripted OpenCode that answers the
-// bridge's writes (prompt, permission reply, interrupt) and appends the feed
-// records the tailer would have written, from the row's scripted model turns.
-// The bridge reads that feed through pi's log transport exactly as it reads a
-// real run's, so a row reads what the record would hold. The real tailer is
-// U10's and tested there; here the scripted serve stands in for the server and
-// the tailer both. The driver plants the sentinel under the bot's provider-key
-// variables (derived from the run's provider dialect, the config's table), and
-// declares the one cannot the maintainer decided: OpenCode's gate cannot be
-// unforgeable by construction — a forged approval is caught by detection, one
-// tool call late, not prevented (record 0038's fifth amendment).
+// item 11): a run driven through the REAL `OpenCodeHarness` object — its full
+// `open` (the launch through the seam, the seed imported as an authored
+// session, the request prompted, the relay registered, the follow-up drain, the
+// gate-and-record loop `driveOpenCode`) — over a fake `opencode serve`. The
+// fake serve is an in-process scripted OpenCode: it answers the launch's
+// readiness probes, the session import and create, the prompt, the permission
+// reply, the interrupt and the wait, and it plays the row's scripted model
+// turns by appending the feed records the tailer would have written and by
+// running the relayed tools through the bot exactly as the real plugin's
+// `POST /harness/tool` would. The bridge reads that feed through pi's log
+// transport exactly as it reads a real run's, and the model calls the driver
+// records from the store stand in for the proxy's wire requests, so a row reads
+// what the record — and the model — would hold. The real binary is the driver
+// in `../../testing/drivers.ts`; here the scripted serve stands in for the
+// server, the tailer and the model at once.
+//
+// The one declared cannot is the maintainer's decision (record 0038's fifth
+// amendment): OpenCode's gate cannot be unforgeable by construction — a forged
+// approval is caught by detection, one tool call late, not prevented.
 
 import type { AgentDef, Identity } from "../../../../agents/registry.js";
 import type { Executor } from "../../../../execution/executor.js";
 import { updateStatusTool } from "../../../../tools/status.js";
 import type { ChatMessage, ContentPart } from "../../../chatMessage.js";
-import type { ProviderConfig } from "../../../provider.js";
+import type { CompletionRequest, ProviderConfig, ToolDef } from "../../../provider.js";
 import type { RunEvent } from "../../../runEvents.js";
 import type { StepReport } from "../../../runLedger/stepReport.js";
 import { RunControl } from "../../../runRegistry/runControl.js";
 import { FollowUpInbox } from "../../../threadAdmission.js";
+import { openThroughSeam, type HarnessDeps, type HarnessFacts, type HarnessRun } from "../../contract.js";
 import {
-  openThroughSeam,
-  type Finding,
-  type Harness,
-  type HarnessDeps,
-  type HarnessFacts,
-  type HarnessRun,
-  type HarnessSession,
-} from "../../contract.js";
-import type { HarnessContainer, HarnessRequest } from "../../container.js";
-import { HarnessRegistry } from "../../pi/relay.js";
+  HarnessContainerError,
+  HarnessContainerRuntimeReplacedError,
+  type HarnessRequest,
+  type HarnessResponse,
+} from "../../container.js";
+import { authorizeToolCall, HarnessRegistry, runRelayedTool } from "../../pi/relay.js";
 import { FakeHarnessContainer } from "../../testing/fakeContainer.js";
 import type { DrivenRun, HarnessDriver, ModelTurn, RunScript } from "../../testing/scenarios.js";
-import { driveOpenCode, type OpenCodeConnection } from "../bridge.js";
-import { OPENCODE_EVENT_DISPOSITION } from "../dispositions.js";
-import { openCodeBuiltinToolsFor, openCodeFacts, openCodeProviderPackage, openCodeRunPaths } from "../process.js";
+import { openCodeToolNameWord } from "../bridge.js";
+import { OpenCodeHarness } from "../harness.js";
+import { OPENCODE_VERSION } from "../client.js";
+import { openCodeProviderPackage, openCodeRunPaths } from "../process.js";
 
 const RUN_ID = "run-c";
-const SESSION_ID = "ses_c";
+const SESSION_ID = "ses_run-c";
 const BEARER = "sbr_run-c.conformance-secret-no-row-may-carry";
 const CONTAINER_WORD = "vm-conformance";
-const PASSWORD = "conformance-password";
+/** The word the container answers after it is replaced under the run, so the
+ *  replaced verdict's `was`/`now` are two distinct words. */
+const REPLACED_WORD = "vm-conformance-2";
 const PROVIDER_KEY_SENTINEL = "provider-key-sentinel-no-harness-may-forward";
 const NOW = 1_700_000_000_000;
+/** The port the fake serve of THIS generation listens on: the free port every launch is given. */
 const PORT = 41_000;
+/** The port a row's facts record for a previous generation's server — another
+ *  port than this generation's launch gets, so a probe of the recorded port is
+ *  told apart from the launch's readiness probes and answered as the row's
+ *  script says: the old server still up (`processAliveOnResume`), or gone. */
+const RECORDED_PORT = 41_001;
+const HARNESS_URL = "https://bot.example.com";
 
-/** The bot's provider-key variable for a dialect: what a provider config could
- *  interpolate for a key, and so what must never reach the child's environment.
- *  Derived from the config's provider table (its `package`), not a hardcoded
- *  trio, so a new dialect brings its own variable. */
+/** The bot's provider-key variable for a dialect, planted for the run's
+ *  duration: what a harness that forwarded the bot's key would leak, derived
+ *  from the run's provider dialect so a new dialect brings its own variable. */
 function providerKeyEnvs(providerType: ProviderConfig["type"]): string[] {
   return openCodeProviderPackage(providerType).includes("anthropic")
     ? ["ANTHROPIC_API_KEY"]
@@ -77,8 +90,8 @@ const executor: Executor = {
 };
 
 /** One scenario tool call as OpenCode names and asserts it: the pi tool word the
- *  scenario scripts becomes OpenCode's tool name and permission action, and its
- *  resources are the command, path or pattern the gate reads. */
+ *  scenario scripts becomes OpenCode's tool name and permission action, its
+ *  resources the command, path or pattern the gate reads. */
 function toolAsk(name: string, input: Record<string, unknown>): { name: string; action: string; resources: string[] } {
   switch (name) {
     case "bash":
@@ -98,22 +111,26 @@ function toolAsk(name: string, input: Record<string, unknown>): { name: string; 
   }
 }
 
-/** The result text an allowed tool answers with. */
-function toolResultText(name: string, input: Record<string, unknown>): string {
+/** The result text an allowed OpenCode-own tool answers with. */
+function ownToolResultText(name: string, input: Record<string, unknown>): string {
   if (name === "bash") return `ran: ${String(input.command ?? "")}`;
   return `${name} done`;
 }
 
 type ToolUse = Extract<ContentPart, { type: "tool_use" }>;
 
-/** The scripted OpenCode: plays the row's turns, appending the feed records the
- *  tailer would have written (through `container.emit`) and answering the
- *  bridge's writes over the container. Its pending replies are the deferreds
- *  the reply route resolves. */
 interface Decision {
   reply: "once" | "reject";
   message?: string;
 }
+
+/** One clause's behaviour switched off, so the suite fails the clause's row once
+ *  (record 0038's mutation requirement): `credential` leaks a provider key into the server's
+ *  environment; `gate` runs a refused tool anyway; `relay` returns a canned
+ *  result instead of running the tool in the bot; `record` drops the tool call
+ *  from the stream; `conversation` never imports the seed; `survival` never
+ *  writes the row's facts. */
+export type MutatedClause = "credential" | "gate" | "relay" | "record" | "conversation" | "survival";
 
 /** Faults the fake serve can be told to commit, beyond the row's script. */
 export interface FakeServeOptions {
@@ -121,25 +138,55 @@ export interface FakeServeOptions {
   failReplyPosts?: number;
   /** Every permission-reply POST throws (the container gone under the request), the ask left pending. */
   replyPostThrows?: boolean;
+  /** Every steer POST (a follow-up) answers 500: the server never takes the follow-up. */
+  steerPostFails?: boolean;
+  /** The relay registry the run is opened on; a test hands one that already
+   *  holds the run's registration with a relayed call still running, so a
+   *  relaunch is seen to take it over rather than register anew. Fresh unless given. */
+  registry?: HarnessRegistry;
+  /** One clause's behaviour removed, for the mutation rows. */
+  mutate?: MutatedClause;
 }
 
+/** The scripted OpenCode: answers the harness's writes and plays the row's
+ *  turns by appending the feed records the tailer would have written. */
 class ScriptedServe {
   private readonly store: Record<string, unknown>[] = [];
   private readonly replies = new Map<string, (decision: Decision) => void>();
+  private readonly pendingSteers: string[] = [];
   private interrupted = false;
+  /** The container was replaced with the last turn's call in flight: the play
+   *  stops, having left that call open (no success event). */
+  private replaced = false;
   private ordinal = 0;
   private replyFailuresLeft: number;
   private readonly replyPostThrows: boolean;
+  private readonly steerPostFails: boolean;
+  private readonly mutate: MutatedClause | undefined;
+  private readonly offered: Set<string>;
+  private readonly relayNames: Set<string>;
+  private readonly toolDefs: ToolDef[];
+  /** The model requests the driver records — the proxy's wire, from the store the model saw. */
+  readonly modelCalls: CompletionRequest[] = [];
 
   constructor(
     private readonly container: FakeHarnessContainer,
+    private readonly run: HarnessRun,
     private readonly script: RunScript,
-    request: string,
+    private readonly deps: HarnessDeps,
     options: FakeServeOptions = {},
   ) {
-    this.store.push({ id: "msg_u0", type: "user", text: request, time: { created: NOW } });
     this.replyFailuresLeft = options.failReplyPosts ?? 0;
     this.replyPostThrows = options.replyPostThrows === true;
+    this.steerPostFails = options.steerPostFails === true;
+    this.mutate = options.mutate;
+    const builtins = new OpenCodeHarness().builtinTools(run.agent.identity);
+    this.relayNames = new Set(run.tools.map((t) => t.name));
+    this.offered = new Set([...builtins, ...this.relayNames]);
+    this.toolDefs = [
+      ...builtins.map((name): ToolDef => ({ name, description: "", inputSchema: {} })),
+      ...run.tools.map((t): ToolDef => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
+    ];
   }
 
   private emitEvent(type: string, data: Record<string, unknown>): void {
@@ -168,21 +215,72 @@ class ScriptedServe {
     });
   }
 
-  /** Route one of the bridge's writes: the prompt starts the play, a reply
-   *  unblocks its ask, an interrupt ends it. */
-  onRequest(req: HarnessRequest): { status: number; headers: Record<string, string>; body: string } {
+  /** Route one of the harness's writes: the readiness probes, the session
+   *  import and create, the prompt (a queue starts the play, a steer injects a
+   *  user turn), the permission reply, the interrupt, the wait. */
+  onRequest(req: HarnessRequest): HarnessResponse {
+    const j = (status: number, obj: unknown): HarnessResponse => ({
+      status,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(obj),
+    });
+    // A request to the port a previous generation's row recorded, not this
+    // generation's launch: the row's server is still up there only when the
+    // script says so; otherwise nothing listens and the connection is refused,
+    // as the container answers for a port with no server.
+    if (req.port !== PORT) {
+      if (this.script.processAliveOnResume) return j(200, { healthy: true, version: OPENCODE_VERSION, pid: 77 });
+      throw new HarnessContainerError(
+        "request",
+        `curl: (7) Failed to connect to 127.0.0.1 port ${req.port}: Connection refused`,
+      );
+    }
+    if (req.method === "GET" && req.path === "/api/health")
+      return j(200, { healthy: true, version: OPENCODE_VERSION, pid: 77 });
+    if (req.method === "GET" && req.path === "/api/config") {
+      // The document the launch actually wrote, so readiness holds the run's own config.
+      const written = this.container.files.get(configPath());
+      const info = written ? (JSON.parse(written) as Record<string, unknown>) : {};
+      return j(200, [{ type: "document", path: configPath(), info }]);
+    }
+    if (req.method === "POST" && req.path === "/api/plugin/await-activation")
+      return { status: 204, headers: {}, body: "" };
+    if (req.method === "POST" && req.path === "/api/session/import") {
+      const body = parseBody(req.body);
+      // The conversation clause switched off: the seed is never imported, so the
+      // model's first call does not see the thread's earlier turns.
+      if (this.mutate !== "conversation")
+        for (const m of Array.isArray(body.messages) ? body.messages : [])
+          this.store.push(m as Record<string, unknown>);
+      return j(200, { data: { id: (body.info as { id?: string })?.id ?? SESSION_ID } });
+    }
+    if (req.method === "POST" && req.path === "/api/session") return j(200, { data: { id: SESSION_ID } });
+    if (req.method === "POST" && req.path.endsWith("/wait")) return { status: 204, headers: {}, body: "" };
     if (req.method === "POST" && req.path.endsWith("/prompt")) {
-      if (parseBody(req.body).delivery !== "steer") void this.play();
-      return { status: 200, headers: {}, body: JSON.stringify({ id: "inb_0" }) };
+      const body = parseBody(req.body);
+      const text = String(body.text ?? "");
+      if (body.delivery === "steer") {
+        // The steer POST the server never takes (F1): the follow-up drainer must
+        // record it as undelivered and hand it back to the inbox, never as read.
+        if (this.steerPostFails) return j(500, { error: "the store hiccuped" });
+        this.pendingSteers.push(text);
+      } else {
+        // A rebuild's prompt is the continue that triggers the session; the
+        // imported record already holds the conversation and the settlement, so
+        // the continue's echo is elided (the mirror starts from the settlement
+        // turn it primed). A fresh run's prompt is the request, a store turn.
+        if (!this.script.resume)
+          this.store.push({ id: `msg_u${this.store.length}`, type: "user", text, time: { created: NOW } });
+        void this.play();
+      }
+      return j(200, { data: { id: `inb_${this.ordinal++}` } });
     }
     const reply = /\/permission\/([^/]+)\/reply$/.exec(req.path);
     if (req.method === "POST" && reply) {
-      // A reply POST that never reaches the server, or one the server fails:
-      // either way the ask stays pending, as the real failure would leave it.
       if (this.replyPostThrows) throw new Error("curl: (7) Failed to connect to 127.0.0.1: the container is gone");
       if (this.replyFailuresLeft > 0) {
         this.replyFailuresLeft--;
-        return { status: 500, headers: {}, body: JSON.stringify({ error: "the store hiccuped" }) };
+        return j(500, { error: "the store hiccuped" });
       }
       const resolve = this.replies.get(reply[1]);
       if (resolve) {
@@ -199,19 +297,63 @@ class ScriptedServe {
       this.interrupted = true;
       for (const resolve of this.replies.values()) resolve({ reply: "reject" });
       this.replies.clear();
-      return { status: 200, headers: {}, body: JSON.stringify({ interrupted: true }) };
+      return j(200, { interrupted: true });
     }
-    return { status: 404, headers: {}, body: "" };
+    return j(404, { error: "no such route" });
   }
 
   private waitReply(requestID: string): Promise<Decision> {
     return new Promise((resolve) => this.replies.set(requestID, resolve));
   }
 
+  /** Any steers posted since the last turn, injected into the store as user
+   *  turns, so the model's next call sees them (as OpenCode delivers a steer at
+   *  the next step boundary). */
+  private flushSteers(): void {
+    for (const text of this.pendingSteers.splice(0))
+      this.store.push({ id: `msg_s${this.store.length}`, type: "user", text, time: { created: NOW } });
+  }
+
+  /** The store the model saw, as the completion request the proxy would carry. */
+  private recordModelCall(): void {
+    this.modelCalls.push({
+      model: this.run.model.id,
+      system: this.run.system,
+      messages: storeToMessages(this.store),
+      tools: this.toolDefs,
+      maxTokens: this.run.agent.maxTokens,
+    });
+  }
+
   private async play(): Promise<void> {
     if (this.script.unknownEventKind) this.emitEvent(this.script.unknownEventKind, { sessionID: SESSION_ID });
-    for (let t = 0; t < this.script.turns.length && !this.interrupted; t++)
+    for (let t = 0; t < this.script.turns.length && !this.interrupted; t++) {
+      // A hard stop before this model call (`hardStopBeforeModelCall`): request
+      // it, then wait for the loop to see it and interrupt the session (the
+      // interrupt route sets `interrupted`) before this turn plays — so the run
+      // ends hard-stopped, never on this turn's answer.
+      if (this.script.hardStopBeforeModelCall === t + 1) {
+        this.run.control?.requestStop("hard");
+        for (let i = 0; i < 200 && !this.interrupted; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+      }
+      if (this.interrupted) break;
+      this.flushSteers();
+      this.recordModelCall();
       await this.playTurn(this.script.turns[t], t);
+      if (this.replaced) {
+        // The container was replaced with this turn's call in flight: rename the
+        // container (so the verdict's was → now are two words) and arm the next
+        // feed read to fail with the executor's word once the records already
+        // written — this turn among them — are read. No further turns; the call
+        // stays open, its result never delivered.
+        this.container.vm = REPLACED_WORD;
+        this.container.failOnceDrained = new HarnessContainerRuntimeReplacedError(
+          "read",
+          "runtime-replaced: the sandbox was replaced under the run",
+        );
+        return;
+      }
+    }
     this.emitEvent(this.interrupted ? "session.execution.interrupted" : "session.execution.succeeded", {
       sessionID: SESSION_ID,
       ...(this.interrupted ? { reason: "user" } : {}),
@@ -224,13 +366,12 @@ class ScriptedServe {
     const content: Record<string, unknown>[] = [];
     for (const part of turn.content) {
       if (part.type === "text") {
-        const ordinal = this.ordinal;
-        this.emitEvent("session.text.started", { sessionID: SESSION_ID, assistantMessageID, ordinal });
-        this.emitEvent("session.text.ended", { sessionID: SESSION_ID, assistantMessageID, ordinal, text: part.text });
+        this.emitEvent("session.text.started", { sessionID: SESSION_ID, assistantMessageID });
+        this.emitEvent("session.text.ended", { sessionID: SESSION_ID, assistantMessageID, text: part.text });
         content.push({ type: "text", text: part.text });
       } else if (part.type === "tool_use") {
-        content.push(await this.playToolCall(part, assistantMessageID, index === 0));
-        if (this.interrupted) break;
+        content.push(await this.playToolCall(part, assistantMessageID, index));
+        if (this.interrupted || this.replaced) break;
       }
     }
     this.emitEvent("session.step.ended", {
@@ -244,18 +385,47 @@ class ScriptedServe {
       id: assistantMessageID,
       type: "assistant",
       agent: "switchboard",
-      model: { providerID: "switchboard", id: "claude-fable-5" },
+      model: { providerID: "switchboard", id: this.run.model.id },
       content,
       time: { created: NOW, completed: NOW },
     });
     this.emitMessages();
   }
 
+  private toolContent(
+    callId: string,
+    name: string,
+    input: Record<string, unknown>,
+    status: "completed" | "error" | "running",
+    body: unknown,
+  ): Record<string, unknown> {
+    return {
+      type: "tool",
+      id: callId,
+      name,
+      state:
+        status === "completed"
+          ? { status, input, content: body as unknown[] }
+          : status === "running"
+            ? // A call in flight when the container was replaced: the store holds it
+              // still running, so the rebuilt record projects an assistant turn with
+              // the call and no result, and the settlement note stands in its place.
+              { status, input }
+            : {
+                status,
+                input,
+                error: { type: "permission.rejected", message: String(body) },
+                content: [{ type: "text", text: String(body) }],
+              },
+    };
+  }
+
   private async playToolCall(
     part: ToolUse,
     assistantMessageID: string,
-    firstTurn: boolean,
+    turnIndex: number,
   ): Promise<Record<string, unknown>> {
+    const firstTurn = turnIndex === 0;
     const callId = part.id;
     const input = (typeof part.input === "object" && part.input !== null ? part.input : {}) as Record<string, unknown>;
     const ask = toolAsk(part.name, input);
@@ -271,32 +441,43 @@ class ScriptedServe {
       id: callId,
       text: JSON.stringify(input),
     });
-    this.emitEvent("session.tool.called", {
-      sessionID: SESSION_ID,
-      assistantMessageID,
-      id: callId,
-      input,
-      executed: false,
-    });
-    const text = toolResultText(part.name, input);
-    const success = () => {
+    // The record clause switched off: the tool call never reaches the stream, so
+    // the record loses its `tool_call` vocabulary.
+    if (this.mutate !== "record")
+      this.emitEvent("session.tool.called", {
+        sessionID: SESSION_ID,
+        assistantMessageID,
+        id: callId,
+        input,
+        executed: false,
+      });
+
+    // A tool the identity's deny rules removed: OpenCode fails it with no ask
+    // because the tool was never there — the walls held, nothing ran.
+    if (!this.offered.has(part.name)) {
+      const message = `No tool named "${ask.name}" is currently available. Please use a tool from the available tool list.`;
+      this.emitEvent("session.tool.failed", {
+        sessionID: SESSION_ID,
+        assistantMessageID,
+        id: callId,
+        executed: false,
+        error: { type: "tool.execution", message },
+      });
+      return this.toolContent(callId, ask.name, input, "error", message);
+    }
+
+    // A bypass (AE2): the tool runs with no ask the bot answered.
+    if (firstTurn && this.script.bypassGate) {
+      const content = [{ type: "text", text: ownToolResultText(part.name, input) }];
       this.emitEvent("session.tool.success", {
         sessionID: SESSION_ID,
         assistantMessageID,
         id: callId,
-        content: [{ type: "text", text }],
+        content,
         executed: true,
       });
-      return {
-        type: "tool",
-        id: callId,
-        name: ask.name,
-        state: { status: "completed", input, content: [{ type: "text", text }] },
-      };
-    };
-
-    // A bypass (AE2): the tool runs with no ask the bot answered.
-    if (firstTurn && this.script.bypassGate) return success();
+      return this.toolContent(callId, ask.name, input, "completed", content);
+    }
 
     const requestID = `per_${callId}`;
     const request = {
@@ -307,111 +488,137 @@ class ScriptedServe {
       source: { type: "tool", messageID: assistantMessageID, id: callId },
     };
     this.emitEvent("permission.asked", request);
-    // The hard vector the declared cannot names: the model's shell, holding
-    // the server's password, answers `once` under the REAL request id before
-    // the bot's reply lands; the server echoes that reply and runs the tool
-    // against the bot's decision. The bot's own POST arrives after — the fake
-    // takes it without effect, as a real server would answer it not found.
+    // The declared cannot: the model's shell forges a `once` under the real
+    // request id before the bot's reply lands; the server runs the tool against
+    // the bot's decision.
     if (firstTurn && this.script.forgeApproval) {
       this.emitEvent("permission.replied", { sessionID: SESSION_ID, requestID, reply: "once" });
-      return success();
+      const content = [{ type: "text", text: ownToolResultText(part.name, input) }];
+      this.emitEvent("session.tool.success", {
+        sessionID: SESSION_ID,
+        assistantMessageID,
+        id: callId,
+        content,
+        executed: true,
+      });
+      return this.toolContent(callId, ask.name, input, "completed", content);
     }
     this.emitPermissions([request]);
     const decision = await this.waitReply(requestID);
     this.emitPermissions([]);
     this.emitEvent("permission.replied", { sessionID: SESSION_ID, requestID, reply: decision.reply });
-    if (decision.reply === "once") return success();
-    // A reject WITH the bot's reason: OpenCode turns the feedback into the tool's
-    // failure so the model reads it (`CorrectedError` → `ToolFailure`).
+    // The container is replaced with this call in flight (survival's ceiling):
+    // the bot decided, but the result never comes back — the server and the tool
+    // die with the old container's disk. Leave the call open (a `running` tool
+    // state, no success/failed event), so the bridge holds its span for the
+    // replaced verdict's settlement; the play stops after this turn. The 1-based
+    // model call that would carry this call's result is `containerReplaced…`, so
+    // the call itself is the turn two before it.
+    if (
+      this.script.containerReplacedBeforeModelCall !== undefined &&
+      turnIndex === this.script.containerReplacedBeforeModelCall - 2
+    ) {
+      this.replaced = true;
+      return this.toolContent(callId, ask.name, input, "running", []);
+    }
+    // The gate clause switched off: a refused tool runs anyway (the bot's reject
+    // is ignored), so a push to a protected branch is not stopped.
+    if (decision.reply === "once" || this.mutate === "gate") {
+      // A relayed tool runs in the bot exactly as the plugin's POST /harness/tool
+      // would — the run's registration, its context, the bot's own gates. The
+      // relay clause switched off returns a canned result, so the tool never
+      // runs in the bot and its side effect never lands.
+      const content =
+        this.relayNames.has(part.name) && this.mutate !== "relay"
+          ? await this.runRelay(callId, part.name, input)
+          : [{ type: "text", text: ownToolResultText(part.name, input) }];
+      this.emitEvent("session.tool.success", {
+        sessionID: SESSION_ID,
+        assistantMessageID,
+        id: callId,
+        content,
+        executed: true,
+      });
+      return this.toolContent(callId, ask.name, input, "completed", content);
+    }
     const message = decision.message ?? "The user rejected permission to use this specific tool call.";
     this.emitEvent("session.tool.failed", {
       sessionID: SESSION_ID,
       assistantMessageID,
       id: callId,
+      executed: false,
       error: { type: "permission.rejected", message },
       content: [{ type: "text", text: message }],
-      executed: false,
     });
-    return {
-      type: "tool",
-      id: callId,
-      name: ask.name,
-      state: {
-        status: "error",
-        input,
-        error: { type: "permission.rejected", message },
-        content: [{ type: "text", text: message }],
-      },
-    };
+    return this.toolContent(callId, ask.name, input, "error", message);
+  }
+
+  /** The relayed tool run through the bot, as the plugin's POST /harness/tool
+   *  would — the registered run's context, so its side effect lands. */
+  private async runRelay(
+    callId: string,
+    tool: string,
+    input: Record<string, unknown>,
+  ): Promise<Array<{ type: string; text: string }>> {
+    const live = this.deps.registry.get(this.run.runId);
+    if (!live) return [{ type: "text", text: "the run is not on the relay" }];
+    // The plugin asks `/harness/authorize` before `/harness/tool`: during the
+    // run's write-up the LiveHarness's `toolsBlocked` refuses the call (the same
+    // refusal pi's relay makes), and the tool never runs in the bot.
+    const authorized = authorizeToolCall(live, { toolCallId: callId, tool, input });
+    if (!authorized.allow) return [{ type: "text", text: authorized.reason }];
+    const answer = await runRelayedTool(live, { toolCallId: callId, tool, input });
+    const text = answer.content.map((c) => (c.type === "text" ? c.text : `[${c.type}]`)).join("\n");
+    return [{ type: "text", text: text || "(no output)" }];
   }
 }
 
-/** The test harness the driver drives the bridge through: OpenCode's object as
- *  far as the gate and record rows need it. Its `open` runs `driveOpenCode`
- *  over the fake serve the run already wired; the survival and relay pieces are
- *  U12's `harness.ts`. */
-class FakeServeOpenCodeHarness implements Harness {
-  readonly name = "opencode" as const;
-  readonly history = "authored-session" as const;
-  readonly dispositions = OPENCODE_EVENT_DISPOSITION;
-  effort(): string | undefined {
-    return undefined;
-  }
-  builtinTools(identity: Identity): readonly string[] {
-    return openCodeBuiltinToolsFor(identity);
-  }
-  async open(deps: HarnessDeps, run: HarnessRun): Promise<HarnessSession> {
-    const container = deps.container as FakeHarnessContainer;
-    const paths = openCodeRunPaths(run.runId);
-    const conn: OpenCodeConnection = {
-      container,
-      paths,
-      port: PORT,
-      password: PASSWORD,
-      sessionID: SESSION_ID,
-      feedOffset: 0,
-      tailerPid: container.pid,
-    };
-    let answer: string;
-    try {
-      ({ answer } = await driveOpenCode(deps, run, conn));
-    } catch (err) {
-      // A loop that threw — a bypass, a forged approval, a failed model call —
-      // ends the process before it propagates, as pi's loop ends pi on a throw.
-      await container.kill(container.pid).catch(() => {});
-      throw err;
+function configPath(): string {
+  return openCodeRunPaths(RUN_ID).config;
+}
+
+/** The store as the conversation the model saw (`ChatMessage[]`): a user
+ *  message is a user turn; an assistant message is its text and tool calls, and
+ *  a settled tool's result the user turn after it — projectStore's shape, for
+ *  the model-call record. */
+function storeToMessages(store: readonly Record<string, unknown>[]): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  for (const m of store) {
+    if (m.type === "user") {
+      out.push({ role: "user", content: [{ type: "text", text: String(m.text ?? "") }] });
+    } else if (m.type === "assistant") {
+      const content: ContentPart[] = [];
+      const results: ContentPart[] = [];
+      for (const part of Array.isArray(m.content) ? (m.content as Record<string, unknown>[]) : []) {
+        if (part.type === "text" && typeof part.text === "string") content.push({ type: "text", text: part.text });
+        else if (part.type === "tool") {
+          const state = (typeof part.state === "object" && part.state !== null ? part.state : {}) as Record<
+            string,
+            unknown
+          >;
+          content.push({
+            type: "tool_use",
+            id: String(part.id),
+            name: openCodeToolNameWord(String(part.name)),
+            input: (state.input as Record<string, unknown>) ?? {},
+          });
+          if (state.status === "completed" || state.status === "error") {
+            const c = Array.isArray(state.content) ? (state.content as Record<string, unknown>[]) : [];
+            results.push({
+              type: "tool_result",
+              toolUseId: String(part.id),
+              content: c.map((p) => (p.type === "text" ? String(p.text) : "")).join("\n"),
+              ...(state.status === "error" ? { isError: true } : {}),
+            });
+          }
+        }
+      }
+      if (content.length > 0) out.push({ role: "assistant", content });
+      for (const r of results) out.push({ role: "user", content: [r] });
     }
-    run.saveFacts?.(
-      openCodeFacts(
-        { pid: container.pid, port: PORT, paths, tailerPid: container.pid },
-        {
-          sessionID: SESSION_ID,
-          logOffset: 0,
-          bearer: deps.bearer,
-          container: await container.identity(),
-          relaunches: run.resume?.facts?.relaunches ?? 0,
-        },
-      ),
-    );
-    return {
-      answer,
-      followUp: async () => {
-        throw new Error("the OpenCode follow-up turn is U12's");
-      },
-      end: async () => {
-        await container.kill(container.pid);
-      },
-    };
   }
-  async find(_facts: HarnessFacts, _container: HarnessContainer): Promise<Finding> {
-    // Survival is U12's `harness.ts`; the conformance subset U11 runs does not
-    // walk the survival rows.
-    return "dead";
-  }
-  async end(_facts: HarnessFacts, _container: HarnessContainer): Promise<void> {}
+  return out;
 }
-
-const object = new FakeServeOpenCodeHarness();
 
 function parseBody(body: string | undefined): Record<string, unknown> {
   if (!body) return {};
@@ -423,25 +630,27 @@ function parseBody(body: string | undefined): Record<string, unknown> {
   }
 }
 
-function promptTextOf(messages: readonly ChatMessage[]): string {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m.role === "user") return m.content.flatMap((p) => (p.type === "text" ? [p.text] : [])).join("\n\n");
-  }
-  return "";
+/** Plants the sentinel under the bot's provider-key variables for the run's
+ *  dialect, so a harness that forwarded one would leak it into the child's env. */
+function plantProviderKeys(providerType: ProviderConfig["type"]): () => void {
+  const envs = providerKeyEnvs(providerType);
+  const saved = envs.map((k) => [k, process.env[k]] as const);
+  for (const k of envs) process.env[k] = PROVIDER_KEY_SENTINEL;
+  return () => {
+    for (const [k, v] of saved)
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+  };
 }
 
 export function openCodeDriver(options: FakeServeOptions = {}): HarnessDriver {
+  const object = new OpenCodeHarness();
   return {
     harness: "opencode",
     object,
     bearer: BEARER,
     containerWord: CONTAINER_WORD,
     providerKeySentinel: PROVIDER_KEY_SENTINEL,
-    // The maintainer's decision (record 0038's fifth amendment): OpenCode's gate
-    // is enforcement by detection, so the bot's decision is not final by
-    // construction — an effect the bot did not decide is caught one tool call
-    // late, and the run fails closed.
     cannot: {
       "gate-approval-unforgeable":
         "OpenCode's approval lives in its server, whose password the model's shell shares, so an effect the bot did not decide — a call with no ask, a reply the bot did not send, a reply that differs from the bot's, a success after the bot's refusal — is caught by detection and fails the run closed, never prevented by construction",
@@ -449,7 +658,7 @@ export function openCodeDriver(options: FakeServeOptions = {}): HarnessDriver {
     facts: (partial) => ({
       harness: "opencode",
       pid: partial.pid,
-      port: PORT,
+      port: RECORDED_PORT,
       logOffset: 0,
       sessionID: SESSION_ID,
       root: partial.root ?? openCodeRunPaths(RUN_ID).dir,
@@ -470,6 +679,7 @@ async function runOpenCode(script: RunScript, options: FakeServeOptions = {}): P
   const identity = script.identity ?? "write";
   const container = new FakeHarnessContainer();
   container.vm = script.containerWord === null ? undefined : (script.containerWord ?? CONTAINER_WORD);
+  container.freePort = PORT;
   const control = new RunControl();
   const inbox = new FollowUpInbox();
   if (script.followUp !== undefined) inbox.push({ text: script.followUp, userId: "user:conformance", at: NOW });
@@ -495,36 +705,31 @@ async function runOpenCode(script: RunScript, options: FakeServeOptions = {}): P
     onEvent: (e) => void events.push(e),
     onProgress: (n) => void progress.push(n),
     onStep: async (r) => void steps.push(r),
-    saveFacts: (f) => void facts.push(f),
+    // The survival clause switched off: the row's facts are never written.
+    ...(options.mutate === "survival" ? {} : { saveFacts: (f: HarnessFacts) => void facts.push(f) }),
     ...(script.resume ? { resume: script.resume } : {}),
   };
-  // Wire the fake serve before the seam opens: the two starts (server, then the
-  // tailer whose log IS the feed) file the run and set the container's log to
-  // the feed; the prompt the bridge posts starts the scripted play.
-  const paths = openCodeRunPaths(RUN_ID);
-  await container.start({
-    paths,
-    command: "opencode",
-    args: ["serve", "--hostname", "127.0.0.1", "--port", "41000"],
-    env: launchEnv(BEARER),
-    port: PORT,
-  });
-  await container.start({
-    paths: paths.tailer,
-    command: "node",
-    args: [paths.tailerScript],
-    env: {},
-    port: PORT,
-    keepLog: true,
-  });
-  const serve = new ScriptedServe(container, script, promptTextOf(run.messages), options);
-  container.onRequest = (req) => serve.onRequest(req);
-
-  const registry = new HarnessRegistry();
+  // The credential clause switched off: a provider key rides the server's
+  // environment, the leak the credential row hunts for.
+  if (options.mutate === "credential") {
+    const origStart = container.start.bind(container);
+    container.start = async (s) => {
+      const started = await origStart(s);
+      if (s.command === "opencode") {
+        const last = container.starts.length - 1;
+        container.starts[last] = {
+          ...container.starts[last],
+          env: { ...container.starts[last].env, ANTHROPIC_API_KEY: PROVIDER_KEY_SENTINEL },
+        };
+      }
+      return started;
+    };
+  }
+  const registry = options.registry ?? new HarnessRegistry();
   const deps: HarnessDeps = {
     container,
     bearer: BEARER,
-    harnessUrl: "https://bot.example.com",
+    harnessUrl: HARNESS_URL,
     registry,
     clock: () => NOW,
     sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 2))),
@@ -532,10 +737,18 @@ async function runOpenCode(script: RunScript, options: FakeServeOptions = {}): P
     tickMs: 5,
     finaleTimeoutMs: 60_000,
   };
+
+  const harness = new OpenCodeHarness();
+  const serve = new ScriptedServe(container, run, script, deps, options);
+  container.onRequest = (req) => serve.onRequest(req);
+  // The tailer's readiness note, as a subscribed tailer would have written it.
+  container.emit({ feed: "tailer", at: 0, note: "started" });
+  container.emit({ feed: "tailer", at: 1, note: "connected", connections: 1 });
+
   const restore = plantProviderKeys(run.model.providerType);
   let outcome: DrivenRun["outcome"];
   try {
-    const session = await openThroughSeam(object, deps, run);
+    const session = await openThroughSeam(harness, deps, run);
     outcome = { kind: "answered", answer: session.answer };
     await session.end();
   } catch (err) {
@@ -550,34 +763,12 @@ async function runOpenCode(script: RunScript, options: FakeServeOptions = {}): P
     steps,
     facts,
     progress,
-    starts: container.starts,
+    // The row means "the run's process": OpenCode's server, not the tailer beside it.
+    starts: container.starts.filter((s) => s.command === "opencode"),
     killed: container.killed,
+    removed: container.removed,
     requests: container.requests,
-    modelCalls: [],
+    modelCalls: serve.modelCalls,
     statusReports,
-  };
-}
-
-/** The launch environment the credential row reads: the bearer, no provider
- *  key, whatever the bot's own environment holds. */
-function launchEnv(bearer: string): Record<string, string> {
-  return {
-    SWITCHBOARD_RUN_BEARER: bearer,
-    SWITCHBOARD_HARNESS_URL: "https://bot.example.com",
-    SWITCHBOARD_RUN_ID: RUN_ID,
-  };
-}
-
-/** Plants the sentinel under the bot's provider-key variables for the run's
- *  own dialect, so a harness that forwarded one would leak it into the child's
- *  environment — and a row on an OpenAI-dialect provider plants that dialect's. */
-function plantProviderKeys(providerType: ProviderConfig["type"]): () => void {
-  const envs = providerKeyEnvs(providerType);
-  const saved = envs.map((k) => [k, process.env[k]] as const);
-  for (const k of envs) process.env[k] = PROVIDER_KEY_SENTINEL;
-  return () => {
-    for (const [k, v] of saved)
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
   };
 }

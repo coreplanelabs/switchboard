@@ -44,6 +44,15 @@ export class FakeHarnessContainer implements HarnessContainer {
   vm: string | undefined = "vm-fake";
   /** Set to make the next operation fail as the executor would report it. */
   failNext: { operation: string; error: Error } | undefined;
+  /** Set to make a log read fail once the log is drained — after the records
+   *  already written were read — as the container replaced under the run does
+   *  (harness-pi item 16): the poll for the next output reaches the replacement
+   *  and fails with the executor's word, with the last turn's call in flight. */
+  failOnceDrained: Error | undefined;
+  /** Pids a previous generation's process left running that this generation
+   *  finds alive besides the one this container started — a row's OpenCode or
+   *  pi still up in this container on a resume, for `alive`/`find`. */
+  readonly alivePids = new Set<number>();
   /** Runs after each stdin line the harness writes — a scripted process answering. */
   onStdin: ((line: string, container: FakeHarnessContainer) => void) | undefined;
   /** Answers a request into the container — a scripted server; unset, no server listens. */
@@ -116,11 +125,16 @@ export class FakeHarnessContainer implements HarnessContainer {
     this.maybeFail("read");
     if (this.logPath !== undefined && path !== this.logPath)
       throw new HarnessContainerError("read", `tail: cannot open '${path}' for reading: No such file or directory`);
-    return new Uint8Array(this.log.subarray(offset, Math.min(this.log.length, offset + maxBytes)));
+    const chunk = this.log.subarray(offset, Math.min(this.log.length, offset + maxBytes));
+    // The container was replaced under the run: the records already written are
+    // read (the last turn's call among them), then the poll for the next output
+    // reaches the replacement and fails with the executor's word.
+    if (this.failOnceDrained !== undefined && chunk.length === 0) throw this.failOnceDrained;
+    return new Uint8Array(chunk);
   }
 
   async alive(pid: number): Promise<boolean> {
-    return this.live && pid === this.pid;
+    return (this.live && pid === this.pid) || this.alivePids.has(pid);
   }
 
   async identity(): Promise<string | undefined> {

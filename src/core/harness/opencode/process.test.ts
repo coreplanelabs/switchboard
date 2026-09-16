@@ -13,6 +13,7 @@ import {
 import { HARNESS_URL_ENV, PROXY_PROVIDER, RUN_BEARER_ENV } from "../pi/process.js";
 import { FakeHarnessContainer } from "../testing/fakeContainer.js";
 import { OPENCODE_VERSION, openCodeAuthHeader, type OpenCodePermissionRule } from "./client.js";
+import { OPENCODE_PLUGIN_SOURCE } from "./pluginSource.js";
 import {
   ASK_ALL_RULE,
   OPENCODE_AGENT,
@@ -21,7 +22,6 @@ import {
   OPENCODE_BUILTIN_TOOLS,
   OPENCODE_NONE_DENIED,
   OPENCODE_PASSWORD_ENV,
-  OPENCODE_PLUGIN_PLACEHOLDER,
   OPENCODE_PLUGIN_REF,
   OPENCODE_READ_TOOLS,
   OpenCodeNotReadyError,
@@ -377,12 +377,16 @@ describe("the configuration writer", () => {
     expect(empty).not.toHaveProperty("compaction");
   });
 
-  it("the files: the configuration, the plugin placeholder that loads and registers nothing, the tailer — none of them a secret", () => {
+  it("the files: the configuration, the relay plugin that speaks the bot's protocol, the tailer — none of them a secret", () => {
     const files = openCodeLaunchFiles(spec);
     expect(files.map((f) => f.path)).toEqual([spec.paths.config, spec.paths.plugin, spec.paths.tailerScript]);
     expect(files[0].content).toBe(openCodeConfigJson(spec));
-    expect(files[1].content).toBe(OPENCODE_PLUGIN_PLACEHOLDER);
-    expect(OPENCODE_PLUGIN_PLACEHOLDER).toContain('export default { id: "switchboard", async setup() {} };');
+    // The relay plugin (U12), not the placeholder: it registers the run's tools
+    // from GET /harness/tools and speaks pi's `/harness/*` protocol.
+    expect(files[1].content).toBe(OPENCODE_PLUGIN_SOURCE);
+    expect(files[1].content).toContain("/harness/tools");
+    expect(files[1].content).toContain("/harness/authorize");
+    expect(files[1].content).toContain("/harness/tool");
     expect(files[2].content).toBe(OPENCODE_TAILER_SOURCE);
     for (const f of files) expect(f.content).not.toContain("sbr_");
   });
