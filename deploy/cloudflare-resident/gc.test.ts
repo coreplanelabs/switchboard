@@ -146,8 +146,8 @@ describe("parsePullsBody — defensive parse of the REST answer", () => {
 });
 
 describe("reclaimDecision — evict this binding now?", () => {
-  const base = { fate: "merged" as const, isDefaultRef: false, busy: 0, clean: true as boolean | null };
-  it("merged PR, clean tree, idle → reclaim", () => {
+  const base = { fate: "merged" as const, isDefaultRef: false, busy: 0 };
+  it("merged PR, idle → reclaim", () => {
     expect(reclaimDecision(base)).toEqual({ reclaim: true, why: "merged" });
   });
   it("branch deleted upstream → reclaim; PR closed without merge → reclaim", () => {
@@ -168,11 +168,16 @@ describe("reclaimDecision — evict this binding now?", () => {
   it("an op in flight on the thread → keep (busy)", () => {
     expect(reclaimDecision({ ...base, busy: 2 })).toEqual({ reclaim: false, why: "busy" });
   });
-  it("a dirty or unverifiable tree → keep (dirty): a merged PR can still have unpushed local work", () => {
-    expect(reclaimDecision({ ...base, clean: false })).toEqual({ reclaim: false, why: "dirty" });
-  });
-  it("runtime down (tree already gone with the disk) → nothing to preserve → reclaim", () => {
-    expect(reclaimDecision({ ...base, clean: null })).toEqual({ reclaim: true, why: "merged" });
+  it("the decision asks nothing about the tree: a finished ref goes whatever its tree holds (a run starts from a clean tree — item 17), and no keep is named for dirt", () => {
+    // An input that still carried a clean verdict changes nothing: the field
+    // is gone from ReclaimInput, and "dirty" from ReclaimWhy.
+    expect(reclaimDecision({ ...base, clean: false } as never)).toEqual({ reclaim: true, why: "merged" });
+    expect(reclaimDecision({ ...base, fate: "gone", clean: null } as never)).toEqual({ reclaim: true, why: "gone" });
+    const whys = new Set<string>();
+    for (const fate of ["gone", "merged", "closed", "open", "no-pr", "unknown"] as const)
+      for (const busy of [0, 1])
+        for (const isDefaultRef of [false, true]) whys.add(reclaimDecision({ fate, busy, isDefaultRef }).why);
+    expect(whys.has("dirty")).toBe(false);
   });
 });
 

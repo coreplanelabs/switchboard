@@ -1,7 +1,7 @@
 // Residency garbage collection — the PURE decision logic, kept free of
 // the Sandbox SDK and DO storage so it runs under plain-Node vitest
 // (gc.test.ts). worker.ts feeds it what it observed (mirror refs, the GitHub
-// pulls list, tree cleanliness, live views) and acts on the answers.
+// pulls list, ops in flight, live views) and acts on the answers.
 //
 // Two mechanisms:
 //   1. Event-triggered reclamation: after every refresh-cycle `fetch --prune`,
@@ -79,9 +79,6 @@ export interface ReclaimInput {
   isDefaultRef: boolean;
   /** Thread exec/read/write currently running on this binding. */
   busy: number;
-  /** Tree cleanliness as the thread user; `null` = the runtime is down, so
-   *  the tree is already gone with the disk and there is nothing to preserve. */
-  clean: boolean | null;
 }
 
 /** The PR that decided the fate (for the audit trail): the open one, else the
@@ -97,13 +94,14 @@ export type ReclaimWhy =
   | "fate-unknown"
   | "busy"
   | "re-attached"
-  | "dirty"
   | Extract<RefFate, "gone" | "merged" | "closed">;
 
 /** Evict this binding now? A finished ref (gone/merged/closed) is reclaimed
- *  only when nothing runs on it and its tree is provably clean — a merged PR
- *  can still have unpushed local commits, and destroying work on a signal is
- *  exactly what this must never do. Keeps are named so the pass is auditable. */
+ *  when nothing runs on it — and nothing else is asked. What its tree holds
+ *  is never a reason to keep it: a run starts from a clean tree, so dirt in a
+ *  tree no run is using protects nothing (the next attach wipes it); the
+ *  Worker measures and records what it removes instead. Keeps are named so
+ *  the pass is auditable. */
 export function reclaimDecision(input: ReclaimInput): { reclaim: boolean; why: ReclaimWhy } {
   if (input.isDefaultRef) return { reclaim: false, why: "default-ref" };
   switch (input.fate) {
@@ -115,7 +113,6 @@ export function reclaimDecision(input: ReclaimInput): { reclaim: boolean; why: R
       return { reclaim: false, why: "fate-unknown" };
   }
   if (input.busy > 0) return { reclaim: false, why: "busy" };
-  if (input.clean === false) return { reclaim: false, why: "dirty" };
   return { reclaim: true, why: input.fate };
 }
 

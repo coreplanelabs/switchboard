@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
@@ -45,6 +45,25 @@ describe("the root vitest config", () => {
     const paths = projects.filter((p): p is string => typeof p === "string");
     expect(paths.length).toBeGreaterThan(0);
     for (const p of paths) expect(existsSync(new URL(p, `file://${root}`)), `missing project config ${p}`).toBe(true);
+  });
+
+  it("a project that names its test files one by one names every test file beside its config — a file left off the list runs nowhere", async () => {
+    const { projects } = await loadConfig();
+    const paths = projects.filter((p): p is string => typeof p === "string");
+    let checked = 0;
+    for (const p of paths) {
+      const configUrl = new URL(p, `file://${root}`);
+      const mod = (await import(configUrl.href)) as { default: Project };
+      const include = mod.default.test?.include;
+      // A glob covers what it names; only a literal list can leave a file out.
+      if (!include || include.some((entry) => /[*{]/.test(entry))) continue;
+      const beside = readdirSync(new URL(".", configUrl))
+        .filter((name) => /\.test\.(?:ts|mts|js|mjs)$/.test(name))
+        .sort();
+      expect([...include].sort(), `${p}: every test file beside it is on its include list`).toEqual(beside);
+      checked++;
+    }
+    expect(checked).toBeGreaterThan(0);
   });
 
   it("every workspace with a `test` script is a project, except the workerd-only ones and the ones whose tests need their own build", async () => {

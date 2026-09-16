@@ -93,6 +93,30 @@ export function leftBehindOf(measured: WorktreeCleanliness): LeftBehind | undefi
   return { uncommittedChanges: measured.changes, unpushedCommits: measured.unpushed };
 }
 
+/** What an eviction records about the tree it removed
+ *  (docs/reference/specs/resident-repos.md item 17: dirt never keeps a tree,
+ *  and nothing is discarded silently), written on the binding beside the
+ *  cause: the counts when the probes ran and found something, or the probe's
+ *  first error line when git could not read the tree — nothing readable was
+ *  kept, but the record must not read as clean. */
+export type EvictedTree = { leftBehind: LeftBehind } | { unmeasured: string };
+
+/** The measurement as the eviction's record: `undefined` for a clean tree or
+ *  one already gone with the disk (nothing was discarded). */
+export function evictedTreeOf(measured: WorktreeCleanliness): EvictedTree | undefined {
+  const leftBehind = leftBehindOf(measured);
+  if (leftBehind) return { leftBehind };
+  if (!measured.clean) return { unmeasured: measured.reason ?? "clean-check failed" };
+  return undefined;
+}
+
+/** The resident's log line for what an eviction discarded. */
+export function evictedTreeSentence(tree: EvictedTree): string {
+  if ("leftBehind" in tree)
+    return `left behind ${tree.leftBehind.uncommittedChanges} uncommitted change(s) and ${tree.leftBehind.unpushedCommits} unpushed commit(s), discarded with the tree`;
+  return `the tree could not be measured before its removal (${tree.unmeasured})`;
+}
+
 /** The bot's word for a discarded tree, in the release log and the run's
  *  record: what was left, why it is gone, what to do instead. */
 export function leftBehindSentence(left: LeftBehind): string {

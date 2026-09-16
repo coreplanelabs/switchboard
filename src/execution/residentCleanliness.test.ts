@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  evictedTreeOf,
+  evictedTreeSentence,
   leftBehindOf,
   leftBehindSentence,
   parseWorktreeCleanliness,
@@ -122,6 +124,43 @@ describe("leftBehindOf and leftBehindSentence: what a release discards", () => {
   it("the sentence names both counts, why they are gone, and what to do instead", () => {
     expect(leftBehindSentence({ uncommittedChanges: 2, unpushedCommits: 1 })).toBe(
       "2 uncommitted change(s) and 1 unpushed commit(s) were left in the worktree; a run starts from a clean tree, so they were discarded — commit and push what must be kept",
+    );
+  });
+});
+
+// Feature: docs/reference/specs/resident-repos.md item 17 — dirt never keeps a
+// tree, so every eviction records what the tree it removed held: the counts
+// when something was there, or that git could not read it — never a clean
+// record for a tree nobody could measure.
+describe("evictedTreeOf and evictedTreeSentence: what an eviction records about the tree it removed", () => {
+  it("uncommitted changes or unpushed commits → the counts; a clean tree → nothing to record", () => {
+    expect(evictedTreeOf(parseWorktreeCleanliness(r("present=yes\ngitrc=0\nchanges=3\nunpushed=2\n")))).toEqual({
+      leftBehind: { uncommittedChanges: 3, unpushedCommits: 2 },
+    });
+    expect(evictedTreeOf(parseWorktreeCleanliness(r("present=yes\ngitrc=0\nchanges=0\nunpushed=1\n")))).toEqual({
+      leftBehind: { uncommittedChanges: 0, unpushedCommits: 1 },
+    });
+    expect(evictedTreeOf(parseWorktreeCleanliness(r("present=yes\ngitrc=0\nchanges=0\nunpushed=0\n")))).toBeUndefined();
+  });
+  it("a tree git could not read → `unmeasured` naming the probe's failure — still removable, never recorded as clean", () => {
+    expect(
+      evictedTreeOf(parseWorktreeCleanliness(r("present=yes\ngitrc=1\ngiterr=fatal: not a git repository\n"))),
+    ).toEqual({ unmeasured: "clean-check failed: fatal: not a git repository" });
+    expect(
+      evictedTreeOf(
+        parseWorktreeCleanliness(r("present=yes\n", { exitCode: 1, stderr: "su: user worker3 does not exist" })),
+      ),
+    ).toEqual({ unmeasured: "clean-check failed: su: user worker3 does not exist" });
+  });
+  it("a tree already gone with the disk → nothing: there was nothing to discard", () => {
+    expect(evictedTreeOf(parseWorktreeCleanliness(r("present=no\n")))).toBeUndefined();
+  });
+  it("the sentence names the counts, or that the tree could not be measured", () => {
+    expect(evictedTreeSentence({ leftBehind: { uncommittedChanges: 2, unpushedCommits: 1 } })).toBe(
+      "left behind 2 uncommitted change(s) and 1 unpushed commit(s), discarded with the tree",
+    );
+    expect(evictedTreeSentence({ unmeasured: "clean-check failed: fatal: not a git repository" })).toBe(
+      "the tree could not be measured before its removal (clean-check failed: fatal: not a git repository)",
     );
   });
 });

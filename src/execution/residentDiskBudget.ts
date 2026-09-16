@@ -311,17 +311,18 @@ export interface DiskEvictionCandidate {
 
 /** Why a tree was kept under disk pressure. `other` is the caller's fallback
  *  for a keep decided outside `orderEvictionCandidates` (a binding that moved
- *  during the check); free text never becomes a token. */
-export type DiskKeepWhy = "busy" | "default-ref" | "recent" | "dirty" | "requesting" | "other";
+ *  during the check); free text never becomes a token. No token names dirt:
+ *  a tree is never kept for what it holds (a run starts from a clean tree),
+ *  the Worker records what it removes instead. */
+export type DiskKeepWhy = "busy" | "default-ref" | "recent" | "requesting" | "other";
 
 /** Order the live trees for eviction under pressure and name every one that is
  *  kept: the requesting thread itself, a busy tree, the default branch (the
  *  one most likely re-attached — the same rule as `reclaimDecision`), and a
  *  tree attached within `DISK_EVICT_MIN_IDLE_MS` are never candidates; the
- *  rest are ordered coldest first (oldest `lastAttachAt`, ties on key).
- *  Cleanliness is NOT decided here — it needs the container (as the thread
- *  user), so the Worker checks each candidate in this order and keeps a dirty
- *  or unreadable one (`dirty`), exactly like the sweep. */
+ *  rest are ordered coldest first (oldest `lastAttachAt`, ties on key). What
+ *  each tree holds is not asked — the Worker measures it as the thread user
+ *  right before the eviction, for the record only. */
 export function orderEvictionCandidates(input: {
   candidates: readonly DiskEvictionCandidate[];
   now: number;
