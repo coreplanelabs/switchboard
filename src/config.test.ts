@@ -2,7 +2,9 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import { secretsFrom } from "./secrets.js";
+import type { AssistantMessage as PiAssistantMessage, ProviderStreams } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import { secretsFrom, type Secrets } from "./secrets.js";
 import {
   ConfigStore,
   FileOverridesBacking,
@@ -27,6 +29,8 @@ import { NO_GRANTS } from "./core/authz/types.js";
 import { resolveShipCaps, SHIP_DEFAULT_MAX_MINUTES, shipPresetFor } from "./core/shipPipeline.js";
 import { DEFAULT_MAX_CHILDREN, maxChildrenOf } from "./core/dispatch/spawn.js";
 import { PiAiProviders } from "./core/harness/piAi.js";
+import { parseModelRef, type CompletionRequest } from "./core/provider.js";
+import { upstreamFor } from "./channels/modelProxy.js";
 
 // Feature: docs/reference/specs/routing-and-config.md — layered resolution & permission gates.
 
@@ -836,10 +840,17 @@ describe("ship caps block (agent:ship pipeline)", () => {
   });
 });
 
-// Feature: docs/reference/specs/routing-and-config.md — the example config's commented
-// provider blocks are real configurations, not prose: uncommented, each loads and builds.
-describe("the example config's commented provider blocks", () => {
+// Feature: docs/reference/specs/routing-and-config.md — the example config's provider
+// blocks are real configurations, not prose: the OpenRouter block ships live and the
+// example loads as shipped with it; the blocks still commented (Groq, a local server)
+// load and build once turned on.
+describe("the example config's provider blocks", () => {
   const EXAMPLE = readFileSync(join(process.cwd(), "config/config.example.yaml"), "utf8");
+  const OPENROUTER = {
+    type: "openai-compatible",
+    baseUrl: "https://openrouter.ai/api/v1",
+    apiKeyEnv: "OPENROUTER_API_KEY",
+  };
 
   /** The example with one commented `providers.<name>` block turned on: its `# <name>:` line and
    *  the `#   key: value` lines under it lose their `# `; every other comment stays one. */
@@ -854,6 +865,13 @@ describe("the example config's commented provider blocks", () => {
     return lines.join("\n");
   };
 
+  /** The example with one line edited; a replacement that changes nothing is a test bug, not a pass. */
+  const edited = (from: string, to: string): string => {
+    const yaml = EXAMPLE.replace(from, to);
+    if (yaml === EXAMPLE) throw new Error(`config.example.yaml has no line ${JSON.stringify(from)}`);
+    return yaml;
+  };
+
   const storeFrom = (yaml: string): ConfigStore => {
     const dir = mkdtempSync(join(tmpdir(), "swb-config-example-provider-"));
     const cfg = join(dir, "config.yaml");
@@ -861,39 +879,122 @@ describe("the example config's commented provider blocks", () => {
     return new ConfigStore(cfg, join(dir, "overrides.json"));
   };
 
+  /** A pi API answering every stream with one text message, so a completion proves the call reached it. */
+  const scriptedApi = (provider: string): ProviderStreams => {
+    const stream: ProviderStreams["stream"] = (model) => {
+      const message: PiAssistantMessage = {
+        role: "assistant",
+        content: [{ type: "text", text: "ok" }],
+        api: model.api,
+        provider,
+        model: model.id,
+        usage: {
+          input: 1,
+          output: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 2,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: "stop",
+        timestamp: 0,
+      };
+      const out = createAssistantMessageEventStream();
+      out.push({ type: "done", reason: "stop", message });
+      return out;
+    };
+    return { stream, streamSimple: stream };
+  };
+
+  const request: CompletionRequest = {
+    model: "claude-haiku-4-5",
+    messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    maxTokens: 50,
+  };
+
   // Feature: docs/reference/specs/harness-pi.md item 13 — the block is the one
   // the router and reflection reach OpenRouter through, on pi's library.
-  it("the OpenRouter block, uncommented, loads and is one openai-completions model on pi's library — the same base, the trailing slash stripped, the key from the block's variable", () => {
-    const yaml = uncommented("openrouter");
-    expect(yaml).toContain("\n  openrouter:\n    type: openai-compatible\n");
-    const store = storeFrom(yaml);
-    expect(store.config.providers.openrouter).toEqual({
-      type: "openai-compatible",
-      baseUrl: "https://openrouter.ai/api/v1",
-      apiKeyEnv: "OPENROUTER_API_KEY",
-    });
+  it("the OpenRouter block ships live: the example loads as shipped with it, every default model still on the anthropic block, and pi's library builds one openai-completions provider from it — a trailing slash on baseUrl kept by the loader and stripped by the reader", () => {
+    const store = storeFrom(EXAMPLE);
+    expect(store.config.providers.openrouter).toEqual(OPENROUTER);
+    expect(Object.keys(store.config.providers)).toEqual(["anthropic", "openai", "openrouter"]);
+    for (const ref of Object.values(store.config.defaults.models)) expect(ref).toMatch(/^anthropic\//);
     const provider = new PiAiProviders(store.config.providers, { secrets: secretsFrom({}) }).get("openrouter");
     expect(provider).toMatchObject({
       name: "openrouter",
       api: "openai-completions",
-      baseUrl: "https://openrouter.ai/api/v1",
+      baseUrl: OPENROUTER.baseUrl,
+      keyEnv: OPENROUTER.apiKeyEnv,
     });
-    expect(provider.model("anthropic/claude-sonnet-4", 100)).toMatchObject({
+    const slashed = storeFrom(edited(`baseUrl: ${OPENROUTER.baseUrl}\n`, `baseUrl: ${OPENROUTER.baseUrl}/\n`));
+    expect(slashed.config.providers.openrouter.baseUrl).toBe(`${OPENROUTER.baseUrl}/`);
+    expect(new PiAiProviders(slashed.config.providers, { secrets: secretsFrom({}) }).get("openrouter").baseUrl).toBe(
+      OPENROUTER.baseUrl,
+    );
+  });
+
+  it("reads no key at construction: a process without OPENROUTER_API_KEY loads the example and completes on the anthropic block as today; only a call on the openrouter block fails, by the variable's name, at the first model call", async () => {
+    const asked: string[] = [];
+    const env = secretsFrom({ ANTHROPIC_API_KEY: "sk-ant-test" });
+    const secrets: Secrets = {
+      ...env,
+      named: (name) => {
+        asked.push(name);
+        return env.named(name);
+      },
+    };
+    const table = new PiAiProviders(storeFrom(EXAMPLE).config.providers, {
+      secrets,
+      apis: { "anthropic-messages": scriptedApi("anthropic"), "openai-completions": scriptedApi("openrouter") },
+    });
+    expect(asked).toEqual([]);
+    await expect(table.get("anthropic").complete(request)).resolves.toMatchObject({ stopReason: "end_turn" });
+    await expect(table.get("openrouter").complete({ ...request, model: "anthropic/claude-sonnet-4" })).rejects.toThrow(
+      'Provider "openrouter": OPENROUTER_API_KEY is not set',
+    );
+    expect(asked).toEqual(["ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"]);
+  });
+
+  // Feature: docs/reference/specs/model-proxy.md items 2 and 4 — a run's upstream is the
+  // block the `<provider>` half of its model ref names; `upstreamFor` is called here, not changed.
+  it("any preset's model points at OpenRouter by one ref: defaults.models.general: openrouter/anthropic/<model> splits at the first slash into the openrouter block and pi's model id anthropic/<model>; a run on it reaches the block's /chat/completions with the key as the bearer, and provider_key_missing names OPENROUTER_API_KEY without one", () => {
+    const store = storeFrom(
+      edited("general: anthropic/claude-haiku-4-5", "general: openrouter/anthropic/claude-sonnet-4"),
+    );
+    const ref = parseModelRef(store.config.defaults.models.general);
+    expect(ref).toEqual({ provider: "openrouter", model: "anthropic/claude-sonnet-4" });
+    const table = new PiAiProviders(store.config.providers, { secrets: secretsFrom({}) });
+    expect(table.get(ref.provider).model(ref.model, 100)).toMatchObject({
       id: "anthropic/claude-sonnet-4",
       provider: "openrouter",
       api: "openai-completions",
-      baseUrl: "https://openrouter.ai/api/v1",
+      baseUrl: OPENROUTER.baseUrl,
     });
-    const slashed = storeFrom(
-      uncommented("openrouter").replace(
-        "baseUrl: https://openrouter.ai/api/v1",
-        "baseUrl: https://openrouter.ai/api/v1/",
-      ),
-    );
-    expect(new PiAiProviders(slashed.config.providers, { secrets: secretsFrom({}) }).get("openrouter").baseUrl).toBe(
-      "https://openrouter.ai/api/v1",
-    );
+    const block = store.config.providers[ref.provider];
+    expect(
+      upstreamFor("openai-compatible", ref.provider, block, secretsFrom({ OPENROUTER_API_KEY: "sk-or-test" }), {}),
+    ).toEqual({
+      ok: true,
+      url: `${OPENROUTER.baseUrl}/chat/completions`,
+      headers: { "content-type": "application/json", authorization: "Bearer sk-or-test" },
+    });
+    expect(upstreamFor("openai-compatible", ref.provider, block, secretsFrom({}), {})).toEqual({
+      ok: false,
+      code: "provider_key_missing",
+      message: 'provider "openrouter": OPENROUTER_API_KEY is not set',
+    });
   });
+
+  it.each(["groq", "local"])(
+    "the %s block, still commented, is a real configuration: turned on it loads and pi's library builds an openai-completions provider from it",
+    (name) => {
+      const store = storeFrom(uncommented(name));
+      expect(store.config.providers[name].type).toBe("openai-compatible");
+      expect(new PiAiProviders(store.config.providers, { secrets: secretsFrom({}) }).get(name).api).toBe(
+        "openai-completions",
+      );
+    },
+  );
 });
 
 // Feature: docs/reference/specs/routing-and-config.md item 12 — where runtime overrides persist.

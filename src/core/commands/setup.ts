@@ -94,6 +94,11 @@ const initOptions = z.object({
   modelKey: secret
     .optional()
     .describe("with --openai-compatible: the endpoint's key → OPENAI_API_KEY (a local endpoint needs none)"),
+  openrouterKey: secret
+    .optional()
+    .describe(
+      "an OpenRouter API key → OPENROUTER_API_KEY; keeps the example's `openrouter` provider beside the one the default models run on (a preset's model is then openrouter/<vendor>/<model>)",
+    ),
   slackAppToken: secret.optional().describe("the Slack app-level token (xapp-…) → SLACK_APP_TOKEN"),
   slackBotToken: secret.optional().describe("the Slack bot token (xoxb-…) → SLACK_BOT_TOKEN"),
   githubAppId: digits.optional().describe("the GitHub App's id → GITHUB_APP_ID"),
@@ -216,7 +221,8 @@ const ASK = {
  * loop needs — the organization, one provider, and Slack: both tokens when
  * neither was given (an empty app token skips Slack), the missing one when
  * only one was — and only when there is a prompt. The GitHub App and Cloudflare are flags only: both need values
- * copied from another screen, which a prompt does not make easier. Without a
+ * copied from another screen, which a prompt does not make easier; so is the
+ * OpenRouter key, an addition beside the provider the prompt already settled. Without a
  * prompt, a missing organization or provider is `invalid_input` naming the flag.
  */
 async function gatherAnswers(o: z.output<typeof initOptions>, setup: SetupCommandDeps["setup"]): Promise<InitAnswers> {
@@ -265,6 +271,7 @@ async function gatherAnswers(o: z.output<typeof initOptions>, setup: SetupComman
     ...(given(openaiCompatible) ? { openaiCompatible } : {}),
     ...(given(model) ? { model } : {}),
     ...(given(modelKey) ? { modelKey } : {}),
+    ...(given(o.openrouterKey) ? { openrouterKey: o.openrouterKey } : {}),
     ...(given(slackAppToken) ? { slackAppToken } : {}),
     ...(given(slackBotToken) ? { slackBotToken } : {}),
     ...(given(o.githubAppId) ? { githubAppId: o.githubAppId } : {}),

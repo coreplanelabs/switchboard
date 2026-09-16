@@ -32,6 +32,7 @@ const TEMPLATES: InitTemplates = {
 
 const ANTHROPIC = "sk-ant-test-0123456789";
 const OPENAI = "sk-test-openai-9876543210";
+const OPENROUTER = "sk-or-test-openrouter-5555555555";
 const APP_TOKEN = "xapp-1-test-token";
 const BOT_TOKEN = "xoxb-test-token";
 const PEM = "-----BEGIN RSA PRIVATE KEY-----\nMIIEtest\nline2\n-----END RSA PRIVATE KEY-----\n";
@@ -146,6 +147,29 @@ describe("planInit — the files", () => {
       review: "openai/gpt-5",
       explore: "openai/gpt-5",
     });
+  });
+
+  // Feature: init.md item 3 — the example's live `openrouter` block rides into an installation only with its key.
+  it("an OpenRouter key beside the provider the defaults run on keeps the example's `openrouter` block and writes OPENROUTER_API_KEY on its example line; without one the block is gone from the written config, as `anthropic` and `openai` are without theirs", () => {
+    const withKey = planned({ ...minimal, openrouterKey: OPENROUTER });
+    expect(Object.keys(withKey.config.providers)).toEqual(["anthropic", "openrouter"]);
+    expect(withKey.config.providers.openrouter).toEqual({
+      type: "openai-compatible",
+      baseUrl: "https://openrouter.ai/api/v1",
+      apiKeyEnv: "OPENROUTER_API_KEY",
+    });
+    expect(withKey.config.defaults.models.general).toBe("anthropic/claude-haiku-4-5");
+    expect(withKey.providers).toEqual(["anthropic", "openrouter"]);
+    const env = fileAt(withKey, ENV_PATH);
+    expect(parseEnv(env.text).OPENROUTER_API_KEY).toBe(OPENROUTER);
+    expect(env.text.split("\n").filter((l) => l.includes("OPENROUTER_API_KEY"))).toEqual([
+      `OPENROUTER_API_KEY=${OPENROUTER}`,
+    ]);
+    expect(env.secretNames).toEqual(["ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"]);
+
+    const without = planned(minimal);
+    expect(Object.keys(without.config.providers)).toEqual(["anthropic"]);
+    expect(parseEnv(fileAt(without, ENV_PATH).text).OPENROUTER_API_KEY).toBeUndefined();
   });
 
   it("Slack tokens and the GitHub App land in .env on their example lines; the PEM is one double-quoted line Node's parser reads back whole; the ids are not secrets", () => {
@@ -282,6 +306,13 @@ describe("planInit — refusals", () => {
     expect(r.code).toBe("invalid_input");
     expect(r.problems).toEqual([
       "a model provider is needed: --anthropic-key <key>, or --openai-compatible <baseUrl> --model <name> [--model-key <key>]",
+    ]);
+  });
+
+  it("an OpenRouter key alone is no provider: the example's defaults run on the anthropic block, so the refusal names the flag and both ways to run on OpenRouter", () => {
+    expect(refused({ organization: "acme", name: "switchboard", openrouterKey: OPENROUTER }).problems).toEqual([
+      "a model provider is needed: --anthropic-key <key>, or --openai-compatible <baseUrl> --model <name> [--model-key <key>]",
+      "--openrouter-key keeps the example's openrouter block beside the provider the default models run on; alone it names no default model — add --anthropic-key <key>, or run every agent on OpenRouter with --openai-compatible https://openrouter.ai/api/v1 --model <vendor>/<model> --model-key <key>",
     ]);
   });
 

@@ -40,6 +40,9 @@ export interface InitAnswers {
   modelKey?: string;
   /** The model every agent runs on at the endpoint (`openai/<model>` in `defaults.models`). */
   model?: string;
+  /** An OpenRouter key, written as `OPENROUTER_API_KEY`: keeps the example's `openrouter` block
+   *  beside the provider the default models run on (a preset's model is then `openrouter/<vendor>/<model>`). */
+  openrouterKey?: string;
   slackAppToken?: string;
   slackBotToken?: string;
   githubAppId?: string;
@@ -109,12 +112,16 @@ const SECRET_ENV_NAMES = [
   "SLACK_APP_TOKEN",
   "ANTHROPIC_API_KEY",
   "OPENAI_API_KEY",
+  "OPENROUTER_API_KEY",
   "GITHUB_APP_PRIVATE_KEY",
 ] as const;
 
 /** The example's OpenAI-compatible provider: its name is the env var's prefix and the model ref's provider. */
 const OPENAI_PROVIDER = "openai";
 const OPENAI_KEY_ENV = "OPENAI_API_KEY";
+/** The example's OpenRouter block, live in `config.example.yaml`: kept only when its key is given. */
+const OPENROUTER_PROVIDER = "openrouter";
+const OPENROUTER_KEY_ENV = "OPENROUTER_API_KEY";
 /** The agents `config.example.yaml` gives a default model — every one of them
  *  moves to the endpoint's model, or an OpenAI-only installation would name a
  *  provider it does not have. */
@@ -178,6 +185,11 @@ function answerProblems(a: InitAnswers): string[] {
     problems.push(
       "a model provider is needed: --anthropic-key <key>, or --openai-compatible <baseUrl> --model <name> [--model-key <key>]",
     );
+  // The example's default models name the `anthropic` block; the `openrouter` block alone leaves them dangling.
+  if (!anthropic && !endpoint && a.openrouterKey !== undefined)
+    problems.push(
+      "--openrouter-key keeps the example's openrouter block beside the provider the default models run on; alone it names no default model — add --anthropic-key <key>, or run every agent on OpenRouter with --openai-compatible https://openrouter.ai/api/v1 --model <vendor>/<model> --model-key <key>",
+    );
   if (endpoint && !anthropic && a.model === undefined)
     problems.push("--openai-compatible needs --model <name>: the model every agent runs on at that endpoint");
   if (!endpoint && a.model !== undefined) problems.push("--model only means something with --openai-compatible");
@@ -204,6 +216,7 @@ function envFile(a: InitAnswers, template: string): PlannedFile {
   if (a.slackAppToken !== undefined) values.SLACK_APP_TOKEN = a.slackAppToken;
   if (a.anthropicKey !== undefined) values.ANTHROPIC_API_KEY = a.anthropicKey;
   if (a.modelKey !== undefined) values[OPENAI_KEY_ENV] = a.modelKey;
+  if (a.openrouterKey !== undefined) values[OPENROUTER_KEY_ENV] = a.openrouterKey;
   if (a.githubAppId !== undefined) values.GITHUB_APP_ID = a.githubAppId;
   if (a.githubInstallationId !== undefined) values.GITHUB_APP_INSTALLATION_ID = a.githubInstallationId;
   if (a.githubPrivateKey !== undefined) values.GITHUB_APP_PRIVATE_KEY = a.githubPrivateKey;
@@ -268,12 +281,14 @@ export function maskedPreview(file: PlannedFile): string {
 // ---- config.yaml -----------------------------------------------------------------
 
 /** `config.example.yaml` edited in place (the `yaml` document keeps every
- *  comment): the organization, the providers the keys given call for, and the
- *  default models — every optional block stays as the example has it, off. */
+ *  comment): the organization, the providers the keys given call for — each of
+ *  the example's three live blocks stays only with its key — and the default
+ *  models; every optional block stays as the example has it, off. */
 function configFile(a: InitAnswers, template: string): PlannedFile {
   const doc = YAML.parseDocument(template);
   doc.set("organization", a.organization);
   if (a.anthropicKey === undefined) doc.deleteIn(["providers", "anthropic"]);
+  if (a.openrouterKey === undefined) doc.deleteIn(["providers", OPENROUTER_PROVIDER]);
   if (a.openaiCompatible === undefined) doc.deleteIn(["providers", OPENAI_PROVIDER]);
   else {
     doc.setIn(["providers", OPENAI_PROVIDER, "baseUrl"], a.openaiCompatible);
