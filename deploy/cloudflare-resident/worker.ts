@@ -227,6 +227,7 @@ import {
   type FetchRecord,
   type SnapshotStamp,
 } from "../../src/execution/residentStepPlan.js";
+import { backupIdsOf, RETIRED_SNAPSHOT_KEY, rotateSnapshots } from "../../src/execution/snapshotRetention.js";
 import {
   DF_FREE_ARGV,
   DISK_FULL_FREE_KIB,
@@ -2621,7 +2622,7 @@ export class ResidentDO extends Sandbox<Env> {
       [UPDATED_KEY]: new Date(systemClock()).toISOString(),
       [DEADLINE_AT_KEY]: systemClock() + provisioningTimeoutMs,
     });
-    await this.ctx.storage.delete([FACTS_KEY, SNAPSHOT_KEY]); // defensive: no stale facts from a past life
+    await this.ctx.storage.delete([FACTS_KEY, SNAPSHOT_KEY, RETIRED_SNAPSHOT_KEY]); // defensive: no stale facts from a past life
     try {
       this.deleteSchedules(PROVISIONING_CALLBACK);
       this.deleteSchedules(PROVISION_RUN_CALLBACK);
@@ -3163,16 +3164,38 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** The cycle's snapshot phase: the stamped pair to R2 and, when this cycle's
    *  record stands (not superseded by another writer's), the ready marker and
-   *  the replaced snapshot's objects swept. Answers whether the record committed. */
+   *  the rotation — the replaced pair retired, the pair retired before it
+   *  swept (docs/reference/specs/resident-repos.md item 7: two generations, so a
+   *  handle a seeded restore read from `/status` still resolves for a cycle).
+   *  Answers whether the record committed. */
   private async refreshSnapshot(resource: string, stamp: SnapshotStamp): Promise<boolean> {
     const snapped = await this.snapshot({ resource, stamp });
     const committed = snapped.done || !snapped.superseded;
     if (committed) {
       await this.writeDiskMarkers({ ready: stamp.sha });
-      const previous = !snapped.done && !snapped.superseded ? snapped.previous : undefined;
-      if (previous) await this.deleteBackupObjects([previous.mirror.id, previous.checkout.id]).catch(() => {});
+      const replaced = !snapped.done && !snapped.superseded ? snapped.previous : undefined;
+      if (replaced) await this.retireSnapshot(replaced);
     }
     return committed;
+  }
+
+  /** The rotation's bookkeeping: the retired generation recorded (the storage
+   *  write first, so a deletion that fails leaves the record true and the
+   *  1-year R2 TTL as the backstop), then the objects the rotation frees. */
+  private async retireSnapshot(replaced: SnapshotRecord): Promise<void> {
+    const rotation = rotateSnapshots({ replaced, retired: await this.retiredSnapshot() });
+    if (rotation.retired) await this.ctx.storage.put(RETIRED_SNAPSHOT_KEY, rotation.retired);
+    if (rotation.deleteIds.length > 0) await this.deleteBackupObjects(rotation.deleteIds).catch(() => {});
+  }
+
+  private retiredSnapshot(): Promise<SnapshotRecord | undefined> {
+    return this.ctx.storage.get<SnapshotRecord>(RETIRED_SNAPSHOT_KEY);
+  }
+
+  /** The backup ids of every recorded generation — the current pair and the
+   *  retired one — for the paths that delete or itemize them all. */
+  private async recordedBackupIds(current: SnapshotRecord | undefined): Promise<string[]> {
+    return backupIdsOf([current, await this.retiredSnapshot()]);
   }
 
   /** The cycle's completion: the facts to the stamp (the snapshot step moved
@@ -7162,6 +7185,7 @@ export class ResidentDO extends Sandbox<Env> {
       };
     }
     const snap = await this.ctx.storage.get<SnapshotRecord>(SNAPSHOT_KEY);
+    const recorded = await this.recordedBackupIds(snap);
     const bindings = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
     const plan = {
       resource,
@@ -7178,7 +7202,7 @@ export class ResidentDO extends Sandbox<Env> {
               checkoutBackupId: snap.checkout.id,
             }
           : null,
-        backupObjects: snap ? await this.countBackupObjects([snap.mirror.id, snap.checkout.id]) : 0,
+        backupObjects: await this.countBackupObjects(recorded),
       },
       reprovision: { defaultRef, provisioningTimeoutMs },
       keeps: { registryRecord: true as const, threadBindings: bindings.size },
@@ -7189,9 +7213,9 @@ export class ResidentDO extends Sandbox<Env> {
     // and backups/<id>/ lives outside the resident/<resource>/ prefix — this
     // is the only path that can still reach them (same ordering as teardown).
     let backupObjectsDeleted = 0;
-    if (snap) {
+    if (recorded.length > 0) {
       try {
-        backupObjectsDeleted = await this.deleteBackupObjects([snap.mirror.id, snap.checkout.id]);
+        backupObjectsDeleted = await this.deleteBackupObjects(recorded);
       } catch {
         // best effort — the 1-year R2 TTL is the leak backstop
       }
@@ -7227,8 +7251,7 @@ export class ResidentDO extends Sandbox<Env> {
       this.listSchedules(PROVISIONING_CALLBACK),
       this.listSchedules(PROVISION_RUN_CALLBACK),
     ]);
-    const snap = await this.ctx.storage.get<SnapshotRecord>(SNAPSHOT_KEY);
-    const ids = snap ? [snap.mirror.id, snap.checkout.id] : [];
+    const ids = await this.recordedBackupIds(await this.ctx.storage.get<SnapshotRecord>(SNAPSHOT_KEY));
     const bindings = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
     return {
       ...status,
@@ -7256,10 +7279,10 @@ export class ResidentDO extends Sandbox<Env> {
     let backupObjectsDeleted = 0;
     this.deleteSchedules(PROVISIONING_CALLBACK);
     this.deleteSchedules(PROVISION_RUN_CALLBACK);
-    const snap = await this.ctx.storage.get<SnapshotRecord>(SNAPSHOT_KEY);
-    if (snap) {
+    const recorded = await this.recordedBackupIds(await this.ctx.storage.get<SnapshotRecord>(SNAPSHOT_KEY));
+    if (recorded.length > 0) {
       try {
-        backupObjectsDeleted = await this.deleteBackupObjects([snap.mirror.id, snap.checkout.id]);
+        backupObjectsDeleted = await this.deleteBackupObjects(recorded);
       } catch (err) {
         errors.push(`backup object deletion failed: ${errMsg(err)}`);
       }
