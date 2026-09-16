@@ -125,6 +125,78 @@ export function fleetBusyExhaustedMessage(waitedMs: number): string {
   );
 }
 
+// ---------------------------------------------------------------------------
+// A container that is still starting (docs/reference/specs/execution.md item 23).
+//
+// Why this exists: a thread's first request finds no running container, and
+// the SDK's first exec then carries the whole start — the platform's instance
+// grant (its default wait 30 s), the image pull on a machine that has not seen
+// this image, the microVM boot and the runtime's port (90 s) — before the
+// command runs. The executor's per-send deadline for a 60 s command is 90 s,
+// so every fresh-sandbox run died with "gave no answer within 90s" while its
+// container came up a minute later and sat idle. The Worker now names the
+// condition instead: it starts the container in the background and answers
+// `sandbox-starting` at once, the executor waits on the token exactly as it
+// waits on `fleet-busy` — the identical request re-sent, nothing ran — under a
+// start budget of its own, and the command runs once the container is up.
+
+/** The machine token the executor waits on, beside `fleet-busy`. */
+export const SANDBOX_STARTING_REASON = "sandbox-starting" as const;
+
+/** What the token means, in the words the model and the operator see. */
+export const SANDBOX_STARTING_EXPLANATION =
+  "the thread's sandbox container is starting (image pull, boot, runtime) — nothing ran yet; the request is re-sent once it is up";
+
+/** The executor waits at most this long for a container to start, whatever
+ *  the command's own budget: the platform's own start allowances (30 s for an
+ *  instance, 90 s for the port) plus a slow image pull fit inside it, and a
+ *  60 s command is never killed by a two-minute start it did not cause. */
+export const SANDBOX_START_WAIT_MAX_MS = 5 * 60_000;
+
+/** Backoff between re-sends while a container starts: 5 s, 10 s, then 15 s.
+ *  A start takes tens of seconds, not minutes, so the poll is denser than the
+ *  fleet wait's and a ready container is used within 15 s of coming up. */
+export const SANDBOX_START_BACKOFF_MS: readonly number[] = [5_000, 10_000, 15_000];
+
+/** The reasons whose answers the executor re-sends after a wait. Every other
+ *  `reason` — or none — is an ordinary failure after one send. */
+export type WaitReason = typeof FLEET_BUSY_REASON | typeof SANDBOX_STARTING_REASON;
+
+export function isWaitReason(reason: unknown): reason is WaitReason {
+  return reason === FLEET_BUSY_REASON || reason === SANDBOX_STARTING_REASON;
+}
+
+/** The Worker's answer on /read and /write (sent as HTTP 503) while the
+ *  container starts: the token, and the start's own phase as the cause. */
+export function sandboxStartingAnswer(cause: string): { error: string; reason: typeof SANDBOX_STARTING_REASON } {
+  return {
+    error: `${SANDBOX_STARTING_REASON}: ${SANDBOX_STARTING_EXPLANATION} (${cause})`,
+    reason: SANDBOX_STARTING_REASON,
+  };
+}
+
+/** The Worker's answer on /exec, in-body under the streamed HTTP 200 in the
+ *  item-3 dual shape, like `fleetBusyExecAnswer`. */
+export function sandboxStartingExecAnswer(cause: string): {
+  error: string;
+  reason: typeof SANDBOX_STARTING_REASON;
+  stdout: "";
+  stderr: string;
+  exitCode: 127;
+} {
+  const { error, reason } = sandboxStartingAnswer(cause);
+  return { error, reason, stdout: "", stderr: error, exitCode: 127 };
+}
+
+/** The message `ExecCapacityError` carries when a container did not start
+ *  inside the start budget: the wait, and what to do. */
+export function startWaitExhaustedMessage(waitedMs: number): string {
+  return (
+    `sandbox not ready — the thread's container did not finish starting within ${Math.round(waitedMs / 1000)}s; ` +
+    "try again in a few minutes"
+  );
+}
+
 /** The text the Worker carries in-body for a thrown value: the SDK's own
  *  message when it has one, else a sentence that says the SDK gave none —
  *  naming the error's name and code, and the one condition known to produce
