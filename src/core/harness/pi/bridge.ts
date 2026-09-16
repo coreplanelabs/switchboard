@@ -24,18 +24,18 @@ import {
 } from "../../runEvents.js";
 import type { CompactionEntry } from "../../runLedger/types.js";
 import type { Clock, Span } from "../../trace/types.js";
+import type { Disposition } from "../contract.js";
 import { BLOCKED_AT_DOOR_PREFIX, BLOCKED_UNAVAILABLE_PREFIX } from "./extensionSource.js";
 import { piAnsweredWithoutRunning, type PiEvent } from "./protocol.js";
 
-/** Where each event type pi's RPC protocol documents lands: `mapped` (a
- *  RunEvent, a span or a progress note), `structure` (the run's own shape,
- *  already recorded by the harness), `folded` (partial output the final record
- *  carries), `impossible` (the harness never causes it — recorded as a
+/** Where each event type pi's RPC protocol documents lands — pi's table for
+ *  the contract's record clause (`Disposition`, docs/reference/specs/harness.md):
+ *  `mapped` (a RunEvent, a span or a progress note), `structure` (the run's own
+ *  shape, already recorded by the harness), `folded` (partial output the final
+ *  record carries), `impossible` (the harness never causes it — recorded as a
  *  harness error if pi emits it anyway), `note` (a `run_note`). An unknown kind
  *  is a `harness_error` naming it, so a pi bump shows in the first run's record. */
-export type PiDisposition = "mapped" | "structure" | "folded" | "impossible" | "note";
-
-export const PI_EVENT_DISPOSITION: Readonly<Record<string, PiDisposition>> = {
+export const PI_EVENT_DISPOSITION: Readonly<Record<string, Disposition>> = {
   response: "structure",
   agent_start: "structure",
   agent_end: "structure",

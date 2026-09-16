@@ -53,6 +53,7 @@ import { channelVisibilityOf, type RecordDeps } from "./record.js";
 import { attachmentSuffix, composeRunLabel, humanizeMessageText, isMrkdwnChannel, liveViewLink } from "./reply.js";
 import { contextMessageTexts, type TextTurn } from "./messages.js";
 import { ROUTED_CARD_FOOTER, routedLabel, routedPartLines, type RouteDecided } from "./route.js";
+import type { HarnessProcessDeps } from "./run.js";
 import type { ReferencedConversation } from "../references/types.js";
 
 /** What the provision stage reads off the dispatcher's dependencies. A run's
@@ -63,6 +64,10 @@ import type { ReferencedConversation } from "../references/types.js";
 export interface ProvisionDeps
   extends RecordDeps, Pick<AdmissionDeps, "runLedger">, Pick<AuthorizeDeps, "capabilities"> {
   config: ConfigStore;
+  /** The harness the process drives runs with (docs/reference/specs/harness.md
+   *  item 8), for the name `run_meta` carries; absent in a process that starts
+   *  no run (a test of the stages before the loop), and the meta names none. */
+  harness?: HarnessProcessDeps;
   /** where runtime state (sandboxes.json) lives; default ./data */
   dataDir?: string;
   /** What the resident Worker last said about the fleet (its cap), read in the
@@ -496,6 +501,10 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
       agentSource,
       model: resolved.modelRef,
       traceId: root.traceId,
+      // The harness the run is driven by (harness.md item 8): the object's own
+      // name, so a record can be told from another harness's; none in a
+      // process that starts no run.
+      ...(deps.harness ? { harness: deps.harness.harness.name } : {}),
       ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
       ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
       ...(repoCtx.ref !== undefined ? { ref: repoCtx.ref } : {}),

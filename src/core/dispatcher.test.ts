@@ -65,7 +65,9 @@ import { InMemoryRunLedger } from "./runLedger/inMemory.js";
 import { messageFromInbox } from "./runLedger/inboxMessage.js";
 import { createLedgerWriteThrough, NullLedgerWriteThrough } from "./runLedger/writeThrough.js";
 import { textTurnsOf } from "./dispatch/textTurns.js";
-import { runPiHarnessOpen, type OpenPiSession } from "./harness/pi/harness.js";
+import type { HarnessSession } from "./harness/contract.js";
+import { runPiHarnessOpen } from "./harness/pi/harness.js";
+import { PiHarness } from "./harness/pi/piHarness.js";
 import { HarnessRegistry, authorizeToolCall, relayToolCall, type ToolCallAsk } from "./harness/pi/relay.js";
 import { FakePiContainer } from "./harness/pi/testing/fakeContainer.js";
 import { scriptPiFromProvider } from "./harness/pi/testing/providerPi.js";
@@ -152,7 +154,10 @@ vi.mock("./harness/pi/harness.js", async (importOriginal) => {
 });
 
 /** What a scripted pi run answers: the loop's answer with a session that takes no follow-up and ends at once. */
-const piAnswered = (answer: string): OpenPiSession => ({ answer, followUp: async () => answer, end: async () => {} });
+const piAnswered = (answer: string): HarnessSession => ({ answer, followUp: async () => answer, end: async () => {} });
+
+/** The harness every test process drives runs with (harness.md item 7): pi, with no deployment settings behind it. */
+const piHarness = new PiHarness();
 
 /** The process's own timer, taken before any test fakes them: the harness polls
  *  a scripted pi on it, so a test that advances fake timers around a model turn
@@ -180,6 +185,7 @@ function makeDeps(fixtureYaml: string, provider: Provider): TestDeps {
     completions: { get: () => provider },
     runBearers,
     harness: {
+      harness: piHarness,
       registry: harnesses,
       harnessUrl: "https://bot.test",
       loopbackUrl: "http://127.0.0.1:8080",
@@ -4529,6 +4535,7 @@ describe("live run-view wiring (Area 2)", () => {
       agentSource: "directive",
       model: expect.stringContaining("/"),
       traceId: expect.any(String),
+      harness: "pi", // the harness the process drives runs with (harness.md item 8)
       at: expect.any(Number),
     });
   });
@@ -10221,6 +10228,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     /** The first run's pi opens one bash call and dies with its container, which names itself anew; the restarted run's pi is scripted from the provider. */
     const containers: FakePiContainer[] = [];
     deps.harness = {
+      harness: piHarness,
       registry: harnesses,
       harnessUrl: "https://bot.test",
       loopbackUrl: "http://127.0.0.1:8080",
@@ -11848,6 +11856,7 @@ workspaceDir: __WORKDIR__
     const bearers = new RunBearerStore({ clock: Date.now });
     let starts = 0;
     t.deps.harness = {
+      harness: piHarness,
       registry: harnesses,
       harnessUrl: "https://bot.test",
       loopbackUrl: "http://127.0.0.1:8080",
@@ -13204,7 +13213,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       fallback: { put: async () => {} },
       warn: (m) => warnings.push(m),
     });
-    deps.harness = { registry: new HarnessRegistry(), harnessUrl: "https://bot.test" };
+    deps.harness = { harness: piHarness, registry: new HarnessRegistry(), harnessUrl: "https://bot.test" };
     deps.runBearers = new RunBearerStore({ clock: () => NOW });
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
     await ledger.claimSession(KEY, "run-prev", "gen-R");
@@ -13380,9 +13389,15 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     expect(handedRecords).toEqual([{ pr: { repo: "acme/api", number: 7, at: PREVIOUS_END } }]);
   });
 
-  // docs/reference/specs/harness-pi.md item 4: the config's `pi.compaction` reaches the harness deps for a run on pi.
+  // docs/reference/specs/harness-pi.md item 4: the config's `pi.compaction` reaches the harness deps for a run on pi —
+  // through the harness object the process is wired with (harness.md item 7), as src/index.ts builds it from the config.
+  const wiredFromConfig = (deps: TestDeps) => {
+    const compaction = deps.config.config.pi?.compaction;
+    deps.harness = { ...deps.harness!, harness: new PiHarness(compaction ? { compaction } : {}) };
+  };
   it("the deployment's compaction thresholds ride from the config into the pi harness's deps; a config without the block hands none", async () => {
     const t = await threadWithSession(PI_YAML + "pi:\n  compaction:\n    reserveTokens: 150000\n");
+    wiredFromConfig(t.deps);
     vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
     let compaction: unknown = "unset";
     vi.mocked(runPiHarnessOpen).mockImplementationOnce(async (deps) => {
@@ -13395,6 +13410,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     expect(compaction).toEqual({ reserveTokens: 150_000 });
 
     const plain = await threadWithSession(PI_YAML);
+    wiredFromConfig(plain.deps);
     vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
     let none: unknown = "unset";
     vi.mocked(runPiHarnessOpen).mockImplementationOnce(async (deps) => {

@@ -68,9 +68,10 @@ describe("one harness — the native loop, both provider adapters and the native
     expect(offenders).toEqual([]);
   });
 
-  it("the run stage has one loop: the pi harness's open form, and nothing that selects between two", () => {
+  it("the run stage has one loop: the harness object's open form (docs/reference/specs/harness.md item 7), never pi's function by name, and nothing that selects between two", () => {
     const runLoop = readFileSync(join(REPO, "src/core/dispatch/runLoop.ts"), "utf8");
-    expect(runLoop).toContain("runPiHarnessOpen(");
+    expect(runLoop).toContain("harness.open(");
+    expect(runLoop).not.toMatch(/\brunPiHarnessOpen\b/);
     expect(runLoop).not.toMatch(/\brunAgent\b/);
     expect(runLoop).not.toMatch(/\beffectiveHarness\b/);
     expect(runLoop).not.toMatch(/harness\s*===\s*"/);

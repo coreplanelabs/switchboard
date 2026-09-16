@@ -483,6 +483,10 @@ export type RunEvent =
       model?: string;
       /** The request's trace id (docs/reference/specs/tracing.md), once the root exists. */
       traceId?: string;
+      /** The harness the run is driven by (`Harness.name`; docs/reference/specs/harness.md
+       *  item 8): `pi` today. Absent on a command run, which starts no process,
+       *  and on a record written before the seam existed. Additive. */
+      harness?: string;
       effort?: string;
       repo?: string;
       ref?: string;

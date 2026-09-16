@@ -16,12 +16,21 @@
 // — are one more `prompt` on it, and the caller ends pi when they are done.
 
 import { randomUUID } from "node:crypto";
-import type { AgentDef } from "../../../agents/registry.js";
 import type { PiCompactionConfig } from "../../../config.js";
-import type { Effort } from "../../../effort.js";
 import { ExecSandboxRestartedError } from "../../../execution/executor.js";
 import type { ChatMessage } from "../../chatMessage.js";
-import type { ProviderConfig } from "../../provider.js";
+import {
+  HarnessInterruptedError,
+  HarnessMismatchError,
+  isPiFacts,
+  type Finding,
+  type FollowUpTurn,
+  type HarnessDeps,
+  type HarnessResume,
+  type HarnessRun,
+  type HarnessSession,
+  type PiHarnessFacts,
+} from "../contract.js";
 import {
   HARD_STOP_MESSAGE,
   SOFT_STOP_INSTRUCTION,
@@ -38,23 +47,11 @@ import {
   wrapUpInstruction,
   wrapUpNote,
 } from "./windDown.js";
-import type { StepReport } from "../../runLedger/stepReport.js";
-import type { RunnableTool, ToolContext } from "../../../tools/runnableTool.js";
-import { bearerHashOf, type RunBearerStore } from "../../modelProxy/runBearers.js";
+import { bearerHashOf } from "../../modelProxy/runBearers.js";
 import { redactAndCap, redactSecrets, type RunEvent, type RunNoteKind, type StopMode } from "../../runEvents.js";
 import type { Settlement } from "../../runLedger/resume.js";
 import type { AssembledCompaction } from "../../runLedger/transcript.js";
-import type { Notepad } from "../../runLedger/types.js";
-import type { RunControl } from "../../runRegistry/runControl.js";
-import {
-  followUpMessageId,
-  followUpPrompt,
-  followUpSnippet,
-  type FollowUpInbox,
-  type FollowUpInput,
-} from "../../threadAdmission.js";
-import type { Backend } from "../../trace/attrs.js";
-import type { Clock, Span } from "../../trace/types.js";
+import { followUpMessageId, followUpPrompt, followUpSnippet, type FollowUpInput } from "../../threadAdmission.js";
 import { PiBridge } from "./bridge.js";
 import { PiContainerRuntimeReplacedError, RUNTIME_WORD, type PiContainer } from "./container.js";
 import { PiMirror, piSessionFile, type LedgerTail } from "./mirror.js";
@@ -67,174 +64,32 @@ import {
   type PiRunPaths,
 } from "./process.js";
 import { parsePiLine } from "./protocol.js";
-import type { HarnessRegistry, LiveHarness, RelayedToolAnswer } from "./relay.js";
+import type { LiveHarness, RelayedToolAnswer } from "./relay.js";
 import type { ToolRuleContext } from "./toolRules.js";
 import { PiRpcTransport } from "./transport.js";
 
-/** What a run's row remembers about its pi, so the next bot generation finds it (harness-pi item 8). */
-export interface PiHarnessFacts {
-  pid: number;
-  /** The log byte the next generation reads from: the boundary after the last
-   *  record whose effect the ledger holds — the assistant turn the mirror
-   *  wrote as a step, the compaction it wrote as a row — and never where the
-   *  transport had read to. What pi wrote after it (the results and steers
-   *  pending for the next step) lived in the mirror's memory and died with
-   *  the bot, so the generation that re-attaches reads it again (harness-pi item 8). */
-  logOffset: number;
-  /** pi's session file, once `get_state` named it. */
-  sessionFile?: string;
-  /** The directory pi was filed under by the build that started it, so the
-   *  build that comes back after a restart reads the log and feeds the FIFO
-   *  there whatever root it would choose for a run of its own. Absent on a
-   *  row written before the root was recorded: that pi cannot be found, so it
-   *  is ended and a fresh one started (harness-pi item 8). */
-  root?: string;
-  /** The SHA-256 (hex) of the secret in the bearer pi was started with
-   *  (`bearerHashOf`; model-proxy item 2) — never the bearer. The generation
-   *  that re-attaches adopts it onto its own proxy, so the calls pi keeps
-   *  making with the previous generation's bearer verify. Absent on a row
-   *  written before it was recorded: that pi's calls no proxy here can honour,
-   *  so it is ended and a fresh one started with this generation's bearer. */
-  bearerHash?: string;
-  /** The identity of the container pi runs in (`PiContainer.identity`), so a
-   *  generation handed another container reads "pi is elsewhere", never "pi
-   *  is dead", and probes or ends nothing at that pid there. Absent on a row
-   *  written before it was recorded, or on a container that cannot name
-   *  itself: the pid alone is then judged, as before. */
-  container?: string;
-}
-
-/** The harness facts a previous generation wrote on the row (`state.harness`),
- *  when they have the shape this build reads; anything else is no facts. */
-export function piHarnessFactsOf(value: unknown): PiHarnessFacts | undefined {
-  if (typeof value !== "object" || value === null) return undefined;
-  const v = value as Record<string, unknown>;
-  if (typeof v.pid !== "number" || typeof v.logOffset !== "number") return undefined;
-  return {
-    pid: v.pid,
-    logOffset: v.logOffset,
-    ...(typeof v.sessionFile === "string" ? { sessionFile: v.sessionFile } : {}),
-    ...(typeof v.bearerHash === "string" ? { bearerHash: v.bearerHash } : {}),
-    ...(typeof v.root === "string" ? { root: v.root } : {}),
-    ...(typeof v.container === "string" ? { container: v.container } : {}),
-  };
-}
-
-export interface PiHarnessResume {
-  /** The transcript the ledger held, as `planResume` assembled it. */
-  messages: ChatMessage[];
-  /** pi's compaction entries among those messages (session-log item 6), rendered
-   *  where they sat so the restarted pi's window is what pi had, not the raw
-   *  turns compacted again. Absent on a plan from before the log kept them. */
-  compactions?: AssembledCompaction[];
-  /** The calls in flight at the kill; under pi none is re-run — its effects
-   *  are the container's. A restarted pi reads each one's restart note as a
-   *  tool result in its rebuilt session; a re-attached pi's extension, still
-   *  asking for the call the dead generation never answered, is answered the
-   *  same note over the relay (item 8). */
-  settlements: Settlement[];
-  remainingMs: number;
-  turn: number;
-  inboxConsumedSeq: number;
-  /** The row's harness facts, when the previous generation wrote them. */
-  facts?: PiHarnessFacts;
-}
-
-export interface PiHarnessRun {
-  runId: string;
-  /** The preset with its effective budget (`budgetedAgent`). */
-  agent: AgentDef;
-  effort?: Effort;
-  model: { id: string; provider: string; providerType: ProviderConfig["type"] };
-  system: string;
-  /** The seed conversation as the dispatcher composed it — the thread's earlier
-   *  turns, then the request as the last user turn. The earlier turns become
-   *  pi's session, the request its prompt (`splitSeed`). */
-  messages: ChatMessage[];
-  /** The tools pi relays to the bot — the preset's toolset (src/tools/toolsets.ts), every one run here. */
-  tools: RunnableTool[];
-  toolContext: ToolContext;
-  /** The thread's facts the gate judges pi's own tools by: the checkout, the
-   *  run's branch, the protected ones. The identity is the preset's
-   *  (`agent.identity`) and is folded in here, so the allowlist pi starts
-   *  with and the reach the gate judges by read one word (harness-pi item 10). */
-  rules: Omit<ToolRuleContext, "identity">;
-  /** The session's notepad as the `notes` tool last wrote it (session-log item
-   *  10), read when pi compacts so the steer that follows carries it; absent
-   *  for a run without a session, and the steer says the notes are empty. */
-  notepad?: () => Promise<Notepad | null>;
-  /** The run's conversation as its session log holds it (session-log item 3),
-   *  read at the call: what the relayed `spawn_run` hands `spawnChild` as the
-   *  child's seed (agent-conductor item 3), since pi keeps the transcript in
-   *  its own process and the bot's copy is the mirror's rows on the ledger.
-   *  Absent for a run without a session: a child then starts from its thread. */
-  conversation?: () => Promise<readonly ChatMessage[]>;
-  backend?: Backend;
-  span?: Span;
-  control?: RunControl;
-  inbox?: FollowUpInbox;
-  /** A steered follow-up's staged files (record 0033): awaited before the steer is sent, so the
-   *  files are copied into the store and pulled into the container's workspace first; the line
-   *  it answers with (the attachments line, or empty) ends the steer's text. Bound by the loop
-   *  only when the deployment configures a store — absent, the steer is sent as it always was. */
-  stageFollowUps?: (inputs: readonly FollowUpInput[]) => Promise<string>;
-  onEvent?: (event: RunEvent) => void;
-  onProgress?: (note: string) => void;
-  onStep?: (report: StepReport) => Promise<void>;
-  /** The row's write for the harness facts (`ledgerRun.setState({ harness })`). */
-  saveFacts?: (facts: PiHarnessFacts) => void;
-  resume?: PiHarnessResume;
-}
-
-export interface PiHarnessDeps {
-  container: PiContainer;
-  /** The run's bearer, revealed once into pi's environment. */
-  bearer: string;
-  /** The bot's base URL as the container reaches it. */
-  harnessUrl: string;
-  registry: HarnessRegistry;
-  bearers?: RunBearerStore;
-  /** The deployment's compaction thresholds for pi's settings (`pi.compaction`;
-   *  harness-pi item 4), the same for every run on pi; absent, pi's defaults. */
+/** What pi's loop needs beyond what every harness is handed (`HarnessDeps`,
+ *  the contract): the deployment's compaction thresholds for pi's settings
+ *  (`pi.compaction`; harness-pi item 4), the same for every run on pi; absent,
+ *  pi's defaults. `PiHarness` folds them in from its own settings. */
+export interface PiHarnessDeps extends HarnessDeps {
   compaction?: PiCompactionConfig;
-  clock: Clock;
-  sleep: (ms: number) => Promise<void>;
-  pollMs?: number;
-  /** How often the loop wakes without an event to check budgets, stops and the inbox. */
-  tickMs?: number;
-  /** How long a write-up may take before pi is aborted (the native finale's bound). */
-  finaleTimeoutMs?: number;
 }
 
-/** One more turn on the run's own pi session after its loop settled
- *  (harness-pi item 14): what the run stage hands the coding description turn
- *  and the review's head-move re-review on a preset on pi, in place of
- *  `runAgent`. `text` is the user turn the caller appended to the run's
- *  messages, sent to pi as a `prompt`; the answer is pi's reply, labelled as
- *  the loop labels a write-up. The tool context is the turn's own — the
- *  relayed tools read it for the turn's duration, so a hook the caller
- *  overrides (the description's, the verdict's) is the one fed. The turn is
- *  bounded by its own budget, never the run's remainder, and its tool spans
- *  hang under a `run.agent` opened under `span`. pi's system prompt stays the
- *  session's: pi reads `SYSTEM.md` once, at load. */
-export interface PiFollowUpTurnInput {
-  text: string;
-  maxTurns: number;
-  maxMinutes: number;
-  toolContext: ToolContext;
-  span?: Span;
-}
-export type PiFollowUpTurn = (input: PiFollowUpTurnInput) => Promise<string>;
-
-/** A run on pi whose loop has ended and whose pi still lives, idle on its
- *  session (harness-pi item 14): the loop's answer, one more turn on that
- *  session, and the end of it — the caller's duty once the post-turns are
- *  done or the run failed. Ending is idempotent; a follow-up after it throws. */
-export interface OpenPiSession {
-  answer: string;
-  followUp: PiFollowUpTurn;
-  /** Ends pi, removes its root, forgets the run on the relay. */
-  end(): Promise<void>;
+/** Where the row's pi is, judged as item 8 says and before any pid is probed:
+ *  a row naming another container than the one this run was handed (`here`,
+ *  the container's own answer, asked once by the caller) is "pi is elsewhere"
+ *  — the pid here is a stranger's, so nothing is probed; a row naming this
+ *  container, or none, or a container that cannot name itself, is judged by
+ *  the pid: alive here, or dead. The steps `open` takes before a re-attach,
+ *  and what `PiHarness.find` answers the run loop with. */
+export async function locatePi(
+  facts: PiHarnessFacts,
+  container: PiContainer,
+  here: string | undefined,
+): Promise<Exclude<Finding, "another-harness">> {
+  if (facts.container !== undefined && here !== undefined && facts.container !== here) return "another-container";
+  return (await container.alive(facts.pid)) ? "alive-here" : "dead";
 }
 
 const FINALE_TIMEOUT_MS = 3 * 60_000;
@@ -379,7 +234,7 @@ export function settlementResults(settlements: Settlement[]): ChatMessage | unde
  *  for a transcript ending on a user turn, or none at all. The mirror knows
  *  this row by sight, so reading it again writes it no second time. */
 export function ledgerTailOf(
-  resume: Pick<PiHarnessResume, "messages" | "compactions"> | undefined,
+  resume: Pick<HarnessResume, "messages" | "compactions"> | undefined,
 ): LedgerTail | undefined {
   if (!resume) return undefined;
   const closing = resume.compactions?.filter((c) => c.before === resume.messages.length).at(-1);
@@ -406,8 +261,10 @@ export function settlementAnswer(s: Settlement): RelayedToolAnswer {
  *  kernel's boot id, which a container replaced on the same kernel keeps),
  *  either unknown when a container could not name itself. Nothing of the
  *  run's is in the container that answers now: a pid there is a stranger's,
- *  and pi's root was on the old disk. */
-export class PiContainerReplacedError extends Error {
+ *  and pi's root was on the old disk. An interruption in the seam's vocabulary
+ *  (`HarnessInterruptedError`, harness.md item 7): the loop and the dispatcher
+ *  read the card's reason and the request's outcome off it, never its name. */
+export class PiContainerReplacedError extends HarnessInterruptedError {
   constructor(
     readonly said: string,
     readonly was: string | undefined,
@@ -416,6 +273,8 @@ export class PiContainerReplacedError extends Error {
     super(
       `the container running pi was replaced (${was ?? "unknown"} → ${now ?? "unknown"}; the executor said: ` +
         `${redactAndCap(said.replace(/\s+/g, " ").trim(), 240)}); the run restarts from its request`,
+      "container replaced under the run; restarting from the request",
+      "container_replaced",
     );
     this.name = "PiContainerReplacedError";
   }
@@ -471,7 +330,7 @@ export function replacedCallNote(tool: string): string {
 
 /** The closed form: the loop, and pi ended before the answer comes back — the
  *  run stage's shape until item 14, and every caller's that runs no post-turn. */
-export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Promise<string> {
+export async function runPiHarness(deps: PiHarnessDeps, run: HarnessRun): Promise<string> {
   const session = await runPiHarnessOpen(deps, run);
   try {
     return session.answer;
@@ -484,9 +343,23 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
  *  answer handed back with pi alive on its session for the caller's follow-up
  *  turns, and the end left to the caller. A throw before the loop settles ends
  *  pi here, as the closed form does. */
-export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): Promise<OpenPiSession> {
+export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Promise<HarnessSession> {
   const { container, clock } = deps;
   const now = () => clock();
+  // The row's facts are read by the harness that wrote them (harness.md item
+  // 7): the run loop refuses another harness's row before it opens any
+  // harness, so this is pi's own defence for a caller that is not the loop —
+  // another harness's facts name a process pi can neither judge nor end, so
+  // the run restarts from its request: refused before anything is filed,
+  // started or registered, and said on the record first, since no bridge
+  // exists yet to say it. From here `recorded` is pi's shape.
+  const recorded = run.resume?.facts;
+  if (recorded !== undefined && !isPiFacts(recorded)) {
+    const mismatch = new HarnessMismatchError("pi", recorded.harness);
+    run.onProgress?.(mismatch.message);
+    run.onEvent?.({ type: "run_note", kind: "harness_error", summary: mismatch.message, at: now() });
+    throw mismatch;
+  }
   const agentSpan = run.span?.start("run.agent");
   if (agentSpan) deps.bearers?.reparent(run.runId, agentSpan);
   const emit = (event: RunEvent) => run.onEvent?.(event.at === undefined ? { ...event, at: now() } : event);
@@ -676,7 +549,6 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): 
     // cannot find: it is ended where it runs and a fresh pi starts below, as
     // after a death. A dead pi's root, when known and not the one the fresh
     // start is filed under, goes with it (below).
-    const recorded = run.resume?.facts;
     let reattached = false;
     /** Why a live pi was ended here for the fresh start: the row named no
      *  root for it, or carried no bearer this generation could honour. */
@@ -696,14 +568,14 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): 
     const honoured = (hash: string | undefined): boolean =>
       hash !== undefined && (deps.bearers === undefined || deps.bearers.adopt(run.runId, hash));
     if (recorded !== undefined) {
-      if (recorded.container !== undefined && here !== undefined && recorded.container !== here) {
+      const located = await locatePi(recorded, container, here);
+      if (located === "another-container") {
         elsewhere = `pi is elsewhere: the row's pi (pid ${recorded.pid}) ran in container ${recorded.container}, not the one this run was handed (${here}), so it was neither probed nor ended here`;
-      } else {
-        const alive = await container.alive(recorded.pid);
-        if (alive && recorded.root !== undefined && honoured(recorded.bearerHash)) {
+      } else if (located === "alive-here") {
+        if (recorded.root !== undefined && honoured(recorded.bearerHash)) {
           reattached = true;
           paths = piRunPathsAt(recorded.root);
-        } else if (alive) {
+        } else {
           ended =
             recorded.root === undefined
               ? "named no directory for its pi"
@@ -816,13 +688,17 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): 
       // restart looks for this pi where it is, not where it would file its own;
       // the bearer's hash rides beside it, so that build's proxy can honour
       // the bearer this pi keeps presenting (model-proxy item 2).
+      // The relaunch count is the run loop's, carried through every start of
+      // the run's process (the survival clause): a fresh run's is 0.
       const bearerHash = bearerHashOf(deps.bearer);
       facts = {
+        harness: "pi",
         pid,
         logOffset: 0,
         root: paths.dir,
         ...(bearerHash !== undefined ? { bearerHash } : {}),
         ...(here !== undefined ? { container: here } : {}),
+        relaunches: recorded?.relaunches ?? 0,
       };
       save();
       transport = new PiRpcTransport({ container, paths, pid, pollMs: deps.pollMs ?? 750, sleep: deps.sleep });
@@ -1056,7 +932,10 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): 
           typeof (r.data as Record<string, unknown> | undefined)?.sessionFile === "string"
         ) {
           const data = r.data as Record<string, unknown>;
-          facts = { ...(facts ?? { pid: pid!, logOffset: 0, root: paths.dir }), sessionFile: String(data.sessionFile) };
+          facts = {
+            ...(facts ?? { harness: "pi", pid: pid!, logOffset: 0, root: paths.dir, relaunches: 0 }),
+            sessionFile: String(data.sessionFile),
+          };
           save();
         }
         if (r.id === ids.prompt) {
@@ -1205,7 +1084,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: PiHarnessRun): 
      *  (pr-description item 5) — so nothing here is a step and the row's
      *  offset stands. The inbox is not drained: a follow-up in the thread waits
      *  for the run's end, as it does on the native loop's post-turns. */
-    const followUp: PiFollowUpTurn = async (input) => {
+    const followUp: FollowUpTurn = async (input) => {
       if (sessionEnded) throw new Error("the pi session has ended: no follow-up turn can run on it");
       const turnSpan = input.span?.start("run.agent");
       if (turnSpan) deps.bearers?.reparent(run.runId, turnSpan);

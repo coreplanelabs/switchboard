@@ -36,17 +36,23 @@ import type { AuthorizeDeps } from "./authorize.js";
 import type { ProvisionDeps } from "./provision.js";
 import type { RecordDeps } from "./record.js";
 import { processSecrets } from "../../secrets.js";
+import type { Harness } from "../harness/contract.js";
 import type { PiContainer } from "../harness/pi/container.js";
 import type { HarnessRegistry } from "../harness/pi/relay.js";
 import type { Executor } from "../../execution/executor.js";
 import type { MachineClass } from "../../agents/registry.js";
 
-/** What a run on the pi harness needs from the process (docs/reference/specs/
- *  harness-pi.md): the registry the harness routes answer from, the bot's URL
- *  as pi reaches it (the public one from a run's container, the bot's own
- *  loopback from the bot host, item 12) and, for a test, the container to
+/** What a run on the harness needs from the process (docs/reference/specs/
+ *  harness.md; harness-pi.md): the harness object every run is driven by, the
+ *  registry the harness routes answer from, the bot's URL as the process
+ *  reaches it (the public one from a run's container, the bot's own loopback
+ *  from the bot host, harness-pi item 12) and, for a test, the container to
  *  drive in place of the run's own. */
-export interface HarnessDeps {
+export interface HarnessProcessDeps {
+  /** The harness every run here is driven by (harness.md item 7): `PiHarness`
+   *  in production. The loop calls it — `open`, `find`, `end` — and compares
+   *  no word: which harness this is, its object says. */
+  harness: Harness;
   registry: HarnessRegistry;
   /** `PUBLIC_BASE_URL`, where a run's container reaches the proxy and the
    *  routes; without it no preset with a workspace can go on pi and the run says so. */
@@ -81,11 +87,12 @@ export interface RunDeps
     Pick<ProvisionDeps, "skills" | "runBearers"> {
   config: ConfigStore;
   /**
-   * The pi harness's process-wide pieces (docs/reference/specs/harness-pi.md).
-   * Absent (a test of the stages before the loop) → no run can start here,
-   * and the run stage says so by name.
+   * The harness's process-wide pieces (docs/reference/specs/harness.md): the
+   * object runs are driven by and what it needs from the process. Absent (a
+   * test of the stages before the loop) → no run can start here, and the run
+   * stage says so by name.
    */
-  harness?: HarnessDeps;
+  harness?: HarnessProcessDeps;
   /**
    * The durable store of finished runs, READ by a review run for the PR
    * description a coding run submitted for the head it reviews

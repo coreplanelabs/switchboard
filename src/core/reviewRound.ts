@@ -27,7 +27,7 @@ import type { Executor, ReleaseMode, ReleaseOptions } from "../execution/executo
 import type { ToolContext } from "../tools/runnableTool.js";
 import type { Span } from "../core/trace/types.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
-import type { PiFollowUpTurn } from "./harness/pi/harness.js";
+import type { FollowUpTurn } from "./harness/contract.js";
 import {
   carriedFooter,
   classifyHeadMove,
@@ -357,7 +357,7 @@ export interface ReviewTurnSpec {
    *  a `finish` plan, whose session ended with the previous generation — a
    *  substantive move is not re-reviewed: the verdict stands for the head it
    *  reviewed and the post gate pins it there (agent-review item 10). */
-  followUp?: PiFollowUpTurn;
+  followUp?: FollowUpTurn;
 }
 
 /** What the settle decided the round actually reviewed — the values the post

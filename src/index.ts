@@ -71,6 +71,7 @@ import {
   OPENAI_CHAT_COMPLETIONS_PATH,
 } from "./channels/modelProxy.js";
 import { RunBearerStore } from "./core/modelProxy/runBearers.js";
+import { PiHarness } from "./core/harness/pi/piHarness.js";
 import { HarnessRegistry } from "./core/harness/pi/relay.js";
 import { createHarnessRoutesHandler, isHarnessPath } from "./channels/harnessRoutes.js";
 import { handleAdminTraceLog, TRACE_LOG_PATH } from "./channels/adminTraceLog.js";
@@ -376,6 +377,8 @@ export async function runBot(): Promise<void> {
   // routes answer for exactly these; the bot's public URL is where a run's
   // container reaches the proxy and the routes, and this process's own port,
   // over loopback, is where a pi running as a child of the bot does (item 12).
+  // The harness every run is driven by is one object (harness.md item 7): pi,
+  // with the deployment's compaction thresholds behind it (harness-pi item 4).
   const harnesses = new HarnessRegistry();
   const deps: CoreDeps = {
     config,
@@ -383,6 +386,7 @@ export async function runBot(): Promise<void> {
     spanLog,
     runBearers,
     harness: {
+      harness: new PiHarness(config.config.pi?.compaction ? { compaction: config.config.pi.compaction } : {}),
       registry: harnesses,
       ...(process.env.PUBLIC_BASE_URL ? { harnessUrl: process.env.PUBLIC_BASE_URL } : {}),
       ...(process.env.PORT ? { loopbackUrl: `http://127.0.0.1:${process.env.PORT}` } : {}),
