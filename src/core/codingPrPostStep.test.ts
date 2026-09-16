@@ -302,7 +302,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
         baseRef: "main",
         bindingRef: "main",
         resolvedRef: "docs/seed-header",
-        ownPr: { number: 41, headSha: PR_HEAD },
+        ownPr: { number: 41, headSha: PR_HEAD, state: "open" },
       },
       openPullRequest: spy.fn,
       fetchRepoInfo: unreachable,
@@ -340,7 +340,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
         baseRef: "main",
         bindingRef: "main",
         resolvedRef: "main",
-        ownPr: { number: 41, headSha: HEAD },
+        ownPr: { number: 41, headSha: HEAD, state: "open" },
       },
       openPullRequest: openSpy().fn,
       fetchRepoInfo: unreachable,
@@ -369,7 +369,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
         baseRef: "main",
         bindingRef: "main",
         resolvedRef: "main",
-        ownPr: { number: 41, headSha: HEAD },
+        ownPr: { number: 41, headSha: HEAD, state: "open" },
       },
       openPullRequest: spy.fn,
       fetchRepoInfo: unreachable,
@@ -382,6 +382,129 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     expect(spy.calls).toHaveLength(1);
     expect(spy.calls[0]).toMatchObject({ repo: "acme/api", headBranch: "feat/x", base: "main" });
     expect(note).toContain("PR updated: https://github.com/acme/api/pull/41");
+  });
+
+  // The thread was rebound onto its own pull request's head branch (resident-
+  // repos item 16): the binding ref IS the head, so a base resolved off it is
+  // the branch itself. With the pull request known, that is never a refusal —
+  // the description is for that pull request, edited by number.
+  it("the thread is bound to its own pull request's head branch, no base known and nothing pushed → edited by number, never 'the branch is the base'", async () => {
+    const PR_HEAD = "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432";
+    const spy = openSpy();
+    const update = vi.fn(async (): Promise<void> => {});
+    const published: RunEvent[] = [];
+    const note = await runCodingPrPostStep({
+      observed: observation({ head: PR_HEAD, remoteHead: PR_HEAD, branch: "fix/x", checkedOut: "fix/x" }),
+      description: DESCRIPTION,
+      target: {
+        repo: "acme/api",
+        baseRef: undefined,
+        bindingRef: "fix/x",
+        resolvedRef: "fix/x",
+        ownPr: { number: 41, headSha: PR_HEAD, state: "open" },
+      },
+      openPullRequest: spy.fn,
+      fetchRepoInfo: unreachable,
+      findOpenPr: noOpenPr,
+      updatePullRequest: update,
+      publish: (e) => void published.push(e),
+      logKey: "t",
+    });
+    expect(spy.calls).toHaveLength(0);
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(update).toHaveBeenCalledWith("acme/api", 41, expect.objectContaining({ title: DESCRIPTION.title }));
+    expect(published.map((e) => e.type)).toEqual(["pr_opened", "review_artifact"]);
+    expect(note).toContain("PR updated: https://github.com/acme/api/pull/41");
+    expect(note).not.toContain("base branch");
+  });
+
+  // The thread's own pull request was merged (or closed) before the follow-up
+  // ran — the resolver then binds no `pr` (a review never posts to it), but
+  // hands the coding post-step the PR as closed: its body is still the record
+  // of the change, and a description resubmitted for it edits that body.
+  it("the thread's own pull request is merged and nothing was pushed past its head → edited by number, the reply saying the pull request is merged; a closed one reads closed", async () => {
+    const PR_HEAD = "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432";
+    const spy = openSpy();
+    const updates: Array<{ number: number; body: string }> = [];
+    const published: RunEvent[] = [];
+    const run = (state: "merged" | "closed") =>
+      runCodingPrPostStep({
+        // The workspace still sits on the branch at the merged head; whether the remote still has it changes nothing.
+        observed: observation({ head: PR_HEAD, remoteHead: undefined, branch: "fix/x", checkedOut: "fix/x" }),
+        description: DESCRIPTION,
+        target: {
+          repo: "acme/api",
+          baseRef: undefined,
+          bindingRef: "fix/x",
+          resolvedRef: undefined,
+          ownPr: { number: 41, headSha: PR_HEAD, state },
+        },
+        openPullRequest: spy.fn,
+        fetchRepoInfo: unreachable,
+        findOpenPr: noOpenPr,
+        updatePullRequest: async (_repo, number, patch) => void updates.push({ number, body: patch.body }),
+        publish: (e) => void published.push(e),
+        logKey: "t",
+      });
+    const merged = await run("merged");
+    expect(spy.calls).toHaveLength(0);
+    expect(updates).toHaveLength(1);
+    expect(updates[0].number).toBe(41);
+    expect(updates[0].body).toContain(`https://github.com/acme/api/blob/${PR_HEAD}/src/login.ts#L10-L20`);
+    expect(published[0]).toEqual({
+      type: "pr_opened",
+      url: "https://github.com/acme/api/pull/41",
+      number: 41,
+      created: false,
+      at: expect.any(Number),
+    });
+    expect(published[1]).toMatchObject({ artifact: "pr_description", origin: "submitted", pr: 41, headSha: PR_HEAD });
+    expect(merged).toBe(
+      `🔀 PR updated: https://github.com/acme/api/pull/41 — body re-rendered at \`${PR_HEAD.slice(0, 7)}\` (the pull request is merged; its description was edited in place)`,
+    );
+    expect(merged).not.toContain("base branch");
+    const closed = await run("closed");
+    expect(closed).toContain("(the pull request is closed; its description was edited in place)");
+    expect(updates).toHaveLength(2);
+  });
+
+  it("the thread's own pull request is merged but the branch was pushed past its head → new work, not an edit of the old pull request: no edit, no open call, a pr_not_opened note and the compare URL", async () => {
+    const PR_HEAD = "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432";
+    const spy = openSpy();
+    const update = vi.fn(noUpdate);
+    const published: RunEvent[] = [];
+    const note = await runCodingPrPostStep({
+      observed: observation({ head: HEAD, remoteHead: HEAD, branch: "fix/x", checkedOut: "fix/x" }),
+      description: DESCRIPTION,
+      target: {
+        repo: "acme/api",
+        baseRef: undefined,
+        bindingRef: "fix/x",
+        resolvedRef: undefined,
+        ownPr: { number: 41, headSha: PR_HEAD, state: "merged" },
+      },
+      openPullRequest: spy.fn,
+      fetchRepoInfo: unreachable,
+      findOpenPr: noOpenPr,
+      updatePullRequest: update,
+      publish: (e) => void published.push(e),
+      logKey: "t",
+    });
+    expect(update).not.toHaveBeenCalled();
+    expect(spy.calls).toHaveLength(0);
+    expect(published).toEqual([
+      expect.objectContaining({
+        type: "run_note",
+        kind: "pr_not_opened",
+        summary: expect.stringContaining("was pushed past the thread's merged pull request"),
+      }),
+    ]);
+    expect(note).toContain("https://github.com/acme/api/pull/41");
+    expect(note).toContain("merged");
+    expect(note).toContain(HEAD.slice(0, 7));
+    expect(note).toContain("new pull request");
+    expect(note).toContain("https://github.com/acme/api/compare/fix/x");
+    expect(note).not.toContain("is the base branch");
   });
 
   it("the branch is the base and no pull request is known → the refusal stands, and the edit seam is never asked", async () => {

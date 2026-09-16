@@ -840,8 +840,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     // target, and only the tag carries it), else the resident binding ref,
     // else the dispatch's resolved ref. Shared by the description turn's
     // decision and the post-step below. `ownPr`: the pull request the thread's
-    // own run opened, where a description resubmitted without a push lands
-    // even from a workspace on the base (pr-description.md item 5).
+    // own run opened — open, or merged or closed since — where a description
+    // resubmitted without a push lands even from a workspace on the base or
+    // on that pull request's own head branch (pr-description.md item 5).
     const ownPr = recordPrOf(repoCtx);
     const prTarget = {
       repo: repoCtx.repo,

@@ -40,9 +40,10 @@
 // record gets `pr_opened` with `created: false`; only a branch with no open
 // PR gets the compare URL and "open manually". A description from a workspace
 // sitting on the base is refused ("the branch is the base") — unless the
-// thread's own pull request is known (`CodingPrTarget.ownPr`): the run pushed
-// nothing, so the description is for that PR, edited by number and rendered
-// at its own head.
+// thread's own pull request is known (`CodingPrTarget.ownPr` — open, or merged
+// or closed since): the run pushed nothing, so the description is for that PR,
+// edited by number and rendered at its own head; a push past a closed one's
+// head is new work, said so with the compare URL, never an edit of the old body.
 //
 // Base resolution (CodingPrTarget): the base the caller already knows — a
 // bound PR's true base, else the base a coordinator's spawn put on its child's
@@ -294,12 +295,16 @@ export interface CodingPrTarget {
   /** The dispatch's resolved ref — the base of last resort before a GitHub fetch. */
   resolvedRef: string | undefined;
   /** The pull request the thread's OWN run opened, inherited off the run
-   *  record (`RepoContext.prFromRecord`, `recordPrOf` in repoContext.ts), with
-   *  its head commit as the resolver fetched it. Where a description
-   *  resubmitted by a run that pushed nothing lands — the workspace on the
-   *  base, the binding still the repo default — instead of the base-branch
-   *  refusal. Never a pull request a person named. */
-  ownPr?: { number: number; headSha: string };
+   *  record (`RepoContext.prFromRecord` / `closedRecordPr`, `recordPrOf` in
+   *  repoContext.ts), with its head commit as the resolver fetched it and
+   *  whether it is still open. Where a description resubmitted by a run that
+   *  pushed nothing lands — the workspace on the base, the binding still the
+   *  repo default, or the thread bound to the pull request's own head branch
+   *  — instead of the base-branch refusal. A `merged` or `closed` one takes
+   *  no more pushes, so a description for it can only edit its body, and does;
+   *  a push past its head is new work, which needs a new pull request. Never a
+   *  pull request a person named. */
+  ownPr?: { number: number; headSha: string; state: "open" | "merged" | "closed" };
 }
 
 /**
@@ -382,23 +387,57 @@ export async function runCodingPrPostStep(input: {
     ? await resolveBaseRefLazy(candidates, repo, input.fetchRepoInfo)
     : resolveBaseRef(candidates, undefined);
   const pushedBranch = branch !== undefined && branch !== base && pushed;
-  if (prDescription && branch !== undefined && branch === base && target.ownPr !== undefined) {
-    // The workspace sits on the base and the run pushed nothing (a push the
-    // run made would have named its branch, and the base is not a branch the
-    // gate lets it push), in a thread whose own run opened a pull request —
-    // the binding still the repo default because a dirty tree kept the
-    // resident from moving it, or the tree recreated there. The description
-    // is for THAT pull request: edit it by number, the body rendered at its
-    // head as the resolver fetched it — never at the base's tip the workspace
-    // shows, which is not the pull request's code. `pr_opened` carries no
-    // `head`: nothing was pushed, so the release has no branch to remember.
-    const { number, headSha: prHead } = target.ownPr;
+  const ownPr = target.ownPr;
+  // The pushed head when it is not the thread's own pull request's head: new
+  // work, beyond what that pull request describes.
+  const pushedPastOwnPr =
+    ownPr !== undefined && pushed && headSha !== undefined && !sameCommit(headSha, ownPr.headSha) ? headSha : undefined;
+  if (
+    prDescription &&
+    ownPr !== undefined &&
+    ownPr.state !== "open" &&
+    pushedPastOwnPr !== undefined &&
+    branch !== undefined
+  ) {
+    // The thread's own pull request is merged or closed and the run pushed
+    // its branch past that pull request's head: the commits are new work,
+    // and a closed pull request takes none — a new one is needed, from a base
+    // the workspace cannot name (the binding sits on the old head branch, the
+    // resolver binds nothing to a closed pull request). Said plainly, with the
+    // compare URL, never as an edit of the old body at its old head.
+    const url = `https://github.com/${repo}/pull/${ownPr.number}`;
+    console.log(
+      `[pr-post] ${logKey} skipped: ${branchLog} was pushed past the thread's ${ownPr.state} ${repo}#${ownPr.number} (its head ${ownPr.headSha.slice(0, 7)}, the workspace at ${pushedPastOwnPr.slice(0, 7)}) — a new PR is needed`,
+    );
+    input.publish({
+      type: "run_note",
+      kind: "pr_not_opened",
+      summary: `no PR opened: ${branch} was pushed past the thread's ${ownPr.state} pull request #${ownPr.number}; the new commits need a new pull request`,
+      at: systemClock(),
+    });
+    return `⚠️ A PR description was submitted and \`${branch}\`${branchNote} was pushed to \`${pushedPastOwnPr.slice(0, 7)}\`, but this thread's pull request ${url} is ${ownPr.state} and that branch is its head — the new commits need a new pull request, so nothing was edited: compare & open manually: ${compareUrl}`;
+  }
+  if (prDescription && ownPr !== undefined && (branch === base || ownPr.state !== "open")) {
+    // The description is for the thread's own pull request, edited by number
+    // with the body rendered at its head as the resolver fetched it — never at
+    // the tip the workspace shows, which is not the pull request's code.
+    // Either the workspace sits on the base and the run pushed nothing (a
+    // push the run made would have named its branch, and the base is not a
+    // branch the gate lets it push) — the binding still the repo default, or
+    // moved onto the pull request's own head branch, which a base resolved off
+    // it then equals — or the pull request is merged or closed since and the
+    // run pushed nothing past its head: it takes no more pushes, its body is
+    // still the record of the change, and the description is for it.
+    // `pr_opened` carries no `head`: nothing was pushed, so the release has no
+    // branch to remember.
+    const { number, headSha: prHead, state } = ownPr;
     const url = `https://github.com/${repo}/pull/${number}`;
+    const standing = state === "open" ? "" : ` (${state})`;
     try {
       const body = renderPrDescriptionMarkdown(prDescription, { repo, headSha: prHead });
       await input.updatePullRequest(repo, number, { title: prDescription.title, body });
       console.log(
-        `[pr-post] ${logKey} updated ${repo}#${number} — the thread's own pull request, nothing pushed (workspace on ${branchLog}; rendered at its head ${prHead.slice(0, 7)})`,
+        `[pr-post] ${logKey} updated ${repo}#${number} — the thread's own pull request${standing}, nothing pushed past its head (workspace on ${branchLog}; rendered at its head ${prHead.slice(0, 7)})`,
       );
       input.publish({ type: "pr_opened", url, number, created: false, at: systemClock() });
       input.publish({
@@ -406,7 +445,9 @@ export async function runCodingPrPostStep(input: {
         ...submittedPrDescriptionArtifact(prDescription, { repo, pr: number, headSha: prHead, body }),
         at: systemClock(),
       });
-      return `🔀 PR updated: ${url} — body re-rendered at \`${prHead.slice(0, 7)}\``;
+      return state === "open"
+        ? `🔀 PR updated: ${url} — body re-rendered at \`${prHead.slice(0, 7)}\``
+        : `🔀 PR updated: ${url} — body re-rendered at \`${prHead.slice(0, 7)}\` (the pull request is ${state}; its description was edited in place)`;
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       console.error(`[pr-post] ${logKey} update failed for ${repo}#${number}: ${reason}`);

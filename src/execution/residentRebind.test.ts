@@ -13,6 +13,7 @@ import {
   rememberOwnBranches,
   type RebindableBinding,
 } from "./residentRebind.js";
+import { decideWorktree } from "./residentReuse.js";
 
 // Feature: docs/reference/specs/resident-repos.md item 16 — the one exception to
 // the sticky ref binding: a thread bound to the repo default for want of a
@@ -347,6 +348,36 @@ describe("rebindVerdict: the tree decides a measured plan", () => {
       checkout: false,
       note: 'the worktree is dirty but its HEAD is already "fix/exact-match" (the run made the branch here); the binding moves, the tree is not touched',
     });
+  });
+
+  // The two decisions the attach makes over one measured tree, composed the
+  // way the Worker composes them (`rebindToOwnPr` → `keepTree` →
+  // `ensureThreadWorktree`): the promise the verdict's note makes is kept by
+  // the worktree step, so the dirty file the run left is still dirty after the
+  // attach. Without the hand-over, item 17's discipline wipes that tree.
+  it("the no-checkout verdict hands the attach's worktree step a tree to keep: the same dirt that moved the record alone is not a reason to wipe, and the tree stays at its path", () => {
+    const sha = "1220b9c487f9538a6dd509ef11b6a5042d85bd05";
+    const worktreePath = "/workspace/threads/slack-CX-1.0-abcd1234/main";
+    const verdict = rebindVerdict(plan, { exists: true, branchExists: true, dirty: true, head: OWN_PR.ref });
+    expect(verdict).toMatchObject({ kind: "rebind", checkout: false });
+    const keepTree = verdict.kind === "rebind" && !verdict.checkout;
+    const treeAfterTheMove = { exists: true, readable: true, dirty: true, head: sha };
+    expect(
+      decideWorktree({ reuse: false, keepTree, modeSwitch: false, sha, worktreePath, facts: treeAfterTheMove }),
+    ).toEqual({ kind: "reuse" });
+    // The clean-tree verdict (the checkout ran) hands nothing over: the tree is judged by item 17 as before.
+    const checkedOut = rebindVerdict(plan, { exists: true, branchExists: true, dirty: false });
+    expect(checkedOut).toEqual({ kind: "rebind", checkout: true });
+    expect(
+      decideWorktree({
+        reuse: false,
+        keepTree: checkedOut.kind === "rebind" && !checkedOut.checkout,
+        modeSwitch: false,
+        sha,
+        worktreePath,
+        facts: treeAfterTheMove,
+      }),
+    ).toEqual({ kind: "recreate", why: "dirty" });
   });
 
   it("a dirty tree whose HEAD is any other ref — the bound branch, a third branch, detached, or unreadable — keeps its binding as before", () => {

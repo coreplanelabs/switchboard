@@ -1110,9 +1110,12 @@ const NO_REF_HINT_REASON: RefHintReason = { ownPr: null, refByDefault: false };
 type RebindOutcome =
   | { kind: "none"; binding: ThreadBinding }
   | { kind: "refuse"; refused: RebindRefused }
-  /** `note`: the move was the record alone — a dirty tree already on the
-   *  branch, no checkout run — in the verdict's words, for the log line. */
-  | { kind: "rebound"; moved: ThreadBinding; rebound: Rebound; note?: string };
+  | { kind: "rebound"; moved: ThreadBinding; rebound: Rebound; keepTree: false }
+  /** The move was the record alone — a dirty tree already on the branch, no
+   *  checkout run — with the verdict's `note` for the log line. The attach
+   *  that follows must keep that tree (`keepTree`, the worktree step's word
+   *  for it): the promise the note makes is the attach's to keep. */
+  | { kind: "rebound"; moved: ThreadBinding; rebound: Rebound; keepTree: true; note: string };
 
 /** Result of one /op test/build execution. `ok` is the command's
  *  verdict — a failing test run is a RESULT with ok:false, never an error. */
@@ -4570,6 +4573,7 @@ export class ResidentDO extends Sandbox<Env> {
         refHint,
         wantSha,
         reuse,
+        keepTree: rebind.keepTree === true,
         slug,
         t0,
         facts,
@@ -4595,16 +4599,32 @@ export class ResidentDO extends Sandbox<Env> {
    *  mirror mutex so no other attach of the thread touches the tree meanwhile.
    *  The rest of the attach then runs on the moved ref: the mirror fetch for
    *  the PR head (item 51) and item 17's stale check, which keeps a tree whose
-   *  HEAD is the ref's tip or a descendant of it. The binding records the move
-   *  (`rebound`); the answer carries it, or the named refusal, so the bot can
-   *  say where the follow-up runs and why. A refusal never fails the attach. */
+   *  HEAD is the ref's tip or a descendant of it. When the verdict moved the
+   *  record alone — a dirty tree with the branch already checked out — the
+   *  answer says so (`keepTree`) and the worktree step keeps that tree, dirt
+   *  included, instead of item 17's dirty wipe: the promise not to touch it is
+   *  the whole attach's. The binding records the move (`rebound`); the answer
+   *  carries it, or the named refusal, so the bot can say where the follow-up
+   *  runs and why. A refusal never fails the attach. */
   private async rebindToOwnPr(
     prior: ThreadBinding | undefined,
     ownPr: OwnPr | null,
     reuse: boolean,
     defaultRef: string,
     slug: string,
-  ): Promise<{ binding: ThreadBinding | undefined; rebound?: Rebound; rebindRefused?: RebindRefused } | ThreadErr> {
+  ): Promise<
+    | {
+        binding: ThreadBinding | undefined;
+        rebound?: Rebound;
+        rebindRefused?: RebindRefused;
+        /** The move was the record alone — the tree is dirty with the branch
+         *  already checked out — and the attach must keep that tree as it
+         *  stands: the worktree step's item 17 wipe of a dirty tree would
+         *  destroy the very work the rebind declined to touch. */
+        keepTree?: true;
+      }
+    | ThreadErr
+  > {
     const plan = rebindPlan({ ownPr, reuse, binding: prior, defaultRef });
     if (plan.kind === "none" || prior === undefined) return { binding: prior };
     if (plan.kind === "refuse") return { binding: prior, rebindRefused: plan.refused };
@@ -4704,8 +4724,8 @@ export class ResidentDO extends Sandbox<Env> {
           const moved: ThreadBinding = { ...current, ref: again.to, rebound };
           await this.ctx.storage.put(key, moved);
           return verdict.checkout
-            ? { kind: "rebound", moved, rebound }
-            : { kind: "rebound", moved, rebound, note: verdict.note };
+            ? { kind: "rebound", moved, rebound, keepTree: false }
+            : { kind: "rebound", moved, rebound, keepTree: true, note: verdict.note };
         }, ATTACH_MUTEX_WAIT_MS)
       ).value;
     } catch (err) {
@@ -4723,10 +4743,16 @@ export class ResidentDO extends Sandbox<Env> {
       return { binding: prior, rebindRefused: outcome.refused };
     }
     const { moved, rebound } = outcome;
+    if (!outcome.keepTree) {
+      console.log(
+        `attach ${prior.threadKey}: rebound ${rebound.from} → ${rebound.to} (the thread's own pull request #${rebound.pr})`,
+      );
+      return { binding: moved, rebound };
+    }
     console.log(
-      `attach ${prior.threadKey}: rebound ${rebound.from} → ${rebound.to} (the thread's own pull request #${rebound.pr})${outcome.note ? ` — ${outcome.note}` : ""}`,
+      `attach ${prior.threadKey}: rebound ${rebound.from} → ${rebound.to} (the thread's own pull request #${rebound.pr}) — ${outcome.note}`,
     );
-    return { binding: moved, rebound };
+    return { binding: moved, rebound, keepTree: true };
   }
 
   /** The move when the thread's tree is gone (item 16): the binding's ref
@@ -4781,7 +4807,7 @@ export class ResidentDO extends Sandbox<Env> {
     };
     const moved: ThreadBinding = { ...current, ref: plan.to, rebound };
     await this.ctx.storage.put(threadBindingKey(current.threadKey), moved);
-    return { kind: "rebound", moved, rebound };
+    return { kind: "rebound", moved, rebound, keepTree: false };
   }
 
   /** The release's word on what the run pushed (`/detach` `pushed`, item
@@ -4809,6 +4835,10 @@ export class ResidentDO extends Sandbox<Env> {
     refHint: string | null;
     wantSha: string | null;
     reuse: boolean;
+    /** The rebind moved the record alone over a dirty tree already on the
+     *  branch (item 16) and promised not to touch it: the worktree step keeps
+     *  the tree as it stands instead of item 17's dirty wipe. */
+    keepTree: boolean;
     slug: string;
     t0: number;
     facts: RepoFacts;
@@ -4820,7 +4850,7 @@ export class ResidentDO extends Sandbox<Env> {
     rebound?: Rebound;
     rebindRefused?: RebindRefused;
   }): Promise<AttachOk | ThreadErr> {
-    const { threadKey, refHint, wantSha, reuse, slug, t0, facts, record, binding, mode, rollback } = input;
+    const { threadKey, refHint, wantSha, reuse, keepTree, slug, t0, facts, record, binding, mode, rollback } = input;
     const { rebound, rebindRefused } = input;
 
     // Command-level token mint — before the lock so mint latency
@@ -4899,6 +4929,7 @@ export class ResidentDO extends Sandbox<Env> {
         const recreated = await this.ensureThreadWorktree(binding, sha, mode.originUrl, mode.modeSwitch, {
           detached: target.kind === "sha",
           reuse,
+          keepTree,
         });
         return { sha, threadLockKey, recreated };
       }, ATTACH_MUTEX_WAIT_MS);
@@ -5003,10 +5034,13 @@ export class ResidentDO extends Sandbox<Env> {
    *  trees; a reusing attach (`opts.reuse`, item 66) keeps a readable tree
    *  exactly as it stands (the dirt and the HEAD are the resumed run's own
    *  work) and throws `ReuseRefusedError` for one it cannot keep, touching
-   *  nothing. The decision is the pure `decideWorktree`; this method measures
-   *  the facts and runs the verdict. Returns true when the tree was
-   *  (re)created. MUST be called holding the mirror mutex: the clone reads
-   *  the mirror.
+   *  nothing; a provisioning attach whose own rebind moved the record alone
+   *  over a dirty tree already on the branch (`opts.keepTree`, item 16) keeps
+   *  that tree as it stands too — the dirt is why the rebind declined to touch
+   *  it — and provisions one that turns out not to be there. The decision is
+   *  the pure `decideWorktree`; this method measures the facts and runs the
+   *  verdict. Returns true when the tree was (re)created. MUST be called
+   *  holding the mirror mutex: the clone reads the mirror.
    *
    *  "Dirty" is tracked-file dirt (`status --porcelain -uno`): untracked
    *  scratch files are the thread's own state and survive re-attach.
@@ -5029,8 +5063,11 @@ export class ResidentDO extends Sandbox<Env> {
     /** `detached`: the bound ref is gone from the mirror and `sha` is the
      *  expected commit it still holds (item 51) — the tree is checked out at
      *  that commit, detached, instead of at a branch. `reuse`: a resumed
-     *  run's attach (item 66): keep the tree as it stands, or refuse. */
-    opts: { detached: boolean; reuse: boolean } = { detached: false, reuse: false },
+     *  run's attach (item 66): keep the tree as it stands, or refuse.
+     *  `keepTree`: this attach's rebind moved the record alone over a dirty
+     *  tree already on the branch (item 16): keep a readable tree as it
+     *  stands, provision one that is not there. */
+    opts: { detached: boolean; reuse: boolean; keepTree: boolean } = { detached: false, reuse: false, keepTree: false },
   ): Promise<boolean> {
     const wt = binding.worktreePath;
     const threadDir = parentDir(wt);
@@ -5067,7 +5104,14 @@ export class ResidentDO extends Sandbox<Env> {
         }
       }
     }
-    const decision = decideWorktree({ reuse: opts.reuse, modeSwitch, sha, worktreePath: wt, facts });
+    const decision = decideWorktree({
+      reuse: opts.reuse,
+      keepTree: opts.keepTree,
+      modeSwitch,
+      sha,
+      worktreePath: wt,
+      facts,
+    });
     if (decision.kind === "refuse") throw new ReuseRefusedError(decision.why);
     if (decision.kind === "reuse") return false;
 

@@ -84,6 +84,50 @@ describe("decideWorktree: a reuse-only attach keeps the tree as it stands", () =
   });
 });
 
+// The attach after a no-checkout rebind (resident-repos item 16): the rebind
+// measured the tree dirty with its HEAD already on the thread's own pull
+// request branch and moved the record alone, promising not to touch the tree.
+// The attach's worktree step then sees the same dirt; item 17's wipe would
+// break that promise, so the tree is kept as it stands — and a tree that
+// turns out not to be there is provisioned like any fresh attach's.
+describe("decideWorktree: the attach after a no-checkout rebind keeps the tree the rebind promised not to touch", () => {
+  const kept = (facts: WorktreeFacts, modeSwitch = false) =>
+    decideWorktree({ reuse: false, keepTree: true, modeSwitch, sha: SHA, worktreePath: WT, facts });
+
+  it("a dirty tree is kept — the dirt is the thread's own uncommitted work on its own branch, the reason the checkout was skipped", () => {
+    expect(kept(readable({ dirty: true }))).toEqual({ kind: "reuse" });
+  });
+
+  it("a dirty tree whose HEAD is not the mirror's tip is kept too: the rebind judged the HEAD, and the ancestry probe is never run on a dirty tree", () => {
+    expect(kept(readable({ dirty: true, head: OTHER }))).toEqual({ kind: "reuse" });
+  });
+
+  it("a clean tree keeps item 17's word: at the tip or a descendant it is reused, stale it recreates", () => {
+    expect(kept(readable())).toEqual({ kind: "reuse" });
+    expect(kept(readable({ head: OTHER, descendsFromTip: true }))).toEqual({ kind: "reuse" });
+    expect(kept(readable({ head: OTHER, descendsFromTip: false }))).toEqual({ kind: "recreate", why: "stale" });
+  });
+
+  it("a tree that is gone, unreadable or built for the other mode has nothing to keep: provisioned like a fresh attach's, never refused", () => {
+    expect(kept({ exists: false })).toEqual({ kind: "recreate", why: "missing" });
+    expect(kept({ exists: true, readable: false, detail: "boom" })).toEqual({ kind: "recreate", why: "unreadable" });
+    expect(kept(readable({ dirty: true }), true)).toEqual({ kind: "recreate", why: "mode-switch" });
+  });
+
+  it("a resumed run's attach still refuses what it cannot keep, whatever the rebind said", () => {
+    expect(
+      decideWorktree({
+        reuse: true,
+        keepTree: true,
+        modeSwitch: false,
+        sha: SHA,
+        worktreePath: WT,
+        facts: { exists: false },
+      }).kind,
+    ).toBe("refuse");
+  });
+});
+
 describe("decideWorktree: a fresh attach keeps the dirty/stale discipline", () => {
   it("a missing tree is created", () => {
     expect(
