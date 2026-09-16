@@ -176,6 +176,17 @@ RUN npm install -g @earendil-works/pi-coding-agent@0.85.1 \
   && pi --version | grep -qx '0.85.1' \
   && pi --help | grep -q -- '--mode <mode>'
 
+# OpenCode, the second harness (docs/reference/specs/harness.md): `@opencode/cli`
+# at the EXACT pin held by src/deploy/imageOpenCodeHarness.test.ts, beside pi.
+# The wrapper's postinstall hard-links the platform binary into place, so it
+# is the one install script allowed by name; the grep proves the binary on
+# PATH prints the pin's version text (`opencode v2.0.3`, exactly); the npm
+# cache (a 200 MB tarball) is dropped in the same layer. Dark until a
+# deployment names it: nothing here starts it on its own.
+RUN npm install -g --allow-scripts=@opencode/cli @opencode/cli@2.0.3 \
+  && npm cache clean --force \
+  && opencode --version | grep -qx 'opencode v2.0.3'
+
 # The container outlives a crash of the SDK's container server (the
 # supervisor's header says why). The base image's ENTRYPOINT is tini running
 # the server, so one uncaught exception there ended the container; here tini
