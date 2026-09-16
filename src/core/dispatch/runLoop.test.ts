@@ -46,6 +46,7 @@ import { FakeHarnessContainer } from "../harness/testing/fakeContainer.js";
 import { scriptPiFromProvider } from "../harness/pi/testing/providerPi.js";
 import { judgeToolCall, type ToolRuleContext } from "../harness/pi/toolRules.js";
 import type { CoordinatorTag } from "../coordinator/contract.js";
+import { InMemoryCoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import type { RepoContext } from "../repoContext.js";
 import type { ResidentBinding } from "../../execution/resident.js";
 import { InMemoryArtifactStore, type ArtifactStore } from "../../artifacts/store.js";
@@ -872,10 +873,14 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
         return super.register(harness);
       }
     }
-    const rulesOf = async (thread: {
+    const rulesOf = async ({
+      instances,
+      ...thread
+    }: {
       repoCtx: RepoContext;
       coordinator?: CoordinatorTag;
       binding?: ResidentBinding;
+      instances?: InMemoryCoordinatorInstanceStore;
     }) => {
       const container = new FakeHarnessContainer();
       const registry = new RecordingRegistry();
@@ -892,6 +897,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
         bearer: "sbr_run-l.s3cret",
         ...thread,
       });
+      if (instances) s.deps.coordinatorInstances = instances;
       await runLoop(s.deps, s.ctx);
       return seen.pop()!;
     };
@@ -924,6 +930,36 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     });
     expect(push(child, "unit/u26")).toBe("allowed");
     expect(push(child, "feat/trunk")).toBe("refused");
+    // A unit child resumed from a row written before the tag carried a base
+    // (run-history item 48a's second guard): the base is read from the
+    // coordinator store BEFORE the session opens, so the push rules see it —
+    // the unit branch is the run's own and the recovered base is protected,
+    // never the unit branch itself.
+    const fromStore = new InMemoryCoordinatorInstanceStore();
+    await fromStore.put({
+      id: "coord-2",
+      kind: "ship",
+      userId: "slack:UX",
+      channelId: "slack:CX",
+      threadKey: "slack:CX:1.0",
+      repo: "o/r",
+      branch: "unit/u27",
+      base: "feat/trunk",
+      createdAt: 0,
+    });
+    const recovered = await rulesOf({
+      repoCtx: { repo: "o/r", ref: "unit/u27" },
+      coordinator: { parentInstanceId: "coord-2", idempotencyKey: "coord-2:U27/0/coding" },
+      instances: fromStore,
+    });
+    expect(recovered).toEqual({
+      identity: "write",
+      checkout: "/workspace",
+      branch: "unit/u27",
+      protectedBranches: ["feat/trunk"],
+    });
+    expect(push(recovered, "unit/u27")).toBe("allowed");
+    expect(push(recovered, "feat/trunk")).toBe("refused");
     // A plain thread bound at the repository's base: the run pushes a branch of its own making.
     const plain = await rulesOf({ repoCtx: { repo: "o/r", ref: "main" }, binding: { ref: "main", sha: "def" } });
     expect(plain).toEqual({ identity: "write", checkout: "/workspace", protectedBranches: ["main"] });
@@ -2083,6 +2119,124 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     expect(rec.events.filter((e) => e.type === "review_posted")).toHaveLength(0);
     expect(rec.events.some((e) => e.type === "run_note" && (e as { kind: string }).kind === "review_not_posted")).toBe(
       false,
+    );
+  });
+
+  // run-history item 48a: a coding child resumed after a bot roll whose tag
+  // lost the plan's base — the spawn's dispatch options gone with the process —
+  // reads `instance.base` from the coordinator store by parentInstanceId before
+  // building its PR target, rather than letting the binding ref (the unit
+  // branch itself) stand in.
+  it("a coordinator child resumed with a description in hand and a tag without a base reads the plan's base from the coordinator store: the PR opens against instance.base, never against the unit branch", async () => {
+    const BRANCH = "plan/p/u1";
+    const description: PrDescription = {
+      title: "Fix the login redirect",
+      tldr: "Restores the session cookie on login. Users can sign in again.",
+      whatWhy: "The handler dropped the cookie; this restores it.",
+      tour: [{ title: "The fix", description: "The cookie is set again.", anchor: { path: "src/a", from: 1, to: 2 } }],
+      remaining: [],
+      decisions: [{ title: "Keep it small", rationale: "One-line fix." }],
+      risks: "none",
+      validation: { criteria: [{ criterion: "tests", proof: "green" }] },
+    };
+    const executor = {
+      exec: async (cmd: string) => {
+        if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
+        if (/rev-parse HEAD/.test(cmd)) return `${HEAD}\n`;
+        if (/rev-parse 'refs\/heads\//.test(cmd)) return `${HEAD}\n`;
+        if (/ls-remote --exit-code origin/.test(cmd)) return `${HEAD}\trefs/heads/${BRANCH}\n`;
+        return "";
+      },
+    };
+    const s = setup("", {
+      agent: "coding",
+      provider: neverCalled(),
+      repoCtx: { repo: "o/r", ref: BRANCH } as RepoContext,
+      binding: { ref: BRANCH, sha: HEAD, workspace: "/srv/wt/u1" },
+      executor,
+      coding: true,
+      coordinator: { parentInstanceId: "plan-p-2", idempotencyKey: "plan-p-2:U16/1/coding" },
+    });
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await instances.put({
+      id: "plan-p-2",
+      kind: "ship",
+      userId: "slack:UX",
+      channelId: "slack:CX",
+      threadKey: THREAD,
+      repo: "o/r",
+      branch: BRANCH,
+      base: "feat/trunk",
+      createdAt: NOW,
+    });
+    s.deps.coordinatorInstances = instances;
+    const opened: Array<Record<string, unknown>> = [];
+    s.deps.openPullRequest = async (target) => {
+      opened.push({ ...target });
+      return { number: 9, htmlUrl: "https://github.com/o/r/pull/9", created: true };
+    };
+    s.deps.fetchRepoShipInfo = async () => {
+      throw new Error("the default branch is not the plan's base and must not be asked for");
+    };
+    const resume = finishing("Done: pushed the fix.", {
+      agent: "coding",
+      state: { prDescription: description, pushedBranch: BRANCH },
+    });
+    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    expect(opened).toHaveLength(1);
+    expect(opened[0]).toMatchObject({ repo: "o/r", headBranch: BRANCH, base: "feat/trunk" });
+    expect(out.prNote).toContain("PR opened");
+  });
+
+  it("a coordinator child whose plan base survived nowhere — no tag base, no instance in the store — opens nothing and publishes pr_not_opened saying the plan's base was lost across a roll", async () => {
+    const BRANCH = "plan/p/u1";
+    const description: PrDescription = {
+      title: "Fix the login redirect",
+      tldr: "Restores the session cookie on login. Users can sign in again.",
+      whatWhy: "The handler dropped the cookie; this restores it.",
+      tour: [{ title: "The fix", description: "The cookie is set again.", anchor: { path: "src/a", from: 1, to: 2 } }],
+      remaining: [],
+      decisions: [{ title: "Keep it small", rationale: "One-line fix." }],
+      risks: "none",
+      validation: { criteria: [{ criterion: "tests", proof: "green" }] },
+    };
+    const executor = {
+      exec: async (cmd: string) => {
+        if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
+        if (/rev-parse HEAD/.test(cmd)) return `${HEAD}\n`;
+        if (/rev-parse 'refs\/heads\//.test(cmd)) return `${HEAD}\n`;
+        if (/ls-remote --exit-code origin/.test(cmd)) return `${HEAD}\trefs/heads/${BRANCH}\n`;
+        return "";
+      },
+    };
+    const s = setup("", {
+      agent: "coding",
+      provider: neverCalled(),
+      repoCtx: { repo: "o/r", ref: BRANCH } as RepoContext,
+      binding: { ref: BRANCH, sha: HEAD, workspace: "/srv/wt/u1" },
+      executor,
+      coding: true,
+      coordinator: { parentInstanceId: "plan-p-2", idempotencyKey: "plan-p-2:U16/1/coding" },
+    });
+    s.deps.coordinatorInstances = new InMemoryCoordinatorInstanceStore();
+    const opened: unknown[] = [];
+    s.deps.openPullRequest = async (target) => {
+      opened.push(target);
+      return { number: 9, htmlUrl: "https://github.com/o/r/pull/9", created: true };
+    };
+    s.deps.fetchRepoShipInfo = async () => ({ defaultBranch: "main" });
+    const resume = finishing("Done: pushed the fix.", {
+      agent: "coding",
+      state: { prDescription: description, pushedBranch: BRANCH },
+    });
+    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    expect(opened).toEqual([]);
+    expect(out.prNote).toContain("the plan's base was lost across a roll");
+    s.ending.drain(true);
+    await s.writer.settled();
+    const rec = (await s.store.get("run-l"))!;
+    expect(rec.events.filter((e) => e.type === "run_note" && (e as { kind: string }).kind === "pr_not_opened")).toEqual(
+      [expect.objectContaining({ summary: "no PR opened: the plan's base was lost across a roll" })],
     );
   });
 

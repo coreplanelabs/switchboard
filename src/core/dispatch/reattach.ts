@@ -5,6 +5,8 @@
 // says why, and its request is dispatched again as a new run in the thread,
 // never migrated silently onto another backend.
 import { workspaceBindingOf, type WorkspaceBinding } from "../../execution/factory.js";
+import type { CoordinatorTag } from "../coordinator/contract.js";
+import type { RunEvent } from "../runEvents.js";
 import { messageFromInbox } from "../runLedger/inboxMessage.js";
 import type { LiveRunRow } from "../runLedger/types.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
@@ -31,6 +33,24 @@ export function carriedWorkspaceBinding(row: LiveRunRow): WorkspaceBinding | und
     return { backend: "resident", ...(row.meta.workspace ? { workspace: row.meta.workspace } : {}) };
   if (row.meta.selection === "sandbox" || row.meta.selection === "local") return { backend: row.meta.selection };
   return undefined;
+}
+
+/**
+ * The coordinator tag a resumed run carries forward (run-history item 48a):
+ * the instance and key off the row's meta — written at the claim — and the
+ * plan's base off the `coordinator_tag` event the spawning process published
+ * at dispatch, so a coding child re-attached after a bot roll still knows the
+ * branch its pull request targets instead of calling the unit branch its own
+ * base. Undefined for a run no coordinator spawned; a row written before the
+ * event existed carries the two meta fields and no base — the post-step's
+ * second guard (the coordinator store) covers it.
+ */
+export function carriedCoordinatorTag(row: LiveRunRow, events: readonly RunEvent[]): CoordinatorTag | undefined {
+  const { parentInstanceId, idempotencyKey } = row.meta;
+  if (typeof parentInstanceId !== "string" || typeof idempotencyKey !== "string") return undefined;
+  const tag = events.find((e) => e.type === "coordinator_tag");
+  const base = tag?.type === "coordinator_tag" ? tag.base : undefined;
+  return { parentInstanceId, idempotencyKey, ...(base !== undefined ? { base } : {}) };
 }
 
 /** The `resumed` note's words for a workspace that could not be re-attached. */

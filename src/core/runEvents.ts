@@ -635,6 +635,16 @@ export type RunEvent =
       seq?: number;
       at?: number;
     }
+  /** The coordinator tag as a fact of the run (docs/reference/specs/run-history.md
+   *  item 48a): the instance the run is a child of, the unit its idempotency
+   *  key named, and the base branch its pull request targets — published by
+   *  the dispatcher once at dispatch, from `DispatchOptions.coordinator`, so
+   *  a run re-attached or restarted after a bot roll (whose spawn options are
+   *  gone with the process) reads the plan's base back off its own events
+   *  instead of letting the binding ref — the unit branch itself — stand in.
+   *  `base` is absent when the spawn knew none; the post-step then falls to
+   *  the coordinator store's `instance.base`. Additive: unknown → ignored. */
+  | { type: "coordinator_tag"; parentInstanceId: string; unit?: string; base?: string; seq?: number; at?: number }
   /** The review post-step's outcome when the verdict landed
    *  (docs/reference/specs/agent-review.md item 18): the pull request it was
    *  posted to, the head it was pinned to (the carried head after a rebase,

@@ -72,7 +72,12 @@ import { shipPresetFor } from "./shipPipeline.js";
 import { DEFAULT_CONTRACT_MAX_CHARS, renderContract, type ChildContract } from "./ship/contract.js";
 import { withContractInFirstUserTurn } from "./ship/codingChild.js";
 import { prepareFreshTurn, settleThread, tellDropped } from "./dispatch/settle.js";
-import { abandonLostWorkspace, carriedWorkspaceBinding, prepareRestartTurn } from "./dispatch/reattach.js";
+import {
+  abandonLostWorkspace,
+  carriedCoordinatorTag,
+  carriedWorkspaceBinding,
+  prepareRestartTurn,
+} from "./dispatch/reattach.js";
 import { workspaceBindingFor } from "../execution/factory.js";
 import { lineageOf, lineageParent, tellParent, type LineageHeard } from "./dispatch/lineage.js";
 import { sessionSeedFor } from "./dispatch/seed.js";
@@ -724,7 +729,11 @@ export async function dispatch(
     // spawned thread the same parent; a coordinator's child its instance and
     // key (item 48).
     const parentRunId = parent?.runId;
-    const coordinator = opts.coordinator;
+    // A resumed run carries its coordinator tag forward (run-history item 48a):
+    // the spawn's dispatch options are gone with the process that spawned it,
+    // so the tag is rebuilt from the adopted row's meta and the
+    // `coordinator_tag` event the spawning dispatch published.
+    const coordinator = opts.coordinator ?? (resume ? carriedCoordinatorTag(resume.row, resume.events) : undefined);
     const registration = await registerRun(deps, {
       msg,
       io,

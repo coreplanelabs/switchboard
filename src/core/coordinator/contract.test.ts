@@ -15,6 +15,7 @@ import {
   parseUnitKey,
   UNIT_KEY_PATTERN,
   unitKeyOf,
+  unitOfIdempotencyKey,
   type CoordinatorInstance,
   type CoordinatorUnit,
   type WorkflowSender,
@@ -97,6 +98,14 @@ describe("a unit's key — the instance and the unit, the prefix of every child'
       unit: "task",
     });
     expect(idempotencyKeyFor("plan-p-2", "U16/1/coding").startsWith(`${key}/`)).toBe(true);
+  });
+
+  it("unitOfIdempotencyKey reads the unit off a child's key — the head of its step — and answers nothing for a malformed key or a step without a unit prefix", () => {
+    expect(unitOfIdempotencyKey("plan-p-2:U16/1/coding")).toBe("U16");
+    expect(unitOfIdempotencyKey("ship-abc_1:task/2/review")).toBe("task");
+    expect(unitOfIdempotencyKey("plan-p-2:U16")).toBe("U16");
+    expect(unitOfIdempotencyKey("plan-p-2")).toBeUndefined();
+    expect(unitOfIdempotencyKey(`plan-p-2:${"u".repeat(33)}/1/coding`)).toBeUndefined();
   });
 
   it("refuses what is not a key: no colon, an empty half, a unit with a slash or a colon, an instance over 100 characters", () => {

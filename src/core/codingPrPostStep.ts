@@ -342,6 +342,14 @@ export interface CodingPrTarget {
    *  a push past its head is new work, which needs a new pull request. Never a
    *  pull request a person named. */
   ownPr?: { number: number; headSha: string; state: "open" | "merged" | "closed" };
+  /** True for a coordinator's child whose plan base is unknown even after the
+   *  second guard — the tag's `coordinator_tag` event lost across a roll and
+   *  the coordinator store's instance record without a `base`. The child is
+   *  dispatched AT its unit branch, so the binding ref is the branch itself
+   *  and the repo's default branch is not the plan's base: neither may stand
+   *  in, and a submitted description is refused with a `pr_not_opened` note
+   *  saying the base was lost, never opened against a guessed branch. */
+  planBaseLost?: boolean;
 }
 
 /**
@@ -411,6 +419,26 @@ export async function runCodingPrPostStep(input: {
         `[pr-post] ${logKey} skipped: no repo resolvable (none at dispatch, no GitHub origin remote observed; branch ${branchLog})`,
       );
       return `⚠️ A PR description was submitted but no repository is known for this thread (none resolved at dispatch, and no GitHub origin remote was observed in the workspace), so no PR was opened.`;
+    }
+    return undefined;
+  }
+  if (target.planBaseLost) {
+    // A coordinator's child whose plan base survived nowhere (CodingPrTarget's
+    // `planBaseLost`): no branch here is the plan's base, so nothing is opened
+    // and nothing stands in — said as a typed note when a description was
+    // submitted, so a plan runner's `pr-check` sees why no pull request
+    // followed; silence otherwise, as for every round with nothing to report.
+    if (prDescription) {
+      console.log(
+        `[pr-post] ${logKey} skipped: the plan's base was lost across a roll (repo ${repo}, branch ${branchLog}) — no PR opened`,
+      );
+      input.publish({
+        type: "run_note",
+        kind: "pr_not_opened",
+        summary: "no PR opened: the plan's base was lost across a roll",
+        at: systemClock(),
+      });
+      return `⚠️ A PR description was submitted but the plan's base was lost across a roll, so no PR was opened${compareUrl ? ` — compare & open manually: ${compareUrl}` : "."}`;
     }
     return undefined;
   }

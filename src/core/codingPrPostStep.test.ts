@@ -287,6 +287,72 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     expect(note).not.toContain("/compare/");
   });
 
+  // A coordinator's child re-attached after a bot roll whose
+  // plan base survived nowhere — the tag's event lost, the coordinator store's
+  // instance record without a base. The binding ref is the unit branch itself
+  // and the repo default is not the plan's base: neither may stand in, and the
+  // note says the base was lost, never "the branch is the base".
+  it("planBaseLost with a description and a pushed branch → no PR call, no GitHub default-branch lookup, a `pr_not_opened` note saying the plan's base was lost across a roll, and the reply note with the compare URL", async () => {
+    const spy = openSpy();
+    const fetchRepoInfo = vi.fn(unreachable);
+    const published: RunEvent[] = [];
+    const note = await runCodingPrPostStep({
+      observed: observation({ branch: "plan/p/u1", checkedOut: "plan/p/u1" }),
+      description: DESCRIPTION,
+      target: {
+        repo: "acme/api",
+        baseRef: undefined,
+        bindingRef: "plan/p/u1",
+        resolvedRef: "plan/p/u1",
+        planBaseLost: true,
+      },
+      openPullRequest: spy.fn,
+      fetchRepoInfo,
+      findOpenPr: noOpenPr,
+      updatePullRequest: noUpdate,
+      publish: (e) => void published.push(e),
+      logKey: "t",
+    });
+    expect(spy.calls).toHaveLength(0);
+    expect(fetchRepoInfo).not.toHaveBeenCalled();
+    expect(published).toEqual([
+      {
+        type: "run_note",
+        kind: "pr_not_opened",
+        summary: "no PR opened: the plan's base was lost across a roll",
+        at: expect.any(Number),
+      },
+    ]);
+    expect(note).toContain("the plan's base was lost across a roll");
+    expect(note).toContain("no PR was opened");
+    expect(note).toContain("https://github.com/acme/api/compare/plan/p/u1");
+  });
+
+  it("planBaseLost without a description → silence: no note, no call, nothing published", async () => {
+    const spy = openSpy();
+    const published: RunEvent[] = [];
+    const note = await runCodingPrPostStep({
+      observed: observation({ branch: "plan/p/u1", checkedOut: "plan/p/u1", remoteHead: undefined }),
+      description: undefined,
+      target: {
+        repo: "acme/api",
+        baseRef: undefined,
+        bindingRef: "plan/p/u1",
+        resolvedRef: "plan/p/u1",
+        planBaseLost: true,
+      },
+      openPullRequest: spy.fn,
+      fetchRepoInfo: unreachable,
+      findOpenPr: noOpenPr,
+      updatePullRequest: noUpdate,
+      publish: (e) => void published.push(e),
+      logKey: "t",
+    });
+    expect(note).toBeUndefined();
+    expect(spy.calls).toHaveLength(0);
+    expect(published).toEqual([]);
+  });
+
   // A description-only follow-up in a thread whose own run opened the pull
   // request: the workspace sits on the base (the binding still the repo
   // default) and the run pushed nothing, so the description is for THAT pull
