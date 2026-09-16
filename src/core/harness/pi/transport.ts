@@ -9,13 +9,12 @@
 // `PiTransport` shape the spike driver speaks over a child process, so the
 // bridge and the driver's accumulator never know which.
 
-import { LOG_READ_BYTES, type PiContainer } from "./container.js";
-import type { PiRunPaths } from "./process.js";
+import { LOG_READ_BYTES, type HarnessContainer, type HarnessPaths } from "../container.js";
 import type { PiTransport } from "./protocol.js";
 
 export interface PiRpcTransportDeps {
-  container: PiContainer;
-  paths: PiRunPaths;
+  container: HarnessContainer;
+  paths: HarnessPaths;
   pid: number;
   /** Between two reads that found nothing. */
   pollMs: number;

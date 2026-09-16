@@ -11,9 +11,15 @@ import type { Identity } from "../../../agents/registry.js";
 import type { Effort } from "../../../effort.js";
 import type { ProviderConfig } from "../../provider.js";
 import type { PiCompactionConfig } from "../../../config.js";
+import type { HarnessPaths, HarnessStart } from "../container.js";
 import { PI_EXTENSION_SOURCE } from "./extensionSource.js";
 
+/** The program the container starts: pi on the container's PATH. */
 export const PI_BIN = "pi";
+/** What marks a streaming delta in pi's stdout: a line carrying it never reaches the log, on any container. */
+export const MESSAGE_UPDATE_MARK = '"type":"message_update"';
+/** pi's stdout filter for the container seam: the streaming deltas dropped at the source, because no reader wants a token at a time. */
+export const PI_STDOUT_FILTER: NonNullable<HarnessStart["stdoutFilter"]> = { dropLinesContaining: MESSAGE_UPDATE_MARK };
 /** The variable pi's models.json interpolates as the provider's key: the run bearer. */
 export const RUN_BEARER_ENV = "SWITCHBOARD_RUN_BEARER";
 /** Where the extension reaches the bot: the base URL the proxy and the harness routes hang under. */
@@ -49,19 +55,15 @@ export function piThinkingLevel(effort: Effort | undefined): string | undefined 
   return effort;
 }
 
-/** The files and paths of one run's pi, all under one directory of the run's own. */
-export interface PiRunPaths {
-  dir: string;
+/** The files and paths of one run's pi, all under one directory of the run's
+ *  own: the container seam's layout (`HarnessPaths`: the root and the
+ *  directories the start makes, the FIFO, the log, the error log, the pid
+ *  file, the command directory) plus pi's own files. */
+export interface PiRunPaths extends HarnessPaths {
   /** `PI_CODING_AGENT_DIR`: settings.json, models.json, SYSTEM.md, sessions/. */
   agentDir: string;
   sessionDir: string;
   extension: string;
-  fifo: string;
-  log: string;
-  errLog: string;
-  pidFile: string;
-  /** Where a command too long for one write lands before it is fed to the FIFO. */
-  commandDir: string;
 }
 
 /** Every path is derived from the run id, so two runs never share a file and
@@ -90,16 +92,20 @@ export function piRunPaths(runId: string): PiRunPaths {
  *  one would choose. The layout under the root is the contract between
  *  builds: a build that changes it cannot re-attach to a pi of the old one. */
 export function piRunPathsAt(dir: string): PiRunPaths {
+  const sessionDir = `${dir}/agent/sessions`;
+  const commandDir = `${dir}/cmd`;
   return {
     dir,
+    // The directories the start makes at 700, the root first (harness-pi item 4).
+    dirs: [dir, sessionDir, commandDir],
     agentDir: `${dir}/agent`,
-    sessionDir: `${dir}/agent/sessions`,
+    sessionDir,
     extension: `${dir}/extension.js`,
     fifo: `${dir}/rpc.in`,
     log: `${dir}/rpc.log`,
     errLog: `${dir}/rpc.err`,
     pidFile: `${dir}/pi.pid`,
-    commandDir: `${dir}/cmd`,
+    commandDir,
   };
 }
 

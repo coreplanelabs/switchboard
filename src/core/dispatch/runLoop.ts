@@ -24,7 +24,8 @@ import {
   type HarnessFacts,
   type HarnessSession,
 } from "../harness/contract.js";
-import { piContainerFor } from "../harness/pi/botHostContainer.js";
+import { harnessContainerFor } from "../harness/botHostContainer.js";
+import { isContainerGone } from "../harness/container.js";
 import { ModelPolicyRefusedError } from "../harness/pi/harness.js";
 import { softStopAnswer, timeBudgetAnswer } from "../harness/pi/windDown.js";
 import { loopEndingOf, reviewPostedBefore, type LoopEnding } from "../runLedger/resume.js";
@@ -615,9 +616,23 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
             `the ${agent.name} preset's run left ${facts.harness} harness facts on its row, but this process has no harness deps to end that process with`,
           );
         const container =
-          deps.harness.containerFor?.(executor, profile.machine) ?? piContainerFor(executor, profile.machine);
-        const found = await deps.harness.harness.find(facts, container);
+          deps.harness.containerFor?.(executor, profile.machine) ?? harnessContainerFor(executor, profile.machine);
+        // The container itself may be gone under the question (harness.md
+        // item 9: the seam rethrows the executor's typed word instead of
+        // answering no name): then nothing of the leftover is here to end, the
+        // record says so, and the post-steps run with the answer as before.
+        const found = await deps.harness.harness.find(facts, container).catch((err: unknown) => {
+          if (!isContainerGone(err)) throw err;
+          return "gone" as const;
+        });
         switch (found) {
+          case "gone":
+            onEvent({
+              type: "run_note",
+              kind: "resumed",
+              summary: `the container this run was handed is gone under the finish, so nothing of the run's ${facts.harness} process (pid ${facts.pid}) is here to end`,
+            });
+            break;
           case "another-container": {
             // Both words go on the note — the row's and this container's — so
             // forensics can tell which generation ran where after a roll.
@@ -697,7 +712,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
       ];
       harnessSession = await harnessDeps.harness.open(
         {
-          container: harnessDeps.containerFor?.(executor, profile.machine) ?? piContainerFor(executor, profile.machine),
+          container:
+            harnessDeps.containerFor?.(executor, profile.machine) ?? harnessContainerFor(executor, profile.machine),
           bearer: ctx.bearer,
           harnessUrl,
           registry: harnessDeps.registry,

@@ -37,7 +37,7 @@ import type { ProvisionDeps } from "./provision.js";
 import type { RecordDeps } from "./record.js";
 import { processSecrets } from "../../secrets.js";
 import type { Harness } from "../harness/contract.js";
-import type { PiContainer } from "../harness/pi/container.js";
+import type { HarnessContainer } from "../harness/container.js";
 import type { HarnessRegistry } from "../harness/pi/relay.js";
 import type { Executor } from "../../execution/executor.js";
 import type { MachineClass } from "../../agents/registry.js";
@@ -62,9 +62,9 @@ export interface HarnessProcessDeps {
    *  pi and the run says so. */
   loopbackUrl?: string;
   /** The container for a run, given its executor and machine class; absent →
-   *  `piContainerFor`: over the executor for a class with a workspace, the
+   *  `harnessContainerFor`: over the executor for a class with a workspace, the
    *  bot host for `none`. */
-  containerFor?: (executor: Executor, machine: MachineClass) => PiContainer;
+  containerFor?: (executor: Executor, machine: MachineClass) => HarnessContainer;
   /** How often the harness polls pi's log and checks the budgets, and the
    *  sleep that paces it, for a test that drives a scripted pi (one under fake
    *  timers hands the harness a clock of its own); absent, the harness's own

@@ -24,7 +24,7 @@ import type { RunControl } from "../runRegistry/runControl.js";
 import type { FollowUpInbox, FollowUpInput } from "../threadAdmission.js";
 import type { Backend } from "../trace/attrs.js";
 import type { Clock, Span } from "../trace/types.js";
-import type { PiContainer } from "./pi/container.js";
+import type { HarnessContainer } from "./container.js";
 import type { HarnessRegistry } from "./pi/relay.js";
 import type { ToolRuleContext } from "./pi/toolRules.js";
 
@@ -64,7 +64,7 @@ export interface PiHarnessFacts {
    *  written before it was recorded: that pi's calls no proxy here can honour,
    *  so it is ended and a fresh one started with this generation's bearer. */
   bearerHash?: string;
-  /** The identity of the container pi runs in (`PiContainer.identity`), so a
+  /** The identity of the container pi runs in (`HarnessContainer.identity`), so a
    *  generation handed another container reads "pi is elsewhere", never "pi
    *  is dead", and probes or ends nothing at that pid there. Absent on a row
    *  written before it was recorded, or on a container that cannot name
@@ -340,7 +340,7 @@ export interface HarnessRun {
  *  the clock and sleep the loop paces on. A harness's own settings — pi's
  *  compaction thresholds — sit behind its object, never here. */
 export interface HarnessDeps {
-  container: PiContainer;
+  container: HarnessContainer;
   /** The run's bearer, revealed once into the process's environment. */
   bearer: string;
   /** The bot's base URL as the container reaches it. */
@@ -384,8 +384,8 @@ export interface Harness {
   /** Where the process a row's facts name is, before any pid is probed or
    *  ended (`Finding`); another harness's facts answer `another-harness` with
    *  no container command. */
-  find(facts: HarnessFacts, container: PiContainer): Promise<Finding>;
+  find(facts: HarnessFacts, container: HarnessContainer): Promise<Finding>;
   /** End the process the facts name and remove its files, in the container
    *  they name: idempotent, best-effort; another harness's facts are left alone. */
-  end(facts: HarnessFacts, container: PiContainer): Promise<void>;
+  end(facts: HarnessFacts, container: HarnessContainer): Promise<void>;
 }

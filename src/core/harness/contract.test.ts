@@ -25,7 +25,7 @@ import { runPiHarnessOpen } from "./pi/harness.js";
 import { PiHarness } from "./pi/piHarness.js";
 import { piBuiltinToolsFor, piRunPaths, piSettingsJson, piThinkingLevel } from "./pi/process.js";
 import { HarnessRegistry } from "./pi/relay.js";
-import { FakePiContainer } from "./pi/testing/fakeContainer.js";
+import { FakeHarnessContainer } from "./testing/fakeContainer.js";
 import { scriptPiFromProvider } from "./pi/testing/providerPi.js";
 
 // Feature: docs/reference/specs/harness.md — the seam between the run loop and
@@ -109,7 +109,7 @@ const textOnlyProvider = (): Provider => ({
  *  two-turn one by default); the sinks record what the harness writes, the
  *  clock never moves, the sleep is the event loop's own turn. */
 function world(opts: { resume?: HarnessRun["resume"]; provider?: Provider } = {}) {
-  const container = new FakePiContainer();
+  const container = new FakeHarnessContainer();
   const registry = new HarnessRegistry();
   const events: RunEvent[] = [];
   const steps: StepReport[] = [];
@@ -149,7 +149,7 @@ function world(opts: { resume?: HarnessRun["resume"]; provider?: Provider } = {}
 }
 
 /** The fake, recording which of `identity` and `alive` the harness asked. */
-class WatchedContainer extends FakePiContainer {
+class WatchedContainer extends FakeHarnessContainer {
   readonly asked: string[] = [];
   override async identity(): Promise<string | undefined> {
     this.asked.push("identity");
@@ -298,7 +298,7 @@ describe("PiHarness — pi as the contract's object", () => {
     const c = new WatchedContainer();
     expect(await pi.find(piFactsIn("vm-old"), c)).toBe("another-container");
     expect(c.asked).toEqual(["identity"]);
-    await c.start({ paths, args: [], env: {} });
+    await c.start({ paths, command: "pi", args: [], env: {} });
     expect(await pi.find(piFactsIn("vm-fake"), c)).toBe("alive-here");
     expect(await pi.find(piFactsIn(), c)).toBe("alive-here");
     c.die();
@@ -325,15 +325,15 @@ describe("PiHarness — pi as the contract's object", () => {
 
   it("end kills the pid and removes the root the facts name; a row without a root ends the pid alone; a remove that fails is swallowed, like the session's own end", async () => {
     const pi = new PiHarness();
-    const c = new FakePiContainer();
+    const c = new FakeHarnessContainer();
     await pi.end({ harness: "pi", pid: 777, logOffset: 10, root: "/tmp/switchboard-pi-old", relaunches: 0 }, c);
     expect(c.killed).toEqual([777]);
     expect(c.removed).toEqual(["/tmp/switchboard-pi-old"]);
-    const d = new FakePiContainer();
+    const d = new FakeHarnessContainer();
     await pi.end({ harness: "pi", pid: 778, logOffset: 10, relaunches: 0 }, d);
     expect(d.killed).toEqual([778]);
     expect(d.removed).toEqual([]);
-    const e = new FakePiContainer();
+    const e = new FakeHarnessContainer();
     e.failNext = { operation: "remove", error: new Error("rm: refused") };
     await expect(
       pi.end({ harness: "pi", pid: 1, logOffset: 0, root: "/tmp/x", relaunches: 0 }, e),
@@ -392,6 +392,7 @@ describe("PiHarness — pi as the contract's object", () => {
     // The previous generation's pi, still alive: started as the harness starts one, so the scripted double reads its run and model off the start.
     await reattach.container.start({
       paths,
+      command: "pi",
       args: ["--tools", "read,bash,edit,write,grep,find,ls,update_status", "--model", "claude-fable-5:high"],
       env: { SWITCHBOARD_RUN_ID: "run-7" },
     });

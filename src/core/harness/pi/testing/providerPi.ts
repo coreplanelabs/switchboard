@@ -1,5 +1,5 @@
 // A pi driven by a scripted `Provider` (the tests' model double), behind the
-// `FakePiContainer`. Where a real pi calls the model through the proxy and runs
+// `FakeHarnessContainer`. Where a real pi calls the model through the proxy and runs
 // its tools in the container, this one asks the test's provider for each turn
 // and does what pi would with the answer — the prompt echoed, the assistant
 // message and its tool calls announced record by record, every tool call put
@@ -27,7 +27,7 @@ import type { Executor } from "../../../../execution/executor.js";
 import { TracingExecutor } from "../../../../execution/tracingExecutor.js";
 import { isEffort, type Effort } from "../../../../effort.js";
 import { chatMessageOf } from "../mirror.js";
-import { PI_BUILTIN_TOOLS } from "../process.js";
+import { PI_BUILTIN_TOOLS, piRunPathsAt } from "../process.js";
 import {
   authorizeToolCall,
   relayToolCall,
@@ -38,7 +38,7 @@ import {
   type RelayedToolAnswer,
   type ToolCallAsk,
 } from "../relay.js";
-import type { FakePiContainer } from "./fakeContainer.js";
+import type { FakeHarnessContainer } from "../../testing/fakeContainer.js";
 
 export const PI_BUSY_REFUSAL =
   "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.";
@@ -121,7 +121,7 @@ interface Session {
  * harness writes to pi's stdin is answered as pi would answer it, and each turn
  * of a prompt is one `provider.complete`.
  */
-export function scriptPiFromProvider(container: FakePiContainer, opts: ProviderPiOptions): ProviderPi {
+export function scriptPiFromProvider(container: FakeHarnessContainer, opts: ProviderPiOptions): ProviderPi {
   const requests: CompletionRequest[] = [];
   const steers: string[] = [];
   let session: Session | undefined;
@@ -205,13 +205,15 @@ export function scriptPiFromProvider(container: FakePiContainer, opts: ProviderP
         if (turn) appendMerged(messages, turn);
       }
     }
+    // pi's files under the root the start was filed under: the seam's start carries the neutral layout, pi's is derived from its root.
+    const piPaths = piRunPathsAt(start.paths.dir);
     session = {
       runId: start.env.SWITCHBOARD_RUN_ID ?? "run",
       model: modelArg.split(":")[0],
       effort: isEffort(thinking) ? thinking : undefined,
-      system: container.files.get(`${start.paths.agentDir}/SYSTEM.md`),
+      system: container.files.get(`${piPaths.agentDir}/SYSTEM.md`),
       builtins: tools.filter((t) => (PI_BUILTIN_TOOLS as readonly string[]).includes(t)),
-      sessionFile: sessionPath ?? `${start.paths.sessionDir}/session.jsonl`,
+      sessionFile: sessionPath ?? `${piPaths.sessionDir}/session.jsonl`,
       messages,
     };
     return session;

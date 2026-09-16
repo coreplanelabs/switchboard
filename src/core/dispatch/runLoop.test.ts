@@ -37,7 +37,7 @@ import type { SessionCapability } from "../../tools/session.js";
 import { HarnessInterruptedError, HarnessMismatchError } from "../harness/contract.js";
 import { ModelPolicyRefusedError, PiContainerReplacedError } from "../harness/pi/harness.js";
 import { PiHarness } from "../harness/pi/piHarness.js";
-import { FakePiContainer } from "../harness/pi/testing/fakeContainer.js";
+import { FakeHarnessContainer } from "../harness/testing/fakeContainer.js";
 import { scriptPiFromProvider } from "../harness/pi/testing/providerPi.js";
 import { judgeToolCall, type ToolRuleContext } from "../harness/pi/toolRules.js";
 import type { CoordinatorTag } from "../coordinator/contract.js";
@@ -158,7 +158,7 @@ function setup(
           harnessUrl: "https://bot.example.com",
           loopbackUrl: "http://127.0.0.1:8080",
           containerFor: () => {
-            const container = new FakePiContainer();
+            const container = new FakeHarnessContainer();
             scriptPiFromProvider(container, {
               provider: runProvider,
               registry: harness!.registry,
@@ -492,7 +492,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
 
   /** A pi that answers the harness's first prompt with one bash turn and a
    *  final text — its extension asking the gate for the call, as the real one does. */
-  function scriptedPi(container: FakePiContainer, registry: HarnessRegistry, finalText: string) {
+  function scriptedPi(container: FakeHarnessContainer, registry: HarnessRegistry, finalText: string) {
     container.onStdin = (line, c) => {
       const cmd = JSON.parse(line) as Record<string, unknown>;
       if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
@@ -527,7 +527,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
 
   /** A pi that starts on the prompt and finishes only once a steer arrives — so the
    *  test sees the steer's text the way pi would, staged files and all. */
-  function piFinishingOnSteer(container: FakePiContainer, finalText: string) {
+  function piFinishingOnSteer(container: FakeHarnessContainer, finalText: string) {
     const steers: string[] = [];
     container.onStdin = (line, c) => {
       const cmd = JSON.parse(line) as Record<string, unknown>;
@@ -567,7 +567,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
   // staged file is copied into the store and pulled into the container over the
   // run's executor BEFORE the steer pi reads, whose text ends with the line.
   it("a steered follow-up's staged file is copied and pulled before pi reads the steer; the steer's text ends with the attachments line; the record carries the `in` event", async () => {
-    const container = new FakePiContainer();
+    const container = new FakeHarnessContainer();
     const steers = piFinishingOnSteer(container, "sheet cut");
     const store = new InMemoryArtifactStore({
       bucket: "test",
@@ -623,7 +623,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
   });
 
   it("without a store the pi steer is sent as before: no copy, no pull, no line", async () => {
-    const container = new FakePiContainer();
+    const container = new FakeHarnessContainer();
     const steers = piFinishingOnSteer(container, "done");
     const commands: string[] = [];
     const s = setup("", {
@@ -654,7 +654,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
   });
 
   it("a preset the deployment moved to pi runs on the harness: pi's answer is the run's, its tool events are on the stream, the bearer reaches pi and the provider is never called", async () => {
-    const container = new FakePiContainer();
+    const container = new FakeHarnessContainer();
     const registry = new HarnessRegistry();
     scriptedPi(container, registry, "pi says done");
     let providerCalls = 0;
@@ -719,7 +719,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       risks: "none",
       validation: { criteria: [{ criterion: "hygiene:check", proof: "ok — 201 files" }] },
     };
-    const container = new FakePiContainer();
+    const container = new FakeHarnessContainer();
     const registry = new HarnessRegistry();
     // The workspace as the post-step observes it: on the pushed branch, its tip on the remote.
     const executor = {
@@ -840,7 +840,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
   // run's pi files go under the run's own root all the same: the root never
   // depends on knowing that user, present or not (harness-pi item 4).
   it("a run on a resident files its pi under the run's own root directly under /tmp, whatever pool user the attach binding names, and removes it when the run ends", async () => {
-    const container = new FakePiContainer();
+    const container = new FakeHarnessContainer();
     const registry = new HarnessRegistry();
     scriptedPi(container, registry, "pi says done");
     const s = setup("", {
@@ -872,7 +872,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       coordinator?: CoordinatorTag;
       binding?: ResidentBinding;
     }) => {
-      const container = new FakePiContainer();
+      const container = new FakeHarnessContainer();
       const registry = new RecordingRegistry();
       scriptedPi(container, registry, "done");
       const s = setup("", {
@@ -962,7 +962,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
 describe("the pi harness — the container replaced under a live run", () => {
   it("a run whose pi container is replaced under it ends `interrupted`, not failed: the replaced-container error propagates for the dispatcher's restart, the registry and the record say interrupted with the sandbox_restarted note and the settled call, the workspace is released, and the card closes 🔁 saying the run restarts from its request — never ❌", async () => {
     const registry = new HarnessRegistry();
-    const container = new FakePiContainer();
+    const container = new FakeHarnessContainer();
     container.onStdin = (line, c) => {
       const cmd = JSON.parse(line) as Record<string, unknown>;
       if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
@@ -1061,7 +1061,7 @@ describe("the pi harness — the review preset", () => {
    *  extension blocks it and pi ends it as an error — nothing ran), submits
    *  the verdict through the relay as the real extension does (`POST
    *  /harness/tool`), then answers. */
-  function scriptedReviewPi(container: FakePiContainer, registry: HarnessRegistry, finalText: string) {
+  function scriptedReviewPi(container: FakeHarnessContainer, registry: HarnessRegistry, finalText: string) {
     container.onStdin = (line, c) => {
       const cmd = JSON.parse(line) as Record<string, unknown>;
       if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
@@ -1133,7 +1133,7 @@ describe("the pi harness — the review preset", () => {
   }
 
   it("`harness: { review: pi }` runs the review on pi under the read identity: no edit or write on pi's allowlist, the readonly toolset relayed, the read-only note in the framing, a write refused by the gate with a tool_refused note, and the relayed verdict posted to the pull request as `LGTM:` behind the reviewed-head guard", async () => {
-    const container = new FakePiContainer();
+    const container = new FakeHarnessContainer();
     const registry = new HarnessRegistry();
     scriptedReviewPi(container, registry, "The review: one nit, F1.");
     let providerCalls = 0;
@@ -1215,7 +1215,7 @@ describe("the pi harness — the review preset", () => {
   // posted, pinned to the new head; pi is ended once the settle is done.
   it("a substantive head move mid-review on pi re-reviews as a prompt on the same pi session: one pi process, two prompts, the worktree moved first, the second verdict posted pinned to the new head, the second answer the run's, pi ended after the settle", async () => {
     const NEW = "d75b5a51aba97d43c64a42c96e580dd9abbfd78e";
-    const container = new FakePiContainer();
+    const container = new FakeHarnessContainer();
     const registry = new HarnessRegistry();
     let worktreeHead = HEAD;
     const moves: string[] = [];
@@ -1354,7 +1354,7 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
   /** A pi that asks the gate for a shell it was never given (refused), then
    *  calls the relayed `update_status` through the bot as the real extension
    *  does (`POST /harness/tool`), then answers. */
-  function scriptedGeneralPi(container: FakePiContainer, registry: HarnessRegistry, finalText: string) {
+  function scriptedGeneralPi(container: FakeHarnessContainer, registry: HarnessRegistry, finalText: string) {
     const refusals: Array<{ allow: boolean; reason?: string }> = [];
     container.onStdin = (line, c) => {
       const cmd = JSON.parse(line) as Record<string, unknown>;
@@ -1411,7 +1411,7 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
   }
 
   it("`harness: { general: pi }` runs a general ask on pi on the bot host: the container is asked for by the `none` machine class, pi reaches the bot over loopback, its allowlist is the assistant toolset's relays and none of pi's own tools, the note says so, a shell pi asks for is refused by name, the relayed update_status runs in the bot, and pi's answer is the run's", async () => {
-    const container = new FakePiContainer();
+    const container = new FakeHarnessContainer();
     const registry = new HarnessRegistry();
     const refusals = scriptedGeneralPi(container, registry, "General says done.");
     const asked: string[] = [];
@@ -1515,7 +1515,7 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
     "github_issue_list",
     "github_issue_get",
   ];
-  const rpcAnswers = (cmd: Record<string, unknown>, c: FakePiContainer) => {
+  const rpcAnswers = (cmd: Record<string, unknown>, c: FakeHarnessContainer) => {
     if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
       c.emit({ id: cmd.id, type: "response", command: cmd.type, success: true, data: { sessionFile: "s.jsonl" } });
   };
@@ -1525,7 +1525,7 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
    *  gate, then asked of the relay until it answers; the call's end, its result
    *  as pi's own entry and the turn's end emitted after. */
   async function relayedTurn(
-    c: FakePiContainer,
+    c: FakeHarnessContainer,
     live: LiveHarness,
     calls: RelayedCalls,
     ask: ToolCallAsk,
@@ -1559,7 +1559,7 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
     );
     return answer;
   }
-  const settle = (c: FakePiContainer, text: string) => {
+  const settle = (c: FakeHarnessContainer, text: string) => {
     const done = assistant([{ type: "text", text }], "stop");
     c.emit(
       { type: "message_end", message: done },
@@ -1569,7 +1569,7 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
   };
 
   it("`harness: { research: pi }` runs a research ask on pi on the bot host: the container asked for by the `none` class, pi reaching the bot over loopback, the allowlist the web toolset's relays and none of pi's own tools, a shell refused by name, the relayed web_fetch run in the bot under its own URL guard, and pi's answer the run's", async () => {
-    const container = new FakePiContainer();
+    const container = new FakeHarnessContainer();
     const registry = new HarnessRegistry();
     const asked: string[] = [];
     const refusals: Array<{ allow: boolean; reason?: string }> = [];
@@ -1701,7 +1701,7 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
   });
 
   it("`harness: { conductor: pi }` runs the conductor on pi on the bot host with the conductor toolset relayed: a `coding` spawn is refused `spawn_identity` in the tool result and starts nothing; a `research` spawn reaches spawnChild with the text turns of the conversation the session log holds, so the child is dispatched with `seed` set; pi's answer is the run's", async () => {
-    const container = new FakePiContainer();
+    const container = new FakeHarnessContainer();
     const registry = new HarnessRegistry();
     const asked: string[] = [];
     const { spawn, dispatched, leads } = stubbedSpawn();
@@ -2075,7 +2075,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
   });
 
   it("on the pi harness no pi is started and the one the previous generation left is ended at its recorded pid and root (harness-pi item 8)", async () => {
-    const container = new FakePiContainer();
+    const container = new FakeHarnessContainer();
     const s = setup("", {
       agent: "coding",
       provider: neverCalled(),
@@ -2100,8 +2100,44 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
   });
 
+  // harness.md item 9: the seam rethrows the executor's word that the container
+  // is gone; a `finish` plan reads it as nothing left to end, never a failure.
+  it("on the pi harness a `finish` plan whose container is gone under the question — the seam rethrows the executor's typed word — ends nothing, notes it, and runs the post-steps with the answer", async () => {
+    const container = new FakeHarnessContainer();
+    container.identity = async () => {
+      throw new ExecSandboxRestartedError("the sandbox restarted under the run (waited 42 s)", 42_000);
+    };
+    const s = setup("", {
+      agent: "coding",
+      provider: neverCalled(),
+      yaml: YAML + "harness:\n  coding: pi\n",
+      harness: {
+        harness: piHarness,
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        containerFor: () => container,
+      },
+    });
+    const resume = finishing("Done: pushed the fix.", {
+      agent: "coding",
+      state: { harness: { pid: 777, logOffset: 10, root: "/tmp/switchboard-pi-run-l", container: "vm-old" } },
+    });
+    const out = await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages });
+    expect(out.answer).toBe("Done: pushed the fix.");
+    expect(container.killed).toEqual([]);
+    expect(container.removed).toEqual([]);
+    const notes = s.registry
+      .snapshotById("run-l")!
+      .events.filter((e) => e.type === "run_note")
+      .map((e) => (e as { summary: string }).summary);
+    expect(notes).toContainEqual(
+      "the container this run was handed is gone under the finish, so nothing of the run's pi process (pid 777) is here to end",
+    );
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+  });
+
   it("on the pi harness a leftover pi whose facts name another container than this run was handed is not ended here: the pid is a stranger's in this container, and a note names the orphan (harness-pi item 8)", async () => {
-    const container = new FakePiContainer();
+    const container = new FakeHarnessContainer();
     const s = setup("", {
       agent: "coding",
       provider: neverCalled(),
@@ -2147,7 +2183,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
   };
 
   it("a `finish` plan whose row carries another harness's facts ends nothing: the harness answers another-harness, a note names both harnesses, and the post-steps run with the answer", async () => {
-    const container = new FakePiContainer();
+    const container = new FakeHarnessContainer();
     const s = setup("", {
       agent: "coding",
       provider: neverCalled(),
@@ -2176,7 +2212,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
   });
 
   it("a resume mid-loop whose row carries another harness's facts closes the run `interrupted`, not failed: the loop refuses before any harness opens, HarnessMismatchError propagates for the dispatcher's restart, nothing is filed, started, killed or removed, the record carries the harness_error note once, the workspace is released, and the card closes 🔁 naming both harnesses — never ❌", async () => {
-    const container = new FakePiContainer();
+    const container = new FakeHarnessContainer();
     const opened: string[] = [];
     const watching = new PiHarness();
     const open = watching.open.bind(watching);
