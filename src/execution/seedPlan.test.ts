@@ -213,11 +213,18 @@ describe("the seeded sandbox wiring (static)", () => {
     }
   });
 
-  it("the resident publishes the deps entry handle beside the checkout's on /status", () => {
+  it("the resident publishes the snapshot handle — the checkout's id and the deps entry's — on /status, the route the bot probes", () => {
     const resident = read("deploy/cloudflare-resident/worker.ts");
-    expect(resident).toMatch(
-      /checkoutBackupId: snap\.checkout\.id,[\s\S]{0,600}depsBackupId: \(await this\.depsBackupRecord\(snap\.lockfileHash\)\)\?\.backup\.id \?\? null/,
+    const handle = resident.slice(
+      resident.indexOf("async snapshotHandle("),
+      resident.indexOf("async getResidentInfo("),
     );
+    expect(handle).toContain("checkoutBackupId: record.checkout.id");
+    expect(handle).toContain("depsBackupId: (await this.depsBackupRecord(record.lockfileHash))?.backup.id ?? null");
+    const status = resident.slice(resident.indexOf("async function handleStatus("));
+    const body = status.slice(0, status.indexOf("\n}\n"));
+    expect(body).toContain("stub.snapshotHandle()");
+    expect(body).toMatch(/return json\(\{[\s\S]*?\bsnapshot,[\s\S]*?\}\);/);
   });
 });
 
