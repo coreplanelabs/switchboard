@@ -550,7 +550,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
         baseRef: undefined,
         bindingRef: "fix/x",
         resolvedRef: undefined,
-        ownPr: { number: 41, headSha: PR_HEAD, state: "merged" },
+        ownPr: { number: 41, headSha: PR_HEAD, headBranch: "fix/x", state: "merged" },
       },
       openPullRequest: spy.fn,
       fetchRepoInfo: unreachable,
@@ -571,9 +571,119 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     expect(note).toContain("https://github.com/acme/api/pull/41");
     expect(note).toContain("merged");
     expect(note).toContain(HEAD.slice(0, 7));
+    expect(note).toContain("that branch is its head");
     expect(note).toContain("new pull request");
     expect(note).toContain("https://github.com/acme/api/compare/fix/x");
     expect(note).not.toContain("is the base branch");
+  });
+
+  // The live shape of resident-repos item 16's second movement: the thread's
+  // own pull request was closed and its branch deleted, the resident returned
+  // the thread to the default, and the next follow-up pushed nothing — its
+  // tree sits on the base at the remote's tip, which the observation cannot
+  // tell from a pushed branch (`head === remoteHead` either way). The base is
+  // never that pull request's head, so it is never "pushed past" it: the
+  // description edits the closed body exactly as it would from the pull
+  // request's own branch, and the reply speaks of no push.
+  it("the thread's own pull request is closed and the workspace sits on the base at the remote's tip (returned to the default, nothing pushed) → edited by number with the closed wording; never 'pushed past', no compare URL, no word of a push", async () => {
+    const PR_HEAD = "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432";
+    const spy = openSpy();
+    const updates: Array<{ number: number; body: string }> = [];
+    const published: RunEvent[] = [];
+    const note = await runCodingPrPostStep({
+      observed: observation({ head: HEAD, remoteHead: HEAD, branch: "main", checkedOut: "main" }),
+      description: DESCRIPTION,
+      target: {
+        repo: "acme/api",
+        baseRef: undefined,
+        bindingRef: "main",
+        resolvedRef: "main",
+        ownPr: { number: 41, headSha: PR_HEAD, headBranch: "fix/x", state: "closed" },
+      },
+      openPullRequest: spy.fn,
+      fetchRepoInfo: unreachable,
+      findOpenPr: noOpenPr,
+      updatePullRequest: async (_repo, number, patch) => void updates.push({ number, body: patch.body }),
+      publish: (e) => void published.push(e),
+      logKey: "t",
+    });
+    expect(spy.calls).toHaveLength(0);
+    expect(updates).toHaveLength(1);
+    expect(updates[0].number).toBe(41);
+    expect(updates[0].body).toContain(`https://github.com/acme/api/blob/${PR_HEAD}/src/login.ts#L10-L20`);
+    expect(updates[0].body).not.toContain(HEAD);
+    expect(published.map((e) => e.type)).toEqual(["pr_opened", "review_artifact"]);
+    expect(note).toBe(
+      `🔀 PR updated: https://github.com/acme/api/pull/41 — body re-rendered at \`${PR_HEAD.slice(0, 7)}\` (the pull request is closed; its description was edited in place)`,
+    );
+    expect(note).not.toMatch(/pushed/);
+    expect(note).not.toMatch(/\/compare\//);
+  });
+
+  // After the return the follow-up's real work lands on a NEW branch: the run
+  // pushes it and describes it. That branch is not the closed pull request's
+  // head, so nothing was "pushed past" that pull request — and the description
+  // is not the closed body's either: it takes the ordinary path, a pull request
+  // opened (or edited) from the pushed branch against the base.
+  it("the thread's own pull request is closed and the run pushed a third branch → never 'pushed past' that pull request and never an edit of its closed body: the ordinary open-or-edit from the pushed branch against the base", async () => {
+    const PR_HEAD = "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432";
+    const spy = openSpy({ number: 52, htmlUrl: "https://github.com/acme/api/pull/52", created: true });
+    const update = vi.fn(noUpdate);
+    const published: RunEvent[] = [];
+    const note = await runCodingPrPostStep({
+      observed: observation({ head: HEAD, remoteHead: HEAD, branch: "feat/y", checkedOut: "feat/y" }),
+      description: DESCRIPTION,
+      target: {
+        repo: "acme/api",
+        baseRef: undefined,
+        bindingRef: "main",
+        resolvedRef: "main",
+        ownPr: { number: 41, headSha: PR_HEAD, headBranch: "fix/x", state: "closed" },
+      },
+      openPullRequest: spy.fn,
+      fetchRepoInfo: unreachable,
+      findOpenPr: noOpenPr,
+      updatePullRequest: update,
+      publish: (e) => void published.push(e),
+      logKey: "t",
+    });
+    expect(update).not.toHaveBeenCalled();
+    expect(spy.calls).toHaveLength(1);
+    expect(spy.calls[0]).toMatchObject({ repo: "acme/api", headBranch: "feat/y", base: "main" });
+    expect(published.map((e) => e.type)).toEqual(["pr_opened", "review_artifact"]);
+    expect(published[0]).toMatchObject({ type: "pr_opened", number: 52, created: true, head: "feat/y" });
+    expect(note).toMatch(/^🔀 PR opened: \S+\/pull\/52 /);
+    expect(note).not.toMatch(/pushed past|\/pull\/41(?!\d)|\/compare\//);
+  });
+
+  it("the thread's own pull request is closed and the workspace sits on a third branch the remote does not hold → the unpushed note names that branch; never an edit of the closed body, never 'pushed past', no compare URL", async () => {
+    const PR_HEAD = "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432";
+    const spy = openSpy();
+    const update = vi.fn(noUpdate);
+    const published: RunEvent[] = [];
+    const note = await runCodingPrPostStep({
+      observed: observation({ head: HEAD, remoteHead: undefined, branch: "feat/y", checkedOut: "feat/y" }),
+      description: DESCRIPTION,
+      target: {
+        repo: "acme/api",
+        baseRef: undefined,
+        bindingRef: "main",
+        resolvedRef: "main",
+        ownPr: { number: 41, headSha: PR_HEAD, headBranch: "fix/x", state: "closed" },
+      },
+      openPullRequest: spy.fn,
+      fetchRepoInfo: unreachable,
+      findOpenPr: noOpenPr,
+      updatePullRequest: update,
+      publish: (e) => void published.push(e),
+      logKey: "t",
+    });
+    expect(update).not.toHaveBeenCalled();
+    expect(spy.calls).toHaveLength(0);
+    expect(published).toEqual([]);
+    expect(note).toContain("`feat/y`");
+    expect(note).toContain("was not found on the remote");
+    expect(note).not.toMatch(/pushed past|\/pull\/41(?!\d)|\/compare\//);
   });
 
   it("the branch is the base and no pull request is known → the refusal stands, and the edit seam is never asked", async () => {

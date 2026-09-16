@@ -42,8 +42,14 @@
 // sitting on the base is refused ("the branch is the base") — unless the
 // thread's own pull request is known (`CodingPrTarget.ownPr` — open, or merged
 // or closed since): the run pushed nothing, so the description is for that PR,
-// edited by number and rendered at its own head; a push past a closed one's
-// head is new work, said so with the compare URL, never an edit of the old body.
+// edited by number and rendered at its own head; a push of a closed one's own
+// head branch past its head is new work, said so with the compare URL, never
+// an edit of the old body. Only that branch can be "pushed past" it: a tree on
+// the base at origin's tip reads like a pushed branch (`head === remoteHead`)
+// but is a checkout — the thread returned to the default once the pull
+// request's branch was gone — and edits the closed pull request like any run
+// that pushed nothing; a tree on some other branch describes that branch, not
+// the closed body, and takes the ordinary open-or-edit path.
 //
 // Base resolution (CodingPrTarget): the base the caller already knows — a
 // bound PR's true base, else the base a coordinator's spawn put on its child's
@@ -92,12 +98,15 @@ export interface WorkspaceObservation {
    *  unless HEAD moved to another branch after the push — then the
    *  post-step's notes name both. */
   checkedOut: string | undefined;
-  /** The commit the remote holds for `branch` — the proof of a push, read
-   *  from the remote itself (`git ls-remote --exit-code origin
-   *  refs/heads/<branch>`), so it does not depend on the clone's shape. A
-   *  remote that answers "no such branch" is final (undefined). Only when
-   *  that probe itself fails (network, auth, an unreadable origin) does the
-   *  local record of the last push, `<branch>@{u}`, stand in. */
+  /** The commit the remote holds for `branch`, read from the remote itself
+   *  (`git ls-remote --exit-code origin refs/heads/<branch>`), so it does not
+   *  depend on the clone's shape. Equal to `head`, it proves the branch is at
+   *  the remote's tip — a push, for a branch the run could push; for the
+   *  base it is only a checkout at origin's tip, and the post-step never
+   *  calls that pushed. A remote that answers "no such branch" is final
+   *  (undefined). Only when that probe itself fails (network, auth, an
+   *  unreadable origin) does the local record of the last push,
+   *  `<branch>@{u}`, stand in. */
   remoteHead: string | undefined;
   /** `owner/name` parsed from the origin remote, probed only when asked. */
   remoteRepo: string | undefined;
@@ -333,15 +342,19 @@ export interface CodingPrTarget {
   resolvedRef: string | undefined;
   /** The pull request the thread's OWN run opened, inherited off the run
    *  record (`RepoContext.prFromRecord` / `closedRecordPr`, `recordPrOf` in
-   *  repoContext.ts), with its head commit as the resolver fetched it and
-   *  whether it is still open. Where a description resubmitted by a run that
-   *  pushed nothing lands — the workspace on the base, the binding still the
-   *  repo default, or the thread bound to the pull request's own head branch
-   *  — instead of the base-branch refusal. A `merged` or `closed` one takes
-   *  no more pushes, so a description for it can only edit its body, and does;
-   *  a push past its head is new work, which needs a new pull request. Never a
+   *  repoContext.ts), with its head commit as the resolver fetched it, its
+   *  head branch when the resolver learned it, and whether it is still open.
+   *  Where a description resubmitted by a run that pushed nothing lands — the
+   *  workspace on the base, the binding still the repo default, or the thread
+   *  bound to the pull request's own head branch — instead of the base-branch
+   *  refusal. A `merged` or `closed` one takes no more pushes, so a
+   *  description for it can only edit its body, and does; a push of
+   *  `headBranch` past `headSha` is new work, which needs a new pull request.
+   *  Only that branch can be pushed past it: a workspace on the base, or on
+   *  any other branch, holds no commit of this pull request's, whatever its
+   *  head — and with `headBranch` unknown no branch is taken for it. Never a
    *  pull request a person named. */
-  ownPr?: { number: number; headSha: string; state: "open" | "merged" | "closed" };
+  ownPr?: { number: number; headSha: string; headBranch?: string; state: "open" | "merged" | "closed" };
   /** True for a coordinator's child whose plan base is unknown even after the
    *  second guard — the tag's `coordinator_tag` event lost across a roll and
    *  the coordinator store's instance record without a `base`. The child is
@@ -376,9 +389,11 @@ export async function runCodingPrPostStep(input: {
   findOpenPr: (repo: string, branch: string) => Promise<OpenPrRef | null>;
   /** Edit a pull request the caller knows by number (githubPulls.ts'
    *  updatePullRequest). Asked ONLY when a description arrives from a
-   *  workspace sitting on the base while the thread's own pull request is
-   *  known (`target.ownPr`): the run pushed nothing, and the description is
-   *  for that pull request. A failure is reported in the note, never thrown. */
+   *  workspace sitting on the base — or on the pull request's own head branch
+   *  once it is merged or closed, with nothing pushed past its head — while
+   *  the thread's own pull request is known (`target.ownPr`): the run pushed
+   *  nothing for it, and the description is for that pull request. A failure
+   *  is reported in the note, never thrown. */
   updatePullRequest: (repo: string, number: number, patch: { title: string; body: string }) => Promise<void>;
   /** The repo's default branch — the PR base of last resort, fetched via
    *  GitHub (githubPulls.ts' fetchRepoShipInfo; shared with agent:ship's own
@@ -451,12 +466,32 @@ export async function runCodingPrPostStep(input: {
   const base = prDescription
     ? await resolveBaseRefLazy(candidates, repo, input.fetchRepoInfo)
     : resolveBaseRef(candidates, undefined);
+  // `pushed` above is the BRANCH's state, not the run's act: the remote holds
+  // the branch at the observed head, which a checkout at the remote's tip
+  // reads exactly like a push — a resident tree provisioned on the default
+  // sits at origin's tip before the run types a thing. So "pushed" is said
+  // only of a branch the run could have pushed: one other than the base
+  // (`pushedBranch` — the gate's `protectedBranches`, src/core/harness/pi/
+  // toolRules.ts, refuse a run's push to the base its pull request would
+  // target and to the repository's default), or the thread's own pull
+  // request's head branch (`pushedPastOwnPr`), never the base by the base's
+  // name. Telling a run's push from a checkout for certain would take a
+  // record of the remote before the run; nothing observes one today.
   const pushedBranch = branch !== undefined && branch !== base && pushed;
   const ownPr = target.ownPr;
-  // The pushed head when it is not the thread's own pull request's head: new
-  // work, beyond what that pull request describes.
+  // The workspace branch IS the thread's own pull request's head branch, as
+  // GitHub named it. A workspace on the base — the thread returned to the
+  // default once that branch was gone (resident-repos.md item 16's second
+  // movement) — or on any other branch is not, whatever commit it sits at;
+  // and a pull request whose head branch the resolver never learned has no
+  // branch to be pushed past.
+  const onOwnPrBranch = ownPr?.headBranch !== undefined && branch === ownPr.headBranch;
+  // That branch's head when the remote holds it at a commit other than the
+  // pull request's own: new work, beyond what that pull request describes.
   const pushedPastOwnPr =
-    ownPr !== undefined && pushed && headSha !== undefined && !sameCommit(headSha, ownPr.headSha) ? headSha : undefined;
+    ownPr !== undefined && onOwnPrBranch && pushed && headSha !== undefined && !sameCommit(headSha, ownPr.headSha)
+      ? headSha
+      : undefined;
   if (
     prDescription &&
     ownPr !== undefined &&
@@ -465,7 +500,7 @@ export async function runCodingPrPostStep(input: {
     branch !== undefined
   ) {
     // The thread's own pull request is merged or closed and the run pushed
-    // its branch past that pull request's head: the commits are new work,
+    // its head branch past that pull request's head: the commits are new work,
     // and a closed pull request takes none — a new one is needed, from a base
     // the workspace cannot name (the binding sits on the old head branch, the
     // resolver binds nothing to a closed pull request). Said plainly, with the
@@ -482,17 +517,22 @@ export async function runCodingPrPostStep(input: {
     });
     return `⚠️ A PR description was submitted and \`${branch}\`${branchNote} was pushed to \`${pushedPastOwnPr.slice(0, 7)}\`, but this thread's pull request ${url} is ${ownPr.state} and that branch is its head — the new commits need a new pull request, so nothing was edited: compare & open manually: ${compareUrl}`;
   }
-  if (prDescription && ownPr !== undefined && (branch === base || ownPr.state !== "open")) {
+  if (prDescription && ownPr !== undefined && (branch === base || (ownPr.state !== "open" && onOwnPrBranch))) {
     // The description is for the thread's own pull request, edited by number
     // with the body rendered at its head as the resolver fetched it — never at
     // the tip the workspace shows, which is not the pull request's code.
     // Either the workspace sits on the base and the run pushed nothing (a
     // push the run made would have named its branch, and the base is not a
     // branch the gate lets it push) — the binding still the repo default, or
-    // moved onto the pull request's own head branch, which a base resolved off
-    // it then equals — or the pull request is merged or closed since and the
-    // run pushed nothing past its head: it takes no more pushes, its body is
-    // still the record of the change, and the description is for it.
+    // returned to it once the pull request's branch was gone, or moved onto
+    // the pull request's own head branch, which a base resolved off it then
+    // equals — or the pull request is merged or closed since and the workspace
+    // is on its head branch with nothing pushed past its head: it takes no
+    // more pushes, its body is still the record of the change, and the
+    // description is for it. A closed pull request with the workspace on some
+    // OTHER branch is not here: that branch's description is not this body's,
+    // and it takes the ordinary path below — opened or edited from that branch
+    // when the remote holds it, refused as unpushed when it does not.
     // `pr_opened` carries no `head`: nothing was pushed, so the release has no
     // branch to remember.
     const { number, headSha: prHead, state } = ownPr;
