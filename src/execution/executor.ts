@@ -7,6 +7,7 @@ import { MAX_READ_BYTES, tooLargeMessage } from "./binaryRead.js";
 import type { Span } from "../core/trace/types.js";
 import { systemClock } from "../core/trace/clock.js";
 import type { PushedBranch } from "./residentRebind.js";
+import type { LeftBehind } from "./residentCleanliness.js";
 import { publicEnv } from "../secrets.js";
 
 // The timeout policy (default/floor/ceiling + clamp) lives in bashTimeout.ts
@@ -52,9 +53,12 @@ export interface Executor {
    *  that needs it then says so instead of decoding a text view. */
   readBytes?(path: string, opts?: ExecTraceOptions): Promise<Uint8Array>;
   /** Optional: give back whatever the run held for this thread once it ends
-   *  (a resident's pool user + worktree). "always" — nothing to preserve
-   *  (read-only agents); "if-clean" — keep the workspace if it has uncommitted
-   *  or unpushed work. Best-effort: implementations report, never throw. */
+   *  (a resident's pool user + worktree). A run starts from a clean tree, so
+   *  nothing in the workspace outlives the run either way: "if-idle" — the
+   *  run's normal end — keeps the workspace only while a command is still in
+   *  flight in it, and answers what the release discarded; "always" — a
+   *  read-only agent, a hard stop — ends what is in flight and releases now.
+   *  Best-effort: implementations report, never throw. */
   release?(mode: ReleaseMode, opts?: ReleaseOptions): Promise<ReleaseResult>;
   /** Optional: bring the workspace to `sha` — the PR head that moved while a
    *  review ran (agent-review.md item 12) — fetching as needed, and answer the
@@ -102,11 +106,16 @@ export function execDeadline(timeoutMs: number, signal?: AbortSignal): AbortSign
   return AbortSignal.any([deadline.signal, signal]);
 }
 
-export type ReleaseMode = "always" | "if-clean";
+export type ReleaseMode = "always" | "if-idle";
 export interface ReleaseResult {
   released: boolean;
   /** Why the workspace was kept (or why release failed) — for the log line. */
   reason?: string;
+  /** What the released workspace still held — uncommitted changes, unpushed
+   *  commits — now gone with it (docs/reference/specs/resident-repos.md item
+   *  16a); for the log line. Absent when nothing was left, or the workspace's
+   *  owner could not measure it. */
+  leftBehind?: LeftBehind;
 }
 
 /** An exec-INFRASTRUCTURE failure: the sandbox/exec transport itself failed —

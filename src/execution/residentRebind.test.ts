@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   boundByFor,
   boundByOf,
+  canReturnToDefault,
   OWN_BRANCHES_MAX,
   parseOwnPr,
   parsePushed,
@@ -11,17 +12,20 @@ import {
   rebindRefused,
   rebindVerdict,
   rememberOwnBranches,
+  returnToDefault,
   type RebindableBinding,
 } from "./residentRebind.js";
-import { decideWorktree } from "./residentReuse.js";
 
 // Feature: docs/reference/specs/resident-repos.md item 16 — the one exception to
 // the sticky ref binding: a thread bound to the repo default for want of a
-// named branch moves onto the branch its OWN run opened a pull request on, once,
-// when that branch is a local branch of the thread's worktree and the tree is
-// clean. A ref a person named is never moved, a rebound thread never moves
-// again, a branch the tree never made is refused, and a dirty tree keeps its
-// binding — every refusal named in the attach answer.
+// named branch moves onto the branch its OWN run opened a pull request on, once
+// per pull request. The move is a decision about the binding alone — the
+// attach provisions the tree at the moved ref (item 17). A ref a person named
+// is never moved, a rebound thread never moves again until its move is
+// returned, a branch that is neither remembered from a release nor local to
+// the thread's surviving tree is refused — every refusal named in the attach
+// answer. The second movement: a rebound binding whose branch is gone from the
+// mirror goes back to the default; a person-named ref never does.
 
 const OWN_PR = { number: 7, ref: "fix/exact-match" };
 const DEFAULT_REF = "main";
@@ -88,7 +92,7 @@ describe("rebindPlan: whether the binding may move, read off the binding alone",
     ).toEqual({ kind: "none" });
   });
 
-  it("a default-bound thread with a live tree is measured: the tree decides", () => {
+  it("a default-bound thread with a live tree is measured: the memory, else the tree, decides", () => {
     expect(rebindPlan({ ownPr: OWN_PR, reuse: false, binding: bound(), defaultRef: DEFAULT_REF })).toEqual({
       kind: "measure",
       from: "main",
@@ -124,7 +128,7 @@ describe("rebindPlan: whether the binding may move, read off the binding alone",
     ).toMatchObject({ kind: "refuse", refused: { reason: "named-ref" } });
   });
 
-  it("a thread already rebound is never moved again", () => {
+  it("a thread already rebound is never moved again — until its move is returned, when the thread may follow its next pull request", () => {
     const rebound = { from: "main", to: "fix/first", pr: 5, at: "2000-01-01T00:00:00.000Z" };
     expect(
       rebindPlan({
@@ -142,6 +146,14 @@ describe("rebindPlan: whether the binding may move, read off the binding alone",
         why: 'the thread was already rebound from "main" to "fix/first" (its pull request #5); a thread moves once',
       },
     });
+    expect(
+      rebindPlan({
+        ownPr: OWN_PR,
+        reuse: false,
+        binding: bound({ boundBy: "default", rebound: { ...rebound, returnedAt: "t1" } }),
+        defaultRef: DEFAULT_REF,
+      }),
+    ).toMatchObject({ kind: "measure", from: "main", to: "fix/exact-match" });
   });
 
   it("an evicted binding with no memory of the branch has no tree to verify it in: refused as branch-absent", () => {
@@ -170,14 +182,6 @@ describe("rebindPlan: whether the binding may move, read off the binding alone",
   });
 });
 
-// The thread remembers the branches its runs pushed (item 16): a clean tree is
-// released the moment a run ends, so on the happy path the thread's own
-// worktree never exists at the follow-up's attach and no local branch can be
-// verified there. The run's release hands the resident the exact fact —
-// `pushed: [{ref, pr}]` off its `pr_opened` events — and the binding keeps it
-// as `ownBranches`, which survives the eviction by construction. An evicted
-// (or tree-less) default-bound thread whose own branch is remembered moves and
-// recreates its tree at that branch; a live tree keeps today's checks.
 describe("parsePushed and rememberOwnBranches: the `pushed` detach body field and the binding's memory of it", () => {
   const error = "pushed must be a list of {ref: <branch>, pr: <positive integer>} when present";
 
@@ -222,6 +226,14 @@ describe("parsePushed and rememberOwnBranches: the `pushed` detach body field an
   });
 });
 
+// The thread remembers the branches its runs pushed (item 16): a run's end
+// releases its tree, so on the happy path the thread's own worktree never
+// exists at the follow-up's attach and no local branch can be verified there.
+// The run's release hands the resident the exact fact — `pushed: [{ref, pr}]`
+// off its `pr_opened` events — and the binding keeps it as `ownBranches`,
+// which survives the eviction by construction. A default-bound thread whose
+// own branch is remembered moves, tree or no tree; a live tree whose binding
+// remembers nothing is the fallback evidence.
 describe("rebindPlan and rebindVerdict when the thread's tree is gone: the remembered branch decides", () => {
   const own = [{ ref: OWN_PR.ref, pr: OWN_PR.number, at: "2026-01-01T00:00:00.000Z" }];
 
@@ -289,7 +301,7 @@ describe("rebindPlan and rebindVerdict when the thread's tree is gone: the remem
     ).toEqual({ kind: "none" });
   });
 
-  it("a live binding's plan carries whether the branch is remembered, so a tree that turns out missing (a slept container) can be recreated too", () => {
+  it("a live binding's plan carries whether the branch is remembered, and the memory decides by itself: a tree that turns out missing, or never made the branch, moves all the same", () => {
     expect(
       rebindPlan({ ownPr: OWN_PR, reuse: false, binding: bound({ ownBranches: own }), defaultRef: DEFAULT_REF }),
     ).toEqual({
@@ -304,7 +316,8 @@ describe("rebindPlan and rebindVerdict when the thread's tree is gone: the remem
       own: false,
     });
     const plan = { to: OWN_PR.ref, pr: OWN_PR.number };
-    expect(rebindVerdict({ ...plan, own: true }, { exists: false })).toEqual({ kind: "recreate" });
+    expect(rebindVerdict({ ...plan, own: true }, { exists: false })).toEqual({ kind: "rebind" });
+    expect(rebindVerdict({ ...plan, own: true }, { exists: true, branchExists: false })).toEqual({ kind: "rebind" });
     expect(rebindVerdict({ ...plan, own: false }, { exists: false })).toEqual({
       kind: "refuse",
       refused: {
@@ -313,96 +326,29 @@ describe("rebindPlan and rebindVerdict when the thread's tree is gone: the remem
         why: 'the thread\'s worktree is missing and none of its runs pushed "fix/exact-match"; the branch cannot be verified there',
       },
     });
-    // A live tree keeps today's checks whatever was remembered: the branch must be local and the tree clean.
-    expect(rebindVerdict({ ...plan, own: true }, { exists: true, readable: true, branchExists: false })).toMatchObject({
-      kind: "refuse",
-      refused: { reason: "branch-absent" },
-    });
-    expect(
-      rebindVerdict({ ...plan, own: true }, { exists: true, readable: true, branchExists: true, dirty: true }),
-    ).toMatchObject({
-      kind: "refuse",
-      refused: { reason: "dirty" },
-    });
   });
 });
 
-describe("rebindVerdict: the tree decides a measured plan", () => {
+describe("rebindVerdict: without a memory of the branch, the surviving tree decides a measured plan", () => {
   const plan = { to: OWN_PR.ref, pr: OWN_PR.number };
 
-  it("the branch is a local branch of the thread's worktree and the tree is clean → rebind, with the checkout", () => {
-    expect(rebindVerdict(plan, { exists: true, branchExists: true, dirty: false })).toEqual({
-      kind: "rebind",
-      checkout: true,
-    });
-    // A clean tree already on the branch is checked out like any other: the checkout is a no-op there.
-    expect(rebindVerdict(plan, { exists: true, branchExists: true, dirty: false, head: OWN_PR.ref })).toEqual({
-      kind: "rebind",
-      checkout: true,
-    });
+  it("the branch is a local branch of the thread's worktree → rebind, whatever the tree's dirt or HEAD: the attach provisions the tree at the branch", () => {
+    expect(rebindVerdict(plan, { exists: true, branchExists: true })).toEqual({ kind: "rebind" });
+    expect(rebindVerdict({ ...plan, own: false }, { exists: true, branchExists: true })).toEqual({ kind: "rebind" });
   });
 
-  it("a dirty tree whose HEAD is already the branch moves the record alone: no checkout, the tree untouched, the note saying so", () => {
-    expect(rebindVerdict(plan, { exists: true, branchExists: true, dirty: true, head: OWN_PR.ref })).toEqual({
-      kind: "rebind",
-      checkout: false,
-      note: 'the worktree is dirty but its HEAD is already "fix/exact-match" (the run made the branch here); the binding moves, the tree is not touched',
-    });
-  });
-
-  // The two decisions the attach makes over one measured tree, composed the
-  // way the Worker composes them (`rebindToOwnPr` → `keepTree` →
-  // `ensureThreadWorktree`): the promise the verdict's note makes is kept by
-  // the worktree step, so the dirty file the run left is still dirty after the
-  // attach. Without the hand-over, item 17's discipline wipes that tree.
-  it("the no-checkout verdict hands the attach's worktree step a tree to keep: the same dirt that moved the record alone is not a reason to wipe, and the tree stays at its path", () => {
-    const sha = "1220b9c487f9538a6dd509ef11b6a5042d85bd05";
-    const worktreePath = "/workspace/threads/slack-CX-1.0-abcd1234/main";
-    const verdict = rebindVerdict(plan, { exists: true, branchExists: true, dirty: true, head: OWN_PR.ref });
-    expect(verdict).toMatchObject({ kind: "rebind", checkout: false });
-    const keepTree = verdict.kind === "rebind" && !verdict.checkout;
-    const treeAfterTheMove = { exists: true, readable: true, dirty: true, head: sha };
-    expect(
-      decideWorktree({ reuse: false, keepTree, modeSwitch: false, sha, worktreePath, facts: treeAfterTheMove }),
-    ).toEqual({ kind: "reuse" });
-    // The clean-tree verdict (the checkout ran) hands nothing over: the tree is judged by item 17 as before.
-    const checkedOut = rebindVerdict(plan, { exists: true, branchExists: true, dirty: false });
-    expect(checkedOut).toEqual({ kind: "rebind", checkout: true });
-    expect(
-      decideWorktree({
-        reuse: false,
-        keepTree: checkedOut.kind === "rebind" && !checkedOut.checkout,
-        modeSwitch: false,
-        sha,
-        worktreePath,
-        facts: treeAfterTheMove,
-      }),
-    ).toEqual({ kind: "recreate", why: "dirty" });
-  });
-
-  it("a dirty tree whose HEAD is any other ref — the bound branch, a third branch, detached, or unreadable — keeps its binding as before", () => {
-    const dirty = (head: string | undefined) =>
-      rebindVerdict(plan, { exists: true, branchExists: true, dirty: true, ...(head !== undefined ? { head } : {}) });
-    for (const head of ["main", "feat/other", "HEAD", undefined]) {
-      expect(dirty(head)).toEqual({
-        kind: "refuse",
-        refused: {
-          ...plan,
-          reason: "dirty",
-          why: "the worktree has uncommitted changes on the bound branch; the binding stands until they are committed or discarded",
-        },
-      });
-    }
-  });
-
-  it("a branch the tree never made is refused: the physical fact this thread's run created it is missing", () => {
-    expect(rebindVerdict(plan, { exists: true, branchExists: false, dirty: false })).toEqual({
+  it("a branch the tree never made — or a tree git cannot read, which verifies nothing — is refused: the physical fact this thread's run created it is missing", () => {
+    expect(rebindVerdict(plan, { exists: true, branchExists: false })).toEqual({
       kind: "refuse",
       refused: {
         ...plan,
         reason: "branch-absent",
-        why: "\"fix/exact-match\" is not a local branch of the thread's worktree; only a branch this thread's own run made moves it",
+        why: "\"fix/exact-match\" is not a local branch of the thread's worktree and none of its runs pushed it; only a branch this thread's own run made moves it",
       },
+    });
+    expect(rebindVerdict(plan, { exists: true })).toMatchObject({
+      kind: "refuse",
+      refused: { reason: "branch-absent" },
     });
     expect(rebindVerdict(plan, { exists: false })).toMatchObject({
       kind: "refuse",
@@ -411,21 +357,65 @@ describe("rebindVerdict: the tree decides a measured plan", () => {
         why: 'the thread\'s worktree is missing and none of its runs pushed "fix/exact-match"; the branch cannot be verified there',
       },
     });
-    // A tree git cannot read verifies nothing either — whatever rev-parse said.
-    expect(rebindVerdict(plan, { exists: true, branchExists: true, readable: false })).toMatchObject({
-      kind: "refuse",
-      refused: {
-        reason: "branch-absent",
-        why: "the thread's worktree cannot be read; the branch cannot be verified there",
-      },
-    });
   });
 
-  it("a checkout that fails is a refusal naming git's first line, never an attach failure", () => {
-    expect(rebindRefused(plan, "checkout-failed", "error: pathspec did not match")).toEqual({
+  it("a refusal carries the plan's branch and pull request beside its reason", () => {
+    expect(rebindRefused(plan, "branch-absent", "the mirror does not hold it")).toEqual({
       ...plan,
-      reason: "checkout-failed",
-      why: "error: pathspec did not match",
+      reason: "branch-absent",
+      why: "the mirror does not hold it",
     });
+  });
+});
+
+// The second movement (item 16): a rebound binding names a branch that can be
+// deleted once its pull request merges. Left there, every later attach of the
+// thread would fail `unknown-ref` and fall to a cold sandbox. So the binding
+// goes back to the default it was bound to, the move stamped returned, and
+// the thread is default-bound again. A ref a person named never returns.
+describe("canReturnToDefault and returnToDefault: a rebound binding whose branch is gone goes back to the default", () => {
+  const rebound = { from: "main", to: "fix/exact-match", pr: 7, at: "t0" };
+
+  it("a default-bound binding a rebind moved, still on that branch, may return", () => {
+    expect(canReturnToDefault({ ref: "fix/exact-match", boundBy: "default", rebound }, DEFAULT_REF)).toBe(true);
+  });
+
+  it("a ref a person named never returns — that branch is the person's to sort out — and neither does a binding never moved, one already returned, or one on the default", () => {
+    expect(canReturnToDefault({ ref: "fix/exact-match", boundBy: "name", rebound }, DEFAULT_REF)).toBe(false);
+    // A binding made before `boundBy` and sitting off the default reads as named.
+    expect(canReturnToDefault({ ref: "fix/exact-match", rebound }, DEFAULT_REF)).toBe(false);
+    expect(canReturnToDefault({ ref: "release/2", boundBy: "name" }, DEFAULT_REF)).toBe(false);
+    expect(canReturnToDefault({ ref: "main", boundBy: "default" }, DEFAULT_REF)).toBe(false);
+    expect(
+      canReturnToDefault(
+        { ref: "fix/exact-match", boundBy: "default", rebound: { ...rebound, returnedAt: "t" } },
+        DEFAULT_REF,
+      ),
+    ).toBe(false);
+    // The binding is no longer on the branch the move named: nothing to return from.
+    expect(canReturnToDefault({ ref: "main", boundBy: "default", rebound }, DEFAULT_REF)).toBe(false);
+  });
+
+  it("the return puts the ref back on the default, stamps the move returned, and answers the move back for the card", () => {
+    const binding = { ref: "fix/exact-match", user: "worker2", boundBy: "default" as const, rebound };
+    const at = "t1";
+    const back = returnToDefault(binding, DEFAULT_REF, at);
+    expect(back.binding).toEqual({
+      ref: "main",
+      user: "worker2",
+      boundBy: "default",
+      rebound: { ...rebound, returnedAt: at },
+    });
+    expect(back.returned).toEqual({ from: "fix/exact-match", to: "main", pr: 7, at });
+    // Default-bound again: the next own pull request may move the thread once more.
+    expect(canReturnToDefault(back.binding, DEFAULT_REF)).toBe(false);
+    expect(
+      rebindPlan({
+        ownPr: { number: 9, ref: "fix/next" },
+        reuse: false,
+        binding: back.binding,
+        defaultRef: DEFAULT_REF,
+      }),
+    ).toMatchObject({ kind: "measure", from: "main", to: "fix/next", pr: 9 });
   });
 });

@@ -16,11 +16,11 @@
  *  PROVISIONS (a fresh one). A reusing attach keeps a readable tree exactly
  *  as it stands, dirt and stale HEAD included, and refuses by name a tree it
  *  cannot keep (gone, unreadable, built for the other mode) without touching
- *  it. A provisioning attach keeps the dirty/stale discipline byte for byte —
- *  with one exception it is told about (`keepTree`): when its own rebind onto
- *  the thread's pull request branch found the tree dirty with that branch
- *  already checked out and moved the record alone, the dirt is the thread's
- *  own work and the tree is kept as it stands. */
+ *  it. A provisioning attach keeps the dirty/stale discipline byte for byte:
+ *  a run starts from a clean tree at the bound ref's tip, and what a run
+ *  wants kept it commits and pushes (docs/reference/specs/resident-repos.md
+ *  item 17) — so a tree left dirty, or on a branch the binding has since
+ *  moved away from, is recreated, never repaired. */
 
 export type ParsedReuse = { reuse: boolean } | { error: string };
 
@@ -62,15 +62,6 @@ export type WorktreeDecision =
 export function decideWorktree(input: {
   /** True for a resumed run's attach: keep the tree, never wipe it. */
   reuse: boolean;
-  /** True when this attach's rebind moved the binding onto the branch the
-   *  tree already had checked out, dirty, and promised not to touch it
-   *  (residentRebind.ts, the `checkout: false` verdict): the dirt is the
-   *  thread's own uncommitted work on its own pull request branch, so a
-   *  readable tree is kept as it stands — dirt and HEAD included, like a
-   *  resumed run's — while a tree that turns out missing, unreadable or built
-   *  for the other mode has nothing to keep and is provisioned like any fresh
-   *  attach's. Absent on every attach that did not make that move. */
-  keepTree?: boolean;
   /** The tree was built for the other mode (read-only against writable). */
   modeSwitch: boolean;
   /** The commit a provisioning attach checks out: the ref's tip, or the expected head. */
@@ -78,7 +69,7 @@ export function decideWorktree(input: {
   worktreePath: string;
   facts: WorktreeFacts;
 }): WorktreeDecision {
-  const { reuse, keepTree = false, modeSwitch, sha, worktreePath, facts } = input;
+  const { reuse, modeSwitch, sha, worktreePath, facts } = input;
   if (modeSwitch) {
     return reuse
       ? {
@@ -105,9 +96,7 @@ export function decideWorktree(input: {
   }
   // A reusing attach judges nothing past readability: the dirt and the HEAD are the run's own state.
   if (reuse) return { kind: "reuse" };
-  // The rebind promised a dirty tree on its own branch would not be touched;
-  // the dirt is the reason it made that promise, so it is not a reason to wipe.
-  if (facts.dirty) return keepTree ? { kind: "reuse" } : { kind: "recreate", why: "dirty" };
+  if (facts.dirty) return { kind: "recreate", why: "dirty" };
   if (facts.head !== sha && facts.descendsFromTip !== true) return { kind: "recreate", why: "stale" };
   return { kind: "reuse" };
 }

@@ -24,6 +24,7 @@ import {
   type WorkspaceBinding,
 } from "../execution/factory.js";
 import type { Executor, ReleaseMode, ReleaseOptions } from "../execution/executor.js";
+import { leftBehindSentence } from "../execution/residentCleanliness.js";
 import type { ToolContext } from "../tools/runnableTool.js";
 import type { Span } from "../core/trace/types.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
@@ -59,12 +60,15 @@ export type FetchPrCommits = (q: { repo: string; base: string; sha: string }) =>
 // ---- per-agent attach/release pairing ---------------------------------------
 
 /** Release mode paired to a round's identity: a `read` identity attached a
- *  read-only worktree that holds nothing worth keeping → "always"; any other
- *  keeps a worktree with uncommitted/unpushed work for the thread's follow-ups
- *  → "if-clean". A hard stop means "tear it down now" (the abandoned command
- *  may still be running in there) → "always" regardless of the identity. */
+ *  read-only worktree that holds nothing and can be torn down at once →
+ *  "always"; any other ends its run in an orderly way → "if-idle": the
+ *  workspace is released unless a command is still in flight in it, and what
+ *  the run left uncommitted or unpushed is named — a run starts from a clean
+ *  tree, so nothing in it survives the run (resident-repos item 16a). A hard
+ *  stop means "tear it down now" (the abandoned command may still be running
+ *  in there) → "always" regardless of the identity. */
 export function releaseModeFor(identity: Identity, opts: { hardStopped: boolean }): ReleaseMode {
-  return identity === "read" || opts.hardStopped ? "always" : "if-clean";
+  return identity === "read" || opts.hardStopped ? "always" : "if-idle";
 }
 
 /** One round's workspace: the executor selection made for the round's agent,
@@ -145,7 +149,13 @@ export async function attachRoundWorkspace(input: {
         ...(opts.pushed !== undefined && opts.pushed.length > 0 ? { pushed: opts.pushed } : {}),
       };
       const r = await executor.release(mode, Object.keys(releaseOpts).length > 0 ? releaseOpts : undefined);
-      console.log(`[release] ${input.logKey} ${r.released ? "released" : "kept"}${r.reason ? ` (${r.reason})` : ""}`);
+      // What the release discarded is said here too (resident-repos item 16a):
+      // the run's own record carries the note, published before its stream
+      // closed; this line is the operator's copy.
+      const left = r.leftBehind ? ` — ${leftBehindSentence(r.leftBehind)}` : "";
+      console.log(
+        `[release] ${input.logKey} ${r.released ? "released" : "kept"}${r.reason ? ` (${r.reason})` : ""}${left}`,
+      );
     } catch (err) {
       console.warn(`[release] ${input.logKey} failed: ${err instanceof Error ? err.message : String(err)}`);
     }

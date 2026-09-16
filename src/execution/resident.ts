@@ -34,6 +34,7 @@ import {
   type ReleaseResult,
 } from "./executor.js";
 import type { ExecTraceOptions, ReleaseOptions } from "./executor.js";
+import type { LeftBehind } from "./residentCleanliness.js";
 
 // Remote execution against a resident repo environment — the always-warm
 // per-repo service behind the resident Worker (deploy/cloudflare-resident/).
@@ -118,10 +119,12 @@ export interface ResidentExecutorOptions {
   refHint?: string;
   /** The pull request the thread's OWN run opened, and its head branch — the
    *  reason `refHint` is that branch (`ownPrOf`, resident-repos item 29). The
-   *  resident may move a default-bound thread onto it, once, when the branch is
-   *  a local branch of the thread's worktree and the tree is clean; a PR a
-   *  person named is never sent here. Sent only when set, so an older resident
-   *  sees the body it always did. */
+   *  resident may move a default-bound thread onto it, once per pull request,
+   *  when the branch is the thread's own — remembered from a release, or a
+   *  local branch of its surviving tree — and the mirror holds it; the tree
+   *  is then provisioned at the branch, clean. A PR a person named is never
+   *  sent here. Sent only when set, so an older resident sees the body it
+   *  always did. */
   ownPr?: { number: number; ref: string };
   /** `refHint` is the resident's own default branch, bound because the message
    *  named none (item 30): the resident records the binding as made by
@@ -175,15 +178,22 @@ export interface ResidentBinding {
    *  where, to where, which PR. Absent when the binding stood. */
   rebound?: { from: string; to: string; pr: number };
   /** The attach asked for that move and the resident kept the binding: the
-   *  branch, the PR, the reason (`dirty`, `branch-absent`, `named-ref`,
-   *  `already-rebound`, `checkout-failed`) and the resident's sentence. The
-   *  run goes on where the binding is; the card and the run's stream say so. */
+   *  branch, the PR, the reason (`branch-absent`, `named-ref`,
+   *  `already-rebound`) and the resident's sentence. The run goes on where the
+   *  binding is; the card and the run's stream say so. */
   rebindRefused?: { to: string; pr: number; reason: string; why: string };
+  /** This attach moved the thread's binding BACK to the repository's default
+   *  branch (item 16's second movement): the branch a rebind had moved it onto
+   *  is gone from the mirror — deleted after its pull request merged — so the
+   *  run starts clean on the default instead of failing on a dead ref. From
+   *  which branch, to which, for which PR. Absent on every other attach. */
+  returned?: { from: string; to: string; pr: number };
 }
 
-/** The attach answer's `rebound` (item 16), when well-formed; anything else
- *  reads as no move, so a resident answering an unexpected shape binds as
- *  before. Strings were sanitized at the parse. */
+/** The attach answer's `rebound` or `returned` (item 16) — the two moves share
+ *  a shape — when well-formed; anything else reads as no move, so a resident
+ *  answering an unexpected shape binds as before. Strings were sanitized at
+ *  the parse. */
 function reboundOf(value: unknown): ResidentBinding["rebound"] {
   if (typeof value !== "object" || value === null) return undefined;
   const v = value as Record<string, unknown>;
@@ -199,6 +209,18 @@ function rebindRefusedOf(value: unknown): ResidentBinding["rebindRefused"] {
   if (typeof v.to !== "string" || typeof v.pr !== "number" || typeof v.reason !== "string") return undefined;
   if (!v.to || !v.reason || !Number.isSafeInteger(v.pr) || v.pr <= 0) return undefined;
   return { to: v.to, pr: v.pr, reason: v.reason, why: typeof v.why === "string" ? v.why : "" };
+}
+
+/** The detach answer's `leftBehind` (item 16a) — what the release discarded —
+ *  when well-formed: two non-negative integers; anything else reads as
+ *  nothing reported, so an older resident's answer, or an unexpected shape,
+ *  logs as before. */
+function leftBehindAnswerOf(value: unknown): LeftBehind | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const v = value as Record<string, unknown>;
+  const count = (n: unknown): n is number => typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
+  if (!count(v.uncommittedChanges) || !count(v.unpushedCommits)) return undefined;
+  return { uncommittedChanges: v.uncommittedChanges, unpushedCommits: v.unpushedCommits };
 }
 
 /** What one `/attach` answered: the binding, or the refusal as the service
@@ -495,6 +517,7 @@ export class ResidentExecutor implements Executor {
     const trace = sanitizeGraftedSteps(data.trace);
     const rebound = reboundOf(data.rebound);
     const rebindRefused = rebindRefusedOf(data.rebindRefused);
+    const returned = reboundOf(data.returned);
     this.lastBinding = {
       ref: data.ref,
       sha: data.sha,
@@ -505,6 +528,7 @@ export class ResidentExecutor implements Executor {
       ...(typeof data.attachMs === "number" && Number.isFinite(data.attachMs) ? { attachMs: data.attachMs } : {}),
       ...(rebound !== undefined ? { rebound } : {}),
       ...(rebindRefused !== undefined ? { rebindRefused } : {}),
+      ...(returned !== undefined ? { returned } : {}),
     };
     return { ok: true, binding: this.lastBinding };
   }
@@ -543,10 +567,13 @@ export class ResidentExecutor implements Executor {
 
   /** POST /detach: return this thread's pool user (and remove its worktree)
    *  now that the run is over, instead of holding both until the inactivity
-   *  sweep. `force` (mode "always") skips the resident's clean check; "if-clean"
-   *  lets the resident keep a worktree with uncommitted/unpushed work — the
-   *  binding (ref) survives either way, so the next attach recreates
-   *  the tree on the same ref. Best-effort by contract: never throws. */
+   *  sweep. A run starts from a clean tree, so the tree goes whatever it
+   *  holds: "if-idle" (`force:false`) lets the resident keep it only while a
+   *  command is still in flight in it and answers what the release discarded
+   *  (`leftBehind`); "always" (`force:true`) ends what is in flight and
+   *  releases now. The binding (ref) survives either way, so the next attach
+   *  recreates the tree on the same ref. Best-effort by contract: never
+   *  throws. */
   async release(mode: ReleaseMode, opts?: ReleaseOptions): Promise<ReleaseResult> {
     try {
       // What the run pushed rides along when there is something to hand over
@@ -557,7 +584,12 @@ export class ResidentExecutor implements Executor {
       if (opts?.pushed !== undefined && opts.pushed.length > 0) body.pushed = opts.pushed;
       const { status, data } = await this.call("/detach", body, DETACH_TIMEOUT_MS, undefined, opts?.span);
       if (status !== 200) return { released: false, reason: `HTTP ${status}: ${String(data.error ?? "")}` };
-      return { released: data.released === true, reason: typeof data.reason === "string" ? data.reason : undefined };
+      const leftBehind = leftBehindAnswerOf(data.leftBehind);
+      return {
+        released: data.released === true,
+        reason: typeof data.reason === "string" ? data.reason : undefined,
+        ...(leftBehind !== undefined ? { leftBehind } : {}),
+      };
     } catch (err) {
       return { released: false, reason: err instanceof Error ? err.message : String(err) };
     }

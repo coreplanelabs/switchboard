@@ -87,6 +87,7 @@ import { parseReadonly, planReadonlyAttach } from "../../src/execution/residentR
 import { decideWorktree, parseReuse, type WorktreeFacts } from "../../src/execution/residentReuse.js";
 import {
   boundByFor,
+  canReturnToDefault,
   parseOwnPr,
   parsePushed,
   parseRefByDefault,
@@ -94,10 +95,12 @@ import {
   rebindRefused,
   rebindVerdict,
   rememberOwnBranches,
+  returnToDefault,
   type BoundBy,
   type OwnBranch,
   type OwnPr,
   type PushedBranch,
+  type Returned,
   type Rebound,
   type RebindRefused,
   type RebindTreeFacts,
@@ -112,7 +115,12 @@ import {
   type DepCacheMaterialization,
   type ThreadDepsMechanism,
 } from "../../src/execution/residentDepCache.js";
-import { parseWorktreeCleanliness, worktreeCleanlinessScript } from "../../src/execution/residentCleanliness.js";
+import {
+  leftBehindOf,
+  parseWorktreeCleanliness,
+  worktreeCleanlinessScript,
+  type LeftBehind,
+} from "../../src/execution/residentCleanliness.js";
 import {
   base64LengthOf,
   chunkPlan,
@@ -994,15 +1002,17 @@ interface ThreadBinding {
    *  binding made before the field: read as `default` iff `ref` is the default
    *  branch. Only a `default` binding may ever move. */
   boundBy?: BoundBy;
-  /** The one move a binding may make (item 16): from the default it was bound
-   *  to, onto the branch the thread's own run opened a pull request on. Set,
-   *  the binding never moves again. */
+  /** The move a binding may make (item 16): from the default it was bound to,
+   *  onto the branch the thread's own run opened a pull request on. Set, the
+   *  binding moves again only after the move is returned (`returnedAt`: the
+   *  branch was gone from the mirror and the binding went back to the
+   *  default), and then for the next own pull request. */
   rebound?: Rebound;
   /** The branches the thread's own runs pushed and the pull requests they
    *  head, as each run's release handed them over (`/detach` `pushed`, item
    *  16a) — written before any eviction decision, so the fact outlives the
-   *  tree: a clean tree is released the moment a run ends, and this is what
-   *  lets the follow-up's attach move onto the branch and recreate the tree
+   *  tree: the tree is released the moment its run ends, and this is what
+   *  lets the follow-up's attach move onto the branch and provision the tree
    *  there. Newest last; the oldest fall off past `OWN_BRANCHES_MAX`. */
   ownBranches?: OwnBranch[];
   /** Allocated OS user (worker2..worker17); "" once evicted (pool released). */
@@ -1088,6 +1098,20 @@ interface AttachOk {
   /** The caller asked for that move and the binding stood: the branch, the PR
    *  and why — so the bot can say where the follow-up runs and why. */
   rebindRefused?: RebindRefused;
+  /** This attach moved the binding BACK to the default branch (item 16's
+   *  second movement): the branch a rebind had moved it onto is gone from the
+   *  mirror, so the tree was provisioned on the default instead of the attach
+   *  failing `unknown-ref`. From where, to where, which PR's branch it was. */
+  returned?: Returned;
+}
+
+/** What `POST /detach` answers: whether the pool user went back, why not, and
+ *  — on a release — what the tree still held (item 16a), now gone with it. */
+interface DetachAnswer {
+  released: boolean;
+  reason?: string;
+  user?: string;
+  leftBehind?: LeftBehind;
 }
 
 /** Why the caller's `refHint` is what it is (item 16), beside the hint itself:
@@ -1105,17 +1129,11 @@ const NO_REF_HINT_REASON: RefHintReason = { ownPr: null, refByDefault: false };
 
 /** What the rebind decided under the mutex (item 16): nothing to move (the
  *  row is already on the branch), a named refusal, or the move — written on
- *  the row, whether a checkout in the live tree or a ref the attach will
- *  recreate the tree at. */
+ *  the row; the attach that follows provisions the tree at the moved ref. */
 type RebindOutcome =
   | { kind: "none"; binding: ThreadBinding }
   | { kind: "refuse"; refused: RebindRefused }
-  | { kind: "rebound"; moved: ThreadBinding; rebound: Rebound; keepTree: false }
-  /** The move was the record alone — a dirty tree already on the branch, no
-   *  checkout run — with the verdict's `note` for the log line. The attach
-   *  that follows must keep that tree (`keepTree`, the worktree step's word
-   *  for it): the promise the note makes is the attach's to keep. */
-  | { kind: "rebound"; moved: ThreadBinding; rebound: Rebound; keepTree: true; note: string };
+  | { kind: "rebound"; moved: ThreadBinding; rebound: Rebound };
 
 /** Result of one /op test/build execution. `ok` is the command's
  *  verdict — a failing test run is a RESULT with ok:false, never an error. */
@@ -4514,10 +4532,12 @@ export class ResidentDO extends Sandbox<Env> {
 
     // The binding's ref wins for the thread's whole life, with one exception
     // (item 16): a thread bound to the repo default for want of a named branch
-    // moves, once and in place, onto the branch its own run opened a pull
-    // request on — when that branch is a local branch of this thread's tree and
-    // the tree is clean. Decided here, before the ref is chosen, so the rest of
-    // the attach (fetch, stale check, deps, credentials) runs on the moved ref.
+    // moves, once per pull request, onto the branch its own run opened a pull
+    // request on — when that branch is the thread's own and the mirror holds
+    // it. A decision about the binding alone, made here, before the ref is
+    // chosen, so the rest of the attach (fetch, the worktree step that
+    // provisions the tree clean at the moved ref, deps, credentials) runs on
+    // the moved ref.
     const rebind = await this.rebindToOwnPr(
       stored.get(threadBindingKey(threadKey)) as ThreadBinding | undefined,
       reason.ownPr,
@@ -4573,7 +4593,6 @@ export class ResidentDO extends Sandbox<Env> {
         refHint,
         wantSha,
         reuse,
-        keepTree: rebind.keepTree === true,
         slug,
         t0,
         facts,
@@ -4591,54 +4610,36 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** Item 16's one exception to the sticky binding: a thread bound to the repo
    *  default for want of a named branch moves onto the branch its own run
-   *  opened a pull request on (`ownPr`), once, in place. The decision is the
-   *  pure `rebindPlan` / `rebindVerdict` of src/execution/residentRebind.ts;
-   *  this method measures the tree as the thread user and runs the verdict: a
-   *  `git checkout` inside the existing worktree — same path, same pool user,
-   *  no clone, no `rm -rf`, deps and snapshot lineage untouched — under the
-   *  mirror mutex so no other attach of the thread touches the tree meanwhile.
-   *  The rest of the attach then runs on the moved ref: the mirror fetch for
-   *  the PR head (item 51) and item 17's stale check, which keeps a tree whose
-   *  HEAD is the ref's tip or a descendant of it. When the verdict moved the
-   *  record alone — a dirty tree with the branch already checked out — the
-   *  answer says so (`keepTree`) and the worktree step keeps that tree, dirt
-   *  included, instead of item 17's dirty wipe: the promise not to touch it is
-   *  the whole attach's. The binding records the move (`rebound`); the answer
-   *  carries it, or the named refusal, so the bot can say where the follow-up
-   *  runs and why. A refusal never fails the attach. */
+   *  opened a pull request on (`ownPr`), once per pull request. A decision
+   *  about the BINDING alone — the pure `rebindPlan` / `rebindVerdict` of
+   *  src/execution/residentRebind.ts: the branch must be the thread's own,
+   *  remembered from a release (`ownBranches`) or, when nothing was
+   *  remembered, a local branch of the thread's surviving tree, measured as
+   *  the thread user — and the mirror must hold it (`moveOntoOwnBranch`), since
+   *  the attach that follows provisions the tree at the moved ref from the
+   *  mirror as it provisions any tree (item 17: clean at the ref's tip, a tree
+   *  left dirty or on the old branch recreated, the binding's path kept). Under
+   *  the mirror mutex, on the row as it stands there. The binding records the
+   *  move (`rebound`); the answer carries it, or the named refusal, so the bot
+   *  can say where the follow-up runs and why. A refusal never fails the attach. */
   private async rebindToOwnPr(
     prior: ThreadBinding | undefined,
     ownPr: OwnPr | null,
     reuse: boolean,
     defaultRef: string,
     slug: string,
-  ): Promise<
-    | {
-        binding: ThreadBinding | undefined;
-        rebound?: Rebound;
-        rebindRefused?: RebindRefused;
-        /** The move was the record alone — the tree is dirty with the branch
-         *  already checked out — and the attach must keep that tree as it
-         *  stands: the worktree step's item 17 wipe of a dirty tree would
-         *  destroy the very work the rebind declined to touch. */
-        keepTree?: true;
-      }
-    | ThreadErr
-  > {
+  ): Promise<{ binding: ThreadBinding | undefined; rebound?: Rebound; rebindRefused?: RebindRefused } | ThreadErr> {
     const plan = rebindPlan({ ownPr, reuse, binding: prior, defaultRef });
     if (plan.kind === "none" || prior === undefined) return { binding: prior };
     if (plan.kind === "refuse") return { binding: prior, rebindRefused: plan.refused };
     const key = threadBindingKey(prior.threadKey);
-    // A tree that is gone is recreated at the branch by the attach (item 16):
-    // the mirror must hold the branch first, and a branch pushed since the
-    // last refresh cycle is fetched for — with a token minted here, before
-    // the mutex, like the attach's own recovery fetch. Only when the binding
-    // allows a recreate at all: an evicted tree, or a live one whose runs
-    // pushed the branch (the tree may turn out missing).
-    const fetchToken =
-      (plan.kind === "recreate" || plan.own) && githubAppConfigured(this.env)
-        ? ((await mintRepoScopedToken(this.env, slug).catch(() => null))?.token ?? null)
-        : null;
+    // The tree is provisioned at the branch from the mirror, so the mirror
+    // must hold it first: a branch pushed since the last refresh cycle is
+    // fetched for — with a token minted here, before the mutex, like the
+    // attach's own recovery fetch.
+    const fetchToken = githubAppConfigured(this.env)
+      ? ((await mintRepoScopedToken(this.env, slug).catch(() => null))?.token ?? null)
+      : null;
     let outcome: RebindOutcome;
     try {
       outcome = (
@@ -4653,79 +4654,25 @@ export class ResidentDO extends Sandbox<Env> {
           const again = rebindPlan({ ownPr, reuse, binding: current, defaultRef });
           if (again.kind === "none") return { kind: "none", binding: current };
           if (again.kind === "refuse") return again;
-          if (again.kind === "recreate") return this.recreateAtOwnBranch(current, again, fetchToken);
-          const wt = current.worktreePath;
-          // The facts, as the thread user in the thread's own tree: is the
-          // branch a local branch here (the physical trace of this thread's
-          // run having made it), and are the tracked files clean — judged
-          // only off a status git could read.
-          const tree: RebindTreeFacts = { exists: (await this.run(["test", "-d", `${wt}/.git`])).exitCode === 0 };
-          if (tree.exists) {
-            const branch = await this.threadRun(
-              current.user,
-              wt,
-              `git rev-parse --verify --quiet ${shellQuote(`refs/heads/${again.to}`)}`,
-              DEFAULT_EXEC_TIMEOUT_MS,
-            );
-            tree.branchExists = branch.exitCode === 0;
-            const status = await this.threadRun(
-              current.user,
-              wt,
-              "git status --porcelain -uno",
-              DEFAULT_EXEC_TIMEOUT_MS,
-            );
-            tree.readable = status.exitCode === 0;
-            if (tree.readable) tree.dirty = status.stdout.trim() !== "";
-            if (tree.dirty) {
-              // A dirty tree is refused unless its HEAD is already the branch
-              // (the run made it here and left an edit after pushing): the
-              // one fact that tells the two apart, measured only when it
-              // decides anything.
-              const head = await this.threadRun(
+          if (again.kind === "measure" && !again.own) {
+            // Nothing remembered from a release: the branch must be a local
+            // branch of the thread's surviving tree — the physical trace of
+            // this thread's run having made it — measured as the thread user.
+            const wt = current.worktreePath;
+            const tree: RebindTreeFacts = { exists: (await this.run(["test", "-d", `${wt}/.git`])).exitCode === 0 };
+            if (tree.exists) {
+              const branch = await this.threadRun(
                 current.user,
                 wt,
-                "git rev-parse --abbrev-ref HEAD",
+                `git rev-parse --verify --quiet ${shellQuote(`refs/heads/${again.to}`)}`,
                 DEFAULT_EXEC_TIMEOUT_MS,
               );
-              if (head.exitCode === 0) tree.head = head.stdout.trim();
+              tree.branchExists = branch.exitCode === 0;
             }
+            const verdict = rebindVerdict(again, tree);
+            if (verdict.kind === "refuse") return verdict;
           }
-          // Judged on the re-read plan: it carries whether the branch is the
-          // thread's own, which the pre-lock plan lacks when it was a recreate.
-          const verdict = rebindVerdict(again, tree);
-          if (verdict.kind === "recreate") return this.recreateAtOwnBranch(current, again, fetchToken);
-          if (verdict.kind !== "rebind") return verdict;
-          if (verdict.checkout) {
-            const startedAt = systemClock();
-            const checkout = await this.threadRun(
-              current.user,
-              wt,
-              `git checkout --quiet ${shellQuote(again.to)}`,
-              DEFAULT_EXEC_TIMEOUT_MS,
-            );
-            this.stepTrace.getStore()?.record("rebind-checkout", {
-              startedAt,
-              endedAt: systemClock(),
-              exitCode: checkout.exitCode,
-              timedOut: checkout.timedOut,
-            });
-            if (checkout.exitCode !== 0) {
-              const detail =
-                checkout.stderr.trim().split("\n")[0]?.slice(0, 200) || `git checkout exited ${checkout.exitCode}`;
-              return { kind: "refuse", refused: rebindRefused(again, "checkout-failed", detail) };
-            }
-          }
-          const rebound: Rebound = {
-            from: current.ref,
-            to: again.to,
-            pr: again.pr,
-            at: new Date(systemClock()).toISOString(),
-          };
-          const moved: ThreadBinding = { ...current, ref: again.to, rebound };
-          await this.ctx.storage.put(key, moved);
-          return verdict.checkout
-            ? { kind: "rebound", moved, rebound, keepTree: false }
-            : { kind: "rebound", moved, rebound, keepTree: true, note: verdict.note };
+          return this.moveOntoOwnBranch(current, again, fetchToken);
         }, ATTACH_MUTEX_WAIT_MS)
       ).value;
     } catch (err) {
@@ -4743,28 +4690,22 @@ export class ResidentDO extends Sandbox<Env> {
       return { binding: prior, rebindRefused: outcome.refused };
     }
     const { moved, rebound } = outcome;
-    if (!outcome.keepTree) {
-      console.log(
-        `attach ${prior.threadKey}: rebound ${rebound.from} → ${rebound.to} (the thread's own pull request #${rebound.pr})`,
-      );
-      return { binding: moved, rebound };
-    }
     console.log(
-      `attach ${prior.threadKey}: rebound ${rebound.from} → ${rebound.to} (the thread's own pull request #${rebound.pr}) — ${outcome.note}`,
+      `attach ${prior.threadKey}: rebound ${rebound.from} → ${rebound.to} (the thread's own pull request #${rebound.pr}); the tree is provisioned at it`,
     );
-    return { binding: moved, rebound, keepTree: true };
+    return { binding: moved, rebound };
   }
 
-  /** The move when the thread's tree is gone (item 16): the binding's ref
-   *  becomes the branch its own run pushed, and the attach that follows
-   *  recreates the tree at it — `ensureThreadWorktree` finds no tree and
-   *  clones the branch from the mirror. So the mirror must hold the branch:
-   *  one pushed since the last refresh cycle is fetched for here, under the
-   *  mutex; a branch still missing after the fetch (deleted after a merge, or
-   *  never pushed) is a `branch-absent` refusal and the binding stands — the
-   *  attach then goes on at the ref it had, never `unknown-ref`. Nothing on
-   *  disk is touched: no checkout (there is no tree), no clone (the attach's). */
-  private async recreateAtOwnBranch(
+  /** The move itself (item 16): the binding's ref becomes the branch, and the
+   *  attach that follows provisions the tree at it — `ensureThreadWorktree`
+   *  clones the branch from the mirror when the tree is gone, dirty or on the
+   *  old ref. So the mirror must hold the branch: one pushed since the last
+   *  refresh cycle is fetched for here, under the mutex; a branch still
+   *  missing after the fetch (deleted after a merge, or never pushed) is a
+   *  `branch-absent` refusal and the binding stands — the attach then goes on
+   *  at the ref it had, never `unknown-ref`. Nothing on disk is touched here:
+   *  the row is written, the tree is the attach's. */
+  private async moveOntoOwnBranch(
     current: ThreadBinding,
     plan: { to: string; pr: number },
     fetchToken: string | null,
@@ -4795,7 +4736,7 @@ export class ResidentDO extends Sandbox<Env> {
         refused: rebindRefused(
           plan,
           "branch-absent",
-          `the thread's worktree is gone and the mirror does not hold ${JSON.stringify(plan.to)} (deleted after a merge, or never pushed); the tree cannot be recreated at it`,
+          `the mirror does not hold ${JSON.stringify(plan.to)} even after a fetch (deleted after a merge, or never pushed); the tree cannot be provisioned at it`,
         ),
       };
     }
@@ -4807,13 +4748,43 @@ export class ResidentDO extends Sandbox<Env> {
     };
     const moved: ThreadBinding = { ...current, ref: plan.to, rebound };
     await this.ctx.storage.put(threadBindingKey(current.threadKey), moved);
-    return { kind: "rebound", moved, rebound, keepTree: false };
+    return { kind: "rebound", moved, rebound };
+  }
+
+  /** Item 16's second movement, decided where the fact is established — under
+   *  the mirror mutex, after the attach's fetch found the bound ref gone: a
+   *  binding a rebind moved onto its own pull request's branch, that branch
+   *  now deleted (its pull request merged), goes back to the default it was
+   *  bound to, so the run starts clean there (item 17) instead of the thread
+   *  failing `unknown-ref` for the rest of its life. The row as it stands is
+   *  re-read and re-judged (`canReturnToDefault`: a ref a person named never
+   *  returns — that branch is theirs to sort out), the move stamped returned
+   *  so the thread may follow its next pull request, and the answer carries
+   *  the move back for the card. A row that no longer qualifies — another
+   *  attach moved it meanwhile — is answered as it stands, nothing written. */
+  private async returnBindingToDefault(
+    binding: ThreadBinding,
+    defaultRef: string,
+  ): Promise<{ binding: ThreadBinding; returned?: Returned }> {
+    const key = threadBindingKey(binding.threadKey);
+    const current = (await this.ctx.storage.get<ThreadBinding>(key)) ?? binding;
+    if (current.rebound === undefined || !canReturnToDefault(current, defaultRef)) return { binding: current };
+    const back = returnToDefault(
+      { ...current, rebound: current.rebound },
+      defaultRef,
+      new Date(systemClock()).toISOString(),
+    );
+    await this.ctx.storage.put(key, back.binding);
+    console.log(
+      `attach ${binding.threadKey}: ${back.returned.from} is gone from the mirror (the thread's own pull request #${back.returned.pr}) — returned to ${back.returned.to}; the tree is provisioned there`,
+    );
+    return back;
   }
 
   /** The release's word on what the run pushed (`/detach` `pushed`, item
-   *  16a), remembered on the binding BEFORE the detach decides anything: a
-   *  clean tree is evicted at once, a dirty one kept, an already-evicted
-   *  binding answered as such — and in every case the fact must outlive the
+   *  16a), remembered on the binding BEFORE the detach decides anything: the
+   *  tree evicted, a busy one kept, an already-evicted binding answered as
+   *  such — and in every case the fact must outlive the
    *  tree, since it is what a follow-up's rebind onto the thread's own pull
    *  request branch reads once the tree is gone. No binding → nothing to
    *  remember on (the detach answers its 404 next). */
@@ -4835,10 +4806,6 @@ export class ResidentDO extends Sandbox<Env> {
     refHint: string | null;
     wantSha: string | null;
     reuse: boolean;
-    /** The rebind moved the record alone over a dirty tree already on the
-     *  branch (item 16) and promised not to touch it: the worktree step keeps
-     *  the tree as it stands instead of item 17's dirty wipe. */
-    keepTree: boolean;
     slug: string;
     t0: number;
     facts: RepoFacts;
@@ -4850,8 +4817,14 @@ export class ResidentDO extends Sandbox<Env> {
     rebound?: Rebound;
     rebindRefused?: RebindRefused;
   }): Promise<AttachOk | ThreadErr> {
-    const { threadKey, refHint, wantSha, reuse, keepTree, slug, t0, facts, record, binding, mode, rollback } = input;
+    const { threadKey, refHint, wantSha, reuse, slug, t0, facts, record, mode, rollback } = input;
     const { rebound, rebindRefused } = input;
+    // Reassigned once, under the lock, when the bound ref turns out gone from
+    // the mirror and the binding goes back to the default (item 16's second
+    // movement): everything after the lock — deps, credentials, the row's
+    // final write, the answer — then speaks of the returned binding.
+    let binding = input.binding;
+    let returned: Returned | undefined;
 
     // Command-level token mint — before the lock so mint latency
     // never holds the mutex, and failure never blocks the attach.
@@ -4882,7 +4855,7 @@ export class ResidentDO extends Sandbox<Env> {
     // The expected head applies to the ref it was resolved for; a sticky
     // binding on another branch drops it (item 51) rather than fetching on
     // every attach of a thread that can never be at that commit.
-    const want = wantShaForBinding({ boundRef: binding.ref, refHint, wantSha });
+    let want = wantShaForBinding({ boundRef: binding.ref, refHint, wantSha });
     let fetchToken: string | null = token;
     if (!fetchToken && githubAppConfigured(this.env) && (await this.mirrorNeedsFetchFor(binding.ref, want))) {
       fetchToken = (await mintRepoScopedToken(this.env, slug).catch(() => null))?.token ?? null;
@@ -4912,11 +4885,27 @@ export class ResidentDO extends Sandbox<Env> {
         // for every missing ref, so only a fetched mirror needs the re-read.
         // (Under the mirror mutex — the mirror cannot change in between.)
         const refExists = !fetched || (await this.refExists(binding.ref));
-        const target = attachTarget({
+        let target = attachTarget({
           refExists,
           wantSha: want,
           commitInMirror: !refExists && want !== null && (await this.commitInMirror(want)),
         });
+        if (target.kind === "unknown-ref" && canReturnToDefault(binding, facts.defaultRef)) {
+          // The branch a rebind moved this thread onto is gone even after the
+          // fetch — deleted once its pull request merged. The binding goes
+          // back to the default (item 16's second movement) and the attach
+          // goes on there: the default is always in the mirror, and the
+          // worktree step below provisions the tree at its tip.
+          const back = await this.returnBindingToDefault(binding, facts.defaultRef);
+          binding = back.binding;
+          returned = back.returned;
+          want = wantShaForBinding({ boundRef: binding.ref, refHint, wantSha });
+          target = attachTarget({
+            refExists: await this.refExists(binding.ref),
+            wantSha: want,
+            commitInMirror: false,
+          });
+        }
         if (target.kind === "unknown-ref") {
           throw new StepError(
             "unknown-ref",
@@ -4929,7 +4918,6 @@ export class ResidentDO extends Sandbox<Env> {
         const recreated = await this.ensureThreadWorktree(binding, sha, mode.originUrl, mode.modeSwitch, {
           detached: target.kind === "sha",
           reuse,
-          keepTree,
         });
         return { sha, threadLockKey, recreated };
       }, ATTACH_MUTEX_WAIT_MS);
@@ -5027,20 +5015,20 @@ export class ResidentDO extends Sandbox<Env> {
       trace: this.currentSteps(),
       ...(rebound !== undefined ? { rebound } : {}),
       ...(rebindRefused !== undefined ? { rebindRefused } : {}),
+      ...(returned !== undefined ? { returned } : {}),
     };
   }
 
   /** Ensure the worktree exists. A provisioning attach wipes dirty/stale
-   *  trees; a reusing attach (`opts.reuse`, item 66) keeps a readable tree
-   *  exactly as it stands (the dirt and the HEAD are the resumed run's own
-   *  work) and throws `ReuseRefusedError` for one it cannot keep, touching
-   *  nothing; a provisioning attach whose own rebind moved the record alone
-   *  over a dirty tree already on the branch (`opts.keepTree`, item 16) keeps
-   *  that tree as it stands too — the dirt is why the rebind declined to touch
-   *  it — and provisions one that turns out not to be there. The decision is
-   *  the pure `decideWorktree`; this method measures the facts and runs the
-   *  verdict. Returns true when the tree was (re)created. MUST be called
-   *  holding the mirror mutex: the clone reads the mirror.
+   *  trees — a run starts from a clean tree at the bound ref's tip (item 17),
+   *  and a rebind that moved the binding leaves a tree on the old branch that
+   *  this discipline recreates like any stale one; a reusing attach
+   *  (`opts.reuse`, item 66) keeps a readable tree exactly as it stands (the
+   *  dirt and the HEAD are the resumed run's own work) and throws
+   *  `ReuseRefusedError` for one it cannot keep, touching nothing. The
+   *  decision is the pure `decideWorktree`; this method measures the facts
+   *  and runs the verdict. Returns true when the tree was (re)created. MUST be
+   *  called holding the mirror mutex: the clone reads the mirror.
    *
    *  "Dirty" is tracked-file dirt (`status --porcelain -uno`): untracked
    *  scratch files are the thread's own state and survive re-attach.
@@ -5063,11 +5051,8 @@ export class ResidentDO extends Sandbox<Env> {
     /** `detached`: the bound ref is gone from the mirror and `sha` is the
      *  expected commit it still holds (item 51) — the tree is checked out at
      *  that commit, detached, instead of at a branch. `reuse`: a resumed
-     *  run's attach (item 66): keep the tree as it stands, or refuse.
-     *  `keepTree`: this attach's rebind moved the record alone over a dirty
-     *  tree already on the branch (item 16): keep a readable tree as it
-     *  stands, provision one that is not there. */
-    opts: { detached: boolean; reuse: boolean; keepTree: boolean } = { detached: false, reuse: false, keepTree: false },
+     *  run's attach (item 66): keep the tree as it stands, or refuse. */
+    opts: { detached: boolean; reuse: boolean } = { detached: false, reuse: false },
   ): Promise<boolean> {
     const wt = binding.worktreePath;
     const threadDir = parentDir(wt);
@@ -5104,14 +5089,7 @@ export class ResidentDO extends Sandbox<Env> {
         }
       }
     }
-    const decision = decideWorktree({
-      reuse: opts.reuse,
-      keepTree: opts.keepTree,
-      modeSwitch,
-      sha,
-      worktreePath: wt,
-      facts,
-    });
+    const decision = decideWorktree({ reuse: opts.reuse, modeSwitch, sha, worktreePath: wt, facts });
     if (decision.kind === "refuse") throw new ReuseRefusedError(decision.why);
     if (decision.kind === "reuse") return false;
 
@@ -6092,19 +6070,21 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** POST /detach: a run has ended — give the thread's pool user back now
    *  instead of holding it until the TTL sweep (the pool is sized for
-   *  simultaneous runs). `force` releases unconditionally (read-only agents,
-   *  hard stops): an op still in flight is KILLED first (the bot has
-   *  already dropped its fetch, the command would otherwise run on and hold
-   *  the user until the sweep); otherwise a busy thread, or a worktree with
-   *  uncommitted or unpushed work, is KEPT and the caller learns why. No
-   *  binding → 404-shaped error; already evicted → a no-op success. Never
-   *  flips lifecycle state. */
+   *  simultaneous runs). A run starts from a clean tree (item 17), so the tree
+   *  goes whatever it holds: what it held — uncommitted changes, unpushed
+   *  commits — is measured once, as the thread user, and named in the answer
+   *  (`leftBehind`) so the loss is never silent. The one thing that keeps a
+   *  tree is an op still in flight in it (`busy`) — `force` (read-only agents,
+   *  hard stops) KILLS that op first (the bot has already dropped its fetch,
+   *  the command would otherwise run on and hold the user until the sweep)
+   *  and measures nothing. No binding → 404-shaped error; already evicted → a
+   *  no-op success. Never flips lifecycle state. */
   async detachThread(
     threadKey: string,
     force: boolean,
     /** What the ending run pushed (item 16a): remembered on the binding first, whatever the detach then decides. */
     pushed: readonly PushedBranch[] = [],
-  ): Promise<{ released: boolean; reason?: string; user?: string } | ThreadErr> {
+  ): Promise<DetachAnswer | ThreadErr> {
     if (pushed.length > 0) await this.rememberOwnBranches(threadKey, pushed);
     const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
     if (!binding) return { error: `no-binding: ${threadKey} has never attached to this resident`, status: 404 };
@@ -6125,11 +6105,18 @@ export class ResidentDO extends Sandbox<Env> {
       if (left > 0) return { released: false, reason: busyAfterKillReason(left), user: binding.user };
     }
     const active = await this.isRuntimeActive().catch(() => false);
+    // What the tree still holds, for the answer — never a reason to keep it.
+    // Not measured on a force release: a read-only tree holds nothing, and a
+    // hard stop's tree is whatever the killed command left. A probe that
+    // fails names nothing (never a guess) and is a log line.
+    let leftBehind: LeftBehind | undefined;
     if (!force && active) {
-      const c = await this.worktreeCleanliness(binding);
-      if (!c.clean) return { released: false, reason: `${c.reason} — kept`, user: binding.user };
+      const measured = await this.worktreeCleanliness(binding);
+      leftBehind = leftBehindOf(measured);
+      if (!measured.clean && leftBehind === undefined)
+        console.log(`detach: ${threadKey}: the tree could not be measured before its release (${measured.reason})`);
     }
-    // Re-check right before removal: the clean check above awaited (the DO
+    // Re-check right before removal: the measurement above awaited (the DO
     // yields at each await), so an exec that arrived mid-detach would otherwise
     // have its tree removed under it.
     const busyNow = this.threadOpsInFlight.get(threadKey) ?? 0;
@@ -6139,22 +6126,27 @@ export class ResidentDO extends Sandbox<Env> {
         reason: `busy: ${busyNow} operation(s) started during detach — kept`,
         user: binding.user,
       };
-    // Same re-read as the sweep: a re-attach during the clean check means a
+    // Same re-read as the sweep: a re-attach during the measurement means a
     // fresh tree we must not remove from a stale snapshot.
     const current = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
     if (!current || current.evicted) return { released: false, reason: "already-evicted" };
     if (current.lastAttachAt !== binding.lastAttachAt)
-      return { released: false, reason: "re-attached during the clean check — kept", user: current.user };
+      return { released: false, reason: "re-attached during the detach — kept", user: current.user };
     const user = current.user;
-    // Same as the sweep: `active` was read before the clean check's awaits; a
+    // Same as the sweep: `active` was read before the measurement's awaits; a
     // container that woke meanwhile must get the rm, not an orphaned tree.
     const activeNow = await this.isRuntimeActive().catch(() => false);
     if (!(await this.evictBinding(current, activeNow, `detach`, "detach"))) {
       return { released: false, reason: "re-attached during eviction — kept", user };
     }
+    if (leftBehind) {
+      console.log(
+        `detach: ${threadKey} released — left behind ${leftBehind.uncommittedChanges} uncommitted change(s) and ${leftBehind.unpushedCommits} unpushed commit(s), discarded with the tree`,
+      );
+    }
     // Item 55: the tree is gone; the gauge catches up at the next refresh
     // instance's `measure` step, and the admission's `df` sees the space now.
-    return { released: true, user };
+    return { released: true, user, ...(leftBehind !== undefined ? { leftBehind } : {}) };
   }
 
   /** Force-detach's kill: end every process owned by the pool user —
@@ -6254,35 +6246,29 @@ export class ResidentDO extends Sandbox<Env> {
     const ttlDays = record?.worktreeTtlDays ?? WORKTREE_TTL_DAYS_DEFAULT;
     const cutoff = systemClock() - ttlDays * 86_400_000;
     const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
-    const active = await this.isRuntimeActive().catch(() => false);
     const idleCutoff = systemClock() - CLEAN_IDLE_RELEASE_S * 1000;
     for (const binding of all.values()) {
       if (binding.evicted || !binding.user) continue;
       const last = Date.parse(binding.lastAttachAt);
       if (last >= cutoff) {
-        // Not past the TTL. Still release it if it has been idle for an hour,
-        // nothing is running on it, and the tree is provably clean — the run
-        // that used it is over and there is nothing to preserve. A slept
-        // container has NO tree any more (sleep destroys the disk), so an
-        // idle binding on an inactive runtime is releasable outright: there is
-        // nothing left to protect, only a pool user to give back. (Keeping
-        // them would leave idle bindings on a sleeping resident until the
-        // 7-day TTL.)
+        // Not past the TTL. Still release it if it has been idle for an hour
+        // and nothing is running on it: the run that used it is over, and
+        // whatever its tree holds has no future — the next attach provisions
+        // a clean tree (item 17) — so there is nothing to keep it for. This is
+        // what drains the bindings of runs whose release never came (a
+        // resident that was sick at the run's end, a run older than
+        // `/detach`). A live run is protected by its op in flight, not by its
+        // dirt. A slept container has no tree any more anyway (sleep destroys
+        // the disk).
         const busy = this.threadOpsInFlight.get(binding.threadKey) ?? 0;
-        const cleanIdle =
-          last < idleCutoff && busy === 0 && (!active || (await this.worktreeCleanliness(binding)).clean);
-        // Re-read right before removal: the clean check awaited (the DO
-        // yields), so an exec that arrived meanwhile would otherwise have
-        // its tree removed under it — same guard as detachThread.
-        const busyNow = this.threadOpsInFlight.get(binding.threadKey) ?? 0;
-        if (!cleanIdle || busyNow > 0) {
+        if (last >= idleCutoff || busy > 0) {
           kept++;
           continue;
         }
       }
-      // Re-read the binding too: a re-attach that completed inside the
-      // clean-check await bumped lastAttachAt and rebuilt the tree — evicting
-      // from this loop's stale snapshot would rm the fresh tree.
+      // Re-read the binding: earlier iterations awaited (the DO yields), so a
+      // re-attach that completed meanwhile bumped lastAttachAt and rebuilt the
+      // tree — evicting from this loop's stale snapshot would rm the fresh tree.
       const current = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(binding.threadKey));
       if (!current || current.evicted || current.lastAttachAt !== binding.lastAttachAt) {
         kept++;

@@ -18,7 +18,6 @@ export const RESIDENT_STEP_LABELS = {
   "for-each-ref": "listing the branches",
   checkout: "checking out the branch",
   "checkout-update": "updating the checkout",
-  "rebind-checkout": "checking out the thread's own branch",
   "rev-parse": "reading the commit",
   "cat-file": "checking the mirror for the commit",
   "show-ref": "reading the branch tip",

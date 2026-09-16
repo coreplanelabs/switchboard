@@ -5,7 +5,7 @@
  *  shipped code.
  *
  *  Background: the check used to be three sequential container spawns per
- *  binding (`test -d`, `su … git status --porcelain`, `su … git rev-list
+ *  binding (`test -d`, `su … git status --porcelain -uno`, `su … git rev-list
  *  --count HEAD --not --remotes`), and `isIdle()` ran it serially per live
  *  binding — every refresh cycle's idle gate paid 3×N process round-trips.
  *  The three probes fold into one `sh -c` script; the DECISION semantics are
@@ -42,7 +42,7 @@ export function worktreeCleanlinessScript(worktreePath: string, user: string): s
   const inner = [
     `t=$(mktemp) || { echo gitrc=1; echo 'giterr=mktemp failed'; exit 0; }`,
     `cd ${wt} 2>"$t" || { echo gitrc=1; printf 'giterr=%s\\n' "$(grep -m 1 . "$t" || echo 'cd failed')"; rm -f "$t"; exit 0; }`,
-    `s_out=$(git status --porcelain 2>"$t"); s_rc=$?; s_err=$(grep -m 1 . "$t" || true)`,
+    `s_out=$(git status --porcelain -uno 2>"$t"); s_rc=$?; s_err=$(grep -m 1 . "$t" || true)`,
     `a_out=$(git rev-list --count HEAD --not --remotes 2>"$t"); a_rc=$?; a_err=$(grep -m 1 . "$t" || true)`,
     `rm -f "$t"`,
     `if [ "$s_rc" -ne 0 ] || [ "$a_rc" -ne 0 ]; then`,
@@ -66,6 +66,40 @@ export function worktreeCleanlinessScript(worktreePath: string, user: string): s
 export interface WorktreeCleanliness {
   clean: boolean;
   reason?: string;
+  /** What the probes counted, when they ran: the tracked files `git status
+   *  --porcelain -uno` listed as changed — item 17's definition of dirt, the
+   *  same the run loop counts for its note, so the card and the release log
+   *  name one number; untracked scratch is the thread's own and not work —
+   *  and the commits on no remote branch. Absent when the tree is missing or
+   *  a probe failed. */
+  changes?: number;
+  unpushed?: number;
+}
+
+/** What a release discards (docs/reference/specs/resident-repos.md item 16a):
+ *  the counts a run left in its tree, named in the detach answer and the
+ *  bot's log so the loss is never silent. */
+export interface LeftBehind {
+  uncommittedChanges: number;
+  unpushedCommits: number;
+}
+
+/** The counts the probes measured, as what a release leaves behind: nothing
+ *  when the probes could not run (a tree that is gone or unreadable) and
+ *  nothing when both are zero — the answer names only a loss. */
+export function leftBehindOf(measured: WorktreeCleanliness): LeftBehind | undefined {
+  if (measured.changes === undefined || measured.unpushed === undefined) return undefined;
+  if (measured.changes === 0 && measured.unpushed === 0) return undefined;
+  return { uncommittedChanges: measured.changes, unpushedCommits: measured.unpushed };
+}
+
+/** The bot's word for a discarded tree, in the release log and the run's
+ *  record: what was left, why it is gone, what to do instead. */
+export function leftBehindSentence(left: LeftBehind): string {
+  return (
+    `${left.uncommittedChanges} uncommitted change(s) and ${left.unpushedCommits} unpushed commit(s) were left in the worktree; ` +
+    "a run starts from a clean tree, so they were discarded — commit and push what must be kept"
+  );
 }
 
 /** Decide from the script's tagged output. Unknown (missing/failed tags,
@@ -89,7 +123,13 @@ export function parseWorktreeCleanliness(r: {
   }
   const changes = Number(tags.get("changes")) || 0;
   const unpushed = Number(tags.get("unpushed")) || 0;
-  if (changes > 0 || unpushed > 0)
-    return { clean: false, reason: `dirty: ${changes} uncommitted change(s), ${unpushed} unpushed commit(s)` };
-  return { clean: true };
+  if (changes > 0 || unpushed > 0) {
+    return {
+      clean: false,
+      reason: `dirty: ${changes} uncommitted change(s), ${unpushed} unpushed commit(s)`,
+      changes,
+      unpushed,
+    };
+  }
+  return { clean: true, changes, unpushed };
 }

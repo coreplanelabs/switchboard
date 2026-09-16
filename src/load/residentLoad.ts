@@ -18,7 +18,7 @@ export interface ResidentThreadClient {
   exec(command: string, opts?: { timeoutMs?: number }): Promise<string>;
   readFile(path: string): Promise<string>;
   writeFile(path: string, content: string): Promise<string>;
-  release(mode: "always" | "if-clean"): Promise<{ released: boolean; reason?: string }>;
+  release(mode: "always" | "if-idle"): Promise<{ released: boolean; reason?: string }>;
 }
 
 export interface ResidentLoadDeps {

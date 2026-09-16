@@ -594,11 +594,12 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
       {
         body: {
           ...ATTACH_OK,
-          rebindRefused: { to: "fix/x", pr: 7, reason: "dirty", why: "the worktree has uncommitted changes" },
+          rebindRefused: { to: "fix/x", pr: 7, reason: "branch-absent", why: "the mirror does not hold it" },
         },
       },
-      { body: { ...ATTACH_OK, rebound: { from: "master" }, rebindRefused: "no" } },
+      { body: { ...ATTACH_OK, rebound: { from: "master" }, rebindRefused: "no", returned: { to: "master" } } },
       { body: ATTACH_OK },
+      { body: { ...ATTACH_OK, returned: { from: "fix/x", to: "master", pr: 7, at: "t" } } },
     );
     const moved = await ResidentExecutor.open({ ...OPTS, refHint: "fix/x", ownPr: { number: 7, ref: "fix/x" } });
     expect(moved.binding).toMatchObject({ ref: "fix/x", rebound: { from: "master", to: "fix/x", pr: 7 } });
@@ -606,15 +607,21 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
     const kept = await ResidentExecutor.open({ ...OPTS, refHint: "fix/x", ownPr: { number: 7, ref: "fix/x" } });
     expect(kept.binding).toMatchObject({
       ref: "master",
-      rebindRefused: { to: "fix/x", pr: 7, reason: "dirty", why: "the worktree has uncommitted changes" },
+      rebindRefused: { to: "fix/x", pr: 7, reason: "branch-absent", why: "the mirror does not hold it" },
     });
     expect(kept.binding).not.toHaveProperty("rebound");
     const malformed = await ResidentExecutor.open({ ...OPTS, refHint: "master" });
     expect(malformed.binding).not.toHaveProperty("rebound");
     expect(malformed.binding).not.toHaveProperty("rebindRefused");
+    expect(malformed.binding).not.toHaveProperty("returned");
     const bare = await ResidentExecutor.open({ ...OPTS, refHint: "master" });
     expect(bare.binding).not.toHaveProperty("rebound");
     expect(bare.binding).not.toHaveProperty("rebindRefused");
+    expect(bare.binding).not.toHaveProperty("returned");
+    // The second movement (item 16): the binding went back to the default because its branch is gone.
+    const back = await ResidentExecutor.open({ ...OPTS, refHint: "master" });
+    expect(back.binding).toMatchObject({ ref: "master", returned: { from: "fix/x", to: "master", pr: 7 } });
+    expect(back.binding).not.toHaveProperty("rebound");
   });
 
   it('a 409 needs:"recreate" (the tree cannot be reused) is a typed ResidentReuseRefusedError carrying the resident\'s own words, never a retry', async () => {
@@ -948,15 +955,34 @@ describe("ResidentExecutor.release — return the thread's pool user when a run 
     expect(sentBody(calls[1])).toMatchObject({ resource: OPTS.resource, threadKey: OPTS.threadKey, force: true });
   });
 
-  it('"if-clean" POSTs force:false and a kept (dirty) worktree comes back released:false with the reason', async () => {
+  it('"if-idle" POSTs force:false; a worktree kept for an op in flight comes back released:false with the reason', async () => {
     const { calls } = stubFetch(
       { body: ATTACH_OK },
-      { body: { released: false, reason: "dirty: 2 uncommitted change(s)" } },
+      { body: { released: false, reason: "busy: 1 operation(s) in flight on this thread — kept" } },
     );
     const ex = await ResidentExecutor.open(OPTS);
-    const r = await ex.release("if-clean");
-    expect(r).toEqual({ released: false, reason: "dirty: 2 uncommitted change(s)" });
+    const r = await ex.release("if-idle");
+    expect(r).toEqual({ released: false, reason: "busy: 1 operation(s) in flight on this thread — kept" });
     expect(sentBody(calls[1])).toMatchObject({ force: false });
+  });
+
+  // docs/reference/specs/resident-repos.md item 16a: a run starts from a clean
+  // tree, so the release discards whatever the tree held — and says so.
+  it("a release that discarded uncommitted or unpushed work reports it as `leftBehind` when well-formed; a malformed or absent one reports nothing", async () => {
+    stubFetch(
+      { body: ATTACH_OK },
+      { body: { released: true, user: "worker2", leftBehind: { uncommittedChanges: 2, unpushedCommits: 1 } } },
+      { body: { released: true, user: "worker2", leftBehind: { dirty: true } } },
+      { body: { released: true, user: "worker2" } },
+    );
+    const ex = await ResidentExecutor.open(OPTS);
+    expect(await ex.release("if-idle")).toEqual({
+      released: true,
+      reason: undefined,
+      leftBehind: { uncommittedChanges: 2, unpushedCommits: 1 },
+    });
+    expect(await ex.release("if-idle")).toEqual({ released: true, reason: undefined });
+    expect(await ex.release("if-idle")).toEqual({ released: true, reason: undefined });
   });
 
   // docs/reference/specs/resident-repos.md item 16: the release hands the
@@ -970,14 +996,14 @@ describe("ResidentExecutor.release — return the thread's pool user when a run 
       { body: { released: true } },
     );
     const ex = await ResidentExecutor.open({ ...OPTS, refHint: "master" });
-    await ex.release("if-clean", { pushed: [{ ref: "fix/x", pr: 7 }] });
+    await ex.release("if-idle", { pushed: [{ ref: "fix/x", pr: 7 }] });
     expect(sentBody(calls[1])).toEqual({
       resource: "repo:jshttp/vary",
       threadKey: "slack:CX:1.0",
       force: false,
       pushed: [{ ref: "fix/x", pr: 7 }],
     });
-    await ex.release("if-clean", { pushed: [] });
+    await ex.release("if-idle", { pushed: [] });
     expect(sentBody(calls[2])).not.toHaveProperty("pushed");
     await ex.release("always");
     expect(sentBody(calls[3])).not.toHaveProperty("pushed");

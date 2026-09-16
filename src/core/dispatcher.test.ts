@@ -490,7 +490,7 @@ describe("executor provisioning by agent resources", () => {
     expect(ctx).toMatchObject({ repo: "acme/api", ref: "patch-1", headSha: "e".repeat(40) });
   });
 
-  it("releases the executor's workspace when the run ends: if-clean for a coding run, always for a read-only agent", async () => {
+  it("releases the executor's workspace when the run ends: if-idle for a coding run, always for a read-only agent", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("GITHUB_APP_ID", "");
     const provider = capturingProvider();
@@ -501,7 +501,7 @@ describe("executor provisioning by agent resources", () => {
     vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fake });
     await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
     expect(release).toHaveBeenCalledTimes(1);
-    expect(release).toHaveBeenCalledWith("if-clean", {
+    expect(release).toHaveBeenCalledWith("if-idle", {
       span: expect.objectContaining({ name: "post.workspace_release" }),
     });
 
@@ -590,7 +590,7 @@ describe("executor provisioning by agent resources", () => {
     expect(registry.listActive()[0].stop).toEqual({ mode: "hard", state: "stopped" });
   });
 
-  it("a soft stop keeps the normal release policy (if-clean for coding) and marks the card stopped", async () => {
+  it("a soft stop keeps the normal release policy (if-idle for coding) and marks the card stopped", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("GITHUB_APP_ID", "");
     const registry = new RunRegistry({ genId: () => "r1", genToken: () => "t1" });
@@ -615,11 +615,14 @@ describe("executor provisioning by agent resources", () => {
     const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
     deps.runRegistry = registry;
     const { io, replies, statuses } = fakeIO();
-    const release = vi.fn(async () => ({ released: false, reason: "dirty" }));
+    const release = vi.fn(async () => ({
+      released: false,
+      reason: "busy: 1 operation(s) in flight on this thread — kept",
+    }));
     const fake = { exec: async () => "ok", readFile: async () => "", writeFile: async () => "", release };
     vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fake });
     await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
-    expect(release).toHaveBeenCalledWith("if-clean", {
+    expect(release).toHaveBeenCalledWith("if-idle", {
       span: expect.objectContaining({ name: "post.workspace_release" }),
     });
     expect(replies.some((r) => r.includes("summary so far") && r.includes("Stopped early"))).toBe(true);
@@ -1730,7 +1733,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
     vi.stubEnv("GITHUB_APP_ID", "");
     const SHA = "f".repeat(40);
     const why =
-      "the worktree has uncommitted changes on the bound branch; the binding stands until they are committed or discarded";
+      'the mirror does not hold "fix/x" even after a fetch (deleted after a merge, or never pushed); the tree cannot be provisioned at it';
     residentFetchStub({
       attach: () =>
         new Response(
@@ -1739,7 +1742,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
             ref: "main",
             sha: "abc1234def",
             user: "worker2",
-            rebindRefused: { to: "fix/x", pr: 7, reason: "dirty", why },
+            rebindRefused: { to: "fix/x", pr: 7, reason: "branch-absent", why },
           }),
           { status: 200 },
         ),
@@ -1761,7 +1764,9 @@ describe("repo/ref resolution + resident prompt selection", () => {
     expect(replies).toContain("answer");
     expect(
       statuses.some((s) =>
-        s.title.includes("resident · acme/api · main@abc1234 · rebind to fix/x (this thread's PR #7) refused: dirty"),
+        s.title.includes(
+          "resident · acme/api · main@abc1234 · rebind to fix/x (this thread's PR #7) refused: branch-absent",
+        ),
       ),
     ).toBe(true);
     // …and on the run's stream, head material like the cold-sandbox note: the
@@ -1770,7 +1775,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
     const noteAt = events.findIndex((e) => e.type === "run_note" && e.kind === "rebind_refused");
     const loopAt = events.findIndex((e) => e.type === "span_start" && e.name === "run.agent");
     expect(events[noteAt]).toMatchObject({
-      summary: `kept on main — rebind to fix/x (this thread's PR #7) refused: dirty — ${why}`,
+      summary: `kept on main — rebind to fix/x (this thread's PR #7) refused: branch-absent — ${why}`,
     });
     expect(noteAt).toBeLessThan(loopAt);
     expect(events.slice(0, loopAt).every(isHeadMaterial)).toBe(true);
@@ -3177,6 +3182,10 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
       cloneDir?: string;
       bindingRef?: string;
       pushed?: { branch: string; head: string; remoteHead?: string | null };
+      /** What the run leaves in the tree (item 17): `status --porcelain -uno`
+       *  lists that many tracked changes, `rev-list --count HEAD --not
+       *  --remotes` that many commits. Absent: a clean tree with nothing unpushed. */
+      leftBehind?: { uncommitted: number; unpushed: number };
     } = {},
   ) {
     const order: string[] = [];
@@ -3191,6 +3200,12 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
       // The push itself prints the block; so does `cat push.log` — a transcript
       // of it, which must NOT count as a push.
       if (/^git push\b/.test(cmd) || /^cat push\.log\b/.test(cmd)) return pushBlock;
+      if (/status --porcelain -uno/.test(cmd)) {
+        if (!opts.head) return notARepo;
+        return Array.from({ length: opts.leftBehind?.uncommitted ?? 0 }, (_, i) => ` M file-${i}.ts\n`).join("");
+      }
+      if (/rev-list --count HEAD --not --remotes/.test(cmd))
+        return opts.head ? `${opts.leftBehind?.unpushed ?? 0}\n` : notARepo;
       if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return opts.branch ? `${opts.branch}\n` : notARepo;
       if (/rev-parse @\{u\}/.test(cmd)) {
         if (opts.cloneDir)
@@ -3544,7 +3559,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     deps.openPullRequest = openSpy({ number: 41 }).fn;
     const { io } = fakeIO();
     await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
-    expect(releases).toEqual([{ mode: "if-clean", pushed: [{ ref: "fix/x", pr: 41 }] }]);
+    expect(releases).toEqual([{ mode: "if-idle", pushed: [{ ref: "fix/x", pr: 41 }] }]);
 
     const none = codingDeps(describeThenAnswer(undefined));
     const bare = codingExecutor({ head: HEAD, bindingRef: "main" }); // no branch, no push
@@ -3556,7 +3571,47 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
       },
     });
     await dispatch(none, msg("agent:coding fix it", "slack:UADMIN"), fakeIO().io);
-    expect(bareReleases).toEqual([{ mode: "if-clean" }]);
+    expect(bareReleases).toEqual([{ mode: "if-idle" }]);
+  });
+
+  // resident-repos item 17: a run starts from a clean tree, so what a run
+  // leaves uncommitted or unpushed does not outlive it. The run loop reads
+  // the tree at the run's end — before the record is sealed, since the
+  // release that discards it runs after — and says so on the record and the
+  // card. A run that left nothing says nothing.
+  it("a coding run that leaves uncommitted changes or unpushed commits gets a `work_left_behind` note on its record and the loss on its card label; a run that left nothing gets neither", async () => {
+    const deps = codingDeps(describeThenAnswer(undefined));
+    codingExecutor({ head: HEAD, branch: "fix/x", bindingRef: "main", leftBehind: { uncommitted: 2, unpushed: 1 } });
+    const registry = new RunRegistry({ genId: () => "r-left", genToken: () => "t-left" });
+    deps.runRegistry = registry;
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    const events = registry.snapshot("r-left", "t-left")?.events ?? [];
+    const note = events.find((e) => e.type === "run_note" && e.kind === "work_left_behind");
+    expect(note).toMatchObject({
+      summary:
+        "2 uncommitted change(s) and 1 unpushed commit(s) were left in the worktree; a run starts from a clean tree, so they were discarded — commit and push what must be kept",
+    });
+    // After the loop's last turn (`run.agent` has ended) and before `finish()` closes the stream to
+    // content: the note follows the loop's span end, and its presence in the snapshot is what says
+    // it landed on the record rather than on a finished run.
+    const loopEndAt = events.findIndex((e) => e.type === "span_end" && e.name === "run.agent");
+    expect(events.indexOf(note!)).toBeGreaterThan(loopEndAt);
+    expect(
+      statuses.some((s) =>
+        s.title.includes("2 uncommitted change(s) and 1 unpushed commit(s) left behind — discarded at the run's end"),
+      ),
+    ).toBe(true);
+
+    const clean = codingDeps(describeThenAnswer(undefined));
+    codingExecutor({ head: HEAD, branch: "fix/x", bindingRef: "main" });
+    const cleanRegistry = new RunRegistry({ genId: () => "r-clean", genToken: () => "t-clean" });
+    clean.runRegistry = cleanRegistry;
+    const cleanIo = fakeIO();
+    await dispatch(clean, msg("agent:coding fix it", "slack:UADMIN"), cleanIo.io);
+    const cleanEvents = cleanRegistry.snapshot("r-clean", "t-clean")?.events ?? [];
+    expect(cleanEvents.some((e) => e.type === "run_note" && e.kind === "work_left_behind")).toBe(false);
+    expect(cleanIo.statuses.some((s) => s.title.includes("left behind"))).toBe(false);
   });
 
   it("the same child without a coordinator tag: the binding ref is the branch, so the branch is the base — no PR call, and instead of silence the record carries a `pr_not_opened` note and the reply says the branch is the base", async () => {
