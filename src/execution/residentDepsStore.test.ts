@@ -27,6 +27,7 @@ import {
   planDepsEviction,
   planDepsMaterialization,
   DEPS_STORE_MAX_UNREFERENCED,
+  DEPS_STORE_MAX_UNREFERENCED_UNDER_PRESSURE,
 } from "./residentDepsStore.js";
 
 const KEY_A = "a".repeat(64);
@@ -265,6 +266,30 @@ describe("store listing and eviction (LRU among unreferenced entries, never a pr
     // C is warmer than B: C stays as the one unreferenced entry, B goes.
     expect(plan.remove).toEqual([depsEntryPath(KEY_B), "/workspace/deps/.staging-x"]);
     expect(plan.keep).toEqual([KEY_A, KEY_C]);
+    expect(plan.evicted.map((e) => e.key)).toEqual([KEY_B]);
+  });
+
+  // item 55: the attach's pressure path keeps no spare — the coldest goes
+  // first, then the warmer one, each with its measured size for the refusal
+  // text; a protected entry never, whatever the pressure.
+  it("under disk pressure the plan keeps no spare (DEPS_STORE_MAX_UNREFERENCED_UNDER_PRESSURE = 0), coldest first, protected entries untouched", () => {
+    expect(DEPS_STORE_MAX_UNREFERENCED_UNDER_PRESSURE).toBe(0);
+    const plan = planDepsEviction({
+      entries: [
+        { key: KEY_A, complete: true, kib: 3_000_000, usedAtS: 300 }, // the checkout's: protected
+        { key: KEY_B, complete: true, kib: 3_400_000, usedAtS: 100 },
+        { key: KEY_C, complete: true, kib: 2_900_000, usedAtS: 200 },
+      ],
+      leftovers: [],
+      protectedKeys: new Set([KEY_A]),
+      maxUnreferenced: DEPS_STORE_MAX_UNREFERENCED_UNDER_PRESSURE,
+    });
+    expect(plan.remove).toEqual([depsEntryPath(KEY_B), depsEntryPath(KEY_C)]);
+    expect(plan.evicted.map((e) => [e.key, e.kib])).toEqual([
+      [KEY_B, 3_400_000],
+      [KEY_C, 2_900_000],
+    ]);
+    expect(plan.keep).toEqual([KEY_A]);
   });
 
   it("nothing to remove → empty plan (no fork)", () => {
