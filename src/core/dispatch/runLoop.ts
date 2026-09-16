@@ -49,13 +49,21 @@ import {
 import { parseDigestReport, type DigestReport } from "../diffDigest.js";
 import { runReviewPostStep, settleReviewedHead, type ReviewPostOutcome, type RoundWorkspace } from "../reviewRound.js";
 import { postReviewComment } from "../../execution/githubComments.js";
-import { observeCodingWorkspace, runCodingPrPostStep, trackPushedBranch } from "../codingPrPostStep.js";
+import {
+  observeCodingWorkspace,
+  runCodingPrPostStep,
+  trackPushedBranch,
+  workLeftBehindLabel,
+  workLeftBehindOf,
+  workLeftBehindSummary,
+} from "../codingPrPostStep.js";
 import { descriptionTurnTarget, runDescriptionTurn } from "../descriptionTurn.js";
 import { runVerdictTurn } from "../verdictTurn.js";
 import { reviewPostOptedOut } from "../reviewPost.js";
 import { startReviewReadingDiff } from "../readingDiff.js";
 import { startReviewDescription } from "../reviewDescription.js";
 import { isSpanRecord, type RunEvent } from "../runEvents.js";
+import { oneLine } from "../redact.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "../runFriction.js";
 import { markdownOutput } from "../llmOutput/index.js";
 import { pushedBranchesOf, type RunFailure, type RunSeed, type RunStatus } from "../runRecord.js";
@@ -440,6 +448,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
   // the dispatch resolved no repo (the agent discovered the repo itself) —
   // the PR-open repo of last resort.
   let observedRemoteRepo: string | undefined;
+  // What the run leaves in its tree that will not outlive it (resident-repos
+  // item 17): tracked changes and commits no remote holds, read in the same
+  // observation, for the `work_left_behind` note. Undefined when unreadable.
+  let observedUncommitted: number | undefined;
+  let observedUnpushed: number | undefined;
   // The PR post-step's reply note: assembled in the try below — the open
   // runs BEFORE the stream finishes, so its outcome is a fact of the run —
   // and appended to the channel reply at the end.
@@ -472,12 +485,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
   // Give the workspace back now rather than at the inactivity sweep: a
   // resident's pool user is a scarce slot (docs/reference/specs/resident-repos.md item
   // 16a). The release mode is paired to the round's agent by the attach
-  // helper (reviewRound.ts): read-only agents hold nothing worth keeping; a
-  // coding run keeps its worktree only while it has uncommitted/unpushed
-  // work — unless an operator HARD-stopped it, which means "tear it
-  // down now": the abandoned command may still be running in there, and the
-  // whole point of a hard stop is to free the resources. Best-effort — a
-  // failed release is a log line, never a failed run. Called AFTER the
+  // helper (reviewRound.ts): a run's normal end releases the tree whatever
+  // it holds — a run starts from a clean tree, and what it left behind was
+  // said above — keeping it only while a command is still in flight in it;
+  // a read-only agent's, or one an operator HARD-stopped ("tear it down
+  // now": the abandoned command may still be running in there, and the
+  // whole point of a hard stop is to free the resources), is released
+  // unconditionally. Best-effort — a failed release is a log line, never a
+  // failed run. Called AFTER the
   // answer has been sent (or the failure card closed): the `/detach` round
   // trip is bounded at 10 s on a sick resident, and nothing about the reply
   // depends on it, so it must never sit between "answer ready" and the
@@ -858,6 +873,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
       observedCheckedOut = observed.checkedOut;
       observedRemoteHead = observed.remoteHead;
       observedRemoteRepo = observed.remoteRepo;
+      observedUncommitted = observed.uncommittedChanges;
+      observedUnpushed = observed.unpushedCommits;
     };
     // Where the post-step's PR would open (CodingPrTarget), in order: the PR's
     // true base ref when the thread's context came from a PR (a fix round
@@ -934,6 +951,27 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     // The last prompt on the run's pi has been sent: pi ends here, before the
     // post-step and before the workspace it runs in can be released.
     await harnessSession?.end();
+    // What the run leaves uncommitted or unpushed does not outlive it: a run
+    // starts from a clean tree (resident-repos item 17), and the release that
+    // follows the reply discards the tree. Said HERE — on the record, before
+    // the finally below finish()es the stream to content, and on the card's
+    // label before it closes — because the release runs after the record is
+    // sealed and could not say it anywhere a person reads. Read off the last
+    // observation above (after the description turn, in case it pushed); a
+    // hard stop observed nothing and has its own ⛔.
+    const leftBehind =
+      isCodingPrRun && run.control.requested !== "hard"
+        ? workLeftBehindOf({ uncommittedChanges: observedUncommitted, unpushedCommits: observedUnpushed })
+        : undefined;
+    if (leftBehind) {
+      registry.publish(run.id, {
+        type: "run_note",
+        kind: "work_left_behind",
+        summary: oneLine(workLeftBehindSummary(leftBehind)),
+        at: clock(),
+      });
+      shell.setLabel(`${shell.label} · ${workLeftBehindLabel(leftBehind)}`);
+    }
     // The accepted PrDescription is a fact of the run: publish it as a typed
     // event BEFORE the finally below finish()es the stream, string fields
     // redacted like every payload, so the run page's review panel renders

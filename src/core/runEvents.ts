@@ -137,6 +137,14 @@ export type RunNoteKind =
    *  attach, before the first turn, so the run page explains a follow-up that
    *  runs on the default instead of on its thread's PR. */
   | "rebind_refused"
+  /** The run ended with uncommitted changes or unpushed commits in its
+   *  workspace, and they do not outlive it: a run starts from a clean tree
+   *  (docs/reference/specs/resident-repos.md item 17), so the release that
+   *  follows the reply discards them. The summary names both counts and what
+   *  to do instead (commit and push). Read off the workspace by the run loop
+   *  after the model's last turn — the release itself runs after the record
+   *  is sealed — and set on the card's label too, so the loss is never silent. */
+  | "work_left_behind"
   /** A coding run submitted a PR description but the post-step opened no
    *  pull request because the branch it observed IS the base the pull
    *  request would target (docs/reference/specs/pr-description.md item 5) —
@@ -201,6 +209,7 @@ export const RUN_NOTE_KINDS = [
   "verdict_turn",
   "cold_sandbox",
   "rebind_refused",
+  "work_left_behind",
   "pr_not_opened",
   "review_not_posted",
   "compacted",

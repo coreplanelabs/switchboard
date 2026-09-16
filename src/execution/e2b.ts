@@ -116,7 +116,7 @@ export class E2BExecutor implements Executor {
 
   /** "always" (a read-only run, or a hard stop) kills the micro-VM outright —
    *  the only way to end a command e2b's API can't cancel; the next request in
-   *  the thread creates a fresh sandbox (repos re-clone). "if-clean" keeps the
+   *  the thread creates a fresh sandbox (repos re-clone). "if-idle" keeps the
    *  sandbox: its idle timeout is the existing reclaim path. Never throws. */
   async release(mode: ReleaseMode): Promise<ReleaseResult> {
     if (mode !== "always") return { released: false, reason: "kept for the thread (idle timeout reclaims it)" };

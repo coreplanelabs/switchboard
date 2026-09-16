@@ -362,21 +362,38 @@ describe("makeExecutor resident selection", () => {
           rebindRefused: {
             to: "fix/x",
             pr: 7,
-            reason: "dirty",
-            why: "the worktree has uncommitted changes on the bound branch; the binding stands until they are committed or discarded",
+            reason: "branch-absent",
+            why: 'the mirror does not hold "fix/x" even after a fetch (deleted after a merge, or never pushed); the tree cannot be provisioned at it',
           },
         }),
       );
       const { note, binding } = await makeExecutor(residentOpts(), { ...repoCtx(), ref: "fix/x", headSha: SHA, ownPr });
       expect(note).toBe(
-        "resident · jshttp/vary · master@47c4230 · rebind to fix/x (this thread's PR #7) refused: dirty",
+        "resident · jshttp/vary · master@47c4230 · rebind to fix/x (this thread's PR #7) refused: branch-absent",
       );
       expect(binding?.rebindRefused).toEqual({
         to: "fix/x",
         pr: 7,
-        reason: "dirty",
-        why: "the worktree has uncommitted changes on the bound branch; the binding stands until they are committed or discarded",
+        reason: "branch-absent",
+        why: 'the mirror does not hold "fix/x" even after a fetch (deleted after a merge, or never pushed); the tree cannot be provisioned at it',
       });
+    });
+
+    // Item 16's second movement: the branch a rebind moved the thread onto is
+    // gone from the mirror, so the resident moved the binding back to the
+    // default and provisioned the tree there — the card says so.
+    it("an answer that returned the binding to the default names the move back on the note, and the binding carries it", async () => {
+      stubEnvs();
+      stubFetch(
+        { body: { state: "warm", reason: "" } },
+        attached({ ref: "master", returned: { from: "fix/x", to: "master", pr: 7, at: "t" } }),
+      );
+      const { note, binding } = await makeExecutor(residentOpts(), { ...repoCtx(), ref: "fix/x", headSha: SHA });
+      expect(note).toBe(
+        "resident · jshttp/vary · master@47c4230 · returned to master (the branch of this thread's PR #7 is gone)",
+      );
+      expect(binding?.returned).toEqual({ from: "fix/x", to: "master", pr: 7 });
+      expect(binding?.rebound).toBeUndefined();
     });
 
     it("a serviceable non-warm resident says the move before the snapshot note", async () => {

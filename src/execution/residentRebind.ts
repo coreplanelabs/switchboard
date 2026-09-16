@@ -16,21 +16,34 @@
  *
  *  Shape: the caller names the reason for its hint (`ownPr`: the pull request
  *  the thread's own run opened and its head branch — never a PR a person
- *  named). The resident moves the binding only when all of these hold:
+ *  named). The move is a decision about the BINDING alone; the tree is the
+ *  attach's business afterwards (item 17: a run starts from a clean tree at
+ *  the bound ref, so the attach provisions the tree at the moved ref as it
+ *  provisions any other). The resident moves the binding only when all of
+ *  these hold:
  *  - the binding was made by default (the first message named no branch), read
  *    off `boundBy`, or, for a binding made before that field, off whether the
  *    ref is the default branch — a ref a person named is never moved;
- *  - the thread was not rebound before — a thread moves once;
- *  - the branch is a local branch of the thread's OWN worktree — the physical
- *    fact that this thread's run created it; a branch the tree never made is
- *    refused whatever the caller says;
- *  - the tree has no uncommitted tracked changes — never at the cost of work —
- *    unless its HEAD is already the branch: the run made the branch in this
- *    tree and left an edit after pushing, so the record alone moves and no
- *    git command touches the tree.
- *  The move is a `git checkout` inside the existing tree: same path, same pool
- *  user, deps and snapshot lineage untouched. Every refusal is named in the
- *  attach answer so the bot can say why the follow-up runs where it does. */
+ *  - the thread was not rebound before, or its earlier move was returned (the
+ *    second movement below) — a thread moves once per pull request;
+ *  - the branch is the thread's own: remembered from a release (`ownBranches`,
+ *    the branches its runs pushed), or, when nothing was remembered, a local
+ *    branch of the thread's surviving tree — the physical fact that this
+ *    thread's run created it. A branch neither remembered nor local is
+ *    refused whatever the caller says; so is one the mirror does not hold
+ *    even after a fetch (the Worker's check: the tree is cloned from it).
+ *  Every refusal is named in the attach answer so the bot can say why the
+ *  follow-up runs where it does.
+ *
+ *  The second movement: a rebound binding names a branch that can die — the
+ *  pull request merges and the branch is deleted. A binding left on it would
+ *  fail every later attach (`unknown-ref`) for the thread's whole life. So a
+ *  binding a rebind moved, whose branch the mirror no longer holds after a
+ *  fetch, goes back to the default it was bound to (`canReturnToDefault`,
+ *  `returnToDefault`); the attach provisions the tree there, clean, and the
+ *  thread is default-bound again, so a later own pull request may move it once
+ *  more. A ref a person named that vanished keeps the `unknown-ref` refusal:
+ *  that branch is the person's to sort out. */
 
 /** The pull request the thread's own run opened, and its head branch — the
  *  reason a caller's refHint is that branch. */
@@ -145,15 +158,29 @@ export function boundByOf(binding: { ref: string; boundBy?: BoundBy }, defaultRe
   return binding.boundBy ?? (binding.ref === defaultRef ? "default" : "name");
 }
 
-/** The record a rebind leaves on the binding and in the attach answer. */
+/** The record a rebind leaves on the binding and in the attach answer: from
+ *  which ref, onto which branch, for which pull request, when. `returnedAt`:
+ *  that branch was gone from the mirror at a later attach and the binding
+ *  went back to the default (the second movement) — a returned move no
+ *  longer counts as the thread's one move. */
 export interface Rebound {
+  from: string;
+  to: string;
+  pr: number;
+  at: string;
+  returnedAt?: string;
+}
+
+/** The move back, in the attach answer: from the branch that is gone, to the
+ *  default, for the pull request whose branch it was, when. */
+export interface Returned {
   from: string;
   to: string;
   pr: number;
   at: string;
 }
 
-export type RebindRefusal = "named-ref" | "already-rebound" | "branch-absent" | "dirty" | "checkout-failed";
+export type RebindRefusal = "named-ref" | "already-rebound" | "branch-absent";
 
 /** Why the binding stood, in the attach answer: the branch it was asked to
  *  move to, the pull request, the reason and its sentence. */
@@ -182,9 +209,10 @@ export type RebindPlan =
   | { kind: "none" }
   /** The binding alone rules it out; nothing on disk is consulted. */
   | { kind: "refuse"; refused: RebindRefused }
-  /** The binding allows it and has a live tree; the tree decides
-   *  (`rebindVerdict`). `own`: the thread's own runs pushed the branch, so a
-   *  tree that turns out missing may still be recreated at it. */
+  /** The binding allows it and has a live tree. `own`: the thread's own runs
+   *  pushed the branch, as the binding remembers it — the fact that decides;
+   *  when nothing was remembered, the tree's local branch is the fallback
+   *  evidence (`rebindVerdict`). */
   | { kind: "measure"; from: string; to: string; pr: number; own: boolean }
   /** The binding allows it, its tree was evicted, and the thread's own runs
    *  pushed the branch: the binding moves and the attach recreates the tree
@@ -217,7 +245,10 @@ export function rebindPlan(input: {
       ),
     };
   }
-  if (binding.rebound) {
+  // A move that was returned (its branch gone, the binding back on the
+  // default) no longer stands in the way: the thread may follow its next
+  // pull request as it followed the first.
+  if (binding.rebound && binding.rebound.returnedAt === undefined) {
     const r = binding.rebound;
     return {
       kind: "refuse",
@@ -243,42 +274,30 @@ export function rebindPlan(input: {
   return { kind: "measure", from: binding.ref, ...plan, own };
 }
 
-/** What the attach measured about the thread's tree, as the thread user. Each
- *  probe past `exists` is measured only when the tree is there. */
+/** What the attach measured about the thread's tree, as the thread user —
+ *  only when the binding remembers no push of the branch: the tree is then
+ *  the only place the branch's origin can be read. */
 export interface RebindTreeFacts {
   /** `<worktree>/.git` is a directory. */
   exists: boolean;
-  /** `git rev-parse --verify --quiet refs/heads/<to>` succeeded in the tree. */
+  /** `git rev-parse --verify --quiet refs/heads/<to>` succeeded in the tree;
+   *  false for a branch the tree never made and for a tree git cannot read
+   *  (neither verifies anything). */
   branchExists?: boolean;
-  /** `git status --porcelain -uno` ran: false is a tree git cannot read
-   *  (corrupt, or owned by an earlier pool user), where nothing is verifiable. */
-  readable?: boolean;
-  /** `git status --porcelain -uno` listed a tracked change (untracked scratch
-   *  files are the thread's own state and survive a checkout). */
-  dirty?: boolean;
-  /** `git rev-parse --abbrev-ref HEAD` in the tree — the branch checked out
-   *  (`HEAD` when detached) — measured once the tree is dirty: the one fact
-   *  that tells a dirty tree already on the branch from one elsewhere. */
-  head?: string;
 }
 
 export type RebindVerdict =
-  /** Move the binding. `checkout: true`: check the branch out in the existing
-   *  tree. `checkout: false`: the tree is dirty but its HEAD is already the
-   *  branch — the run made it here and left an edit after pushing — so only
-   *  the record moves; no checkout, no fetch, no reset, the tree not touched
-   *  by the rebind (`note` says so for the log). */
-  | { kind: "rebind"; checkout: true }
-  | { kind: "rebind"; checkout: false; note: string }
-  /** The tree is gone (a slept container) and the thread's own runs pushed the
-   *  branch: move the binding and let the attach recreate the tree at it. */
-  | { kind: "recreate" }
-  | { kind: "refuse"; refused: RebindRefused };
+  /** The branch is the thread's own: move the binding. The tree is not this
+   *  verdict's concern — the attach provisions it at the moved ref (item 17),
+   *  once the Worker has seen the mirror hold the branch. */
+  { kind: "rebind" } | { kind: "refuse"; refused: RebindRefused };
 
-/** The tree's verdict on a measured plan. */
+/** Whether the branch is the thread's own, for a measured plan: the memory of
+ *  a release decides by itself; without it, the surviving tree must hold the
+ *  branch as a local branch. */
 export function rebindVerdict(plan: { to: string; pr: number; own?: boolean }, tree: RebindTreeFacts): RebindVerdict {
+  if (plan.own === true) return { kind: "rebind" };
   if (!tree.exists) {
-    if (plan.own === true) return { kind: "recreate" };
     return {
       kind: "refuse",
       refused: rebindRefused(
@@ -288,46 +307,42 @@ export function rebindVerdict(plan: { to: string; pr: number; own?: boolean }, t
       ),
     };
   }
-  if (tree.readable === false) {
-    return {
-      kind: "refuse",
-      refused: rebindRefused(
-        plan,
-        "branch-absent",
-        "the thread's worktree cannot be read; the branch cannot be verified there",
-      ),
-    };
-  }
   if (tree.branchExists !== true) {
     return {
       kind: "refuse",
       refused: rebindRefused(
         plan,
         "branch-absent",
-        `${JSON.stringify(plan.to)} is not a local branch of the thread's worktree; only a branch this thread's own run made moves it`,
+        `${JSON.stringify(plan.to)} is not a local branch of the thread's worktree and none of its runs pushed it; only a branch this thread's own run made moves it`,
       ),
     };
   }
-  if (tree.dirty === true) {
-    // A dirty tree whose HEAD is the branch has nothing a checkout could
-    // cost: the run created the branch in this very tree and left the edit
-    // after pushing, and only the record still names the old ref. Moving
-    // the record is the whole move. Any other HEAD keeps the guard.
-    if (tree.head === plan.to) {
-      return {
-        kind: "rebind",
-        checkout: false,
-        note: `the worktree is dirty but its HEAD is already ${JSON.stringify(plan.to)} (the run made the branch here); the binding moves, the tree is not touched`,
-      };
-    }
-    return {
-      kind: "refuse",
-      refused: rebindRefused(
-        plan,
-        "dirty",
-        "the worktree has uncommitted changes on the bound branch; the binding stands until they are committed or discarded",
-      ),
-    };
-  }
-  return { kind: "rebind", checkout: true };
+  return { kind: "rebind" };
+}
+
+/** Whether a binding whose ref the mirror no longer holds goes back to the
+ *  default branch (the second movement): only a binding a rebind moved onto
+ *  its own pull request's branch — bound by default in the first place, still
+ *  on that branch, the move not yet returned. Anything else keeps the
+ *  attach's `unknown-ref` refusal: a ref a person named is that person's to
+ *  sort out, and a binding on the default cannot lose its ref. */
+export function canReturnToDefault(
+  binding: { ref: string; boundBy?: BoundBy; rebound?: Rebound },
+  defaultRef: string,
+): boolean {
+  const r = binding.rebound;
+  if (r === undefined || r.returnedAt !== undefined || binding.ref !== r.to) return false;
+  return binding.ref !== defaultRef && boundByOf(binding, defaultRef) === "default";
+}
+
+/** The move back: the binding's ref becomes the default and the move that
+ *  brought it here is stamped returned, so the thread may move again. Only
+ *  ever applied to a binding `canReturnToDefault` admitted. */
+export function returnToDefault<B extends { ref: string; rebound?: Rebound }>(
+  binding: B & { rebound: Rebound },
+  defaultRef: string,
+  at: string,
+): { binding: B; returned: Returned } {
+  const returned: Returned = { from: binding.ref, to: defaultRef, pr: binding.rebound.pr, at };
+  return { binding: { ...binding, ref: defaultRef, rebound: { ...binding.rebound, returnedAt: at } }, returned };
 }

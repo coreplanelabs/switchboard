@@ -76,6 +76,7 @@ import { parseExitPrefix, type RunEvent } from "./runEvents.js";
 import { systemClock } from "./trace/clock.js";
 import type { Span } from "./trace/types.js";
 import type { ExecTraceOptions } from "../execution/executor.js";
+import { leftBehindSentence, type LeftBehind } from "../execution/residentCleanliness.js";
 
 /** What the PR post-step observed in the run's workspace, all read BEFORE the
  *  workspace is released. Every field is undefined when its probe failed. */
@@ -100,6 +101,36 @@ export interface WorkspaceObservation {
   remoteHead: string | undefined;
   /** `owner/name` parsed from the origin remote, probed only when asked. */
   remoteRepo: string | undefined;
+  /** What the run leaves that will not outlive it (docs/reference/specs/
+   *  resident-repos.md item 17 — a run starts from a clean tree): the tracked
+   *  files `git status --porcelain -uno` lists as changed, and the commits
+   *  `git rev-list --count HEAD --not --remotes` finds on no remote branch.
+   *  Absent when the probe failed (no repository here), and on an observation
+   *  a caller assembled for the post-step alone. */
+  uncommittedChanges?: number;
+  unpushedCommits?: number;
+}
+
+/** The counts of an observation, as what the run leaves behind: nothing when
+ *  either probe failed (never a guess) and nothing when both are zero. */
+export function workLeftBehindOf(
+  observed: Pick<WorkspaceObservation, "uncommittedChanges" | "unpushedCommits">,
+): LeftBehind | undefined {
+  const { uncommittedChanges, unpushedCommits } = observed;
+  if (uncommittedChanges === undefined || unpushedCommits === undefined) return undefined;
+  if (uncommittedChanges === 0 && unpushedCommits === 0) return undefined;
+  return { uncommittedChanges, unpushedCommits };
+}
+
+/** The `work_left_behind` note's summary: what the run leaves, why it does not
+ *  survive, what to do instead — the same sentence the release log carries. */
+export function workLeftBehindSummary(left: LeftBehind): string {
+  return leftBehindSentence(left);
+}
+
+/** The card's word for it, beside the binding line. */
+export function workLeftBehindLabel(left: LeftBehind): string {
+  return `${left.uncommittedChanges} uncommitted change(s) and ${left.unpushedCommits} unpushed commit(s) left behind — discarded at the run's end`;
 }
 
 /**
@@ -129,7 +160,7 @@ export async function observeCodingWorkspace(
   const probe = (cmd: string) => executor.exec(cmd, trace).catch(() => "");
   const pushed = opts.pushedBranch;
   const probesAt = async (git: string): Promise<{ observation: WorkspaceObservation; isRepo: boolean }> => {
-    const [headOut, branchOut, upstreamOut, remoteOut, tipOut] = await Promise.all([
+    const [headOut, branchOut, upstreamOut, remoteOut, tipOut, statusOut, unpushedOut] = await Promise.all([
       probe(`${git} rev-parse HEAD`),
       probe(`${git} rev-parse --abbrev-ref HEAD`),
       // The head branch's own upstream: `@{u}` reads the checkout's, which is
@@ -137,6 +168,11 @@ export async function observeCodingWorkspace(
       probe(pushed === undefined ? `${git} rev-parse @{u}` : `${git} rev-parse ${shellQuote(`${pushed}@{u}`)}`),
       opts.probeRemote ? probe(`${git} remote get-url origin`) : Promise.resolve(""),
       pushed === undefined ? Promise.resolve("") : probe(`${git} rev-parse ${shellQuote(`refs/heads/${pushed}`)}`),
+      // What the run leaves behind (item 17's clean-tree rule): tracked
+      // changes only — untracked scratch is the run's own noise — and commits
+      // no remote branch holds.
+      probe(`${git} status --porcelain -uno`),
+      probe(`${git} rev-list --count HEAD --not --remotes`),
     ]);
     const headSha = parseRevParseOutput(headOut);
     const checkedOut = parseBranchOutput(branchOut);
@@ -158,6 +194,7 @@ export async function observeCodingWorkspace(
         checkedOut,
         remoteHead,
         remoteRepo: parseOriginRemoteOutput(remoteOut),
+        ...countsOf(parseStatusCount(statusOut), parseCountOutput(unpushedOut)),
       },
       isRepo: headSha !== undefined,
     };
@@ -585,6 +622,44 @@ export async function runCodingPrPostStep(input: {
     return `ℹ️ No PR was opened: the run pushed \`${branch}\` but submitted no PR description (submit_pr_description was never called) — compare & open manually: ${compareUrl}`;
   }
   return undefined;
+}
+
+/** The executors' word for a command that failed: an `exit N:` prefix, or
+ *  git's own `fatal:`/`error:` first line — output that carries no count. */
+function isCommandNoise(first: string | undefined): boolean {
+  return first === undefined || /^(exit \d+|fatal:|error:)/i.test(first);
+}
+
+/** The number of entries `git status --porcelain -uno` listed — one per line
+ *  in git's `XY path` form — or undefined when the command failed. An empty
+ *  output is a clean tree: zero. */
+function parseStatusCount(output: string): number | undefined {
+  const lines = output.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  if (lines.length === 0) return 0;
+  if (isCommandNoise(lines[0]!.trim())) return undefined;
+  return lines.filter((line) => /^[ MTADRCU?!]{2} /.test(line)).length;
+}
+
+/** The two counts as observation fields: each present only when measured. */
+function countsOf(
+  uncommittedChanges: number | undefined,
+  unpushedCommits: number | undefined,
+): Pick<WorkspaceObservation, "uncommittedChanges" | "unpushedCommits"> {
+  return {
+    ...(uncommittedChanges !== undefined ? { uncommittedChanges } : {}),
+    ...(unpushedCommits !== undefined ? { unpushedCommits } : {}),
+  };
+}
+
+/** The one integer `git rev-list --count …` prints, or undefined when the
+ *  command failed or printed anything else. */
+function parseCountOutput(output: string): number | undefined {
+  const first = output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  if (first === undefined || !/^\d+$/.test(first)) return undefined;
+  return Number(first);
 }
 
 /** The branch name from `git rev-parse --abbrev-ref HEAD` output, or undefined

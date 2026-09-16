@@ -5,12 +5,15 @@ import { methodOf, readSource } from "./testing/sourceScan";
 // item 16): the `ownPr` body field — the pull request the thread's own run
 // opened and its head branch — reaches `attachThreadBody`, whose decision is
 // the pure `rebindPlan` / `rebindVerdict` of src/execution/residentRebind.ts
-// (the tested code IS the shipped code). The move is a `git checkout` inside
-// the thread's existing worktree, measured and run as the thread user under
-// the mirror mutex: no clone, no `rm -rf`, no new path, no new pool user. The
-// binding records how its ref was chosen (`boundBy`) and the move (`rebound`);
-// the answer carries the move or the named refusal. Plain Node, the entry read
-// as text, never loaded, like reuseAttach.test.ts.
+// (the tested code IS the shipped code). The move is a decision about the
+// binding alone: the row's ref changes under the mirror mutex once the mirror
+// is known to hold the branch, and the attach that follows provisions the
+// tree at the moved ref exactly as it provisions any tree (item 17) — no
+// checkout in place, no flag that keeps a dirty tree. The binding records how
+// its ref was chosen (`boundBy`) and the move (`rebound`); the answer carries
+// the move or the named refusal. The second movement: a rebound binding whose
+// branch is gone from the mirror goes back to the default. Plain Node, the
+// entry read as text, never loaded, like reuseAttach.test.ts.
 
 const source = readSource("worker.ts");
 const residentDO = source.slice(source.indexOf("export class ResidentDO"));
@@ -68,7 +71,7 @@ describe("the `ownPr` and `refByDefault` body fields reach the binding decision"
   });
 });
 
-describe("rebindToOwnPr moves the binding in place, or names why it stands", () => {
+describe("rebindToOwnPr moves the binding, or names why it stands — a decision about the binding alone", () => {
   const rebind = method("rebindToOwnPr");
 
   it("plans off the binding with the pure rebindPlan and stops there for none and refuse", () => {
@@ -83,39 +86,36 @@ describe("rebindToOwnPr moves the binding in place, or names why it stands", () 
     const lockEnd = rebind.indexOf("}, ATTACH_MUTEX_WAIT_MS)");
     const reread = rebind.indexOf("const current = (await this.ctx.storage.get<ThreadBinding>(key)) ?? prior;");
     const rejudge = rebind.indexOf("const again = rebindPlan({ ownPr, reuse, binding: current, defaultRef });");
-    const put = rebind.indexOf("await this.ctx.storage.put(key, moved);");
+    const move = rebind.indexOf("return this.moveOntoOwnBranch(current, again, fetchToken);");
     expect(lockStart).toBeGreaterThan(-1);
     expect(reread).toBeGreaterThan(lockStart);
     expect(rejudge).toBeGreaterThan(reread);
-    expect(put).toBeGreaterThan(rejudge);
-    expect(lockEnd).toBeGreaterThan(put);
+    expect(move).toBeGreaterThan(rejudge);
+    expect(lockEnd).toBeGreaterThan(move);
     expect(rebind).toMatch(/if \(again\.kind === "none"\) return \{ kind: "none", binding: current \};/);
     expect(rebind).toMatch(/if \(again\.kind === "refuse"\) return again;/);
-    // Inside the mutex the measure, the checkout and the write all use the re-read row, never the pre-lock snapshot.
+    // Inside the mutex the measure and the move use the re-read row, never the pre-lock snapshot.
     expect(rebind.slice(reread, lockEnd)).not.toMatch(/\bprior\.(user|worktreePath|ref)\b/);
   });
 
-  it("measures the tree AS THE THREAD USER under the mirror mutex — the branch is a local branch of this tree, the tracked files are clean and judged only off a status git could read — and asks rebindVerdict", () => {
+  it("the memory of a release decides by itself; only a branch nothing remembered is looked for in the surviving tree — one probe, AS THE THREAD USER, for the local branch — and rebindVerdict judges it", () => {
+    expect(rebind).toMatch(/if \(again\.kind === "measure" && !again\.own\) \{/);
     expect(rebind).toMatch(/this\.run\(\["test", "-d", `\$\{wt\}\/\.git`\]\)/);
     expect(rebind).toMatch(
       /this\.threadRun\(\s*current\.user,\s*wt,\s*`git rev-parse --verify --quiet \$\{shellQuote\(`refs\/heads\/\$\{again\.to\}`\)\}`,/,
     );
-    expect(rebind).toMatch(
-      /this\.threadRun\(\s*current\.user,\s*wt,\s*"git status --porcelain -uno",\s*DEFAULT_EXEC_TIMEOUT_MS,?\s*\)/,
-    );
-    expect(rebind).toMatch(
-      /tree\.readable = status\.exitCode === 0;\s*if \(tree\.readable\) tree\.dirty = status\.stdout\.trim\(\) !== "";/,
-    );
-    // The verdict is judged on the re-read plan, which carries `own`; the pre-lock plan lacks it when it was a recreate.
+    expect(rebind).toMatch(/tree\.branchExists = branch\.exitCode === 0;/);
     expect(rebind).toMatch(/const verdict = rebindVerdict\(again, tree\);/);
-    expect(rebind).not.toMatch(/rebindVerdict\(plan,/);
-  });
-
-  it("the move is one `git checkout` inside the existing tree as the thread user, recorded as its own step; a failed checkout is a named refusal, never an attach failure", () => {
-    expect(rebind).toMatch(/`git checkout --quiet \$\{shellQuote\(again\.to\)\}`/);
-    expect(rebind).toMatch(/record\("rebind-checkout",/);
-    expect(rebind).toMatch(/rebindRefused\(again, "checkout-failed",/);
-    // Nothing is cloned, wiped, re-pathed or re-allocated: same worktree, same pool user.
+    expect(rebind).toMatch(/if \(verdict\.kind === "refuse"\) return verdict;/);
+    // The tree's dirt and HEAD are not the rebind's concern: no status, no
+    // HEAD probe, no checkout, no fetch, no reset in the tree. The binding
+    // moves; the attach provisions the tree (item 17).
+    expect(rebind).not.toMatch(/git status/);
+    expect(rebind).not.toMatch(/abbrev-ref HEAD/);
+    expect(rebind).not.toMatch(/git checkout/);
+    expect(rebind).not.toMatch(/git (fetch|reset|clean|stash)/);
+    expect(rebind).not.toMatch(/keepTree|dirty|checkout-failed|rebind-checkout/);
+    // Nothing is cloned, wiped, re-pathed or re-allocated here either: the tree is the attach's.
     expect(rebind).not.toMatch(/rm", "-rf"/);
     expect(rebind).not.toMatch(/git", "clone"/);
     expect(rebind).not.toMatch(/threadWorktreePath\(/);
@@ -123,90 +123,83 @@ describe("rebindToOwnPr moves the binding in place, or names why it stands", () 
     expect(rebind).not.toMatch(/allocateThreadUser\(/);
   });
 
-  it("a dirty tree already on the branch moves the record alone: HEAD is measured as the thread user only once the tree is dirty, the checkout runs only on the verdict's word, the binding is written either way and the note rides the outcome", () => {
-    // The HEAD probe follows the status probe and is gated on its dirt.
-    const status = rebind.indexOf('"git status --porcelain -uno"');
-    const headGate = rebind.indexOf("if (tree.dirty) {");
-    const headProbe = rebind.indexOf('"git rev-parse --abbrev-ref HEAD"');
-    const verdict = rebind.indexOf("const verdict = rebindVerdict(again, tree);");
-    expect(status).toBeGreaterThan(-1);
-    expect(headGate).toBeGreaterThan(status);
-    expect(headProbe).toBeGreaterThan(headGate);
-    expect(verdict).toBeGreaterThan(headProbe);
-    expect(rebind).toMatch(
-      /this\.threadRun\(\s*current\.user,\s*wt,\s*"git rev-parse --abbrev-ref HEAD",\s*DEFAULT_EXEC_TIMEOUT_MS,?\s*\)/,
-    );
-    expect(rebind).toMatch(/if \(head\.exitCode === 0\) tree\.head = head\.stdout\.trim\(\);/);
-    // The checkout sits inside the verdict's gate; the write follows the gate, so both verdicts reach it.
-    const checkoutGate = rebind.indexOf("if (verdict.checkout) {");
-    const checkout = rebind.indexOf("git checkout --quiet");
-    const put = rebind.indexOf("await this.ctx.storage.put(key, moved);");
-    expect(checkoutGate).toBeGreaterThan(verdict);
-    expect(checkout).toBeGreaterThan(checkoutGate);
-    expect(put).toBeGreaterThan(checkout);
-    // No other git command touches the tree on that path: no fetch, no reset, no clean.
-    expect(rebind).not.toMatch(/git (fetch|reset|clean|stash)/);
-    // The outcome carries the verdict's note, and the log line says the tree was not touched.
-    expect(rebind).toMatch(/note: verdict\.note/);
-    expect(rebind).toMatch(/outcome\.note/);
-    expect(source).toMatch(/kind: "rebound"; moved: ThreadBinding; rebound: Rebound; keepTree: true; note: string/);
+  it("every allowed plan — a live tree or an evicted one — goes through the mirror check on the re-read plan, and the fetch token is minted before the mutex for it", () => {
+    const mint = rebind.indexOf("const fetchToken = githubAppConfigured(this.env)");
+    const lock = rebind.indexOf("await this.withMirrorLock(");
+    expect(mint).toBeGreaterThan(-1);
+    expect(lock).toBeGreaterThan(mint);
+    expect(rebind).toMatch(/mintRepoScopedToken\(this\.env, slug\)/);
+    expect(rebind).toMatch(/return this\.moveOntoOwnBranch\(current, again, fetchToken\);/);
+    expect(rebind).not.toMatch(/moveOntoOwnBranch\(current, plan,/);
+    expect(rebind).not.toMatch(/recreateAtOwnBranch/);
   });
 
-  it("a rebind rewrites the re-read binding's ref and records the move on it, inside the mutex; a mutex timeout is the attach's 503 mirror-busy", () => {
-    expect(rebind).toMatch(
-      /const rebound: Rebound = \{\s*from: current\.ref,\s*to: again\.to,\s*pr: again\.pr,\s*at: /,
-    );
-    expect(rebind).toMatch(/const moved: ThreadBinding = \{ \.\.\.current, ref: again\.to, rebound \};/);
-    expect(rebind).toMatch(/await this\.ctx\.storage\.put\(key, moved\);/);
+  it("a mutex timeout is the attach's 503 mirror-busy; a move is logged as the tree being provisioned at the branch", () => {
     expect(rebind).toMatch(/if \(err instanceof MirrorBusyError\)/);
     expect(rebind).toMatch(/reason: "mirror-busy"/);
+    expect(rebind).toMatch(
+      /rebound \$\{rebound\.from\} → \$\{rebound\.to\} \(the thread's own pull request #\$\{rebound\.pr\}\); the tree is provisioned at it/,
+    );
+    expect(rebind).toMatch(/return \{ binding: moved, rebound \};/);
   });
 });
 
-// The no-checkout move keeps the tree on disk as it is: same directory, same
-// contents, uncommitted changes intact. The rebind's promise ("the tree is
-// not touched") is carried to the worktree step as `keepTree`, so item 17's
-// dirty wipe — the one `rm -rf` of the attach, followed by a fresh clone —
-// never runs on the tree the rebind just declined to touch. The path is the
-// binding's stored one throughout: nothing is derived from the moved ref.
-describe("the attach after a no-checkout rebind keeps the dirty tree at its path", () => {
-  const rebind = method("rebindToOwnPr");
+describe("moveOntoOwnBranch: the mirror must hold the branch, then the row moves and the attach provisions the tree", () => {
+  const move = method("moveOntoOwnBranch");
+
+  it("fetches when the mirror lacks the branch — a failed fetch is logged and degrades to the refusal, never the attach's 500 — and a branch still missing after the fetch (deleted after a merge) is a branch-absent refusal, the binding kept", () => {
+    expect(move).toMatch(/await this\.refExists\(plan\.to\)/);
+    const tryAt = move.indexOf("try {");
+    const fetchAt = move.search(
+      /await this\.gitWithCred\(\s*fetchToken,\s*\["-C", MIRROR_DIR, "fetch", "--prune", "origin"\],\s*"fetch",\s*GIT_NETWORK_TIMEOUT_MS,?\s*\)/,
+    );
+    const catchAt = move.indexOf("} catch (err) {");
+    const recheckAt = move.lastIndexOf("present = await this.refExists(plan.to);");
+    expect(tryAt).toBeGreaterThan(-1);
+    expect(fetchAt).toBeGreaterThan(tryAt);
+    expect(catchAt).toBeGreaterThan(fetchAt);
+    expect(recheckAt).toBeGreaterThan(catchAt);
+    expect(move).not.toMatch(/attach-failed/);
+    expect(move).not.toMatch(/throw /);
+    expect(move).toMatch(/rebindRefused\(\s*plan,\s*"branch-absent",/);
+  });
+
+  it("the move is recorded on the row and nothing on disk is touched — the tree is the attach's to provision at the new ref, at the binding's stored path", () => {
+    expect(move).toMatch(/const moved: ThreadBinding = \{ \.\.\.current, ref: plan\.to, rebound \};/);
+    expect(move).toMatch(/await this\.ctx\.storage\.put\(threadBindingKey\(current\.threadKey\), moved\);/);
+    expect(move).toMatch(/return \{ kind: "rebound", moved, rebound \};/);
+    expect(move).not.toMatch(/rm", "-rf"/);
+    expect(move).not.toMatch(/git", "clone"/);
+    expect(move).not.toMatch(/git checkout/);
+    expect(move).not.toMatch(/worktreePath/);
+    // The path is the binding's throughout: nothing is derived from the moved ref.
+    expect(method("attachThreadBody")).toMatch(
+      /const worktreePath = prior\?\.worktreePath \?\? \(await threadWorktreePath\(threadKey, ref\)\);/,
+    );
+  });
+});
+
+// The tree after a move is item 17's business, and item 17 has one rule: a
+// provisioning attach's tree is clean at the bound ref's tip, or recreated.
+// No word from the rebind reaches the worktree step.
+describe("the attach after a rebind provisions the tree at the moved ref as it provisions any tree", () => {
   const body = method("attachThreadBody");
   const create = method("attachThreadCreate");
   const ensure = method("ensureThreadWorktree");
 
-  it("the rebind outcome says whether the attach must keep the tree: only the record-alone move does, never the checkout or a recreate", () => {
-    expect(source).toMatch(/kind: "rebound"; moved: ThreadBinding; rebound: Rebound; keepTree: false \}/);
-    expect(source).toMatch(/kind: "rebound"; moved: ThreadBinding; rebound: Rebound; keepTree: true; note: string \}/);
-    expect(rebind).toMatch(/\{ kind: "rebound", moved, rebound, keepTree: false \}/);
-    expect(rebind).toMatch(/\{ kind: "rebound", moved, rebound, keepTree: true, note: verdict\.note \}/);
-    // The checkout path returns without the flag; the record-alone path returns with it — and the log line carries the note.
-    const checkedOut = rebind.indexOf("if (!outcome.keepTree) {");
-    const plain = rebind.indexOf("return { binding: moved, rebound };");
-    const kept = rebind.indexOf("return { binding: moved, rebound, keepTree: true };");
-    expect(checkedOut).toBeGreaterThan(-1);
-    expect(plain).toBeGreaterThan(checkedOut);
-    expect(kept).toBeGreaterThan(plain);
-    expect(rebind.slice(plain, kept)).toMatch(/\$\{outcome\.note\}/);
-    expect(rebind).toMatch(/keepTree\?: true;/);
-    // A tree that is gone has nothing to keep: the recreate outcome says so and the attach clones at the new ref.
-    expect(method("recreateAtOwnBranch")).toMatch(/return \{ kind: "rebound", moved, rebound, keepTree: false \};/);
-  });
-
-  it("the attach keeps the binding's stored path — the moved ref derives nothing — and hands `keepTree` down to the worktree step", () => {
-    expect(body).toMatch(
-      /const worktreePath = prior\?\.worktreePath \?\? \(await threadWorktreePath\(threadKey, ref\)\);/,
-    );
-    expect(body).toMatch(/attachThreadCreate\(\{[\s\S]*?keepTree: rebind\.keepTree === true,[\s\S]*?\}\)/);
-    expect(create).toMatch(/keepTree: boolean;/);
+  it("no flag about the tree rides from the rebind to the worktree step: the outcome is the moved row alone", () => {
+    expect(source).toMatch(/\| \{ kind: "rebound"; moved: ThreadBinding; rebound: Rebound \};/);
+    for (const m of [body, create, ensure]) expect(m).not.toMatch(/keepTree/);
     expect(create).toMatch(
-      /this\.ensureThreadWorktree\(binding, sha, mode\.originUrl, mode\.modeSwitch, \{\s*detached: target\.kind === "sha",\s*reuse,\s*keepTree,?\s*\}\)/,
+      /this\.ensureThreadWorktree\(binding, sha, mode\.originUrl, mode\.modeSwitch, \{\s*detached: target\.kind === "sha",\s*reuse,?\s*\}\)/,
     );
-    expect(ensure).toMatch(/opts: \{ detached: boolean; reuse: boolean; keepTree: boolean \}/);
-    expect(ensure).toMatch(/decideWorktree\(\{\s*reuse: opts\.reuse,\s*keepTree: opts\.keepTree,/);
+    expect(ensure).toMatch(/opts: \{ detached: boolean; reuse: boolean \}/);
+    expect(ensure).toMatch(
+      /const decision = decideWorktree\(\{ reuse: opts\.reuse, modeSwitch, sha, worktreePath: wt, facts \}\);/,
+    );
   });
 
-  it("the worktree step's one rm -rf and its clone sit behind the pure decision, which reuses a kept dirty tree — no other path in the attach removes or clones a tree", () => {
+  it("the worktree step's one rm -rf and its clone sit behind the pure decision, which recreates a dirty or stale tree — the tree the run left on the old branch included — and no other path in the attach removes or clones a tree", () => {
     const decision = ensure.indexOf("const decision = decideWorktree(");
     const reuse = ensure.indexOf('if (decision.kind === "reuse") return false;');
     const wipe = ensure.indexOf('await this.runOk(["rm", "-rf", wt], "worktree-clean");');
@@ -215,15 +208,83 @@ describe("the attach after a no-checkout rebind keeps the dirty tree at its path
     expect(reuse).toBeGreaterThan(decision);
     expect(wipe).toBeGreaterThan(reuse);
     expect(clone).toBeGreaterThan(wipe);
-    for (const m of [body, create, rebind]) {
+    for (const m of [body, create, method("rebindToOwnPr"), method("moveOntoOwnBranch")]) {
       expect(m).not.toMatch(/rm", "-rf"/);
       expect(m).not.toMatch(/git", "clone"/);
     }
-    // The decision's own word on a kept dirty tree lives in src/execution/residentReuse.ts.
+    // The decision's own word on a dirty tree lives in src/execution/residentReuse.ts: recreate, no exception.
     const reuseModule = readSource("../../src/execution/residentReuse.ts");
-    expect(reuseModule).toMatch(
-      /if \(facts\.dirty\) return keepTree \? \{ kind: "reuse" \} : \{ kind: "recreate", why: "dirty" \};/,
+    expect(reuseModule).toMatch(/if \(facts\.dirty\) return \{ kind: "recreate", why: "dirty" \};/);
+    expect(reuseModule).not.toMatch(/keepTree/);
+  });
+});
+
+// The second movement (item 16): the branch a rebind moved the thread onto is
+// deleted once its pull request merges, and a binding left on it would fail
+// every later attach `unknown-ref` and fall to a cold sandbox for the rest of
+// the thread's life. Decided where the fact is established — under the mirror
+// mutex, after the attach's fetch found the ref gone — for a rebound,
+// default-bound binding only: the pure `canReturnToDefault`.
+describe("a rebound binding whose branch is gone from the mirror returns to the default, and the run starts clean there", () => {
+  const create = method("attachThreadCreate");
+  const back = method("returnBindingToDefault");
+
+  it("the create step asks canReturnToDefault only on an unknown-ref target after the fetch, re-targets the default, and still throws unknown-ref for a binding that may not return", () => {
+    expect(source).toMatch(
+      /import \{[^}]*canReturnToDefault[^}]*\} from "\.\.\/\.\.\/src\/execution\/residentRebind\.js";/,
     );
+    expect(source).toMatch(
+      /import \{[^}]*returnToDefault[^}]*\} from "\.\.\/\.\.\/src\/execution\/residentRebind\.js";/,
+    );
+    const lockStart = create.indexOf("await this.withMirrorLock(");
+    const fetched = create.indexOf("const fetched = await this.mirrorNeedsFetchFor(binding.ref, want);");
+    const firstTarget = create.indexOf("let target = attachTarget({");
+    const gate = create.indexOf(
+      'if (target.kind === "unknown-ref" && canReturnToDefault(binding, facts.defaultRef)) {',
+    );
+    const returned = create.indexOf("const back = await this.returnBindingToDefault(binding, facts.defaultRef);");
+    const retarget = create.indexOf("want = wantShaForBinding({ boundRef: binding.ref, refHint, wantSha });", returned);
+    const throwAt = create.indexOf('if (target.kind === "unknown-ref") {');
+    const worktree = create.indexOf("const recreated = await this.ensureThreadWorktree(binding, sha,");
+    expect(lockStart).toBeGreaterThan(-1);
+    expect(fetched).toBeGreaterThan(lockStart);
+    expect(firstTarget).toBeGreaterThan(fetched);
+    expect(gate).toBeGreaterThan(firstTarget);
+    expect(returned).toBeGreaterThan(gate);
+    expect(retarget).toBeGreaterThan(returned);
+    expect(throwAt).toBeGreaterThan(retarget);
+    expect(worktree).toBeGreaterThan(throwAt);
+    expect(create).toMatch(/binding = back\.binding;\s*returned = back\.returned;/);
+    expect(create).toMatch(/refExists: await this\.refExists\(binding\.ref\),/);
+    // The tree is provisioned at the default by the same worktree step, at the same path: nothing special-cased.
+    expect(create).toMatch(/let binding = input\.binding;/);
+    expect(create).toMatch(/let returned: Returned \| undefined;/);
+  });
+
+  it("the return re-reads the row under the mutex, re-judges it with canReturnToDefault — a person-named ref, or a row another attach moved meanwhile, is answered as it stands and nothing is written — and writes the pure returnToDefault's row", () => {
+    expect(back).toMatch(/const current = \(await this\.ctx\.storage\.get<ThreadBinding>\(key\)\) \?\? binding;/);
+    expect(back).toMatch(
+      /if \(current\.rebound === undefined \|\| !canReturnToDefault\(current, defaultRef\)\) return \{ binding: current \};/,
+    );
+    expect(back).toMatch(/const back = returnToDefault\(/);
+    expect(back).toMatch(/await this\.ctx\.storage\.put\(key, back\.binding\);/);
+    expect(back).toMatch(
+      /is gone from the mirror .* — returned to \$\{back\.returned\.to\}; the tree is provisioned there/,
+    );
+    // Nothing on disk: the tree is the attach's.
+    expect(back).not.toMatch(/rm", "-rf"/);
+    expect(back).not.toMatch(/git", "clone"/);
+    expect(back).not.toMatch(/threadRun\(/);
+  });
+
+  it("the row's final write and the answer speak of the returned binding; the answer carries `returned` for the card", () => {
+    const answer = create.slice(create.indexOf("const container = await this.containerIdentity();"));
+    expect(answer).toMatch(/ref: binding\.ref,/);
+    expect(answer).toMatch(/\.\.\.\(returned !== undefined \? \{ returned \} : \{\}\),/);
+    expect(source).toMatch(/interface AttachOk \{[\s\S]*?returned\?: Returned;[\s\S]*?\n\}/);
+    // The move's record on the binding carries its return, so the thread may move again.
+    const rebindModule = readSource("../../src/execution/residentRebind.ts");
+    expect(rebindModule).toMatch(/export interface Rebound \{[\s\S]*?returnedAt\?: string;[\s\S]*?\n\}/);
   });
 });
 
@@ -237,7 +298,7 @@ describe("the run's pushed branches survive the tree: the detach body's `pushed`
     expect(handler).toMatch(/detachThread\(ctx\.threadKey, body\.force === true, pushed\.pushed\)/);
   });
 
-  it("detachThread remembers the pushed branches FIRST — before the already-evicted, busy, dirty and eviction decisions — so a release that evicts, keeps, or finds the tree already gone all leave the fact behind", () => {
+  it("detachThread remembers the pushed branches FIRST — before the already-evicted, busy and eviction decisions — so a release that evicts, keeps, or finds the tree already gone all leave the fact behind", () => {
     const detach = method("detachThread");
     expect(detach).toMatch(/pushed: readonly PushedBranch\[\] = \[\],/);
     const remember = detach.indexOf("await this.rememberOwnBranches(threadKey, pushed);");
@@ -259,53 +320,6 @@ describe("the run's pushed branches survive the tree: the detach body's `pushed`
   });
 });
 
-describe("rebindToOwnPr recreates the tree at a remembered branch when the tree is gone", () => {
-  const rebind = method("rebindToOwnPr");
-
-  it("an evicted binding's recreate plan, and a live binding whose tree turned out missing, both go through the mirror check — never the local-branch probe — on the re-read plan", () => {
-    expect(rebind).toMatch(
-      /if \(again\.kind === "recreate"\) return this\.recreateAtOwnBranch\(current, again, fetchToken\);/,
-    );
-    expect(rebind).toMatch(
-      /if \(verdict\.kind === "recreate"\) return this\.recreateAtOwnBranch\(current, again, fetchToken\);/,
-    );
-    expect(rebind).not.toMatch(/recreateAtOwnBranch\(current, plan,/);
-  });
-
-  it("the mirror must hold the branch to clone it: fetched when missing — a failed fetch is logged and degrades to the refusal, never the attach's 500 — and a branch still missing after the fetch (deleted after a merge) is a branch-absent refusal, the binding kept", () => {
-    const recreate = method("recreateAtOwnBranch");
-    expect(recreate).toMatch(/await this\.refExists\(plan\.to\)/);
-    const tryAt = recreate.indexOf("try {");
-    const fetchAt = recreate.search(
-      /await this\.gitWithCred\(\s*fetchToken,\s*\["-C", MIRROR_DIR, "fetch", "--prune", "origin"\],\s*"fetch",\s*GIT_NETWORK_TIMEOUT_MS,?\s*\)/,
-    );
-    const catchAt = recreate.indexOf("} catch (err) {");
-    const recheckAt = recreate.lastIndexOf("present = await this.refExists(plan.to);");
-    expect(tryAt).toBeGreaterThan(-1);
-    expect(fetchAt).toBeGreaterThan(tryAt);
-    expect(catchAt).toBeGreaterThan(fetchAt);
-    expect(recheckAt).toBeGreaterThan(catchAt);
-    expect(recreate).not.toMatch(/attach-failed/);
-    expect(recreate).not.toMatch(/throw /);
-    expect(recreate).toMatch(/rebindRefused\(\s*plan,\s*"branch-absent",/);
-    // The move is recorded on the row; the tree itself is the attach's to clone at the new ref.
-    expect(recreate).toMatch(/const moved: ThreadBinding = \{ \.\.\.current, ref: plan\.to, rebound \};/);
-    expect(recreate).toMatch(/await this\.ctx\.storage\.put\(threadBindingKey\(current\.threadKey\), moved\);/);
-    expect(recreate).not.toMatch(/rm", "-rf"/);
-    expect(recreate).not.toMatch(/git", "clone"/);
-    expect(recreate).not.toMatch(/git checkout/);
-  });
-
-  it("the fetch token is minted before the mutex, only when a recreate is possible, and never for a plan the binding already ruled out", () => {
-    const mint = rebind.indexOf("const fetchToken =");
-    const lock = rebind.indexOf("await this.withMirrorLock(");
-    expect(mint).toBeGreaterThan(-1);
-    expect(lock).toBeGreaterThan(mint);
-    expect(rebind).toMatch(/plan\.kind === "recreate" \|\| plan\.own/);
-    expect(rebind).toMatch(/mintRepoScopedToken\(this\.env, slug\)/);
-  });
-});
-
 describe("the binding and the attach answer carry the record", () => {
   it("ThreadBinding records boundBy and rebound; AttachOk answers rebound or rebindRefused; the create step spreads them into the answer", () => {
     expect(source).toMatch(
@@ -321,8 +335,9 @@ describe("the binding and the attach answer carry the record", () => {
     expect(create).toMatch(/\.\.\.\(rebindRefused !== undefined \? \{ rebindRefused \} : \{\}\),/);
   });
 
-  it("the step vocabulary names the checkout", () => {
+  it("the step vocabulary names no checkout of the thread's own branch: the move is the row's, the tree is the worktree step's", () => {
     const steps = readSource("../../src/execution/residentSteps.ts");
-    expect(steps).toMatch(/"rebind-checkout": "checking out the thread's own branch",/);
+    expect(steps).not.toMatch(/rebind-checkout/);
+    expect(steps).toMatch(/"worktree-clone": "cloning the worktree",/);
   });
 });

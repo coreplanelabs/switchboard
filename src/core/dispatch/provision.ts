@@ -674,7 +674,7 @@ export async function attachWorkspace(
   const ownPr = ownPrOf(repoCtx);
   // The workspace attach is paired with its release on the round's profile
   // (reviewRound.ts): a `read` identity → readonly worktree +
-  // release("always"); any other → release("if-clean"). The factory is handed
+  // release("always"); any other → release("if-idle"). The factory is handed
   // the EFFECTIVE profile — what is provisioned and as whom is read from it,
   // never from the preset.
   let round: RoundWorkspace;

@@ -35,10 +35,10 @@ const OTHER = "d75b5a51aba97d43c64a42c96e580dd9abbfd78e";
 const THIRD = "1111111111111111111111111111111111111111";
 
 describe("releaseModeFor (per-agent attach/release pairing)", () => {
-  it("a read identity → always; a writing one → if-clean", () => {
+  it("a read identity → always; a writing one → if-idle (released unless a command is still in flight)", () => {
     expect(releaseModeFor("read", { hardStopped: false })).toBe("always");
-    expect(releaseModeFor("write", { hardStopped: false })).toBe("if-clean");
-    expect(releaseModeFor("none", { hardStopped: false })).toBe("if-clean");
+    expect(releaseModeFor("write", { hardStopped: false })).toBe("if-idle");
+    expect(releaseModeFor("none", { hardStopped: false })).toBe("if-idle");
   });
 
   it("a hard stop forces always regardless of the identity", () => {
@@ -108,7 +108,7 @@ describe("attachRoundWorkspace (explicit AgentDef → attach + paired release)",
     expect(detach?.body).toMatchObject({ force: true });
   });
 
-  it("a writable AgentDef yields a writable attach (no readonly flag), and release() detaches if-clean (no force)", async () => {
+  it("a writable AgentDef yields a writable attach (no readonly flag), and release() detaches if-idle (no force)", async () => {
     const calls = residentStub({ ref: "main", sha: HEAD });
     const round = await attachRoundWorkspace({
       factory: factoryOptions(),

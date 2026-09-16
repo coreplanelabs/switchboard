@@ -8,6 +8,9 @@ import {
   pushedBranchOf,
   runCodingPrPostStep,
   trackPushedBranch,
+  workLeftBehindLabel,
+  workLeftBehindOf,
+  workLeftBehindSummary,
   type WorkspaceObservation,
 } from "./codingPrPostStep.js";
 
@@ -1042,6 +1045,46 @@ describe("observeCodingWorkspace", () => {
     expect(ws.commands().some((c) => /rev-parse 'refs\/heads\//.test(c))).toBe(false); // no pushed-branch tip probe
   });
 
+  // resident-repos item 17: a run starts from a clean tree, so what the run
+  // leaves uncommitted or unpushed is read here, in the same observation, for
+  // the `work_left_behind` note — counted, never guessed.
+  it("counts the tracked changes and the unpushed commits the run leaves; a failed probe leaves the count undefined, an empty status is zero", async () => {
+    const ws = workspace([
+      [/abbrev-ref/, "feat/x\n"],
+      [/@\{u\}/, `${HEAD}\n`],
+      [/rev-parse HEAD/, `${HEAD}\n`],
+      [/ls-remote/, `${HEAD}\trefs/heads/feat/x\n`],
+      [/status --porcelain -uno/, " M src/a.ts\nA  src/b.ts\n"],
+      [/rev-list --count HEAD --not --remotes/, "3\n"],
+    ]);
+    const observed = await observeCodingWorkspace(ws, { probeRemote: false });
+    expect(observed).toMatchObject({ uncommittedChanges: 2, unpushedCommits: 3 });
+    expect(ws.commands()).toContain("git status --porcelain -uno");
+    expect(ws.commands()).toContain("git rev-list --count HEAD --not --remotes");
+
+    const clean = workspace([
+      [/abbrev-ref/, "feat/x\n"],
+      [/rev-parse HEAD/, `${HEAD}\n`],
+      [/status --porcelain -uno/, ""],
+      [/rev-list --count HEAD --not --remotes/, "0\n"],
+    ]);
+    expect(await observeCodingWorkspace(clean, { probeRemote: false })).toMatchObject({
+      uncommittedChanges: 0,
+      unpushedCommits: 0,
+    });
+
+    // The executors' failure noise is not a count: neither field is set.
+    const broken = workspace([
+      [/abbrev-ref/, "feat/x\n"],
+      [/rev-parse HEAD/, `${HEAD}\n`],
+      [/status --porcelain -uno/, "exit 128:\nfatal: not a git repository\n"],
+      [/rev-list --count HEAD --not --remotes/, "fatal: bad revision 'HEAD'\nexit 128\n"],
+    ]);
+    const unread = await observeCodingWorkspace(broken, { probeRemote: false });
+    expect(unread).not.toHaveProperty("uncommittedChanges");
+    expect(unread).not.toHaveProperty("unpushedCommits");
+  });
+
   it("the pushed branch is the checkout too → the same answer as the checkout path (its tip is HEAD)", async () => {
     const ws = workspace([
       [/abbrev-ref/, "feat/x\n"],
@@ -1293,5 +1336,34 @@ describe("pushedBranchOf (the branch a run's own git push named)", () => {
         ),
       ).toBe("feat/y");
     });
+  });
+});
+
+// resident-repos item 17: what a run leaves uncommitted or unpushed does not
+// outlive it. The counts become the `work_left_behind` note and the card's
+// word — only when there is something, and never from a failed probe.
+describe("workLeftBehindOf, workLeftBehindSummary and workLeftBehindLabel", () => {
+  it("something left → the counts; a clean tree → nothing; a failed probe → nothing (never a guess)", () => {
+    expect(workLeftBehindOf({ uncommittedChanges: 2, unpushedCommits: 1 })).toEqual({
+      uncommittedChanges: 2,
+      unpushedCommits: 1,
+    });
+    expect(workLeftBehindOf({ uncommittedChanges: 0, unpushedCommits: 1 })).toEqual({
+      uncommittedChanges: 0,
+      unpushedCommits: 1,
+    });
+    expect(workLeftBehindOf({ uncommittedChanges: 0, unpushedCommits: 0 })).toBeUndefined();
+    expect(workLeftBehindOf({ uncommittedChanges: 2 })).toBeUndefined();
+    expect(workLeftBehindOf({})).toBeUndefined();
+  });
+
+  it("the summary names both counts, why they are gone and what to do; the label is the card's shorter word", () => {
+    const left = { uncommittedChanges: 2, unpushedCommits: 1 };
+    expect(workLeftBehindSummary(left)).toBe(
+      "2 uncommitted change(s) and 1 unpushed commit(s) were left in the worktree; a run starts from a clean tree, so they were discarded — commit and push what must be kept",
+    );
+    expect(workLeftBehindLabel(left)).toBe(
+      "2 uncommitted change(s) and 1 unpushed commit(s) left behind — discarded at the run's end",
+    );
   });
 });

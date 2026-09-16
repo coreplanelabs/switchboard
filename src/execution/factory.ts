@@ -88,9 +88,10 @@ export interface ExecutorContext {
   headSha?: string;
   /** The pull request the thread's OWN run opened, whose head branch `ref` is
    *  (`ownPrOf`; docs/reference/specs/resident-repos.md item 16): the one reason
-   *  the resident may move a default-bound thread onto `ref`. Never a PR a
-   *  person named. Absent for every other resolution, and never sent on a
-   *  resume (the tree stays exactly as the run left it). */
+   *  the resident may move a default-bound thread onto `ref` — the tree is
+   *  then provisioned there, clean. Never a PR a person named. Absent for
+   *  every other resolution, and never sent on a resume (the tree stays
+   *  exactly as the run left it). */
   ownPr?: { number: number; ref: string };
   /** A resumed run's recorded binding (docs/reference/specs/run-history.md item 54):
    *  where the run's workspace is. Set, the factory re-attaches THERE and never
@@ -485,11 +486,16 @@ async function openResident(
 
 /** The card's word on the binding's move (docs/reference/specs/resident-repos.md
  *  item 16), beside the binding line the way the repo-default note is said:
- *  the resident moved the thread onto its own PR's branch, or kept the binding
- *  and named why — so a follow-up running on the default instead of on the
- *  thread's PR is readable from the card. Empty when neither happened. */
-export function rebindLabel(binding: Pick<ResidentBinding, "rebound" | "rebindRefused">): string {
+ *  the resident moved the thread onto its own PR's branch, moved it back to
+ *  the default because that branch is gone, or kept the binding and named why
+ *  — so a follow-up running somewhere other than where the thread's last run
+ *  did is readable from the card. Empty when none of these happened. */
+export function rebindLabel(binding: Pick<ResidentBinding, "rebound" | "rebindRefused" | "returned">): string {
   if (binding.rebound) return ` · rebound to ${binding.rebound.to} (this thread's PR #${binding.rebound.pr})`;
+  if (binding.returned) {
+    const r = binding.returned;
+    return ` · returned to ${r.to} (the branch of this thread's PR #${r.pr} is gone)`;
+  }
   if (binding.rebindRefused) {
     const r = binding.rebindRefused;
     return ` · rebind to ${r.to} (this thread's PR #${r.pr}) refused: ${r.reason}`;

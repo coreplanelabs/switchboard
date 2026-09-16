@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { parseWorktreeCleanliness, worktreeCleanlinessScript } from "./residentCleanliness.js";
+import {
+  leftBehindOf,
+  leftBehindSentence,
+  parseWorktreeCleanliness,
+  worktreeCleanlinessScript,
+} from "./residentCleanliness.js";
 
 const r = (stdout: string, over: Partial<{ stderr: string; exitCode: number; timedOut: boolean }> = {}) => ({
   stdout,
@@ -19,7 +24,8 @@ describe("worktreeCleanlinessScript (three probes in one spawn)", () => {
     expect(script).toContain("su -s /bin/bash 'worker3' -c ");
     // Both probes live inside the su -c payload, after the su invocation.
     const su = script.slice(script.indexOf("su -s /bin/bash"));
-    expect(su).toContain("git status --porcelain");
+    // Tracked files only (item 17's definition of dirt): the same flags the run loop's note counts with.
+    expect(su).toContain("git status --porcelain -uno");
     expect(su).toContain("git rev-list --count HEAD --not --remotes");
   });
   it("quotes a hostile worktree path so it cannot break out of the script", () => {
@@ -35,13 +41,19 @@ describe("parseWorktreeCleanliness (tag-keyed, PAM-banner safe)", () => {
       reason: "worktree missing (disk recycled)",
     });
   });
-  it("a clean tree with nothing unpushed is clean", () => {
-    expect(parseWorktreeCleanliness(r("present=yes\ngitrc=0\nchanges=0\nunpushed=0\n"))).toEqual({ clean: true });
+  it("a clean tree with nothing unpushed is clean, its counts measured as zero", () => {
+    expect(parseWorktreeCleanliness(r("present=yes\ngitrc=0\nchanges=0\nunpushed=0\n"))).toEqual({
+      clean: true,
+      changes: 0,
+      unpushed: 0,
+    });
   });
-  it("uncommitted changes and unpushed commits are named, in the exact pre-existing wording", () => {
+  it("uncommitted changes and unpushed commits are named, in the exact pre-existing wording, and counted", () => {
     expect(parseWorktreeCleanliness(r("present=yes\ngitrc=0\nchanges=3\nunpushed=2\n"))).toEqual({
       clean: false,
       reason: "dirty: 3 uncommitted change(s), 2 unpushed commit(s)",
+      changes: 3,
+      unpushed: 2,
     });
   });
   it("unpushed commits alone are dirty", () => {
@@ -75,9 +87,41 @@ describe("parseWorktreeCleanliness (tag-keyed, PAM-banner safe)", () => {
       parseWorktreeCleanliness(
         r("Warning: your password will expire\npresent=yes\ngitrc=0\nchanges=0\nunpushed=0\npresent=no\n"),
       ),
-    ).toEqual({ clean: true });
+    ).toEqual({ clean: true, changes: 0, unpushed: 0 });
   });
   it("a non-numeric unpushed value reads as 0, exactly like the old Number(...) || 0", () => {
-    expect(parseWorktreeCleanliness(r("present=yes\ngitrc=0\nchanges=0\nunpushed=oops\n"))).toEqual({ clean: true });
+    expect(parseWorktreeCleanliness(r("present=yes\ngitrc=0\nchanges=0\nunpushed=oops\n"))).toEqual({
+      clean: true,
+      changes: 0,
+      unpushed: 0,
+    });
+  });
+});
+
+// Feature: docs/reference/specs/resident-repos.md item 16a — a run's end
+// releases its tree whatever it holds, and the release names what it
+// discards: the counts the probes measured, only when there was something.
+describe("leftBehindOf and leftBehindSentence: what a release discards", () => {
+  it("uncommitted changes, unpushed commits, or both → the counts; a clean tree → nothing", () => {
+    expect(leftBehindOf(parseWorktreeCleanliness(r("present=yes\ngitrc=0\nchanges=3\nunpushed=2\n")))).toEqual({
+      uncommittedChanges: 3,
+      unpushedCommits: 2,
+    });
+    expect(leftBehindOf(parseWorktreeCleanliness(r("present=yes\ngitrc=0\nchanges=0\nunpushed=1\n")))).toEqual({
+      uncommittedChanges: 0,
+      unpushedCommits: 1,
+    });
+    expect(leftBehindOf(parseWorktreeCleanliness(r("present=yes\ngitrc=0\nchanges=0\nunpushed=0\n")))).toBeUndefined();
+  });
+  it("a tree that is gone or could not be measured leaves nothing to name — never a guess", () => {
+    expect(leftBehindOf(parseWorktreeCleanliness(r("present=no\n")))).toBeUndefined();
+    expect(
+      leftBehindOf(parseWorktreeCleanliness(r("present=yes\ngitrc=1\ngiterr=fatal: not a git repository\n"))),
+    ).toBeUndefined();
+  });
+  it("the sentence names both counts, why they are gone, and what to do instead", () => {
+    expect(leftBehindSentence({ uncommittedChanges: 2, unpushedCommits: 1 })).toBe(
+      "2 uncommitted change(s) and 1 unpushed commit(s) were left in the worktree; a run starts from a clean tree, so they were discarded — commit and push what must be kept",
+    );
   });
 });
