@@ -44,3 +44,4 @@ Six surfaces show a run's duration (page, index, `runs list`, seed, card, fricti
 
 - [Watch a run](../how-to/watch-a-run.md) — the dashboard built on this.
 - [Configuration](../reference/configuration.md) — the `runHistory` block.
+- [A thread's conversation outlives its runs](a-thread-continues.md) — the session log whose ranges point into this run record.
