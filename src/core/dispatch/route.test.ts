@@ -6,7 +6,7 @@ import { AGENTS, COMPOUND_PRESET, presetDoor } from "../../agents/registry.js";
 import { TOOLSETS } from "../../tools/toolsets.js";
 import { ROUTE_ATTACH_FIXTURES } from "../../load/routeAttachFixtures.js";
 import { ConfigStore } from "../../config.js";
-import type { CompletionRequest, CompletionResult, Provider } from "../provider.js";
+import type { CompletionRequest, CompletionResult, Provider, ToolDef } from "../provider.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import type { IncomingMessage } from "../types.js";
 import type { McpCatalogEntry, McpToolSource } from "../../mcp/source.js";
@@ -29,6 +29,7 @@ import {
   ROUTE_REASON_CAP,
   ROUTE_TEXT_CAP,
   ROUTE_TOOL_NAME,
+  ROUTE_COMMAND_VALUE_CAP,
   routeMaxOutputTokens,
   structuralRoute,
   routeTool,
@@ -527,6 +528,33 @@ describe("routeMaxOutputTokens — the cap fits the largest legal answer", () =>
     await route({ ...input, compound: OFFER }, model);
     expect(seen).toEqual([ROUTE_MIN_OUTPUT_TOKENS, routeMaxOutputTokens(OFFER)]);
   });
+
+  it("derived from the offered tools: grows with field count and declared maxLength, uses the value cap where none is declared, the largest tool sets the cap, and never drops below the floor", () => {
+    const tool = (properties: Record<string, unknown>): ToolDef => ({
+      name: "cmd",
+      description: "a command",
+      inputSchema: { type: "object", properties },
+    });
+    const field = (n: number, schema: Record<string, unknown> = { type: "string" }) =>
+      Object.fromEntries(Array.from({ length: n }, (_, i) => [`field${i}`, schema]));
+    // a small tool never drags the cap below the floor
+    expect(routeMaxOutputTokens(undefined, [tool(field(1, { type: "string", maxLength: 10 }))])).toBe(
+      ROUTE_MIN_OUTPUT_TOKENS,
+    );
+    // an undeclared value budgets exactly the named per-value cap
+    expect(routeMaxOutputTokens(undefined, [tool(field(20))])).toBe(
+      routeMaxOutputTokens(undefined, [tool(field(20, { type: "string", maxLength: ROUTE_COMMAND_VALUE_CAP }))]),
+    );
+    // the cap grows with the field count and with a declared maxLength
+    expect(routeMaxOutputTokens(undefined, [tool(field(20))])).toBeGreaterThan(
+      routeMaxOutputTokens(undefined, [tool(field(10))]),
+    );
+    const big = tool(field(1, { type: "string", maxLength: 9000 }));
+    expect(routeMaxOutputTokens(undefined, [big])).toBeGreaterThan(routeMaxOutputTokens(undefined, [tool(field(1))]));
+    // the largest tool sets the cap; the route answer's own shape still holds it up
+    expect(routeMaxOutputTokens(undefined, [tool(field(1)), big])).toBe(routeMaxOutputTokens(undefined, [big]));
+    expect(routeMaxOutputTokens(OFFER, [tool(field(1))])).toBe(routeMaxOutputTokens(OFFER));
+  });
 });
 
 describe("providerRouteModel — the live seam over a provider", () => {
@@ -544,16 +572,43 @@ describe("providerRouteModel — the live seam over a provider", () => {
     return { provider, requests };
   };
 
-  it("forces the route tool: the prompt's tool is the one tool offered, the choice names it, and the tool_use input comes back as the JSON the parse reads", async () => {
+  it("forces the route tool: the prompt's tool is the one tool offered, the choice names it, and the one call comes back with its name and input", async () => {
     const { provider, requests } = fake({
       content: [{ type: "tool_use", id: "t1", name: ROUTE_TOOL_NAME, input: { preset: "research", reason: "why" } }],
       stopReason: "tool_use",
     });
-    const text = await providerRouteModel(provider, "fast-model")(prompt, opts());
-    expect(JSON.parse(text)).toEqual({ preset: "research", reason: "why" });
+    const answer = await providerRouteModel(provider, "fast-model")(prompt, opts());
+    expect(answer).toEqual({ tool: ROUTE_TOOL_NAME, input: { preset: "research", reason: "why" } });
     expect(requests[0].tools).toEqual([prompt.tool]);
     expect(requests[0].toolChoice).toEqual({ type: "tool", name: ROUTE_TOOL_NAME });
-    expect(parseRouteAnswer(text, ["research"])).toEqual({ preset: "research", reason: "why" });
+    expect(parseRouteAnswer(JSON.stringify((answer as { input: unknown }).input), ["research"])).toEqual({
+      preset: "research",
+      reason: "why",
+    });
+  });
+
+  it("an answer carrying two calls is refused by name — parallel calls are off on the wire, and a provider that sends two anyway is no answer; through route() it is no route saying so", async () => {
+    const { provider } = fake({
+      content: [
+        { type: "tool_use", id: "t1", name: ROUTE_TOOL_NAME, input: { preset: "research", reason: "a" } },
+        { type: "tool_use", id: "t2", name: ROUTE_TOOL_NAME, input: { preset: "general", reason: "b" } },
+      ],
+      stopReason: "tool_use",
+    });
+    const model = providerRouteModel(provider, "fast-model");
+    await expect(model(prompt, opts())).rejects.toThrow(/answer carried 2 tool calls/);
+    const d = await route({ text: "x", recentDirectives: {}, presets, allowed: allNames, fallback: "general" }, model);
+    expect(d.preset).toBeUndefined();
+    expect(d.reason).toMatch(/^router failed: answer carried 2 tool calls/);
+  });
+
+  it("through route(): the seam's call return routes as its input, and a call to a tool that is not the route tool is no route naming it", async () => {
+    const input = { text: "x", recentDirectives: {}, presets, allowed: allNames, fallback: "general" };
+    const d = await route(input, async () => ({ tool: ROUTE_TOOL_NAME, input: { preset: "general", reason: "q" } }));
+    expect(d).toEqual({ preset: "general", reason: "q" });
+    const other = await route(input, async () => ({ tool: "repo_test", input: {} }));
+    expect(other.preset).toBeUndefined();
+    expect(other.reason).toMatch(/repo_test/);
   });
 
   it("a provider that answers in text anyway hands the text to the same parse — the automatic fallback", async () => {

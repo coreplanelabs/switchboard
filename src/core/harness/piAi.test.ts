@@ -218,6 +218,28 @@ describe("complete — one request through pi's own adapter, on the wire", () =>
     });
   });
 
+  it("toolChoice any on the wire, Anthropic: tool_choice {type: any} with parallel calls off, and the payload carries cache_control on the system block and the last tool", async () => {
+    const { fetchImpl, calls } = fakeFetch(anthropicToolCallStream());
+    const table = new PiAiProviders(CONFIGS, { secrets: SECRETS, clock: CLOCK, fetch: fetchImpl });
+    await table.get("anthropic").complete({ ...routeRequest(), toolChoice: { type: "any" } });
+    const [call] = calls;
+    expect(call.body.tool_choice).toEqual({ type: "any", disable_parallel_tool_use: true });
+    const system = call.body.system as { cache_control?: unknown }[];
+    expect(system[system.length - 1].cache_control).toMatchObject({ type: "ephemeral" });
+    const tools = call.body.tools as { cache_control?: unknown }[];
+    expect(tools[tools.length - 1].cache_control).toMatchObject({ type: "ephemeral" });
+  });
+
+  it("toolChoice any on the wire, Chat Completions: tool_choice required and parallel_tool_calls false", async () => {
+    const { fetchImpl, calls } = fakeFetch(openAiToolCallStream());
+    const table = new PiAiProviders(CONFIGS, { secrets: SECRETS, clock: CLOCK, fetch: fetchImpl });
+    await table
+      .get("openrouter")
+      .complete({ ...routeRequest("anthropic/claude-sonnet-4"), toolChoice: { type: "any" } });
+    expect(calls[0].body.tool_choice).toBe("required");
+    expect(calls[0].body.parallel_tool_calls).toBe(false);
+  });
+
   it("a keyless openai-compatible block (a local server) sends no authorization header at all", async () => {
     const { fetchImpl, calls } = fakeFetch(openAiToolCallStream());
     const table = new PiAiProviders(CONFIGS, { secrets: SECRETS, clock: CLOCK, fetch: fetchImpl });
@@ -537,6 +559,39 @@ describe("piStreamOptions — what rides beside the context, per dialect", () =>
       maxTokens: 200,
       cacheRetention: "short",
       toolChoice: { type: "function", function: { name: "route" } },
+    });
+  });
+
+  it('the any choice: anthropic-messages spells it "any", openai-completions "required", each with the payload hook that switches parallel calls off', () => {
+    const anyReq: CompletionRequest = { ...req, toolChoice: { type: "any" } };
+    expect(piStreamOptions("anthropic-messages", anyReq, "k")).toEqual({
+      apiKey: "k",
+      maxTokens: 200,
+      cacheRetention: "short",
+      toolChoice: "any",
+      onPayload: expect.any(Function),
+    });
+    expect(piStreamOptions("openai-completions", anyReq, "k")).toEqual({
+      apiKey: "k",
+      maxTokens: 200,
+      cacheRetention: "short",
+      toolChoice: "required",
+      onPayload: expect.any(Function),
+    });
+  });
+
+  it("the payload hook sets the parallel flag per API — disable_parallel_tool_use inside Anthropic's tool_choice, parallel_tool_calls beside Chat Completions' — and touches nothing else", () => {
+    const anyReq: CompletionRequest = { ...req, toolChoice: { type: "any" } };
+    const hookOf = (api: PiApi) =>
+      (piStreamOptions(api, anyReq, "k") as { onPayload: (payload: unknown, model: unknown) => unknown }).onPayload;
+    expect(hookOf("anthropic-messages")({ model: "m", tool_choice: { type: "any" } }, undefined)).toEqual({
+      model: "m",
+      tool_choice: { type: "any", disable_parallel_tool_use: true },
+    });
+    expect(hookOf("openai-completions")({ model: "m", tool_choice: "required" }, undefined)).toEqual({
+      model: "m",
+      tool_choice: "required",
+      parallel_tool_calls: false,
     });
   });
 });
