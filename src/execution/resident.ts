@@ -428,6 +428,52 @@ export class ResidentExecutor implements Executor {
     return { kind: "status", state: residentState(data.state), reason: String(data.reason ?? "") };
   }
 
+  /** One subscription to the resident's restore event (execution.md item 23):
+   *  POST /await-restore, held open by the resident Durable Object until its
+   *  state leaves `restoring` (or the wait's ceiling passes, when it answers
+   *  with the state as it stands). Event-driven on this side too: one held
+   *  request, no polling and no retry timer. Never throws. */
+  static async awaitRestore(
+    baseUrl: string,
+    token: string,
+    resource: string,
+    budgetMs: number,
+    span?: Span,
+  ): Promise<ResidentStatusProbe> {
+    let res: Response;
+    try {
+      res = await tracedFetch(
+        span,
+        `${baseUrl.replace(/\/$/, "")}/await-restore`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+          body: JSON.stringify({ resource, budgetMs }),
+          // The server answers at the event or its own ceiling; the margin
+          // only guards a resident Worker that hangs past both.
+          signal: AbortSignal.timeout(budgetMs + EXEC_CALL_MARGIN_MS),
+        },
+        { route: "/await-restore" },
+      );
+    } catch (err) {
+      return { kind: "unreachable", error: err instanceof Error ? err.message : String(err), transport: true };
+    }
+    if (res.status === 404) {
+      // An older resident Worker (unknown route) or an offboarded resource:
+      // either way there is nothing to wait on — the caller falls back cold.
+      return { kind: "status", state: "not-onboarded", reason: "" };
+    }
+    const data = sanitizeResidentBody((await res.json().catch(() => ({}))) as Record<string, unknown>);
+    if (!res.ok) {
+      return {
+        kind: "unreachable",
+        error: `await-restore HTTP ${res.status}: ${String(data.error ?? "")}`,
+        transport: false,
+      };
+    }
+    return { kind: "status", state: residentState(data.state), reason: String(data.reason ?? "") };
+  }
+
   /** POST one route; resource + threadKey ride in every body. Reads the FULL
    *  body as text before parsing: /exec streams heartbeat whitespace and then
    *  exactly one JSON document, always over HTTP 200. */

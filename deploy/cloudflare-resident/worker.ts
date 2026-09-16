@@ -254,6 +254,7 @@ import {
 } from "../../src/execution/residentDiskBudget.js";
 import { attachTarget, mirrorNeedsFetch, parseWantSha, wantShaForBinding } from "../../src/execution/residentHead.js";
 import { residentText, sanitizeResidentBody } from "../../src/execution/residentText.js";
+import { RESTORE_WAIT_MAX_MS, RestoreWaiters } from "../../src/execution/residentRestoreEvent.js";
 import {
   abandonedWaitStepResult,
   describeStepFailure,
@@ -1567,6 +1568,12 @@ export class ResidentDO extends Sandbox<Env> {
    *  checkout). A DO reset drops the set together with the transfers it named:
    *  the restore is driven from this isolate, so nothing outlives it. */
   private readonly pendingRestores = new Set<Promise<unknown>>();
+
+  /** Subscribers to the restore event (execution.md item 23): held
+   *  `/await-restore` requests, answered by `setResidentState` the moment the
+   *  state leaves `restoring`. In-memory on purpose — a subscriber is a held
+   *  request into this isolate, so an isolate restart drops both together. */
+  private readonly restoreWaiters = new RestoreWaiters();
 
   /** Run one R2 restore and judge it by the bytes arriving in its target
    *  directory (judgeRestoreProgress): the SDK call takes no timeout, progress
@@ -6788,6 +6795,29 @@ export class ResidentDO extends Sandbox<Env> {
       [REASON_KEY]: residentText(reason),
       [UPDATED_KEY]: new Date(systemClock()).toISOString(),
     });
+    // Publish the restore event (execution.md item 23): every held
+    // /await-restore subscriber is answered the moment the state is no longer
+    // `restoring`; a transition into it answers nobody.
+    this.restoreWaiters.publish(state, residentText(reason));
+  }
+
+  /** One restore subscription (execution.md item 23): answers at once when the
+   *  state is not `restoring`; otherwise holds until the next transition out of
+   *  it, or until the bounded budget passes — then answers with the state as it
+   *  stands and the caller decides (the bot falls back cold). */
+  async awaitRestore(budgetMs: number): Promise<ResidentStatus> {
+    const status = await this.getStatus();
+    if (status.state !== "restoring") return status;
+    const bounded = Math.max(
+      0,
+      Math.min(Number.isFinite(budgetMs) ? budgetMs : RESTORE_WAIT_MAX_MS, RESTORE_WAIT_MAX_MS),
+    );
+    const answered = await Promise.race([
+      this.restoreWaiters.subscribe(),
+      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), bounded)),
+    ]);
+    if (answered) return { state: answered.state as ResidentState, reason: answered.reason };
+    return this.getStatus();
   }
 
   async getStatus(): Promise<ResidentStatus> {
@@ -7516,6 +7546,8 @@ export default {
           }
           case "/status":
             return await handleStatus(env, url);
+          case "/await-restore":
+            return await handleAwaitRestore(env, body);
           case "/attach":
             return await handleAttach(env, body, traceparent);
           case "/detach":
@@ -7989,6 +8021,21 @@ async function handleStatus(env: Env, url: URL): Promise<Response> {
     lifecycle: refresh.lifecycle,
     refresh: { instance: refresh.instance, skipped: refresh.skipped },
   });
+}
+
+/** POST /await-restore { resource, budgetMs? } (execution.md item 23): one
+ *  subscription to the resident's restore event, held by the Durable Object
+ *  until the state leaves `restoring` or the bounded budget passes; answers
+ *  the item-7 lifecycle pair either way. Operator scope, like /status. */
+async function handleAwaitRestore(env: Env, body: Record<string, unknown>): Promise<Response> {
+  const resource = parseResource(typeof body.resource === "string" ? body.resource : null);
+  if ("error" in resource) return json({ error: resource.error }, 400);
+  const record = await registryStub(env).getRecord(resource.resource);
+  if (!record) return json({ error: `${resource.resource} is not onboarded` }, 404);
+  const budgetMs =
+    typeof body.budgetMs === "number" && Number.isFinite(body.budgetMs) ? body.budgetMs : RESTORE_WAIT_MAX_MS;
+  const status = await residentStub(env, resource.resource).awaitRestore(budgetMs);
+  return json({ state: status.state, reason: status.reason });
 }
 
 // -- thread data plane handlers -----------------------------------------------

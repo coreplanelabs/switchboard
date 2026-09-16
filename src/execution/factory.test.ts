@@ -481,16 +481,60 @@ describe("makeExecutor resident selection", () => {
     expect(bodies[3]).not.toHaveProperty("sha");
   });
 
-  it("not-warm probe → fallback carrying state and reason verbatim; no attach, discriminant NOT set", async () => {
+  it("restoring probe → one /await-restore subscription; still restoring at its end → fallback naming the wait, discriminant NOT set", async () => {
     stubEnvs();
-    const { calls } = stubFetch({ body: { state: "restoring", reason: "rehydrating" } });
+    const { calls } = stubFetch(
+      { body: { state: "restoring", reason: "rehydrating" } },
+      { body: { state: "restoring", reason: "rehydrating" } },
+    );
     const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
     expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
-    expect(note).toBe("resident restoring (rehydrating) — using fresh sandbox");
+    expect(note).toMatch(
+      /^resident restoring \(rehydrating\) after waiting \d+s for the resident's restore — using fresh sandbox$/,
+    );
     // A per-thread fallback is NOT the resident branch: the dispatcher must
     // keep the agent's own prompt, so the discriminant stays falsy.
     expect(resident).toBeFalsy();
-    expect(calls).toEqual(["/status"]);
+    expect(calls).toEqual(["/status", "/await-restore"]);
+  });
+
+  it("restoring probe → the subscription answers warm → ResidentExecutor, the note naming the wait (event-driven, no re-probe)", async () => {
+    stubEnvs();
+    const { calls, bodies } = stubFetch(
+      { body: { state: "restoring", reason: "rehydrating" } },
+      { body: { state: "warm", reason: "" } },
+      {
+        body: {
+          workspace: "/workspace/threads/x/master",
+          ref: "master",
+          sha: "abc",
+          user: "worker2",
+          deps: "hardlink",
+        },
+      },
+    );
+    const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
+    expect(executor).toBeInstanceOf(ResidentExecutor);
+    expect(resident).toBe(true);
+    expect(note).toMatch(
+      /^resident restored after \d+s \(waited for the resident's restore\) · jshttp\/vary · master@abc — attached to the last snapshot$/,
+    );
+    expect(calls).toEqual(["/status", "/await-restore", "/attach"]);
+    expect(bodies[1]).toMatchObject({ resource: "repo:jshttp/vary" });
+  });
+
+  it("restoring probe → an unreachable subscription (older Worker's 404 → not-onboarded) still falls back cold on the restoring note", async () => {
+    stubEnvs();
+    const { calls } = stubFetch(
+      { body: { state: "restoring", reason: "rehydrating" } },
+      { status: 404, body: { error: "unknown route" } },
+    );
+    const { executor, note } = await makeExecutor(residentOpts(), repoCtx());
+    expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
+    expect(note).toMatch(
+      /^resident restoring \(rehydrating\) after waiting \d+s for the resident's restore — using fresh sandbox$/,
+    );
+    expect(calls).toEqual(["/status", "/await-restore"]);
   });
 
   // Serviceable non-warm states: the resident keeps serving the last snapshot
@@ -604,7 +648,6 @@ describe("makeExecutor resident selection", () => {
   // The engine-owned states: nothing serviceable to attach to.
   it.each([
     ["onboarding", ""],
-    ["restoring", "rehydrating"],
     ["down", "provision-failed at clone: no such repo"],
   ])("%s probe → per-thread fallback with the verbatim state/reason note; no attach", async (state, reason) => {
     stubEnvs();
@@ -649,11 +692,11 @@ describe("makeExecutor resident selection", () => {
   it("not-warm states are NOT cached — the next dispatch probes again", async () => {
     stubEnvs();
     const { fn } = stubFetch(
-      { body: { state: "restoring", reason: "rehydrating" } },
+      { body: { state: "onboarding", reason: "" } },
       { body: { state: "down", reason: "r2-restore-failed: boom" } },
     );
     const first = await makeExecutor(residentOpts(), repoCtx());
-    expect(first.note).toBe("resident restoring (rehydrating) — using fresh sandbox");
+    expect(first.note).toBe("resident onboarding — using fresh sandbox");
     const second = await makeExecutor(residentOpts(), repoCtx());
     expect(second.note).toBe("resident down (r2-restore-failed: boom) — using fresh sandbox");
     expect(fn).toHaveBeenCalledTimes(2);

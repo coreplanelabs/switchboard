@@ -20,6 +20,7 @@ import {
 import { repoResourceId } from "../core/residentAdmin.js";
 import { resolveGithubToken, type GithubTokenScope } from "./githubApp.js";
 import { isServiceable } from "./residentState.js";
+import { RESTORE_WAIT_MAX_MS, restoredAfterWaitNote, restoreWaitFallbackNote } from "./residentRestoreEvent.js";
 import { systemClock } from "../core/trace/clock.js";
 import { processSecrets, type Secret, type Secrets } from "../secrets.js";
 
@@ -278,7 +279,28 @@ export async function makeExecutor(
     const token = processSecrets.named(tokenEnv);
     if (!token) throw new Error(`execution.resident is configured but ${tokenEnv} is not set`);
     const resource = repoResourceId(ctx.repo);
-    const probe = await probeResident(resident, token, resource, span);
+    let probe = await probeResident(resident, token, resource, span);
+    /** How long the restore subscription was held, when one was (item 23). */
+    let restoreWaitMs: number | undefined;
+    if (probe.kind === "status" && probe.state === "restoring") {
+      // Event-driven fallback (docs/reference/specs/execution.md item 23): the
+      // disk is being rehydrated, so instead of falling cold at once — into a
+      // fleet the restore's own overflow may have filled — subscribe to the
+      // restore event: one held request the resident answers the moment its
+      // state leaves `restoring` (WAITING_FOR_RESTORE_NOTE is the card's word
+      // for the window). A still-restoring or unreachable answer falls back
+      // cold exactly as before, with the wait named.
+      const waitStart = systemClock();
+      const after = await ResidentExecutor.awaitRestore(
+        resident.baseUrl,
+        token.reveal(),
+        resource,
+        RESTORE_WAIT_MAX_MS,
+        span,
+      );
+      restoreWaitMs = systemClock() - waitStart;
+      if (after.kind === "status" && after.state !== "not-onboarded") probe = after;
+    }
     if (probe.kind === "status" && isServiceable(probe.state, probe.reason)) {
       // The resident can degrade between the /status probe and /attach: 503
       // (mirror-busy) or 429 (pool-exhausted) surface only at attach time.
@@ -289,8 +311,9 @@ export async function makeExecutor(
       try {
         // Non-warm but serviceable: the note says so while the run
         // still gets the worktree it came for; openResident adds ref@sha.
-        const nonWarm =
+        let nonWarm =
           probe.state === "warm" ? undefined : oneLine(`${probe.state}${probe.reason ? ` (${probe.reason})` : ""}`);
+        if (restoreWaitMs !== undefined) nonWarm = restoredAfterWaitNote(restoreWaitMs, nonWarm);
         // A `read` identity gets a read-only worktree — decided from the
         // run's profile, never from the prompt
         // (docs/reference/specs/resident-repos.md item 50).
@@ -322,7 +345,10 @@ export async function makeExecutor(
     } else if (probe.kind === "unreachable") {
       note = oneLine(`resident unreachable (${probe.error}) — using fresh sandbox`);
     } else if (probe.state !== "not-onboarded") {
-      note = oneLine(`resident ${probe.state}${probe.reason ? ` (${probe.reason})` : ""} — using fresh sandbox`);
+      note =
+        restoreWaitMs !== undefined
+          ? oneLine(restoreWaitFallbackNote(restoreWaitMs, `${probe.state}${probe.reason ? ` (${probe.reason})` : ""}`))
+          : oneLine(`resident ${probe.state}${probe.reason ? ` (${probe.reason})` : ""} — using fresh sandbox`);
     } else {
       // not-onboarded is the ordinary per-thread case — but still make the cold
       // fall-through visible: the user needs to know coding ran cold in a
