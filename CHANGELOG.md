@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.236.0](https://github.com/coreplanelabs/switchboard/compare/v1.235.0...v1.236.0) (2026-09-16)
+
+
+### Features
+
+* **dispatcher:** the router offers every chat command as a tool beside route — a read runs through the registry with its receipt first, a write is handed back as the line to paste, and a failed command ends the dispatch with its own line and the footer ([#1382](https://github.com/coreplanelabs/switchboard/issues/1382)) ([a733684](https://github.com/coreplanelabs/switchboard/commit/a7336844748918be3f39c52b413db0755be102d2))
+* **harness:** OpenCodeBridge — every tool call decided in the bot over the HTTP ask, a forged reply failing the run closed, every event on the record in pi's words, OpenCode green on the gate and record rows (stage A) ([#1381](https://github.com/coreplanelabs/switchboard/issues/1381)) ([e03d762](https://github.com/coreplanelabs/switchboard/commit/e03d7627468c3586e26860e2f3cb6fc1d7b306cb))
+* **harness:** the bearer rotates without losing its meter, the run loop names its mid-run interrupted outcome, the workspace re-attaches mid-run, and a replaced registration keeps its relayed calls ([#1378](https://github.com/coreplanelabs/switchboard/issues/1378)) ([ff355fd](https://github.com/coreplanelabs/switchboard/commit/ff355fd7f8855a4b4aebf9d111c3b19fadf119d1))
+* **harness:** the OpenCode process — @opencode/cli@2.0.3 pinned in every image, a per-run configuration with the proxy as the only provider, a tailer the harness reads like pi's log, and readiness on the row ([#1361](https://github.com/coreplanelabs/switchboard/issues/1361)) ([2d22008](https://github.com/coreplanelabs/switchboard/commit/2d2200856e9cacc0a8f5b873f0b3e4c2a37c019f))
+* **resident:** each resident on the index folds open to the runs on it — stopwatch, run and thread links, the worktree each holds and its bytes — kept live by an SSE feed that re-reads the listing when a tree is bound or released ([#1373](https://github.com/coreplanelabs/switchboard/issues/1373)) ([b1baade](https://github.com/coreplanelabs/switchboard/commit/b1baadeb4f95365e6ae5d6146b4df3523d3eb50d))
+* **web:** a settings page configures MCP servers and channel scopes from the dashboard and shows what only config.yaml can change ([#1375](https://github.com/coreplanelabs/switchboard/issues/1375)) ([fd8f1fe](https://github.com/coreplanelabs/switchboard/commit/fd8f1fe98f7e64e78120e602c4eb2e940593909d))
+
+
+### Bug fixes
+
+* **dispatcher:** a pull request with a retry note is a review, and the route replay scores the presets typed for the message ([#1368](https://github.com/coreplanelabs/switchboard/issues/1368)) ([8f7fe00](https://github.com/coreplanelabs/switchboard/commit/8f7fe00e5e989c544e405d8d4e5af8fac9dc4365))
+* **resident:** a full disk is recycled when no run has used it within the idle floor, whatever its trees hold, and each discarded tree is recorded on its binding ([#1359](https://github.com/coreplanelabs/switchboard/issues/1359)) ([95b4fac](https://github.com/coreplanelabs/switchboard/commit/95b4face165e6f62b5d32273557ba97004e24c68))
+* **sandbox:** a thread's first request never carries the container's start — the Worker answers sandbox-starting while it warms the container up, and the executor waits on it under a start budget of its own ([#1369](https://github.com/coreplanelabs/switchboard/issues/1369)) ([1a993fb](https://github.com/coreplanelabs/switchboard/commit/1a993fb35ef151a804649f799d01c4988063ddfd))
+* **ship:** a coding child that dies after pushing keeps its round — the runner opens the pull request from the branch and hears the interruption at once ([#1370](https://github.com/coreplanelabs/switchboard/issues/1370)) ([53bd085](https://github.com/coreplanelabs/switchboard/commit/53bd085f503b6b90e62e16605e80257492107c3d))
+* **ship:** a conflicting pull request is refused at the merge door before the checks are read, and the coding contract re-fetches the base right before the push ([#1377](https://github.com/coreplanelabs/switchboard/issues/1377)) ([2e004ba](https://github.com/coreplanelabs/switchboard/commit/2e004ba28544bf7fab209b323a53aec4f9b886e1))
+* **ship:** a coordinator child keeps the plan's base across a bot roll ([#1379](https://github.com/coreplanelabs/switchboard/issues/1379)) ([acb2bfb](https://github.com/coreplanelabs/switchboard/commit/acb2bfbb61508e7188a09ab8b2ccfd6106138b8c))
+* **ship:** a shipped pull request at the wall-clock cap ends review pending and the re-issue starts at the review round ([#1371](https://github.com/coreplanelabs/switchboard/issues/1371)) ([6387ceb](https://github.com/coreplanelabs/switchboard/commit/6387ceb12f6e08a096e43aef18f7193f1c6202d7))
+
+
+### Documentation
+
+* **docs:** record 0038's fifth amendment reads the gate as intent decided by the bot and effects bounded by the walls, continues OpenCode with a detection gate, and drops every egress receipt from the stage A plan ([#1372](https://github.com/coreplanelabs/switchboard/issues/1372)) ([63762ad](https://github.com/coreplanelabs/switchboard/commit/63762adb3a85cf27697c76fdca2f8f78b70ecc86))
+* **docs:** the program plan records stage A's cheap slice complete with U10 in review, the floor's passing rerun, the tree rule finished and U35's notes closed ([#1363](https://github.com/coreplanelabs/switchboard/issues/1363)) ([2e221ac](https://github.com/coreplanelabs/switchboard/commit/2e221ac42f098277dd3aa76556f0cfe6c55dc90e))
+
 ## [1.235.0](https://github.com/coreplanelabs/switchboard/compare/v1.234.0...v1.235.0) (2026-09-16)
 
 
