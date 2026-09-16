@@ -1106,10 +1106,9 @@ export interface CostsViewer {
 export interface CostsServiceDeps {
   /** The run history; absent (or the null store) → the by-user report is empty and says history is off. */
   runStore?: RunStore;
-  /** A Slack user id (`U…`) → its email, when the app can read it — how the
-   *  viewer's Access email is matched to the run ids the history bills. */
   /** A Slack user's profile email by platform-namespaced id (`slack:U…`) — the bot's
-   *  `slackEmailLookup`; undefined without `users:read.email` or for an unknown id. */
+   *  `slackEmailLookup`, how the viewer's Access email is matched to the run ids the
+   *  history bills; undefined without `users:read.email` or for an unknown id. */
   emailOfSlackUser?: (userId: string) => Promise<string | undefined>;
 }
 

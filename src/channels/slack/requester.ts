@@ -38,46 +38,69 @@ export interface RelayFooter {
 }
 
 /** The slice of a Slack Block Kit block the flattener reads: a section's text,
- *  a context block's elements, a rich_text block's nested elements. */
+ *  a context block's elements, a rich_text block's nested runs (text, link, user). */
 export interface SlackBlock {
   type?: string;
   text?: { type?: string; text?: string } | string;
   elements?: SlackBlock[];
+  /** A rich_text `link` run's target — its text when it has no label. */
+  url?: string;
+  /** A rich_text `user` run's subject — rendered as the mention the message text carries. */
+  user_id?: string;
 }
 
-/** Every text a message's blocks carry, in order. Slack puts an app's footer in
- *  a `context` block and leaves the message's `text` as the request alone, so
- *  the requester and the strippers must read the blocks too. Rich-text runs
- *  (`{type: "text", text: "…"}`, links `{type: "link", url, text?}`) flatten to
- *  their text; unknown shapes contribute nothing. */
+/** Every text a message's blocks carry, one line per block. Slack puts an app's
+ *  footer in a `context` block and leaves the message's `text` as the request
+ *  alone, so the requester and the strippers must read the blocks too. A
+ *  context block's elements are separate fragments and join with a space; a
+ *  rich_text block's runs are one line and join as written. A run renders as
+ *  the message text would: a `text` run as its text, a `link` run as its label
+ *  or else its URL, a `user` run as `<@U…>`; unknown shapes contribute nothing. */
 export function textOfBlocks(blocks: readonly SlackBlock[] | undefined): string {
   if (!blocks) return "";
-  const out: string[] = [];
-  const walk = (b: SlackBlock): void => {
-    if (typeof b.text === "string") out.push(b.text);
-    else if (b.text && typeof b.text.text === "string") out.push(b.text.text);
-    for (const e of b.elements ?? []) walk(e);
-  };
+  const lines: string[] = [];
   for (const b of blocks) {
-    const before = out.length;
+    const parts: string[] = [];
+    const walk = (e: SlackBlock): void => {
+      if (typeof e.text === "string") parts.push(e.text);
+      else if (e.text && typeof e.text.text === "string") parts.push(e.text.text);
+      else if (typeof e.url === "string") parts.push(e.url);
+      else if (typeof e.user_id === "string") parts.push(`<@${e.user_id}>`);
+      for (const c of e.elements ?? []) walk(c);
+    };
     walk(b);
-    // One line per block: a context footer must end the text on its own line.
-    if (out.length > before) out.push("\n");
+    const line = parts.join(b.type === "context" ? " " : "").trim();
+    if (line) lines.push(line);
   }
-  return out.join("").replace(/\n+$/, "");
+  return lines.join("\n");
 }
 
-/** The text the adapter reads a message by: its `text`, then what its blocks
- *  say that the text does not (the footer). */
+/** A text reduced to the words a person reads: mentions dropped, a `<url|label>`
+ *  link as its label, a bare `<url>` as the url, URL schemes dropped (Slack
+ *  labels a bare link without its scheme), whitespace collapsed — so a block's
+ *  rendering and the message's mrkdwn compare as the same words. */
+function plainWordsOf(text: string): string {
+  return text
+    .replace(/<@[A-Z0-9]+(?:\|[^>]*)?>/g, " ")
+    .replace(/<(https?:\/\/[^|>\s]+)\|([^>]*)>/g, "$2")
+    .replace(/<(https?:\/\/[^|>\s]+)>/g, "$1")
+    .replace(/https?:\/\//g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** The text the adapter reads a message by: its `text`, then the block lines
+ *  that say something the text does not (the footer) — never the request a
+ *  second time in the block's rendering. */
 export function rawTextOf(text: string | undefined, blocks: readonly SlackBlock[] | undefined): string {
   const base = text ?? "";
   const fromBlocks = textOfBlocks(blocks);
   if (!fromBlocks) return base;
-  // The blocks usually repeat the text; append only the lines the text lacks.
-  const extra = fromBlocks
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0 && !base.includes(l));
+  const known = plainWordsOf(base);
+  const extra = fromBlocks.split("\n").filter((line) => {
+    const words = plainWordsOf(line);
+    return words.length > 0 && !known.includes(words);
+  });
   return extra.length > 0 ? `${base}\n${extra.join("\n")}` : base;
 }
 

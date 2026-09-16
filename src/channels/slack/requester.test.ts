@@ -118,22 +118,54 @@ const LIVE_BLOCKS = [
 ];
 
 describe("textOfBlocks / rawTextOf", () => {
-  it("flattens section, context and rich_text blocks to their texts, one line per block; unknown shapes add nothing", () => {
+  it("flattens section, context and rich_text blocks to their texts, one line per block, runs rendered as the message text carries them; unknown shapes add nothing", () => {
     expect(textOfBlocks(LIVE_BLOCKS)).toBe(
-      " agent:review github.com/acme/api/pull/42 — retry after the exec timeout\n" +
+      "<@U0BOT> agent:review github.com/acme/api/pull/42 — retry after the exec timeout\n" +
         "Sent by Claude in <#C0PROMPT> on behalf of <@U0B0RIS> · <https://acme.slack.com/archives/C0PROMPT/p1789506812453899?thread_ts=1789506812.453899&amp;cid=C0PROMPT|thread>",
     );
     expect(textOfBlocks([{ type: "section", text: { type: "mrkdwn", text: "hi" } }, { type: "divider" }])).toBe("hi");
     expect(textOfBlocks(undefined)).toBe("");
+    // A link run with no label is its URL, not nothing.
+    expect(textOfBlocks([{ type: "rich_text", elements: [{ type: "link", url: "https://acme.example/x" }] }])).toBe(
+      "https://acme.example/x",
+    );
+    // A context block's elements are fragments: joined with a space, so a footer's `Sent by` keeps its leading boundary.
+    expect(
+      textOfBlocks([
+        {
+          type: "context",
+          elements: [
+            { type: "mrkdwn", text: "*draft*" },
+            {
+              type: "mrkdwn",
+              text: "Sent by Claude in <#C1> · <https://acme.slack.com/archives/C1/p1789504919942589|thread>",
+            },
+          ],
+        },
+      ]),
+    ).toBe("*draft* Sent by Claude in <#C1> · <https://acme.slack.com/archives/C1/p1789504919942589|thread>");
   });
 
-  it("the raw text is the message text plus the block lines the text lacks — the footer — never the request twice", () => {
+  it("the raw text is the message text plus only the block lines that say something the text does not — the footer — and never the request a second time", () => {
     const raw = rawTextOf(LIVE_TEXT, LIVE_BLOCKS);
     expect(raw.startsWith(LIVE_TEXT)).toBe(true);
-    expect(raw.split("\n")).toHaveLength(3); // the text, the rich_text line it does not literally contain, the footer
+    // Two lines: the text and the footer. The rich_text rendering of the request (a
+    // link's label for its mrkdwn `<url>`) is the same words and is not repeated.
+    expect(raw.split("\n")).toHaveLength(2);
     expect(raw).toContain("Sent by Claude in <#C0PROMPT> on behalf of <@U0B0RIS>");
     expect(rawTextOf("plain", undefined)).toBe("plain");
     expect(rawTextOf("hi", [{ type: "section", text: { text: "hi" } }])).toBe("hi");
+    expect(
+      rawTextOf("see <https://acme.example/x|the doc>", [
+        {
+          type: "rich_text",
+          elements: [
+            { type: "text", text: "see " },
+            { type: "link", url: "https://acme.example/x", text: "the doc" },
+          ],
+        },
+      ]),
+    ).toBe("see <https://acme.example/x|the doc>");
     expect(parseRelayFooter(raw)).toEqual({
       channel: "C0PROMPT",
       threadTs: "1789506812.453899",
