@@ -29,6 +29,7 @@ import {
   type PlanGraph,
   type ShipCaps,
 } from "../ship/coordinator.js";
+import type { AgentSource } from "../runEvents.js";
 import type { CoordinatorInstance, CoordinatorUnit } from "./contract.js";
 import type { CoordinatorInstanceStore } from "./instanceStore.js";
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "./instancesRoute.js";
@@ -45,6 +46,10 @@ export interface HandOffInput {
     threadKey: string;
     sourceUrl?: string;
   };
+  /** How the ship preset was chosen (`run_meta.agentSource`): a routed ship
+   *  (`route`) runs generated plans alone — the seeded form is refused naming
+   *  the directive, so the router can never start a runner-merged plan. */
+  agentSource?: AgentSource;
   /** The ship request's run: the record the coordinator's finish writes the plan's story under. */
   runId: string;
   label: string;
@@ -163,6 +168,14 @@ async function plan(
       },
     };
   }
+  // The routed guard (agent-ship item 16; routing-and-config item 21): a
+  // seeded plan's units merge under the runner's grant, so only a typed
+  // `agent:ship` may start one — a routed ship runs generated plans alone.
+  if (input.agentSource === "route")
+    return {
+      ok: false,
+      reply: `🚫 A routed request never runs a seeded plan — its units would merge under the runner's grant. Type \`agent:ship plan ${request.planPath}\` to run it.`,
+    };
   let planId: string;
   try {
     planId = planIdOf(request.planPath);

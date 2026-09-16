@@ -15,7 +15,7 @@ In ten minutes it will be answering you in your terminal and in a Slack channel,
 | | |
 |---|---|
 | **One process** | The bot. It talks to your terminal, and to Slack over Socket Mode: no public URL, no Docker, no hosted service in between. |
-| **Three agents** | `general` answers and reads links. `review` reviews a pull request. `coding` makes a change and opens the PR. You never name one: the bot reads your message, picks the agent, and its status card says which and why. |
+| **Three agents** | `general` answers and reads links. `review` reviews a pull request. `ship` makes a change, opens the PR and has it reviewed; a person merges. You never name one: the bot reads your message, picks the agent, and its status card says which and why. |
 | **Your keys, at home** | Keys live in `~/.switchboard/.env`, readable only by you. Every later command finds them from any directory. |
 
 ## Part 1: an answer in your terminal

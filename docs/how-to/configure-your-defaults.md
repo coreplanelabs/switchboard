@@ -53,7 +53,7 @@ Every message here now defaults to `review` unless a directive or the sender's o
 | Flag | Caps |
 |---|---|
 | `--boundary.maxMinutes <n>` | the wall-clock budget of every run, in minutes (at least 2); a preset asking for more is clipped, and the card says so |
-| `--boundary.maxIdentity <none\|read\|write>` | the credential a run acts as; a preset above it (`coding` needs `write`) is refused by name before anything starts |
+| `--boundary.maxIdentity <none\|read\|write>` | the credential a run acts as; a preset above it (`ship` needs `write`) is refused by name before anything starts |
 | `--boundary.machines <a,b>` | the machine classes a run may execute on (`none`, `blank`, `repo-cold`, `repo-resident`); a preset outside the list is refused |
 
 A boundary caps and never grants: it cannot let you run an agent you are not granted. Boundaries are the one setting that does not override — yours intersects with the channel's and the installation's (the smallest budget, the lowest identity, the classes every one allows), so you can only tighten what they allow. `config show` prints the effective boundary once one is in force.

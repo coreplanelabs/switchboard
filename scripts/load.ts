@@ -75,6 +75,7 @@ import {
   historyCompounds,
   imperativeScore,
   labelledRequests,
+  mapHistoricalLabels,
   readToWriteRoutes,
   renderCompound,
   renderConfusion,
@@ -83,6 +84,7 @@ import {
   replayImperative,
   replayRoutes,
   routeChecks,
+  tableWritePreset,
 } from "../src/load/routeReplay.js";
 import { ROUTE_COMPOUND_FIXTURES } from "../src/load/routeCompoundFixtures.js";
 import { ROUTE_IMPERATIVE_FIXTURES } from "../src/load/routeImperativeFixtures.js";
@@ -1103,7 +1105,17 @@ async function routeReplay(f: Flags): Promise<boolean> {
   // route. The stamped labels (directive, sticky) make the table and the bar;
   // an unstamped one — a pre-stamp record, whose preset may be a scope's —
   // is replayed and reported apart, so it never inflates the accuracy.
-  const singles = requests.filter((r) => r.label !== COMPOUND_PRESET);
+  const presets = routablePresets();
+  const allowed = presets.map((p) => p.name);
+  const writePreset = tableWritePreset(allowed) ?? "(none)";
+  // Historical labels whose preset left the table but shares its write
+  // identity (`coding`, after `ship` took its seat) score as the table's write
+  // preset; the count is printed beside the table (load-harness item 17).
+  const mapping = mapHistoricalLabels(
+    requests.filter((r) => r.label !== COMPOUND_PRESET),
+    allowed,
+  );
+  const singles = mapping.requests;
   const stamped = singles.filter((r) => r.labelSource !== "unstamped");
   const unstamped = singles.filter((r) => r.labelSource === "unstamped");
   const fromHistory = historyCompounds(requests);
@@ -1114,8 +1126,6 @@ async function routeReplay(f: Flags): Promise<boolean> {
   // One decision function for both halves: the production prompt, the compound
   // form offered under the cap — so a single that the router splits is a
   // misroute in the table, and a decoy split is counted where it belongs.
-  const presets = routablePresets();
-  const allowed = presets.map((p) => p.name);
   const decide = (text: string) =>
     route({ text, recentDirectives: {}, presets, allowed, fallback: defaultPreset, compound: { maxParts } }, model, {
       timeoutMs: ROUTE_TIMEOUT_MS,
@@ -1173,11 +1183,16 @@ async function routeReplay(f: Flags): Promise<boolean> {
     compoundBar: { detection: 0.9 },
     imperative,
     imperativeBar: { hit: 0.9 },
+    writePreset,
   });
   const bySource: Record<string, number> = {};
   for (const r of requests) bySource[r.labelSource] = (bySource[r.labelSource] ?? 0) + 1;
   const notes = [
     ...renderConfusion(table),
+    "",
+    mapping.mapped === 0
+      ? "historical labels mapped onto the table's write preset: none"
+      : `historical labels mapped onto ${writePreset}: ${mapping.mapped} (a label whose preset left the table but shares its write identity)`,
     "",
     readToWrite.length === 0
       ? "read-only labels routed to a write preset: none"
@@ -1196,7 +1211,7 @@ async function routeReplay(f: Flags): Promise<boolean> {
     ...(history.compounds === 0 ? [] : renderCompound(history).slice(2)),
     "",
     `checked-in imperative set (${imperative.imperatives} imperatives, ${imperative.decoys} read-only decoys, ${imperative.reviews} review-shaped):`,
-    ...renderImperative(imperative),
+    ...renderImperative(imperative, { writePreset }),
     "",
     `labels: ${Object.entries(bySource)
       .map(([k, v]) => `${k}=${v}`)

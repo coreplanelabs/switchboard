@@ -96,9 +96,10 @@ export interface AgentDef {
    *  router's table is rendered from this registry. `false` keeps a preset
    *  out of the table — structurally: it is absent from the table the model
    *  is shown and refused as a single route even if the model names it.
-   *  `ship` (it holds the merge grant) opts out for good; `conductor` (it
-   *  starts other runs) opts out of the table and is reached through the
-   *  router's compound form alone, with its parts named. */
+   *  `coding` (a bare write ask deserves the review loop, so `ship` holds its
+   *  seat) opts out; `conductor` (it starts other runs) opts out of the table
+   *  and is reached through the router's compound form alone, with its parts
+   *  named. */
   routable?: false;
   /** System prompt variant for resident-repo runs (docs/reference/specs/resident-repos.md):
    *  the workspace is a ready worktree — no cloning, no installs, no repo
@@ -535,6 +536,11 @@ const WORK_PRESETS = {
     // `config set channel efforts.coding=…`, or `effort:` per request).
     machine: "repo-resident",
     identity: "write", // pushes branches and opens pull requests
+    // Never routed: a plain write ask deserves the coding → review loop, so
+    // the router's table offers `ship` in coding's seat — a routed ship runs
+    // a generated one-unit plan whose merge is a person's, never the runner's.
+    // A request that wants a bare coding run names it — `agent:coding`.
+    routable: false,
   },
   review: {
     name: "review",
@@ -568,10 +574,10 @@ const WORK_PRESETS = {
     toolset: "full",
     machine: "repo-resident",
     identity: "write",
-    // Never routed: ship is the plan runner and holds the merge grant, so a
-    // wrong route into it is code landing on main, not a stray pull request.
-    // A request that wants it names it — `agent:ship`.
-    routable: false,
+    // Routable: a routed ship runs a generated one-unit plan whose merge is a
+    // person's (`merge: person`) and never a seeded plan (the hand-off refuses
+    // a routed `plan <path>.md` naming `agent:ship`), so a wrong route costs a
+    // reviewed pull request, never code landing on main.
     maxTurns: 1,
     maxTokens: 16000,
     maxMinutes: 120,

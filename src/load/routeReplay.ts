@@ -188,6 +188,34 @@ export async function replayRoutes(
  *  preset that pushes (coding, ship). */
 const identityOf = (preset: string): string | undefined => AGENTS[preset]?.identity;
 
+/** The offered table's write preset — the one the imperative bars name and
+ *  the historical-label mapping targets; undefined for a table without one. */
+export function tableWritePreset(names: readonly string[]): string | undefined {
+  return names.find((n) => identityOf(n) === "write");
+}
+
+/** Historical labels mapped onto the table's write preset (load-harness item
+ *  17): a label whose preset is not in the offered table but shares its
+ *  identity with the table's write preset (`coding`, once routable, after
+ *  `ship` took its seat) scores as that preset — the requester asked for a
+ *  write run, and the table's write door moved under them. The count is
+ *  printed beside the table so the mapping is legible on the receipt. */
+export function mapHistoricalLabels(
+  requests: readonly ReplayRequest[],
+  tableNames: readonly string[],
+): { requests: ReplayRequest[]; mapped: number } {
+  const write = tableWritePreset(tableNames);
+  let mapped = 0;
+  const out = requests.map((r) => {
+    if (write !== undefined && !tableNames.includes(r.label) && identityOf(r.label) === "write") {
+      mapped++;
+      return { ...r, label: write };
+    }
+    return r;
+  });
+  return { requests: out, mapped };
+}
+
 /** Record 0026's clause on the router: a request whose typed label is a
  *  read-only preset (identity `none` or `read`) must never be routed to a
  *  write preset. The results that break it — none, or the receipt's verdict
@@ -532,14 +560,17 @@ export function imperativeScore(results: readonly ImperativeResult[]): Imperativ
 }
 
 /** The imperative score and its misses as markdown lines, for the receipt's notes. */
-export function renderImperative(score: ImperativeScore, opts: { textCap?: number } = {}): string[] {
+export function renderImperative(
+  score: ImperativeScore,
+  opts: { textCap?: number; writePreset?: string } = {},
+): string[] {
   const cap = opts.textCap ?? 80;
   const snippet = (text: string) => {
     const one = text.replace(/\s+/g, " ").trim();
     return one.length > cap ? `${one.slice(0, cap - 1)}…` : one;
   };
   return [
-    `imperatives: ${score.imperativesHit}/${score.imperatives} to coding (${pct(score.hitRate)}); look-alikes to a write preset ${score.lookalikesToWrite}/${score.lookalikes} (decoys ${score.decoysHit}/${score.decoys} read-only as expected, review-shaped ${score.reviewsHit}/${score.reviews} to review)`,
+    `imperatives: ${score.imperativesHit}/${score.imperatives} to ${opts.writePreset ?? "the write preset"} (${pct(score.hitRate)}); look-alikes to a write preset ${score.lookalikesToWrite}/${score.lookalikes} (decoys ${score.decoysHit}/${score.decoys} read-only as expected, review-shaped ${score.reviewsHit}/${score.reviews} to review)`,
     "",
     score.misses.length === 0 ? "misses: none" : `misses (${score.misses.length}):`,
     ...score.misses.map(
@@ -563,6 +594,9 @@ export interface RouteCheckInput {
   /** The checked-in imperative set's score. */
   imperative: ImperativeScore;
   imperativeBar: { hit: number };
+  /** The offered table's write preset (`tableWritePreset`), named by the
+   *  imperative bar — derived from the table, never typed by the caller's hand. */
+  writePreset: string;
 }
 
 /** The check rows: the accuracy bar, every request answered, record 0026's
@@ -572,7 +606,7 @@ export interface RouteCheckInput {
  *  apart from the read-to-write clause, and no decoy split) and the imperative
  *  bars. */
 export function routeChecks(input: RouteCheckInput): SloCheck[] {
-  const { table, answered, readToWrite, compound, compoundBar, imperative, imperativeBar } = input;
+  const { table, answered, readToWrite, compound, compoundBar, imperative, imperativeBar, writePreset } = input;
   const breaks = readToWriteRoutes(table.misroutes).map((r) => r.id);
   return [
     {
@@ -612,7 +646,7 @@ export function routeChecks(input: RouteCheckInput): SloCheck[] {
       limit: "0",
     },
     {
-      name: `terse imperatives routed to coding on ≥ ${Math.round(imperativeBar.hit * 100)}% of the checked-in imperative asks`,
+      name: `terse imperatives routed to ${writePreset} on ≥ ${Math.round(imperativeBar.hit * 100)}% of the checked-in imperative asks`,
       pass: imperative.hitRate >= imperativeBar.hit,
       actual: `${imperative.imperativesHit}/${imperative.imperatives} (${pct(imperative.hitRate)})`,
       limit: `≥ ${Math.round(imperativeBar.hit * 100)}%`,

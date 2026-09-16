@@ -338,6 +338,7 @@ export async function runShipBranch(
           entry,
           requestText: directives.text,
           msg,
+          agentSource: ctx.agentSource,
           runId: run.id,
           label,
           caps,
