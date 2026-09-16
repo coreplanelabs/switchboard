@@ -212,7 +212,12 @@ async function plan(
 /** The rows of a plan's selected units under an instance, as the plan states
  *  them; a generated plan's one unit takes the entry's branch when the entry
  *  resumed, and the resume rides its row. */
-function rowsFor(p: Planned, selected: readonly string[], instanceId: string): CoordinatorUnit[] {
+function rowsFor(
+  p: Planned,
+  selected: readonly string[],
+  instanceId: string,
+  lastPushOf?: ReadonlyMap<string, string>,
+): CoordinatorUnit[] {
   return p.graph.units
     .filter((u) => selected.includes(u.id))
     .map((u) => ({
@@ -224,6 +229,7 @@ function rowsFor(p: Planned, selected: readonly string[], instanceId: string): C
       dependsOn: u.dependsOn,
       rounds: [],
       ...(p.resume !== undefined ? { resume: p.resume } : {}),
+      ...(lastPushOf?.has(u.id) ? { lastPush: lastPushOf.get(u.id)! } : {}),
     }));
 }
 
@@ -317,9 +323,16 @@ export async function handOffToCoordinator(deps: HandOffDeps, input: HandOffInpu
   // next — a leftover's replacement included, so a resume whose create failed
   // never reruns a unit the base already carries.
   const merged = new Set<string>();
+  // A `review_pending` ending's recorded head (the coding child's own last
+  // push): carried onto the next attempt's row, so its pre-check starts at the
+  // review round when the open pull request still heads exactly there. The
+  // latest attempt's word wins.
+  const lastPushOf = new Map<string, string>();
   for (let n = 1; n <= attempt; n++)
-    for (const row of await deps.instances.listUnits(planInstanceId(p.planId, n)))
+    for (const row of await deps.instances.listUnits(planInstanceId(p.planId, n))) {
       if (row.ending?.kind === "merged") merged.add(row.unit);
+      if (row.lastPush !== undefined) lastPushOf.set(row.unit, row.lastPush);
+    }
   const remaining = p.selected.filter((u) => !merged.has(u));
   if (remaining.length === 0)
     return refused(
@@ -329,7 +342,7 @@ export async function handOffToCoordinator(deps: HandOffDeps, input: HandOffInpu
   if (status.kind === "absent") {
     // The latest attempt's create failed after its records were written: the
     // records are this request's to replace, under the same id and attempt.
-    const units = rowsFor(p, remaining, latest.id);
+    const units = rowsFor(p, remaining, latest.id, lastPushOf);
     const instance: CoordinatorInstance = {
       id: latest.id,
       ...p.identity,
@@ -344,7 +357,7 @@ export async function handOffToCoordinator(deps: HandOffDeps, input: HandOffInpu
   }
   // Ended: the next attempt reruns what the earlier attempts did not merge.
   const nextId = planInstanceId(p.planId, attempt + 1);
-  const units = rowsFor(p, remaining, nextId);
+  const units = rowsFor(p, remaining, nextId, lastPushOf);
   const instance: CoordinatorInstance = {
     id: nextId,
     ...p.identity,

@@ -28,8 +28,12 @@ export interface ShipConfig {
   maxMinutes?: number;
 }
 
-import { shipInterruptedNote, type ShipCaps } from "./ship/coordinator.js";
-export { shipInterruptedNote, type ShipCaps };
+import { SHIP_LOOP_RESERVE_MS, SHIP_MIN_MAX_MINUTES, shipInterruptedNote, type ShipCaps } from "./ship/coordinator.js";
+// The pipeline is budgeted for the loop, not one round (agent-ship item 8): the
+// coding child's directive is clipped to leave `SHIP_LOOP_RESERVE_MS` (two
+// review rounds and one merge poll) on the pipeline's clock, and `validateShip`
+// holds `ship.maxMinutes` to at least `SHIP_MIN_MAX_MINUTES` so the clip can hold.
+export { SHIP_LOOP_RESERVE_MS, SHIP_MIN_MAX_MINUTES, shipInterruptedNote, type ShipCaps };
 
 export const SHIP_DEFAULT_MAX_ROUNDS = 3;
 /** One number: the ship preset's own declared budget is the default the knob replaces. */

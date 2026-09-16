@@ -51,6 +51,29 @@ export interface ShipCaps {
  *  burning an attach and a model turn on a doomed round. */
 export const SHIP_ROUND_RESERVE_MS = 3 * MIN;
 
+/** What a round-0 coding child must leave on the pipeline's clock: two review
+ *  rounds (a review and, after a fix, its re-review) and one merge poll — the
+ *  loop the pipeline exists to run. The coding child's budget is clipped to
+ *  the remaining wall clock MINUS this reserve (never under the two minutes a
+ *  spawn accepts), so a child that uses its whole directive still hands the
+ *  pipeline a clock that holds the review; without the clip a 40-minute
+ *  pipeline hands 39 minutes to the child and caps out with the pull request
+ *  shipped and unreviewed. */
+export const SHIP_LOOP_RESERVE_MS = 2 * SHIP_ROUND_RESERVE_MS + 5 * MIN;
+
+/** What a findings child (the fix after a review asked for changes) must leave
+ *  on the clock: the re-review and one merge poll — one round's reserve and
+ *  five minutes. Never the whole loop's: by the time a fix round runs, the
+ *  first review has already happened, and holding two rounds back from a late
+ *  fix would cap a pipeline that still has the time. */
+export const SHIP_FIX_RESERVE_MS = SHIP_ROUND_RESERVE_MS + 5 * MIN;
+
+/** The floor `validateShip` holds `ship.maxMinutes` to: the loop's reserve
+ *  plus one round's — under it no coding child can both work and leave the
+ *  review its time, so the config is refused at load rather than left to cap
+ *  out on every unit. */
+export const SHIP_MIN_MAX_MINUTES = (SHIP_LOOP_RESERVE_MS + SHIP_ROUND_RESERVE_MS) / MIN;
+
 /** What a ship pipeline's thread and card say when the bot died under it (run-
  *  history item 36): the work it did stands on GitHub with nobody driving it,
  *  so the note names the PR when one was opened and the exact re-issue that
@@ -488,7 +511,12 @@ export type UnitEnding =
   | { kind: "merge_ready"; pr: PrRef; reviewRounds: number }
   | { kind: "merge_refused"; pr: PrRef; reason: string; reviewRounds: number }
   | { kind: "round_cap"; maxRounds: number; reviewRounds: number }
-  | { kind: "wall_clock_cap"; remainingMs: number; reviewRounds: number }
+  | { kind: "wall_clock_cap"; remainingMs: number; reviewRounds: number; spent: ShipBudgetSpent }
+  /** The wall clock capped AFTER the coding child opened or updated the pull
+   *  request: the work stands and only the review is missing, so the ending
+   *  names the pull request and "review pending" instead of calling the unit a
+   *  failure — the re-issued attempt starts at the review round (`lastPush`). */
+  | { kind: "review_pending"; pr: PrRef; headSha?: string; reviewRounds: number; spent: ShipBudgetSpent }
   | {
       kind: "stopped";
       mode: "soft" | "hard";
@@ -509,6 +537,12 @@ export type CoordinatorNote =
   | { type: "round"; index: number; agent: ChildPreset; outcome: ShipRoundOutcome }
   | { type: "ended"; ending: UnitEnding };
 
+/** How the pipeline's budget went, in ms: the coding rounds' (round 0 and the
+ *  findings steps), the review rounds', and everything else (branching,
+ *  pr-checks, busy waits, merge polls) — reported on the cap endings so a
+ *  person can see whether the cap or the child is the problem. */
+export type ShipBudgetSpent = Readonly<Record<"coding" | "review" | "waiting", number>>;
+
 export interface UnitPipelineInput {
   unit: { id: string; branch: string };
   repo: string;
@@ -528,6 +562,11 @@ export interface UnitPipelineInput {
   generated: boolean;
   /** Resume at review: an open pull request of ship's own the requester named. */
   resume?: { pr: number; headSha?: string; url?: string };
+  /** The head the previous attempt's coding child last pushed (a
+   *  `review_pending` ending's `headSha`, carried on the unit's row): when the
+   *  pre-check finds the open pull request still at exactly this head, there is
+   *  nothing to code and the attempt starts at the review round. */
+  lastPush?: string;
 }
 
 type Phase =
@@ -576,6 +615,8 @@ export interface UnitPipelineState {
   readonly findingsRunByRound: Readonly<Record<number, string>>;
   /** The last coding run (round 0's child or a findings step's): its record carries the unit's handoff. */
   readonly lastCodingRunId?: string;
+  /** How the budget went so far, accrued as each answer moves the clock. */
+  readonly spentMs: ShipBudgetSpent;
   readonly ending?: UnitEnding;
 }
 
@@ -604,6 +645,7 @@ export function openUnitPipeline(input: UnitPipelineInput, at: number): UnitPipe
     clock: at,
     phase: { at: "pre-check" },
     reviewRounds: 0,
+    spentMs: { coding: 0, review: 0, waiting: 0 },
     findingsByRound: {},
     dispositionsByRound: {},
     reviewRunByRound: {},
@@ -634,8 +676,25 @@ function waitSliceMs(clock: number, until: number): number {
 /** The child's budget: its preset's own, clipped to the pipeline's remaining
  *  wall clock (agent-ship item 8's clip), never under the two minutes a
  *  spawn accepts. */
-function budgetMinutesFor(s: UnitPipelineState, preset: ChildPreset): number {
-  return Math.max(2, Math.min(s.input.childMinutes[preset], Math.floor(remainingMs(s) / MIN)));
+function budgetMinutesFor(s: UnitPipelineState, round: RoundRef): number {
+  const headroom = remainingMs(s) - reserveFor(round.kind);
+  return Math.max(2, Math.min(s.input.childMinutes[presetOf(round.kind)], Math.floor(headroom / MIN)));
+}
+
+/** What a child of each round kind leaves on the pipeline's clock: round 0's
+ *  coding child the whole loop (two reviews and the merge poll,
+ *  SHIP_LOOP_RESERVE_MS), a findings child the re-review and the merge poll
+ *  (SHIP_FIX_RESERVE_MS), a review child nothing — the review is what the
+ *  reserve was held for. */
+function reserveFor(kind: RoundKind): number {
+  switch (kind) {
+    case "coding":
+      return SHIP_LOOP_RESERVE_MS;
+    case "findings":
+      return SHIP_FIX_RESERVE_MS;
+    case "review":
+      return 0;
+  }
 }
 
 const roundStep = (s: UnitPipelineState, round: RoundRef) => `${s.input.unit.id}/${round.index}/${round.kind}`;
@@ -693,7 +752,7 @@ export function nextAction(s: UnitPipelineState): CoordinatorAction {
         step: roundStep(s, p.round),
         preset,
         round: p.round,
-        budgetMinutes: budgetMinutesFor(s, preset),
+        budgetMinutes: budgetMinutesFor(s, p.round),
         brief: briefFor(s, p.round),
       };
     }
@@ -746,12 +805,26 @@ const roundNote = (round: RoundRef, outcome: ShipRoundOutcome): CoordinatorNote 
   outcome,
 });
 
+/** The cap's ending: `review_pending` when the clock ran out entering a
+ *  review round with the child's pull request standing — the work shipped and
+ *  only the review is missing — else the wall-clock cap. Both carry the split. */
+function capEnding(s: UnitPipelineState, round?: RoundRef): UnitEnding {
+  if (round?.kind === "review" && s.pr !== undefined)
+    return {
+      kind: "review_pending",
+      pr: s.pr,
+      ...(s.lastReviewHead !== undefined ? { headSha: s.lastReviewHead } : {}),
+      reviewRounds: s.reviewRounds,
+      spent: s.spentMs,
+    };
+  return { kind: "wall_clock_cap", remainingMs: remainingMs(s), reviewRounds: s.reviewRounds, spent: s.spentMs };
+}
+
 /** Start a round if the reservation holds (agent-ship item 8's check: a
  *  child clipped under the reserve cannot do useful work). */
 function enterRound(s: UnitPipelineState, round: RoundRef, notes: CoordinatorNote[] = []): Transition {
   const remaining = remainingMs(s);
-  if (remaining < SHIP_ROUND_RESERVE_MS)
-    return end(s, { kind: "wall_clock_cap", remainingMs: remaining, reviewRounds: s.reviewRounds }, notes);
+  if (remaining < SHIP_ROUND_RESERVE_MS) return end(s, capEnding(s, round), notes);
   const reviewRounds = round.kind === "review" ? round.index : s.reviewRounds;
   return { state: { ...s, reviewRounds, phase: { at: "spawn", round, busy: 0 } }, notes };
 }
@@ -1036,6 +1109,17 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
   ]);
 }
 
+/** Move the clock and charge the elapsed time to the budget's bucket: a phase
+ *  inside a coding or findings round is the coding child's time, a review
+ *  round's is the review's, everything else — the pre-check, the branch, busy
+ *  waits, the merge polls — is waiting. The split rides the cap endings. */
+function withClock(s: UnitPipelineState, at: number): UnitPipelineState {
+  const delta = Math.max(0, at - s.clock);
+  const round = "round" in s.phase ? s.phase.round : undefined;
+  const bucket = round === undefined ? "waiting" : round.kind === "review" ? "review" : "coding";
+  return { ...s, clock: at, spentMs: { ...s.spentMs, [bucket]: s.spentMs[bucket] + delta } };
+}
+
 /**
  * Feed a step's answer to the machine. An answer for any step but the one the
  * machine is at — a duplicate `run finished`, a replayed spawn — changes
@@ -1045,7 +1129,7 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
   const expected = nextAction(s);
   if (expected.type === "end" || ret.step !== expected.step || ret.type !== expected.type)
     return { state: s, notes: [] };
-  const clocked: UnitPipelineState = "at" in ret ? { ...s, clock: ret.at } : s;
+  const clocked: UnitPipelineState = "at" in ret ? withClock(s, ret.at) : s;
   const p = s.phase;
   switch (p.at) {
     case "pre-check": {
@@ -1056,6 +1140,20 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
       // by the coding child and adopted at the round's own pr-check.
       const r = ret as Extract<StepReturn, { type: "pr-check" }>;
       if (r.pr.state === "merged") return foundMerged(clocked, r.pr);
+      // The open pull request still heads at the child's own last push (the
+      // previous attempt ended `review_pending`): nothing to code, so the
+      // attempt adopts it and starts at the review round — never a fresh
+      // coding round on an already-shipped pull request.
+      if (r.pr.state === "open") {
+        const head = normalizeHead(r.pr.headSha);
+        const lastPush = normalizeHead(s.input.lastPush);
+        if (head !== undefined && lastPush !== undefined && sameCommit(head, lastPush))
+          return nextReview({
+            ...clocked,
+            pr: { number: r.pr.prNumber, url: r.pr.url },
+            lastReviewHead: head,
+          });
+      }
       return { state: { ...clocked, phase: { at: "branch" } }, notes: [] };
     }
     case "branch": {
@@ -1073,7 +1171,7 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
         case "spawned":
         case "alreadySpawned": {
           // The child's budget runs from the spawn's answer; the wait walks it, plus the margin, in chunks.
-          const until = clocked.clock + budgetMinutesFor(s, presetOf(p.round.kind)) * MIN + WAIT_MARGIN_MS;
+          const until = clocked.clock + budgetMinutesFor(s, p.round) * MIN + WAIT_MARGIN_MS;
           const runs =
             p.round.kind === "review"
               ? { reviewRunByRound: { ...s.reviewRunByRound, [p.round.index]: r.runId } }
@@ -1091,12 +1189,7 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
         case "busy": {
           // Another run holds the unit's thread: wait for its end, then ask
           // again — unless the pipeline's wall clock ran out meanwhile.
-          if (remainingMs(clocked) < SHIP_ROUND_RESERVE_MS)
-            return end(clocked, {
-              kind: "wall_clock_cap",
-              remainingMs: remainingMs(clocked),
-              reviewRounds: s.reviewRounds,
-            });
+          if (remainingMs(clocked) < SHIP_ROUND_RESERVE_MS) return end(clocked, capEnding(clocked, p.round));
           return {
             state: {
               ...clocked,
@@ -1213,6 +1306,12 @@ function dispositionFor(s: UnitPipelineState, finding: Finding, round: number): 
   return undefined;
 }
 
+/** How the budget went, in the card's words: coding, review, waiting minutes. */
+function budgetSplitLine(spent: ShipBudgetSpent, maxMinutes: number): string {
+  const min = (ms: number) => Math.round(ms / MIN);
+  return `Budget split (${maxMinutes} min): coding ${min(spent.coding)} min, review ${min(spent.review)} min, waiting ${min(spent.waiting)} min.`;
+}
+
 /** The cap report's declined-vs-unaddressed split over the last review round's findings. */
 function splitReport(s: UnitPipelineState): string {
   if (s.reviewRounds === 0) return "No review round ran before the cap — there are no findings to report.";
@@ -1300,7 +1399,14 @@ export function renderUnitReport(s: UnitPipelineState, facts?: MergeReadyFacts):
     case "wall_clock_cap":
       return join([
         `🧢 Ship stopped at a cap: the remaining pipeline time (~${Math.max(0, Math.round(e.remainingMs / MIN))} min of the ${s.input.caps.maxMinutes}-minute budget) cannot hold another round — no approval after ${rounds}.${prLine}`,
+        budgetSplitLine(e.spent, s.input.caps.maxMinutes),
         splitReport(s),
+        reissue,
+      ]);
+    case "review_pending":
+      return join([
+        `⏳ Review pending: the coding child shipped ${e.pr.url}${e.headSha !== undefined ? ` (head \`${e.headSha.slice(0, 7)}\`)` : ""} but the remaining pipeline time cannot hold the review round — the work stands, only the review is missing. The next attempt starts at the review round while the pull request still heads at the child's own last push.`,
+        budgetSplitLine(e.spent, s.input.caps.maxMinutes),
         reissue,
       ]);
     case "stopped":

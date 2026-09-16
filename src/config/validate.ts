@@ -6,7 +6,7 @@ import { TRACING_LOG_LEVELS } from "../core/trace/sinks.js";
 import { EFFORT_LEVELS_HINT, isEffort } from "../effort.js";
 import type { SelfImprovementConfig } from "../core/selfImprovement.js";
 import type { RunHistoryConfig } from "../core/runStore.js";
-import type { ShipConfig } from "../core/shipPipeline.js";
+import { SHIP_MIN_MAX_MINUTES, type ShipConfig } from "../core/shipPipeline.js";
 import type { SpawnConfig } from "../core/dispatch/spawn.js";
 import { validateDashboardConfig } from "../core/dashboardAuthConfig.js";
 import { validateArtifacts } from "../artifacts/config.js";
@@ -443,11 +443,18 @@ function validateShip(ship: ShipConfig): void {
       );
     throw new Error(`config.yaml: ship.${key} is not a known key`);
   }
-  for (const key of ["maxRounds", "maxMinutes"] as const) {
-    const v = ship[key];
-    if (v !== undefined && (!Number.isInteger(v) || v < 1))
-      throw new Error(`config.yaml: ship.${key} must be an integer >= 1`);
-  }
+  const rounds = ship.maxRounds;
+  if (rounds !== undefined && (!Number.isInteger(rounds) || rounds < 1))
+    throw new Error("config.yaml: ship.maxRounds must be an integer >= 1");
+  // The pipeline budgets for the loop (agent-ship item 8): the coding child's
+  // directive is clipped to leave two review rounds and the merge poll, so a
+  // budget under the loop's reserve plus one round leaves no room for the child
+  // to work at all — refused at load rather than left to cap out on every unit.
+  const minutes = ship.maxMinutes;
+  if (minutes !== undefined && (!Number.isInteger(minutes) || minutes < SHIP_MIN_MAX_MINUTES))
+    throw new Error(
+      `config.yaml: ship.maxMinutes must be an integer >= ${SHIP_MIN_MAX_MINUTES} — the pipeline reserves two review rounds and the merge poll out of it, and the coding child's budget is clipped to the rest (docs/reference/specs/agent-ship.md item 8)`,
+    );
 }
 
 /** The `spawn` block's keys, held equal to `SpawnConfig` the way the top-level keys are. */

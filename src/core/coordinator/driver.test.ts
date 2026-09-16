@@ -231,7 +231,9 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
         unit: "U10",
         step: "U10/0/coding",
         preset: "coding",
-        budget: 45,
+        // The coding preset's 45 clipped to the 45-minute wall clock minus the
+        // loop's reserve (two review rounds and the merge poll, 11 min).
+        budget: 34,
         brief: { kind: "contract", unit: "U10", rebase: { branch: "plan/fixture/u10", onto: "main" } },
       },
       {
@@ -657,14 +659,16 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     ]);
     expect(s.names().some((n) => /\/fix\b/.test(n))).toBe(false);
     expect(b.of("unit-start")).toEqual([{ parentInstanceId: INSTANCE, unit: "U10" }]);
-    // The budgets are the presets' own clipped to the plan's 45-minute wall clock: 25 left at the findings
-    // step (T0 + 20), 15 at the re-review (T0 + 30).
+    // The budgets are the presets' own clipped to the plan's 45-minute wall clock:
+    // 25 left at the findings step (T0 + 20) minus the fix reserve (the re-review
+    // and the merge poll, 8 min — never the round-0 child's 11), 15 at the
+    // re-review (T0 + 30).
     expect(b.of("spawn")[2]).toEqual({
       parentInstanceId: INSTANCE,
       unit: "U10",
       step: "U10/1/findings",
       preset: "coding",
-      budget: 25,
+      budget: 17,
       brief: { kind: "findings", unit: "U10", pr: 7, reviewRunId: "run-r1" },
     });
     expect(b.of("spawn")[3]).toEqual({
@@ -870,6 +874,89 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(transientRefusal(answer({ ok: false, error: "spawn_failed", message: "x" }, T0, 502))).toBeUndefined();
     expect(transientRefusal(answer({ ok: false, reason: "HTTP 422" }))).toBeUndefined();
     expect(transientRefusal(answer({ ok: true, state: "none" }))).toBeUndefined();
+  });
+});
+
+describe("the plan runner's driver — a shipped pull request at the wall-clock cap (review pending)", () => {
+  it("the cap after the coding child shipped ends the unit review_pending: the unit-end names the pull request and the child's own last push (headSha) so the re-issue's row can carry it, and the report says review pending with the budget split", async () => {
+    const s = steps({ "U10/0/coding/wait/1": "event" });
+    const b = bot({
+      plan: [
+        ok({
+          ok: true,
+          planId: "fixture",
+          merge: "person",
+          repo: "acme/api",
+          base: "main",
+          caps: { maxRounds: 2, maxMinutes: 40 },
+          childMinutes: { coding: 45, review: 25 },
+          units: [row("U10")],
+        }),
+      ],
+      "unit-start": [ok({ ok: true, threadKey: "slack:C1:1.0" })],
+      branch: [ok({ ok: true })],
+      spawn: [spawned("run-c0")],
+      "read-record": [codingDone("run-c0", T0 + 38 * MIN)],
+      // The pre-check, then the round's check: the pull request is open at the child's head with 2 minutes left.
+      "pr-check": [prNone(), prOpen(T0 + 38 * MIN)],
+      round: [acked(), acked()],
+      "unit-end": [acked()],
+      finish: [acked()],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary.units).toEqual({ U10: "review_pending" });
+    // The coding child's directive left the loop's reserve: 40 − 11, never 39.
+    expect(b.of("spawn")[0]).toMatchObject({ step: "U10/0/coding", preset: "coding", budget: 29 });
+    const [end] = b.of("unit-end") as Array<{
+      ending: { kind: string; report: string };
+      pr: unknown;
+      headSha?: string;
+    }>;
+    expect(end.ending.kind).toBe("review_pending");
+    expect(end.pr).toEqual({ number: 7, url: PR_URL });
+    expect(end.headSha).toBe(HEAD);
+    expect(end.ending.report).toContain("⏳ Review pending");
+    expect(end.ending.report).toContain("Budget split (40 min):");
+  });
+
+  it("a unit row carrying lastPush starts the attempt at the review round when the pre-check finds the open pull request still at that head: no branch and no coding child run again on the shipped pull request", async () => {
+    const s = steps({ "U10/1/review/wait/1": "event" });
+    const b = bot({
+      plan: [
+        ok({
+          ok: true,
+          planId: "fixture",
+          merge: "person",
+          repo: "acme/api",
+          base: "main",
+          caps: { maxRounds: 2, maxMinutes: 45 },
+          childMinutes: { coding: 45, review: 25 },
+          units: [row("U10", { lastPush: HEAD })],
+        }),
+      ],
+      "unit-start": [ok({ ok: true, threadKey: "slack:C1:1.0" })],
+      spawn: [spawned("run-r1")],
+      "read-record": [reviewApproved("run-r1", T0 + 5 * MIN)],
+      // The pre-check finds the pull request open at exactly the child's last
+      // push, then the merge_ready ending reads the facts at the approved head.
+      "pr-check": [prOpen(), prOpen(T0 + 5 * MIN)],
+      round: [acked(), acked()],
+      "unit-end": [acked()],
+      finish: [acked()],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary.units).toEqual({ U10: "merge_ready" });
+    expect(b.of("branch")).toEqual([]);
+    expect(b.of("spawn")).toEqual([
+      {
+        parentInstanceId: INSTANCE,
+        unit: "U10",
+        step: "U10/1/review",
+        preset: "review",
+        budget: 25,
+        brief: { kind: "review", unit: "U10", pr: 7, headSha: HEAD, round: 1 },
+      },
+    ]);
   });
 });
 

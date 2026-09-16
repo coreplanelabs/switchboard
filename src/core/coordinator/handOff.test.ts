@@ -253,6 +253,30 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     ]);
   });
 
+  it("a re-issue after a review_pending ending carries the row's lastPush — the coding child's own last push — onto the next attempt's row, so its pre-check starts at the review round", async () => {
+    const id = "plan-warm-the-cache-on-wake-dfa06c";
+    const req = input({
+      entry: { repo: "acme/api", base: "main" },
+      requestText: "in acme/api: warm the cache on wake",
+    });
+    const h = harness({ status: { [id]: { kind: "status", status: "complete" } } });
+    await handOffToCoordinator(h.deps, req);
+    const rows = await h.instances.listUnits(id);
+    await h.instances.putUnits([
+      {
+        ...rows[0]!,
+        lastPush: "abcdef1234abcdef1234abcdef1234abcdef1234",
+        ending: { kind: "review_pending", at: NOW } as unknown as CoordinatorUnit["ending"],
+      },
+    ]);
+    const attempt2 = await handOffToCoordinator(h.deps, req);
+    expect(attempt2.status).toBe("completed");
+    // The same unit, on attempt 2's row, carrying the head attempt 1 recorded.
+    expect(await h.instances.listUnits(`${id}-2`)).toMatchObject([
+      { unit: rows[0]!.unit, lastPush: "abcdef1234abcdef1234abcdef1234abcdef1234" },
+    ]);
+  });
+
   it("a resume at review (agent-ship item 10) is the one generated unit with the pull request on its row and the entry's branch — the pull request's own head — so the runner opens it at the review round; the reply names the pull request and that no coding round runs first", async () => {
     const h = harness();
     const id = "plan-implement-the-task-this-f502bc";

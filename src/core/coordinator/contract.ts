@@ -182,6 +182,11 @@ export interface CoordinatorUnit {
    *  — no pre-check, no branch, no round 0. A task string's row only; written by
    *  the hand-off, read by the driver into the machine's input. */
   resume?: { pr: number; headSha?: string; url?: string };
+  /** The head the unit's own coding child last pushed, recorded when the unit
+   *  ended `review_pending` (the wall clock capped after the pull request was
+   *  opened or updated): the next attempt's pre-check starts at the review
+   *  round when the open pull request still heads exactly here. */
+  lastPush?: string;
   /** The round boundaries the coordinator reported, oldest first (the `ship_round` vocabulary). */
   rounds: Array<{ index: number; agent: string; outcome: string; at: number }>;
   /** How the unit ended: the ending's kind and the thread's report, when it has. */
@@ -244,6 +249,7 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   if (r.issue !== undefined && !isFinite(r.issue)) return false;
   if (r.pr !== undefined && !isPr(r.pr)) return false;
   if (r.resume !== undefined && !isResume(r.resume)) return false;
+  if (r.lastPush !== undefined && !isText(r.lastPush)) return false;
   if (
     !Array.isArray(r.rounds) ||
     r.rounds.length > MAX_ROUNDS ||

@@ -802,8 +802,14 @@ describe("ship caps block (agent:ship pipeline)", () => {
   it("rejects non-integers and values < 1 at load, naming the key", async () => {
     expect(() => store(YAML_FIXTURE + "ship:\n  maxRounds: 0\n")).toThrow(/ship\.maxRounds must be an integer >= 1/);
     expect(() => store(YAML_FIXTURE + "ship:\n  maxMinutes: 1.5\n")).toThrow(
-      /ship\.maxMinutes must be an integer >= 1/,
+      /ship\.maxMinutes must be an integer >= 14/,
     );
+    // The pipeline budgets for the loop: a maxMinutes under the loop's reserve
+    // plus one round leaves the coding child no room at all, refused at load.
+    expect(() => store(YAML_FIXTURE + "ship:\n  maxMinutes: 13\n")).toThrow(
+      /ship\.maxMinutes must be an integer >= 14 — the pipeline reserves two review rounds and the merge poll/,
+    );
+    expect(store(YAML_FIXTURE + "ship:\n  maxMinutes: 14\n").config.ship).toEqual({ maxMinutes: 14 });
     expect(() => store(YAML_FIXTURE + 'ship: "nope"\n')).toThrow(/ship must be a mapping/);
   });
 
