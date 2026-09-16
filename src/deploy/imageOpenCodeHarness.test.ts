@@ -25,6 +25,9 @@ const ALL_IMAGES = [...EXECUTION_IMAGES, BOT] as const;
 
 export const OPENCODE_PACKAGE = "@opencode/cli";
 const OPENCODE_PROOF = `opencode --version | grep -qx '${OPENCODE_VERSION_TEXT}'`;
+
+/** A literal for a RegExp: every metacharacter escaped, the backslash included. */
+const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const ALLOW_SCRIPTS = `--allow-scripts=${OPENCODE_PACKAGE}`;
 
 /** The instruction lines of a Dockerfile, continuations joined, comments dropped. */
@@ -60,7 +63,7 @@ describe.each(ALL_IMAGES)("%s", (path) => {
     // The install carries the one package: the allowlist could not quietly cover another.
     expect(layer).toMatch(
       new RegExp(
-        `npm install -g ${ALLOW_SCRIPTS} ${OPENCODE_PACKAGE.replace("/", "\\/")}@${OPENCODE_VERSION.replace(/\./g, "\\.")} `,
+        `npm install -g ${escapeRegExp(ALLOW_SCRIPTS)} ${escapeRegExp(OPENCODE_PACKAGE)}@${escapeRegExp(OPENCODE_VERSION)} `,
       ),
     );
   });
@@ -115,7 +118,7 @@ describe("the resident image proves OpenCode as a thread user", () => {
     const lines = instructions(read(RESIDENT));
     const pool = lines.findIndex((l) => /useradd -m -u "\$\(\(2000 \+ i\)\)"/.test(l));
     const asWorker = lines.findIndex((l) =>
-      new RegExp(`^RUN su -s /bin/bash worker1 -c ".*${OPENCODE_PROOF.replace(/[|'.]/g, "\\$&")}`).test(l),
+      new RegExp(`^RUN su -s /bin/bash worker1 -c ".*${escapeRegExp(OPENCODE_PROOF)}`).test(l),
     );
     expect(pool).toBeGreaterThan(-1);
     expect(asWorker).toBeGreaterThan(pool);

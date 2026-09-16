@@ -1,6 +1,6 @@
 // How a run's OpenCode is launched (docs/reference/specs/harness.md, the
 // OpenCode process item; record 0038's fourth amendment): the layout of the
-// run's directory — per-run XDG roots, a home of its own, the configuration
+// run's directory — per-run XDG roots, the configuration
 // file, the relay plugin's directory, the server's logs, the feed the tailer
 // writes, the pid files — the environment that hands `opencode serve` the run
 // bearer as its provider key and the bot's URL as the provider's home (never a
@@ -21,6 +21,7 @@ import type { Clock } from "../../trace/types.js";
 import {
   HarnessContainerError,
   isContainerGone,
+  LOG_READ_BYTES,
   PORT_ARG,
   type HarnessContainer,
   type HarnessPaths,
@@ -33,6 +34,7 @@ import {
   OPENCODE_VERSION,
   openCodeAuthHeader,
   parseConfigEntries,
+  parseFeedRecord,
   parseHealth,
   type OpenCodeConfigEntry,
   type OpenCodePermissionRule,
@@ -59,6 +61,10 @@ export const OPENCODE_PASSWORD_ENV = "OPENCODE_PASSWORD";
 export const OPENCODE_READY_MS = 30_000;
 /** Between two readiness probes that found no server yet. */
 export const OPENCODE_READY_POLL_MS = 250;
+/** The most a readiness poll backs off to, once the first second has passed with no answer. */
+export const OPENCODE_READY_POLL_MAX_MS = 2_000;
+/** The model's context window when the spec names none: OpenCode compacts against it. */
+export const OPENCODE_DEFAULT_CONTEXT_TOKENS = 200_000;
 /** How much of the server's stderr a readiness failure quotes. */
 const READY_TAIL_BYTES = 2000;
 
@@ -71,8 +77,6 @@ const READY_TAIL_BYTES = 2000;
 export interface OpenCodeRunPaths extends HarnessPaths {
   /** The four XDG roots (`packages/util/src/global-roots.ts:5-8`): every global path OpenCode has, under the run. */
   xdg: { data: string; config: string; cache: string; state: string };
-  /** `HOME` for the process: `~` in a shell command and the protected-path list resolve here, not to the container user's home. */
-  home: string;
   /** `OPENCODE_CONFIG`: the one configuration document the server loads. */
   config: string;
   /** The relay plugin's directory (`OPENCODE_PLUGIN_REF` resolved), and its entrypoint. */
@@ -104,21 +108,19 @@ export function openCodeRunPathsAt(dir: string): OpenCodeRunPaths {
     cache: `${dir}/xdg/cache`,
     state: `${dir}/xdg/state`,
   };
-  const home = `${dir}/home`;
   const pluginDir = `${dir}/plugins/switchboard`;
   const commandDir = `${dir}/cmd`;
   const feed = `${dir}/feed.jsonl`;
   return {
     dir,
     // The directories the start makes at 700, the root first.
-    dirs: [dir, xdg.data, xdg.config, xdg.cache, xdg.state, home, pluginDir, commandDir],
+    dirs: [dir, xdg.data, xdg.config, xdg.cache, xdg.state, pluginDir, commandDir],
     fifo: `${dir}/serve.in`,
     log: `${dir}/serve.log`,
     errLog: `${dir}/serve.err`,
     pidFile: `${dir}/pid`,
     commandDir,
     xdg,
-    home,
     config: `${dir}/opencode.json`,
     pluginDir,
     plugin: `${pluginDir}/index.js`,
@@ -215,8 +217,10 @@ export interface OpenCodeCompactionConfig {
 export interface OpenCodeLaunchSpec {
   runId: string;
   paths: OpenCodeRunPaths;
-  /** The resolved model and the provider's wire shape — the proxy route the server calls. */
-  model: { id: string; providerType: ProviderConfig["type"]; maxTokens: number };
+  /** The resolved model and the provider's wire shape — the proxy route the server calls.
+   *  `contextTokens` is the model's window, which OpenCode compacts against; absent,
+   *  `OPENCODE_DEFAULT_CONTEXT_TOKENS` stands and the compaction timing is a guess. */
+  model: { id: string; providerType: ProviderConfig["type"]; maxTokens: number; contextTokens?: number };
   /** The bot's base URL as the server reaches it: the public one from a run's container, the bot's loopback from the bot host. */
   harnessUrl: string;
   identity: Identity;
@@ -293,7 +297,7 @@ export function openCodeSystemPrompt(spec: OpenCodeLaunchSpec): string {
  *  take `false`: `packages/schema/src/config/lsp.ts:19`, `formatter.ts:14`); and
  *  the compaction thresholds when the deployment sets them. */
 export function openCodeConfig(spec: OpenCodeLaunchSpec): Record<string, unknown> {
-  const { id, maxTokens, providerType } = spec.model;
+  const { id, maxTokens, providerType, contextTokens } = spec.model;
   const compaction = {
     ...(spec.compaction?.buffer !== undefined ? { buffer: spec.compaction.buffer } : {}),
     ...(spec.compaction?.keepTokens !== undefined ? { keep: { tokens: spec.compaction.keepTokens } } : {}),
@@ -307,7 +311,7 @@ export function openCodeConfig(spec: OpenCodeLaunchSpec): Record<string, unknown
         models: {
           [id]: {
             name: id,
-            limit: { context: 200_000, output: maxTokens },
+            limit: { context: contextTokens ?? OPENCODE_DEFAULT_CONTEXT_TOKENS, output: maxTokens },
             cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
           },
         },
@@ -381,10 +385,10 @@ export function openCodePassword(bearer: string): string {
 
 /** The server's environment beyond what the executor's shell already has: the
  *  bearer under the name the configuration interpolates, the bot's URL for the
- *  plugin, the run's id, the four XDG roots and a home under the run
- *  (`HOME` decides `~` in the model's shell commands and OpenCode's
- *  protected-path list: `packages/core/src/shell/parse.ts:322-334`,
- *  `filesystem/protected.ts:4`), the one configuration document with the
+ *  plugin, the run's id, the four XDG roots under the run (every global path
+ *  OpenCode has, `packages/util/src/global-roots.ts:5-8`; `HOME` is left the
+ *  container user's, so the model's shell sees the same `~/.gitconfig`,
+ *  `~/.npmrc` and the rest that pi's shell sees), the one configuration document with the
  *  project's own configuration disabled under both names the server reads
  *  (`packages/cli/src/server-process.ts:107-109`: the first wins when both are
  *  set), the models catalogue and the update check off, the store in memory,
@@ -397,7 +401,6 @@ export function openCodeLaunchEnv(spec: OpenCodeLaunchSpec, bearer: string, pass
     [RUN_BEARER_ENV]: bearer,
     [HARNESS_URL_ENV]: spec.harnessUrl,
     SWITCHBOARD_RUN_ID: spec.runId,
-    HOME: paths.home,
     XDG_DATA_HOME: paths.xdg.data,
     XDG_CONFIG_HOME: paths.xdg.config,
     XDG_CACHE_HOME: paths.xdg.cache,
@@ -487,6 +490,8 @@ export interface OpenCodeStarted {
   password: string;
   paths: OpenCodeRunPaths;
   version: string;
+  /** The feed byte after the tailer's `connected` note: the first `logOffset` the row carries. */
+  feedOffset: number;
 }
 
 /** The launch: the root the container makes for the run, the files, the
@@ -523,20 +528,30 @@ export async function launchOpenCode(
   const auth = { Authorization: openCodeAuthHeader(password) };
   const request = (route: { method: string; path: string }): Promise<HarnessResponse> =>
     container.request(paths, { method: route.method, port, path: route.path, secretHeaders: auth });
-  const notReady = async (reason: string) =>
-    new OpenCodeNotReadyError(reason, await container.tail(paths.errLog, READY_TAIL_BYTES));
+  const notReady = async (reason: string, errLog = paths.errLog) =>
+    new OpenCodeNotReadyError(reason, await container.tail(errLog, READY_TAIL_BYTES));
 
-  const deadline = clock() + readyMs;
+  const startedAt = clock();
+  const deadline = startedAt + readyMs;
   let last = "no answer yet";
   let version: string | undefined;
+  // A server that answered any status is alive: the pid is probed only before
+  // the first request and after a request that reached no server, and the
+  // poll backs off once the first second has passed — on the exec classes
+  // every probe and every request is one command.
+  let probePid = true;
+  let poll = pollMs;
   while (version === undefined) {
-    if (!(await container.alive(pid))) throw await notReady("the server exited before it answered its health");
+    if (probePid && !(await container.alive(pid)))
+      throw await notReady("the server exited before it answered its health");
     let res: HarnessResponse | undefined;
     try {
       res = await request(OPENCODE_ROUTES["health.get"]);
+      probePid = false;
     } catch (err) {
       if (isContainerGone(err)) throw err;
       last = err instanceof Error ? err.message : String(err);
+      probePid = true;
     }
     if (res) {
       if (res.status === 401) throw await notReady("the server refused the run's password");
@@ -552,7 +567,8 @@ export async function launchOpenCode(
     }
     if (clock() >= deadline)
       throw await notReady(`the server did not answer its health within ${readyMs} ms (${last})`);
-    await sleep(pollMs);
+    await sleep(poll);
+    if (clock() - startedAt >= 1000) poll = Math.min(OPENCODE_READY_POLL_MAX_MS, poll * 2);
   }
 
   const config = await request(OPENCODE_ROUTES["config.get"]);
@@ -574,8 +590,37 @@ export async function launchOpenCode(
     args: [paths.tailerScript],
     env: openCodeTailerEnv(password, pid),
     port,
+    // The feed is read by offset and a later generation may restart the
+    // tailer over it: its log is never truncated by a start.
+    keepLog: true,
   });
-  return { pid, port, tailerPid: tailer.pid, password, paths, version };
+  // Readiness ends when the tailer is subscribed, not when it is started: the
+  // first session's earliest events — its creation, its first step, a
+  // first-step ask — would otherwise be emitted before anyone listens, and the
+  // step-end refill repairs messages, never asks. The end of the tailer's
+  // `connected` note is the feed byte the row starts reading from.
+  let feedOffset: number | undefined;
+  poll = pollMs;
+  while (feedOffset === undefined) {
+    const text = Buffer.from(await container.readLog(paths.feed, 0, LOG_READ_BYTES)).toString("utf8");
+    let consumed = 0;
+    for (const line of text.split("\n").slice(0, -1)) {
+      consumed += Buffer.byteLength(line, "utf8") + 1;
+      const record = parseFeedRecord(line);
+      if (record?.feed === "tailer" && record.note === "connected") {
+        feedOffset = consumed;
+        break;
+      }
+    }
+    if (feedOffset !== undefined) break;
+    if (!(await container.alive(tailer.pid)))
+      throw await notReady("the tailer exited before it connected to the event stream", paths.tailer.errLog);
+    if (clock() >= deadline)
+      throw await notReady(`the tailer did not connect to the event stream within ${readyMs} ms`, paths.tailer.errLog);
+    await sleep(poll);
+    if (clock() - startedAt >= 1000) poll = Math.min(OPENCODE_READY_POLL_MAX_MS, poll * 2);
+  }
+  return { pid, port, tailerPid: tailer.pid, password, paths, version, feedOffset };
 }
 
 /** What a run's row remembers about its OpenCode (`OpenCodeHarnessFacts`): the
@@ -583,7 +628,7 @@ export async function launchOpenCode(
  *  feed byte the ledger's effect reaches, the bearer's hash (never the
  *  bearer), the container's word, and the loop's relaunch count. */
 export function openCodeFacts(
-  started: Pick<OpenCodeStarted, "pid" | "port" | "paths">,
+  started: Pick<OpenCodeStarted, "pid" | "port" | "paths" | "tailerPid">,
   run: { sessionID: string; logOffset: number; bearer?: string; container?: string; relaunches: number },
 ): OpenCodeHarnessFacts {
   const bearerHash = run.bearer === undefined ? undefined : bearerHashOf(run.bearer);
@@ -591,6 +636,7 @@ export function openCodeFacts(
     harness: "opencode",
     pid: started.pid,
     port: started.port,
+    tailerPid: started.tailerPid,
     logOffset: run.logOffset,
     sessionID: run.sessionID,
     root: started.paths.dir,

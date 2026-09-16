@@ -47,7 +47,7 @@ import {
 import { OPENCODE_SERVE_PID_ENV, OPENCODE_TAILER_SOURCE } from "./tailerSource.js";
 
 // Feature: docs/reference/specs/harness.md, the OpenCode process item — how a
-// run's OpenCode is launched: per-run roots and a home under the run, the
+// run's OpenCode is launched: per-run roots under the run, the
 // bearer as the provider key through the environment (never a command line,
 // never a model key), the proxy as the one provider, the `switchboard` agent
 // whose rules ask the bot before every tool and hide what the identity does
@@ -103,12 +103,12 @@ function evaluate(action: string, rules: readonly OpenCodePermissionRule[]): Ope
 const decodeConfig = Schema.decodeUnknownResult(ConfigInfo, { errors: "all" });
 
 describe("openCodeRunPaths", () => {
-  it("files the run directly under /tmp, every path derived from the run id, the XDG roots and a home of its own among the directories the start makes", () => {
+  it("files the run directly under /tmp, every path derived from the run id, the XDG roots among the directories the start makes; HOME is left the container user's", () => {
     const p = openCodeRunPaths("run-7");
     expect(p.dir).toBe("/tmp/switchboard-oc-run-7");
     expect(p.dirs[0]).toBe(p.dir);
     expect(p.dirs).toEqual(
-      expect.arrayContaining([p.xdg.data, p.xdg.config, p.xdg.cache, p.xdg.state, p.home, p.pluginDir, p.commandDir]),
+      expect.arrayContaining([p.xdg.data, p.xdg.config, p.xdg.cache, p.xdg.state, p.pluginDir, p.commandDir]),
     );
     expect(p.xdg).toEqual({
       data: `${p.dir}/xdg/data`,
@@ -116,7 +116,7 @@ describe("openCodeRunPaths", () => {
       cache: `${p.dir}/xdg/cache`,
       state: `${p.dir}/xdg/state`,
     });
-    expect(p.home).toBe(`${p.dir}/home`);
+    expect(p).not.toHaveProperty("home");
     expect(p.config).toBe(`${p.dir}/opencode.json`);
     expect(p.pluginDir).toBe(`${p.dir}/plugins/switchboard`);
     expect(p.plugin).toBe(`${p.pluginDir}/index.js`);
@@ -167,7 +167,6 @@ describe("openCodeLaunchArgs and the environment", () => {
           RUN_BEARER_ENV,
           HARNESS_URL_ENV,
           "SWITCHBOARD_RUN_ID",
-          "HOME",
           "XDG_DATA_HOME",
           "XDG_CONFIG_HOME",
           "XDG_CACHE_HOME",
@@ -184,7 +183,7 @@ describe("openCodeLaunchArgs and the environment", () => {
       expect(env[RUN_BEARER_ENV]).toBe(BEARER);
       expect(env[HARNESS_URL_ENV]).toBe("https://bot.example.com/");
       expect(env.SWITCHBOARD_RUN_ID).toBe("run-7");
-      expect(env.HOME).toBe(spec.paths.home);
+      expect(env).not.toHaveProperty("HOME");
       expect(env.XDG_DATA_HOME).toBe(spec.paths.xdg.data);
       expect(env.XDG_CONFIG_HOME).toBe(spec.paths.xdg.config);
       expect(env.XDG_CACHE_HOME).toBe(spec.paths.xdg.cache);
@@ -435,7 +434,9 @@ describe("configProblem — the loaded document held against what was written", 
 
 /** A launch over the fake container: a scripted server answering the three
  *  readiness routes, the clock advanced by every sleep. */
-function harness(opts: { onRequest?: (req: HarnessRequest, container: FakeHarnessContainer) => HarnessResponse } = {}) {
+function harness(
+  opts: { onRequest?: (req: HarnessRequest, container: FakeHarnessContainer) => HarnessResponse; feed?: false } = {},
+) {
   const container = new FakeHarnessContainer();
   let now = 1_000_000;
   const clock = () => now;
@@ -474,6 +475,18 @@ function harness(opts: { onRequest?: (req: HarnessRequest, container: FakeHarnes
     return json(404, { error: "no such route" });
   };
   container.onRequest = opts.onRequest ?? serverFor(spec);
+  /** What the tailer writes first once it is subscribed: the note readiness waits for. */
+  const connected = JSON.stringify({ feed: "tailer", at: 1, note: "connected", connections: 1 }) + "\n";
+  /** The feed as a tailer that started and subscribed would have left it: the
+   *  fake starts no process, so the test says what the tailer would have said
+   *  through the fake's one log, which is the feed once the tailer's start named it. */
+  const feedConnected = () => {
+    container.emit({ feed: "tailer", at: 0, note: "started" });
+    container.emit({ feed: "tailer", at: 1, note: "connected", connections: 1 });
+  };
+  if (opts.feed !== false) feedConnected();
+  /** The feed's bytes as the harness reads them. */
+  const feedText = async () => Buffer.from(await container.readLog(spec.paths.feed, 0, 65536)).toString("utf8");
   return {
     container,
     clock,
@@ -484,6 +497,9 @@ function harness(opts: { onRequest?: (req: HarnessRequest, container: FakeHarnes
     health,
     configEcho,
     serverFor,
+    feedConnected,
+    connected,
+    feedText,
     deps: { container, clock, sleep, pollMs: 250 },
   };
 }
@@ -498,7 +514,10 @@ describe("launchOpenCode — the server started through the seam and found ready
       tailerPid: 4242,
       password: h.password,
       version: OPENCODE_VERSION,
+      // The byte after the tailer's `connected` note: where the row starts reading the feed.
+      feedOffset: Buffer.byteLength(await h.feedText(), "utf8"),
     });
+    expect(started.feedOffset).toBeGreaterThan(Buffer.byteLength(h.connected, "utf8"));
     expect(started.paths).toEqual(spec.paths);
     // The files, before the start.
     expect([...h.container.files.keys()]).toEqual([spec.paths.config, spec.paths.plugin, spec.paths.tailerScript]);
@@ -536,7 +555,7 @@ describe("launchOpenCode — the server started through the seam and found ready
   });
 
   it("the row's facts carry the port and the root the launch settled on, the bearer's hash and never the bearer", () => {
-    const started = { pid: 4242, port: 41000, paths: spec.paths };
+    const started = { pid: 4242, port: 41000, tailerPid: 4243, paths: spec.paths };
     const facts = openCodeFacts(started, {
       sessionID: "ses_1",
       logOffset: 120,
@@ -548,6 +567,7 @@ describe("launchOpenCode — the server started through the seam and found ready
       harness: "opencode",
       pid: 4242,
       port: 41000,
+      tailerPid: 4243,
       logOffset: 120,
       sessionID: "ses_1",
       root: "/tmp/switchboard-oc-run-7",
@@ -562,10 +582,11 @@ describe("launchOpenCode — the server started through the seam and found ready
   });
 
   it("files under the root the container makes when it is not the one proposed, and the facts name that root", async () => {
-    const h = harness();
+    const h = harness({ feed: false });
     h.container.makeRoot = async (wanted) => `${wanted}-k3`;
     const placed = openCodeRunPathsAt("/tmp/switchboard-oc-run-7-k3");
     h.container.onRequest = h.serverFor({ ...spec, paths: placed });
+    h.feedConnected();
     const started = await launchOpenCode(h.deps, spec, BEARER);
     expect(started.paths).toEqual(placed);
     expect([...h.container.files.keys()]).toEqual([placed.config, placed.plugin, placed.tailerScript]);
@@ -676,6 +697,45 @@ describe("launchOpenCode — the server started through the seam and found ready
       req.path === "/api/plugin/await-activation" ? activation.json(500, { error: "boom" }) : serve4(req, c);
     await expect(launchOpenCode(activation.deps, spec, BEARER)).rejects.toThrow(/plugin activation answered 500/);
     expect(activation.container.starts).toHaveLength(1);
+  });
+
+  it("readiness ends only when the tailer says it is connected: a feed without the note within the bound is a named failure with the tailer's stderr, a tailer that exited first is another, and the feed offset answered is the byte after the note", async () => {
+    const silent = harness({ feed: false });
+    silent.container.files.set(spec.paths.tailer.errLog, "tailer: ECONNREFUSED\n");
+    const promise = launchOpenCode({ ...silent.deps, readyMs: 1000 }, spec, BEARER);
+    await expect(promise).rejects.toBeInstanceOf(OpenCodeNotReadyError);
+    await expect(promise).rejects.toThrow(/the tailer did not connect to the event stream within 1000 ms/);
+    await expect(promise).rejects.toThrow(/stderr: tailer: ECONNREFUSED/);
+    expect(silent.container.starts).toHaveLength(2);
+
+    const exited = harness({ feed: false });
+    const start = exited.container.start.bind(exited.container);
+    exited.container.start = async (s) => {
+      const answer = await start(s);
+      if (s.command === TAILER_BIN) exited.container.die();
+      return answer;
+    };
+    exited.container.files.set(spec.paths.tailer.errLog, "node: cannot find module\n");
+    await expect(launchOpenCode(exited.deps, spec, BEARER)).rejects.toThrow(
+      /the tailer exited before it connected.*node: cannot find module/,
+    );
+
+    // The note lands after a poll: the offset is the byte after it, not the end of what follows.
+    const late = harness({ feed: false });
+    let polls = 0;
+    const sleep = late.deps.sleep;
+    late.deps.sleep = async (ms: number) => {
+      await sleep(ms);
+      if (++polls === 2) {
+        late.feedConnected();
+        late.container.emit({ feed: "event", at: 2, event: {} });
+      }
+    };
+    const started = await launchOpenCode(late.deps, spec, BEARER);
+    const feed = await late.feedText();
+    expect(started.feedOffset).toBe(feed.indexOf(late.connected) + late.connected.length);
+    expect(started.feedOffset).toBeLessThan(Buffer.byteLength(feed, "utf8"));
+    expect(polls).toBeGreaterThanOrEqual(2);
   });
 
   it("a container gone under the readiness probe is the typed error, rethrown as it is, never a not-ready verdict", async () => {

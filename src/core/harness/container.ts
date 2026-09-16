@@ -60,6 +60,12 @@ export interface HarnessStart {
    *  port replaces `PORT_ARG` in the arguments, rides the environment under
    *  `HARNESS_PORT_ENV`, and comes back as `HarnessStarted.port`, for the row. */
   port?: number | "free";
+  /** Keep the log's bytes: the wrapper creates the log when it is missing and
+   *  appends, instead of truncating it. For a process whose log is a file the
+   *  harness reads by offset and may restart the writer of (OpenCode's tailer,
+   *  whose stdout is the run's feed): a restart must not wipe what a recorded
+   *  offset points into. Absent, the log starts empty, as pi's always has. */
+  keepLog?: boolean;
 }
 
 /** What a start answers: the pid the wrapper recorded — the leader of the
@@ -218,7 +224,7 @@ function portLine(port: number | "free"): string {
  *  them. A start that names a port exports it first and says it on the first
  *  line of the output; the pid is the last line either way. */
 export function startScript(start: HarnessStart): string {
-  const { paths, command, args, port, stdoutFilter } = start;
+  const { paths, command, args, port, stdoutFilter, keepLog } = start;
   if (!COMMAND_WORD.test(command)) throw new HarnessContainerError("start", `not a program name: ${command}`);
   checkPortArg(start);
   const argv = args.map((a) => (a === PORT_ARG ? `"$${HARNESS_PORT_ENV}"` : shellQuote(a)));
@@ -233,7 +239,7 @@ export function startScript(start: HarnessStart): string {
     `(umask 077 && mkdir -p ${paths.dirs.map(shellQuote).join(" ")})`,
     `rm -f ${shellQuote(paths.fifo)}`,
     `mkfifo -m 600 ${shellQuote(paths.fifo)}`,
-    `: > ${shellQuote(paths.log)}`,
+    keepLog ? `: >> ${shellQuote(paths.log)}` : `: > ${shellQuote(paths.log)}`,
     `: > ${shellQuote(paths.errLog)}`,
     `setsid -f sh -c ${shellQuote(inner)}`,
     `sleep 0.3`,

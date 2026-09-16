@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { shellQuote } from "../../execution/shellQuote.js";
 import { ExecSandboxRestartedError, type ExecOptions, type Executor } from "../../execution/executor.js";
 import {
   CURL_MAX_TIME_S,
@@ -115,6 +116,22 @@ describe("the container scripts", () => {
     );
     expect(() => startScript({ paths, command: "pi; rm -rf /", args: [], env: {} })).toThrow(HarnessContainerError);
     expect(() => startScript({ paths, command: "$(pi)", args: [], env: {} })).toThrow(/not a program name/);
+  });
+
+  it("keepLog: the wrapper creates the log when it is missing and appends instead of truncating it, so a restarted writer (the tailer, whose stdout is a feed read by offset) keeps what a recorded offset points into; pi never sets it and its script is unchanged", () => {
+    const kept = startScript({
+      paths,
+      command: "node",
+      args: ["/tmp/switchboard-oc-run-7/tailer.js"],
+      env: {},
+      keepLog: true,
+    });
+    expect(kept).toContain(`: >> ${shellQuote(paths.log)}`);
+    expect(kept).not.toContain(`: > ${shellQuote(paths.log)}`);
+    expect(kept).toContain(`: > ${shellQuote(paths.errLog)}`);
+    const fresh = startScript({ paths, command: "node", args: [], env: {} });
+    expect(fresh).toContain(`: > ${shellQuote(paths.log)}`);
+    expect(fresh).not.toContain(": >>");
   });
 
   it("a start that names a port exports it first and says it on the first line — picked in the container with node for `free`, as given for a number — and the port's placeholder among the arguments becomes the variable; the placeholder with no port named is refused by name", () => {
