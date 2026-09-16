@@ -6,8 +6,11 @@
 // write preset is `ship`: a routed write ask runs the coding → review loop,
 // its generated plan merged by a person); five decoys
 // that look imperative but are read-only (a question or a check about the same
-// failure), which must never reach a write preset; and five review-shaped asks
-// that name a pull request, which are a review, not an order to change it. The
+// failure), which must never reach a write preset; and six review-shaped asks
+// that name a pull request, which are a review, not an order to change it —
+// one of them with a note about the request's own history ("retry at head …:
+// the run died"), the shape the replay routed to `ship` once `ship` held the
+// write seat. The
 // set exists because the replay over the run history has almost no such
 // requests: the one it had was the router's one real coding misroute. Neutral
 // names only (acme/…, PR NNNN): the public tree carries no private references.
@@ -60,4 +63,10 @@ export const ROUTE_IMPERATIVE_FIXTURES: readonly RouteImperativeFixture[] = [
   { id: "r03", kind: "review", text: "review https://github.com/acme/api/pull/1080", presets: REVIEW },
   { id: "r04", kind: "review", text: "take a look at PR 1077 before I merge it", presets: REVIEW },
   { id: "r05", kind: "review", text: "does PR 91 look right to you?", presets: REVIEW },
+  {
+    id: "r06",
+    kind: "review",
+    text: "https://github.com/acme/api/pull/3179 (retry at head c6583d2: the run died)",
+    presets: REVIEW,
+  },
 ];

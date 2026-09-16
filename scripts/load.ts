@@ -1040,7 +1040,7 @@ async function piReviewSuite(f: Flags): Promise<boolean> {
  *  presets against the unit's bar, and the history's `conductor` requests —
  *  few — on detection, their count printed.
  *  Then the imperative half: the checked-in set of terse imperatives (twenty,
- *  five read-only decoys, five review-shaped) scored on reaching coding and on
+ *  five read-only decoys, six review-shaped) scored on reaching the table's write preset and on
  *  no look-alike reaching a write preset. Live model spend: one small call per
  *  request, the key from the environment. */
 async function routeReplay(f: Flags): Promise<boolean> {

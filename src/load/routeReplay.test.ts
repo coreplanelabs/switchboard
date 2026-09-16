@@ -616,13 +616,13 @@ describe("the checked-in imperative set (src/load/routeImperativeFixtures.ts)", 
   const names = table.map((p) => p.name);
   const writers = table.filter((p) => p.identity === "write").map((p) => p.name);
 
-  it("is twenty terse imperatives expecting a write preset, five read-only decoys expecting research or general, five review-shaped asks expecting review; every preset a row of the table, every id unique", () => {
+  it("is twenty terse imperatives expecting a write preset, five read-only decoys expecting research or general, six review-shaped asks expecting review; every preset a row of the table, every id unique", () => {
     const imperatives = ROUTE_IMPERATIVE_FIXTURES.filter((f) => f.kind === "imperative");
     const decoys = ROUTE_IMPERATIVE_FIXTURES.filter((f) => f.kind === "decoy");
     const reviews = ROUTE_IMPERATIVE_FIXTURES.filter((f) => f.kind === "review");
     expect(imperatives).toHaveLength(20);
     expect(decoys).toHaveLength(5);
-    expect(reviews).toHaveLength(5);
+    expect(reviews).toHaveLength(6);
     for (const f of imperatives) expect(f.presets, f.id).toEqual(writers);
     for (const f of decoys) expect([...f.presets].sort(), f.id).toEqual(["general", "research"]);
     for (const f of reviews) expect(f.presets, f.id).toEqual(["review"]);
@@ -635,6 +635,12 @@ describe("the checked-in imperative set (src/load/routeImperativeFixtures.ts)", 
     expect(new Set(ROUTE_IMPERATIVE_FIXTURES.map((f) => f.id)).size).toBe(ROUTE_IMPERATIVE_FIXTURES.length);
     // The one real misroute the replay at the flip found is on the set, verbatim.
     expect(imperatives.map((f) => f.text)).toContain("looks like the ci failed, fix it");
+    // The one real read-to-write misroute the replay after the ship door found — a
+    // pull request named with a note about the request's own history — is on the
+    // set as a review-shaped ask, on a neutral repository.
+    expect(reviews.map((f) => f.text)).toContain(
+      "https://github.com/acme/api/pull/3179 (retry at head c6583d2: the run died)",
+    );
   });
 });
 
@@ -704,16 +710,16 @@ describe("the imperative set through route() over a scripted model", () => {
       imperatives: 20,
       imperativesHit: 20,
       hitRate: 1,
-      lookalikes: 10,
+      lookalikes: 11,
       lookalikesToWrite: 0,
       decoys: 5,
       decoysHit: 5,
-      reviews: 5,
-      reviewsHit: 5,
+      reviews: 6,
+      reviewsHit: 6,
       misses: [],
     });
     expect(renderImperative(score, { writePreset: "ship" })).toEqual([
-      "imperatives: 20/20 to ship (100%); look-alikes to a write preset 0/10 (decoys 5/5 read-only as expected, review-shaped 5/5 to review)",
+      "imperatives: 20/20 to ship (100%); look-alikes to a write preset 0/11 (decoys 5/5 read-only as expected, review-shaped 6/6 to review)",
       "",
       "misses: none",
     ]);
@@ -729,7 +735,7 @@ describe("the imperative set through route() over a scripted model", () => {
     }).filter((c) => /imperative|look-alike/.test(c.name));
     expect(rows.map((c) => [c.pass, c.actual, c.limit])).toEqual([
       [true, "20/20 (100%)", "≥ 90%"],
-      [true, "0/10", "0"],
+      [true, "0/11", "0"],
     ]);
   });
 
@@ -761,7 +767,7 @@ describe("the imperative set through route() over a scripted model", () => {
       writePreset: "coding",
     }).filter((c) => /imperative|look-alike/.test(c.name));
     expect(rows.map((c) => c.pass)).toEqual([true, false]);
-    expect(rows[1].actual).toBe(`${score.lookalikesToWrite}/10`);
+    expect(rows[1].actual).toBe(`${score.lookalikesToWrite}/11`);
     expect(renderImperative(score).slice(2)[0]).toBe(`misses (${score.misses.length}):`);
   });
 
