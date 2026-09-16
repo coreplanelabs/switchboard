@@ -91,6 +91,7 @@
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.85.1",
     "@eslint/js": "^10.0.1",
+    "@opencode/cli": "^2.0.3",
     "@opencode/protocol": "2.0.3",
     "@opencode/schema": "2.0.3",
     "@types/node": "^24.0.0",

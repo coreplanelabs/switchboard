@@ -39,6 +39,7 @@ import {
   type OpenCodeConfigEntry,
   type OpenCodePermissionRule,
 } from "./client.js";
+import { OPENCODE_PLUGIN_SOURCE } from "./pluginSource.js";
 import { OPENCODE_SERVE_PID_ENV, OPENCODE_TAILER_SOURCE } from "./tailerSource.js";
 
 /** The program the container starts: OpenCode on the container's PATH (`@opencode/cli`'s `opencode`). */
@@ -358,11 +359,13 @@ export interface OpenCodeFile {
   content: string;
 }
 
-/** Every file the container must hold before the server starts, none of them a secret. */
+/** Every file the container must hold before the server starts, none of them a
+ *  secret: the configuration, the relay plugin (the tool that speaks the bot's
+ *  protocol; U12's `OPENCODE_PLUGIN_SOURCE`), the tailer. */
 export function openCodeLaunchFiles(spec: OpenCodeLaunchSpec): OpenCodeFile[] {
   return [
     { path: spec.paths.config, content: openCodeConfigJson(spec) },
-    { path: spec.paths.plugin, content: OPENCODE_PLUGIN_PLACEHOLDER },
+    { path: spec.paths.plugin, content: OPENCODE_PLUGIN_SOURCE },
     { path: spec.paths.tailerScript, content: OPENCODE_TAILER_SOURCE },
   ];
 }

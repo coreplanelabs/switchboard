@@ -14,6 +14,7 @@ import type { StepReport } from "../../../runLedger/stepReport.js";
 import { RunControl } from "../../../runRegistry/runControl.js";
 import { FollowUpInbox } from "../../../threadAdmission.js";
 import { openThroughSeam, type HarnessDeps, type HarnessFacts, type HarnessRun } from "../../contract.js";
+import { HarnessContainerRuntimeReplacedError } from "../../container.js";
 import { FakeHarnessContainer } from "../../testing/fakeContainer.js";
 import type { DrivenRun, HarnessDriver, RunScript } from "../../testing/scenarios.js";
 import { PiHarness } from "../piHarness.js";
@@ -104,6 +105,10 @@ export function piDriver(): HarnessDriver {
       const identity = script.identity ?? "write";
       const container = new FakeHarnessContainer();
       container.vm = script.containerWord === null ? undefined : (script.containerWord ?? CONTAINER_WORD);
+      // The row's pi is still alive in this container on the resume (the
+      // survival clause's alive-here): its pid answers `alive` before anything
+      // is started, so `open` finds it and reconciles with it.
+      if (script.processAliveOnResume && script.resume?.facts) container.alivePids.add(script.resume.facts.pid);
       const registry = new HarnessRegistry();
       const control = new RunControl();
       const inbox = new FollowUpInbox();
@@ -123,6 +128,23 @@ export function piDriver(): HarnessDriver {
         beforeModelCall: async () => {
           modelCalls++;
           if (script.hardStopBeforeModelCall === modelCalls) control.requestStop("hard");
+          // The container is replaced under the run before this model call, with
+          // the previous turn's tool call in flight (the survival clause's
+          // ceiling): the read that would carry the model this call's input fails
+          // with the executor's word, so the loop never reaches this call. Armed
+          // on the next read (the previous turn is fully mirrored — the harness
+          // awaited its record — so the record settles that turn's call), which
+          // fires before this call's turn is read, whatever the load.
+          if (script.containerReplacedBeforeModelCall === modelCalls) {
+            container.vm = "vm-conformance-2";
+            container.failNext = {
+              operation: "read",
+              error: new HarnessContainerRuntimeReplacedError(
+                "read",
+                "runtime-replaced: the sandbox was replaced under the run",
+              ),
+            };
+          }
           await new Promise((r) => setTimeout(r, 15));
         },
         ...(script.bypassGate ? { bypassGate: true } : {}),
@@ -181,6 +203,7 @@ export function piDriver(): HarnessDriver {
         progress,
         starts: container.starts,
         killed: container.killed,
+        removed: container.removed,
         requests: container.requests,
         modelCalls: model.requests,
         statusReports,
