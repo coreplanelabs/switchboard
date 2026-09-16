@@ -1,6 +1,6 @@
 # Known limits
 
-What is deliberately off, narrow on purpose, or not yet proven, so an absence is not mistaken for a bug.
+What is deliberately off, narrow on purpose, not yet proven, or a known wart, so an absence or a stray error is not mistaken for a bug.
 
 ## Off until you turn it on
 
@@ -22,5 +22,9 @@ What is deliberately off, narrow on purpose, or not yet proven, so an absence is
 - **Resident `[gap]` rows**: cross-repository token scope; a push from a resident thread.
 - **Run history `[gap]` rows**: a summary-only friction read; a full-scan listing.
 - **A ship unit's page is not built yet**: its runs are read from one route (the `runs unit` command); the page waits on a design check-in.
+
+## Known warts
+
+- **A plan runner that outlives a bot deploy ends with one runtime error.** The Workflows engine pins the instance to the Worker version it started on and wakes it on the current one; when that wake completes the plan, the runtime cancels the `ShipCoordinator.run` call as "hung" one millisecond after recording the instance's end. The unit report, the card, the parent run record and the instance's status are all complete — read that error on a finished instance as this, not as a stuck runner. An instance that starts and ends on one version never logs it.
 
 Complete list: the specs' [`[gap]` rows](../reference/specs/README.md); switches: [Turn features on and off](../how-to/turn-features-on-and-off.md).
