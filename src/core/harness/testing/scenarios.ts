@@ -450,6 +450,67 @@ export const SCENARIOS: readonly ScenarioRow[] = [
     },
   },
   {
+    id: "survival-rebuild-records-settlement",
+    clause: "survival",
+    title:
+      "a process rebuilt from the record with a call in flight writes the settlement turn onto the ledger: the next step's rows are the settlement results with the continue's echo as one user turn from the seed index, then the assistant turn — and the model's view of the conversation is those same rows, so the record rebuilds a transcript with a result for every call at the next death",
+    script: (driver) => ({
+      turns: [text("carried on")],
+      resume: {
+        messages: [
+          { role: "user", content: [{ type: "text", text: "carry on" }] },
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "c-flight", name: "bash", input: { command: "make" } }],
+          },
+        ],
+        settlements: [
+          {
+            toolUse: { type: "tool_use", id: "c-flight", name: "bash", input: { command: "make" } },
+            action: "synthetic",
+            text: "The container was replaced while this bash call was in flight; its result was lost.",
+          },
+        ],
+        remainingMs: 5 * 60_000,
+        turn: 1,
+        inboxConsumedSeq: 0,
+        facts: driver.facts({ pid: 999, container: "vm-old" }),
+      },
+    }),
+    check: (run) => {
+      assert.equal(answered(run), "carried on");
+      assert.ok(run.steps.length > 0, "no step was written after the rebuild");
+      const step = run.steps[0];
+      assert.equal(step.firstIdx, 2, "the settlement turn does not land at the seed index");
+      assert.equal(step.turns.length, 2, "the step does not carry the user turn and the assistant turn");
+      const [settled, answer] = step.turns;
+      assert.equal(settled.role, "user");
+      assert.deepEqual(settled.content[0], {
+        type: "tool_result",
+        toolUseId: "c-flight",
+        content: "The container was replaced while this bash call was in flight; its result was lost.",
+        isError: true,
+      });
+      assert.ok(
+        settled.content.slice(1).every((p) => p.type === "text"),
+        "the continue's echo is not the rest of the settlement turn",
+      );
+      assert.equal(answer.role, "assistant");
+      // The model saw exactly the ledger's rows: the transcript it was handed, then the settlement turn.
+      assert.ok(run.modelCalls.length > 0, "the model was never asked");
+      const view = run.modelCalls[0].messages;
+      assert.deepEqual(view.slice(0, 2), [
+        { role: "user", content: [{ type: "text", text: "carry on" }] },
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "c-flight", name: "bash", input: { command: "make" } }],
+        },
+      ]);
+      assert.deepEqual(view[2], settled, "the model's view of the settlement turn is not the ledger's row");
+      assert.equal(view.length, 3);
+    },
+  },
+  {
     id: "survival-foreign-row-refused",
     clause: "survival",
     title:

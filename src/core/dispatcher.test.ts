@@ -16,7 +16,7 @@ import { AGENTS, getAgent } from "../agents/registry.js";
 import { planResume } from "./runLedger/resume.js";
 import { knownToolsFor, launchResumes, resumeMessage } from "./resumeLaunch.js";
 import { reclaimRuns } from "./boot.js";
-import { piRunPaths } from "./harness/pi/process.js";
+import { piRunPaths, RUN_BEARER_ENV } from "./harness/pi/process.js";
 import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
 import { makeExecutor } from "../execution/factory.js";
 import { InMemoryArtifactStore } from "../artifacts/store.js";
@@ -86,7 +86,7 @@ import { InMemoryCoordinatorInstanceStore } from "./coordinator/instanceStore.js
 import type { CoordinatorInstance } from "./coordinator/contract.js";
 import type { Operations } from "./operations.js";
 import type { ResidentAdminClient } from "./residentAdmin.js";
-import { BEARER_MARGIN_MS, RunBearerStore } from "./modelProxy/runBearers.js";
+import { BEARER_MARGIN_MS, bearerHashOf, RunBearerStore } from "./modelProxy/runBearers.js";
 
 /** `CoreDeps` plus the two backends the registry's `repo.*` commands reach
  *  through the catalogue wiring (tests inject them here; production resolves
@@ -10298,18 +10298,24 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
 
   /**
    * The world of a pi run whose resident container is replaced under it
-   * (harness-pi item 16): a resident thread, the ledger as `ledger` shows it
-   * (a proxy may hold or watch its writes), and two containers — the first
-   * run's pi opens one bash call and dies with its container, which names
-   * itself anew; the restarted run's pi is scripted from the provider.
+   * (harness-pi item 16; harness.md item 6): a resident thread, the ledger as
+   * `ledger` shows it (a proxy may hold or watch its writes), and two
+   * containers — the first run's pi opens one bash call and dies with its
+   * container, which names itself anew; the pi in the container handed out
+   * next (the relaunch's, or a restarted run's) is scripted from the provider.
    * `onCallOpen` runs once the first run's pi has opened its call: the run is
-   * live on the ledger, the map may be filled to name it.
+   * live on the ledger, the map may be filled to name it. `attach` answers the
+   * resident's attach in place of the stub's default — how a test refuses the
+   * re-attach the relaunch asks for (`reuse: true`).
    */
-  function replacedContainerWorld(ledger: InMemoryRunLedger, hooks: { onCallOpen?: () => void } = {}) {
+  function replacedContainerWorld(
+    ledger: InMemoryRunLedger,
+    hooks: { onCallOpen?: () => void; attach?: (body: Record<string, unknown>) => Response } = {},
+  ) {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
     vi.stubEnv("GITHUB_APP_ID", "");
-    const { calls } = residentFetchStub();
+    const { calls } = residentFetchStub(hooks.attach ? { attach: hooks.attach } : {});
     const provider = capturingProvider("started over and done");
     let n = 0;
     const registry = new RunRegistry({ genId: () => `run-${++n}`, genToken: () => `tok-${n}` });
@@ -10396,60 +10402,84 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     return { deps, provider, registry, writer, containers, calls };
   }
 
-  // Feature: docs/reference/specs/harness-pi.md item 16 — a container replaced
-  // under a live pi run ends the way a refused re-attach does (item 54): the
-  // row closes `interrupted` with the note that says why, no failure reply,
-  // and the request runs again as a new run once the thread is free.
-  it("a live pi run whose resident container is replaced under it closes interrupted with the sandbox_restarted note and no ❌, and its request runs again as a new run once the thread is free — the outcome a refused re-attach has (item 54)", async () => {
+  // Feature: docs/reference/specs/harness.md item 6 (the survival clause's
+  // ceiling) over harness-pi.md item 16 — a container replaced under a live pi
+  // run on a living bot keeps the run: the resident is asked to keep the
+  // thread's tree as it stands, the bearer is rotated on the run's own meter,
+  // pi restarts in the replacement on the mirrored transcript, and the run
+  // completes as the one run it was — one record, no restart, no failure reply.
+  it("a live pi run whose resident container is replaced under it is relaunched in the replacement: the resident re-attaches the run's own worktree (reuse), the bearer is rotated on the same meter, pi restarts on the mirrored transcript with the call settled, the one record ends completed with the sandbox_restarted verdict and one resumed note, relaunches = 1, and no second run is started", async () => {
     const ledger = new InMemoryRunLedger(() => 10_000);
     const { deps, provider, registry, writer, containers, calls } = replacedContainerWorld(ledger);
+    const bearers = deps.runBearers!;
     const { io, replies } = ioWithCard();
     const outcome = await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
     await writer.settled();
-    // The interrupted run: the same outcome shape as a refused re-attach, its row closed with the note in its record, no failure reply.
-    expect(outcome).toEqual({ status: "refused", refusal: "container_replaced" });
-    const closed = ledger.finished.get("run-1");
-    expect(closed?.status).toBe("interrupted");
-    const note = closed?.events.find((e) => e.type === "run_note") as { kind: string; summary: string } | undefined;
-    expect(note).toMatchObject({
-      kind: "sandbox_restarted",
-      summary:
-        "the container running pi was replaced (vm-fake → vm-new; the executor said: the sandbox restarted under the run (waited 42 s)); the run restarts from its request",
-    });
-    expect(closed?.events.find((e) => e.type === "tool_result")).toMatchObject({
+    expect(outcome).toEqual({ status: "completed" });
+    const record = ledger.finished.get("run-1");
+    expect(record?.status).toBe("completed");
+    const notes = (record?.events ?? []).filter((e) => e.type === "run_note") as Array<{
+      kind: string;
+      summary: string;
+    }>;
+    expect(notes.find((n) => n.kind === "sandbox_restarted")?.summary).toBe(
+      "the container running pi was replaced (vm-fake → vm-new; the executor said: the sandbox restarted under the run (waited 42 s))",
+    );
+    const resumed = notes.filter((n) => n.kind === "resumed");
+    expect(resumed).toHaveLength(1);
+    expect(resumed[0]!.summary).toMatch(
+      /^relaunched after the container was replaced \(vm-fake → vm-new\): the row's pi \(pid 4242\) went with the old container and was neither probed nor ended here; pi restarted in the container the run holds on the mirrored transcript — 1 call\(s\) were in flight: 1 lost with the container/,
+    );
+    expect(record?.events.find((e) => e.type === "tool_result")).toMatchObject({
       tool: "bash",
       ok: false,
       callId: "c1",
     });
     expect(replies.some((r) => r.startsWith("❌"))).toBe(false);
-    expect(containers[0]!.killed).toEqual([]); // a pid in the new container is a stranger's
-    // The restarted run: the original request, attached as a fresh run is, on its own id, answering the thread.
-    expect(containers).toHaveLength(2);
-    expect(provider.requests).toHaveLength(1);
-    expect(textTurnsOf(provider.requests[0]!.messages).at(-1)).toMatchObject({
-      role: "user",
-      text: expect.stringContaining("fix it"),
-    });
     expect(replies.at(-1)).toBe("started over and done");
+    // Nothing of the old process is judged, ended or removed in the replacement; the relaunched pi runs there.
+    expect(containers).toHaveLength(2);
+    expect(containers[0]!.killed).toEqual([]);
+    expect(containers[0]!.removed).toEqual([]);
+    expect(containers[1]!.starts).toHaveLength(1);
+    // The resident was asked, once, to keep the run's own tree (run-history item 54); the fresh attach never was.
     const attaches = calls.filter((c) => c.path === "/status" || c.path === "/attach");
     expect(attaches.map((c) => c.path)).toEqual(["/status", "/attach", "/status", "/attach"]);
     expect(attaches[1]!.body).not.toHaveProperty("reuse");
-    expect(attaches[3]!.body).not.toHaveProperty("reuse");
-    expect(ledger.finished.get("run-2")?.status).toBe("completed");
-    expect(ledger.live.has("run-1")).toBe(false);
-    expect(registry.getById("run-1")).toMatchObject({ finished: true, status: "interrupted" });
-    expect(registry.getById("run-2")).toMatchObject({ finished: true, status: "completed" });
+    expect(attaches[3]!.body).toMatchObject({ reuse: true });
+    // The bearer was rotated on the run's own meter: one secret buys its calls, the relaunched pi's turn counted on it, revoked at the finish.
+    expect(bearers.grantOf("run-1")).toMatchObject({ bearers: 1, turns: 1, revoked: true });
+    // The model continued from the record: the request, the call, its settlement, then the continue.
+    expect(provider.requests).toHaveLength(1);
+    const req = provider.requests[0]!.messages;
+    expect(textTurnsOf(req)[0]).toMatchObject({ role: "user", text: expect.stringContaining("fix it") });
+    expect(req.find((m) => m.role === "assistant")?.content).toEqual([
+      { type: "tool_use", id: "c1", name: "bash", input: { command: "npm test" } },
+    ]);
+    expect(req.flatMap((m) => m.content).find((p) => p.type === "tool_result")).toMatchObject({
+      toolUseId: "c1",
+      isError: true,
+    });
+    expect(textTurnsOf(req).at(-1)?.text).toMatch(/^Continue where you left off/);
+    // One run, on the ledger and in the registry; nothing restarted.
+    expect(ledger.finished.size).toBe(1);
+    expect(ledger.live.size).toBe(0);
+    expect(registry.getById("run-1")).toMatchObject({ finished: true, status: "completed" });
+    expect(registry.getById("run-2")).toBeNull();
   });
 
-  // Feature: docs/reference/specs/thread-admission.md item 5 and harness-pi.md
-  // item 16 — the restart from the request is admitted milliseconds after the
-  // settle freed the thread, while the closed row's finish write is still in
-  // flight: the ledger would take a push into that row. If the boot-gap map
-  // names the run — the state a run resumed across a generation was left in
-  // before the adopt forgot it, and the state any later change that lists a
-  // run of this generation would leave — the restart must still run fresh:
-  // the run it restarts is not a live run.
-  it("a restart from the request never steers into the row it closed: with the boot-gap map naming the replaced run and the row's finish landing only after the restart began, the request still runs as a new run in the thread — the first record carrying sandbox_restarted — and the map forgets the run", async () => {
+  // Feature: docs/reference/specs/thread-admission.md item 5, harness-pi.md
+  // item 16 and harness.md item 6 — the relaunch refused by name is the floor:
+  // the resident answers the re-attach with another tree, so the run closes
+  // `interrupted` with the refusal `workspace_lost` and its request is
+  // dispatched again. That restart is admitted milliseconds after the settle
+  // freed the thread, while the closed row's finish write is still in flight:
+  // the ledger would take a push into that row. If the boot-gap map names the
+  // run — the state a run resumed across a generation was left in before the
+  // adopt forgot it, and the state any later change that lists a run of this
+  // generation would leave — the restart must still run fresh: the run it
+  // restarts is not a live run.
+  it("a relaunch whose re-attach the resident refuses (another tree for the thread) closes the run interrupted with workspace_lost and restarts from the request, never steering into the row it closed: with the boot-gap map naming the replaced run and the row's finish landing only after the restart began, the request still runs as a new run in the thread — the first record carrying the verdict and the refusal — and the map forgets the run", async () => {
     const inner = new InMemoryRunLedger(() => 10_000);
     const elsewhere = new ThreadsElsewhere();
     const order: string[] = [];
@@ -10494,16 +10524,34 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       // The map names the run while it runs: what a stale entry for its thread looks like.
       onCallOpen: () =>
         elsewhere.replace([{ threadKey: "slack:CX:1.0", runId: "run-1", startedAt: 5_000, meta: { agent: "coding" } }]),
+      // The re-attach (`reuse`) finds the thread rebound onto another tree: not the run's work, refused by name.
+      attach: (body) =>
+        new Response(
+          JSON.stringify(
+            body.reuse
+              ? { workspace: "/workspace/threads/t/other", ref: "main", sha: "abc", user: "worker3" }
+              : { workspace: "/workspace/threads/t/main", ref: "main", sha: "abc", user: "worker2" },
+          ),
+          { status: 200 },
+        ),
     });
     deps.threadsElsewhere = elsewhere;
     deps.admission = new ThreadAdmission();
     const { io, replies } = ioWithCard();
     const outcome = await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
     await writer.settled();
-    expect(outcome).toEqual({ status: "refused", refusal: "container_replaced" });
+    expect(outcome).toEqual({ status: "refused", refusal: "workspace_lost" });
     const closed = inner.finished.get("run-1");
     expect(closed?.status).toBe("interrupted");
-    expect(closed?.events.find((e) => e.type === "run_note")).toMatchObject({ kind: "sandbox_restarted" });
+    const notes = (closed?.events ?? []).filter((e) => e.type === "run_note") as Array<{
+      kind: string;
+      summary: string;
+    }>;
+    // The verdict, then the outcome — both the floor's kind; never `resumed` on a run that is not.
+    expect(notes.map((n) => n.kind)).toEqual(["sandbox_restarted", "sandbox_restarted"]);
+    expect(notes[1]!.summary).toBe(
+      "the run's workspace could not be re-attached in the replacement container (the resident's worktree for this thread is /workspace/threads/t/other as worker3, not the run's recorded /workspace/threads/t/main as worker2); the run restarts from its request as a new run in this thread",
+    );
     // Never a push into the closed row, no steer ack in the thread; the map forgot the run.
     expect(order.filter((o) => o.startsWith("push"))).toEqual([]);
     expect(replies.filter((r) => r.startsWith("↪"))).toEqual([]);
@@ -10522,18 +10570,17 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(registry.getById("run-2")).toMatchObject({ finished: true, status: "completed" });
   });
 
-  // Feature: docs/reference/specs/thread-admission.md item 5 and harness-pi.md
-  // item 16 — the roll order every image-changing deploy has: the bot rolls
-  // first (the run is handed to the next generation and resumed there, pi
-  // still alive in the resident's container), the resident's container rolls
-  // minutes later (the platform's own rollout). The row the new generation
-  // reclaimed sits on its boot-gap map from the reclaim on, and nothing but
-  // the adopt takes it out; the restart from the request is then admitted
-  // while the closed row's finish write is still in flight. Without the
-  // adopt's forget the restart is steered into the row it closed and the
-  // request is never run again (seen live on 1.233.0); the exclusion by id
-  // is pinned above and in admission.test.ts.
-  it("the roll order every deploy has: a pi run handed to the next generation is resumed there with pi alive — the row named on the boot-gap map until the adopt forgets it — then its container is replaced: the first record ends interrupted with sandbox_restarted, and a second run starts from the same request in the same thread, never steered into the row it closed, the closed row's finish landing after the restart began (thread-admission item 5, harness-pi item 16)", async () => {
+  // Feature: docs/reference/specs/harness.md item 6, harness-pi.md items 8 and
+  // 16, thread-admission.md item 5 — the roll order every image-changing
+  // deploy has: the bot rolls first (the run is handed to the next generation
+  // and resumed there, pi still alive in the resident's container), the
+  // resident's container rolls minutes later (the platform's own rollout).
+  // The new generation is a living bot when the container goes, so it
+  // relaunches pi there instead of closing the run: the resumed run is one
+  // run from its request to its answer, the boot-gap map forgets it at the
+  // adopt, and nothing is dispatched again (the restart-from-request road is
+  // the refused relaunch's, pinned above).
+  it("the roll order every deploy has: a pi run handed to the next generation is resumed there with pi alive — the row named on the boot-gap map until the adopt forgets it — then its container is replaced: the same generation relaunches pi in the replacement with the adopted bearer rotated away, the one record ends completed with the resumed, sandbox_restarted and relaunched notes, and no second run is started (harness.md item 6, thread-admission item 5)", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
     vi.stubEnv("GITHUB_APP_ID", "");
@@ -10645,42 +10692,25 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     // The drain (run-history item 39): generation A hands the row to the next generation and exits.
     expect(await inner.handoff("gen-A", ["run-old"])).toEqual({ marked: ["run-old"] });
 
-    // Generation B's view of the ledger. The closed row's finish is held until
-    // the restart has begun — in production the finish is an HTTP write in
-    // flight while the restart is admitted milliseconds after the settle — and
-    // lands before the restart reserves a row of its own, as it did live. A
-    // push into the closed row (the bug) releases it too, so a regression
-    // fails on the assertions below rather than on the clock.
+    // Generation B's view of the ledger: every write recorded by name, so the
+    // test can say nothing was pushed into the row and no other row was claimed.
     const order: string[] = [];
-    let restartBegan!: () => void;
-    const begun = new Promise<void>((r) => (restartBegan = r));
-    let finishLanded!: () => void;
-    const landed = new Promise<void>((r) => (finishLanded = r));
     const ledger = new Proxy(inner, {
       get(target, prop) {
-        if (prop === "finish")
-          return async (runId: string, gen: string, record: RunRecord) => {
-            if (runId === "run-old") await begun;
-            order.push(`finish ${runId}`);
-            const result = await target.finish(runId, gen, record);
-            if (runId === "run-old") finishLanded();
-            return result;
-          };
         if (prop === "pushInbox")
           return async (runId: string, message: Record<string, unknown>) => {
             order.push(`push ${runId}`);
-            const result = await target.pushInbox(runId, message);
-            restartBegan();
-            return result;
+            return target.pushInbox(runId, message);
           };
         if (prop === "claim")
           return async (req: ClaimRequest) => {
-            if (req.runId !== "run-old") {
-              order.push(`claim ${req.runId}`);
-              restartBegan();
-              await Promise.race([landed, realSleep(2_000)]);
-            }
+            order.push(`claim ${req.runId}`);
             return target.claim(req);
+          };
+        if (prop === "finish")
+          return async (runId: string, gen: string, record: RunRecord) => {
+            order.push(`finish ${runId}`);
+            return target.finish(runId, gen, record);
           };
         const v = Reflect.get(target, prop) as unknown;
         return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
@@ -10728,7 +10758,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
           containers.push(container);
           return container;
         }
-        // The restarted run's pi, scripted from the provider as a fresh run's is.
+        // The relaunched pi, in the replacement container, scripted from the provider.
         const fresh = new FakeHarnessContainer();
         scriptPiFromProvider(fresh, { provider, registry: harnesses, bearers, beforeModelCall: () => realSleep(10) });
         containers.push(fresh);
@@ -10766,53 +10796,61 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     // its workspace, the map no longer named the thread.
     expect(elsewhereAtAttach).toBeUndefined();
     // The resumed run found pi alive and continued it, then its container was
-    // replaced: the first record ends interrupted with the sandbox_restarted
-    // note, the call in flight settled with the restart note; nothing killed.
-    const closed = inner.finished.get("run-old");
-    expect(closed?.status).toBe("interrupted");
-    const notes = (closed?.events ?? []).filter((e) => e.type === "run_note") as Array<{
+    // replaced under this living generation: pi was relaunched in the
+    // replacement on the mirrored transcript and the run completed — one
+    // record, the resume, the verdict, the relaunch; the call in flight settled
+    // with the restart note; nothing killed or started in the old container.
+    const finished = inner.finished.get("run-old");
+    expect(finished?.status).toBe("completed");
+    const notes = (finished?.events ?? []).filter((e) => e.type === "run_note") as Array<{
       kind: string;
       summary: string;
     }>;
-    expect(notes.find((e) => e.kind === "resumed")?.summary).toMatch(
-      /^resumed after a restart: pi still runs in the container \(pid 4242\)/,
+    expect(notes.map((n) => n.kind).filter((k) => k === "resumed" || k === "sandbox_restarted")).toEqual([
+      "resumed",
+      "sandbox_restarted",
+      "resumed",
+    ]);
+    expect(notes[0]!.summary).toMatch(/^resumed after a restart: pi still runs in the container \(pid 4242\)/);
+    expect(notes.find((n) => n.kind === "sandbox_restarted")?.summary).toBe(
+      "the container running pi was replaced (vm-fake → vm-new; the executor said: the sandbox restarted under the run (waited 42 s))",
     );
-    expect(notes.find((e) => e.kind === "sandbox_restarted")?.summary).toBe(
-      "the container running pi was replaced (vm-fake → vm-new; the executor said: the sandbox restarted under the run (waited 42 s)); the run restarts from its request",
+    expect(notes.filter((n) => n.kind === "resumed").at(-1)!.summary).toMatch(
+      /^relaunched after the container was replaced \(vm-fake → vm-new\): the row's pi \(pid 4242\) went with the old container/,
     );
-    expect(closed?.events.find((e) => e.type === "tool_result")).toMatchObject({
+    expect(finished?.events.find((e) => e.type === "tool_result")).toMatchObject({
       tool: "bash",
       ok: false,
       callId: "c1",
     });
     expect(container.killed).toEqual([]);
-    expect(container.starts).toEqual([]); // the previous generation's pi, continued
-    // The restart was never steered into the row it closed…
-    expect(order.filter((o) => o.startsWith("push"))).toEqual([]);
-    expect(replies.filter((r) => r.startsWith("↪"))).toEqual([]);
-    expect(replies.some((r) => r.startsWith("❌"))).toBe(false);
-    // …and ran as a new run in the thread from the same request, tracked on the
-    // ledger under its own id, its reservation made before the closed row's
-    // finish landed and accepted once it had.
-    const restarted = [...inner.finished.keys()].filter((id) => id !== "run-old");
-    expect(restarted).toHaveLength(1);
-    const freshId = restarted[0]!;
-    expect(order[0]).toBe(`claim ${freshId}`);
-    expect(order).toContain("finish run-old");
-    const fresh = inner.finished.get(freshId);
-    expect(fresh).toMatchObject({ status: "completed", threadKey: THREAD, agent: "coding" });
-    expect((fresh?.events.find((e) => e.type === "input") as { text?: string } | undefined)?.text).toContain("fix it");
-    expect(provider.requests).toHaveLength(1);
-    expect(textTurnsOf(provider.requests[0]!.messages).at(-1)).toMatchObject({
-      role: "user",
-      text: expect.stringContaining("fix it"),
-    });
-    expect(replies.at(-1)).toBe("started over and done");
+    expect(container.starts).toEqual([]); // the previous generation's pi, continued, never restarted here
     expect(containers).toHaveLength(2);
+    expect(containers[1]!.starts).toHaveLength(1);
+    // The bearer the resumed run adopted from the row was rotated away with
+    // the mint's: one secret, the relaunched pi's, its turn counted on the
+    // run's meter, revoked at the finish.
+    expect(bearers.grantOf("run-old")).toMatchObject({ bearers: 1, turns: 1, revoked: true });
+    const relaunchedBearer = containers[1]!.starts[0]!.env[RUN_BEARER_ENV]!;
+    expect(bearerHashOf(relaunchedBearer)).not.toBe("ab".repeat(32));
+    // The model continued from the record: the request, the call, its settlement, then the continue.
+    expect(provider.requests).toHaveLength(1);
+    const req = provider.requests[0]!.messages;
+    expect(textTurnsOf(req)[0]).toMatchObject({ role: "user", text: expect.stringContaining("fix it") });
+    expect(req.find((m) => m.role === "assistant")?.content).toEqual([
+      { type: "tool_use", id: "c1", name: "bash", input: { command: "sleep 240" } },
+    ]);
+    expect(textTurnsOf(req).at(-1)?.text).toMatch(/^Continue where you left off/);
+    expect(replies.at(-1)).toBe("started over and done");
+    expect(replies.some((r) => r.startsWith("❌"))).toBe(false);
+    // Nothing was pushed into the row and no other run was claimed: one run,
+    // from the request to the answer; the map forgot it at the adopt.
+    expect(order).toEqual(["finish run-old"]);
+    expect(replies.filter((r) => r.startsWith("↪"))).toEqual([]);
+    expect(inner.finished.size).toBe(1);
     expect(inner.live.size).toBe(0);
     expect(elsewhere.get(THREAD)).toBeUndefined();
-    expect(registry.getById("run-old")).toMatchObject({ finished: true, status: "interrupted" });
-    expect(registry.getById(freshId)).toMatchObject({ finished: true, status: "completed" });
+    expect(registry.getById("run-old")).toMatchObject({ finished: true, status: "completed" });
   });
 
   it("a steered follow-up is written to the run's durable inbox with its seq, and the next step record says the run consumed it (thread-admission item 5, run-history item 40)", async () => {

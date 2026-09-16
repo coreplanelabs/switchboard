@@ -20,12 +20,13 @@ import type { PiCompactionConfig } from "../../../config.js";
 import { ExecSandboxRestartedError } from "../../../execution/executor.js";
 import type { ChatMessage } from "../../chatMessage.js";
 import {
-  HarnessInterruptedError,
+  HarnessContainerReplacedError,
   HarnessMismatchError,
   isPiFacts,
   type Finding,
   type FollowUpTurn,
   type HarnessDeps,
+  type HarnessRecord,
   type HarnessResume,
   type HarnessRun,
   type HarnessSession,
@@ -49,7 +50,7 @@ import {
 } from "../windDown.js";
 import { bearerHashOf } from "../../modelProxy/runBearers.js";
 import { redactAndCap, redactSecrets, type RunEvent, type RunNoteKind, type StopMode } from "../../runEvents.js";
-import type { Settlement } from "../../runLedger/resume.js";
+import type { Settlement, ToolUsePart } from "../../runLedger/resume.js";
 import type { AssembledCompaction } from "../../runLedger/transcript.js";
 import { followUpMessageId, followUpPrompt, followUpSnippet, type FollowUpInput } from "../../threadAdmission.js";
 import { PiBridge } from "./bridge.js";
@@ -67,7 +68,7 @@ import {
   type PiRunPaths,
 } from "./process.js";
 import { parsePiLine } from "./protocol.js";
-import type { LiveHarness, RelayedToolAnswer } from "./relay.js";
+import { RELAY_POLL_WINDOW_MS, stillRunningNote, type LiveHarness, type RelayedToolAnswer } from "./relay.js";
 import type { ToolRuleContext } from "./toolRules.js";
 import { PiRpcTransport } from "./transport.js";
 
@@ -217,17 +218,43 @@ export function settlementText(s: Settlement): string {
     : `The bot restarted while this ${s.toolUse.name} call was in flight; its result was lost — re-check its effects before re-running it.`;
 }
 
-/** The settlements as the user turn a rebuilt session ends on (item 8): one error tool result per call in flight. */
-export function settlementResults(settlements: Settlement[]): ChatMessage | undefined {
+/** What a relayed call in flight at a relaunch settled to on the relay (item
+ *  8): the answer the bot gave inside the window, or the still-running note. */
+export interface RelaySettlement {
+  text: string;
+  isError: boolean;
+}
+
+/** The settlements as the user turn a rebuilt session ends on (item 8): one
+ *  tool result per call in flight — the settlement's note as an error result,
+ *  or, for a call the relay settled at a relaunch (`settled`, by call id), the
+ *  relay's own text and verdict. In the transcript's canonical shape
+ *  (`chatMessageOf`: `isError` only when true), so the turn primed into the
+ *  mirror and the same turn read back from pi's session are one value. */
+export function settlementResults(
+  settlements: Settlement[],
+  settled: ReadonlyMap<string, RelaySettlement> = new Map(),
+): ChatMessage | undefined {
   if (settlements.length === 0) return undefined;
   return {
     role: "user",
-    content: settlements.map((s) => ({
-      type: "tool_result" as const,
-      toolUseId: s.toolUse.id,
-      content: settlementText(s),
-      isError: true as const,
-    })),
+    content: settlements.map((s) => {
+      const relay = settled.get(s.toolUse.id);
+      return {
+        type: "tool_result" as const,
+        toolUseId: s.toolUse.id,
+        content: relay?.text ?? settlementText(s),
+        ...((relay?.isError ?? true) ? { isError: true as const } : {}),
+      };
+    }),
+  };
+}
+
+/** A relayed answer as a rebuilt session's tool result carries it: the text blocks joined, an image named. */
+export function relaySettlementOf(answer: RelayedToolAnswer): RelaySettlement {
+  return {
+    text: answer.content.map((c) => (c.type === "text" ? c.text : "[image]")).join("\n"),
+    isError: answer.isError,
   };
 }
 
@@ -254,30 +281,28 @@ export function settlementAnswer(s: Settlement): RelayedToolAnswer {
 /** The container pi ran in was replaced under the live run (harness-pi item
  *  16): the executor said so on a container command — pi and the tool it was
  *  running died with the old container's disk, and the record holds
- *  everything the run had. The run ends `interrupted` and its request is
- *  dispatched again as a new run — the outcome a refused workspace re-attach
- *  already has (run-history item 54). The relaunch of pi in the new
- *  container with a rotated bearer is record 0038's stage A, not this.
- *  `said` is the executor's word, the condition; `was` is the container the
- *  row recorded for pi and `now` the one that answered when pi was found
- *  gone — corroboration for the record, never the condition (the word is the
- *  kernel's boot id, which a container replaced on the same kernel keeps),
- *  either unknown when a container could not name itself. Nothing of the
- *  run's is in the container that answers now: a pid there is a stranger's,
- *  and pi's root was on the old disk. An interruption in the seam's vocabulary
- *  (`HarnessInterruptedError`, harness.md item 7): the loop and the dispatcher
- *  read the card's reason and the request's outcome off it, never its name. */
-export class PiContainerReplacedError extends HarnessInterruptedError {
-  constructor(
-    readonly said: string,
-    readonly was: string | undefined,
-    readonly now: string | undefined,
-  ) {
+ *  everything the run had. The seam's word for it (`HarnessContainerReplacedError`,
+ *  harness.md item 6), carrying the record as pi mirrored it so the run loop
+ *  can relaunch pi in the container the run holds now — the survival clause's
+ *  ceiling — or close the run `interrupted` for a restart from its request,
+ *  the floor, when the relaunch is refused by name. `said` is the executor's
+ *  word, the condition; `was` is the container the row recorded for pi and
+ *  `now` the one that answered when pi was found gone — corroboration for the
+ *  record, never the condition (the word is the kernel's boot id, which a
+ *  container replaced on the same kernel keeps), either unknown when a
+ *  container could not name itself. Nothing of the run's is in the container
+ *  that answers now: a pid there is a stranger's, and pi's root was on the
+ *  old disk. The loop and the dispatcher read the card's reason and the
+ *  request's outcome off it, never its name. */
+export class PiContainerReplacedError extends HarnessContainerReplacedError {
+  constructor(said: string, was: string | undefined, now: string | undefined, record: HarnessRecord) {
     super(
       `the container running pi was replaced (${was ?? "unknown"} → ${now ?? "unknown"}; the executor said: ` +
-        `${redactAndCap(said.replace(/\s+/g, " ").trim(), 240)}); the run restarts from its request`,
-      "container replaced under the run; restarting from the request",
-      "container_replaced",
+        `${redactAndCap(said.replace(/\s+/g, " ").trim(), 240)})`,
+      said,
+      was,
+      now,
+      record,
     );
     this.name = "PiContainerReplacedError";
   }
@@ -492,19 +517,62 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         await deps.sleep(seenTick);
     },
   };
-  const forget = deps.registry.register(live);
+  // A relaunch under a living bot (the survival clause's ceiling; item 8) takes
+  // the run's registration over with its relayed calls kept — the calls the
+  // bot still runs for the pi that died with its container — where a fresh run
+  // or a resume after a bot death registers anew.
+  const relaunch = run.resume?.relaunch;
+  const forget =
+    relaunch !== undefined && deps.registry.get(run.runId) !== undefined
+      ? deps.registry.replace(live)
+      : deps.registry.register(live);
   // A call the row says was in flight when the bot died is answered from the
   // record if pi asks the relay for it again (item 8): a re-attached pi's
   // extension does, with the call id whose answer died with the previous
   // generation; a pi restarted on the mirrored transcript never does — its
   // session file carries the same note. Settled before anything is awaited, so
-  // no ask can start the tool between the registration and here.
+  // no ask can start the tool between the registration and here. A call the
+  // relay still runs (a relaunch) keeps its running answer: `settle` yields to it.
   const calls = deps.registry.calls(run.runId);
   for (const s of run.resume?.settlements ?? []) calls?.settle(s.toolUse.id, settlementAnswer(s));
 
   let pid: number | undefined;
   let transport: PiRpcTransport | undefined;
   let facts: PiHarnessFacts | undefined;
+  /** The transcript the ledger held when this generation started — the seed
+   *  with its request (pi's echo of the request is that row, item 9), or the
+   *  resumed transcript — which the mirror's rows follow: together, this
+   *  generation's copy of the run's record. A rebuilt session's settlement
+   *  turn is not here: it is primed into the mirror and lands as the first of
+   *  its rows, so the record holds it once. */
+  const recordBase: { messages: readonly ChatMessage[]; compactions: readonly AssembledCompaction[] } = {
+    messages: run.resume?.messages ?? run.messages,
+    compactions: run.resume?.compactions ?? [],
+  };
+  /** How the relay settled each call in flight at a relaunch (item 8), by call id; how many still run there. */
+  const relaySettled = new Map<string, RelaySettlement>();
+  let stillRunning = 0;
+  /** The record as this generation holds it (`HarnessRecord`): the base and
+   *  the mirror's rows, every call of the last turn settled with the replaced
+   *  note — the loop relaunches pi from it when the container is replaced
+   *  under a living bot (harness.md item 6). */
+  const recordNow = (): HarnessRecord => {
+    const written = mirror.written;
+    const messages = [...recordBase.messages, ...written.messages];
+    const last = messages.at(-1);
+    const calls = last?.role === "assistant" ? last.content.filter((p): p is ToolUsePart => p.type === "tool_use") : [];
+    return {
+      messages,
+      compactions: [
+        ...recordBase.compactions,
+        ...written.compactions.map((c) => ({ ...c, before: recordBase.messages.length + c.before })),
+      ],
+      settlements: calls.map((toolUse) => ({ toolUse, action: "synthetic", text: replacedCallNote(toolUse.name) })),
+      turn: bridge.turns,
+      inboxConsumedSeq: mirror.inboxConsumedSeq,
+      deadline,
+    };
+  };
   /** The log boundary after the last record whose effect the ledger holds
    *  (`PiHarnessFacts.logOffset`): a fresh pi's log from its first byte, a
    *  re-attach from where the row said, then wherever the mirror last wrote. */
@@ -552,12 +620,14 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           : "the run ended",
     );
     save();
-    forget();
     // pi's container was replaced (item 16): the executor reaches the
     // replacement now, where a pid is a stranger's and the run's root never
     // was, so nothing is ended or removed — whatever the container answers
-    // for its name.
+    // for its name. The run's registration stands, its relayed calls still
+    // running: the run loop's relaunch takes it over with them (item 8), and
+    // the loop forgets it when it does not relaunch (`HarnessRegistry.forget`).
     if (replaced !== undefined) return;
+    forget();
     if (pid !== undefined) await container.kill(pid).catch(() => {});
     if (paths !== undefined) await container.remove(paths).catch(() => {});
   };
@@ -588,7 +658,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
      *  needs adopting. */
     const honoured = (hash: string | undefined): boolean =>
       hash !== undefined && (deps.bearers === undefined || deps.bearers.adopt(run.runId, hash));
-    if (recorded !== undefined) {
+    // On a relaunch the row's pi is known gone with its container — the
+    // executor's typed word was the loop's condition — so nothing is located,
+    // probed or ended by the pid, whatever this container answers for its name
+    // (item 16: the word is corroboration, never the condition).
+    if (recorded !== undefined && relaunch === undefined) {
       const located = await locatePi(recorded, container, here);
       if (located === "another-container") {
         elsewhere = `pi is elsewhere: the row's pi (pid ${recorded.pid}) ran in container ${recorded.container}, not the one this run was handed (${here}), so it was neither probed nor ended here`;
@@ -634,8 +708,14 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       // another, goes with it.
       paths = piRunPathsAt(await container.makeRoot(piRunPaths(run.runId).dir));
       // A dead pi's root elsewhere on THIS container goes; a pi in another
-      // container left nothing here to remove.
-      if (recorded?.root !== undefined && recorded.root !== paths.dir && elsewhere === undefined)
+      // container, or one gone with the replaced container, left nothing here
+      // to remove.
+      if (
+        recorded?.root !== undefined &&
+        recorded.root !== paths.dir &&
+        elsewhere === undefined &&
+        relaunch === undefined
+      )
         await container.remove(piRunPathsAt(recorded.root)).catch(() => {});
       const spec: PiLaunchSpec = {
         runId: run.runId,
@@ -656,13 +736,47 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       let session:
         { stem: "resumed" | "seed"; messages: ChatMessage[]; compactions: readonly AssembledCompaction[] } | undefined;
       if (run.resume) {
-        const settled = settlementResults(run.resume.settlements);
+        // The relayed calls the bot still runs for the pi that died with its
+        // container (a relaunch, item 8): awaited together up to the relay
+        // window, one that answers inside it the result the rebuilt session
+        // carries, one still running after it the still-running note — it
+        // keeps running here for an ask by the same id and is never re-run.
+        // Nothing is in flight on a fresh registration, so a resume after a
+        // bot death awaits nothing.
+        const wanted = new Map(run.resume.settlements.map((s) => [s.toolUse.id, s.toolUse.name]));
+        // The wait is said on the card: the window is a silent half minute otherwise.
+        const running = calls?.inFlight().filter((id) => wanted.has(id)) ?? [];
+        if (running.length > 0)
+          run.onProgress?.(
+            `waiting up to ${Math.round(RELAY_POLL_WINDOW_MS / 1000)} s for ${running.length} relayed call(s) still running in the bot before pi restarts`,
+          );
+        for (const p of (await calls?.awaitInFlight({ sleep: (ms) => deps.sleep(ms) })) ?? []) {
+          const tool = wanted.get(p.callId);
+          if (tool === undefined) continue;
+          relaySettled.set(
+            p.callId,
+            p.done ? relaySettlementOf(p.answer) : { text: stillRunningNote(tool), isError: false },
+          );
+          if (!p.done) stillRunning++;
+        }
+        // An answer that landed before the dead process could read it is carried too.
+        for (const [callId] of wanted) {
+          if (relaySettled.has(callId)) continue;
+          const answer = await calls?.answered(callId);
+          if (answer !== undefined) relaySettled.set(callId, relaySettlementOf(answer));
+        }
+        const settled = settlementResults(run.resume.settlements, relaySettled);
         // The settlement turn follows every message, so the compaction positions hold.
         session = {
           stem: "resumed",
           messages: settled ? [...run.resume.messages, settled] : run.resume.messages,
           compactions: run.resume.compactions ?? [],
         };
+        // The same turn reaches the ledger: primed as the results pending for
+        // the next step, it lands with the continue's echo as that step's user
+        // turn, so the ledger's rows are the session's and a rebuild from the
+        // ledger at the next death hands the model a result for every call.
+        if (settled) mirror.prime(settled.content);
       } else {
         const earlier = splitSeed(run.messages).session;
         if (earlier.length > 0) session = { stem: "seed", messages: earlier, compactions: [] };
@@ -691,7 +805,28 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           ),
         );
       }
-      if (run.resume) {
+      if (run.resume && relaunch !== undefined) {
+        // One `resumed` note for the relaunch (harness.md item 6): the two
+        // containers' words, how each call in flight was settled, the budget.
+        const inFlight = run.resume.settlements.length;
+        const answered = relaySettled.size - stillRunning;
+        const lost = inFlight - relaySettled.size;
+        const settledHow =
+          inFlight === 0
+            ? "nothing was in flight"
+            : `${inFlight} call(s) were in flight: ` +
+              [
+                ...(answered > 0 ? [`${answered} answered on the relay`] : []),
+                ...(stillRunning > 0 ? [`${stillRunning} still running there`] : []),
+                ...(lost > 0 ? [`${lost} lost with the container, each answered with a restart note`] : []),
+              ].join(", ");
+        note(
+          "resumed",
+          `relaunched after the container was replaced (${relaunch.from ?? "unknown"} → ${relaunch.to ?? "unknown"}): ` +
+            `the row's pi (pid ${recorded?.pid ?? "unknown"}) went with the old container and was neither probed nor ended here; ` +
+            `pi restarted in the container the run holds on the mirrored transcript — ${settledHow}; ${Math.round(remainingMs / 60_000)} min of budget left`,
+        );
+      } else if (run.resume) {
         const lost = run.resume.settlements.length;
         const how =
           elsewhere !== undefined
@@ -915,6 +1050,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         said.message,
         facts?.container,
         await container.identity().catch(() => undefined),
+        recordNow(),
       );
     };
     check();

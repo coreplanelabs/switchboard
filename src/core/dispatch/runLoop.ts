@@ -17,13 +17,17 @@ import { budgetedAgent, type RunProfile } from "../../config/profile.js";
 import { parseModelRef } from "../provider.js";
 import { mergeTools, TOOLSETS } from "../../tools/toolsets.js";
 import {
+  HarnessContainerReplacedError,
   HarnessInterruptedError,
   harnessFactsOf,
   openThroughSeam,
   type HarnessFacts,
+  type HarnessResume,
   type HarnessSession,
 } from "../harness/contract.js";
+import { prepareRelaunch } from "./relaunch.js";
 import { harnessContainerFor } from "../harness/botHostContainer.js";
+import { workspaceBindingFor } from "../../execution/factory.js";
 import { isContainerGone } from "../harness/container.js";
 import { ModelPolicyRefusedError } from "../harness/pi/harness.js";
 import { softStopAnswer, timeBudgetAnswer } from "../harness/windDown.js";
@@ -229,7 +233,6 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     mcpForRun,
     run,
     registry,
-    round,
     admitted,
     ledgerRun,
     resume,
@@ -259,7 +262,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // EFFECTIVE budget (its deadline, wrap-up warning and budget label read
   // `maxMinutes`) — a copy, never the shared registry entry.
   const agent = budgetedAgent(ctx.agent, profile);
-  const { executor, binding } = round.selection;
+  // The executor the run holds: the dispatch's attach, or — after its
+  // container was replaced under a living bot and the process relaunched
+  // (harness.md item 6) — the same workspace re-attached in the replacement,
+  // which the harness's container and the relayed tools read from then on.
+  // The round stays the dispatch's: its release gives the same workspace back.
+  const { round } = ctx;
+  let { executor } = round.selection;
+  const { binding } = round.selection;
   // The plan's base for a coordinator's child (run-history item 48a): the
   // tag's — the spawn's own, or the one the `coordinator_tag` event carried
   // across a roll — else, when the tag lost it, the second guard: the parent
@@ -641,6 +651,17 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // whichever harness wrote them: for the harness's re-attach or, on a finish,
   // for ending the process the previous generation left behind.
   const facts = resume ? harnessFactsOf(resume.row.state.harness) : undefined;
+  // The facts as this run last saved them: the relaunch count the ceiling is
+  // read off (harness.md item 6), whichever generation wrote it; the harness's
+  // every save goes through here and onto the row.
+  let lastFacts: HarnessFacts | undefined = facts;
+  const saveFacts = (h: HarnessFacts) => {
+    lastFacts = h;
+    ledgerRun?.setState({ harness: h });
+  };
+  // Where the run's workspace is (run-history item 54): the dispatch's binding,
+  // then the one each relaunch re-attached — what the next relaunch re-attaches.
+  let workspaceBinding = workspaceBindingFor(round.selection, profile.machine);
   try {
     if (finish) {
       onEvent({
@@ -751,64 +772,131 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           ),
         ),
       ];
-      harnessSession = await openThroughSeam(
-        harnessDeps.harness,
-        {
-          container:
-            harnessDeps.containerFor?.(executor, profile.machine) ?? harnessContainerFor(executor, profile.machine),
-          bearer: ctx.bearer,
-          harnessUrl,
-          registry: harnessDeps.registry,
-          ...(deps.runBearers ? { bearers: deps.runBearers } : {}),
-          clock,
-          sleep: harnessDeps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
-          ...(harnessDeps.pollMs !== undefined ? { pollMs: harnessDeps.pollMs } : {}),
-          ...(harnessDeps.tickMs !== undefined ? { tickMs: harnessDeps.tickMs } : {}),
-        },
-        {
-          runId: run.id,
-          agent,
-          ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
-          model: { id: modelId, provider: providerName, providerType: providerCfg.type },
-          system,
-          messages,
-          tools: mergeTools(TOOLSETS[agent.toolset] ?? [], mcpForRun?.tools),
-          toolContext,
-          ...(session ? { notepad: () => session.readNotepad(), conversation: () => session.readConversation() } : {}),
-          rules: {
-            checkout: binding?.workspace ?? "/workspace",
-            ...(ownBranch !== undefined ? { branch: ownBranch } : {}),
-            protectedBranches,
+      // What the harness opens the run on: the bearer as minted, and a bot
+      // death's resume plan when there is one — or, after a relaunch, the
+      // rotated bearer and the record the harness held at the interruption.
+      let bearer = ctx.bearer;
+      let harnessResume: HarnessResume | undefined = reentry
+        ? {
+            messages: reentry.messages,
+            compactions: reentry.compactions,
+            settlements: reentry.settlements,
+            remainingMs: reentry.remainingMs,
+            turn: reentry.turn,
+            inboxConsumedSeq: reentry.inboxConsumedSeq,
+            ...(facts ? { facts } : {}),
+          }
+        : undefined;
+      const openRun = () =>
+        openThroughSeam(
+          harnessDeps.harness,
+          {
+            container:
+              harnessDeps.containerFor?.(executor, profile.machine) ?? harnessContainerFor(executor, profile.machine),
+            bearer,
+            harnessUrl,
+            registry: harnessDeps.registry,
+            ...(deps.runBearers ? { bearers: deps.runBearers } : {}),
+            clock,
+            sleep: harnessDeps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
+            ...(harnessDeps.pollMs !== undefined ? { pollMs: harnessDeps.pollMs } : {}),
+            ...(harnessDeps.tickMs !== undefined ? { tickMs: harnessDeps.tickMs } : {}),
           },
-          ...(round.selection.backend ? { backend: round.selection.backend } : {}),
-          span: root,
-          control: run.control,
-          inbox: admitted.inbox,
-          ...(stageFollowUps ? { stageFollowUps } : {}),
-          onEvent,
-          onProgress,
-          ...(ledgerRun
-            ? {
-                onStep: ledgerRun.step.bind(ledgerRun),
-                logIndexOf: ledgerRun.logIndexOf.bind(ledgerRun),
-                saveFacts: (h: HarnessFacts) => ledgerRun.setState({ harness: h }),
-              }
-            : {}),
-          ...(reentry
-            ? {
-                resume: {
-                  messages: reentry.messages,
-                  compactions: reentry.compactions,
-                  settlements: reentry.settlements,
-                  remainingMs: reentry.remainingMs,
-                  turn: reentry.turn,
-                  inboxConsumedSeq: reentry.inboxConsumedSeq,
-                  ...(facts ? { facts } : {}),
-                },
-              }
-            : {}),
-        },
-      );
+          {
+            runId: run.id,
+            agent,
+            ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
+            model: { id: modelId, provider: providerName, providerType: providerCfg.type },
+            system,
+            messages,
+            tools: mergeTools(TOOLSETS[agent.toolset] ?? [], mcpForRun?.tools),
+            toolContext,
+            ...(session
+              ? { notepad: () => session.readNotepad(), conversation: () => session.readConversation() }
+              : {}),
+            rules: {
+              checkout: binding?.workspace ?? "/workspace",
+              ...(ownBranch !== undefined ? { branch: ownBranch } : {}),
+              protectedBranches,
+            },
+            ...(round.selection.backend ? { backend: round.selection.backend } : {}),
+            span: root,
+            control: run.control,
+            inbox: admitted.inbox,
+            ...(stageFollowUps ? { stageFollowUps } : {}),
+            onEvent,
+            onProgress,
+            ...(ledgerRun
+              ? { onStep: ledgerRun.step.bind(ledgerRun), logIndexOf: ledgerRun.logIndexOf.bind(ledgerRun) }
+              : {}),
+            saveFacts,
+            ...(harnessResume ? { resume: harnessResume } : {}),
+          },
+        );
+      // The survival clause's ceiling (harness.md item 6; dispatch/relaunch.ts):
+      // the harness's typed word that the run's container was replaced under
+      // it — the bot lives, or this loop would not be running — relaunches the
+      // process from the record in the container the run holds: the bound
+      // read off the row's facts, the workspace re-attached or refused by
+      // name, the bearer rotated with the row written inside the rotation,
+      // then the harness's own rebuild through the same door. A refusal is an
+      // interruption like the floor's: the relay registration the harness left
+      // standing for the relaunch is forgotten, the record says why, and the
+      // catch below finishes the run `interrupted` for the dispatcher's
+      // restart. Every other throw is the run's, as before.
+      for (;;) {
+        try {
+          harnessSession = await openRun();
+          break;
+        } catch (err) {
+          if (!(err instanceof HarnessContainerReplacedError)) throw err;
+          let decision: Awaited<ReturnType<typeof prepareRelaunch>>;
+          try {
+            decision = await prepareRelaunch(deps, {
+              runId: run.id,
+              threadKey: msg.threadKey,
+              agent: ctx.agent,
+              profile,
+              repoCtx,
+              root,
+              clock,
+              harness: harnessDeps.harness,
+              replaced: err,
+              facts: lastFacts,
+              binding: workspaceBinding,
+              saveFacts,
+            });
+          } catch (failed) {
+            // The relaunch itself failed (the row's write threw inside the
+            // rotation): the run fails as any throw fails it, and the
+            // registration left for the relaunch goes with it.
+            harnessDeps.registry.forget(run.id);
+            throw failed;
+          }
+          if (decision.kind === "refused") {
+            // The floor's own note kind carries the outcome, starting at the
+            // why: the harness's `sandbox_restarted` note said the verdict, this
+            // one says what followed. Never `resumed` — the run is not.
+            harnessDeps.registry.forget(run.id);
+            onEvent({ type: "run_note", kind: "sandbox_restarted", summary: decision.interruption.message });
+            throw decision.interruption;
+          }
+          if (decision.round !== undefined) {
+            // The run holds the re-attached round's executor and binding from
+            // here: the next relaunch re-attaches what this one bound, and the
+            // row learns the binding complete, as a resumed row does.
+            executor = decision.round.selection.executor;
+            toolContext.executor = executor;
+            const rebound = workspaceBindingFor(decision.round.selection, profile.machine);
+            if (rebound !== undefined) {
+              workspaceBinding = rebound;
+              ledgerRun?.setState({ binding: rebound });
+            }
+          }
+          if (decision.bearer !== undefined) bearer = decision.bearer;
+          harnessResume = decision.resume;
+        }
+      }
       answer = harnessSession.answer;
     }
     // Reviewed-head settle (docs/reference/specs/agent-review.md items 8 + 12,

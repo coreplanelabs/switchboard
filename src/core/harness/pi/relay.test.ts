@@ -110,6 +110,22 @@ describe("HarnessRegistry", () => {
     forget();
     expect(r.size()).toBe(0);
   });
+
+  // harness.md item 6: the harness leaves a replaced run's registration
+  // standing for the loop's relaunch; a loop that does not relaunch ends it here.
+  it("forget(runId) ends whichever registration holds the run and its calls — the loop's word for a relaunch refused — and is a no-op for a run not registered", () => {
+    const r = new HarnessRegistry();
+    const { harness } = live();
+    const forget = r.register(harness);
+    const calls = r.calls("run-7")!;
+    r.forget("run-7");
+    expect(r.get("run-7")).toBeUndefined();
+    expect(r.calls("run-7")).toBeUndefined();
+    expect(calls.signal.aborted).toBe(true);
+    forget(); // the earlier closure finds nothing of its own to forget
+    r.forget("run-7");
+    expect(r.size()).toBe(0);
+  });
 });
 
 describe("relayedToolDefinitions", () => {
@@ -943,6 +959,29 @@ describe("HarnessRegistry.replace and RelayedCalls.awaitInFlight — a relaunche
     // A settled call was never running: the record's answer is not awaited.
     calls.settle("c-settled", { content: [{ type: "text", text: "from the record" }], isError: false });
     expect(calls.inFlight()).toEqual([]);
+  });
+
+  it("answered(callId) hands a relaunch the answer of a call that landed before the dead process could read it — a rejected start as the error answer — and nothing for a call still running or never asked", async () => {
+    const quick = gated("quick");
+    const slow = gated("slow");
+    const { harness } = live();
+    harness.tools = [quick.tool, slow.tool];
+    const calls = new RelayedCalls();
+    void relayToolCall(harness, calls, { toolCallId: "c-q", tool: "quick", input: {} }, { windowMs: 1 });
+    void relayToolCall(harness, calls, { toolCallId: "c-s", tool: "slow", input: {} }, { windowMs: 1 });
+    void relayToolCall(harness, calls, { toolCallId: "c-x", tool: "not-served", input: {} }, { windowMs: 1 });
+    quick.release("quick done");
+    await new Promise((r) => setImmediate(r));
+    expect(calls.inFlight()).toEqual(["c-s"]);
+    expect(await calls.answered("c-q")).toEqual({ content: [{ type: "text", text: "quick done" }], isError: false });
+    expect(await calls.answered("c-s")).toBeUndefined();
+    expect(await calls.answered("c-never")).toBeUndefined();
+    expect(await calls.answered("c-x")).toMatchObject({ isError: true });
+    // A settlement is the record's answer, not the bot's: never read as one.
+    calls.settle("c-settled", { content: [{ type: "text", text: "from the record" }], isError: true });
+    expect(await calls.answered("c-settled")).toBeUndefined();
+    slow.release("slow done");
+    calls.end();
   });
 
   it("a call whose start rejects is done with an error answer carrying the message, and the others' answers are still read: one straggler's exception never fails the wait", async () => {

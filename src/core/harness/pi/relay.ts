@@ -100,6 +100,18 @@ export class HarnessRegistry {
     return this.hold({ harness, calls: previous.calls });
   }
 
+  /** The run forgotten whichever registration holds it, its calls ended: the
+   *  run loop's, for a run whose process was found gone with its container
+   *  and is not relaunched — the harness left the registration standing so a
+   *  relaunch could take it over (`replace`) with the calls kept, and a
+   *  refusal has to end them. A run not registered is nothing to forget. */
+  forget(runId: string): void {
+    const entry = this.live.get(runId);
+    if (!entry) return;
+    this.live.delete(runId);
+    entry.calls.end();
+  }
+
   private hold(entry: Registration): () => void {
     this.live.set(entry.harness.runId, entry);
     return () => {
@@ -154,6 +166,8 @@ export class RelayedCalls {
   private readonly calls = new Map<string, Promise<RelayedToolAnswer>>();
   /** The ids whose call is still running: joined by `join`, forgotten as each answers. */
   private readonly running = new Set<string>();
+  /** The ids answered from the record (`settle`), never run here. */
+  private readonly settledIds = new Set<string>();
   private readonly ending = new AbortController();
 
   get size(): number {
@@ -181,6 +195,23 @@ export class RelayedCalls {
   /** The ids of the calls still running, in the order they were started. */
   inFlight(): string[] {
     return [...this.running];
+  }
+
+  /** A call asked here whose answer already landed: the answer, or nothing
+   *  for a call never asked, one still running (`awaitInFlight` reads those)
+   *  or one settled from the record (`settle`: the record's answer, not the
+   *  bot's). What a relaunch reads for a call the record names beside the
+   *  calls it awaits (harness-pi item 8): an answer that landed after the
+   *  process died and before it could ask again is carried into the rebuilt
+   *  session too, never lost to a restart note. A `start` that rejected is
+   *  the error answer `runRelayedTool` would have given. */
+  async answered(callId: string): Promise<RelayedToolAnswer | undefined> {
+    const answer = this.calls.get(callId);
+    if (!answer || this.running.has(callId) || this.settledIds.has(callId)) return undefined;
+    return answer.then(
+      (a) => a,
+      (err: unknown) => errorAnswerOf(err),
+    );
   }
 
   /** Every call still running, awaited together up to one window — the relay
@@ -221,13 +252,16 @@ export class RelayedCalls {
    *  died, whose extension asks again with the same id. Every ask reads it and
    *  the tool never runs; a call already joined keeps the answer it has. */
   settle(callId: string, answer: RelayedToolAnswer): void {
-    if (!this.calls.has(callId)) this.calls.set(callId, Promise.resolve(answer));
+    if (this.calls.has(callId)) return;
+    this.calls.set(callId, Promise.resolve(answer));
+    this.settledIds.add(callId);
   }
 
   end(): void {
     this.ending.abort();
     this.calls.clear();
     this.running.clear();
+    this.settledIds.clear();
   }
 }
 
