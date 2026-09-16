@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.234.0](https://github.com/coreplanelabs/switchboard/compare/v1.233.0...v1.234.0) (2026-09-16)
+
+
+### Features
+
+* **dispatcher:** a plain change request routes to ship — the reviewed loop a person merges — and coding runs only when named ([#1338](https://github.com/coreplanelabs/switchboard/issues/1338)) ([dcbd759](https://github.com/coreplanelabs/switchboard/commit/dcbd75981edf6d8918328a737af2e1176bc3bba7))
+* **dispatcher:** the provider seam forces one tool of many with parallel calls off, and the router's output cap follows the offered tools ([#1349](https://github.com/coreplanelabs/switchboard/issues/1349)) ([cc38ba8](https://github.com/coreplanelabs/switchboard/commit/cc38ba8b2471dac959eb5402ff1824171eb97b7e))
+* **harness:** the container seam is harness-neutral in fact — the program, its arguments, its stdout filter, its layout and a port are the start's inputs, a request reaches a server in the container over loopback, and pi's start script is byte-identical ([#1344](https://github.com/coreplanelabs/switchboard/issues/1344)) ([153a7d2](https://github.com/coreplanelabs/switchboard/commit/153a7d2ef2436c8e574e06f23fffe9b95187d5b0))
+* **harness:** the run loop drives every run through one Harness object — pi behind the contract, the row's facts keyed on the harness that wrote them, and another harness's row closes the run interrupted ([#1335](https://github.com/coreplanelabs/switchboard/issues/1335)) ([fa6d956](https://github.com/coreplanelabs/switchboard/commit/fa6d9562ce129cbd73948016c28e7dda57b547c8))
+* **web:** a ship unit's page composes both threads' runs in round order, each opening to its timeline, with a search over one thread's log ([#1345](https://github.com/coreplanelabs/switchboard/issues/1345)) ([dab9023](https://github.com/coreplanelabs/switchboard/commit/dab9023a4a2f17d12287602d75a0ac92f5459d2d))
+
+
+### Bug fixes
+
+* **dispatcher:** a run re-dispatched after its container was replaced runs as a new run — a row this generation adopted is not "elsewhere", and a restart never steers into the row it closed ([#1347](https://github.com/coreplanelabs/switchboard/issues/1347)) ([b100594](https://github.com/coreplanelabs/switchboard/commit/b1005943e4de654aea386cc5be191bc0e0189851))
+* **resident:** a run starts from a clean tree at its bound ref — the release discards and names what a run left behind, a rebind moves the binding alone, and a thread whose own branch is gone returns to the default ([#1346](https://github.com/coreplanelabs/switchboard/issues/1346)) ([4311a98](https://github.com/coreplanelabs/switchboard/commit/4311a98a6fc9ba9a45a1287f4c50f8cd37fe99ee))
+
+
+### Documentation
+
+* **docs:** the program plan records U36 built and live, U37's seam merged with [#1340](https://github.com/coreplanelabs/switchboard/issues/1340) ahead of its rotation units, the tree rule of 2026-09-16 and the container-replaced floor's first live receipt ([#1348](https://github.com/coreplanelabs/switchboard/issues/1348)) ([02c031a](https://github.com/coreplanelabs/switchboard/commit/02c031a359407e40a481b3da122731da20dc3991))
+* **docs:** the stage A plan's OpenCode facts gain a log offset and pi's optional words, and the re-dispatch fix gates the rotation and relaunch units ([#1342](https://github.com/coreplanelabs/switchboard/issues/1342)) ([85b1828](https://github.com/coreplanelabs/switchboard/commit/85b1828a45a41ffc8ed0059552525185c4ce5f34))
+
 ## [1.233.0](https://github.com/coreplanelabs/switchboard/compare/v1.232.0...v1.233.0) (2026-09-16)
 
 
