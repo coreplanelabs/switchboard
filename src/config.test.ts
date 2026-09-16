@@ -137,6 +137,30 @@ describe("layered resolution", () => {
   });
 });
 
+describe("channelsWithScope — the index of configured channels", () => {
+  it("lists every channel with a static or runtime scope, sorted, with the setting NAMES it carries and where they come from", async () => {
+    const s = store();
+    await s.setChannelOverride("slack:CX", { instructions: "This channel is about billing." });
+    await s.setChannelOverride("slack:CREVIEW", { models: { review: "anthropic/other" } });
+    expect(s.channelsWithScope()).toEqual([
+      { channelId: "slack:CMODEL", settings: ["models"], source: "config" },
+      { channelId: "slack:CREVIEW", settings: ["agent", "models"], source: "both" },
+      { channelId: "slack:CX", settings: ["instructions"], source: "runtime" },
+    ]);
+    // Names only: the instructions text and the model refs are not in the index.
+    expect(JSON.stringify(s.channelsWithScope())).not.toContain("billing");
+    expect(JSON.stringify(s.channelsWithScope())).not.toContain("anthropic/");
+  });
+
+  it("a channel whose runtime scope was cleared and has no static block leaves the index; a user scope never enters it", async () => {
+    const s = store();
+    await s.setChannelOverride("slack:CX", { agent: "review" });
+    await s.setUserOverride("slack:UX", { agent: "review" });
+    await s.clearChannelOverride("slack:CX");
+    expect(s.channelsWithScope().map((r) => r.channelId)).toEqual(["slack:CMODEL", "slack:CREVIEW"]);
+  });
+});
+
 describe("effort resolution (the same layers as model)", () => {
   const EFFORT_YAML = `
 organization: acme

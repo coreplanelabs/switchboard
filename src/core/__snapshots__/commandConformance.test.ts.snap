@@ -89,6 +89,20 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "config:read",
+    "args": [],
+    "effect": "read",
+    "id": "config.overrides",
+    "options": [],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
     "action": "config:write",
     "args": [
       {

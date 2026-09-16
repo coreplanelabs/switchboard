@@ -539,20 +539,57 @@ export const FIELD_HINTS: SampleHints = {
   session: FIXTURE.sessionKey,
 };
 
+/** A refusal the DATA decides on one surface only (command-registry.md item
+ *  22, record 0041): the handler answers `error` for a variant `when` names,
+ *  on the surfaces listed, and succeeds everywhere else. The one such rule
+ *  today: a `me` write from the Access surface (a browser session never
+ *  requests a run, so its own scope is read by nothing). The suite asserts the
+ *  refusal on those cells instead of the identical-output contract. */
+export interface SurfaceRefusal {
+  surfaces: readonly SurfaceKey[];
+  when: (named: Named) => boolean;
+  error: "unauthorized";
+  why: string;
+}
+
+/** The Access surfaces: what a browser session or a dashboard bearer reaches. */
+const ACCESS_SURFACES: readonly SurfaceKey[] = ["httpGet", "httpPost"];
+
+const ME_ON_ACCESS: SurfaceRefusal = {
+  surfaces: ACCESS_SURFACES,
+  when: (named) => named.scope === "me",
+  error: "unauthorized",
+  why: "a `me` write from the Access surface writes a scope no run reads (record 0041)",
+};
+/** `mcp add|connect|remove` default to `me` when `--scope` is absent. */
+const MCP_ME_ON_ACCESS: SurfaceRefusal = {
+  ...ME_ON_ACCESS,
+  when: (named) => (named.scope ?? "me") === "me",
+};
+
 /** Commands the generic fixture cannot drive on its own: `hints` override a
  *  field-name hint for this command; `baseline` options are present in EVERY
- *  variant. Each entry says why the generic sample is not enough. */
-export const COMMAND_FIXTURES: Readonly<Record<string, { hints?: SampleHints; baseline?: Named; why: string }>> = {
+ *  variant; `refusal` is a surface-bound refusal the data decides. Each entry
+ *  says why the generic sample is not enough. */
+export const COMMAND_FIXTURES: Readonly<
+  Record<string, { hints?: SampleHints; baseline?: Named; refusal?: SurfaceRefusal; why: string }>
+> = {
   "config.show": {
     baseline: { channel: FIXTURE.channel },
     why: "a machine caller has no origin channel — `--channel` is required there",
   },
   "config.set": {
     baseline: { channel: FIXTURE.channel, agent: "general" },
+    refusal: ME_ON_ACCESS,
     why: "as config.show, plus at least one setting (a bare `config set` is `nothing to set`)",
   },
-  "config.clear": { baseline: { channel: FIXTURE.channel }, why: "as config.show" },
-  "config.instructions": { baseline: { channel: FIXTURE.channel }, why: "as config.show" },
+  "config.clear": { baseline: { channel: FIXTURE.channel }, refusal: ME_ON_ACCESS, why: "as config.show" },
+  "config.instructions": {
+    baseline: { channel: FIXTURE.channel },
+    // The peek (no text) is a read of the caller's own scope and still answers; only a write is refused.
+    refusal: { ...ME_ON_ACCESS, when: (named) => named.scope === "me" && named.text !== undefined },
+    why: "as config.show",
+  },
   "repo.reconfigure": {
     baseline: { ref: "main" },
     why: "at least one change is required (a bare `repo reconfigure <slug>` is `nothing to reconfigure`)",
@@ -584,14 +621,16 @@ export const COMMAND_FIXTURES: Readonly<Record<string, { hints?: SampleHints; ba
   "mcp.add": {
     hints: { name: "notion" },
     baseline: { channel: FIXTURE.channel },
+    refusal: MCP_ME_ON_ACCESS,
     why: "the generic `name` hint is the seeded server (a duplicate); `--scope channel` needs a channel on machine surfaces",
   },
   "mcp.connect": {
     baseline: { channel: FIXTURE.channel },
+    refusal: MCP_ME_ON_ACCESS,
     why: "`--scope channel` needs a channel on machine surfaces",
   },
   "mcp.show": { baseline: { channel: FIXTURE.channel }, why: "as mcp.connect" },
-  "mcp.remove": { baseline: { channel: FIXTURE.channel }, why: "as mcp.connect" },
+  "mcp.remove": { baseline: { channel: FIXTURE.channel }, refusal: MCP_ME_ON_ACCESS, why: "as mcp.connect" },
   "mcp.list": { baseline: { channel: FIXTURE.channel }, why: "a machine caller has no origin channel" },
   "setup.init": {
     baseline: {
@@ -672,7 +711,17 @@ export function expectedRejection(variant: Variant): RejectionCode | undefined {
 
 // ---- the matrix -------------------------------------------------------------------------------------
 
-export type MatrixCell = { kind: "ok" } | { kind: "rejected" } | { kind: "not-exposed" };
+export type MatrixCell = { kind: "ok" } | { kind: "rejected" } | { kind: "refused-here" } | { kind: "not-exposed" };
+
+/** The surface-bound refusal this variant meets on this surface, if the command declares one (`COMMAND_FIXTURES[id].refusal`). */
+export function surfaceRefusalOf(
+  cmd: Pick<CommandDef<unknown>, "id">,
+  surface: Pick<SurfaceMeta, "key">,
+  named: Named,
+): SurfaceRefusal | undefined {
+  const refusal = COMMAND_FIXTURES[cmd.id]?.refusal;
+  return refusal && refusal.surfaces.includes(surface.key) && refusal.when(named) ? refusal : undefined;
+}
 
 export interface MatrixRow {
   variant: string;
@@ -875,7 +924,8 @@ export function buildConformanceMatrix(catalogue: readonly CommandDef<unknown>[]
         const cells = Object.fromEntries(
           SURFACE_METAS.map((s): [SurfaceKey, MatrixCell] => {
             if (!exposedOn(cmd, s, variant)) return [s.key, { kind: "not-exposed" }];
-            return [s.key, rejection === undefined ? { kind: "ok" } : { kind: "rejected" }];
+            if (rejection !== undefined) return [s.key, { kind: "rejected" }];
+            return [s.key, surfaceRefusalOf(cmd, s, variant.named) ? { kind: "refused-here" } : { kind: "ok" }];
           }),
         ) as Record<SurfaceKey, MatrixCell>;
         return { variant: variant.name, input, ...(rejection === undefined ? {} : { rejection }), cells };
@@ -964,7 +1014,12 @@ export const CROSS_CUTTING_ASSERTIONS: ReadonlyArray<{ name: string; assertion: 
   },
 ];
 
-const CELL_TEXT: Record<MatrixCell["kind"], string> = { ok: "✅", rejected: "⛔", "not-exposed": "—" };
+const CELL_TEXT: Record<MatrixCell["kind"], string> = {
+  ok: "✅",
+  rejected: "⛔",
+  "refused-here": "🚫",
+  "not-exposed": "—",
+};
 
 const mdCell = (s: string) => s.replace(/\|/g, "\\|");
 
@@ -976,7 +1031,7 @@ export function renderVariantCell(row: Pick<MatrixRow, "variant" | "rejection">)
 export function renderConformanceMatrix(matrix: ConformanceMatrix): string {
   const { summary } = matrix;
   const out: string[] = [
-    `**${summary.commands} commands × ${summary.surfaces} surfaces × ${summary.variants} variants = ${summary.cells} scenario cells** (a cell is one command × variant × exposed surface; ✅ = expected to succeed with identical output, ⛔ = expected refusal with the ONE code the row names — identical on every exposed surface, — = surface not exposed for this case).`,
+    `**${summary.commands} commands × ${summary.surfaces} surfaces × ${summary.variants} variants = ${summary.cells} scenario cells** (a cell is one command × variant × exposed surface; ✅ = expected to succeed with identical output, ⛔ = expected refusal with the ONE code the row names — identical on every exposed surface, 🚫 = a refusal the data decides on THIS surface alone (\`unauthorized\`: a \`me\` write from the Access surface, which no run reads — record 0041), — = surface not exposed for this case).`,
     "",
   ];
   for (const cmd of matrix.commands) {

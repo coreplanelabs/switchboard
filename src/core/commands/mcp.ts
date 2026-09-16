@@ -85,6 +85,27 @@ function channelOf(caller: Caller, option: string | undefined): string | undefin
   return option ?? caller.origin?.channelId;
 }
 
+/** Why a `me` write is refused on the Access surface (record 0041): a browser
+ *  session never requests a run, so a server on its own tier would reach no run. */
+export const MCP_ME_ON_ACCESS_MESSAGE =
+  "Personal MCP servers are added in chat (`mcp add <name> --url …`): your runs are requested as your chat user, not as this browser session, so a server added here for yourself would reach no run. Pass --scope org or --scope channel.";
+
+/** The tier a write targets. `me` (the default) is the caller's own user tier,
+ *  and a run resolves the tier of the user who requested it — a chat user; the
+ *  Access surface never requests a run, so its `me` is refused by the data
+ *  (docs/reference/specs/command-registry.md item 22), before any store is touched. */
+async function writeTarget(
+  svc: McpService,
+  caller: Caller,
+  actor: McpActor,
+  word: "me" | "channel" | "org" | undefined,
+  channel: string | undefined,
+) {
+  if ((word ?? "me") === "me" && caller.kind === "access")
+    throw new CommandError("unauthorized", MCP_ME_ON_ACCESS_MESSAGE);
+  return via(() => svc.target(actor, word ?? "me", channel));
+}
+
 /** Service decisions become the registry's codes; anything else is a store being unreachable. */
 async function via<T>(fn: () => Promise<T> | T): Promise<T> {
   try {
@@ -236,7 +257,7 @@ export const mcpAdd = defineCommand({
     const svc = await serviceOf(deps);
     const channel = channelOf(caller, options.channel);
     const actor = actorOf(caller, channel);
-    const target = await via(() => svc.target(actor, options.scope ?? "me", channel));
+    const target = await writeTarget(svc, caller, actor, options.scope, channel);
     return (await via(() =>
       svc.add(actor, target, {
         name: args.name,
@@ -263,7 +284,7 @@ export const mcpConnect = defineCommand({
     const svc = await serviceOf(deps);
     const channel = channelOf(caller, options.channel);
     const actor = actorOf(caller, channel);
-    const target = await via(() => svc.target(actor, options.scope ?? "me", channel));
+    const target = await writeTarget(svc, caller, actor, options.scope, channel);
     return (await via(() => svc.connect(actor, target, args.name))) as unknown as JsonObject;
   },
 });
@@ -310,7 +331,7 @@ export const mcpRemove = defineCommand({
     const svc = await serviceOf(deps);
     const channel = channelOf(caller, options.channel);
     const actor = actorOf(caller, channel);
-    const target = await via(() => svc.target(actor, options.scope ?? "me", channel));
+    const target = await writeTarget(svc, caller, actor, options.scope, channel);
     return (await via(() => svc.remove(actor, target, args.name))) as unknown as JsonObject;
   },
 });

@@ -631,6 +631,7 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
       setUserOverride: (u, p) => s.config.setUserOverride(u, p),
       clearChannelOverride: (c) => s.config.clearChannelOverride(c),
       clearUserOverride: (u) => s.config.clearUserOverride(u),
+      channelsWithScope: async () => s.config.channelsWithScope(),
       agentNames: () => Object.keys(AGENTS),
     },
     runs, // a live run's friction window ends at the pinned clock on every surface
