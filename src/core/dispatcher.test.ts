@@ -1076,8 +1076,10 @@ describe("resident repo dispatch", () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
     vi.stubEnv("GITHUB_APP_ID", "");
-    // The /status probe answers restoring; the run then uses the per-thread
-    // backend (no further RESIDENT calls happen before the fake provider ends —
+    // The /status probe answers restoring; the held /await-restore answers
+    // restoring again (execution.md item 25 — a wait that lands non-serviceable
+    // falls cold with the wait named); the run then uses the per-thread backend
+    // (no further RESIDENT calls happen before the fake provider ends —
     // the coding PR post-step's head/branch probe goes to the sandbox backend).
     const fetchSpy = vi.fn(
       async (_url: unknown) =>
@@ -1092,8 +1094,10 @@ describe("resident repo dispatch", () => {
     const { io, replies, statuses } = fakeIO();
     await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
     expect(replies).toContain("answer");
-    expect(fetchSpy.mock.calls.filter((c) => String(c[0]).includes("resident.example"))).toHaveLength(1);
-    expect(statuses.some((s) => s.title.includes("resident restoring (rehydrating) — using fresh sandbox"))).toBe(true);
+    expect(fetchSpy.mock.calls.filter((c) => String(c[0]).includes("resident.example"))).toHaveLength(2);
+    const coldNote =
+      "resident restoring (rehydrating) after waiting for the resident's restore — using fresh sandbox";
+    expect(statuses.some((s) => s.title.includes(coldNote))).toBe(true);
     // …and on the run's stream: a `cold_sandbox` note with the same text, after
     // the attach and before the loop, head material like the rest of the setup
     // — so the run page, not only the card, says why this run went cold.
@@ -1101,7 +1105,9 @@ describe("resident repo dispatch", () => {
     const noteAt = events.findIndex((e) => e.type === "run_note" && e.kind === "cold_sandbox");
     const attachEndAt = events.findIndex((e) => e.type === "span_end" && e.name === "dispatch.workspace.attach");
     const loopAt = events.findIndex((e) => e.type === "span_start" && e.name === "run.agent");
-    expect(events[noteAt]).toMatchObject({ summary: "resident restoring (rehydrating) — using fresh sandbox" });
+    expect(events[noteAt]).toMatchObject({
+      summary: "resident restoring (rehydrating) after waiting for the resident's restore — using fresh sandbox",
+    });
     expect(noteAt).toBeGreaterThan(attachEndAt);
     expect(noteAt).toBeLessThan(loopAt);
     expect(events.slice(0, loopAt).every(isHeadMaterial)).toBe(true);

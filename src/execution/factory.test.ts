@@ -622,7 +622,12 @@ describe("makeExecutor resident selection", () => {
   // older Worker's 404 falls back cold with the wait named.
   describe("a restoring resident — the one held /await-restore request (item 25)", () => {
     const attachOk = {
-      body: { workspace: "/workspace/threads/x/master", ref: "master", sha: "47c4230692cbc5961682532afb822e9c2f1f40b7", user: "worker2" },
+      body: {
+        workspace: "/workspace/threads/x/master",
+        ref: "master",
+        sha: "47c4230692cbc5961682532afb822e9c2f1f40b7",
+        user: "worker2",
+      },
     };
 
     it("restoring probe → /await-restore held; a warm answer attaches, the card names the wait", async () => {

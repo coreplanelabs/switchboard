@@ -371,9 +371,7 @@ export type ResidentStatusProbe =
  *  failure. Never throws — every outcome is a value the factory turns into a
  *  card note. */
 export type ResidentRestoreWait =
-  | { kind: "status"; state: string; reason: string }
-  | { kind: "unsupported" }
-  | { kind: "unreachable"; error: string };
+  { kind: "status"; state: string; reason: string } | { kind: "unsupported" } | { kind: "unreachable"; error: string };
 
 export class ResidentExecutor implements Executor {
   /** Consecutive `runtime-replaced` answers on the idempotent routes (/read,

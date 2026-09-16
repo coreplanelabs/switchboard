@@ -350,7 +350,10 @@ export async function makeExecutor(
         );
         // Item 25: the wait is on the card whichever state the restore landed on.
         return waitedForRestore
-          ? { ...selection, note: oneLine(`${selection.note ?? "resident"} · after waiting for the resident's restore`) }
+          ? {
+              ...selection,
+              note: oneLine(`${selection.note ?? "resident"} · after waiting for the resident's restore`),
+            }
           : selection;
       } catch (err) {
         if (err instanceof ResidentNeedsRefError) throw err;
