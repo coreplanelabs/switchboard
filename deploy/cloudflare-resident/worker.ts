@@ -156,6 +156,7 @@ import {
   type WatchdogSummary,
 } from "../../src/core/schedules.js";
 import type { ResidentLifecycleState } from "../../src/execution/residentState.js";
+import { RestoreWaiters } from "../../src/execution/restoreWaiters.js";
 import {
   decisivePull,
   effectiveLimits,
@@ -348,7 +349,7 @@ const BUILD_ID = buildId(BUILD);
 // route is a `resident.fetch` root at the edge. Each joins the bot's trace when
 // the request carried one. The tracer and its log sink are shared.ts's: the
 // refresh instance's root (refresh.ts) starts from the same pair.
-const STREAMED_ROUTES: ReadonlySet<string> = new Set(["/attach", "/exec", "/op"]);
+const STREAMED_ROUTES: ReadonlySet<string> = new Set(["/attach", "/exec", "/op", "/await-restore"]);
 
 /** One request as the resident's own root: started at its t0, joining the
  *  bot's trace when `traceparent` parses, the collector's steps grafted as
@@ -1729,6 +1730,12 @@ export class ResidentDO extends Sandbox<Env> {
    *  afterwards, so `setResidentState` clears the memos and nothing more. */
   private incarnation = mintIncarnationId();
   private leaseSeq = 0;
+
+  /** Item 27: the held /await-restore requests, answered by the lifecycle
+   *  transition out of `restoring` (`setResidentState`). In-memory on purpose:
+   *  a DO restart drops the held RPCs with the ledger and the bot's own
+   *  deadline names the fallback. */
+  private restoreWaiters = new RestoreWaiters();
 
   private nextHolder(): string {
     return `${this.incarnation}:${++this.leaseSeq}`;
@@ -6975,6 +6982,29 @@ export class ResidentDO extends Sandbox<Env> {
       [REASON_KEY]: residentText(reason),
       [UPDATED_KEY]: new Date(systemClock()).toISOString(),
     });
+    // Item 27: the transition OUT of `restoring` is the restore event — it
+    // answers every held /await-restore request with the state landed on.
+    if (state !== "restoring") this.restoreWaiters.publish({ state, reason: residentText(reason) });
+  }
+
+  /** POST /await-restore (docs/reference/specs/execution.md item 27): answer at
+   *  once when the state is anything but `restoring`; otherwise hold the ONE
+   *  request on the waiter ledger until `setResidentState` leaves `restoring`
+   *  and publishes. No polling and no retry timer on either side. */
+  async awaitRestore(): Promise<{ state: string; reason: string }> {
+    // The waiter goes on the ledger BEFORE the state is read: the read awaits
+    // storage, and a transition that lands in that gap would publish to a
+    // ledger this request is not on yet and hold it for a transition that may
+    // never come (the bot's deadline would then turn a short wait cold). A
+    // state already out of `restoring` answers at once and withdraws the waiter.
+    const held = this.restoreWaiters.hold();
+    const status = await this.getStatus();
+    if (status.state !== "restoring") {
+      held.withdraw();
+      return { state: status.state, reason: status.reason };
+    }
+    const outcome = await held.outcome;
+    return { state: outcome.state, reason: outcome.reason };
   }
 
   async getStatus(): Promise<ResidentStatus> {
@@ -7619,6 +7649,7 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
   "/read": { scope: "operator", method: "POST" },
   "/write": { scope: "operator", method: "POST" },
   "/op": { scope: "operator", method: "POST" },
+  "/await-restore": { scope: "operator", method: "POST" },
 };
 
 /** Per-resource R2 prefix for future resident cache objects; offboard deletes
@@ -7734,6 +7765,8 @@ export default {
             return await handleWrite(env, body);
           case "/op":
             return await handleOp(env, body, traceparent);
+          case "/await-restore":
+            return await handleAwaitRestore(env, body);
           default:
             return json({ error: "unknown route" }, 404);
         }
@@ -8283,6 +8316,24 @@ async function handleAttach(env: Env, body: Record<string, unknown>, traceparent
       traceparent,
       reason,
     ),
+    (result) => result,
+    (err) => ({ error: errMsg(err), status: 500 }),
+  );
+}
+
+/** POST /await-restore (docs/reference/specs/execution.md item 27): the bot's
+ *  one held request while the resident restores. Held server-side by the DO's
+ *  waiter ledger; the answer streams like /attach (heartbeat whitespace then
+ *  ONE JSON document over HTTP 200) so a restore lasting minutes cannot lose
+ *  the connection. A pre-route Worker answers 404 (unknown route), which the
+ *  bot reads as "this Worker predates the route" and falls back cold. */
+async function handleAwaitRestore(env: Env, body: Record<string, unknown>): Promise<Response> {
+  const resource = parseResource(body.resource);
+  if ("error" in resource) return json({ error: resource.error }, 400);
+  const record = await registryStub(env).getRecord(resource.resource);
+  if (!record) return json({ error: `${resource.resource} is not onboarded` }, 404);
+  return streamHeartbeatJson(
+    residentStub(env, resource.resource).awaitRestore(),
     (result) => result,
     (err) => ({ error: errMsg(err), status: 500 }),
   );
