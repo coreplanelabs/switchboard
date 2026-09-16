@@ -68,4 +68,5 @@ The fix child and its brief, the fix round's disposition sink, the conductor's h
 
 - [Runs: live, then remembered](runs-live-and-history.md) — the run record the log's ranges point into.
 - [How a request flows](how-a-request-flows.md) — where the thread read sits in the pipeline.
+- [Known limits](known-limits.md) — what is proven live and what is not yet built.
 - The contract: [session-log](../reference/specs/session-log.md), [harness-pi](../reference/specs/harness-pi.md) item 8, [routing-and-config](../reference/specs/routing-and-config.md) item 3, [resident-repos](../reference/specs/resident-repos.md) item 29.
