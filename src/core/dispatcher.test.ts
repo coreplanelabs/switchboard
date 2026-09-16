@@ -3380,6 +3380,40 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     expect(replies.some((r) => /base branch/.test(r))).toBe(false);
   });
 
+  // The thread's own pull request was merged before the follow-up ran, and the
+  // thread is bound to that pull request's head branch: the resolver binds no
+  // `pr` (fail-closed, a review never posts to it) but hands the post-step the
+  // record's PR as closed, so the description still edits its body by number
+  // — never "the branch is the base branch", which the head branch is not.
+  it("a description resubmitted in a thread whose own pull request is merged, the thread bound to its head branch → that PR is edited by number and the reply says it is merged; no open call, no base-branch refusal", async () => {
+    const PR_HEAD = "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432";
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION, "Resubmitted."));
+    deps.resolveRepoContext = () => ({
+      repo: "acme/api",
+      prUnpostable: { number: 41, reason: "closed" },
+      closedRecordPr: { number: 41, headSha: PR_HEAD, merged: true },
+    });
+    codingExecutor({ head: PR_HEAD, branch: "docs/seed-header", bindingRef: "docs/seed-header" });
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const updated: Array<{ repo: string; number: number; title: string; body: string }> = [];
+    deps.updatePullRequest = vi.fn(async (repo: string, number: number, patch: { title: string; body: string }) => {
+      updated.push({ repo, number, ...patch });
+    });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding add the tests' names to the PR description", "slack:UADMIN"), io);
+    expect(spy.calls).toHaveLength(0);
+    expect(updated).toHaveLength(1);
+    expect(updated[0]).toMatchObject({ repo: "acme/api", number: 41, title: "Fix the login redirect" });
+    expect(updated[0].body).toContain(`https://github.com/acme/api/blob/${PR_HEAD}/src/login.ts#L10-L20`);
+    // The link is matched by its path with a digit guard — never a host-bearing regex or substring.
+    const updatedReply = replies.find((r) => r.includes("PR updated:"));
+    expect(updatedReply).toBeDefined();
+    expect(updatedReply).toMatch(/\/pull\/41(?!\d)/);
+    expect(updatedReply).toContain("the pull request is merged");
+    expect(replies.some((r) => /base branch/.test(r))).toBe(false);
+  });
+
   it("the pushed branch is gone from the remote while the checkout moved on → the note names BOTH branches, no PR call", async () => {
     const deps = codingDeps(
       bashThenDescribe(["git push -u origin feat/login-fix", "git checkout -b chore/other"], DESCRIPTION),

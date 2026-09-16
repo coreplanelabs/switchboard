@@ -149,7 +149,7 @@ describe("rebindToOwnPr moves the binding in place, or names why it stands", () 
     // The outcome carries the verdict's note, and the log line says the tree was not touched.
     expect(rebind).toMatch(/note: verdict\.note/);
     expect(rebind).toMatch(/outcome\.note/);
-    expect(source).toMatch(/kind: "rebound"; moved: ThreadBinding; rebound: Rebound; note\?: string/);
+    expect(source).toMatch(/kind: "rebound"; moved: ThreadBinding; rebound: Rebound; keepTree: true; note: string/);
   });
 
   it("a rebind rewrites the re-read binding's ref and records the move on it, inside the mutex; a mutex timeout is the attach's 503 mirror-busy", () => {
@@ -160,6 +160,70 @@ describe("rebindToOwnPr moves the binding in place, or names why it stands", () 
     expect(rebind).toMatch(/await this\.ctx\.storage\.put\(key, moved\);/);
     expect(rebind).toMatch(/if \(err instanceof MirrorBusyError\)/);
     expect(rebind).toMatch(/reason: "mirror-busy"/);
+  });
+});
+
+// The no-checkout move keeps the tree on disk as it is: same directory, same
+// contents, uncommitted changes intact. The rebind's promise ("the tree is
+// not touched") is carried to the worktree step as `keepTree`, so item 17's
+// dirty wipe — the one `rm -rf` of the attach, followed by a fresh clone —
+// never runs on the tree the rebind just declined to touch. The path is the
+// binding's stored one throughout: nothing is derived from the moved ref.
+describe("the attach after a no-checkout rebind keeps the dirty tree at its path", () => {
+  const rebind = method("rebindToOwnPr");
+  const body = method("attachThreadBody");
+  const create = method("attachThreadCreate");
+  const ensure = method("ensureThreadWorktree");
+
+  it("the rebind outcome says whether the attach must keep the tree: only the record-alone move does, never the checkout or a recreate", () => {
+    expect(source).toMatch(/kind: "rebound"; moved: ThreadBinding; rebound: Rebound; keepTree: false \}/);
+    expect(source).toMatch(/kind: "rebound"; moved: ThreadBinding; rebound: Rebound; keepTree: true; note: string \}/);
+    expect(rebind).toMatch(/\{ kind: "rebound", moved, rebound, keepTree: false \}/);
+    expect(rebind).toMatch(/\{ kind: "rebound", moved, rebound, keepTree: true, note: verdict\.note \}/);
+    // The checkout path returns without the flag; the record-alone path returns with it — and the log line carries the note.
+    const checkedOut = rebind.indexOf("if (!outcome.keepTree) {");
+    const plain = rebind.indexOf("return { binding: moved, rebound };");
+    const kept = rebind.indexOf("return { binding: moved, rebound, keepTree: true };");
+    expect(checkedOut).toBeGreaterThan(-1);
+    expect(plain).toBeGreaterThan(checkedOut);
+    expect(kept).toBeGreaterThan(plain);
+    expect(rebind.slice(plain, kept)).toMatch(/\$\{outcome\.note\}/);
+    expect(rebind).toMatch(/keepTree\?: true;/);
+    // A tree that is gone has nothing to keep: the recreate outcome says so and the attach clones at the new ref.
+    expect(method("recreateAtOwnBranch")).toMatch(/return \{ kind: "rebound", moved, rebound, keepTree: false \};/);
+  });
+
+  it("the attach keeps the binding's stored path — the moved ref derives nothing — and hands `keepTree` down to the worktree step", () => {
+    expect(body).toMatch(
+      /const worktreePath = prior\?\.worktreePath \?\? \(await threadWorktreePath\(threadKey, ref\)\);/,
+    );
+    expect(body).toMatch(/attachThreadCreate\(\{[\s\S]*?keepTree: rebind\.keepTree === true,[\s\S]*?\}\)/);
+    expect(create).toMatch(/keepTree: boolean;/);
+    expect(create).toMatch(
+      /this\.ensureThreadWorktree\(binding, sha, mode\.originUrl, mode\.modeSwitch, \{\s*detached: target\.kind === "sha",\s*reuse,\s*keepTree,?\s*\}\)/,
+    );
+    expect(ensure).toMatch(/opts: \{ detached: boolean; reuse: boolean; keepTree: boolean \}/);
+    expect(ensure).toMatch(/decideWorktree\(\{\s*reuse: opts\.reuse,\s*keepTree: opts\.keepTree,/);
+  });
+
+  it("the worktree step's one rm -rf and its clone sit behind the pure decision, which reuses a kept dirty tree — no other path in the attach removes or clones a tree", () => {
+    const decision = ensure.indexOf("const decision = decideWorktree(");
+    const reuse = ensure.indexOf('if (decision.kind === "reuse") return false;');
+    const wipe = ensure.indexOf('await this.runOk(["rm", "-rf", wt], "worktree-clean");');
+    const clone = ensure.indexOf('"worktree-clone"');
+    expect(decision).toBeGreaterThan(-1);
+    expect(reuse).toBeGreaterThan(decision);
+    expect(wipe).toBeGreaterThan(reuse);
+    expect(clone).toBeGreaterThan(wipe);
+    for (const m of [body, create, rebind]) {
+      expect(m).not.toMatch(/rm", "-rf"/);
+      expect(m).not.toMatch(/git", "clone"/);
+    }
+    // The decision's own word on a kept dirty tree lives in src/execution/residentReuse.ts.
+    const reuseModule = readSource("../../src/execution/residentReuse.ts");
+    expect(reuseModule).toMatch(
+      /if \(facts\.dirty\) return keepTree \? \{ kind: "reuse" \} : \{ kind: "recreate", why: "dirty" \};/,
+    );
   });
 });
 
