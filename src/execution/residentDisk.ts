@@ -11,7 +11,7 @@
 // the disk. Two facts fix that: the failure is classified `disk-full` (never
 // serviceable, so the bot skips the attach and the card names the disk), and
 // the resident recycles its container — the disk is a cache; the next refresh
-// cycle restores mirror + checkout from R2 — once nothing live would be lost.
+// cycle restores mirror + checkout from R2 — once no run is using it.
 
 /** The errno wording tools print for ENOSPC: Node's `ENOSPC` code and libc's
  *  strerror text (git, cp, tar, pnpm all pass it through). A message carrying
@@ -76,17 +76,27 @@ export const DISK_FULL_RECYCLE_COOLDOWN_MS = 60 * 60_000;
 export type DiskFullRecovery = { action: "recycle" } | { action: "wait"; why: string };
 
 /** Whether a disk-full resident may stop its container now. The disk is a
- *  cache, but two things on it are not: work in flight (a recycle kills the
- *  process) and a live worktree's uncommitted or unpushed changes (a recycle
- *  destroys the tree; the next attach recreates it from the mirror). Both keep
- *  the container; so does the cooldown. `treesClean` must be computed as the
- *  thread users (never root git in a thread tree) and treated as false when a
- *  check could not run — an unreadable tree is kept, never guessed clean. */
+ *  cache — the next cycle restores mirror + checkout from R2, and a live
+ *  binding's tree is recreated on its next attach — so the one question is
+ *  whether a RUN is using it, never what the trees hold (item 17: a run
+ *  starts from a clean tree; what it wants kept, it commits and pushes). Two
+ *  facts say a run may be: an operation in flight (a recycle kills it), and a
+ *  live binding attached to or used within the idle floor — the op counter is
+ *  0 between a run's tool calls, so the recent-use floor is what stands for a
+ *  run mid-flight. That is the idle-sleep gate's own predicate (item 16b): a
+ *  platform sleep destroys the disk exactly as a recycle does, so one rule
+ *  says when the disk may go away. Both keep the container; so does the
+ *  cooldown. */
 export function planDiskFullRecovery(input: {
   now: number;
   lastRecycleAt?: number;
   inFlight: number;
-  treesClean: boolean;
+  /** A live binding was attached to or used (an exec bumps `lastAttachAt`
+   *  too) within `idleFloorS` — computed once by the Worker, for the idle
+   *  gate and this plan alike. */
+  recentlyUsed: boolean;
+  /** The floor `recentlyUsed` was measured against, named in the refusal. */
+  idleFloorS: number;
 }): DiskFullRecovery {
   if (input.lastRecycleAt !== undefined && input.now - input.lastRecycleAt < DISK_FULL_RECYCLE_COOLDOWN_MS) {
     const min = Math.round((input.now - input.lastRecycleAt) / 60_000);
@@ -97,10 +107,11 @@ export function planDiskFullRecovery(input: {
   }
   if (input.inFlight > 0)
     return { action: "wait", why: `${input.inFlight} operation(s) in flight — a recycle would kill them` };
-  if (!input.treesClean) {
+  if (input.recentlyUsed) {
+    const min = Math.round(input.idleFloorS / 60);
     return {
       action: "wait",
-      why: "a live worktree has (or could not prove it has no) uncommitted or unpushed work — a recycle would destroy it",
+      why: `a live worktree was attached to or used within the last ${min} min — a run may be mid-flight between two tool calls, and a recycle would destroy its tree`,
     };
   }
   return { action: "recycle" };
