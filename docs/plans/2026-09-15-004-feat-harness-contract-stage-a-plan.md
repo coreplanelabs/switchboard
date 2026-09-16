@@ -91,7 +91,7 @@ After `146f9287` every preset runs on pi and nothing in the tree says what a har
 ### Dependencies
 
 - Record 0038's stage gates (its "Stage gates and the review each must survive" table, as overridden by the fourth amendment) gate each unit.
-- The container-roll floor merged (#1294, #1321): the typed error from any container operation, no kill or remove in the replacement, `interrupted` and re-dispatch.
+- The container-roll floor merged (#1294, #1321): the typed error from any container operation, no kill or remove in the replacement, `interrupted` and re-dispatch. The re-dispatch half is receipted failed on the 1.233.0 deploy: a run resumed across a bot roll and then interrupted by a container roll had its restart-from-request steered into its own dying row (#1340); every deploy rolls in that order, so #1340 lands before U8 and U9, which sit on the same restart path.
 - `@opencode/cli@2.0.3` and `@opencode/protocol@2.0.3` on npm; the spike's fourteen unverified items closed on the build's first day.
 
 ---
@@ -253,7 +253,7 @@ Units U4 to U7 of this plan's first version were Codex-specific and are retired;
 - **Approach:**
   1. The plugin registers the tools from `GET /harness/tools` at load through the v2 `tool.transform` editor and runs each through `/harness/authorize` and `/harness/tool` with pi's re-ask and wait.
   2. `open`: write the layout and configuration, start `serve` and the tailer, import the seed (or the rebuild) and prompt; steers as `delivery: "steer"`; the hard stop as `interrupt`; post-turns as `wait` then `prompt`; `end` kills the process group and removes the root.
-  3. Facts `{ harness: "opencode", pid, port, sessionID, root, bearerHash, container, relaunches }`; `find` is `GET /api/health` and `GET /api/session/:id` on the recorded port through `request`.
+  3. Facts `{ harness: "opencode", pid, port, sessionID, logOffset, root, bearerHash?, container?, relaunches }`: `logOffset` is the byte boundary in the tailer's file after the last record whose effect the ledger holds, as pi's is; `container` and `bearerHash` carry pi's semantics and are absent where the container cannot name itself (the bot-host class) or the token has no secret; `find` is `GET /api/health` and `GET /api/session/:id` on the recorded port through `request`.
   4. Identity rules per KTD12; the effort tier onto variants.
 - **Execution note:** close spike items 9, 10 and 11 first; each decides a mechanism in this unit.
 - **Test scenarios:**
@@ -280,7 +280,7 @@ Units U4 to U7 of this plan's first version were Codex-specific and are retired;
 
 - **Goal:** the two shared-code pieces the relaunch needs, landed before the relaunch.
 - **Requirements:** R16 (prerequisites); KTD14.
-- **Dependencies:** U1.
+- **Dependencies:** U1; #1340 merged (the re-dispatch after an interrupted close, which the mid-run `interrupted` path here reuses).
 - **Files:** `src/core/modelProxy/runBearers.ts`, `src/core/dispatch/runLoop.ts`, `src/core/dispatcher.ts`, `src/core/dispatch/provision.ts`, `src/core/dispatch/reattach.ts`, `src/core/harness/pi/relay.ts` (`HarnessRegistry.replace`); tests beside each; docs `model-proxy.md` item 2, `run-history.md` item 54, `harness-pi.md` item 8.
 - **Test scenarios:**
   - `rotate` then `verify(old)` answers `unknown_bearer`; `verify(new)` answers the same grant with the same `turns`.
@@ -293,7 +293,7 @@ Units U4 to U7 of this plan's first version were Codex-specific and are retired;
 
 - **Goal:** a replaced container costs a run at most one model call and never a tool's effects, on both harnesses.
 - **Requirements:** R16; KTD10, KTD14.
-- **Dependencies:** U8, U12, the floor (#1294, #1321).
+- **Dependencies:** U8, U12, the floor (#1294, #1321) and its re-dispatch fix (#1340).
 - **Files:** `src/core/harness/pi/harness.ts`, `src/core/harness/opencode/harness.ts`, `src/core/dispatch/runLoop.ts`; tests beside each; docs `harness-pi.md` gap row closed, `harness.md` survival rows.
 - **Approach:** on the typed error under a living bot: no kill or remove in the new container; re-attach or refuse by name; new hash on the row, `rotate`, old hashes dropped; pi rebuilds its session file, OpenCode imports the ledger; relayed calls in flight awaited up to the relay window then settled as still running; `relaunches` incremented; the third finding closes `interrupted`.
 - **Execution note:** the mid-run re-attach spike is the record's first gate; if it fails, this unit is withheld and the floor stays the behaviour.
