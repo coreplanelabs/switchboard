@@ -989,6 +989,11 @@ describe("buildRoutePrompt — the imperative rule, stated for the write preset 
     expect(p.system).toMatch(/"why did ci fail\?"/i);
     expect(p.system).toMatch(/named by a link or a number, or the thread's own/);
     expect(p.system).toMatch(/no pull request in view is not a review/);
+    // A pull request named with a note about the request's own history — a retry
+    // at a head, an earlier run that died — is still a review: the note describes
+    // the ask, never an order to change the pipeline or the code.
+    expect(p.system).toMatch(/note about the request's own history/);
+    expect(p.system).toMatch(/"\(retry at head …\)"/);
     // The rule rides the system half — the cache-controlled, per-deployment part — never the per-message user turn.
     expect(p.user).not.toMatch(/make it pass/);
   });

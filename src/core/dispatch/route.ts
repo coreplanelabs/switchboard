@@ -480,12 +480,16 @@ function writeAskClause(writers: readonly string[]): string {
  *  one terse order to change something or to make a failure go away is a
  *  request to change code even when it names no file, repository or cause,
  *  since the channel or thread it arrives in is bound to a repository; a
- *  question or a read-only ask about the same failure changes nothing. A rule
+ *  question or a read-only ask about the same failure changes nothing; a pull
+ *  request named with a note about the request's own history (a retry at a
+ *  head) is a review — the one read-to-write misroute the replay found once
+ *  `ship` held the write seat read the note as an order to change the
+ *  pipeline. A rule
  *  in the prompt's static half, never keyword matching in code — the parse and
  *  the allowlist are untouched by it. */
 function imperativeRule(writers: readonly string[]): string {
   const names = writers.map((w) => `\`${w}\``).join(" or ");
-  return `Short imperatives: one terse order to change something or to make a failure go away — "fix it", "make it pass", "make the tests green", "add X", "rename Y", "bump Z" — is a request to change code even when it names no file, repository or cause: the channel or thread it arrives in is bound to a repository, and the preset that implements changes finds the failure itself. For it, answer ${names}. A question or a read-only ask about the same failure — "why did ci fail?", "check whether ci is red", "tell me why the build failed", "list the failing tests" — changes nothing: answer a read-only preset that covers it, never ${names}. An ask to look at, check or judge a pull request — named by a link or a number, or the thread's own ("this PR") — is a review, not an order to change it; a question about a failure with no pull request in view is not a review.`;
+  return `Short imperatives: one terse order to change something or to make a failure go away — "fix it", "make it pass", "make the tests green", "add X", "rename Y", "bump Z" — is a request to change code even when it names no file, repository or cause: the channel or thread it arrives in is bound to a repository, and the preset that implements changes finds the failure itself. For it, answer ${names}. A question or a read-only ask about the same failure — "why did ci fail?", "check whether ci is red", "tell me why the build failed", "list the failing tests" — changes nothing: answer a read-only preset that covers it, never ${names}. An ask to look at, check or judge a pull request — named by a link or a number, or the thread's own ("this PR") — is a review, not an order to change it, and so is a pull request named with a note about the request's own history — "(retry at head …)", "re-review at …", "the earlier run died": the note describes the ask, never an order to change the pipeline or the code; a question about a failure with no pull request in view is not a review.`;
 }
 
 /** The rule for a posted file: only the presets whose toolset carries `attach_file`
