@@ -516,6 +516,32 @@ describe("run ledger — the coordinator's event and the key (items 47–48)", (
     expect(sent.map((s) => (s.payload as { status: string }).status)).toEqual(["interrupted", "interrupted"]);
   });
 
+  it("a terminal record committed through put, outside the ledger's finish — the run loop's or a reclaim's interrupted close, the pi harness's restart — sends `run-finished-<runId>` once; the start tombstone (finishedAt = startedAt) sends nothing; a record without the tag sends nothing", async () => {
+    const key = storeKey();
+    const sent = await coordinatorDouble(key);
+    // The tombstone a run writes at its start: not a close, so no wake.
+    const started = record("p1", "slack:C1:3.0");
+    await post("/runs/put", {
+      storeKey: key,
+      record: { ...started, finishedAt: started.startedAt, status: "interrupted", ...TAG },
+    });
+    expect(sent).toEqual([]);
+    // The interrupted close written outside `finish`: one send, the record's status on it.
+    expect(
+      await post("/runs/put", { storeKey: key, record: { ...childRecord("p1", "slack:C1:3.0", "interrupted") } }),
+    ).toMatchObject({ status: 200, data: { ok: true, stored: true } });
+    expect(sent).toEqual([
+      {
+        instance: "ship_acme_api_1",
+        type: "run-finished-p1",
+        payload: expect.objectContaining({ runId: "p1", status: "interrupted", parentInstanceId: "ship_acme_api_1" }),
+      },
+    ]);
+    // A plain record — no coordinator — wakes nobody.
+    await post("/runs/put", { storeKey: key, record: record("p2", "slack:C1:4.0") });
+    expect(sent).toHaveLength(1);
+  });
+
   it("a record without parentInstanceId sends nothing; a fenced finish sends nothing", async () => {
     const key = storeKey();
     const sent = await coordinatorDouble(key);
