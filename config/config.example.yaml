@@ -20,18 +20,20 @@ providers:
   #   type: openai-compatible
   #   baseUrl: https://api.groq.com/openai/v1
   #   apiKeyEnv: GROQ_API_KEY
-  # OpenRouter: one key, many vendors' models. Its model ids already carry the
-  # vendor, so a model is named openrouter/anthropic/claude-sonnet-4 (the first
-  # slash separates the provider; the rest is passed through). The compatible
-  # adapter sends no effort tier, turns document inputs into a text note and
-  # asks for no provider-side prompt caching. The request router and memory
-  # reflection reach it through pi's model library instead (the same block,
-  # the same key), which applies its own OpenRouter rules there, prompt-cache
-  # markers included.
-  # openrouter:
-  #   type: openai-compatible
-  #   baseUrl: https://openrouter.ai/api/v1
-  #   apiKeyEnv: OPENROUTER_API_KEY
+  # OpenRouter: one key, many vendors' models, on the same compatible adapter.
+  # Its model ids already carry the vendor, so any preset's model may be
+  # openrouter/<vendor>/<model> — e.g. openrouter/anthropic/claude-sonnet-4:
+  # the first slash names this block, the rest is the model id passed through.
+  # OPENROUTER_API_KEY is read at the first model call, never at load, so
+  # without it every other block runs as today and only a run on this one
+  # fails, by that name. Effort tiers, documents and prompt caching ride the
+  # compatible adapter as far as it carries them: pi applies its OpenRouter
+  # rules (prompt-cache markers included); a document becomes a text note.
+  # `switchboard init` keeps this block only with --openrouter-key.
+  openrouter:
+    type: openai-compatible
+    baseUrl: https://openrouter.ai/api/v1
+    apiKeyEnv: OPENROUTER_API_KEY
   # local:
   #   type: openai-compatible
   #   baseUrl: http://localhost:11434/v1   # Ollama

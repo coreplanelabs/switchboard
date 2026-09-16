@@ -1403,6 +1403,11 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
       {
+        "name": "openrouterKey",
+        "required": false,
+        "type": "string",
+      },
+      {
         "name": "slackAppToken",
         "required": false,
         "type": "string",

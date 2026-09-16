@@ -139,6 +139,7 @@ describe("setup.init — flags", () => {
         "modelKey",
         "name",
         "openaiCompatible",
+        "openrouterKey",
         "organization",
         "slackAppToken",
         "slackBotToken",
