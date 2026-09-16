@@ -44,6 +44,7 @@ import {
 } from "../../src/execution/sandboxLifecycle.js";
 import { envFromRequest } from "../../src/execution/sandboxEnv.js";
 import { IdleGuard, type IdleGuardHost } from "../../src/execution/sandboxIdle.js";
+import { StartGate, type StartGateHost, type StartingCause } from "../../src/execution/sandboxStart.js";
 import { RUNTIME_REPLACEMENT_WORDING, isRuntimeUnreachableSignal } from "../../src/execution/residentRefresh.js";
 import {
   fleetBusyAnswer,
@@ -53,6 +54,8 @@ import {
   runtimeUnreachableAnswer,
   runtimeUnreachableExecAnswer,
   SandboxRuntimeUnreachableError,
+  sandboxStartingAnswer,
+  sandboxStartingExecAnswer,
   thrownShape,
   thrownText,
 } from "../../src/execution/sandboxErrors.js";
@@ -167,6 +170,12 @@ interface FileRefusal {
   reason?: string;
 }
 
+/** The SDK's own limit on the warm-up command (`true`): generous, since the
+ *  SDK's start — an instance grant up to 30 s, the runtime's port up to 90 s
+ *  by its defaults — happens inside this one call. The executor's wait for
+ *  the `sandbox-starting` token is bounded on its own side. */
+const WARM_UP_BACKSTOP_MS = 4 * 60_000;
+
 /** Durable Object storage key of the idle ledger's served-time. */
 const IDLE_LEDGER_KEY = "switchboard.idle.lastServedAt";
 /** The scheduled-callback name of the idle sweep (a method below). */
@@ -185,10 +194,12 @@ export class SwitchboardSandbox extends Sandbox<Env> {
   sleepAfter = SANDBOX_SLEEP_AFTER;
 
   private readonly idle: IdleGuard;
+  private readonly gate: StartGate;
 
   constructor(...args: ConstructorParameters<typeof Sandbox<Env>>) {
     super(...args);
     this.idle = new IdleGuard(this.idleHost());
+    this.gate = new StartGate(this.startHost());
     // Every wake, including the one the SDK's own alarm causes on a leaked
     // container: the baseline is read and a sweep armed before any request.
     this.ctx.blockConcurrencyWhile(() => this.idle.wake());
@@ -212,6 +223,25 @@ export class SwitchboardSandbox extends Sandbox<Env> {
       saveLastServedAt: (at) => this.ctx.storage.put(IDLE_LEDGER_KEY, at),
       log: (event) => console.log(JSON.stringify({ ...event, thread: this.ctx.id.name ?? this.ctx.id.toString() })),
       wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    };
+  }
+
+  /** The start gate's view of this object (docs/reference/specs/execution.md
+   *  item 23): the platform's running flag, and a warm-up that is one trivial
+   *  command through the SDK — which does the start (instance grant, image
+   *  pull, boot, the runtime's port) and answers when the runtime does. The
+   *  warm-up runs inside the idle ledger so the guard sees a request in flight
+   *  for as long as the start takes. */
+  private startHost(): StartGateHost {
+    return {
+      now: systemClock,
+      containerRunning: () => this.ctx.container?.running,
+      warmUp: () =>
+        this.idle.served(async () => {
+          const proc = await createExtensionProcessSandbox(this).exec(["true"], { timeout: WARM_UP_BACKSTOP_MS });
+          await proc.output({ encoding: "utf8", timeout: WARM_UP_BACKSTOP_MS });
+        }),
+      log: (event) => console.log(JSON.stringify({ ...event, thread: this.ctx.id.name ?? this.ctx.id.toString() })),
     };
   }
 
@@ -240,7 +270,19 @@ export class SwitchboardSandbox extends Sandbox<Env> {
     execTimeoutSecs: number,
     envVars: Record<string, string>,
   ): Promise<ExecAnswer | ExecFailure> {
-    return this.idle.served(() => this.execute(command, execTimeoutSecs, envVars));
+    const startedAt = systemClock();
+    return this.idle.served(async () => {
+      try {
+        return await this.gate.through(
+          () => this.execute(command, execTimeoutSecs, envVars),
+          (cause) => sandboxStartingExecAnswer(cause),
+        );
+      } catch (err) {
+        // The warm-up's own failure, handed on by the gate: a full fleet or a
+        // silent control port keeps its name; anything else propagates.
+        return this.execFailure(err, startedAt);
+      }
+    });
   }
 
   /** `runCommand` without the ledger entry: the body, and the internal caller
@@ -337,9 +379,19 @@ export class SwitchboardSandbox extends Sandbox<Env> {
     }
   }
 
+  /** A file route's answer while the container starts: HTTP 503 with the
+   *  token, like a full fleet's. */
+  private startingRefusal(cause: StartingCause): FileRefusal {
+    const { error, reason } = sandboxStartingAnswer(cause);
+    return { error, status: 503, reason };
+  }
+
   async readText(path: string): Promise<{ content: string } | FileRefusal> {
     return this.idle.served(() =>
-      this.fileOp(async () => ({ content: (await this.readFile(path, { encoding: "utf-8" })).content })),
+      this.gate.through(
+        () => this.fileOp(async () => ({ content: (await this.readFile(path, { encoding: "utf-8" })).content })),
+        (cause) => this.startingRefusal(cause),
+      ),
     );
   }
 
@@ -348,7 +400,12 @@ export class SwitchboardSandbox extends Sandbox<Env> {
    *  decoded bytes to it — an SDK read that came back short would otherwise
    *  pass as the file. A file over the cap is refused by name inside a 200. */
   async readBase64(path: string): Promise<Base64ReadAnswer | FileRefusal> {
-    return this.idle.served(() => this.readBase64Now(path));
+    return this.idle.served(() =>
+      this.gate.through(
+        () => this.readBase64Now(path),
+        (cause) => this.startingRefusal(cause),
+      ),
+    );
   }
 
   private async readBase64Now(path: string): Promise<Base64ReadAnswer | FileRefusal> {
@@ -377,10 +434,14 @@ export class SwitchboardSandbox extends Sandbox<Env> {
 
   async write(path: string, content: string): Promise<{ ok: true } | FileRefusal> {
     return this.idle.served(() =>
-      this.fileOp(async () => {
-        await this.writeFile(path, content);
-        return { ok: true as const };
-      }),
+      this.gate.through(
+        () =>
+          this.fileOp(async () => {
+            await this.writeFile(path, content);
+            return { ok: true as const };
+          }),
+        (cause) => this.startingRefusal(cause),
+      ),
     );
   }
 }

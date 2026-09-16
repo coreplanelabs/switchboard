@@ -13,7 +13,12 @@ import {
   FLEET_BUSY_BACKOFF_MS,
   FLEET_BUSY_REASON,
   FLEET_BUSY_WAIT_MAX_MS,
+  SANDBOX_START_BACKOFF_MS,
+  SANDBOX_START_WAIT_MAX_MS,
   fleetBusyExhaustedMessage,
+  isWaitReason,
+  startWaitExhaustedMessage,
+  type WaitReason,
 } from "./sandboxErrors.js";
 import { tracedFetch } from "../core/trace/tracedFetch.js";
 import type { Span } from "../core/trace/types.js";
@@ -42,13 +47,32 @@ export interface CloudflareSandboxOptions {
   ref?: string;
 }
 
-/** The Worker named a full fleet (docs/reference/specs/execution.md item 14): in-body on
- *  the streamed /exec answer, or as an HTTP 503 on /read and /write. Matched on
- *  the machine token only — an older Worker's bare SDK message stays an
- *  ordinary in-body error (infra), so a bot deployed ahead of its Worker
- *  changes nothing. */
-function isFleetBusyAnswer(res: Response, data: Record<string, unknown>): boolean {
-  return (res.ok || res.status === 503) && data.reason === FLEET_BUSY_REASON;
+/** The Worker named a condition the executor waits on — a full fleet
+ *  (docs/reference/specs/execution.md item 14) or a container still starting
+ *  (item 23): in-body on the streamed /exec answer, or as an HTTP 503 on
+ *  /read and /write. Matched on the machine token only — an older Worker's
+ *  bare SDK message stays an ordinary in-body error (infra), so a bot
+ *  deployed ahead of its Worker changes nothing. */
+function waitReasonOf(res: Response, data: Record<string, unknown>): WaitReason | null {
+  return (res.ok || res.status === 503) && isWaitReason(data.reason) ? data.reason : null;
+}
+
+/** How long the executor waits on each token, and how it re-sends. A full
+ *  fleet is waited on inside the operation's own budget (a slot is the
+ *  command's time); a starting container is waited on under the start budget
+ *  whatever the command's budget (the start is not the command's time, and a
+ *  60 s command must survive a two-minute start). */
+function waitPlan(
+  reason: WaitReason,
+  budgetMs: number,
+): { budget: number; backoff: readonly number[]; exhausted: (waitedMs: number) => string } {
+  return reason === FLEET_BUSY_REASON
+    ? {
+        budget: Math.min(budgetMs, FLEET_BUSY_WAIT_MAX_MS),
+        backoff: FLEET_BUSY_BACKOFF_MS,
+        exhausted: fleetBusyExhaustedMessage,
+      }
+    : { budget: SANDBOX_START_WAIT_MAX_MS, backoff: SANDBOX_START_BACKOFF_MS, exhausted: startWaitExhaustedMessage };
 }
 
 /** The bot-side wait for ONE send: the operation's budget plus the margin
@@ -100,7 +124,8 @@ export class CloudflareSandboxExecutor implements Executor {
   constructor(private opts: CloudflareSandboxOptions) {}
 
   /** One request to the Worker, with the transport-level retries, and the
-   *  fleet-busy wait around it: a busy answer re-sends the IDENTICAL request
+   *  wait around it for a named condition — a full fleet (item 14) or a
+   *  container still starting (item 23): a busy answer re-sends the IDENTICAL request
    *  (same route, body — env included —, headers; the envs resolved once
    *  here, so the wait never mints a new credential mid-command) after 10 s,
    *  20 s, then 30 s, until the total wait reaches `budgetMs` capped at
@@ -137,16 +162,17 @@ export class CloudflareSandboxExecutor implements Executor {
     const callerEnv = isPlainEnv(body.env) ? body.env : {};
     const sent: Record<string, unknown> = { ...body, env: { ...callerEnv, ...envs } };
 
-    const budget = Math.min(budgetMs, FLEET_BUSY_WAIT_MAX_MS);
+    // One wait ledger for both tokens: the plan (budget, backoff, the
+    // exhausted message) is the LAST token's, so a start that turns into a
+    // full fleet is judged by the fleet's budget from then on, and the time
+    // already waited counts against it.
     let waited = 0;
     for (let attempt = 0; ; attempt++) {
       const answer = await this.send(route, sent, headers, budgetMs, signal, span);
       if (answer.kind === "ok") return answer.data;
-      if (waited >= budget) throw new ExecCapacityError(fleetBusyExhaustedMessage(waited));
-      const delay = Math.min(
-        FLEET_BUSY_BACKOFF_MS[Math.min(attempt, FLEET_BUSY_BACKOFF_MS.length - 1)],
-        budget - waited,
-      );
+      const plan = waitPlan(answer.reason, budgetMs);
+      if (waited >= plan.budget) throw new ExecCapacityError(plan.exhausted(waited));
+      const delay = Math.min(plan.backoff[Math.min(attempt, plan.backoff.length - 1)], plan.budget - waited);
       await waitForSlot(delay, waited, signal);
       waited += delay;
     }
@@ -164,7 +190,7 @@ export class CloudflareSandboxExecutor implements Executor {
     budgetMs: number,
     signal?: AbortSignal,
     span?: Span,
-  ): Promise<{ kind: "ok"; data: Record<string, unknown> } | { kind: "busy" }> {
+  ): Promise<{ kind: "ok"; data: Record<string, unknown> } | { kind: "busy"; reason: WaitReason }> {
     // Sandbox cold starts can 5xx on a thread's first command — retry briefly.
     const delays = [0, 3000, 6000, 12000];
     let lastErr = "";
@@ -222,9 +248,11 @@ export class CloudflareSandboxExecutor implements Executor {
       } catch {
         // fall through with {} — the HTTP status decides
       }
-      // A full fleet is the ONE answer that is re-sent (by `call`): the Worker
-      // names it only when no session could be created, so nothing ran.
-      if (isFleetBusyAnswer(res, data)) return { kind: "busy" };
+      // A full fleet or a starting container are the answers that are re-sent
+      // (by `call`): the Worker names them only before any command or file op
+      // started, so nothing ran.
+      const reason = waitReasonOf(res, data);
+      if (reason) return { kind: "busy", reason };
       // A success body has no `error` key at all, so a PRESENT but empty
       // `error` is the Worker's failure shape with its text missing — infra,
       // not a command exit. A thread placed on a previous-image container

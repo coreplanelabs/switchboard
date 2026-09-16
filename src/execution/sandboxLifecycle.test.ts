@@ -193,8 +193,21 @@ describe("sandbox Worker wiring (static)", () => {
     expect(worker.match(/container\?\.destroy\(\)/g)).toHaveLength(1);
     expect(worker).toMatch(/override async onActivityExpired\(\): Promise<void> \{\s*await this\.idle\.expired\(\);/);
     expect(worker).toMatch(/blockConcurrencyWhile\(\(\) => this\.idle\.wake\(\)\)/);
-    // every route the fetch handler calls runs inside served()
-    expect(worker.match(/this\.idle\.served\(/g)).toHaveLength(4);
+    // every route the fetch handler calls runs inside served(), and so does the start gate's warm-up
+    expect(worker.match(/this\.idle\.served\(/g)).toHaveLength(5);
+  });
+
+  // item 23: every route passes through the start gate, whose warm-up is one
+  // trivial command through the SDK inside the idle ledger; a route answers
+  // the token (exec shape in-body, 503 on the file routes) while it starts.
+  it("every route goes through the start gate; the warm-up is `true` through the SDK inside the idle ledger", () => {
+    expect(worker.match(/this\.gate\.through\(/g)).toHaveLength(4);
+    expect(worker).toMatch(
+      /warmUp: \(\) =>\s*this\.idle\.served\(async \(\) => \{\s*const proc = await createExtensionProcessSandbox\(this\)\.exec\(\["true"\]/,
+    );
+    expect(worker).toMatch(/\(cause\) => sandboxStartingExecAnswer\(cause\)/);
+    expect(worker.match(/\(cause\) => this\.startingRefusal\(cause\)/g)).toHaveLength(3);
+    expect(worker).toMatch(/return \{ error, status: 503, reason \};/);
   });
 
   // The rollout window a NEW thread can fall into is closed by replacing the

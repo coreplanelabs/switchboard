@@ -16,7 +16,14 @@ import {
   runtimeUnreachableAnswer,
   runtimeUnreachableExecAnswer,
   runtimeUnreachableMessage,
+  SANDBOX_START_BACKOFF_MS,
+  SANDBOX_START_WAIT_MAX_MS,
+  SANDBOX_STARTING_REASON,
   SandboxRuntimeUnreachableError,
+  isWaitReason,
+  sandboxStartingAnswer,
+  sandboxStartingExecAnswer,
+  startWaitExhaustedMessage,
 } from "./sandboxErrors.js";
 import { BASH_TIMEOUT_MS } from "./bashTimeout.js";
 
@@ -85,6 +92,38 @@ describe("the fleet-busy answer shapes the Worker sends", () => {
     const a = fleetBusyExecAnswer("Failed to create session: 503");
     expect(a).toEqual({ error: a.error, reason: "fleet-busy", stdout: "", stderr: a.error, exitCode: 127 });
     expect(a.error).toMatch(/^fleet-busy: /);
+  });
+});
+
+// Feature: docs/reference/specs/execution.md item 23 — a container still
+// starting is named, not waited for inside the first command's deadline.
+describe("the sandbox-starting answer shapes the Worker sends", () => {
+  it("names the reason, the explanation and the start's phase as the cause; the exec shape is the dual in-body form", () => {
+    const a = sandboxStartingAnswer("container not running; starting it");
+    expect(a.reason).toBe(SANDBOX_STARTING_REASON);
+    expect(SANDBOX_STARTING_REASON).toBe("sandbox-starting");
+    expect(a.error).toMatch(/^sandbox-starting: /);
+    expect(a.error).toContain("nothing ran yet");
+    expect(a.error).toContain("(container not running; starting it)");
+    const e = sandboxStartingExecAnswer("container starting");
+    expect(e).toEqual({ error: e.error, reason: "sandbox-starting", stdout: "", stderr: e.error, exitCode: 127 });
+  });
+
+  it("the two wait tokens are the only reasons the executor re-sends on; anything else is an ordinary failure", () => {
+    expect(isWaitReason("fleet-busy")).toBe(true);
+    expect(isWaitReason("sandbox-starting")).toBe(true);
+    expect(isWaitReason("runtime-unreachable")).toBe(false);
+    expect(isWaitReason(undefined)).toBe(false);
+    expect(isWaitReason("")).toBe(false);
+  });
+
+  it("the start budget covers the platform's own start allowances with room, and its poll is denser than the fleet wait's", () => {
+    expect(SANDBOX_START_WAIT_MAX_MS).toBe(5 * 60_000);
+    expect(SANDBOX_START_WAIT_MAX_MS).toBeGreaterThan(30_000 + 90_000); // instance grant + port ready, the SDK's defaults
+    expect(SANDBOX_START_BACKOFF_MS).toEqual([5_000, 10_000, 15_000]);
+    expect(startWaitExhaustedMessage(300_000)).toBe(
+      "sandbox not ready — the thread's container did not finish starting within 300s; try again in a few minutes",
+    );
   });
 });
 

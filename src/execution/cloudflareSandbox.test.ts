@@ -7,6 +7,7 @@ import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import { ExecCapacityError, ExecInfraError } from "./executor.js";
 import {
   FLEET_BUSY_WAIT_MAX_MS,
+  SANDBOX_START_WAIT_MAX_MS,
   runtimeUnreachableAnswer,
   runtimeUnreachableExecAnswer,
   runtimeUnreachableMessage,
@@ -631,5 +632,140 @@ describe("CloudflareSandboxExecutor runtime-unreachable", () => {
     expect(err).toBeInstanceOf(ExecInfraError);
     expect((err as Error).message).toBe(`sandbox worker /read HTTP 503: ${MESSAGE}`);
     expect(calls).toHaveLength(4);
+  });
+});
+
+// Feature: docs/reference/specs/execution.md item 23 — a container still
+// starting is a wait under the START budget, whatever the command's own
+// budget: the start is not the command's time, and a 60 s command must
+// survive a two-minute start it did not cause. The Worker names it
+// `sandbox-starting` before anything ran, so the identical request is re-sent.
+describe("CloudflareSandboxExecutor sandbox-starting wait", () => {
+  const STARTING_EXEC = {
+    error: "sandbox-starting: the thread's sandbox container is starting (container not running; starting it)",
+    reason: "sandbox-starting",
+    stdout: "",
+    stderr: "sandbox-starting: …",
+    exitCode: 127,
+  };
+  const BUSY_EXEC = {
+    error: "fleet-busy: no free per-thread sandbox",
+    reason: "fleet-busy",
+    stdout: "",
+    stderr: "…",
+    exitCode: 127,
+  };
+  const OK = { stdout: "ok", stderr: "", exitCode: 0 };
+
+  function scriptedFetch(responses: Array<{ status?: number; body: unknown }>) {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fn = vi.fn(async (url: unknown, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      const r = responses[Math.min(calls.length - 1, responses.length - 1)];
+      return new Response(JSON.stringify(r.body), { status: r.status ?? 200 });
+    });
+    vi.stubGlobal("fetch", fn);
+    return { fn, calls };
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("re-sends the SAME request after 5 s, 10 s, then 15 s while the container starts, and returns the eventual result", async () => {
+    const { calls } = scriptedFetch([
+      { body: STARTING_EXEC },
+      { body: STARTING_EXEC },
+      { body: STARTING_EXEC },
+      { body: OK },
+    ]);
+    const ex = new CloudflareSandboxExecutor({ ...OPTS, resolveEnvs: async () => ({ GH_TOKEN: "ghs_x" }) });
+    const p = ex.exec("git clone …", { timeoutMs: 60_000 });
+    void p.then(
+      () => undefined,
+      () => undefined,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(calls).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(calls).toHaveLength(3);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(calls).toHaveLength(4);
+    await expect(p).resolves.toBe("ok");
+    for (const c of calls) {
+      expect(String(c.init.body)).toBe(String(calls[0].init.body));
+      expect(c.init.headers).toEqual(calls[0].init.headers);
+    }
+    expect(sentBody(calls[3])).toEqual({ command: "git clone …", timeoutMs: 60_000, env: { GH_TOKEN: "ghs_x" } });
+  });
+
+  it("a 60 s command waits through a two-minute start: the start budget, not the command's, bounds the wait", async () => {
+    // 5 + 10 + 15×7 = 120 s of waiting → the 10th send finds the container up
+    const script = Array.from({ length: 9 }, () => ({ body: STARTING_EXEC }));
+    const { calls } = scriptedFetch([...script, { body: OK }]);
+    const p = new CloudflareSandboxExecutor(OPTS).exec("npm test", { timeoutMs: 60_000 });
+    void p.then(
+      () => undefined,
+      () => undefined,
+    );
+    await vi.advanceTimersByTimeAsync(120_000);
+    await expect(p).resolves.toBe("ok");
+    expect(calls).toHaveLength(10);
+  });
+
+  it("gives up at SANDBOX_START_WAIT_MAX_MS with ExecCapacityError naming the start, never ExecInfraError", async () => {
+    const { calls } = scriptedFetch([{ body: STARTING_EXEC }]);
+    const outcome = new CloudflareSandboxExecutor(OPTS)
+      .exec("npm test", { timeoutMs: 60_000 })
+      .catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(SANDBOX_START_WAIT_MAX_MS);
+    const err = await outcome;
+    expect(err).toBeInstanceOf(ExecCapacityError);
+    expect(err).not.toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toBe(
+      "sandbox not ready — the thread's container did not finish starting within 300s; try again in a few minutes",
+    );
+    // 5 + 10 + 15×19 = 300 s → 21 waits, 22 sends, then no more
+    expect(calls).toHaveLength(22);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(calls).toHaveLength(22);
+  });
+
+  it("a /read answered HTTP 503 with reason sandbox-starting is the same wait", async () => {
+    const { calls } = scriptedFetch([
+      { status: 503, body: { error: "sandbox-starting: …", reason: "sandbox-starting" } },
+      { body: { content: "hello" } },
+    ]);
+    const p = new CloudflareSandboxExecutor(OPTS).readFile("a.txt");
+    void p.then(
+      () => undefined,
+      () => undefined,
+    );
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(p).resolves.toBe("hello");
+    expect(calls).toHaveLength(2);
+  });
+
+  it("a start that turns into a full fleet is judged by the fleet's budget from then on, the time already waited counted", async () => {
+    // one starting answer (5 s), then busy for good with a 20 s command: the fleet budget is 20 s and 5 s are already spent
+    const { calls } = scriptedFetch([{ body: STARTING_EXEC }, { body: BUSY_EXEC }]);
+    const outcome = new CloudflareSandboxExecutor(OPTS)
+      .exec("npm test", { timeoutMs: 20_000 })
+      .catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(20_000);
+    const err = await outcome;
+    expect(err).toBeInstanceOf(ExecCapacityError);
+    expect((err as Error).message).toContain("sandbox fleet busy");
+    expect((err as Error).message).toContain("after waiting 20s");
+    // sends at 0 (starting), 5 (busy: the second backoff step is the fleet's 20 s, capped at the 15 s left),
+    // 20 (busy, the budget spent), then the throw
+    expect(calls).toHaveLength(3);
   });
 });
