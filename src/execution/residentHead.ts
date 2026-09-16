@@ -42,19 +42,45 @@ export function wantShaForBinding(input: {
   return input.wantSha;
 }
 
-/** Whether the attach must fetch the mirror before cloning the thread tree.
- *  - the ref is not in the mirror → fetch (the only pre-existing rule);
+/** Why the attach fetches the mirror before cloning the thread tree. The
+ *  Worker treats the three differently when the fetch fails: a `missing-ref`
+ *  or `stale-tip` fetch that fails fails the attach, as it always did; a
+ *  `returnable-ref` fetch only verifies a ref the mirror holds, so its
+ *  failure is one log line and the attach goes on with the mirror's ref. */
+export type FetchReason = "missing-ref" | "stale-tip" | "returnable-ref";
+
+/** Whether — and why — the attach must fetch the mirror before cloning the
+ *  thread tree; null when the mirror is good enough as it stands.
+ *  - the ref is not in the mirror → `missing-ref` (the oldest rule);
  *  - a `wantSha` was named and the mirror's tip of the ref is not that
- *    commit → fetch;
- *  - otherwise the mirror is good enough as it stands.
+ *    commit → `stale-tip`;
+ *  - the bound ref is one the binding could return from — a branch a rebind
+ *    moved it onto, or one the thread's own runs pushed (`canReturnToDefault`,
+ *    resident-repos.md item 16) → `returnable-ref`: such a branch dies when
+ *    its pull request merges, and the deletion reaches the mirror only through
+ *    a `fetch --prune`. Trusting the mirror because it still holds the ref
+ *    would provision a tree at the deleted branch's stale tip until the
+ *    refresh cycle's prune caught up — whether the thread returned to the
+ *    default would depend on where in the cycle its follow-up landed. So the
+ *    ref is verified against the origin at every attach, and the return is
+ *    decided at the first attach after the deletion. The default cannot be
+ *    lost and a ref a person named that the thread never pushed has no way
+ *    back, so neither pays this fetch: the refresh cycle is their freshness.
+ *  - otherwise null.
  *  A fetch that STILL leaves the tip elsewhere (a push racing this attach, or
  *  a force-push) is not this function's concern: the attach proceeds on the
  *  fetched tip and reports it, and the reviewed-head guard decides what a
  *  review of it may do. */
-export function mirrorNeedsFetch(input: { refExists: boolean; mirrorSha?: string; wantSha: string | null }): boolean {
-  if (!input.refExists) return true;
-  if (input.wantSha === null) return false;
-  return input.mirrorSha !== input.wantSha;
+export function mirrorFetchReason(input: {
+  refExists: boolean;
+  mirrorSha?: string;
+  wantSha: string | null;
+  returnable: boolean;
+}): FetchReason | null {
+  if (!input.refExists) return "missing-ref";
+  if (input.wantSha !== null && input.mirrorSha !== input.wantSha) return "stale-tip";
+  if (input.returnable) return "returnable-ref";
+  return null;
 }
 
 /** What the attach checks out, once the mirror is as fresh as it will get. */

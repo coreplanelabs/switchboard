@@ -252,7 +252,13 @@ import {
   type DiskSample,
   type ThreadCostKind,
 } from "../../src/execution/residentDiskBudget.js";
-import { attachTarget, mirrorNeedsFetch, parseWantSha, wantShaForBinding } from "../../src/execution/residentHead.js";
+import {
+  attachTarget,
+  type FetchReason,
+  mirrorFetchReason,
+  parseWantSha,
+  wantShaForBinding,
+} from "../../src/execution/residentHead.js";
 import { residentText, sanitizeResidentBody } from "../../src/execution/residentText.js";
 import {
   abandonedWaitStepResult,
@@ -2102,13 +2108,20 @@ export class ResidentDO extends Sandbox<Env> {
     throw new StepError("cat-file", `git cat-file exited ${r.exitCode}: ${r.stderr.trim() || "(no output)"}`);
   }
 
-  /** Attach's fetch decision (item 51) over the mirror's actual state: the ref
-   *  is missing, or `wantSha` names a commit the ref's tip is not at. The
-   *  decision itself is the pure, tested `mirrorNeedsFetch`. */
-  private async mirrorNeedsFetchFor(ref: string, wantSha: string | null): Promise<boolean> {
+  /** Attach's fetch decision (item 51) over the mirror's actual state — why
+   *  the mirror is fetched before the tree is cloned, or null: the ref is
+   *  missing, `wantSha` names a commit the ref's tip is not at, or the ref is
+   *  one the binding could return from (item 16's second movement) and is
+   *  verified against the origin before the mirror's word on it is trusted.
+   *  The decision itself is the pure, tested `mirrorFetchReason`. */
+  private async mirrorFetchReasonFor(
+    ref: string,
+    wantSha: string | null,
+    returnable: boolean,
+  ): Promise<FetchReason | null> {
     const refExists = await this.refExists(ref);
     const mirrorSha = refExists && wantSha !== null ? await this.readMirrorSha(ref) : undefined;
-    return mirrorNeedsFetch({ refExists, mirrorSha, wantSha });
+    return mirrorFetchReason({ refExists, mirrorSha, wantSha, returnable });
   }
 
   /** Dependency/build cache key: sha256 over the ls-tree lines (mode,
@@ -4933,9 +4946,22 @@ export class ResidentDO extends Sandbox<Env> {
     // The expected head applies to the ref it was resolved for; a sticky
     // binding on another branch drops it (item 51) rather than fetching on
     // every attach of a thread that can never be at that commit.
+    // A ref the binding could return from — a branch a rebind moved it onto,
+    // or one its own runs pushed (item 16's second movement) — is fetched for
+    // whether or not the mirror holds it: the branch dies when its pull
+    // request merges, the deletion reaches the mirror only through a
+    // `fetch --prune`, and a mirror trusted for still holding the ref would
+    // provision a tree at the deleted branch's stale tip until the refresh
+    // cycle's prune caught up. One predicate, read once here, drives the mint
+    // pre-check, the fetch under the lock and the return gate alike.
     let want = wantShaForBinding({ boundRef: binding.ref, refHint, wantSha });
+    const returnable = canReturnToDefault(binding, facts.defaultRef);
     let fetchToken: string | null = token;
-    if (!fetchToken && githubAppConfigured(this.env) && (await this.mirrorNeedsFetchFor(binding.ref, want))) {
+    if (
+      !fetchToken &&
+      githubAppConfigured(this.env) &&
+      (await this.mirrorFetchReasonFor(binding.ref, want, returnable)) !== null
+    ) {
       fetchToken = (await mintRepoScopedToken(this.env, slug).catch(() => null))?.token ?? null;
     }
 
@@ -4943,14 +4969,27 @@ export class ResidentDO extends Sandbox<Env> {
     try {
       locked = await this.withMirrorLock(async () => {
         await this.ensureGitSetup();
-        const fetched = await this.mirrorNeedsFetchFor(binding.ref, want);
-        if (fetched) {
-          await this.gitWithCred(
-            fetchToken,
-            ["-C", MIRROR_DIR, "fetch", "--prune", "origin"],
-            "fetch",
-            GIT_NETWORK_TIMEOUT_MS,
-          );
+        const why = await this.mirrorFetchReasonFor(binding.ref, want, returnable);
+        if (why !== null) {
+          try {
+            await this.gitWithCred(
+              fetchToken,
+              ["-C", MIRROR_DIR, "fetch", "--prune", "origin"],
+              "fetch",
+              GIT_NETWORK_TIMEOUT_MS,
+            );
+          } catch (err) {
+            // A fetch for a missing or stale ref fails the attach as it always
+            // did. One that only verifies a returnable ref the mirror holds is
+            // not the attach's failure — the origin unreachable, no token for
+            // a private repo — so the attach goes on with the mirror's ref, as
+            // it did before the verification existed; the return is only
+            // ever decided on a fetch that ran.
+            if (why !== "returnable-ref") throw err;
+            console.log(
+              `attach ${threadKey}: the fetch verifying ${binding.ref} at the origin failed (${errMsg(err)}) — the attach goes on with the mirror's ref`,
+            );
+          }
         }
         // What to check out, now that the mirror is as fresh as it will get
         // (item 51, the pure `attachTarget`): the ref's tip when the ref is
@@ -4959,16 +4998,18 @@ export class ResidentDO extends Sandbox<Env> {
         // `refs/pull/N/head` still names its head, and the caller told us that
         // head — so a review of a merged PR stays on the warm resident instead
         // of falling back to a cold sandbox that clones the same commit itself.
-        // No fetch ran ⇒ the ref existed at the check: `mirrorNeedsFetch` fetches
-        // for every missing ref, so only a fetched mirror needs the re-read.
-        // (Under the mirror mutex — the mirror cannot change in between.)
-        const refExists = !fetched || (await this.refExists(binding.ref));
+        // No fetch was due ⇒ the ref existed at the check: `mirrorFetchReason`
+        // fetches for every missing ref, so only a fetched mirror needs the
+        // re-read — and a returnable ref is re-read for real, the fact the
+        // second movement is decided on. (Under the mirror mutex — the mirror
+        // cannot change in between.)
+        const refExists = why === null || (await this.refExists(binding.ref));
         let target = attachTarget({
           refExists,
           wantSha: want,
           commitInMirror: !refExists && want !== null && (await this.commitInMirror(want)),
         });
-        if (target.kind === "unknown-ref" && canReturnToDefault(binding, facts.defaultRef)) {
+        if (target.kind === "unknown-ref" && returnable) {
           // The thread's branch — one a rebind moved it onto, or one its own
           // runs pushed and it was bound to by name — is gone even after the
           // fetch: deleted once its pull request merged. The binding goes

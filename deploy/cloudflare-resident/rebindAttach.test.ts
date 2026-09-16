@@ -239,11 +239,9 @@ describe("a binding whose own branch is gone from the mirror returns to the defa
       /import \{[^}]*returnToDefault[^}]*\} from "\.\.\/\.\.\/src\/execution\/residentRebind\.js";/,
     );
     const lockStart = create.indexOf("await this.withMirrorLock(");
-    const fetched = create.indexOf("const fetched = await this.mirrorNeedsFetchFor(binding.ref, want);");
+    const fetched = create.indexOf("const why = await this.mirrorFetchReasonFor(binding.ref, want, returnable);");
     const firstTarget = create.indexOf("let target = attachTarget({");
-    const gate = create.indexOf(
-      'if (target.kind === "unknown-ref" && canReturnToDefault(binding, facts.defaultRef)) {',
-    );
+    const gate = create.indexOf('if (target.kind === "unknown-ref" && returnable) {');
     const returned = create.indexOf("const back = await this.returnBindingToDefault(binding, facts.defaultRef);");
     const retarget = create.indexOf("want = wantShaForBinding({ boundRef: binding.ref, refHint, wantSha });", returned);
     const throwAt = create.indexOf('if (target.kind === "unknown-ref") {');
@@ -261,6 +259,40 @@ describe("a binding whose own branch is gone from the mirror returns to the defa
     // The tree is provisioned at the default by the same worktree step, at the same path: nothing special-cased.
     expect(create).toMatch(/let binding = input\.binding;/);
     expect(create).toMatch(/let returned: Returned \| undefined;/);
+  });
+
+  it("a returnable ref the mirror still holds is verified against the origin at every attach: the fetch decision is handed canReturnToDefault, computed once before the mutex, so the prune runs and the ref is re-read for real; a verification fetch that fails is one log line and the mirror's ref, while a fetch for a missing or stale ref fails as before", () => {
+    expect(source).toMatch(
+      /import \{[^}]*mirrorFetchReason[^}]*\} from "\.\.\/\.\.\/src\/execution\/residentHead\.js";/,
+    );
+    expect(source).not.toMatch(/mirrorNeedsFetch/);
+    const decision = method("mirrorFetchReasonFor");
+    expect(decision).toMatch(
+      /mirrorFetchReasonFor\(\s*ref: string,\s*wantSha: string \| null,\s*returnable: boolean,?\s*\): Promise<FetchReason \| null>/,
+    );
+    expect(decision).toMatch(/return mirrorFetchReason\(\{ refExists, mirrorSha, wantSha, returnable \}\);/);
+    // One predicate, read once off the binding before the lock, drives the mint
+    // pre-check, the fetch under the lock and the return gate alike.
+    const returnable = create.indexOf("const returnable = canReturnToDefault(binding, facts.defaultRef);");
+    const mint = create.indexOf("(await this.mirrorFetchReasonFor(binding.ref, want, returnable))");
+    const lockStart = create.indexOf("await this.withMirrorLock(");
+    const why = create.indexOf("const why = await this.mirrorFetchReasonFor(binding.ref, want, returnable);");
+    const fetch = create.indexOf('["-C", MIRROR_DIR, "fetch", "--prune", "origin"],', why);
+    const soft = create.indexOf('if (why !== "returnable-ref") throw err;', fetch);
+    const reread = create.indexOf("const refExists = why === null || (await this.refExists(binding.ref));", soft);
+    expect(returnable).toBeGreaterThan(-1);
+    expect(mint).toBeGreaterThan(returnable);
+    expect(lockStart).toBeGreaterThan(mint);
+    expect(why).toBeGreaterThan(lockStart);
+    expect(fetch).toBeGreaterThan(why);
+    expect(soft).toBeGreaterThan(fetch);
+    expect(reread).toBeGreaterThan(soft);
+    expect(create.slice(why, reread)).toMatch(/if \(why !== null\) \{\s*try \{\s*await this\.gitWithCred\(/);
+    expect(create.slice(soft, reread)).toMatch(
+      /the fetch verifying \$\{binding\.ref\} at the origin failed \(\$\{errMsg\(err\)\}\) — the attach goes on with the mirror's ref/,
+    );
+    // No second predicate spelling: the gate reads the same fact.
+    expect(create).not.toMatch(/canReturnToDefault\(binding, facts\.defaultRef\)\)/);
   });
 
   it("the return re-reads the row under the mutex and hands it whole — rebound and ownBranches alike — to the pure returnToDefault, whose undefined (a person-named ref the thread never pushed, or a row another attach moved meanwhile) is answered as the row stands with nothing written; its row is what gets written", () => {
