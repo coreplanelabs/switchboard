@@ -132,8 +132,8 @@ describe("diskHeadroom", () => {
     expect(h.freeKiB).toBe(10_808_176);
     expect(h.reserve.totalKiB).toBeGreaterThan(0);
     expect(h.headroomKiB).toBe(Math.max(0, h.freeKiB - h.reserve.totalKiB));
-    expect(h.room.hardlink).toBe(17);
-    expect(h.room.reconcile).toBe(7);
+    expect(h.room.hardlink).toBe(20);
+    expect(h.room.reconcile).toBe(9);
   });
   it("caps the free space under diskBudgetMb and says so; an unmeasured checkout has no room figure", () => {
     const capped = diskHeadroom(disk, 8 * 1024);

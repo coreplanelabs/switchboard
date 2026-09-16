@@ -4075,6 +4075,9 @@ export class ResidentDO extends Sandbox<Env> {
         committedKiB: this.diskCommittedKiB,
         diskBudgetMb: input.record.diskBudgetMb,
         kind,
+        // A deps-store entry backup stages its archive from the deps (item
+        // 61); the reserve holds their share only while one runs.
+        depsBackupInFlight: this.depsBackupsInFlight.size > 0,
       });
     let rawFree = df.freeKiB;
     let verdict = decide(rawFree);

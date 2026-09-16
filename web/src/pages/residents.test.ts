@@ -287,7 +287,7 @@ describe("ResidentsIndexPage — the fold (item 42: what is on this resident)", 
     expect(idle[0].find(".elapsed").exists()).toBe(false);
     expect(idle[0].find("a.open").exists()).toBe(false);
     expect(fold.find(".disk").attributes("data-idle")).toBe("1");
-    expect(norm(fold.find(".disk").text())).toBe("10.3 GiB free · room for 17 more trees · measured 15 minutes ago");
+    expect(norm(fold.find(".disk").text())).toBe("10.3 GiB free · room for 20 more trees · measured 15 minutes ago");
   });
 
   it("an idle worktree becomes a run's the moment a run on its thread appears; an unmeasured resident says so in the size cell and the disk line", () => {
@@ -514,11 +514,11 @@ describe("ResidentDetailPage", () => {
     expect(t).toContain("4.06 GiB/14.4 GiB (28%)");
     expect(t).toContain("10.3 GiB"); // free
     // reserve = 0.6 × (mirror + deps + checkout) + max(1 GiB, 5 %) = 0.6 × 2.94 GiB + 1 GiB
-    expect(t).toMatch(/reserve\s*2\.76 GiB \(snapshot staging 1\.76 GiB \+ floor 1\.00 GiB\)/);
+    expect(t).toMatch(/reserve\s*1\.48 GiB \(snapshot staging 0\.48 GiB \+ floor 1\.00 GiB\)/);
     // headroom = 10.3 − 2.76 = 7.5 GiB → 17 hardlinked (0.44 GiB each) or 7 lockfile-diverged
     // (0.44 + 0.25 × 2.14 = 0.98 GiB each: the seed plus the reconcile share of the deps)
     expect(t).toMatch(
-      /headroom\s*7\.5\d GiB — room for 17 more \(0\.44 GiB each\) hardlinked trees, 7 more \(0\.98 GiB each\) lockfile-diverged \(reconciling\)/,
+      /headroom\s*8\.8\d GiB — room for 20 more \(0\.44 GiB each\) hardlinked trees, 9 more \(0\.98 GiB each\) lockfile-diverged \(reconciling\)/,
     );
     expect(t).toContain("2026-09-07T15:30:00.000Z");
     expect(t).toMatch(/mirror\s*0\.35 GiB/);
