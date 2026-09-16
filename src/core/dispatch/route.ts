@@ -38,6 +38,7 @@
 // failure replies the command's own error line and the override footer and
 // stops — one model call, never a second route.
 import { AGENTS, COMPOUND_PRESET, type Identity, type MachineClass } from "../../agents/registry.js";
+import { HAND_BACK_PREFIX } from "./handBack.js";
 import { TOOLSETS } from "../../tools/toolsets.js";
 import { routingOn, type ConfigStore, type ResolvedRequest } from "../../config.js";
 import type { RouteAnswerMode } from "../../config/validate.js";
@@ -96,8 +97,9 @@ export const ROUTE_RECEIPT_CAP = 300;
  *  route line uses for a preset. */
 export const ROUTED_RECEIPT_PREFIX = "routed:";
 /** The hand-back's prefix for an `effect: write` command (record 0039): the line
- *  to paste follows it, and nothing runs. */
-export const HAND_BACK_PREFIX = "To run this:";
+ *  to paste follows it, and nothing runs. Defined in its own pure module so the
+ *  web bundle can read it (the home page fills its composer with the command). */
+export { HAND_BACK_PREFIX };
 /** The line that opens the parts block of a routed conductor's brief; the
  *  conductor's prompt (`CONDUCTOR_SYSTEM`) names the same words. */
 export const COMPOUND_BRIEF_HEADING = "Routed as a compound request";

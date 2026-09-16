@@ -18,6 +18,21 @@ export const MANIFEST_PATH = `${SCREENSHOTS_DIR}/manifest.json`;
 
 /** One picture per surface: its file name and the preview route that renders it. */
 export const SURFACES = [
+  {
+    name: "home-empty",
+    path: "/chats",
+    what: "the home page's empty state: the mark, the greeting, the composer in the middle, the chips",
+  },
+  {
+    name: "home-conversation",
+    path: "/chats/conv-1",
+    what: "a finished conversation: three turns, each a run with its receipt and reply",
+  },
+  {
+    name: "home-live",
+    path: "/chats/conv-live",
+    what: "a conversation whose newest run is live: the pending row and the open work",
+  },
   { name: "runs-index", path: "/runs?all=1", what: "the runs index, live and finished rows" },
   { name: "run-page", path: "/runs/hist-1", what: "a finished coding run's page and timeline" },
   { name: "residents", path: "/residents?open=acme/web", what: "the residents index, one resident folded open" },

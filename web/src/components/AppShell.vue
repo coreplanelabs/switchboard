@@ -73,7 +73,10 @@ const menuItems = computed(() => [
     >
       <slot name="leading" />
       <h1 class="flex items-center gap-2 text-base font-medium tracking-tight text-highlighted">
-        <BrandMark />{{ title }}
+        <!-- The mark is the way home (docs/reference/specs/web-chat.md item 1): a
+             full page load to the chat, like every section. -->
+        <a class="home flex items-center text-highlighted no-underline" href="/chats" aria-label="Home"><BrandMark /></a
+        >{{ title }}
       </h1>
       <slot name="status" />
       <span class="ml-auto flex items-center gap-4">

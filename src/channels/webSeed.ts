@@ -157,6 +157,61 @@ export interface UnitSeed {
   retentionDays: number | null;
 }
 
+/** One turn of a home conversation (docs/reference/specs/web-chat.md; record
+ *  0043): the run as every listing views it, a live row with its token as the
+ *  index carries it, plus the two texts its `input` and `answer` events hold
+ *  and the route it ran under. */
+export type HomeTurnSeed = Omit<RunView, "route"> & {
+  token?: string;
+  /** The request's text (the `input` event). */
+  request: string;
+  /** The reply's text (the `answer` event); absent while live or when the run made none. */
+  answer?: string;
+  /** The front door's decision (the `route` event), when the run was routed. */
+  route?: { preset: string; reason: string };
+};
+
+/** One row of the rail: a conversation is the runs of one `web:` thread. */
+export interface HomeConversationRowSeed {
+  id: string;
+  /** The first request's first line, cut to 60 characters. */
+  title: string;
+  lastAt: number;
+  runs: number;
+  live: boolean;
+}
+
+/** The home page (`/`, `/c/<conversation>`): the open conversation's turns,
+ *  the viewer's other conversations, and what the empty state and the composer
+ *  are grounded in — every list derived from data the bot already holds. */
+export interface HomeSeed {
+  page: "home";
+  /** The open conversation's id (a fresh one on `/`). */
+  conversation: string;
+  turns: HomeTurnSeed[];
+  conversations: HomeConversationRowSeed[];
+  viewer: { name: string };
+  /** Where the composer POSTs (`/c/<conversation>/send`). */
+  sendUrl: string;
+  /** The server clock when the seed was built (relative times, the greeting). */
+  now: number;
+  retentionDays: number | null;
+  /** The empty state's chips, each sent on click: what Switchboard does well (a review,
+   *  a shipped change, an investigated run, a channel's agent, an MCP server) over the
+   *  viewer's repositories, and one that asks what it can do. */
+  suggestions: string[];
+  /** The `/` palette's rows: every command the registry exposes to chat and the viewer
+   *  may run, in its chat form with the command's own `describe` (record 0008). */
+  commands: HomeCommandSeed[];
+}
+
+/** One row of the composer's `/` palette: the chat form to insert and one line on what it does. */
+export interface HomeCommandSeed {
+  /** The chat form, `<group> <verb>` (what the fast path recognizes at the start of a message). */
+  chat: string;
+  describe: string;
+}
+
 /** The admin /residents listing, passed through as received (the view renders
  *  whatever the resident reports, defensively — never a contract the bot
  *  enforces). Values are JSON-safe by construction: they arrived as JSON.
@@ -272,7 +327,8 @@ export type PageSeed =
   | ResidentDetailSeed
   | CostsSeed
   | DeliverySeed
-  | SettingsSeed;
+  | SettingsSeed
+  | HomeSeed;
 
 /** What the island holds: the page's seed plus what is on in this process
  *  (src/core/capabilities.ts) — stamped by the shell renderer (webShell.ts),
