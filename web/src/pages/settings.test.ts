@@ -88,13 +88,15 @@ describe("settingsTabs", () => {
 });
 
 describe("SettingsPage", () => {
-  it("paints the tab the seed names, marks it current, and lists the nav's Settings section", () => {
+  it("paints the tab the seed names, marks it current, and lights the header's settings cog", () => {
     const wrapper = mountApp(SettingsPage, {
       seed: island(base({ tab: "installation", installation: { settings: [], capabilities: [] } })),
     });
     expect(wrapper.find("h1").text()).toBe("Settings");
     expect(wrapper.find('nav.tabs a[aria-current="page"]').text()).toBe("Installation");
-    expect(wrapper.find('nav.site a[aria-current="page"]').attributes("href")).toBe("/settings");
+    // Settings is chrome, not a section: no nav entry is current, the header's cog is.
+    expect(wrapper.find('nav.site a[aria-current="page"]').exists()).toBe(false);
+    expect(wrapper.find('.settings-link[aria-current="page"]').attributes("href")).toBe("/settings");
   });
 
   it("without a seed renders the empty state, never a crash", () => {

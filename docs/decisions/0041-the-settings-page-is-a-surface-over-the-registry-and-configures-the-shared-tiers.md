@@ -29,7 +29,9 @@ The delta from what a veteran expects, each with its proof.
 
 ## The shape
 
-The settings page is the fifth section of the dashboard, `/settings`, three tabs, each a full page load over a seed the bot renders from the viewer's own actor: **MCPs** is `mcp list` as a table with an add form, a connect link and a remove button; **Channels** is a picker over the channels whose scope the viewer may read, then `config show --channel` as a form whose Save is `config set channel` and whose Clear is `config clear channel`; **Installation** is a read-only table of the running `config.yaml` behaviour knobs, each with its current value and the sentence that says how it changes, plus the capabilities that are on. Every button on the page is one `POST /api/<group>.<verb>`; the page then reloads and shows what the registry now says. The page carries the viewer's write rights only as a boolean the seed computed with the same `authorize` call the handler will make, and uses it to disable controls, never to decide.
+*Amended 2026-09-16 (while proposed): settings is chrome, not a fifth section. The way in is a cog beside the docs link in every page's header, lit on `/settings`, and the site nav keeps its four sections; the maintainer asked for the conventional icon after the first deploy. Nothing else in this record changes.*
+
+The settings page is `/settings`, reached from the header's cog, three tabs, each a full page load over a seed the bot renders from the viewer's own actor: **MCPs** is `mcp list` as a table with an add form, a connect link and a remove button; **Channels** is a picker over the channels whose scope the viewer may read, then `config show --channel` as a form whose Save is `config set channel` and whose Clear is `config clear channel`; **Installation** is a read-only table of the running `config.yaml` behaviour knobs, each with its current value and the sentence that says how it changes, plus the capabilities that are on. Every button on the page is one `POST /api/<group>.<verb>`; the page then reloads and shows what the registry now says. The page carries the viewer's write rights only as a boolean the seed computed with the same `authorize` call the handler will make, and uses it to disable controls, never to decide.
 
 The closest known shape is the GitHub repository settings page over the REST API the `gh` CLI also uses: one API, two clients, and the page has no capability the CLI lacks. The one way this differs is the missing tier: GitHub's page can show "your" settings because the browser session is the same identity as the API token; here it is not, so the dashboard shows the shared tiers and points at chat for the personal one.
 
@@ -131,7 +133,7 @@ If customers set personal settings far more than shared ones, the missing `me` t
 | A `me` write from an `access` caller is refused with the pointer to chat, on the config and the MCP commands; a chat caller's `me` write is unchanged | `[gap]` `src/core/commands/config.test.ts`, `src/core/commands/mcp.test.ts` |
 | `config overrides` lists only channels the caller may read and names settings, never values | `[gap]` `src/core/commands/config.test.ts` |
 | The installation projection contains no `*Env` name, no URL and no bot secret name for the full example config | `[gap]` `src/core/installationSettings.test.ts` |
-| The nav lists Settings for every installation and the MCPs tab only with the `mcp` capability | `[gap]` `web/src/components/AppNav.test.ts`, `web/src/pages/settings.test.ts` |
+| The header carries the settings cog for every installation (amended: a cog, not a nav section) and the MCPs tab only with the `mcp` capability | `web/src/components/AppNav.test.ts`, `web/src/pages/settings.test.ts` (bound in settings-page.md item 6) |
 | Human-gated: an admin adds, connects and removes an org server from the deployed page; an ungranted viewer sees the page read-only | receipt on the PR |
 
 ## Sources

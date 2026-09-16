@@ -12,6 +12,7 @@ import { useColorMode } from "@vueuse/core";
 import AppNav from "./AppNav.vue";
 import { navSections, type NavSection } from "../lib/navSections";
 import DocsLink, { DOCS_HREF, DOCS_ICON, DOCS_LABEL } from "./DocsLink.vue";
+import SettingsLink, { SETTINGS_HREF, SETTINGS_ICON, SETTINGS_LABEL } from "./SettingsLink.vue";
 import ThemeToggle from "./ThemeToggle.vue";
 import BrandMark from "./BrandMark.vue";
 import { browser } from "../lib/browser";
@@ -30,9 +31,19 @@ const THEMES = [
 ] as const;
 
 const menuItems = computed(() => [
-  // The docs sit in their own group: an external destination, not a section of
-  // this app, and the only item here that leaves the page.
-  [{ label: DOCS_LABEL, icon: DOCS_ICON, to: DOCS_HREF, target: "_blank" as const }],
+  // The docs and the settings cog sit in their own group: chrome, not sections
+  // of this app — the docs the only item here that leaves the page, settings a
+  // full page load like the sections.
+  [
+    { label: DOCS_LABEL, icon: DOCS_ICON, to: DOCS_HREF, target: "_blank" as const },
+    {
+      label: SETTINGS_LABEL,
+      icon: SETTINGS_ICON,
+      type: "checkbox" as const,
+      checked: props.nav === "settings",
+      onSelect: () => browser.navigate(SETTINGS_HREF),
+    },
+  ],
   sections.value.map((s) => ({
     label: s.label,
     icon: s.icon,
@@ -69,6 +80,7 @@ const menuItems = computed(() => [
         <slot name="actions" />
         <span class="hidden items-center gap-4 sm:flex">
           <AppNav :current="nav" />
+          <SettingsLink :current="nav === 'settings'" />
           <DocsLink />
           <ThemeToggle />
         </span>

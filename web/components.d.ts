@@ -36,6 +36,7 @@ declare module 'vue' {
     RunTimeline: typeof import('./src/components/run/RunTimeline.vue')['default']
     RunUnitsBlock: typeof import('./src/components/run/RunUnitsBlock.vue')['default']
     SessionSearch: typeof import('./src/components/unit/SessionSearch.vue')['default']
+    SettingsLink: typeof import('./src/components/SettingsLink.vue')['default']
     SettingsTabs: typeof import('./src/components/settings/SettingsTabs.vue')['default']
     SlackMark: typeof import('./src/components/SlackMark.vue')['default']
     SourceMark: typeof import('./src/components/runs/SourceMark.vue')['default']
