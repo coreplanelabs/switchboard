@@ -270,3 +270,31 @@ describe("matchesPredicate", () => {
     expect(matchesPredicate({ kind: "repos-in", repos: new Set([REPOS[0]]) }, {})).toBe(false);
   });
 });
+
+// Feature: docs/decisions/0042 — `is-self` compiles to one `user-is` per self id,
+// ORed, so the store predicate vocabulary is unchanged: an unlinked actor gets
+// the single equality it always did, a linked dashboard session its own id or
+// its person's; `acts-as-person` compiles to all/none.
+describe("record 0042 — the self set in a store predicate", () => {
+  it("a linked session's runs:read predicate admits its person's private and DM runs; the unlinked session's is unchanged", () => {
+    const linked = predicateFor(A.linkedBrowser, "runs:read", "run");
+    const own = { channelId: CHANNELS.priv.id, userId: "slack:UHANK", channelVisibility: "private" as const };
+    const dm = { channelId: CHANNELS.dm.id, userId: "slack:UHANK", channelVisibility: "dm" as const };
+    const other = { channelId: CHANNELS.priv.id, userId: "slack:UERIN", channelVisibility: "private" as const };
+    expect(matchesPredicate(linked, own)).toBe(true);
+    expect(matchesPredicate(linked, dm)).toBe(true);
+    expect(matchesPredicate(linked, other)).toBe(false);
+    const unlinked = predicateFor(A.browser, "runs:read", "run");
+    expect(matchesPredicate(unlinked, own)).toBe(false);
+    expect(unlinked).toEqual(predicateFor({ ...A.browser, self: ["access:viewer"] }, "runs:read", "run"));
+  });
+
+  it("the linked predicate is the unlinked one with one more user-is alternative and no new kind", () => {
+    const kinds = (p: Predicate): string[] => (p.kind === "or" || p.kind === "and" ? p.of.flatMap(kinds) : [p.kind]);
+    const linked = predicateFor(A.linkedBrowser, "runs:read", "run");
+    const unlinked = predicateFor(A.browser, "runs:read", "run");
+    expect(kinds(linked).filter((k) => k === "user-is")).toHaveLength(2);
+    expect(kinds(unlinked).filter((k) => k === "user-is")).toHaveLength(1);
+    expect(new Set(kinds(linked))).toEqual(new Set(kinds(unlinked)));
+  });
+});

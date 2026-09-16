@@ -15,7 +15,7 @@
 // in-memory store runs, and what the differential test checks against
 // `authorize`.
 
-import { effectiveGrants, hasAction, holds, isKnownActorKind, principalOf } from "./authorize.js";
+import { actsAsPerson, effectiveGrants, hasAction, holds, isKnownActorKind, selfIdsOf } from "./authorize.js";
 import { POLICY, resolveGrant, ruleTarget } from "./policy.js";
 import { RESOURCE_KINDS, targetOf, type ResourceAttributes } from "./resource.js";
 import type {
@@ -52,7 +52,7 @@ function anyOf(alternatives: readonly Predicate[]): Predicate {
   return { kind: "or", of: flat };
 }
 
-function compileCondition(condition: Condition, grants: Grants, selfId: string): Predicate {
+function compileCondition(condition: Condition, grants: Grants, selfIds: readonly string[]): Predicate {
   switch (condition.kind) {
     case "has-grant": {
       if (grants.actions === "all") return ALL;
@@ -64,7 +64,13 @@ function compileCondition(condition: Condition, grants: Grants, selfId: string):
       if (grants.channels === "all") return ALL;
       return anyOf([grants.channels.size === 0 ? NONE : { kind: "channels-in", channelIds: grants.channels }, PUBLIC]);
     case "is-self":
-      return { kind: "user-is", userId: selfId };
+      // One `user-is` per self id, ORed (record 0042): an unlinked actor
+      // compiles to the single equality it always did, a linked dashboard
+      // session to its own id or its person's — the store predicate vocabulary
+      // is unchanged, so every translator (file store, state Worker) runs it as is.
+      return anyOf(selfIds.map((userId): Predicate => ({ kind: "user-is", userId })));
+    case "acts-as-person":
+      return actsAsPerson(selfIds) ? ALL : NONE;
     case "owner-of":
       if (grants.repos === "all") return ALL;
       return grants.repos.size === 0 ? NONE : { kind: "repos-in", repos: grants.repos };
@@ -74,11 +80,11 @@ function compileCondition(condition: Condition, grants: Grants, selfId: string):
   return NONE;
 }
 
-function compileRule(rule: Rule, grants: Grants, selfId: string): Predicate {
+function compileRule(rule: Rule, grants: Grants, selfIds: readonly string[]): Predicate {
   if (rule.originVisibility) return NONE;
   const parts: Predicate[] = [];
   for (const condition of rule.when) {
-    const part = compileCondition(condition, grants, selfId);
+    const part = compileCondition(condition, grants, selfIds);
     if (part.kind === "none") return NONE;
     if (part.kind !== "all") parts.push(part);
   }
@@ -102,12 +108,12 @@ export function predicateWith(
   if (!target) throw new TypeError(`authz predicate: no target for ${resourceType}${kind ? `/${kind}` : ""}`);
   if (!isKnownActorKind(actor.kind)) return NONE;
   const grants = effectiveGrants(actor);
-  const selfId = principalOf(actor).id;
+  const selfIds = selfIdsOf(actor);
   const alternatives: Predicate[] = [];
   for (const rule of rules) {
     if (rule.action !== action || ruleTarget(rule) !== target) continue;
     if (rule.actorKinds && !rule.actorKinds.includes(actor.kind)) continue;
-    alternatives.push(compileRule(rule, grants, selfId));
+    alternatives.push(compileRule(rule, grants, selfIds));
   }
   return anyOf(alternatives);
 }

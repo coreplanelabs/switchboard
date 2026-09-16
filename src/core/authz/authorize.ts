@@ -63,6 +63,21 @@ export function principalOf(actor: Actor): Actor {
   return current;
 }
 
+/** The ids that mean "me" for a decision (record 0042): the root principal's
+ *  `self` when it carries one — its own id and the person a dashboard session
+ *  is linked to — else its id alone. Never read by a grant check. */
+export function selfIdsOf(actor: Actor): readonly string[] {
+  const principal = principalOf(actor);
+  return principal.self && principal.self.length > 0 ? principal.self : [principal.id];
+}
+
+/** Whether a self set names a chat identity — the `acts-as-person` condition:
+ *  every chat actor, a dashboard session linked to its person; never an
+ *  unlinked browser session or a credential. */
+export function actsAsPerson(selfIds: readonly string[]): boolean {
+  return selfIds.some((id) => id.startsWith("slack:"));
+}
+
 // ── decision ─────────────────────────────────────────────────────────────────
 
 const ALLOW: Decision = Object.freeze({ allow: true });
@@ -76,11 +91,13 @@ export type DenyReason =
   | "missing-grant"
   | "not-member"
   | "not-self"
+  | "not-person"
   | "not-owner"
   | "not-all-channels";
 
 const FAILURE_REASON: Readonly<Record<Condition["kind"], DenyReason>> = {
   "has-grant": "missing-grant",
+  "acts-as-person": "not-person",
   "member-of": "not-member",
   "is-self": "not-self",
   "owner-of": "not-owner",
@@ -98,7 +115,7 @@ export function isKnownActorKind(kind: string): boolean {
 export function evaluateCondition(
   condition: Condition,
   grants: Grants,
-  selfId: string,
+  selfIds: readonly string[],
   attributes: ResourceAttributes,
 ): boolean {
   switch (condition.kind) {
@@ -115,7 +132,9 @@ export function evaluateCondition(
         attributes.channelVisibility === "public"
       );
     case "is-self":
-      return attributes.userId !== undefined && attributes.userId === selfId;
+      return attributes.userId !== undefined && selfIds.includes(attributes.userId);
+    case "acts-as-person":
+      return actsAsPerson(selfIds);
     case "owner-of":
       return attributes.repo !== undefined && holds(grants.repos, attributes.repo);
     case "all-channels":
@@ -134,8 +153,8 @@ export function evaluateRule(rule: Rule, actor: Actor, resource: Resource): bool
   const attributes = attributesOf(resource);
   if (rule.originVisibility && !rule.originVisibility.includes(attributes.visibility)) return false;
   const grants = effectiveGrants(actor);
-  const selfId = principalOf(actor).id;
-  return rule.when.every((condition) => evaluateCondition(condition, grants, selfId, attributes));
+  const selfIds = selfIdsOf(actor);
+  return rule.when.every((condition) => evaluateCondition(condition, grants, selfIds, attributes));
 }
 
 /** `authorize` over an explicit (validated) table. Tests use it to drive
@@ -153,10 +172,10 @@ export function authorizeWith(rules: readonly Rule[], actor: Actor, action: Acti
   );
   if (forOrigin.length === 0) return deny("origin-visibility");
   const grants = effectiveGrants(actor);
-  const selfId = principalOf(actor).id;
+  const selfIds = selfIdsOf(actor);
   let reason: DenyReason | undefined;
   for (const rule of forOrigin) {
-    const failed = rule.when.find((condition) => !evaluateCondition(condition, grants, selfId, attributes));
+    const failed = rule.when.find((condition) => !evaluateCondition(condition, grants, selfIds, attributes));
     if (!failed) return ALLOW;
     reason ??= FAILURE_REASON[failed.kind];
   }
