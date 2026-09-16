@@ -143,7 +143,11 @@ describe("MessageFiles", () => {
     expect(row.find("a.download").exists()).toBe(true);
   });
 
-  it("a video row starts closed and mounts nothing; opening it renders a <video controls preload=metadata playsinline> from the route on a finished page (no query); audio likewise", async () => {
+  // `preload="auto"`, not `"metadata"`: the player is mounted only once a person
+  // opens the row, and a stream-copied MP4 keeps its index at the end — a
+  // metadata-only preload stalled live when the browser fell back from ranges
+  // to a plain read it could not size (live-view.md item 26).
+  it("a video row starts closed and mounts nothing; opening it renders a <video controls preload=auto playsinline> from the route on a finished page (no query); audio likewise", async () => {
     const w = mountApp(MessageFiles, { props: { files: [mp4, wav] }, provides: withLinks(finished) });
     const [video, audio] = w.findAll("li.artifact");
     expect(video.attributes("data-kind")).toBe("video");
@@ -153,7 +157,7 @@ describe("MessageFiles", () => {
     const player = video.find("video.preview");
     expect(player.attributes("src")).toBe("/runs/run-1/artifacts/runs/run-1/out/3-clip.mp4");
     expect(player.attributes("controls")).toBeDefined();
-    expect(player.attributes("preload")).toBe("metadata");
+    expect(player.attributes("preload")).toBe("auto");
     expect(player.attributes("playsinline")).toBeDefined();
     expect(player.attributes("autoplay")).toBeUndefined();
     expect(video.findAll("a")).toHaveLength(0);

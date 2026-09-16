@@ -18,10 +18,11 @@ describe("the shim forwards the model proxy's paths to the container blind", () 
     expect(source).toMatch(/pathname === "\/admin\/restart"\s*\?\s*await handleAdminRestart\(/);
     expect(source).toMatch(/pathname === COORDINATOR_INSTANCES_PATH\s*\?\s*await handleCoordinatorInstances\(/);
     expect(source).toMatch(/statusId !== undefined\s*\?\s*await handleCoordinatorInstanceStatus\(/);
-    expect(source).toMatch(/:\s*await getContainer\(env\.SWITCHBOARD, INSTANCE\)\.fetch\(forwarded\)/);
+    // The container's answer passes through with its length declared (knownLength.ts) — nothing else touches it.
+    expect(source).toMatch(/:\s*withLength\(await getContainer\(env\.SWITCHBOARD, INSTANCE\)\.fetch\(forwarded\)\)/);
     // A path the shim's own route table gives no root to is forwarded as it came.
     expect(source).toMatch(
-      /if \(route === undefined\) return getContainer\(env\.SWITCHBOARD, INSTANCE\)\.fetch\(inbound\);/,
+      /if \(route === undefined\) return withLength\(await getContainer\(env\.SWITCHBOARD, INSTANCE\)\.fetch\(inbound\)\);/,
     );
     // Nothing in the shim knows the proxy's paths: no route of its own, no rewrite, no read of a body.
     expect(source).not.toContain("/v1/");

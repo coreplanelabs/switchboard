@@ -25,7 +25,7 @@
     "web/src/components/costs/CostChart.vue": "d48000d00266ad30e01826f51d00c4c21e5527676733b66b46842eca223f4686",
     "web/src/components/costs/CostsByUser.vue": "df094fa42c3ff175c38f1ab1e2c1ad18e463f27f9a0313b49a4cfcf13c72f703",
     "web/src/components/run/CallCard.vue": "908739a4052d576576ce7537a643a9be139bc1072fb0bd81f71bc272040f8ec8",
-    "web/src/components/run/MessageFiles.vue": "9e8f0cb159284ea5ee3fd9984824fc3914933028ee0d456b1da31a5bad7c58f7",
+    "web/src/components/run/MessageFiles.vue": "7cece928a02b6c80f7484db1a3fbf9754c5f0ec15ff233dd9e56f2d1bc3402ac",
     "web/src/components/run/ReplyBlock.vue": "b9173c6bc51fd7a85cc7a6584a8f43b180efbbdcf03ec90707e35e1b97b43ca3",
     "web/src/components/run/SpanRow.vue": "aef81176ffc2cd3db10660134d9fff0716f29ff7e0738f6e91da37bcab82a1db",
     "web/src/components/run/StepBlock.vue": "c4da1f661964e9c71722789100d3ad5144004dd7794fbcb9d43d8272124e7061",

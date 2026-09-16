@@ -212,7 +212,7 @@ const directionTitle = (direction: "in" | "out") =>
                 :src="row.href"
                 controls
                 playsinline
-                preload="metadata"
+                preload="auto"
                 @error="mediaFailed(row.key)"
               />
               <audio
@@ -220,7 +220,7 @@ const directionTitle = (direction: "in" | "out") =>
                 class="preview mt-1.5 w-full max-w-xl"
                 :src="row.href"
                 controls
-                preload="metadata"
+                preload="auto"
                 @error="mediaFailed(row.key)"
               />
               <div v-else-if="row.kind === 'text'" class="mt-1.5">
