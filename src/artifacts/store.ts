@@ -219,9 +219,16 @@ export class R2ArtifactStore implements ArtifactStore {
     if (res.status === 404) return null;
     const contentType = res.headers.get("content-type") ?? "application/octet-stream";
     if (res.status === 416) {
+      // A 416 names the size as `Content-Range: bytes */<size>` — when it does.
+      // R2's S3 endpoint answers InvalidRange with an XML body and no such
+      // header, so the size is read from one HEAD instead; the range was the
+      // caller's, and a start past the end must answer 416, never a throw. An
+      // object the HEAD no longer finds is gone: null, the route's 410.
       const total = /\/(\d+)\s*$/.exec(res.headers.get("content-range") ?? "");
-      if (!total) throw new Error(`artifact store: GET ${key} answered HTTP 416 without the object's size`);
-      return { unsatisfiable: true, size: Number(total[1]), contentType };
+      if (total) return { unsatisfiable: true, size: Number(total[1]), contentType };
+      const head = await this.head(key);
+      if (!head) return null;
+      return { unsatisfiable: true, size: head.size, contentType: head.contentType };
     }
     if (!res.ok || !res.body) throw new Error(`artifact store: GET ${key} answered HTTP ${res.status}`);
     if (res.status === 206) {
