@@ -483,10 +483,10 @@ describe("makeExecutor resident selection", () => {
 
   it("not-warm probe → fallback carrying state and reason verbatim; no attach, discriminant NOT set", async () => {
     stubEnvs();
-    const { calls } = stubFetch({ body: { state: "restoring", reason: "rehydrating" } });
+    const { calls } = stubFetch({ body: { state: "down", reason: "r2-restore-failed: boom" } });
     const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
     expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
-    expect(note).toBe("resident restoring (rehydrating) — using fresh sandbox");
+    expect(note).toBe("resident down (r2-restore-failed: boom) — using fresh sandbox");
     // A per-thread fallback is NOT the resident branch: the dispatcher must
     // keep the agent's own prompt, so the discriminant stays falsy.
     expect(resident).toBeFalsy();
@@ -604,7 +604,6 @@ describe("makeExecutor resident selection", () => {
   // The engine-owned states: nothing serviceable to attach to.
   it.each([
     ["onboarding", ""],
-    ["restoring", "rehydrating"],
     ["down", "provision-failed at clone: no such repo"],
   ])("%s probe → per-thread fallback with the verbatim state/reason note; no attach", async (state, reason) => {
     stubEnvs();
@@ -614,6 +613,106 @@ describe("makeExecutor resident selection", () => {
     expect(resident).toBeFalsy();
     expect(note).toBe(`resident ${state}${reason ? ` (${reason})` : ""} — using fresh sandbox`);
     expect(calls).toEqual(["/status"]);
+  });
+
+  // docs/reference/specs/execution.md item 27: a probe that finds the resident
+  // restoring opens the ONE held /await-restore request instead of falling to
+  // the cold fleet — event-driven, no polling, no retry timer — attaches when
+  // the answer is serviceable, and names the wait on the card either way. An
+  // older Worker's 404 falls back cold with the wait named.
+  describe("a restoring resident — the one held /await-restore request (item 27)", () => {
+    const attachOk = {
+      body: {
+        workspace: "/workspace/threads/x/master",
+        ref: "master",
+        sha: "47c4230692cbc5961682532afb822e9c2f1f40b7",
+        user: "worker2",
+      },
+    };
+
+    it("restoring probe → /await-restore held; a warm answer attaches, the card names the wait", async () => {
+      stubEnvs();
+      const { calls, bodies } = stubFetch(
+        { body: { state: "restoring", reason: "rehydrating" } },
+        { body: { state: "warm", reason: "" } },
+        attachOk,
+      );
+      const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
+      expect(executor).toBeInstanceOf(ResidentExecutor);
+      expect(resident).toBe(true);
+      expect(calls).toEqual(["/status", "/await-restore", "/attach"]);
+      expect(bodies[1]).toEqual({ resource: "repo:jshttp/vary" });
+      expect(note).toBe("resident · jshttp/vary · master@47c4230 · after waiting for the resident's restore");
+    });
+
+    it("a restore landing on a serviceable non-warm state attaches too, the wait and the snapshot both named", async () => {
+      stubEnvs();
+      stubFetch(
+        { body: { state: "restoring", reason: "rehydrating" } },
+        { body: { state: "refreshing", reason: "" } },
+        attachOk,
+      );
+      const { note, resident } = await makeExecutor(residentOpts(), repoCtx());
+      expect(resident).toBe(true);
+      expect(note).toBe(
+        "resident refreshing · jshttp/vary · master@47c4230 — attached to the last snapshot · after waiting for the resident's restore",
+      );
+    });
+
+    it("an older Worker's 404 → cold fallback with the wait named as unsupported; no attach", async () => {
+      stubEnvs();
+      const { calls } = stubFetch(
+        { body: { state: "restoring", reason: "rehydrating" } },
+        { status: 404, body: { error: "unknown route" } },
+      );
+      const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
+      expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
+      expect(resident).toBeFalsy();
+      expect(calls).toEqual(["/status", "/await-restore"]);
+      expect(note).toBe(
+        "resident restoring (rehydrating) — this Worker has no /await-restore route, " +
+          "so waiting for the resident's restore is not possible — using fresh sandbox",
+      );
+    });
+
+    it("a restore landing on a non-serviceable state → cold fallback naming the state AND the wait", async () => {
+      stubEnvs();
+      stubFetch(
+        { body: { state: "restoring", reason: "rehydrating" } },
+        { body: { state: "down", reason: "r2-restore-failed: boom" } },
+      );
+      const { note, resident } = await makeExecutor(residentOpts(), repoCtx());
+      expect(resident).toBeFalsy();
+      expect(note).toBe(
+        "resident down (r2-restore-failed: boom) after waiting for the resident's restore — using fresh sandbox",
+      );
+    });
+
+    it("a wait that fails in transport → cold fallback naming the failed wait; never a throw", async () => {
+      stubEnvs();
+      stubFetch({ body: { state: "restoring", reason: "rehydrating" } }, { reject: "fetch failed" });
+      const { executor, note } = await makeExecutor(residentOpts(), repoCtx());
+      expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
+      expect(note).toMatch(
+        /^resident restoring — waiting for the resident's restore failed \(.*fetch failed.*\) — using fresh sandbox$/,
+      );
+    });
+
+    it("a wait that lands warm but whose attach then fails → cold fallback naming the attach failure AND the wait", async () => {
+      stubEnvs();
+      const { calls } = stubFetch(
+        { body: { state: "restoring", reason: "rehydrating" } },
+        { body: { state: "warm", reason: "" } },
+        { status: 503, body: { error: "mirror-busy: reprovisioning" } },
+      );
+      const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
+      expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
+      expect(resident).toBeFalsy();
+      expect(calls).toEqual(["/status", "/await-restore", "/attach"]);
+      expect(note).toMatch(
+        /^resident attach failed \(.*mirror-busy.*\) after waiting for the resident's restore — using fresh sandbox$/,
+      );
+    });
   });
 
   // AE6 (3-reviewer-corroborated): the resident can degrade between the warm
@@ -649,11 +748,11 @@ describe("makeExecutor resident selection", () => {
   it("not-warm states are NOT cached — the next dispatch probes again", async () => {
     stubEnvs();
     const { fn } = stubFetch(
-      { body: { state: "restoring", reason: "rehydrating" } },
+      { body: { state: "onboarding", reason: "" } },
       { body: { state: "down", reason: "r2-restore-failed: boom" } },
     );
     const first = await makeExecutor(residentOpts(), repoCtx());
-    expect(first.note).toBe("resident restoring (rehydrating) — using fresh sandbox");
+    expect(first.note).toBe("resident onboarding — using fresh sandbox");
     const second = await makeExecutor(residentOpts(), repoCtx());
     expect(second.note).toBe("resident down (r2-restore-failed: boom) — using fresh sandbox");
     expect(fn).toHaveBeenCalledTimes(2);
@@ -1300,10 +1399,11 @@ describe("makeExecutor seeded sandbox", () => {
 
   it("nothing to seed from: a probe without a snapshot, an unreachable resident, a repository not onboarded — the cold path, no /seed", async () => {
     stubEnvs();
-    const noSnapshot = stubFetch({ body: { state: "restoring", reason: "rehydrating", snapshot: null } });
+    // `onboarding`, not `restoring`: a restoring probe opens the held /await-restore (item 27).
+    const noSnapshot = stubFetch({ body: { state: "onboarding", reason: "", snapshot: null } });
     const a = await makeExecutor(residentOpts(), repoCtx());
     expect(noSnapshot.calls).toEqual(["/status"]);
-    expect(a.note).toBe("resident restoring (rehydrating) — using fresh sandbox");
+    expect(a.note).toBe("resident onboarding — using fresh sandbox");
     expect(a.seeded).toBeUndefined();
 
     resetResidentProbeCache();
