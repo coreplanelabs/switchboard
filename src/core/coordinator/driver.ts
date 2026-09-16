@@ -274,7 +274,18 @@ function readRecordReturn(step: string, a: BotAnswer): StepReturn {
 
 function prCheckReturn(step: string, a: BotAnswer): StepReturn {
   const { ok, state, prNumber, url, headSha, sha, mergedAt, at } = a.body;
-  if (ok === true && state === "none") return { type: "pr-check", step, pr: { state: "none" }, at };
+  if (ok === true && state === "none") {
+    const { unrecovered } = a.body;
+    return {
+      type: "pr-check",
+      step,
+      pr: {
+        state: "none",
+        ...(unrecovered === "no_commits" || unrecovered === "no_base" ? { unrecovered } : {}),
+      },
+      at,
+    };
+  }
   if (ok === true && state === "open" && typeof prNumber === "number" && typeof url === "string")
     return {
       type: "pr-check",
@@ -389,9 +400,16 @@ async function perform(
         ),
       );
     case "pr-check":
+      // `recover` rides only after a dead coding child: the bot opens the pull
+      // request from the pushed branch itself instead of answering `none`.
       return prCheckReturn(
         action.step,
-        answerOf("pr-check", await step.do(action.step, STEP_CONFIG, () => call(bot, "pr-check", tag))),
+        answerOf(
+          "pr-check",
+          await step.do(action.step, STEP_CONFIG, () =>
+            call(bot, "pr-check", { ...tag, ...(action.recover !== undefined ? { recover: action.recover } : {}) }),
+          ),
+        ),
       );
     case "sleep":
       await step.sleep(action.step, action.ms);

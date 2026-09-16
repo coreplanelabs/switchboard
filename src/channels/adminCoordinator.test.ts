@@ -128,6 +128,8 @@ function harness(
     reviewsSequence?: Array<PullRequestReview[] | undefined>;
     self?: GithubIdentity;
     ioFor?: (thread: { threadKey: string; userId: string; cardTs?: string }) => ChannelIO | undefined;
+    /** The recover path's open-or-edit: the opened pull request, or the refusal (nothing pushed). */
+    openPr?: { number: number; htmlUrl: string; created: boolean } | Error;
     /** The merge step's GitHub: the pull request's facts, the checks at the head, the squash's answer. */
     prFacts?: PullRequestFacts | Error;
     checks?: CommitChecks | Error;
@@ -154,6 +156,7 @@ function harness(
   const threadsAsked: Array<{ threadKey: string; userId: string; cardTs?: string }> = [];
   const written: RunRecord[] = [];
   const merges: Array<{ pr: { repo: string; number: number }; opts: { sha: string; title: string } }> = [];
+  const opens: Array<{ repo: string; headBranch: string; base: string; title: string; body: string }> = [];
   const sleeps: number[] = [];
   let reviewFetches = 0;
   const github = new InMemoryGithubApi({ "acme/api": { files: over.files ?? {}, issues: over.issues ?? [] } });
@@ -179,6 +182,11 @@ function harness(
       mergedLookups.push([repo, branch]);
       if (over.mergedPr instanceof Error) throw over.mergedPr;
       return over.mergedPr ?? null;
+    },
+    openPullRequest: async (target) => {
+      opens.push(target);
+      if (over.openPr instanceof Error) throw over.openPr;
+      return over.openPr ?? { number: 77, htmlUrl: "https://github.com/acme/api/pull/77", created: true };
     },
     github,
     createBranchRef: async (repo, branch, fromRef) => {
@@ -227,6 +235,7 @@ function harness(
     logs,
     prLookups,
     mergedLookups,
+    opens,
     branches,
     threadsAsked,
     written,
@@ -693,6 +702,79 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
       status: 502,
       body: { ok: false, error: "github_unavailable", message: "PR lookup failed: HTTP 502", at: NOW },
     });
+  });
+
+  it("recover after a dead coding child: with nothing heading the branch, the pull request is opened from the pushed branch itself — a minimal body naming the unit when the record holds no description — and a refused create still answers none", async () => {
+    const h = harness();
+    await h.instances.put(INSTANCE);
+    const res = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+        parentInstanceId: INSTANCE.id,
+        recover: { runId: "11111111-1111-4111-8111-111111111111" },
+      }),
+      h.deps,
+    );
+    expect(res.body).toEqual({
+      ok: true,
+      state: "open",
+      prNumber: 77,
+      url: "https://github.com/acme/api/pull/77",
+      at: NOW,
+    });
+    expect(h.opens).toHaveLength(1);
+    expect(h.opens[0]).toMatchObject({ repo: "acme/api", headBranch: "plan/orchestration/u12", base: "main" });
+    expect(h.opens[0]!.body).toContain("ended before it could open the pull request");
+
+    // Nothing pushed: GitHub refuses the create, and the check answers `none` as before.
+    const refused = harness({ openPr: new Error("PR create failed: HTTP 422 no commits between main and the head") });
+    await refused.instances.put(INSTANCE);
+    const none = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+        parentInstanceId: INSTANCE.id,
+        recover: { runId: "11111111-1111-4111-8111-111111111111" },
+      }),
+      refused.deps,
+    );
+    expect(none.body).toEqual({ ok: true, state: "none", unrecovered: "no_commits", at: NOW });
+
+    // Without `recover`, nothing is ever opened from here.
+    const plain = harness();
+    await plain.instances.put(INSTANCE);
+    await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, { parentInstanceId: INSTANCE.id }),
+      plain.deps,
+    );
+    expect(plain.opens).toHaveLength(0);
+  });
+});
+
+describe("pr-check recover — the answer says why nothing was recovered, and GitHub being down is never none", () => {
+  const RUN = "11111111-1111-4111-8111-111111111111";
+  const recoverCheck = (deps: Parameters<typeof handleCoordinatorRequest>[1]) =>
+    handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, { parentInstanceId: INSTANCE.id, recover: { runId: RUN } }),
+      deps,
+    );
+
+  it("an instance with no base branch attempts no create and answers none with `no_base`", async () => {
+    const h = harness();
+    const { base: _base, ...withoutBase } = INSTANCE;
+    await h.instances.put(withoutBase as typeof INSTANCE);
+    const res = await recoverCheck(h.deps);
+    expect(res.body).toEqual({ ok: true, state: "none", unrecovered: "no_base", at: NOW });
+    expect(h.opens).toHaveLength(0);
+  });
+
+  it("a create GitHub refuses for any reason other than an empty branch is github_unavailable — the step is asked again, and the report never claims nothing was pushed", async () => {
+    const down = harness({ openPr: new Error("PR create failed: HTTP 502 bad gateway") });
+    await down.instances.put(INSTANCE);
+    expect(await recoverCheck(down.deps)).toEqual({
+      status: 502,
+      body: { ok: false, error: "github_unavailable", message: "PR create failed: HTTP 502 bad gateway", at: NOW },
+    });
+    const forbidden = harness({ openPr: new Error("PR create failed: HTTP 403 resource not accessible") });
+    await forbidden.instances.put(INSTANCE);
+    expect((await recoverCheck(forbidden.deps)).status).toBe(502);
   });
 });
 

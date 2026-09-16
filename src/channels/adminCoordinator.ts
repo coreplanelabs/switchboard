@@ -84,9 +84,11 @@ import type {
   CommitChecks,
   MergedPrRef,
   MergeResult,
+  OpenedPullRequest,
   OpenPrRef,
   PullRequestFacts,
   PullRequestReview,
+  PullRequestTarget,
 } from "../execution/githubPulls.js";
 import type { Secret } from "../secrets.js";
 import { readBody, type IngressResponse } from "./http.js";
@@ -129,6 +131,11 @@ export interface AdminCoordinatorDeps {
    *  a unit whose pull request merged before the runner reached it is done, not aborted. */
   findOpenPrByHead: (repo: string, branch: string) => Promise<OpenPrRef | null>;
   findMergedPrByHead: (repo: string, branch: string) => Promise<MergedPrRef | null>;
+  /** The recover path's one write (githubPulls.openPullRequest, open-or-edit by
+   *  head branch): a coding child that pushed and then died leaves its work on
+   *  the branch — the pr-check opens the pull request from the branch itself
+   *  instead of answering `none` over stranded work (agent-ship item 15). */
+  openPullRequest: (target: PullRequestTarget) => Promise<OpenedPullRequest>;
   /** The target repository at the base ref (the plan, the specs, the rules), its
    *  issues (a unit's board issue) and the comment a unit's ending leaves there
    *  — the App's GitHub reads and the one write beside the merge. */
@@ -829,11 +836,82 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
   });
 }
 
+/** Why a recover pr-check opened nothing: GitHub refused the create because
+ *  nothing sits between the base and the head (`no_commits`), or the instance
+ *  names no base to open against and no create was tried (`no_base`). Any
+ *  other GitHub failure is not a reason but an outage: it propagates, the
+ *  check answers `github_unavailable`, and the step is asked again. */
+type Unrecovered = "no_commits" | "no_base";
+type Recovered = { kind: "opened"; pr: OpenedPullRequest } | { kind: "none"; why: Unrecovered };
+
+/** GitHub's refusal of a pull request over an empty branch: HTTP 422 with
+ *  "No commits between <base> and <head>". Everything else that fails the
+ *  create is treated as GitHub being unavailable. */
+function isEmptyBranchRefusal(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /HTTP 422\b/.test(message) && /no commits between/i.test(message);
+}
+
+/** The recover path's pull request (agent-ship items 10 and 15): a coding
+ *  child pushed its branch and then died — the pull request is opened from the
+ *  branch itself, title from the unit, body from the child's submitted
+ *  description when the record holds one, else a minimal body naming the unit.
+ *  `none` names why when nothing could be opened; a GitHub failure that is
+ *  neither reason is thrown for the caller's `github_unavailable`. */
+async function recoverPushedBranch(
+  deps: AdminCoordinatorDeps,
+  instance: CoordinatorInstance,
+  row: CoordinatorUnit | undefined,
+  branch: string,
+  runId: string,
+): Promise<Recovered> {
+  if (instance.base === undefined) return { kind: "none", why: "no_base" };
+  const unitName = row?.unit ?? "the unit";
+  let title = row?.title !== undefined ? `${row.unit}: ${row.title}` : `${unitName} — ${branch}`;
+  let prBody = `Opened by the plan runner from the pushed branch \`${branch}\`: the coding run ${runId} of ${unitName} ended before it could open the pull request or submit its description. The review round asks for the description.`;
+  try {
+    const full = await deps.runs.getRun(runId, { include: "messages" });
+    if (full.ok && full.value.parentInstanceId === instance.id) {
+      const events = full.value.events ?? [];
+      const descEvent = [...events].reverse().find((e) => e.type === "pr_description");
+      const desc = descEvent?.type === "pr_description" ? descEvent.description : undefined;
+      if (desc !== undefined) {
+        title = desc.title;
+        prBody = `${desc.tldr}\n\n${desc.whatWhy}\n\n_Rendered by the plan runner from the coding run's submitted description; the run ended before it could open the pull request itself._`;
+      }
+    }
+  } catch {
+    // the minimal body stands
+  }
+  try {
+    const pr = await deps.openPullRequest({
+      repo: instance.repo,
+      headBranch: branch,
+      base: instance.base,
+      title,
+      body: prBody,
+    });
+    return { kind: "opened", pr };
+  } catch (err) {
+    // Nothing to recover only when GitHub says the branch is empty; any other
+    // failure is an outage the caller reports, never a claim that nothing was pushed.
+    if (isEmptyBranchRefusal(err)) return { kind: "none", why: "no_commits" };
+    throw err;
+  }
+}
+
 async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps): Promise<IngressResponse> {
   const id = parseInstanceId(body.parentInstanceId);
   if (!id.ok) return json(400, { ok: false, error: id.error });
   if (body.unit !== undefined && (typeof body.unit !== "string" || !UNIT_ID.test(body.unit)))
     return json(400, { ok: false, error: "unit must be a unit id" });
+  const recover =
+    typeof body.recover === "object" &&
+    body.recover !== null &&
+    typeof (body.recover as Record<string, unknown>).runId === "string" &&
+    RUN_ID_PATTERN.test((body.recover as Record<string, unknown>).runId as string)
+      ? { runId: (body.recover as Record<string, unknown>).runId as string }
+      : undefined;
   const at = (deps.clock ?? systemClock)();
   const instance = await deps.instances.get(id.value);
   if (!instance) return json(404, { ok: false, error: "unknown_instance" });
@@ -866,7 +944,18 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     // rather than aborted (record 0031's `merged` ending, reached without the
     // runner's merge). Asked only now: an open pull request is the round's.
     const merged = await deps.findMergedPrByHead(instance.repo, branch);
-    if (!merged) return json(200, { ok: true, state: "none", at });
+    if (!merged) {
+      // A dead coding child's pushed work is recovered here: the pull request
+      // is opened from the branch itself rather than the round ending aborted
+      // with the work stranded (agent-ship items 10 and 15).
+      if (recover === undefined) return json(200, { ok: true, state: "none", at });
+      const recovered = await recoverPushedBranch(deps, instance, unit.row, branch, recover.runId);
+      if (recovered.kind === "opened") {
+        await remember({ number: recovered.pr.number, url: recovered.pr.htmlUrl });
+        return json(200, { ok: true, state: "open", prNumber: recovered.pr.number, url: recovered.pr.htmlUrl, at });
+      }
+      return json(200, { ok: true, state: "none", unrecovered: recovered.why, at });
+    }
     await remember({ number: merged.number, url: merged.htmlUrl });
     return json(200, {
       ok: true,

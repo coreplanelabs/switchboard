@@ -741,11 +741,45 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect(renderUnitReport(noBranch.state)).toContain("Could not create the pipeline branch");
     expect(noBranch.rounds()).toEqual([]);
 
+    // A failed coding child is given the recover pr-check first (issue 1276):
+    // with nothing on the branch the unit still aborts with the child's reason.
     const failed = fresh(input({ merge: "person" }));
     failed.answer({ type: "branch", ok: true, at: T0 });
     runChild(failed, "run-c0", finished({ status: "failed" }), T0 + 5 * MIN);
+    expect(failed.action).toMatchObject({ type: "pr-check", recover: { runId: "run-c0" } });
+    failed.answer({ type: "pr-check", pr: { state: "none", unrecovered: "no_commits" }, at: T0 + 6 * MIN });
     expect(failed.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
     expect(renderUnitReport(failed.state)).toContain("ended `failed`");
+    expect(renderUnitReport(failed.state)).toContain("no commits were pushed, so there was no work to recover");
+
+    // The bot says WHY it recovered nothing, and the abort repeats it: an
+    // instance with no base branch never claims nothing was pushed.
+    const noBase = fresh(input({ merge: "person" }));
+    noBase.answer({ type: "branch", ok: true, at: T0 });
+    runChild(noBase, "run-c0", finished({ status: "failed" }), T0 + 5 * MIN);
+    noBase.answer({ type: "pr-check", pr: { state: "none", unrecovered: "no_base" }, at: T0 + 6 * MIN });
+    expect(noBase.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
+    expect(renderUnitReport(noBase.state)).toContain("names no base branch");
+    expect(renderUnitReport(noBase.state)).not.toContain("no work to recover");
+
+    // A bare `none` (a bot from before the reason rode the answer) claims neither.
+    const bare = fresh(input({ merge: "person" }));
+    bare.answer({ type: "branch", ok: true, at: T0 });
+    runChild(bare, "run-c0", finished({ status: "failed" }), T0 + 5 * MIN);
+    bare.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 6 * MIN });
+    expect(renderUnitReport(bare.state)).toContain("nothing was recovered");
+    expect(renderUnitReport(bare.state)).not.toContain("no work to recover");
+
+    // The child pushed before it died: the recover pr-check answers the pull
+    // request opened from the branch itself, and the round continues to review
+    // — the pushed work is never stranded and the ending is never the budget clip.
+    const pushed = fresh(input({ merge: "person" }));
+    pushed.answer({ type: "branch", ok: true, at: T0 });
+    runChild(pushed, "run-c0", finished({ status: "failed" }), T0 + 5 * MIN);
+    expect(pushed.action).toMatchObject({ type: "pr-check", recover: { runId: "run-c0" } });
+    pushed.answer({ type: "pr-check", pr: { state: "open", prNumber: 7, url: PR_URL }, at: T0 + 6 * MIN });
+    expect(pushed.action).toMatchObject({ type: "spawn", preset: "review" });
+    expect(pushed.rounds()).toEqual(["0 coding started", "0 coding pr_opened"]);
 
     const stale = fresh(input({ merge: "person" }));
     throughRoundZero(stale);
@@ -1002,10 +1036,14 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
     expect(b.action).toMatchObject({ type: "wait", step: "U10/0/coding/busy/1", timeoutMs: WAIT_CHUNK_MS });
   });
 
-  it("a read-record that says `interrupted` ends the unit with the ship-restart note, naming the pull request when one was opened", () => {
+  it("a read-record that says `interrupted` ends the unit with the ship-restart note, naming the pull request when one was opened — after the recover pr-check found nothing pushed for a coding child", () => {
     const noPr = atWait();
     noPr.answer({ type: "wait", outcome: "event" });
     noPr.answer({ type: "read-record", run: finished({ status: "interrupted" }), at: T0 + 5 * MIN });
+    // A dead coding child may have pushed first: the pr-check looks, with the
+    // run named so the bot can recover the branch as a pull request.
+    expect(noPr.action).toMatchObject({ type: "pr-check", recover: { runId: "run-c0" } });
+    noPr.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 6 * MIN });
     expect(noPr.action).toMatchObject({ type: "end", ending: { kind: "interrupted", runId: "run-c0" } });
     expect(renderUnitReport(noPr.state)).toBe(shipInterruptedNote());
     expect(noPr.rounds()).toEqual(["0 coding started", "0 coding aborted"]);
@@ -1015,6 +1053,68 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
     runChild(withPr, "run-r1", finished({ status: "interrupted" }), T0 + 20 * MIN);
     expect(withPr.action).toMatchObject({ type: "end", ending: { kind: "interrupted", runId: "run-r1" } });
     expect(renderUnitReport(withPr.state)).toBe(shipInterruptedNote(PR_URL));
+  });
+
+  it("a findings child that died at an unchanged head ends with the child's own reason — interrupted with the ship-restart note naming the pull request, failed as an abort naming the failure — never as the round's inaction", () => {
+    const reviewed = (d: ReturnType<typeof fresh>) => {
+      throughRoundZero(d);
+      runChild(
+        d,
+        "run-r1",
+        finished({
+          status: "completed",
+          verdict: { verdict: "request_changes", summary: "x", findings: [FINDING] },
+          reviewPosted: true,
+          reviewHead: HEAD_A,
+        }),
+        T0 + 20 * MIN,
+      );
+    };
+    // The bot rolled under the findings child before it pushed: the recover
+    // pr-check finds the round's own pull request still at the reviewed head.
+    const interrupted = fresh(input({ merge: "person" }));
+    reviewed(interrupted);
+    runChild(interrupted, "run-f1", finished({ status: "interrupted" }), T0 + 30 * MIN);
+    expect(interrupted.action).toMatchObject({ type: "pr-check", recover: { runId: "run-f1" } });
+    interrupted.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A },
+      at: T0 + 30 * MIN,
+    });
+    expect(interrupted.action).toMatchObject({
+      type: "end",
+      ending: { kind: "interrupted", runId: "run-f1", round: { index: 1, kind: "findings" } },
+    });
+    expect(renderUnitReport(interrupted.state)).toBe(shipInterruptedNote(PR_URL));
+    expect(interrupted.rounds().at(-1)).toBe("1 coding aborted");
+
+    const failed = fresh(input({ merge: "person" }));
+    reviewed(failed);
+    runChild(failed, "run-f1", finished({ status: "failed" }), T0 + 30 * MIN);
+    failed.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A },
+      at: T0 + 30 * MIN,
+    });
+    expect(failed.action).toMatchObject({
+      type: "end",
+      ending: { kind: "aborted", round: { index: 1, kind: "findings" } },
+    });
+    const report = renderUnitReport(failed.state);
+    expect(report).toContain("ended `failed`");
+    expect(report).toContain("still sits at");
+    expect(report).not.toContain("produced no new head");
+
+    // A dead child that DID push carries the round on to review as before.
+    const pushed = fresh(input({ merge: "person" }));
+    reviewed(pushed);
+    runChild(pushed, "run-f1", finished({ status: "interrupted" }), T0 + 30 * MIN);
+    pushed.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B },
+      at: T0 + 30 * MIN,
+    });
+    expect(pushed.action).toMatchObject({ type: "spawn", preset: "review" });
   });
 
   it("a spawn answering `alreadySpawned` proceeds to the wait on that run without a second child", () => {

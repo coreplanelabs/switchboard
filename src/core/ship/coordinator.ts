@@ -407,7 +407,15 @@ export type CoordinatorAction =
   | { type: "spawn"; step: string; preset: ChildPreset; round: RoundRef; budgetMinutes: number; brief: Brief }
   | { type: "wait"; step: string; runId: string; timeoutMs: number }
   | { type: "read-record"; step: string; runId: string }
-  | { type: "pr-check"; step: string }
+  | {
+      type: "pr-check";
+      step: string;
+      /** Set after a coding child died: the bot opens the pull request from the
+       *  pushed branch itself (title from the unit, body from this run's
+       *  submitted description when the record holds one) instead of answering
+       *  `none` over stranded work. */
+      recover?: { runId: string };
+    }
   | { type: "merge"; step: string; prNumber: number; headSha: string }
   | { type: "sleep"; step: string; ms: number }
   | { type: "end"; step: string; ending: UnitEnding };
@@ -442,7 +450,14 @@ export type ChildFacts =
 /** What heads the unit's branch on GitHub: nothing, an open pull request, or —
  *  with no open one — a merged one, `sha` the merge commit on the base. */
 export type PrCheck =
-  | { state: "none" }
+  | {
+      state: "none";
+      /** After a recover pr-check (a dead coding child): why nothing was
+       *  recovered — `no_commits` (GitHub refused the create: nothing between
+       *  the base and the head) or `no_base` (the instance names no base to
+       *  open against, so no create was tried). Absent on a plain check. */
+      unrecovered?: "no_commits" | "no_base";
+    }
   | { state: "open"; prNumber: number; url: string; headSha?: string; autoMergeEnabled?: boolean }
   | { state: "merged"; prNumber: number; url: string; sha: string; mergedAt: string };
 
@@ -524,7 +539,17 @@ type Phase =
   /** `until`: when the child's budget plus the margin runs out, counted from the spawn's answer — the wait's last slice ends there. */
   | { at: "wait"; round: RoundRef; runId: string; n: number; until: number }
   | { at: "read"; round: RoundRef; runId: string; n: number; until: number }
-  | { at: "pr-check"; round: RoundRef; runId: string; childHead?: string; finalReply?: string }
+  | {
+      at: "pr-check";
+      round: RoundRef;
+      runId: string;
+      childHead?: string;
+      finalReply?: string;
+      /** The coding child died (`failed` or `interrupted`) after it may have
+       *  pushed: the pr-check recovers a pushed branch by opening its pull
+       *  request; with nothing pushed the unit ends with the child's own reason. */
+      dead?: "failed" | "interrupted";
+    }
   | { at: "merge"; pr: PrRef; headSha: string; n: number; since: number }
   | { at: "merge-sleep"; pr: PrRef; headSha: string; n: number; since: number }
   | { at: "ended" };
@@ -687,7 +712,11 @@ export function nextAction(s: UnitPipelineState): CoordinatorAction {
     case "read":
       return { type: "read-record", step: `${roundStep(s, p.round)}/read/${p.n}`, runId: p.runId };
     case "pr-check":
-      return { type: "pr-check", step: `${roundStep(s, p.round)}/pr-check` };
+      return {
+        type: "pr-check",
+        step: `${roundStep(s, p.round)}/pr-check`,
+        ...(p.dead !== undefined ? { recover: { runId: p.runId } } : {}),
+      };
     case "merge":
       return { type: "merge", step: `${unit}/merge/${p.n}`, prNumber: p.pr.number, headSha: p.headSha };
     case "merge-sleep":
@@ -773,17 +802,12 @@ function settleCoding(
       },
       [roundNote(round, "stopped")],
     );
+  // A failed coding child no longer aborts outright: the pr-check looks at the
+  // branch first — a push before the death is recovered as the round's pull
+  // request (agent-ship items 10 and 15), and only a branch with
+  // nothing on it ends the unit with the child's own reason.
   if (facts.status === "failed")
-    return end(
-      next,
-      {
-        kind: "aborted",
-        reason: `⚠️ The coding child of round ${round.index} (run ${runId}) ended \`failed\` — its run page has the error; nothing was opened or edited from it.`,
-        round,
-        reviewRounds: next.reviewRounds,
-      },
-      [roundNote(round, "aborted")],
-    );
+    return { state: { ...next, phase: { at: "pr-check", round, runId, dead: "failed" } }, notes: [] };
   next = {
     ...next,
     phase: {
@@ -919,6 +943,32 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
   // completed without a pull request of its own, and the unit is done.
   if (pr.state === "merged") return foundMerged(s, pr, [roundNote(round, "completed")]);
   if (pr.state === "none") {
+    // A dead child left nothing on the branch to recover: the unit ends with
+    // the child's own reason — never the budget clip.
+    if (phase.dead === "interrupted")
+      return end(s, { kind: "interrupted", round, runId: phase.runId, reviewRounds: s.reviewRounds }, [
+        roundNote(round, "aborted"),
+      ]);
+    if (phase.dead === "failed") {
+      // The abort repeats the bot's reason for recovering nothing, and claims
+      // no more than the answer carried.
+      const why =
+        pr.unrecovered === "no_commits"
+          ? `nothing heads \`${s.input.unit.branch}\`: no commits were pushed, so there was no work to recover`
+          : pr.unrecovered === "no_base"
+            ? `\`${s.input.unit.branch}\` could not be given a pull request: the instance names no base branch to open it against, so whatever was pushed stays on the branch`
+            : `the pr-check found no pull request heading \`${s.input.unit.branch}\`, so nothing was recovered`;
+      return end(
+        s,
+        {
+          kind: "aborted",
+          reason: `⚠️ The coding child of round ${round.index} (run ${phase.runId}) ended \`failed\` — its run page has the error — and ${why}.`,
+          round,
+          reviewRounds: s.reviewRounds,
+        },
+        [roundNote(round, "aborted")],
+      );
+    }
     const reason =
       round.index === 0
         ? `⚠️ Ship ended at round 0: the coding round ended without opening a pull request (a clarifying question, a budget write-up, an unproven push or a description-less push ends the pipeline here). No review round ran.`
@@ -944,6 +994,25 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
     const codingHead = normalizeHead(head);
     const reviewedAt = normalizeHead(s.lastReviewHead);
     if (codingHead !== undefined && reviewedAt !== undefined && sameCommit(codingHead, reviewedAt)) {
+      // A findings child that died before it pushed: the recover pr-check found
+      // the round's own pull request, still at the reviewed head. The unit
+      // ends with the child's own reason — the ship-restart note for a bot
+      // roll, the failure for a failed run — never as the round's inaction.
+      if (phase.dead === "interrupted")
+        return end(next, { kind: "interrupted", round, runId: phase.runId, reviewRounds: next.reviewRounds }, [
+          roundNote(round, "aborted"),
+        ]);
+      if (phase.dead === "failed")
+        return end(
+          next,
+          {
+            kind: "aborted",
+            reason: `⚠️ The findings child of round ${round.index} (run ${phase.runId}) ended \`failed\` — its run page has the error — and the branch still sits at \`${codingHead.slice(0, 7)}\`, the commit the review already read, so nothing new was pushed to re-review.`,
+            round,
+            reviewRounds: next.reviewRounds,
+          },
+          [roundNote(round, "aborted")],
+        );
       const findings = s.findingsByRound[round.index] ?? [];
       const dispositions = s.dispositionsByRound[round.index] ?? [];
       const allDeclined =
@@ -1076,10 +1145,19 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
           },
           notes: [],
         };
-      if (r.run.status === "interrupted")
+      if (r.run.status === "interrupted") {
+        // A dead CODING child may have pushed before the ledger closed it: the
+        // pr-check recovers the branch. A review child has nothing on the
+        // branch to recover, so its interruption still ends the unit at once.
+        if (p.round.kind !== "review")
+          return {
+            state: { ...clocked, phase: { at: "pr-check", round: p.round, runId: p.runId, dead: "interrupted" } },
+            notes: [],
+          };
         return end(clocked, { kind: "interrupted", round: p.round, runId: p.runId, reviewRounds: s.reviewRounds }, [
           roundNote(p.round, "aborted"),
         ]);
+      }
       return p.round.kind === "review"
         ? settleReview(clocked, p.round, r.run)
         : settleCoding(clocked, p.round, p.runId, r.run);

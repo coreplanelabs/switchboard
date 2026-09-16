@@ -95,6 +95,7 @@ import {
   findMergedPrByHead,
   findOpenPrByHead,
   mergePullRequest,
+  openPullRequest,
 } from "./execution/githubPulls.js";
 import { RestGithubApi } from "./execution/githubApi.js";
 import { resolveGithubIdentity } from "./execution/githubApp.js";
@@ -577,6 +578,9 @@ export async function runBot(): Promise<void> {
       ioFor: (thread) => threadIoFor(thread),
       findOpenPrByHead,
       findMergedPrByHead,
+      // The recover path (agent-ship item 15): a coding child that pushed and
+      // then died has its pull request opened from the branch itself.
+      openPullRequest,
       // The App's GitHub reads for the plan, the specs, the rules and a unit's
       // board issue; the branch create; the reviews and the identity the merge
       // gate's "the verdict stands" question is answered from.
