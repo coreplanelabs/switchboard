@@ -176,21 +176,34 @@ export function removeScript(dir: string): string {
 
 const STDERR_MARK = "\n--- stderr ---\n";
 
-/** The executors' word in place of a command's output: the resident answers
- *  an isolate swapped under a command with `runtime-replaced: …` as the
- *  command's text (resident-repos item 43), and the sandbox names a runtime
- *  nothing answered `runtime-unreachable: …` (execution item 9). Neither is
- *  what the command printed — it may never have run — so neither is an
- *  answer to `alive`, `read` or `send`; the harness reads the word for a
- *  container replaced under the run (harness-pi item 16). */
-const RUNTIME_WORD = /^(?:runtime-unreachable:|runtime-replaced)/;
+/** The executors' word for the runtime under a command being gone: the
+ *  resident's `runtime-replaced` (an isolate swapped under the command,
+ *  resident-repos item 43) and the sandbox's `runtime-unreachable` (a runtime
+ *  nothing answered, execution item 9). The word counts wherever it sits: an
+ *  executor puts its own words around it (`resident /exec: …`, `exit 127:` and
+ *  a newline), and the seam's commands print a pid, a boot id, `alive`/`dead`,
+ *  base64 or nothing — never the word — so a text carrying it is the
+ *  executor's, not the command's. The harness reads it for a container
+ *  replaced under the run (harness-pi item 16). */
+export const RUNTIME_WORD = /\bruntime-(?:unreachable|replaced)\b/;
 
-/** The stdout of an executor's answer: the `exit N:` prefix is a failure, the
- *  executors' runtime word is a failure naming it, the stderr the executors
- *  append is dropped, the empty marker is empty. */
+/** A container command answered with the executors' word for a replaced
+ *  runtime in place of the command's output (`stdoutOf`): the command may
+ *  never have run, and the harness reads the failure as the container replaced
+ *  under the run (harness-pi item 16) — by this type, never by the words. */
+export class PiContainerRuntimeReplacedError extends PiContainerError {
+  constructor(operation: string, detail: string) {
+    super(operation, detail);
+    this.name = "PiContainerRuntimeReplacedError";
+  }
+}
+
+/** The stdout of an executor's answer: the executors' runtime word anywhere in
+ *  it is the typed failure naming it, the `exit N:` prefix is a failure, the
+ *  stderr the executors append is dropped, the empty marker is empty. */
 export function stdoutOf(operation: string, out: string): string {
-  const exit = parseExitPrefix(out);
-  if (exit.failed || RUNTIME_WORD.test(out)) throw new PiContainerError(operation, out);
+  if (RUNTIME_WORD.test(out)) throw new PiContainerRuntimeReplacedError(operation, out);
+  if (parseExitPrefix(out).failed) throw new PiContainerError(operation, out);
   const cut = out.indexOf(STDERR_MARK);
   const stdout = cut >= 0 ? out.slice(0, cut) : out;
   return stdout === "(no output)" ? "" : stdout;

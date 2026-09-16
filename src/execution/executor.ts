@@ -141,16 +141,20 @@ export class ExecCapacityError extends Error {
   }
 }
 
-/** The sandbox restarted under a live run and came back (docs/reference/specs/
- *  resident-repos.md item 65): the resident's container exited inside a
- *  rollout, the executor waited for the wake and re-attached, and the command
- *  it was about to send never ran. Deliberately NOT an `ExecInfraError`: the
- *  sandbox is alive again. The pi harness reads it as the container replaced
- *  under the run (harness-pi.md item 16): pi ran inside the old container and
- *  is gone with it, so the call in flight is settled with the restart note,
- *  the run ends `interrupted` and its request is dispatched again as a new
- *  run. `message` carries the facts a reader would give the model: the wait
- *  and the fresh worktree's ref and sha. */
+/** The container under a live run was replaced — the executor's one typed word
+ *  for it, whatever the resident said (docs/reference/specs/resident-repos.md
+ *  items 65, 43 and 27): the container exited inside a rollout and the
+ *  executor waited for the wake and re-attached before the command ran
+ *  (`waitedMs` the wait, `message` the fresh worktree's ref and sha); or a
+ *  deploy swapped the runtime under a command in flight (`runtime-replaced`),
+ *  or the preflight found the container disk recycled (`worktree-missing`) —
+ *  then thrown at once, no wait (`waitedMs` 0) and no recovery first,
+ *  `message` the resident's own words. Deliberately NOT an `ExecInfraError`:
+ *  a replacement is not a dead sandbox. The command was never re-issued. The
+ *  pi harness reads it as the container replaced under the run (harness-pi.md
+ *  item 16): pi ran inside the old container and is gone with it, so the call
+ *  in flight is settled with the restart note, the run ends `interrupted` and
+ *  its request is dispatched again as a new run. */
 export class ExecSandboxRestartedError extends Error {
   readonly restarted = true as const;
   constructor(

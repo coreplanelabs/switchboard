@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentDef } from "../../../agents/registry.js";
 import { ExecInfraError, ExecSandboxRestartedError, type Executor } from "../../../execution/executor.js";
+import { ResidentExecutor } from "../../../execution/resident.js";
 import type { ChatMessage } from "../../chatMessage.js";
 import {
   HARD_STOP_MESSAGE,
@@ -28,7 +29,7 @@ import {
   type RelayedToolAnswer,
 } from "./relay.js";
 import { judgeToolCall, type ToolRuleContext } from "./toolRules.js";
-import { PiContainerError } from "./container.js";
+import { ExecPiContainer, PiContainerError, PiContainerRuntimeReplacedError, type PiContainer } from "./container.js";
 import { FakePiContainer } from "./testing/fakeContainer.js";
 import {
   compactionSteer,
@@ -189,6 +190,10 @@ function world(
     notepad?: () => Promise<{ text: string; updatedAt: number } | null>;
     /** The container to drive; a fresh fake unless a test brings one of its own shape. */
     container?: FakePiContainer;
+    /** The seam the harness is handed when it is not the fake itself: an
+     *  `ExecPiContainer` over an executor whose commands a test's resident
+     *  Worker runs against `container`. */
+    seam?: PiContainer;
     /** The deployment's compaction thresholds for pi's settings (harness-pi item 4). */
     compaction?: { reserveTokens?: number; keepRecentTokens?: number };
     /** The harness's sleep; a test that kills the bot mid-run hands one that stops answering. */
@@ -243,7 +248,7 @@ function world(
     saveFacts: (f) => void facts.push(f),
   };
   const harnessDeps: PiHarnessDeps = {
-    container,
+    container: opts.seam ?? container,
     bearer,
     harnessUrl: "https://bot.example.com",
     registry,
@@ -1854,8 +1859,9 @@ describe("runPiHarness — the container replaced under a live run", () => {
     expect(nameless.container.killed).toEqual([4242]);
   });
 
-  it("saysContainerReplaced reads the executors' words for a replaced runtime — the resident's ExecSandboxRestartedError, an error opening `runtime-unreachable:` or `runtime-replaced`, the same words under the seam's own wrap and the executors' exit prefix — and nothing else", () => {
+  it("saysContainerReplaced reads the executors' typed word first — the resident's ExecSandboxRestartedError, the seam's PiContainerRuntimeReplacedError — then the word `runtime-replaced` or `runtime-unreachable` anywhere in a failure's text, behind any prefix; a failure without the word is not one, and a bare string never is", () => {
     expect(saysContainerReplaced(new ExecSandboxRestartedError("the sandbox restarted under the run", 1))).toBe(true);
+    expect(saysContainerReplaced(new PiContainerRuntimeReplacedError("alive", "dead"))).toBe(true);
     expect(
       saysContainerReplaced(new ExecInfraError("runtime-unreachable: the sandbox container's runtime did not answer")),
     ).toBe(true);
@@ -1864,9 +1870,12 @@ describe("runPiHarness — the container replaced under a live run", () => {
         new Error("runtime-replaced: the resident runtime was replaced (a deploy) while this command ran"),
       ),
     ).toBe(true);
+    // The word behind a prefix: the seam's wrap, the executors' exit prefix
+    // (a newline after the colon, as the executors write it), the resident
+    // client's own sentence around the resident's words.
     expect(
       saysContainerReplaced(
-        new PiContainerError("alive", "exit 127: runtime-replaced: the resident runtime was replaced"),
+        new PiContainerError("alive", "exit 127:\nruntime-replaced: the resident runtime was replaced"),
       ),
     ).toBe(true);
     expect(
@@ -1874,13 +1883,207 @@ describe("runPiHarness — the container replaced under a live run", () => {
         new PiContainerError("read", "runtime-unreachable: the container's control port did not answer"),
       ),
     ).toBe(true);
+    expect(
+      saysContainerReplaced(
+        new ExecInfraError(
+          "resident /exec: runtime replaced 2 times in a row with no successful operation between (runtime-replaced: the resident runtime was replaced (a deploy) while this command was running) — a deploy storm or a flapping resident, not a one-off deploy.",
+        ),
+      ),
+    ).toBe(true);
+    expect(saysContainerReplaced(new Error("the command mentioned runtime-replaced in its output"))).toBe(true);
+    // Without the word, a failure is the failure it was.
     expect(saysContainerReplaced(new PiContainerError("read", "tail: cannot open '/tmp/x' for reading"))).toBe(false);
     expect(
       saysContainerReplaced(new ExecInfraError("resident /exec: worktree still unavailable after a re-attach")),
     ).toBe(false);
+    expect(
+      saysContainerReplaced(
+        new Error(
+          "resident attach failed for repo:jshttp/vary: image-stale: the container predates the current pool and is restarting; retry shortly",
+        ),
+      ),
+    ).toBe(false);
     expect(saysContainerReplaced(new Error("ECONNRESET"))).toBe(false);
-    expect(saysContainerReplaced(new Error("the command mentioned runtime-replaced in its output"))).toBe(false);
     expect(saysContainerReplaced("runtime-replaced")).toBe(false);
+  });
+});
+
+// Feature: docs/reference/specs/harness-pi.md item 16 — the resident's answers
+// as the executor really hands them to the seam. The 1.230.0 deploy replaced a
+// resident's container under coding run 5b7e3b50 (a pi inside `sleep 1500`);
+// the floor did not fire: the run failed with no `sandbox_restarted` note and
+// was not dispatched again. These tests drive the real
+// `ResidentExecutor` over a resident Worker that answers as the real one does
+// after a roll, through `ExecPiContainer` and the harness, so the word the
+// harness keys on is the word the executor produces — never a test's own.
+describe("runPiHarness — the resident's answers after a roll, as the executor hands them to the seam", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const OPTS = {
+    baseUrl: "https://resident.example",
+    token: "op-token",
+    resource: "repo:jshttp/vary",
+    threadKey: "slack:CX:1.0",
+  };
+  const ATTACH_OK = {
+    workspace: "/workspace/threads/slack-CX-1.0-abcd1234/master",
+    ref: "master",
+    sha: "1220b9c4",
+    user: "worker2",
+    attachMs: 2500,
+  };
+  /** The resident's `/exec` answer for a thread whose worktree is gone with the container's disk — the preflight's word, in-body over the 200 stream, in the Worker's dual shape. */
+  const WORKTREE_MISSING = {
+    error: "worktree-missing: the container disk was recycled since the last attach — POST /attach to recreate",
+    needs: "attach",
+    stdout: "",
+    stderr: "worktree-missing: the container disk was recycled since the last attach — POST /attach to recreate",
+    exitCode: 127,
+  };
+  /** The resident's `/exec` answer for a command in flight when a deploy swapped the runtime under it (resident-repos item 43). */
+  const RUNTIME_REPLACED = {
+    error:
+      "runtime-replaced: the resident runtime was replaced (a deploy) while this command was running; its output is lost (Process handle refers to a previous runtime incarnation)",
+    reason: "runtime-replaced",
+    stdout: "",
+    stderr: "runtime-replaced: the resident runtime was replaced (a deploy) while this command was running",
+    exitCode: 127,
+  };
+  /** The attach refused while the replacement is still being reconciled with the pool's image — what the recovery met after the deploy's own restart. */
+  const IMAGE_STALE = {
+    status: 503,
+    body: {
+      error: "image-stale: the container predates the current pool and is restarting; retry shortly",
+      state: "restoring",
+      reason: "image-stale",
+    },
+  };
+
+  /** The resident Worker as the seam's commands reach it: `/exec` runs each of
+   *  the seam's scripts against `fake` — the start's pid, a line into the
+   *  FIFO, the log's bytes as base64, `alive`/`dead`, the boot id — in the
+   *  Worker's answer shape, and `/attach` answers the binding. `roll(on, …)`
+   *  replaces the container: the next command of kind `on` is answered as the
+   *  resident answers after a roll, `/attach` as the test says, and every
+   *  later command runs in the replacement, where pi's root never was — the
+   *  log read answers the stderr-only text the real pipeline does (exit 0),
+   *  the probe finds no pid, the container names itself anew. */
+  function residentWorkerOver(fake: FakePiContainer) {
+    const routes: string[] = [];
+    const replacementCommands: string[] = [];
+    let rolled:
+      { on: "alive" | "read"; exec: Record<string, unknown>; attach: { status: number; body: unknown } } | undefined;
+    let replaced = false;
+    const answer = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
+    const ok = (stdout = "", stderr = "") => answer({ stdout, stderr, exitCode: 0, truncated: false });
+    const unquote = (q: string) => q.slice(1, -1).replaceAll(`'\\''`, "'");
+    const kindOf = (command: string): "alive" | "read" | "other" =>
+      command.startsWith("kill -0 ") ? "alive" : command.startsWith("tail -c +") ? "read" : "other";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown, init?: RequestInit) => {
+        const route = new URL(String(url)).pathname;
+        routes.push(route);
+        if (route === "/attach") return rolled ? answer(rolled.attach.body, rolled.attach.status) : answer(ATTACH_OK);
+        if (route !== "/exec") return answer({ error: `unexpected route ${route}` }, 404);
+        const command = String((JSON.parse(String(init?.body)) as { command: unknown }).command);
+        if (rolled && !replaced && kindOf(command) === rolled.on) {
+          replaced = true;
+          return answer(rolled.exec);
+        }
+        if (replaced) {
+          replacementCommands.push(command);
+          if (kindOf(command) === "alive") return ok("dead\n");
+          if (kindOf(command) === "read") {
+            const path = /^tail -c \+\d+ '([^']+)'/.exec(command)?.[1] ?? "?";
+            return ok("", `tail: cannot open '${path}' for reading: No such file or directory`);
+          }
+          if (command.startsWith("cat /proc/sys/kernel/random/boot_id")) return ok("boot-new\n");
+          return ok();
+        }
+        let m: RegExpExecArray | null;
+        if (command.includes("setsid -f sh -c "))
+          return ok(`${(await fake.start({ paths, args: [], env: {} })).pid}\n`);
+        if ((m = /^printf '%s\\n' (.*) >> '[^']+'$/.exec(command))) {
+          await fake.writeLine(paths, unquote(m[1]));
+          return ok();
+        }
+        if ((m = /^tail -c \+(\d+) '([^']+)' \| head -c (\d+) \| base64/.exec(command))) {
+          const bytes = await fake.readLog(m[2], Number(m[1]) - 1, Number(m[3]));
+          return ok(Buffer.from(bytes).toString("base64"));
+        }
+        if ((m = /^kill -0 (\d+) /.exec(command))) return ok((await fake.alive(Number(m[1]))) ? "alive\n" : "dead\n");
+        if (command.startsWith("cat /proc/sys/kernel/random/boot_id")) return ok("boot-old\n");
+        if (command.startsWith("kill -TERM")) {
+          await fake.kill(fake.pid);
+          return ok();
+        }
+        if (command.startsWith("rm -rf ")) {
+          await fake.remove(paths);
+          return ok();
+        }
+        return ok();
+      }),
+    );
+    return {
+      routes,
+      replacementCommands,
+      roll(on: "alive" | "read", exec: Record<string, unknown>, attach: { status: number; body: unknown }) {
+        rolled = { on, exec, attach };
+      },
+    };
+  }
+
+  /** A run on the real seam over the real resident client: pi opens one bash call, its own, and sleeps in it; `fate` rolls the container. */
+  function runOnResident(fate: (worker: ReturnType<typeof residentWorkerOver>) => void) {
+    const fake = new FakePiContainer();
+    const worker = residentWorkerOver(fake);
+    const w = world({ container: fake, seam: new ExecPiContainer(new ResidentExecutor(OPTS)) });
+    scriptedPi(fake, () => {
+      const msg = assistant([{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "sleep 1500" } }]);
+      fake.emit(
+        { type: "turn_start" },
+        { type: "message_end", message: msg },
+        { type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: { command: "sleep 1500" } },
+      );
+      authorizeToolCall(w.registry.get("run-7")!, { toolCallId: "c1", tool: "bash", input: { command: "sleep 1500" } });
+      fate(worker);
+    });
+    return { w, worker, fake };
+  }
+  const noteKinds = (w: ReturnType<typeof world>) =>
+    w.events.filter((e) => e.type === "run_note").map((e) => (e as { kind: string }).kind);
+
+  it("the container replaced between two polls — pi's bash inside it, nothing of the bot's in flight — reaches the seam as the preflight's `worktree-missing`: the executor hands it back as the typed restart at once, without a re-attach, and the run ends by the redispatch path with the call settled and a sandbox_restarted note naming both containers — never as a dead pi in the replacement", async () => {
+    const { w, worker } = runOnResident((worker) =>
+      worker.roll("alive", WORKTREE_MISSING, { status: 200, body: ATTACH_OK }),
+    );
+    const err = await w.start().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PiContainerReplacedError);
+    expect((err as Error).message).toMatch(
+      /^the container running pi was replaced \(boot-old → boot-new; the executor said: worktree-missing: the container disk was recycled since the last attach/,
+    );
+    expect(w.events.filter((e) => e.type === "tool_result")).toEqual([
+      expect.objectContaining({ tool: "bash", ok: false, callId: "c1", summary: replacedCallNote("bash") }),
+    ]);
+    expect(noteKinds(w)).toEqual(["sandbox_restarted"]);
+    // The executor never re-attached and never re-issued the probe: the word was the answer.
+    expect(worker.routes).not.toContain("/attach");
+    // Nothing of the run's is ended or removed in the replacement: the one command it answered was the probe that met the roll.
+    expect(worker.replacementCommands.filter((c) => c.startsWith("kill -TERM") || c.startsWith("rm -rf"))).toEqual([]);
+    expect(w.registry.get("run-7")).toBeUndefined();
+  });
+
+  it("a log read in flight when the runtime is swapped — the resident's `runtime-replaced` — is the typed restart at once; the recovery attach the client used to make, refused `image-stale` while the replacement reconciles, can no longer hide the verdict", async () => {
+    const { w, worker } = runOnResident((worker) => worker.roll("read", RUNTIME_REPLACED, IMAGE_STALE));
+    const err = await w.start().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PiContainerReplacedError);
+    expect((err as Error).message).toMatch(
+      /^the container running pi was replaced \(boot-old → boot-new; the executor said: runtime-replaced: the resident runtime was replaced \(a deploy\) while this command was running/,
+    );
+    expect(noteKinds(w)).toEqual(["sandbox_restarted"]);
+    expect(worker.routes).not.toContain("/attach");
+    expect(worker.replacementCommands.filter((c) => c.startsWith("kill -TERM") || c.startsWith("rm -rf"))).toEqual([]);
   });
 });
 

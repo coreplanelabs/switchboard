@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   WAKE_WAIT_MAX_MS,
+  containerGoneMessage,
   isContainerRolling,
   sandboxRestartedMessage,
+  saysContainerGone,
   wakeDecision,
   wakeWaitBudget,
 } from "./residentWake.js";
@@ -113,5 +115,41 @@ describe("sandboxRestartedMessage: what the model is told about the tree it come
     expect(text).toContain("main@abc1234");
     expect(text).toMatch(/uncommitted/);
     expect(text).toMatch(/unpushed/);
+  });
+});
+
+// Feature: docs/reference/specs/resident-repos.md items 43 and 27 — the two
+// answers that say the container under the thread is gone, which /exec hands
+// back as the typed restart the pi harness keys on (harness-pi.md item 16).
+describe("saysContainerGone: the answers that say the container under the thread is gone", () => {
+  it("is the resident's runtime-replaced and the preflight's worktree-missing, and none of the answers that leave the container standing", () => {
+    expect(
+      saysContainerGone({ error: "runtime-replaced: the resident runtime was replaced", reason: "runtime-replaced" }),
+    ).toBe(true);
+    expect(
+      saysContainerGone({
+        error: "worktree-missing: the container disk was recycled since the last attach — POST /attach to recreate",
+        needs: "attach",
+      }),
+    ).toBe(true);
+    for (const data of [
+      {
+        error: "evicted: this thread's worktree was evicted after inactivity — POST /attach to recreate",
+        needs: "attach",
+      },
+      { error: "not-attached: no binding for this threadKey — POST /attach first", needs: "attach" },
+      { error: "not-serviceable: The container just exited", state: "warm" },
+      { error: "worktree-missing: mentioned without needs" },
+      { stdout: "fine", exitCode: 0 },
+      {},
+    ]) {
+      expect(saysContainerGone(data), JSON.stringify(data)).toBe(false);
+    }
+  });
+
+  it("containerGoneMessage carries the resident's own words and that the command was not run again", () => {
+    expect(containerGoneMessage(" runtime-replaced: deploy ")).toBe(
+      "runtime-replaced: deploy; the command was not run again",
+    );
   });
 });

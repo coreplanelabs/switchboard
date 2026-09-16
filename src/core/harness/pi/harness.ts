@@ -56,7 +56,7 @@ import {
 import type { Backend } from "../../trace/attrs.js";
 import type { Clock, Span } from "../../trace/types.js";
 import { PiBridge } from "./bridge.js";
-import type { PiContainer } from "./container.js";
+import { PiContainerRuntimeReplacedError, RUNTIME_WORD, type PiContainer } from "./container.js";
 import { PiMirror, piSessionFile, type LedgerTail } from "./mirror.js";
 import {
   piLaunchArgs,
@@ -443,20 +443,22 @@ export class ModelPolicyRefusedError extends Error {
 }
 
 /** Whether a container command's failure says the runtime under it was
- *  replaced: the resident's `ExecSandboxRestartedError` (resident-repos item
- *  65 — the container exited inside a rollout and came back before the
- *  command ran), or an error opening `runtime-unreachable:` (the sandbox
- *  Worker's word for a control port nothing answers, execution item 9) or
- *  `runtime-replaced` (the resident's word for an isolate swapped
- *  mid-command, item 43, which the seam raises from a command's answer) —
- *  read under the seam's own wrap (`pi container: <op> failed — …`) and the
- *  executors' `exit N:` prefix, and nowhere else in a message, so a command's
- *  own output that mentions the word is not a replacement. */
+ *  replaced. The condition is typed first: the resident client's
+ *  `ExecSandboxRestartedError` — its one word for every answer that says the
+ *  container under the thread is gone, thrown before any recovery
+ *  (resident-repos items 65, 43 and 27: the container exited inside a rollout,
+ *  a deploy swapped the runtime under the command, the container disk was
+ *  recycled) — and the seam's `PiContainerRuntimeReplacedError`, an executor
+ *  that handed the word back as a command's text. Then the words themselves,
+ *  `runtime-replaced` or `runtime-unreachable` (the sandbox's word for a
+ *  control port nothing answers, execution item 9), anywhere in a failure's
+ *  text: the executors write their own sentence around the word (`exit 127:`
+ *  and a newline, `resident /exec: …`), an anchor at the head misses it, and
+ *  the seam's own commands never print it, so a failure carrying it is the
+ *  executor's. A failure without any of that is the failure it was. */
 export function saysContainerReplaced(err: unknown): boolean {
-  if (err instanceof ExecSandboxRestartedError) return true;
-  if (!(err instanceof Error)) return false;
-  const text = err.message.replace(/^pi container: [a-z]+ failed — /, "").replace(/^exit \d+: /, "");
-  return /^(?:runtime-unreachable:|runtime-replaced)/.test(text);
+  if (err instanceof ExecSandboxRestartedError || err instanceof PiContainerRuntimeReplacedError) return true;
+  return err instanceof Error && RUNTIME_WORD.test(err.message);
 }
 
 /** The restart note a call in flight when the container was replaced is

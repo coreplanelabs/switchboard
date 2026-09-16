@@ -104,6 +104,29 @@ export function wakeWaitBudget(commandBudgetMs: number | undefined): number {
   return Math.max(0, Math.min(WAKE_WAIT_MAX_MS, Math.trunc(commandBudgetMs)));
 }
 
+/** Whether a thread route's answer says the container under the thread is
+ *  gone — with it every process the run had in it, and the worktree the
+ *  command was aimed at (resident-repos item 43, item 27; harness-pi item 16).
+ *  Two of the resident's words say so: `reason:"runtime-replaced"`, a deploy
+ *  swapped the runtime under a command in flight (the command may have started;
+ *  its output is lost), and the preflight's `worktree-missing:` under
+ *  `needs:"attach"`, the container disk was recycled since the last attach
+ *  (nothing ran). The other `needs:"attach"` words (`evicted:`, the sweep took
+ *  an idle thread's tree; `not-attached:`) leave the container standing and
+ *  keep the one re-attach and retry. */
+export function saysContainerGone(data: Record<string, unknown>): boolean {
+  if (data.reason === "runtime-replaced") return true;
+  return data.needs === "attach" && typeof data.error === "string" && data.error.startsWith("worktree-missing:");
+}
+
+/** What the caller is told when `/exec` met a container gone under the
+ *  thread: the resident's own words, and that the command was not re-issued —
+ *  it may have started before the runtime was swapped, and the replacement is
+ *  not the container it was aimed at. */
+export function containerGoneMessage(error: string): string {
+  return `${error.trim()}; the command was not run again`;
+}
+
 /** What the model is told once the resident is back: how long the wait took
  *  and the tree it comes back to. The re-attach recreated the thread's
  *  worktree from the mirror at the bound ref's tip, so anything the run had

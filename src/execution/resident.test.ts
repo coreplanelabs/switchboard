@@ -198,14 +198,14 @@ describe("ResidentExecutor.exec", () => {
     expect("env" in sentBody(calls[1])).toBe(false);
   });
 
-  it('needs:"attach" (evicted/recycled worktree) re-attaches once and retries the command', async () => {
+  it('needs:"attach" for an evicted worktree re-attaches once and retries the command', async () => {
     const { fn, calls } = stubFetch(
       {
         body: {
-          error: "worktree-missing: disk was recycled",
+          error: "evicted: this thread's worktree was evicted after inactivity — POST /attach to recreate",
           needs: "attach",
           stdout: "",
-          stderr: "worktree-missing",
+          stderr: "evicted",
           exitCode: 127,
         },
       },
@@ -220,6 +220,34 @@ describe("ResidentExecutor.exec", () => {
     expect(sentBody(calls[2]).command).toBe("echo recovered");
   });
 
+  // Feature: docs/reference/specs/resident-repos.md item 27 / harness-pi.md
+  // item 16 — the preflight's `worktree-missing` says the container disk was
+  // recycled since the last attach: the container under the thread is gone,
+  // and with it every process the run had in it. On /exec that is the typed
+  // restart at once: no recovery is attempted first (a refused or slow
+  // re-attach used to stand in for the verdict), and the command is never
+  // re-issued in the replacement.
+  it('needs:"attach" saying the container disk was recycled (`worktree-missing`) on /exec is the typed ExecSandboxRestartedError at once — no re-attach, the command is never re-issued', async () => {
+    const { calls } = stubFetch({
+      body: {
+        error: "worktree-missing: the container disk was recycled since the last attach — POST /attach to recreate",
+        needs: "attach",
+        stdout: "",
+        stderr: "worktree-missing",
+        exitCode: 127,
+      },
+    });
+    const ex = new ResidentExecutor(OPTS);
+    const err = await ex.exec("kill -0 4242").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExecSandboxRestartedError);
+    expect(err).not.toBeInstanceOf(ExecInfraError);
+    expect((err as ExecSandboxRestartedError).waitedMs).toBe(0);
+    expect((err as Error).message).toBe(
+      "worktree-missing: the container disk was recycled since the last attach — POST /attach to recreate; the command was not run again",
+    );
+    expect(calls.map(route)).toEqual(["/exec"]);
+  });
+
   it('a second needs:"attach" after re-attach is a legible ExecInfraError, not a loop', async () => {
     stubFetch(
       {
@@ -228,10 +256,10 @@ describe("ResidentExecutor.exec", () => {
       { body: ATTACH_OK },
       {
         body: {
-          error: "worktree-missing: still gone",
+          error: "evicted: still gone",
           needs: "attach",
           stdout: "",
-          stderr: "worktree-missing",
+          stderr: "evicted",
           exitCode: 127,
         },
       },
@@ -244,33 +272,36 @@ describe("ResidentExecutor.exec", () => {
     expect((err as Error).message).toMatch(/re-attach/);
   });
 
-  it("runtime-replaced (a deploy mid-command) re-attaches once and returns the outcome as tool text — the command is NEVER re-run", async () => {
+  it("runtime-replaced (a deploy mid-command) on /exec is the typed ExecSandboxRestartedError at once — no re-attach, the command is NEVER re-run", async () => {
     // The resident names a mid-command runtime replacement (a `wrangler deploy`
     // swapped the isolate under a running command): the process may have
     // started and produced side effects, so the client must not blind-retry.
-    // It re-attaches (proves the new isolate serves the thread) and hands the
-    // named outcome to the model as ordinary output — not an ExecInfraError.
-    const { fn, calls } = stubFetch(
-      {
-        body: {
-          error: "runtime-replaced: the resident runtime was replaced (a deploy) while this command ran",
-          reason: "runtime-replaced",
-          stdout: "",
-          stderr: "runtime-replaced",
-          exitCode: 127,
-        },
+    // The container under the thread is gone with everything the run had in
+    // it, so the answer is the typed word the pi harness keys on, before any
+    // recovery — the re-attach it used to make first blocks through the
+    // restore and can be refused, and either hid the verdict (the 1.230.0 miss).
+    const { fn, calls } = stubFetch({
+      body: {
+        error: "runtime-replaced: the resident runtime was replaced (a deploy) while this command ran",
+        reason: "runtime-replaced",
+        stdout: "",
+        stderr: "runtime-replaced",
+        exitCode: 127,
       },
-      { body: ATTACH_OK },
-    );
+    });
     const ex = new ResidentExecutor(OPTS);
-    const out = await ex.exec("pnpm install");
-    expect(out).toMatch(/runtime-replaced/);
-    expect(out).toMatch(/re-check/i);
-    expect(fn).toHaveBeenCalledTimes(2);
-    expect(calls.map(route)).toEqual(["/exec", "/attach"]);
+    const err = await ex.exec("pnpm install").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExecSandboxRestartedError);
+    expect(err).not.toBeInstanceOf(ExecInfraError);
+    expect((err as ExecSandboxRestartedError).waitedMs).toBe(0);
+    expect((err as Error).message).toBe(
+      "runtime-replaced: the resident runtime was replaced (a deploy) while this command ran; the command was not run again",
+    );
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(calls.map(route)).toEqual(["/exec"]);
   });
 
-  it("a second runtime-replaced in a row (no success between) is an ExecInfraError — a flapping resident, not one deploy", async () => {
+  it("two runtime-replaced /exec answers in a row are two typed restarts — the streak's infra error is for the idempotent routes, never for the word the harness keys on", async () => {
     const replaced = {
       error: "runtime-replaced: the resident runtime was replaced (a deploy) while this command ran",
       reason: "runtime-replaced",
@@ -278,33 +309,29 @@ describe("ResidentExecutor.exec", () => {
       stderr: "runtime-replaced",
       exitCode: 127,
     };
-    stubFetch({ body: replaced }, { body: ATTACH_OK }, { body: replaced });
+    stubFetch({ body: replaced }, { body: replaced });
     const ex = new ResidentExecutor(OPTS);
-    await expect(ex.exec("echo a")).resolves.toMatch(/runtime-replaced/);
-    const err = await ex.exec("echo b").catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(ExecInfraError);
-    expect((err as Error).message).toMatch(/2 times in a row/);
+    await expect(ex.exec("echo a")).rejects.toBeInstanceOf(ExecSandboxRestartedError);
+    const second = await ex.exec("echo b").catch((e: unknown) => e);
+    expect(second).toBeInstanceOf(ExecSandboxRestartedError);
+    expect(second).not.toBeInstanceOf(ExecInfraError);
   });
 
-  it("a successful op between two runtime-replaced outcomes resets the streak (each is a one-off deploy)", async () => {
-    const replaced = {
-      error: "runtime-replaced: deploy",
-      reason: "runtime-replaced",
-      stdout: "",
-      stderr: "runtime-replaced",
-      exitCode: 127,
-    };
+  it("a successful op between two runtime-replaced reads resets the streak (each is a one-off deploy)", async () => {
+    const replaced = { error: "runtime-replaced: deploy", reason: "runtime-replaced" };
     stubFetch(
-      { body: replaced },
+      { status: 409, body: replaced },
       { body: ATTACH_OK },
-      { body: { stdout: "fine", stderr: "", exitCode: 0, truncated: false } },
-      { body: replaced },
+      { body: { content: "first" } },
+      { body: { content: "fine" } },
+      { status: 409, body: replaced },
       { body: ATTACH_OK },
+      { body: { content: "third" } },
     );
     const ex = new ResidentExecutor(OPTS);
-    await expect(ex.exec("echo a")).resolves.toMatch(/runtime-replaced/);
-    await expect(ex.exec("echo b")).resolves.toBe("fine");
-    await expect(ex.exec("echo c")).resolves.toMatch(/runtime-replaced/);
+    await expect(ex.readFile("a")).resolves.toBe("first");
+    await expect(ex.readFile("b")).resolves.toBe("fine");
+    await expect(ex.readFile("c")).resolves.toBe("third");
   });
 
   it("a command-too-long rejection (plain HTTP 400, no needs) is a normal client Error, not infra", async () => {
@@ -369,10 +396,10 @@ describe("ResidentExecutor infra classification", () => {
       { body: ATTACH_OK },
       {
         body: {
-          error: "worktree-missing: still gone",
+          error: "evicted: still gone",
           needs: "attach",
           stdout: "",
-          stderr: "worktree-missing",
+          stderr: "evicted",
           exitCode: 127,
         },
       },
@@ -382,21 +409,20 @@ describe("ResidentExecutor infra classification", () => {
     expect(err).toBeInstanceOf(ExecInfraError);
   });
 
-  it("a single runtime-replaced (one deploy) is a recoverable outcome, never infra", async () => {
-    stubFetch(
-      {
-        body: {
-          error: "runtime-replaced: deploy",
-          reason: "runtime-replaced",
-          stdout: "",
-          stderr: "runtime-replaced",
-          exitCode: 127,
-        },
+  it("a runtime-replaced on /exec (one deploy) is the typed restart, never infra", async () => {
+    stubFetch({
+      body: {
+        error: "runtime-replaced: deploy",
+        reason: "runtime-replaced",
+        stdout: "",
+        stderr: "runtime-replaced",
+        exitCode: 127,
       },
-      { body: ATTACH_OK },
-    );
+    });
     const executor = new ResidentExecutor(OPTS);
-    await expect(executor.exec("echo x")).resolves.toMatch(/runtime-replaced/);
+    const err = await executor.exec("echo x").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExecSandboxRestartedError);
+    expect(err).not.toBeInstanceOf(ExecInfraError);
   });
 
   it("a non-2xx HTTP status is infra", async () => {
@@ -411,7 +437,9 @@ describe("ResidentExecutor infra classification", () => {
   // isolate swap — because worker.ts classifies the raw workerd refusal
   // "The container is not running, consider calling start()" as a replacement.
   // Answered as a bare infra error instead, the roll would read as a dead
-  // sandbox. These two assert the contract at the boundary the bug tripped.
+  // sandbox. These two assert the contract at the boundary the bug tripped:
+  // on /exec the typed restart the pi harness keys on, on the idempotent
+  // routes the streak that keeps a flapping resident from riding forever.
   const containerRolled = {
     error:
       "resident /exec: runtime-replaced: the resident runtime was replaced (a deploy) while this command was " +
@@ -422,20 +450,21 @@ describe("ResidentExecutor infra classification", () => {
     exitCode: 127,
   };
 
-  it("a single container roll rides through as recoverable — no infra error, re-attached once", async () => {
-    const { calls } = stubFetch({ body: containerRolled }, { body: ATTACH_OK });
+  it("a container roll under /exec is the typed restart carrying the resident's words — no infra error, no re-attach", async () => {
+    const { calls } = stubFetch({ body: containerRolled });
     const executor = new ResidentExecutor(OPTS);
-    const out = await executor.exec("git status");
-    expect(out).toMatch(/consider calling start/); // the named outcome reaches the model, not an abort
-    expect(out).toMatch(/re-check/i);
-    expect(calls.map(route)).toEqual(["/exec", "/attach"]); // re-attach restarts + rehydrates the container
+    const err = await executor.exec("git status").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExecSandboxRestartedError);
+    expect(err).not.toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toMatch(/consider calling start/); // the resident's own words ride the verdict
+    expect(calls.map(route)).toEqual(["/exec"]); // nothing is recovered first: the verdict is the answer
   });
 
-  it("bound: a container that cannot come back is infra — a second roll with no success between", async () => {
-    stubFetch({ body: containerRolled }, { body: ATTACH_OK }, { body: containerRolled }, { body: ATTACH_OK });
+  it("bound: a container that cannot come back is infra on the idempotent routes — a second roll with no success between", async () => {
+    const rolledRead = { status: 409, body: { error: containerRolled.error, reason: "runtime-replaced" } };
+    stubFetch(rolledRead, { body: ATTACH_OK }, rolledRead);
     const executor = new ResidentExecutor(OPTS);
-    await expect(executor.exec("git status")).resolves.toMatch(/consider calling start/);
-    const err = await executor.exec("git status").catch((e: unknown) => e);
+    const err = await executor.readFile("README.md").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ExecInfraError);
     expect((err as Error).message).toMatch(/2 times in a row/);
   });
@@ -743,7 +772,7 @@ describe("ResidentExecutor trace context — the recovery re-attach", () => {
     const execSpan = root.start("exec.exec");
     stubFetch(
       {
-        body: { error: "worktree-missing: disk was recycled", needs: "attach", stdout: "", stderr: "", exitCode: 127 },
+        body: { error: "evicted: worktree was evicted", needs: "attach", stdout: "", stderr: "", exitCode: 127 },
       },
       { body: ATTACH_OK },
       { raw: JSON.stringify({ stdout: "recovered", stderr: "", exitCode: 0 }) },
