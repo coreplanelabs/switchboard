@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { attachTarget, mirrorNeedsFetch, parseWantSha, wantShaForBinding } from "./residentHead.js";
+import { attachTarget, mirrorFetchReason, parseWantSha, wantShaForBinding } from "./residentHead.js";
 
 // Feature: docs/reference/specs/resident-repos.md item 51 — the attach target once the
 // mirror is as fresh as it will get: the ref when it exists; the expected commit,
@@ -66,21 +66,36 @@ describe("wantShaForBinding", () => {
   });
 });
 
-describe("mirrorNeedsFetch", () => {
-  it("a missing ref always fetches (the pre-existing rule), with or without a wanted sha", () => {
-    expect(mirrorNeedsFetch({ refExists: false, wantSha: null })).toBe(true);
-    expect(mirrorNeedsFetch({ refExists: false, wantSha: TIP })).toBe(true);
+// The fetch decision names WHY it fetches: a missing ref and a stale tip fail
+// the attach when their fetch fails, as they always did; a fetch that only
+// verifies a returnable ref against the origin (item 16's second movement)
+// fails soft — the attach goes on with the mirror's ref.
+describe("mirrorFetchReason", () => {
+  const trusted = { returnable: false };
+  it("a missing ref always fetches (the pre-existing rule), with or without a wanted sha, returnable or not", () => {
+    expect(mirrorFetchReason({ refExists: false, wantSha: null, ...trusted })).toBe("missing-ref");
+    expect(mirrorFetchReason({ refExists: false, wantSha: TIP, ...trusted })).toBe("missing-ref");
+    expect(mirrorFetchReason({ refExists: false, wantSha: null, returnable: true })).toBe("missing-ref");
   });
-  it("no wanted sha + ref present → the mirror as it stands is good enough", () => {
-    expect(mirrorNeedsFetch({ refExists: true, mirrorSha: OLD, wantSha: null })).toBe(false);
+  it("no wanted sha + ref present, on a ref the binding could not return from → the mirror as it stands is good enough", () => {
+    expect(mirrorFetchReason({ refExists: true, mirrorSha: OLD, wantSha: null, ...trusted })).toBeNull();
   });
   it("ref present but its tip is an older commit than the wanted head → fetch", () => {
-    expect(mirrorNeedsFetch({ refExists: true, mirrorSha: OLD, wantSha: TIP })).toBe(true);
+    expect(mirrorFetchReason({ refExists: true, mirrorSha: OLD, wantSha: TIP, ...trusted })).toBe("stale-tip");
   });
   it("tip already at the wanted commit → no fetch", () => {
-    expect(mirrorNeedsFetch({ refExists: true, mirrorSha: TIP, wantSha: TIP })).toBe(false);
+    expect(mirrorFetchReason({ refExists: true, mirrorSha: TIP, wantSha: TIP, ...trusted })).toBeNull();
   });
   it("an unreadable mirror tip with a wanted sha → fetch (never assume fresh)", () => {
-    expect(mirrorNeedsFetch({ refExists: true, wantSha: TIP })).toBe(true);
+    expect(mirrorFetchReason({ refExists: true, wantSha: TIP, ...trusted })).toBe("stale-tip");
+  });
+  it("a returnable ref the mirror still holds → fetch: a branch this thread may return from is verified against the origin at every attach, never trusted from the mirror alone", () => {
+    expect(mirrorFetchReason({ refExists: true, wantSha: null, returnable: true })).toBe("returnable-ref");
+    expect(mirrorFetchReason({ refExists: true, mirrorSha: TIP, wantSha: TIP, returnable: true })).toBe(
+      "returnable-ref",
+    );
+  });
+  it("a returnable ref at a stale tip is the stale fetch, not the verification: its failure keeps failing the attach", () => {
+    expect(mirrorFetchReason({ refExists: true, mirrorSha: OLD, wantSha: TIP, returnable: true })).toBe("stale-tip");
   });
 });

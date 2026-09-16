@@ -14,7 +14,9 @@ import {
   rememberOwnBranches,
   returnToDefault,
   type RebindableBinding,
+  type ReturnableBinding,
 } from "./residentRebind.js";
+import { attachTarget, mirrorFetchReason } from "./residentHead.js";
 
 // Feature: docs/reference/specs/resident-repos.md item 16 — the one exception to
 // the sticky ref binding: a thread bound to the repo default for want of a
@@ -477,5 +479,94 @@ describe("canReturnToDefault and returnToDefault: a binding whose own branch is 
     const back = returnToDefault(binding, DEFAULT_REF, "t1");
     expect(back!.binding.rebound).toEqual({ ...rebound, returnedAt: "t1" });
     expect(back!.returned).toEqual({ from: "fix/exact-match", to: "main", pr: 7, at: "t1" });
+  });
+});
+
+// The timing of the second movement: a branch deleted at the origin leaves the
+// mirror only through a `fetch --prune`, and the refresh cycle prunes every ten
+// minutes. An attach that trusted a returnable ref because the mirror still held
+// it would provision a tree at the deleted branch's stale tip until the cycle
+// caught up — whether a thread returned to the default would depend on where in
+// the cycle its follow-up landed. So the attach's fetch decision (item 51,
+// `mirrorFetchReason`) fetches for a returnable ref the mirror holds, and the
+// return is decided at the first attach after the deletion. This drives the pure
+// chain the Worker's create step is wired from — the decision, the fetch's effect
+// on the mirror, the re-read, `attachTarget`, `canReturnToDefault`,
+// `returnToDefault` — over a mirror and an origin held as branch-name sets.
+describe("the second movement is decided at the first attach after the deletion, never at the next refresh cycle", () => {
+  const AT = "t1";
+  /** One attach's fetch-and-target chain as the Worker's create step composes it:
+   *  `mirror` is the mirror's branch set, `origin` the hosting service's; a fetch
+   *  makes the mirror the origin (`fetch --prune`). */
+  function attach(binding: ReturnableBinding & { user: string }, mirror: Set<string>, origin: ReadonlySet<string>) {
+    const returnable = canReturnToDefault(binding, DEFAULT_REF);
+    const why = mirrorFetchReason({ refExists: mirror.has(binding.ref), wantSha: null, returnable });
+    if (why !== null) {
+      mirror.clear();
+      for (const r of origin) mirror.add(r);
+    }
+    const refExists = why === null || mirror.has(binding.ref);
+    const target = attachTarget({ refExists, wantSha: null, commitInMirror: false });
+    if (target.kind === "unknown-ref" && returnable) {
+      const back = returnToDefault(binding, DEFAULT_REF, AT)!;
+      return { fetched: why, ref: back.binding.ref, returned: back.returned };
+    }
+    return { fetched: why, ref: target.kind === "unknown-ref" ? null : binding.ref, returned: undefined };
+  }
+  const rebound = { from: "main", to: "docs/x", pr: 7, at: "t0" };
+  const own = [{ ref: "plan/slug/u1", pr: 12, at: "t0" }];
+
+  it("a rebound thread whose branch was deleted at the origin seconds ago — the mirror still holding it — is fetched for, finds the branch gone and returns to the default at this attach", () => {
+    const mirror = new Set(["main", "docs/x"]);
+    const out = attach({ ref: "docs/x", user: "worker2", boundBy: "default", rebound }, mirror, new Set(["main"]));
+    expect(out).toEqual({
+      fetched: "returnable-ref",
+      ref: "main",
+      returned: { from: "docs/x", to: "main", pr: 7, at: AT },
+    });
+    expect(mirror.has("docs/x")).toBe(false);
+  });
+
+  it("so does a thread bound by name to a branch its own runs pushed (a ship unit's), whatever boundBy says", () => {
+    const mirror = new Set(["main", "plan/slug/u1"]);
+    const out = attach(
+      { ref: "plan/slug/u1", user: "worker2", boundBy: "name", ownBranches: own },
+      mirror,
+      new Set(["main"]),
+    );
+    expect(out).toEqual({
+      fetched: "returnable-ref",
+      ref: "main",
+      returned: { from: "plan/slug/u1", to: "main", pr: 12, at: AT },
+    });
+  });
+
+  it("a returnable ref still at the origin is fetched for and kept — the fetch is the verification, not a move", () => {
+    const mirror = new Set(["main", "docs/x"]);
+    const out = attach(
+      { ref: "docs/x", user: "worker2", boundBy: "default", rebound },
+      mirror,
+      new Set(["main", "docs/x"]),
+    );
+    expect(out).toEqual({ fetched: "returnable-ref", ref: "docs/x", returned: undefined });
+  });
+
+  it("a default-bound thread attaches without a fetch: the default cannot be lost, and the refresh cycle is its freshness", () => {
+    const out = attach({ ref: "main", user: "worker2", boundBy: "default" }, new Set(["main"]), new Set(["main"]));
+    expect(out).toEqual({ fetched: null, ref: "main", returned: undefined });
+  });
+
+  it("a ref a person named that the thread never pushed is trusted from the mirror without a fetch, and once the cycle's prune removes it the attach is unknown-ref — the default is never swapped in unasked", () => {
+    const person = { ref: "feature/x", user: "worker2", boundBy: "name" as const, ownBranches: own };
+    expect(attach(person, new Set(["main", "feature/x"]), new Set(["main"]))).toEqual({
+      fetched: null,
+      ref: "feature/x",
+      returned: undefined,
+    });
+    expect(attach(person, new Set(["main"]), new Set(["main"]))).toEqual({
+      fetched: "missing-ref",
+      ref: null,
+      returned: undefined,
+    });
   });
 });
