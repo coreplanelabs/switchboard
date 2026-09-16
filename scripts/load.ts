@@ -69,28 +69,44 @@ import {
   type AgentDirLayout,
 } from "../src/load/piProcess.js";
 import {
+  commandScore,
   compoundExamples,
   compoundScore,
   confusionTable,
+  emptyCounters,
   historyCompounds,
   imperativeScore,
   labelledRequests,
   mapHistoricalLabels,
   readToWriteRoutes,
+  renderCommands,
   renderCompound,
   renderConfusion,
+  renderCounters,
   renderImperative,
+  replayCommands,
   replayCompound,
   replayImperative,
   replayRoutes,
   routeChecks,
   tableWritePreset,
+  tallyingProvider,
   typedLabels,
 } from "../src/load/routeReplay.js";
 import { ROUTE_COMPOUND_FIXTURES } from "../src/load/routeCompoundFixtures.js";
 import { ROUTE_IMPERATIVE_FIXTURES } from "../src/load/routeImperativeFixtures.js";
+import { ROUTE_COMMAND_EXAMPLES } from "../src/load/routeCommandFixtures.js";
 import { COMPOUND_PRESET } from "../src/agents/registry.js";
-import { providerRouteModel, routablePresets, route, ROUTE_TIMEOUT_MS } from "../src/core/dispatch/route.js";
+import { CommandRegistry } from "../src/core/commandRegistry.js";
+import { registerCoreCommands, type CoreCommandDeps } from "../src/core/commands/all.js";
+import { ALL_CAPABILITIES } from "../src/core/capabilities.js";
+import {
+  providerRouteModel,
+  routableCommands,
+  routablePresets,
+  route,
+  ROUTE_TIMEOUT_MS,
+} from "../src/core/dispatch/route.js";
 import { DEFAULT_MAX_CHILDREN } from "../src/core/dispatch/spawn.js";
 import { WorkerRunStore } from "../src/core/runStoreWorker.js";
 import { PiAiProviders } from "../src/core/harness/piAi.js";
@@ -1068,7 +1084,11 @@ async function routeReplay(f: Flags): Promise<boolean> {
       ...(baseUrl ? { baseUrl } : {}),
     },
   });
-  const model = providerRouteModel(providers.get(providerName), modelId);
+  // Every router call rides the tallying decorator: the receipt's counters
+  // line sums the usage fields (cost and prompt caching) and counts the
+  // answers refused for carrying two tool calls (load-harness item 17).
+  const counters = emptyCounters();
+  const model = providerRouteModel(tallyingProvider(providers.get(providerName), counters), modelId);
   const modelRef = `${providerName}/${modelId}`;
   const base = str(f, "state-url", process.env.SWITCHBOARD_STATE_WORKER_URL).replace(/\/$/, "");
   const store = new WorkerRunStore({
@@ -1134,6 +1154,28 @@ async function routeReplay(f: Flags): Promise<boolean> {
     route({ text, recentDirectives: {}, presets, allowed, fallback: defaultPreset, compound: { maxParts } }, model, {
       timeoutMs: ROUTE_TIMEOUT_MS,
     });
+  // The command half's menu: the bare full-capability catalogue —
+  // `registerCoreCommands` over a fresh registry, never a bound deployment's —
+  // so every offered command is scored; the replay binds and parses only,
+  // nothing is ever invoked (the registry carries no deps to invoke with).
+  const commandRegistry = new CommandRegistry<CoreCommandDeps>({ audit: () => {}, capabilities: ALL_CAPABILITIES });
+  registerCoreCommands(commandRegistry);
+  const menu = routableCommands(commandRegistry);
+  const decideCommand = (text: string, threadRepo?: string) =>
+    route(
+      {
+        text,
+        recentDirectives: {},
+        presets,
+        allowed,
+        fallback: defaultPreset,
+        compound: { maxParts },
+        commands: menu,
+        ...(threadRepo ? { threadRepo } : {}),
+      },
+      model,
+      { timeoutMs: ROUTE_TIMEOUT_MS },
+    );
   const results = await replayRoutes(typed, decide, { concurrency, now: systemClock });
   const table = confusionTable(results, allowed);
   const stickyResults = await replayRoutes(sticky, decide, { concurrency, now: systemClock });
@@ -1153,6 +1195,13 @@ async function routeReplay(f: Flags): Promise<boolean> {
     now: systemClock,
   });
   const imperative = imperativeScore(imperativeResults);
+  const commandResults = await replayCommands(
+    ROUTE_COMMAND_EXAMPLES,
+    decideCommand,
+    { concurrency, now: systemClock },
+    menu.map((c) => c.def),
+  );
+  const command = commandScore(commandResults);
   const samples: Sample[] = [
     ...[...results, ...stickyResults, ...unstampedResults].map((r): Sample => ({
       op: "route",
@@ -1178,6 +1227,14 @@ async function routeReplay(f: Flags): Promise<boolean> {
       status: r.routed ?? "none",
       ...(r.routed === undefined ? { reason: "no-route" } : {}),
     })),
+    ...commandResults.map((r): Sample => ({
+      op: "route-command",
+      startedAt: systemClock(),
+      ms: r.ms,
+      ok: r.bound !== undefined || r.routed !== undefined,
+      status: r.bound?.id ?? r.routed ?? "none",
+      ...(r.bound === undefined && r.routed === undefined ? { reason: "no-route" } : {}),
+    })),
   ];
   const summary = summarize(samples);
   const answered = results.filter((r) => r.routed !== undefined).length;
@@ -1191,7 +1248,9 @@ async function routeReplay(f: Flags): Promise<boolean> {
     imperative,
     imperativeBar: { hit: 0.9 },
     writePreset,
+    command: { score: command, bars: { command: 1.0, input: 0.9 } },
   });
+  process.stdout.write(`${renderCounters(counters)}\n`);
   const bySource: Record<string, number> = {};
   for (const r of requests) bySource[r.labelSource] = (bySource[r.labelSource] ?? 0) + 1;
   const notes = [
@@ -1223,6 +1282,11 @@ async function routeReplay(f: Flags): Promise<boolean> {
     "",
     `checked-in imperative set (${imperative.imperatives} imperatives, ${imperative.decoys} read-only decoys, ${imperative.reviews} review-shaped):`,
     ...renderImperative(imperative, { writePreset }),
+    "",
+    `checked-in command set (${command.fixtures} fixtures over ${menu.length} offered commands, ${command.decoys} decoys; bound and parsed, never invoked):`,
+    ...renderCommands(command),
+    "",
+    renderCounters(counters),
     "",
     `labels: ${Object.entries(bySource)
       .map(([k, v]) => `${k}=${v}`)
@@ -1258,6 +1322,8 @@ async function routeReplay(f: Flags): Promise<boolean> {
         history: { ...history, misses: history.misses.map(redacted), results: historyResults.map(redacted) },
       },
       imperative: { ...imperative, misses: imperative.misses.map(redacted), results: imperativeResults.map(redacted) },
+      command: { ...command, misses: command.misses.map(redacted), results: commandResults.map(redacted) },
+      counters,
       skipped,
     },
     notes,

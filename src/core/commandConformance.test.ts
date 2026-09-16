@@ -28,6 +28,10 @@ import { registerCoreCommands, type CoreCommandDeps } from "./commands/all.js";
 import type { CoreDeps } from "./dispatcher.js";
 import { RunStoreFrictionLedger } from "./frictionLedger.js";
 import { NO_CAPABILITIES, type Capabilities } from "./capabilities.js";
+import { routableCommands } from "./dispatch/route.js";
+import { ROUTE_COMMAND_DECOYS, ROUTE_COMMAND_FIXTURES } from "../load/routeCommandFixtures.js";
+import { fixturesFor } from "./testing/commandConformance.js";
+import { parseInput } from "./commandRegistry.js";
 import { dependsOn, isEnabled, withOff, withOn } from "./capabilityGating.js";
 import { RunRegistry } from "./runRegistry.js";
 import { InMemoryRunStore } from "./runStore.js";
@@ -210,6 +214,39 @@ describe("command conformance — catalogue fences", () => {
     const ids = new Set(CATALOGUE.map((c) => c.id));
     for (const id of Object.keys(COMMAND_FIXTURES))
       expect(ids.has(id), `COMMAND_FIXTURES["${id}"] names no registered command`).toBe(true);
+  });
+
+  // The routing-fixture fence (record 0036, unit 3; load-harness item 17):
+  // every command the router is offered carries its three routing fixtures in
+  // the checked-in sets, so a command added to the catalogue fails `verify` by
+  // name until a happy path, a paraphrase and a decoy land beside it.
+  it("every offered command has its three routing fixtures — happy path, paraphrase, decoy (load:route's command half)", () => {
+    const missing: string[] = [];
+    for (const cmd of routableCommands({ list: () => CATALOGUE })) {
+      const three = fixturesFor(cmd);
+      for (const kind of ["happy", "paraphrase", "decoy"] as const)
+        if (three[kind] === undefined) missing.push(`${cmd.id}: no ${kind} routing fixture`);
+    }
+    expect(missing).toEqual([]);
+  });
+
+  it("every routing fixture and decoy names an offered command, and a fixture's expected input parses (parseInput ok)", () => {
+    const offered = new Map(routableCommands({ list: () => CATALOGUE }).map((c) => [c.id, c.def]));
+    const stale = [
+      ...[...ROUTE_COMMAND_FIXTURES, ...ROUTE_COMMAND_DECOYS]
+        .filter((f) => !offered.has(f.command))
+        .map((f) => `${f.id}: ${f.command} is not an offered command`),
+      ...ROUTE_COMMAND_FIXTURES.filter((f) => {
+        const def = offered.get(f.command);
+        return def !== undefined && !parseInput(def, f.input).ok;
+      }).map((f) => `${f.id}: expected input does not parse for ${f.command}`),
+    ];
+    expect(stale).toEqual([]);
+  });
+
+  it("the fence names a command with two fixtures and the missing kind", () => {
+    const orphan = { id: "demo.unfixtured" };
+    expect(fixturesFor(orphan)).toEqual({ happy: undefined, paraphrase: undefined, decoy: undefined });
   });
 
   it("authorization: every command's action has a policy row on the resource it authorizes (docs/reference/specs/authorization.md item 4)", () => {
