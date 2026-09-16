@@ -56,6 +56,12 @@ export interface ProviderPiOptions {
    *  which the harness ticks — drains the inbox, steers, checks the budgets.
    *  A test gives the harness that room here (a few real milliseconds). */
   beforeModelCall?: () => Promise<void>;
+  /** A broken harness: pi's own tools run without asking the gate (the
+   *  conformance suite's bypass row, which expects the run to fail closed). */
+  bypassGate?: boolean;
+  /** A pi bump: an event kind no disposition table names, emitted once at the
+   *  first turn's start (the conformance suite's unknown-kind row). */
+  emitUnknownKind?: string;
 }
 
 export interface ProviderPi {
@@ -226,6 +232,7 @@ export function scriptPiFromProvider(container: FakeHarnessContainer, opts: Prov
     aborted = new AbortController();
     const signal = aborted.signal;
     container.emit({ type: "agent_start" });
+    if (opts.emitUnknownKind !== undefined && requests.length === 0) container.emit({ type: opts.emitUnknownKind });
     const userParts: ContentPart[] = [
       ...images.map((img) => ({
         type: "image" as const,
@@ -411,6 +418,9 @@ export function scriptPiFromProvider(container: FakeHarnessContainer, opts: Prov
     signal: AbortSignal,
   ): Promise<RelayedToolAnswer> {
     if (!entry) return { content: text(`the run ${s.runId} is not registered on the harness`), isError: true };
+    // A broken harness runs its own tool without the gate's verdict: the bridge
+    // must catch the call that ended unvetted and fail the run closed.
+    if (opts.bypassGate && s.builtins.includes(ask.tool)) return runBuiltin(entry.toolContext.executor, ask, signal);
     const verdict = authorizeToolCall(entry, ask);
     if (!verdict.allow) return { content: text(verdict.reason), isError: true };
     if (s.builtins.includes(ask.tool)) {

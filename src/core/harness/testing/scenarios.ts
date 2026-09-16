@@ -1,0 +1,563 @@
+// The conformance table (docs/reference/specs/harness.md item 11): record
+// 0038's six clauses as rows any harness is held to, each a function of a
+// `HarnessDriver` — start a run from a scripted model, read the run events and
+// the ledger steps, end — so pi's driver over the fake container, a second
+// harness's driver over a fake of its server and one over the real binary all
+// walk the same rows and a harness never gets a table of its own. A row's
+// check reads the record: the lint (`runRow`) refuses a row that read neither
+// the run events nor the ledger steps, because a row that passes without
+// looking at the record proves nothing about the record. The matrix printer
+// (`renderHarnessConformanceMatrix`) is what a PR body carries: harness × row.
+// Assertions are Node's own, so the table runs under vitest and under a plain
+// script alike.
+
+import assert from "node:assert/strict";
+import type { Identity } from "../../../agents/registry.js";
+import type { RunnableTool } from "../../../tools/runnableTool.js";
+import type { ChatMessage, ContentPart } from "../../chatMessage.js";
+import type { CompletionRequest, CompletionResult } from "../../provider.js";
+import type { RunEvent } from "../../runEvents.js";
+import type { StepReport } from "../../runLedger/stepReport.js";
+import type { HarnessRequest, HarnessStart } from "../container.js";
+import {
+  HarnessMismatchError,
+  harnessFactsOf,
+  type Finding,
+  type Harness,
+  type HarnessFacts,
+  type HarnessName,
+  type HarnessResume,
+} from "../contract.js";
+import { HARD_STOP_MESSAGE } from "../pi/windDown.js";
+
+/** One answer of the scripted model: the content parts and how it stopped. */
+export interface ModelTurn {
+  content: ContentPart[];
+  stopReason?: CompletionResult["stopReason"];
+}
+
+/** The run a row asks the driver for: the model's turns and what surrounds them. */
+export interface RunScript {
+  /** The model's answers in order; the last is the text the run answers with. */
+  turns: ModelTurn[];
+  /** The preset's identity the harness reads (its own tools, the gate's reach); `write` unless said. */
+  identity?: Identity;
+  /** The thread's earlier turns before the request (the seed rule). */
+  seed?: ChatMessage[];
+  /** The request, the seed's last user turn. */
+  request?: string;
+  /** The relayed tools the run holds; the status tool alone unless said. */
+  relayed?: RunnableTool[];
+  /** A resume, with the row's facts the previous generation wrote. */
+  resume?: HarnessResume;
+  /** A broken harness: its own tools run without asking the gate. The row expects the run to fail closed. */
+  bypassGate?: boolean;
+  /** The process emits an event kind no table names, once. */
+  unknownEventKind?: string;
+  /** A thread follow-up queued before the run starts, for the harness to steer. */
+  followUp?: string;
+  /** A hard stop requested before the model call of this 1-based number. */
+  hardStopBeforeModelCall?: number;
+  /** The container's word for itself; `null` for a container that cannot name itself. */
+  containerWord?: string | null;
+}
+
+/** What the driver hands back: the run's outcome and everything the harness wrote or was seen to do. */
+export interface DrivenRun {
+  harness: HarnessName;
+  outcome: { kind: "answered"; answer: string } | { kind: "failed"; error: Error };
+  /** The run events the harness put on the stream, in order. */
+  events: RunEvent[];
+  /** The ledger's step records, in order. */
+  steps: StepReport[];
+  /** Every save of the row's facts, in order. */
+  facts: HarnessFacts[];
+  /** The progress notes (the card's activity line). */
+  progress: string[];
+  /** What the container was asked to start. */
+  starts: HarnessStart[];
+  /** The pids the container was asked to end. */
+  killed: number[];
+  /** Every request the harness made into the container's loopback server, in order; none for a harness that has no server. */
+  requests: HarnessRequest[];
+  /** What the model was asked, per call: the conversation it saw and the tools it was offered. */
+  modelCalls: CompletionRequest[];
+  /** What the relayed status tool reported into the run's context: the relay's side effect. */
+  statusReports: string[];
+}
+
+/** One harness's driver: what the table needs of a harness to walk its rows. */
+export interface HarnessDriver {
+  readonly harness: HarnessName;
+  /** The harness object under test, for its declared tables. */
+  readonly object: Harness;
+  /** The run bearer the driver hands the process, so a row can look for it. */
+  readonly bearer: string;
+  /** The container word the driver's container answers when the script names none. */
+  readonly containerWord: string;
+  /** This harness's row facts for the pieces a row cares about. */
+  facts(partial: { pid: number; container?: string; root?: string; bearerHash?: string }): HarnessFacts;
+  run(script: RunScript): Promise<DrivenRun>;
+  /** `find` on a fresh container of the driver's, answering `containerWord` (or nothing for `null`). */
+  find(facts: HarnessFacts, containerWord?: string | null): Promise<Finding>;
+}
+
+export type Clause = "credential" | "gate" | "relay" | "record" | "conversation" | "survival" | "parity";
+
+export interface ScenarioRow {
+  /** The matrix's key, stable across renames of the title. */
+  id: string;
+  clause: Clause;
+  title: string;
+  script: RunScript | ((driver: HarnessDriver) => RunScript);
+  check: (run: DrivenRun, driver: HarnessDriver) => void | Promise<void>;
+}
+
+const text = (t: string): ModelTurn => ({ content: [{ type: "text", text: t }], stopReason: "end_turn" });
+const call = (id: string, name: string, input: Record<string, unknown>): ModelTurn => ({
+  content: [{ type: "tool_use", id, name, input }],
+  stopReason: "tool_use",
+});
+
+/** A header name that carries a credential: on a request into the container it belongs in `secretHeaders`. */
+const AUTH_HEADER = /^(authorization|proxy-authorization|x-api-key|cookie)$/i;
+
+const notes = (run: DrivenRun) =>
+  run.events.filter((e): e is Extract<RunEvent, { type: "run_note" }> => e.type === "run_note");
+const toolCalls = (run: DrivenRun) =>
+  run.events.filter((e): e is Extract<RunEvent, { type: "tool_call" }> => e.type === "tool_call");
+const toolResults = (run: DrivenRun) =>
+  run.events.filter((e): e is Extract<RunEvent, { type: "tool_result" }> => e.type === "tool_result");
+const answered = (run: DrivenRun): string => {
+  assert.equal(
+    run.outcome.kind,
+    "answered",
+    `the run failed: ${run.outcome.kind === "failed" ? run.outcome.error.message : ""}`,
+  );
+  return run.outcome.kind === "answered" ? run.outcome.answer : "";
+};
+const failed = (run: DrivenRun): Error => {
+  assert.equal(run.outcome.kind, "failed", "the run answered where it should have failed");
+  return run.outcome.kind === "failed" ? run.outcome.error : new Error("unreachable");
+};
+/** The model's first call of the run: the roster it was offered and the conversation it was seeded with. */
+const firstModelCall = (run: DrivenRun) => {
+  const first = run.modelCalls[0];
+  assert.ok(first, "the model was never called");
+  return first;
+};
+const offeredTools = (run: DrivenRun): string[] => (firstModelCall(run).tools ?? []).map((t) => t.name);
+const userTexts = (m: ChatMessage): string[] =>
+  m.role === "user" ? m.content.flatMap((p) => (p.type === "text" ? [p.text] : [])) : [];
+
+/** Another harness's facts, for the row that hands a driver a row it did not write. */
+export function foreignFactsFor(name: HarnessName): HarnessFacts {
+  return name === "opencode"
+    ? { harness: "pi", pid: 31, logOffset: 0, root: "/tmp/switchboard-pi-run-c", relaunches: 0 }
+    : {
+        harness: "opencode",
+        pid: 31,
+        port: 41000,
+        logOffset: 0,
+        sessionID: "ses_c",
+        root: "/tmp/switchboard-oc-run-c",
+        relaunches: 0,
+      };
+}
+
+const resumeOf = (facts: HarnessFacts): HarnessResume => ({
+  messages: [{ role: "user", content: [{ type: "text", text: "carry on" }] }],
+  settlements: [],
+  remainingMs: 5 * 60_000,
+  turn: 0,
+  inboxConsumedSeq: 0,
+  facts,
+});
+
+/** The record's clauses as rows, in the record's order, then the parity rows. */
+export const SCENARIOS: readonly ScenarioRow[] = [
+  {
+    id: "credential-bearer-only",
+    clause: "credential",
+    title:
+      "the process is started with the run bearer in its environment and no provider key, neither the run events nor the ledger steps carry the bearer, and a request into the process's server carries its auth in secretHeaders, never in plain headers",
+    script: { turns: [call("c1", "bash", { command: "echo hi" }), text("done")] },
+    check: (run, driver) => {
+      assert.equal(run.starts.length, 1);
+      const env = run.starts[0].env;
+      assert.ok(Object.values(env).includes(driver.bearer), "the bearer is not in the process's environment");
+      const keys = Object.keys(env).filter((k) => /API_KEY|_TOKEN$|SECRET/i.test(k) && env[k] !== driver.bearer);
+      assert.deepEqual(keys, [], `a provider key reached the process: ${keys.join(", ")}`);
+      const secret = driver.bearer.slice(driver.bearer.indexOf(".") + 1);
+      assert.ok(!JSON.stringify(run.events).includes(secret), "a run event carries the bearer");
+      assert.ok(!JSON.stringify(run.steps).includes(secret), "a ledger step carries the bearer");
+      // The exec classes log a request's command text: a secret in `headers` would be in the logs, one in `secretHeaders` rides the env channel.
+      for (const req of run.requests) {
+        const plain = Object.keys(req.headers ?? {}).filter((h) => AUTH_HEADER.test(h));
+        assert.deepEqual(
+          plain,
+          [],
+          `a request carries its auth in plain headers: ${plain.join(", ")} ${req.method} ${req.path}`,
+        );
+        assert.ok(
+          !JSON.stringify(req.headers ?? {}).includes(secret),
+          `a request's plain headers carry the bearer: ${req.path}`,
+        );
+      }
+      assert.equal(answered(run), "done");
+    },
+  },
+  {
+    id: "gate-decides-every-call",
+    clause: "gate",
+    title:
+      "every tool call the harness runs is decided by the bot: an allowed command runs and its result is on the record, a push to a protected branch is refused with a tool_refused note and the model reads the reason",
+    script: {
+      turns: [
+        call("c1", "bash", { command: "echo hi" }),
+        call("c2", "bash", { command: "git push origin main" }),
+        text("stopped pushing"),
+      ],
+    },
+    check: (run) => {
+      assert.equal(answered(run), "stopped pushing");
+      const results = toolResults(run);
+      assert.deepEqual(
+        results.map((r) => [r.callId, r.ok]),
+        [
+          ["c1", true],
+          ["c2", false],
+        ],
+      );
+      const refused = notes(run).filter((n) => n.kind === "tool_refused");
+      assert.equal(refused.length, 1, "one tool_refused note for the push");
+      assert.match(refused[0].summary, /main/);
+    },
+  },
+  {
+    id: "gate-bypass-fails-closed",
+    clause: "gate",
+    title:
+      "a command the harness ran without asking fails the run closed: a harness_error note names the call, the process is ended, and the run's outcome is the bypass by name",
+    script: { turns: [call("c1", "bash", { command: "ls" }), text("never")], bypassGate: true },
+    check: (run) => {
+      const error = failed(run);
+      assert.match(error.message, /bypassed/);
+      const bypass = notes(run).find((n) => n.kind === "harness_error" && /bypassed/.test(n.summary));
+      assert.ok(bypass, "no harness_error note names the bypass");
+      assert.match(bypass.summary, /c1/);
+      assert.ok(run.killed.length > 0, "the process was not ended");
+    },
+  },
+  {
+    id: "relay-runs-in-bot",
+    clause: "relay",
+    title:
+      "a relayed tool is served to the model under its own name and runs in the bot under the run's context: its side effect lands in the run's context and its call and result are on the record",
+    script: { turns: [call("c1", "update_status", { checklist: "○ first step" }), text("noted")] },
+    check: (run) => {
+      assert.equal(answered(run), "noted");
+      assert.deepEqual(run.statusReports, ["○ first step"]);
+      assert.ok(offeredTools(run).includes("update_status"), "the relayed tool was not offered");
+      assert.deepEqual(
+        toolCalls(run).map((c) => c.tool),
+        ["update_status"],
+      );
+      assert.deepEqual(
+        toolResults(run).map((r) => [r.tool, r.ok]),
+        [["update_status", true]],
+      );
+    },
+  },
+  {
+    id: "record-vocabulary-and-steps",
+    clause: "record",
+    title:
+      "the run's events are the record's vocabulary — tool_call, tool_result, run_note — and every assistant turn is one ledger step with its calls in flight, the results as the next step's user turn",
+    script: { turns: [call("c1", "bash", { command: "echo hi" }), text("all done")] },
+    check: (run) => {
+      assert.equal(answered(run), "all done");
+      const kinds = new Set(run.events.map((e) => e.type));
+      for (const k of kinds)
+        assert.ok(
+          ["tool_call", "tool_result", "run_note", "assistant", "input"].includes(k),
+          `an event kind outside the record's vocabulary: ${k}`,
+        );
+      assert.ok(kinds.has("tool_call") && kinds.has("tool_result"));
+      assert.equal(run.steps.length, 2, "one step per assistant turn");
+      assert.deepEqual(run.steps[0].inFlight, [{ callId: "c1", tool: "bash" }]);
+      assert.deepEqual(run.steps[1].inFlight, []);
+      const resultTurn = run.steps[1].turns.find(
+        (t) => t.role === "user" && t.content.some((p) => p.type === "tool_result"),
+      );
+      assert.ok(resultTurn, "the tool's result is not the next step's user turn");
+    },
+  },
+  {
+    id: "record-unknown-kind-noted",
+    clause: "record",
+    title:
+      "an event kind the harness's table does not name lands as a harness_error note naming it, and the run goes on to its answer",
+    script: { turns: [text("fine")], unknownEventKind: "made_up_kind" },
+    check: (run) => {
+      assert.equal(answered(run), "fine");
+      const note = notes(run).find((n) => n.kind === "harness_error" && n.summary.includes("made_up_kind"));
+      assert.ok(note, "no harness_error note names the unknown kind");
+    },
+  },
+  {
+    id: "conversation-seed-then-prompt",
+    clause: "conversation",
+    title:
+      "the thread's earlier turns seed the process and the request is the prompt: the model's first call sees the seed then the request, and the first ledger step counts from the seed's end",
+    script: {
+      seed: [
+        { role: "user", content: [{ type: "text", text: "earlier question" }] },
+        { role: "assistant", content: [{ type: "text", text: "earlier answer" }] },
+      ],
+      request: "and now this",
+      turns: [text("continuing")],
+    },
+    check: (run) => {
+      assert.equal(answered(run), "continuing");
+      const seen = firstModelCall(run).messages;
+      assert.deepEqual(
+        seen.map((m) => m.role),
+        ["user", "assistant", "user"],
+      );
+      assert.deepEqual(userTexts(seen[0]), ["earlier question"]);
+      assert.deepEqual(userTexts(seen[2]), ["and now this"]);
+      assert.equal(run.steps[0].firstIdx, 3, "the first step counts from the seed's end");
+    },
+  },
+  {
+    id: "conversation-steer",
+    clause: "conversation",
+    title:
+      "a thread follow-up is steered into the running process as the next user turn: an input event and a follow_up note on the record, the text in the model's next call",
+    script: {
+      turns: [call("c1", "bash", { command: "echo hi" }), text("also did that")],
+      followUp: "also check the docs",
+    },
+    check: (run) => {
+      assert.equal(answered(run), "also did that");
+      const input = run.events.find((e) => e.type === "input" && e.text === "also check the docs");
+      assert.ok(input, "no input event for the follow-up");
+      assert.ok(
+        notes(run).some((n) => n.kind === "follow_up"),
+        "no follow_up note",
+      );
+      assert.ok(
+        run.modelCalls.some((c) => c.messages.some((m) => userTexts(m).some((t) => t.includes("also check the docs")))),
+        "the model never read the follow-up",
+      );
+    },
+  },
+  {
+    id: "conversation-hard-stop",
+    clause: "conversation",
+    title: "a hard stop ends the process: a stopped note in mode hard, the process ended, the abort line as the answer",
+    script: { turns: [call("c1", "bash", { command: "echo hi" }), text("never")], hardStopBeforeModelCall: 2 },
+    check: (run) => {
+      assert.equal(answered(run), HARD_STOP_MESSAGE);
+      const stopped = notes(run).find((n) => n.kind === "stopped");
+      assert.ok(stopped, "no stopped note");
+      assert.equal(stopped.mode, "hard");
+      assert.ok(run.killed.length > 0, "the process was not ended");
+    },
+  },
+  {
+    id: "survival-facts-on-row",
+    clause: "survival",
+    title:
+      "the row's facts name the harness, the pid, the container and a relaunch count of zero, and survive a parse round trip",
+    script: { turns: [text("ok")] },
+    check: (run, driver) => {
+      assert.equal(answered(run), "ok");
+      assert.ok(run.facts.length > 0, "no facts were saved");
+      const first = run.facts[0];
+      assert.equal(first.harness, driver.harness);
+      assert.equal(typeof first.pid, "number");
+      assert.equal(first.relaunches, 0);
+      assert.equal(first.container, driver.containerWord);
+      const last = run.facts[run.facts.length - 1];
+      assert.deepEqual(harnessFactsOf(JSON.parse(JSON.stringify(last))), last);
+      assert.ok(!notes(run).some((n) => n.kind === "harness_error"), "a harness_error note on a clean run");
+    },
+  },
+  {
+    id: "survival-another-container",
+    clause: "survival",
+    title:
+      "a resume whose facts name another container neither probes nor ends the pid there: a fresh process starts on the record and a resumed note names the orphan by pid and container",
+    script: (driver) => ({
+      turns: [text("resumed")],
+      resume: resumeOf(driver.facts({ pid: 999, container: "vm-old" })),
+    }),
+    check: (run) => {
+      assert.equal(answered(run), "resumed");
+      assert.ok(!run.killed.includes(999), "the orphan's pid was ended here");
+      assert.equal(run.starts.length, 1, "no fresh process was started");
+      const note = notes(run).find(
+        (n) => n.kind === "resumed" && n.summary.includes("999") && n.summary.includes("vm-old"),
+      );
+      assert.ok(note, "no resumed note names the orphan by pid and container");
+    },
+  },
+  {
+    id: "survival-foreign-row-refused",
+    clause: "survival",
+    title:
+      "a resume whose facts another harness wrote is refused before anything is started: a harness_error note names both harnesses, the outcome is the mismatch, and find answers another-harness",
+    script: (driver) => ({ turns: [text("never")], resume: resumeOf(foreignFactsFor(driver.harness)) }),
+    check: async (run, driver) => {
+      const error = failed(run);
+      assert.ok(error instanceof HarnessMismatchError, `not a HarnessMismatchError: ${error.message}`);
+      assert.equal(run.starts.length, 0, "a process was started for a foreign row");
+      const foreign = foreignFactsFor(driver.harness);
+      const note = notes(run).find((n) => n.kind === "harness_error" && n.summary.includes(foreign.harness));
+      assert.ok(note, "no harness_error note names the foreign harness");
+      assert.ok(note.summary.includes(driver.harness));
+      assert.equal(await driver.find(foreign), "another-harness");
+    },
+  },
+  {
+    id: "parity-roster",
+    clause: "parity",
+    title:
+      "the tools the model is offered are exactly the harness's own tools for the identity plus the relayed ones, and every call it makes names one of them",
+    script: { turns: [call("c1", "bash", { command: "echo hi" }), text("ok")] },
+    check: (run, driver) => {
+      assert.equal(answered(run), "ok");
+      const offered = new Set(offeredTools(run));
+      const expected = new Set([...driver.object.builtinTools("write"), "update_status"]);
+      assert.deepEqual(offered, expected);
+      for (const c of toolCalls(run)) assert.ok(offered.has(c.tool), `a call to a tool never offered: ${c.tool}`);
+    },
+  },
+  {
+    id: "parity-identity-none",
+    clause: "parity",
+    title:
+      "under identity none the model is offered the relayed tools alone, and a shell call it makes anyway is refused by name with a tool_refused note",
+    script: { identity: "none", turns: [call("c1", "bash", { command: "ls" }), text("no shell here")] },
+    check: (run, driver) => {
+      assert.equal(answered(run), "no shell here");
+      assert.deepEqual(driver.object.builtinTools("none"), []);
+      const offered = offeredTools(run);
+      assert.deepEqual(offered, ["update_status"]);
+      const refused = notes(run).find((n) => n.kind === "tool_refused" && /bash/.test(n.summary));
+      assert.ok(refused, "the shell call was not refused by name");
+      assert.deepEqual(
+        toolResults(run).map((r) => r.ok),
+        [false],
+      );
+    },
+  },
+  {
+    id: "parity-identity-read",
+    clause: "parity",
+    title:
+      "under identity read the model holds no edit or write tool, an edit it asks for anyway is refused as outside its reach, and a read runs",
+    script: {
+      identity: "read",
+      turns: [
+        call("c1", "edit", { path: "README.md", oldText: "a", newText: "b" }),
+        call("c2", "read", { path: "README.md" }),
+        text("read only"),
+      ],
+    },
+    check: (run, driver) => {
+      assert.equal(answered(run), "read only");
+      const offered = new Set(offeredTools(run));
+      assert.ok(!offered.has("edit") && !offered.has("write"));
+      assert.ok(offered.has("read"));
+      assert.deepEqual(new Set(driver.object.builtinTools("read")).has("edit"), false);
+      assert.deepEqual(
+        toolResults(run).map((r) => [r.callId, r.ok]),
+        [
+          ["c1", false],
+          ["c2", true],
+        ],
+      );
+      assert.ok(notes(run).some((n) => n.kind === "tool_refused" && /edit/.test(n.summary)));
+    },
+  },
+];
+
+/** The record's keys a row must read: a row that reads neither proves nothing about the record. */
+export const RECORD_KEYS: readonly (keyof DrivenRun)[] = ["events", "steps"];
+
+/** One row against one driver, under the lint: the run as the driver returns
+ *  it, wrapped so every property the check reads is recorded; a check that
+ *  passed without reading the run events or the ledger steps fails here. */
+export async function runRow(driver: HarnessDriver, row: ScenarioRow): Promise<{ reads: Set<string> }> {
+  const script = typeof row.script === "function" ? row.script(driver) : row.script;
+  const run = await driver.run(script);
+  const reads = new Set<string>();
+  const watched = new Proxy(run, {
+    get(target, key, receiver) {
+      if (typeof key === "string") reads.add(key);
+      return Reflect.get(target, key, receiver);
+    },
+  });
+  await row.check(watched, driver);
+  assertReadsRecord(row, reads);
+  return { reads };
+}
+
+/** The lint itself, on what a check read. */
+export function assertReadsRecord(row: Pick<ScenarioRow, "id">, reads: ReadonlySet<string>): void {
+  assert.ok(
+    RECORD_KEYS.some((k) => reads.has(k)),
+    `row ${row.id} asserts nothing on the record: its check read neither ${RECORD_KEYS.join(" nor ")}`,
+  );
+}
+
+export type RowOutcome = "pass" | "fail" | "absent";
+
+export interface MatrixColumn {
+  harness: HarnessName;
+  rows: Record<string, RowOutcome>;
+}
+
+/** Every row against every driver, each outcome caught, for the printer. */
+export async function buildHarnessConformanceMatrix(drivers: readonly HarnessDriver[]): Promise<MatrixColumn[]> {
+  const columns: MatrixColumn[] = [];
+  for (const driver of drivers) {
+    const rows: Record<string, RowOutcome> = {};
+    for (const row of SCENARIOS) {
+      try {
+        await runRow(driver, row);
+        rows[row.id] = "pass";
+      } catch {
+        rows[row.id] = "fail";
+      }
+    }
+    columns.push({ harness: driver.harness, rows });
+  }
+  return columns;
+}
+
+const CELL: Record<RowOutcome, string> = { pass: "✅", fail: "❌", absent: "—" };
+
+/** The matrix as Markdown: one row per scenario, one column per harness, a
+ *  harness with no driver shown absent. */
+export function renderHarnessConformanceMatrix(
+  columns: readonly MatrixColumn[],
+  harnesses?: readonly HarnessName[],
+): string {
+  const names = harnesses ?? columns.map((c) => c.harness);
+  const out: string[] = [
+    `**${SCENARIOS.length} rows × ${names.length} harness(es)** — record 0038's six clauses and the parity rows, one table for every harness; ✅ passes, ❌ fails, — no driver.`,
+    "",
+    `| Clause | Row | ${names.join(" | ")} |`,
+    `|---|---|${names.map(() => ":-:").join("|")}|`,
+  ];
+  for (const row of SCENARIOS) {
+    const cells = names.map((n) => CELL[columns.find((c) => c.harness === n)?.rows[row.id] ?? "absent"]);
+    out.push(`| ${row.clause} | \`${row.id}\` — ${row.title} | ${cells.join(" | ")} |`);
+  }
+  out.push("");
+  return out.join("\n");
+}
