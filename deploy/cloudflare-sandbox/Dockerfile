@@ -37,8 +37,15 @@ ENV COMMAND_TIMEOUT_MS=1240000
 # call. The sandbox is already root with full capabilities inside its own
 # microVM, so a container a run starts shares that run's blast radius and
 # nothing more; no privileged flag or capability is added anywhere.
+# squashfs-tools (`unsquashfs`): the seed (docs/reference/specs/execution.md
+# item 25) restores the resident's snapshot with the SDK's presigned restore,
+# which MOUNTS the archive (squashfuse + fuse-overlayfs) instead of extracting
+# it; the Worker extracts it onto the disk the way the resident does
+# (resident-repos item 61) so the checkout is one plain ext4 tree. The build
+# asserts the binary with the probe the extract script uses (`command -v`).
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git curl ca-certificates docker.io iptables \
+  && apt-get install -y --no-install-recommends git curl ca-certificates docker.io iptables squashfs-tools \
+  && command -v unsquashfs >/dev/null \
   && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
        -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
   && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \

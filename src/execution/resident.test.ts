@@ -1387,3 +1387,59 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     expect(calls.map(route)).toEqual(["/read", "/status", "/status", "/attach", "/read"]);
   });
 });
+
+// docs/reference/specs/execution.md item 25: the probe carries the seed handle
+// the resident publishes — the checkout archive, the deps entry when one has
+// been taken, the stamp — and nothing when the body has no snapshot of that shape.
+describe("ResidentExecutor.probeStatus — the seed handle", () => {
+  it("carries snapshot.{checkoutBackupId, depsBackupId, ref, sha} as `seed`, the deps id only when present", async () => {
+    stubFetch({
+      body: {
+        state: "warm",
+        reason: "",
+        snapshot: {
+          ref: "main",
+          sha: "0123456789abcdef0123456789abcdef01234567",
+          lockfileHash: "l1",
+          createdAt: "t",
+          mirrorBackupId: "m-1",
+          checkoutBackupId: "c-1",
+          depsBackupId: "d-1",
+        },
+      },
+    });
+    const probe = await ResidentExecutor.probeStatus("https://resident.example", "t", "repo:x/y", 2000);
+    expect(probe).toEqual({
+      kind: "status",
+      state: "warm",
+      reason: "",
+      seed: {
+        checkoutBackupId: "c-1",
+        depsBackupId: "d-1",
+        ref: "main",
+        sha: "0123456789abcdef0123456789abcdef01234567",
+      },
+    });
+    stubFetch({
+      body: {
+        state: "warm",
+        reason: "",
+        snapshot: { ref: "main", sha: "s", checkoutBackupId: "c-1", depsBackupId: null },
+      },
+    });
+    const noDeps = await ResidentExecutor.probeStatus("https://resident.example", "t", "repo:x/y", 2000);
+    expect(noDeps).toMatchObject({ seed: { checkoutBackupId: "c-1", ref: "main", sha: "s" } });
+    expect((noDeps as { seed: object }).seed).not.toHaveProperty("depsBackupId");
+  });
+
+  it("a body without a snapshot, or with one missing its ids, carries no seed", async () => {
+    stubFetch({ body: { state: "onboarding", reason: "", snapshot: null } });
+    expect(await ResidentExecutor.probeStatus("https://resident.example", "t", "repo:x/y", 2000)).not.toHaveProperty(
+      "seed",
+    );
+    stubFetch({ body: { state: "warm", reason: "", snapshot: { ref: "main", sha: "s" } } });
+    expect(await ResidentExecutor.probeStatus("https://resident.example", "t", "repo:x/y", 2000)).not.toHaveProperty(
+      "seed",
+    );
+  });
+});

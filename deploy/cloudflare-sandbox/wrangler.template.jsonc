@@ -14,6 +14,25 @@
   "workers_dev": false,
   "routes": [{ "pattern": "{{hostname}}", "custom_domain": true }],
   "observability": { "enabled": true },
+  // {{#if resident}}
+  // The seed (docs/reference/specs/execution.md item 25): a cold sandbox restores
+  // the resident's checkout snapshot and its deps-store entry from the
+  // RESIDENT's cache bucket before the run's first command. The restore is
+  // presigned — the container downloads the archive over a URL the Durable
+  // Object signs, so a gigabyte never crosses the isolate — and the SDK's
+  // `requirePresignedURLSupport` reads four values: these two vars and the
+  // R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY secrets (deploy/secrets.manifest.json,
+  // the resident's own token). With any of them absent the Worker answers
+  // `seed-unconfigured` and the run goes cold, as before the seed; /healthz
+  // `backupTransfer` says which. The bucket is the resident's, named after its
+  // script exactly as the resident's template names it. A profile without a
+  // resident has nothing to seed from and renders none of this.
+  "vars": {
+    "CLOUDFLARE_ACCOUNT_ID": "{{account}}",
+    "BACKUP_BUCKET_NAME": "{{resident.script}}-cache"
+  },
+  "r2_buckets": [{ "binding": "BACKUP_BUCKET", "bucket_name": "{{resident.script}}-cache" }],
+  // {{/if}}
   "containers": [
     {
       "class_name": "SwitchboardSandbox",

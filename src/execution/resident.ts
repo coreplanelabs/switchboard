@@ -363,7 +363,32 @@ export class ResidentOperations implements Operations {
  *  marker. `transport: true` means the failure was network-level (fetch threw
  *  or timed out) — the only kind the factory's negative cache may store. */
 export type ResidentStatusProbe =
-  { kind: "status"; state: string; reason: string } | { kind: "unreachable"; error: string; transport: boolean };
+  | { kind: "status"; state: string; reason: string; seed?: ResidentSeedHandle }
+  | { kind: "unreachable"; error: string; transport: boolean };
+
+/** The seed handle a resident's `/status` publishes (docs/reference/specs/execution.md
+ *  item 25): the snapshot's checkout archive, the deps entry archive for its
+ *  lockfile key when one has been taken, and the stamp they were taken at.
+ *  Carried on the probe only when the body's `snapshot` has the shape. */
+export interface ResidentSeedHandle {
+  checkoutBackupId: string;
+  depsBackupId?: string;
+  ref: string;
+  sha: string;
+}
+
+function seedHandleOf(snapshot: unknown): ResidentSeedHandle | undefined {
+  if (typeof snapshot !== "object" || snapshot === null) return undefined;
+  const s = snapshot as Record<string, unknown>;
+  if (typeof s.checkoutBackupId !== "string" || typeof s.ref !== "string" || typeof s.sha !== "string")
+    return undefined;
+  return {
+    checkoutBackupId: s.checkoutBackupId,
+    ...(typeof s.depsBackupId === "string" ? { depsBackupId: s.depsBackupId } : {}),
+    ref: s.ref,
+    sha: s.sha,
+  };
+}
 
 export class ResidentExecutor implements Executor {
   /** Consecutive `runtime-replaced` answers on the idempotent routes (/read,
@@ -425,7 +450,13 @@ export class ResidentExecutor implements Executor {
     if (!res.ok) {
       return { kind: "unreachable", error: `probe HTTP ${res.status}: ${String(data.error ?? "")}`, transport: false };
     }
-    return { kind: "status", state: residentState(data.state), reason: String(data.reason ?? "") };
+    const seed = seedHandleOf(data.snapshot);
+    return {
+      kind: "status",
+      state: residentState(data.state),
+      reason: String(data.reason ?? ""),
+      ...(seed ? { seed } : {}),
+    };
   }
 
   /** POST one route; resource + threadKey ride in every body. Reads the FULL
