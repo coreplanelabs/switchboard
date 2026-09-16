@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.231.1](https://github.com/coreplanelabs/switchboard/compare/v1.231.0...v1.231.1) (2026-09-16)
+
+
+### Bug fixes
+
+* **slack:** the relay footer is read from the message's blocks, where Slack puts it, and the person it names is the requester outright ([#1319](https://github.com/coreplanelabs/switchboard/issues/1319)) ([2fa5190](https://github.com/coreplanelabs/switchboard/commit/2fa5190699beb8b122bfef06dc09e7a8d22f12ae))
+* **workers:** a container answer keeps the length it named — the bot shim re-frames every bodied answer through a FixedLengthStream so a whole-object artifact reaches the browser sized, and the opened players preload in full ([#1316](https://github.com/coreplanelabs/switchboard/issues/1316)) ([77d71f7](https://github.com/coreplanelabs/switchboard/commit/77d71f7d513f9f2add505e5dd3ac91005e2f4d54))
+
+
+### Documentation
+
+* **docs:** link Known limits from the thread-continues Read next list ([#1315](https://github.com/coreplanelabs/switchboard/issues/1315)) ([008d29f](https://github.com/coreplanelabs/switchboard/commit/008d29f04c400946e8317ea9a445f7ddbe9ba139))
+* **docs:** link the runs page to the thread-continuation explainer ([#1320](https://github.com/coreplanelabs/switchboard/issues/1320)) ([8966d27](https://github.com/coreplanelabs/switchboard/commit/8966d275b0c3a413cc708c3eb1f9c8467dba1ae5))
+* **docs:** stage A of record 0038 starts when the seam is quiet, a rework touches it or pi is at risk — the cheap slice's three triggers, the maintainer's ask of 2026-09-16 ([#1317](https://github.com/coreplanelabs/switchboard/issues/1317)) ([e854799](https://github.com/coreplanelabs/switchboard/commit/e85479952645c93f59f20631bfefa14824cdfa13))
+
 ## [1.231.0](https://github.com/coreplanelabs/switchboard/compare/v1.230.0...v1.231.0) (2026-09-16)
 
 
