@@ -1918,6 +1918,42 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       (await call(h, "unit-end", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10", ending: { kind: "x" } })).status,
     ).toBe(400);
 
+    // A review_pending ending's headSha — the coding child's own last push —
+    // is persisted on the row as lastPush, so the next attempt's pre-check can
+    // start at the review round; a value that is not a sha leaves the row alone.
+    expect(
+      (
+        await call(h, "unit-end", {
+          parentInstanceId: PLAN_INSTANCE.id,
+          unit: "U10",
+          ending: { kind: "review_pending", report: "⏸ capped" },
+          headSha: "ABCDEF1234abcdef1234abcdef1234abcdef1234",
+        })
+      ).status,
+    ).toBe(200);
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0].lastPush).toBe(
+      "abcdef1234abcdef1234abcdef1234abcdef1234",
+    );
+    await call(h, "unit-end", {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U10",
+      ending: { kind: "review_pending", report: "⏸ capped" },
+      headSha: "not-a-sha",
+    });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0].lastPush).toBe(
+      "abcdef1234abcdef1234abcdef1234abcdef1234",
+    );
+    // Restore the merge_ready ending for the finish assertions below.
+    await call(h, "unit-end", {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U10",
+      ending: {
+        kind: "merge_ready",
+        report: "✅ Merge-ready after 1 review round: https://github.com/acme/api/pull/7",
+      },
+      pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+    });
+
     expect(await call(h, "finish", { parentInstanceId: PLAN_INSTANCE.id, outcome: "completed" })).toEqual({
       status: 200,
       body: { ok: true, runId: "run-parent", at: NOW },

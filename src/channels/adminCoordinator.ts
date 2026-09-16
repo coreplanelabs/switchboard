@@ -1211,11 +1211,16 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   const row = units.find((u) => u.unit === body.unit);
   if (!row) return json(404, { ok: false, error: "unit_not_found", unit: body.unit });
   const pr = body.pr as { number?: unknown; url?: unknown } | undefined;
+  // A review_pending ending names the coding child's own last push (the
+  // driver's `headSha`): persisted on the row as `lastPush`, so the next
+  // attempt's rows carry it and its pre-check starts at the review round.
+  const lastPush = normalizeHead(body.headSha);
   const updated: CoordinatorUnit = {
     ...row,
     ...(pr && typeof pr.number === "number" && typeof pr.url === "string"
       ? { pr: { number: pr.number, url: pr.url } }
       : {}),
+    ...(lastPush !== undefined ? { lastPush } : {}),
     ending: { kind: ending.kind, report: ending.report, at },
   };
   await deps.instances.putUnits([updated]);

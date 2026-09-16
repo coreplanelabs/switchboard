@@ -444,7 +444,11 @@ async function runUnit(
   // A resume at review (agent-ship item 10) rides the unit's row: the pull
   // request of ship's own the requester named opens the pipeline at its first
   // review round, with no pre-check, no branch and no round 0.
-  const resume = plan.units.find((u) => u.unit === unit)?.resume;
+  const row = plan.units.find((u) => u.unit === unit);
+  const resume = row?.resume;
+  // A previous attempt's `review_pending` head: the machine's pre-check starts
+  // at the review round when the open pull request still heads exactly there.
+  const lastPush = row?.lastPush;
   let state: UnitPipelineState = openUnitPipeline(
     {
       unit: { id: unit, branch: node.branch },
@@ -459,6 +463,7 @@ async function runUnit(
       merge: plan.merge,
       generated: plan.generated,
       ...(resume !== undefined ? { resume } : {}),
+      ...(lastPush !== undefined ? { lastPush } : {}),
     },
     start.at,
   );
@@ -504,6 +509,11 @@ async function runUnit(
           ...tag,
           ending: { kind: note.ending.kind, report: renderUnitReport(state, endFacts) },
           ...(state.pr !== undefined ? { pr: state.pr } : {}),
+          // A review_pending ending names the child's own last push so the next
+          // attempt's pre-check can start at the review round (the row's lastPush).
+          ...(note.ending.kind === "review_pending" && note.ending.headSha !== undefined
+            ? { headSha: note.ending.headSha }
+            : {}),
           ...(state.lastCodingRunId !== undefined ? { codingRunId: state.lastCodingRunId } : {}),
         };
         await step.do(`${unit}/end`, STEP_CONFIG, () => call(bot, "unit-end", body));
