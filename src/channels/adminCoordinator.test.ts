@@ -2217,6 +2217,41 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     for (const h of [red, running, none, unreadable]) expect(h.merges).toEqual([]);
   });
 
+  it("a conflicting pull request (mergeable_state dirty) is refused at once, before the checks are read — zero checks stays pending only on a mergeable pull request", async () => {
+    // Checks unreadable would answer 502; the dirty refusal lands first, so
+    // the checks were never consulted.
+    const dirty = await mergeHarness({
+      prFacts: facts({ mergeable: false, mergeableState: "dirty" }),
+      checks: undefined,
+    });
+    expect(await merge(dirty)).toEqual({
+      status: 200,
+      body: {
+        ok: true,
+        outcome: "refused",
+        reason: `acme/api#7 conflicts with \`main\` at \`${HEAD.slice(0, 7)}\`, rebase and re-issue`,
+        at: NOW,
+      },
+    });
+    expect(dirty.merges).toEqual([]);
+    // The refusal names the pull request's own base — a stacked unit rebases
+    // onto its parent, not onto main.
+    const stacked = await mergeHarness({
+      prFacts: facts({ mergeable: false, mergeableState: "dirty", baseRef: "plan/fixture/u9" }),
+      checks: undefined,
+    });
+    expect((await merge(stacked)).body).toMatchObject({
+      outcome: "refused",
+      reason: `acme/api#7 conflicts with \`plan/fixture/u9\` at \`${HEAD.slice(0, 7)}\`, rebase and re-issue`,
+    });
+    // A mergeable pull request with zero checks still answers pending.
+    const clean = await mergeHarness({
+      prFacts: facts({ mergeable: true, mergeableState: "clean" }),
+      checks: { total: 0, pending: [], failed: [] },
+    });
+    expect((await merge(clean)).body).toMatchObject({ outcome: "pending" });
+  });
+
   it("GitHub's own refusal of the squash — a conflict, a branch protection, a head that moved between the check and the merge — is answered as refused in GitHub's words; the pull request unreadable or the merge call failing is a passing 502; a malformed body is 400 and an unknown instance or unit 404", async () => {
     const conflict = await mergeHarness({ merge: { ok: false, status: 405, reason: "Pull Request is not mergeable" } });
     expect((await merge(conflict)).body).toMatchObject({

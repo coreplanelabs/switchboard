@@ -427,7 +427,9 @@ function renderFirstInstruction(rebase: ChildContract["rebase"]): string {
   const onto = rebase.onto ? `\`${rebase.onto}\`` : "the merged parent";
   return (
     `Rebase ${branch} onto ${onto} before any other work — the parent unit has merged and the base has moved; ` +
-    `the only writes are your own on that branch. A conflict ends the unit: report it as the handoff and stop.`
+    `the only writes are your own on that branch. A conflict ends the unit: report it as the handoff and stop. ` +
+    `Right before the push, fetch ${onto} again and rebase once more if it moved during verify, ` +
+    `so the pull request is not born conflicting.`
   );
 }
 

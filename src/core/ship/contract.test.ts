@@ -363,6 +363,12 @@ describe("renderContract — one block under `## Contract`, fixed sub-headings i
     expect([...order].sort((a, b) => a - b)).toEqual(order);
     // the first instruction names the branch and the parent
     expect(text).toContain("Rebase `plan/fixture/u10-warm-the-cache` onto `main`");
+    // the first instruction also carries the pre-push re-fetch, so the pull
+    // request is not born conflicting when main moved during verify
+    expect(text).toContain(
+      "Right before the push, fetch `main` again and rebase once more if it moved during verify, " +
+        "so the pull request is not born conflicting.",
+    );
     // the unit: its id and title on the fixed heading, its bullets verbatim
     expect(text).toContain(`${CONTRACT_SECTION_HEADINGS.unit} U10 — Warm the cache on wake`);
     expect(text).toContain(
