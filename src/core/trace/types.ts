@@ -68,6 +68,11 @@ export interface SpanOptions {
  *  plain fetch it was. */
 export interface TraceOptions {
   span?: Span;
+  /** Which door the call came through when it was not the surface's own
+   *  grammar: `route` for a command the request router bound from prose
+   *  (record 0036). Copied onto the registry's audit line, never read by a
+   *  handler. Absent for a typed command. */
+  source?: "route";
 }
 
 export interface Span {

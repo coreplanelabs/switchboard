@@ -421,7 +421,16 @@ export async function dispatch(
       // A restart is the same run under the same card: the row's decision
       // (run-history item 35) is the route, re-resolved, never re-asked.
       ...(restart?.row.meta.route ? { carried: restart.row.meta.route } : {}),
+      // The command menu (record 0036, unit 2): the router may call a chat
+      // command instead of routing; the branch answers it here — a write
+      // handed back, a read run through the registry — with no card, no
+      // thread claim and no agent run.
+      command: { deps, io, ending, trace, history },
     });
+    // A command the router bound has been answered (record 0039): the reply
+    // went out, a read's run is sealed by the drain, and the dispatch is over
+    // before the agent gate and the thread claim.
+    if (routing.kind === "command") return ended;
     if (routing.kind === "routed") {
       resolved = routing.resolved;
       route = routing.route;

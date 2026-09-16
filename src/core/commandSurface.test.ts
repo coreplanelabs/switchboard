@@ -6,6 +6,7 @@ import {
   catalogueText,
   chatCatalogueText,
   chatHelpText,
+  chatInvocation,
   cliFlag,
   helpText,
   httpPath,
@@ -393,5 +394,42 @@ describe("help", () => {
     });
     expect(chatHelpText(bare)).toContain("• `--quiet`");
     expect(chatHelpText(bare)).not.toMatch(/—\s*$/m);
+  });
+});
+
+describe("chatInvocation — a bound input spelled as the chat line that reads back to it (record 0036, unit 2)", () => {
+  /** The tokens of a chat line past its two command words; a line the tokenizer refuses fails the test. */
+  const tailTokens = (line: string): string[] => {
+    const t = tokenize(line);
+    if (!t.ok) throw new Error(t.error);
+    return t.tokens.slice(2);
+  };
+  it("positionals in declared order, options as --kebab flags, nested keys dotted, tokens quoted as the tokenizer needs; parseInvocation reads the same { args, options } back", () => {
+    const line = chatInvocation(propose, {
+      args: [],
+      options: { dryRun: true, top: 3, models: { coding: "anthropic/claude-opus-5" } },
+    });
+    expect(line).toBe("friction propose --dry-run --top 3 --models.coding anthropic/claude-opus-5");
+    const back = parseInvocation(propose, tailTokens(line));
+    expect(back).toEqual({
+      kind: "invoke",
+      input: { args: [], options: { dryRun: true, top: "3", models: { coding: "anthropic/claude-opus-5" } } },
+    });
+    // A rest argument is spelled word by word — the grammar joins the rest
+    // positionals back with single spaces — so only the word holding quotes
+    // needs quoting, and the read-back is the original text.
+    const withArgs = chatInvocation(instructions, { args: ["channel", `say "hi" to every new thread`], options: {} });
+    expect(withArgs).toBe(`config instructions channel say '"hi"' to every new thread`);
+    const readBack = parseInvocation(instructions, tailTokens(withArgs));
+    expect(readBack).toEqual({
+      kind: "invoke",
+      input: { args: ["channel", `say "hi" to every new thread`], options: {} },
+    });
+  });
+
+  it("a missing trailing positional is left out and an undefined option never spells; the command's words come from its id", () => {
+    expect(chatInvocation(stop, { args: [undefined], options: { mode: "soft" } })).toBe("runs stop --mode soft");
+    expect(chatInvocation(stop, { args: ["run-7"], options: {} })).toBe("runs stop run-7");
+    expect(chatInvocation(instructions, {})).toBe("config instructions");
   });
 });

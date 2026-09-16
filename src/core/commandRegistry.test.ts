@@ -515,6 +515,20 @@ describe("CommandRegistry audit line", () => {
     expect(JSON.stringify(audit.mock.calls)).not.toMatch(/limit|"7"|status/);
   });
 
+  it("the audit line carries `source: route` when the call came through the request router's door (record 0036, unit 2), and no source otherwise — for an unknown id too", async () => {
+    const { registry, audit, deps } = setup();
+    await registry.invoke("demo.echo", opts({ status: "all", limit: 7 }), cli, deps, { source: "route" });
+    await registry.invoke("demo.echo", opts({ status: "all", limit: 7 }), cli, deps);
+    await registry.invoke("demo.nothing", opts({}), cli, deps, { source: "route" });
+    expect(audit.mock.calls.map(([e]) => e.source)).toEqual(["route", undefined, "route"]);
+    expect(audit.mock.calls[0]?.[0]).toMatchObject({ commandId: "demo.echo", outcome: "ok", source: "route" });
+    expect(audit.mock.calls[2]?.[0]).toMatchObject({
+      commandId: "demo.nothing",
+      outcome: "not_found",
+      source: "route",
+    });
+  });
+
   it("the deny reason is the audit line's, never the reply's", async () => {
     const { registry, audit, deps } = setup();
     const res = await registry.invoke("demo.echo", opts({ status: "all" }), chatRandom, deps);

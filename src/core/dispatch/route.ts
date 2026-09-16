@@ -27,6 +27,16 @@
 // the tool's parts enum carries the readers alone, and a compound answer that
 // still names a write part collapses to one route on that preset with the
 // message as typed as its request.
+// The door offers every chat command too (record 0036, unit 2; record 0039):
+// beside the `route` tool the model is handed one tool per chat-exposed command,
+// derived from the registry (`routableCommands`: the MCP name, the description,
+// the JSON schema — the same derivation the MCP adapter lists), and may call one
+// of them instead of routing. A command call binds the request to a typed
+// input; the stage then hands an `effect: write` command back as the line to
+// paste and never runs it from prose, runs an `effect: read` command through
+// the registry as the message's user with the receipt line first, and on any
+// failure replies the command's own error line and the override footer and
+// stops — one model call, never a second route.
 import { AGENTS, COMPOUND_PRESET, type Identity, type MachineClass } from "../../agents/registry.js";
 import { TOOLSETS } from "../../tools/toolsets.js";
 import { routingOn, type ConfigStore, type ResolvedRequest } from "../../config.js";
@@ -34,12 +44,29 @@ import type { RouteAnswerMode } from "../../config/validate.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
 import { parseModelRef, type Provider, type ToolDef } from "../provider.js";
 import type { ProviderTable } from "../harness/piAi.js";
-import { oneLine, redactAndCap } from "../redact.js";
-import { ROUTED_LABEL_PREFIX } from "../statusCardFrame.js";
-import type { AgentSource } from "../runEvents.js";
+import { oneLine, redactAndCap, redactSecrets } from "../redact.js";
+import { ROUTED_LABEL_PREFIX, ROUTED_CARD_FOOTER } from "../statusCardFrame.js";
+import type {
+  AgentSource,
+  RouteInputLeaf,
+  RouteInputLeafOrList,
+  RouteInputObject1,
+  RouteInputObject2,
+  RouteInputObject3,
+  RouteInputValue,
+} from "../runEvents.js";
+import { COMMAND_RUN_AGENT } from "../runOwner.js";
 import type { Span } from "../trace/types.js";
-import type { IncomingMessage } from "../types.js";
+import type { ChannelIO, HistoryItem, IncomingMessage } from "../types.js";
+import type { RunEnding } from "../runEnding.js";
+import type { RequestTrace } from "../requestTrace.js";
 import type { McpCatalogEntry, McpToolSource } from "../../mcp/source.js";
+import { CommandRegistry, type CommandDef, type CommandEffect, type CommandInput } from "../commandRegistry.js";
+import { chatInvocation, jsonSchemaFor, mcpToolName, namedToInput } from "../commandSurface.js";
+import { unwrapChatLinks, type ChatCommands } from "../commandChat.js";
+import { repoFromThread } from "../repoContext.js";
+import { postSettledOutcome, runChatCommand, type RouteEventFields } from "./commandRun.js";
+import type { FastPathDeps } from "./fastPath.js";
 import { maxChildrenOf } from "./spawn.js";
 
 /** The most request text the router is shown; the rest is cut with a note. */
@@ -61,6 +88,16 @@ export const ROUTE_PART_LINE_CAP = 100;
  *  declares no `maxLength` — the output cap's per-value assumption for the
  *  command tools the menu offers (record 0036, unit 2). */
 export const ROUTE_COMMAND_VALUE_CAP = 200;
+/** The most the receipt line of a routed command may carry — the chat form the
+ *  reply leads with and the `route` event records (record 0036, unit 2), so a
+ *  long bound value never floods the thread or the record. */
+export const ROUTE_RECEIPT_CAP = 300;
+/** The receipt line's prefix: `routed: <chat form>` — the same word the card's
+ *  route line uses for a preset. */
+export const ROUTED_RECEIPT_PREFIX = "routed:";
+/** The hand-back's prefix for an `effect: write` command (record 0039): the line
+ *  to paste follows it, and nothing runs. */
+export const HAND_BACK_PREFIX = "To run this:";
 /** The line that opens the parts block of a routed conductor's brief; the
  *  conductor's prompt (`CONDUCTOR_SYSTEM`) names the same words. */
 export const COMPOUND_BRIEF_HEADING = "Routed as a compound request";
@@ -97,6 +134,34 @@ export function routablePresets(): RoutablePreset[] {
       identity,
       maxMinutes,
       attaches: (TOOLSETS[toolset] ?? []).some((t) => t.name === "attach_file"),
+    }));
+}
+
+/** One command the router may call instead of routing (record 0036, unit 2):
+ *  the registry's def, its effect — the one fact the stage decides on — and
+ *  the tool the model is shown, derived from the def exactly as the MCP
+ *  adapter derives its listing (`mcpToolName`, `describe`, `jsonSchemaFor`). */
+export interface RoutableCommand {
+  id: string;
+  effect: CommandEffect;
+  tool: ToolDef;
+  def: CommandDef<unknown>;
+}
+
+/** The commands the router is offered beside the presets: every command the
+ *  catalogue exposes to chat — `surfaces.chat !== false`, the capability on in
+ *  this process (`list()` already filters that) — in catalogue order. Derived,
+ *  never copied: a command added to the catalogue is offered the day it lands,
+ *  and one that opts out of chat is neither shown nor accepted as a call. */
+export function routableCommands(commands: Pick<ChatCommands, "list">): RoutableCommand[] {
+  return commands
+    .list()
+    .filter((cmd) => CommandRegistry.exposedTo(cmd, "chat"))
+    .map((cmd) => ({
+      id: cmd.id,
+      effect: cmd.effect,
+      def: cmd,
+      tool: { name: mcpToolName(cmd.id), description: cmd.describe, inputSchema: jsonSchemaFor(cmd) },
     }));
 }
 
@@ -146,6 +211,15 @@ export interface RouteInput {
    *  without MCP — builds the prompt exactly as before; `[]` adds the rule and
    *  says none. */
   sources?: readonly RouteSource[];
+  /** The commands the model may call instead of routing (record 0036, unit
+   *  2): one tool each beside `route`. Absent or empty, the route tool is the
+   *  one tool and the prompt says nothing of commands. */
+  commands?: readonly RoutableCommand[];
+  /** The repository the thread is bound to, when its earlier turns name one
+   *  (`repoFromThread`): a fact in the user turn, so a command that takes a
+   *  repository binds the thread's when the request names none ("run the
+   *  tests on main" in a repository's thread). */
+  threadRepo?: string;
 }
 
 /** One connected data source as the router reads it: the server, the least
@@ -185,6 +259,9 @@ export interface RoutePrompt {
   system: string;
   user: string;
   tool: ToolDef;
+  /** The command tools offered beside `tool` (record 0036, unit 2); absent when
+   *  no command is offered, and the model is then forced to call `tool`. */
+  tools?: ToolDef[];
 }
 
 /** The output cap for one answer: the largest answer the parse accepts — every
@@ -292,7 +369,16 @@ export function routeTool(presets: readonly RoutablePreset[], compound?: Compoun
  *  keeps: a compound answer the parse refused. */
 export type RouteDecision =
   | { preset: string; reason: string; parts?: RoutePart[]; collapsed?: CollapsedCompound }
-  | { preset: undefined; reason: string; compoundRejected?: true };
+  | { preset: undefined; reason: string; compoundRejected?: true; command?: RouteCommandDecision };
+
+/** A command the router called instead of routing (record 0036, unit 2): the
+ *  command's id and the input the call bound, already in the registry's
+ *  `{ args, options }` shape (`namedToInput`) — no side effect yet; the stage
+ *  decides by the command's effect what happens next. */
+export interface RouteCommandDecision {
+  id: string;
+  input: CommandInput;
+}
 
 /** A compound answer that carried a write-identity part, collapsed onto that
  *  preset as one route (record 0034: a write ask is never a part): the preset
@@ -338,6 +424,7 @@ function directivesLine(d: ThreadDirectives): string {
  *  untrusted data, in the user part. */
 export function buildRoutePrompt(input: Omit<RouteInput, "allowed">): RoutePrompt {
   const writers = input.presets.filter((p) => p.identity === "write").map((p) => p.name);
+  const commands = input.commands ?? [];
   const attachers = input.presets.filter((p) => p.attaches).map((p) => p.name);
   const system = [
     "You route one chat request to one Switchboard preset. Answer with a single JSON object and nothing else — no prose, no code fence:",
@@ -348,6 +435,7 @@ export function buildRoutePrompt(input: Omit<RouteInput, "allowed">): RoutePromp
     ...(writers.length > 0 ? ["", imperativeRule(writers)] : []),
     ...(attachers.length > 0 ? ["", attachRule(attachers)] : []),
     ...(input.sources !== undefined ? ["", SOURCES_RULE] : []),
+    ...(commands.length > 0 ? ["", commandsRule(commands)] : []),
     "",
     "Presets you may pick:",
     renderPresetTable(input.presets),
@@ -355,13 +443,29 @@ export function buildRoutePrompt(input: Omit<RouteInput, "allowed">): RoutePromp
   ].join("\n");
   const user = [
     `Earlier directives in this thread: ${directivesLine(input.recentDirectives)}`,
+    ...(input.threadRepo ? [`The thread's repository: ${input.threadRepo}`] : []),
     ...(input.sources !== undefined ? ["", ...sourcesBlock(input.sources)] : []),
     "",
     "<request>",
     quoteRequest(input.text),
     "</request>",
   ].join("\n");
-  return { system, user, tool: routeTool(input.presets, input.compound) };
+  return {
+    system,
+    user,
+    tool: routeTool(input.presets, input.compound),
+    ...(commands.length > 0 ? { tools: commands.map((c) => c.tool) } : {}),
+  };
+}
+
+/** The rule for the command tools (record 0036, unit 2), in the system half:
+ *  a request that asks exactly what one command does is that command's call,
+ *  its arguments bound from the request and the thread's repository; anything
+ *  the model is unsure a command covers is a route, never a guessed call. The
+ *  rule never names a command — the tools carry their own descriptions and
+ *  schemas — so a command added to the catalogue is covered the day it lands. */
+function commandsRule(commands: readonly RoutableCommand[]): string {
+  return `Commands: beside \`${ROUTE_TOOL_NAME}\` you are offered one tool per command this deployment answers without a model — ${commands.length} of them, each described by its own tool. When the request asks exactly what one of those tools does — a listing, a setting, a repository operation, a lookup by id — call that tool with its arguments bound from the request (a repository the request leaves unnamed is the thread's repository when one is given). A command call is not a route: call exactly one tool, either \`${ROUTE_TOOL_NAME}\` or one command, never two. When the request asks for anything a command does not do exactly — a judgement, a change to code, an investigation, a question about the world — call \`${ROUTE_TOOL_NAME}\`. A command that changes state is handed back to the person as the line to type, never run from a call, so a call to one costs nothing when the person did not mean it; a command that only reads runs at once.`;
 }
 
 /** The rule for connected data sources (record 0040), in the system half so it
@@ -636,7 +740,7 @@ export async function route(
   let raw: string;
   try {
     const answer = await model(prompt, {
-      maxTokens: routeMaxOutputTokens(compound),
+      maxTokens: routeMaxOutputTokens(compound, prompt.tools),
       signal: AbortSignal.timeout(opts.timeoutMs ?? ROUTE_TIMEOUT_MS),
     });
     if (typeof answer === "string") {
@@ -644,9 +748,10 @@ export async function route(
     } else if (answer.tool === ROUTE_TOOL_NAME) {
       raw = JSON.stringify(answer.input);
     } else {
-      // A call to another tool is a command decision once the menu is offered
-      // (record 0036, unit 2); until then no other tool rides the request.
-      return { preset: undefined, reason: tidyReason(`router called tool "${answer.tool}", not the route tool`) };
+      // A call to an offered command is a command decision (record 0036, unit
+      // 2): the call's input bound to the registry's shape, no side effect here.
+      // A call to a name the menu did not offer is no route, said by name.
+      return commandDecision(answer.tool, answer.input, rest.commands ?? []);
     }
   } catch (err) {
     return {
@@ -659,6 +764,28 @@ export async function route(
     offered.map((p) => p.name),
     compound,
   );
+}
+
+/** A command call as a decision: the tool name looked up among the offered
+ *  commands (never the whole catalogue — a command the menu did not carry is
+ *  not accepted even when it exists), its input an object whose keys are the
+ *  command's argument and option names as the schema declared them
+ *  (`jsonSchemaFor` spells camelCase), bound through `namedToInput` into the
+ *  registry's `{ args, options }`. The registry's own parse still runs at
+ *  invoke: a value the schema refuses is the command's `invalid_input`, said
+ *  in the command's own words, never the router's. */
+function commandDecision(tool: string, input: unknown, commands: readonly RoutableCommand[]): RouteDecision {
+  const offered = commands.find((c) => c.tool.name === tool);
+  if (!offered) return { preset: undefined, reason: tidyReason(`router called tool "${tool}", which was not offered`) };
+  const named = typeof input === "object" && input !== null && !Array.isArray(input) ? input : {};
+  const bound = namedToInput(offered.def, named as Record<string, unknown>, "camel");
+  if ("error" in bound)
+    return { preset: undefined, reason: tidyReason(`router called ${offered.id} with ${bound.error}`) };
+  return {
+    preset: undefined,
+    reason: `command ${offered.id}`,
+    command: { id: offered.id, input: bound },
+  };
 }
 
 /** The token a request names when it wants the file tool itself, whatever else
@@ -708,13 +835,19 @@ export function providerRouteModel(
 ): RouteModel {
   const forced = (opts.answer ?? "tool") === "tool";
   return async (prompt, call) => {
+    // One tool: the route tool, forced by name. Several (the command menu,
+    // record 0036 unit 2): the route tool and the commands, the model forced
+    // to call one of them (`any`; parallel calls off on the wire).
+    const tools = [prompt.tool, ...(prompt.tools ?? [])];
+    const toolChoice =
+      tools.length > 1 ? ({ type: "any" } as const) : ({ type: "tool", name: prompt.tool.name } as const);
     const result = await provider.complete({
       model,
       system: prompt.system,
       messages: [{ role: "user", content: [{ type: "text", text: prompt.user }] }],
       maxTokens: call.maxTokens,
       signal: call.signal,
-      ...(forced ? { tools: [prompt.tool], toolChoice: { type: "tool", name: prompt.tool.name } } : {}),
+      ...(forced ? { tools, toolChoice } : {}),
     });
     if (result.stopReason === "max_tokens") throw new Error(`answer cut at the output cap (${call.maxTokens} tokens)`);
     const calls = result.content.filter(
@@ -760,6 +893,11 @@ export interface RouteDeps {
    *  config and cache only, never a server — so the prompt can name the
    *  connected data sources. Absent, the prompt is built exactly as before. */
   mcp?: McpToolSource;
+  /** The command registry bound to its deps (`CoreDeps.commands`): the menu
+   *  the router is offered beside the presets (record 0036, unit 2), and what
+   *  a read command the router bound is invoked through. Absent, no command
+   *  is offered and the route tool is the one tool. */
+  commands?: ChatCommands;
 }
 
 /** What the stage reads off the dispatch. */
@@ -781,6 +919,22 @@ export interface RouteStageContext {
    *  no model call and no regard to the router's switch: the run was routed
    *  when it started, and a restart is the same run under the same card. */
   carried?: RouteDecided;
+  /** What the command branch needs to answer a command the router bound
+   *  (record 0036, unit 2): the dispatcher's deps the command-run machinery
+   *  reads, the channel handle the reply goes out on, the run ending that
+   *  seals a command run after its reply, the request's trace, and the
+   *  thread's history for the repository line. Absent — a caller with no
+   *  command surface, the CLI's `ask` among them — no command is offered. */
+  command?: CommandBranchContext;
+}
+
+/** The command branch's context (see `RouteStageContext.command`). */
+export interface CommandBranchContext {
+  deps: FastPathDeps;
+  io: ChannelIO;
+  ending: RunEnding;
+  trace: RequestTrace;
+  history: HistoryItem[];
 }
 
 /** The (agent, model, effort) triple re-resolved through the config layers
@@ -810,7 +964,9 @@ function resolveRouted(
  *  answer was refused, the rejection the record keeps as its `route` event —
  *  or it runs as the routed preset with the triple re-resolved for it. */
 export type RouteStage =
-  { kind: "unrouted"; rejected?: RouteDecided } | { kind: "routed"; resolved: ResolvedRequest; route: RouteDecided };
+  | { kind: "unrouted"; rejected?: RouteDecided }
+  | { kind: "routed"; resolved: ResolvedRequest; route: RouteDecided }
+  | { kind: "command"; command: string; outcome: "hand_back" | "ok" | "error" };
 
 /**
  * The stage. Turned off (`routing: { auto: false }`), or an agent any layer
@@ -879,20 +1035,31 @@ export async function routeRequest(deps: RouteDeps, ctx: RouteStageContext): Pro
         shown,
       )
     : undefined;
+  // The command menu (record 0036, unit 2): offered when this process has a
+  // command surface and the caller handed the branch what it needs to answer
+  // one. The text the model binds from has Slack's link wrapping undone so a
+  // bound URL is bare, and the thread's repository rides the user turn as a
+  // fact for a command that takes one.
+  const menu = ctx.command && deps.commands ? routableCommands(deps.commands) : [];
+  const threadRepo = ctx.command && menu.length > 0 ? repoFromThread(ctx.command.history) : undefined;
   const decision = await root.span("dispatch.route", () =>
     route(
       {
-        text: directives.text,
+        text: menu.length > 0 ? unwrapChatLinks(directives.text) : directives.text,
         recentDirectives: sticky,
         presets,
         allowed,
         fallback: cfg.defaults.agent,
         ...(compound ? { compound } : {}),
         ...(sources !== undefined ? { sources } : {}),
+        ...(menu.length > 0 ? { commands: menu } : {}),
+        ...(threadRepo ? { threadRepo } : {}),
       },
       model,
     ),
   );
+  if (decision.preset === undefined && decision.command && ctx.command && deps.commands)
+    return answerCommand(deps.commands, ctx.command, msg, decision.command, modelRef, root);
   if (decision.preset === undefined) {
     console.log(`[route] ${msg.threadKey} not routed (${decision.reason}) — running ${cfg.defaults.agent}`);
     return decision.compoundRejected
@@ -916,6 +1083,108 @@ export async function routeRequest(deps: RouteDeps, ctx: RouteStageContext): Pro
       ...(parts ? { parts } : {}),
       ...(collapsed ? { collapsed } : {}),
     },
+  };
+}
+
+/**
+ * The command branch (record 0036, unit 2; record 0039): what happens once the
+ * router called a command instead of routing. The command's `effect` decides —
+ * no field on the def, no list in code. `write`: the request is handed back as
+ * the line to paste (`To run this: <chat form>`) and nothing runs, because a
+ * write bound from prose is a write nobody typed. `read`: the command runs
+ * through the same machinery a typed command does (`runChatCommand`), as the
+ * message's user, with `source: route` on the audit line and the decision on
+ * the run's record as its `route` event; the reply leads with the receipt
+ * (`routed: <chat form>`, the same words the card uses for a preset) so the
+ * person sees what was bound and can paste it to run it again. On any failure
+ * — a refusal, a bad value, a repository with no resident, a handler error —
+ * the reply is the receipt, the command's own error line and the override
+ * footer, and the dispatch ends: one model call, never a second route. Every
+ * field the record gains is redacted and capped.
+ */
+async function answerCommand(
+  commands: ChatCommands,
+  branch: CommandBranchContext,
+  msg: IncomingMessage,
+  decided: RouteCommandDecision,
+  modelRef: string,
+  root: Span,
+): Promise<RouteStage> {
+  const { deps, io, ending, trace } = branch;
+  const def = commands.get(decided.id);
+  if (!def) {
+    // The menu was read off the same catalogue moments ago; a command gone
+    // between the two reads is no decision to act on.
+    console.log(`[route] ${msg.threadKey} not routed: command ${decided.id} is no longer in the catalogue`);
+    return { kind: "unrouted" };
+  }
+  const receipt = redactAndCap(chatInvocation(def, decided.input), ROUTE_RECEIPT_CAP);
+  const receiptLine = `${ROUTED_RECEIPT_PREFIX} ${receipt}`;
+  if (def.effect === "write") {
+    console.log(`[route] ${msg.threadKey} handed back ${def.id} on ${modelRef}: ${receipt}`);
+    await ending.sealAfterReply(
+      async () => {},
+      () => root.span("post.reply", () => io.reply(`${HAND_BACK_PREFIX} ${receipt}`)),
+    );
+    return { kind: "command", command: def.id, outcome: "hand_back" };
+  }
+  console.log(`[route] ${msg.threadKey} routed to command ${def.id} on ${modelRef}: ${receipt}`);
+  const route: RouteEventFields = {
+    preset: COMMAND_RUN_AGENT,
+    reason: `command ${def.id}`,
+    model: modelRef,
+    command: def.id,
+    input: redactedInput(decided.input),
+    receipt,
+  };
+  const res = await runChatCommand(deps, msg, io, { kind: "invoke", id: def.id, input: decided.input }, ending, trace, {
+    route,
+    source: "route",
+  });
+  const text = res.ok ? `${receiptLine}\n${res.text}` : `${receiptLine}\n${res.text}\n${ROUTED_CARD_FOOTER}`;
+  await ending.sealAfterReply(
+    async () => {},
+    () => root.span("post.reply", () => io.reply(text)),
+  );
+  if (res.ok && res.followUp) postSettledOutcome(res.followUp, io, root);
+  return { kind: "command", command: def.id, outcome: res.ok ? "ok" : "error" };
+}
+
+/** A bound input as the record may carry it: every string redacted and cut at
+ *  `ROUTE_COMMAND_VALUE_CAP`, options walked three objects deep, JSON scalars
+ *  as they are, an undefined option dropped — the shape stays `{ args,
+ *  options }` so a reader can replay it. The depth is the record's
+ *  (`RouteInputValue`): a value below it is stored as its JSON text. */
+export function redactedInput(input: CommandInput): { [key: string]: RouteInputValue } {
+  const text = (s: string): string => redactAndCap(redactSecrets(s), ROUTE_COMMAND_VALUE_CAP);
+  // A value below the typed depth, or one JSON has no word for, is stored as
+  // its JSON text rather than dropped, so the record still says what was bound.
+  const leaf = (v: unknown): RouteInputLeaf => {
+    if (typeof v === "string") return text(v);
+    if (typeof v === "number" || typeof v === "boolean" || v === null) return v;
+    return v === undefined ? null : text(JSON.stringify(v) ?? String(v));
+  };
+  const leafOrList = (v: unknown): RouteInputLeafOrList => (Array.isArray(v) ? v.map(leaf) : leaf(v));
+  // A plain object only: a Date or a Map has no JSON shape of its own and is
+  // spelled as its JSON text like any other value JSON has no word for.
+  const isRecord = (v: unknown): v is Record<string, unknown> =>
+    typeof v === "object" &&
+    v !== null &&
+    (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null);
+  const entries = <T>(v: Record<string, unknown>, of: (x: unknown) => T): { [key: string]: T } =>
+    Object.fromEntries(
+      Object.entries(v)
+        .filter(([, x]) => x !== undefined)
+        .map(([k, x]) => [k, of(x)]),
+    );
+  const object1 = (v: Record<string, unknown>): RouteInputObject1 => entries(v, leafOrList);
+  const object2 = (v: Record<string, unknown>): RouteInputObject2 =>
+    entries(v, (x) => (isRecord(x) ? object1(x) : leafOrList(x)));
+  const object3 = (v: Record<string, unknown>): RouteInputObject3 =>
+    entries(v, (x) => (isRecord(x) ? object2(x) : leafOrList(x)));
+  return {
+    ...(input.args ? { args: input.args.map(leaf) } : {}),
+    ...(input.options ? { options: object3(input.options) } : {}),
   };
 }
 

@@ -356,6 +356,21 @@ export interface SpanEndEvent {
   at?: number;
 }
 
+/** A value a `route` event may carry in a bound command input: JSON, nested
+ *  at most three objects deep under `options`, and nothing else. The record
+ *  crosses the run store's RPC boundary, whose typing walks every field: a
+ *  field of `unknown` types the whole record `never`, and a recursive alias is
+ *  "excessively deep" to it, so the nesting is spelled out level by level. The
+ *  model's tool call is JSON to begin with; the registry's option schemas nest
+ *  one object deep (`models.coding`); a deeper value is stored as its JSON
+ *  text, still redacted and capped. */
+export type RouteInputLeaf = string | number | boolean | null;
+export type RouteInputLeafOrList = RouteInputLeaf | ReadonlyArray<RouteInputLeaf>;
+export type RouteInputObject1 = { readonly [key: string]: RouteInputLeafOrList };
+export type RouteInputObject2 = { readonly [key: string]: RouteInputLeafOrList | RouteInputObject1 };
+export type RouteInputObject3 = { readonly [key: string]: RouteInputLeafOrList | RouteInputObject2 };
+export type RouteInputValue = RouteInputLeafOrList | RouteInputObject3;
+
 export type RunEvent =
   /** `callId` is the provider's tool_use id — the explicit pair key between a
    *  call and its result (live-view item 13); the runner stamps it on both. */
@@ -689,7 +704,14 @@ export type RunEvent =
    *  `run_meta.agentSource` stays `default`). Published by the dispatcher
    *  straight to the registry right after `run_meta`, once per run the router
    *  answered; absent on every run a directive, a sticky preset or a scope
-   *  chose. Head material, like `run_meta`. Additive: unknown → ignored. */
+   *  chose. Head material, like `run_meta`. Additive: unknown → ignored.
+   *  A command the router bound from prose (record 0036: the door offers every
+   *  chat command as a tool beside `route`) rides the command run's record
+   *  instead, right after its `run_meta`: `preset` is the command run's agent
+   *  (`command`), `command` the id the model called, `input` the bound input
+   *  (redacted, each value capped) and `receipt` the chat form the reply led
+   *  with (`routed: <chat form>`, redacted and capped at `ROUTE_RECEIPT_CAP`);
+   *  how the invoke ended is the run's own status and `answer`. */
   | {
       type: "route";
       preset: string;
@@ -697,6 +719,9 @@ export type RunEvent =
       model: string;
       parts?: ReadonlyArray<{ preset: string; text: string }>;
       collapsed?: { presets: ReadonlyArray<string> };
+      command?: string;
+      input?: { readonly [key: string]: RouteInputValue };
+      receipt?: string;
       seq?: number;
       at?: number;
     }
