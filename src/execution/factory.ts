@@ -220,6 +220,11 @@ export interface ExecutorSelection {
 // are NEVER cached (the next dispatch must see a recovery immediately).
 // In-process only — deliberately not persisted (restart-survival invariant).
 const PROBE_OUTAGE_WINDOW_MS = 30_000;
+
+/** How long the bot holds its one /await-restore request (item 25): generous
+ *  next to the resident's own restore ceiling, so the server's answer — the
+ *  restore event — wins; past it the run falls cold with the wait named. */
+const AWAIT_RESTORE_TIMEOUT_MS = 10 * 60_000;
 let probeOutage: { until: number; error: string } | undefined;
 
 /** Test seam: clears the module-level probe circuit breaker. */
@@ -278,8 +283,39 @@ export async function makeExecutor(
     const token = processSecrets.named(tokenEnv);
     if (!token) throw new Error(`execution.resident is configured but ${tokenEnv} is not set`);
     const resource = repoResourceId(ctx.repo);
-    const probe = await probeResident(resident, token, resource, span);
-    if (probe.kind === "status" && isServiceable(probe.state, probe.reason)) {
+    let probe: ResidentStatusProbe = await probeResident(resident, token, resource, span);
+    /** Set when the run held the one /await-restore request (item 25) — the
+     *  card names the wait whichever way the answer went. */
+    let waitedForRestore = false;
+    if (probe.kind === "status" && probe.state === "restoring") {
+      // Item 25: a probe that finds the resident restoring opens the ONE held
+      // /await-restore request instead of falling to the cold fleet — the DO
+      // answers when its state leaves `restoring` (event-driven; no polling,
+      // no retry timer). An older Worker's 404 falls back cold, the wait named.
+      const wait = await ResidentExecutor.awaitRestore(
+        resident.baseUrl,
+        token.reveal(),
+        resource,
+        AWAIT_RESTORE_TIMEOUT_MS,
+        span,
+      );
+      if (wait.kind === "status") {
+        waitedForRestore = true;
+        probe = { kind: "status", state: wait.state, reason: wait.reason };
+      } else if (wait.kind === "unsupported") {
+        note = oneLine(
+          `resident restoring${probe.reason ? ` (${probe.reason})` : ""} — this Worker has no /await-restore route, ` +
+            `so waiting for the resident's restore is not possible — using fresh sandbox`,
+        );
+      } else {
+        note = oneLine(
+          `resident restoring — waiting for the resident's restore failed (${wait.error}) — using fresh sandbox`,
+        );
+      }
+    }
+    if (note !== undefined) {
+      // the restore wait ended cold; fall through to the per-thread backend below
+    } else if (probe.kind === "status" && isServiceable(probe.state, probe.reason)) {
       // The resident can degrade between the /status probe and /attach: 503
       // (mirror-busy) or 429 (pool-exhausted) surface only at attach time.
       // ResidentNeedsRefError must still propagate (the dispatcher's ask-once
@@ -298,7 +334,7 @@ export async function makeExecutor(
         // The resolved PR head rides along so the resident fetches a mirror
         // whose ref tip lags it (item 51) instead of cloning a stale tip; the
         // thread's own PR rides along as the reason for the hint (item 16).
-        return await openResident(
+        const selection = await openResident(
           {
             baseUrl: resident.baseUrl,
             token: token.reveal(),
@@ -312,6 +348,10 @@ export async function makeExecutor(
           nonWarm,
           span,
         );
+        // Item 25: the wait is on the card whichever state the restore landed on.
+        return waitedForRestore
+          ? { ...selection, note: oneLine(`${selection.note ?? "resident"} · after waiting for the resident's restore`) }
+          : selection;
       } catch (err) {
         if (err instanceof ResidentNeedsRefError) throw err;
         failedAttach = residentTraceOf(err);
@@ -322,7 +362,9 @@ export async function makeExecutor(
     } else if (probe.kind === "unreachable") {
       note = oneLine(`resident unreachable (${probe.error}) — using fresh sandbox`);
     } else if (probe.state !== "not-onboarded") {
-      note = oneLine(`resident ${probe.state}${probe.reason ? ` (${probe.reason})` : ""} — using fresh sandbox`);
+      // Item 25: a restore that landed on a non-serviceable state still names the wait.
+      const wait = waitedForRestore ? " after waiting for the resident's restore" : "";
+      note = oneLine(`resident ${probe.state}${probe.reason ? ` (${probe.reason})` : ""}${wait} — using fresh sandbox`);
     } else {
       // not-onboarded is the ordinary per-thread case — but still make the cold
       // fall-through visible: the user needs to know coding ran cold in a

@@ -365,6 +365,16 @@ export class ResidentOperations implements Operations {
 export type ResidentStatusProbe =
   { kind: "status"; state: string; reason: string } | { kind: "unreachable"; error: string; transport: boolean };
 
+/** Answer of the one held POST /await-restore (docs/reference/specs/execution.md
+ *  item 25): the state the resident landed on when its restore ended,
+ *  `unsupported` for a Worker that predates the route (its 404), or the named
+ *  failure. Never throws — every outcome is a value the factory turns into a
+ *  card note. */
+export type ResidentRestoreWait =
+  | { kind: "status"; state: string; reason: string }
+  | { kind: "unsupported" }
+  | { kind: "unreachable"; error: string };
+
 export class ResidentExecutor implements Executor {
   /** Consecutive `runtime-replaced` answers on the idempotent routes (/read,
    *  /write) with no successful op between them. One is a deploy that swapped
@@ -426,6 +436,48 @@ export class ResidentExecutor implements Executor {
       return { kind: "unreachable", error: `probe HTTP ${res.status}: ${String(data.error ?? "")}`, transport: false };
     }
     return { kind: "status", state: residentState(data.state), reason: String(data.reason ?? "") };
+  }
+
+  /** The one held request while the resident restores (item 25): POST
+   *  /await-restore, which the resident's Durable Object holds until its state
+   *  leaves `restoring` and the transition publishes — event-driven, no
+   *  polling, no retry timer on either side. The answer streams heartbeat
+   *  whitespace then one JSON document; `timeoutMs` bounds the whole wait so a
+   *  restore that never ends becomes a named cold fallback. A 404 is an older
+   *  Worker without the route. Never throws. */
+  static async awaitRestore(
+    baseUrl: string,
+    token: string,
+    resource: string,
+    timeoutMs: number,
+    span?: Span,
+  ): Promise<ResidentRestoreWait> {
+    try {
+      const res = await tracedFetch(
+        span,
+        `${baseUrl.replace(/\/$/, "")}/await-restore`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+          body: JSON.stringify({ resource }),
+          signal: AbortSignal.timeout(timeoutMs),
+        },
+        { route: "/await-restore" },
+      );
+      if (res.status === 404) return { kind: "unsupported" };
+      const data = await parseResidentBody(res);
+      // A streamed refusal carries its status in the body (like /attach).
+      const status =
+        res.status === 200 && typeof data.error === "string" && typeof data.status === "number"
+          ? data.status
+          : res.status;
+      if (status !== 200 || typeof data.error === "string") {
+        return { kind: "unreachable", error: `await-restore HTTP ${status}: ${String(data.error ?? "")}` };
+      }
+      return { kind: "status", state: residentState(data.state), reason: String(data.reason ?? "") };
+    } catch (err) {
+      return { kind: "unreachable", error: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   /** POST one route; resource + threadKey ride in every body. Reads the FULL

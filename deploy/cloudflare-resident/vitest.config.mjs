@@ -11,7 +11,9 @@ import { defineConfig } from "vitest/config";
 // for the in-place rebind onto the thread's own pull request branch
 // (rebindAttach.test.ts), for the release at a run's end
 // (releaseAtRunEnd.test.ts) and for the rule that dirt never keeps a tree
-// (dirtNeverKeeps.test.ts); testing/sourceScan.ts is their helper. Every
+// (dirtNeverKeeps.test.ts), and for the held /await-restore route and its
+// waiter ledger wiring (awaitRestore.test.ts); testing/sourceScan.ts is their
+// helper. Every
 // test file of this directory is listed here — src/vitestWorkspace.test.ts
 // holds that.
 // worker.ts itself is covered by typecheck + the [agent] receipts in
@@ -32,6 +34,7 @@ export default defineConfig({
       "rebindAttach.test.ts",
       "releaseAtRunEnd.test.ts",
       "dirtNeverKeeps.test.ts",
+      "awaitRestore.test.ts",
     ],
   },
 });
