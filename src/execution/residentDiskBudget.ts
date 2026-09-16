@@ -151,9 +151,19 @@ export { parseDfKiB };
 // ---------------------------------------------------------------------------
 
 /** The refresh cycle snapshots mirror + checkout to R2 through the Sandbox
- *  SDK (`createBackup`); whether it stages a tarball on local disk is
- *  SDK-internal, so the budget holds room for one compressed copy of what it
- *  archives — the same ratio `instanceSizing.test.ts` sizes the instance with. */
+ *  SDK (`createBackup`), which stages each archive on the container's own disk
+ *  (`/var/backups/<id>.sqsh`, lz4 squashfs) before the upload and removes it
+ *  after, the pair concurrently — so the budget holds room for one compressed
+ *  copy of what the cycle archives, at the ratio `instanceSizing.test.ts` sizes
+ *  the instance with. Since item 61 PR B the checkout archive EXCLUDES
+ *  node_modules (`CHECKOUT_SNAPSHOT_EXCLUDES`): the deps are not in the
+ *  cycle's staging. The deps-store entry has its own archive, taken once per
+ *  lockfile key right after the entry is committed, and that one IS staged
+ *  from the deps — the reserve counts it only while such a backup is in
+ *  flight (`depsBackupInFlight`), never as a standing charge. Before this,
+ *  the standing term multiplied the deps too: on a resident whose deps are
+ *  6.9 GiB of an 8.3 GiB archived set, five gigabytes were held for an archive
+ *  of about one, and every attach was refused with 6.7 GiB free. */
 export const SNAPSHOT_STAGING_RATIO = 0.6;
 
 /** The fixed floor under the staging term: at least 1 GiB, or 5 % of the disk
@@ -173,13 +183,26 @@ export interface DiskReserve {
   totalKiB: number;
 }
 
+/** What the reserve knows beyond the sample: whether a deps-store entry
+ *  backup is being taken right now (item 61), whose archive is staged from
+ *  the deps and so needs their share of the ratio while it runs. */
+export interface DiskReserveInput {
+  depsBackupInFlight?: boolean;
+}
+
 /** `staging + floor`. Staging is computed from the MEASURED mirror and
- *  checkout (deps + rest); an unmeasured part counts as 0 there — the floor
- *  still stands, and `projectThreadCostKiB` refuses to project from missing
- *  parts, so an unmeasured resident never admits on a guess. */
-export function diskReserveKiB(sample: Pick<DiskSample, "totalKiB" | "parts">): DiskReserve {
-  const archived = (sample.parts.mirror ?? 0) + (sample.parts.deps ?? 0) + (sample.parts.checkout ?? 0);
-  const stagingKiB = Math.round(archived * SNAPSHOT_STAGING_RATIO);
+ *  checkout (the checkout's own bytes: history + tree + build output, never
+ *  the deps, which the checkout archive excludes), plus the deps while a
+ *  deps-store entry backup is in flight; an unmeasured part counts as 0 there
+ *  — the floor still stands, and `projectThreadCostKiB` refuses to project
+ *  from missing parts, so an unmeasured resident never admits on a guess. */
+export function diskReserveKiB(
+  sample: Pick<DiskSample, "totalKiB" | "parts">,
+  input: DiskReserveInput = {},
+): DiskReserve {
+  const staged = (sample.parts.mirror ?? 0) + (sample.parts.checkout ?? 0);
+  const depsStaged = input.depsBackupInFlight ? (sample.parts.deps ?? 0) : 0;
+  const stagingKiB = Math.round((staged + depsStaged) * SNAPSHOT_STAGING_RATIO);
   const floorKiB = Math.max(DISK_FLOOR_MIN_KIB, Math.round(sample.totalKiB * DISK_FLOOR_FRACTION));
   return { stagingKiB, floorKiB, totalKiB: stagingKiB + floorKiB };
 }
@@ -261,11 +284,14 @@ export function checkDiskAdmission(input: {
   committedKiB?: number;
   diskBudgetMb?: number;
   kind: ThreadCostKind;
+  /** A deps-store entry backup is in flight: its archive is staged from the
+   *  deps, so the reserve holds their share for as long as it runs. */
+  depsBackupInFlight?: boolean;
 }): AdmissionVerdict {
   const rawFree = Math.max(0, (input.freeKiB ?? input.sample.freeKiB) - (input.committedKiB ?? 0));
   const live = { ...input.sample, freeKiB: rawFree, usedKiB: input.sample.totalKiB - rawFree };
   const { capacityKiB, freeKiB, capped } = effectiveFreeKiB(live, input.diskBudgetMb);
-  const reserve = diskReserveKiB(input.sample);
+  const reserve = diskReserveKiB(input.sample, { depsBackupInFlight: input.depsBackupInFlight });
   const projectedKiB = projectThreadCostKiB(input.sample.parts, input.kind);
   const headroomKiB = freeKiB - reserve.totalKiB - (projectedKiB ?? 0);
   const math: AdmissionMath = { projectedKiB, kind: input.kind, freeKiB, capacityKiB, capped, reserve, headroomKiB };

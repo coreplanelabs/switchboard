@@ -146,10 +146,10 @@ describe("measurement — one df, one du, hardlinks counted once", () => {
 });
 
 describe("the reserve — snapshot staging + a floor", () => {
-  it("staging is 0.6 × (mirror + deps + checkout); the floor is the larger of 1 GiB and 5 % of the disk", () => {
+  it("staging is 0.6 × (mirror + checkout) — the archives the cycle stages, the deps not among them; the floor is the larger of 1 GiB and 5 % of the disk", () => {
     const r = diskReserveKiB(sample());
     expect(SNAPSHOT_STAGING_RATIO).toBe(0.6);
-    expect(r.stagingKiB).toBe(Math.round((360 + 2100 + 430) * MB * 0.6));
+    expect(r.stagingKiB).toBe(Math.round((360 + 430) * MB * 0.6));
     expect(DISK_FLOOR_MIN_KIB).toBe(GIB);
     expect(DISK_FLOOR_FRACTION).toBe(0.05);
     expect(r.floorKiB).toBe(GIB); // 5 % of 15 GiB = 0.75 GiB < 1 GiB
@@ -164,6 +164,35 @@ describe("the reserve — snapshot staging + a floor", () => {
     const r = diskReserveKiB(sample({}, { mirror: null, deps: null, checkout: null }));
     expect(r.stagingKiB).toBe(0);
     expect(r.floorKiB).toBe(GIB);
+  });
+
+  // item 61: the deps-store entry's archive is staged from the deps, once per
+  // lockfile key, right after the entry is committed — the reserve holds their
+  // share only while that backup runs, never as a standing charge.
+  it("a deps-store entry backup in flight adds 0.6 × deps to staging, and only then", () => {
+    const standing = diskReserveKiB(sample());
+    const during = diskReserveKiB(sample(), { depsBackupInFlight: true });
+    expect(during.stagingKiB - standing.stagingKiB).toBe(Math.round(2100 * MB * 0.6));
+    expect(diskReserveKiB(sample(), { depsBackupInFlight: false }).stagingKiB).toBe(standing.stagingKiB);
+    expect(diskReserveKiB(sample({}, { deps: null }), { depsBackupInFlight: true }).stagingKiB).toBe(
+      standing.stagingKiB,
+    );
+  });
+
+  // The shape that led here: a resident whose deps are 6.9 GiB of an 8.3 GiB
+  // archived set held five gigabytes for an archive of about one and refused
+  // every attach with 6.7 GiB free.
+  it("on a resident with 6.9 GiB of deps the standing reserve no longer swallows the free space", () => {
+    const pressed = sample(
+      { totalKiB: Math.round(18.0 * GIB), usedKiB: Math.round(11.2 * GIB), freeKiB: Math.round(6.73 * GIB) },
+      { mirror: Math.round(0.55 * GIB), deps: Math.round(6.88 * GIB), checkout: Math.round(0.88 * GIB) },
+    );
+    const r = diskReserveKiB(pressed);
+    expect(r.stagingKiB).toBe(Math.round((Math.round(0.55 * GIB) + Math.round(0.88 * GIB)) * 0.6));
+    expect(r.stagingKiB).toBeLessThan(0.9 * GIB);
+    expect(checkDiskAdmission({ sample: pressed, kind: "hardlink" }).fits).toBe(true);
+    // while its deps archive is being taken the old arithmetic is the right one, and the same attach waits
+    expect(checkDiskAdmission({ sample: pressed, kind: "hardlink", depsBackupInFlight: true }).fits).toBe(false);
   });
 });
 
@@ -225,15 +254,15 @@ describe("checkDiskAdmission — free − reserve ≥ projected", () => {
 
   it("a fresher df free reading overrides the sample's (the attach re-probes df, the du parts are the last cycle's)", () => {
     const s = sample({ usedKiB: 4 * GIB, freeKiB: 11 * GIB });
-    expect(checkDiskAdmission({ sample: s, kind: "reconcile", freeKiB: 3 * GIB }).fits).toBe(false);
+    expect(checkDiskAdmission({ sample: s, kind: "reconcile", freeKiB: 2 * GIB }).fits).toBe(false);
     expect(checkDiskAdmission({ sample: s, kind: "reconcile", freeKiB: 6 * GIB }).fits).toBe(true);
   });
 
-  it("the budget cap lowers free: a 6 GB budget on a 15 GiB disk with 4 GiB used leaves ~2 GB, under the reserve → refused", () => {
-    const v = checkDiskAdmission({ sample: sample(), kind: "hardlink", diskBudgetMb: 6 * 1024 });
+  it("the budget cap lowers free: a 5 GB budget on a 15 GiB disk with 4 GiB used leaves ~1 GB, under the reserve → refused", () => {
+    const v = checkDiskAdmission({ sample: sample(), kind: "hardlink", diskBudgetMb: 5 * 1024 });
     expect(v.fits).toBe(false);
-    expect(v.math.capacityKiB).toBe(6 * GIB);
-    expect(v.math.freeKiB).toBe(2 * GIB);
+    expect(v.math.capacityKiB).toBe(5 * GIB);
+    expect(v.math.freeKiB).toBe(1 * GIB);
   });
 
   it("an unmeasured projection admits only while free clears the reserve (never refuses a fresh resident on a guess; never admits past the floor blind)", () => {
@@ -339,7 +368,7 @@ describe("orderEvictionCandidates — coldest clean idle trees first, every keep
 
 describe("diskPressureReason — the refusal names free, reserve, projected, what was evicted and what was kept", () => {
   it("full shape", () => {
-    const s = sample({ usedKiB: 12 * GIB, freeKiB: 3 * GIB });
+    const s = sample({ usedKiB: 13 * GIB, freeKiB: 2 * GIB });
     const v = checkDiskAdmission({ sample: s, kind: "reconcile" });
     if (v.fits) throw new Error("fixture must not fit");
     // The keep tokens are the pure order's plus the Worker's two — a tree is
@@ -349,9 +378,9 @@ describe("diskPressureReason — the refusal names free, reserve, projected, wha
       evicted: [{ freedKiB: 450_000 }],
       kept: [{ why: "busy" }, { why: "recent" }, { why: "other" }],
     });
-    // 430 MB + 0.25 × 2100 MB = 955 MB (0.93 GiB) projected; reserve = 0.6 × 2890 MB + 1 GiB = 1734 MB + 1024 MB = 2.69 GiB; 3 − 2.69 = 0.31 left; short 0.63.
+    // 430 MB + 0.25 × 2100 MB = 955 MB (0.93 GiB) projected; reserve = 0.6 × (360 + 430) MB + 1 GiB = 474 MB + 1024 MB = 1.46 GiB; 2 − 1.46 = 0.54 left; short 0.40.
     expect(text).toMatch(
-      /^disk-pressure: need 0\.93 GiB for a new tree \(reconcile\), but 3\.00 GiB free minus the 2\.69 GiB reserve \(snapshot staging 1\.69 GiB \+ floor 1\.00 GiB\) leaves 0\.31 GiB — short by 0\.63 GiB; /,
+      /^disk-pressure: need 0\.93 GiB for a new tree \(reconcile\), but 2\.00 GiB free minus the 1\.46 GiB reserve \(snapshot staging 0\.46 GiB \+ floor 1\.00 GiB\) leaves 0\.54 GiB — short by 0\.40 GiB; /,
     );
     expect(text).not.toContain("cap"); // no diskBudgetMb → no cap named
     expect(text).toContain("evicted 1 idle tree(s) (0.43 GiB back)");
