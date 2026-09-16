@@ -234,6 +234,13 @@ export interface McpServerView {
   addedByName?: string;
   addedAt?: number;
   promotedFrom?: string;
+  /** `promotedFrom` as a display name, when the lookup answered. */
+  promotedFromName?: string;
+  /** A user row's owner (the id after `user:` in `scopeKey`) as a display name, when the lookup answered. */
+  ownerName?: string;
+  /** A higher tier holds this name, so runs use that entry and this one is idle (`mcpServersFor`'s
+   *  `shadowedBy`, the winning scope key — `org`, or `channel:<id>`); absent when this entry serves. */
+  shadowedBy?: string;
 }
 
 export function serverView(

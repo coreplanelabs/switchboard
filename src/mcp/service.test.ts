@@ -864,7 +864,7 @@ describe("McpService — record 0042: every tier for an admin, promotion by re-i
     expect((await h.service.list(bob, "slack:COTHER")).map((s) => s.name)).toEqual(["github", "hub", "secretive"]);
   });
 
-  it("promote copies a person's runtime entry into the org tier — same name, url and auth, addedBy the admin, promotedFrom the person — never touching their credential; bearer/oauth mint a fresh ORG ticket; the personal entry stays and is shadowed", async () => {
+  it("promote copies a person's runtime entry into the org tier — same name, url and auth, addedBy the admin, promotedFrom the person — never touching their credential; bearer/oauth mint a fresh ORG ticket; the personal entry stays shadowed until the org copy connects, then retires with its credential", async () => {
     const h = harness({ email: { "slack:UADMIN": "admin@example.com" } });
     const added = await h.service.add(alice, ME(alice), {
       name: "vanta",
@@ -912,6 +912,22 @@ describe("McpService — record 0042: every tier for an admin, promotion by re-i
     expect(h.backing.document?.users["slack:UALICE"]?.mcpServers?.vanta).toBeDefined();
     const forAlice = h.config.mcpServersFor("slack:COTHER", "slack:UALICE").filter((r) => r.name === "vanta");
     expect(forAlice.map((r) => `${r.kind}:${r.shadowedBy ?? "-"}`)).toEqual(["org:-", "user:org"]);
+    // The list row says so too, and alice's server still works for her until the org copy does.
+    const aliceRow = (await h.service.list(alice, "slack:COTHER")).find(
+      (s) => s.scope === "user" && s.name === "vanta",
+    );
+    expect(aliceRow).toMatchObject({ shadowedBy: "org", state: "connected" });
+    // The admin completes the ORG ticket: the org's credential is stored, and alice's entry retires with hers.
+    await h.service.openTicket(orgNonce, { sub: "cf-admin", email: "admin@example.com" });
+    const done = await h.service.completeTicket(orgNonce, { sub: "cf-admin", email: "admin@example.com" }, "org-token");
+    expect(done.verified).toBe(true);
+    expect(await h.secrets.getCredential("org/vanta")).not.toBeNull();
+    expect(h.backing.document?.users["slack:UALICE"]?.mcpServers?.vanta).toBeUndefined();
+    expect(await h.secrets.getCredential("user:slack:UALICE/vanta")).toBeNull();
+    expect((await h.service.list(alice, "slack:COTHER")).map((s) => `${s.scope}/${s.name}`)).toEqual([
+      "org/github",
+      "org/vanta",
+    ]);
   });
 
   it("promote refusals: not an admin; no such personal server; the org already holds the name; a pinned personal entry; agents widened only when the admin asks, under the org's rule", async () => {
@@ -921,6 +937,8 @@ describe("McpService — record 0042: every tier for an admin, promotion by re-i
     expect(await code(h.service.promote(admin, "nope", "slack:UALICE"))).toBe("not_found");
     expect(await code(h.service.promote(admin, "vanta", "slack:UBOB"))).toBe("not_found");
     expect(await code(h.service.promote(admin, "github", "slack:UALICE"))).toBe("not_found"); // org-only name, not alice's
+    // Bob's same-named server, added while no org copy exists yet, for the conflict below.
+    await h.service.add(bob, ME(bob), { name: "vanta", url: "https://mcp.vanta.com/mcp", auth: "none" });
     // Widened agents: the org may name coding; an unknown agent is refused before anything is written.
     expect(await code(h.service.promote(admin, "vanta", "slack:UALICE", { agents: ["general", "bogus"] }))).toBe(
       "invalid_input",
@@ -930,8 +948,13 @@ describe("McpService — record 0042: every tier for an admin, promotion by re-i
     expect(done.server.agents).toEqual(["general", "coding"]);
     expect(done.connectUrl).toBeUndefined(); // auth none: promoted and connected at once
     expect(done.server.state).toBe("connected");
-    // Now the org holds the name: promoting again (or adding it) conflicts.
-    expect(await code(h.service.promote(admin, "vanta", "slack:UALICE"))).toBe("conflict");
+    // … and the personal entry retired at once (nothing of hers was waiting on a credential).
+    expect(done.retired).toBe(true);
+    expect(h.backing.document?.users["slack:UALICE"]?.mcpServers?.vanta).toBeUndefined();
+    // Retired means gone: a second promote finds nothing of hers. Bob's same-named server, added before
+    // the org held the name, now conflicts with the org's copy.
+    expect(await code(h.service.promote(admin, "vanta", "slack:UALICE"))).toBe("not_found");
+    expect(await code(h.service.promote(admin, "vanta", "slack:UBOB"))).toBe("conflict");
     // A personal entry pinned in config.yaml is not the service's to move.
     const pinned = harness({
       yaml:

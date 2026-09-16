@@ -449,7 +449,10 @@ describe("mcp list --all and mcp promote (record 0042)", () => {
     expect(promoted).toContain(`added by ${ADMIN} · promoted from ${ALICE}`);
     expect(promoted).toContain("open this link and paste the server's token");
     expect(backing.document?.org?.mcpServers?.vanta).toMatchObject({ addedBy: ADMIN, promotedFrom: ALICE });
-    expect(backing.document?.users[ALICE]?.mcpServers?.vanta).toBeDefined();
+    expect(backing.document?.users[ALICE]?.mcpServers?.vanta).toBeDefined(); // shadowed, not yet retired: the org copy awaits its credential
+    expect(await text(inv, "mcp.list", { options: { all: true } }, chat(ADMIN))).toContain(
+      `\`vanta\` (user) ⏳ awaiting credential — https://mcp.vanta.com/mcp · agents: general, research · auth: bearer · added by ${ALICE} · tier of ${ALICE} · shadowed by org`,
+    );
     expect(await inv.invoke("mcp.promote", { args: ["vanta"], options: { from: ALICE } }, chat(ADMIN))).toMatchObject({
       ok: false,
       error: "conflict",

@@ -151,7 +151,8 @@ describe("McpServersPanel", () => {
     expect(rows[0].text()).toContain("pinned in config.yaml");
     expect(rows[0].text()).not.toContain("Remove");
     expect(rows[1].text()).toContain("awaiting credential");
-    expect(rows[1].text()).toContain("added by you");
+    expect(rows[1].find("td.addedby").text()).toBe("you");
+    expect(rows[0].find("td.addedby").text()).toBe("");
     expect(rows[1].text()).toContain("Remove");
     expect(rows[1].text()).toContain("Connect");
   });
@@ -296,6 +297,120 @@ describe("McpServersPanel", () => {
       },
     });
     expect(member.text()).not.toContain("Promote");
+  });
+
+  it("reads as people and chips: a user row's owner and `promoted from` show names when the view carries them, the id otherwise; agents are the run page's hue chips; a row a higher tier shadows is marked, dimmed and offers no Promote", () => {
+    const HERS: McpServerView = {
+      name: "vanta",
+      scope: "user",
+      scopeKey: "user:slack:UHER",
+      url: "https://mcp.vanta.com/mcp",
+      agents: ["general", "coding", "explore"],
+      auth: "bearer",
+      state: "connected",
+      source: "runtime",
+      addedBy: "slack:UHER",
+      addedByName: "Hana",
+      ownerName: "Hana",
+      shadowedBy: "org",
+    };
+    const ORGS: McpServerView = {
+      ...HERS,
+      scope: "org",
+      scopeKey: "org",
+      state: "awaiting_credential",
+      addedBy: "access:me",
+      addedByName: undefined,
+      ownerName: undefined,
+      shadowedBy: undefined,
+      promotedFrom: "slack:UHER",
+      promotedFromName: "Hana",
+    };
+    const wrapper = mountApp(McpServersPanel, {
+      props: { mcps: mcps({ servers: [ORGS, HERS], allTiers: true }), vocabulary: VOCABULARY, viewer: "access:me" },
+    });
+    const [org, hers] = wrapper.findAll("tr.server");
+    expect(org.find("td.addedby").text()).toBe("youpromoted from Hana");
+    expect(org.find("span.shadow").exists()).toBe(false);
+    expect(hers.find("span.owner").text()).toBe("Hana");
+    expect(hers.find("span.shadow").text()).toBe("shadowed by org");
+    expect(hers.classes()).toContain("shadowed");
+    expect(hers.text()).not.toContain("Promote");
+    expect(hers.findAll("span.agent").map((c) => [c.text(), c.attributes("data-agent-hue")])).toEqual([
+      ["general", "general"],
+      ["coding", "coding"],
+      ["explore", "other"],
+    ]);
+    expect(hers.find("span.agent").classes().join(" ")).toContain("text-info"); // the run page's `general` hue
+    // Without names the ids stand.
+    const plain = mountApp(McpServersPanel, {
+      props: {
+        mcps: mcps({ servers: [{ ...HERS, ownerName: undefined, shadowedBy: undefined, addedByName: undefined }] }),
+        vocabulary: VOCABULARY,
+        viewer: "access:me",
+      },
+    });
+    expect(plain.find("span.owner").text()).toBe("slack:UHER");
+    expect(plain.find("td.addedby").text()).toBe("slack:UHER");
+    expect(plain.text()).toContain("Promote");
+  });
+
+  it("a connect link opens in a new tab and the page watches the row it was minted for: one mcp list every few seconds, a reload when its state changes, nothing after the link's life", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.spyOn(browser, "confirm").mockReturnValue(true);
+      const reload = vi.spyOn(browser, "reload").mockImplementation(() => {});
+      const HERS: McpServerView = {
+        name: "vanta",
+        scope: "user",
+        scopeKey: "user:slack:UHER",
+        url: "https://mcp.vanta.com/mcp",
+        agents: ["general"],
+        auth: "bearer",
+        state: "connected",
+        source: "runtime",
+        addedBy: "slack:UHER",
+      };
+      let orgState: McpServerView["state"] = "awaiting_credential";
+      const calls: string[] = [];
+      const fetchFn = vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push(`${init?.method ?? "GET"} ${url}`);
+        const body =
+          init?.method === "POST"
+            ? { connectUrl: "https://sb.example/mcp/connect/n9", promotedFrom: "slack:UHER" }
+            : { servers: [{ ...HERS, scope: "org", scopeKey: "org", state: orgState }] };
+        return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+      });
+      const wrapper = mountApp(McpServersPanel, {
+        props: {
+          mcps: mcps({ servers: [HERS], allTiers: true }),
+          vocabulary: VOCABULARY,
+          viewer: "access:me",
+          fetch: fetchFn,
+        },
+      });
+      await wrapper.findAll("tr.server button")[1].trigger("click");
+      await vi.advanceTimersByTimeAsync(0);
+      const link = wrapper.find("p.notice a.connect");
+      expect(link.attributes("target")).toBe("_blank");
+      expect(link.attributes("rel")).toBe("noopener");
+      expect(wrapper.find("span.watching").exists()).toBe(true);
+      expect(calls).toEqual(["POST /api/mcp.promote"]);
+      // Two ticks while the org copy still awaits: asked, not reloaded.
+      await vi.advanceTimersByTimeAsync(4_000);
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(calls.slice(1)).toEqual(["GET /api/mcp.list?all=true", "GET /api/mcp.list?all=true"]);
+      expect(reload).not.toHaveBeenCalled();
+      // The admin completes the link in the other tab: the next tick sees the state change and reloads once.
+      orgState = "connected";
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(reload).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(40_000);
+      expect(calls).toHaveLength(4); // the watch stopped with the reload
+      expect(reload).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("MCP off: the reason in place of the table and no form", () => {
@@ -480,7 +595,7 @@ describe("McpServersPanel for a linked session (record 0042)", () => {
     });
     expect((wrapper.find("#mcp-scope").element as HTMLSelectElement).value).toBe("me");
     const mine = wrapper.findAll("tr.server")[1];
-    expect(mine.text()).toContain("added by you");
+    expect(mine.find("td.addedby").text()).toBe("you");
     expect(mine.findAll("button").filter((b) => (b.element as HTMLButtonElement).disabled)).toHaveLength(0);
     await wrapper.find("#mcp-name").setValue("notes");
     await wrapper.find("#mcp-url").setValue("https://mcp.notes.example/mcp");
@@ -499,7 +614,7 @@ describe("McpServersPanel for a linked session (record 0042)", () => {
     expect((wrapper.find("#mcp-scope").element as HTMLSelectElement).value).toBe("org");
     expect((wrapper.find('#mcp-scope option[value="me"]').element as HTMLOptionElement).disabled).toBe(true);
     const row = wrapper.findAll("tr.server")[1];
-    expect(row.text()).not.toContain("added by you");
+    expect(row.find("td.addedby").text()).not.toBe("you");
     expect(row.findAll("button").filter((b) => (b.element as HTMLButtonElement).disabled).length).toBeGreaterThan(0);
   });
 });
