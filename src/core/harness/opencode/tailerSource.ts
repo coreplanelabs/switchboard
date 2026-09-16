@@ -121,6 +121,10 @@ async function refill(sessionID, reason) {
     known.set(sessionID, seen);
     emit({ feed: "messages", at, sessionID, reason, data: changed });
   } catch (err) {
+    // The session is known from here on even though its list is empty, so the
+    // reconnect sweep covers it: a session whose only refill failed would
+    // otherwise wait for its next step end.
+    if (!known.has(sessionID)) known.set(sessionID, new Map());
     note("message refill failed", { sessionID, reason, detail: detailOf(err) });
   }
 }

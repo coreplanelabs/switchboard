@@ -128,7 +128,8 @@ describe("the container scripts", () => {
     });
     expect(kept).toContain(`: >> ${shellQuote(paths.log)}`);
     expect(kept).not.toContain(`: > ${shellQuote(paths.log)}`);
-    expect(kept).toContain(`: > ${shellQuote(paths.errLog)}`);
+    expect(kept).toContain(`: >> ${shellQuote(paths.errLog)}`);
+    expect(kept).not.toContain(`: > ${shellQuote(paths.errLog)}`);
     const fresh = startScript({ paths, command: "node", args: [], env: {} });
     expect(fresh).toContain(`: > ${shellQuote(paths.log)}`);
     expect(fresh).not.toContain(": >>");

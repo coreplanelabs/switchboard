@@ -333,6 +333,7 @@ describe("BotHostHarnessContainer: the seam is harness-neutral in fact", () => {
     const container = new BotHostHarnessContainer({ spawn, env: { PATH: process.env.PATH! } });
     const paths = await rootOf(container);
     writeFileSync(paths.log, "kept\n");
+    writeFileSync(paths.errLog, "earlier\n");
     const { pid } = await container.start({ paths, command: "opencode", args: ["serve"], env: {}, keepLog: true });
     try {
       await vi.waitFor(async () => {

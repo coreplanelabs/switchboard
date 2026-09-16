@@ -649,6 +649,16 @@ describe("launchOpenCode — the server started through the seam and found ready
     const shape = harness({ onRequest: () => ({ status: 200, headers: {}, body: "<html>" }) });
     await expect(launchOpenCode(shape.deps, spec, BEARER)).rejects.toThrow(/not the health shape/);
 
+    // 500 is the server saying its start failed: named at once, never polled to the deadline.
+    const failedStart = harness({
+      onRequest: () => ({ status: 500, headers: {}, body: JSON.stringify({ code: "service_failed" }) }),
+    });
+    await expect(launchOpenCode(failedStart.deps, spec, BEARER)).rejects.toThrow(
+      /reported that its start failed \(health answered 500\)/,
+    );
+    expect(failedStart.container.requests).toHaveLength(1);
+    expect(failedStart.clock()).toBe(1_000_000);
+
     const dead = harness();
     const start = dead.container.start.bind(dead.container);
     dead.container.start = async (s) => {

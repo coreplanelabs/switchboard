@@ -31,6 +31,8 @@ interface Fake {
   streams: ServerResponse[];
   permissions: Record<string, unknown[]>;
   messages: Record<string, Array<{ id: string; [k: string]: unknown }>>;
+  /** Sessions whose next message refill answers 500, once: a refill that fails. */
+  failMessagesOnce: Set<string>;
   emit(event: Record<string, unknown>): void;
   heartbeat(): void;
   drop(): void;
@@ -47,6 +49,7 @@ async function fakeServe(opts: { password?: string } = {}): Promise<Fake> {
     streams: [],
     permissions: {},
     messages: {},
+    failMessagesOnce: new Set(),
     emit(event) {
       for (const res of fake.streams) res.write(`data: ${JSON.stringify(event)}\n\n`);
     },
@@ -89,6 +92,11 @@ async function fakeServe(opts: { password?: string } = {}): Promise<Fake> {
     }
     const msgs = /^\/api\/session\/([^/]+)\/message$/.exec(url.pathname);
     if (req.method === "GET" && msgs) {
+      if (fake.failMessagesOnce.delete(msgs[1])) {
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "store unavailable" }));
+        return;
+      }
       const all = fake.messages[msgs[1]] ?? [];
       // Two pages when there is more than one message: the tailer must follow the cursor.
       const cursor = url.searchParams.get("cursor");
@@ -347,6 +355,36 @@ describe("the tailer", () => {
     expect(messages[2].data).toEqual([]);
     expect(events(records).map((e) => e.id)).toEqual(["evt_0", "evt_1", "evt_0", "evt_4"]);
     expect(fake.requests.slice(before).map((r) => r.line)[0]).toBe("GET /api/event");
+  }, 15_000);
+
+  it("a session whose only refill failed is still swept on reconnect: the failure is noted, the session is known from then on, and the reconnect's refill carries its messages", async () => {
+    const fake = await fakeServe();
+    fake.failMessagesOnce.add("ses_2");
+    fake.messages.ses_2 = [{ id: "msg_u2", type: "user", time: { created: 1 } }];
+    const tailer = startTailer(fake.port);
+    scenario(fake, tailer);
+    await until(() => fake.streams.length === 1, "the tailer to subscribe");
+    fake.emit(STEP_END("ses_2", "evt_1"));
+    await until(
+      () => fake.requests.filter((r) => r.line.includes("/session/ses_2/message?")).length >= 1,
+      "the refill that fails",
+    );
+    await sleep(50);
+    fake.drop();
+    await until(() => fake.streams.length === 1, "the tailer to reconnect");
+    await until(
+      () => fake.requests.filter((r) => r.line.includes("/session/ses_2/message?")).length >= 2,
+      "the reconnect's refill of the session whose refill failed",
+    );
+    await sleep(50);
+    await stop(tailer);
+    const records = await replay(tailer.feed);
+    expect(notes(records)).toContain("message refill failed");
+    const messages = records.filter(
+      (r): r is Extract<OpenCodeFeedRecord, { feed: "messages" }> => r.feed === "messages" && r.sessionID === "ses_2",
+    );
+    expect(messages.map((r) => r.reason)).toEqual(["reconnect"]);
+    expect(messages[0].data.map((m) => m.id)).toEqual(["msg_u2"]);
   }, 15_000);
 
   it("exits on its own once the server process it watches is gone and the stream has closed; a server that refuses the password is noted and retried, never a crash", async () => {

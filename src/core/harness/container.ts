@@ -60,8 +60,8 @@ export interface HarnessStart {
    *  port replaces `PORT_ARG` in the arguments, rides the environment under
    *  `HARNESS_PORT_ENV`, and comes back as `HarnessStarted.port`, for the row. */
   port?: number | "free";
-  /** Keep the log's bytes: the wrapper creates the log when it is missing and
-   *  appends, instead of truncating it. For a process whose log is a file the
+  /** Keep the log's and the error log's bytes: the wrapper creates them when
+   *  missing and appends, instead of truncating. For a process whose log is a file the
    *  harness reads by offset and may restart the writer of (OpenCode's tailer,
    *  whose stdout is the run's feed): a restart must not wipe what a recorded
    *  offset points into. Absent, the log starts empty, as pi's always has. */
@@ -240,7 +240,7 @@ export function startScript(start: HarnessStart): string {
     `rm -f ${shellQuote(paths.fifo)}`,
     `mkfifo -m 600 ${shellQuote(paths.fifo)}`,
     keepLog ? `: >> ${shellQuote(paths.log)}` : `: > ${shellQuote(paths.log)}`,
-    `: > ${shellQuote(paths.errLog)}`,
+    keepLog ? `: >> ${shellQuote(paths.errLog)}` : `: > ${shellQuote(paths.errLog)}`,
     `setsid -f sh -c ${shellQuote(inner)}`,
     `sleep 0.3`,
     `cat ${shellQuote(paths.pidFile)}`,

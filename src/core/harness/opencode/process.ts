@@ -555,6 +555,8 @@ export async function launchOpenCode(
     }
     if (res) {
       if (res.status === 401) throw await notReady("the server refused the run's password");
+      // 500 is the server's own word for a start that failed (`packages/server/src/process.ts:214-224`): nothing to poll for.
+      if (res.status === 500) throw await notReady("the server reported that its start failed (health answered 500)");
       if (res.status === 200) {
         const health = parseHealth(res.body);
         if (!health) throw await notReady("the health answered something that is not the health shape");
