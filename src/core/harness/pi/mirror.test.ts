@@ -390,3 +390,80 @@ describe("piSessionFile — the session a restarted pi continues from", () => {
     });
   });
 });
+
+// harness.md item 6: a relaunch under a living bot rebuilds pi from this
+// generation's copy of the record — the rows the mirror wrote — so the mirror
+// keeps them, wired or not, and knows where each compaction sat among them.
+describe("PiMirror — the rows it wrote, kept for a relaunch", () => {
+  it("keeps every row it wrote and each compaction's position among them, wired or unwired, and leaves out a row met again on a re-attach, which the caller's transcript already holds", async () => {
+    const reports: StepReport[] = [];
+    const m = new PiMirror({ onStep: async (r) => void reports.push(r), seedLength: 1, remainingMs: () => 600_000 });
+    m.expectSeedEcho();
+    await m.onMessage({ role: "user", content: "go" }, 0);
+    await m.onMessage(bashCall, 1);
+    await m.onMessage(bashResult, 1);
+    await m.onCompaction({ summary: "so far", tokensBefore: 10 }, 1);
+    await m.onMessage(final, 2);
+    const written = m.written;
+    expect(written.messages).toEqual([
+      chatMessageOf(bashCall),
+      { role: "user", content: [{ type: "tool_result", toolUseId: "call_0", content: " M README.md" }] },
+      chatMessageOf(final),
+    ]);
+    expect(written.compactions).toEqual([{ before: 2, entry: { summary: "so far", tokensBefore: 10 } }]);
+    // The same rows the steps carried, in order.
+    expect(reports.flatMap((r) => r.turns)).toEqual(written.messages);
+    // Unwired: nothing reported, the rows kept all the same.
+    const unwired = new PiMirror({ seedLength: 1, remainingMs: () => 1 });
+    expect(await unwired.onMessage(bashCall, 1)).toBe(false);
+    expect(await unwired.onCompaction({ summary: "so far" }, 1)).toBe(false);
+    expect(unwired.written.messages).toEqual([chatMessageOf(bashCall)]);
+    expect(unwired.written.compactions).toEqual([{ before: 1, entry: { summary: "so far" } }]);
+    // A re-attach that meets the transcript's tail again writes it no second time and keeps it nowhere.
+    const tail = chatMessageOf(bashCall)!;
+    const reattached = new PiMirror({
+      onStep: async () => {},
+      seedLength: 2,
+      remainingMs: () => 1,
+      mirroredTail: { turn: tail },
+    });
+    expect(await reattached.onMessage(bashCall, 1)).toBe(true);
+    expect(reattached.written.messages).toEqual([]);
+    await reattached.onMessage(bashResult, 1);
+    await reattached.onMessage(final, 2);
+    expect(reattached.written.messages).toEqual([
+      { role: "user", content: [{ type: "tool_result", toolUseId: "call_0", content: " M README.md" }] },
+      chatMessageOf(final),
+    ]);
+  });
+
+  // harness-pi item 8: the settlement turn a rebuilt session starts on reaches
+  // the ledger too — primed as the results pending for the next step, it lands
+  // with the continue's echo as that step's user turn from the seed index.
+  it("prime puts a rebuilt session's settlement turn before the next step's user content: the first step carries [user(settlements + the continue's echo), assistant] from the seed index, the written rows hold it once, and a compaction after it sits one row later", async () => {
+    const reports: StepReport[] = [];
+    const m = new PiMirror({ onStep: async (r) => void reports.push(r), seedLength: 2, remainingMs: () => 600_000 });
+    const settlement = {
+      type: "tool_result" as const,
+      toolUseId: "call_0",
+      content: "lost with the container",
+      isError: true as const,
+    };
+    m.prime([settlement]);
+    expect(await m.onMessage({ role: "user", content: "Continue where you left off" }, 1)).toBe(false);
+    expect(await m.onMessage(final, 2)).toBe(true);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({
+      firstIdx: 2,
+      inFlight: [],
+      turns: [
+        { role: "user", content: [settlement, { type: "text", text: "Continue where you left off" }] },
+        chatMessageOf(final),
+      ],
+    });
+    expect(m.written.messages).toEqual(reports[0]!.turns);
+    await m.onCompaction({ summary: "so far" }, 2);
+    expect(m.written.compactions).toEqual([{ before: 2, entry: { summary: "so far" } }]);
+    expect(reports[1]).toMatchObject({ firstIdx: 4, turns: [] });
+  });
+});

@@ -85,7 +85,7 @@ export interface RunDeps
     RecordDeps,
     Pick<AdmissionDeps, "runLedger">,
     Pick<AuthorizeDeps, "fetchPrHead">,
-    Pick<ProvisionDeps, "skills" | "runBearers"> {
+    Pick<ProvisionDeps, "skills" | "runBearers" | "dataDir"> {
   config: ConfigStore;
   /**
    * The harness's process-wide pieces (docs/reference/specs/harness.md): the

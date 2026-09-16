@@ -103,6 +103,17 @@ export class PiMirror {
   private seedEchoPending = false;
   private mirroredTail: LedgerTail | undefined;
   private iteration = 0;
+  /** The rows written since the mirror started, and the compaction entries
+   *  among them by position — kept whether or not the ledger is wired, so
+   *  the harness holds this generation's copy of the record it wrote
+   *  (`written`), what a relaunch under a living bot rebuilds from. Bounded
+   *  by the run as the ledger's transcript and pi's own session file are — one
+   *  row per turn under the run's turn guard, the same bytes both already
+   *  hold — and never trimmed: a rebuilt session renders every row, with each
+   *  compaction where it sat, so a row dropped here would be a row the record
+   *  clause lost. */
+  private readonly rows: ChatMessage[] = [];
+  private readonly compactionRows: AssembledCompaction[] = [];
   /** The highest ledger inbox seq folded in so far (run-history item 40). */
   inboxConsumedSeq = 0;
 
@@ -114,6 +125,16 @@ export class PiMirror {
   /** Whether a report is owed: the mirror is wired and something happened. */
   get wired(): boolean {
     return this.deps.onStep !== undefined;
+  }
+
+  /** The transcript rows this mirror has written since it started (the rows
+   *  after the seed or the resumed transcript it was constructed on), and the
+   *  compaction entries among them, each `before` counted from the first of
+   *  these rows: what a relaunch under a living bot rebuilds from
+   *  (harness-pi item 8), this generation's copy of the ledger's rows. A row
+   *  met again on a re-attach (`alreadyHeld`) was the caller's and is not here. */
+  get written(): { messages: ChatMessage[]; compactions: AssembledCompaction[] } {
+    return { messages: [...this.rows], compactions: [...this.compactionRows] };
   }
 
   /** The row (the run's own index) the calls under way ride in — the last
@@ -139,6 +160,20 @@ export class PiMirror {
     this.seedEchoPending = true;
   }
 
+  /** The settlement turn a rebuilt process's session starts on (harness-pi
+   *  item 8) — one tool result per call in flight at the death: the relay's
+   *  answer, the still-running note or the restart note — primed as the user
+   *  content pending for the next step, the write-through's own convention
+   *  (the results since the last assistant turn are the one user turn the next
+   *  step carries). The ledger's next rows are then the session's,
+   *  `[user(settlements + the continue echo), assistant]` from the seed index,
+   *  so a rebuild from the ledger at the next death hands the model a
+   *  `tool_result` for every `tool_use` and the two records agree on what the
+   *  model saw. Never on a re-attach, where pi's own log carries the results. */
+  prime(parts: readonly ContentPart[]): void {
+    this.pendingUser.push(...parts);
+  }
+
   /** The row about to be written, against the transcript's tail — compared
    *  once, with the first row the mirror meets: equal means the ledger holds
    *  it already (read again, harness-pi item 8), together with the results
@@ -160,7 +195,6 @@ export class PiMirror {
    *  there — so the harness can move the row's offset past it. A result or a
    *  steer's text waits in memory for the next step, and the answer is no. */
   async onMessage(message: Record<string, unknown>, turn: number): Promise<boolean> {
-    if (!this.deps.onStep) return false;
     const chat = chatMessageOf(message);
     if (!chat) return false;
     // A message with no parts is not a turn (session-log item 2, one index per
@@ -176,7 +210,7 @@ export class PiMirror {
       this.pendingUser.push(...chat.content);
       return false;
     }
-    if (this.alreadyHeld({ turn: chat })) return true;
+    if (this.alreadyHeld({ turn: chat })) return this.wired;
     const turns: ChatMessage[] = [];
     if (this.pendingUser.length > 0) turns.push({ role: "user", content: this.pendingUser });
     this.pendingUser = [];
@@ -195,6 +229,9 @@ export class PiMirror {
     };
     this.idx += turns.length;
     this.lastAssistantIdx = this.idx - 1; // the assistant turn is the step's last row
+    this.rows.push(...turns);
+    // Unwired, the rows are kept and nothing is held on the ledger.
+    if (!this.deps.onStep) return false;
     await this.deps.onStep(report);
     return true;
   }
@@ -205,8 +242,7 @@ export class PiMirror {
    *  the summary where pi wrote it and the index moves past it. Answers as
    *  `onMessage` does: the ledger holds everything up to the entry. */
   async onCompaction(entry: CompactionEntry, turn: number): Promise<boolean> {
-    if (!this.deps.onStep) return false;
-    if (this.alreadyHeld({ compaction: entry })) return true;
+    if (this.alreadyHeld({ compaction: entry })) return this.wired;
     const turns: ChatMessage[] = [];
     if (this.pendingUser.length > 0) turns.push({ role: "user", content: this.pendingUser });
     this.pendingUser = [];
@@ -221,6 +257,9 @@ export class PiMirror {
       inboxConsumedSeq: this.inboxConsumedSeq,
     };
     this.idx += turns.length + 1;
+    this.rows.push(...turns);
+    this.compactionRows.push({ before: this.rows.length, entry });
+    if (!this.deps.onStep) return false;
     await this.deps.onStep(report);
     return true;
   }

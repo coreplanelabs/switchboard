@@ -71,9 +71,11 @@ export interface PiHarnessFacts {
    *  itself: the pid alone is then judged, as before. */
   container?: string;
   /** How many times the run loop relaunched the run's process after its
-   *  container was replaced (the survival clause): the loop's count, carried
-   *  through every save so the bound it keeps survives a bot generation; 0 on
-   *  a fresh start, and read as 0 from a row written before it existed. */
+   *  container was replaced (the survival clause): the loop's count, written
+   *  by the loop inside the bearer's rotation and carried unchanged through
+   *  every save of the harness, so the bound it keeps (`RELAUNCH_CEILING`)
+   *  survives a bot generation; 0 on a fresh start, and read as 0 from a row
+   *  written before it existed. */
   relaunches: number;
 }
 
@@ -247,6 +249,61 @@ export class HarnessMismatchError extends HarnessInterruptedError {
   }
 }
 
+/** How many times the run loop relaunches a run's process after its container
+ *  was replaced under a living bot (the survival clause's ceiling; harness.md
+ *  item 6): counted on the row's facts (`HarnessFacts.relaunches`) so the
+ *  bound survives a bot generation, and the finding past it closes the run
+ *  `interrupted` naming the bound, so a crash-looping container cannot spin
+ *  a run. */
+export const RELAUNCH_CEILING = 2;
+
+/** What a harness holds of the run's record at the moment its container is
+ *  found replaced under a living bot: the transcript as the harness mirrored
+ *  it onto the ledger — the same rows a bot death's resume reads back, this
+ *  generation's copy of them — with every call of the last turn settled as
+ *  the floor settles it (its result died with the container and is never
+ *  re-run; a relayed call the bot still runs is awaited by the harness that
+ *  rebuilds, and its answer or the still-running note takes the settlement's
+ *  place), the counters the process stood at, and the run's deadline. A
+ *  `HarnessResume` short of its facts and its budget, which the run loop fills
+ *  once the bearer is rotated and the workspace re-attached. */
+export interface HarnessRecord {
+  messages: ChatMessage[];
+  compactions: AssembledCompaction[];
+  settlements: Settlement[];
+  turn: number;
+  inboxConsumedSeq: number;
+  /** The run's wall-clock deadline, so the budget keeps running through the relaunch. */
+  deadline: number;
+}
+
+/** The container the harness's process ran in was replaced under the run:
+ *  the executor's typed word on a container command (harness-pi.md item 16),
+ *  the condition of the survival clause's ceiling and the one thing the loop
+ *  reads by type. The harness has settled every open call on the record and
+ *  said so in a `sandbox_restarted` note; nothing of the old process is
+ *  reachable in the container the run holds now, so it probed, ended and
+ *  removed nothing there. The run loop relaunches the process from `record`
+ *  in that container — the workspace re-attached or refused by name, the
+ *  bearer rotated, at most `RELAUNCH_CEILING` times — or closes the run
+ *  `interrupted` as the floor does, saying why. `was` and `now` are the
+ *  container's words, corroboration for the record and never the condition:
+ *  the word is the kernel's boot id, which a container replaced on the same
+ *  kernel keeps. */
+export class HarnessContainerReplacedError extends HarnessInterruptedError {
+  constructor(
+    message: string,
+    /** The executor's words, the condition. */
+    readonly said: string,
+    readonly was: string | undefined,
+    readonly now: string | undefined,
+    readonly record: HarnessRecord,
+  ) {
+    super(message, "container replaced under the run", "container_replaced");
+    this.name = "HarnessContainerReplacedError";
+  }
+}
+
 /** One more turn on the run's own session after its loop settled (the
  *  conversation clause; harness-pi.md item 14): what the run stage hands the
  *  coding description turn and the review's head-move re-review in place of a
@@ -300,6 +357,17 @@ export interface HarnessResume {
   /** The row's harness facts, when the previous generation wrote them —
    *  whichever harness wrote them: the harness asked refuses another's. */
   facts?: HarnessFacts;
+  /** Set on a relaunch under a living bot (the survival clause's ceiling): the
+   *  run's container was replaced under its process — the executor's typed
+   *  word, the loop's condition — so the row's process is gone with the old
+   *  container whatever this one answers for its name or the pid: the harness
+   *  probes, ends and removes nothing at the row's pid and root, rebuilds from
+   *  the record, takes the run's relay registration over with its calls kept
+   *  (`HarnessRegistry.replace`), and says `relaunched` in its `resumed` note.
+   *  `from` and `to` are the two containers' words when either could name
+   *  itself, for the note. Absent on a resume after a bot death, where the
+   *  harness finds the process first. */
+  relaunch?: { from?: string; to?: string };
 }
 
 /** One run as the loop hands it to a harness: the preset and its budget, the

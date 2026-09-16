@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -12,7 +12,14 @@ import { channelOf, startRequestRoot } from "../requestTrace.js";
 import { createRunEnding } from "../runEnding.js";
 import { createRunHistoryWriter } from "../runHistoryWriter.js";
 import { RunRegistry } from "../runRegistry.js";
-import { NullLedgerWriteThrough } from "../runLedger/writeThrough.js";
+import { createLedgerWriteThrough, NullLedgerRun, NullLedgerWriteThrough } from "../runLedger/writeThrough.js";
+import { InMemoryRunLedger } from "../runLedger/inMemory.js";
+import { planResume, transcriptSource } from "../runLedger/resume.js";
+import { localWorkspaceDir } from "../../execution/factory.js";
+import { reattachWorkspace } from "./provision.js";
+import { bearerHashOf, RunBearerStore } from "../modelProxy/runBearers.js";
+import { RUN_BEARER_ENV } from "../harness/pi/process.js";
+import { openThroughSeam, type HarnessFacts, type HarnessRun } from "../harness/contract.js";
 import { InMemoryRunStore, NullRunStore } from "../runStore.js";
 import { createCardShell } from "../statusCardFrame.js";
 import { ThreadAdmission } from "../threadAdmission.js";
@@ -40,7 +47,7 @@ import {
 } from "../harness/pi/relay.js";
 import { spawnCapabilityFor, type SpawnCapability, type SpawnDeps } from "./spawn.js";
 import type { SessionCapability } from "../../tools/session.js";
-import { ModelPolicyRefusedError } from "../harness/pi/harness.js";
+import { ModelPolicyRefusedError, PiContainerReplacedError } from "../harness/pi/harness.js";
 import { PiHarness } from "../harness/pi/piHarness.js";
 import { FakeHarnessContainer } from "../harness/testing/fakeContainer.js";
 import { scriptPiFromProvider } from "../harness/pi/testing/providerPi.js";
@@ -56,6 +63,7 @@ import type { PrDescription } from "../prDescription.js";
 import type { ChatMessage } from "../chatMessage.js";
 import type { ResumeContext } from "./admission.js";
 import type { AppendableEvent, LiveRunRow, StepRecord } from "../runLedger/types.js";
+import type { RunRecord } from "../runRecord.js";
 
 // Feature: docs/reference/specs/harness-pi.md, docs/reference/specs/run-history.md
 // items 20–22, docs/reference/specs/llm-output.md item 5 — the loop's own
@@ -996,15 +1004,17 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
 // review post-step exactly as the native loop's does: the reviewed-head guard,
 // the `LGTM:` line, a comment and never an approval. Without the block, or
 // with `review: native`, a review is the native loop byte for byte.
-// Feature: docs/reference/specs/harness-pi.md item 16 — the run stage reads the
-// harness's replaced-container verdict as an interruption, never a failure:
-// the terminal shape a refused re-attach leaves (run-history item 54), so the
-// dispatcher runs the request again as a new run.
-describe("the pi harness — the container replaced under a live run", () => {
-  it("a run whose pi container is replaced under it ends `interrupted`, not failed: the loop answers the interrupted outcome for the dispatcher's restart — the card's reason, the refusal by name, the note's words and the request to run again as a new run — the registry and the record say interrupted with the sandbox_restarted note and the settled call, the workspace is released, and the card closes 🔁 saying the run restarts from its request — never ❌", async () => {
-    const registry = new HarnessRegistry();
-    const container = new FakeHarnessContainer();
-    container.onStdin = (line, c) => {
+// Feature: docs/reference/specs/harness.md item 6 (the survival clause's
+// ceiling) and harness-pi.md item 16 (the floor beneath it) — the run stage on
+// a container replaced under a living bot: the loop relaunches pi from the
+// record in the container the run holds, the workspace re-attached or refused
+// by name, the bearer rotated on its own meter with the row written inside the
+// rotation, at most two relaunches; a refusal and the third finding close the
+// run `interrupted` for the dispatcher's restart exactly as the floor did.
+describe("the pi harness — the container replaced under a living bot: the relaunch ceiling", () => {
+  /** A pi that opens one bash call and then meets the roll: the replacement names itself anew and the next log read is the executor's typed word. */
+  function piThatMeetsTheRoll(registry: HarnessRegistry) {
+    return (line: string, c: FakeHarnessContainer) => {
       const cmd = JSON.parse(line) as Record<string, unknown>;
       if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
         c.emit({ id: cmd.id, type: "response", command: cmd.type, success: true, data: { sessionFile: "s.jsonl" } });
@@ -1023,61 +1033,439 @@ describe("the pi harness — the container replaced under a live run", () => {
       authorizeToolCall(registry.get("run-l")!, { toolCallId: "c1", tool: "bash", input: { command: "npm test" } });
       // The resident's container rolls under the run: the executor waits for
       // the wake, re-attaches to the replacement — which names itself anew —
-      // and hands the probe back as the restart (resident-repos item 65).
+      // and hands the next log read back as the restart (resident-repos item 65).
       c.vm = "vm-new";
-      c.alive = async () => {
-        throw new ExecSandboxRestartedError("the sandbox restarted under the run (waited 42 s)", 42_000);
+      const read = c.readLog.bind(c);
+      c.readLog = async (path, offset, max) => {
+        const chunk = await read(path, offset, max);
+        if (chunk.length === 0)
+          throw new ExecSandboxRestartedError("the sandbox restarted under the run (waited 42 s)", 42_000);
+        return chunk;
       };
     };
+  }
+  /** The run's workspace, re-attached on the local backend under a directory of the test's own. */
+  const yamlWithWorkspace = () =>
+    `${YAML}harness:\n  coding: pi\nworkspaceDir: ${mkdtempSync(join(tmpdir(), "swb-relaunch-"))}\n`;
+  /** A ledger run that records the row's state patches — the facts the relaunch writes — and the finish record its sink is handed. */
+  function recordingLedgerRun() {
+    const states: Record<string, unknown>[] = [];
+    const records: RunRecord[] = [];
+    const ledgerRun = new NullLedgerRun("run-l", { put: async (record) => void records.push(record) });
+    ledgerRun.setState = (patch) => void states.push(patch as Record<string, unknown>);
+    return { ledgerRun, states, record: () => records[0]! };
+  }
+  const harnessStates = (states: Record<string, unknown>[]) =>
+    states.flatMap((s) => (s.harness ? [s.harness as Record<string, unknown>] : []));
+  const notesOf = (record: { events: unknown[] }) =>
+    (record.events as Array<{ type: string; kind?: string; summary?: string }>)
+      .filter((e) => e.type === "run_note" && (e.kind === "sandbox_restarted" || e.kind === "resumed"))
+      .map((e) => ({ kind: e.kind!, summary: e.summary! }));
+  const harnessOver = (registry: HarnessRegistry, containerFor: () => FakeHarnessContainer): HarnessProcessDeps => ({
+    harness: piHarness,
+    registry,
+    harnessUrl: "https://bot.example.com",
+    loopbackUrl: "http://127.0.0.1:8080",
+    containerFor,
+    pollMs: 1,
+    tickMs: 5,
+  });
+  const mintFor = (bearers: RunBearerStore, s: ReturnType<typeof setup>) =>
+    bearers.mint({
+      runId: "run-l",
+      modelRef: "anthropic/general-model",
+      providerName: "anthropic",
+      providerType: "anthropic",
+      model: "general-model",
+      maxTokens: 4096,
+      maxTurns: 50,
+      expiresAt: NOW + 60 * 60_000,
+      span: s.ctx.root,
+      publish: () => {},
+    });
+
+  it("a living bot, the typed error from the log read: pi is relaunched in the replacement container from the record — nothing killed or removed for the old process, the workspace re-attached, the bearer rotated with its turns preserved and the row's hash the new secret's, one resumed note, relaunches = 1 — and the run completes with the model continuing from the rebuilt transcript", async () => {
+    const registry = new HarnessRegistry();
+    const bearers = new RunBearerStore({ clock: () => NOW });
+    const a = new FakeHarnessContainer();
+    a.onStdin = piThatMeetsTheRoll(registry);
+    const b = new FakeHarnessContainer();
+    b.vm = "vm-new";
+    b.pid = 5151;
+    const model = scriptPiFromProvider(b, {
+      provider: provider("resumed and done"),
+      registry,
+      bearers,
+      beforeModelCall: () => new Promise((r) => setTimeout(r, 10)),
+    });
+    const containers: FakeHarnessContainer[] = [];
     const s = setup("unused", {
       agent: "coding",
-      yaml: YAML + "harness:\n  coding: pi\n",
-      harness: {
-        harness: piHarness,
-        registry,
-        harnessUrl: "https://bot.example.com",
-        loopbackUrl: "http://127.0.0.1:8080",
-        containerFor: () => container,
-        pollMs: 1,
-        tickMs: 5,
-      },
+      yaml: yamlWithWorkspace(),
+      harness: harnessOver(registry, () => {
+        const c = containers.length === 0 ? a : b;
+        containers.push(c);
+        return c;
+      }),
     });
-    // The seam's interruption vocabulary (harness.md item 7), as the loop's own
-    // outcome: the dispatcher reads the refusal and the request to run again
-    // off it, never an exception. The note's words are the record's.
-    const out = await runLoop(s.deps, s.ctx);
-    expect(out).toEqual({
-      kind: "interrupted",
-      reason: "container replaced under the run; restarting from the request",
-      refusal: "container_replaced",
-      note: "the container running pi was replaced (vm-fake → vm-new; the executor said: the sandbox restarted under the run (waited 42 s)); the run restarts from its request",
-      restart: { request: s.ctx.msg, restartOf: "run-l" },
+    s.deps.runBearers = bearers;
+    const bearer = mintFor(bearers, s);
+    bearers.consumeTurn("run-l");
+    bearers.consumeTurn("run-l");
+    const { ledgerRun, states, record: recorded } = recordingLedgerRun();
+    const out = answered(await runLoop(s.deps, { ...s.ctx, ledgerRun, bearer }));
+    expect(out.answer).toBe("resumed and done");
+    expect(containers).toEqual([a, b]);
+    // Nothing of the old process is judged, ended or removed in the replacement; the relaunched pi is ended as any run's is.
+    expect(a.killed).toEqual([]);
+    expect(a.removed).toEqual([]);
+    expect(b.starts).toHaveLength(1);
+    expect(b.killed).toEqual([5151]);
+    // The rotation: the meter kept (two turns spent before, one by the relaunched pi), one secret — the new one, in pi's environment — and the old refused.
+    expect(bearers.grantOf("run-l")).toMatchObject({ turns: 3, bearers: 1 });
+    expect(bearers.verify(bearer)).toEqual({ ok: false, reason: "unknown_bearer", runId: "run-l" });
+    const rotated = b.starts[0]!.env[RUN_BEARER_ENV]!;
+    expect(rotated).not.toBe(bearer);
+    expect(bearers.verify(rotated)).toMatchObject({ ok: true });
+    // The row: the rotation's write carries the new hash and the count, and every save of the relaunched pi keeps both.
+    const facts = harnessStates(states);
+    expect(facts.find((f) => f.relaunches === 1)).toMatchObject({
+      relaunches: 1,
+      bearerHash: bearerHashOf(rotated),
+      pid: 4242,
+      container: "vm-fake",
     });
-    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "interrupted" });
-    expect(s.releases).toEqual(["paired"]);
-    expect(s.closes).toHaveLength(1);
-    const close = JSON.stringify(s.closes[0]);
-    expect(close).toContain("🔁");
-    expect(close).toContain("container replaced under the run; restarting from the request");
-    expect(close).not.toContain("❌");
-    expect(s.published).toEqual([]);
+    expect(facts.at(-1)).toMatchObject({
+      relaunches: 1,
+      pid: 5151,
+      container: "vm-new",
+      bearerHash: bearerHashOf(rotated),
+    });
+    expect(
+      facts.filter((f) => f.relaunches === 0).every((f) => f.pid === 4242 && f.bearerHash === bearerHashOf(bearer)),
+    ).toBe(true);
+    // The row learns the binding the relaunch re-attached on, as a resumed row does; the next relaunch re-attaches that one.
+    expect(states.filter((p) => p.binding !== undefined)).toEqual([{ binding: { backend: "local" } }]);
+    // The record: pi's verdict, then exactly one resumed note — the relaunch — and the call settled with the replaced note.
     s.ending.drain(undefined);
     await s.writer.settled();
-    const record = (await s.store.get("run-l"))!;
-    expect(record.status).toBe("interrupted");
-    const note = record.events.find((e) => e.type === "run_note") as { kind: string; summary: string };
-    expect(note).toMatchObject({
-      kind: "sandbox_restarted",
-      summary:
-        "the container running pi was replaced (vm-fake → vm-new; the executor said: the sandbox restarted under the run (waited 42 s)); the run restarts from its request",
-    });
+    const record = recorded();
+    expect(record.status).toBe("completed");
+    const notes = notesOf(record);
+    expect(notes.map((n) => n.kind)).toEqual(["sandbox_restarted", "resumed"]);
+    expect(notes[0]!.summary).toBe(
+      "the container running pi was replaced (vm-fake → vm-new; the executor said: the sandbox restarted under the run (waited 42 s))",
+    );
+    expect(notes[1]!.summary).toBe(
+      "relaunched after the container was replaced (vm-fake → vm-new): the row's pi (pid 4242) went with the old container and was neither probed nor ended here; pi restarted in the container the run holds on the mirrored transcript — 1 call(s) were in flight: 1 lost with the container, each answered with a restart note; 45 min of budget left",
+    );
     expect(record.events.find((e) => e.type === "tool_result")).toMatchObject({
       tool: "bash",
       ok: false,
       callId: "c1",
       summary: expect.stringMatching(/^The container running pi was replaced while this bash call was in flight/),
     });
+    // The model continued from the record: the request, the call, its settlement, then the continue.
+    const req = model.requests[0]!.messages;
+    expect(req[0]).toMatchObject({ role: "user" });
+    expect(req[1]!.content).toEqual([{ type: "tool_use", id: "c1", name: "bash", input: { command: "npm test" } }]);
+    const rest = req.slice(2).flatMap((m) => m.content);
+    expect(rest[0]).toMatchObject({ type: "tool_result", toolUseId: "c1", isError: true });
+    expect(rest.at(-1)).toMatchObject({ type: "text", text: expect.stringMatching(/^Continue where you left off/) });
+    // The release the reply stage calls gives the dispatch's round back: the re-attach provisioned nothing of its own.
+    await out.releaseWorkspace();
+    expect(s.releases).toEqual(["paired"]);
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+    expect(registry.get("run-l")).toBeUndefined();
+  });
+
+  it("the worktree refused by name: no relaunch — the run closes interrupted with the refusal workspace_lost, the record saying why after pi's verdict, the relay forgotten, the workspace released, the card 🔁 — and the request runs again as a new run", async () => {
+    const registry = new HarnessRegistry();
+    const a = new FakeHarnessContainer();
+    a.onStdin = piThatMeetsTheRoll(registry);
+    const s = setup("unused", {
+      agent: "coding",
+      yaml: YAML + "harness:\n  coding: pi\n",
+      harness: harnessOver(registry, () => a),
+      binding: {
+        ref: "main",
+        sha: "0123456",
+        workspace: "/workspace/threads/t/main",
+        user: "worker2",
+      } as ResidentBinding,
+    });
+    // The round ran on a resident this process has no configuration for: the recorded binding cannot be re-attached here.
+    const round = { ...s.ctx.round, selection: { ...s.ctx.round.selection, backend: "resident" as const } };
+    const out = await runLoop(s.deps, { ...s.ctx, round });
+    expect(out).toEqual({
+      kind: "interrupted",
+      reason: "workspace lost with the replaced container; restarting from the request",
+      refusal: "workspace_lost",
+      note: "the run's workspace could not be re-attached in the replacement container (no resident backend is configured in this process); the run restarts from its request as a new run in this thread",
+      restart: { request: s.ctx.msg, restartOf: "run-l" },
+    });
+    expect(a.starts).toHaveLength(1);
+    expect(a.killed).toEqual([]);
+    expect(a.removed).toEqual([]);
+    expect(registry.get("run-l")).toBeUndefined();
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "interrupted" });
+    expect(s.releases).toEqual(["paired"]);
+    const close = JSON.stringify(s.closes[0]);
+    expect(close).toContain("🔁");
+    expect(close).toContain("workspace lost with the replaced container; restarting from the request");
+    expect(close).not.toContain("❌");
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const record = (await s.store.get("run-l"))!;
+    expect(record.status).toBe("interrupted");
+    // The verdict, then the outcome, both the floor's kind: never a `resumed` note on a run that is not resumed.
+    const notes = notesOf(record);
+    expect(notes.map((n) => n.kind)).toEqual(["sandbox_restarted", "sandbox_restarted"]);
+    expect(notes[0]!.summary).toBe(
+      "the container running pi was replaced (vm-fake → vm-new; the executor said: the sandbox restarted under the run (waited 42 s))",
+    );
+    expect(notes[1]!.summary).toBe((out as { note: string }).note);
+  });
+
+  it("the third finding closes the run interrupted naming the bound: two relaunches in a container that keeps dying under the run, no fourth start, the row counting each, the record carrying each verdict and relaunch, the relay forgotten, the card 🔁 — and the request runs again", async () => {
+    const registry = new HarnessRegistry();
+    const container = new FakeHarnessContainer();
+    container.onStdin = piThatMeetsTheRoll(registry);
+    const s = setup("unused", {
+      agent: "coding",
+      yaml: yamlWithWorkspace(),
+      harness: harnessOver(registry, () => container),
+    });
+    const { ledgerRun, states, record: recorded } = recordingLedgerRun();
+    const out = await runLoop(s.deps, { ...s.ctx, ledgerRun });
+    expect(out).toEqual({
+      kind: "interrupted",
+      reason: "relaunch ceiling: 2 relaunches already; restarting from the request",
+      refusal: "container_replaced",
+      note: "the container was replaced under the run again and the relaunch ceiling is 2 (2 relaunches already), so pi is not started a fourth time; the run restarts from its request",
+      restart: { request: s.ctx.msg, restartOf: "run-l" },
+    });
+    expect(container.starts).toHaveLength(3);
     expect(container.killed).toEqual([]);
+    expect(container.removed).toEqual([]);
+    const counts = harnessStates(states).map((f) => f.relaunches as number);
+    expect(Math.max(...counts)).toBe(2);
+    expect(counts).toEqual([...counts].sort((x, y) => x - y)); // the count never goes back
+    expect(registry.get("run-l")).toBeUndefined();
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "interrupted" });
+    expect(s.releases).toEqual(["paired"]);
+    expect(JSON.stringify(s.closes[0])).toContain(
+      "relaunch ceiling: 2 relaunches already; restarting from the request",
+    );
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const record = recorded();
+    expect(record.status).toBe("interrupted");
+    expect(notesOf(record).map((n) => n.kind)).toEqual([
+      "sandbox_restarted",
+      "resumed",
+      "sandbox_restarted",
+      "resumed",
+      "sandbox_restarted",
+      "sandbox_restarted",
+    ]);
+    expect(record.events.filter((e) => e.type === "tool_result")).toHaveLength(3);
+  });
+
+  // The record clause across the roll order every image-changing release has
+  // (harness.md item 6): the container rolls under the living bot (a relaunch,
+  // rebuild one), then the bot rolls minutes later with pi inside its next
+  // call (a resume from the ledger, rebuild two). The second rebuild is only
+  // possible because the first wrote the settlement turn its session started
+  // on onto the ledger.
+  it("two deaths in one run: the container rolls under the living bot (a relaunch), then the bot rolls with pi inside its next call — the ledger the next generation reads back carries the settlement turn the relaunch's session started on, so planResume yields a transcript with a result for every call and pi restarts on it in a third container, the model handed a result after every tool_use", async () => {
+    const inner = new InMemoryRunLedger(() => NOW);
+    const ledger = createLedgerWriteThrough({
+      ledger: inner,
+      gen: "gen-T",
+      fallback: { put: async () => {} },
+      warn: () => {},
+    });
+    const seed: ChatMessage[] = [{ role: "user", content: [{ type: "text", text: "fix the failing test" }] }];
+    const ledgerRun = (await ledger.open({
+      runId: "run-l",
+      threadKey: THREAD,
+      startedAt: NOW,
+      meta: {
+        channelId: "slack:CX",
+        userId: "slack:UX",
+        threadKey: THREAD,
+        agent: "coding",
+        model: "anthropic/m",
+        repo: "acme/api",
+        ref: "main",
+      },
+      card: null,
+      system: "the system prompt",
+      tools: [],
+      seed: { messages: seed, budgetMs: 45 * 60_000 },
+    }))!;
+    const registry = new HarnessRegistry();
+    const stub: Executor = { exec: async () => "ran", readFile: async () => "", writeFile: async () => "" };
+    const facts: HarnessFacts[] = [];
+    const agent = getAgent("coding");
+    const runOf = (resume?: HarnessRun["resume"]): HarnessRun => ({
+      runId: "run-l",
+      agent,
+      model: { id: "m", provider: "anthropic", providerType: "anthropic" },
+      system: "the system prompt",
+      messages: seed,
+      tools: [],
+      toolContext: { executor: stub },
+      rules: { checkout: "/workspace/threads/t/main", protectedBranches: ["main"] },
+      onEvent: () => {},
+      onStep: ledgerRun.step.bind(ledgerRun),
+      logIndexOf: ledgerRun.logIndexOf.bind(ledgerRun),
+      saveFacts: (f) => {
+        facts.push(f);
+        ledgerRun.setState({ harness: f });
+      },
+      ...(resume ? { resume } : {}),
+    });
+    const depsFor = (container: FakeHarnessContainer) => ({
+      container,
+      bearer: "sbr_run-l.s3cret",
+      harnessUrl: "https://bot.example.com",
+      registry,
+      clock: () => NOW,
+      sleep: (ms: number) => new Promise<void>((r) => setTimeout(r, Math.min(ms, 1))),
+      pollMs: 1,
+      tickMs: 5,
+    });
+    const until = async (cond: () => boolean) => {
+      for (let i = 0; i < 1000 && !cond(); i++) await new Promise((r) => setTimeout(r, 5));
+      expect(cond()).toBe(true);
+    };
+
+    // Death one: container A is replaced under the living bot with pi inside c1.
+    const a = new FakeHarnessContainer();
+    a.onStdin = piThatMeetsTheRoll(registry);
+    const first = await openThroughSeam(piHarness, depsFor(a), runOf()).catch((e: unknown) => e);
+    expect(first).toBeInstanceOf(PiContainerReplacedError);
+    const { deadline, ...record } = (first as PiContainerReplacedError).record;
+
+    // The relaunch: container B, pi echoing the continue, opening c2, and the
+    // bot dying inside B's next model call — after the step with c2 in flight
+    // landed, before the result pi read reached any ledger row.
+    const b = new FakeHarnessContainer();
+    b.vm = "vm-new";
+    b.pid = 5151;
+    let botDies!: () => void;
+    const dying = new Promise<never>((_, reject) => {
+      botDies = () => reject(new Error("the bot died with this generation"));
+    });
+    let modelCalls = 0;
+    const providerB: Provider = {
+      name: "b",
+      async complete() {
+        modelCalls++;
+        if (modelCalls === 1)
+          return {
+            content: [{ type: "tool_use", id: "c2", name: "bash", input: { command: "echo ok" } }],
+            stopReason: "tool_use",
+          };
+        return dying;
+      },
+    };
+    scriptPiFromProvider(b, { provider: providerB, registry });
+    const bOpen = openThroughSeam(
+      piHarness,
+      depsFor(b),
+      runOf({
+        ...record,
+        remainingMs: deadline - NOW,
+        facts: { ...facts.at(-1)!, relaunches: 1 },
+        relaunch: { from: "vm-fake", to: "vm-new" },
+      }),
+    );
+    await until(() => (inner.steps.get("run-l") ?? []).some((st) => st.inFlight.some((c) => c.callId === "c2")));
+
+    // Death two: the bot rolls. The next generation reads the ledger as the boot reclaim does.
+    const source = transcriptSource(inner.live.get("run-l")!.meta);
+    const transcript =
+      source.kind === "session"
+        ? await inner.readSession(source.key, source.from)
+        : await inner.readTranscript("run-l");
+    const plan = planResume({ transcript, lastStep: inner.steps.get("run-l")!.at(-1)!, tools: [] });
+    if (plan.kind !== "resume") throw new Error(plan.kind === "interrupted" ? plan.why : plan.kind);
+    expect(plan.messages).toEqual([
+      seed[0],
+      { role: "assistant", content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "npm test" } }] },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            toolUseId: "c1",
+            content: expect.stringMatching(/^The container running pi was replaced while this bash call was in flight/),
+            isError: true,
+          },
+          { type: "text", text: expect.stringMatching(/^Continue where you left off/) },
+        ],
+      },
+      { role: "assistant", content: [{ type: "tool_use", id: "c2", name: "bash", input: { command: "echo ok" } }] },
+    ]);
+    expect(plan.settlements.map((st) => st.toolUse.id)).toEqual(["c2"]);
+
+    // pi restarts on it in a third container, and the model is handed a result after every call.
+    const c = new FakeHarnessContainer();
+    c.vm = "vm-third";
+    const modelC = scriptPiFromProvider(c, { provider: provider("third time"), registry });
+    const third = await openThroughSeam(
+      piHarness,
+      depsFor(c),
+      runOf({
+        messages: plan.messages,
+        compactions: plan.compactions,
+        settlements: plan.settlements,
+        remainingMs: plan.remainingMs,
+        turn: plan.turn,
+        inboxConsumedSeq: plan.inboxConsumedSeq,
+        facts: facts.at(-1)!,
+      }),
+    );
+    expect(third.answer).toBe("third time");
+    await third.end();
+    const view = modelC.requests[0]!.messages;
+    expect(view).toHaveLength(5);
+    for (const [i, m] of view.entries())
+      for (const part of m.content)
+        if (part.type === "tool_use")
+          expect(view[i + 1]!.content.some((q) => q.type === "tool_result" && q.toolUseId === part.id)).toBe(true);
+    expect(facts.at(-1)).toMatchObject({ relaunches: 1, container: "vm-third" });
+
+    // Generation B, gone: its pending model call fails and its pi is ended where it ran.
+    botDies();
+    await expect(bOpen).rejects.toThrow(/the bot died with this generation/);
+    expect(b.killed).toEqual([5151]);
+    await ledgerRun.close();
+  });
+
+  it("a row write that throws inside the rotation fails the run: nothing is relaunched, no second start, both secrets still verify, the relay is forgotten and the workspace released — never a relaunch on a row that does not name the new secret", async () => {
+    const registry = new HarnessRegistry();
+    const bearers = new RunBearerStore({ clock: () => NOW });
+    const a = new FakeHarnessContainer();
+    a.onStdin = piThatMeetsTheRoll(registry);
+    const s = setup("unused", { agent: "coding", yaml: yamlWithWorkspace(), harness: harnessOver(registry, () => a) });
+    s.deps.runBearers = bearers;
+    const bearer = mintFor(bearers, s);
+    const { ledgerRun } = recordingLedgerRun();
+    ledgerRun.setState = (patch) => {
+      if ((patch.harness as { relaunches?: number } | undefined)?.relaunches === 1)
+        throw new Error("the ledger is unreachable");
+    };
+    await expect(runLoop(s.deps, { ...s.ctx, ledgerRun, bearer })).rejects.toThrow("the ledger is unreachable");
+    expect(a.starts).toHaveLength(1);
+    expect(bearers.grantOf("run-l")).toMatchObject({ bearers: 2, revoked: false });
+    expect(bearers.verify(bearer).ok).toBe(true);
+    expect(registry.get("run-l")).toBeUndefined();
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "failed" });
+    expect(s.releases).toEqual(["paired"]);
   });
 });
 
@@ -2433,5 +2821,246 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       summary:
         "the run's row carries opencode harness facts and this run is driven by pi: nothing of that process is judged or ended here; the run restarts from its request",
     });
+  });
+});
+
+// Feature: record 0038's first stage gate for the relaunch (harness.md item 6,
+// the ceiling over harness-pi.md item 16's floor): before the run loop
+// relaunches anything, the two pieces a live run could not reach are shown to
+// work mid-run in the fakes — a recorded binding re-attached with no gate
+// context (the same round back, nothing provisioned; a binding whose backend
+// is not here refused by name), and pi started again in a replacement
+// container from a session rebuilt from the run's ledger rows, the call in
+// flight settled and the model continuing from it. Had this failed for a
+// reason that holds live, the unit would have been withheld and the floor
+// kept (the plan's execution note).
+describe("the relaunch ceiling — the mid-run re-attach spike (the record's first gate)", () => {
+  it("a recorded binding re-attaches mid-run with no gate context — the same round comes back on the local backend, the thread's directory made once; a resident binding with no resident configured is refused by name — and pi starts again in a replacement container from a session rebuilt from the ledger's rows, the call in flight settled with the restart note, the model continuing from the rebuilt transcript", async () => {
+    const workspaceDir = mkdtempSync(join(tmpdir(), "swb-relaunch-"));
+    const config = configStore(`${YAML}workspaceDir: ${workspaceDir}\n`);
+    const provisionDeps = { config, dataDir: join(workspaceDir, "data") };
+    const agent = getAgent("coding");
+    const profile = declaredProfile(agent);
+    const repoCtx: RepoContext = { repo: "acme/api", ref: "main" };
+    const trace = startRequestRoot({ clock: () => NOW }, { channel: channelOf("slack:CX"), receivedAt: NOW });
+    const attachCtx = { threadKey: THREAD, agent, profile, repoCtx, root: trace.root, clock: () => NOW };
+
+    // The re-attach, mid-run, with nothing of the dispatch-time gate: the
+    // recorded local backend answers the thread's own directory, made once.
+    const dir = localWorkspaceDir(workspaceDir, THREAD);
+    const first = await reattachWorkspace(provisionDeps, { ...attachCtx, reattach: { backend: "local" } });
+    if (first.kind !== "attached") throw new Error(first.why);
+    expect(first.round.selection.backend).toBe("local");
+    expect(existsSync(dir)).toBe(true);
+    expect((await first.round.selection.executor.exec("pwd")).trim().endsWith("slack_CX_1.0")).toBe(true);
+    const again = await reattachWorkspace(provisionDeps, { ...attachCtx, reattach: { backend: "local" } });
+    if (again.kind !== "attached") throw new Error(again.why);
+    expect((await again.round.selection.executor.exec("pwd")).trim()).toBe(
+      (await first.round.selection.executor.exec("pwd")).trim(),
+    );
+    await again.round.release({ hardStopped: false });
+    // A binding whose backend is not in this process is refused by name, nothing provisioned in its place.
+    expect(
+      await reattachWorkspace(provisionDeps, {
+        ...attachCtx,
+        reattach: { backend: "resident", workspace: "/workspace/threads/t/main", user: "worker2" },
+      }),
+    ).toEqual({ kind: "reattach_refused", why: "no resident backend is configured in this process" });
+
+    // The run's record on the ledger, as the harness's mirror writes it.
+    const inner = new InMemoryRunLedger(() => NOW);
+    const ledger = createLedgerWriteThrough({
+      ledger: inner,
+      gen: "gen-T",
+      fallback: { put: async () => {} },
+      warn: () => {},
+    });
+    const seed: ChatMessage[] = [{ role: "user", content: [{ type: "text", text: "fix the failing test" }] }];
+    const ledgerRun = (await ledger.open({
+      runId: "run-l",
+      threadKey: THREAD,
+      startedAt: NOW,
+      meta: {
+        channelId: "slack:CX",
+        userId: "slack:UX",
+        threadKey: THREAD,
+        agent: "coding",
+        model: "anthropic/m",
+        repo: "acme/api",
+        ref: "main",
+      },
+      card: null,
+      system: "the system prompt",
+      tools: [],
+      seed: { messages: seed, budgetMs: 45 * 60_000 },
+    }))!;
+    expect(ledgerRun).toBeDefined();
+    const registry = new HarnessRegistry();
+    const bearers = new RunBearerStore({ clock: () => NOW });
+    const grant = {
+      runId: "run-l",
+      modelRef: "anthropic/m",
+      providerName: "anthropic",
+      providerType: "anthropic" as const,
+      model: "m",
+      maxTokens: 4096,
+      maxTurns: 50,
+      expiresAt: NOW + 60 * 60_000,
+      span: trace.root,
+      publish: () => {},
+    };
+    const bearer = bearers.mint(grant);
+    const facts: HarnessFacts[] = [];
+    const events: import("../runEvents.js").RunEvent[] = [];
+    const runOf = (messages: ChatMessage[], resume?: HarnessRun["resume"]): HarnessRun => ({
+      runId: "run-l",
+      agent,
+      model: { id: "m", provider: "anthropic", providerType: "anthropic" },
+      system: "the system prompt",
+      messages,
+      tools: [],
+      toolContext: { executor: first.round.selection.executor },
+      rules: { checkout: dir, protectedBranches: ["main"] },
+      onEvent: (e) => void events.push(e),
+      onStep: ledgerRun.step.bind(ledgerRun),
+      logIndexOf: ledgerRun.logIndexOf.bind(ledgerRun),
+      saveFacts: (f) => {
+        facts.push(f);
+        ledgerRun.setState({ harness: f });
+      },
+      ...(resume ? { resume } : {}),
+    });
+    const harnessDeps = (container: FakeHarnessContainer) => ({
+      container,
+      bearer,
+      harnessUrl: "https://bot.example.com",
+      registry,
+      bearers,
+      clock: () => NOW,
+      sleep: (ms: number) => new Promise<void>((r) => setTimeout(r, Math.min(ms, 1))),
+      pollMs: 1,
+      tickMs: 5,
+    });
+
+    // Container A: pi opens one bash call, the mirror writes the step with the
+    // call in flight, then the container is replaced under it — the executor's
+    // typed word on the next log read.
+    const a = new FakeHarnessContainer();
+    a.onStdin = (line, c) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
+        c.emit({ id: cmd.id, type: "response", command: cmd.type, success: true, data: { sessionFile: "s.jsonl" } });
+      if (cmd.type !== "prompt") return;
+      const call = {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "npm test" } }],
+        stopReason: "toolUse",
+      };
+      c.emit(
+        { id: cmd.id, type: "response", command: "prompt", success: true },
+        { type: "agent_start" },
+        { type: "message_end", message: call },
+        { type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: { command: "npm test" } },
+      );
+      authorizeToolCall(registry.get("run-l")!, { toolCallId: "c1", tool: "bash", input: { command: "npm test" } });
+      const read = c.readLog.bind(c);
+      c.readLog = async (path, offset, max) => {
+        const chunk = await read(path, offset, max);
+        if (chunk.length === 0)
+          throw new ExecSandboxRestartedError("the sandbox restarted under the run (waited 42 s)", 42_000);
+        return chunk;
+      };
+    };
+    await expect(openThroughSeam(piHarness, harnessDeps(a), runOf(seed))).rejects.toBeInstanceOf(
+      PiContainerReplacedError,
+    );
+    expect(a.killed).toEqual([]);
+    expect(a.removed).toEqual([]);
+
+    // The record: the ledger's rows and its last step name the call in flight,
+    // exactly as a bot death's resume reads them.
+    const lastStep = inner.steps.get("run-l")!.at(-1)!;
+    expect(lastStep.inFlight).toEqual([{ callId: "c1", tool: "bash" }]);
+    // Read as the boot reclaim reads it: from the session log the row names, else the run's own object.
+    const source = transcriptSource(inner.live.get("run-l")!.meta);
+    const transcript =
+      source.kind === "session"
+        ? await inner.readSession(source.key, source.from)
+        : await inner.readTranscript("run-l");
+    const plan = planResume({ transcript, lastStep, tools: [] });
+    if (plan.kind !== "resume") throw new Error(plan.kind === "interrupted" ? plan.why : plan.kind);
+    expect(plan.messages).toHaveLength(2);
+    expect(plan.settlements.map((s) => s.toolUse.id)).toEqual(["c1"]);
+
+    // Container B — the replacement, which names itself anew: pi starts there
+    // on the rebuilt session and the model continues from it.
+    const b = new FakeHarnessContainer();
+    b.vm = "vm-new";
+    const model = scriptPiFromProvider(b, { provider: provider("continued"), registry, bearers });
+    const session = await openThroughSeam(
+      piHarness,
+      harnessDeps(b),
+      runOf(seed, {
+        messages: plan.messages,
+        compactions: plan.compactions,
+        settlements: plan.settlements,
+        remainingMs: plan.remainingMs,
+        turn: plan.turn,
+        inboxConsumedSeq: plan.inboxConsumedSeq,
+        facts: facts.at(-1)!,
+      }),
+    );
+    expect(session.answer).toBe("continued");
+    await session.end();
+    expect(b.starts).toHaveLength(1);
+    expect(b.killed).toEqual([4242]); // the relaunched pi's own end
+    const sessionPath = b.starts[0]!.args[b.starts[0]!.args.indexOf("--session") + 1]!;
+    const entries = b.files
+      .get(sessionPath)!
+      .trimEnd()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(entries.slice(1).map((e) => (e.message as { role: string }).role)).toEqual([
+      "user",
+      "assistant",
+      "toolResult",
+    ]);
+    const req = model.requests[0]!.messages;
+    expect(req[0]).toEqual(seed[0]);
+    expect(req[1]!.role).toBe("assistant");
+    expect(req[1]!.content).toEqual([{ type: "tool_use", id: "c1", name: "bash", input: { command: "npm test" } }]);
+    const parts = req.slice(2).flatMap((m) => m.content);
+    expect(parts[0]).toMatchObject({ type: "tool_result", toolUseId: "c1", isError: true });
+    expect(parts.at(-1)).toMatchObject({ type: "text", text: expect.stringMatching(/^Continue where you left off/) });
+    const notes = events.filter((e) => e.type === "run_note").map((e) => e as { kind: string; summary: string });
+    expect(notes.map((n) => n.kind)).toEqual(["sandbox_restarted", "resumed"]);
+    expect(notes[1]!.summary).toMatch(
+      /pi is elsewhere: the row's pi \(pid 4242\) ran in container vm-fake, not the one this run was handed \(vm-new\)/,
+    );
+    // The record clause across two deaths (harness.md item 6): the ledger's
+    // transcript after the rebuild holds the settlement turn pi's session
+    // started on — a result for every call — so the next reclaim rebuilds a
+    // transcript the model accepts, and the ledger's rows are what the model saw.
+    if (source.kind !== "session") throw new Error("the row names no session log");
+    const after = await inner.readSession(source.key, source.from);
+    const rebuilt = planResume({ transcript: after, lastStep: inner.steps.get("run-l")!.at(-1)!, tools: [] });
+    if (rebuilt.kind === "interrupted") throw new Error(rebuilt.why);
+    const settlement = plan.settlements[0]!;
+    expect(rebuilt.messages).toHaveLength(4);
+    expect(rebuilt.messages[2]).toEqual({
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          toolUseId: "c1",
+          content: settlement.action === "synthetic" ? settlement.text : "",
+          isError: true,
+        },
+        { type: "text", text: expect.stringMatching(/^Continue where you left off/) },
+      ],
+    });
+    expect(rebuilt.messages[3]).toEqual({ role: "assistant", content: [{ type: "text", text: "continued" }] });
+    expect(rebuilt.messages.slice(0, 3)).toEqual(req.slice(0, 3));
+    await ledgerRun.close();
   });
 });
