@@ -29,6 +29,7 @@ declare module 'vue' {
     MarkdownText: typeof import('./src/components/MarkdownText.vue')['default']
     McpServersPanel: typeof import('./src/components/settings/McpServersPanel.vue')['default']
     MessageFiles: typeof import('./src/components/run/MessageFiles.vue')['default']
+    PendingTurnRow: typeof import('./src/components/run/PendingTurnRow.vue')['default']
     PersonTurn: typeof import('./src/components/home/PersonTurn.vue')['default']
     ReceiptChip: typeof import('./src/components/home/ReceiptChip.vue')['default']
     ReplyBlock: typeof import('./src/components/run/ReplyBlock.vue')['default']

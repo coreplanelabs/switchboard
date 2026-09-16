@@ -382,7 +382,7 @@ describe("RunPage — history mode", () => {
     expect(w.find("#reply .caption").text()).toBe("answer"); // no meta: the general word
     expect(w.find("#answer").exists()).toBe(false); // the section is called what the product calls it
     expect(w.find("#actions").exists()).toBe(false);
-    expect(w.find("h1").text()).toBe("Run");
+    expect(w.find("h1 .title").text()).toBe("Run");
     // the way back to the token-less, Access-gated index — never with a token
     expect(w.find("a.back").attributes("href")).toBe("/runs");
   });
@@ -1016,7 +1016,7 @@ describe("RunPage — live mode", () => {
     expect(wrapper.find("#log").text()).toContain("step one");
     expect(wrapper.find("details.call").attributes("data-status")).toBe("running");
     expect(wrapper.find("#state").text()).toMatch(/^running · /);
-    expect(wrapper.find("h1").text()).toBe("Live run");
+    expect(wrapper.find("h1 .title").text()).toBe("Live run");
   });
 
   it("the tab's dot speaks run state: green while the run is going, gray once it ends (a history page never repaints)", async () => {

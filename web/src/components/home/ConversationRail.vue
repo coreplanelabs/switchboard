@@ -8,7 +8,7 @@ import { filterRows } from "../../lib/homeModel";
 // conversations, each the runs of one `web:` thread, newest first, titled by
 // its first request. Bounded by the seed (the bot caps it), so there is nothing
 // to page: the way to everything is the `All runs` link at the foot. A filter
-// (⌘K) narrows the rows by a fuzzy match; the new-chat CTA carries its
+// (⌘K) narrows the rows by a fuzzy match; the new-thread CTA carries its
 // shortcut (⇧⌘O). A full page load per conversation, like every section.
 
 const props = defineProps<{
@@ -37,20 +37,20 @@ defineExpose({ focusFilter });
 </script>
 
 <template>
-  <nav class="rail flex flex-col gap-1 text-[0.8rem]" aria-label="Recent conversations">
+  <nav class="rail flex flex-col gap-1 text-[0.8rem]" aria-label="Recent threads">
     <!-- The CTA: the one solid control on the rail, with its shortcut in view. -->
     <a
       class="new group mb-3 flex items-center gap-2 rounded-xl bg-inverted px-3 py-2 font-medium text-inverted no-underline transition-[transform,opacity] duration-150 ease-out hover:-translate-y-px hover:opacity-90 active:translate-y-0 active:opacity-100"
-      href="/chats"
+      href="/threads"
       :aria-current="current === '' ? 'page' : undefined"
-      data-testid="new-chat"
+      data-testid="new-thread"
     >
       <UIcon
         name="i-lucide-plus"
         class="size-4 shrink-0 transition-transform duration-150 ease-out group-hover:rotate-90"
         aria-hidden="true"
       />
-      <span>New chat</span>
+      <span>New thread</span>
       <span class="kbd ml-auto flex gap-0.5 font-mono text-[0.65rem] opacity-70" aria-label="shortcut shift command O">
         <kbd class="rounded border border-current/30 px-1">⇧</kbd
         ><kbd class="rounded border border-current/30 px-1">⌘</kbd
@@ -69,7 +69,7 @@ defineExpose({ focusFilter });
         class="min-w-0 flex-1 bg-transparent text-[0.8rem] text-highlighted outline-none placeholder:text-dimmed"
         type="text"
         placeholder="Filter recent"
-        aria-label="Filter recent conversations"
+        aria-label="Filter recent threads"
         autocomplete="off"
         @keydown="onFilterKey"
       />
@@ -84,7 +84,7 @@ defineExpose({ focusFilter });
         v-for="row in shown"
         :key="row.id"
         class="row group relative flex items-baseline gap-2 rounded-lg px-3 py-1.5 no-underline transition-colors duration-150 ease-out hover:bg-(--ui-bg-muted) aria-[current=page]:bg-(--ui-bg-accented)"
-        :href="`/chats/${encodeURIComponent(row.id)}`"
+        :href="`/threads/${encodeURIComponent(row.id)}`"
         :aria-current="row.id === current ? 'page' : undefined"
         :title="`${row.runs} run${row.runs === 1 ? '' : 's'}`"
       >

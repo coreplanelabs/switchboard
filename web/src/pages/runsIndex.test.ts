@@ -62,12 +62,12 @@ describe("RunsIndexPage — toolbar, states, pager", () => {
     expect(wrapper.find("#livecount").text()).toBe("2 running");
     expect(wrapper.findAll("li.run").map((li) => li.attributes("data-run-id"))).toEqual(["b", "a"]);
     expect(es().url).toBe("/runs?stream=1");
-    expect(wrapper.find("h1").text()).toBe("Live runs");
+    expect(wrapper.find("h1 .title").text()).toBe("Live runs");
   });
 
   it("?all=1 titles the page All runs and opens the all feed", () => {
     const { wrapper, es } = mountIndex(seed([done("c")], { all: true }));
-    expect(wrapper.find("h1").text()).toBe("All runs");
+    expect(wrapper.find("h1 .title").text()).toBe("All runs");
     expect(es().url).toBe("/runs?stream=1&all=1");
   });
 

@@ -8,7 +8,7 @@ import type { Capabilities } from "@core/core/capabilities.js";
 // shell's phone menu and the tests all read the one list, and a `.vue` file's
 // named exports are invisible to static analysis of the TypeScript beside it.
 
-// `home` is the chat at `/chats` (docs/reference/specs/web-chat.md): the first
+// `home` is the threads page at `/threads` (docs/reference/specs/web-chat.md): the first
 // section, always on — the dashboard's front door — and the brand mark's target.
 export type NavSection = "home" | "runs" | "residents" | "costs" | "delivery" | "settings";
 
@@ -22,7 +22,7 @@ export interface NavItem {
 }
 
 const SECTIONS: ReadonlyArray<NavItem> = [
-  { id: "home", label: "Chats", href: "/chats", icon: "i-lucide-message-square" },
+  { id: "home", label: "Threads", href: "/threads", icon: "i-lucide-message-square" },
   { id: "runs", label: "Runs", href: "/runs", icon: "i-lucide-list" },
   { id: "residents", label: "Residents", href: "/residents", icon: "i-lucide-server", on: (c) => c.residents },
   { id: "costs", label: "Costs", href: "/costs", icon: "i-lucide-circle-dollar-sign", on: (c) => c.costs },
@@ -33,9 +33,9 @@ const SECTIONS: ReadonlyArray<NavItem> = [
   // say it is the current one.
 ];
 
-/** The sections this installation has, in fixed order: Chats, Runs, each one
+/** The sections this installation has, in fixed order: Threads, Runs, each one
  *  whose capability is on, and the current one (the viewer is on it — it
- *  exists). No capabilities (no seed) → Chats, Runs and the current section only. */
+ *  exists). No capabilities (no seed) → Threads, Runs and the current section only. */
 export function navSections(caps: Capabilities | null, current: NavSection): NavItem[] {
   return SECTIONS.filter((s) => s.id === current || s.on === undefined || (caps !== null && s.on(caps)));
 }

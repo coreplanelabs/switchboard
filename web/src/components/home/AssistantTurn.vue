@@ -10,14 +10,15 @@ import { formatDuration } from "../../lib/format";
 import { AGENT_HUE, agentHue, statusLabel } from "../../lib/indexRow";
 import { durationTone, heatStyle } from "../../lib/durationTone";
 import { parseSseReplay } from "../../lib/sseReplay";
-import { EVENT_SOURCE_CLOSED, useEventSourceFactory, type EventSourceLike } from "../../lib/eventSource";
+import { useEventSourceFactory } from "../../lib/eventSource";
+import { attachRunStream, type StreamPhase } from "../../lib/runStream";
+import { thinkingVerb } from "../../lib/thinkingVerbs";
+import PendingTurnRow from "../run/PendingTurnRow.vue";
 import {
   createRunClock,
   createRunPageModel,
   liveWait,
   modelName,
-  parseFinishedFrame,
-  parseReplayElided,
   runnerNow,
   RunnerClockKey,
   ArtifactLinksKey,
@@ -53,8 +54,7 @@ const emit = defineEmits<{
 
 const model = createRunPageModel();
 const state = model.state;
-type Phase = "connecting" | "running" | "finished" | "ended" | "disconnected";
-const phase = ref<Phase>(props.live ? "connecting" : "ended");
+const phase = ref<StreamPhase>(props.live ? "connecting" : "ended");
 const route = ref<{ preset: string; reason: string } | null>(props.turn.route ?? null);
 const firstInput = ref(true);
 
@@ -101,9 +101,8 @@ provide(
   computed(() => state.reply !== null),
 );
 
-// The pending row's word: the deepest open step's, else a fixed list walked by
-// how long this silence has lasted — every silence starts at "Thinking".
-const THINKING = ["Thinking", "Pondering", "Reasoning", "Weighing options", "Deliberating", "Noodling", "Ruminating"];
+// The pending row (the run page's own, PendingTurnRow) shows while the model is
+// silent and nothing runs; its word is the shared list walked by the silence's length.
 const waiting = computed(() => (live.value ? liveWait(state, model.pendingCall(), props.now) : null));
 /** The pending row shows while the model is silent and nothing runs: before the
  *  first stamped event (`starting`) and between calls (`thinking`). A running
@@ -111,8 +110,8 @@ const waiting = computed(() => (live.value ? liveWait(state, model.pendingCall()
 const pendingRow = computed(() => {
   const w = waiting.value;
   if (disconnected.value || !w || w.kind === "call") return null;
-  if (w.kind === "starting") return { verb: "Starting", elapsedMs: elapsedMs.value };
-  return { verb: THINKING[Math.floor(w.elapsedMs / 6000) % THINKING.length], elapsedMs: w.elapsedMs };
+  if (w.kind === "starting") return { verb: "Starting", elapsedMs: elapsedMs.value, slow: false };
+  return { verb: thinkingVerb(w.elapsedMs), elapsedMs: w.elapsedMs, slow: w.slow };
 });
 
 const steps = computed(() => state.log.filter((i) => i.kind === "step"));
@@ -122,9 +121,9 @@ const outcome = computed(() =>
 );
 const runHref = computed(() => `/runs/${encodeURIComponent(props.turn.id)}`);
 
-// ---- the stream (live) ----------------------------------------------------------
+// ---- the stream (live): the run page's own attach (web/src/lib/runStream.ts) ------
 const makeEventSource = useEventSourceFactory();
-let es: EventSourceLike | null = null;
+let stream: ReturnType<typeof attachRunStream> | null = null;
 
 function handle(e: unknown): void {
   const ev = e as { type?: string; text?: string; at?: number; preset?: string; reason?: string };
@@ -144,55 +143,30 @@ function handle(e: unknown): void {
 onMounted(() => {
   if (!props.live) return;
   emit("stop", props.live.stopUrl);
-  es = makeEventSource(props.live.eventsUrl);
-  es.onopen = () => {
-    if (phase.value === "connecting") phase.value = "running";
-  };
-  let lastSeq = 0;
-  es.onmessage = (m) => {
-    let e: { type?: string };
-    try {
-      e = JSON.parse(m.data) as typeof e;
-    } catch {
-      return;
-    }
-    if (e.type !== "replay_note") {
-      const sid = Number(m.lastEventId);
-      if (sid > 0) {
-        if (sid <= lastSeq) return;
-        lastSeq = sid;
-      }
-    }
-    handle(e);
-  };
-  es.addEventListener("replay_elided", (data) => {
-    const range = parseReplayElided(data);
-    if (range) model.noteElided(range);
-  });
-  es.addEventListener("finished", (data) => {
-    const frame = parseFinishedFrame(data);
-    if (frame) frozenMs.value = runClock ? runClock.elapsedAt(frame.finishedAt) : elapsedMs.value;
-    if (phase.value === "connecting" || phase.value === "running") phase.value = "finished";
-  });
-  es.addEventListener("end", () => {
-    model.flushPendingTurn("the run ended here");
-    model.closePhases();
-    frozenMs.value ??= elapsedMs.value;
-    phase.value = "ended";
-    es?.close();
-    emit("ended");
-  });
-  es.onerror = () => {
+  stream = attachRunStream({
+    url: props.live.eventsUrl,
+    factory: makeEventSource,
+    model,
+    handle,
+    // The agent stopped: the clock freezes at the server's stamp, or where it
+    // stands for a turn a `202` mounted without a server clock.
+    onFinished: (frame) => {
+      frozenMs.value = runClock ? runClock.elapsedAt(frame.finishedAt) : elapsedMs.value;
+    },
+    onEnd: () => {
+      frozenMs.value ??= elapsedMs.value;
+      emit("ended");
+    },
     // The browser gave up reconnecting: the run may still be working, so the
     // turn stays live for the conversation, its clock freezes where the stream
     // dropped, and the row says so with the run's own page as the way on.
-    if (es && es.readyState === EVENT_SOURCE_CLOSED) {
+    onDisconnected: () => {
       frozenMs.value ??= elapsedMs.value;
-      phase.value = "disconnected";
-    }
-  };
+    },
+  });
+  watch(stream.phase, (p) => (phase.value = p), { immediate: true });
 });
-onUnmounted(() => es?.close());
+onUnmounted(() => stream?.close());
 
 // ---- the work (the fold) --------------------------------------------------------
 // Open by default while live (the work is what is happening); closed once over.
@@ -253,15 +227,14 @@ const workSummary = computed(() => {
 
     <!-- The pending row: the model silent, nothing running — visibly alive and obviously the model. -->
     <Transition name="sb-fade">
-      <div
+      <PendingTurnRow
         v-if="live && pendingRow"
-        class="pending flex items-baseline gap-2.5 rounded-lg border border-dashed border-accented px-3 py-2 font-mono text-xs text-muted"
-        data-testid="pending"
-      >
-        <span class="pulse select-none text-[1.1em] leading-none text-ok motion-safe:animate-pulse">∿</span>
-        <span class="verb">{{ pendingRow.verb }}…</span>
-        <span class="ml-auto tabular-nums text-dimmed">{{ formatDuration(pendingRow.elapsedMs, "clock") }}</span>
-      </div>
+        tag="div"
+        :verb="pendingRow.verb"
+        :elapsed-ms="pendingRow.elapsedMs"
+        :slow="pendingRow.slow"
+        :model="state.meta?.model ?? turn.model ?? null"
+      />
     </Transition>
 
     <!-- The stream dropped (the run page's disconnected phase): the run may still

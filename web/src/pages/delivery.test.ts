@@ -85,7 +85,7 @@ const seed = (r: DeliveryReport = report(), repos: string[] = ["acme/api", "acme
 describe("DeliveryPage", () => {
   it("renders hostile titles as text, never as markup", () => {
     const w = mountApp(DeliveryPage, { seed: seed() });
-    expect(w.find("h1").text()).toBe("acme/api delivery");
+    expect(w.find("h1 .title").text()).toBe("acme/api delivery");
     expect(w.html()).not.toContain("<script>alert");
     expect(w.find("table.units").text()).toContain("OpenRouter as a documented example <b>");
     expect(w.find("table.units b").exists()).toBe(false);

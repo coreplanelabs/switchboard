@@ -9,7 +9,7 @@ import { ALL_ON, mountApp } from "../testing/mount";
 
 // Feature: docs/reference/specs/live-view.md — the site nav and the shell follow the
 // installation's capabilities (the seed): Residents needs `residents`, Costs
-// `costs`, Delivery `github`; Chats and Runs are always there, and so is the section the viewer is on. The
+// `costs`, Delivery `github`; Threads and Runs are always there, and so is the section the viewer is on. The
 // docs link needs nothing: it opens the project's published site
 // (docs/reference/specs/docs-site.md item 11).
 
@@ -23,7 +23,7 @@ const island = (over: Partial<Capabilities> = {}): WebSeed => ({
 const MINIMAL: Partial<Capabilities> = { residents: false, costs: false, schedules: false, github: false };
 
 describe("navSections — which sections exist", () => {
-  it("every capability on → Chats, Runs, Residents, Costs, Delivery in fixed order; settings is chrome, not a section", () => {
+  it("every capability on → Threads, Runs, Residents, Costs, Delivery in fixed order; settings is chrome, not a section", () => {
     expect(navSections(ALL_ON, "runs").map((s) => s.id)).toEqual(["home", "runs", "residents", "costs", "delivery"]);
     expect(navSections(ALL_ON, "settings").map((s) => s.id)).toEqual([
       "home",
@@ -55,7 +55,7 @@ describe("navSections — which sections exist", () => {
     expect(navSections({ ...ALL_ON, ...MINIMAL }, "residents").map((s) => s.id)).toEqual(["home", "runs", "residents"]);
   });
 
-  it("no capabilities (no seed) → Chats, Runs and the current section only", () => {
+  it("no capabilities (no seed) → Threads, Runs and the current section only", () => {
     expect(navSections(null, "runs").map((s) => s.id)).toEqual(["home", "runs"]);
     expect(navSections(null, "residents").map((s) => s.id)).toEqual(["home", "runs", "residents"]);
   });
@@ -65,8 +65,8 @@ describe("AppNav", () => {
   it("renders the five sections in fixed order with clean hrefs (no tokens, no query strings)", () => {
     const wrapper = mountApp(AppNav, { props: { current: "runs" }, seed: island() });
     const links = wrapper.findAll("nav.site a");
-    expect(links.map((a) => a.text())).toEqual(["Chats", "Runs", "Residents", "Costs", "Delivery"]);
-    expect(links.map((a) => a.attributes("href"))).toEqual(["/chats", "/runs", "/residents", "/costs", "/delivery"]);
+    expect(links.map((a) => a.text())).toEqual(["Threads", "Runs", "Residents", "Costs", "Delivery"]);
+    expect(links.map((a) => a.attributes("href"))).toEqual(["/threads", "/runs", "/residents", "/costs", "/delivery"]);
     for (const a of links) {
       expect(a.attributes("href")).not.toContain("?");
       expect(a.attributes("href")).not.toContain("t=");
@@ -78,29 +78,29 @@ describe("AppNav", () => {
       const wrapper = mountApp(AppNav, { props: { current }, seed: island() });
       const marked = wrapper.findAll('nav.site a[aria-current="page"]');
       expect(marked).toHaveLength(1);
-      expect(marked[0].attributes("href")).toBe(current === "home" ? "/chats" : `/${current}`);
+      expect(marked[0].attributes("href")).toBe(current === "home" ? "/threads" : `/${current}`);
     }
   });
 
-  it("drops Residents when residents is off and Costs when costs is off; the minimal installation is Chats and Runs", () => {
+  it("drops Residents when residents is off and Costs when costs is off; the minimal installation is Threads and Runs", () => {
     expect(
       mountApp(AppNav, { props: { current: "runs" }, seed: island({ residents: false }) })
         .findAll("nav.site a")
         .map((a) => a.text()),
-    ).toEqual(["Chats", "Runs", "Costs", "Delivery"]);
+    ).toEqual(["Threads", "Runs", "Costs", "Delivery"]);
     expect(
       mountApp(AppNav, { props: { current: "runs" }, seed: island({ costs: false }) })
         .findAll("nav.site a")
         .map((a) => a.text()),
-    ).toEqual(["Chats", "Runs", "Residents", "Delivery"]);
+    ).toEqual(["Threads", "Runs", "Residents", "Delivery"]);
     const minimal = mountApp(AppNav, { props: { current: "runs" }, seed: island(MINIMAL) });
-    expect(minimal.findAll("nav.site a").map((a) => a.text())).toEqual(["Chats", "Runs"]);
+    expect(minimal.findAll("nav.site a").map((a) => a.text())).toEqual(["Threads", "Runs"]);
     expect(minimal.find('nav.site a[aria-current="page"]').attributes("href")).toBe("/runs");
   });
 
-  it("without a seed lists Chats and Runs only", () => {
+  it("without a seed lists Threads and Runs only", () => {
     const wrapper = mountApp(AppNav, { props: { current: "runs" } });
-    expect(wrapper.findAll("nav.site a").map((a) => a.text())).toEqual(["Chats", "Runs"]);
+    expect(wrapper.findAll("nav.site a").map((a) => a.text())).toEqual(["Threads", "Runs"]);
   });
 });
 
@@ -111,7 +111,9 @@ describe("AppShell", () => {
       seed: island(),
       slots: { default: () => h("p", { id: "body" }, "hello") },
     });
-    expect(wrapper.find("h1").text()).toBe("Live runs");
+    expect(wrapper.find("h1 .title").text()).toBe("Live runs");
+    expect(wrapper.find("h1 a.brand .wordmark").text()).toBe("Switchboard");
+    expect(wrapper.find("h1 a.brand").attributes("href")).toBe("/threads");
     expect(wrapper.find("nav.site").exists()).toBe(true);
     expect(wrapper.find("#body").text()).toBe("hello");
   });
@@ -142,7 +144,7 @@ describe("AppShell", () => {
     expect(cog.attributes("target")).toBeUndefined();
     expect(cog.attributes("aria-label")).toBe("Settings");
     expect(cog.attributes("aria-current")).toBeUndefined();
-    expect(elsewhere.findAll("nav.site a").map((a) => a.text())).toEqual(["Chats", "Runs"]);
+    expect(elsewhere.findAll("nav.site a").map((a) => a.text())).toEqual(["Threads", "Runs"]);
     const here = mountApp(AppShell, { props: { title: "Settings", nav: "settings" }, seed: island() });
     expect(here.find("a.settings-link").attributes("aria-current")).toBe("page");
     expect(here.find('nav.site a[aria-current="page"]').exists()).toBe(false);
@@ -162,7 +164,7 @@ describe("AppShell", () => {
       expect.objectContaining({ label: "Docs", to: "/docs", target: "_blank" }),
       expect.objectContaining({ label: "Settings", checked: false }),
     ]);
-    expect(items[1].map((i) => i.label)).toEqual(["Chats", "Runs", "Residents", "Costs", "Delivery"]);
+    expect(items[1].map((i) => i.label)).toEqual(["Threads", "Runs", "Residents", "Costs", "Delivery"]);
     expect(items[2].map((i) => i.label)).toEqual(["Light", "Dark", "System"]);
   });
 
@@ -172,22 +174,22 @@ describe("AppShell", () => {
       seed: island({ costs: false }),
     });
     expect(wrapper.find("a.docs-link").exists()).toBe(true);
-    expect(wrapper.findAll("nav.site a").map((a) => a.text())).toEqual(["Chats", "Runs", "Residents", "Delivery"]);
+    expect(wrapper.findAll("nav.site a").map((a) => a.text())).toEqual(["Threads", "Runs", "Residents", "Delivery"]);
     const items = menuGroups(wrapper);
     expect(items).toHaveLength(3);
     expect(items[0].map((i) => i.label)).toEqual(["Docs", "Settings"]);
-    expect(items[1].map((i) => i.label)).toEqual(["Chats", "Runs", "Residents", "Delivery"]);
+    expect(items[1].map((i) => i.label)).toEqual(["Threads", "Runs", "Residents", "Delivery"]);
     expect(items[2].map((i) => i.label)).toEqual(["Light", "Dark", "System"]);
   });
 
-  it("the minimal installation's header is Chats, Runs, the settings cog, the docs link, the theme toggle and the menu — nothing that leads nowhere", () => {
+  it("the minimal installation's header is Threads, Runs, the settings cog, the docs link, the theme toggle and the menu — nothing that leads nowhere", () => {
     const wrapper = mountApp(AppShell, { props: { title: "Live runs", nav: "runs" }, seed: island(MINIMAL) });
-    expect(wrapper.findAll("nav.site a").map((a) => a.text())).toEqual(["Chats", "Runs"]);
+    expect(wrapper.findAll("nav.site a").map((a) => a.text())).toEqual(["Threads", "Runs"]);
     expect(wrapper.find("a.docs-link").exists()).toBe(true);
     expect(wrapper.find("a.settings-link").exists()).toBe(true);
     expect(menuGroups(wrapper).map((g) => g.map((i) => i.label))).toEqual([
       ["Docs", "Settings"],
-      ["Chats", "Runs"],
+      ["Threads", "Runs"],
       ["Light", "Dark", "System"],
     ]);
   });

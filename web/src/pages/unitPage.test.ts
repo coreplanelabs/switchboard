@@ -166,7 +166,7 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
 describe("UnitPage — the unit is the reading unit (item 28)", () => {
   it("lays out both threads' runs in round order, each row wearing its round and thread; the header names the unit, its branch, pull request, issue, both threads and the round count; the contract block names the plan and links the plan's record", () => {
     const w = mountApp(UnitPage, { seed: seed() });
-    expect(w.find("h1").text()).toBe("Unit U16");
+    expect(w.find("h1 .title").text()).toBe("Unit U16");
     const rows = w.findAll("#unitruns li.fold");
     expect(
       rows.map((li) => [li.attributes("data-run-id"), li.attributes("data-round"), li.attributes("data-thread")]),
@@ -542,7 +542,7 @@ describe("UnitRoutePage (the /runs/unit/:key dispatch)", () => {
 
   it("renders the unit page for a unit seed", () => {
     const w = mountApp(UnitRoutePage, { seed: seed() });
-    expect(w.find("h1").text()).toBe("Unit U16");
+    expect(w.find("h1 .title").text()).toBe("Unit U16");
     expect(w.text()).not.toContain("That run isn't here.");
   });
 });

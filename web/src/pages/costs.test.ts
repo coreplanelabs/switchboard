@@ -149,7 +149,7 @@ const usersSeed = (users: UserCostReport | null = usersReport()): CostsSeed => (
 describe("CostsPage", () => {
   it("renders a hostile label as text, never as markup", () => {
     const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
-    expect(w.find("h1").text()).toContain("Switchboard <b> spend");
+    expect(w.find("h1 .title").text()).toContain("Switchboard <b> spend");
     expect(w.find("h1 b").exists()).toBe(false);
   });
 
