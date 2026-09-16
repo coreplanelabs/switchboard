@@ -180,6 +180,15 @@ describe("prepareRestartTurn: the request runs again as its own dispatch", () =>
     expect(turn.msg).toMatchObject({ ...REQUEST, receivedAt: NOW });
     expect(turn.msg.originAt).toBeUndefined();
     expect(turn.opts.trace.root.name).toBe("request");
+    expect(turn.opts).not.toHaveProperty("restartOf");
+  });
+
+  it("names the run it restarts on the dispatch options, so admission never steers the request into that run's row (thread-admission item 5)", () => {
+    const turn = prepareRestartTurn(
+      { clock: () => NOW },
+      { request: REQUEST, pending: [], clock: () => NOW, restartOf: "run-closed" },
+    );
+    expect(turn.opts.restartOf).toBe("run-closed");
   });
 
   it("appends the follow-ups the resumed run never consumed, their attachments merged after the request's own", () => {

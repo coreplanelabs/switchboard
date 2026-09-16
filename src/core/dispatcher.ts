@@ -146,6 +146,15 @@ export interface DispatchOptions {
   /** A fresh turn's wait behind the run it was parked on (the `queued …
    *  behind the previous run` caption; a `request` attr; never a duration term). */
   queuedBehindMs?: number;
+  /** Set by the restart from the request alone (`prepareRestartTurn`;
+   *  run-history item 54, harness-pi item 16): the run this request is the
+   *  request of, closed `interrupted` by the dispatch that hands it on. Its
+   *  finish write is in flight while this request is admitted, and after a
+   *  resume across a bot generation the boot-gap map may still name it
+   *  (thread-admission item 5) — so admission never steers this request into
+   *  that run's inbox: it runs fresh, as a new run in the thread. Absent for
+   *  every other request. */
+  restartOf?: string;
   /** Set by `spawnChild()` (dispatch/spawn.ts; routing-and-config item 20):
    *  this request is a child run — the run that spawned it, its depth, and the
    *  wall clock the parent had left, which the child's effective profile takes
@@ -313,7 +322,11 @@ export async function dispatch(
   // 54): its row was closed with the note that says why, and its request runs
   // again as a new run once this dispatch has freed the thread.
   let resumeRowClosed = false;
-  let restartRequest: IncomingMessage | undefined;
+  // The request to dispatch again as a new run once the thread is free (item
+  // 54; harness-pi item 16), and the run it restarts — the one this dispatch
+  // closed `interrupted`, which admission must never steer the request into
+  // (thread-admission item 5). Undefined until a restart is decided.
+  let restartRequest: { request: IncomingMessage; restartOf?: string } | undefined;
   const reservationHooks = {
     onStop: (mode: StopMode) => void registered?.control.requestStop(mode),
     onFenced: () => {
@@ -474,6 +487,7 @@ export async function dispatch(
       resume,
       restart,
       carriedRow,
+      ...(opts.restartOf !== undefined ? { restartOf: opts.restartOf } : {}),
       ...(opts.coordinator ? { coordinator: opts.coordinator } : {}),
       clock,
       root,
@@ -490,14 +504,16 @@ export async function dispatch(
     const outcome = await admit(deps, admissionCtx);
     // A redispatch (the boot-gap steer that found its row gone) is a request
     // of its own — its own root, no resume or restart — but the same message:
-    // a child stays its parent's child, starts from the same seed, and a
-    // coordinator's child stays its instance's, so `parent`, `seed` and
-    // `coordinator` ride along, and its outcome is the one the caller gets.
+    // a child stays its parent's child, starts from the same seed, a
+    // coordinator's child stays its instance's, and a restart still names the
+    // run it restarts, so `parent`, `seed`, `coordinator` and `restartOf` ride
+    // along, and its outcome is the one the caller gets.
     if (outcome.kind === "redispatch")
       return dispatch(deps, msg, io, {
         ...(opts.parent ? { parent: opts.parent } : {}),
         ...(opts.seed ? { seed: opts.seed } : {}),
         ...(opts.coordinator ? { coordinator: opts.coordinator } : {}),
+        ...(opts.restartOf !== undefined ? { restartOf: opts.restartOf } : {}),
       });
     // A reply folded into the live child of a spawned thread: its parent hears it now.
     if (outcome.kind === "steered") await tellLineage({ kind: "steered" });
@@ -853,7 +869,7 @@ export async function dispatch(
       // saying why, and its request runs again as a new run in the thread,
       // provisioned as a fresh run is, after the outer finally frees the thread.
       if (resume) {
-        restartRequest = await abandonLostWorkspace({
+        const request = await abandonLostWorkspace({
           msg,
           io,
           refuse,
@@ -867,6 +883,7 @@ export async function dispatch(
           ledgerRun,
           why: attach.why,
         });
+        if (request) restartRequest = { request, restartOf: resume.row.runId };
         resumeRowClosed = true;
       }
       return ended;
@@ -1222,7 +1239,7 @@ export async function dispatch(
       // request: the interruption's refusal by name, never a failure.
       refused = true;
       ended.refusal ??= err.refusal;
-      restartRequest = msg;
+      restartRequest = { request: msg, ...(registered ? { restartOf: registered.id } : {}) };
       console.log(`[dispatch] ${msg.threadKey} run ${registered?.id ?? "?"} restarts from its request: ${err.message}`);
       return ended;
     }
@@ -1308,9 +1325,16 @@ export async function dispatch(
       // is free — a resumed run whose workspace could not be re-attached (item
       // 54), or a live run whose pi container was replaced under it
       // (harness-pi item 16) — with the follow-ups the run never consumed
-      // appended, as a fresh turn would carry them.
+      // appended, as a fresh turn would carry them, and the closed run named
+      // so admission never steers the request into its row: the finish above
+      // is still in flight, and the boot-gap map may still list the run.
       const pending = settled.kind === "handed-on" ? settled.pending : [];
-      const restart = prepareRestartTurn(deps, { request: restartRequest, pending, clock });
+      const restart = prepareRestartTurn(deps, {
+        request: restartRequest.request,
+        pending,
+        clock,
+        ...(restartRequest.restartOf !== undefined ? { restartOf: restartRequest.restartOf } : {}),
+      });
       await dispatch(deps, restart.msg, io, restart.opts).catch((err: unknown) =>
         console.error(
           `[dispatch] ${msg.threadKey} restart from the request failed: ${err instanceof Error ? err.message : String(err)}`,
