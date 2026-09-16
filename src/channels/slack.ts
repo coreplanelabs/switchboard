@@ -27,7 +27,7 @@ import {
 } from "./slack/attachments.js";
 import { dedupeDelivery, wasHandledHere } from "./slack/dedupe.js";
 import { resolveChannelName, resolveTeamUrl, resolveUserName, slackPermalink } from "./slack/lookups.js";
-import { resolveSlackRequester, type SlackPoster } from "./slack/requester.js";
+import { rawTextOf, resolveSlackRequester, type SlackBlock, type SlackPoster } from "./slack/requester.js";
 import { isLiveCard, liveCardKey, liveCards, refreshForeignLiveCards, render } from "./slack/statusCard.js";
 import { ACK_EMOJI, catchUpMissedMentions, tsMs } from "./slackCatchUp.js";
 import { processSecrets, type Secret } from "../secrets.js";
@@ -232,7 +232,12 @@ export function createSlackApp(deps: CoreDeps) {
     botUserId ??= (await client.auth.test()).user_id ?? undefined;
     // An app's post that mentions the bot arrives here with no `user`: the
     // poster rides along and the requester is resolved from it (item 13).
-    const posted = event as { bot_id?: string; username?: string; bot_profile?: { name?: string } };
+    const posted = event as {
+      bot_id?: string;
+      username?: string;
+      bot_profile?: { name?: string };
+      blocks?: SlackBlock[];
+    };
     await handle(
       deps,
       { client, statusClient },
@@ -240,7 +245,7 @@ export function createSlackApp(deps: CoreDeps) {
         channel: event.channel,
         user: event.user,
         poster: posterOf(posted),
-        rawText: event.text ?? "",
+        rawText: rawTextOf(event.text, posted.blocks),
         text: stripMention(event.text ?? "", botUserId),
         ts: event.ts,
         threadTs: event.thread_ts ?? event.ts,
@@ -285,7 +290,7 @@ export function createSlackApp(deps: CoreDeps) {
         channel: m.channel,
         user: m.user,
         poster: posterOf(m),
-        rawText: m.text ?? "",
+        rawText: rawTextOf(m.text, (m as { blocks?: SlackBlock[] }).blocks),
         text: stripMention(m.text ?? "", botUserId),
         ts: m.ts,
         threadTs: m.thread_ts ?? m.ts,

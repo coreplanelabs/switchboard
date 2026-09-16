@@ -29,10 +29,56 @@ export interface SlackPoster {
   name?: string;
 }
 
-/** Where a relayed request came from: the person's own conversation. */
+/** Where a relayed request came from: the person's own conversation, and the
+ *  person themselves when the footer names them (`on behalf of <@U…>`). */
 export interface RelayFooter {
   channel: string;
   threadTs: string;
+  onBehalfOf?: string;
+}
+
+/** The slice of a Slack Block Kit block the flattener reads: a section's text,
+ *  a context block's elements, a rich_text block's nested elements. */
+export interface SlackBlock {
+  type?: string;
+  text?: { type?: string; text?: string } | string;
+  elements?: SlackBlock[];
+}
+
+/** Every text a message's blocks carry, in order. Slack puts an app's footer in
+ *  a `context` block and leaves the message's `text` as the request alone, so
+ *  the requester and the strippers must read the blocks too. Rich-text runs
+ *  (`{type: "text", text: "…"}`, links `{type: "link", url, text?}`) flatten to
+ *  their text; unknown shapes contribute nothing. */
+export function textOfBlocks(blocks: readonly SlackBlock[] | undefined): string {
+  if (!blocks) return "";
+  const out: string[] = [];
+  const walk = (b: SlackBlock): void => {
+    if (typeof b.text === "string") out.push(b.text);
+    else if (b.text && typeof b.text.text === "string") out.push(b.text.text);
+    for (const e of b.elements ?? []) walk(e);
+  };
+  for (const b of blocks) {
+    const before = out.length;
+    walk(b);
+    // One line per block: a context footer must end the text on its own line.
+    if (out.length > before) out.push("\n");
+  }
+  return out.join("").replace(/\n+$/, "");
+}
+
+/** The text the adapter reads a message by: its `text`, then what its blocks
+ *  say that the text does not (the footer). */
+export function rawTextOf(text: string | undefined, blocks: readonly SlackBlock[] | undefined): string {
+  const base = text ?? "";
+  const fromBlocks = textOfBlocks(blocks);
+  if (!fromBlocks) return base;
+  // The blocks usually repeat the text; append only the lines the text lacks.
+  const extra = fromBlocks
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0 && !base.includes(l));
+  return extra.length > 0 ? `${base}\n${extra.join("\n")}` : base;
 }
 
 const PERMALINK_TS = /^p(\d{10})(\d{6})$/;
@@ -48,7 +94,7 @@ export function parseRelayFooter(text: string): RelayFooter | undefined {
   if (!m) return undefined;
   let url: URL;
   try {
-    url = new URL(m[2].replaceAll("&amp;", "&"));
+    url = new URL(m[3].replaceAll("&amp;", "&"));
   } catch {
     return undefined;
   }
@@ -58,7 +104,7 @@ export function parseRelayFooter(text: string): RelayFooter | undefined {
   if (!ts) return undefined;
   const threadTs = url.searchParams.get("thread_ts") ?? `${ts[1]}.${ts[2]}`;
   if (!THREAD_TS.test(threadTs)) return undefined;
-  return { channel: parts[1], threadTs };
+  return { channel: parts[1], threadTs, ...(m[2] ? { onBehalfOf: m[2] } : {}) };
 }
 
 /** How the requester was found — on the record's span for forensics, and so a
@@ -159,6 +205,9 @@ export async function resolveSlackRequester(client: RequesterClient, ev: Request
   const poster: SlackPoster = ev.poster ?? {};
   const relay = parseRelayFooter(ev.text);
   if (relay) {
+    // The footer names the person outright on current posts; older posts name
+    // only their thread, whose parent the person started.
+    if (relay.onBehalfOf) return personRequester(relay.onBehalfOf, "relay-footer", poster);
     const user = await threadParentUser(client, relay.channel, relay.threadTs);
     if (user) return personRequester(user, "relay-footer", poster);
   }
