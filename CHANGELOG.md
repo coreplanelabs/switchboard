@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.239.0](https://github.com/coreplanelabs/switchboard/compare/v1.238.0...v1.239.0) (2026-09-16)
+
+
+### Features
+
+* **sandbox:** a cold sandbox is seeded from the resident's snapshot before its first command — POST /seed restores the checkout and its deps entry presigned, fixes ownership and origin and checks the thread's ref out; load:sandbox --seed-from measures it ([#1417](https://github.com/coreplanelabs/switchboard/issues/1417)) ([ec14186](https://github.com/coreplanelabs/switchboard/commit/ec141864e2a1a7a611f73978e7ce9b686d85997f))
+* **sandbox:** a run the resident refuses lands in a sandbox seeded from its snapshot — the factory forwards the probe's handle to POST /seed, retries once on a rotated handle, names the seed on the card, and the agents get a seeded prompt variant ([#1421](https://github.com/coreplanelabs/switchboard/issues/1421)) ([cf5284a](https://github.com/coreplanelabs/switchboard/commit/cf5284ab62c648ebeee33c3924e753b99472bc1b))
+* **slack:** the status card draws the running command as a code block — the activity is typed on the frame, never re-parsed from text ([#1422](https://github.com/coreplanelabs/switchboard/issues/1422)) ([4c87597](https://github.com/coreplanelabs/switchboard/commit/4c875976f90ac0b4d2d80268833bae92084bba93))
+
 ## [1.238.0](https://github.com/coreplanelabs/switchboard/compare/v1.237.0...v1.238.0) (2026-09-16)
 
 
