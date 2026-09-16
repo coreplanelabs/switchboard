@@ -619,7 +619,7 @@ describe("the card's words", () => {
   });
 
   it("the routed card's closing line says how to run the request another way — plain text, no backticks (the Slack card body is literal)", () => {
-    expect(ROUTED_CARD_FOOTER).toBe("reply agent:<preset> to run it another way");
+    expect(ROUTED_CARD_FOOTER).toBe("wrong preset? reply agent:<preset> to run it another way");
     expect(ROUTED_CARD_FOOTER).not.toContain("`");
   });
 });

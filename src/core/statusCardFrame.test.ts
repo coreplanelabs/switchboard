@@ -68,7 +68,7 @@ describe("createCardShell — every paint comes from one builder", () => {
       label: LABEL,
       startedAt: now,
       now: () => now,
-      footer: "reply agent:<preset> to run it another way",
+      footer: "wrong preset? reply agent:<preset> to run it another way",
     });
     expect(shell.ack()).toEqual({ title: `👀 ${LABEL} · preparing workspace…` });
     now += 5_000;
@@ -81,19 +81,21 @@ describe("createCardShell — every paint comes from one builder", () => {
       shell.close({ kind: "done", icon: "✅", detail: "✓ reading the diff", shape: "4s thinking · 1s in tools" }),
     ).toEqual({
       title: `✅ ${LABEL} · 5s`,
-      detail: "4s thinking · 1s in tools\n✓ reading the diff\nreply agent:<preset> to run it another way",
+      detail: "4s thinking · 1s in tools\n✓ reading the diff\nwrong preset? reply agent:<preset> to run it another way",
       link: undefined,
     });
     // A close with nothing else to say still carries it; every close kind does.
-    expect(shell.close({ kind: "done", icon: "❌" }).detail).toBe("reply agent:<preset> to run it another way");
+    expect(shell.close({ kind: "done", icon: "❌" }).detail).toBe(
+      "wrong preset? reply agent:<preset> to run it another way",
+    );
     expect(shell.close({ kind: "not_started", icon: "📦", reason: "repo access" }).detail).toBe(
-      "reply agent:<preset> to run it another way",
+      "wrong preset? reply agent:<preset> to run it another way",
     );
     expect(shell.close({ kind: "refused", icon: "🚫", reason: "no plan" }).detail).toBe(
-      "reply agent:<preset> to run it another way",
+      "wrong preset? reply agent:<preset> to run it another way",
     );
     expect(shell.close({ kind: "setup_failed", reason: "attach timed out" }).detail).toBe(
-      "reply agent:<preset> to run it another way",
+      "wrong preset? reply agent:<preset> to run it another way",
     );
     // No footer: a close's detail is exactly what it was.
     expect(shellAt(0).close({ kind: "done", icon: "✅" }).detail).toBeUndefined();

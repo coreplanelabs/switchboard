@@ -9321,7 +9321,9 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     await writer.settled();
     expect(deps.routeModel).not.toHaveBeenCalled();
     expect(statuses[0].title).toContain("*review* on `anthropic/review-model` · routed: a review ask");
-    expect(statuses.at(-1)!.detail?.split("\n").at(-1)).toBe("reply agent:<preset> to run it another way");
+    expect(statuses.at(-1)!.detail?.split("\n").at(-1)).toBe(
+      "wrong preset? reply agent:<preset> to run it another way",
+    );
     const record = ledger.finished.get("run-routed")!;
     expect(record.agent).toBe("review");
     expect(record.events.filter((e) => e.type === "route")).toEqual([
@@ -9491,7 +9493,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(statuses[0].title).toContain("*general* on `anthropic/general-model` · routed: a plain question");
     const closed = statuses.at(-1)!;
     expect(closed.title).toContain("✅");
-    expect(closed.detail?.split("\n").at(-1)).toBe("reply agent:<preset> to run it another way");
+    expect(closed.detail?.split("\n").at(-1)).toBe("wrong preset? reply agent:<preset> to run it another way");
     const record = ledger.finished.get("run-routed")!;
     expect(record.events.filter((e) => e.type === "route")).toHaveLength(1);
   });
@@ -12420,7 +12422,7 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
   const routingUnset = (yaml: string) => yaml.replace(ROUTING_OFF, "");
   const ROUTED_YAML = routingOn(YAML_FIXTURE);
   const ROUTED_REMOTE_YAML = routingOn(REMOTE_YAML_FIXTURE);
-  const FOOTER = "reply agent:<preset> to run it another way";
+  const FOOTER = "wrong preset? reply agent:<preset> to run it another way";
   /** A scripted router: a change to make is coding, a review ask is review, anything else general. */
   const router = () =>
     vi.fn(async (prompt: { user: string }) => {
@@ -13259,7 +13261,9 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       "*coding* on `anthropic/coding-model` · routed: an imperative ask in a repo thread",
     );
     expect(statuses[0].title).not.toContain("compound collapsed");
-    expect(statuses.at(-1)!.detail?.split("\n").at(-1)).toBe("reply agent:<preset> to run it another way");
+    expect(statuses.at(-1)!.detail?.split("\n").at(-1)).toBe(
+      "wrong preset? reply agent:<preset> to run it another way",
+    );
     // The router was never asked: the preset is the transcript's.
     expect(t.provider.requests).toHaveLength(0);
     // The record: the carried decision on `route`, no `route` event, `agentSource` sticky —
