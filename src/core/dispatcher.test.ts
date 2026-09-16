@@ -71,7 +71,7 @@ import type { HarnessSession } from "./harness/contract.js";
 import { runPiHarnessOpen } from "./harness/pi/harness.js";
 import { PiHarness } from "./harness/pi/piHarness.js";
 import { HarnessRegistry, authorizeToolCall, relayToolCall, type ToolCallAsk } from "./harness/pi/relay.js";
-import { FakePiContainer } from "./harness/pi/testing/fakeContainer.js";
+import { FakeHarnessContainer } from "./harness/testing/fakeContainer.js";
 import { scriptPiFromProvider } from "./harness/pi/testing/providerPi.js";
 import { SOFT_STOP_INSTRUCTION } from "./harness/pi/windDown.js";
 import { ThreadsElsewhere, type ThreadElsewhere } from "./runLedger/threadsElsewhere.js";
@@ -192,7 +192,7 @@ function makeDeps(fixtureYaml: string, provider: Provider): TestDeps {
       harnessUrl: "https://bot.test",
       loopbackUrl: "http://127.0.0.1:8080",
       containerFor: () => {
-        const container = new FakePiContainer();
+        const container = new FakeHarnessContainer();
         scriptPiFromProvider(container, {
           provider,
           registry: harnesses,
@@ -10331,14 +10331,15 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     const harnesses = new HarnessRegistry();
     const bearers = new RunBearerStore({ clock: Date.now });
     deps.runBearers = bearers;
-    const containers: FakePiContainer[] = [];
+    /** The first run's pi opens one bash call and dies with its container, which names itself anew; the restarted run's pi is scripted from the provider. */
+    const containers: FakeHarnessContainer[] = [];
     deps.harness = {
       harness: piHarness,
       registry: harnesses,
       harnessUrl: "https://bot.test",
       loopbackUrl: "http://127.0.0.1:8080",
       containerFor: () => {
-        const container = new FakePiContainer();
+        const container = new FakeHarnessContainer();
         containers.push(container);
         if (containers.length > 1) {
           scriptPiFromProvider(container, {
@@ -10544,7 +10545,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     // to the boundary the row records (the turn the mirror wrote as step 1),
     // then the call's start — pi is inside `sleep 240`, waiting on nothing
     // the bot has to answer.
-    const container = new FakePiContainer();
+    const container = new FakeHarnessContainer();
     container.pid = PID;
     const call = {
       role: "assistant",
@@ -10712,7 +10713,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     deps.runBearers = bearers;
     /** What the boot-gap map said of the thread when the resumed run attached its workspace — after the adopt, before pi was probed. */
     let elsewhereAtAttach: ThreadElsewhere | undefined | "never attached" = "never attached";
-    const containers: FakePiContainer[] = [];
+    const containers: FakeHarnessContainer[] = [];
     deps.harness = {
       harness: piHarness,
       registry: harnesses,
@@ -10726,7 +10727,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
           return container;
         }
         // The restarted run's pi, scripted from the provider as a fresh run's is.
-        const fresh = new FakePiContainer();
+        const fresh = new FakeHarnessContainer();
         scriptPiFromProvider(fresh, { provider, registry: harnesses, bearers, beforeModelCall: () => realSleep(10) });
         containers.push(fresh);
         return fresh;
@@ -12341,7 +12342,7 @@ workspaceDir: __WORKDIR__
       warn: () => {},
     });
     t.deps.runs = createRunsService({ registry: t.registry, store: t.store, ledger });
-    const container = new FakePiContainer();
+    const container = new FakeHarnessContainer();
     const harnesses = new HarnessRegistry();
     const bearers = new RunBearerStore({ clock: Date.now });
     let starts = 0;
@@ -12353,7 +12354,7 @@ workspaceDir: __WORKDIR__
       // The first pi is the scripted conductor below; the research child's is scripted from the provider.
       containerFor: () => {
         if (starts++ === 0) return container;
-        const child = new FakePiContainer();
+        const child = new FakeHarnessContainer();
         scriptPiFromProvider(child, { provider, registry: harnesses, bearers, beforeModelCall: () => realSleep(10) });
         return child;
       },

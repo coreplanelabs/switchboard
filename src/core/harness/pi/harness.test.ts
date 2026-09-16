@@ -29,8 +29,13 @@ import {
   type RelayedToolAnswer,
 } from "./relay.js";
 import { judgeToolCall, type ToolRuleContext } from "./toolRules.js";
-import { ExecPiContainer, PiContainerError, PiContainerRuntimeReplacedError, type PiContainer } from "./container.js";
-import { FakePiContainer } from "./testing/fakeContainer.js";
+import {
+  ExecHarnessContainer,
+  HarnessContainerError,
+  HarnessContainerRuntimeReplacedError,
+  type HarnessContainer,
+} from "../container.js";
+import { FakeHarnessContainer } from "../testing/fakeContainer.js";
 import {
   compactionSteer,
   isTransientProviderError,
@@ -95,8 +100,8 @@ const PI_BUSY_REFUSAL =
  *  pi inside a tool call: it refuses a plain `prompt` as pi does and accepts one
  *  queued as a steer, which its script delivers when the call ends. */
 function scriptedPi(
-  c: FakePiContainer,
-  turns: (n: number, c: FakePiContainer) => void,
+  c: FakeHarnessContainer,
+  turns: (n: number, c: FakeHarnessContainer) => void,
   opts: { refusePrompt?: string; sessionFile?: string; busy?: boolean } = {},
 ) {
   let prompts = 0;
@@ -145,7 +150,7 @@ const assistant = (content: Record<string, unknown>[], stopReason = "toolUse") =
  *  extension's `tool_call` hook asking the bot's gate for the call, which is
  *  how every call pi runs reaches the harness. */
 const bashTurn = (
-  w: { container: FakePiContainer; registry: HarnessRegistry },
+  w: { container: FakeHarnessContainer; registry: HarnessRegistry },
   id: string,
   command: string,
   result: string,
@@ -174,7 +179,7 @@ const bashTurn = (
     { type: "turn_end", message: msg, toolResults: [] },
   );
 };
-const finalTurn = (c: FakePiContainer, text: string) => {
+const finalTurn = (c: FakeHarnessContainer, text: string) => {
   const msg = assistant([{ type: "text", text }], "stop");
   c.emit(
     { type: "turn_start" },
@@ -194,11 +199,11 @@ function world(
     /** The session's notepad the compaction steer reads (session-log item 10). */
     notepad?: () => Promise<{ text: string; updatedAt: number } | null>;
     /** The container to drive; a fresh fake unless a test brings one of its own shape. */
-    container?: FakePiContainer;
+    container?: FakeHarnessContainer;
     /** The seam the harness is handed when it is not the fake itself: an
-     *  `ExecPiContainer` over an executor whose commands a test's resident
+     *  `ExecHarnessContainer` over an executor whose commands a test's resident
      *  Worker runs against `container`. */
-    seam?: PiContainer;
+    seam?: HarnessContainer;
     /** The deployment's compaction thresholds for pi's settings (harness-pi item 4). */
     compaction?: { reserveTokens?: number; keepRecentTokens?: number };
     /** The harness's sleep; a test that kills the bot mid-run hands one that stops answering. */
@@ -206,7 +211,7 @@ function world(
   } = {},
 ) {
   const clock = opts.clock ?? { now: NOW };
-  const container = opts.container ?? new FakePiContainer();
+  const container = opts.container ?? new FakeHarnessContainer();
   const registry = new HarnessRegistry();
   const bearers = new RunBearerStore({ clock: () => clock.now });
   const sink = recordingSink();
@@ -560,7 +565,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
 
   // docs/reference/specs/session-log.md item 10: the notepad's second read point.
   it("after every compaction pi is steered with the notepad as it stands and the reach recall gives; a run without a notepad is told its notes are empty and how to keep them; a failed compaction steers nothing", async () => {
-    const compaction = (c: FakePiContainer, summary: string) =>
+    const compaction = (c: FakeHarnessContainer, summary: string) =>
       c.emit({
         type: "compaction_end",
         reason: "threshold",
@@ -1024,7 +1029,7 @@ describe("runPiHarness — after a bot restart", () => {
   it("re-attaches to a pi still running: reads the log from the recorded offset, tolerates the turn that failed while the bot was away, asks it to continue", async () => {
     const w = world();
     // The previous generation's pi: still alive, its log already carrying the error turn the bot's death caused.
-    await w.container.start({ paths, args: [], env: {} });
+    await w.container.start({ paths, command: "pi", args: [], env: {} });
     w.container.emit({ type: "agent_start" }); // before the recorded offset: never re-read
     const skip = Buffer.byteLength('{"type":"agent_start"}\n');
     w.container.emit(
@@ -1066,7 +1071,7 @@ describe("runPiHarness — after a bot restart", () => {
 
   it("re-attaches without judging the calls the log already held — the generation that died vetted them — and judges its own from the prompt on", async () => {
     const w = world();
-    await w.container.start({ paths, args: [], env: {} });
+    await w.container.start({ paths, command: "pi", args: [], env: {} });
     // The previous generation's pi: a call the old bot's gate saw and pi ran, then the model call that failed when the bot died.
     w.container.emit(
       { type: "tool_execution_start", toolCallId: "c0", toolName: "bash", args: { command: "npm test" } },
@@ -1113,7 +1118,7 @@ describe("runPiHarness — after a bot restart", () => {
     const w = world();
     let ran = 0;
     w.run.tools = [{ ...updateStatus, run: async () => (ran++, "status updated") }];
-    await w.container.start({ paths, args: [], env: {} });
+    await w.container.start({ paths, command: "pi", args: [], env: {} });
     // The log past the recorded offset: the turn that made the call and the
     // call's start — nothing since, pi is waiting on the bot's answer.
     const call = assistant([{ type: "toolCall", id: "c0", name: "update_status", arguments: { checklist: "step 1" } }]);
@@ -1211,7 +1216,7 @@ describe("runPiHarness — after a bot restart", () => {
   /** A container whose pi outlives the first generation's end: the bot died
    *  before its finally ran, so the kill never reached pi and the log is what
    *  pi wrote — the second generation finds pi where the first left it. */
-  class PiOutlivesTheBot extends FakePiContainer {
+  class PiOutlivesTheBot extends FakeHarnessContainer {
     private deaths = 1;
     override async kill(pid: number) {
       if (this.deaths-- > 0) return;
@@ -1277,7 +1282,7 @@ describe("runPiHarness — after a bot restart", () => {
   // between the two leaves it one turn behind: that turn is read again.
   it("an assistant turn the ledger already holds, read again because the row's offset lagged the write, spends no second index: the results after it are the next step's user turn and the steps continue from the transcript", async () => {
     const w = world();
-    await w.container.start({ paths, args: [], env: {} });
+    await w.container.start({ paths, command: "pi", args: [], env: {} });
     // The dead generation's log from the start: the turn the transcript ends with, its command's result, the turn's end.
     const turn = assistant([{ type: "toolCall", id: "c0", name: "bash", arguments: { command: "npm test" } }]);
     w.container.emit(
@@ -1326,7 +1331,7 @@ describe("runPiHarness — after a bot restart", () => {
   // generation's own commands were answered; those answers are pi's to it.
   it("the answers pi gave a dead generation's commands, read again, are not taken for this generation's: the catch-up lasts until this generation's prompt is answered, so the model call that failed with the bot stays a note, and the dead generation's continue prompt is a turn the model was told", async () => {
     const w = world();
-    await w.container.start({ paths, args: [], env: {} });
+    await w.container.start({ paths, command: "pi", args: [], env: {} });
     const earlier = NOW - 60_000;
     w.container.emit(
       { id: `retry:${earlier}-0badc0de`, type: "response", command: "set_auto_retry", success: true },
@@ -1382,7 +1387,7 @@ describe("runPiHarness — after a bot restart", () => {
     const b = world();
     scriptedPi(b.container, (_n, c) => finalTurn(c, "two"));
     await b.start();
-    const ids = (w: { container: FakePiContainer }) => w.container.commands().map((c) => String(c.id));
+    const ids = (w: { container: FakeHarnessContainer }) => w.container.commands().map((c) => String(c.id));
     for (const id of [...ids(a), ...ids(b)]) expect(id).toMatch(/^(retry|state|prompt):1700000000000-[0-9a-f]{8}$/);
     expect(new Set([...ids(a), ...ids(b)]).size).toBe(6);
   });
@@ -1446,7 +1451,7 @@ describe("runPiHarness — after a bot restart", () => {
   // sends no seed, so nothing it reads is that echo.
   it("a steer's text the dead generation read but never wrote is the next step's user turn, not mistaken for the seed's echo; the continue prompt's own echo is a turn the model was told", async () => {
     const w = world();
-    await w.container.start({ paths, args: [], env: {} });
+    await w.container.start({ paths, command: "pi", args: [], env: {} });
     w.container.emit({
       type: "message_end",
       message: { role: "user", content: [{ type: "text", text: wrapUpInstruction(3) }] },
@@ -1487,7 +1492,7 @@ describe("runPiHarness — after a bot restart", () => {
   it("re-attaches at the root the row recorded, a previous build's shape: pi's log is read and its FIFO fed there, not under this build's own root, and that root goes when the run ends", async () => {
     const w = world();
     const theirs = piRunPathsAt("/tmp/switchboard-pi-worker2/run-7");
-    await w.container.start({ paths: theirs, args: [], env: {} });
+    await w.container.start({ paths: theirs, command: "pi", args: [], env: {} });
     w.run.resume = resume({
       pid: 4242,
       logOffset: 0,
@@ -1510,7 +1515,7 @@ describe("runPiHarness — after a bot restart", () => {
   it("a row whose facts name no root cannot be re-attached: its pi is ended by pid and a fresh pi starts on this build's root from the mirrored transcript, the note saying why", async () => {
     const w = world();
     const theirs = piRunPathsAt("/tmp/switchboard-pi/run-7");
-    await w.container.start({ paths: theirs, args: [], env: {} }); // alive, filed where this build never looks
+    await w.container.start({ paths: theirs, command: "pi", args: [], env: {} }); // alive, filed where this build never looks
     w.run.resume = resume({ pid: 4242, logOffset: 0, sessionFile: "s.jsonl" });
     scriptedPi(w.container, (_n, c) => finalTurn(c, "continued"));
     expect(await w.start()).toBe("continued");
@@ -1548,7 +1553,7 @@ describe("runPiHarness — after a bot restart", () => {
       publish: () => {},
     });
     const theirs = piRunPathsAt("/tmp/switchboard-pi-worker2/run-7");
-    await w.container.start({ paths: theirs, args: [], env: {} });
+    await w.container.start({ paths: theirs, command: "pi", args: [], env: {} });
     w.run.resume = resume({
       pid: 4242,
       logOffset: 0,
@@ -1569,7 +1574,7 @@ describe("runPiHarness — after a bot restart", () => {
   it("a row whose facts carry no bearer hash cannot be re-attached: its pi is ended by pid and a fresh pi starts with this generation's bearer, the note saying why", async () => {
     const w = world();
     const theirs = piRunPathsAt("/tmp/switchboard-pi-worker2/run-7");
-    await w.container.start({ paths: theirs, args: [], env: {} }); // alive and findable, holding a bearer nobody here can verify
+    await w.container.start({ paths: theirs, command: "pi", args: [], env: {} }); // alive and findable, holding a bearer nobody here can verify
     w.run.resume = resume({ pid: 4242, logOffset: 0, sessionFile: "s.jsonl", root: theirs.dir });
     scriptedPi(w.container, (_n, c) => finalTurn(c, "continued"));
     expect(await w.start()).toBe("continued");
@@ -1592,7 +1597,7 @@ describe("runPiHarness — after a bot restart", () => {
     let probed = 0;
     const alive = w.container.alive.bind(w.container);
     w.container.alive = async (pid) => (probed++, alive(pid));
-    await w.container.start({ paths, args: [], env: {} }); // whatever runs at that pid HERE is not the row's pi
+    await w.container.start({ paths, command: "pi", args: [], env: {} }); // whatever runs at that pid HERE is not the row's pi
     w.run.resume = resume({
       pid: 4242,
       logOffset: 0,
@@ -1616,7 +1621,7 @@ describe("runPiHarness — after a bot restart", () => {
 
   it("a row whose facts name this very container re-attaches as before, and a row from before the container was recorded is judged by its pid alone, the re-attach recording the container it found", async () => {
     const w = world();
-    await w.container.start({ paths, args: [], env: {} });
+    await w.container.start({ paths, command: "pi", args: [], env: {} });
     w.run.resume = resume({
       pid: 4242,
       logOffset: 0,
@@ -1630,7 +1635,7 @@ describe("runPiHarness — after a bot restart", () => {
     expect(w.container.starts).toHaveLength(1);
 
     const legacy = world();
-    await legacy.container.start({ paths, args: [], env: {} });
+    await legacy.container.start({ paths, command: "pi", args: [], env: {} });
     legacy.run.resume = resume({
       pid: 4242,
       logOffset: 0,
@@ -1647,7 +1652,7 @@ describe("runPiHarness — after a bot restart", () => {
   it("a container that cannot name itself judges nothing: the row's pi is found by its pid as before", async () => {
     const w = world();
     w.container.vm = undefined;
-    await w.container.start({ paths, args: [], env: {} });
+    await w.container.start({ paths, command: "pi", args: [], env: {} });
     w.run.resume = resume({
       pid: 4242,
       logOffset: 0,
@@ -1732,7 +1737,7 @@ describe("runPiHarness — after a bot restart", () => {
 // the same container keeps the failure it always was.
 describe("runPiHarness — the container replaced under a live run", () => {
   /** A pi that opens one bash call — its extension asking the gate, as the real one does — and then meets `fate` mid-call. */
-  function piMidCall(w: ReturnType<typeof world>, fate: (c: FakePiContainer) => void) {
+  function piMidCall(w: ReturnType<typeof world>, fate: (c: FakeHarnessContainer) => void) {
     scriptedPi(w.container, (_n, c) => {
       const msg = assistant([{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "npm test" } }]);
       c.emit(
@@ -1745,7 +1750,7 @@ describe("runPiHarness — the container replaced under a live run", () => {
     });
   }
   /** The container's read of pi's log fails with `error` once the log is drained — after the records already written were read. */
-  function failOnceDrained(c: FakePiContainer, error: Error) {
+  function failOnceDrained(c: FakeHarnessContainer, error: Error) {
     const read = c.readLog.bind(c);
     c.readLog = async (path, offset, max) => {
       const chunk = await read(path, offset, max);
@@ -1822,7 +1827,7 @@ describe("runPiHarness — the container replaced under a live run", () => {
     const onSend = world();
     onSend.container.failNext = {
       operation: "send",
-      error: new PiContainerError(
+      error: new HarnessContainerError(
         "send",
         "runtime-replaced: the resident runtime was replaced (a deploy) while this command ran",
       ),
@@ -1831,7 +1836,7 @@ describe("runPiHarness — the container replaced under a live run", () => {
     const err2 = await onSend.start().catch((e: unknown) => e);
     expect(err2).toBeInstanceOf(PiContainerReplacedError);
     expect((err2 as Error).message).toMatch(
-      /^the container running pi was replaced \(vm-fake → vm-fake; the executor said: pi container: send failed — runtime-replaced: /,
+      /^the container running pi was replaced \(vm-fake → vm-fake; the executor said: harness container: send failed — runtime-replaced: /,
     );
     expect(onSend.events.filter((e) => e.type === "tool_result")).toEqual([]);
     expect(noteKinds(onSend)).toEqual(["sandbox_restarted"]);
@@ -1839,8 +1844,10 @@ describe("runPiHarness — the container replaced under a live run", () => {
 
     // A read that failed for any other reason is that failure, as before.
     const other = world();
-    piMidCall(other, (c) => failOnceDrained(c, new PiContainerError("read", "tail: cannot open '/tmp/x' for reading")));
-    await expect(other.start()).rejects.toThrow(/^pi container: read failed — tail: cannot open/);
+    piMidCall(other, (c) =>
+      failOnceDrained(c, new HarnessContainerError("read", "tail: cannot open '/tmp/x' for reading")),
+    );
+    await expect(other.start()).rejects.toThrow(/^harness container: read failed — tail: cannot open/);
     expect(noteKinds(other)).not.toContain("sandbox_restarted");
     expect(other.container.killed).toEqual([4242]);
   });
@@ -1877,9 +1884,9 @@ describe("runPiHarness — the container replaced under a live run", () => {
     expect(nameless.container.killed).toEqual([4242]);
   });
 
-  it("saysContainerReplaced reads the executors' typed word first — the resident's ExecSandboxRestartedError, the seam's PiContainerRuntimeReplacedError — then the word `runtime-replaced` or `runtime-unreachable` anywhere in a failure's text, behind any prefix; a failure without the word is not one, and a bare string never is", () => {
+  it("saysContainerReplaced reads the executors' typed word first — the resident's ExecSandboxRestartedError, the seam's HarnessContainerRuntimeReplacedError — then the word `runtime-replaced` or `runtime-unreachable` anywhere in a failure's text, behind any prefix; a failure without the word is not one, and a bare string never is", () => {
     expect(saysContainerReplaced(new ExecSandboxRestartedError("the sandbox restarted under the run", 1))).toBe(true);
-    expect(saysContainerReplaced(new PiContainerRuntimeReplacedError("alive", "dead"))).toBe(true);
+    expect(saysContainerReplaced(new HarnessContainerRuntimeReplacedError("alive", "dead"))).toBe(true);
     expect(
       saysContainerReplaced(new ExecInfraError("runtime-unreachable: the sandbox container's runtime did not answer")),
     ).toBe(true);
@@ -1893,12 +1900,12 @@ describe("runPiHarness — the container replaced under a live run", () => {
     // client's own sentence around the resident's words.
     expect(
       saysContainerReplaced(
-        new PiContainerError("alive", "exit 127:\nruntime-replaced: the resident runtime was replaced"),
+        new HarnessContainerError("alive", "exit 127:\nruntime-replaced: the resident runtime was replaced"),
       ),
     ).toBe(true);
     expect(
       saysContainerReplaced(
-        new PiContainerError("read", "runtime-unreachable: the container's control port did not answer"),
+        new HarnessContainerError("read", "runtime-unreachable: the container's control port did not answer"),
       ),
     ).toBe(true);
     expect(
@@ -1910,7 +1917,9 @@ describe("runPiHarness — the container replaced under a live run", () => {
     ).toBe(true);
     expect(saysContainerReplaced(new Error("the command mentioned runtime-replaced in its output"))).toBe(true);
     // Without the word, a failure is the failure it was.
-    expect(saysContainerReplaced(new PiContainerError("read", "tail: cannot open '/tmp/x' for reading"))).toBe(false);
+    expect(saysContainerReplaced(new HarnessContainerError("read", "tail: cannot open '/tmp/x' for reading"))).toBe(
+      false,
+    );
     expect(
       saysContainerReplaced(new ExecInfraError("resident /exec: worktree still unavailable after a re-attach")),
     ).toBe(false);
@@ -1932,7 +1941,7 @@ describe("runPiHarness — the container replaced under a live run", () => {
 // the floor did not fire: the run failed with no `sandbox_restarted` note and
 // was not dispatched again. These tests drive the real
 // `ResidentExecutor` over a resident Worker that answers as the real one does
-// after a roll, through `ExecPiContainer` and the harness, so the word the
+// after a roll, through `ExecHarnessContainer` and the harness, so the word the
 // harness keys on is the word the executor produces — never a test's own.
 describe("runPiHarness — the resident's answers after a roll, as the executor hands them to the seam", () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -1986,7 +1995,7 @@ describe("runPiHarness — the resident's answers after a roll, as the executor 
    *  later command runs in the replacement, where pi's root never was — the
    *  log read answers the stderr-only text the real pipeline does (exit 0),
    *  the probe finds no pid, the container names itself anew. */
-  function residentWorkerOver(fake: FakePiContainer) {
+  function residentWorkerOver(fake: FakeHarnessContainer) {
     const routes: string[] = [];
     const replacementCommands: string[] = [];
     let rolled:
@@ -2021,7 +2030,7 @@ describe("runPiHarness — the resident's answers after a roll, as the executor 
         }
         let m: RegExpExecArray | null;
         if (command.includes("setsid -f sh -c "))
-          return ok(`${(await fake.start({ paths, args: [], env: {} })).pid}\n`);
+          return ok(`${(await fake.start({ paths, command: "pi", args: [], env: {} })).pid}\n`);
         if ((m = /^printf '%s\\n' (.*) >> '[^']+'$/.exec(command))) {
           await fake.writeLine(paths, unquote(m[1]));
           return ok();
@@ -2054,9 +2063,9 @@ describe("runPiHarness — the resident's answers after a roll, as the executor 
 
   /** A run on the real seam over the real resident client: pi opens one bash call, its own, and sleeps in it; `fate` rolls the container. */
   function runOnResident(fate: (worker: ReturnType<typeof residentWorkerOver>) => void) {
-    const fake = new FakePiContainer();
+    const fake = new FakeHarnessContainer();
     const worker = residentWorkerOver(fake);
-    const w = world({ container: fake, seam: new ExecPiContainer(new ResidentExecutor(OPTS)) });
+    const w = world({ container: fake, seam: new ExecHarnessContainer(new ResidentExecutor(OPTS)) });
     scriptedPi(fake, () => {
       const msg = assistant([{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "sleep 1500" } }]);
       fake.emit(
@@ -2162,9 +2171,9 @@ describe("the small pure pieces", () => {
 // its own (the bot host's mkdtemp) is found there by the next generation and
 // a dead pi's recorded root elsewhere goes when the fresh start is filed.
 describe("runPiHarness: the root the container makes", () => {
-  class ElsewhereContainer extends FakePiContainer {
-    override async makeRoot(runId: string) {
-      return piRunPathsAt(`/tmp/elsewhere-${runId}-a1b2c3`);
+  class ElsewhereContainer extends FakeHarnessContainer {
+    override async makeRoot(wanted: string) {
+      return `${wanted.replace("/tmp/switchboard-pi-", "/tmp/elsewhere-")}-a1b2c3`;
     }
   }
   it("files a fresh run under the root the container makes, records that root on the facts, and removes it when the run ends", async () => {
@@ -2177,8 +2186,8 @@ describe("runPiHarness: the root the container makes", () => {
     expect(w.facts[0]).toMatchObject({ root });
     expect(w.container.removed).toEqual([root]);
   });
-  it("the fake answers the predictable root, so every other test's run is filed where it always was", async () => {
-    expect(await new FakePiContainer().makeRoot("run-7")).toEqual(piRunPaths("run-7"));
+  it("the fake answers the root the harness proposes, so every other test's run is filed where it always was", async () => {
+    expect(await new FakeHarnessContainer().makeRoot(piRunPaths("run-7").dir)).toBe("/tmp/switchboard-pi-run-7");
   });
 
   // The session file's working directory is the container's answer for the
@@ -2187,19 +2196,19 @@ describe("runPiHarness: the root the container makes", () => {
   // it runs, and the bot host has no /workspace and a new root in each
   // generation. The fake answers as the exec container does, the checkout;
   // this container answers as the bot host does, the root itself.
-  class BotHostShapedContainer extends FakePiContainer {
+  class BotHostShapedContainer extends FakeHarnessContainer {
     private generation = 0;
-    override async makeRoot(runId: string) {
-      return piRunPathsAt(`${piRunPaths(runId).dir}-gen${++this.generation}`);
+    override async makeRoot(wanted: string) {
+      return `${wanted}-gen${++this.generation}`;
     }
     override cwd(paths: PiRunPaths) {
       return paths.dir;
     }
   }
-  const header = (w: { container: FakePiContainer }, stem: string) => {
+  const header = (w: { container: FakeHarnessContainer }, stem: string) => {
     const [started] = w.container.starts;
     const sessionPath = started.args[started.args.indexOf("--session") + 1];
-    expect(sessionPath).toMatch(new RegExp(`^${started.paths.sessionDir}/${stem}-\\d+\\.jsonl$`));
+    expect(sessionPath).toMatch(new RegExp(`^${piRunPathsAt(started.paths.dir).sessionDir}/${stem}-\\d+\\.jsonl$`));
     return { root: started.paths.dir, header: JSON.parse(w.container.files.get(sessionPath)!.split("\n")[0]) };
   };
   it("a dead pi on the bot host is restarted on a session whose working directory is the root this generation made, not the checkout and not the root the row recorded, which goes", async () => {
@@ -2427,7 +2436,7 @@ describe("runPiHarness — the deployment's compaction thresholds in pi's settin
 // budget; then the caller ends pi. The closed form (`runPiHarness`) is the
 // same loop with the end at once, as every test above drives it.
 describe("runPiHarnessOpen — the session stays open for one more turn", () => {
-  const sent = (c: FakePiContainer) => c.stdin.map((l) => JSON.parse(l) as Record<string, unknown>);
+  const sent = (c: FakeHarnessContainer) => c.stdin.map((l) => JSON.parse(l) as Record<string, unknown>);
 
   it("hands back the loop's answer with pi alive; a follow-up prompts the same session with its text, its tool call is on the stream under a run.agent of the caller's span, the relayed tools read the turn's context, no step is mirrored for it, and end() kills pi and removes the root once", async () => {
     const w = world({ withSpans: true });

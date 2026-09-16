@@ -53,12 +53,15 @@ import type { Settlement } from "../../runLedger/resume.js";
 import type { AssembledCompaction } from "../../runLedger/transcript.js";
 import { followUpMessageId, followUpPrompt, followUpSnippet, type FollowUpInput } from "../../threadAdmission.js";
 import { PiBridge } from "./bridge.js";
-import { PiContainerRuntimeReplacedError, RUNTIME_WORD, type PiContainer } from "./container.js";
+import { HarnessContainerRuntimeReplacedError, RUNTIME_WORD, type HarnessContainer } from "../container.js";
 import { PiMirror, piSessionFile, type LedgerTail } from "./mirror.js";
 import {
+  PI_BIN,
+  PI_STDOUT_FILTER,
   piLaunchArgs,
   piLaunchEnv,
   piLaunchFiles,
+  piRunPaths,
   piRunPathsAt,
   type PiLaunchSpec,
   type PiRunPaths,
@@ -85,7 +88,7 @@ export interface PiHarnessDeps extends HarnessDeps {
  *  and what `PiHarness.find` answers the run loop with. */
 export async function locatePi(
   facts: PiHarnessFacts,
-  container: PiContainer,
+  container: HarnessContainer,
   here: string | undefined,
 ): Promise<Exclude<Finding, "another-harness">> {
   if (facts.container !== undefined && here !== undefined && facts.container !== here) return "another-container";
@@ -307,7 +310,7 @@ export class ModelPolicyRefusedError extends Error {
  *  container under the thread is gone, thrown before any recovery
  *  (resident-repos items 65, 43 and 27: the container exited inside a rollout,
  *  a deploy swapped the runtime under the command, the container disk was
- *  recycled) — and the seam's `PiContainerRuntimeReplacedError`, an executor
+ *  recycled) — and the seam's `HarnessContainerRuntimeReplacedError`, an executor
  *  that handed the word back as a command's text. Then the words themselves,
  *  `runtime-replaced` or `runtime-unreachable` (the sandbox's word for a
  *  control port nothing answers, execution item 9), anywhere in a failure's
@@ -316,7 +319,7 @@ export class ModelPolicyRefusedError extends Error {
  *  the seam's own commands never print it, so a failure carrying it is the
  *  executor's. A failure without any of that is the failure it was. */
 export function saysContainerReplaced(err: unknown): boolean {
-  if (err instanceof ExecSandboxRestartedError || err instanceof PiContainerRuntimeReplacedError) return true;
+  if (err instanceof ExecSandboxRestartedError || err instanceof HarnessContainerRuntimeReplacedError) return true;
   return err instanceof Error && RUNTIME_WORD.test(err.message);
 }
 
@@ -607,9 +610,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             : ""),
       );
     } else {
-      // The fresh start's root is the container's to make; a dead pi's
-      // recorded root, when it is another, goes with it.
-      paths = await container.makeRoot(run.runId);
+      // The fresh start's root is the container's to make, from the
+      // predictable one pi proposes (`piRunPaths`); pi's files are laid out
+      // under whatever root comes back. A dead pi's recorded root, when it is
+      // another, goes with it.
+      paths = piRunPathsAt(await container.makeRoot(piRunPaths(run.runId).dir));
       // A dead pi's root elsewhere on THIS container goes; a pi in another
       // container left nothing here to remove.
       if (recorded?.root !== undefined && recorded.root !== paths.dir && elsewhere === undefined)
@@ -683,7 +688,13 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       }
       const launch = sessionPath ? { ...spec, sessionPath } : spec;
       for (const file of piLaunchFiles(launch)) await container.writeFile(file.path, file.content);
-      ({ pid } = await container.start({ paths, args: piLaunchArgs(launch), env: piLaunchEnv(launch, deps.bearer) }));
+      ({ pid } = await container.start({
+        paths,
+        command: PI_BIN,
+        args: piLaunchArgs(launch),
+        env: piLaunchEnv(launch, deps.bearer),
+        stdoutFilter: PI_STDOUT_FILTER,
+      }));
       // The root rides the first facts, so the build that comes back after a
       // restart looks for this pi where it is, not where it would file its own;
       // the bearer's hash rides beside it, so that build's proxy can honour

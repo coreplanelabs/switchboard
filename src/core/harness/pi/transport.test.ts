@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { LOG_READ_BYTES } from "./container.js";
+import { LOG_READ_BYTES } from "../container.js";
 import { piRunPaths } from "./process.js";
-import { FakePiContainer } from "./testing/fakeContainer.js";
+import { FakeHarnessContainer } from "../testing/fakeContainer.js";
 import { PiRpcTransport } from "./transport.js";
 
 // Feature: docs/reference/specs/harness-pi.md item 4 — the RPC transport over
@@ -13,7 +13,7 @@ import { PiRpcTransport } from "./transport.js";
 const paths = piRunPaths("run-7");
 
 /** The sleep yields a macrotask, so a test's own writes get their turn between polls. */
-function transport(container: FakePiContainer, extra: { alivePolls?: number; offset?: number } = {}) {
+function transport(container: FakeHarnessContainer, extra: { alivePolls?: number; offset?: number } = {}) {
   const sleeps: number[] = [];
   const t = new PiRpcTransport({
     container,
@@ -40,8 +40,8 @@ async function collect(t: PiRpcTransport, max: number): Promise<string[]> {
 
 describe("PiRpcTransport", () => {
   it("sends commands to the FIFO in order, one JSON line each", async () => {
-    const c = new FakePiContainer();
-    await c.start({ paths, args: [], env: {} });
+    const c = new FakeHarnessContainer();
+    await c.start({ paths, command: "pi", args: [], env: {} });
     const { t } = transport(c);
     t.send({ id: "s", type: "get_state" });
     t.send({ type: "prompt", message: "go" });
@@ -50,8 +50,8 @@ describe("PiRpcTransport", () => {
   });
 
   it("reads whole records however the log's bytes fall across reads, advancing its offset by exact bytes", async () => {
-    const c = new FakePiContainer();
-    await c.start({ paths, args: [], env: {} });
+    const c = new FakeHarnessContainer();
+    await c.start({ paths, command: "pi", args: [], env: {} });
     const { t } = transport(c);
     // A record longer than one read (a big tool result), split across polls; a
     // multibyte character on the boundary survives because bytes, not text, are buffered.
@@ -72,8 +72,8 @@ describe("PiRpcTransport", () => {
   });
 
   it("sleeps between empty polls and continues from its offset when more arrives; a partial record waits", async () => {
-    const c = new FakePiContainer();
-    await c.start({ paths, args: [], env: {} });
+    const c = new FakeHarnessContainer();
+    await c.start({ paths, command: "pi", args: [], env: {} });
     const { t, sleeps } = transport(c);
     const out: string[] = [];
     const reading = (async () => {
@@ -94,8 +94,8 @@ describe("PiRpcTransport", () => {
   });
 
   it("ends the stream when pi is found dead, after one last read of what it wrote on the way out", async () => {
-    const c = new FakePiContainer();
-    await c.start({ paths, args: [], env: {} });
+    const c = new FakeHarnessContainer();
+    await c.start({ paths, command: "pi", args: [], env: {} });
     const { t } = transport(c, { alivePolls: 2 });
     const out: string[] = [];
     const reading = (async () => {
@@ -114,16 +114,16 @@ describe("PiRpcTransport", () => {
   // replaced arrives as a throw from the probe or the read; the stream ends
   // with that error for the harness to judge, never as pi found dead.
   it("a probe or a read that throws ends the stream with that error, and pi is not read as dead", async () => {
-    const c = new FakePiContainer();
-    await c.start({ paths, args: [], env: {} });
+    const c = new FakeHarnessContainer();
+    await c.start({ paths, command: "pi", args: [], env: {} });
     const { t } = transport(c, { alivePolls: 1 });
     c.alive = async () => {
       throw new Error("the sandbox restarted under the run");
     };
     await expect(collect(t, 1)).rejects.toThrow("the sandbox restarted under the run");
     expect(t.exited).toBe(false);
-    const onRead = new FakePiContainer();
-    await onRead.start({ paths, args: [], env: {} });
+    const onRead = new FakeHarnessContainer();
+    await onRead.start({ paths, command: "pi", args: [], env: {} });
     onRead.failNext = { operation: "read", error: new Error("runtime-replaced: the resident runtime was replaced") };
     const { t: t2 } = transport(onRead);
     await expect(collect(t2, 1)).rejects.toThrow("runtime-replaced");
@@ -131,8 +131,8 @@ describe("PiRpcTransport", () => {
   });
 
   it("a write that fails surfaces as the stream's error on the next read", async () => {
-    const c = new FakePiContainer();
-    await c.start({ paths, args: [], env: {} });
+    const c = new FakeHarnessContainer();
+    await c.start({ paths, command: "pi", args: [], env: {} });
     const { t } = transport(c);
     c.failNext = { operation: "send", error: new Error("resident /exec: worktree evicted") };
     t.send({ type: "abort" });
@@ -141,8 +141,8 @@ describe("PiRpcTransport", () => {
   });
 
   it("a re-attach starts reading at the offset it was handed", async () => {
-    const c = new FakePiContainer();
-    await c.start({ paths, args: [], env: {} });
+    const c = new FakeHarnessContainer();
+    await c.start({ paths, command: "pi", args: [], env: {} });
     c.emit({ type: "agent_start" }, { type: "turn_start" });
     const skip = Buffer.byteLength('{"type":"agent_start"}\n');
     const { t } = transport(c, { offset: skip });
@@ -153,8 +153,8 @@ describe("PiRpcTransport", () => {
   // item 8): the read position moves by whole chunks, the consumed boundary by
   // the records a reader has actually been handed.
   it("the consumed offset is the boundary after the record last handed out while the read position sits at the end of the bytes read; a partial record is read but not consumed; both start at the offset handed in", async () => {
-    const c = new FakePiContainer();
-    await c.start({ paths, args: [], env: {} });
+    const c = new FakeHarnessContainer();
+    await c.start({ paths, command: "pi", args: [], env: {} });
     const first = '{"type":"agent_start"}';
     const second = '{"type":"turn_start"}';
     c.emit(first, second);

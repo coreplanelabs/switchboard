@@ -19,7 +19,7 @@ import {
   type HarnessSession,
 } from "../contract.js";
 import { PI_EVENT_DISPOSITION } from "./bridge.js";
-import type { PiContainer } from "./container.js";
+import type { HarnessContainer } from "../container.js";
 import { locatePi, runPiHarnessOpen, type PiHarnessDeps } from "./harness.js";
 import { piBuiltinToolsFor, piRunPathsAt, piThinkingLevel } from "./process.js";
 
@@ -58,7 +58,7 @@ export class PiHarness implements Harness {
    *  once, then `locatePi` judges the row's word and the pid, the same steps
    *  `open` takes before a re-attach. Another harness's facts are answered
    *  without a command: nothing of that process is pi's to probe. */
-  async find(facts: HarnessFacts, container: PiContainer): Promise<Finding> {
+  async find(facts: HarnessFacts, container: HarnessContainer): Promise<Finding> {
     if (!isPiFacts(facts)) return "another-harness";
     return locatePi(facts, container, await container.identity());
   }
@@ -67,7 +67,7 @@ export class PiHarness implements Harness {
    *  root its facts name, best-effort like the session's end; a row without a
    *  root ends the pid alone. Only the caller knows whether this is the
    *  container the facts name (`find`), so it decides whether to call this. */
-  async end(facts: HarnessFacts, container: PiContainer): Promise<void> {
+  async end(facts: HarnessFacts, container: HarnessContainer): Promise<void> {
     if (!isPiFacts(facts)) return;
     await container.kill(facts.pid).catch(() => {});
     if (facts.root !== undefined) await container.remove(piRunPathsAt(facts.root)).catch(() => {});

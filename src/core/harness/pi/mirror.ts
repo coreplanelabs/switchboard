@@ -211,7 +211,7 @@ export class PiMirror {
  *  calls, one toolResult per result part — each with an id and its parent's,
  *  so pi's `--session <path>` loads it as a session it wrote. The header's
  *  `cwd` is the directory the pi that loads the file runs in, the container
- *  seam's answer (`PiContainer.cwd`), never a constant: pi exits at once on a
+ *  seam's answer (`HarnessContainer.cwd`), never a constant: pi exits at once on a
  *  stored directory that does not exist where it runs, and the same transcript
  *  is resumed in a checkout on a container and in the run's own root on the
  *  bot host. The assistant

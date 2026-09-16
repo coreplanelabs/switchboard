@@ -75,7 +75,11 @@ describe("piRunPaths", () => {
     expect(p.errLog).toBe("/tmp/switchboard-pi-run-7/rpc.err");
     expect(p.pidFile).toBe("/tmp/switchboard-pi-run-7/pi.pid");
     expect(p.commandDir).toBe("/tmp/switchboard-pi-run-7/cmd");
-    expect(Object.values(p).every((v) => v === p.dir || v.startsWith(`${p.dir}/`))).toBe(true);
+    expect(
+      Object.values(p)
+        .flat()
+        .every((v) => v === p.dir || v.startsWith(`${p.dir}/`)),
+    ).toBe(true);
     // The root's parent is /tmp itself: nothing between them for one user to own.
     expect(p.dir.slice(0, p.dir.lastIndexOf("/"))).toBe("/tmp");
     // Another run's root is a sibling, never above or below this one.
@@ -84,7 +88,11 @@ describe("piRunPaths", () => {
     expect(other.dir.startsWith(`${p.dir}/`)).toBe(false);
     expect(p.dir.startsWith(`${other.dir}/`)).toBe(false);
     // The shared root of before is gone in every case: no path is under it.
-    expect(Object.values(p).some((v) => v.startsWith("/tmp/switchboard-pi/"))).toBe(false);
+    expect(
+      Object.values(p)
+        .flat()
+        .some((v) => v.startsWith("/tmp/switchboard-pi/")),
+    ).toBe(false);
   });
 
   // A run's row records the root its pi was filed under (harness-pi item 8),
@@ -96,7 +104,11 @@ describe("piRunPaths", () => {
     expect(theirs.log).toBe("/tmp/switchboard-pi-worker2/run-7/rpc.log");
     expect(theirs.fifo).toBe("/tmp/switchboard-pi-worker2/run-7/rpc.in");
     expect(theirs.sessionDir).toBe("/tmp/switchboard-pi-worker2/run-7/agent/sessions");
-    expect(Object.values(theirs).every((v) => v === theirs.dir || v.startsWith(`${theirs.dir}/`))).toBe(true);
+    expect(
+      Object.values(theirs)
+        .flat()
+        .every((v) => v === theirs.dir || v.startsWith(`${theirs.dir}/`)),
+    ).toBe(true);
     expect(piRunPaths("run-7")).toEqual(piRunPathsAt("/tmp/switchboard-pi-run-7"));
   });
 });
