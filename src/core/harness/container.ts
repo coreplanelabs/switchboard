@@ -222,7 +222,20 @@ function portLine(port: number | "free"): string {
  *  the filter — when the start names one — into the log, its stderr into its
  *  own file. The arguments are quoted one by one; the bearer is in none of
  *  them. A start that names a port exports it first and says it on the first
- *  line of the output; the pid is the last line either way. */
+ *  line of the output; the pid is the last line either way. The wrapper's own
+ *  stdio is redirected to /dev/null: `setsid -f` forks it out of the exec's
+ *  process group but not out of the exec's file descriptors, and a detached
+ *  shell holding the exec's stdout and stderr keeps the sandbox runtime
+ *  waiting for an end of output that never comes — on the 0.13 line the
+ *  exec's answer is collected from that stream, so the start command never
+ *  answered and every cold run died at the executor's deadline
+ *  (docs/reference/specs/execution.md item 24). */
+/** The redirects every detached wrapper carries so the exec that forked it
+ *  owns no descriptor of its: stdin from /dev/null, stdout and stderr to it.
+ *  Shared with the sandbox Worker's exit-124 hint, so the model detaches a
+ *  long job the way the seam does. */
+export const DETACHED_STDIO = "</dev/null >/dev/null 2>&1";
+
 export function startScript(start: HarnessStart): string {
   const { paths, command, args, port, stdoutFilter, keepLog } = start;
   if (!COMMAND_WORD.test(command)) throw new HarnessContainerError("start", `not a program name: ${command}`);
@@ -241,7 +254,7 @@ export function startScript(start: HarnessStart): string {
     `mkfifo -m 600 ${shellQuote(paths.fifo)}`,
     keepLog ? `: >> ${shellQuote(paths.log)}` : `: > ${shellQuote(paths.log)}`,
     keepLog ? `: >> ${shellQuote(paths.errLog)}` : `: > ${shellQuote(paths.errLog)}`,
-    `setsid -f sh -c ${shellQuote(inner)}`,
+    `setsid -f sh -c ${shellQuote(inner)} ${DETACHED_STDIO}`,
     `sleep 0.3`,
     `cat ${shellQuote(paths.pidFile)}`,
   ].join(" && ");

@@ -41,6 +41,9 @@ import {
   SANDBOX_SLEEP_AFTER,
   isRecycleError,
   recycledMidCommandMessage,
+  DETACH_HINT,
+  OUTPUT_AFTER_EXIT_MS,
+  heldOutputNote,
 } from "../../src/execution/sandboxLifecycle.js";
 import { envFromRequest } from "../../src/execution/sandboxEnv.js";
 import { IdleGuard, type IdleGuardHost } from "../../src/execution/sandboxIdle.js";
@@ -88,10 +91,17 @@ const EXEC_TIMEOUT_SECS = 280;
  *  the shell-level 124 is always the deadline a command meets first. */
 const SDK_BACKSTOP_MARGIN_MS = 40_000;
 
-/** How long the Durable Object waits for the process's exit past the SDK's
- *  own limit before it kills the process itself and reports the timeout: the
- *  runtime should have ended it at the limit; a starved container ends it late. */
-const OUTPUT_WAIT_MARGIN_MS = 30_000;
+/** How long the Durable Object waits for the process's output to END past
+ *  the command's own deadline before it asks the runtime what became of the
+ *  process (docs/reference/specs/execution.md item 24). The runtime ends the
+ *  output stream only when every holder of the command's stdout and stderr is
+ *  gone; a process that exited while a detached child holds them is answered
+ *  with its exit code and a note, a process still running is killed and
+ *  answered as the shell-level timeout. The wait is `OUTPUT_AFTER_EXIT_MS`
+ *  (20 s), inside the executor's per-send margin, so this answer always
+ *  reaches the bot before it gives the command up — the SDK's own limit
+ *  (`SDK_BACKSTOP_MARGIN_MS`) stays above it as the last resort. */
+const OUTPUT_WAIT_AFTER_DEADLINE_MS = OUTPUT_AFTER_EXIT_MS;
 
 /** The interruption reasons that mean the container's runtime is not the one
  *  the command started on: the process, if it started, is gone with its
@@ -303,7 +313,10 @@ export class SwitchboardSandbox extends Sandbox<Env> {
       return this.execFailure(err, startedAt);
     }
     try {
-      const out = await proc.output({ encoding: "utf8", timeout: backstopMs + OUTPUT_WAIT_MARGIN_MS });
+      const out = await proc.output({
+        encoding: "utf8",
+        timeout: execTimeoutSecs * 1000 + OUTPUT_WAIT_AFTER_DEADLINE_MS,
+      });
       // coreutils `timeout` exits 124 when the deadline killed the command
       // (137 when the follow-up SIGKILL had to); the SDK's own limit, if it
       // ever wins, reports `timedOut`. All three are the one story.
@@ -321,9 +334,21 @@ export class SwitchboardSandbox extends Sandbox<Env> {
       };
     } catch (err) {
       if (err instanceof ProcessWaitTimeoutError) {
-        // The runtime should have ended the process at the SDK's limit and
-        // did not; abandoning a live process would leave it running in the
-        // workspace. End it, then report the shell-level timeout it exceeded.
+        // The output never ended inside the command's deadline plus the
+        // margin. Two stories, told apart by asking the runtime (item 24):
+        // the process EXITED and a detached child holds its output open —
+        // the answer is its exit code and the note, the child runs on; or
+        // the process is still RUNNING past its own `timeout` — end it, and
+        // report the shell-level timeout it exceeded.
+        const status = await proc.status().catch(() => null);
+        if (status?.state === "exited") {
+          return {
+            stdout: "",
+            stderr: heldOutputNote(status.exit.code),
+            exitCode: status.exit.code,
+            durationMs: systemClock() - startedAt,
+          };
+        }
         await proc.kill(9).catch(() => {});
         return {
           stdout: "",
@@ -449,11 +474,12 @@ export class SwitchboardSandbox extends Sandbox<Env> {
 /** The stderr line an exit 124 carries: the limit, the knob, and the way to
  *  outlive a command (`setsid -f`: every /exec runs under `timeout … bash -c`,
  *  whose process group is reaped when the command returns, so a plain
- *  background job dies with it). */
+ *  background job dies with it — and with the wrapper's stdio redirected, so
+ *  the command's output ends when the command does, item 24). */
 function timeoutNote(execTimeoutSecs: number): string {
   return (
     `command timed out in the sandbox after ${execTimeoutSecs}s (pass the bash tool's timeoutMs for longer commands, max ${BASH_TIMEOUT_MAX_MS} ms); ` +
-    "re-run as smaller/faster steps, or start it detached with `setsid -f sh -c '<command> > /tmp/job.log 2>&1'` and poll the log on later calls"
+    `re-run as smaller/faster steps, or start it detached with \`${DETACH_HINT}\` and poll the log on later calls`
   );
 }
 
