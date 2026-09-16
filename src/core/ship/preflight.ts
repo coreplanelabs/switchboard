@@ -6,7 +6,7 @@
 
 import { resolveBaseRef, type PullRequestFacts, type RepoShipInfo } from "../../execution/githubPulls.js";
 import type { RepoContext } from "../repoContext.js";
-import { parseShipPlanRequest } from "./coordinator.js";
+import { parseShipPlanRequest, isUnitBranch } from "./coordinator.js";
 
 // ---- naming -------------------------------------------------------
 
@@ -249,11 +249,18 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
   // carry the stranger's commits and dangle when the PR merges. The resolver
   // flags such a ref (`refFromPr`) at the source, so this holds even when the
   // facts fetch failed and the head ref is otherwise unknown.
+  // Nor a unit branch of ship's own: a thread stays bound at the branch its
+  // last run opened a pull request on, so after a plan's unit it sits at
+  // `plan/<id>/<slug>`, and a fresh task re-issued there would base the next
+  // generated plan on the earlier unit — its pull request targeting that
+  // branch instead of the repository's.
   // Belt-and-braces guard stays: a repo-shaped ref (the slug itself, or any
   // owner/name the API would 404 on as a ref) can only be a misparse —
   // createBranchRef would fail on it. Any of these → the repo's default branch.
   const ref =
-    repoCtx.ref && !repoCtx.refFromPr && repoCtx.ref.toLowerCase() !== repo.toLowerCase() ? repoCtx.ref : undefined;
+    repoCtx.ref && !repoCtx.refFromPr && !isUnitBranch(repoCtx.ref) && repoCtx.ref.toLowerCase() !== repo.toLowerCase()
+      ? repoCtx.ref
+      : undefined;
   return {
     ok: true,
     entry: { repo, base: resolveBaseRef([ref], info?.defaultBranch) },
