@@ -303,6 +303,9 @@ import {
   parseDepsStoreListing,
   planDepsEviction,
   planDepsMaterialization,
+  DEPS_STORE_MAX_UNREFERENCED_UNDER_PRESSURE,
+  type DepsEvictionPlan,
+  type DepsStoreListing,
 } from "../../src/execution/residentDepsStore.js";
 import { buildId, injectedBuildStamp } from "../../src/deploy/buildStamp.js";
 import { createRefreshInstance, createRefreshInstanceNow, type RefreshInstanceParams } from "./refresh";
@@ -4097,6 +4100,27 @@ export class ResidentDO extends Sandbox<Env> {
     const evicted: Array<{ threadKey: string; freedKiB: number | null }> = [];
     // Item 62: keep decisions travel as tokens; the key stays for the log line.
     const kept: Array<{ threadKey: string; why: DiskKeepWhy }> = [];
+    // The deps store's spares go first (item 55): a warm cache no live tree
+    // references, worth minutes on a future attach, against a tree refused
+    // now. Their bytes come back before any idle tree is considered.
+    let spares: Array<{ key: string; freedKiB: number }> = [];
+    if (!verdict.fits) {
+      spares = await this.evictDepsSparesUnderPressure().catch((err) => {
+        console.log(`disk-pressure: deps spare eviction failed: ${errMsg(err)}`);
+        return [];
+      });
+      if (spares.length > 0) {
+        console.log(
+          `disk-pressure: evicted ${spares.length} deps-store spare(s) (${formatGiB(spares.reduce((a, e) => a + e.freedKiB, 0))} back) to make room for ${input.threadKey}`,
+        );
+        rawFree = rawFreeAfterEviction(
+          rawFree,
+          await this.dfSample(),
+          spares.reduce((a, e) => a + e.freedKiB, 0),
+        );
+        verdict = decide(rawFree);
+      }
+    }
     if (!verdict.fits) {
       const live = await this.liveBindings();
       const candidates: DiskEvictionCandidate[] = live.map((b) => ({
@@ -4143,7 +4167,7 @@ export class ResidentDO extends Sandbox<Env> {
     // truthiness does not narrow a boolean-literal discriminant.
     const final = verdict;
     if (final.fits === false) {
-      const reason = diskPressureReason({ verdict: final, evicted, kept });
+      const reason = diskPressureReason({ verdict: final, evicted, kept, spares });
       console.log(`attach ${input.threadKey}: ${reason}`);
       const s = await this.getStatus();
       return { error: reason, status: 503, state: s.state, reason: DISK_PRESSURE_REASON };
@@ -4151,7 +4175,7 @@ export class ResidentDO extends Sandbox<Env> {
     const m = final.math;
     console.log(
       `attach ${input.threadKey}: disk admitted — ${kind} ${formatGiB(m.projectedKiB)} projected, ${formatGiB(m.freeKiB)} free, ` +
-        `reserve ${formatGiB(m.reserve.totalKiB)}, headroom ${formatGiB(m.headroomKiB)}${evicted.length > 0 ? `, evicted ${evicted.map((e) => e.threadKey).join(", ")}` : ""}`,
+        `reserve ${formatGiB(m.reserve.totalKiB)}, headroom ${formatGiB(m.headroomKiB)}${spares.length > 0 ? `, evicted ${spares.length} deps spare(s)` : ""}${evicted.length > 0 ? `, evicted ${evicted.map((e) => e.threadKey).join(", ")}` : ""}`,
     );
     const committedKiB = m.projectedKiB ?? 0;
     this.diskCommittedKiB += committedKiB;
@@ -5767,27 +5791,24 @@ export class ResidentDO extends Sandbox<Env> {
    *  in flight, and remove what `planDepsEviction` names — debris first, then
    *  the coldest spares beyond DEPS_STORE_MAX_UNREFERENCED. Housekeeping:
    *  a failure is a log line, never a lifecycle flip. */
-  private async sweepDepsStore(): Promise<void> {
-    const listed = await this.run(["sh", "-c", depsStoreListScript()], { timeoutMs: DU_TIMEOUT_MS });
-    if (listed.exitCode !== 0) return;
-    const listing = parseDepsStoreListing(listed.stdout);
-    if (listing.entries.length === 0 && listing.leftovers.length === 0) return;
+  /** The store entries no eviction may touch: the checkout's key, every live
+   *  binding's, every install and every entry backup in flight. */
+  private async depsProtectedKeys(): Promise<Set<string>> {
     const facts = await this.ctx.storage.get<RepoFacts>(FACTS_KEY);
     const protectedKeys = new Set<string>([...this.depsInFlight.keys(), ...this.depsBackupsInFlight]);
     if (facts?.lockfileHash) protectedKeys.add(facts.lockfileHash);
     for (const b of await this.liveBindings()) if (b.depsKey) protectedKeys.add(b.depsKey);
-    // A scratch/staging dir of an install still running in this incarnation
-    // is live work, not debris; the listing cannot tell them apart, so
-    // leftovers wait for a sweep with nothing in flight.
-    const leftovers = this.depsInFlight.size > 0 ? [] : listing.leftovers;
-    const plan = planDepsEviction({ entries: listing.entries, leftovers, protectedKeys });
-    if (plan.remove.length === 0) return;
+    return protectedKeys;
+  }
+
+  /** Remove the store entries a plan names and drop their entry backups with
+   *  them (item 61 PR B: a spare nothing references on disk is a spare nothing
+   *  will wake into). Shared by the sweep and the attach's pressure path. */
+  private async applyDepsEviction(plan: DepsEvictionPlan, listing: DepsStoreListing, who: string): Promise<void> {
     await this.runOk(["rm", "-rf", ...plan.remove], "deps-evict", { timeoutMs: DU_TIMEOUT_MS });
     console.log(
-      `deps: evicted ${plan.remove.length} path(s) — ${plan.remove.map((p) => p.slice(DEPS_STORE_DIR.length + 1, DEPS_STORE_DIR.length + 9)).join(", ")}; kept ${plan.keep.map((k) => k.slice(0, 8)).join(", ")}`,
+      `deps: ${who} evicted ${plan.remove.length} path(s) — ${plan.remove.map((p) => p.slice(DEPS_STORE_DIR.length + 1, DEPS_STORE_DIR.length + 9)).join(", ")}; kept ${plan.keep.map((k) => k.slice(0, 8)).join(", ")}`,
     );
-    // The evicted entries' archives go with them (item 61 PR B): a spare
-    // nothing references on disk is a spare nothing will wake into.
     const kept = new Set(plan.keep);
     const evictedKeys = listing.entries.map((e) => e.key).filter((k) => !kept.has(k));
     const drop = depsBackupsToDrop({
@@ -5800,6 +5821,44 @@ export class ResidentDO extends Sandbox<Env> {
         `deps: dropped ${drop.length} entry backup(s) (${n} object(s)) — ${drop.map((k) => k.slice(0, 8)).join(", ")}`,
       );
     }
+  }
+
+  /** Under disk pressure (item 55) the store keeps no spare: every complete
+   *  entry no live tree references goes, coldest first, before any idle tree
+   *  is considered — a spare is a cache worth minutes on a future attach, a
+   *  refused tree is a run falling to a cold sandbox now. Leftovers are the
+   *  sweep's business (they may be live installs' scratch). Answers what it
+   *  removed with the bytes each measured at; a listing that fails answers
+   *  nothing and the tree path decides as before. */
+  private async evictDepsSparesUnderPressure(): Promise<Array<{ key: string; freedKiB: number }>> {
+    const listed = await this.run(["sh", "-c", depsStoreListScript()], { timeoutMs: DU_TIMEOUT_MS });
+    if (listed.exitCode !== 0) return [];
+    const listing = parseDepsStoreListing(listed.stdout);
+    if (listing.entries.length === 0) return [];
+    const plan = planDepsEviction({
+      entries: listing.entries,
+      leftovers: [],
+      protectedKeys: await this.depsProtectedKeys(),
+      maxUnreferenced: DEPS_STORE_MAX_UNREFERENCED_UNDER_PRESSURE,
+    });
+    if (plan.remove.length === 0) return [];
+    await this.applyDepsEviction(plan, listing, "disk-pressure");
+    return plan.evicted.map((e) => ({ key: e.key, freedKiB: e.kib }));
+  }
+
+  private async sweepDepsStore(): Promise<void> {
+    const listed = await this.run(["sh", "-c", depsStoreListScript()], { timeoutMs: DU_TIMEOUT_MS });
+    if (listed.exitCode !== 0) return;
+    const listing = parseDepsStoreListing(listed.stdout);
+    if (listing.entries.length === 0 && listing.leftovers.length === 0) return;
+    const protectedKeys = await this.depsProtectedKeys();
+    // A scratch/staging dir of an install still running in this incarnation
+    // is live work, not debris; the listing cannot tell them apart, so
+    // leftovers wait for a sweep with nothing in flight.
+    const leftovers = this.depsInFlight.size > 0 ? [] : listing.leftovers;
+    const plan = planDepsEviction({ entries: listing.entries, leftovers, protectedKeys });
+    if (plan.remove.length === 0) return;
+    await this.applyDepsEviction(plan, listing, "sweep");
   }
 
   /** The per-user 700 staging dir (`install -d` is idempotent), memoized per

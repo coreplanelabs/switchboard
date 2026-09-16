@@ -299,6 +299,14 @@ export function parseDepsStoreListing(stdout: string): DepsStoreListing {
  *  attaches. Raise with the instance, never by feel. */
 export const DEPS_STORE_MAX_UNREFERENCED = 1;
 
+/** How many spares the attach's disk-pressure path keeps: none. A spare is a
+ *  warm cache for a lockfile key no live tree references, worth minutes on
+ *  the next attach at that key; a tree refused for want of space is a run
+ *  falling to a cold sandbox now. Under pressure the spare goes first, before
+ *  any idle tree (docs/reference/specs/resident-repos.md item 55), and its
+ *  entry backup with it — the next attach at that key restores or installs. */
+export const DEPS_STORE_MAX_UNREFERENCED_UNDER_PRESSURE = 0;
+
 /** Eviction candidates coldest first. Never a protected key (the checkout's,
  *  a live binding's, an install in flight). Debris — an incomplete entry
  *  with nothing in flight for it — is always first: it is half an install
@@ -318,6 +326,9 @@ export interface DepsEvictionPlan {
   remove: string[];
   /** Keys that stay, for the log. */
   keep: string[];
+  /** The entries `remove` names (debris first, then the coldest spares), with
+   *  their measured sizes — what a pressure eviction gives back. */
+  evicted: DepsStoreEntry[];
 }
 
 export function planDepsEviction(input: {
@@ -336,7 +347,8 @@ export function planDepsEviction(input: {
   const evictSpares = spares.slice(0, Math.max(0, spares.length - max));
   const remove = [...debris, ...evictSpares].map((e) => depsEntryPath(e.key, storeDir));
   remove.push(...input.leftovers);
-  const removed = new Set([...debris, ...evictSpares].map((e) => e.key));
+  const evicted = [...debris, ...evictSpares];
+  const removed = new Set(evicted.map((e) => e.key));
   const keep = input.entries.filter((e) => !removed.has(e.key)).map((e) => e.key);
-  return { remove, keep };
+  return { remove, keep, evicted };
 }

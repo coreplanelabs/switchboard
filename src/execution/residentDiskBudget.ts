@@ -427,6 +427,9 @@ export function diskPressureReason(input: {
   verdict: Extract<AdmissionVerdict, { fits: false }>;
   evicted: ReadonlyArray<{ freedKiB: number | null }>;
   kept: ReadonlyArray<{ why: DiskKeepWhy }>;
+  /** Deps-store spares removed first under the pressure (item 55), with the
+   *  bytes each gave back. */
+  spares?: ReadonlyArray<{ freedKiB: number }>;
 }): string {
   const { math } = input.verdict;
   const need =
@@ -438,10 +441,15 @@ export function diskPressureReason(input: {
     `${DISK_PRESSURE_REASON}: need ${need}, but ${formatGiB(math.freeKiB)} free${cap} minus the ${formatGiB(math.reserve.totalKiB)} reserve ` +
       `(snapshot staging ${formatGiB(math.reserve.stagingKiB)} + floor ${formatGiB(math.reserve.floorKiB)}) leaves ${formatGiB(Math.max(0, math.freeKiB - math.reserve.totalKiB))} — short by ${formatGiB(input.verdict.shortfallKiB)}`,
   ];
+  const spares = input.spares ?? [];
+  if (spares.length > 0) {
+    const freed = spares.reduce((a, e) => a + e.freedKiB, 0);
+    parts.push(`evicted ${spares.length} deps-store spare(s) (${formatGiB(freed)} back)`);
+  }
   if (input.evicted.length > 0) {
     const freed = input.evicted.reduce((a, e) => a + (e.freedKiB ?? 0), 0);
     parts.push(`evicted ${input.evicted.length} idle tree(s) (${formatGiB(freed)} back)`);
-  } else parts.push("evicted nothing");
+  } else parts.push(spares.length > 0 ? "evicted no idle tree" : "evicted nothing");
   if (input.kept.length > 0) {
     const counts = new Map<DiskKeepWhy, number>();
     for (const k of input.kept) counts.set(k.why, (counts.get(k.why) ?? 0) + 1);

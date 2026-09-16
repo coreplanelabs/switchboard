@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   DISK_EVICT_MIN_IDLE_MS,
@@ -393,6 +395,24 @@ describe("diskPressureReason — the refusal names free, reserve, projected, wha
     expect(isDiskPressureReason("disk-full: x")).toBe(false);
   });
 
+  // item 55: the deps store's spare goes before any tree — the refusal says
+  // what it gave back, and that no tree followed when none did.
+  it("names the deps-store spares evicted first and their bytes, and says no tree followed when none did", () => {
+    const s = sample({ usedKiB: 13 * GIB, freeKiB: 2 * GIB });
+    const v = checkDiskAdmission({ sample: s, kind: "reconcile" });
+    if (v.fits) throw new Error("fixture must not fit");
+    const text = diskPressureReason({ verdict: v, evicted: [], kept: [], spares: [{ freedKiB: 3_400_000 }] });
+    expect(text).toContain("evicted 1 deps-store spare(s) (3.24 GiB back); evicted no idle tree");
+    const both = diskPressureReason({
+      verdict: v,
+      evicted: [{ freedKiB: 450_000 }],
+      kept: [],
+      spares: [{ freedKiB: 3_400_000 }, { freedKiB: 2_900_000 }],
+    });
+    expect(both).toContain("evicted 2 deps-store spare(s) (6.01 GiB back); evicted 1 idle tree(s) (0.43 GiB back)");
+    expect(diskPressureReason({ verdict: v, evicted: [], kept: [] })).toContain("evicted nothing");
+  });
+
   it("names a budget cap and an unmeasured projection when those decided", () => {
     const v = checkDiskAdmission({
       sample: sample({}, { checkout: null, deps: null }),
@@ -429,5 +449,32 @@ describe("threadUserCacheCleanArgv — an eviction removes the pool user's packa
       "/home/worker7/.yarn",
       "/home/worker7/.bun",
     ]);
+  });
+});
+
+// item 55: the resident Worker cannot run under vitest (a Durable Object and
+// a container), so the pressure path's wiring is read from the source, as the
+// exec-env tests do: the deps store's spares go before any tree, with the
+// under-pressure limit, and the refusal carries what they gave back.
+describe("resident Worker wiring (static) — spares before trees under disk pressure", () => {
+  const worker = readFileSync(resolve(import.meta.dirname, "../../deploy/cloudflare-resident/worker.ts"), "utf8");
+
+  it("the admission evicts deps-store spares first, with DEPS_STORE_MAX_UNREFERENCED_UNDER_PRESSURE, re-probes df, and only then orders the trees", () => {
+    const spares = worker.indexOf("spares = await this.evictDepsSparesUnderPressure()");
+    const trees = worker.indexOf("orderEvictionCandidates({ candidates");
+    expect(spares).toBeGreaterThan(0);
+    expect(trees).toBeGreaterThan(spares);
+    expect(worker).toMatch(/maxUnreferenced: DEPS_STORE_MAX_UNREFERENCED_UNDER_PRESSURE,/);
+    expect(worker).toMatch(/rawFree = rawFreeAfterEviction\(\s*rawFree,\s*await this\.dfSample\(\),\s*spares\.reduce/);
+    expect(worker).toMatch(/diskPressureReason\(\{ verdict: final, evicted, kept, spares \}\)/);
+  });
+
+  it("the pressure path and the sweep share one protected-key rule and one removal (entries and their backups)", () => {
+    expect(worker.match(/await this\.depsProtectedKeys\(\)/g)).toHaveLength(2);
+    expect(worker.match(/await this\.applyDepsEviction\(plan, listing, "(disk-pressure|sweep)"\)/g)).toHaveLength(2);
+    // leftovers are the sweep's business: a live install's scratch may be among them
+    expect(worker).toMatch(
+      /entries: listing\.entries,\s*leftovers: \[\],\s*protectedKeys: await this\.depsProtectedKeys\(\),/,
+    );
   });
 });
