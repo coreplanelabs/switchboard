@@ -93,15 +93,18 @@ describe("agent registry matches the feature specs", () => {
     expect(AGENTS.conductor.identity).toBe("none");
   });
 
-  it("door declarations: how a plain message reaches each preset — the table for the five routable ones, the compound form alone for the conductor, a directive alone for ship", () => {
+  it("door declarations: how a plain message reaches each preset — the table for the five routable ones (ship among them), the compound form alone for the conductor, a directive alone for coding", () => {
     // `presetDoor` reads `routable` off the def and names the compound preset
     // (docs/reference/specs/routing-and-config.md item 21); `help` renders its
-    // lines from it, so a preset's door is declared once, here.
-    for (const name of ["general", "coding", "review", "research", "explore"])
+    // lines from it, so a preset's door is declared once, here. Ship is routed
+    // — a routed ship runs a generated plan merged by a person — and coding is
+    // directive-only: a bare write ask deserves the coding → review loop.
+    for (const name of ["general", "ship", "review", "research", "explore"])
       expect(presetDoor(AGENTS[name]), name).toBe("routed");
     expect(COMPOUND_PRESET).toBe("conductor");
     expect(presetDoor(AGENTS.conductor)).toBe("compound");
-    expect(presetDoor(AGENTS.ship)).toBe("directive");
+    expect(presetDoor(AGENTS.coding)).toBe("directive");
+    expect(AGENTS.ship.routable).not.toBe(false);
     expect(AGENTS[COMPOUND_PRESET].routable).toBe(false);
   });
 

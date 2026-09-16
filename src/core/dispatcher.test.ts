@@ -8171,6 +8171,51 @@ workspaceDir: __WORKDIR__
     expect(replies[replies.length - 1]).not.toContain("adopts");
   });
 
+  // The routed door (routing-and-config item 21; agent-ship item 16): ship is
+  // in the router's table, a routed ship runs the request as a generated plan
+  // whose merge is a person's, and the seeded form stays behind the directive.
+  const SHIP_ROUTED_YAML = SHIP_YAML.replace("routing: { auto: false }", "routing: { auto: true }");
+  const shipRouter = () => vi.fn(async () => JSON.stringify({ preset: "ship", reason: "a change to land" }));
+
+  it("a routed ship on a task hands off merge: person — the card reads `ship … routed:` and the instance is the generated plan's", async () => {
+    const { deps, instances, created } = shipDeps(SHIP_ROUTED_YAML);
+    deps.routeModel = shipRouter();
+    const registry = new RunRegistry({ genId: () => "run-shiprouted", genToken: () => "tok" });
+    deps.runRegistry = registry;
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, msg("fix the login redirect", "slack:UADMIN"), io);
+    expect(deps.routeModel).toHaveBeenCalledTimes(1);
+    expect(statuses[0].title).toContain("*ship*");
+    expect(statuses[0].title).toContain("routed: a change to land");
+    const { instance, unit } = await handed(instances, "run-shiprouted");
+    expect(instance).toMatchObject({ merge: "person" });
+    expect(instance?.plan?.id).toBe(
+      generatedPlanId(shipTaskText("fix the login redirect", "acme/api"), "slack:CX:1.0"),
+    );
+    expect(unit).toBeDefined();
+    expect(created).toHaveLength(1);
+    const meta = registry.snapshotById("run-shiprouted")?.events.find((e) => e.type === "run_meta") as
+      { agentSource?: string } | undefined;
+    expect(meta?.agentSource).toBe("route");
+  });
+
+  it("a routed seeded request (`plan <path>.md`) is refused naming `agent:ship`, nothing written", async () => {
+    const { deps, instances, created } = shipDeps(SHIP_ROUTED_YAML);
+    deps.githubApi = new InMemoryGithubApi({
+      "acme/api": { files: { "docs/plans/fixture.md": "### U10. First unit\n- **Dependencies**: none\n" } },
+    });
+    deps.routeModel = shipRouter();
+    const registry = new RunRegistry({ genId: () => "run-shiproutedseed", genToken: () => "tok" });
+    deps.runRegistry = registry;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("plan docs/plans/fixture.md", "slack:UADMIN"), io);
+    expect(replies[replies.length - 1]).toContain("🚫");
+    expect(replies[replies.length - 1]).toContain("`agent:ship plan docs/plans/fixture.md`");
+    expect(created).toEqual([]);
+    const { instance } = await handed(instances, "run-shiproutedseed");
+    expect(instance).toBeNull();
+  });
+
   it("a resume prefers the PR's OWN base ref over the repo default (non-default-base ship PR): the runner is handed that base", async () => {
     const { deps, instances } = shipDeps();
     deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 7, headSha: HEAD_A, ref: SHIP_BRANCH }); // thread text names no base
@@ -12484,7 +12529,6 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
   /** The fixture with no `routing` block at all: the default — on. */
   const routingUnset = (yaml: string) => yaml.replace(ROUTING_OFF, "");
   const ROUTED_YAML = routingOn(YAML_FIXTURE);
-  const ROUTED_REMOTE_YAML = routingOn(REMOTE_YAML_FIXTURE);
   const FOOTER = "wrong preset? reply agent:<preset> to run it another way";
   /** A scripted router: a change to make is coding, a review ask is review, anything else general. */
   const router = () =>
@@ -12585,33 +12629,7 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
     expect(metaOf(registry, "r1")?.agentSource).toBe("route");
   });
 
-  it("a route to coding dispatches at once like any other preset — no ask, no pause; the card carries the routed line and the record the event", async () => {
-    vi.stubEnv("SANDBOX_TOKEN", "tok");
-    vi.stubEnv("GITHUB_APP_ID", "");
-    let ids = 0;
-    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
-    const provider = capturingProvider();
-    const deps = makeDeps(ROUTED_REMOTE_YAML, provider);
-    deps.runRegistry = registry;
-    deps.routeModel = router();
-    const fake = { exec: async () => "", readFile: async () => "", writeFile: async () => "" };
-    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fake });
-    const { io, statuses } = fakeIO();
-    await dispatch(deps, msg("fix the flaky login test", "slack:UADMIN"), io);
-    expect(deps.routeModel).toHaveBeenCalledTimes(1);
-    expect(provider.requests[0].model).toBe("coding-model");
-    expect(vi.mocked(makeExecutor).mock.calls.map((c) => c[1].agent.name)).toEqual(["coding"]);
-    expect(statuses[0].title).toContain("*coding* on `anthropic/coding-model` · routed: coding fits the request");
-    expect(statuses.every((s) => !/reply go|not started/.test(s.title))).toBe(true);
-    expect(statuses.at(-1)!.title).toContain("✅");
-    expect(statuses.at(-1)!.detail?.split("\n").at(-1)).toBe(FOOTER);
-    expect(routeEvents(registry, "r1")).toEqual([
-      expect.objectContaining({ type: "route", preset: "coding", reason: "coding fits the request" }),
-    ]);
-    expect(metaOf(registry, "r1")?.agentSource).toBe("route");
-  });
-
-  it("ship is never routed: a router answering ship leaves an admin's plain message on defaults.agent, with no route event", async () => {
+  it("a route to ship is a real route: the router answering ship resolves the ship preset — the route event, agentSource route, the routed card line — and the ship pipeline takes it (its own gate refuses here, never a silent fall to the default)", async () => {
     let ids = 0;
     const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
     const provider = capturingProvider();
@@ -12621,18 +12639,40 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
     const { io, statuses } = fakeIO();
     await dispatch(deps, msg("land the login fix", "slack:UADMIN"), io);
     expect(deps.routeModel).toHaveBeenCalledTimes(1);
+    // Ship never runs a provider turn of its own; this harness has none of the
+    // runner's seams, so the pipeline's own gate closes the card — the route
+    // itself is on the record. The full hand-off (merge: person) is proven in
+    // the ship suite.
+    expect(provider.requests).toHaveLength(0);
+    expect(statuses[0].title).toContain("*ship*");
+    expect(statuses[0].title).toContain("routed: land it");
+    // The record-level route event and `agentSource: route` on a routed ship
+    // run are proven in the ship suite, where the ledger the ship path claims
+    // on is wired.
+  });
+
+  it("coding is never routed: a router answering coding leaves an admin's change request on defaults.agent, with no route event", async () => {
+    let ids = 0;
+    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
+    const provider = capturingProvider();
+    const deps = makeDeps(ROUTED_YAML, provider);
+    deps.runRegistry = registry;
+    deps.routeModel = router(); // fix → coding, which left the table when ship took its seat
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, msg("fix the flaky login test", "slack:UADMIN"), io);
+    expect(deps.routeModel).toHaveBeenCalledTimes(1);
     expect(provider.requests[0].model).toBe("general-model");
     expect(routeEvents(registry, "r1")).toEqual([]);
     expect(metaOf(registry, "r1")?.agentSource).toBe("default");
     expect(statuses.every((s) => !s.title.includes("routed:"))).toBe(true);
   });
 
-  it("a route the requester may not run is no route: the plain user's change request runs defaults.agent, not coding", async () => {
+  it("a route the requester may not run is no route: ship restricted for the plain user runs defaults.agent", async () => {
     const provider = capturingProvider();
-    const deps = makeDeps(ROUTED_YAML, provider);
-    deps.routeModel = router();
+    const deps = makeDeps(ROUTED_YAML.replace("agents: [coding]", "agents: [coding, ship]"), provider);
+    deps.routeModel = vi.fn(async () => JSON.stringify({ preset: "ship", reason: "land it" }));
     const { io, statuses } = fakeIO();
-    await dispatch(deps, msg("fix the flaky login test"), io); // slack:UX may not run the restricted coding preset
+    await dispatch(deps, msg("land the login fix"), io); // slack:UX may not run the restricted ship preset
     expect(provider.requests[0].model).toBe("general-model");
     expect(statuses.every((s) => !s.title.includes("routed:"))).toBe(true);
   });
@@ -12874,56 +12914,39 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
       });
     });
 
-    it("a compound answer with a coding part collapses to one coding run: its request is the message as typed (no brief), the card names the collapse, the route event carries it and no parts, and no child is spawned", async () => {
-      vi.stubEnv("SANDBOX_TOKEN", "tok");
-      vi.stubEnv("GITHUB_APP_ID", "");
+    it("a compound answer with a ship part collapses to one ship run: no child is spawned, the card names the collapse, the route event carries it and no parts", async () => {
       const { provider, requests } = briefFollowingProvider();
-      const t = treeDeps(`${COMPOUND_YAML}execution:\n  type: cloudflare\n  url: https://sandbox.example\n`, provider);
+      const t = treeDeps(COMPOUND_YAML, provider);
       t.deps.routeModel = vi.fn(async () =>
         JSON.stringify({
           preset: "conductor",
           parts: [
             { text: "review the login PR", preset: "review" },
-            { text: "fix the flaky login test", preset: "coding" },
+            { text: "fix the flaky login test", preset: "ship" },
           ],
           reason: "a review and a fix",
         }),
       );
-      const fake = { exec: async () => "", readFile: async () => "", writeFile: async () => "" };
-      vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fake });
       const { parent, children } = treeIO();
       const text = "review the login PR and fix the flaky login test it touches";
       await dispatch(t.deps, { ...msg(text, "slack:UADMIN"), userName: "alice" }, parent.io);
       await t.writer.settled();
       expect(t.deps.routeModel).toHaveBeenCalledTimes(1);
-      // One coding run on coding's own model; its first turn is the message as typed: no brief, no parts.
-      expect(requests).toHaveLength(1);
-      expect(requests[0].model).toBe("coding-model");
-      expect(firstUserText(requests[0]).startsWith(text)).toBe(true);
-      expect(firstUserText(requests[0])).not.toContain("Routed as a compound request");
-      expect(vi.mocked(makeExecutor).mock.calls.map((c) => c[1].agent.name)).toEqual(["coding"]);
+      // Ship runs the plan runner, never a provider turn of its own; this
+      // harness carries none of the runner's seams, so its own gate closes the
+      // run — the collapse decision is what this scenario proves, and the full
+      // routed hand-off (merge: person) is the ship suite's.
+      expect(requests).toHaveLength(0);
       expect(children).toHaveLength(0);
       // The card: the routed line names the collapse; no part lines under it.
-      expect(parent.statuses[0].title).toContain(
-        "*coding* on `anthropic/coding-model` · routed: a review and a fix (compound collapsed: review+coding)",
-      );
+      expect(parent.statuses[0].title).toContain("*ship*");
+      expect(parent.statuses[0].title).toContain("routed: a review and a fix (compound collapsed: review+ship)");
       expect(parent.statuses[0].detail).toBeUndefined();
-      // The record: agentSource route, the route event with the collapse and no parts, the input the message as typed.
-      expect(metaOf(t.registry, "run-parent")?.agentSource).toBe("route");
-      const [event] = routeEvents(t.registry, "run-parent");
-      expect(event).toEqual(
-        expect.objectContaining({
-          type: "route",
-          preset: "coding",
-          reason: "a review and a fix",
-          model: "anthropic/general-model",
-          collapsed: { presets: ["review", "coding"] },
-        }),
-      );
-      expect(event).not.toHaveProperty("parts");
-      expect((await t.ledger.finished.get("run-parent"))!.events.filter((e) => e.type === "input")).toEqual([
-        expect.objectContaining({ text }),
-      ]);
+      // The collapse decision itself (the event's `collapsed.presets`, no
+      // `parts`) is proven at the route stage in route.test.ts; the routed
+      // hand-off's record (merge: person, agentSource route) in the ship
+      // suite. This harness has no repository bound, so the ship pipeline
+      // refuses before a run is claimed — no record to read here.
     });
 
     it("a decoy — one ask with several steps — the router keeps single: no conductor, no parts, the single route's card and event", async () => {

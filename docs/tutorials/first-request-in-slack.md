@@ -42,7 +42,7 @@ Every reply in a thread the bot has answered in reaches it, and the thread keeps
 @switchboard in acme/api, add a retry to the webhook sender and open a PR
 ```
 
-You named no agent. The bot read the sentence and routed it to `coding`, and the card's first line says so: `coding · routed: <its reason>`. `in acme/api` names the repository. The card links to a live run page; open it to watch files read, commands run and tests as they happen. The run ends in a pull request.
+You named no agent. The bot read the sentence and routed it to `ship`, and the card's first line says so: `ship · routed: <its reason>`. `in acme/api` names the repository. The card links to a live run page; open it to watch files read, commands run and tests as they happen. The run ends in a pull request.
 
 ## Check what it did
 
@@ -60,7 +60,7 @@ The first runs as `review`, the second as `research`, the third as a `conductor`
 
 ## When you want to choose
 
-Say `agent:coding` in the message and that agent runs, no picking; reply `agent:<name>` in a thread to run it another way; `ship`, which merges, only ever runs when named. Commands exist too, for whoever wants them: [Slack commands](../reference/slack-commands.md). To turn the picking off for a deployment, set `routing: { auto: false }` ([Turn features on and off](../how-to/turn-features-on-and-off.md)); every plain message then runs `general`.
+Say `agent:coding` in the message and that agent runs, no picking; reply `agent:<name>` in a thread to run it another way; a routed `ship` runs your change through coding and review, and a person merges the pull request. Commands exist too, for whoever wants them: [Slack commands](../reference/slack-commands.md). To turn the picking off for a deployment, set `routing: { auto: false }` ([Turn features on and off](../how-to/turn-features-on-and-off.md)); every plain message then runs `general`.
 
 ## Next
 

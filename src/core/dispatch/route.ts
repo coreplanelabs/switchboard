@@ -14,10 +14,11 @@
 // Whatever it picks meets the agent gate and the profile gate like a typed
 // directive: the router only proposes.
 // A routed preset dispatches at once — the owner's call in this stage's
-// review: a wrong route to coding costs a pull request, cheap to undo, and the
-// card's `routed:` reason is the affordance. `ship` is the exception,
-// structurally: it holds the merge grant, so its def opts out of the table and
-// the allowlist. The conductor opts out of the table too, and is reached one
+// review: a wrong route to a write preset costs a reviewed pull request,
+// cheap to undo, and the card's `routed:` reason is the affordance. The table
+// offers `ship` and not `coding`: a routed write ask runs the coding → review
+// loop as a generated plan whose merge is a person's, and the hand-off refuses
+// the seeded form on a routed ship. The conductor opts out of the table, and is reached one
 // way only — the compound form: a request with two or more independent parts
 // answers as `conductor` with the parts, each on a read-identity preset of the
 // same table (a part runs as a spawned child, and a child is a reader: record
@@ -78,8 +79,8 @@ export interface RoutablePreset {
 /** The presets the router may pick from, in registry order: every def the
  *  registry declares routable (`routable !== false`). Rendered, never copied:
  *  a preset added to the registry is offered the day it lands, and one the
- *  registry keeps out of the table — `ship`, which holds the merge grant, and
- *  the conductor, which starts other runs — is neither shown as a row nor
+ *  registry keeps out of the table — `coding`, whose routed seat `ship` holds,
+ *  and the conductor, which starts other runs — is neither shown as a row nor
  *  accepted as a single route. The conductor is reached through the compound
  *  form alone (`CompoundOffer`), never as a plain preset. */
 export function routablePresets(): RoutablePreset[] {
@@ -124,7 +125,7 @@ export function renderPresetTable(presets: readonly RoutablePreset[]): string {
  *  requester may run (the policy table's answer, asked once here); the model is
  *  shown the presets in `presets` the requester may run and its answer is
  *  checked against exactly those — a name in `allowed` but not in `presets`
- *  (`ship`) is never accepted. `fallback` is the preset the request runs on
+ *  (`coding`) is never accepted. `fallback` is the preset the request runs on
  *  when nothing fits — `defaults.agent`. */
 export interface RouteInput {
   text: string;
@@ -200,7 +201,7 @@ export function routeMaxOutputTokens(compound?: CompoundOffer): number {
 
 /** The answer as a tool the model is forced to call (`CompletionRequest.toolChoice`):
  *  `preset` an enum of exactly the offered names — `conductor` among them only
- *  with the compound offer, `ship` never, since it is no row — `reason` one
+ *  with the compound offer, `coding` never, since it is no row — `reason` one
  *  line, and with the offer `parts`: two to the cap, each a read-identity
  *  preset from the table (`partPresets`) and a text, so under a forced call a
  *  write preset cannot be named as a part at all. Derived from the same
@@ -526,7 +527,7 @@ export function parseRouteAnswer(raw: string, allowed: readonly string[], compou
 
 /** The compound answer, held to its rule: offered at all; two or more parts,
  *  no more than the cap; each an object naming a preset from the offered
- *  table (never `ship` or `conductor` — neither is a row) with a text that
+ *  table (never `coding` or `conductor` — neither is a row) with a text that
  *  says something. Anything else is `compound_rejected: <why>` — no route, the
  *  request runs on `defaults.agent`, and the record keeps the why. The parts
  *  come back redacted and capped: each text is a child's whole prompt. A
@@ -577,7 +578,7 @@ function parseCompound(
  * The decision: the table filtered to what the requester may run, the prompt,
  * one model call under a timeout, the strict parse against the presets that
  * were offered — so a name the caller allows but the table does not carry
- * (`ship`) is refused even when the model produces it. A model that throws or
+ * (`coding`) is refused even when the model produces it. A model that throws or
  * times out is no route with the failure named — never a thrown error, so the
  * request always falls through to `defaults.agent`.
  */

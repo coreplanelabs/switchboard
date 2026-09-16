@@ -17,7 +17,7 @@ import type { RouteImperativeFixture } from "./routeImperativeFixtures.js";
  *  may land on either read-only preset the model picks. */
 export type RouteAttachFixture = RouteImperativeFixture;
 
-const HOLDER = ["coding"];
+const HOLDER = ["ship"];
 const READ_ONLY = ["research", "general", "explore"];
 
 export const ROUTE_ATTACH_FIXTURES: readonly RouteAttachFixture[] = [

@@ -17,7 +17,7 @@ Placed right after the mention, before the request text:
 
 | Directive | Example | Effect |
 |---|---|---|
-| `agent:<name>` | `agent:review` | force this agent for this message; without it a plain message picks its own agent and the card says why — the router, on by default; `routing: { auto: false }` turns it off ([Turn features on and off](../how-to/turn-features-on-and-off.md)) and a plain message then runs the default. `ship` is never picked for you: name it |
+| `agent:<name>` | `agent:review` | force this agent for this message; without it a plain message picks its own agent and the card says why — the router, on by default; `routing: { auto: false }` turns it off ([Turn features on and off](../how-to/turn-features-on-and-off.md)) and a plain message then runs the default. `coding` is never picked for you: name it — a routed change request runs `ship`, the coding → review loop a person merges |
 | `model:<provider>/<model>` | `model:openai/gpt-5` | use this model for this message only |
 | `effort:<low\|medium\|high\|xhigh\|max>` | `effort:low` | how hard the model thinks this turn |
 | `budget:<minutes>` | `budget:30` | cap this run's wall clock, in whole minutes (at least 2); it only ever narrows the agent's own budget or a boundary's, and the card says what it did |

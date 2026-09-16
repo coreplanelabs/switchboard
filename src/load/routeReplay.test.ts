@@ -14,6 +14,7 @@ import {
   historyCompounds,
   imperativeScore,
   labelledRequests,
+  mapHistoricalLabels,
   NO_ROUTE,
   readToWriteRoutes,
   renderCompound,
@@ -23,6 +24,7 @@ import {
   replayImperative,
   replayRoutes,
   routeChecks,
+  tableWritePreset,
   type CompoundExample,
   type ReplayRequest,
   type ReplayResult,
@@ -272,8 +274,8 @@ describe("the checked-in compound set (src/load/routeCompoundFixtures.ts)", () =
       for (const preset of f.presets) expect(table, `${f.id}: ${preset}`).toContain(preset);
     }
     expect(new Set(ROUTE_COMPOUND_FIXTURES.map((f) => f.id)).size).toBe(ROUTE_COMPOUND_FIXTURES.length);
-    // Every part preset is a row of the table — ship and conductor never.
-    expect(ROUTE_COMPOUND_FIXTURES.flatMap((f) => f.presets)).not.toContain("ship");
+    // Every part preset is a row of the table — coding and conductor never.
+    expect(ROUTE_COMPOUND_FIXTURES.flatMap((f) => f.presets)).not.toContain("coding");
     expect(ROUTE_COMPOUND_FIXTURES.flatMap((f) => f.presets)).not.toContain("conductor");
   });
 
@@ -290,7 +292,7 @@ describe("the checked-in compound set (src/load/routeCompoundFixtures.ts)", () =
       "c15",
       "c18",
     ]);
-    expect(compounds.filter((f) => f.collapsesTo !== undefined).every((f) => f.collapsesTo === "coding")).toBe(true);
+    expect(compounds.filter((f) => f.collapsesTo !== undefined).every((f) => f.collapsesTo === "ship")).toBe(true);
     for (const f of ROUTE_COMPOUND_FIXTURES.filter((f) => f.kind === "decoy"))
       expect(f.collapsesTo, f.id).toBeUndefined();
   });
@@ -522,7 +524,7 @@ describe("the checked-in set through route() over a scripted model", () => {
       route({ text, recentDirectives: {}, presets, allowed, fallback: "general", compound: { maxParts: 3 } }, model);
   const textOf = (prompt: { user: string }) => /<request>\n([\s\S]*)\n<\/request>/.exec(prompt.user)![1];
 
-  it("a router that answers every fixture as a split of its parts: 13/13 splittable compounds detected, the 7 with a coding part collapsed to coding by the parse, 0/5 decoys split, every part preset right, the bars met", async () => {
+  it("a router that answers every fixture as a split of its parts: 13/13 splittable compounds detected, the 7 with a ship part collapsed to ship by the parse, 0/5 decoys split, every part preset right, the bars met", async () => {
     const knowing: RouteModel = async (prompt) => {
       const f = byText.get(textOf(prompt))!;
       return f.kind === "compound"
@@ -536,9 +538,9 @@ describe("the checked-in set through route() over a scripted model", () => {
     const results = await replayCompound(compoundExamples(ROUTE_COMPOUND_FIXTURES), decideWith(knowing), {
       now: () => 0,
     });
-    // The parse collapsed every compound answer that named coding: the decision was coding, single.
+    // The parse collapsed every compound answer that named ship: the decision was ship, single.
     for (const r of results.filter((r) => r.collapsesTo !== undefined))
-      expect([r.id, r.routed, r.collapsed, r.detected]).toEqual([r.id, "coding", true, false]);
+      expect([r.id, r.routed, r.collapsed, r.detected]).toEqual([r.id, "ship", true, false]);
     const score = compoundScore(results);
     const expectedParts = ROUTE_COMPOUND_FIXTURES.filter((f) => f.kind === "compound" && !f.collapsesTo).reduce(
       (n, f) => n + f.presets.length,
@@ -562,10 +564,10 @@ describe("the checked-in set through route() over a scripted model", () => {
     );
   });
 
-  it("a router that answers coding outright for a compound with a coding part, as the prompt asks, scores the same collapse: 7/7", async () => {
+  it("a router that answers ship outright for a compound with a ship part, as the prompt asks, scores the same collapse: 7/7", async () => {
     const direct: RouteModel = async (prompt) => {
       const f = byText.get(textOf(prompt))!;
-      if (f.collapsesTo) return JSON.stringify({ preset: f.collapsesTo, reason: "a write part: one coding run" });
+      if (f.collapsesTo) return JSON.stringify({ preset: f.collapsesTo, reason: "a write part: one ship run" });
       return f.kind === "compound"
         ? JSON.stringify({
             preset: "conductor",
@@ -671,13 +673,13 @@ describe("the checked-in attach set (src/load/routeAttachFixtures.ts)", () => {
     );
     expect(asked).toBe(1);
     expect(results.map((r) => [r.id, r.routed, r.hit])).toEqual([
-      ["a01", "coding", true],
-      ["a02", "coding", true],
-      ["a03", "coding", true],
-      ["a04", "coding", true],
+      ["a01", "ship", true],
+      ["a02", "ship", true],
+      ["a03", "ship", true],
+      ["a04", "ship", true],
       ["a05", "explore", true],
     ]);
-    for (const r of results.slice(0, 4)) expect(r.reason).toBe("names attach_file, which only coding holds");
+    for (const r of results.slice(0, 4)) expect(r.reason).toBe("names attach_file, which only ship holds");
     const score = imperativeScore(results);
     expect(score).toMatchObject({ imperatives: 4, imperativesHit: 4, hitRate: 1, decoys: 1, decoysHit: 1, misses: [] });
   });
@@ -693,7 +695,7 @@ describe("the imperative set through route() over a scripted model", () => {
       route({ text, recentDirectives: {}, presets, allowed, fallback: "general", compound: { maxParts: 3 } }, model);
   const textOf = (prompt: { user: string }) => /<request>\n([\s\S]*)\n<\/request>/.exec(prompt.user)![1];
 
-  it("a router that reads the rule: every imperative to coding, every look-alike read-only, every review-shaped ask to review — both rows pass", async () => {
+  it("a router that reads the rule: every imperative to ship, every look-alike read-only, every review-shaped ask to review — both rows pass", async () => {
     const knowing: RouteModel = async (prompt) =>
       JSON.stringify({ preset: byText.get(textOf(prompt))!.presets[0], reason: "as the rule says" });
     const results = await replayImperative(ROUTE_IMPERATIVE_FIXTURES, decideWith(knowing), { now: () => 0 });
@@ -710,8 +712,8 @@ describe("the imperative set through route() over a scripted model", () => {
       reviewsHit: 5,
       misses: [],
     });
-    expect(renderImperative(score)).toEqual([
-      "imperatives: 20/20 to coding (100%); look-alikes to a write preset 0/10 (decoys 5/5 read-only as expected, review-shaped 5/5 to review)",
+    expect(renderImperative(score, { writePreset: "ship" })).toEqual([
+      "imperatives: 20/20 to ship (100%); look-alikes to a write preset 0/10 (decoys 5/5 read-only as expected, review-shaped 5/5 to review)",
       "",
       "misses: none",
     ]);
@@ -723,6 +725,7 @@ describe("the imperative set through route() over a scripted model", () => {
       compoundBar: { detection: 0.9 },
       imperative: score,
       imperativeBar: { hit: 0.9 },
+      writePreset: "coding",
     }).filter((c) => /imperative|look-alike/.test(c.name));
     expect(rows.map((c) => [c.pass, c.actual, c.limit])).toEqual([
       [true, "20/20 (100%)", "≥ 90%"],
@@ -730,7 +733,7 @@ describe("the imperative set through route() over a scripted model", () => {
     ]);
   });
 
-  it("a keyword router — fix, ci, tests, build mean coding — gets every imperative but sends the decoys to coding too: the look-alike row is what catches it", async () => {
+  it("a keyword router — fix, ci, tests, build mean ship — gets every imperative but sends the decoys to ship too: the look-alike row is what catches it", async () => {
     const keyword: RouteModel = async (prompt) => {
       const text = textOf(prompt);
       const preset = /\b(pr|pull request)\b/i.test(text)
@@ -738,7 +741,7 @@ describe("the imperative set through route() over a scripted model", () => {
         : /fix|ci\b|tests?|build|add|rename|bump|make|green|red|lint|typecheck|docs|version|retries|delete|update/i.test(
               text,
             )
-          ? "coding"
+          ? "ship"
           : "general";
       return JSON.stringify({ preset, reason: "keyword" });
     };
@@ -755,6 +758,7 @@ describe("the imperative set through route() over a scripted model", () => {
       compoundBar: { detection: 0.9 },
       imperative: score,
       imperativeBar: { hit: 0.9 },
+      writePreset: "coding",
     }).filter((c) => /imperative|look-alike/.test(c.name));
     expect(rows.map((c) => c.pass)).toEqual([true, false]);
     expect(rows[1].actual).toBe(`${score.lookalikesToWrite}/10`);
@@ -802,7 +806,7 @@ describe("the imperative set through route() over a scripted model", () => {
       reviewsHit: 0,
     });
     expect(score.misses.map((m) => m.id)).toEqual(["i2", "d2", "r1"]);
-    expect(renderImperative(score)).toEqual([
+    expect(renderImperative(score, { writePreset: "coding" })).toEqual([
       "imperatives: 1/2 to coding (50%); look-alikes to a write preset 1/3 (decoys 1/2 read-only as expected, review-shaped 0/1 to review)",
       "",
       "misses (3):",
@@ -856,6 +860,7 @@ describe("readToWriteRoutes + routeChecks — the verdict's rows", () => {
       compoundBar: { detection: 0.9 },
       imperative: imperativeScore([]),
       imperativeBar: { hit: 0.9 },
+      writePreset: "coding",
     });
     expect(checks.map((c) => c.name)).toEqual([
       "routing accuracy ≥ 95% against the presets people typed (record 0026's bar)",
@@ -896,6 +901,7 @@ describe("readToWriteRoutes + routeChecks — the verdict's rows", () => {
       compoundBar: { detection: 0.9 },
       imperative: imperativeScore([]),
       imperativeBar: { hit: 0.9 },
+      writePreset: "coding",
     };
     const rowOf = (checks: ReturnType<typeof routeChecks>, prefix: string) =>
       checks.find((c) => c.name.startsWith(prefix))!;
@@ -923,6 +929,51 @@ describe("readToWriteRoutes + routeChecks — the verdict's rows", () => {
     expect(rowOf(red, "compound detected")).toMatchObject({ actual: "0/0 (—)" }); // a collapsing compound is not a split to detect
   });
 
+  it("the imperative bar's label names the table's write preset, never a hardcoded name", () => {
+    const checks = routeChecks({
+      table: confusionTable([], ["general", "ship"]),
+      answered: 0,
+      readToWrite: 0,
+      compound: compoundScore([]),
+      compoundBar: { detection: 0.9 },
+      imperative: imperativeScore([]),
+      imperativeBar: { hit: 0.9 },
+      writePreset: tableWritePreset(["general", "ship"])!,
+    });
+    expect(checks.map((c) => c.name)).toContain(
+      "terse imperatives routed to ship on ≥ 90% of the checked-in imperative asks",
+    );
+  });
+
+  it("a historical label whose preset left the table but shares its write identity maps onto the table's write preset and is counted; a read label stays and scores wrong", () => {
+    const table = ["general", "ship", "review", "research", "explore"];
+    expect(tableWritePreset(table)).toBe("ship");
+    const requests = [
+      { id: "h1", label: "coding", text: "fix the bug", labelSource: "directive" as const },
+      { id: "h2", label: "review", text: "look at PR 9", labelSource: "directive" as const },
+      { id: "h3", label: "zebra", text: "stripes", labelSource: "directive" as const },
+    ];
+    const { requests: mappedReqs, mapped } = mapHistoricalLabels(requests, table);
+    // `coding` left the table when `ship` took its write seat: the request
+    // asked for a write run, so a `ship` answer is correct — and counted.
+    expect(mappedReqs.map((r) => r.label)).toEqual(["ship", "review", "zebra"]);
+    expect(mapped).toBe(1);
+    const results: ReplayResult[] = mappedReqs.map((r) => ({
+      id: r.id,
+      label: r.label,
+      text: r.text,
+      labelSource: r.labelSource,
+      routed: "ship",
+      correct: r.label === "ship", // as replayRoutes scores it: routed === label
+      reason: "r",
+      ms: 0,
+    }));
+    const scored = confusionTable(results, table);
+    const row = (label: string) => scored.rows.find((r) => r.label === label)!;
+    expect(row("ship").correct).toBe(1); // the mapped coding label, correct on a ship answer
+    expect(row("review").correct).toBe(0); // a review label answered ship is still a misroute
+  });
+
   it("one read-only label routed to coding fails the read-only-to-write row — and with it the verdict — even when the accuracy bar still passes", () => {
     const results: ReplayResult[] = [
       ...Array.from({ length: 30 }, (_, i) => ({ ...result("review", "review"), id: `ok${i}` })),
@@ -938,6 +989,7 @@ describe("readToWriteRoutes + routeChecks — the verdict's rows", () => {
       compoundBar: { detection: 0.9 },
       imperative: imperativeScore([]),
       imperativeBar: { hit: 0.9 },
+      writePreset: "coding",
     });
     const row = checks.find((c) => c.name.startsWith("read-only labels routed to a write preset"))!;
     expect(row).toEqual({

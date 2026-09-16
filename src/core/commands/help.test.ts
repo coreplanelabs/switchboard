@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { CHAT_OPEN_ACTIONS } from "../authz/grants.js";
 import { CommandRegistry, bindCommands, renderText, type Caller } from "../commandRegistry.js";
 import { PROJECT_DOCS_URL } from "../docsLink.js";
+import { AGENTS, presetDoor } from "../../agents/registry.js";
 import { callerWith } from "../testing/callers.js";
 import {
   COMMANDS_REFERENCE_URL,
@@ -25,8 +26,8 @@ const chat: Caller = callerWith("chat", "slack:UX", CHAT_OPEN_ACTIONS);
  *  so a line that appears for it is proven derived, not copied. */
 const AGENTS_OF_EVERY_DOOR: ReturnType<HelpCommandDeps["help"]["agents"]> = [
   { name: "general", description: "answers questions", door: "routed" },
-  { name: "coding", description: "ships PRs", door: "routed" },
-  { name: "ship", description: "the coding → review loop to LGTM", door: "directive" },
+  { name: "ship", description: "the coding → review loop to LGTM", door: "routed" },
+  { name: "coding", description: "ships PRs", door: "directive" },
   { name: "zebra", description: "stripes on demand", door: "routed" },
   { name: "conductor", description: "coordinates other runs", door: "compound" },
 ];
@@ -69,11 +70,11 @@ describe("help.show — the plain-language guide", () => {
     expect(lines[2]).toBe("*Want a particular agent?* Start your message with `agent:<preset>`:");
     expect(lines.slice(3, 6)).toEqual([
       "• `general` — answers questions",
-      "• `coding` — ships PRs",
+      "• `ship` — the coding → review loop to LGTM",
       "• `zebra` — stripes on demand",
     ]);
     // A preset reached by name alone says so, by name.
-    expect(lines[6]).toBe("`ship` is never picked for you — name it: `agent:ship` — the coding → review loop to LGTM");
+    expect(lines[6]).toBe("`coding` is never picked for you — name it: `agent:coding` — ships PRs");
     // How to change a route: once the card closes, a reply with the directive.
     expect(lines[7]).toBe(
       "*Wrong pick?* Once the card closes, reply `agent:<preset>` in the thread and the request runs there instead.",
@@ -105,6 +106,18 @@ describe("help.show — the plain-language guide", () => {
     expect(text).not.toContain("general");
     expect(text).not.toContain("never picked for you");
     expect(text).not.toContain("Several independent asks");
+  });
+
+  it("over the production registry: ship is among the presets a plain message picks from and coding is named-only", async () => {
+    // The doors as the registry declares them (routing-and-config item 21):
+    // a routed write ask runs ship's generated plan, so ship is picked for
+    // you; coding runs only when named.
+    const real = Object.values(AGENTS).map((a) => ({ name: a.name, description: a.description, door: presetDoor(a) }));
+    const { show } = await bound(real);
+    const { text } = await show("help.show");
+    expect(text).toContain("• `ship` —");
+    expect(text).not.toContain("• `coding` —");
+    expect(text).toContain("`coding` is never picked for you — name it: `agent:coding`");
   });
 });
 
