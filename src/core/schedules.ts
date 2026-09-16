@@ -415,8 +415,9 @@ export function watchdogFiring(
   const errors = result.results.filter((r) => r.error !== undefined);
   const created = result.results.filter((r) => instanceActionOf(r.instance) === "created").length;
   const timedOut = result.results.filter((r) => r.action === "provision-timed-out").length;
+  const rebuilt = result.results.filter((r) => r.action === "auto-rebuilt").length;
   const disk = fullestDisk(result.results);
-  const counts = `${result.count}/${result.cap} residents · ${created} refreshed · ${timedOut} timed out · ${errors.length} errors${disk ? ` · disk max ${disk}` : ""}`;
+  const counts = `${result.count}/${result.cap} residents · ${created} refreshed · ${timedOut} timed out · ${errors.length} errors${rebuilt > 0 ? ` · ${rebuilt} rebuilt` : ""}${disk ? ` · disk max ${disk}` : ""}`;
   const first = errors[0];
   return {
     schedule: schedule.name,

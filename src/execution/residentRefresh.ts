@@ -180,7 +180,7 @@ export function killStaleBuildProcessesCommand(user: string, dir: string): strin
  *  a tool naming the signal. A bare "killed" is NOT enough — compilers and
  *  OOM messages say it too — and a step the cycle itself timed out is a real
  *  failure however it died. */
-const INTERRUPTION_SIGNATURE = /\bexit 143\b|Session terminated|SIGTERM/;
+const INTERRUPTION_SIGNATURE = /\bexit 143\b|Session terminated|SIGTERM|^restore-interrupted:/;
 
 /** Message wording of the Sandbox SDK's runtime-replacement error family — the
  *  container went away UNDER a live SDK call, so the failure never reaches the
@@ -396,11 +396,33 @@ export function isRuntimeUnreachableReason(reason: string): boolean {
  *  means the stream ran on before the replacement. */
 export function restoreFailureDisposition(
   message: string,
-  facts: { runtimeReplaced?: boolean } = {},
+  facts: { runtimeReplaced?: boolean; runtimeActive?: boolean } = {},
 ): { action: "interrupted"; reason: string } | { action: "down"; reason: string } {
   const timedOut = /\(timed out\)/.test(message);
-  if (!timedOut && (facts.runtimeReplaced === true || RUNTIME_REPLACEMENT_WORDING.test(message))) {
+  if (timedOut) {
+    return {
+      action: "down",
+      reason: `r2-restore-failed: ${message} — container stopped so the transfer cannot land on a rebuild`,
+    };
+  }
+  // The kill signature the instance step's classifier reads
+  // (INTERRUPTION_SIGNATURE): a container roll SIGTERMs the extract, whose
+  // exec comes back a normal `exit 143` result — the SDK's replacement
+  // wording only reaches the execs that follow. Same event, same reading.
+  if (
+    facts.runtimeReplaced === true ||
+    RUNTIME_REPLACEMENT_WORDING.test(message) ||
+    INTERRUPTION_SIGNATURE.test(message)
+  ) {
     return { action: "interrupted", reason: `restore-interrupted: ${message}` };
+  }
+  // The Worker's probe after the failure: a runtime that is no longer active
+  // took the disk the extract wrote to with it, whatever the exit code said.
+  if (facts.runtimeActive === false) {
+    return {
+      action: "interrupted",
+      reason: `restore-interrupted: ${message} — the container stopped under the restore`,
+    };
   }
   return {
     action: "down",

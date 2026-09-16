@@ -10,8 +10,9 @@ import { defineConfig } from "vitest/config";
 // reuse-only attach path and the container identity (reuseAttach.test.ts), and
 // for the in-place rebind onto the thread's own pull request branch
 // (rebindAttach.test.ts), for the release at a run's end
-// (releaseAtRunEnd.test.ts) and for the rule that dirt never keeps a tree
-// (dirtNeverKeeps.test.ts); testing/sourceScan.ts is their helper. Every
+// (releaseAtRunEnd.test.ts), for the rule that dirt never keeps a tree
+// (dirtNeverKeeps.test.ts) and for the rebuild on the down transition with
+// the watchdog as backstop (autoRebuild.test.ts); testing/sourceScan.ts is their helper. Every
 // test file of this directory is listed here — src/vitestWorkspace.test.ts
 // holds that.
 // worker.ts itself is covered by typecheck + the [agent] receipts in
@@ -32,6 +33,7 @@ export default defineConfig({
       "rebindAttach.test.ts",
       "releaseAtRunEnd.test.ts",
       "dirtNeverKeeps.test.ts",
+      "autoRebuild.test.ts",
     ],
   },
 });

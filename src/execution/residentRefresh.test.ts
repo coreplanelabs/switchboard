@@ -257,6 +257,20 @@ describe("classifyRefreshFailure (a build SIGTERM'd by a deploy is an interrupti
     );
   });
 
+  it("a wake path's `restore-interrupted:` verdict (the probe found the container gone) is an interruption for the instance step too, whatever exit the extract reported", () => {
+    const f = classifyRefreshFailure({
+      step: "checkout-restore-extract",
+      message: "restore-interrupted: exit 137: no output — the container stopped under the restore",
+    });
+    expect(f.interrupted).toBe(true);
+    expect(f.reason).toMatch(/^refresh-interrupted: checkout-restore-extract restore-interrupted: exit 137/);
+    // The prefix is read at the start of the message only: a step whose own
+    // output happens to quote it is not an interruption.
+    expect(
+      classifyRefreshFailure({ step: "build", message: "exit 1: grep: restore-interrupted: not found" }).interrupted,
+    ).toBe(false);
+  });
+
   it("an ordinary build failure stays <step>-failed with the message verbatim", () => {
     const f = classifyRefreshFailure({ step: "build", message: "exit 1: src/x.ts(3,1): error TS2304" });
     expect(f).toEqual({
@@ -374,6 +388,31 @@ describe("restoreFailureDisposition (a restore the runtime replacement interrupt
     expect(
       restoreFailureDisposition("exit 143 (timed out): The container is not running, consider calling start()").action,
     ).toBe("down");
+  });
+
+  // The incident this names: a release's deploy rolled a resident's container
+  // 300 ms into the checkout extract; the extract's exec came
+  // back a normal result — `exit 143: no output`, SIGTERM — and only the
+  // cleanup execs 10 ms later carried the SDK's `container is not running`
+  // wording, swallowed. The wake path read a snapshot failure and went `down`.
+  it("an extract killed by SIGTERM (exit 143, no output) is `interrupted` — the same kill signature the instance step's classifier already reads", () => {
+    for (const msg of ["exit 143: no output", "exit 143: stderr: Terminated", "unsquashfs: SIGTERM received"]) {
+      expect(restoreFailureDisposition(msg), msg).toEqual({
+        action: "interrupted",
+        reason: `restore-interrupted: ${msg}`,
+      });
+    }
+  });
+
+  it("a runtime the Worker probed and found stopped after the failure is `interrupted` whatever the exit said: the disk the extract wrote to is gone", () => {
+    expect(restoreFailureDisposition("exit 137: no output", { runtimeActive: false })).toEqual({
+      action: "interrupted",
+      reason: "restore-interrupted: exit 137: no output — the container stopped under the restore",
+    });
+    expect(restoreFailureDisposition("exit 137: no output", { runtimeActive: true }).action).toBe("down");
+    expect(restoreFailureDisposition("exit 137: no output").action).toBe("down");
+    // A timeout still wins: the stream may still be running on a live disk.
+    expect(restoreFailureDisposition("exit 143 (timed out): no output", { runtimeActive: false }).action).toBe("down");
   });
 });
 
