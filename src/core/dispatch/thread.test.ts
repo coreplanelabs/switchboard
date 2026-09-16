@@ -66,6 +66,19 @@ describe("stickyAgentOf — the thread's agent by transcript", () => {
     expect(stickyAgentOf([run({ id: "r1", agent: "coding" })])).toBeUndefined();
     expect(stickyAgentOf([])).toBeUndefined();
   });
+
+  it("a run a coordinator spawned into the thread is the runner's turn, not the thread's: skipped, so the newest run a person addressed decides — a ship thread whose newest addressed run holds no transcript has no sticky agent and routes again", () => {
+    const child = run({ id: "c1", agent: "coding", session: closed, parentInstanceId: "plan-fix-1" });
+    // The plan's own run — the ship hand-off — wrote no session log: the
+    // follow-up resolves through the scopes and the router, never as coding.
+    expect(stickyAgentOf([child, run({ id: "s1", agent: "ship" })])).toBeUndefined();
+    // A person's earlier run with a transcript is the one that sticks.
+    expect(stickyAgentOf([child, run({ id: "g1", agent: "general", session: closed })])).toBe("general");
+    // A thread of children alone has no sticky agent.
+    expect(
+      stickyAgentOf([child, run({ id: "c0", agent: "review", session: closed, parentInstanceId: "plan-fix-1" })]),
+    ).toBeUndefined();
+  });
 });
 
 // docs/reference/specs/routing-and-config.md item 21: the route a sticky-by-
@@ -88,6 +101,18 @@ describe("threadRouteOf — the route a sticky follow-up carries", () => {
     expect(threadRouteOf([run({ id: "r1", agent: "coding", route })], "coding")).toBeUndefined();
     expect(threadRouteOf([run({ id: "r1", agent: "review", session: closed, route })], "coding")).toBeUndefined();
     expect(threadRouteOf([], "coding")).toBeUndefined();
+  });
+
+  it("a coordinator's spawned child is skipped here too: the route carried is the newest addressed run's", () => {
+    const child = run({ id: "c1", agent: "coding", session: closed, parentInstanceId: "plan-fix-1", route });
+    const addressed = run({
+      id: "r1",
+      agent: "coding",
+      session: closed,
+      route: { ...route, reason: "the person's ask" },
+    });
+    expect(threadRouteOf([child, addressed], "coding")).toEqual({ ...route, reason: "the person's ask" });
+    expect(threadRouteOf([child], "coding")).toBeUndefined();
   });
 });
 
