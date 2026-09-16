@@ -17,7 +17,13 @@ import {
   type JsonValue,
 } from "../commandRegistry.js";
 import { callerWith } from "../testing/callers.js";
-import { MCP_COMMANDS, MCP_OFF_MESSAGE, registerMcpCommands, type McpCommandDeps } from "./mcp.js";
+import {
+  MCP_COMMANDS,
+  MCP_ME_ON_ACCESS_MESSAGE,
+  MCP_OFF_MESSAGE,
+  registerMcpCommands,
+  type McpCommandDeps,
+} from "./mcp.js";
 
 // docs/reference/specs/mcp-tools.md items 13–15: the `mcp.*` commands are thin writes into
 // the config layers through the service; these tests pin the surface contract
@@ -115,6 +121,42 @@ describe("mcp.* commands", () => {
         message: MCP_OFF_MESSAGE,
       });
     }
+  });
+
+  it("a `me` write from the Access surface is refused with the pointer to chat (record 0041); org and channel writes and every read are unchanged for it", async () => {
+    const { svc } = service();
+    const inv = bind(svc);
+    const browser = callerWith("access", "access:sub-1", "all");
+    for (const [id, input] of [
+      ["mcp.add", { args: ["vanta"], options: { url: "https://mcp.vanta.com/mcp" } }],
+      ["mcp.add", { args: ["vanta"], options: { url: "https://mcp.vanta.com/mcp", scope: "me" } }],
+      ["mcp.connect", { args: ["vanta"] }],
+      ["mcp.remove", { args: ["vanta"], options: { scope: "me" } }],
+    ] as const) {
+      expect(await inv.invoke(id, input, browser)).toMatchObject({
+        ok: false,
+        error: "unauthorized",
+        decidedBy: "handler",
+        message: MCP_ME_ON_ACCESS_MESSAGE,
+      });
+    }
+    expect(await text(inv, "mcp.list", {}, browser)).toContain("No MCP servers");
+    const added = await inv.invoke(
+      "mcp.add",
+      { args: ["vanta"], options: { url: "https://mcp.vanta.com/mcp", scope: "org" } },
+      browser,
+    );
+    expect(added).toMatchObject({ ok: true, value: { server: { name: "vanta", scope: "org" } } });
+    expect(
+      await inv.invoke(
+        "mcp.add",
+        { args: ["notion"], options: { url: "https://mcp.notion.so/mcp", scope: "channel", channel: "slack:CX" } },
+        browser,
+      ),
+    ).toMatchObject({ ok: true, value: { server: { name: "notion", scope: "channel" } } });
+    expect(await inv.invoke("mcp.remove", { args: ["vanta"], options: { scope: "org" } }, browser)).toMatchObject({
+      ok: true,
+    });
   });
 
   it("add for yourself lands in your config scope; the reply carries the one-time link and never a token; the empty list points at the command", async () => {

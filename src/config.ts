@@ -817,6 +817,28 @@ export class ConfigStore {
   }
 
   /**
+   * The index of configured channels (docs/reference/specs/routing-and-config.md
+   * item 24): every channel with a static block or a runtime override, sorted
+   * by id, each with the NAMES of the settings its effective scope carries and
+   * whether they come from `config.yaml`, the overrides document, or both.
+   * Never a value — the index is what a settings page lists before the
+   * caller's right to read each channel is decided; `config show --channel`
+   * is the read that carries the values.
+   */
+  channelsWithScope(): ChannelScopeIndexRow[] {
+    const ids = new Set([...Object.keys(this.config.channels ?? {}), ...Object.keys(this.overrides.channels)]);
+    const rows: ChannelScopeIndexRow[] = [];
+    for (const channelId of [...ids].sort()) {
+      const settings = Object.keys(this.channelScope(channelId)).sort() as (keyof Scope)[];
+      if (settings.length === 0) continue;
+      const inConfig = (this.config.channels?.[channelId] ?? undefined) !== undefined;
+      const inRuntime = Object.keys(this.overrides.channels[channelId] ?? {}).length > 0;
+      rows.push({ channelId, settings, source: inConfig && inRuntime ? "both" : inConfig ? "config" : "runtime" });
+    }
+    return rows;
+  }
+
+  /**
    * Resolve which agent, model, and effort serve a request, and the boundary
    * every run on this path meets.
    * Agent:    request directive > user scope > channel scope > default.
@@ -1071,6 +1093,14 @@ function mergeScope(current: Scope | undefined, patch: Scope): Scope {
   const merged: Record<string, unknown> = { ...current, ...patch };
   for (const key of Object.keys(merged)) if (merged[key] === undefined) delete merged[key];
   return merged as Scope;
+}
+
+/** One configured channel as `config overrides` lists it: the setting names, never their values. */
+export interface ChannelScopeIndexRow {
+  channelId: string;
+  settings: (keyof Scope)[];
+  /** `config` = the static `channels.<id>` block only; `runtime` = the overrides document only; `both`. */
+  source: "config" | "runtime" | "both";
 }
 
 export interface ConfigDescription {

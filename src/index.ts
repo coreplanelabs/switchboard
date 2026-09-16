@@ -18,6 +18,9 @@ import { makeShellRenderer } from "./channels/webShell.js";
 import { createResidentsViewHandler } from "./channels/residentsView.js";
 import { createCostsViewHandler } from "./channels/costsView.js";
 import { createDeliveryViewHandler } from "./channels/deliveryView.js";
+import { createSettingsViewHandler } from "./channels/settingsView.js";
+import { installationSettings } from "./core/installationSettings.js";
+import { EFFORT_LEVELS } from "./effort.js";
 import { NullDeliveryService, parseDeliveryConfig, SNAPSHOT_EVERY_MINUTES } from "./core/delivery.js";
 import { buildDeliverySnapshotStore } from "./core/deliverySnapshotStore.js";
 import {
@@ -58,7 +61,7 @@ import { ThreadsElsewhere } from "./core/runLedger/threadsElsewhere.js";
 import { LedgerTakeover } from "./core/runLedger/takeover.js";
 import { nullChannelIO } from "./core/nullChannelIo.js";
 import type { ChannelIO } from "./core/types.js";
-import { getAgent } from "./agents/registry.js";
+import { AGENTS, getAgent, IDENTITIES, MACHINE_CLASSES } from "./agents/registry.js";
 import { systemClock } from "./core/trace/index.js";
 import { resumeSlackIO } from "./channels/slack.js";
 import { closeReclaimedCards, markForeignLiveCards, setForeignLiveCardsSource } from "./channels/slack/statusCard.js";
@@ -105,7 +108,13 @@ import { buildScheduleStore, NullScheduleStore } from "./core/scheduleStore.js";
 import { SCHEDULES } from "./core/schedules.js";
 // --- command registry adapters ---
 import { buildCoreCommands, deliveryFromConfig } from "./core/commandCatalogue.js";
-import { accessActor, createCommandHttpHandler, isCommandPath, serviceTokenAllowed } from "./channels/commandHttp.js";
+import {
+  accessActor,
+  callerFor,
+  createCommandHttpHandler,
+  isCommandPath,
+  serviceTokenAllowed,
+} from "./channels/commandHttp.js";
 import { coreCommandGroups } from "./core/commands/all.js";
 // --- end command registry adapters ---
 import { claimEntry } from "./invokedAsScript.js";
@@ -674,6 +683,24 @@ export async function runBot(): Promise<void> {
     // (+ .json twin). Reads GitHub and the viewer's own runs live per request;
     // gated below alongside /runs, /residents and /costs.
     const deliveryView = createDeliveryViewHandler({ service: deliveryService, runs: runsService }, shell);
+    // Settings page: GET /settings and its tabs (record 0041). Every tab's seed
+    // is the registry's answer to the same commands the CLI would run, invoked
+    // as the viewer; the Installation tab projects the running config by allow-list.
+    const settingsView = createSettingsViewHandler(
+      {
+        commands,
+        callerFor: (identity) => callerFor(identity, { grantsFor: (id) => config.grantsFor(id) }),
+        installation: () => installationSettings(config.config, capabilities),
+        vocabulary: {
+          agents: Object.keys(AGENTS),
+          efforts: [...EFFORT_LEVELS],
+          identities: [...IDENTITIES],
+          machines: [...MACHINE_CLASSES],
+        },
+        capabilities,
+      },
+      shell,
+    );
     const deliveryState = !capabilities.github
       ? "GET /delivery (503 — no GitHub credential)"
       : deliveryService.repos().length === 0
@@ -864,7 +891,9 @@ export async function runBot(): Promise<void> {
         path.startsWith("/costs/") ||
         path === "/delivery" ||
         path === "/delivery.json" ||
-        path.startsWith("/delivery/")
+        path.startsWith("/delivery/") ||
+        path === "/settings" ||
+        path.startsWith("/settings/")
       ) {
         dashboardAuth
           .verify(req)
@@ -893,6 +922,7 @@ export async function runBot(): Promise<void> {
             if (residentsView(req, res, { actor })) return;
             if (costsView(req, res, { identity: gate.identity })) return;
             if (deliveryView(req, res, { actor })) return;
+            if (settingsView(req, res, { identity: gate.identity })) return;
             res.writeHead(200, { "content-type": "text/plain" });
             res.end("ok");
           })
@@ -969,7 +999,7 @@ export async function runBot(): Promise<void> {
       // (~seconds) for an external prober to land inside the window itself.
       httpListeningAt = systemClock();
       console.log(
-        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + model proxy (POST ${ANTHROPIC_MESSAGES_PATH}, POST ${OPENAI_CHAT_COMPLETIONS_PATH}) + ${liveViewState} + ${schedulesState} + ${residentsState} + ${costsState} + ${deliveryState} + ${commandHttpState} + /docs → ${PROJECT_DOCS_URL}; ` +
+        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + model proxy (POST ${ANTHROPIC_MESSAGES_PATH}, POST ${OPENAI_CHAT_COMPLETIONS_PATH}) + ${liveViewState} + ${schedulesState} + ${residentsState} + ${costsState} + ${deliveryState} + GET /settings + ${commandHttpState} + /docs → ${PROJECT_DOCS_URL}; ` +
           `${tokenCount > 0 ? `${tokenCount} ingress token(s)` : "ingress + MCP DISABLED — no tokens configured"}; ${accessState})`,
       );
     });

@@ -7,6 +7,9 @@ import type { DeliveryReport } from "../core/delivery.js";
 import type { ScheduledRow } from "./scheduledPanel.js";
 import type { LiveFrame } from "./liveView/sse.js";
 import type { Capabilities } from "../core/capabilities.js";
+import type { ChannelScopeIndexRow, ConfigDescription, Scope } from "../config.js";
+import type { InstallationView } from "../core/installationSettings.js";
+import type { McpServerView } from "../mcp/registry.js";
 
 // The seed contract between the server and the web app (web/): every HTML
 // route renders the same shell (webShell.ts) with one WebSeed embedded as a
@@ -197,6 +200,53 @@ export interface DeliverySeed {
   repos: string[];
 }
 
+export type SettingsTab = "mcps" | "channels" | "installation";
+
+/** The words the Channels tab's form offers: the same lists the config commands validate against. */
+export interface SettingsVocabulary {
+  agents: string[];
+  efforts: string[];
+  identities: string[];
+  machines: string[];
+}
+
+/** A channel's scope as the page shows it: `config show --channel <id>` without
+ *  the viewer's own user scope (the dashboard configures the shared tiers,
+ *  record 0041) and without `mcpServers` (the MCPs tab shows servers through
+ *  `McpServerView`, which carries no credential name). */
+export type ChannelScopeView = Omit<ConfigDescription, "user" | "channel" | "org"> & {
+  channel: Omit<Scope, "mcpServers">;
+  org?: Omit<Scope, "mcpServers">;
+};
+
+/** The settings page (docs/reference/specs/settings-page.md): three tabs, one
+ *  seed each, every value the answer of a registry command invoked as the
+ *  viewer, and `canWrite` the same `authorize` question the write handlers ask
+ *  — the page disables controls with it and decides nothing. */
+export interface SettingsSeed {
+  page: "settings";
+  tab: SettingsTab;
+  /** The viewer's caller id (`access:<sub>`), for the "added by you" mark. */
+  viewer: string;
+  vocabulary: SettingsVocabulary;
+  mcps?: {
+    /** The channel whose tier is listed beside org and own (`?channel=`); absent → org + own only. */
+    channel?: string;
+    servers: McpServerView[];
+    /** `mcp list` refused or MCP is off: the reason, in place of the rows. */
+    unavailable?: string;
+    canWrite: { org: boolean; channel: boolean };
+  };
+  channels?: {
+    index: ChannelScopeIndexRow[];
+    /** `config overrides` could not be read: the reason. */
+    unavailable?: string;
+    /** `/settings/channels/<id>`: that channel's scope, or why it could not be read. */
+    selected?: { channelId: string; scope?: ChannelScopeView; refused?: string; canWrite: boolean };
+  };
+  installation?: InstallationView;
+}
+
 /** One page's data, as its view builds it. */
 export type PageSeed =
   | RunsIndexSeed
@@ -208,7 +258,8 @@ export type PageSeed =
   | ResidentsIndexSeed
   | ResidentDetailSeed
   | CostsSeed
-  | DeliverySeed;
+  | DeliverySeed
+  | SettingsSeed;
 
 /** What the island holds: the page's seed plus what is on in this process
  *  (src/core/capabilities.ts) — stamped by the shell renderer (webShell.ts),

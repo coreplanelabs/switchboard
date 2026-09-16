@@ -55,12 +55,14 @@ import {
   roleActor,
   schemaPropertyNames,
   SURFACE_METAS,
+  surfaceRefusalOf,
   toChatText,
   toKebabQuery,
   UNKNOWN_OPTION,
   variantsOf,
   withCallerToken,
   type Named,
+  type SurfaceKey,
 } from "./testing/commandConformance.js";
 
 // Feature: docs/reference/specs/command-registry.md item 25 — the REGISTRY-DRIVEN
@@ -331,22 +333,37 @@ describe("command conformance — catalogue fences", () => {
     expect(md).toContain(renderAuthorizationMatrix(matrix.authorization).join("\n"));
   });
 
-  it("one error vocabulary: no matrix row has two exposed cells that disagree — a rejected row names its one code and every exposed cell is ⛔, an accepted row is all ✅", () => {
+  it("one error vocabulary: no matrix row has two exposed cells that disagree — a rejected row names its one code and every exposed cell is ⛔, an accepted row is all ✅ except the cells a declared surface-bound refusal names (🚫)", () => {
     const matrix = buildConformanceMatrix(CATALOGUE);
     const rows = matrix.commands.flatMap((c) => c.rows.map((r) => ({ id: c.id, ...r })));
     expect(rows.length).toBeGreaterThan(0);
+    let refusedCells = 0;
     for (const row of rows) {
-      const exposed = Object.values(row.cells).filter((c) => c.kind !== "not-exposed");
+      const exposed = Object.entries(row.cells).filter(([, c]) => c.kind !== "not-exposed");
       expect(exposed.length, `${row.id} [${row.variant}] runs nowhere`).toBeGreaterThan(0);
-      expect(
-        new Set(exposed.map((c) => JSON.stringify(c))).size,
-        `${row.id} [${row.variant}]: ${JSON.stringify(row.cells)}`,
-      ).toBe(1);
-      expect(exposed[0].kind === "rejected" ? row.rejection : undefined, `${row.id} [${row.variant}]`).toBe(
-        exposed[0].kind === "rejected" ? "invalid_input" : undefined,
+      const kinds = new Set(exposed.map(([, c]) => c.kind));
+      const variant = variantsOf(CATALOGUE.find((c) => c.id === row.id)!).variants.find((v) => v.name === row.variant)!;
+      // A 🚫 cell is exactly a cell the command's declared refusal names for that surface; the rest of the row is ✅.
+      const refusedHere = exposed.filter(([, c]) => c.kind === "refused-here").map(([k]) => k);
+      // A rejected row never reaches the handler, so its declared refusal names no cell.
+      const declared =
+        row.rejection !== undefined
+          ? []
+          : exposed
+              .filter(([k]) => surfaceRefusalOf({ id: row.id }, { key: k as SurfaceKey }, variant.named))
+              .map(([k]) => k);
+      expect(refusedHere, `${row.id} [${row.variant}]: ${JSON.stringify(row.cells)}`).toEqual(declared);
+      refusedCells += refusedHere.length;
+      const rest = new Set([...kinds].filter((k) => k !== "refused-here"));
+      expect(rest.size, `${row.id} [${row.variant}]: ${JSON.stringify(row.cells)}`).toBe(1);
+      if (refusedHere.length > 0) expect(rest.has("ok"), `${row.id} [${row.variant}]`).toBe(true);
+      expect(kinds.has("rejected") ? row.rejection : undefined, `${row.id} [${row.variant}]`).toBe(
+        kinds.has("rejected") ? "invalid_input" : undefined,
       );
     }
-    // The rendered rows say the same: every non-"—" cell of a row is the same glyph, and only a rejected row names a code.
+    // The rule is exercised: the `me` writes of the config and MCP commands on the Access surface.
+    expect(refusedCells).toBeGreaterThan(0);
+    // The rendered rows say the same: every non-"—" cell of a row is the same glyph (🚫 beside ✅ only), and only a rejected row names a code.
     const rendered = renderConformanceMatrix(matrix)
       .split("\n")
       .map((l) => l.split(" | "))
@@ -359,8 +376,10 @@ describe("command conformance — catalogue fences", () => {
         .slice(2)
         .map((c) => c.replace(/\s*\|$/, ""))
         .filter((c) => c !== "—");
-      expect(new Set(cells).size, cols.join(" | ")).toBe(1);
-      expect(cols[0].includes("→ `invalid_input`"), cols.join(" | ")).toBe(cells[0] === "⛔");
+      const glyphs = new Set(cells.filter((c) => c !== "🚫"));
+      expect(glyphs.size, cols.join(" | ")).toBe(1);
+      if (cells.includes("🚫")) expect(glyphs.has("✅"), cols.join(" | ")).toBe(true);
+      expect(cols[0].includes("→ `invalid_input`"), cols.join(" | ")).toBe(glyphs.has("⛔"));
     }
     expect(renderVariantCell({ variant: "unknown option", rejection: "invalid_input" })).toBe(
       "unknown option → `invalid_input`",
@@ -564,6 +583,15 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
         const f = await fresh();
         f.recorded.length = 0;
         const out = await runOn(surface, f, cmd, variant.named, "power");
+        // A refusal the data decides on this surface alone (a `me` write from
+        // the Access surface, record 0041): the handler's code, nothing written.
+        const refusal = surfaceRefusalOf(cmd, surface.meta, variant.named);
+        if (refusal) {
+          expect(out.ok, `${where}: accepted ${out.wire}`).toBe(false);
+          expect(out.code, `${where}: ${out.wire}`).toBe(refusal.error);
+          assertNoSecrets(out.wire, f, where);
+          continue;
+        }
         expect(out.ok, `${where}: ${out.wire}`).toBe(true);
         const { caller, parsed } = lastInvoke(f, cmd);
         expect({ kind: caller.kind, id: caller.id }, `${where}: the Caller the registry saw`).toEqual(

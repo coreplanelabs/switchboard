@@ -86,6 +86,10 @@ Directives in the message always win and persist nothing:
 
 Nothing set here bypasses a restriction; the gate applies when a run starts.
 
+## From the dashboard
+
+Open **Settings → Channels** on the dashboard (`/settings/channels`): every channel that carries a scope, and one channel's scope as a form — agent, models, effort, the boundary and the instructions — over the same `config set channel`, `config instructions channel` and `config clear channel`. Your own defaults stay in chat (`config set me`), where your runs are requested as you. **Settings → Installation** shows the `config.yaml` values in force, the `defaults.*` a channel overrides among them.
+
 ## Next
 
 - [Slack commands](../reference/slack-commands.md#config): every `config` flag.

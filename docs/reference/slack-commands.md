@@ -50,6 +50,7 @@ Combine freely: `agent:ship model:anthropic/claude-opus-5 effort:high in acme/ap
 | Command | What it does | Who can run it |
 |---|---|---|
 | `config show [--channel <string>]` | The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted. | anyone |
+| `config overrides` | Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; `config show --channel <id>` reads one. | anyone |
 | `config set <channel\|me> [--agent <string>] [--model <string>] [--models <object>] [--effort <low\|medium\|high\|xhigh\|max>] [--efforts <object>] [--boundary <object>] [--channel <string>]` | Set the agent, model, effort or boundary for a channel (gated) or for yourself; per-agent forms take --models.&lt;agent&gt; / --efforts.&lt;agent&gt;, the boundary's axes --boundary.&lt;axis&gt; (a boundary caps every run in the scope and never grants). | anyone |
 | `config clear <channel\|me> [--channel <string>]` | Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again. | anyone |
 | `config instructions <channel\|me> [text…] [--channel <string>]` | Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions. | anyone |

@@ -273,6 +273,7 @@ export function buildCoreCommands(
       setUserOverride: async (u, p) => (await cfg()).setUserOverride(u, p),
       clearChannelOverride: async (c) => (await cfg()).clearChannelOverride(c),
       clearUserOverride: async (u) => (await cfg()).clearUserOverride(u),
+      channelsWithScope: async () => (await cfg()).channelsWithScope(),
       agentNames: () => Object.keys(AGENTS),
     },
     channelVisibility: (channelId) => {

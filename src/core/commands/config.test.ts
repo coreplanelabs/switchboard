@@ -9,7 +9,13 @@ import { CommandRegistry, bindCommands, renderText, type Caller, type CommandInv
 import { callerWith } from "../testing/callers.js";
 import { EFFORT_LEVELS } from "../../effort.js";
 import { helpRows, parseInvocation, tokenize } from "../commandSurface.js";
-import { configCommands, configSet, registerConfigCommands, type ConfigCommandDeps } from "./config.js";
+import {
+  configCommands,
+  configSet,
+  ME_ON_ACCESS_MESSAGE,
+  registerConfigCommands,
+  type ConfigCommandDeps,
+} from "./config.js";
 
 // Feature: docs/reference/specs/routing-and-config.md items 5, 9 / docs/reference/specs/command-registry.md
 // (phase 4b): `config show|set|clear|instructions` as registry commands. The
@@ -61,6 +67,7 @@ function configDeps(config: ConfigStore) {
     setUserOverride: (u: string, p: Parameters<ConfigStore["setUserOverride"]>[1]) => config.setUserOverride(u, p),
     clearChannelOverride: (c: string) => config.clearChannelOverride(c),
     clearUserOverride: (u: string) => config.clearUserOverride(u),
+    channelsWithScope: async () => config.channelsWithScope(),
   };
 }
 
@@ -136,6 +143,79 @@ describe("config show", () => {
     expect(
       await commands.invoke("config.show", { options: { channel: "slack:COTHER" } }, mcp("dispatch")),
     ).toMatchObject({ ok: false, error: "unauthorized" });
+  });
+});
+
+// Feature: docs/reference/specs/routing-and-config.md item 24: `config overrides`
+// is the index of configured channels — setting names, never values — filtered
+// by the same per-channel `config:read` question `config show --channel` asks,
+// so it never names a channel whose scope the caller could not then read.
+describe("config overrides — the index of configured channels", () => {
+  const visibilityOf =
+    (answers: Record<string, "public" | "private">, calls: string[] = []) =>
+    async (channelId: string) => {
+      calls.push(channelId);
+      return answers[channelId] ?? ("unknown" as const);
+    };
+
+  it("an admin sees every configured channel with its setting names and source, and the directory is never asked", async () => {
+    const config = store();
+    await config.setChannelOverride("slack:CPRIVATE", { instructions: "Secret channel rules." });
+    await config.setChannelOverride("slack:CPUBLIC", { agent: "review", models: { review: "anthropic/x" } });
+    const calls: string[] = [];
+    const commands = bind(config, visibilityOf({ "slack:CPUBLIC": "public", "slack:CPRIVATE": "private" }, calls));
+    const { res, text } = await say(commands, "config overrides", chat(config, "slack:UADMIN"));
+    expect(res).toMatchObject({
+      ok: true,
+      value: {
+        channels: [
+          { channelId: "slack:CPRIVATE", settings: ["instructions"], source: "runtime" },
+          { channelId: "slack:CPUBLIC", settings: ["agent", "models"], source: "runtime" },
+        ],
+      },
+    });
+    expect(text).toBe("slack:CPRIVATE: instructions (runtime)\nslack:CPUBLIC: agent, models (runtime)");
+    expect(text).not.toContain("Secret");
+    expect(calls).toEqual([]);
+  });
+
+  it("a chat user without the grant sees public channels and the one they speak from; private and unknown ones are absent, not greyed", async () => {
+    const config = store();
+    await config.setChannelOverride("slack:CPRIVATE", { instructions: "Secret channel rules." });
+    await config.setChannelOverride("slack:CPUBLIC", { agent: "review" });
+    await config.setChannelOverride("slack:CX", { agent: "review" });
+    await config.setChannelOverride("slack:CNOWHERE", { agent: "review" });
+    const commands = bind(config, visibilityOf({ "slack:CPUBLIC": "public", "slack:CPRIVATE": "private" }));
+    const { res } = await say(commands, "config overrides", chat(config, "slack:UX"));
+    expect(
+      (res as unknown as { value: { channels: { channelId: string }[] } }).value.channels.map((c) => c.channelId),
+    ).toEqual(["slack:CPUBLIC", "slack:CX"]);
+  });
+
+  it("a machine caller needs config:read and, without a grant on the channels, sees only the public ones", async () => {
+    const config = store();
+    await config.setChannelOverride("slack:CPRIVATE", { agent: "review" });
+    await config.setChannelOverride("slack:CPUBLIC", { agent: "review" });
+    const commands = bind(config, visibilityOf({ "slack:CPUBLIC": "public", "slack:CPRIVATE": "private" }));
+    expect(await commands.invoke("config.overrides", {}, mcp("dispatch"))).toMatchObject({
+      ok: false,
+      error: "unauthorized",
+    });
+    const reader = callerWith("mcp", "mcp:reader", { actions: new Set(["config:read"]) });
+    expect(await commands.invoke("config.overrides", {}, reader)).toMatchObject({
+      ok: true,
+      value: { channels: [{ channelId: "slack:CPUBLIC" }] },
+    });
+    expect(await commands.invoke("config.overrides", {}, mcp("config:read"))).toMatchObject({
+      ok: true,
+      value: { channels: [{ channelId: "slack:CPRIVATE" }, { channelId: "slack:CPUBLIC" }] },
+    });
+  });
+
+  it("renders the empty index as a sentence", async () => {
+    const config = store(YAML);
+    const { text } = await say(bind(config), "config overrides", chat(config, "slack:UADMIN"));
+    expect(text).toBe("No channel carries a scope.");
   });
 });
 
@@ -358,8 +438,9 @@ describe("config set", () => {
     });
   });
 
-  it("a credential needs config:write for any scope; a person always has their own scope — an Access browser session without an operators entry writes `me`, never `channel`", async () => {
-    const commands = bind(store());
+  it("a credential needs config:write for any scope; a chat person always has their own scope; an Access browser session writes neither `me` (no run is its) nor `channel` (no grant)", async () => {
+    const config = store();
+    const commands = bind(config);
     expect(
       await commands.invoke("config.set", { args: ["me"], options: { agent: "review" } }, mcp("config:read")),
     ).toMatchObject({ ok: false, error: "unauthorized", decidedBy: "registry" });
@@ -370,12 +451,32 @@ describe("config set", () => {
     expect(
       await commands.invoke("config.set", { args: ["me"], options: { agent: "review" } }, mcp("dispatch")),
     ).toMatchObject({ ok: false, error: "unauthorized", decidedBy: "registry" });
-    // The one deliberate departure from the pre-table gates: a browser session may write ITS OWN scope (`config-scope/user` is the user's,
-    // and nothing dispatches as an Access identity); the channel scope stays the channel-config right it never held.
+    // A browser session's `me` is a scope no run reads (nothing dispatches as an
+    // Access identity), so the handler refuses it with the pointer to chat
+    // (record 0041); the channel scope stays the channel-config right it never held.
     const browser = callerWith("access", "access:u", ["config:read"]);
-    expect((await commands.invoke("config.set", { args: ["me"], options: { agent: "review" } }, browser)).ok).toBe(
-      true,
-    );
+    expect(await commands.invoke("config.set", { args: ["me"], options: { agent: "review" } }, browser)).toMatchObject({
+      ok: false,
+      error: "unauthorized",
+      decidedBy: "handler",
+      message: ME_ON_ACCESS_MESSAGE,
+    });
+    expect(await commands.invoke("config.clear", { args: ["me"] }, browser)).toMatchObject({
+      ok: false,
+      error: "unauthorized",
+      message: ME_ON_ACCESS_MESSAGE,
+    });
+    expect(await commands.invoke("config.instructions", { args: ["me", "Be brief."] }, browser)).toMatchObject({
+      ok: false,
+      error: "unauthorized",
+      message: ME_ON_ACCESS_MESSAGE,
+    });
+    // The peek is a read of an empty scope, not a write: still answered.
+    expect(await commands.invoke("config.instructions", { args: ["me"] }, browser)).toMatchObject({
+      ok: true,
+      value: { scope: "me", action: "show" },
+    });
+    expect(config.scopes("slack:CX", "access:u").user).toEqual({});
     expect(
       await commands.invoke(
         "config.set",

@@ -1,5 +1,10 @@
 import { z } from "zod";
-import { formatConfigDescription, type ConfigDescription, type Scope } from "../../config.js";
+import {
+  formatConfigDescription,
+  type ChannelScopeIndexRow,
+  type ConfigDescription,
+  type Scope,
+} from "../../config.js";
 import { boundaryProblem, MAX_INSTRUCTIONS_LENGTH, MIN_BOUNDARY_MINUTES } from "../../config/validate.js";
 import type { Boundary } from "../../config/profile.js";
 import { IDENTITIES, MACHINE_CLASSES, type MachineClass } from "../../agents/registry.js";
@@ -19,6 +24,7 @@ import {
 
 // The `config.*` registrations (phase 4b): runtime config on the typed model.
 //   config show [--channel <id>]
+//   config overrides                       — the channels that carry a scope, setting names only
 //   config set <channel|me> [--agent x] [--model p/m] [--models.<agent> p/m] [--effort e] [--efforts.<agent> e]
 //                           [--boundary.maxMinutes n] [--boundary.maxIdentity none|read|write] [--boundary.machines a,b] [--channel <id>]
 //   config clear <channel|me> [--channel <id>]
@@ -50,6 +56,8 @@ export interface ConfigCommandDeps {
     setUserOverride(userId: string, patch: Scope): Promise<Scope>;
     clearChannelOverride(channelId: string): Promise<void>;
     clearUserOverride(userId: string): Promise<void>;
+    /** Every channel with a scope, names only (`ConfigStore.channelsWithScope`), before the per-channel read gate. */
+    channelsWithScope(): Promise<ChannelScopeIndexRow[]>;
     /** The agent names a scope may pin (`AGENTS` keys). */
     agentNames(): string[];
   };
@@ -118,6 +126,20 @@ function assertMayEditChannel(caller: Caller, channel: string): void {
     throw new CommandError("unauthorized", "Channel config changes are restricted.");
 }
 
+/** Why a `me` write is refused on the Access surface (record 0041): a browser
+ *  session never requests a run, so the scope it would write is read by nothing. */
+export const ME_ON_ACCESS_MESSAGE =
+  "Personal settings are set in chat (`config set me`, `config instructions me`): your runs are requested as your chat user, not as this browser session, so a setting written here would apply to nothing. Use `channel` here.";
+
+/** The `me` scope is the caller's own user scope, and a run reads the scope
+ *  of the user who requested it — a chat user. The Access surface (the
+ *  dashboard, a dashboard bearer) never requests a run, so its `me` would be
+ *  a setting that lies: refused by the data, on every surface that carries the
+ *  `access` kind (docs/reference/specs/command-registry.md item 22). */
+function assertMeWritable(caller: Caller): void {
+  if (caller.kind === "access") throw new CommandError("unauthorized", ME_ON_ACCESS_MESSAGE);
+}
+
 /** Reading a channel's scope — its instructions text included — from another
  *  channel is the table's decision (authorization.md item 4, the `config:read`
  *  rows on `config-scope { channel }`), asked twice: for the caller's own actor
@@ -129,15 +151,26 @@ function assertMayEditChannel(caller: Caller, channel: string): void {
  *  — no directory, a failed or slow lookup — reads as private: fail-closed. One
  *  refusal text for private, DM, unknown and nonexistent alike: the reply says
  *  nothing about the channel a workspace member could not already learn. */
-async function assertMayReadChannel(caller: Caller, channel: string, deps: ConfigCommandDeps): Promise<void> {
+async function mayReadChannel(caller: Caller, channel: string, deps: ConfigCommandDeps): Promise<boolean> {
   const origin = caller.origin?.channelId;
+  const scopeAt = (visibility: ChannelVisibility) =>
+    ({ type: "config-scope", kind: "channel", id: channel, visibility }) as const;
+  // A grant (or the caller's own membership) admits the read whatever the
+  // channel's visibility, so the directory is asked only when it could change
+  // the answer — an admin listing every configured channel asks it never.
+  if (authorize(caller.actor, "config:read", scopeAt("unknown")).allow) return true;
   const visibility: ChannelVisibility =
     origin === channel || !deps.channelVisibility ? "unknown" : await deps.channelVisibility(channel);
-  const scope = { type: "config-scope", kind: "channel", id: channel, visibility } as const;
-  const allowed =
+  const scope = scopeAt(visibility);
+  return (
     authorize(caller.actor, "config:read", scope).allow ||
-    (origin !== undefined && authorize(pointingActor(caller.actor, origin), "config:read", scope).allow);
-  if (!allowed) throw new CommandError("unauthorized", "That channel's config is restricted.");
+    (origin !== undefined && authorize(pointingActor(caller.actor, origin), "config:read", scope).allow)
+  );
+}
+
+async function assertMayReadChannel(caller: Caller, channel: string, deps: ConfigCommandDeps): Promise<void> {
+  if (!(await mayReadChannel(caller, channel, deps)))
+    throw new CommandError("unauthorized", "That channel's config is restricted.");
 }
 
 /** Scope as shown in replies: instructions are elided to their length so a
@@ -170,6 +203,30 @@ export const configShow = defineCommand({
       channelConfigRestricted: !mayEditChannel(caller, channel),
     };
     return description as unknown as JsonValue;
+  },
+});
+
+// ---- config overrides ---------------------------------------------------------------
+
+export const configOverrides = defineCommand({
+  id: "config.overrides",
+  options: z.object({}),
+  action: "config:read",
+  effect: "read",
+  describe:
+    "Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; `config show --channel <id>` reads one.",
+  render: (output) => {
+    const rows = (output as unknown as { channels: ChannelScopeIndexRow[] }).channels;
+    if (rows.length === 0) return "No channel carries a scope.";
+    return rows.map((r) => `${r.channelId}: ${r.settings.join(", ")} (${r.source})`).join("\n");
+  },
+  handler: async ({ caller, deps }) => {
+    // The same per-channel question `config show --channel` asks, so the index
+    // never names a channel whose scope the caller could not then read; the
+    // lookups run side by side, each bounded like a run's visibility stamp.
+    const rows = await deps.config.channelsWithScope();
+    const readable = await Promise.all(rows.map((r) => mayReadChannel(caller, r.channelId, deps)));
+    return { channels: rows.filter((_, i) => readable[i]) } as unknown as JsonValue;
   },
 });
 
@@ -249,6 +306,7 @@ export const configSet = defineCommand({
       assertMayEditChannel(caller, channel);
       effective = await deps.config.setChannelOverride(channel, patch);
     } else {
+      assertMeWritable(caller);
       effective = await deps.config.setUserOverride(caller.id, patch);
     }
     return { scope: args.scope, effective: summarizeScope(effective) };
@@ -272,6 +330,7 @@ export const configClear = defineCommand({
       assertMayEditChannel(caller, channel);
       await deps.config.clearChannelOverride(channel);
     } else {
+      assertMeWritable(caller);
       await deps.config.clearUserOverride(caller.id);
     }
     return { scope: args.scope, cleared: true };
@@ -339,6 +398,7 @@ export const configInstructions = defineCommand({
       assertMayEditChannel(caller, channel);
       effective = await deps.config.setChannelOverride(channel, patch);
     } else {
+      assertMeWritable(caller);
       effective = await deps.config.setUserOverride(caller.id, patch);
     }
     if (text.length === 0) {
@@ -353,6 +413,7 @@ export const configInstructions = defineCommand({
 
 export const configCommands: readonly CommandDef<ConfigCommandDeps>[] = [
   configShow,
+  configOverrides,
   configSet,
   configClear,
   configInstructions,
