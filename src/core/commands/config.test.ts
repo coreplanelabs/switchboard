@@ -714,3 +714,35 @@ describe("config set --boundary.<axis> and config show's effective boundary", ()
     });
   });
 });
+
+// Feature: docs/decisions/0042 — a dashboard session linked to its person writes and
+// reads the PERSON's scope as `me`; an unlinked session is still refused (record 0041).
+describe("config `me` for a linked dashboard session (record 0042)", () => {
+  const linkedBrowser = (config: ConfigStore): Caller => {
+    const base = callerWith("access", "access:u", ["config:read"]);
+    void config;
+    return {
+      ...base,
+      actor: { ...base.actor, self: ["access:u", "slack:UX"], asUser: { id: "slack:UX", name: "ux" } },
+    };
+  };
+
+  it("config set|instructions|clear me act on the linked person's scope, which the person's chat runs read; the browser's own scope stays empty", async () => {
+    const config = store();
+    const commands = bind(config);
+    const me = linkedBrowser(config);
+    expect(await commands.invoke("config.set", { args: ["me"], options: { agent: "review" } }, me)).toMatchObject({
+      ok: true,
+      value: { scope: "me", effective: { agent: "review" } },
+    });
+    expect(await commands.invoke("config.instructions", { args: ["me", "Be brief."] }, me)).toMatchObject({ ok: true });
+    expect(config.scopes("slack:CX", "slack:UX").user).toEqual({ agent: "review", instructions: "Be brief." });
+    expect(config.scopes("slack:CX", "access:u").user).toEqual({});
+    expect(config.resolve({ channelId: "slack:CX", userId: "slack:UX", request: {} }).agentName).toBe("review");
+    // `config show` describes the person's scope for the linked session.
+    const shown = await commands.invoke("config.show", { options: { channel: "slack:CX" } }, me);
+    expect(shown).toMatchObject({ ok: true, value: { user: { agent: "review" } } });
+    expect(await commands.invoke("config.clear", { args: ["me"] }, me)).toMatchObject({ ok: true });
+    expect(config.scopes("slack:CX", "slack:UX").user).toEqual({});
+  });
+});

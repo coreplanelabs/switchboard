@@ -355,3 +355,34 @@ describe("mcp.* commands — the connect follow-up (settle, item 19)", () => {
     });
   });
 });
+
+// Feature: docs/decisions/0042 — a dashboard session linked to its person manages the
+// PERSON's MCP tier as `me`: the self-serve row admits it, `addedBy` names the person.
+describe("mcp `me` for a linked dashboard session (record 0042)", () => {
+  it("add without --scope lands in the person's tier with addedBy the person; list shows it; the unlinked session stays refused", async () => {
+    const { svc } = service();
+    const inv = bind(svc);
+    const base = callerWith("access", "access:sub-1", ["mcp:read"]);
+    const linked: Caller = {
+      ...base,
+      actor: { ...base.actor, self: ["access:sub-1", "slack:ULINK"], asUser: { id: "slack:ULINK", name: "link" } },
+    };
+    const added = await inv.invoke(
+      "mcp.add",
+      { args: ["vanta"], options: { url: "https://mcp.vanta.com/mcp" } },
+      linked,
+    );
+    expect(added).toMatchObject({
+      ok: true,
+      value: { server: { name: "vanta", scope: "user", scopeKey: "user:slack:ULINK", addedBy: "slack:ULINK" } },
+    });
+    expect(await text(inv, "mcp.list", {}, linked)).toContain("`vanta` (user)");
+    expect(await inv.invoke("mcp.remove", { args: ["vanta"] }, linked)).toMatchObject({ ok: true });
+    expect(
+      await inv.invoke("mcp.add", { args: ["vanta"], options: { url: "https://mcp.vanta.com/mcp" } }, base),
+    ).toMatchObject({
+      ok: false,
+      error: "unauthorized",
+    });
+  });
+});

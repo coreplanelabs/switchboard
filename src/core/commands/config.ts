@@ -126,18 +126,31 @@ function assertMayEditChannel(caller: Caller, channel: string): void {
     throw new CommandError("unauthorized", "Channel config changes are restricted.");
 }
 
-/** Why a `me` write is refused on the Access surface (record 0041): a browser
- *  session never requests a run, so the scope it would write is read by nothing. */
+/** Why a `me` write is refused on the Access surface when the session is not
+ *  linked to a person (records 0041, 0042): a browser session never requests
+ *  a run, so the scope it would write is read by nothing. */
 export const ME_ON_ACCESS_MESSAGE =
   "Personal settings are set in chat (`config set me`, `config instructions me`): your runs are requested as your chat user, not as this browser session, so a setting written here would apply to nothing. Use `channel` here.";
 
-/** The `me` scope is the caller's own user scope, and a run reads the scope
- *  of the user who requested it — a chat user. The Access surface (the
- *  dashboard, a dashboard bearer) never requests a run, so its `me` would be
- *  a setting that lies: refused by the data, on every surface that carries the
- *  `access` kind (docs/reference/specs/command-registry.md item 22). */
-function assertMeWritable(caller: Caller): void {
-  if (caller.kind === "access") throw new CommandError("unauthorized", ME_ON_ACCESS_MESSAGE);
+/**
+ * The id whose scope `me` means for this caller (record 0042): a chat user,
+ * the CLI and a token are themselves; an Access caller is the person its
+ * session is linked to (`actor.self` carries the `slack:U…` id when the
+ * session's email named one), and nobody when it is not — its own
+ * `access:<sub>` scope is read by no run, so `me` there would be a setting
+ * that lies. Exported for the surfaces that read a person's scope as the viewer.
+ */
+export function meIdOf(caller: Caller): string | undefined {
+  if (caller.kind !== "access") return caller.id;
+  return caller.actor.self?.find((id) => id.startsWith("slack:"));
+}
+
+/** The `me` scope a write may reach, or the refusal by the data
+ *  (docs/reference/specs/command-registry.md item 22) for an unlinked Access session. */
+function meIdOrRefuse(caller: Caller): string {
+  const id = meIdOf(caller);
+  if (id === undefined) throw new CommandError("unauthorized", ME_ON_ACCESS_MESSAGE);
+  return id;
 }
 
 /** Reading a channel's scope — its instructions text included — from another
@@ -199,7 +212,7 @@ export const configShow = defineCommand({
     await assertMayReadChannel(caller, channel, deps);
     // The same question `config set channel` asks, answered for THIS caller's actor — the CLI's `all`, a token's grants, a Slack user's — never for an id the store looks up on its own.
     const description: ConfigDescription = {
-      ...(await deps.config.describeConfig(channel, caller.id)),
+      ...(await deps.config.describeConfig(channel, meIdOf(caller) ?? caller.id)),
       channelConfigRestricted: !mayEditChannel(caller, channel),
     };
     return description as unknown as JsonValue;
@@ -306,8 +319,7 @@ export const configSet = defineCommand({
       assertMayEditChannel(caller, channel);
       effective = await deps.config.setChannelOverride(channel, patch);
     } else {
-      assertMeWritable(caller);
-      effective = await deps.config.setUserOverride(caller.id, patch);
+      effective = await deps.config.setUserOverride(meIdOrRefuse(caller), patch);
     }
     return { scope: args.scope, effective: summarizeScope(effective) };
   },
@@ -330,8 +342,7 @@ export const configClear = defineCommand({
       assertMayEditChannel(caller, channel);
       await deps.config.clearChannelOverride(channel);
     } else {
-      assertMeWritable(caller);
-      await deps.config.clearUserOverride(caller.id);
+      await deps.config.clearUserOverride(meIdOrRefuse(caller));
     }
     return { scope: args.scope, cleared: true };
   },
@@ -379,7 +390,7 @@ export const configInstructions = defineCommand({
     const channel = args.scope === "channel" ? targetChannel(caller, options.channel) : undefined;
     // The peek reads another channel's text under the same rule `config show` does; a write is gated below.
     if (args.text === undefined && channel !== undefined) await assertMayReadChannel(caller, channel, deps);
-    const scopes = await deps.config.scopes(channel ?? caller.origin?.channelId ?? "", caller.id);
+    const scopes = await deps.config.scopes(channel ?? caller.origin?.channelId ?? "", meIdOf(caller) ?? caller.id);
     const current = (args.scope === "channel" ? scopes.channel : scopes.user).instructions?.trim();
     // No value at all only SHOWS the current text (a peek must never clear).
     if (args.text === undefined)
@@ -398,8 +409,7 @@ export const configInstructions = defineCommand({
       assertMayEditChannel(caller, channel);
       effective = await deps.config.setChannelOverride(channel, patch);
     } else {
-      assertMeWritable(caller);
-      effective = await deps.config.setUserOverride(caller.id, patch);
+      effective = await deps.config.setUserOverride(meIdOrRefuse(caller), patch);
     }
     if (text.length === 0) {
       // Deleting the runtime key lets any static config.yaml text show

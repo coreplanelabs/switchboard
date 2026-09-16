@@ -2,6 +2,7 @@ import { z } from "zod";
 import { MCP_SERVER_NAME_PATTERN } from "../../mcp/config.js";
 import { MCP_OFF_MESSAGE, McpServiceError, type McpActor, type McpService } from "../../mcp/service.js";
 import { authorize } from "../authz/authorize.js";
+import { meIdOf } from "./config.js";
 import {
   CommandError,
   commandDefiner,
@@ -74,7 +75,9 @@ async function serviceOf(deps: McpCommandDeps): Promise<McpService> {
  *  the caller named one (or speaks from one); the row reads no attribute of it. */
 function actorOf(caller: Caller, channel: string | undefined): McpActor {
   return {
-    id: caller.id,
+    // The person, for a dashboard session linked to one (record 0042): its
+    // own tier, `addedBy` and the connect ticket's email are the person's.
+    id: meIdOf(caller) ?? caller.id,
     orgAdmin: authorize(caller.actor, "mcp:write", { type: "config-scope", kind: "org" }).allow,
     channelAdmin: authorize(caller.actor, "mcp:write", { type: "config-scope", kind: "channel", id: channel ?? "" })
       .allow,
@@ -85,15 +88,17 @@ function channelOf(caller: Caller, option: string | undefined): string | undefin
   return option ?? caller.origin?.channelId;
 }
 
-/** Why a `me` write is refused on the Access surface (record 0041): a browser
- *  session never requests a run, so a server on its own tier would reach no run. */
+/** Why a `me` write is refused on the Access surface when the session is not
+ *  linked to a person (records 0041, 0042): a browser session never requests
+ *  a run, so a server on its own tier would reach no run. */
 export const MCP_ME_ON_ACCESS_MESSAGE =
   "Personal MCP servers are added in chat (`mcp add <name> --url …`): your runs are requested as your chat user, not as this browser session, so a server added here for yourself would reach no run. Pass --scope org or --scope channel.";
 
 /** The tier a write targets. `me` (the default) is the caller's own user tier,
- *  and a run resolves the tier of the user who requested it — a chat user; the
- *  Access surface never requests a run, so its `me` is refused by the data
- *  (docs/reference/specs/command-registry.md item 22), before any store is touched. */
+ *  and a run resolves the tier of the user who requested it — a chat user; an
+ *  Access session not linked to a person (`meIdOf` undefined) never requests a
+ *  run, so its `me` is refused by the data (docs/reference/specs/command-registry.md
+ *  item 22), before any store is touched. A linked session's `me` is its person's. */
 async function writeTarget(
   svc: McpService,
   caller: Caller,
@@ -101,7 +106,7 @@ async function writeTarget(
   word: "me" | "channel" | "org" | undefined,
   channel: string | undefined,
 ) {
-  if ((word ?? "me") === "me" && caller.kind === "access")
+  if ((word ?? "me") === "me" && meIdOf(caller) === undefined)
     throw new CommandError("unauthorized", MCP_ME_ON_ACCESS_MESSAGE);
   return via(() => svc.target(actor, word ?? "me", channel));
 }

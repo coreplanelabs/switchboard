@@ -47,6 +47,16 @@ export interface Actor {
   readonly onBehalfOf?: Actor;
   /** Where a chat actor is speaking from — context, never authority. */
   readonly origin?: { readonly channelId: string; readonly threadKey: string };
+  /**
+   * The ids that mean "me" for this actor (record 0042): its own `id` first,
+   * then the person it is linked to — a dashboard session whose Access email
+   * names one Slack user carries that `slack:U…` id here. Read by `is-self`,
+   * `acts-as-person`, the `me` tier and the "mine" filters; NEVER by a grant
+   * check — the link is identity, not authority. Absent → `[id]`.
+   */
+  readonly self?: readonly string[];
+  /** The linked person, for display and the audit line (`asUser`); absent when unlinked. */
+  readonly asUser?: { readonly id: string; readonly name?: string };
 }
 
 /** `<group>:<read|write|exec>` plus the non-command actions. A plain
@@ -103,8 +113,12 @@ export type Condition =
    *  resource's channel is `public` (a run's stamped `channelVisibility`;
    *  `unknown` is never public). One definition for both evaluators. */
   | { readonly kind: "member-of" }
-  /** resource.userId === actor.id (or the on-behalf-of principal's id). */
+  /** resource.userId is one of the principal's `self` ids (its own id, or the person it is linked to). */
   | { readonly kind: "is-self" }
+  /** The principal's `self` names a chat identity (`slack:U…`): every chat
+   *  actor, and a dashboard session linked to its person (record 0042) — never
+   *  an unlinked browser session or a credential. */
+  | { readonly kind: "acts-as-person" }
   /** actor.grants.repos contains the resource's repo (or is "all"). */
   | { readonly kind: "owner-of" }
   /** actor.grants.channels === "all". */

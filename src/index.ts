@@ -40,7 +40,7 @@ import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 import { buildMcp } from "./mcp/index.js";
 import { NullMcpToolSource } from "./mcp/source.js";
 import { createMcpConnectViewHandler, isConnectPath } from "./channels/mcpConnectView.js";
-import { resolveUserEmail } from "./channels/slack/lookups.js";
+import { resolvePersonByEmail, resolveUserEmail } from "./channels/slack/lookups.js";
 import { mdToMrkdwn } from "./channels/mrkdwn.js";
 import { buildMemoryStore, NullMemoryStore, pendingReflectionCount } from "./core/memory/index.js";
 import { healthPayload, readBuildInfo } from "./channels/health.js";
@@ -109,11 +109,12 @@ import { SCHEDULES } from "./core/schedules.js";
 // --- command registry adapters ---
 import { buildCoreCommands, deliveryFromConfig } from "./core/commandCatalogue.js";
 import {
-  accessActor,
   callerFor,
   createCommandHttpHandler,
   isCommandPath,
+  resolveAccessActor,
   serviceTokenAllowed,
+  type PersonLookup,
 } from "./channels/commandHttp.js";
 import { coreCommandGroups } from "./core/commands/all.js";
 // --- end command registry adapters ---
@@ -200,6 +201,9 @@ export async function runBot(): Promise<void> {
   // Access-gated connect page work off ONE service, and its servers are the
   // per-run tool source. Requester emails come from Slack once the app exists.
   let slackEmailLookup: ((userId: string) => Promise<string | undefined>) | undefined;
+  let slackPersonByEmail: PersonLookup | undefined;
+  const personByEmail: PersonLookup = (email) =>
+    slackPersonByEmail ? slackPersonByEmail(email) : Promise.resolve(undefined);
   const mcpWiring = buildMcp(config, processSecrets, {
     publicBaseUrl: process.env.PUBLIC_BASE_URL,
     resolveEmail: (userId) => (slackEmailLookup ? slackEmailLookup(userId) : Promise.resolve(undefined)),
@@ -531,6 +535,10 @@ export async function runBot(): Promise<void> {
     userId.startsWith("slack:")
       ? resolveUserEmail(app.client, userId.slice("slack:".length))
       : Promise.resolve(undefined);
+  // The dashboard link (record 0042): a browser session's Access email names
+  // its Slack person, resolved once per gate pass through a cached reverse
+  // lookup — identity, never authority.
+  slackPersonByEmail = (email) => resolvePersonByEmail(app.client, email);
 
   // Work in flight = agent runs + the background memory reflections they spawn
   // + run-history writes still retrying (a record lost at SIGTERM is
@@ -689,7 +697,7 @@ export async function runBot(): Promise<void> {
     const settingsView = createSettingsViewHandler(
       {
         commands,
-        callerFor: (identity) => callerFor(identity, { grantsFor: (id) => config.grantsFor(id) }),
+        callerFor: (identity) => callerFor(identity, { grantsFor: (id) => config.grantsFor(id), personByEmail }),
         installation: () => installationSettings(config.config, capabilities),
         vocabulary: {
           agents: Object.keys(AGENTS),
@@ -729,7 +737,7 @@ export async function runBot(): Promise<void> {
     // Access-authenticated viewer, so — like the index — they must only be
     // exposed behind Access, and both are bound to that viewer's actor
     // (docs/reference/specs/authorization.md items 5–7): the gate's identity is
-    // resolved with the SAME `accessActor` the /api adapter uses and handed to
+    // resolved with the SAME `resolveAccessActor` the /api adapter uses and handed to
     // the handler as `ctx.actor` below, so the index lists and the run page
     // reads exactly what `/api/runs.*` would for that identity — under the
     // `token` strategy the configured actor, under `none` the local operator
@@ -788,6 +796,7 @@ export async function runBot(): Promise<void> {
     // all of /api/* and answers its own 404. ---
     const commandHttp = createCommandHttpHandler(commands, {
       grantsFor: (id) => config.grantsFor(id),
+      personByEmail,
       publicBaseUrl,
     });
     const commandHttpState = `GET|POST /api/<group>.<verb> (${commands.list().length} commands)`;
@@ -897,7 +906,7 @@ export async function runBot(): Promise<void> {
       ) {
         dashboardAuth
           .verify(req)
-          .then((gate) => {
+          .then(async (gate) => {
             if (!gate.ok) {
               res.writeHead(gate.status, { "content-type": "text/plain; charset=utf-8" });
               res.end(gate.body);
@@ -915,7 +924,12 @@ export async function runBot(): Promise<void> {
             // --- /api/*: the command handler owns everything under it. ---
             if (isCommandPath(path)) return commandHttp(req, res, gate.identity);
             // --- end /api/* ---
-            const actor = accessActor(gate.identity, (id) => config.grantsFor(id));
+            // The pages' actor: the same resolution `/api` makes, linked to its
+            // person when the session's email names one (record 0042).
+            const actor = await resolveAccessActor(gate.identity, {
+              grantsFor: (id) => config.grantsFor(id),
+              personByEmail,
+            });
             if (liveView(req, res, { actor })) return;
             // --- /mcp/connect/<nonce>: the credential page, identity-bound. ---
             if (mcpConnectView(req, res, gate.identity)) return;

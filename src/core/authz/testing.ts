@@ -134,6 +134,13 @@ export const ACTORS = {
   chatUserGated: actor("user", "slack:UGUS", { actions: new Set(CHAT_OPEN_ACTIONS) }),
   /** An unlisted Access browser session: every group's read, nothing else. */
   browser: actor("user", "access:viewer", { actions: browserReadActions(COMMAND_GROUPS) }),
+  /** The same session linked to its person (record 0042): the same grants, a second self id. */
+  linkedBrowser: actor(
+    "user",
+    "access:linked",
+    { actions: browserReadActions(COMMAND_GROUPS) },
+    { self: ["access:linked", "slack:UHANK"], asUser: { id: "slack:UHANK", name: "hank" } },
+  ),
   /** An Access operator (granted every read + write with `channels: all`): fleet-wide, never exec. */
   operator: actor("user", "access:op", {
     actions: new Set(COMMAND_GROUPS.flatMap((g) => [`${g}:read`, `${g}:write`])),

@@ -26,7 +26,9 @@ const OPERATOR_AND_READER: GrantsConfig = {
 };
 import { callerWith } from "../core/testing/callers.js";
 import {
+  accessActor,
   callerFor,
+  resolveAccessActor,
   callerIdFor,
   createCommandHttpHandler,
   isCommandPath,
@@ -532,25 +534,85 @@ describe("callerIdFor — one Access identity → caller id mapping for /api and
           commandGroups: ["runs"],
         }),
     };
-    expect(callerFor({ sub: "op-1" }, opts).actor).toEqual({ kind: "user", id: "access:op-1", grants: ALL_GRANTS });
+    expect((await callerFor({ sub: "op-1" }, opts)).actor).toEqual({
+      kind: "user",
+      id: "access:op-1",
+      grants: ALL_GRANTS,
+    });
     // An unlisted browser session: the reads its translation gives, nothing the adapter added.
-    expect(callerFor(browser, opts).actor).toEqual({
+    expect((await callerFor(browser, opts)).actor).toEqual({
       kind: "user",
       id: "access:user-1",
       grants: { actions: new Set(["runs:read"]), channels: new Set(), repos: new Set() },
     });
-    expect(callerFor(readerBot, opts).actor).toEqual({
+    expect((await callerFor(readerBot, opts)).actor).toEqual({
       kind: "service",
       id: "access:svc:reader-bot",
       grants: { actions: new Set(["runs:read"]), channels: "all", repos: new Set() },
     });
-    expect(callerFor(browser, opts)).toEqual({
+    expect(await callerFor(browser, opts)).toEqual({
       kind: "access",
       id: "access:user-1",
-      actor: callerFor(browser, opts).actor,
+      actor: (await callerFor(browser, opts)).actor,
     });
     // No lookup knowledge → no grants (fail-closed).
-    expect(callerFor(browser, { grantsFor: () => NO_GRANTS }).actor.grants).toBe(NO_GRANTS);
+    expect((await callerFor(browser, { grantsFor: () => NO_GRANTS })).actor.grants).toBe(NO_GRANTS);
+  });
+
+  // Feature: docs/decisions/0042 — the dashboard link is identity, never authority.
+  it("resolveAccessActor links a browser session whose email names a Slack person as a second self id and asUser, with id and grants unchanged; no email, no lookup, no match, a bot, a failure, or a service token → the unlinked actor", async () => {
+    const grantsLookup = (id: string) => grantsFor(id, { commandGroups: ["runs"] });
+    const people: Record<string, { id: string; name?: string } | undefined> = {
+      "alice@example.test": { id: "slack:UALICE", name: "alice" },
+      "bot@example.test": undefined,
+    };
+    const personByEmail = async (email: string) => people[email];
+    const alice = { sub: "a1", email: "alice@example.test" };
+    const linked = await resolveAccessActor(alice, { grantsFor: grantsLookup, personByEmail });
+    const unlinked = accessActor(alice, grantsLookup);
+    expect(linked).toEqual({
+      ...unlinked,
+      self: ["access:a1", "slack:UALICE"],
+      asUser: { id: "slack:UALICE", name: "alice" },
+    });
+    expect(linked.id).toBe("access:a1");
+    expect(linked.grants).toEqual(unlinked.grants);
+    // Every way to stay unlinked yields exactly today's actor.
+    for (const [identity, opts] of [
+      [{ sub: "a1" }, { grantsFor: grantsLookup, personByEmail }],
+      [alice, { grantsFor: grantsLookup }],
+      [
+        { sub: "b2", email: "nobody@example.test" },
+        { grantsFor: grantsLookup, personByEmail },
+      ],
+      [
+        { sub: "b3", email: "bot@example.test" },
+        { grantsFor: grantsLookup, personByEmail },
+      ],
+      [
+        alice,
+        {
+          grantsFor: grantsLookup,
+          personByEmail: async () => {
+            throw new Error("slack down");
+          },
+        },
+      ],
+      [
+        { sub: "", commonName: "svc", email: "alice@example.test" },
+        { grantsFor: grantsLookup, personByEmail },
+      ],
+    ] as const) {
+      const actor = await resolveAccessActor(identity, opts);
+      expect(actor, JSON.stringify(identity)).toEqual(accessActor(identity, grantsLookup));
+      expect(actor.self).toBeUndefined();
+    }
+    // A person id that is not a chat identity never links either.
+    const odd = await resolveAccessActor(alice, {
+      grantsFor: grantsLookup,
+      personByEmail: async () => ({ id: "http:alice" }),
+    });
+    expect(odd.self).toBeUndefined();
   });
 
   it("is the id callerFor's Caller carries", async () => {

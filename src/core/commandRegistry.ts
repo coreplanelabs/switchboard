@@ -295,6 +295,9 @@ export interface AuditEntry {
   commandId: string;
   callerKind: Caller["kind"];
   callerId: string;
+  /** The person a dashboard session is linked to (record 0042), when it differs from `callerId`:
+   *  an operator reading the log sees who acted and through which session. */
+  asUser?: string;
   effect: CommandEffect;
   outcome: "ok" | InvokeErrorCode;
   /** Why the policy table denied (`missing-grant`, `no-rule`, …) when the
@@ -399,6 +402,7 @@ export class CommandRegistry<D> {
         commandId: cmd.id,
         callerKind: caller.kind,
         callerId: caller.id,
+        ...(caller.actor.asUser ? { asUser: caller.actor.asUser.id } : {}),
         effect: cmd.effect,
         outcome: res.ok ? "ok" : res.error,
         ...(reason === undefined ? {} : { reason }),

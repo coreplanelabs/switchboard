@@ -41,6 +41,7 @@ import type { ActorKind, Condition, Rule } from "./types.js";
 const grant = (g: string): Condition => ({ kind: "has-grant", grant: g });
 const MEMBER_OF: Condition = { kind: "member-of" };
 const IS_SELF: Condition = { kind: "is-self" };
+const ACTS_AS_PERSON: Condition = { kind: "acts-as-person" };
 const OWNER_OF: Condition = { kind: "owner-of" };
 const ALL_CHANNELS: Condition = { kind: "all-channels" };
 
@@ -144,6 +145,13 @@ export const POLICY: readonly Rule[] = [
   // ── mcp (external MCP servers live in the three config tiers) ────────────
   { action: "mcp:read", resource: "command", when: [grant("mcp:read")] },
   { action: "mcp:write", resource: "command", when: [grant("mcp:write")] },
+  // A person always has their own tier to write (`mcp add|connect|remove`
+  // for themselves), as `config set me` already is theirs: the row admits an
+  // actor whose `self` names a chat identity — every chat user (who holds
+  // `mcp:write` by baseline anyway) and a dashboard session linked to its
+  // person (record 0042) — never an unlinked browser session or a credential.
+  // Which tier the write reaches stays the handler's question below.
+  { action: "mcp:write", resource: "command", actorKinds: ["user"], when: [ACTS_AS_PERSON] },
   // A CHANNEL's servers: the channel-config right for a person; a credential
   // an admin minted with `mcp:write` manages any tier it can name.
   { action: "mcp:write", resource: "config-scope", resourceKind: "channel", when: [grant("config:write")] },
@@ -214,6 +222,7 @@ export const CONDITION_KINDS: readonly Condition["kind"][] = [
   "has-grant",
   "member-of",
   "is-self",
+  "acts-as-person",
   "owner-of",
   "all-channels",
 ];

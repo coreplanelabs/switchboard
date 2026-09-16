@@ -228,6 +228,8 @@ export interface SettingsSeed {
   tab: SettingsTab;
   /** The viewer's caller id (`access:<sub>`), for the "added by you" mark. */
   viewer: string;
+  /** The person the session is linked to (record 0042), when its email named one: the `me` tier is theirs. */
+  asUser?: { id: string; name?: string };
   vocabulary: SettingsVocabulary;
   mcps?: {
     /** The channel whose tier is listed beside org and own (`?channel=`); absent → org + own only. */

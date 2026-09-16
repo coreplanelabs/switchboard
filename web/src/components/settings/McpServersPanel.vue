@@ -6,27 +6,33 @@ import { browser } from "../../lib/browser";
 import { getCommand, INPUT_CLASS, postCommand, SELECT_CLASS, type FetchLike } from "../../lib/settingsApi";
 
 // The MCPs tab: `mcp list` as a table, an add form, a connect link and a
-// remove button — every action one `POST /api/mcp.*` (record 0041). Two tiers
-// are offered, org and channel; there is no `me` here, because a browser
+// remove button — every action one `POST /api/mcp.*` (record 0041). Org and
+// channel are always offered; `me` only when the session is linked to its
+// person (record 0042: the seed's `asUser`), because an unlinked browser
 // session is not the identity a run is requested as, and the handler refuses
 // it anyway. A credential never passes through this page: `add` and `connect`
 // hand back a one-time link to the Access-gated connect form.
+
+type Tier = "org" | "channel" | "me";
 
 const props = defineProps<{
   mcps: NonNullable<SettingsSeed["mcps"]>;
   vocabulary: SettingsVocabulary;
   viewer: string;
+  /** The person the session is linked to; present → the `me` tier is theirs and offered here. */
+  asUser?: { id: string; name?: string };
   fetch?: FetchLike;
 }>();
 
 const fetchFn: FetchLike = (input, init) => (props.fetch ?? ((i, o) => globalThis.fetch(i, o)))(input, init);
 
 const SELF_SERVE_AGENTS = ["general", "research"];
+const linked = computed(() => props.asUser !== undefined);
 
 const form = reactive({
   name: "",
   url: "",
-  scope: (props.mcps.channel ? "channel" : "org") as "org" | "channel",
+  scope: (props.mcps.channel ? "channel" : props.asUser ? "me" : "org") as Tier,
   agents: new Set<string>(SELF_SERVE_AGENTS),
   auth: "" as "" | "oauth" | "bearer" | "none",
 });
@@ -37,9 +43,22 @@ const notice = ref<{ kind: "ok" | "error"; text: string; connectUrl?: string } |
 /** A `mcp show` probe's answer, per server name. */
 const probes = reactive<Record<string, string>>({});
 
-const canAdd = computed(() => (form.scope === "org" ? props.mcps.canWrite.org : props.mcps.canWrite.channel));
+const canAdd = computed(() =>
+  form.scope === "org"
+    ? props.mcps.canWrite.org
+    : form.scope === "channel"
+      ? props.mcps.canWrite.channel
+      : linked.value,
+);
+/** A user-tier row is the viewer's own when it is the linked person's. */
 const canWriteRow = (s: McpServerView) =>
-  s.scope === "org" ? props.mcps.canWrite.org : s.scope === "channel" ? props.mcps.canWrite.channel : false;
+  s.scope === "org"
+    ? props.mcps.canWrite.org
+    : s.scope === "channel"
+      ? props.mcps.canWrite.channel
+      : props.asUser !== undefined && s.scopeKey === `user:${props.asUser.id}`;
+const isMine = (s: McpServerView) =>
+  s.addedBy === props.viewer || (props.asUser !== undefined && s.addedBy === props.asUser.id);
 
 const STATE_LABEL: Record<McpServerView["state"], string> = {
   connected: "connected",
@@ -58,10 +77,12 @@ function toggleAgent(agent: string, on: boolean): void {
   else form.agents.delete(agent);
 }
 
-/** The target tier's options, by name as the command takes them; never `me`. */
-function tier(scope: "org" | "channel"): Record<string, unknown> {
-  return scope === "channel" ? { scope: "channel", channel: props.mcps.channel } : { scope: "org" };
+/** The target tier's options, by name as the command takes them; `me` only for a linked session (the handler refuses it otherwise). */
+function tier(scope: Tier): Record<string, unknown> {
+  if (scope === "channel") return { scope: "channel", channel: props.mcps.channel };
+  return { scope };
 }
+const tierOf = (s: McpServerView): Tier => (s.scope === "user" ? "me" : s.scope);
 
 async function add(): Promise<void> {
   busy.value = true;
@@ -92,7 +113,7 @@ async function add(): Promise<void> {
 async function connect(s: McpServerView): Promise<void> {
   busy.value = true;
   notice.value = null;
-  const answer = await postCommand(fetchFn, "mcp.connect", { name: s.name, ...tier(s.scope as "org" | "channel") });
+  const answer = await postCommand(fetchFn, "mcp.connect", { name: s.name, ...tier(tierOf(s)) });
   busy.value = false;
   if (!answer.ok) {
     notice.value = { kind: "error", text: answer.failure.message };
@@ -110,7 +131,7 @@ async function remove(s: McpServerView): Promise<void> {
   if (!browser.confirm(`Remove ${s.name} from the ${s.scope} tier and forget its stored credential?`)) return;
   busy.value = true;
   notice.value = null;
-  const answer = await postCommand(fetchFn, "mcp.remove", { name: s.name, ...tier(s.scope as "org" | "channel") });
+  const answer = await postCommand(fetchFn, "mcp.remove", { name: s.name, ...tier(tierOf(s)) });
   busy.value = false;
   if (!answer.ok) {
     notice.value = { kind: "error", text: answer.failure.message };
@@ -141,8 +162,12 @@ async function probe(s: McpServerView): Promise<void> {
   <section class="grid gap-4">
     <p class="text-sm text-muted">
       External MCP servers a run's tools may call, by tier: <strong>org</strong> reaches every run and is the only tier
-      that may name the coding, review or ship agents; <strong>channel</strong> reaches that channel's runs. Personal
-      servers are added in chat (<code>mcp add</code>), where your runs are requested as you.
+      that may name the coding, review or ship agents; <strong>channel</strong> reaches that channel's runs;
+      <template v-if="asUser"
+        ><strong>me</strong> reaches the runs you ask for as {{ asUser.name ?? asUser.id }}.</template
+      ><template v-else
+        >personal servers are added in chat (<code>mcp add</code>), where your runs are requested as you.</template
+      >
     </p>
 
     <form class="flex flex-wrap items-center gap-2 text-sm" @submit.prevent="openChannel">
@@ -190,9 +215,7 @@ async function probe(s: McpServerView): Promise<void> {
           >
             <td class="px-4 py-2 font-mono text-xs font-medium text-highlighted">
               {{ s.name }}
-              <span v-if="s.addedBy === viewer" class="ml-1 text-[0.625rem] font-normal text-dimmed"
-                >· added by you</span
-              >
+              <span v-if="isMine(s)" class="ml-1 text-[0.625rem] font-normal text-dimmed">· added by you</span>
             </td>
             <td class="px-4 py-2 font-mono text-xs">{{ s.scope }}</td>
             <td class="max-w-[18rem] truncate px-4 py-2 font-mono text-xs text-muted" :title="s.url">{{ s.url }}</td>
@@ -272,8 +295,14 @@ async function probe(s: McpServerView): Promise<void> {
           id="mcp-scope"
           v-model="form.scope"
           :class="SELECT_CLASS"
-          :disabled="!canAdd && !mcps.canWrite.org && !mcps.canWrite.channel"
+          :disabled="!canAdd && !mcps.canWrite.org && !mcps.canWrite.channel && !linked"
         >
+          <option value="me" :disabled="!linked">
+            me —
+            {{
+              asUser ? `your own runs, as ${asUser.name ?? asUser.id}` : "your session is not linked to a Slack user"
+            }}
+          </option>
           <option value="org">org — every run; may name coding, review, ship</option>
           <option value="channel" :disabled="!mcps.channel">
             channel — {{ mcps.channel ?? "open a channel above first" }}
@@ -306,7 +335,9 @@ async function probe(s: McpServerView): Promise<void> {
           {{
             form.scope === "org"
               ? "Org-wide servers are managed by admins (repo-management rights)."
-              : "This channel's servers need channel-config rights."
+              : form.scope === "channel"
+                ? "This channel's servers need channel-config rights."
+                : "Personal servers need a session linked to your Slack user; add yours in chat with `mcp add`."
           }}
         </span>
       </div>

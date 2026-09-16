@@ -203,7 +203,8 @@ describe("authorize: fail-closed", () => {
       (r) =>
         r.action === action &&
         ruleTarget(r) === target &&
-        r.when.length === 0 &&
+        // Open to a person: no condition, or `acts-as-person` alone (a Slack user's self names a chat identity).
+        r.when.every((c) => c.kind === "acts-as-person") &&
         (!r.actorKinds || r.actorKinds.includes("user")) &&
         !r.originVisibility,
     );
@@ -239,7 +240,7 @@ describe("authorize: fail-closed", () => {
     throw new Error(`no fixture for ${String(ruleTarget(rule))}`);
   }
 
-  it("NO_GRANTS user: denied on every row except the open ones a user may pass — the shared org memory read, and the config write commands (a person's own scope is theirs; the channel scope is a separate row)", () => {
+  it("NO_GRANTS user: denied on every row except the open ones a person may pass — the shared org memory read, the config write commands and the MCP write commands (a person's own scope and tier are theirs; the channel and org scopes are separate rows)", () => {
     const seen: string[] = [];
     for (const rule of POLICY) {
       const target = ruleTarget(rule)!;
@@ -247,7 +248,11 @@ describe("authorize: fail-closed", () => {
       expect(decision.allow, `${rule.action} on ${target}`).toBe(openRows(rule.action, target));
       if (decision.allow) seen.push(`${rule.action} ${target}`);
     }
-    expect([...new Set(seen)].sort()).toEqual(["config:write command", "memory:read memory-scope/org"]);
+    expect([...new Set(seen)].sort()).toEqual([
+      "config:write command",
+      "mcp:write command",
+      "memory:read memory-scope/org",
+    ]);
   });
   it("a NO_GRANTS credential (service) is denied on every command row — the user-only open row does not admit it", () => {
     const credential = actor("service", "mcp:nothing");
@@ -432,5 +437,55 @@ describe("authorize: deny reasons are machine tokens without resource ids", () =
     expect([...unknownReasons]).toEqual([]);
     expect([...leaks]).toEqual([]);
     expect(denies).toBeGreaterThan(100);
+  });
+});
+
+// Feature: docs/decisions/0042 — the self set. A dashboard session linked to its
+// person carries two self ids; `is-self` admits either, `acts-as-person` holds,
+// and no grant check reads the set: the linked and unlinked sessions hold the
+// same grants and pass the same `has-grant` rows.
+describe("record 0042 — the self set is identity, not authority", () => {
+  const linked = A.linkedBrowser;
+  const unlinked = A.browser;
+  const own = run({ channel: "priv", userId: "slack:UHANK" });
+  const dm = run({ channel: "dm", userId: "slack:UHANK" });
+  const other = run({ channel: "priv", userId: "slack:UERIN" });
+
+  it("is-self admits a run whose userId is the linked person, private channel and DM alike; the unlinked session sees neither", () => {
+    expect(authorize(linked, "runs:read", own).allow).toBe(true);
+    expect(authorize(linked, "runs:read", dm).allow).toBe(true);
+    expect(authorize(linked, "runs:read", other).allow).toBe(false);
+    expect(authorize(unlinked, "runs:read", own).allow).toBe(false);
+    expect(authorize(unlinked, "runs:read", dm).allow).toBe(false);
+  });
+
+  it("the person's own config and memory scopes are the linked session's too", () => {
+    expect(authorize(linked, "config:write", { type: "config-scope", kind: "user", id: "slack:UHANK" }).allow).toBe(
+      true,
+    );
+    expect(authorize(linked, "memory:read", scope("user", "user:slack:UHANK")).allow).toBe(true);
+    expect(authorize(unlinked, "memory:read", scope("user", "user:slack:UHANK")).allow).toBe(false);
+  });
+
+  it("acts-as-person: the MCP self-serve command row admits the linked session and a Slack person, never the unlinked session or a credential", () => {
+    const add = { type: "command", id: "mcp.add" } as const;
+    expect(authorize(linked, "mcp:write", add).allow).toBe(true);
+    expect(authorize(A.noGrants, "mcp:write", add).allow).toBe(true);
+    expect(authorize(unlinked, "mcp:write", add).allow).toBe(false);
+    expect(authorize(actor("service", "mcp:nothing"), "mcp:write", add).allow).toBe(false);
+  });
+
+  it("the link grants nothing: every command action answers the same for the linked and the unlinked session, except the MCP self-serve writes", () => {
+    const actions = new Set(POLICY.filter((r) => r.resource === "command").map((r) => r.action));
+    for (const action of actions) {
+      const decision = (a: Actor) => authorize(a, action, { type: "command", id: "x" }).allow;
+      if (action === "mcp:write") {
+        expect(decision(linked)).toBe(true);
+        expect(decision(unlinked)).toBe(false);
+        continue;
+      }
+      expect(decision(linked), action).toBe(decision(unlinked));
+    }
+    expect(effectiveGrants(linked)).toEqual(effectiveGrants(unlinked));
   });
 });

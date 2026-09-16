@@ -1776,7 +1776,13 @@ const SETTINGS_SCOPE: NonNullable<NonNullable<SettingsSeed["channels"]>["selecte
 const SETTINGS_INSTALLATION = installationSettings(parseAppConfigText(CLOUD_FULL.yaml), CAPABILITIES);
 
 function settingsSeed(pathname: string, search: string): SettingsSeed | null {
-  const base = { page: "settings" as const, viewer: "access:admin", vocabulary: SETTINGS_VOCABULARY };
+  // The admin's session is linked to their Slack user (record 0042), so the MCPs tab offers the `me` tier.
+  const base = {
+    page: "settings" as const,
+    viewer: "access:admin",
+    asUser: { id: "slack:UACME0ADM", name: "admin" },
+    vocabulary: SETTINGS_VOCABULARY,
+  };
   const m = /^\/settings(?:\/(mcps|channels|installation))?(?:\/([^/]+))?\/?$/.exec(pathname);
   if (!m) return null;
   const tab = m[1] ?? (CAPABILITIES.mcp ? "mcps" : "channels");

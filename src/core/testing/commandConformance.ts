@@ -724,9 +724,18 @@ export const AUTHZ_ROLES: readonly AuthzRole[] = [
   { id: "mcp:writer", column: "token: every write" },
   { id: "access:svc:reader", column: "service token: every read" },
   { id: "access:visitor", column: "browser: unlisted" },
+  // The unlisted session linked to its person (record 0042): the same grants, a second self id.
+  { id: "access:linked", column: "browser: linked" },
   { id: "access:operator", column: "browser: operator" },
   { id: "cli:local", column: "cli" },
 ];
+
+/** The person the linked browser role's email names — what the suite's `personByEmail` answers. */
+export const LINKED_ROLE = {
+  id: "access:linked",
+  email: "linked@example.test",
+  person: { id: "slack:ULINKED", name: "linked" },
+} as const;
 
 /** The `grants` block that names the roles — as the suite's AUTHZ config.yaml spells it. An
  *  operator holds every group's read + write over every channel; the unlisted browser
@@ -768,8 +777,15 @@ export function carriedBy(id: string): Caller["kind"] {
 
 /** The `Actor` a role resolves to under `AUTHZ_SOURCE` — the CLI's one caller holds everything. */
 export function roleActor(role: AuthzRole): Actor {
-  return callerWith(carriedBy(role.id), role.id, role.id === "cli:local" ? "all" : grantsFor(role.id, AUTHZ_SOURCE))
-    .actor;
+  const actor = callerWith(
+    carriedBy(role.id),
+    role.id,
+    role.id === "cli:local" ? "all" : grantsFor(role.id, AUTHZ_SOURCE),
+  ).actor;
+  // The linked browser session: identity, not authority — the grants are the unlisted session's.
+  return role.id === LINKED_ROLE.id
+    ? { ...actor, self: [actor.id, LINKED_ROLE.person.id], asUser: LINKED_ROLE.person }
+    : actor;
 }
 
 /** The `Caller` a role drives a command as: its actor, plus a chat origin for Slack roles. */

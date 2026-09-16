@@ -364,7 +364,23 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
     [A.chatUser, A.dispatchOnly, A.token],
   ),
   ...commandRow("mcp:read", "mcp.list", [A.chatUser, A.browser, A.operator], [A.dispatchOnly, A.noGrants, A.token]),
-  ...commandRow("mcp:write", "mcp.add", [A.chatUser, A.mcpWriter, A.operator], [A.browser, A.dispatchOnly, A.noGrants]),
+  ...commandRow("mcp:write", "mcp.add", [A.chatUser, A.mcpWriter, A.operator], [A.browser, A.dispatchOnly, A.token]),
+  // A person's own MCP tier is theirs to write (record 0042): the row admits an
+  // actor whose `self` names a chat identity — a Slack person with no grants at
+  // all, a dashboard session linked to its person — and never an unlinked
+  // browser session or a credential, whatever it holds.
+  "mcp:write command [acts-as-person] kinds=user": {
+    allow: [
+      [A.noGrants, command("mcp.add")],
+      [A.chatUserGated, command("mcp.add")],
+      [A.linkedBrowser, command("mcp.add")],
+    ],
+    deny: [
+      [A.browser, command("mcp.add")],
+      [A.dispatchOnly, command("mcp.add")],
+      [A.token, command("mcp.add")],
+    ],
+  },
   // A CHANNEL's MCP servers: the channel-config right for a person…
   "mcp:write config-scope/channel [has-grant(config:write)]": {
     allow: [

@@ -67,6 +67,8 @@ The property this proves: the link changes who the session *is* for the question
 4. **"Channels you are in."** Membership is an open gap; the honest cut is the read right the index already asks. [The MCP list a person sees](#the-mcp-list-a-person-sees).
 5. **(most work) The three surfaces.** Owner and "mine" on `/runs`, the all-tiers list with names, promote with its button. One paragraph each under [Rollout](#rollout).
 
+*Amended 2026-09-16 (while proposed, at PR 1): `is-self` compiles to one `user-is` per self id, ORed, instead of a new `user-in` predicate. The store vocabulary is unchanged, so the file store and the state Worker's SQL translation run it as is and PR 1 ships no Worker deploy. The identity-not-authority line, the `acts-as-person` row and every other decision stand.*
+
 ## The line: identity, not authority
 
 The constraint: the obvious implementation, "resolve the browser to the Slack actor", unions the chat baseline into the session. That baseline holds `mcp:write` and `memory:write`; a browser session holds neither today. Record 0041 refused a general mapping for exactly this reason, and it was right: an email match must not widen what a session may do.
