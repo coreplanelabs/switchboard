@@ -106,7 +106,8 @@ const seed = (over: Partial<UnitSeed["view"]> = {}, runs: UnitRunRowSeed[] = RUN
   },
 });
 
-/** A stored replay as `/runs/:id/events` writes it: a root, one turn, one tool call, the answer. */
+/** A stored replay as `/runs/:id/events` writes it: a root, one turn, one tool call, the answer.
+ *  The tool events carry the session-log rows their turns landed on (run-history item 53). */
 const REPLAY = [
   "retry: 3000",
   "",
@@ -118,15 +119,17 @@ const REPLAY = [
   "",
   `id: 4\ndata: ${JSON.stringify({ type: "span_end", spanId: "t1", parentSpanId: "agent", name: "model.turn", startedAt: T0 + 10_000, durationMs: 20_000, status: "ok", attrs: { stopReason: "tool_use" }, at: T0 + 30_000, seq: 4 })}`,
   "",
-  `id: 5\ndata: ${JSON.stringify({ type: "tool_call", callId: "k1", tool: "bash", summary: "$ npm test", at: T0 + 30_000, seq: 5 })}`,
+  `id: 5\ndata: ${JSON.stringify({ type: "tool_call", callId: "k1", tool: "bash", summary: "$ npm test", logIndex: 30, at: T0 + 30_000, seq: 5 })}`,
   "",
-  `id: 6\ndata: ${JSON.stringify({ type: "tool_result", callId: "k1", tool: "bash", ok: true, summary: "", output: "ok", at: T0 + 55_000, seq: 6 })}`,
+  `id: 6\ndata: ${JSON.stringify({ type: "tool_result", callId: "k1", tool: "bash", ok: true, summary: "", output: "ok", logIndex: 31, at: T0 + 55_000, seq: 6 })}`,
   "",
   `id: 7\ndata: ${JSON.stringify({ type: "answer", text: "done", at: T0 + 60_000, seq: 7 })}`,
   "",
   "event: end\ndata: {}",
   "",
 ].join("\n");
+/** The same record as a run from before the stamp wrote it: no event names a log row. */
+const UNSTAMPED_REPLAY = REPLAY.replace(/,"logIndex":\d+/g, "");
 
 let fetchMock: ReturnType<typeof vi.fn>;
 function answer(routes: Record<string, () => Promise<Response> | Response>) {
@@ -374,6 +377,128 @@ describe("UnitPage — the unit is the reading unit (item 28)", () => {
     expect(fetchMock.mock.calls.at(-1)?.[0]).toBe(
       "/api/runs.search?session=slack%3AC1%3Au1r%3Areview&query=lockfile&limit=20",
     );
+  });
+
+  it("a hit lands on the step its turn lives in: the fold opens, reads the record once and draws that one step with the run page's own block at the run page's anchor, scrolled to and linking to the same step on the run's page; a turn no event names lands on the step that wrote the row before it; the request row and the reply's are named, not drawn; a record from before the stamp lands nowhere and the fold opens as before; ?open=<id>&turn=<n> lands on first paint", async () => {
+    answer({
+      "/api/runs.search": () =>
+        json({
+          session: "slack:C1:u1:coding",
+          hits: [
+            { turn: 30, role: "assistant", snippet: wrapUntrusted("running npm test"), runId: "c1" },
+            { turn: 35, role: "user", snippet: wrapUntrusted("a steer between the steps"), runId: "c1" },
+            { turn: 40, role: "assistant", snippet: wrapUntrusted("done"), runId: "c1" },
+            { turn: 22, role: "user", snippet: wrapUntrusted("the request"), runId: "c1" },
+            { turn: 5, role: "user", snippet: wrapUntrusted("fix the lockfile"), runId: "c0" },
+          ],
+          gaps: [],
+        }),
+      "/runs/c1/events": () => sse(REPLAY),
+      "/runs/c0/events": () => sse(UNSTAMPED_REPLAY),
+    });
+    const w = mountApp(UnitPage, { seed: seed() });
+    await w.find("#search-words").setValue("lockfile");
+    await w.find("#search form").trigger("submit");
+    await flush();
+    await w.vm.$nextTick();
+    const hits = w.findAll("#search .hit");
+    expect(hits).toHaveLength(5);
+    expect(hits[0].find("a.place").attributes("title")).toBe("open this run's fold at the step this turn lives in");
+    /** Click a hit, let the fold read its record and land. */
+    const land = async (hit: (typeof hits)[number]) => {
+      await hit.find("a.place").trigger("click");
+      await w.vm.$nextTick();
+      await flush();
+      await w.vm.$nextTick();
+      await flush(); // the landing's own tick: scroll and flash
+      await w.vm.$nextTick();
+    };
+    // Turn 30: the assistant turn the `npm test` call rode in — its step, at the step's own anchor.
+    await land(hits[0]);
+    expect((w.find("#run-c1 details").element as HTMLDetailsElement).open).toBe(true);
+    const fold = w.find("#run-c1 .runtimeline");
+    expect(fold.attributes("data-state")).toBe("ready");
+    const landing = fold.find(".landing");
+    expect(landing.attributes("data-turn")).toBe("30");
+    expect(landing.attributes("data-anchor")).toBe("span-t1");
+    expect(landing.find(".landing-head .turn").text()).toBe("turn 30");
+    expect(landing.find(".landing-head .what").text()).toContain("npm test");
+    expect(landing.find("a.page").attributes("href")).toBe("/runs/c1#span-t1");
+    const block = landing.find("li#span-t1.step");
+    expect(block.exists()).toBe(true);
+    expect(block.text()).toContain("npm test");
+    expect(block.classes()).toContain("revealed");
+    // Turn 35: nothing names it; the newest stamped row before it (31, the call's result) is this step's.
+    await land(hits[1]);
+    expect(w.find("#run-c1 .landing").attributes("data-turn")).toBe("35");
+    expect(w.find("#run-c1 .landing").attributes("data-anchor")).toBe("span-t1");
+    // Turn 40 is the range's last row and the run replied: the reply, named and linked, not drawn.
+    await land(hits[2]);
+    const reply = w.find("#run-c1 .landing");
+    expect(reply.attributes("data-anchor")).toBe("reply");
+    expect(reply.find(".landing-head .what").text()).toBe("· the reply");
+    expect(reply.find("a.page").attributes("href")).toBe("/runs/c1#reply");
+    expect(reply.find("li.step").exists()).toBe(false);
+    // Turn 22 is the request row.
+    await land(hits[3]);
+    expect(w.find("#run-c1 .landing").attributes("data-anchor")).toBe("request");
+    expect(w.find("#run-c1 .landing .what").text()).toBe("· the request");
+    // One read of the record served every landing.
+    expect(fetchMock.mock.calls.filter((c) => c[0] === "/runs/c1/events")).toHaveLength(1);
+    // c0's record predates the stamp: the fold opens to its timeline and nothing lands — today's round-level link.
+    await land(hits[4]);
+    expect(w.find("#run-c0 .runtimeline").attributes("data-state")).toBe("ready");
+    expect(w.find("#run-c0 #timeline").exists()).toBe(true);
+    expect(w.find("#run-c0 .landing").exists()).toBe(false);
+
+    // A shareable link to the step: the fold opens and lands on first paint.
+    window.history.replaceState(null, "", "/runs/unit/plan-p-1:U16?open=c1&turn=30");
+    const shared = mountApp(UnitPage, { seed: seed() });
+    await flush();
+    await shared.vm.$nextTick();
+    await flush();
+    await shared.vm.$nextTick();
+    expect(shared.find("#run-c1 .landing").attributes("data-anchor")).toBe("span-t1");
+    expect(shared.find("#run-c1 .landing li#span-t1.step").exists()).toBe(true);
+  });
+
+  it("a landed step anchored by a call id that no CSS selector accepts (a provider's tool_use id with `.` and `:`) still scrolls and flashes: the landing finds its one step by its class, never by a selector built from the id", async () => {
+    // No model turn recorded before the call, so the step's anchor is its card's — `call-<the provider's id>`.
+    const call = { type: "tool_call", callId: "toolu_01.a:b", tool: "bash", summary: "$ npm test", logIndex: 30 };
+    const result = { type: "tool_result", callId: "toolu_01.a:b", tool: "bash", ok: true, summary: "", output: "ok" };
+    const odd = [
+      "retry: 3000",
+      "",
+      `id: 1\ndata: ${JSON.stringify({ type: "span_start", spanId: "root", name: "request", attrs: { channel: "slack" }, at: T0, seq: 1 })}`,
+      "",
+      `id: 2\ndata: ${JSON.stringify({ type: "input", text: "build the unit page", at: T0, seq: 2 })}`,
+      "",
+      `id: 3\ndata: ${JSON.stringify({ type: "span_start", spanId: "agent", parentSpanId: "root", name: "run.agent", at: T0 + 10_000, seq: 3 })}`,
+      "",
+      `id: 4\ndata: ${JSON.stringify({ ...call, at: T0 + 30_000, seq: 4 })}`,
+      "",
+      `id: 5\ndata: ${JSON.stringify({ ...result, logIndex: 31, at: T0 + 55_000, seq: 5 })}`,
+      "",
+      `id: 6\ndata: ${JSON.stringify({ type: "answer", text: "done", at: T0 + 60_000, seq: 6 })}`,
+      "",
+      "event: end\ndata: {}",
+      "",
+    ].join("\n");
+    window.history.replaceState(null, "", "/runs/unit/plan-p-1:U16?open=c1&turn=30");
+    answer({ "/runs/c1/events": () => sse(odd) });
+    const w = mountApp(UnitPage, { seed: seed() });
+    await flush();
+    await w.vm.$nextTick();
+    await flush();
+    await w.vm.$nextTick();
+    const landing = w.find("#run-c1 .landing");
+    expect(landing.attributes("data-anchor")).toBe("call-toolu_01.a:b");
+    expect(landing.find("a.page").attributes("href")).toBe("/runs/c1#call-toolu_01.a:b");
+    const block = landing.find("li.step");
+    expect(block.exists()).toBe(true);
+    expect(block.attributes("id")).toBeUndefined(); // a step without a turn has no id of its own; its card carries the anchor
+    expect(block.find("#call-toolu_01\\.a\\:b").exists()).toBe(true);
+    expect(block.classes()).toContain("revealed");
   });
 
   it("no hits and a refused search each say so in place; empty words ask nothing; ?session=review&q=… runs the search on first paint", async () => {

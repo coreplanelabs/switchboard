@@ -355,6 +355,15 @@ export interface RunPageModel {
    *  page stamps) visible: the group or phase head that folds it opens, as a
    *  reader's own toggle would. Returns false for an anchor no row carries. */
   reveal(anchor: string): boolean;
+  /** The step a session-log turn lives in (session-log.md item 11), with the
+   *  anchor the run page gives that step — its turn's span (`span-<id>`, the
+   *  StepBlock's own id), else its first call's card (`call-<id>`). A turn a
+   *  `tool_call` or `tool_result` was stamped with (`logIndex`) is that
+   *  event's step; any other turn — a steer's text, a compaction entry, an
+   *  assistant turn that made no call — is the step that wrote the newest
+   *  stamped turn before it. Undefined when no stamped turn precedes it, or
+   *  the record carries no stamps at all (one from before the field). */
+  landing(turn: number): { step: StepVm; anchor: string } | undefined;
   /** The collapsed headline of a call card, by call id — what the timeline
    *  names a tool step by (`$ npm test`, not `bash`). */
   callHeadline(callId: string): string | undefined;
@@ -525,6 +534,9 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
   const callVms = new Map<string, CallVm>();
   /** The step each call card sits in, for `reveal`. */
   const stepOfCall = new Map<string, StepVm>();
+  /** The step each stamped session-log row belongs to (`logIndex` on the tool
+   *  events, run-history.md item 53): the first event naming a row places it. */
+  const stepOfRow = new Map<number, StepVm>();
   /** Quiet calls (update_status) render once; their results only refresh the tally. */
   const quietIds = new Set<string>();
   let pendingTurn: TurnVm | null = null;
@@ -847,6 +859,42 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
       }
     }
     for (const change of timeline.push(event)) apply(change);
+    // A tool event stamped with its session-log row names the step that row
+    // lives in: the call's step by its id (a quiet call has no card — the
+    // step open when it arrived is its step).
+    const stamped = event as { type?: unknown; logIndex?: unknown; callId?: unknown } | null;
+    if (
+      (stamped?.type === "tool_call" || stamped?.type === "tool_result") &&
+      typeof stamped.logIndex === "number" &&
+      !stepOfRow.has(stamped.logIndex)
+    ) {
+      const step =
+        (typeof stamped.callId === "string" ? stepOfCall.get(stamped.callId) : undefined) ?? stepVms.get(lastStepIndex);
+      if (step) stepOfRow.set(stamped.logIndex, step);
+    }
+  }
+
+  /** The anchor the run page gives a step: its turn's span, else its first call's card. */
+  function stepAnchor(step: StepVm): string | undefined {
+    if (step.turn) return `span-${step.turn.spanId}`;
+    const first = step.items.find((i) => i.kind === "call");
+    return first?.kind === "call" ? `call-${first.call.id}` : undefined;
+  }
+
+  function landing(turn: number): { step: StepVm; anchor: string } | undefined {
+    let step = stepOfRow.get(turn);
+    if (!step) {
+      let newest = -1;
+      for (const [row, s] of stepOfRow) {
+        if (row < turn && row > newest) {
+          newest = row;
+          step = s;
+        }
+      }
+    }
+    if (!step) return undefined;
+    const anchor = stepAnchor(step);
+    return anchor === undefined ? undefined : { step, anchor };
   }
 
   function pendingCall(): CallVm | null {
@@ -922,6 +970,7 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
       if (entry) entry.toggled = true;
     },
     reveal,
+    landing,
     callHeadline: (callId) => callVms.get(callId)?.headline,
     toggleGroup(step) {
       step.manual = true; // the auto-fold then leaves this group alone forever

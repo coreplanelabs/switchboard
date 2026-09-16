@@ -96,6 +96,9 @@ export interface MirrorDeps {
 export class PiMirror {
   private idx: number;
   private pendingUser: ContentPart[] = [];
+  /** The row of the last assistant turn the ledger holds — written here, or
+   *  met again on a re-attach (`alreadyHeld`); undefined until one is. */
+  private lastAssistantIdx: number | undefined;
   /** pi is about to echo the seed's prompt as a user message (see `expectSeedEcho`). */
   private seedEchoPending = false;
   private mirroredTail: LedgerTail | undefined;
@@ -111,6 +114,21 @@ export class PiMirror {
   /** Whether a report is owed: the mirror is wired and something happened. */
   get wired(): boolean {
     return this.deps.onStep !== undefined;
+  }
+
+  /** The row (the run's own index) the calls under way ride in — the last
+   *  assistant turn the ledger holds — for the `tool_call` stamp (run-history
+   *  item 53); undefined before any assistant turn, or when the transcript's
+   *  tail met again was a compaction and the turn before it is not known here. */
+  get rowOfCalls(): number | undefined {
+    return this.lastAssistantIdx;
+  }
+
+  /** The row the results pending now will make (the run's own index): the
+   *  next row written, since pending results and a steer's text go first in
+   *  the next step's turns — for the `tool_result` stamp. */
+  get rowOfResults(): number {
+    return this.idx;
   }
 
   /** pi answered the seed's prompt: the first user message without results
@@ -131,6 +149,9 @@ export class PiMirror {
     this.mirroredTail = undefined;
     if (!isDeepStrictEqual(row, tail)) return false;
     this.pendingUser = [];
+    // The tail is the transcript's last row, so the turn met again sits right
+    // before the index this mirror starts at.
+    if ("turn" in row) this.lastAssistantIdx = this.idx - 1;
     return true;
   }
 
@@ -173,6 +194,7 @@ export class PiMirror {
       inboxConsumedSeq: this.inboxConsumedSeq,
     };
     this.idx += turns.length;
+    this.lastAssistantIdx = this.idx - 1; // the assistant turn is the step's last row
     await this.deps.onStep(report);
     return true;
   }

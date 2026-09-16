@@ -167,6 +167,12 @@ export interface LedgerRun {
    *  set it — what the session tools read and write by (item 10); undefined
    *  for a run without a session or before its claim. */
   readonly session: RunSession | undefined;
+  /** The log row a local index of the run's conversation lands on — `seedFrom`
+   *  plus the index, the arithmetic every seed and step write uses — so what a
+   *  `tool_call`'s and a `tool_result`'s `logIndex` is stamped with (run-history
+   *  item 53) and the row the step wrote cannot disagree. Undefined for a run
+   *  without a session: its rows are its own and no search reaches them. */
+  logIndexOf(localIndex: number): number | undefined;
   /** The finish record's sink: the ledger's one-transaction `finish`, else the
    *  plain store — never both, never neither. Throws only a transient failure
    *  (the writer retries it; a repeated `finish` is idempotent). */
@@ -306,6 +312,9 @@ export class NullLedgerRun implements LedgerRun {
   tracked(): boolean {
     return false;
   }
+  logIndexOf(_localIndex: number): number | undefined {
+    return undefined; // no session log holds this run's rows
+  }
   async step(_report: StepReport): Promise<void> {
     // no ledger to mirror onto
   }
@@ -444,6 +453,16 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     get session(): RunSession | undefined {
       return this.sessionRow;
     }
+    /** Every row at its log index (session-log item 2): the run's local index
+     *  plus where its seed began; a run without a session writes its own
+     *  object from 0. The one arithmetic the seed, every step and `logIndexOf`
+     *  share. */
+    private rowIndex(localIndex: number): number {
+      return (this.sessionRow?.seedFrom ?? 0) + localIndex;
+    }
+    logIndexOf(localIndex: number): number | undefined {
+      return this.sessionRow ? this.rowIndex(localIndex) : undefined;
+    }
     /** Turns of the run's conversation on the ledger, counted from its seed —
      *  the last step record's `turnIndex` — so the finish can close the range. */
     private turnsWritten: number | undefined;
@@ -573,16 +592,16 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
      *  no record at all was killed before its conversation was stored and
      *  closes `interrupted`. */
     async seed(messages: ChatMessage[], budgetMs: number): Promise<void> {
-      // Every row at its log index: local index i is `seedFrom + i` (session-log
-      // item 2); a run without a session writes its own object from 0. The
-      // messages the seed reused from the log (item 9) — the rows between
-      // `seedFrom` and the range's start — are there already and are skipped.
-      const base = this.sessionRow?.seedFrom ?? 0;
+      // Every row at its log index (`rowIndex`). The messages the seed reused
+      // from the log (item 9) — the rows between `seedFrom` and the range's
+      // start — are there already and are skipped.
       const reused =
         this.sessionRow && this.sessionRow.range !== "broken"
           ? this.sessionRow.range.from - this.sessionRow.seedFrom
           : 0;
-      const turns: TranscriptTurn[] = messages.slice(reused).map((message, i) => ({ idx: base + reused + i, message }));
+      const turns: TranscriptTurn[] = messages
+        .slice(reused)
+        .map((message, i) => ({ idx: this.rowIndex(reused + i), message }));
       try {
         const seeded = await ledger.seed(this.runId, gen, turns, this.sessionRow?.key);
         if (!seeded.ok) {
@@ -617,13 +636,15 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
 
     async step(report: StepReport): Promise<void> {
       if (this.detached) return;
-      // Every row at its log index: the run's local index plus where its seed
-      // began. A compaction entry rides as the row after the step's turns and
-      // counts as a turn, so the completeness rule sees one index per row.
-      const base = this.sessionRow?.seedFrom ?? 0;
-      const turns: TranscriptTurn[] = report.turns.map((message, i) => ({ idx: base + report.firstIdx + i, message }));
+      // Every row at its log index (`rowIndex`). A compaction entry rides as
+      // the row after the step's turns and counts as a turn, so the
+      // completeness rule sees one index per row.
+      const turns: TranscriptTurn[] = report.turns.map((message, i) => ({
+        idx: this.rowIndex(report.firstIdx + i),
+        message,
+      }));
       if (report.compaction)
-        turns.push({ idx: base + report.firstIdx + report.turns.length, compaction: report.compaction });
+        turns.push({ idx: this.rowIndex(report.firstIdx + report.turns.length), compaction: report.compaction });
       const record: StepRecord = {
         step: ++this.stepNo,
         seq: this.lastSeq,

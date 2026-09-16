@@ -39,6 +39,11 @@ export const SURFACES = [
     path: "/runs/unit/plan-acme-3:U13?session=coding&q=lockfile",
     what: "the unit page's search over the coding thread's log, hits placed in their runs",
   },
+  {
+    name: "unit-search-landed",
+    path: "/runs/unit/plan-acme-3:U13?session=coding&q=lockfile&open=unit-c1&turn=47",
+    what: "a search hit landed on its step: the run's fold open at the step the turn lives in, drawn as the run page draws it",
+  },
   { name: "conductor-page", path: "/runs/cond-1", what: "a finished conductor's page listing the runs it spawned" },
 ] as const;
 

@@ -208,6 +208,8 @@ function world(
     compaction?: { reserveTokens?: number; keepRecentTokens?: number };
     /** The harness's sleep; a test that kills the bot mid-run hands one that stops answering. */
     sleep?: (ms: number) => Promise<void>;
+    /** The ledger run's `logIndexOf` (run-history item 53): where the run's rows sit in its session log. */
+    logIndexOf?: (localIndex: number) => number | undefined;
   } = {},
 ) {
   const clock = opts.clock ?? { now: NOW };
@@ -255,6 +257,7 @@ function world(
     onEvent: (e) => void events.push(e),
     onProgress: (n) => void notes.push(n),
     onStep: async (r) => void steps.push(r),
+    ...(opts.logIndexOf ? { logIndexOf: opts.logIndexOf } : {}),
     // pi's loop writes pi's facts alone; the guard keeps the recorder typed as such.
     saveFacts: (f) => {
       if (isPiFacts(f)) facts.push(f);
@@ -407,6 +410,39 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(w.sink.ended("run.agent")?.parentSpanId).toBe(w.root!.id);
     expect(w.sink.ended("tool.bash")?.parentSpanId).toBe(w.sink.ended("run.agent")?.spanId);
     expect(w.bearers.grantOf("run-7")).toBeDefined();
+  });
+
+  // run-history item 53: a search hit's turn finds its step because the tool
+  // events carry the session-log row their turn landed on — asked of the ledger
+  // run, so the stamp is the row the mirror's step wrote and nothing beside it.
+  it("stamps every tool_call with the log row of the assistant turn it rode in and every tool_result with the row its batch's results make, through the ledger run's logIndexOf — the rows the mirrored steps wrote; a run handed no logIndexOf carries no row", async () => {
+    const w = world({ logIndexOf: (i) => 40 + i }); // the seed begins at row 40 of the session's log
+    scriptedPi(w.container, (n, c) => {
+      bashTurn(w, "call_0", "npm test", "1 failing");
+      bashTurn(w, "call_1", "npm test -- --changed", "ok 12 tests");
+      finalTurn(c, "All green.");
+    });
+    await w.start();
+    const tools = w.events.filter((e) => e.type === "tool_call" || e.type === "tool_result");
+    expect(tools.map((e) => [e.type, e.callId, e.logIndex])).toEqual([
+      ["tool_call", "call_0", 41],
+      ["tool_result", "call_0", 42],
+      ["tool_call", "call_1", 43],
+      ["tool_result", "call_1", 44],
+    ]);
+    // The rows the mirror wrote: each step's assistant turn is its last row, its results the next step's first.
+    expect(w.steps.map((s) => 40 + s.firstIdx + s.turns.length - 1)).toEqual([41, 43, 45]);
+    expect(w.steps.slice(1).map((s) => 40 + s.firstIdx)).toEqual([42, 44]);
+
+    const bare = world();
+    scriptedPi(bare.container, (n, c) => {
+      bashTurn(bare, "call_0", "npm test", "ok");
+      finalTurn(c, "Done.");
+    });
+    await bare.start();
+    const bareTools = bare.events.filter((e) => e.type === "tool_call" || e.type === "tool_result");
+    expect(bareTools).toHaveLength(2);
+    expect(bareTools.every((e) => !("logIndex" in e))).toBe(true);
   });
 
   it("a seed with the thread's earlier turns starts pi on a session holding them in order — an assistant's tool call and its result as pi's own entries, a document as its note — and prompts it with the request alone, its image along; no resumed note", async () => {

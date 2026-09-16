@@ -365,7 +365,18 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
   }
   const agentSpan = run.span?.start("run.agent");
   if (agentSpan) deps.bearers?.reparent(run.runId, agentSpan);
-  const emit = (event: RunEvent) => run.onEvent?.(event.at === undefined ? { ...event, at: now() } : event);
+  /** The session-log row a tool event's turn lands on (run-history item 53):
+   *  a call's is the assistant row the mirror wrote it in, a result's the user
+   *  row its batch's results make — asked of the mirror, translated by the
+   *  ledger run's own arithmetic (`run.logIndexOf`), so the stamp and the row
+   *  the step wrote cannot disagree. Bound once the mirror exists; no tool
+   *  event precedes it. Nothing is stamped for a run without a session or a
+   *  row the mirror cannot place. */
+  let placed = (event: RunEvent): RunEvent => event;
+  const emit = (event: RunEvent) => {
+    const stamped = placed(event);
+    run.onEvent?.(stamped.at === undefined ? { ...stamped, at: now() } : stamped);
+  };
   const note = (kind: RunNoteKind, summary: string, mode?: StopMode) => {
     run.onProgress?.(summary);
     emit({ type: "run_note", kind, summary, ...(mode ? { mode } : {}) });
@@ -437,6 +448,13 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     ...(tail ? { mirroredTail: tail } : {}),
   });
   mirror.inboxConsumedSeq = run.resume?.inboxConsumedSeq ?? 0;
+  placed = (event) => {
+    const logIndexOf = run.logIndexOf;
+    if (!logIndexOf || (event.type !== "tool_call" && event.type !== "tool_result")) return event;
+    const row = event.type === "tool_call" ? mirror.rowOfCalls : mirror.rowOfResults;
+    const logIndex = row === undefined ? undefined : logIndexOf(row);
+    return logIndex === undefined ? event : { ...event, logIndex };
+  };
 
   let writeUp: WriteUp | undefined;
   let writeUpAt: number | undefined;

@@ -12,7 +12,8 @@ import type { UnitThread } from "@core/core/unitRuns.js";
 // who spoke, a one-line snippet (the route wraps it as untrusted content for
 // machine callers; a page renders text as text, so the fence comes off) and
 // the run whose recorded range holds the turn — a link that opens that run's
-// fold on this page. A hit past a compaction gap says so: the words were
+// fold on this page at the step the turn lives in (the fold lands on it once
+// the record is read). A hit past a compaction gap says so: the words were
 // found, but the log before that turn was folded into a summary.
 
 export interface SearchSession {
@@ -27,7 +28,7 @@ const props = defineProps<{
   initial?: { thread?: string; q?: string };
   fetch?: typeof globalThis.fetch;
 }>();
-const emit = defineEmits<{ open: [runId: string] }>();
+const emit = defineEmits<{ open: [runId: string, turn: number] }>();
 
 /** Hits the page asks for — a person reads a short list; the route caps at its own maximum. */
 const PAGE_HITS = 20;
@@ -132,7 +133,8 @@ onMounted(() => {
           v-if="hit.runId && runById.has(hit.runId)"
           class="place shrink-0 font-mono text-xs text-primary no-underline hover:underline"
           :href="`#run-${hit.runId}`"
-          @click.prevent="emit('open', hit.runId)"
+          title="open this run's fold at the step this turn lives in"
+          @click.prevent="emit('open', hit.runId, hit.turn)"
           >{{ place(hit) }} ↓</a
         >
         <span v-else class="place shrink-0 font-mono text-xs text-dimmed">{{ place(hit) }}</span>

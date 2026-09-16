@@ -9,6 +9,7 @@ import { GEN_PATTERN, TRANSCRIPT_PART_BYTES } from "./types.js";
 import {
   createLedgerWriteThrough,
   mintGeneration,
+  NullLedgerRun,
   NullLedgerWriteThrough,
   type OpenRunRequest,
 } from "./writeThrough.js";
@@ -968,6 +969,41 @@ describe("the session log — a run is a range of it", () => {
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("log rows 2..3");
     expect(second.resumable).toBe(true);
+  });
+
+  // run-history item 53: the stamp a tool event carries is asked of the run,
+  // never computed beside it, so it names the very row the step wrote.
+  it("logIndexOf names the log row a local index lands on — the seed's rows, a step's, the row after a reused tail — and reads back the turn written there; a run without a session names none, and so does the null run", async () => {
+    const { ledger, wt } = harness();
+    const first = (await wt.open(openReq()))!; // rows 0..2: earlier, sure, go
+    expect([0, 1, 2].map((i) => first.logIndexOf(i))).toEqual([0, 1, 2]);
+    await first.step(step()); // local 3 → row 3: looking
+    expect(first.logIndexOf(3)).toBe(3);
+    expect((await ledger.readSession(KEY, first.logIndexOf(3)!, first.logIndexOf(3)!)).messages).toEqual([
+      assistant("looking"),
+    ]);
+    await first.sink.put(record("r1"));
+    // The next run reuses rows 2..3 as its seed's first two messages (log.from 2): its local 0 is row 2.
+    const second = (await wt.open(
+      openReq({
+        runId: "r2",
+        seed: {
+          messages: [user("go"), assistant("looking"), user("again")],
+          budgetMs: 600_000,
+          log: { from: 2, turns: 2 },
+        },
+      }),
+    ))!;
+    expect(second.session).toEqual({ key: KEY, seedFrom: 2, request: 4, range: { from: 4 } });
+    expect([0, 1, 2].map((i) => second.logIndexOf(i))).toEqual([2, 3, 4]);
+    await second.step(step({ turns: [assistant("on it")], firstIdx: 3 }));
+    expect(second.logIndexOf(3)).toBe(5);
+    expect((await ledger.readSession(KEY, 5, 5)).messages).toEqual([assistant("on it")]);
+    // A ship pipeline has no conversation and no session: its rows are nowhere a search reaches.
+    const ship = (await wt.open(openReq({ runId: "r3", threadKey: "slack:C1:2.0", seed: undefined })))!;
+    expect(ship.session).toBeUndefined();
+    expect(ship.logIndexOf(0)).toBeUndefined();
+    expect(new NullLedgerRun("r9", { put: async () => {} }).logIndexOf(0)).toBeUndefined();
   });
 
   it("two agents in one thread keep two logs; a run without a conversation of its own (a ship pipeline) has no session", async () => {

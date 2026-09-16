@@ -35,6 +35,8 @@ const props = defineProps<{
   label?: string;
   /** Open on first paint (`?open=<id>`, a search hit). */
   open?: boolean;
+  /** The session-log turn the fold lands on once open (a search hit's, `?turn=`). */
+  land?: number;
 }>();
 
 const opened = ref(props.open === true);
@@ -129,7 +131,7 @@ function onToggle(ev: Event): void {
           >open ↗</a
         >
       </summary>
-      <RunTimeline v-if="opened" :run="run" />
+      <RunTimeline v-if="opened" :run="run" :land="land" />
     </details>
     <!-- In progress: the row is drawn where the run will end up, its clock moving; it opens the live page. -->
     <div v-else class="row flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1 px-2 py-2 hover:bg-(--ui-bg-muted)">
