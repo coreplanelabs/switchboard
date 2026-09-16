@@ -137,8 +137,10 @@ export interface AddResult {
   expiresInMinutes?: number;
 }
 
-/** `mcp promote`: the new org entry, the person it came from, and — for bearer/oauth — the admin's fresh ticket. */
-export type PromoteResult = AddResult & { promotedFrom: string };
+/** `mcp promote`: the new org entry, the person it came from, and — for bearer/oauth — the admin's
+ *  fresh ticket; `retired` when the person's entry went at once (`auth: none`), else it retires
+ *  when the ticket completes. */
+export type PromoteResult = AddResult & { promotedFrom: string; retired?: boolean };
 
 /** What the connect page gets back from `startOAuth`. */
 export type StartOAuthResult =
@@ -418,7 +420,10 @@ export class McpService {
     };
     await this.writeServers(org, { ...runtime.mcpServers, [name]: entry });
     const view = serverView("org", name, entry, { hasCredential: false, source: "runtime" });
-    if (entry.auth === "none") return { server: view, promotedFrom: from };
+    if (entry.auth === "none") {
+      await this.retirePromotedSource(mcpCredentialKey("org", name));
+      return { server: view, promotedFrom: from, retired: true };
+    }
     const ticket = await this.mintTicket(mcpCredentialKey("org", name), actor);
     return {
       server: view,
@@ -513,6 +518,7 @@ export class McpService {
     const sealed = await sealCredential(key, decision.ticket.serverId, decision.token, this.now());
     await this.viaSecrets(() => this.opts.secrets.putCredential(sealed));
     this.source.forget(decision.ticket.serverId);
+    await this.retirePromotedSource(decision.ticket.serverId);
     return {
       decision,
       verified: true,
@@ -678,7 +684,7 @@ export class McpService {
       ),
     );
     if (!claimed) return { ok: false, refusal: { kind: "used" }, server };
-    await this.storeOAuth(decision.ticket.serverId, cred);
+    await this.storeOAuthConnected(decision.ticket.serverId, cred);
     return {
       ok: true,
       server: { ...server, state: "connected" },
@@ -691,6 +697,12 @@ export class McpService {
     const sealed = await sealCredential(key, serverId, JSON.stringify(cred), this.now());
     await this.viaSecrets(() => this.opts.secrets.putCredential(sealed));
     this.source.forget(serverId);
+  }
+
+  /** The connect page's completion for OAuth: store the token set, then the promotion's other half. */
+  private async storeOAuthConnected(serverId: string, cred: OAuthCredential): Promise<void> {
+    await this.storeOAuth(serverId, cred);
+    await this.retirePromotedSource(serverId);
   }
 
   /** The thread's follow-up (item 19): wait — bounded by the ticket's own TTL,
@@ -930,11 +942,44 @@ export class McpService {
         ? (await this.viaSecrets(() => this.opts.secrets.getCredential(mcpCredentialKey(r.scopeKey, r.name)))) !== null
         : false;
     const view = serverView(r.scopeKey, r.name, r.entry, { hasCredential, source: r.source });
-    const name =
-      view.addedBy && this.opts.resolveName
-        ? await this.opts.resolveName(view.addedBy).catch(() => undefined)
-        : undefined;
-    return name ? { ...view, addedByName: name } : view;
+    // Names for the people a row names (record 0042): who added it, whose tier it is, who it was
+    // promoted from — the same cached lookup each time; the id stands when it has no answer.
+    const nameOf = async (id: string | undefined): Promise<string | undefined> =>
+      id && this.opts.resolveName ? this.opts.resolveName(id).catch(() => undefined) : undefined;
+    const owner = view.scope === "user" ? view.scopeKey.slice("user:".length) : undefined;
+    const [addedByName, ownerName, promotedFromName] = await Promise.all([
+      nameOf(view.addedBy),
+      nameOf(owner),
+      nameOf(view.promotedFrom),
+    ]);
+    return {
+      ...view,
+      ...(addedByName ? { addedByName } : {}),
+      ...(ownerName ? { ownerName } : {}),
+      ...(promotedFromName ? { promotedFromName } : {}),
+      ...(r.shadowedBy ? { shadowedBy: r.shadowedBy } : {}),
+    };
+  }
+
+  /** The other half of a promotion (record 0042, amended): once the ORG copy of a promoted server
+   *  works — at once for `auth: none`, at the completion of the org connect ticket otherwise —
+   *  the person's runtime entry of the same name retires: it was shadowed by the org's from the
+   *  moment of promotion, so it served no run, and its sealed credential goes with it (theirs,
+   *  never copied). Nothing retires while the org copy is still awaiting its credential, so a
+   *  promotion the admin never completes leaves the person's server working. Idempotent. */
+  private async retirePromotedSource(serverId: string): Promise<void> {
+    const split = splitCredentialKey(serverId);
+    if (!split || split.scopeKey !== "org") return;
+    const from = this.opts.config.runtimeScope("org").mcpServers?.[split.name]?.promotedFrom;
+    if (!from) return;
+    const target: McpTarget = { kind: "user", id: from };
+    const runtime = this.opts.config.runtimeScope("user", from);
+    if (!runtime.mcpServers?.[split.name]) return;
+    const { [split.name]: _retired, ...rest } = runtime.mcpServers;
+    await this.writeServers(target, rest);
+    const key = mcpCredentialKey(mcpScopeKey("user", from), split.name);
+    await this.viaSecrets(() => this.opts.secrets.deleteCredential(key)).catch(() => false);
+    this.source.forget(key);
   }
 
   private async specFor(r: ResolvedMcpServer): Promise<ResolvedServer> {

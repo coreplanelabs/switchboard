@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from "vue";
+import { computed, onUnmounted, reactive, ref } from "vue";
 import type { SettingsSeed, SettingsVocabulary } from "@core/channels/webSeed.js";
 import type { McpServerView } from "@core/mcp/registry.js";
 import { browser } from "../../lib/browser";
+import { AGENT_HUE, agentHue } from "../../lib/indexRow";
 import { getCommand, INPUT_CLASS, postCommand, SELECT_CLASS, type FetchLike } from "../../lib/settingsApi";
 
 // The MCPs tab: `mcp list` as a table, an add form, a connect link and a
@@ -43,6 +44,43 @@ const notice = ref<{ kind: "ok" | "error"; text: string; connectUrl?: string } |
 /** A `mcp show` probe's answer, per server name. */
 const probes = reactive<Record<string, string>>({});
 
+/** While a connect link is out (it opens in a new tab), the page watches the row it was minted
+ *  for — one `mcp list` every few seconds, bounded by the link's own life — and reloads when the
+ *  row's state changes, so closing the connect tab lands back on an up-to-date list. */
+const WATCH_EVERY_MS = 4_000;
+/** The link lives ten minutes: that many ticks, counted — the page reads no clock. */
+const WATCH_TICKS = (10 * 60_000) / WATCH_EVERY_MS;
+const watching = ref(false);
+let watchTimer: ReturnType<typeof setTimeout> | undefined;
+const stopWatching = (): void => {
+  if (watchTimer !== undefined) clearTimeout(watchTimer);
+  watchTimer = undefined;
+  watching.value = false;
+};
+onUnmounted(stopWatching);
+function watchRow(name: string, scopeKey: string, was: McpServerView["state"] | undefined): void {
+  stopWatching();
+  watching.value = true;
+  let ticks = 0;
+  const tick = async (): Promise<void> => {
+    ticks += 1;
+    const answer = await getCommand(fetchFn, "mcp.list", props.mcps.allTiers ? { all: "true" } : {});
+    const rows = answer.ok ? ((answer.value as { servers?: McpServerView[] }).servers ?? []) : [];
+    const row = rows.find((r) => r.name === name && r.scopeKey === scopeKey);
+    if (row && row.state !== was) {
+      stopWatching();
+      browser.reload();
+      return;
+    }
+    if (ticks >= WATCH_TICKS) {
+      stopWatching();
+      return;
+    }
+    watchTimer = setTimeout(() => void tick(), WATCH_EVERY_MS);
+  };
+  watchTimer = setTimeout(() => void tick(), WATCH_EVERY_MS);
+}
+
 const canAdd = computed(() =>
   form.scope === "org"
     ? props.mcps.canWrite.org
@@ -64,7 +102,8 @@ const ownerOf = (s: McpServerView): string => (s.scope === "user" ? s.scopeKey.s
 /** Who added it, as the service could name them; the id otherwise (record 0042). */
 const addedBy = (s: McpServerView): string => (isMine(s) ? "you" : (s.addedByName ?? s.addedBy ?? ""));
 /** Promote (record 0042): a person's runtime server re-issued in the org tier by an org admin. */
-const canPromote = (s: McpServerView) => s.scope === "user" && s.source === "runtime" && props.mcps.canWrite.org;
+const canPromote = (s: McpServerView) =>
+  s.scope === "user" && s.source === "runtime" && props.mcps.canWrite.org && !s.shadowedBy;
 
 const STATE_LABEL: Record<McpServerView["state"], string> = {
   connected: "connected",
@@ -105,7 +144,10 @@ async function add(): Promise<void> {
     notice.value = { kind: "error", text: answer.failure.message };
     return;
   }
-  const v = answer.value as { connectUrl?: string; server?: { name?: string; state?: string } };
+  const v = answer.value as {
+    connectUrl?: string;
+    server?: { name?: string; scopeKey?: string; state?: McpServerView["state"] };
+  };
   notice.value = v.connectUrl
     ? {
         kind: "ok",
@@ -114,6 +156,7 @@ async function add(): Promise<void> {
       }
     : { kind: "ok", text: `Added ${v.server?.name ?? form.name}.` };
   if (!v.connectUrl) browser.reload();
+  else if (v.server?.name && v.server.scopeKey) watchRow(v.server.name, v.server.scopeKey, v.server.state);
 }
 
 async function connect(s: McpServerView): Promise<void> {
@@ -131,6 +174,9 @@ async function connect(s: McpServerView): Promise<void> {
     text: `A fresh one-time link for ${s.name} (10 minutes; only you can complete it).`,
     ...(v.connectUrl ? { connectUrl: v.connectUrl } : {}),
   };
+  // A re-key keeps the state `connected`, so the watcher would see no change: watch the
+  // awaiting row only. (A connected row's re-key is a quiet success either way.)
+  if (v.connectUrl && s.state === "awaiting_credential") watchRow(s.name, s.scopeKey, s.state);
 }
 
 async function remove(s: McpServerView): Promise<void> {
@@ -149,7 +195,7 @@ async function remove(s: McpServerView): Promise<void> {
 async function promote(s: McpServerView): Promise<void> {
   if (
     !browser.confirm(
-      `Promote ${s.name} to the org tier? The org gets its own copy — ${ownerOf(s)}'s credential is never copied; a bearer or oauth server needs you to connect it.`,
+      `Promote ${s.name} to the org tier? The org gets its own copy under the same name — ${s.ownerName ?? ownerOf(s)}'s credential is never copied; a bearer or oauth server needs you to connect it. Their personal entry retires once the org copy works.`,
     )
   )
     return;
@@ -170,6 +216,7 @@ async function promote(s: McpServerView): Promise<void> {
       }
     : { kind: "ok", text: `${s.name} is now an org server.` };
   if (!v.connectUrl) browser.reload();
+  else watchRow(s.name, "org", "awaiting_credential");
 }
 
 async function probe(s: McpServerView): Promise<void> {
@@ -191,33 +238,41 @@ async function probe(s: McpServerView): Promise<void> {
 </script>
 
 <template>
-  <section class="grid gap-4">
-    <p class="text-sm text-muted">
-      External MCP servers a run's tools may call, by tier: <strong>org</strong> reaches every run and is the only tier
-      that may name the coding, review or ship agents; <strong>channel</strong> reaches that channel's runs;
-      <template v-if="asUser"
-        ><strong>me</strong> reaches the runs you ask for as {{ asUser.name ?? asUser.id }}.</template
-      ><template v-else
-        >personal servers are added in chat (<code>mcp add</code>), where your runs are requested as you.</template
-      >
-      <template v-if="mcps.allTiers">
-        As an admin you see every tier — every channel's and every person's — and may <strong>promote</strong> a
-        person's server to the org: the org gets its own copy under the same name, connected by you; their credential is
-        never copied.</template
-      >
-    </p>
+  <section class="grid gap-5">
+    <!-- One line per fact the reader needs before the table; the long version is the spec's. -->
+    <div class="grid gap-1 text-sm text-muted">
+      <p>
+        External MCP servers a run's tools may call.
+        <span class="ml-1 inline-flex flex-wrap gap-x-3 gap-y-1">
+          <span><strong class="text-toned">org</strong> · every run</span>
+          <span><strong class="text-toned">channel</strong> · that channel's runs</span>
+          <span v-if="asUser"
+            ><strong class="text-toned">me</strong> · the runs you ask for as {{ asUser.name ?? asUser.id }}</span
+          >
+          <span v-else><strong class="text-toned">me</strong> · added in chat with <code>mcp add</code></span>
+        </span>
+      </p>
+      <p v-if="mcps.allTiers" class="text-xs text-dimmed">
+        You see every tier. <strong class="font-medium text-muted">Promote</strong> gives the org its own copy of a
+        person's server under the same name, connected by you — their credential is never copied, and their entry
+        retires once the org copy works.
+      </p>
+    </div>
 
     <form class="flex flex-wrap items-center gap-2 text-sm" @submit.prevent="openChannel">
-      <label class="text-muted" for="mcp-channel">Channel tier</label>
+      <label class="text-muted" for="mcp-channel">Channel</label>
       <input
         id="mcp-channel"
         v-model="channelField"
         :class="INPUT_CLASS"
-        class="font-mono text-xs"
-        placeholder="slack:C0123… (blank: org and your own)"
+        class="w-56 font-mono text-xs"
+        placeholder="slack:C0123…"
         aria-label="channel whose MCP servers to list"
       />
       <UButton type="submit" size="xs" color="neutral" variant="outline">Open</UButton>
+      <span class="text-xs text-dimmed">{{
+        mcps.channel ? `Listing ${mcps.channel}'s tier beside the rest.` : "Blank: the org's and your own."
+      }}</span>
     </form>
 
     <p v-if="mcps.unavailable" class="unavailable rounded-md border border-warn/30 bg-warn/10 px-3 py-2 text-sm">
@@ -225,17 +280,17 @@ async function probe(s: McpServerView): Promise<void> {
     </p>
 
     <div v-else class="overflow-x-auto rounded-lg border border-default bg-elevated">
-      <table class="servers w-full min-w-[46rem] border-collapse text-[0.8125rem]">
+      <table class="servers w-full min-w-[60rem] border-collapse text-[0.8125rem]">
         <thead>
           <tr class="text-left font-mono text-[0.6875rem] uppercase tracking-widest text-dimmed">
-            <th class="px-4 py-2.5 font-medium">Name</th>
-            <th class="px-4 py-2.5 font-medium">Tier</th>
-            <th class="px-4 py-2.5 font-medium">URL</th>
-            <th class="px-4 py-2.5 font-medium">Agents</th>
-            <th class="px-4 py-2.5 font-medium">Auth</th>
-            <th class="px-4 py-2.5 font-medium">State</th>
-            <th class="px-4 py-2.5 font-medium">Added by</th>
-            <th class="px-4 py-2.5 font-medium"><span class="sr-only">Actions</span></th>
+            <th class="px-3 py-2.5 font-medium whitespace-nowrap">Name</th>
+            <th class="px-3 py-2.5 font-medium whitespace-nowrap">Tier</th>
+            <th class="px-3 py-2.5 font-medium whitespace-nowrap">URL</th>
+            <th class="px-3 py-2.5 font-medium whitespace-nowrap">Agents</th>
+            <th class="px-3 py-2.5 font-medium whitespace-nowrap">Auth</th>
+            <th class="px-3 py-2.5 font-medium whitespace-nowrap">State</th>
+            <th class="px-3 py-2.5 font-medium whitespace-nowrap">Added by</th>
+            <th class="px-3 py-2.5 font-medium"><span class="sr-only">Actions</span></th>
           </tr>
         </thead>
         <tbody>
@@ -247,22 +302,39 @@ async function probe(s: McpServerView): Promise<void> {
           <tr
             v-for="s in mcps.servers"
             :key="`${s.scopeKey}/${s.name}`"
-            class="server border-t border-muted align-top"
+            class="server border-t border-muted align-middle"
+            :class="s.shadowedBy ? 'shadowed text-dimmed' : ''"
             :data-name="s.name"
             :data-scope="s.scope"
+            :data-shadowed-by="s.shadowedBy"
           >
-            <td class="px-4 py-2 font-mono text-xs font-medium text-highlighted">
-              {{ s.name }}
-              <span v-if="isMine(s)" class="ml-1 text-[0.625rem] font-normal text-dimmed">· added by you</span>
+            <td class="px-3 py-2.5 font-mono text-xs font-medium whitespace-nowrap text-highlighted">{{ s.name }}</td>
+            <td class="px-3 py-2.5 whitespace-nowrap">
+              <span class="tier rounded border border-accented px-1.5 py-0.5 font-mono text-[0.6875rem] text-toned">{{
+                s.scope
+              }}</span>
+              <span v-if="ownerOf(s)" class="owner mt-1 block text-[0.6875rem] text-dimmed" :title="ownerOf(s)">{{
+                s.ownerName ?? ownerOf(s)
+              }}</span>
             </td>
-            <td class="px-4 py-2 font-mono text-xs">
-              {{ s.scope
-              }}<span v-if="ownerOf(s)" class="owner block text-[0.6875rem] text-dimmed">{{ ownerOf(s) }}</span>
+            <td class="px-3 py-2.5">
+              <span class="block max-w-[11rem] truncate font-mono text-xs text-muted" :title="s.url">{{ s.url }}</span>
             </td>
-            <td class="max-w-[18rem] truncate px-4 py-2 font-mono text-xs text-muted" :title="s.url">{{ s.url }}</td>
-            <td class="px-4 py-2 font-mono text-xs">{{ s.agents.join(", ") }}</td>
-            <td class="px-4 py-2 font-mono text-xs">{{ s.auth }}</td>
-            <td class="px-4 py-2 text-xs">
+            <td class="min-w-[11rem] px-3 py-2.5">
+              <!-- The run page's agent chips (indexRow's hue allow-list), so an agent reads the same everywhere. -->
+              <span class="agents flex flex-wrap gap-1">
+                <span
+                  v-for="a in s.agents"
+                  :key="a"
+                  class="agent rounded border px-1.5 font-mono text-[0.68rem] font-medium uppercase tracking-wider"
+                  :class="AGENT_HUE[agentHue(a)]"
+                  :data-agent-hue="agentHue(a)"
+                  >{{ a }}</span
+                >
+              </span>
+            </td>
+            <td class="px-3 py-2.5 font-mono text-xs whitespace-nowrap">{{ s.auth }}</td>
+            <td class="px-3 py-2.5 whitespace-nowrap">
               <span
                 class="state rounded px-1.5 py-0.5 font-mono text-[0.6875rem]"
                 :class="
@@ -274,43 +346,66 @@ async function probe(s: McpServerView): Promise<void> {
                 "
                 >{{ STATE_LABEL[s.state] }}</span
               >
-              <div v-if="probes[s.name]" class="probe mt-1 text-dimmed">{{ probes[s.name] }}</div>
+              <UTooltip
+                v-if="s.shadowedBy"
+                :text="`The ${s.shadowedBy} tier holds a server of this name, so runs use that one; this entry is idle until it is removed or renamed.`"
+              >
+                <span
+                  class="shadow ml-1 cursor-help rounded border border-dashed border-accented px-1.5 py-0.5 font-mono text-[0.6875rem] text-dimmed"
+                  >shadowed by {{ s.shadowedBy }}</span
+                >
+              </UTooltip>
+              <div v-if="probes[s.name]" class="probe mt-1 text-xs text-dimmed">{{ probes[s.name] }}</div>
             </td>
-            <td class="addedby max-w-[10rem] truncate px-4 py-2 text-xs text-muted" :title="s.addedBy">
-              {{ addedBy(s)
-              }}<span v-if="s.promotedFrom" class="block text-[0.6875rem] text-dimmed"
-                >promoted from {{ s.promotedFrom }}</span
+            <td class="addedby px-3 py-2.5 text-xs text-muted" :title="s.addedBy">
+              <span class="block max-w-[8rem] truncate">{{ addedBy(s) }}</span>
+              <span
+                v-if="s.promotedFrom"
+                class="block max-w-[8rem] truncate text-[0.6875rem] text-dimmed"
+                :title="s.promotedFrom"
+                >promoted from {{ s.promotedFromName ?? s.promotedFrom }}</span
               >
             </td>
-            <td class="px-4 py-1.5 text-right whitespace-nowrap">
-              <UButton size="xs" color="neutral" variant="ghost" :disabled="busy" @click="probe(s)">Probe</UButton>
-              <UButton
-                v-if="canPromote(s)"
-                size="xs"
-                color="primary"
-                variant="ghost"
-                :disabled="busy"
-                @click="promote(s)"
-                >Promote</UButton
-              >
-              <UButton
-                v-if="s.source === 'runtime' && s.auth !== 'none'"
-                size="xs"
-                color="neutral"
-                variant="ghost"
-                :disabled="busy || !canWriteRow(s)"
-                @click="connect(s)"
-                >Connect</UButton
-              >
-              <UButton
-                v-if="s.source === 'runtime'"
-                size="xs"
-                color="error"
-                variant="ghost"
-                :disabled="busy || !canWriteRow(s)"
-                @click="remove(s)"
-                >Remove</UButton
-              >
+            <!-- Four fixed slots so the buttons line up down the column whatever a row offers. -->
+            <td class="px-3 py-1.5 text-right whitespace-nowrap">
+              <span class="actions inline-flex items-center justify-end">
+                <span class="slot inline-flex w-[4.5rem] justify-center">
+                  <UButton size="xs" color="neutral" variant="ghost" :disabled="busy" @click="probe(s)">Probe</UButton>
+                </span>
+                <span class="slot inline-flex w-[4.5rem] justify-center">
+                  <UButton
+                    v-if="canPromote(s)"
+                    size="xs"
+                    color="primary"
+                    variant="ghost"
+                    :disabled="busy"
+                    @click="promote(s)"
+                    >Promote</UButton
+                  >
+                </span>
+                <span class="slot inline-flex w-[4.5rem] justify-center">
+                  <UButton
+                    v-if="s.source === 'runtime' && s.auth !== 'none'"
+                    size="xs"
+                    color="neutral"
+                    variant="ghost"
+                    :disabled="busy || !canWriteRow(s)"
+                    @click="connect(s)"
+                    >Connect</UButton
+                  >
+                </span>
+                <span class="slot inline-flex w-[4.5rem] justify-center">
+                  <UButton
+                    v-if="s.source === 'runtime'"
+                    size="xs"
+                    color="error"
+                    variant="ghost"
+                    :disabled="busy || !canWriteRow(s)"
+                    @click="remove(s)"
+                    >Remove</UButton
+                  >
+                </span>
+              </span>
             </td>
           </tr>
         </tbody>
@@ -319,38 +414,47 @@ async function probe(s: McpServerView): Promise<void> {
 
     <form
       v-if="!mcps.unavailable"
-      class="add grid gap-3 rounded-lg border border-default bg-elevated px-5 py-4"
+      class="add grid max-w-3xl gap-4 rounded-lg border border-default bg-elevated px-5 py-4"
       @submit.prevent="add"
     >
       <h2 class="font-mono text-xs font-medium uppercase tracking-wider text-muted">Add a server</h2>
-      <div class="grid gap-3 sm:grid-cols-[8rem_1fr]">
-        <label class="text-sm text-muted" for="mcp-name">Name</label>
-        <input
-          id="mcp-name"
-          v-model="form.name"
-          :class="INPUT_CLASS"
-          class="font-mono text-xs"
-          required
-          pattern="[a-z0-9][a-z0-9-]{0,31}"
-          placeholder="notion — becomes the tool prefix mcp__notion__"
-          :disabled="!canAdd"
-        />
-        <label class="text-sm text-muted" for="mcp-url">URL</label>
-        <input
-          id="mcp-url"
-          v-model="form.url"
-          :class="INPUT_CLASS"
-          class="font-mono text-xs"
-          type="url"
-          required
-          placeholder="https://mcp.example.com/mcp — Streamable HTTP"
-          :disabled="!canAdd"
-        />
-        <label class="text-sm text-muted" for="mcp-scope">Tier</label>
+      <div class="grid gap-x-4 gap-y-3 sm:grid-cols-[5.5rem_minmax(0,1fr)] sm:items-start">
+        <label class="text-sm text-muted sm:pt-1" for="mcp-name">Name</label>
+        <div class="grid gap-1">
+          <input
+            id="mcp-name"
+            v-model="form.name"
+            :class="INPUT_CLASS"
+            class="font-mono text-xs sm:max-w-xs"
+            required
+            pattern="[a-z0-9][a-z0-9-]{0,31}"
+            placeholder="notion"
+            :disabled="!canAdd"
+          />
+          <span class="text-xs text-dimmed"
+            >A slug; its tools appear as <code>mcp__{{ form.name.trim() || "name" }}__…</code></span
+          >
+        </div>
+        <label class="text-sm text-muted sm:pt-1" for="mcp-url">URL</label>
+        <div class="grid gap-1">
+          <input
+            id="mcp-url"
+            v-model="form.url"
+            :class="INPUT_CLASS"
+            class="font-mono text-xs"
+            type="url"
+            required
+            placeholder="https://mcp.example.com/mcp"
+            :disabled="!canAdd"
+          />
+          <span class="text-xs text-dimmed">The server's Streamable-HTTP endpoint.</span>
+        </div>
+        <label class="text-sm text-muted sm:pt-1" for="mcp-scope">Tier</label>
         <select
           id="mcp-scope"
           v-model="form.scope"
           :class="SELECT_CLASS"
+          class="sm:max-w-md"
           :disabled="!canAdd && !mcps.canWrite.org && !mcps.canWrite.channel && !linked"
         >
           <option value="me" :disabled="!linked">
@@ -364,8 +468,8 @@ async function probe(s: McpServerView): Promise<void> {
             channel — {{ mcps.channel ?? "open a channel above first" }}
           </option>
         </select>
-        <span class="text-sm text-muted">Agents</span>
-        <div class="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+        <span class="text-sm text-muted sm:pt-1">Agents</span>
+        <div class="flex flex-wrap gap-x-4 gap-y-1.5 pt-1 text-sm">
           <label v-for="a in vocabulary.agents" :key="a" class="inline-flex items-center gap-1.5 font-mono text-xs">
             <input
               type="checkbox"
@@ -377,25 +481,26 @@ async function probe(s: McpServerView): Promise<void> {
             {{ a }}
           </label>
         </div>
-        <label class="text-sm text-muted" for="mcp-auth">Auth</label>
-        <select id="mcp-auth" v-model="form.auth" :class="SELECT_CLASS" :disabled="!canAdd">
+        <label class="text-sm text-muted sm:pt-1" for="mcp-auth">Auth</label>
+        <select id="mcp-auth" v-model="form.auth" :class="SELECT_CLASS" class="sm:max-w-md" :disabled="!canAdd">
           <option value="">detect from the server</option>
           <option value="oauth">oauth — sign in on a one-time link</option>
           <option value="bearer">bearer — paste a token on a one-time link</option>
           <option value="none">none</option>
         </select>
-      </div>
-      <div class="flex flex-wrap items-center gap-3">
-        <UButton type="submit" size="sm" color="neutral" :disabled="!canAdd || busy">Add</UButton>
-        <span v-if="!canAdd" class="restricted text-xs text-muted">
-          {{
-            form.scope === "org"
-              ? "Org-wide servers are managed by admins (repo-management rights)."
-              : form.scope === "channel"
-                ? "This channel's servers need channel-config rights."
-                : "Personal servers need a session linked to your Slack user; add yours in chat with `mcp add`."
-          }}
-        </span>
+        <span class="hidden sm:block"></span>
+        <div class="flex flex-wrap items-center gap-3">
+          <UButton type="submit" size="sm" color="neutral" :disabled="!canAdd || busy">Add</UButton>
+          <span v-if="!canAdd" class="restricted text-xs text-muted">
+            {{
+              form.scope === "org"
+                ? "Org-wide servers are managed by admins (repo-management rights)."
+                : form.scope === "channel"
+                  ? "This channel's servers need channel-config rights."
+                  : "Personal servers need a session linked to your Slack user; add yours in chat with `mcp add`."
+            }}
+          </span>
+        </div>
       </div>
       <p
         v-if="notice"
@@ -403,9 +508,17 @@ async function probe(s: McpServerView): Promise<void> {
         :class="notice.kind === 'error' ? 'border border-err/30 bg-err/10' : 'border border-ok/30 bg-ok/10'"
       >
         {{ notice.text }}
-        <a v-if="notice.connectUrl" class="connect ml-1 font-mono text-xs underline" :href="notice.connectUrl">{{
-          notice.connectUrl
-        }}</a>
+        <a
+          v-if="notice.connectUrl"
+          class="connect ml-1 font-mono text-xs underline"
+          :href="notice.connectUrl"
+          target="_blank"
+          rel="noopener"
+          >{{ notice.connectUrl }}</a
+        >
+        <span v-if="watching" class="watching ml-1 text-xs text-dimmed"
+          >— this page refreshes itself when the link is used.</span
+        >
       </p>
     </form>
   </section>

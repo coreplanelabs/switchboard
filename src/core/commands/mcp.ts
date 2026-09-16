@@ -174,10 +174,16 @@ function renderServerLine(r: JsonObject): string {
   // where it came from, and for a user server whose tier it is.
   const by =
     typeof r.addedBy === "string" ? ` · added by ${typeof r.addedByName === "string" ? r.addedByName : r.addedBy}` : "";
-  const from = typeof r.promotedFrom === "string" ? ` · promoted from ${r.promotedFrom}` : "";
+  const from =
+    typeof r.promotedFrom === "string"
+      ? ` · promoted from ${typeof r.promotedFromName === "string" ? r.promotedFromName : r.promotedFrom}`
+      : "";
   const owner =
-    r.scope === "user" && typeof r.scopeKey === "string" ? ` · tier of ${r.scopeKey.slice("user:".length)}` : "";
-  return `• \`${String(r.name)}\` (${String(r.scope)}) ${state} — ${String(r.url)} · agents: ${agents} · auth: ${String(r.auth)}${pinned}${by}${from}${owner}`;
+    r.scope === "user" && typeof r.scopeKey === "string"
+      ? ` · tier of ${typeof r.ownerName === "string" ? r.ownerName : r.scopeKey.slice("user:".length)}`
+      : "";
+  const shadowed = typeof r.shadowedBy === "string" ? ` · shadowed by ${r.shadowedBy}` : "";
+  return `• \`${String(r.name)}\` (${String(r.scope)}) ${state} — ${String(r.url)} · agents: ${agents} · auth: ${String(r.auth)}${pinned}${by}${from}${owner}${shadowed}`;
 }
 
 function renderList(output: JsonValue): string {

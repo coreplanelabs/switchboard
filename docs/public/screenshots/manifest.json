@@ -7,7 +7,7 @@
   "now": 1788877800000,
   "inputs": {
     "scripts/screenshots.mts": "2aec7f1618040fad2ae4740f5b4213b6f7731a9a5d0b041b684d50d30521e067",
-    "scripts/web-preview.ts": "a34b4a9d3e00db8d2d09429892ee873ddb5149de82a989a0a1e9284e04dba5cf",
+    "scripts/web-preview.ts": "0bc60b42660f65e4f8512f14d705e3177451e5e62023475447d96cbe449096b3",
     "src/channels/webShell.ts": "5eab7aae4b16bad384c4863ddb8b3d644470cba2421e56d7649bd2fd95b26d92",
     "src/docs/screenshotManifest.ts": "867610f2df36b63706774eba3a4efcff9215309e6b964245429ed2e43fee3fff",
     "web/src/App.vue": "e95e58c24d31cd6de4b5d701b4c44ce9752c5278b7d6afd9c9e7028104ae2122",
@@ -48,7 +48,7 @@
     "web/src/components/runs/SourceMark.vue": "bc1c8701265452c6f1899a895fbee2721d0964ed351ee8c07746ccb1731acc90",
     "web/src/components/settings/ChannelsPanel.vue": "b245c4b492e3ac8e749819f2c021c4dd02e7ecc53b6974cae3e927ccc4e3ac1c",
     "web/src/components/settings/InstallationPanel.vue": "2cf8d9d7fb30f3e1c060de2e67adc8abbafca8237e8a87610c1793c0c9a42a19",
-    "web/src/components/settings/McpServersPanel.vue": "6a17b6e3cf5b102d894cbd7ca184f0865f8881f4750b04f6da154860ec52acff",
+    "web/src/components/settings/McpServersPanel.vue": "249a6a71d581d419127920f6adb710fe417d6ff6518b12ef4f3117ba36e55a4c",
     "web/src/components/settings/SettingsTabs.vue": "531831c0221c81496f316cb438836d6d8fc635b69a707160cc15191e874c6dcd",
     "web/src/components/unit/SessionSearch.vue": "293ce47772657be5c54bbcc6d010f99bc2d4114225d70fee60a6a3b366f64945",
     "web/src/lib/browser.ts": "709674c1c1478024432d5e3fc118e24465f02c0348cffc33c2e21adc23a1e0ed",

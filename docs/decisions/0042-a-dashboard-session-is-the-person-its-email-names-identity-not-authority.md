@@ -101,6 +101,8 @@ The ticket is bound to the admin the way every connect ticket is bound: by the e
 
 Invariants: no sealed credential is ever read, unsealed or written by promote; the org entry's `state` is `awaiting_credential` until the ticket completes; in chat a promote is an inline run like `add` (the inline-run set gains `promote`), and on every surface the audit line records it. Failure mode: the admin never completes the ticket, so the org server sits `awaiting_credential` and the person's shadowed server still works for them; `mcp show` says so.
 
+> **Amendment (2026-09-16, after the first promotions on the deployed dashboard).** "The personal entry stays" was the maintainer's first surprise: after promoting two servers the page showed each twice, and the shadowed copy was dead weight — it served no run from the moment of promotion and nobody wanted to remove it by hand. The design now retires the personal entry **once the org copy works**: at once for `auth: none`, and at the completion of the org connect ticket for `bearer`/`oauth` — the entry and its sealed credential go (theirs, still never copied). Nothing retires while the org copy awaits its credential, which keeps the failure mode above: a promotion the admin never completes leaves the person's server working. Until it retires the row says `shadowed by org`. The alternative it beat, removing the entry at promotion time, would have taken a working server away for the minutes the admin needs to connect the org's.
+
 The alternative it beat: unseal and reseal the personal credential under the org key. It works cryptographically and it is the wrong thing to do with someone's token.
 
 ## The MCP list a person sees
