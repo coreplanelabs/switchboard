@@ -25,8 +25,9 @@ const SECTIONS: ReadonlyArray<NavItem> = [
   { id: "costs", label: "Costs", href: "/costs", icon: "i-lucide-circle-dollar-sign", on: (c) => c.costs },
   // The delivery indicators read GitHub with the App's token: the page exists where a credential does.
   { id: "delivery", label: "Delivery", href: "/delivery", icon: "i-lucide-git-merge", on: (c) => c.github },
-  // Settings configures the channel tiers every installation has (record 0041): always there, last.
-  { id: "settings", label: "Settings", href: "/settings", icon: "i-lucide-settings" },
+  // Settings is chrome, not a section: the cog in the header (SettingsLink.vue)
+  // is the way there, and `settings` stays in `NavSection` only so a page can
+  // say it is the current one.
 ];
 
 /** The sections this installation has, in fixed order: Runs, each one whose
