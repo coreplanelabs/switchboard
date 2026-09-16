@@ -1233,6 +1233,19 @@ interface DepsBackupRecord {
   createdAt: string;
 }
 
+/** The snapshot as `/status` and `/debug info` publish it: the stamp, both
+ *  archive ids, and the deps entry archive for its lockfile key (null until
+ *  one has been taken). */
+interface SnapshotHandle {
+  ref: string;
+  sha: string;
+  lockfileHash: string;
+  createdAt: string;
+  mirrorBackupId: string;
+  checkoutBackupId: string;
+  depsBackupId: string | null;
+}
+
 /** What the snapshot step answers: the record already at the stamp, a record
  *  it committed (with the one it replaced), or a step another writer won. */
 type SnapshotStepResult =
@@ -7019,6 +7032,26 @@ export class ResidentDO extends Sandbox<Env> {
   /** Full admin-facing view (surfaced via GET /residents and /debug info):
    *  lifecycle + recorded sha/cache keys/snapshot stamp/refresh telemetry.
    *  Backup handles are reduced to ids — never the raw handle internals. */
+  /** The stamped snapshot as a handle (docs/reference/specs/resident-repos.md
+   *  item 7): the stamp, both archive ids, and the deps-store entry archive for
+   *  the snapshot's own lockfile key when one has been taken (item 61). What
+   *  `/status` publishes for the seed (execution.md item 25 — a seeded sandbox
+   *  restores the checkout and the deps view from it) and what `/debug info`
+   *  shows; null before the first snapshot. */
+  async snapshotHandle(snap?: SnapshotRecord): Promise<SnapshotHandle | null> {
+    const record = snap ?? (await this.ctx.storage.get<SnapshotRecord>(SNAPSHOT_KEY));
+    if (!record) return null;
+    return {
+      ref: record.ref,
+      sha: record.sha,
+      lockfileHash: record.lockfileHash,
+      createdAt: record.createdAt,
+      mirrorBackupId: record.mirror.id,
+      checkoutBackupId: record.checkout.id,
+      depsBackupId: (await this.depsBackupRecord(record.lockfileHash))?.backup.id ?? null,
+    };
+  }
+
   async getResidentInfo(): Promise<Record<string, unknown>> {
     const map = await this.ctx.storage.get<unknown>([
       RESOURCE_KEY,
@@ -7099,21 +7132,7 @@ export class ResidentDO extends Sandbox<Env> {
       lastRefreshError: facts?.lastRefreshError ?? null,
       lastRestore: facts?.lastRestore ?? null,
       idleSince: facts?.idleSince ?? null,
-      snapshot: snap
-        ? {
-            ref: snap.ref,
-            sha: snap.sha,
-            lockfileHash: snap.lockfileHash,
-            createdAt: snap.createdAt,
-            mirrorBackupId: snap.mirror.id,
-            checkoutBackupId: snap.checkout.id,
-            // The seed handle's other half (docs/reference/specs/execution.md item 25):
-            // the deps-store entry archive for the snapshot's own lockfile key,
-            // when one has been taken (item 61) — a seeded sandbox restores it
-            // beside the checkout and skips the install.
-            depsBackupId: (await this.depsBackupRecord(snap.lockfileHash))?.backup.id ?? null,
-          }
-        : null,
+      snapshot: await this.snapshotHandle(snap),
       // The provisioning schedules, the one timer a resident has (item 3).
       schedules: {
         provisionRun: provisionRun.length,
@@ -8203,8 +8222,9 @@ async function handleStatus(env: Env, url: URL): Promise<Response> {
   const resource = parseResource(url.searchParams.get("resource"));
   if ("error" in resource) return json({ error: resource.error }, 400);
 
-  // Body deliberately limited to { state, reason, inFlight } — operator scope
-  // sees lifecycle and activity, not config.
+  // Body deliberately limited to lifecycle, activity and the snapshot handle
+  // — operator scope sees what a run needs (the seed's handle, execution.md
+  // item 25: opaque archive ids, useless without the bucket), not config.
   // Three RPCs in one flight, not one atomic snapshot: getStatus() awaits
   // storage, and the DO may run other work in that gap, so `state`/`reason`
   // and `inFlight` can be a hair apart (and differ slightly from a /residents
@@ -8212,21 +8232,24 @@ async function handleStatus(env: Env, url: URL): Promise<Response> {
   // deploy gate reads /residents. The registry check rides in the same flight
   // (its 404 is judged first, the probes' results discarded then).
   const stub = residentStub(env, resource.resource);
-  const [record, status, inFlight, refresh] = await Promise.all([
+  const [record, status, inFlight, refresh, snapshot] = await Promise.all([
     registryStub(env).getRecord(resource.resource),
     stub.getStatus(),
     stub.getInFlightCount(),
     stub.getRefreshView(),
+    stub.snapshotHandle(),
   ]);
   if (!record) return json({ error: `${resource.resource} is not onboarded` }, 404);
   // Item 7: which scheduler drives the refresh cycle and, on the Workflow
-  // lifecycle, the current instance with its last step and the last skipped bucket.
+  // lifecycle, the current instance with its last step and the last skipped
+  // bucket; and the snapshot handle a seeded sandbox restores from (item 25).
   return json({
     state: status.state,
     reason: status.reason,
     inFlight,
     lifecycle: refresh.lifecycle,
     refresh: { instance: refresh.instance, skipped: refresh.skipped },
+    snapshot,
   });
 }
 
