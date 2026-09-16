@@ -228,6 +228,20 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "costs:write",
+    "args": [],
+    "effect": "write",
+    "id": "costs.snapshot",
+    "options": [],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
     "action": "delivery:read",
     "args": [],
     "effect": "read",

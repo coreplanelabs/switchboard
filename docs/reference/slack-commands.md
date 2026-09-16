@@ -125,6 +125,12 @@ Combine freely: `agent:ship model:anthropic/claude-opus-5 effort:high in acme/ap
 |---|---|---|
 | `delivery report [--repo <string>] [--since <string>] [--weeks <integer>] [--fresh]` | Delivery indicators per week and per unit — issue-to-merge time, first-pass CI, review rounds, findings and the share resolved with no human edit — from the repository's snapshot of GitHub's facts (--fresh reads GitHub now) and the run history; nothing written. | admins |
 
+### `costs`
+
+| Command | What it does | Who can run it |
+|---|---|---|
+| `costs snapshot` | Take the costs snapshot now: read both billing sources and the run history once over the page's widest range, store the result, and serve it to every reader of the costs page from then on. | admins |
+
 <!-- /generated:chat-commands -->
 
 ## Where each group is explained

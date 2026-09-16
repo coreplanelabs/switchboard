@@ -43,6 +43,10 @@ import type { DeployRunResult, RestartRunResult } from "../../deploy/run.js";
 import type { PlannedFile } from "../../setup/plan.js";
 import { InMemoryGithubApi } from "../../execution/githubApi.js";
 import { InMemoryIssueTracker } from "../../execution/githubIssues.js";
+import { EMPTY_USAGE, parseCostsConfig } from "../costs.js";
+import { CostsSnapshotter } from "../costsSnapshot.js";
+import { InMemoryCostsSnapshotStore } from "../costsSnapshotStore.js";
+import { createCostsService } from "../costsService.js";
 import { createDeliveryService, InMemoryDeliverySource, type PullRequestFacts } from "../delivery.js";
 import { invokeChatCommand, parseChatCommand } from "../commandChat.js";
 import { ReviewAbridger } from "../reviewAbridge.js";
@@ -569,6 +573,16 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
   };
   const runs = async () =>
     createRunsService({ registry: s.reg, store: s.store, clock: () => NOW, units: s.units, sessions: s.ledger });
+  // `costs snapshot`: the real service over an in-memory snapshotter whose
+  // sources answer at once — a take lands and the stamp comes back.
+  const costs = createCostsService(
+    parseCostsConfig({ cloudflareAccountId: "acct-fixture", groups: { fixture: { workers: ["fixture"] } } })!,
+    new CostsSnapshotter(
+      { cloudflare: { fetchUsage: async () => EMPTY_USAGE }, llm: { fetchDailyCost: async () => null } },
+      new InMemoryCostsSnapshotStore(),
+      { everyHours: 24, now: () => new Date(NOW) },
+    ),
+  );
   // `delivery report`: one merged pull request of the fixture repo, reviewed
   // twice by a bot the fixture names, merged in the week of the pinned clock —
   // read from memory, never from GitHub (`fetch` is disarmed here).
@@ -624,6 +638,7 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
   );
   return {
     delivery: { service: async () => delivery },
+    costs: { service: async () => costs },
     help: {
       agents: () =>
         Object.values(AGENTS).map((a) => ({ name: a.name, description: a.description, door: presetDoor(a) })),

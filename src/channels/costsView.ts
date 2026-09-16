@@ -1,5 +1,7 @@
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
-import { COSTS_OFF_MESSAGE, type CostsService, type CostsViewer } from "../core/costs.js";
+import type { CostReport } from "../core/costs.js";
+import type { UserCostReport } from "../core/costsByUser.js";
+import { COSTS_OFF_MESSAGE, NoCostsSnapshotError, type CostsService, type CostsViewer } from "../core/costsService.js";
 import type { ShellRenderer } from "./webShell.js";
 import { WEB_HTML_HEADERS } from "./webShell.js";
 
@@ -7,9 +9,12 @@ import { WEB_HTML_HEADERS } from "./webShell.js";
 // deployed pieces costs per day — `GET /costs` (first group), `/costs/<group>`,
 // a JSON twin at `/costs/<group>.json` for agents, and cost by user at
 // `/costs/<group>?view=users` with its twin `/costs/<group>/users.json`
-// (costs.md item 10). Reads both billing sources LIVE on every request
-// (nothing cached, nothing stored); the by-user view adds one read of the
-// run history.
+// (costs.md item 10). Every figure comes from the costs snapshot (item 6): the
+// billing sources are read on the snapshot's interval or on request, never in
+// a page load, so a request is arithmetic over stored rows. The seed carries
+// the snapshot's status — its stamp, a take in flight, when the next is due —
+// which the page shows beside the numbers; before the first snapshot lands
+// the page shows that status alone and the twins answer 503.
 //
 // Auth: like /runs and /residents this surface has no token of its own —
 // Cloudflare Access is the "who" gate, re-verified fail-closed in
@@ -45,16 +50,31 @@ export interface CostsViewContext {
 
 const UPSTREAM_REASON_MAX = 400;
 
+/** What a twin answers before the first snapshot: come back once it has landed. */
+export const NO_SNAPSHOT_RETRY_AFTER_SECONDS = 60;
+
 function plain(res: ServerResponse, status: number, body: string, extra: Record<string, string> = {}): void {
   res.writeHead(status, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", ...extra });
   res.end(body);
 }
 
+function json(res: ServerResponse, body: unknown): void {
+  res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+  res.end(JSON.stringify(body));
+}
+
+/** A report, or null before the first snapshot; any other failure propagates. */
+const orNone = <T>(read: Promise<T>): Promise<T | null> =>
+  read.catch((err: unknown) => {
+    if (err instanceof NoCostsSnapshotError) return null;
+    throw err;
+  });
+
 /**
  * Node http handler for `/costs*`. Returns false for other paths so the server
- * falls through. GET-only. `service` undefined = not configured → 503. Both
- * billing sources are read live per request; an upstream failure is a 502
- * carrying a capped reason, never a 500.
+ * falls through. GET-only. `service` undefined = not configured → 503. A twin
+ * asked before the first snapshot is a 503 with `Retry-After`; a failure to
+ * build a report is a 502 carrying a capped reason, never a 500.
  */
 export function createCostsViewHandler(
   service: CostsService,
@@ -83,42 +103,45 @@ export function createCostsViewHandler(
     }
     const days = url.searchParams.get("days");
     const failed = (err: unknown) => {
+      if (err instanceof NoCostsSnapshotError) {
+        plain(res, 503, err.message, { "retry-after": String(NO_SNAPSHOT_RETRY_AFTER_SECONDS) });
+        return;
+      }
       const reason = (err instanceof Error ? err.message : String(err)).slice(0, UPSTREAM_REASON_MAX);
-      plain(res, 502, `cost sources unavailable: ${reason}`);
+      plain(res, 502, `cost report unavailable: ${reason}`);
     };
     if (route.kind === "users-json") {
       service
         .usersReport(group, days, ctx.identity)
-        .then((users) => {
-          res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
-          res.end(JSON.stringify(users));
-        })
+        .then((users: UserCostReport) => json(res, users))
         .catch(failed);
       return true;
     }
     if (route.kind === "json") {
       service
         .report(group, days)
-        .then((report) => {
-          res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
-          res.end(JSON.stringify(report));
-        })
+        .then((report: CostReport) => json(res, report))
         .catch(failed);
       return true;
     }
     // The page: the daily report always (tiles and chart), plus the by-user
-    // report when that tab is open — one more read, only when asked for.
-    const users = route.view === "users" ? service.usersReport(group, days, ctx.identity) : Promise.resolve(undefined);
-    Promise.all([service.report(group, days), users])
+    // report when that tab is open — both from the snapshot; before the first
+    // one lands the page carries the status and no report. The status is read
+    // after the reports so it is the one they were built from.
+    const users =
+      route.view === "users" ? orNone(service.usersReport(group, days, ctx.identity)) : Promise.resolve(null);
+    Promise.all([orNone(service.report(group, days)), users])
       .then(([report, usersReport]) => {
         res.writeHead(200, WEB_HTML_HEADERS);
         res.end(
-          shell(`${report.label} spend`, {
+          shell(`${report?.label ?? group} spend`, {
             page: "costs",
+            group,
             report,
             groups,
             view: route.view,
             ...(usersReport ? { users: usersReport } : {}),
+            snapshot: service.status(),
           }),
         );
       })

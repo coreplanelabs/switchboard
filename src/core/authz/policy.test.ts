@@ -159,6 +159,16 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
     [A.chatUser, A.browser, A.operator],
     [A.token, A.noGrants, A.dispatchOnly],
   ),
+  // `costs snapshot` replaces what every viewer of the costs page sees: the grant, never a baseline.
+  "costs:write command [has-grant(costs:write)]": {
+    allow: [[A.admin, command("costs.snapshot")]],
+    deny: [
+      [A.member, command("costs.snapshot")],
+      [A.noGrants, command("costs.snapshot")],
+      [A.chatUser, command("costs.snapshot")],
+      [A.browser, command("costs.snapshot")],
+    ],
+  },
   "friction:write command [has-grant(friction:write)]": {
     allow: [
       [A.schedule, command("friction.propose")],

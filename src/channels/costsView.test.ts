@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { NullCostsService, type CostReport, type CostsService } from "../core/costs.js";
+import type { CostReport } from "../core/costs.js";
 import type { UserCostReport } from "../core/costsByUser.js";
+import type { CostsSnapshotStatus } from "../core/costsSnapshot.js";
+import { NoCostsSnapshotError, NullCostsService, type CostsService } from "../core/costsService.js";
 import { createCostsViewHandler, parseCostsRoute } from "./costsView.js";
 import { makeShellRenderer } from "./webShell.js";
 import { ALL_CAPABILITIES } from "../core/capabilities.js";
 import { SEED_ELEMENT_ID, type CostsSeed } from "./webSeed.js";
 
-// The costs dash handler: routing, live-per-request reads, error statuses,
+// The costs dash handler: routing, the snapshot-backed reads and the status the seed carries, error statuses,
 // the JSON twin, and the seed the shell carries. Rendering is tested in
 // web/src/pages/costs.test.ts.
 
@@ -74,12 +76,36 @@ function seedOf(html: string): CostsSeed {
   return JSON.parse(m[1]) as CostsSeed;
 }
 
+/** The status a snapshot-serving service reports: taken on schedule, the next one due a day later. */
+const STATUS: CostsSnapshotStatus = {
+  snapshot: { takenAt: "2026-08-29T06:15:00.000Z", takenBy: "schedule", durationMs: 31_000 },
+  inFlight: null,
+  everyHours: 24,
+  nextAt: "2026-08-30T06:15:00.000Z",
+  lastFailure: null,
+};
+const NONE_YET: CostsSnapshotStatus = {
+  snapshot: null,
+  inFlight: null,
+  everyHours: 24,
+  nextAt: null,
+  lastFailure: null,
+};
+
 function fakeService(
   impl: (group: string, days: string | null) => Promise<CostReport>,
   groups = ["switchboard"],
   usersReport: CostsService["usersReport"] = () => Promise.reject(new Error("no by-user report in this test")),
+  status: CostsSnapshotStatus = STATUS,
 ): CostsService {
-  return { groups: () => groups, report: impl, usersReport };
+  return {
+    groups: () => groups,
+    report: impl,
+    usersReport,
+    status: () => status,
+    snapshot: () => Promise.reject(new Error("no take in this test")),
+    subscribe: () => () => undefined,
+  };
 }
 
 /** A by-user report shaped like the builder's, small. */
@@ -226,7 +252,7 @@ describe("createCostsViewHandler", () => {
     expect(io.headers.allow).toBe("GET");
   });
 
-  it("serves the first group on the bare index, LIVE per request, with the hardened page headers and the report + groups as the seed", async () => {
+  it("serves the first group on the bare index — the service asked on every request — with the hardened page headers and the report, the groups and the snapshot's status as the seed", async () => {
     let calls = 0;
     const h = createCostsViewHandler(
       fakeService(
@@ -251,8 +277,10 @@ describe("createCostsViewHandler", () => {
       expect(io.headers["x-frame-options"]).toBe("DENY");
       const seed = seedOf(io.body());
       expect(seed.page).toBe("costs");
+      expect(seed.group).toBe("switchboard");
       expect(seed.report).toEqual(report());
       expect(seed.groups).toEqual(["switchboard", "other"]);
+      expect(seed.snapshot).toEqual(STATUS);
       // the title interpolation escapes the hostile label; the seed keeps it as data
       expect(io.body()).toContain("<title>Switchboard &lt;b&gt; spend</title>");
       expect(io.body()).not.toContain("<title>Switchboard <b>");
@@ -316,8 +344,55 @@ describe("createCostsViewHandler", () => {
     h(io.req, io.res, {});
     await tick();
     expect(io.status).toBe(502);
-    expect(io.body()).toContain("cost sources unavailable: run history unreachable");
+    expect(io.body()).toContain("cost report unavailable: run history unreachable");
     expect(io.body().length).toBeLessThan(450);
+  });
+
+  // costs.md item 6: before the first snapshot lands nothing reads a source in
+  // the request — the page shows the status alone, the twins say come back.
+  it("before the first snapshot: the page is served with no report and the status (none yet, nothing in flight), a twin is a 503 with Retry-After — never a live read, never a 500", async () => {
+    let taking: CostsSnapshotStatus = NONE_YET;
+    const h = createCostsViewHandler(
+      {
+        groups: () => ["switchboard"],
+        report: () => Promise.reject(new NoCostsSnapshotError()),
+        usersReport: () => Promise.reject(new NoCostsSnapshotError()),
+        status: () => taking,
+        snapshot: () => Promise.reject(new Error("no take in this test")),
+        subscribe: () => () => undefined,
+      },
+      shell,
+    );
+    const page = fakeReqRes("GET", "/costs/switchboard?view=users&days=7");
+    h(page.req, page.res, { identity: { sub: "s" } });
+    await tick();
+    expect(page.status).toBe(200);
+    expect(page.body()).toContain("<title>switchboard spend</title>");
+    const seed = seedOf(page.body());
+    expect(seed).toMatchObject({
+      page: "costs",
+      group: "switchboard",
+      report: null,
+      view: "users",
+      snapshot: NONE_YET,
+    });
+    expect(seed.users).toBeUndefined();
+
+    // A take in flight rides the same status field.
+    taking = { ...NONE_YET, inFlight: { startedAt: "2026-08-29T06:15:00.000Z", by: "casey" } };
+    const again = fakeReqRes("GET", "/costs");
+    h(again.req, again.res);
+    await tick();
+    expect(seedOf(again.body()).snapshot.inFlight).toEqual({ startedAt: "2026-08-29T06:15:00.000Z", by: "casey" });
+
+    for (const path of ["/costs/switchboard.json", "/costs/switchboard/users.json", "/costs.json"]) {
+      const twin = fakeReqRes("GET", path);
+      h(twin.req, twin.res);
+      await tick();
+      expect(twin.status).toBe(503);
+      expect(twin.headers["retry-after"]).toBe("60");
+      expect(twin.body()).toContain("no cost snapshot yet");
+    }
   });
 
   it("passes ?days through and 404s an unknown group", async () => {
@@ -331,7 +406,7 @@ describe("createCostsViewHandler", () => {
     h(ok.req, ok.res);
     await tick();
     expect(ok.status).toBe(200);
-    expect(seedOf(ok.body()).report.range.days).toBe(7);
+    expect(seedOf(ok.body()).report?.range.days).toBe(7);
 
     const miss = fakeReqRes("GET", "/costs/nope");
     expect(h(miss.req, miss.res)).toBe(true);

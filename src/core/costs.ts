@@ -1,7 +1,4 @@
 import { systemClock } from "./trace/clock.js";
-import { buildUserCostReport, type UserCostReport } from "./costsByUser.js";
-import { NullRunStore, type RunStore } from "./runStore.js";
-import type { RunUsageReport } from "./runUsage.js";
 // Spend report: what a group of deployed pieces ("switchboard" = the bot
 // Worker + its containers, the resident/sandbox/memory Workers) costs per day,
 // assembled from the providers' own billing datasets and priced at list — and
@@ -71,10 +68,38 @@ export interface CostsConfig {
   /** Env var holding an Anthropic Admin API key (sk-ant-admin…). Optional feature. */
   anthropicAdminKeyEnv: string;
   groups: Record<string, CostGroupConfig>;
+  /** The snapshot the page and the twins serve (src/core/costsSnapshot.ts). */
+  snapshot: {
+    /** Hours between two reads of the billing sources. */
+    everyHours: number;
+  };
 }
 
 const DEFAULT_CF_TOKEN_ENV = "CF_ANALYTICS_TOKEN";
 const DEFAULT_ANTHROPIC_ADMIN_ENV = "ANTHROPIC_ADMIN_KEY";
+
+/** `costs.snapshot.everyHours`: the default and the bounds a value must keep. Daily by
+ *  default — both sources bucket by UTC day, and the page is read about as often. */
+export const COSTS_SNAPSHOT_EVERY_HOURS = Object.freeze({ default: 24, min: 1, max: 168 });
+
+/** `costs.snapshot`: absent → the default interval; a value outside the bounds or not a whole number throws by name. */
+function snapshotConfig(raw: unknown): CostsConfig["snapshot"] {
+  if (raw === undefined) return { everyHours: COSTS_SNAPSHOT_EVERY_HOURS.default };
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw))
+    throw new Error("costs.snapshot must be a mapping");
+  const every = (raw as Record<string, unknown>).everyHours;
+  if (every === undefined) return { everyHours: COSTS_SNAPSHOT_EVERY_HOURS.default };
+  if (
+    typeof every !== "number" ||
+    !Number.isInteger(every) ||
+    every < COSTS_SNAPSHOT_EVERY_HOURS.min ||
+    every > COSTS_SNAPSHOT_EVERY_HOURS.max
+  )
+    throw new Error(
+      `costs.snapshot.everyHours must be a whole number of hours between ${COSTS_SNAPSHOT_EVERY_HOURS.min} and ${COSTS_SNAPSHOT_EVERY_HOURS.max}`,
+    );
+  return { everyHours: every };
+}
 
 function labelMap(raw: unknown, what: string): Record<string, string> {
   const m = raw ?? {};
@@ -122,6 +147,7 @@ export function parseCostsConfig(raw: unknown): CostsConfig | undefined {
     anthropicAdminKeyEnv:
       typeof r.anthropicAdminKeyEnv === "string" ? r.anthropicAdminKeyEnv : DEFAULT_ANTHROPIC_ADMIN_ENV,
     groups,
+    snapshot: snapshotConfig(r.snapshot),
   };
 }
 
@@ -465,6 +491,9 @@ export interface CostReport {
    *  the id the page links to and the configured name it prints. */
   account: { id: string; name?: string; cloudUsd: number };
   attribution: CostAttribution;
+  /** The snapshot the report was built from (src/core/costsSnapshot.ts): when it was
+   *  taken, by whom, how long the read took. Absent on a report built straight from the sources. */
+  snapshot?: { takenAt: string; takenBy: string; durationMs: number };
 }
 
 /** What the report carries beyond the priced rows: the account behind the
@@ -733,7 +762,8 @@ export function anthropicTokensCostUsd(modelId: string, t: AnthropicTokens): num
 // ---- range ----------------------------------------------------------------------------
 
 const DEFAULT_DAYS = 30;
-const MAX_DAYS = 90;
+/** The widest range the page offers — and the window a costs snapshot is read for. */
+export const MAX_DAYS = 90;
 
 /** `?days=N` → a UTC date range ending today. Garbage → default; clamped 1..90. */
 export function resolveRange(daysParam: string | null, now: Date = new Date(systemClock())): DateRange {
@@ -1081,138 +1111,4 @@ export class AnthropicCostReportSource implements LlmCostSource {
     }
     return { rows, closedThrough };
   }
-}
-
-// ---- service (what the view talks to) ---------------------------------------------------
-
-export interface CostsService {
-  groups(): string[];
-  /** Live read of both sources for one group; throws on upstream failure. */
-  report(group: string, daysParam: string | null): Promise<CostReport>;
-  /** Cost by user (costs.md item 10): the group's daily report plus the run
-   *  history's per-user usage for the same range, and the signed-in viewer's
-   *  run ids for the **me** toggle (matched by email through the Slack lookup
-   *  when one is wired). Throws on upstream failure like `report`. */
-  usersReport(group: string, daysParam: string | null, viewer: CostsViewer | undefined): Promise<UserCostReport>;
-}
-
-/** Who is looking: the Access identity's fields the viewer match needs. */
-export interface CostsViewer {
-  sub: string;
-  email?: string;
-}
-
-/** What the by-user report reads beyond the two billing sources. */
-export interface CostsServiceDeps {
-  /** The run history; absent (or the null store) → the by-user report is empty and says history is off. */
-  runStore?: RunStore;
-  /** A Slack user's profile email by platform-namespaced id (`slack:U…`) — the bot's
-   *  `slackEmailLookup`, how the viewer's Access email is matched to the run ids the
-   *  history bills; undefined without `users:read.email` or for an unknown id. */
-  emailOfSlackUser?: (userId: string) => Promise<string | undefined>;
-}
-
-/** Why there is no spend report, when the config has no `costs` block or the
- *  Cloudflare analytics token is not in the env. */
-export const COSTS_OFF_MESSAGE =
-  "Cost reporting isn't configured — set costs.cloudflareAccountId + costs.groups in config and the CF_ANALYTICS_TOKEN secret to enable this view.";
-
-/** The service of a process without cost reporting (a Null Object, routing-and-
- *  config item 16): no group exists, and a report of one is refused with the
- *  reason — the view renders that instead of branching on a missing service. */
-export class NullCostsService implements CostsService {
-  groups(): string[] {
-    return [];
-  }
-  report(_group: string, _daysParam: string | null): Promise<CostReport> {
-    return Promise.reject(new Error(COSTS_OFF_MESSAGE));
-  }
-  usersReport(_group: string, _daysParam: string | null, _viewer: CostsViewer | undefined): Promise<UserCostReport> {
-    return Promise.reject(new Error(COSTS_OFF_MESSAGE));
-  }
-}
-
-/** The run ids the history bills that belong to the viewer: every `slack:U…`
- *  user in the report whose Slack email equals the viewer's Access email. One
- *  lookup per distinct user, cached for the process (an email does not move). */
-export async function viewerRunUserIds(
-  userIds: readonly string[],
-  viewer: CostsViewer | undefined,
-  emailOfSlackUser: ((userId: string) => Promise<string | undefined>) | undefined,
-  cache: Map<string, string | undefined>,
-): Promise<{ userIds: string[]; matchedByEmail: boolean }> {
-  const email = viewer?.email?.toLowerCase();
-  if (!email || !emailOfSlackUser) return { userIds: [], matchedByEmail: false };
-  const out: string[] = [];
-  for (const id of new Set(userIds)) {
-    // Only a person can be the viewer: an app nobody was found behind
-    // (`slack:bot:<id>`, slack-channel.md item 13) has no email to look up.
-    if (!id.startsWith("slack:") || id.startsWith("slack:bot:")) continue;
-    // The lookup takes the platform-namespaced id as every other consumer of
-    // the bot's email lookup does (`slack:U…`, the MCP connect ticket's
-    // `resolveEmail`); the first version passed the bare `U…` and the lookup
-    // answered nothing for anyone, so the toggle never matched a soul.
-    // A known email is cached for the process; an unknown one is asked again
-    // next time, since a lookup that failed quietly must not pin the user as
-    // unmatchable for as long as the bot runs.
-    let known = cache.get(id);
-    if (known === undefined) {
-      known = (await emailOfSlackUser(id))?.toLowerCase();
-      if (known !== undefined) cache.set(id, known);
-    }
-    if (known === email) out.push(id);
-  }
-  return { userIds: out, matchedByEmail: true };
-}
-
-export function createCostsService(
-  cfg: CostsConfig,
-  cloudflare: CloudflareUsageSource,
-  llm: LlmCostSource,
-  now: () => Date = () => new Date(systemClock()),
-  deps: CostsServiceDeps = {},
-): CostsService {
-  const emailCache = new Map<string, string | undefined>();
-  const report = async (group: string, daysParam: string | null, at: Date): Promise<CostReport> => {
-    const g = cfg.groups[group];
-    if (!g) throw new Error(`unknown cost group ${group}`);
-    const range = resolveRange(daysParam, at);
-    const [usage, llmRows] = await Promise.all([cloudflare.fetchUsage(range), llm.fetchDailyCost(range)]);
-    return buildCostReport(group, g, usage, llmRows, range, {
-      accountId: cfg.cloudflareAccountId,
-      accountName: cfg.cloudflareAccountName,
-      generatedAt: at.getTime(),
-    });
-  };
-  return {
-    groups: () => Object.keys(cfg.groups),
-    report: (group, daysParam) => report(group, daysParam, now()),
-    async usersReport(group, daysParam, viewer) {
-      const at = now();
-      const store = deps.runStore instanceof NullRunStore ? undefined : deps.runStore;
-      const daily = await report(group, daysParam, at);
-      const usage: RunUsageReport = store
-        ? await store.usageByUser({
-            sinceMs: Date.parse(`${daily.range.from}T00:00:00Z`),
-            untilMs: Date.parse(`${daily.range.to}T00:00:00Z`) + 86_400_000,
-          })
-        : { rows: [], pending: 0, retentionDays: 0 };
-      const viewerIds = await viewerRunUserIds(
-        usage.rows.map((r) => r.userId),
-        viewer,
-        deps.emailOfSlackUser,
-        emailCache,
-      );
-      return buildUserCostReport({
-        group,
-        range: daily.range,
-        usage,
-        days: daily.days,
-        historyOn: store !== undefined,
-        viewerUserIds: viewerIds.userIds,
-        matchedByEmail: viewerIds.matchedByEmail,
-        generatedAt: at.getTime(),
-      });
-    },
-  };
 }

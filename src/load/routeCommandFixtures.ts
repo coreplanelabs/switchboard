@@ -159,6 +159,8 @@ export const ROUTE_COMMAND_FIXTURES: readonly RouteCommandFixture[] = [
   f("c31p", "paraphrase", "what would a production deploy do right now?", "deploy.plan"),
   f("c32h", "happy", "show the delivery report", "delivery.report"),
   f("c32p", "paraphrase", "how long from issue to merge have we been running lately?", "delivery.report"),
+  f("c33h", "happy", "take a fresh costs snapshot now", "costs.snapshot"),
+  f("c33p", "paraphrase", "refresh the spend numbers on the costs page", "costs.snapshot"),
 ];
 
 const d = (id: string, text: string, command: string, allow?: readonly string[]): RouteCommandDecoy => ({
@@ -203,6 +205,7 @@ export const ROUTE_COMMAND_DECOYS: readonly RouteCommandDecoy[] = [
   d("c30d", "is the refresh schedule too aggressive?", "schedule.list"),
   d("c31d", "should we deploy today or wait for the fix?", "deploy.plan"),
   d("c32d", "are we shipping fast enough this quarter?", "delivery.report", ["delivery.report"]),
+  d("c33d", "why did our spend jump yesterday?", "costs.snapshot"),
 ];
 
 /** Every example of the command half, fixtures then decoys, for one replay. */

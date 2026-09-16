@@ -2,6 +2,7 @@ import { CommandRegistry } from "../commandRegistry.js";
 import { registerArtifactsCommands, type ArtifactsCommandDeps } from "./artifacts.js";
 import { registerConfigCommands, type ConfigCommandDeps } from "./config.js";
 import { registerContractCommands, type ContractCommandDeps } from "./contract.js";
+import { registerCostsCommands, type CostsCommandDeps } from "./costs.js";
 import { registerDeliveryCommands, type DeliveryCommandDeps } from "./delivery.js";
 import { registerDeployCommands, type DeployCommandDeps } from "./deploy.js";
 import { registerEnvCommands, type EnvCommandDeps } from "./env.js";
@@ -39,6 +40,7 @@ export type CoreCommandDeps = HelpCommandDeps &
   StatusCommandDeps &
   ContractCommandDeps &
   DeliveryCommandDeps &
+  CostsCommandDeps &
   ArtifactsCommandDeps;
 
 export function registerCoreCommands(registry: CommandRegistry<CoreCommandDeps>): void {
@@ -57,6 +59,7 @@ export function registerCoreCommands(registry: CommandRegistry<CoreCommandDeps>)
   registerSetupCommands(registry);
   registerContractCommands(registry);
   registerDeliveryCommands(registry);
+  registerCostsCommands(registry);
   registerArtifactsCommands(registry);
 }
 

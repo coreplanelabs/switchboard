@@ -24,7 +24,7 @@ Copy the nearest fixture from [`src/core/testing/capabilityFixtures.ts`](../../s
 | `runHistory` | `runHistory.store: file`, or `runHistory.worker.baseUrl` + `MEMORY_TOKEN` | Finished runs stay on `/runs?all=1`, `runs get` and `runs events` for `retentionDays`; `friction report` has runs to read | Finished runs evicted about a minute after they end | `file`: host disk under `data/runs/` (ephemeral on Cloudflare Containers); `worker`: the state Worker's `RunHistoryDO` |
 | `runLedger` | Run history on the state Worker (`worker`, not `file`) | A live run survives a bot restart; a follow-up steers into it; `/runs` lists every bot generation | A restart mid-run loses the run; its card closes as interrupted | Included in the state Worker |
 | `mcp` | An `mcp` block (`credentialKeyEnv`, default `MCP_CREDENTIAL_KEY`, 32 bytes base64) | `mcp` commands; `mcp__<server>__<tool>` tools on runs; the one-time connect page ([Connect an MCP server](connect-an-mcp-server.md)) | No external tools; `mcpServers` entries never connect | Local: sealed credentials in `data/mcp-secrets.json`; with `runtimeOverrides.worker`: the state Worker |
-| `costs` | A `costs` block + `CF_ANALYTICS_TOKEN` (Account Analytics: Read); optional `ANTHROPIC_ADMIN_KEY` | **Costs** section, `/costs`, `/costs/<group>.json` ([Check spend](check-spend.md)) | `/costs` answers 503 | Read-only API tokens; nothing stored |
+| `costs` | A `costs` block + `CF_ANALYTICS_TOKEN` (Account Analytics: Read); optional `ANTHROPIC_ADMIN_KEY` | **Costs** section, `/costs`, `/costs/<group>.json` ([Check spend](check-spend.md)) | `/costs` answers 503 | Read-only API tokens; one snapshot of both providers' rows, taken daily (`costs.snapshot.everyHours`) or on request with `costs snapshot`, kept on the state Worker any `*.worker` block names (in memory without one) |
 | `schedules` | `schedules.worker.baseUrl` + `MEMORY_TOKEN`; the cron identity in `SWITCHBOARD_INGRESS_TOKENS` with a `grants.http:cron` entry | Firing history on the **Scheduled** tab and in `schedule list` | Schedules listed, no firing history | The state Worker's `ScheduleDO`; the bot Worker's cron triggers |
 | `github` | `GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY` + `GITHUB_APP_INSTALLATION_ID`, or a personal `GH_TOKEN` | `github_*` tools; the coding agent's push and PR; `friction propose` files issues; the **Delivery** section, `/delivery` and `delivery report` (repositories under `delivery.repos`) | Agents answer from the conversation and the web; no PRs; `/delivery` answers 503 | A GitHub App (recommended: scoped, rotates) or one personal token |
 | `ingress` | `SWITCHBOARD_INGRESS_TOKENS`: JSON map bearer → `{ subject, channel?, email? }`, each subject granted in `grants.http:<subject>` / `mcp:<subject>`; `email` makes the token's runs the named person's ([authorization](../reference/authorization.md#ingress-tokens-are-credentials-not-grants)) | `POST /ingress` and the MCP server at `/mcp` | Both routes refuse every bearer | Nothing |
@@ -64,7 +64,7 @@ A command under two capabilities is on when either gives it a backend.
 | `runHistory` | `review abridge`, `friction report`, `friction propose` |
 | `runLedger` | — |
 | `mcp` | `mcp list`, `mcp add`, `mcp connect`, `mcp show`, `mcp remove`, `mcp promote` |
-| `costs` | — |
+| `costs` | `costs snapshot` |
 | `schedules` | `schedule list` |
 | `github` | `delivery report` |
 | `ingress` | — |

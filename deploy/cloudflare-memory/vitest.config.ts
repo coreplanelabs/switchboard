@@ -39,6 +39,7 @@ export default defineConfig({
       "runTranscript.test.ts",
       "sessionLog.test.ts",
       "delivery.test.ts",
+      "costs.test.ts",
     ],
   },
 });

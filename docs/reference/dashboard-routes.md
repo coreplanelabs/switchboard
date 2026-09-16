@@ -17,9 +17,9 @@ The header lists only the surfaces this installation has: **Residents** appears 
 | `GET /residents` | Every onboarded repo, its lifecycle state, its disk gauge (used/total) and how many runs are on it; each row folds open to those runs — stopwatch, run link, the worktree each holds (ref, commit, OS user, deps, size), the idle worktrees, and the room left on the disk | The dashboard twin of `repo list`; the fold lists the runs the viewer may read, live |
 | `GET /residents?stream=1` | The residents index feed (SSE): run rows as the registry publishes them, and the listing again whenever a run's worktree is bound or released | What the index consumes to stay current; no timer re-reads the resident Worker |
 | `GET /residents/<owner>/<name>` | One repo's resident: mirror status, warm checkout, active thread worktrees, and its disk — used/total, free, the reserve it keeps back, headroom in "more trees", and every component (mirror, deps, checkout, each thread tree, leftover caches) | The same numbers the resident's attach admission decides on — see [onboard a repo → Disk](../how-to/onboard-a-repo.md#disk) |
-| `GET /costs` | Daily spend across every configured group | Priced live from Cloudflare + (optionally) Anthropic billing data, nothing cached |
-| `GET /costs/<group>` | Spend for one group | |
-| `GET /costs/<group>.json` | Same data, machine-readable | For scripting/alerting, not for embedding a live dashboard elsewhere |
+| `GET /costs` | Daily spend across every configured group | Priced from a snapshot of Cloudflare's and (optionally) Anthropic's billing data, taken daily (`costs.snapshot.everyHours`) or on request with `costs snapshot`; the page names the snapshot, its age and when the next is due |
+| `GET /costs/<group>` | Spend for one group | `?view=users` opens the By user tab |
+| `GET /costs/<group>.json` | Same data, machine-readable | For scripting/alerting, not for embedding a live dashboard elsewhere; carries `snapshot.takenAt`; 503 with `Retry-After` before the first snapshot |
 | `GET /delivery` | Delivery indicators for the first configured repository — issue-to-merge time, first-pass CI, review rounds, the findings and the share resolved with no human edit, per week and per unit | From the repository's snapshot of GitHub's facts, refreshed on an interval and dated in the footer, plus the run history you may see; a read that stopped at its cap says over the tiles that they cover the newest pull requests only and marks the incomplete weeks; `?weeks=n` or `?since=YYYY-MM-DD`; `?fresh=1` reads GitHub now |
 | `GET /delivery/<owner>/<name>` | The same for one configured repository | The command twin, `delivery report --repo`, takes any repository |
 | `GET /delivery/<owner>/<name>.json` | Same data, machine-readable | |
@@ -76,6 +76,7 @@ Every registered command has an HTTP twin behind the same dashboard gate, plus a
 | `/api/schedule.list` | `GET`, `POST` | `schedule:read` | Every scheduled job (cron, UTC), which Worker fires it, its next firing, and what its last firing did. |
 | `/api/deploy.plan` | `GET`, `POST` | `deploy:read` | The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why. |
 | `/api/delivery.report` | `GET`, `POST` | `delivery:read` | Delivery indicators per week and per unit — issue-to-merge time, first-pass CI, review rounds, findings and the share resolved with no human edit — from the repository's snapshot of GitHub's facts (--fresh reads GitHub now) and the run history; nothing written. |
+| `/api/costs.snapshot` | `POST` | `costs:write` | Take the costs snapshot now: read both billing sources and the run history once over the page's widest range, store the result, and serve it to every reader of the costs page from then on. |
 
 <!-- /generated:api-routes -->
 

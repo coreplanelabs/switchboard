@@ -21,6 +21,7 @@ import type { UnitFacts } from "../src/core/unitRuns.js";
 import { ALL_CAPABILITIES, NO_CAPABILITIES } from "../src/core/capabilities.js";
 import type { CostReport, DailyCost } from "../src/core/costs.js";
 import { buildUserCostReport } from "../src/core/costsByUser.js";
+import type { CostsSnapshotStatus } from "../src/core/costsSnapshot.js";
 import type { RunUsage, UserDayUsage } from "../src/core/runUsage.js";
 import { buildDeliveryReport, resolveDeliveryRange, type PullRequestFacts } from "../src/core/delivery.js";
 import { FAVICON_ICO_SVG } from "../src/channels/favicon.js";
@@ -1105,6 +1106,16 @@ const COSTS: CostReport = {
   },
 };
 
+// The snapshot the page says its figures are from (costs.md item 6): taken on
+// schedule three hours before the preview's clock, the next one due a day later.
+const COSTS_SNAPSHOT: CostsSnapshotStatus = {
+  snapshot: { takenAt: new Date(NOW - 3 * 3_600_000).toISOString(), takenBy: "schedule", durationMs: 31_000 },
+  inFlight: null,
+  everyHours: 24,
+  nextAt: new Date(NOW + 21 * 3_600_000).toISOString(),
+  lastFailure: null,
+};
+
 // Cost by user (costs.md item 10), built through the real builder over the same
 // thirty days: three made-up Slack users starting runs on most days, `alice` the
 // signed-in viewer, one older model the price table does not know. The history
@@ -2114,8 +2125,23 @@ function page(
     return {
       title: "Switchboard spend",
       seed: users
-        ? { page: "costs", report: COSTS, groups: ["api", "web"], view: "users", users: COSTS_USERS }
-        : { page: "costs", report: COSTS, groups: ["api", "web"], view: "daily" },
+        ? {
+            page: "costs",
+            group: COSTS.group,
+            report: COSTS,
+            groups: ["api", "web"],
+            view: "users",
+            users: COSTS_USERS,
+            snapshot: COSTS_SNAPSHOT,
+          }
+        : {
+            page: "costs",
+            group: COSTS.group,
+            report: COSTS,
+            groups: ["api", "web"],
+            view: "daily",
+            snapshot: COSTS_SNAPSHOT,
+          },
     };
   }
   if (pathname.startsWith("/settings")) {

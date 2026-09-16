@@ -83,6 +83,7 @@ const GATES: Record<string, (c: Capabilities) => boolean> = {
   "mcp.promote": (c) => c.mcp,
   "schedule.list": (c) => c.schedules,
   "delivery.report": (c) => c.github,
+  "costs.snapshot": (c) => c.costs,
 };
 
 /** Nothing on, tools in a per-thread sandbox: the deterministic ops have no backend either. */

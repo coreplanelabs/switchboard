@@ -23,14 +23,8 @@ import { installationSettings } from "./core/installationSettings.js";
 import { EFFORT_LEVELS } from "./effort.js";
 import { NullDeliveryService, parseDeliveryConfig, SNAPSHOT_EVERY_MINUTES } from "./core/delivery.js";
 import { buildDeliverySnapshotStore } from "./core/deliverySnapshotStore.js";
-import {
-  AnthropicCostReportSource,
-  CloudflareGraphqlUsageSource,
-  NullCostsService,
-  NullLlmCostSource,
-  createCostsService,
-  parseCostsConfig,
-} from "./core/costs.js";
+import { parseCostsConfig } from "./core/costs.js";
+import { costsFromConfig, NullCostsService } from "./core/costsService.js";
 import { NullResidentAdminClient, residentAdminFromConfig } from "./core/residentAdmin.js";
 import { NO_FLEET, residentFleetWatcherFor, type ResidentFleetFacts } from "./core/residentFleet.js";
 import { httpJwksFetcher, JwksCache, parseAccessConfig, type VerifyDeps } from "./channels/accessAuth.js";
@@ -464,6 +458,27 @@ export async function runBot(): Promise<void> {
   const deliveryEveryMinutes = deliveryConfig?.snapshot.everyMinutes ?? SNAPSHOT_EVERY_MINUTES.default;
   if (delivery && deliveryService.repos().length > 0)
     delivery.source.startRefreshLoop({ repos: deliveryService.repos(), everyMinutes: deliveryEveryMinutes });
+  // Costs dash (docs/reference/specs/costs.md): every figure the page, its JSON
+  // twins and `costs snapshot` serve comes from ONE snapshot of both billing
+  // sources and the run history, taken on `costs.snapshot.everyHours` by the
+  // bot's own refresh loop or on request — never in a page load. Without the
+  // `costs:` block or the Cloudflare token the null service has no group and
+  // the page says so (503). Both keys are revealed into their source's
+  // constructor and held nowhere else here.
+  const costsCfg = parseCostsConfig(config.config.costs);
+  const costs =
+    capabilities.costs && costsCfg
+      ? costsFromConfig(costsCfg, config.config, {
+          secrets: processSecrets,
+          runStore,
+          // Cost by user (costs.md item 10): the Slack email lookup that matches the viewer to their runs.
+          emailOfSlackUser: (userId) => (slackEmailLookup ? slackEmailLookup(userId) : Promise.resolve(undefined)),
+          warn: (m) => console.warn(`[costs] ${m}`),
+        })
+      : undefined;
+  const costsService = costs?.service ?? new NullCostsService();
+  // A stale snapshot after a restart is refreshed at once; a young one is left alone.
+  costs?.snapshots.startRefreshLoop();
   const commands = buildCoreCommands(config, runStore, {
     registry: defaultRunRegistry,
     secrets: processSecrets,
@@ -472,6 +487,7 @@ export async function runBot(): Promise<void> {
     capabilities,
     runs: runsService,
     delivery: () => deliveryService,
+    costs: () => costsService,
     abridger: () => abridger,
     frictionLedger,
     tracker: deps.issueTracker,
@@ -661,38 +677,12 @@ export async function runBot(): Promise<void> {
       residentAdminClient instanceof NullResidentAdminClient
         ? `GET /residents (503 — ${residentAdminClient.reason})`
         : `GET /residents (dash → ${config.config.execution?.resident?.baseUrl})`;
-    // Costs dash: GET /costs (first group) + /costs/<group> (+ .json twin).
-    // Reads Cloudflare's billing datasets (and, when an Admin key is present,
-    // Anthropic's cost report) live per request. Without the `costs:` block or
-    // the Cloudflare token the null service has no group and the page says so
-    // (503). Access-gated below alongside /runs and /residents.
-    const costsCfg = parseCostsConfig(config.config.costs);
-    // Both keys are revealed into their source's constructor and held nowhere else here.
-    const anthropicAdminKey = costsCfg ? processSecrets.named(costsCfg.anthropicAdminKeyEnv) : undefined;
-    const cloudflareToken = costsCfg ? processSecrets.named(costsCfg.cloudflareTokenEnv) : undefined;
-    const costsService =
-      capabilities.costs && costsCfg && cloudflareToken
-        ? createCostsService(
-            costsCfg,
-            new CloudflareGraphqlUsageSource({
-              accountId: costsCfg.cloudflareAccountId,
-              token: cloudflareToken.reveal(),
-            }),
-            anthropicAdminKey
-              ? new AnthropicCostReportSource({ adminKey: anthropicAdminKey.reveal() })
-              : new NullLlmCostSource(),
-            undefined,
-            {
-              // Cost by user (costs.md item 10): the run history's per-user usage,
-              // and the Slack email lookup that matches the viewer to their runs.
-              runStore,
-              emailOfSlackUser: (userId) => (slackEmailLookup ? slackEmailLookup(userId) : Promise.resolve(undefined)),
-            },
-          )
-        : new NullCostsService();
+    // Costs dash: GET /costs (first group) + /costs/<group> (+ .json twins),
+    // served from the snapshot built above. Access-gated below alongside /runs
+    // and /residents.
     const costsView = createCostsViewHandler(costsService, shell);
-    const costsState = capabilities.costs
-      ? `GET /costs (${costsService.groups().join(",")}; LLM ${anthropicAdminKey ? "on" : "off"})`
+    const costsState = costs
+      ? `GET /costs (${costsService.groups().join(",")}; LLM ${costs.llmOn ? "on" : "off"}; snapshot every ${costsCfg?.snapshot.everyHours ?? "?"} h)`
       : costsCfg
         ? `GET /costs (503 — ${costsCfg.cloudflareTokenEnv} not set)`
         : "GET /costs (503 — no costs config)";
