@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.235.0](https://github.com/coreplanelabs/switchboard/compare/v1.234.0...v1.235.0) (2026-09-16)
+
+
+### Features
+
+* **harness:** one conformance table holds every harness to record 0038's six clauses — rows as functions of a driver, pi's driver green on every row, a lint refusing a row that reads nothing of the record, and the matrix a PR body carries ([#1351](https://github.com/coreplanelabs/switchboard/issues/1351)) ([49e4046](https://github.com/coreplanelabs/switchboard/commit/49e404636235260964502c8eb26b7c81afb10ad3))
+* **web:** a unit page search hit opens its run's fold at the step the turn lives in ([#1358](https://github.com/coreplanelabs/switchboard/issues/1358)) ([3d783e6](https://github.com/coreplanelabs/switchboard/commit/3d783e6e9e221b5aabd2d7c5360c89e38c7f4a4b))
+
+
+### Bug fixes
+
+* **harness:** the seam's door refuses a foreign row for the loop and every conformance driver, a harness's declared cannot is asserted in the table, the wind-down words live at the harness root, and the credential row plants a sentinel key ([#1357](https://github.com/coreplanelabs/switchboard/issues/1357)) ([d839e04](https://github.com/coreplanelabs/switchboard/commit/d839e04560332e82d2c5b373234e516c64fedefd))
+* **resident:** a tree no run is using is never kept for its dirt, and every eviction records what it discarded ([#1356](https://github.com/coreplanelabs/switchboard/issues/1356)) ([fb113b0](https://github.com/coreplanelabs/switchboard/commit/fb113b0ca10524dde582125f15d5b4350033f6ae))
+* **sandbox:** the idle deadline is the Durable Object's own — a thread's container is destroyed five minutes after its last request whatever runs inside, and the platform's max_instances refusal is a full fleet the executor waits on ([#1355](https://github.com/coreplanelabs/switchboard/issues/1355)) ([34714d5](https://github.com/coreplanelabs/switchboard/commit/34714d5d8df85c73c66ef8c27705016f5a18ac39))
+
 ## [1.234.0](https://github.com/coreplanelabs/switchboard/compare/v1.233.0...v1.234.0) (2026-09-16)
 
 
