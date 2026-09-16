@@ -162,6 +162,21 @@ describe("watchdogFiring (the resident's firing record)", () => {
     });
   });
 
+  it("item 36: the residents a pass auto-rebuilt ride on the line only when there were any — a quiet pass reads as before", () => {
+    const summary = {
+      cap: 6,
+      count: 3,
+      results: [
+        { resource: "repo:a/one", action: "auto-rebuilt", reason: "auto-rebuild (1 of 2 in 24 h): no-snapshot: …" },
+        { resource: "repo:b/two", action: "none" },
+        { resource: "repo:c/three", action: "provision-timed-out" },
+      ],
+    };
+    expect(watchdogFiring(watchdog, T0, summary).detail).toBe(
+      "3/6 residents · 0 refreshed · 1 timed out · 0 errors · 1 rebuilt",
+    );
+  });
+
   it("item 55: the fullest resident's disk gauge rides on the line when any resident has measured; malformed or absent gauges are skipped", () => {
     const summary = {
       cap: 6,

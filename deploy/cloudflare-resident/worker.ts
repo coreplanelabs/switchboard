@@ -195,6 +195,7 @@ import {
   type RestoreSample,
   type RefreshFailure,
 } from "../../src/execution/residentRefresh.js";
+import { autoRebuildDecision, isAutoRebuildEligible } from "../../src/execution/residentAutoRebuild.js";
 import {
   lifecycleOf,
   parseLifecycle,
@@ -591,18 +592,12 @@ function isNonEvidenceReason(reason: string): boolean {
  *  503 {state, reason: "mirror-busy"} instead of queueing forever. */
 const ATTACH_MUTEX_WAIT_MS = 60_000;
 
-/** Watchdog auto-rebuild: a resident down with a REHYDRATION-flavored
- *  reason (bad/unreadable snapshots — states only a rebuild can escape, since
- *  down chains never retry hydration) accumulates one strike per watchdog
- *  pass; at N strikes the watchdog triggers the same down→onboarding rebuild
- *  an admin would, discarding the unusable snapshots and reprovisioning from
- *  GitHub. Provision-failure downs never auto-rebuild — they would loop
- *  against the same broken build. With the 10-minute cron, N=3 ≈ 30 minutes
- *  down before the automatic escape hatch fires. `runtime-unreachable` is the
- *  ladder's last rung (item 64): a recreated container did not answer either,
- *  so the rebuild — destroy plus reprovision — is the only exit left. */
-const AUTO_REBUILD_AFTER_STRIKES = 3;
-const REHYDRATION_FAILURE_RE = /^(r2-restore-failed|snapshot-stamp-mismatch|no-snapshot|runtime-unreachable)/;
+// Auto-rebuild (item 36): a resident `down` on a reason only a rebuild can
+// escape (REHYDRATION_FAILURE_RE, `residentAutoRebuild.ts`) is rebuilt on the
+// `goDown` transition itself, under `AUTO_REBUILD_BUDGET` per window; the
+// watchdog is the backstop for a transition that could not act (no registry
+// record at the time). Provision-failure downs never auto-rebuild — they would
+// loop against the same broken build.
 
 /** /exec budget: the shared 5-minute default (`BASH_TIMEOUT_MS`);
  *  a caller may raise it per call via the body's `timeoutMs` up to the shared
@@ -1447,7 +1442,11 @@ const UPDATED_KEY = "resident:updatedAt";
 const FACTS_KEY = "resident:facts";
 const SNAPSHOT_KEY = "resident:snapshot";
 const DEADLINE_AT_KEY = "resident:provisionDeadlineAt";
-const REBUILD_STRIKES_KEY = "resident:rebuildStrikes"; // watchdog auto-rebuild counter
+/** ISO instants of this resident's auto-rebuilds (item 36): the budget's window
+ *  is judged over it; a manual rebuild or an offboard clears it. */
+const AUTO_REBUILDS_KEY = "resident:autoRebuilds";
+/** The strike counter the watchdog kept before the transition rebuilt (item 36); a serving pass deletes a leftover row. */
+const RETIRED_REBUILD_STRIKES_KEY = "resident:rebuildStrikes";
 /** Consecutive connects the container's control port did not answer (item 64): the ladder's count. */
 const RUNTIME_UNREACHABLE_KEY = "resident:runtimeUnreachable";
 
@@ -2527,8 +2526,19 @@ export class ResidentDO extends Sandbox<Env> {
     } catch (err) {
       // The typed and cause-chain check first: the SDK's replacement errors
       // (a stale process handle, an inactive runtime identity, an interrupted
-      // operation) carry the wording one cause down or not at all.
-      const disposition = restoreFailureDisposition(errMsg(err), { runtimeReplaced: isRuntimeReplacement(err) });
+      // operation) carry the wording one cause down or not at all. An extract
+      // the container roll SIGTERMed is different: its exec comes back a
+      // normal `exit 143` result and the SDK's wording only reaches the execs
+      // that follow — so the disposition also reads the kill signature, and
+      // asks the runtime whether the container the extract wrote to is still
+      // there (the incident that named this: a resident went `down` on exactly
+      // this, 10 ms before every exec answered "container is not running").
+      const runtimeReplaced = isRuntimeReplacement(err);
+      const runtimeActive = runtimeReplaced ? false : await this.isRuntimeActive().catch(() => null);
+      const disposition = restoreFailureDisposition(errMsg(err), {
+        runtimeReplaced,
+        runtimeActive: runtimeActive ?? undefined,
+      });
       if (disposition.action === "interrupted") {
         // The runtime was replaced under the restore (a resident Worker deploy
         // rolled the container): the disk the stream wrote to is gone with the
@@ -2544,7 +2554,10 @@ export class ResidentDO extends Sandbox<Env> {
         console.log(`restore: interrupted by a runtime replacement — ${disposition.reason.slice(0, 400)}`);
         await this.recordRefreshError(disposition.reason);
         await this.setResidentState("degraded", disposition.reason);
-        throw err;
+        // The reason travels on the error: the instance step's classifier
+        // reads `restore-interrupted:` as an interruption whether the verdict
+        // came from the SDK's wording, the kill signature or the probe.
+        throw new StepError(err instanceof StepError ? err.step : "restore", disposition.reason);
       }
       // A stalled or capped restore is STILL STREAMING (the SDK call cannot be
       // cancelled); `pendingRestores` keeps the next hydrate off its directory,
@@ -2600,7 +2613,60 @@ export class ResidentDO extends Sandbox<Env> {
    *  instance: the cron's decision reads the state). */
   private async goDown(reason: string): Promise<ResidentDownError> {
     await this.setResidentState("down", reason);
+    // Item 36: the transition is the trigger — a rehydration down is rebuilt
+    // now (the rebuild arms provisioning's own schedule and returns), not
+    // after three watchdog passes. The error still says `down`: the caller's
+    // step ends the way it always did, and the rebuild's provisioning owns the
+    // disk from its callback on. A failure inside the judgement is logged, not
+    // thrown: the caller's contract is the ResidentDownError, and the state is
+    // already `down`, where the watchdog's backstop pass finds it.
+    await this.autoRebuildFromDown(reason, "transition").catch((err) =>
+      console.log(`auto-rebuild (transition): failed — ${errMsg(err)}; the watchdog's pass is the backstop`),
+    );
     return new ResidentDownError(reason);
+  }
+
+  /** Item 36: judge a `down` for the automatic rebuild and act. `rebuilt` when
+   *  the rebuild started (state is `onboarding` now); `budget-spent` when the
+   *  resident stays down with the budget stamped on its reason; `none` for a
+   *  reason a rebuild cannot help, one already stamped, or a registry record
+   *  missing (an offboard mid-flight — the watchdog's pass is the backstop).
+   *  Both callers — the transition and the watchdog — read and write the one
+   *  history row, so they cannot disagree about the budget. */
+  private async autoRebuildFromDown(
+    reason: string,
+    where: "transition" | "watchdog",
+  ): Promise<"rebuilt" | "budget-spent" | "none"> {
+    if (!isAutoRebuildEligible(reason)) return "none";
+    const history = (await this.ctx.storage.get<string[]>(AUTO_REBUILDS_KEY)) ?? [];
+    const decision = autoRebuildDecision({ reason, history, now: systemClock() });
+    if (decision.action === "not-eligible") return "none";
+    if (decision.action === "budget-spent") {
+      console.log(`auto-rebuild (${where}): ${decision.reason.slice(0, 400)}`);
+      await this.ctx.storage.put(AUTO_REBUILDS_KEY, decision.history);
+      await this.setResidentState("down", decision.reason);
+      return "budget-spent";
+    }
+    const resource = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
+    const record = await this.registry()
+      .getRecord(resource)
+      .catch(() => null);
+    if (!record) {
+      console.log(`auto-rebuild (${where}): no registry record for the resident — left down (${reason.slice(0, 200)})`);
+      return "none";
+    }
+    console.log(`auto-rebuild (${where}): ${decision.reason.slice(0, 400)}`);
+    const result = await this.rebuild(resource, record.defaultRef, record.provisioningTimeoutMs, false, {
+      auto: true,
+    });
+    if ("error" in result) {
+      console.log(`auto-rebuild (${where}): rebuild refused — ${result.error}`);
+      return "none";
+    }
+    // The instant is recorded once the rebuild has started: a refused rebuild
+    // spends no budget.
+    await this.ctx.storage.put(AUTO_REBUILDS_KEY, decision.history);
+    return "rebuilt";
   }
 
   private async recordRefreshError(message: string): Promise<void> {
@@ -3383,8 +3449,8 @@ export class ResidentDO extends Sandbox<Env> {
         await this.recreateContainer(reason);
         throw err;
       case "down":
-        // A fresh VM did not answer either. Down with a strike-eligible reason
-        // (REHYDRATION_FAILURE_RE) — the watchdog rebuilds after its passes —
+        // A fresh VM did not answer either. Down with a rebuild-eligible reason
+        // (REHYDRATION_FAILURE_RE) — goDown rebuilds on the transition, item 36 —
         // and the VM destroyed, so the rebuild's provisioning starts on a new one.
         this.swapIncarnation(); // deliberate incarnation swap
         await this.destroy().catch((destroyErr) =>
@@ -4281,8 +4347,8 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** One watchdog pass over this resident (invoked by the Worker cron): time
    *  out an onboarding stuck past its budget → down(provision-timeout) + cap
-   *  slot release; auto-rebuild a resident stuck down on unusable snapshots
-   *  (one strike per pass, rebuild at AUTO_REBUILD_AFTER_STRIKES); name a
+   *  slot release; the backstop for item 36's auto-rebuild (a rehydration
+   *  down the transition could not act on — same decision, same row); name a
    *  `refreshing`/`restoring` marker older than STALE_MIDFLIGHT_MS that no
    *  live lease and no running instance stands behind —
    *  `degraded(stale-mid-flight: …)` carrying the last instance's id and the
@@ -4324,28 +4390,26 @@ export class ResidentDO extends Sandbox<Env> {
       return { resource, ...status, action: "none" };
     }
     if (status.state === "down") {
-      // Auto-rebuild escape hatch: only rehydration-flavored downs — the
-      // snapshots themselves are the problem, and a down resident runs no
-      // cycle, so without this the resident would stay down forever.
-      if (REHYDRATION_FAILURE_RE.test(status.reason)) {
-        const strikes = ((await this.ctx.storage.get<number>(REBUILD_STRIKES_KEY)) ?? 0) + 1;
-        if (strikes >= AUTO_REBUILD_AFTER_STRIKES) {
-          const record = await this.registry()
-            .getRecord(resource)
-            .catch(() => null);
-          if (record) {
-            const reason = `auto-rebuild: down for ${strikes} watchdog passes (${status.reason})`;
-            await this.rebuild(resource, record.defaultRef, record.provisioningTimeoutMs, false);
-            return { resource, state: "onboarding", reason, action: "auto-rebuilt" };
-          }
-        }
-        await this.ctx.storage.put(REBUILD_STRIKES_KEY, strikes);
+      // Item 36's backstop: the transition rebuilt (or stamped the budget)
+      // when it fired; a rehydration down still here on a pass is one the
+      // transition could not act on — a registry record missing then, or a
+      // down from before the transition rebuilt. Same decision, same history
+      // row, no strikes to accumulate.
+      if ((await this.autoRebuildFromDown(status.reason, "watchdog")) === "rebuilt") {
+        return {
+          resource,
+          state: "onboarding",
+          reason: `auto-rebuild (watchdog): ${status.reason}`,
+          action: "auto-rebuilt",
+        };
       }
-      return { resource, ...status, action: "none" };
+      return { resource, ...(await this.getStatus()), action: "none" };
     }
-    // Any serving state clears accumulated strikes (a recovery must reset the
-    // counter, or an unrelated later down inherits stale strikes).
-    await this.ctx.storage.delete(REBUILD_STRIKES_KEY);
+    // The auto-rebuild history is NOT cleared by a serving state: the budget
+    // counts rebuilds inside a window, so a resident that comes back `warm`
+    // and goes `down` again is judged with its earlier rebuilds in view. The
+    // strike counter the watchdog kept before is a retired row.
+    await this.ctx.storage.delete(RETIRED_REBUILD_STRIKES_KEY);
 
     // A mid-flight state older than STALE_MIDFLIGHT_MS with no cycle or restore
     // actually running is a marker orphaned by a cycle that died — a DO evicted
@@ -7051,6 +7115,9 @@ export class ResidentDO extends Sandbox<Env> {
       // Item 64: consecutive connects the control port did not answer, with
       // the rung that count is on; null while the port answers.
       runtimeUnreachable: unreachable ? { ...unreachable, rung: runtimeUnreachableRung(unreachable.count) } : null,
+      // Item 36: the auto-rebuilds this resident has had (ISO instants; the
+      // budget's window is judged over them). Empty after a person's rebuild.
+      autoRebuilds: (map.get(AUTO_REBUILDS_KEY) as string[] | undefined) ?? [],
     };
   }
 
@@ -7133,12 +7200,17 @@ export class ResidentDO extends Sandbox<Env> {
     return { recreated: true, restoreStartedAt };
   }
 
-  /** Fault injection for the watchdog's auto-rebuild path: persist
-   *  `down` with a rehydration-flavored reason (what a real goDown does), so
-   *  repeated watchdog passes can strike it up to the auto-rebuild without
-   *  corrupting real R2 objects. Test-only semantics; admin scope. */
-  async debugForceDown(reason: string): Promise<ResidentStatus> {
-    await this.setResidentState("down", reason);
+  /** Fault injection for item 36 without corrupting real R2 objects. Bare: persist
+   *  `down` with a rehydration-flavored reason and nothing else, so the next
+   *  watchdog pass is the backstop under test. `transition`: go through
+   *  `goDown` itself — the rebuild (or the budget stamp) happens in this call,
+   *  the way the wake path's own down does. Test-only semantics; admin scope. */
+  async debugForceDown(reason: string, transition: boolean): Promise<ResidentStatus> {
+    if (transition) {
+      await this.goDown(reason);
+    } else {
+      await this.setResidentState("down", reason);
+    }
     return this.getStatus();
   }
 
@@ -7154,6 +7226,8 @@ export class ResidentDO extends Sandbox<Env> {
     defaultRef: string,
     provisioningTimeoutMs: number,
     dryRun: boolean,
+    /** `auto`: item 36's rebuild, which keeps the auto-rebuild history (the budget's count); a person's rebuild clears it. */
+    opts: { auto?: boolean } = {},
   ): Promise<
     | {
         resource: string;
@@ -7220,7 +7294,11 @@ export class ResidentDO extends Sandbox<Env> {
         // best effort — the 1-year R2 TTL is the leak backstop
       }
     }
-    await this.ctx.storage.delete(REBUILD_STRIKES_KEY);
+    // A person's rebuild resets the auto-rebuild budget (item 36): the
+    // history is what stops a flapping resident, and a person asking for a
+    // rebuild has seen it. The automatic one keeps the history — it IS the
+    // budget's count.
+    if (!opts.auto) await this.ctx.storage.delete(AUTO_REBUILDS_KEY);
     // From scratch means a fresh container too: the SDK's runtime identity
     // forgotten and the VM destroyed (SIGKILL, a fresh disk) before
     // provisioning clones onto it. A rebuild that reprovisioned onto the
@@ -8487,11 +8565,12 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
     case "force-onboarding":
       return json(await stub.debugForceOnboarding());
     case "force-down": {
-      // Fault injection for the watchdog auto-rebuild path; a
-      // rehydration-flavored default reason makes it strike-eligible.
+      // Fault injection for item 36; a rehydration-flavored default reason
+      // makes it eligible. `transition: true` fires the down through goDown
+      // (the rebuild happens now); bare, the watchdog's next pass is the backstop.
       const reason =
         typeof body.reason === "string" && body.reason ? body.reason : "r2-restore-failed: injected (debug force-down)";
-      return json(await stub.debugForceDown(reason));
+      return json(await stub.debugForceDown(reason, body.transition === true));
     }
     case "threads":
       return json(await stub.debugThreads());

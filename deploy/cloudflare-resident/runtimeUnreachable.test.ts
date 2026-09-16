@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { REHYDRATION_FAILURE_RE } from "../../src/execution/residentAutoRebuild.js";
 import {
   runtimeUnreachableReason,
   SDK_PORT_READY_ENV,
@@ -177,10 +178,9 @@ describe("the ladder — each rung acts once, logs once and hands the step back 
     expect(down).not.toMatch(/throw err;/);
   });
 
-  it("the down reason is strike-eligible for the watchdog's auto-rebuild, and no rung's reason ever counts toward the park streak or serves an attach", () => {
-    const rehydration = regexConst("REHYDRATION_FAILURE_RE");
-    expect(rehydration.test(runtimeUnreachableReason(6, "down"))).toBe(true);
-    expect(rehydration.test("provision-failed: exit 1")).toBe(false);
+  it("the down reason is eligible for item 36's auto-rebuild, and no rung's reason ever counts toward the park streak or serves an attach", () => {
+    expect(REHYDRATION_FAILURE_RE.test(runtimeUnreachableReason(6, "down"))).toBe(true);
+    expect(REHYDRATION_FAILURE_RE.test("provision-failed: exit 1")).toBe(false);
     const nonEvidence = regexConst("NON_EVIDENCE_REASON");
     for (const rung of ["re-arm", "stop", "recreate", "down"] as const) {
       expect(nonEvidence.test(runtimeUnreachableReason(2, rung))).toBe(true);
