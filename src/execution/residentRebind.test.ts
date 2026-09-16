@@ -368,24 +368,39 @@ describe("rebindVerdict: without a memory of the branch, the surviving tree deci
   });
 });
 
-// The second movement (item 16): a rebound binding names a branch that can be
-// deleted once its pull request merges. Left there, every later attach of the
-// thread would fail `unknown-ref` and fall to a cold sandbox. So the binding
-// goes back to the default it was bound to, the move stamped returned, and
-// the thread is default-bound again. A ref a person named never returns.
-describe("canReturnToDefault and returnToDefault: a rebound binding whose branch is gone goes back to the default", () => {
+// The second movement (item 16): a binding can sit on a branch that dies —
+// its pull request merges and the branch is deleted. Left there, every later
+// attach of the thread would fail `unknown-ref` and fall to a cold sandbox for
+// the rest of the thread's life. So a binding whose gone ref is EITHER the
+// branch a rebind moved it onto OR one of the branches this thread itself
+// pushed (`ownBranches`, whatever `boundBy` says — a ship unit's coding child
+// binds its unit branch by name and pushes it) goes back to the default, the
+// move recorded (`returned`, and `rebound.returnedAt` for a rebind's move), and
+// the thread is default-bound again. A ref a person named that the thread
+// never pushed never returns: that branch is the person's to sort out.
+describe("canReturnToDefault and returnToDefault: a binding whose own branch is gone goes back to the default", () => {
   const rebound = { from: "main", to: "fix/exact-match", pr: 7, at: "t0" };
+  const own = [{ ref: "plan/slug/u1", pr: 12, at: "t0" }];
 
   it("a default-bound binding a rebind moved, still on that branch, may return", () => {
     expect(canReturnToDefault({ ref: "fix/exact-match", boundBy: "default", rebound }, DEFAULT_REF)).toBe(true);
   });
 
-  it("a ref a person named never returns — that branch is the person's to sort out — and neither does a binding never moved, one already returned, or one on the default", () => {
+  it("a binding on a branch this thread itself pushed may return whatever boundBy says: bound by name, bound by default, or made before the field", () => {
+    expect(canReturnToDefault({ ref: "plan/slug/u1", boundBy: "name", ownBranches: own }, DEFAULT_REF)).toBe(true);
+    expect(canReturnToDefault({ ref: "plan/slug/u1", boundBy: "default", ownBranches: own }, DEFAULT_REF)).toBe(true);
+    expect(canReturnToDefault({ ref: "plan/slug/u1", ownBranches: own }, DEFAULT_REF)).toBe(true);
+  });
+
+  it("a ref a person named that the thread never pushed never returns — that branch is the person's to sort out — and neither does a binding never moved, one already returned, or one on the default", () => {
     expect(canReturnToDefault({ ref: "fix/exact-match", boundBy: "name", rebound }, DEFAULT_REF)).toBe(false);
     // A binding made before `boundBy` and sitting off the default reads as named.
     expect(canReturnToDefault({ ref: "fix/exact-match", rebound }, DEFAULT_REF)).toBe(false);
     expect(canReturnToDefault({ ref: "release/2", boundBy: "name" }, DEFAULT_REF)).toBe(false);
+    // The thread pushed OTHER branches; the one it is bound to is not among them.
+    expect(canReturnToDefault({ ref: "release/2", boundBy: "name", ownBranches: own }, DEFAULT_REF)).toBe(false);
     expect(canReturnToDefault({ ref: "main", boundBy: "default" }, DEFAULT_REF)).toBe(false);
+    expect(canReturnToDefault({ ref: "main", boundBy: "default", ownBranches: own }, DEFAULT_REF)).toBe(false);
     expect(
       canReturnToDefault(
         { ref: "fix/exact-match", boundBy: "default", rebound: { ...rebound, returnedAt: "t" } },
@@ -394,28 +409,73 @@ describe("canReturnToDefault and returnToDefault: a rebound binding whose branch
     ).toBe(false);
     // The binding is no longer on the branch the move named: nothing to return from.
     expect(canReturnToDefault({ ref: "main", boundBy: "default", rebound }, DEFAULT_REF)).toBe(false);
+    // A binding that may not return has no move back to make.
+    expect(returnToDefault({ ref: "release/2", user: "worker2", boundBy: "name" }, DEFAULT_REF, "t1")).toBeUndefined();
   });
 
-  it("the return puts the ref back on the default, stamps the move returned, and answers the move back for the card", () => {
+  it("the return of a rebind's move puts the ref back on the default, stamps the move returned, records the move back, and answers it for the card", () => {
     const binding = { ref: "fix/exact-match", user: "worker2", boundBy: "default" as const, rebound };
     const at = "t1";
     const back = returnToDefault(binding, DEFAULT_REF, at);
-    expect(back.binding).toEqual({
+    expect(back).toBeDefined();
+    expect(back!.binding).toEqual({
       ref: "main",
       user: "worker2",
       boundBy: "default",
       rebound: { ...rebound, returnedAt: at },
+      returned: { from: "fix/exact-match", to: "main", pr: 7, at },
     });
-    expect(back.returned).toEqual({ from: "fix/exact-match", to: "main", pr: 7, at });
+    expect(back!.returned).toEqual({ from: "fix/exact-match", to: "main", pr: 7, at });
     // Default-bound again: the next own pull request may move the thread once more.
-    expect(canReturnToDefault(back.binding, DEFAULT_REF)).toBe(false);
+    expect(canReturnToDefault(back!.binding, DEFAULT_REF)).toBe(false);
     expect(
       rebindPlan({
         ownPr: { number: 9, ref: "fix/next" },
         reuse: false,
-        binding: back.binding,
+        binding: back!.binding,
         defaultRef: DEFAULT_REF,
       }),
     ).toMatchObject({ kind: "measure", from: "main", to: "fix/next", pr: 9 });
+  });
+
+  it("the return from a branch the thread pushed under a name it was bound to names that branch's pull request, leaves the binding default-bound with its memory, and frees the thread to follow its next pull request", () => {
+    const binding = { ref: "plan/slug/u1", user: "worker2", boundBy: "name" as const, ownBranches: own };
+    const at = "t1";
+    const back = returnToDefault(binding, DEFAULT_REF, at);
+    expect(back).toBeDefined();
+    expect(back!.binding).toEqual({
+      ref: "main",
+      user: "worker2",
+      boundBy: "default",
+      ownBranches: own,
+      returned: { from: "plan/slug/u1", to: "main", pr: 12, at },
+    });
+    expect(back!.binding).not.toHaveProperty("rebound");
+    expect(back!.returned).toEqual({ from: "plan/slug/u1", to: "main", pr: 12, at });
+    // Already returned: on the default, nothing to return from.
+    expect(canReturnToDefault(back!.binding, DEFAULT_REF)).toBe(false);
+    expect(returnToDefault(back!.binding, DEFAULT_REF, "t2")).toBeUndefined();
+    // Default-bound now: the thread's next own pull request moves it as a rebind, once.
+    expect(
+      rebindPlan({
+        ownPr: { number: 13, ref: "fix/next" },
+        reuse: false,
+        binding: back!.binding,
+        defaultRef: DEFAULT_REF,
+      }),
+    ).toMatchObject({ kind: "measure", from: "main", to: "fix/next", pr: 13 });
+  });
+
+  it("a binding both rebound onto and remembered as its own returns by the rebind's record: the move is stamped returned and the pull request is the rebind's", () => {
+    const binding = {
+      ref: "fix/exact-match",
+      user: "worker2",
+      boundBy: "default" as const,
+      rebound,
+      ownBranches: [{ ref: "fix/exact-match", pr: 7, at: "t0" }],
+    };
+    const back = returnToDefault(binding, DEFAULT_REF, "t1");
+    expect(back!.binding.rebound).toEqual({ ...rebound, returnedAt: "t1" });
+    expect(back!.returned).toEqual({ from: "fix/exact-match", to: "main", pr: 7, at: "t1" });
   });
 });

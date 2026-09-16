@@ -219,13 +219,15 @@ describe("the attach after a rebind provisions the tree at the moved ref as it p
   });
 });
 
-// The second movement (item 16): the branch a rebind moved the thread onto is
-// deleted once its pull request merges, and a binding left on it would fail
-// every later attach `unknown-ref` and fall to a cold sandbox for the rest of
-// the thread's life. Decided where the fact is established — under the mirror
-// mutex, after the attach's fetch found the ref gone — for a rebound,
-// default-bound binding only: the pure `canReturnToDefault`.
-describe("a rebound binding whose branch is gone from the mirror returns to the default, and the run starts clean there", () => {
+// The second movement (item 16): the thread's branch — one a rebind moved it
+// onto, or one its own runs pushed and it was bound to by name (a ship unit's)
+// — is deleted once its pull request merges, and a binding left on it would
+// fail every later attach `unknown-ref` and fall to a cold sandbox for the
+// rest of the thread's life. Decided where the fact is established — under
+// the mirror mutex, after the attach's fetch found the ref gone — by the pure
+// `canReturnToDefault` / `returnToDefault` over the row's `rebound` and
+// `ownBranches`; a person-named ref the thread never pushed keeps the refusal.
+describe("a binding whose own branch is gone from the mirror returns to the default, and the run starts clean there", () => {
   const create = method("attachThreadCreate");
   const back = method("returnBindingToDefault");
 
@@ -261,12 +263,14 @@ describe("a rebound binding whose branch is gone from the mirror returns to the 
     expect(create).toMatch(/let returned: Returned \| undefined;/);
   });
 
-  it("the return re-reads the row under the mutex, re-judges it with canReturnToDefault — a person-named ref, or a row another attach moved meanwhile, is answered as it stands and nothing is written — and writes the pure returnToDefault's row", () => {
+  it("the return re-reads the row under the mutex and hands it whole — rebound and ownBranches alike — to the pure returnToDefault, whose undefined (a person-named ref the thread never pushed, or a row another attach moved meanwhile) is answered as the row stands with nothing written; its row is what gets written", () => {
     expect(back).toMatch(/const current = \(await this\.ctx\.storage\.get<ThreadBinding>\(key\)\) \?\? binding;/);
-    expect(back).toMatch(
-      /if \(current\.rebound === undefined \|\| !canReturnToDefault\(current, defaultRef\)\) return \{ binding: current \};/,
-    );
-    expect(back).toMatch(/const back = returnToDefault\(/);
+    expect(back).toMatch(/const back = returnToDefault\(current, defaultRef, /);
+    expect(back).toMatch(/if \(back === undefined\) return \{ binding: current \};/);
+    // No Worker-side pre-judgement narrows the pure decision to a rebound row:
+    // a binding bound by name to a branch it pushed returns too.
+    expect(back).not.toMatch(/current\.rebound === undefined/);
+    expect(back).not.toMatch(/canReturnToDefault\(/);
     expect(back).toMatch(/await this\.ctx\.storage\.put\(key, back\.binding\);/);
     expect(back).toMatch(
       /is gone from the mirror .* — returned to \$\{back\.returned\.to\}; the tree is provisioned there/,
@@ -285,6 +289,15 @@ describe("a rebound binding whose branch is gone from the mirror returns to the 
     // The move's record on the binding carries its return, so the thread may move again.
     const rebindModule = readSource("../../src/execution/residentRebind.ts");
     expect(rebindModule).toMatch(/export interface Rebound \{[\s\S]*?returnedAt\?: string;[\s\S]*?\n\}/);
+  });
+
+  it("the binding records its last move back (`returned`) beside `rebound` — the home of the return for a binding never rebound — and a re-allocation after eviction carries it", () => {
+    expect(source).toMatch(
+      /interface ThreadBinding \{[\s\S]*?rebound\?: Rebound;[\s\S]*?returned\?: Returned;[\s\S]*?\n\}/,
+    );
+    expect(method("allocateThreadUser")).toMatch(/\{ returned: existing\.returned \}/);
+    const rebindModule = readSource("../../src/execution/residentRebind.ts");
+    expect(rebindModule).toMatch(/export interface RebindableBinding \{[\s\S]*?returned\?: Returned;[\s\S]*?\n\}/);
   });
 });
 

@@ -183,22 +183,33 @@ export interface ResidentBinding {
    *  binding is; the card and the run's stream say so. */
   rebindRefused?: { to: string; pr: number; reason: string; why: string };
   /** This attach moved the thread's binding BACK to the repository's default
-   *  branch (item 16's second movement): the branch a rebind had moved it onto
-   *  is gone from the mirror — deleted after its pull request merged — so the
-   *  run starts clean on the default instead of failing on a dead ref. From
-   *  which branch, to which, for which PR. Absent on every other attach. */
-  returned?: { from: string; to: string; pr: number };
+   *  branch (item 16's second movement): the branch it was on — one a rebind
+   *  had moved it onto, or one this thread itself pushed — is gone from the
+   *  mirror, deleted after its pull request merged, so the run starts clean on
+   *  the default instead of failing on a dead ref. From which branch, to
+   *  which, and for which PR when the resident names one. Absent on every
+   *  other attach. */
+  returned?: { from: string; to: string; pr?: number };
 }
 
-/** The attach answer's `rebound` or `returned` (item 16) — the two moves share
- *  a shape — when well-formed; anything else reads as no move, so a resident
- *  answering an unexpected shape binds as before. Strings were sanitized at
- *  the parse. */
+/** The attach answer's `rebound` (item 16) when well-formed; anything else
+ *  reads as no move, so a resident answering an unexpected shape binds as
+ *  before. Strings were sanitized at the parse. */
 function reboundOf(value: unknown): ResidentBinding["rebound"] {
+  const move = returnedOf(value);
+  return move !== undefined && move.pr !== undefined ? { from: move.from, to: move.to, pr: move.pr } : undefined;
+}
+
+/** The attach answer's `returned` (item 16's second movement) when
+ *  well-formed: the two branches always, the pull request when the resident
+ *  named one — the card then says which PR's branch is gone, and says only
+ *  that the branch is gone when it did not, never inventing a number. */
+function returnedOf(value: unknown): ResidentBinding["returned"] {
   if (typeof value !== "object" || value === null) return undefined;
   const v = value as Record<string, unknown>;
-  if (typeof v.from !== "string" || typeof v.to !== "string" || typeof v.pr !== "number") return undefined;
-  if (!v.from || !v.to || !Number.isSafeInteger(v.pr) || v.pr <= 0) return undefined;
+  if (typeof v.from !== "string" || typeof v.to !== "string" || !v.from || !v.to) return undefined;
+  if (v.pr === undefined) return { from: v.from, to: v.to };
+  if (typeof v.pr !== "number" || !Number.isSafeInteger(v.pr) || v.pr <= 0) return undefined;
   return { from: v.from, to: v.to, pr: v.pr };
 }
 
@@ -517,7 +528,7 @@ export class ResidentExecutor implements Executor {
     const trace = sanitizeGraftedSteps(data.trace);
     const rebound = reboundOf(data.rebound);
     const rebindRefused = rebindRefusedOf(data.rebindRefused);
-    const returned = reboundOf(data.returned);
+    const returned = returnedOf(data.returned);
     this.lastBinding = {
       ref: data.ref,
       sha: data.sha,

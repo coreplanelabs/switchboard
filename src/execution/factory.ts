@@ -487,14 +487,18 @@ async function openResident(
 /** The card's word on the binding's move (docs/reference/specs/resident-repos.md
  *  item 16), beside the binding line the way the repo-default note is said:
  *  the resident moved the thread onto its own PR's branch, moved it back to
- *  the default because that branch is gone, or kept the binding and named why
- *  — so a follow-up running somewhere other than where the thread's last run
- *  did is readable from the card. Empty when none of these happened. */
+ *  the default because the thread's branch is gone (naming the PR whose
+ *  branch it was when the resident named one, else the branch itself), or
+ *  kept the binding and named why — so a follow-up running somewhere other
+ *  than where the thread's last run did is readable from the card. Empty when
+ *  none of these happened. */
 export function rebindLabel(binding: Pick<ResidentBinding, "rebound" | "rebindRefused" | "returned">): string {
   if (binding.rebound) return ` · rebound to ${binding.rebound.to} (this thread's PR #${binding.rebound.pr})`;
   if (binding.returned) {
     const r = binding.returned;
-    return ` · returned to ${r.to} (the branch of this thread's PR #${r.pr} is gone)`;
+    return r.pr !== undefined
+      ? ` · returned to ${r.to} (the branch of this thread's PR #${r.pr} is gone)`
+      : ` · returned to ${r.to} (this thread's branch ${r.from} is gone)`;
   }
   if (binding.rebindRefused) {
     const r = binding.rebindRefused;

@@ -600,6 +600,8 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
       { body: { ...ATTACH_OK, rebound: { from: "master" }, rebindRefused: "no", returned: { to: "master" } } },
       { body: ATTACH_OK },
       { body: { ...ATTACH_OK, returned: { from: "fix/x", to: "master", pr: 7, at: "t" } } },
+      { body: { ...ATTACH_OK, returned: { from: "plan/slug/u1", to: "master", at: "t" } } },
+      { body: { ...ATTACH_OK, returned: { from: "plan/slug/u1", to: "master", pr: 0, at: "t" } } },
     );
     const moved = await ResidentExecutor.open({ ...OPTS, refHint: "fix/x", ownPr: { number: 7, ref: "fix/x" } });
     expect(moved.binding).toMatchObject({ ref: "fix/x", rebound: { from: "master", to: "fix/x", pr: 7 } });
@@ -622,6 +624,12 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
     const back = await ResidentExecutor.open({ ...OPTS, refHint: "master" });
     expect(back.binding).toMatchObject({ ref: "master", returned: { from: "fix/x", to: "master", pr: 7 } });
     expect(back.binding).not.toHaveProperty("rebound");
+    // A return that names no pull request is still the move back — the two
+    // branches are the fact; a malformed pull request number is not read as none.
+    const noPr = await ResidentExecutor.open({ ...OPTS, refHint: "master" });
+    expect(noPr.binding?.returned).toEqual({ from: "plan/slug/u1", to: "master" });
+    const badPr = await ResidentExecutor.open({ ...OPTS, refHint: "master" });
+    expect(badPr.binding).not.toHaveProperty("returned");
   });
 
   it('a 409 needs:"recreate" (the tree cannot be reused) is a typed ResidentReuseRefusedError carrying the resident\'s own words, never a retry', async () => {
