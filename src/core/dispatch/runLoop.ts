@@ -16,17 +16,17 @@ import type { CoordinatorTag } from "../coordinator/contract.js";
 import { budgetedAgent, type RunProfile } from "../../config/profile.js";
 import { parseModelRef } from "../provider.js";
 import { mergeTools, TOOLSETS } from "../../tools/toolsets.js";
-import { piContainerFor } from "../harness/pi/botHostContainer.js";
 import {
-  ModelPolicyRefusedError,
-  PiContainerReplacedError,
-  piHarnessFactsOf,
-  runPiHarnessOpen,
-  type OpenPiSession,
-  type PiHarnessFacts,
-} from "../harness/pi/harness.js";
+  factsBelongTo,
+  HarnessInterruptedError,
+  HarnessMismatchError,
+  harnessFactsOf,
+  type HarnessFacts,
+  type HarnessSession,
+} from "../harness/contract.js";
+import { piContainerFor } from "../harness/pi/botHostContainer.js";
+import { ModelPolicyRefusedError } from "../harness/pi/harness.js";
 import { softStopAnswer, timeBudgetAnswer } from "../harness/pi/windDown.js";
-import { piRunPathsAt } from "../harness/pi/process.js";
 import { loopEndingOf, reviewPostedBefore, type LoopEnding } from "../runLedger/resume.js";
 import type { RouteDecided } from "./route.js";
 import {
@@ -454,20 +454,21 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
   // The failure by name (run-history item 57), when the harness's throw has
   // one: the record says it, so the session's next seed can act on it.
   let failure: RunFailure | undefined;
-  // The harness's verdict that pi's container was replaced under the run
-  // (harness-pi item 16): the loop threw, but the run is interrupted, not
-  // failed — its card says it restarts, and the dispatcher runs the request
-  // again once the thread is free, the path a refused re-attach takes
-  // (run-history item 54).
-  let replaced: PiContainerReplacedError | undefined;
+  // The verdict that the run is interrupted, not failed (harness.md item 7):
+  // the harness's container was replaced under the run (harness-pi item 16),
+  // or the row's facts were written by another harness. The loop threw, but
+  // its card says the run restarts, and the dispatcher runs the request again
+  // once the thread is free, the path a refused re-attach takes (run-history
+  // item 54).
+  let interrupted: HarnessInterruptedError | undefined;
   let runDiagnosis: FrictionDiagnosis | undefined; // the finish-site diagnosis: the done card's shape line
-  // The run keeps its pi alive past the loop (harness-pi item 14): the
-  // reviewed-head settle's re-review and the description turn below are one
-  // more prompt on that session, and it is ended here once they are done — or
-  // on a throw, before the workspace pi runs in is released. A `finish` plan
-  // has none: the loop had answered before the restart and its pi is ended
-  // below, so the post-turns run no turn (item 14).
-  let piSession: OpenPiSession | undefined;
+  // The run keeps its harness process alive past the loop (harness-pi item
+  // 14): the reviewed-head settle's re-review and the description turn below
+  // are one more prompt on that session, and it is ended here once they are
+  // done — or on a throw, before the workspace it runs in is released. A
+  // `finish` plan has none: the loop had answered before the restart and its
+  // process is ended below, so the post-turns run no turn (item 14).
+  let harnessSession: HarnessSession | undefined;
   // Give the workspace back now rather than at the inactivity sweep: a
   // resident's pool user is a scarce slot (docs/reference/specs/resident-repos.md item
   // 16a). The release mode is paired to the round's agent by the attach
@@ -576,9 +577,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
   // settle nor the post runs again, and the reviewed head is the event's.
   const postedBefore = resume ? reviewPostedBefore(resume.events) : undefined;
   if (postedBefore) reviewHead = postedBefore.head;
-  // The row's pi facts (harness-pi item 8), for the harness's re-attach or,
-  // on a finish, for ending the pi the previous generation left behind.
-  const piFacts = resume ? piHarnessFactsOf(resume.row.state.harness) : undefined;
+  // The row's harness facts (harness.md item 7; harness-pi item 8), read by
+  // whichever harness wrote them: for the harness's re-attach or, on a finish,
+  // for ending the process the previous generation left behind.
+  const facts = resume ? harnessFactsOf(resume.row.state.harness) : undefined;
   try {
     if (finish) {
       onEvent({
@@ -586,32 +588,52 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
         kind: "resumed",
         summary: `resumed after a restart: the model had already answered (${describeEnding(loopEnding)}); running the post-steps with its answer`,
       });
-      if (piFacts) {
-        // pi's loop had ended too, but the process that would have ended pi
-        // died first: end it at the pid and root the row recorded, best-effort,
-        // and only in the container the row names (harness-pi item 8): in
-        // another container that pid is a stranger's, so it is named, not ended.
+      if (facts) {
+        // The loop had ended too, but the process that would have ended the
+        // harness's process died first: the harness finds it (harness.md item
+        // 7) and ends it at the pid and root the row recorded, best-effort,
+        // only in the container the row names: in another container that pid
+        // is a stranger's, and another harness's process is not this one's to
+        // judge — either is named, not ended.
+        if (!deps.harness)
+          throw new Error(
+            `the ${agent.name} preset's run left ${facts.harness} harness facts on its row, but this process has no harness deps to end that process with`,
+          );
         const container =
-          deps.harness?.containerFor?.(executor, profile.machine) ?? piContainerFor(executor, profile.machine);
-        const here = await container.identity();
-        if (piFacts.container === undefined || here === undefined || piFacts.container === here) {
-          await container.kill(piFacts.pid).catch(() => {});
-          if (piFacts.root !== undefined) await container.remove(piRunPathsAt(piFacts.root)).catch(() => {});
-        } else {
-          onEvent({
-            type: "run_note",
-            kind: "resumed",
-            summary: `the run's pi (pid ${piFacts.pid}) ran in container ${piFacts.container}, not the one this run was handed (${here}): it was not ended here`,
-          });
+          deps.harness.containerFor?.(executor, profile.machine) ?? piContainerFor(executor, profile.machine);
+        const found = await deps.harness.harness.find(facts, container);
+        switch (found) {
+          case "another-container": {
+            // Both words go on the note — the row's and this container's — so
+            // forensics can tell which generation ran where after a roll.
+            const here = await container.identity().catch(() => undefined);
+            onEvent({
+              type: "run_note",
+              kind: "resumed",
+              summary: `the run's ${facts.harness} process (pid ${facts.pid}) ran in container ${facts.container ?? "unknown"}, not the one this run was handed (${here ?? "unknown"}): it was not ended here`,
+            });
+            break;
+          }
+          case "another-harness":
+            onEvent({
+              type: "run_note",
+              kind: "resumed",
+              summary: `the run's row carries ${facts.harness} harness facts (pid ${facts.pid}), and this run is driven by ${deps.harness.harness.name}: that process was neither judged nor ended here`,
+            });
+            break;
+          default:
+            await deps.harness.harness.end(facts, container);
         }
       }
       answer = answerUnderEnding(finish.answer, loopEnding, agent.maxMinutes);
     } else {
-      // The pi harness (harness-pi.md): pi in the run's own container, the
-      // bearer as its key, the bridge putting its events on this same stream,
-      // the relayed tools running here under this same tool context.
+      // The harness (harness.md; pi's is harness-pi.md): the process in the
+      // run's own container, the bearer as its key, its bridge putting its
+      // events on this same stream, the relayed tools running here under this
+      // same tool context.
       if (!deps.harness)
         throw new Error(`the ${agent.name} preset runs on the pi harness, but this process has no harness deps`);
+      const harnessDeps = deps.harness;
       // Where pi runs and how it reaches the bot follow the run's machine class
       // (harness-pi.md item 12): a class with a workspace has an executor to
       // exec through, and pi reaches the bot at its public URL; `none` has no
@@ -627,6 +649,17 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
         );
       if (ctx.bearer === undefined)
         throw new Error("the pi harness needs the run's model-proxy bearer, and this process minted none");
+      // The row's facts are read by the harness that wrote them (harness.md
+      // item 7): a row another harness wrote names a process this harness can
+      // neither judge nor end, so the run is interrupted here, before any
+      // harness opens — said on the record first, then thrown for the finally
+      // and the dispatcher's restart. The seam's one comparison (`factsBelongTo`).
+      if (facts !== undefined && !factsBelongTo(harnessDeps.harness, facts)) {
+        const mismatch = new HarnessMismatchError(harnessDeps.harness.name, facts.harness);
+        onProgress(mismatch.message);
+        onEvent({ type: "run_note", kind: "harness_error", summary: mismatch.message });
+        throw mismatch;
+      }
       const { provider: providerName, model: modelId } = parseModelRef(resolved.modelRef);
       const providerCfg = deps.config.config.providers[providerName];
       if (!providerCfg) throw new Error(`the pi harness found no provider named ${providerName} in the config`);
@@ -647,21 +680,17 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
           ),
         ),
       ];
-      piSession = await runPiHarnessOpen(
+      harnessSession = await harnessDeps.harness.open(
         {
-          container:
-            deps.harness.containerFor?.(executor, profile.machine) ?? piContainerFor(executor, profile.machine),
+          container: harnessDeps.containerFor?.(executor, profile.machine) ?? piContainerFor(executor, profile.machine),
           bearer: ctx.bearer,
           harnessUrl,
-          registry: deps.harness.registry,
+          registry: harnessDeps.registry,
           ...(deps.runBearers ? { bearers: deps.runBearers } : {}),
-          // The deployment's compaction thresholds ride into pi's settings for
-          // every run on pi (harness-pi item 4); absent, pi's defaults stand.
-          ...(deps.config.config.pi?.compaction ? { compaction: deps.config.config.pi.compaction } : {}),
           clock,
-          sleep: deps.harness.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
-          ...(deps.harness.pollMs !== undefined ? { pollMs: deps.harness.pollMs } : {}),
-          ...(deps.harness.tickMs !== undefined ? { tickMs: deps.harness.tickMs } : {}),
+          sleep: harnessDeps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
+          ...(harnessDeps.pollMs !== undefined ? { pollMs: harnessDeps.pollMs } : {}),
+          ...(harnessDeps.tickMs !== undefined ? { tickMs: harnessDeps.tickMs } : {}),
         },
         {
           runId: run.id,
@@ -688,7 +717,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
           ...(ledgerRun
             ? {
                 onStep: ledgerRun.step.bind(ledgerRun),
-                saveFacts: (h: PiHarnessFacts) => ledgerRun.setState({ harness: h }),
+                saveFacts: (h: HarnessFacts) => ledgerRun.setState({ harness: h }),
               }
             : {}),
           ...(reentry
@@ -700,13 +729,13 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
                   remainingMs: reentry.remainingMs,
                   turn: reentry.turn,
                   inboxConsumedSeq: reentry.inboxConsumedSeq,
-                  ...(piFacts ? { facts: piFacts } : {}),
+                  ...(facts ? { facts } : {}),
                 },
               }
             : {}),
         },
       );
-      answer = piSession.answer;
+      answer = harnessSession.answer;
     }
     // Reviewed-head settle (docs/reference/specs/agent-review.md items 8 + 12,
     // settleReviewedHead in reviewRound.ts): for a PR review, read the
@@ -741,7 +770,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
           toolContext,
           onEvent,
           control: run.control,
-          ...(piSession ? { followUp: piSession.followUp } : {}),
+          ...(harnessSession ? { followUp: harnessSession.followUp } : {}),
         },
         fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
         fetchPrCommits: deps.fetchPrCommits ?? prCommitsSince,
@@ -792,7 +821,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
             toolContext,
             onProgress,
             onEvent,
-            ...(piSession ? { followUp: piSession.followUp } : {}),
+            ...(harnessSession ? { followUp: harnessSession.followUp } : {}),
           },
           logKey: msg.threadKey,
         }),
@@ -893,7 +922,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
               toolContext,
               onProgress,
               onEvent,
-              ...(piSession ? { followUp: piSession.followUp } : {}),
+              ...(harnessSession ? { followUp: harnessSession.followUp } : {}),
             },
             logKey: msg.threadKey,
           }),
@@ -904,7 +933,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     }
     // The last prompt on the run's pi has been sent: pi ends here, before the
     // post-step and before the workspace it runs in can be released.
-    await piSession?.end();
+    await harnessSession?.end();
     // The accepted PrDescription is a fact of the run: publish it as a typed
     // event BEFORE the finally below finish()es the stream, string fields
     // redacted like every payload, so the run page's review panel renders
@@ -1012,19 +1041,19 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
         }),
       );
   } catch (err) {
-    if (err instanceof PiContainerReplacedError) replaced = err;
+    if (err instanceof HarnessInterruptedError) interrupted = err;
     else {
       runFailed = true;
       if (err instanceof ModelPolicyRefusedError) failure = { kind: "policy_refusal" };
     }
     // pi first: it runs in the workspace released next (a no-op once ended).
-    await piSession?.end();
+    await harnessSession?.end();
     await root.span("post.workspace_release", (span) => releaseWorkspace(span));
     throw err;
   } finally {
     clearInterval(heartbeat);
     const stopped = run.control.requested;
-    const status: RunStatus = replaced
+    const status: RunStatus = interrupted
       ? "interrupted"
       : runFailed
         ? "failed"
@@ -1098,27 +1127,23 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     // cross-run proposer reads is run history, so nothing is written twice.
     // A run whose loop threw closes its card here, after the finish, so the
     // card's total is the run's; the outer catch replies and drains. A run
-    // interrupted by a replaced container closes saying it restarts from its
-    // request (harness-pi item 16): the fresh run's card follows this one.
+    // interrupted — a replaced container (harness-pi item 16), another
+    // harness's row (harness.md item 7) — closes saying it restarts from its
+    // request: the fresh run's card follows this one.
     if (runFailed)
       await root
         .span("post.card_close", () =>
           card.done(shell.close({ kind: "done", icon: "❌", detail: checklistAsLeft(), ...doneLines(diagnosis) })),
         )
         .catch(() => {});
-    else if (replaced)
+    else if (interrupted) {
+      const { reason } = interrupted;
       await root
         .span("post.card_close", () =>
-          card.done(
-            shell.close({
-              kind: "refused",
-              icon: "🔁",
-              reason: "container replaced under the run; restarting from the request",
-              ...doneLines(diagnosis),
-            }),
-          ),
+          card.done(shell.close({ kind: "refused", icon: "🔁", reason, ...doneLines(diagnosis) })),
         )
         .catch(() => {});
+    }
   }
   return {
     answer,

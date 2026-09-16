@@ -20,7 +20,7 @@ import type { ChannelIO, IncomingMessage, StatusUpdate } from "../types.js";
 import type { DispatchFollowUp } from "./admission.js";
 import { buildMessages } from "./messages.js";
 import { resolveRun } from "./resolve.js";
-import type { HarnessDeps, RunDeps } from "./run.js";
+import type { HarnessProcessDeps, RunDeps } from "./run.js";
 import { runLoop } from "./runLoop.js";
 import {
   HarnessRegistry,
@@ -34,7 +34,9 @@ import {
 } from "../harness/pi/relay.js";
 import { spawnCapabilityFor, type SpawnCapability, type SpawnDeps } from "./spawn.js";
 import type { SessionCapability } from "../../tools/session.js";
+import { HarnessInterruptedError, HarnessMismatchError } from "../harness/contract.js";
 import { ModelPolicyRefusedError, PiContainerReplacedError } from "../harness/pi/harness.js";
+import { PiHarness } from "../harness/pi/piHarness.js";
 import { FakePiContainer } from "../harness/pi/testing/fakeContainer.js";
 import { scriptPiFromProvider } from "../harness/pi/testing/providerPi.js";
 import { judgeToolCall, type ToolRuleContext } from "../harness/pi/toolRules.js";
@@ -82,6 +84,9 @@ function configStore(yaml = YAML): ConfigStore {
   return new ConfigStore(path, join(dir, "overrides.json"));
 }
 
+/** The harness every test process drives runs with (harness.md item 7): pi, with no deployment settings behind it. */
+const piHarness = new PiHarness();
+
 function provider(answer: string | Error): Provider {
   return {
     name: "fake",
@@ -110,7 +115,7 @@ function setup(
     /** The pi harness's process deps, when the test scripts pi itself; absent,
      *  a fake container whose pi is scripted from the run's provider; `null`,
      *  a process without them. */
-    harness?: HarnessDeps | null;
+    harness?: HarnessProcessDeps | null;
     /** The run's model-proxy bearer, as the dispatcher would hand it over;
      *  `null`, a run handed none. */
     bearer?: string | null;
@@ -144,10 +149,11 @@ function setup(
   const store = new InMemoryRunStore();
   const writer = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
   const runProvider = opts.provider ?? provider(answer);
-  const harness: HarnessDeps | null =
+  const harness: HarnessProcessDeps | null =
     opts.harness !== undefined
       ? opts.harness
       : {
+          harness: piHarness,
           registry: new HarnessRegistry(),
           harnessUrl: "https://bot.example.com",
           loopbackUrl: "http://127.0.0.1:8080",
@@ -577,6 +583,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       provider: provider("unused"),
       yaml: PI_YAML,
       harness: {
+        harness: piHarness,
         registry: new HarnessRegistry(),
         harnessUrl: "https://bot.example.com",
         containerFor: () => container,
@@ -624,6 +631,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       provider: provider("unused"),
       yaml: PI_YAML,
       harness: {
+        harness: piHarness,
         registry: new HarnessRegistry(),
         harnessUrl: "https://bot.example.com",
         containerFor: () => container,
@@ -662,6 +670,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       provider,
       yaml: PI_YAML,
       harness: {
+        harness: piHarness,
         registry,
         harnessUrl: "https://bot.example.com",
         containerFor: () => container,
@@ -778,7 +787,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       agent: "coding",
       provider: provider("unused"),
       yaml: PI_YAML,
-      harness: { registry, harnessUrl: "https://bot.example.com", containerFor: () => container },
+      harness: { harness: piHarness, registry, harnessUrl: "https://bot.example.com", containerFor: () => container },
       bearer: "sbr_run-l.s3cret",
       repoCtx: { repo: "acme/api", ref: "main" } as RepoContext,
       binding: { ref: "main", sha: HEAD, workspace: "/srv/wt/t", user: "worker2" },
@@ -837,7 +846,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     const s = setup("", {
       agent: "coding",
       yaml: PI_YAML,
-      harness: { registry, harnessUrl: "https://bot.example.com", containerFor: () => container },
+      harness: { harness: piHarness, registry, harnessUrl: "https://bot.example.com", containerFor: () => container },
       bearer: "sbr_run-l.s3cret",
       binding: { ref: "main", sha: "abc", workspace: "/workspace/threads/t/main", user: "worker2" },
     });
@@ -870,6 +879,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
         agent: "coding",
         yaml: PI_YAML,
         harness: {
+          harness: piHarness,
           registry,
           harnessUrl: "https://bot.example.com",
           containerFor: () => container,
@@ -922,14 +932,14 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     const noUrl = setup("", {
       agent: "coding",
       yaml: PI_YAML,
-      harness: { registry: new HarnessRegistry() },
+      harness: { harness: piHarness, registry: new HarnessRegistry() },
       bearer: "sbr_x.y",
     });
     await expect(runLoop(noUrl.deps, noUrl.ctx)).rejects.toThrow(/PUBLIC_BASE_URL/);
     const noBearer = setup("", {
       agent: "coding",
       yaml: PI_YAML,
-      harness: { registry: new HarnessRegistry(), harnessUrl: "https://b" },
+      harness: { harness: piHarness, registry: new HarnessRegistry(), harnessUrl: "https://b" },
       bearer: null,
     });
     await expect(runLoop(noBearer.deps, noBearer.ctx)).rejects.toThrow(/model-proxy bearer/);
@@ -982,6 +992,7 @@ describe("the pi harness — the container replaced under a live run", () => {
       agent: "coding",
       yaml: YAML + "harness:\n  coding: pi\n",
       harness: {
+        harness: piHarness,
         registry,
         harnessUrl: "https://bot.example.com",
         loopbackUrl: "http://127.0.0.1:8080",
@@ -992,6 +1003,12 @@ describe("the pi harness — the container replaced under a live run", () => {
     });
     const err = await runLoop(s.deps, s.ctx).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(PiContainerReplacedError);
+    // The seam's interruption vocabulary (harness.md item 7): the loop and the dispatcher read the reason and the refusal off it.
+    expect(err).toBeInstanceOf(HarnessInterruptedError);
+    expect(err).toMatchObject({
+      reason: "container replaced under the run; restarting from the request",
+      refusal: "container_replaced",
+    });
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "interrupted" });
     expect(s.releases).toEqual(["paired"]);
     expect(s.closes).toHaveLength(1);
@@ -1132,7 +1149,7 @@ describe("the pi harness — the review preset", () => {
       agent: "review",
       provider,
       yaml: REVIEW_PI_YAML,
-      harness: { registry, harnessUrl: "https://bot.example.com", containerFor: () => container },
+      harness: { harness: piHarness, registry, harnessUrl: "https://bot.example.com", containerFor: () => container },
       bearer: "sbr_run-l.s3cret",
       ...prThread,
       review: { head: HEAD, post: async (target, body) => void posts.push({ target, body }) },
@@ -1265,7 +1282,7 @@ describe("the pi harness — the review preset", () => {
       agent: "review",
       provider: provider("unused"),
       yaml: REVIEW_PI_YAML,
-      harness: { registry, harnessUrl: "https://bot.example.com", containerFor: () => container },
+      harness: { harness: piHarness, registry, harnessUrl: "https://bot.example.com", containerFor: () => container },
       bearer: "sbr_run-l.s3cret",
       repoCtx: prThread.repoCtx,
       binding: prThread.binding,
@@ -1410,6 +1427,7 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
       provider,
       yaml: GENERAL_PI_YAML,
       harness: {
+        harness: piHarness,
         registry,
         harnessUrl: "https://bot.example.com",
         loopbackUrl: "http://127.0.0.1:8080",
@@ -1478,7 +1496,7 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
   it("a preset without a workspace on pi in a process without the loopback URL fails the run naming PORT: the public URL alone is not where a bot-host pi reaches the bot", async () => {
     const s = setup("", {
       yaml: GENERAL_PI_YAML,
-      harness: { registry: new HarnessRegistry(), harnessUrl: "https://bot.example.com" },
+      harness: { harness: piHarness, registry: new HarnessRegistry(), harnessUrl: "https://bot.example.com" },
       bearer: "sbr_run-l.s3cret",
     });
     await expect(runLoop(s.deps, s.ctx)).rejects.toThrow(/PORT/);
@@ -1593,6 +1611,7 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
       agent: "research",
       yaml: RESEARCH_PI_YAML,
       harness: {
+        harness: piHarness,
         registry,
         harnessUrl: "https://bot.example.com",
         loopbackUrl: "http://127.0.0.1:8080",
@@ -1726,6 +1745,7 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
       agent: "conductor",
       yaml: CONDUCTOR_PI_YAML,
       harness: {
+        harness: piHarness,
         registry,
         harnessUrl: "https://bot.example.com",
         loopbackUrl: "http://127.0.0.1:8080",
@@ -1819,6 +1839,56 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     { role: "assistant", content: [{ type: "text", text: answer }] },
   ];
   /** The reclaimed row and its plan, as the launcher would hand them over. */
+  /** A resume mid-loop (plan `resume`): the row's state as the previous generation left it, one user turn on the transcript, nothing in flight. */
+  function reentering(state: Record<string, unknown>, agentName = "coding"): ResumeContext {
+    const messages: ChatMessage[] = [{ role: "user", content: [{ type: "text", text: "hello there" }] }];
+    const events: AppendableEvent[] = [{ type: "input", messageId: "m1", text: "hello there", at: 1, seq: 1 }];
+    const row: LiveRunRow = {
+      runId: "run-l",
+      threadKey: THREAD,
+      ownerGen: "gen-T",
+      leaseUntil: NOW + 30_000,
+      startedAt: NOW - 60_000,
+      phase: "live",
+      stop: null,
+      meta: { channelId: "slack:CX", userId: "slack:UX", threadKey: THREAD, agent: agentName },
+      card: null,
+      system: "the system prompt",
+      tools: [],
+      state,
+    };
+    const lastStep: StepRecord = {
+      step: 1,
+      seq: 1,
+      turnIndex: 1,
+      inFlight: [],
+      inboxConsumedSeq: 0,
+      remainingMs: 240_000,
+      turn: 1,
+      iteration: 1,
+    };
+    return {
+      row,
+      lastStep,
+      plan: {
+        kind: "resume",
+        messages,
+        compactions: [],
+        settlements: [],
+        stepRecorded: true,
+        inboxConsumedSeq: 0,
+        step: 1,
+        turn: 1,
+        iteration: 1,
+        remainingMs: 240_000,
+      },
+      events,
+      lastSeq: 1,
+      repoCtx: {},
+      inbox: [],
+    };
+  }
+
   function finishing(
     answer: string,
     opts: { agent?: string; events?: AppendableEvent[]; state?: Record<string, unknown>; repoCtx?: RepoContext } = {},
@@ -2011,6 +2081,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       provider: neverCalled(),
       yaml: YAML + "harness:\n  coding: pi\n",
       harness: {
+        harness: piHarness,
         registry: new HarnessRegistry(),
         harnessUrl: "https://bot.example.com",
         containerFor: () => container,
@@ -2036,6 +2107,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       provider: neverCalled(),
       yaml: YAML + "harness:\n  coding: pi\n",
       harness: {
+        harness: piHarness,
         registry: new HarnessRegistry(),
         harnessUrl: "https://bot.example.com",
         containerFor: () => container,
@@ -2054,8 +2126,106 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       .events.filter((e) => e.type === "run_note")
       .map((e) => (e as { summary: string }).summary);
     expect(notes).toContainEqual(
-      "the run's pi (pid 777) ran in container vm-old, not the one this run was handed (vm-fake): it was not ended here",
+      "the run's pi process (pid 777) ran in container vm-old, not the one this run was handed (vm-fake): it was not ended here",
     );
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+  });
+
+  // docs/reference/specs/harness.md item 7: a row's facts are read by the
+  // harness that wrote them. A row another harness wrote names a process pi
+  // can neither judge nor end.
+  const OPENCODE_ROW = {
+    harness: "opencode",
+    pid: 9,
+    port: 41000,
+    logOffset: 0,
+    sessionID: "ses_1",
+    root: "/tmp/switchboard-oc-run-l",
+    bearerHash: "h",
+    container: "vm-1",
+    relaunches: 0,
+  };
+
+  it("a `finish` plan whose row carries another harness's facts ends nothing: the harness answers another-harness, a note names both harnesses, and the post-steps run with the answer", async () => {
+    const container = new FakePiContainer();
+    const s = setup("", {
+      agent: "coding",
+      provider: neverCalled(),
+      yaml: YAML + "harness:\n  coding: pi\n",
+      harness: {
+        harness: piHarness,
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        containerFor: () => container,
+      },
+    });
+    const resume = finishing("Done: pushed the fix.", { agent: "coding", state: { harness: OPENCODE_ROW } });
+    const out = await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages });
+    expect(out.answer).toBe("Done: pushed the fix.");
+    expect(container.killed).toEqual([]);
+    expect(container.removed).toEqual([]);
+    expect(container.starts).toEqual([]);
+    const notes = s.registry
+      .snapshotById("run-l")!
+      .events.filter((e) => e.type === "run_note")
+      .map((e) => (e as { summary: string }).summary);
+    expect(notes).toContainEqual(
+      "the run's row carries opencode harness facts (pid 9), and this run is driven by pi: that process was neither judged nor ended here",
+    );
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+  });
+
+  it("a resume mid-loop whose row carries another harness's facts closes the run `interrupted`, not failed: the loop refuses before any harness opens, HarnessMismatchError propagates for the dispatcher's restart, nothing is filed, started, killed or removed, the record carries the harness_error note once, the workspace is released, and the card closes 🔁 naming both harnesses — never ❌", async () => {
+    const container = new FakePiContainer();
+    const opened: string[] = [];
+    const watching = new PiHarness();
+    const open = watching.open.bind(watching);
+    watching.open = (deps, run) => {
+      opened.push(run.runId);
+      return open(deps, run);
+    };
+    const s = setup("unused", {
+      agent: "coding",
+      yaml: YAML + "harness:\n  coding: pi\n",
+      harness: {
+        harness: piHarness,
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => container,
+        pollMs: 1,
+        tickMs: 5,
+      },
+    });
+    s.deps.harness = { ...s.deps.harness!, harness: watching };
+    const resume = reentering({ harness: OPENCODE_ROW });
+    const err = await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HarnessMismatchError);
+    expect(err).toBeInstanceOf(HarnessInterruptedError);
+    expect(err).toMatchObject({ expected: "pi", found: "opencode", refusal: "harness_mismatch" });
+    expect(opened).toEqual([]); // the loop refused; no harness was opened
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "interrupted" });
+    expect(container.files.size).toBe(0);
+    expect(container.starts).toEqual([]);
+    expect(container.killed).toEqual([]);
+    expect(container.removed).toEqual([]);
+    expect(s.releases).toEqual(["paired"]);
+    expect(s.closes).toHaveLength(1);
+    const close = JSON.stringify(s.closes[0]);
+    expect(close).toContain("🔁");
+    expect(close).toContain("the row's harness facts are opencode's, not pi's; restarting from the request");
+    expect(close).not.toContain("❌");
+    expect(s.published).toEqual([]);
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const record = (await s.store.get("run-l"))!;
+    expect(record.status).toBe("interrupted");
+    const notes = record.events.filter((e) => e.type === "run_note");
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toMatchObject({
+      kind: "harness_error",
+      summary:
+        "the run's row carries opencode harness facts and this run is driven by pi: nothing of that process is judged or ended here; the run restarts from its request",
+    });
   });
 });

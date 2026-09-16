@@ -7,7 +7,7 @@ import { declaredProfile } from "../config/profile.js";
 import { resetResidentProbeCache } from "../execution/factory.js";
 import type { Executor } from "../execution/executor.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
-import type { PiFollowUpTurnInput } from "./harness/pi/harness.js";
+import type { FollowUpTurnInput } from "./harness/contract.js";
 import type { PrCommitList } from "./headMoved.js";
 import type { RunEvent } from "./runEvents.js";
 import { RunControl } from "./runRegistry/runControl.js";
@@ -759,7 +759,7 @@ describe("settleReviewedHead — the head-move re-review", () => {
   }
 
   it("a substantive move's one more turn is a prompt on the run's session: the worktree moved first, the follow-up text as the appended user turn, the round's budget, the turn's own verdict capture, the head re-probed after", async () => {
-    const followUp = vi.fn(async (input: PiFollowUpTurnInput) => {
+    const followUp = vi.fn(async (input: FollowUpTurnInput) => {
       // the relayed submit_verdict, run in the bot under THIS turn's context
       input.toolContext.onVerdict?.({
         verdict: "request_changes",

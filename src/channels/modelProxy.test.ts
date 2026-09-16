@@ -25,6 +25,7 @@ import {
   isModelProxyPath,
   OPENAI_CHAT_COMPLETIONS_PATH,
   pinRequest,
+  PROXY_PATHS,
   proxyShapeOf,
   SseMeter,
   type ModelProxyDeps,
@@ -267,6 +268,25 @@ describe("the model proxy's paths", () => {
     expect(isModelProxyPath("/v1/chat/completions")).toBe(true);
     expect(isModelProxyPath("/ingress")).toBe(false);
     expect(isModelProxyPath("/v1/")).toBe(false);
+  });
+
+  // docs/reference/specs/harness.md: the proxy's wire roster is the two
+  // dialects pi speaks, held here as the route table; a harness that needs a
+  // third dialect is a change to record 0038, never a quiet route.
+  it("serves exactly two dialects — Anthropic messages and OpenAI-compatible chat completions — and a third path under a valid run bearer is refused 404 not_found by name, never forwarded", async () => {
+    expect(Object.entries(PROXY_PATHS)).toEqual([
+      ["anthropic", ANTHROPIC_MESSAGES_PATH],
+      ["openai-compatible", OPENAI_CHAT_COMPLETIONS_PATH],
+    ]);
+    const h = harness();
+    const token = h.bearers.mint(h.grant("run-1"));
+    for (const path of ["/v1/responses", "/v1/complete", "/v1/messages/count_tokens"]) {
+      const res = await handleModelProxyRequest(request({ path, headers: bearer(token) }).req, h.deps);
+      expect(res.status).toBe(404);
+      expect(errorType(res)).toBe("not_found");
+      expect((json(res).error as { message: string }).message).toBe("no model proxy at this path");
+    }
+    expect(h.fetchFake).not.toHaveBeenCalled();
   });
 });
 

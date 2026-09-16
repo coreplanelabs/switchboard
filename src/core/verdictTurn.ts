@@ -23,7 +23,7 @@
 
 import type { AgentDef } from "../agents/registry.js";
 import type { ToolContext } from "../tools/runnableTool.js";
-import type { PiFollowUpTurn } from "./harness/pi/harness.js";
+import type { FollowUpTurn } from "./harness/contract.js";
 import type { ReviewVerdict } from "./reviewVerdict.js";
 import type { RunEvent } from "./runEvents.js";
 import { systemClock } from "./trace/clock.js";
@@ -61,7 +61,7 @@ export interface ReviewVerdictTurnSpec {
   /** One more turn on the run's own pi session (harness-pi item 14). Absent —
    *  a `finish` plan, whose session ended with the previous generation — the
    *  turn is not run and nothing is submitted. */
-  followUp?: PiFollowUpTurn;
+  followUp?: FollowUpTurn;
 }
 
 /**

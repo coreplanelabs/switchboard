@@ -15,6 +15,8 @@ import { NO_FLEET } from "../residentFleet.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import type { RepoContext } from "../repoContext.js";
 import { RunRegistry } from "../runRegistry.js";
+import { PiHarness } from "../harness/pi/piHarness.js";
+import { HarnessRegistry } from "../harness/pi/relay.js";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { durableInboxMessage } from "../runLedger/inboxMessage.js";
 import type { LiveRunRow } from "../runLedger/types.js";
@@ -417,6 +419,40 @@ describe("registerRun — the run's row on every surface before the attach", () 
     out.publishMeta({ ...repoCtx, headSha: "b".repeat(40) });
     const metas = registry.snapshotById("run-p")!.events.filter((e) => e.type === "run_meta");
     expect(metas.map((e) => (e as { headSha?: string }).headSha)).toEqual(["a".repeat(40), "b".repeat(40)]);
+  });
+
+  // docs/reference/specs/harness.md item 8: the run's meta names the harness
+  // the process drives runs with, so a record can be told from another
+  // harness's; a process without one names none.
+  it("run_meta carries the harness object's name when the process has one, and no harness field without", async () => {
+    const d = deps();
+    const r = request(d, "fix the login bug", "coding");
+    const ctx: Parameters<typeof registerRun>[1] = {
+      agentSource: "directive",
+      msg: r.message,
+      io: fakeIO().io,
+      agent: r.agent,
+      resolved: r.resolved,
+      directives: r.directives,
+      history: [],
+      repoCtx,
+      carriedRow: undefined,
+      resume: undefined,
+      startedAt: NOW,
+      receivedAt: NOW,
+      clock: () => NOW,
+      root: r.root,
+      trace: r.trace,
+      registry: new RunRegistry({ genId: () => "run-p", genToken: () => "tok" }),
+      shell: r.shell,
+      admitted: r.admitted,
+    };
+    await registerRun({ ...d, harness: { harness: new PiHarness(), registry: new HarnessRegistry() } }, ctx);
+    const meta = ctx.registry.snapshotById("run-p")!.events.find((e) => e.type === "run_meta");
+    expect(meta).toMatchObject({ type: "run_meta", agent: "coding", harness: "pi" });
+    const bare = new RunRegistry({ genId: () => "run-q", genToken: () => "tok" });
+    await registerRun(d, { ...ctx, registry: bare });
+    expect(bare.snapshotById("run-q")!.events.find((e) => e.type === "run_meta")).not.toHaveProperty("harness");
   });
 
   it("a resume keeps its row's id and start and publishes nothing new: its events were replayed", async () => {

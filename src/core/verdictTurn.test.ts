@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { AGENTS } from "../agents/registry.js";
 import type { Executor } from "../execution/executor.js";
-import type { PiFollowUpTurnInput } from "./harness/pi/harness.js";
+import type { FollowUpTurnInput } from "./harness/contract.js";
 import type { ReviewVerdict } from "./reviewVerdict.js";
 import type { RunEvent } from "./runEvents.js";
 import type { Span } from "./trace/types.js";
@@ -75,7 +75,7 @@ describe("runVerdictTurn — one clipped prompt on the run's own pi session (har
   }
 
   it("publishes the verdict_turn note and prompts the session once: the follow-up text, the clipped budget (never the shared def's), the turn's tool context with the hook under the caller's span; the verdict reaches the hook and the return value", async () => {
-    const followUp = vi.fn(async (input: PiFollowUpTurnInput) => {
+    const followUp = vi.fn(async (input: FollowUpTurnInput) => {
       input.toolContext.onVerdict?.(VERDICT); // the relayed submit_verdict, run in the bot under THIS turn's context
       return "Verdict submitted.";
     });

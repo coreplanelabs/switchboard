@@ -36,7 +36,6 @@ import {
   isTransientProviderError,
   ModelPolicyRefusedError,
   PiContainerReplacedError,
-  piHarnessFactsOf,
   POLICY_REFUSAL_REPLY,
   promptOf,
   replacedCallNote,
@@ -46,9 +45,8 @@ import {
   settlementResults,
   splitSeed,
   type PiHarnessDeps,
-  type PiHarnessFacts,
-  type PiHarnessRun,
 } from "./harness.js";
+import { isPiFacts, type HarnessRun, type PiHarnessFacts } from "../contract.js";
 
 // Feature: docs/reference/specs/harness-pi.md — the harness end to end over a
 // fake container and a scripted pi: the files and the process, the first
@@ -58,6 +56,13 @@ import {
 
 const NOW = 1_700_000_000_000;
 const paths = piRunPaths("run-7");
+
+/** A row's pi facts as a previous generation wrote them: the discriminator and a relaunch count of 0 unless the test says otherwise. */
+const piFacts = (facts: Omit<PiHarnessFacts, "harness" | "relaunches"> & { relaunches?: number }): PiHarnessFacts => ({
+  harness: "pi",
+  relaunches: 0,
+  ...facts,
+});
 
 const agent: AgentDef = {
   name: "coding",
@@ -227,7 +232,7 @@ function world(
     span: root ?? createTracer({ clock: () => clock.now }).start("request", { sinks: [] }),
     publish: () => {},
   });
-  const run: PiHarnessRun = {
+  const run: HarnessRun = {
     runId: "run-7",
     agent: def,
     effort: "high",
@@ -245,7 +250,10 @@ function world(
     onEvent: (e) => void events.push(e),
     onProgress: (n) => void notes.push(n),
     onStep: async (r) => void steps.push(r),
-    saveFacts: (f) => void facts.push(f),
+    // pi's loop writes pi's facts alone; the guard keeps the recorder typed as such.
+    saveFacts: (f) => {
+      if (isPiFacts(f)) facts.push(f);
+    },
   };
   const harnessDeps: PiHarnessDeps = {
     container: opts.seam ?? container,
@@ -301,11 +309,13 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     // The row's first facts name the root beside the pid, so the build that
     // comes back after a restart re-attaches where this one filed pi (item 8).
     expect(w.facts[0]).toEqual({
+      harness: "pi",
       pid: 4242,
       logOffset: 0,
       root: paths.dir,
       bearerHash: bearerHashOf(w.bearer),
       container: "vm-fake",
+      relaunches: 0,
     });
     expect(w.container.killed).toEqual([4242]);
     expect(w.container.removed).toEqual([paths.dir]);
@@ -376,11 +386,13 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     ]);
     // The facts: pid, offset, the root and the session file land on the row; pi is ended; the run is off the registry.
     expect(w.facts[0]).toEqual({
+      harness: "pi",
       pid: 4242,
       logOffset: 0,
       root: paths.dir,
       bearerHash: bearerHashOf(w.bearer),
       container: "vm-fake",
+      relaunches: 0,
     });
     expect(w.facts.at(-1)).toMatchObject({ pid: 4242, root: paths.dir, sessionFile: `${paths.sessionDir}/s.jsonl` });
     expect(w.facts.at(-1)!.logOffset).toBeGreaterThan(0);
@@ -994,7 +1006,7 @@ describe("runPiHarness — after a bot restart", () => {
     { role: "user", content: [{ type: "text", text: "fix the failing test" }] },
     { role: "assistant", content: [{ type: "tool_use", id: "c0", name: "bash", input: { command: "npm test" } }] },
   ];
-  const resume = (facts?: PiHarnessFacts) => ({
+  const resume = (facts?: Parameters<typeof piFacts>[0]) => ({
     messages: transcript,
     settlements: [
       {
@@ -1006,7 +1018,7 @@ describe("runPiHarness — after a bot restart", () => {
     remainingMs: 20 * 60_000,
     turn: 1,
     inboxConsumedSeq: 2,
-    ...(facts ? { facts } : {}),
+    ...(facts ? { facts: piFacts(facts) } : {}),
   });
 
   it("re-attaches to a pi still running: reads the log from the recorded offset, tolerates the turn that failed while the bot was away, asks it to continue", async () => {
@@ -1121,7 +1133,13 @@ describe("runPiHarness — after a bot restart", () => {
       remainingMs: 20 * 60_000,
       turn: 1,
       inboxConsumedSeq: 2,
-      facts: { pid: 4242, logOffset: 0, sessionFile: "s.jsonl", root: paths.dir, bearerHash: bearerHashOf(w.bearer) },
+      facts: piFacts({
+        pid: 4242,
+        logOffset: 0,
+        sessionFile: "s.jsonl",
+        root: paths.dir,
+        bearerHash: bearerHashOf(w.bearer),
+      }),
     };
     const ask = { toolCallId: "c0", tool: "update_status", input: { checklist: "step 1" } };
     let relayed: RelayProgress | undefined;
@@ -1216,7 +1234,7 @@ describe("runPiHarness — after a bot restart", () => {
     const record = w.run.saveFacts!;
     w.run.saveFacts = (f) => {
       record(f);
-      if (w.steps.length > 0 && f.logOffset > 0) dead = true;
+      if (w.steps.length > 0 && isPiFacts(f) && f.logOffset > 0) dead = true;
     };
     scriptedPi(w.container, () => bashTurn(w, "c1", "npm test", "1 passing"));
     await expect(w.start()).rejects.toThrow("the bot process is gone");
@@ -2133,23 +2151,6 @@ describe("the small pure pieces", () => {
       { type: "tool_result", toolUseId: "b", content: "gone", isError: true },
     ]);
   });
-  it("piHarnessFactsOf reads the facts a previous generation wrote on the row (pid, log offset, session file, root, container), keeps a row without a root as facts without one, and answers no facts for another shape", () => {
-    expect(
-      piHarnessFactsOf({ pid: 7, logOffset: 120, sessionFile: "s.jsonl", root: "/tmp/switchboard-pi-run-7" }),
-    ).toEqual({ pid: 7, logOffset: 120, sessionFile: "s.jsonl", root: "/tmp/switchboard-pi-run-7" });
-    expect(piHarnessFactsOf({ pid: 7, logOffset: 120, root: "/tmp/r", container: "vm-1" })).toEqual({
-      pid: 7,
-      logOffset: 120,
-      root: "/tmp/r",
-      container: "vm-1",
-    });
-    expect(piHarnessFactsOf({ pid: 7, logOffset: 120, container: 9 })).toEqual({ pid: 7, logOffset: 120 });
-    expect(piHarnessFactsOf({ pid: 7, logOffset: 120 })).toEqual({ pid: 7, logOffset: 120 });
-    expect(piHarnessFactsOf({ pid: 7, logOffset: 120, root: 42 })).toEqual({ pid: 7, logOffset: 120 });
-    expect(piHarnessFactsOf({ pid: "7", logOffset: 120 })).toBeUndefined();
-    expect(piHarnessFactsOf(undefined)).toBeUndefined();
-    expect(piHarnessFactsOf(null)).toBeUndefined();
-  });
 });
 
 // docs/reference/specs/harness-pi.md item 10 — a preset of the read identity
@@ -2213,7 +2214,7 @@ describe("runPiHarness: the root the container makes", () => {
       remainingMs: 20 * 60_000,
       turn: 1,
       inboxConsumedSeq: 0,
-      facts: { pid: 999, logOffset: 50, root: previous.dir },
+      facts: piFacts({ pid: 999, logOffset: 50, root: previous.dir }),
     };
     scriptedPi(w.container, (_n, c) => finalTurn(c, "continued"));
     expect(await w.start()).toBe("continued");
@@ -2244,7 +2245,7 @@ describe("runPiHarness: the root the container makes", () => {
       remainingMs: 20 * 60_000,
       turn: 1,
       inboxConsumedSeq: 0,
-      facts: { pid: 999, logOffset: 50, root: paths.dir },
+      facts: piFacts({ pid: 999, logOffset: 50, root: paths.dir }),
     };
     scriptedPi(w.container, (_n, c) => finalTurn(c, "continued"));
     expect(await w.start()).toBe("continued");

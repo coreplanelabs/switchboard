@@ -65,7 +65,7 @@ import {
 import type { FrictionDiagnosis } from "./runFriction.js";
 import { claimRun, type RunDeps } from "./dispatch/run.js";
 import { runLoop } from "./dispatch/runLoop.js";
-import { PiContainerReplacedError } from "./harness/pi/harness.js";
+import { HarnessInterruptedError } from "./harness/contract.js";
 import { afterReply, deliverAnswer, type ReplyDeps } from "./dispatch/reply.js";
 import { writeTombstone } from "./dispatch/record.js";
 import { runShipBranch, type ShipDeps } from "./dispatch/ship.js";
@@ -1211,15 +1211,17 @@ export async function dispatch(
     });
     return ended;
   } catch (err) {
-    if (err instanceof PiContainerReplacedError) {
-      // pi's container was replaced under the live run (harness-pi item 16):
-      // the run loop closed the run `interrupted` with the note that says why
-      // and its card says it restarts, so no failure reply lands here. Its
-      // request runs again as a new run once the outer finally frees the
-      // thread — the path a refused re-attach takes (item 54), and the same
-      // outcome for the request: a refusal by name, never a failure.
+    if (err instanceof HarnessInterruptedError) {
+      // The run was interrupted, not failed (harness.md item 7): the harness's
+      // container was replaced under the live run (harness-pi item 16), or the
+      // resumed row's harness facts were another harness's. The run loop
+      // closed the run `interrupted` with the note that says why and its card
+      // says it restarts, so no failure reply lands here. Its request runs
+      // again as a new run once the outer finally frees the thread — the path
+      // a refused re-attach takes (item 54), and the same outcome for the
+      // request: the interruption's refusal by name, never a failure.
       refused = true;
-      ended.refusal ??= "container_replaced";
+      ended.refusal ??= err.refusal;
       restartRequest = msg;
       console.log(`[dispatch] ${msg.threadKey} run ${registered?.id ?? "?"} restarts from its request: ${err.message}`);
       return ended;

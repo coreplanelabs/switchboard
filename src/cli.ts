@@ -86,6 +86,7 @@ import { residentAdminFromConfig } from "./core/residentAdmin.js";
 import { NO_FLEET, residentFleetWatcherFor, type ResidentFleetFacts } from "./core/residentFleet.js";
 import type { ChannelIO, OpenedThread, RunReceipt, StatusHandle, StatusUpdate } from "./core/types.js";
 import { PiAiProviders } from "./core/harness/piAi.js";
+import { PiHarness } from "./core/harness/pi/piHarness.js";
 import { HarnessRegistry } from "./core/harness/pi/relay.js";
 import { LedgerTakeover } from "./core/runLedger/takeover.js";
 import { RunBearerStore } from "./core/modelProxy/runBearers.js";
@@ -665,7 +666,12 @@ async function main(): Promise<void> {
     config,
     completions,
     runBearers,
-    harness: { registry: harnesses, harnessUrl: loopback.url, loopbackUrl: loopback.url },
+    harness: {
+      harness: new PiHarness(config.config.pi?.compaction ? { compaction: config.config.pi.compaction } : {}),
+      registry: harnesses,
+      harnessUrl: loopback.url,
+      loopbackUrl: loopback.url,
+    },
     capabilities,
     residentFleet,
     ...(artifacts ? { artifacts } : {}),

@@ -11,7 +11,7 @@ import {
   runDescriptionTurn,
   type DescriptionTurnTarget,
 } from "./descriptionTurn.js";
-import type { PiFollowUpTurnInput } from "./harness/pi/harness.js";
+import type { FollowUpTurnInput } from "./harness/contract.js";
 import type { PrDescription } from "./prDescription.js";
 import type { RunEvent } from "./runEvents.js";
 import type { Span } from "./trace/types.js";
@@ -203,7 +203,7 @@ describe("runDescriptionTurn — one clipped prompt on the run's own pi session 
   }
 
   it("publishes the description_turn note and prompts the session once: the follow-up text, the clipped budget (never the shared def's), the turn's tool context with the hook under the caller's span; the description the relayed tool submits reaches the hook AND the return value", async () => {
-    const followUp = vi.fn(async (input: PiFollowUpTurnInput) => {
+    const followUp = vi.fn(async (input: FollowUpTurnInput) => {
       input.toolContext.onPrDescription?.(DESCRIPTION); // the relayed submit_pr_description, run in the bot under THIS turn's context
       return "Description resubmitted.";
     });
