@@ -110,6 +110,26 @@ describe("PiRpcTransport", () => {
     expect(t.exited).toBe(true);
   });
 
+  // harness-pi item 16: the executor's word that the runtime under pi was
+  // replaced arrives as a throw from the probe or the read; the stream ends
+  // with that error for the harness to judge, never as pi found dead.
+  it("a probe or a read that throws ends the stream with that error, and pi is not read as dead", async () => {
+    const c = new FakePiContainer();
+    await c.start({ paths, args: [], env: {} });
+    const { t } = transport(c, { alivePolls: 1 });
+    c.alive = async () => {
+      throw new Error("the sandbox restarted under the run");
+    };
+    await expect(collect(t, 1)).rejects.toThrow("the sandbox restarted under the run");
+    expect(t.exited).toBe(false);
+    const onRead = new FakePiContainer();
+    await onRead.start({ paths, args: [], env: {} });
+    onRead.failNext = { operation: "read", error: new Error("runtime-replaced: the resident runtime was replaced") };
+    const { t: t2 } = transport(onRead);
+    await expect(collect(t2, 1)).rejects.toThrow("runtime-replaced");
+    expect(t2.exited).toBe(false);
+  });
+
   it("a write that fails surfaces as the stream's error on the next read", async () => {
     const c = new FakePiContainer();
     await c.start({ paths, args: [], env: {} });

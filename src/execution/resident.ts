@@ -9,9 +9,11 @@ import { residentState, sanitizeResidentBody } from "./residentText.js";
 import {
   WAKE_POLL_MS,
   WAKE_PROBE_TIMEOUT_MS,
+  containerGoneMessage,
   describeProbe,
   isContainerRolling,
   sandboxRestartedMessage,
+  saysContainerGone,
   wakeDecision,
   wakeWaitBudget,
 } from "./residentWake.js";
@@ -64,6 +66,18 @@ import type { ExecTraceOptions, ReleaseOptions } from "./executor.js";
 // and hands /exec back as `ExecSandboxRestartedError` for the runner to
 // settle (`awaitWake`). A definite non-recovering answer is the strike it
 // always was.
+//
+// An answer that says the container under the thread is GONE — the
+// resident's `runtime-replaced` (a deploy swapped the runtime under a command
+// in flight, item 43) or the preflight's `worktree-missing` (the container
+// disk was recycled since the last attach) — is the same typed
+// `ExecSandboxRestartedError` on /exec, at once and before any recovery
+// (`saysContainerGone`): every process the run had in that container died
+// with it, so the pi harness ends the run for a restart from its request
+// (harness-pi.md item 16) and nothing the recovery meets — a re-attach that
+// blocks through the restore or is refused while the replacement reconciles
+// — can stand in for that verdict. The command is never re-issued. The
+// idempotent routes keep item 43's re-attach and retry.
 
 /** /detach is a small control-plane POST the dispatcher makes once the answer
  *  is out: bound it tightly so a sick resident holds the run's slot for
@@ -319,10 +333,11 @@ export type ResidentStatusProbe =
   { kind: "status"; state: string; reason: string } | { kind: "unreachable"; error: string; transport: boolean };
 
 export class ResidentExecutor implements Executor {
-  /** Consecutive `runtime-replaced` outcomes with no successful op between
-   *  them. One is a deploy that swapped the resident isolate under a command
-   *  (routine, recoverable); two in a row is a flapping resident and becomes
-   *  infra so the runner's fail-fast still has teeth. */
+  /** Consecutive `runtime-replaced` answers on the idempotent routes (/read,
+   *  /write) with no successful op between them. One is a deploy that swapped
+   *  the resident isolate under a call (routine: re-attach and re-issue); two
+   *  in a row is a flapping resident and becomes infra. /exec never counts
+   *  here: its `runtime-replaced` is the typed restart (`opWithReattach`). */
   private runtimeReplacedStreak = 0;
 
   private lastBinding?: ResidentBinding;
@@ -548,15 +563,20 @@ export class ResidentExecutor implements Executor {
     }
   }
 
-  /** Run a route; on needs:"attach" (evicted/recycled worktree, in-body for
+  /** Run a route; on needs:"attach" for an evicted worktree (in-body for
    *  /exec, 409 for /read //write) re-attach ONCE and retry, then fail legibly.
    *
-   *  A `reason:"runtime-replaced"` answer (the resident isolate was swapped by
-   *  a deploy while the op ran) also re-attaches once — proving the new isolate
-   *  serves this thread — but the op is re-issued only for the idempotent
-   *  routes (/read, /write). /exec is handed back to the caller as-is: the
-   *  command may have started, so it is never blind-retried. Two such answers
-   *  with no success between them are infra (a flapping resident).
+   *  An answer saying the container under the thread is gone
+   *  (`saysContainerGone`: `reason:"runtime-replaced"`, the isolate was swapped
+   *  by a deploy while the op ran; `worktree-missing`, the container disk was
+   *  recycled since the last attach) is, on /exec, the typed
+   *  `ExecSandboxRestartedError` at once — the word the pi harness keys on
+   *  (harness-pi item 16) — before any recovery, so nothing the recovery
+   *  meets can hide it; the command may have started and is never re-issued.
+   *  On the idempotent routes (/read, /write) a `runtime-replaced` re-attaches
+   *  once — proving the new isolate serves this thread — and re-issues the op;
+   *  two such answers with no success between them are infra (a flapping
+   *  resident).
    *
    *  A refusal naming a container that just exited (item 65) waits for the
    *  wake first (`awaitWake`): the refusal came before the command started, so
@@ -584,6 +604,11 @@ export class ResidentExecutor implements Executor {
         ),
         { kind: "infra", code: "attach" },
       );
+    // The container under the thread is gone: on /exec the typed restart, now.
+    const goneUnderThread = (data: Record<string, unknown>): void => {
+      if (route === "/exec" && saysContainerGone(data))
+        throw new ExecSandboxRestartedError(containerGoneMessage(String(data.error)), 0);
+    };
     let r = await this.call(route, body, callTimeoutMs, signal, span);
     if (isContainerRolling(r.data.error)) {
       const woke = await this.awaitWake(route, String(r.data.error), { signal, budgetMs: opts.waitBudgetMs, span });
@@ -598,22 +623,23 @@ export class ResidentExecutor implements Executor {
         );
       }
     }
+    goneUnderThread(r.data);
     if (r.data.needs === "attach") {
       await this.attach(span); // the recovery rides the same trace as the op it rescues
       r = await this.call(route, body, callTimeoutMs, signal, span);
+      goneUnderThread(r.data);
       if (r.data.needs === "attach") throw stillGone(r.data);
     }
     if (r.data.reason === "runtime-replaced") {
+      // An idempotent route (/exec threw above): re-attach once and re-issue.
       this.noteRuntimeReplaced(route, r.data);
       await this.attach(span); // the recovery rides the same trace as the op it rescues
-      if (route === "/read" || route === "/write") {
-        r = await this.call(route, body, callTimeoutMs, signal, span);
-        if (r.data.reason === "runtime-replaced") this.noteRuntimeReplaced(route, r.data);
-        // Compound fault: the deploy also left the worktree evicted. The
-        // re-attach above was this op's one re-attach, so name it precisely
-        // instead of falling through to the generic status error.
-        if (r.data.needs === "attach") throw stillGone(r.data);
-      }
+      r = await this.call(route, body, callTimeoutMs, signal, span);
+      if (r.data.reason === "runtime-replaced") this.noteRuntimeReplaced(route, r.data);
+      // Compound fault: the deploy also left the worktree evicted. The
+      // re-attach above was this op's one re-attach, so name it precisely
+      // instead of falling through to the generic status error.
+      if (r.data.needs === "attach") throw stillGone(r.data);
     }
     if (typeof r.data.error !== "string" || !r.data.error) this.runtimeReplacedStreak = 0;
     return r;
@@ -723,17 +749,6 @@ export class ResidentExecutor implements Executor {
     // absence of `needs`.
     if (status === 400 && typeof data.error === "string" && data.error && data.needs === undefined) {
       throw new Error(`resident /exec: ${data.error}`);
-    }
-    if (data.reason === "runtime-replaced") {
-      // One deploy swapped the resident isolate under this command. The command
-      // may have started and had effects, so opWithReattach did not re-run it;
-      // hand the named outcome to the model as ordinary output (not infra — a
-      // single deploy must never count toward fail-fast) so it re-checks state
-      // before deciding whether to re-run.
-      return (
-        `${String(data.error)}\n` +
-        "The command may have started; re-check its effects (e.g. git status, the files it writes) before re-running it."
-      );
     }
     if (typeof data.error === "string" && data.error) {
       // post-validation failure (exitCode 127 shape) — legible, never retried.
