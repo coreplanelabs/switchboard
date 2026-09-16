@@ -1,94 +1,140 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import AppShell from "../components/AppShell.vue";
+import ResidentRow from "../components/residents/ResidentRow.vue";
 import StatusDot from "../components/StatusDot.vue";
 import { useSeed } from "../lib/seed";
+import { useWallClock } from "../lib/wallClock";
+import { browser } from "../lib/browser";
+import { EVENT_SOURCE_CLOSED, useEventSourceFactory, type EventSourceLike } from "../lib/eventSource";
 import {
-  RESIDENT_SLUG_RE,
-  residentDisk,
-  residentLive,
+  applyResidentsFrame,
   residentSlug,
-  residentStateTone,
+  residentsFleetTone,
+  runsOnResident,
   str,
   type ResidentRecordView,
+  type ResidentsIndexState,
 } from "@core/channels/residentsModel.js";
-import { formatDiskGauge } from "@core/execution/residentDiskBudget.js";
-import { formatRelative } from "../lib/format";
-import { wallNow } from "../lib/wallClock";
+import { FAVICON_BY_TONE } from "@core/channels/favicon.js";
+import type { ResidentsFeedFrame } from "@core/channels/webSeed.js";
 
-// The residents index: every onboarded repo, its lifecycle state and why,
-// what it is warm on, each row linking to its detail page. The seed is the
-// admin /residents listing, read live per request by the server.
+// The residents index (resident-repos item 42): every onboarded repo, its
+// lifecycle state and why, what it is warm on — and, folded open, the runs on
+// it right now with their worktrees and the disk they take. The seed is the
+// admin /residents listing (read live by the server) plus the registry's live
+// repo runs; the `/residents?stream=1` feed then keeps both current: run rows
+// as the registry publishes them, the listing whenever a tree changes hands
+// (a run's attach ended, a run's stream sealed). No timer re-reads anything;
+// the stopwatches tick from the shared wall clock.
 
 const seed = useSeed("residents");
 
-const now = wallNow(); // a snapshot page — one clock reading is the honest one
+const state = reactive<ResidentsIndexState>({
+  cap: seed?.cap,
+  count: seed?.count,
+  residents: seed?.residents ?? [],
+  runs: new Map((seed?.runs ?? []).map((r) => [r.id, r])),
+});
+
+const now = useWallClock(seed?.now);
+const conn = ref<{ tone: "green" | "amber" | "red"; text: string }>({ tone: "amber", text: "connecting…" });
+
+// `?open=<slug>` opens that resident's fold on first paint.
+const openSlug = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("open") : null;
 
 const rows = computed(() =>
-  (seed?.residents ?? []).map((raw, i) => {
+  state.residents.map((raw, i) => {
     const record = raw as ResidentRecordView;
     const slug = residentSlug(record);
-    const live = residentLive(record);
-    const sha = str(live.sha);
-    const refreshed = str(live.lastRefreshAt);
-    // "refreshed 3 hours ago" reads in a second; the exact stamp rides the hover.
-    const refreshedAt = refreshed ? Date.parse(refreshed) : Number.NaN;
-    // Item 55: the last disk sample's gauge — the same used/total (pct) reading
-    // as `repo list` and the watchdog line; absent until the resident measures.
-    const disk = residentDisk(record);
     return {
       key: `${slug || "?"}-${i}`,
-      display: slug || str(record.resource) || "?",
-      state: live.state,
-      tone: residentStateTone(live.state),
-      reason: live.reason,
-      ref: str(record.defaultRef) || "?",
-      sha: sha ? sha.slice(0, 8) : "",
-      refreshed,
-      refreshedLabel: Number.isFinite(refreshedAt) ? formatRelative(refreshedAt, now) : refreshed,
-      disk: disk ? formatDiskGauge(disk) : "",
-      diskAt: disk?.at ?? "",
-      href: RESIDENT_SLUG_RE.test(slug) ? `/residents/${slug}` : null,
+      record,
+      slug,
+      runs: runsOnResident(state.runs.values(), slug),
     };
   }),
 );
+const cap = computed(() => str(state.cap) || "?");
+const count = computed(() => str(state.count) || String(rows.value.length));
+/** Runs on the residents listed — a repo run whose resident is not (yet) listed is not counted. */
+const running = computed(() => rows.value.reduce((n, r) => n + r.runs.length, 0));
 
-const cap = computed(() => str(seed?.cap) || "?");
-const count = computed(() => str(seed?.count) || String(rows.value.length));
+// The tab carries the count and the fleet's tone (live-view item 21): the
+// same worst-of rule the shell painted from the seed, repainted from each
+// listing frame — the page is no longer a snapshot.
+const title = "Resident repos";
+watch(
+  [running, () => state.residents],
+  ([live, residents]) => {
+    browser.setTitle((live > 0 ? `(${live}) ` : "") + title);
+    browser.setFavicon(FAVICON_BY_TONE[residentsFleetTone(residents as ResidentRecordView[])]);
+  },
+  { immediate: true },
+);
+
+const makeEventSource = useEventSourceFactory();
+let es: EventSourceLike | null = null;
+
+onMounted(() => {
+  es = makeEventSource("/residents?stream=1");
+  // A RE-connect means the backend may have restarted: run rows this page
+  // holds may no longer exist there, and nothing will ever send their
+  // `removed` events. Reload for a fresh server snapshot instead of drifting.
+  let everOpened = false;
+  es.onopen = () => {
+    if (everOpened) {
+      browser.reload();
+      return;
+    }
+    everOpened = true;
+    conn.value = { tone: "green", text: "live" };
+  };
+  es.onmessage = (m) => {
+    let frame: ResidentsFeedFrame;
+    try {
+      frame = JSON.parse(m.data) as ResidentsFeedFrame;
+    } catch {
+      return;
+    }
+    applyResidentsFrame(state, frame);
+  };
+  es.onerror = () => {
+    if (es && es.readyState === EVENT_SOURCE_CLOSED) conn.value = { tone: "red", text: "disconnected" };
+    else conn.value = { tone: "amber", text: "connecting…" };
+  };
+});
+
+onUnmounted(() => {
+  es?.close();
+});
 </script>
 
 <template>
-  <AppShell title="Resident repos" nav="residents">
+  <AppShell :title="title" nav="residents">
+    <template #status>
+      <UTooltip text="runs arrive from the registry feed; the listing is re-read when a run attaches or ends">
+        <span class="conn flex items-center gap-1.5">
+          <StatusDot :tone="conn.tone" :label="conn.text" />
+          <span id="state" class="text-xs text-muted">{{ conn.text }}</span>
+        </span>
+      </UTooltip>
+    </template>
+
     <template v-if="rows.length > 0">
       <p class="mb-2 text-xs text-muted">
-        {{ count }}/{{ cap }} resident slots in use · live registry read, not cached
+        {{ count }}/{{ cap }} resident slots in use ·
+        <span id="running" class="font-mono tabular-nums">{{ running }} running</span>
       </p>
-      <ul class="m-0 list-none p-0">
-        <li v-for="row in rows" :key="row.key" class="border-b border-muted first:border-t">
-          <component
-            :is="row.href ? 'a' : 'span'"
-            class="row flex flex-wrap items-center gap-2.5 rounded-md px-2 py-1.5 text-inherit no-underline"
-            :class="row.href ? 'hover:bg-elevated' : ''"
-            :href="row.href ?? undefined"
-          >
-            <StatusDot :tone="row.tone" :label="row.state" :tip="row.state" />
-            <span class="font-mono font-medium text-primary">{{ row.display }}</span>
-            <span class="font-medium">{{ row.state }}</span>
-            <!-- The facts wrap to their own indented line on a phone instead of
-                 breaking mid-token at the left edge. -->
-            <span
-              class="font-mono text-xs text-muted max-sm:basis-full max-sm:pl-5"
-              :title="row.refreshed || undefined"
-            >
-              ref {{ row.ref }}<template v-if="row.sha"> · sha {{ row.sha }}</template
-              ><template v-if="row.refreshedLabel"> · refreshed {{ row.refreshedLabel }}</template
-              ><template v-if="row.disk">
-                · <span :title="row.diskAt ? `measured ${row.diskAt}` : undefined">disk {{ row.disk }}</span></template
-              >
-            </span>
-            <span v-if="row.reason" class="basis-full pl-5 text-xs text-warn">{{ row.reason }}</span>
-          </component>
-        </li>
+      <ul id="residents" class="m-0 list-none p-0">
+        <ResidentRow
+          v-for="row in rows"
+          :key="row.key"
+          :record="row.record"
+          :runs="row.runs"
+          :now="now"
+          :open="openSlug !== null && openSlug === row.slug"
+        />
       </ul>
     </template>
     <p v-else class="px-2 py-1.5 text-muted">

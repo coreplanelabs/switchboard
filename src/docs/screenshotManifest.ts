@@ -20,7 +20,7 @@ export const MANIFEST_PATH = `${SCREENSHOTS_DIR}/manifest.json`;
 export const SURFACES = [
   { name: "runs-index", path: "/runs?all=1", what: "the runs index, live and finished rows" },
   { name: "run-page", path: "/runs/hist-1", what: "a finished coding run's page and timeline" },
-  { name: "residents", path: "/residents", what: "the residents index" },
+  { name: "residents", path: "/residents?open=acme/web", what: "the residents index, one resident folded open" },
   { name: "costs", path: "/costs", what: "the spend page" },
   { name: "costs-users", path: "/costs?view=users", what: "the spend page's By user tab" },
   { name: "scheduled", path: "/runs/scheduled", what: "the scheduled runs tab" },

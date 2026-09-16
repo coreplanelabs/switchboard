@@ -1006,6 +1006,23 @@ const RESIDENTS = {
   ],
 };
 
+// The one run on a resident right now: a coding run on acme/web whose thread
+// key is the live binding's above, so the fold joins it to its worktree.
+const RESIDENT_RUNS: RunIndexRowSeed[] = [
+  row({
+    id: "live-3",
+    token: "tok-live-3",
+    label: 'coding · acme/web · "make the residents index fold open to what is running"',
+    repo: "acme/web",
+    threadKey: "slack:C1:1787954209.398379",
+    activity: "$ npm test",
+    userName: "alice",
+    sourceUrl: "https://example.slack.com/archives/C1/p1787954209398379",
+    startedAt: NOW - 7 * 60_000 - 40_000,
+    eventCount: 42,
+  }),
+];
+
 // Typed as the report the page renders, so the fixture cannot drift from the
 // shape again (a missing `account` once left the preview's costs page blank).
 const day = (date: string, bot: number, llm: number, llmEstimated = false): DailyCost => ({
@@ -1798,7 +1815,8 @@ function page(
     };
   if (pathname.startsWith("/runs/"))
     return { title: "Run not found", seed: { page: "runNotFound", retentionDays: 30 }, status: 404 };
-  if (pathname === "/residents") return { title: "Resident repos", seed: { page: "residents", ...RESIDENTS } };
+  if (pathname === "/residents")
+    return { title: "(1) Resident repos", seed: { page: "residents", ...RESIDENTS, now: NOW, runs: RESIDENT_RUNS } };
   if (pathname.startsWith("/residents/"))
     return { title: "acme/web", seed: { page: "resident", slug: "acme/web", record: RESIDENTS.residents[0] } };
   if (pathname.startsWith("/costs")) {
@@ -1888,8 +1906,8 @@ createServer((req, res) => {
     res.end("run not found");
     return;
   }
-  if (url.pathname === "/runs" && url.searchParams.get("stream") === "1") {
-    // The index feed: open + heartbeats (rows stay as seeded).
+  if ((url.pathname === "/runs" || url.pathname === "/residents") && url.searchParams.get("stream") === "1") {
+    // The index feeds (runs, residents): open + heartbeats (rows stay as seeded).
     res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache" });
     res.write("retry: 3000\n\n");
     const hb = setInterval(() => res.write(": hb\n\n"), 15_000);

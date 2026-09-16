@@ -4,22 +4,18 @@ import AppShell from "../components/AppShell.vue";
 import StatusDot from "../components/StatusDot.vue";
 import { useSeed } from "../lib/seed";
 import {
+  diskHeadroom,
   RESIDENT_SLUG_RE,
   rec,
   residentDisk,
   residentLive,
   residentSlug,
   residentStateTone,
+  residentThreads,
   str,
   type ResidentRecordView,
 } from "@core/channels/residentsModel.js";
-import {
-  diskReserveKiB,
-  effectiveFreeKiB,
-  formatDiskGauge,
-  formatGiB,
-  projectThreadCostKiB,
-} from "@core/execution/residentDiskBudget.js";
+import { formatDiskGauge, formatGiB, projectThreadCostKiB } from "@core/execution/residentDiskBudget.js";
 
 // One resident's detail page: lifecycle, pinned facts, snapshot stamp, thread
 // worktrees, pending schedules, command table, registry settings — the browser
@@ -47,41 +43,17 @@ const commands = computed(() => {
     .map((k) => ({ name: k, command: str(cmds[k]), effect: str(effects[k]) || "readonly" }));
 });
 
-interface ThreadRow {
-  threadKey: string;
-  ref: string;
-  sha: string;
-  commitHref?: string;
-  user: string;
-  deps: string;
-  boundAt: string;
-  lastAttachAt: string;
-  evicted: boolean;
-  evictedAt: string;
-  evictedWhy: string;
-}
-const threads = computed<ThreadRow[]>(() => {
-  const raw = live.value.threads;
-  const list = Array.isArray(raw) ? raw.map(rec) : [];
-  return list
-    .map((t) => {
-      const tSha = str(t.sha);
-      return {
-        threadKey: str(t.threadKey) || "?",
-        ref: str(t.ref) || "?",
-        sha: tSha ? tSha.slice(0, 8) : "",
-        commitHref: ghRepo.value && /^[0-9a-f]{7,40}$/.test(tSha) ? `${ghRepo.value}/commit/${tSha}` : undefined,
-        user: str(t.user),
-        deps: str(t.deps),
-        boundAt: str(t.boundAt),
-        lastAttachAt: str(t.lastAttachAt),
-        evicted: t.evicted === true,
-        evictedAt: str(t.evictedAt),
-        evictedWhy: str(t.evictedWhy),
-      };
-    })
-    .sort((a, b) => b.lastAttachAt.localeCompare(a.lastAttachAt));
-});
+// The bindings as the shared model reads them (newest attach first), with the
+// short sha and its commit link — hex only — added for the table.
+const threads = computed(() =>
+  residentThreads(record.value).map((t) => ({
+    ...t,
+    threadKey: t.threadKey || "?",
+    ref: t.ref || "?",
+    sha: t.sha ? t.sha.slice(0, 8) : "",
+    commitHref: ghRepo.value && /^[0-9a-f]{7,40}$/.test(t.sha) ? `${ghRepo.value}/commit/${t.sha}` : undefined,
+  })),
+);
 const liveThreads = computed(() => threads.value.filter((t) => !t.evicted).length);
 
 const lastRestore = computed(() => {
@@ -99,25 +71,22 @@ const diskBudgetMb = computed(() =>
 const diskFacts = computed(() => {
   const d = disk.value;
   if (!d) return [];
-  const reserve = diskReserveKiB(d);
-  const { freeKiB, capped, capacityKiB } = effectiveFreeKiB(d, diskBudgetMb.value);
-  const headroom = freeKiB - reserve.totalKiB;
+  const h = diskHeadroom(d, diskBudgetMb.value);
   const room = (kind: "hardlink" | "reconcile"): string => {
-    const cost = projectThreadCostKiB(d.parts, kind);
-    if (cost === null) return "? (checkout not measured)";
-    if (cost === 0) return "?";
-    return `${Math.max(0, Math.floor(headroom / cost))} more (${formatGiB(cost)} each)`;
+    const count = h.room[kind];
+    if (count === null) return projectThreadCostKiB(d.parts, kind) === null ? "? (checkout not measured)" : "?";
+    return `${count} more (${formatGiB(projectThreadCostKiB(d.parts, kind))} each)`;
   };
   return [
     ["used / total", formatDiskGauge(d)],
-    ["free", `${formatGiB(freeKiB)}${capped ? ` under the ${formatGiB(capacityKiB)} diskBudgetMb cap` : ""}`],
+    ["free", `${formatGiB(h.freeKiB)}${h.capped ? ` under the ${formatGiB(h.capacityKiB)} diskBudgetMb cap` : ""}`],
     [
       "reserve",
-      `${formatGiB(reserve.totalKiB)} (snapshot staging ${formatGiB(reserve.stagingKiB)} + floor ${formatGiB(reserve.floorKiB)})`,
+      `${formatGiB(h.reserve.totalKiB)} (snapshot staging ${formatGiB(h.reserve.stagingKiB)} + floor ${formatGiB(h.reserve.floorKiB)})`,
     ],
     [
       "headroom",
-      `${formatGiB(Math.max(0, headroom))} — room for ${room("hardlink")} hardlinked trees, ${room("reconcile")} lockfile-diverged (reconciling)`,
+      `${formatGiB(h.headroomKiB)} — room for ${room("hardlink")} hardlinked trees, ${room("reconcile")} lockfile-diverged (reconciling)`,
     ],
     ["measured", d.at || "—"],
   ];

@@ -23,6 +23,7 @@ declare module 'vue' {
     MarkdownText: typeof import('./src/components/MarkdownText.vue')['default']
     MessageFiles: typeof import('./src/components/run/MessageFiles.vue')['default']
     ReplyBlock: typeof import('./src/components/run/ReplyBlock.vue')['default']
+    ResidentRow: typeof import('./src/components/residents/ResidentRow.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
     RunChildrenBlock: typeof import('./src/components/run/RunChildrenBlock.vue')['default']

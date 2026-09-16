@@ -149,13 +149,30 @@ export interface UnitSeed {
 
 /** The admin /residents listing, passed through as received (the view renders
  *  whatever the resident reports, defensively — never a contract the bot
- *  enforces). Values are JSON-safe by construction: they arrived as JSON. */
+ *  enforces). Values are JSON-safe by construction: they arrived as JSON.
+ *  `runs` are the registry's live rows that name a repo — the runs that can be
+ *  on a resident — under the viewer's `runs:read` predicate, each with its
+ *  token as an index row carries it (resident-repos item 42); `now` is the
+ *  server clock their stopwatches open from. The page keeps both current from
+ *  the `/residents?stream=1` feed (`ResidentsFeedFrame`). */
 export interface ResidentsIndexSeed {
   page: "residents";
   cap?: unknown;
   count?: unknown;
   residents: unknown[];
+  now: number;
+  runs: RunIndexRowSeed[];
 }
+
+/** One frame on the residents feed (`GET /residents?stream=1`): the registry's
+ *  index event for a repo run the viewer may read — the same `upsert` /
+ *  `removed` the runs index gets — or a fresh admin listing, pushed when a
+ *  worktree binding can have changed (a run's `dispatch.workspace.attach` span
+ *  ended, or its stream sealed after the release at run end). */
+export type ResidentsFeedFrame =
+  | { type: "upsert"; run: RunIndexRowSeed }
+  | { type: "removed"; id: string }
+  | { type: "residents"; cap?: unknown; count?: unknown; residents: unknown[] };
 
 export interface ResidentDetailSeed {
   page: "resident";

@@ -13,7 +13,8 @@ The header lists only the surfaces this installation has: **Residents** appears 
 | `GET /runs/<id>/friction` | Why a finished run was slow, if it was | Read-only diagnosis, no side effects |
 | `GET /runs/unit/<instance>:<unit>` | One ship unit's story: its coding thread's runs and its review thread's in round order, each opening to its timeline, with a search over one thread's conversation | What `runs unit` answers, as a page; a unit you may not see is the same 404 an unknown run gives. The pipeline's own run page lists its units, and a conductor's run page lists the runs it spawned |
 | `POST /runs/<id>/stop?mode=soft\|hard` | — | Stops a live run; `soft` lets it wrap up and answer, `hard` aborts in-flight |
-| `GET /residents` | Every onboarded repo, its lifecycle state, and its disk gauge (used/total) | The dashboard twin of `repo list` |
+| `GET /residents` | Every onboarded repo, its lifecycle state, its disk gauge (used/total) and how many runs are on it; each row folds open to those runs — stopwatch, run link, the worktree each holds (ref, commit, OS user, deps, size), the idle worktrees, and the room left on the disk | The dashboard twin of `repo list`; the fold lists the runs the viewer may read, live |
+| `GET /residents?stream=1` | The residents index feed (SSE): run rows as the registry publishes them, and the listing again whenever a run's worktree is bound or released | What the index consumes to stay current; no timer re-reads the resident Worker |
 | `GET /residents/<owner>/<name>` | One repo's resident: mirror status, warm checkout, active thread worktrees, and its disk — used/total, free, the reserve it keeps back, headroom in "more trees", and every component (mirror, deps, checkout, each thread tree, leftover caches) | The same numbers the resident's attach admission decides on — see [onboard a repo → Disk](../how-to/onboard-a-repo.md#disk) |
 | `GET /costs` | Daily spend across every configured group | Priced live from Cloudflare + (optionally) Anthropic billing data, nothing cached |
 | `GET /costs/<group>` | Spend for one group | |
@@ -72,7 +73,7 @@ Every registered command has an HTTP twin behind the same dashboard gate, plus a
 
 ## Screenshots
 
-**Residents index** — every onboarded repo, its state, last activity:
+**Residents index** — every onboarded repo, its state, last activity; each row folds open to the runs on it and their worktrees:
 
 <img src="../images/residents-index.jpg" alt="Residents index" width="720">
 
