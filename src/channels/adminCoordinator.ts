@@ -1357,7 +1357,21 @@ async function merge(
     return json(502, { ok: false, error: "github_unavailable", message: `${where} could not be read`, at });
   if (isReleasePullRequest(facts))
     return refused(`${where} is the release pull request — always a person's merge, never the runner's`);
-  if (facts.state !== "open") return refused(`${where} is ${facts.state}`);
+  if (facts.state !== "open") {
+    // Already merged — auto-merge fired, or a person merged after the approval:
+    // the unit is done, not refused. The door merged nothing, so the outcome
+    // says `by: other` with the merge commit and the time (spec item 9).
+    if (facts.mergedAt !== undefined && facts.mergeCommitSha !== undefined)
+      return json(200, {
+        ok: true,
+        outcome: "merged",
+        by: "other",
+        sha: facts.mergeCommitSha,
+        mergedAt: facts.mergedAt,
+        at,
+      });
+    return refused(`${where} is ${facts.state}`);
+  }
   if (facts.headRef !== row.branch)
     return refused(`${where} heads \`${facts.headRef ?? "?"}\`, not the unit's branch \`${row.branch}\``);
   if (facts.headSha === undefined || !sameCommit(facts.headSha, headSha))

@@ -1333,6 +1333,37 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
     expect(renderUnitReport(refused.state)).toContain("head moved");
   });
 
+  it("a merge answered merged with by other — the door found the pull request already merged after the approval — ends the unit merged by other with the merge commit and the time, and the report reads the Already-merged sentence", () => {
+    const d = fresh(input());
+    throughRoundZero(d);
+    runChild(
+      d,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "approve", summary: "x", findings: [] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    expect(d.action).toMatchObject({ type: "merge", step: "U10/merge/1" });
+    d.answer({
+      type: "merge",
+      outcome: "merged",
+      by: "other",
+      sha: HEAD_B,
+      mergedAt: "2026-09-13T23:55:59Z",
+      at: T0 + 21 * MIN,
+    });
+    expect(d.action).toMatchObject({
+      type: "end",
+      ending: { kind: "merged", by: "other", sha: HEAD_B, mergedAt: "2026-09-13T23:55:59Z", reviewRounds: 1 },
+    });
+    expect(renderUnitReport(d.state)).toContain("✅ Already merged");
+    expect(renderUnitReport(d.state)).toContain(`merge commit \`${HEAD_B.slice(0, 7)}\``);
+  });
+
   it("an approve on a plan branch with no known head to merge at is a refused merge, never a person's merge-ready", () => {
     const d = fresh(input());
     d.answer({ type: "branch", ok: true, at: T0 });

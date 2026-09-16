@@ -345,6 +345,14 @@ export interface PullRequestFacts {
    *  is a conflict with the base, refused at the merge door before the checks
    *  are read (spec item 9). */
   mergeableState?: string;
+  /** When GitHub merged it (`merged_at`, ISO 8601) — present only on a merged
+   *  pull request; a closed one carrying it ends a unit `merged`, never
+   *  refused (spec item 9). */
+  mergedAt?: string;
+  /** The merge commit on the base (`merge_commit_sha`) of a MERGED pull
+   *  request — read only beside `mergedAt`, since GitHub reports a test-merge
+   *  sha under the same field on an open one. */
+  mergeCommitSha?: string;
 }
 
 /**
@@ -442,6 +450,8 @@ export async function fetchPullRequestFacts(pr: {
     auto_merge?: unknown;
     mergeable?: unknown;
     mergeable_state?: unknown;
+    merged_at?: unknown;
+    merge_commit_sha?: unknown;
   } | null;
   if (!data || (data.state !== "open" && data.state !== "closed")) return undefined;
   const headRepo = typeof data.head?.repo?.full_name === "string" ? data.head.repo.full_name.toLowerCase() : undefined;
@@ -475,6 +485,16 @@ export async function fetchPullRequestFacts(pr: {
     ...("mergeable" in data ? { mergeable: data.mergeable === null ? null : data.mergeable === true } : {}),
     ...(typeof data.mergeable_state === "string" && data.mergeable_state
       ? { mergeableState: data.mergeable_state }
+      : {}),
+    // The merge commit rides only a merged row: on an open pull request GitHub
+    // reports a test-merge sha under `merge_commit_sha`.
+    ...(typeof data.merged_at === "string" && data.merged_at
+      ? {
+          mergedAt: data.merged_at,
+          ...(typeof data.merge_commit_sha === "string" && /^[0-9a-f]{40}$/.test(data.merge_commit_sha)
+            ? { mergeCommitSha: data.merge_commit_sha }
+            : {}),
+        }
       : {}),
   };
 }

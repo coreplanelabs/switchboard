@@ -2181,6 +2181,18 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     });
   });
 
+  it("a pull request already merged when the door reads it — auto-merge fired, or a person merged after the approval — answers a typed merged outcome with by other, the merge commit and the time, never `is closed`", async () => {
+    const h = await mergeHarness({
+      prFacts: facts({ state: "closed", mergedAt: "2026-09-16T00:46:19Z", mergeCommitSha: MERGED }),
+    });
+    expect(await merge(h)).toEqual({
+      status: 200,
+      body: { ok: true, outcome: "merged", by: "other", sha: MERGED, mergedAt: "2026-09-16T00:46:19Z", at: NOW },
+    });
+    // The runner merged nothing.
+    expect(h.merges).toEqual([]);
+  });
+
   it("the pull request must be open, head the unit's branch and stand at the approved head; the bot's approving review must be pinned there — each refusal names what is off, and GitHub silent on the reviews is a passing 502", async () => {
     expect((await merge(await mergeHarness({ prFacts: facts({ state: "closed" }) }))).body).toMatchObject({
       outcome: "refused",
