@@ -43,6 +43,7 @@ import {
   recycledMidCommandMessage,
 } from "../../src/execution/sandboxLifecycle.js";
 import { envFromRequest } from "../../src/execution/sandboxEnv.js";
+import { IdleGuard, type IdleGuardHost } from "../../src/execution/sandboxIdle.js";
 import { RUNTIME_REPLACEMENT_WORDING, isRuntimeUnreachableSignal } from "../../src/execution/residentRefresh.js";
 import {
   fleetBusyAnswer,
@@ -166,15 +167,65 @@ interface FileRefusal {
   reason?: string;
 }
 
+/** Durable Object storage key of the idle ledger's served-time. */
+const IDLE_LEDGER_KEY = "switchboard.idle.lastServedAt";
+/** The scheduled-callback name of the idle sweep (a method below). */
+const IDLE_SWEEP_CALLBACK = "idleSweep";
+
 export class SwitchboardSandbox extends Sandbox<Env> {
-  // Idle lifetime of a thread's container (the SDK's own default is 10 min).
-  // Idle means idle: the SDK renews the activity timeout every second while a
-  // command's stream is open (its control connection's busy poll), so a
-  // running command never counts toward it and the shell-level `timeout` is
-  // the one deadline a command can hit (docs/reference/specs/execution.md item 2).
-  // 5 minutes frees the slot sooner while a prompt follow-up still reuses the
-  // warm workspace.
+  // The SDK's idle setting (its own default is 10 min), kept so its alarm
+  // loop calls `onActivityExpired` on this cadence — but on the 0.13 line that
+  // hook is a question to the runtime ("anything still running?"), not a
+  // deadline, and the answer kept twenty-five containers awake for 16 hours.
+  // The deadline itself is the guard's (docs/reference/specs/execution.md
+  // item 22): 5 minutes after the last request this object served, the
+  // container is destroyed, whatever runs inside; the shell-level `timeout`
+  // stays the one deadline a command can hit (item 2), since a request in
+  // flight is service.
   sleepAfter = SANDBOX_SLEEP_AFTER;
+
+  private readonly idle: IdleGuard;
+
+  constructor(...args: ConstructorParameters<typeof Sandbox<Env>>) {
+    super(...args);
+    this.idle = new IdleGuard(this.idleHost());
+    // Every wake, including the one the SDK's own alarm causes on a leaked
+    // container: the baseline is read and a sweep armed before any request.
+    this.ctx.blockConcurrencyWhile(() => this.idle.wake());
+  }
+
+  /** The guard's view of this object: the platform's running flag, the SDK's
+   *  schedule table and clean destroy, the platform's kill, and storage. */
+  private idleHost(): IdleGuardHost {
+    return {
+      now: systemClock,
+      containerRunning: () => this.ctx.container?.running,
+      sweepScheduled: async () => (await this.listSchedules(IDLE_SWEEP_CALLBACK)).length > 0,
+      scheduleSweep: async (delayMs) => {
+        await this.schedule(Math.ceil(delayMs / 1000), IDLE_SWEEP_CALLBACK);
+      },
+      destroySandbox: () => this.destroy(),
+      killContainer: async () => {
+        await this.ctx.container?.destroy();
+      },
+      loadLastServedAt: () => this.ctx.storage.get<number>(IDLE_LEDGER_KEY),
+      saveLastServedAt: (at) => this.ctx.storage.put(IDLE_LEDGER_KEY, at),
+      log: (event) => console.log(JSON.stringify({ ...event, thread: this.ctx.id.name ?? this.ctx.id.toString() })),
+      wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    };
+  }
+
+  /** The idle sweep, scheduled by the guard through the SDK's schedule table
+   *  and re-armed by it while a container is running. */
+  async idleSweep(): Promise<void> {
+    await this.idle.sweep();
+  }
+
+  /** The SDK's activity expiry, answered by the guard's verdict instead of the
+   *  runtime's process probes. */
+  override async onActivityExpired(): Promise<void> {
+    await this.idle.expired();
+  }
 
   /** One command as one supervised process (docs/reference/specs/execution.md
    *  item 4): `timeout -k 10 <secs> bash -c 'mkdir -p /workspace && cd
@@ -185,6 +236,16 @@ export class SwitchboardSandbox extends Sandbox<Env> {
    *  control port and a runtime replaced under the command are named by type
    *  and answered as data; anything else propagates to the fetch handler. */
   async runCommand(
+    command: string,
+    execTimeoutSecs: number,
+    envVars: Record<string, string>,
+  ): Promise<ExecAnswer | ExecFailure> {
+    return this.idle.served(() => this.execute(command, execTimeoutSecs, envVars));
+  }
+
+  /** `runCommand` without the ledger entry: the body, and the internal caller
+   *  (`readBase64`'s stat) that is already inside a served request. */
+  private async execute(
     command: string,
     execTimeoutSecs: number,
     envVars: Record<string, string>,
@@ -277,7 +338,9 @@ export class SwitchboardSandbox extends Sandbox<Env> {
   }
 
   async readText(path: string): Promise<{ content: string } | FileRefusal> {
-    return this.fileOp(async () => ({ content: (await this.readFile(path, { encoding: "utf-8" })).content }));
+    return this.idle.served(() =>
+      this.fileOp(async () => ({ content: (await this.readFile(path, { encoding: "utf-8" })).content })),
+    );
   }
 
   /** `encoding: "base64"` (src/execution/binaryRead.ts): the size first, from
@@ -285,7 +348,11 @@ export class SwitchboardSandbox extends Sandbox<Env> {
    *  decoded bytes to it — an SDK read that came back short would otherwise
    *  pass as the file. A file over the cap is refused by name inside a 200. */
   async readBase64(path: string): Promise<Base64ReadAnswer | FileRefusal> {
-    const stat = await this.runCommand(statCommandFor(path), 60, {});
+    return this.idle.served(() => this.readBase64Now(path));
+  }
+
+  private async readBase64Now(path: string): Promise<Base64ReadAnswer | FileRefusal> {
+    const stat = await this.execute(statCommandFor(path), 60, {});
     if ("error" in stat) {
       // The stat's own named failure — a full fleet, a silent control port —
       // is the read's, token included, so the executor waits as it would
@@ -309,10 +376,12 @@ export class SwitchboardSandbox extends Sandbox<Env> {
   }
 
   async write(path: string, content: string): Promise<{ ok: true } | FileRefusal> {
-    return this.fileOp(async () => {
-      await this.writeFile(path, content);
-      return { ok: true as const };
-    });
+    return this.idle.served(() =>
+      this.fileOp(async () => {
+        await this.writeFile(path, content);
+        return { ok: true as const };
+      }),
+    );
   }
 }
 

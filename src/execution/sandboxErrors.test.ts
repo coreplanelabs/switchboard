@@ -46,6 +46,21 @@ describe("isFleetBusy", () => {
     expect(isFleetBusy('{"code":"CONTAINER_UNAVAILABLE","message":"…"}')).toBe(true);
   });
 
+  it("recognizes the platform's max_instances wording on the 0.13 line — the text that ended two reviews in under a minute each", () => {
+    expect(
+      isFleetBusy(
+        "Maximum number of running container instances exceeded. Try again later, or try configuring a higher value for max_instances",
+      ),
+    ).toBe(true);
+    // the same text after the Worker's own prefix, as the executor sees it in-body
+    expect(
+      isFleetBusyError({
+        name: "Error",
+        message: "Maximum number of running container instances exceeded. Try again later",
+      }),
+    ).toBe(true);
+  });
+
   it("is NOT a stale session, a wedged sandbox, or arbitrary text", () => {
     expect(isFleetBusy("Session 'abc' not found")).toBe(false);
     expect(isFleetBusy("Command execution failed")).toBe(false);

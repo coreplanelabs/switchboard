@@ -48,6 +48,11 @@ const FLEET_BUSY_PATTERNS: readonly RegExp[] = [
   /^Failed to create session: 503\b/i,
   /no container instance (?:that can be provided|available)/i,
   /\bCONTAINER_UNAVAILABLE\b/,
+  // The platform's wording since the 0.13 line ("… Try again later, or try
+  // configuring a higher value for max_instances"): the 0.13 SDK's own warm
+  // pool matches on this exact phrase. Seen live passing through as a plain
+  // in-body error and ending two reviews in under a minute each.
+  /Maximum number of running container instances exceeded/i,
 ];
 
 export function isFleetBusy(message: string): boolean {

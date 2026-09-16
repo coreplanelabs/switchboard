@@ -182,8 +182,19 @@ describe("sandbox Worker wiring (static)", () => {
     expect(worker).toMatch(/status: 503, reason: stat\.reason/);
   });
 
-  it("the Worker never destroys a container of its own accord", () => {
-    expect(worker).not.toMatch(/this\.destroy\(/);
+  // item 22: the one place the Worker ends a container is the idle guard's
+  // host — the SDK's clean destroy and the platform's kill are handed to
+  // IdleGuard, which decides from served-time alone; no route destroys, and
+  // the SDK's own expiry hook is answered by the guard, never left to its
+  // process probes.
+  it("the Worker destroys a container only through the idle guard, and answers the SDK's expiry with the guard's verdict", () => {
+    expect(worker.match(/this\.destroy\(/g)).toHaveLength(1);
+    expect(worker).toMatch(/destroySandbox: \(\) => this\.destroy\(\)/);
+    expect(worker.match(/container\?\.destroy\(\)/g)).toHaveLength(1);
+    expect(worker).toMatch(/override async onActivityExpired\(\): Promise<void> \{\s*await this\.idle\.expired\(\);/);
+    expect(worker).toMatch(/blockConcurrencyWhile\(\(\) => this\.idle\.wake\(\)\)/);
+    // every route the fetch handler calls runs inside served()
+    expect(worker.match(/this\.idle\.served\(/g)).toHaveLength(4);
   });
 
   // The rollout window a NEW thread can fall into is closed by replacing the
