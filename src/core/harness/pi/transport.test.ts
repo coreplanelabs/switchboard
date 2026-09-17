@@ -232,7 +232,7 @@ describe("PiRpcTransport", () => {
     t.send({ id: "p", type: "prompt", message: "go" });
     await t.flushed(); // the failure recorded: the chain is spent
     t.send({ type: "steer", message: "behind the failure" }); // held
-    t.send({ type: "abort" }); // a teardown's abort: direct, so it lands even now
+    t.send({ type: "abort" }); // a teardown's abort: its own step past the spent chain, so it lands even now
     t.close();
     await t.flushed(); // settles: the steer held — never a hang
     expect(t.pendingSend).toEqual({ id: "p", type: "prompt", message: "go" });
@@ -426,7 +426,7 @@ describe("PiRpcTransport", () => {
     expect(caught[1]).toBe(true); // the second, completed by the short read after
   });
 
-  it("a gate reply rides the chain like every other write (only the abort is direct): on a spent chain it is held for the re-attach in its turn, and its own failed write is recorded for the re-attach to re-send as it was — where an abort's failed write is nobody's", async () => {
+  it("a gate reply rides the chain like every other write (only the abort's step ignores a spent chain): on a spent chain it is held for the re-attach in its turn, and its own failed write is recorded for the re-attach to re-send as it was — where an abort's failed write is nobody's", async () => {
     const reply = { id: "d1", type: "extension_ui_response", response: { confirmed: true } };
     // A spent chain: the reply is held behind the steer, in order, for the
     // fresh transport — never written on a chain whose next write is a

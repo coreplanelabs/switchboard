@@ -78,6 +78,10 @@ export const wrapUpUndeliveredNote = (kind: "time" | "turns" | "soft", closes: "
  *  never have got; the loop asks again, and the clock starts when that lands. */
 export const wrapUpWriteFailedNote = (kind: "time" | "turns" | "soft", closes: "run" | "turn" = "run"): string =>
   `the ${wrapUpName(kind)} wrap-up instruction's write failed with the control plane's reset; the ${closes} asks again once re-attached, and its finale clock starts when that instruction lands`;
+/** The record's line when an abort was dropped — nothing kept it, so pi was
+ *  never told to stop (harness-pi item 16). No path reaches it today; the note
+ *  is what makes a swallowed stop seen rather than assumed. */
+export const ABORT_DROPPED_NOTE = "the abort was dropped: no transport kept it, so pi was never told to stop";
 const wrapUpName = (kind: "time" | "turns" | "soft"): string =>
   kind === "time" ? "time-budget" : kind === "turns" ? "turn-guard" : "soft-stop";
 /** The failed call's words when the finale bound itself is why no write-up

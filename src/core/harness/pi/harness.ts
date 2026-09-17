@@ -33,6 +33,7 @@ import {
   type PiHarnessFacts,
 } from "../contract.js";
 import {
+  ABORT_DROPPED_NOTE,
   CONTINUE_PROMPT,
   finaleTimedOutNote,
   wrapUpUndeliveredNote,
@@ -1004,8 +1005,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       abortSent = true;
       bridge.markOpenCallsCut();
       sends.send({ type: "abort" }, (landing) => {
-        if (landing === "dropped")
-          note("harness_error", "the abort was dropped: no transport kept it, so pi was never told to stop");
+        if (landing === "dropped") note("harness_error", ABORT_DROPPED_NOTE);
       });
     };
     /** The hard stop, once, on every tick and at every end of a wait — the

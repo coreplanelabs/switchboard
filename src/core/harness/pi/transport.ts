@@ -122,23 +122,30 @@ export class PiRpcTransport implements PiTransport {
     if (!abort) this.queued.push(command);
     const step: Promise<Landing> = this.sending
       .then((): Landing | Promise<Landing> => {
+        // The abort's step: never queued, so on a transport abandoned to a
+        // re-attach it is `dropped` — nothing re-sends it, and its sender is
+        // told; otherwise written, a spent chain notwithstanding — the reset
+        // that failed a prompt a moment after the abort was asked for must not
+        // swallow the stop, and a teardown's abort still reaches pi past an
+        // earlier failure.
+        if (abort) return this.heldForReattach ? "dropped" : this.land(line);
         // Decided when this write's turn on the chain comes, not when it was
         // queued. Once `abandon()`ed the fresh transport owns every write not
         // yet started: a queued write stays queued for `takeUnsent`, never
-        // landed here, never lost; an abort, never queued, is dropped. Once a
-        // write has FAILED the chain is spent (a steer queued behind the failed
-        // prompt must not land ahead of the prompt's re-send on the fresh
-        // transport — order inverted), so a queued write stays queued — the
-        // abort alone goes on. A plain `close()` (teardown) does neither, so a
-        // write sent just before it still flushes — unless an earlier write
-        // failed, when it is held like the rest (see `close`). Otherwise it is
-        // in flight.
-        if (this.heldForReattach) return abort ? "dropped" : "held";
-        if (!abort && this.sendError !== undefined) return "held";
-        if (!abort) this.queued.shift();
-        return this.deps.container.writeLine(this.deps.paths, line).then(() => "landed" as const);
+        // landed here, never lost. Once a write has FAILED the chain is spent
+        // (a steer queued behind the failed prompt must not land ahead of the
+        // prompt's re-send on the fresh transport — order inverted), so a
+        // queued write stays queued. A plain `close()` (teardown) does
+        // neither, so a write sent just before it still flushes — unless an
+        // earlier write failed, when it is held like the rest (see `close`).
+        // Otherwise it is in flight.
+        if (this.heldForReattach || this.sendError !== undefined) return "held";
+        this.queued.shift();
+        return this.land(line);
       })
       .catch((err: unknown): Landing => {
+        // An abort's failure is nobody's here: the chain stays live and no
+        // re-attach resolves it — its sender is told `failed` and acts.
         if (!abort) {
           this.sendError ??= err instanceof Error ? err : new Error(String(err));
           this.pendingSend ??= command;
@@ -147,6 +154,11 @@ export class PiRpcTransport implements PiTransport {
       });
     this.sending = step.then(() => undefined);
     return step;
+  }
+
+  /** One line into pi's FIFO: `landed` once it is there. */
+  private land(line: string): Promise<Landing> {
+    return this.deps.container.writeLine(this.deps.paths, line).then(() => "landed" as const);
   }
 
   /** Whether the reader is at the log's end as far as it knows: every record
