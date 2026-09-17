@@ -196,6 +196,7 @@ import {
   type RefreshPlan,
   type RestoreSample,
   type RefreshFailure,
+  fetchFailureIsMirrors,
 } from "../../src/execution/residentRefresh.js";
 import { autoRebuildDecision, isAutoRebuildEligible } from "../../src/execution/residentAutoRebuild.js";
 import {
@@ -3328,6 +3329,14 @@ export class ResidentDO extends Sandbox<Env> {
       if (failure.diskFull) {
         await this.setResidentState("degraded", failure.reason);
         await this.recoverFromDiskFull(failure.reason, selfInFlight);
+        return { ok: false, reason: failure.reason };
+      }
+      // Item 67: a fetch that failed on the MIRROR (its remote gone, its
+      // object store broken) is the resident's own step failing — `fetch-failed`,
+      // counted by the ladder, never serviceable — not GitHub being unreachable.
+      // The first live row found a broken mirror parked as `github-unreachable`.
+      if (fetchFailureIsMirrors(message)) {
+        await this.refreshFailed(failure, selfInFlight);
         return { ok: false, reason: failure.reason };
       }
       const reason = `github-unreachable: ${message}`;

@@ -58,6 +58,21 @@ describe("refreshFailed climbs the ladder for resident steps and parks for repo 
   });
 });
 
+describe("the fetch step names GitHub only for GitHub's failures", () => {
+  it("a fetch that failed on the mirror goes through refreshFailed as the resident step `fetch` before anything is called github-unreachable", () => {
+    const body = method("refreshFetch");
+    const mirror = body.indexOf("if (fetchFailureIsMirrors(message))");
+    const github = body.indexOf("const reason = `github-unreachable: ${message}`");
+    expect(mirror).toBeGreaterThan(-1);
+    expect(github).toBeGreaterThan(mirror);
+    const branch = body.slice(mirror, github);
+    expect(branch).toMatch(/await this\.refreshFailed\(failure, selfInFlight\)/);
+    expect(branch).toMatch(/return \{ ok: false, reason: failure\.reason \}/);
+    // The failure handed on was classified with the step named `fetch`.
+    expect(body).toMatch(/const failure = await this\.classifyFailure\("fetch", message\)/);
+  });
+});
+
 describe("the reasons are read as the resident's, never the repo's", () => {
   it("`infra-streak:` is a non-evidence reason (the gate always runs the next cycle) and the gate parks only what parksOnRepeat allows", () => {
     const m = /^const NON_EVIDENCE_REASON = \/(.*)\/;$/m.exec(source);
