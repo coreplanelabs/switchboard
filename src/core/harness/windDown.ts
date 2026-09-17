@@ -11,6 +11,13 @@
 export const HARD_STOP_MESSAGE =
   "⛔ Run aborted by an operator (hard stop). No summary was written; partial work may exist in the workspace.";
 
+/** The prompt a resumed process continues on after the bot restarted mid-run
+ *  (harness-pi.md item 8): the same words for a process re-attached to and for
+ *  one rebuilt from the record, on every harness, so the record reads one
+ *  continue whichever way the run came back. */
+export const CONTINUE_PROMPT =
+  "Continue where you left off: the bot restarted mid-run, so re-check the effects of your last command before relying on them.";
+
 /** The wrap-up warning's card and note text, at `minutesLeft`. */
 export const wrapUpNote = (minutesLeft: number): string => `~${minutesLeft} min left — signaling wrap-up`;
 /** The wrap-up warning as the model reads it, steered into the run once as the deadline nears. */

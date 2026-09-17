@@ -49,6 +49,7 @@ import { PiMirror } from "../pi/mirror.js";
 import { PiRpcTransport } from "../pi/transport.js";
 import { judgeToolCall, openCodeToolWord, type ToolRuleContext } from "../pi/toolRules.js";
 import {
+  CONTINUE_PROMPT,
   HARD_STOP_MESSAGE,
   hardStopNote,
   timeBudgetAnswer,
@@ -272,12 +273,50 @@ export class OpenCodeBridge {
    *  it once. A `permission.replied` is the bot's own echo only when its
    *  requestID is here, its effect equals the decided one, and it is the first;
    *  anything else — an id never decided, another effect, a second reply — is a
-   *  reply the bot did not send (a forgery). */
-  private readonly decidedReplies = new Map<string, { reply: "once" | "reject"; echoed: boolean }>();
-  /** The store messages already mirrored, by count of the pi-shaped turns fed. */
+   *  reply the bot did not send (a forgery). An ask met while catching up on a
+   *  re-attach that the server no longer holds pending is here with no reply:
+   *  for a call whose result the ledger already holds, the dead generation saw
+   *  it run and its echo names its decision, adopted as that generation's
+   *  word; for a call the record shows in flight at the death, the ask was
+   *  answered while the bot was away — by the dead generation an instant
+   *  before it died, or by the model's shell with the server's password — and
+   *  the run cannot tell by whom (`unattributable`): its echo fails the run
+   *  closed, at most one model call lost. */
+  private readonly decidedReplies = new Map<
+    string,
+    { reply: "once" | "reject" | undefined; callId: string; echoed: boolean; unattributable?: boolean }
+  >();
+  /** The calls whose result the ledger held at the re-attach: the dead generation saw them run. */
+  private readonly ledgerResults = new Set<string>();
+  /** The calls in flight at the death whose ask is not pending at the re-attach
+   *  and is not a relayed tool's: answered while the bot was away. A settlement
+   *  or an echo for one met catching up is the gate bypassed. */
+  private readonly unattributableCalls = new Set<string>();
+  /** The store as the bridge has seen it, by message id in the order first
+   *  seen: every refill upserts into it — the real tailer sends only the
+   *  messages that changed since its previous refill, a restarted tailer or
+   *  the fake sends the whole store — and the projection reads the whole map,
+   *  so a turn lands once whichever shape a refill has (the join by message id). */
+  private readonly store = new Map<string, OpenCodeMessage>();
+  /** How many store messages the projection skips: the seed and the request's
+   *  echo on a fresh run, the import on a rebuild; none on a re-attach, where
+   *  the ledger's rows are skipped by turn instead (`adoptStore`). */
+  private storeSeed: number;
+  /** The projected turns already fed to the mirror (the high-water mark). */
   private fedTurns = 0;
   private readonly mirror: PiMirror;
   private turnCounted = 0;
+  /** Reading the feed a dead generation already read (a re-attach, before the
+   *  byte the feed had reached when this generation attached): its tool events
+   *  narrate again and nothing is re-decided — the asks it answered are its,
+   *  their echoes name its decisions, a call that settled ran under its watch,
+   *  and its execution's end or failure is history, not this generation's
+   *  settle. The loop sets this before each record it hands over. */
+  catchingUp = false;
+  /** The asks pending on the server at the re-attach (by request id): the
+   *  ones this generation decides even while catching up — every other ask met
+   *  there was the dead generation's. */
+  private readonly pendingAtReattach = new Set<string>();
   /** The mirror writes, serialized: a refill (or a compaction) chains behind
    *  the last, so two refills that arrive in one poll never race the
    *  high-water mark. `flush` awaits the chain, so a caller reads the answer
@@ -285,6 +324,7 @@ export class OpenCodeBridge {
   private mirrorChain: Promise<void> = Promise.resolve();
 
   constructor(private readonly deps: OpenCodeBridgeDeps) {
+    this.storeSeed = deps.seedLength;
     this.mirror = new PiMirror({
       ...(deps.onStep ? { onStep: deps.onStep } : {}),
       seedLength: deps.seedLength,
@@ -299,6 +339,58 @@ export class OpenCodeBridge {
 
   /** Awaits every mirror write chained so far. */
   flush(): Promise<void> {
+    return this.mirrorChain;
+  }
+
+  /** A resume continues the run's turn count where the record left it: the
+   *  guard's own count (the proxy's meter, when there is one, is read first)
+   *  and the number the next step report carries. */
+  startFromTurn(turn: number): void {
+    this.turns = turn;
+    this.turnCounted = turn;
+  }
+
+  /** A re-attach onto a server that still runs the session: the store as the
+   *  server holds it now, and the ledger's rows, so the projection skips what
+   *  the ledger already holds and feeds only what it lacks — the results and
+   *  steers pending for the next step, which lived in the dead generation's
+   *  memory. The skip is by turn, not by message count: a ledger user row is
+   *  one projected turn per tool result and one for its text, so the flattened
+   *  ledger and the projection align one to one from the first message. The
+   *  store's tool names are learned, so a call that settles live is said under
+   *  its name. The gate during the bot's absence: a call of OpenCode's own
+   *  whose result the ledger does not hold (in flight at the death) and whose
+   *  ask the server no longer holds pending was answered while the bot was
+   *  away, by nobody the run can name — it is marked unattributable, and its
+   *  settlement or its echo met catching up fails the run closed; a relayed
+   *  call is never gated per call, and a pending ask is this generation's to
+   *  decide, catching up or not. A store shorter than the ledger (the dead
+   *  generation imported the seed and died before its prompt's echo landed)
+   *  skips what it has, so the first turn the store gains is still fed. */
+  adoptStore(
+    messages: readonly OpenCodeMessage[],
+    ledger: readonly ChatMessage[],
+    pending: readonly OpenCodePermissionRequest[],
+  ): Promise<void> {
+    for (const request of pending) this.pendingAtReattach.add(request.id);
+    const pendingCalls = new Set(pending.map((r) => r.source?.id ?? r.id));
+    for (const row of ledger)
+      for (const part of row.content) if (part.type === "tool_result") this.ledgerResults.add(part.toolUseId);
+    for (const message of messages) {
+      if (message.type !== "assistant") continue;
+      const content = (message as OpenCodeAssistantMessage).content;
+      for (const part of Array.isArray(content) ? content : []) {
+        if (!isRecord(part) || part.type !== "tool") continue;
+        const id = str(part.id);
+        const name = str(part.name);
+        this.toolNames.set(id, name);
+        if (this.ledgerResults.has(id) || pendingCalls.has(id) || this.deps.relayedToolNames.has(name)) continue;
+        this.unattributableCalls.add(id);
+      }
+    }
+    this.storeSeed = 0;
+    this.fedTurns = Math.min(ledgerTurnCount(ledger), projectStore(messages, 0).length);
+    this.mirrorChain = this.mirrorChain.then(() => this.syncMirror(messages));
     return this.mirrorChain;
   }
 
@@ -508,6 +600,15 @@ export class OpenCodeBridge {
       ...(open?.span ? { spanId: open.span.id } : {}),
     });
     open?.span?.end(settledOk ? "ok" : "error", { callId, ok: settledOk });
+    // A call that settled before this generation attached settled under the
+    // dead generation's watch: its narration is said again, its vetting is not
+    // this generation's to redo — unless the record shows the call in flight at
+    // the death with its ask no longer pending: then it ran on a reply nobody
+    // alive can be named for, and the run fails closed.
+    if (this.catchingUp) {
+      if (this.unattributableCalls.has(callId)) this.bypass(out, unattributableDetail(tool, callId));
+      return;
+    }
     // A relayed tool is not OpenCode's to gate: the plugin registers it and its
     // execute runs `POST /harness/authorize` then `POST /harness/tool` in the
     // bot, so it raises no `permission.asked` (proven against the real binary:
@@ -566,6 +667,19 @@ export class OpenCodeBridge {
   private onPermissionAsked(request: OpenCodePermissionRequest, out: OpenCodeBridgeObservation): void {
     const callId = request.source?.id ?? request.id;
     if (this.answered.has(callId)) return; // a refill re-asked one the stream already carried
+    if (this.decidedReplies.has(request.id)) return; // met again while catching up
+    // An ask read while catching up that the server no longer holds pending:
+    // for a call whose result the ledger holds, the dead generation decided it
+    // and the echo that follows names its decision; for a call the record
+    // shows in flight at the death, it was answered while the bot was away and
+    // the echo that follows is the gate bypassed. Nothing is replied either way.
+    if (this.catchingUp && !this.pendingAtReattach.has(request.id)) {
+      const name = this.toolNames.get(callId) ?? request.action;
+      const unattributable = !this.ledgerResults.has(callId) && !this.deps.relayedToolNames.has(name);
+      if (unattributable) this.unattributableCalls.add(callId);
+      this.decidedReplies.set(request.id, { reply: undefined, callId, echoed: false, unattributable });
+      return;
+    }
     const verdict = judgeOpenCodeAsk(
       request.action,
       Array.isArray(request.resources) ? request.resources : [],
@@ -573,7 +687,7 @@ export class OpenCodeBridge {
       this.deps.relayedToolNames,
     );
     this.answered.set(callId, verdict.reply);
-    this.decidedReplies.set(request.id, { reply: verdict.reply, echoed: false });
+    this.decidedReplies.set(request.id, { reply: verdict.reply, callId, echoed: false });
     if (verdict.reply === "reject")
       this.note("tool_refused", `${verdict.tool} refused: ${redactAndCap(verdict.message ?? "", 300)}`);
     out.replies.push({
@@ -593,10 +707,30 @@ export class OpenCodeBridge {
     // item 2) — and the note names which of the effects it saw.
     const decided = this.decidedReplies.get(requestID);
     if (decided === undefined) {
+      // A reply read while catching up whose ask sits before the row's offset
+      // was the dead generation's exchange, vetted then; live, it is a forgery.
+      if (this.catchingUp) return;
       this.bypass(
         out,
         `a permission.replied for request ${requestID}, which the bot never decided — a reply the bot did not send (it raced the bot, or answered an ask the bot never saw)`,
       );
+      return;
+    }
+    if (decided.reply === undefined) {
+      // An echo for an ask pending at the death: answered while the bot was
+      // away, by nobody the run can name.
+      if (decided.unattributable) {
+        const tool = openCodeToolNameWord(this.toolNames.get(decided.callId) ?? "tool");
+        this.bypass(out, unattributableDetail(tool, decided.callId));
+        return;
+      }
+      // The dead generation's decision, learned from its echo: the settlement
+      // that follows is judged against it as against this generation's own.
+      if (reply === "once" || reply === "reject") {
+        decided.reply = reply;
+        this.answered.set(decided.callId, reply);
+      }
+      decided.echoed = true;
       return;
     }
     if (reply !== decided.reply) {
@@ -626,13 +760,16 @@ export class OpenCodeBridge {
     return { replies: [], settled: false };
   }
 
-  /** The store's messages as the ledger's steps: the pi-shaped turns projected
-   *  from the store (each assistant message split into its assistant turn and a
-   *  user turn for its tool results), fed to the mirror past the high-water mark
-   *  so a re-refill writes no step twice (an upsert by message id). */
+  /** The store's messages as the ledger's steps: the refill upserted into the
+   *  store by message id, the whole store projected into pi-shaped turns (each
+   *  assistant message split into its assistant turn and a user turn for its
+   *  tool results), and the turns past the high-water mark fed to the mirror —
+   *  so a refill of the changed messages alone, a refill of the whole store
+   *  and a re-refill of the same message all write each step once. */
   private async syncMirror(messages: readonly OpenCodeMessage[]): Promise<void> {
+    for (const message of messages) this.store.set(message.id, message);
     if (!this.deps.onStep) return;
-    const turns = projectStore(messages, this.deps.seedLength);
+    const turns = projectStore([...this.store.values()], this.storeSeed);
     for (let i = this.fedTurns; i < turns.length; i++) {
       const turn = turns[i];
       if (turn.role === "assistant") {
@@ -669,6 +806,28 @@ export class OpenCodeBridge {
     if (this.deps.onStep)
       this.mirrorChain = this.mirrorChain.then(() => void this.mirror.onCompaction(entry, this.turnCounted));
   }
+}
+
+/** The bypass's words for a call in flight at the death answered while the bot was away (the gate clause during the bot's absence). */
+function unattributableDetail(tool: string, callId: string): string {
+  return `${tool} (call ${callId}): an ask pending at the bot's death was answered while the bot was away; the run cannot tell by whom`;
+}
+
+/** How many projected turns the ledger's rows stand for (`adoptStore`): an
+ *  assistant row is one turn; a user row is one turn per tool result plus one
+ *  for its other parts (a store user message projects to one text turn whatever
+ *  parts the ledger's row carried), the way `projectStore` splits a store. */
+export function ledgerTurnCount(ledger: readonly ChatMessage[]): number {
+  let turns = 0;
+  for (const row of ledger) {
+    if (row.role === "assistant") {
+      turns++;
+      continue;
+    }
+    const results = row.content.filter((p) => p.type === "tool_result").length;
+    turns += results + (row.content.length > results ? 1 : 0);
+  }
+  return turns;
 }
 
 // PiMirror reads pi-shaped messages: the projection already produced them, so
@@ -781,6 +940,28 @@ export interface OpenCodeConnection {
    *  the run winds down, and the LiveHarness's `toolsBlocked` reads it, so a
    *  relayed tool is refused at the door during the write-up as pi's are. */
   writeUp?: { blocked?: string };
+  /** The row's offset write: called with the feed byte after each store refill
+   *  whose steps have landed on the ledger, so the row's `logOffset` names the
+   *  boundary the next generation reads from. Absent, the row keeps the
+   *  launch's offset. */
+  saveOffset?: (logOffset: number) => void;
+  /** Set when this generation re-attached onto a server a dead generation
+   *  started (the survival clause): what the loop continues from instead of
+   *  priming a rebuilt session. */
+  reattach?: OpenCodeReattach;
+}
+
+/** What a re-attach found on the still-answering server and in its feed. */
+export interface OpenCodeReattach {
+  /** The session's store as the server holds it at the re-attach, every page. */
+  store: OpenCodeMessage[];
+  /** The asks pending on the server for the session: decided through the gate before the feed is read, as on a fresh open. */
+  pendingAsks: OpenCodePermissionRequest[];
+  /** The feed byte the tailer had reached at the re-attach: every record before
+   *  it was written under the dead generation and is read catching up. */
+  catchUpTo: number;
+  /** How the continue reaches the session: steered into the execution under way, or queued on an idle one. */
+  delivery: "steer" | "queue";
 }
 
 /** The run: the request prompted, the feed read to the answer, every tool call
@@ -821,11 +1002,13 @@ export async function driveOpenCode(
     remainingMs: () => deadline - now(),
     textFailing: new Set(run.tools.filter((t) => t.failsInText).map((t) => t.name)),
   });
+  bridge.startFromTurn(run.resume?.turn ?? 0);
   // A rebuild starts on the settlement turn: each call in flight at the death a
   // tool result carrying its note, primed as the ledger's first step's user
   // turn (`OpenCodeBridge.prime`), the same turn the imported record's completed
   // tool content projects to — so the ledger, the store and the record agree.
-  if (run.resume && run.resume.settlements.length > 0) {
+  // Never on a re-attach, whose store carries the real results.
+  if (run.resume && run.resume.settlements.length > 0 && conn.reattach === undefined) {
     bridge.prime(
       run.resume.settlements.map((s) => ({
         type: "tool_result" as const,
@@ -917,8 +1100,59 @@ export async function driveOpenCode(
     }
   };
 
+  /** The bridge's replies posted, `once` or `reject`. A reply that does not
+   *  land — the request threw, or the server answered outside 2xx — stops the
+   *  run, fail closed: the ask is still pending, so the tool has not run and
+   *  nothing is lost, where a turn waiting on an unanswered ask would hang to
+   *  its deadline. Answers the failure, or nothing when every reply landed. */
+  const postReplies = async (obs: OpenCodeBridgeObservation): Promise<OpenCodeReplyFailedError | undefined> => {
+    for (const reply of obs.replies) {
+      let failure: { status: number } | Error | undefined;
+      try {
+        const res = await request(openCodePermissionReplyRoute(conn.sessionID, reply.requestID), {
+          reply: reply.reply,
+          ...(reply.message ? { message: reply.message } : {}),
+        });
+        if (res.status < 200 || res.status >= 300) failure = { status: res.status };
+      } catch (err) {
+        failure = err instanceof Error ? err : new Error(String(err));
+      }
+      if (failure !== undefined) {
+        replyFailed = new OpenCodeReplyFailedError(reply.requestID, reply.callId, reply.reply, failure);
+        note("harness_error", `${replyFailed.message} — the run is stopped`);
+        void request(sessionRoutes["session.interrupt"]).catch(() => {});
+        return replyFailed;
+      }
+    }
+    return undefined;
+  };
+
   try {
-    await request(sessionRoutes["session.prompt"], { text: openCodePromptText(run.messages), delivery: "queue" });
+    // A re-attach continues the session the dead generation drove: the store
+    // as the server holds it aligns the mirror past the ledger's rows, and the
+    // asks pending on the server are decided through the gate as on a fresh
+    // open — a pending ask is never left hanging and never waved through —
+    // before the feed is read, since the feed may hold no record of them.
+    if (conn.reattach !== undefined) {
+      await bridge.adoptStore(conn.reattach.store, run.resume?.messages ?? [], conn.reattach.pendingAsks);
+      const pendingObs = bridge.observe({
+        feed: "permissions",
+        at: now(),
+        sessionID: conn.sessionID,
+        reason: "reattach",
+        data: conn.reattach.pendingAsks,
+      });
+      const unposted = await postReplies(pendingObs);
+      if (unposted !== undefined) throw unposted;
+    }
+    // A fresh run is prompted with its request; a resumed one — rebuilt or
+    // re-attached — with the continue, in pi's words: its transcript already
+    // holds the request, and the last user turn of a transcript may be a
+    // tool result with no text at all.
+    await request(sessionRoutes["session.prompt"], {
+      text: run.resume !== undefined ? CONTINUE_PROMPT : openCodePromptText(run.messages),
+      delivery: conn.reattach?.delivery ?? "queue",
+    });
     check();
     const iterator = transport.lines[Symbol.asyncIterator]();
     let pending: Promise<IteratorResult<string>> | undefined;
@@ -943,36 +1177,33 @@ export async function driveOpenCode(
       }
       pending = undefined;
       if (next.done) break;
+      // The byte after this record: the row's offset once a refill's steps
+      // land, and the line between the dead generation's records and this
+      // generation's on a re-attach.
+      const after = transport.consumedOffset;
+      bridge.catchingUp = conn.reattach !== undefined && after <= conn.reattach.catchUpTo;
       const record = parseFeedRecord(next.value);
       if (!record) continue;
       const obs = bridge.observe(record);
-      for (const reply of obs.replies) {
-        // A reply that does not land — the request threw, or the server
-        // answered outside 2xx — stops the run, fail closed: the ask is still
-        // pending, so the tool has not run and nothing is lost, where a turn
-        // waiting on an unanswered ask would hang to its deadline.
-        let failure: { status: number } | Error | undefined;
-        try {
-          const res = await request(openCodePermissionReplyRoute(conn.sessionID, reply.requestID), {
-            reply: reply.reply,
-            ...(reply.message ? { message: reply.message } : {}),
-          });
-          if (res.status < 200 || res.status >= 300) failure = { status: res.status };
-        } catch (err) {
-          failure = err instanceof Error ? err : new Error(String(err));
-        }
-        if (failure !== undefined) {
-          replyFailed = new OpenCodeReplyFailedError(reply.requestID, reply.callId, reply.reply, failure);
-          note("harness_error", `${replyFailed.message} — the run is stopped`);
-          void request(sessionRoutes["session.interrupt"]).catch(() => {});
-          break;
-        }
+      if (record.feed === "messages" && conn.saveOffset !== undefined) {
+        const save = conn.saveOffset;
+        void bridge.flush().then(() => save(after));
       }
-      if (replyFailed) break;
+      if ((await postReplies(obs)) !== undefined) break;
       if (obs.bypass) {
         bypass = obs.bypass;
         void request(sessionRoutes["session.interrupt"]).catch(() => {});
         break;
+      }
+      if (bridge.catchingUp) {
+        // The dead generation's execution ending, failing or hitting the budget
+        // while the bot was away is a fact of the death, not this generation's
+        // settle: said where it failed, and the run goes on to its own end.
+        if (obs.providerError !== undefined)
+          note("harness_error", `a model call failed while the bot was away (${obs.providerError}); continuing`);
+        check();
+        if (hardStopped) break;
+        continue;
       }
       if (obs.budgetStop && !writeUp) {
         const pace = turnGuardPace(turnCount(), run.agent.maxMinutes * 60_000 - (deadline - now()));

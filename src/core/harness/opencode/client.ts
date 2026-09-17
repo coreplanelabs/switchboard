@@ -303,6 +303,56 @@ export function parseHealth(body: string): OpenCodeHealth | undefined {
   return { healthy: true, version: v.version, pid: typeof v.pid === "number" ? v.pid : 0 };
 }
 
+/** One page of `GET …/message` parsed — the messages and the cursor of the
+ *  next page, when there is one — or nothing for a body of another shape. A
+ *  message is anything with a string `id` and `type`; the fields read later
+ *  are read by type where they are used. */
+export function parseMessagesPage(body: string): { data: OpenCodeMessage[]; next?: string } | undefined {
+  let value: unknown;
+  try {
+    value = JSON.parse(body);
+  } catch {
+    return undefined;
+  }
+  if (typeof value !== "object" || value === null) return undefined;
+  const v = value as { data?: unknown; cursor?: unknown };
+  if (!Array.isArray(v.data)) return undefined;
+  const data: OpenCodeMessage[] = [];
+  for (const item of v.data) {
+    if (typeof item !== "object" || item === null) return undefined;
+    const m = item as Record<string, unknown>;
+    if (typeof m.id !== "string" || typeof m.type !== "string") return undefined;
+    data.push(m as unknown as OpenCodeMessage);
+  }
+  const next =
+    typeof v.cursor === "object" && v.cursor !== null && typeof (v.cursor as { next?: unknown }).next === "string"
+      ? (v.cursor as { next: string }).next
+      : undefined;
+  return next === undefined ? { data } : { data, next };
+}
+
+/** `GET …/permission` parsed — the session's pending asks — or nothing for a
+ *  body of another shape; each ask carries a string `id` and `action`. */
+export function parsePermissionList(body: string): OpenCodePermissionRequest[] | undefined {
+  let value: unknown;
+  try {
+    value = JSON.parse(body);
+  } catch {
+    return undefined;
+  }
+  if (typeof value !== "object" || value === null) return undefined;
+  const data = (value as { data?: unknown }).data;
+  if (!Array.isArray(data)) return undefined;
+  const asks: OpenCodePermissionRequest[] = [];
+  for (const item of data) {
+    if (typeof item !== "object" || item === null) return undefined;
+    const r = item as Record<string, unknown>;
+    if (typeof r.id !== "string" || typeof r.action !== "string") return undefined;
+    asks.push(r as unknown as OpenCodePermissionRequest);
+  }
+  return asks;
+}
+
 /** The configuration entries parsed, or nothing for a body that is not the list. */
 export function parseConfigEntries(body: string): OpenCodeConfigEntry[] | undefined {
   let value: unknown;

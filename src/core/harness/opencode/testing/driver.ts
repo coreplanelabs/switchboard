@@ -19,6 +19,16 @@
 // amendment): OpenCode's gate cannot be unforgeable by construction — a forged
 // approval is caught by detection, one tool call late, not prevented.
 //
+// A row's resume may name a server a dead generation started that still answers
+// in this container (`processAliveOnResume`): the fake plays that server too, on
+// the port the row recorded — the same `ScriptedServe` in its `recorded` role,
+// seeded from the resume's transcript with the calls in flight at the death
+// still running (a pending ask for one of OpenCode's own tools, a relayed call
+// the plugin re-asks the relay for by its id), guarding every route with the
+// row's password, so the harness's re-attach is driven against what a real
+// server would hold. `FakeServeOptions.reattach` names the faults that make a
+// re-attach fall back.
+//
 // The same serve has a second door, `scriptOpenCodeServe`: bound to a bare
 // container before any run exists, for a run the RUN LOOP opens (the
 // configuration word's end-to-end tests in `src/core/dispatch/runLoop.test.ts`,
@@ -46,13 +56,20 @@ import {
   type HarnessRequest,
   type HarnessResponse,
 } from "../../container.js";
-import { authorizeToolCall, HarnessRegistry, runRelayedTool } from "../../pi/relay.js";
+import { authorizeToolCall, HarnessRegistry, relayToolCall, runRelayedTool } from "../../pi/relay.js";
 import { FakeHarnessContainer } from "../../testing/fakeContainer.js";
 import type { DrivenRun, HarnessDriver, ModelTurn, RunScript } from "../../testing/scenarios.js";
 import { openCodeToolNameWord } from "../bridge.js";
 import { OpenCodeHarness } from "../harness.js";
-import { OPENCODE_VERSION } from "../client.js";
-import { OPENCODE_AGENT, openCodeProviderPackage, openCodeRunPaths, openCodeRunPathsAt } from "../process.js";
+import { openCodeAuthHeader, OPENCODE_VERSION } from "../client.js";
+import {
+  OPENCODE_AGENT,
+  openCodePassword,
+  openCodeProviderPackage,
+  openCodeRunPaths,
+  openCodeRunPathsAt,
+} from "../process.js";
+import { openCodeCompactionMessage, openCodeStoreMessages } from "../session.js";
 
 const RUN_ID = "run-c";
 const SESSION_ID = "ses_run-c";
@@ -71,6 +88,15 @@ const PORT = 41_000;
  *  script says: the old server still up (`processAliveOnResume`), or gone. */
 const RECORDED_PORT = 41_001;
 const HARNESS_URL = "https://bot.example.com";
+/** The tailer's readiness notes, as a subscribed tailer writes them first: what every driver run's feed begins with. */
+export const TAILER_READY_NOTES: readonly unknown[] = [
+  { feed: "tailer", at: 0, note: "started" },
+  { feed: "tailer", at: 1, note: "connected", connections: 1 },
+];
+/** How many feed bytes these records take as the fake writes them (one JSON line each): what a row's `logOffset` is computed from. */
+export function feedByteLength(records: readonly unknown[]): number {
+  return records.reduce<number>((n, r) => n + Buffer.byteLength(JSON.stringify(r), "utf8") + 1, 0);
+}
 
 /** The bot's provider-key variable for a dialect, planted for the run's
  *  duration: what a harness that forwarded the bot's key would leak, derived
@@ -160,6 +186,46 @@ export interface FakeServeOptions {
   /** The word the container renames itself to when the script replaces it
    *  (`containerReplacedBeforeModelCall`); the fake's own replaced word unless given. */
   replacedWord?: string;
+  /** How the row's still-answering server (`processAliveOnResume`) departs from
+   *  one a re-attach can continue on, and what the dead generation's feed holds. */
+  reattach?: ReattachOptions;
+  /** Handed the run's container before the run opens, for a test that reads
+   *  what the row's fields do not carry — every start the container was asked
+   *  for, the tailer's among them. */
+  inspectContainer?: (container: FakeHarnessContainer) => void;
+  /** The run's bearer store, handed to the harness as `HarnessDeps.bearers`: a
+   *  test reads whether a re-attach adopted the row's hash onto it. Absent, the
+   *  harness is handed none and adopts nothing. */
+  bearers?: RunBearerStore;
+}
+
+/** The recorded server's faults and the dead generation's feed. */
+export interface ReattachOptions {
+  /** The row's tailer is gone: only the server answers, so the re-attach restarts the tailer over the same feed. */
+  tailerDead?: boolean;
+  /** The server answers 401 whatever password it is shown: the re-attach falls back. */
+  refusePassword?: boolean;
+  /** The server answers 404 for the session's routes: the re-attach falls back. */
+  refuseSession?: boolean;
+  /** The health names another version than the pin: the re-attach falls back. */
+  otherVersion?: string;
+  /** Every store page answers a next cursor: the store never ends, and the re-attach refuses rather than continue on a partial one. */
+  endlessStore?: boolean;
+  /** The feed cannot be read at the re-attach (the container's next read fails): the re-attach falls back. */
+  feedUnreadable?: boolean;
+  /** Records the dead generation's tailer wrote before the row's offset, after
+   *  the readiness notes: a test puts the row's `logOffset` past them
+   *  (`feedByteLength`) and reads that nothing of them is said again. */
+  feedBefore?: readonly unknown[];
+  /** Records the dead generation's tailer wrote after the row's offset and
+   *  after the in-flight calls' records (`seedFeed`): an exchange the ledger
+   *  already holds, read catching up. */
+  feedAfter?: readonly unknown[];
+  /** The in-flight own-tool call's ask was answered `once` while the bot was
+   *  away — by nobody the run can name — and the tool ran: the ask is not
+   *  pending at the re-attach, the store holds the call completed, and the
+   *  feed carries the ask, its echo and the success after the row's offset. */
+  answeredWhileAway?: boolean;
 }
 
 /** What the serve knows of the run it answers for, resolved once at the first
@@ -211,10 +277,28 @@ class ScriptedServe {
   private readonly steerPostFails: boolean;
   private readonly mutate: MutatedClause | undefined;
   private readonly replacedWord: string;
+  private readonly reattach: ReattachOptions;
   /** The run, resolved at the first need and kept (see `ServeRun`). */
   private resolved: (ServeRun & { offered: Set<string>; relayNames: Set<string>; toolDefs: ToolDef[] }) | undefined;
   /** The model requests the driver records — the proxy's wire, from the store the model saw. */
   readonly modelCalls: CompletionRequest[] = [];
+  /** The recorded server's calls in flight at the dead generation's death, by
+   *  call id: each a tool content still `running` in the store's last assistant
+   *  message — an own tool blocked on its pending ask, or a relayed call the
+   *  plugin re-asks the relay for once the run is registered again. */
+  private readonly inFlight = new Map<
+    string,
+    { name: string; action: string; input: Record<string, unknown>; assistantMessageID: string; relayed: boolean }
+  >();
+  /** The asks pending on the recorded server, by request id: what `GET …/permission` lists. */
+  private readonly pendingAsks = new Map<string, Record<string, unknown>>();
+  /** Every in-flight own-tool call's ask, pending or answered while the bot was away, for the feed. */
+  private readonly asksOfInFlight = new Map<string, Record<string, unknown>>();
+  /** The recorded server's execution is under way, blocked on its calls in flight:
+   *  a steer lands at the step boundary those calls settle at. */
+  private running = false;
+  private playing = false;
+  private reasked = false;
 
   constructor(
     private readonly container: FakeHarnessContainer,
@@ -222,12 +306,194 @@ class ScriptedServe {
     private readonly script: RunScript,
     private readonly deps: ServeDeps,
     options: FakeServeOptions = {},
+    /** `recorded`: the server a dead generation started, still answering on the row's port, seeded from the resume. */
+    private readonly role: "live" | "recorded" = "live",
   ) {
     this.replyFailuresLeft = options.failReplyPosts ?? 0;
     this.replyPostThrows = options.replyPostThrows === true;
     this.steerPostFails = options.steerPostFails === true;
     this.mutate = options.mutate;
     this.replacedWord = options.replacedWord ?? REPLACED_WORD;
+    this.reattach = options.reattach ?? {};
+    if (role === "recorded") this.seedFromResume();
+  }
+
+  /** The recorded server's store as the dead generation left it: the resume's
+   *  transcript as store messages (the same shape a rebuild's import writes),
+   *  each call in flight at the death a `running` tool content of the last
+   *  assistant message, and — with nothing in flight — the `idle` marker the
+   *  execution's failure left when the proxy died with the bot. The dead
+   *  generation's tailer wrote the in-flight call's start and its ask before it
+   *  died, so those records are in the feed too. */
+  private seedFromResume(): void {
+    const resume = this.script.resume;
+    if (resume === undefined) throw new Error("a recorded server needs the script's resume: the row it answers for");
+    const settled = new Map(resume.settlements.map((st) => [st.toolUse.id, st.toolUse]));
+    const store = openCodeStoreMessages(resume.messages, {
+      sessionID: this.sessionID,
+      location: { directory: "/workspace/threads/t/main" },
+      model: { providerID: "switchboard", id: this.run.model.id },
+      agent: OPENCODE_AGENT,
+      at: NOW,
+      settlements: new Map([...settled.keys()].map((id) => [id, ""])),
+    });
+    for (const message of store) {
+      if (message.type !== "assistant") continue;
+      const content = Array.isArray(message.content) ? (message.content as Record<string, unknown>[]) : [];
+      for (const part of content) {
+        if (part.type !== "tool" || !settled.has(String(part.id))) continue;
+        const toolUse = settled.get(String(part.id))!;
+        const input = (typeof toolUse.input === "object" && toolUse.input !== null ? toolUse.input : {}) as Record<
+          string,
+          unknown
+        >;
+        const ask = toolAsk(toolUse.name, input);
+        part.name = ask.name;
+        part.state = { status: "running", input };
+        this.inFlight.set(toolUse.id, {
+          name: ask.name,
+          action: ask.action,
+          input,
+          assistantMessageID: String(message.id),
+          relayed: this.relayNames.has(toolUse.name),
+        });
+      }
+    }
+    this.store.push(...store);
+    // The ledger's compaction rows as the store holds them: compaction messages
+    // after the transcript, as a rebuild's import writes them.
+    (resume.compactions ?? []).forEach((c, i) =>
+      this.store.push(openCodeCompactionMessage(`msg_${this.sessionID}_c${i}`, c.entry, NOW)),
+    );
+    if (this.inFlight.size === 0) {
+      this.store.push({ id: "msg_idle_death", type: "idle", outcome: "failed", time: { created: NOW } });
+      return;
+    }
+    this.running = true;
+    for (const [callId, call] of this.inFlight) {
+      if (call.relayed) continue;
+      const requestID = `per_${callId}`;
+      this.asksOfInFlight.set(requestID, {
+        id: requestID,
+        sessionID: this.sessionID,
+        action: call.action,
+        resources: toolAsk(openCodeToolNameWord(call.name), call.input).resources,
+        source: { type: "tool", messageID: call.assistantMessageID, id: callId },
+      });
+      if (!this.reattach.answeredWhileAway) this.pendingAsks.set(requestID, this.asksOfInFlight.get(requestID)!);
+    }
+  }
+
+  /** What the dead generation's tailer wrote of the calls in flight before it
+   *  died — each call's start, and the ask of one blocked on the gate — appended
+   *  to the feed after whatever the fault says came before the row's offset.
+   *  With `answeredWhileAway`, the ask was answered and the tool ran while the
+   *  bot was away: the echo and the success follow the ask, and the store
+   *  holds the call completed. */
+  seedFeed(): void {
+    for (const [callId, call] of this.inFlight) {
+      this.emitEvent("session.tool.input.started", {
+        sessionID: this.sessionID,
+        assistantMessageID: call.assistantMessageID,
+        id: callId,
+        name: call.name,
+      });
+      this.emitEvent("session.tool.called", {
+        sessionID: this.sessionID,
+        assistantMessageID: call.assistantMessageID,
+        id: callId,
+        input: call.input,
+        executed: false,
+      });
+      const request = this.asksOfInFlight.get(`per_${callId}`);
+      if (request !== undefined) this.emitEvent("permission.asked", request);
+    }
+    if (this.pendingAsks.size > 0) this.emitPermissions([...this.pendingAsks.values()]);
+    if (this.reattach.answeredWhileAway)
+      for (const [callId, call] of [...this.inFlight]) {
+        if (call.relayed) continue;
+        this.emitEvent("permission.replied", { sessionID: this.sessionID, requestID: `per_${callId}`, reply: "once" });
+        this.settleInFlight(callId, {
+          content: [{ type: "text", text: ownToolResultText(openCodeToolNameWord(call.name), call.input) }],
+        });
+      }
+  }
+
+  /** The plugin, still waiting on the bot for a relayed call when the bot died,
+   *  asks the relay again by the same call id once the run is registered: the
+   *  record's settlement answers it and the tool never runs; the call settles
+   *  on that note, as the real plugin settles it on the relay's error answer. */
+  private reaskRelayed(): void {
+    if (this.reasked) return;
+    this.reasked = true;
+    for (const [callId, call] of this.inFlight) {
+      if (!call.relayed) continue;
+      void (async () => {
+        const live = this.deps.registry.get(this.run.runId);
+        const calls = this.deps.registry.calls(this.run.runId);
+        if (!live || !calls) return;
+        const ask = { toolCallId: callId, tool: call.name, input: call.input };
+        // The plugin's window, asked again after each `pending` as the real one asks.
+        let progress = await relayToolCall(live, calls, ask, { windowMs: 50 });
+        while (!progress.done) progress = await relayToolCall(live, calls, ask, { windowMs: 50 });
+        const text = progress.answer.content.map((c) => (c.type === "text" ? c.text : `[${c.type}]`)).join("\n");
+        this.settleInFlight(callId, progress.answer.isError ? { error: text } : { content: [{ type: "text", text }] });
+      })();
+    }
+  }
+
+  /** One call in flight at the death settles on the recorded server: the store's
+   *  tool content completes or errors, the event lands, the store refills, and
+   *  with no call left in flight the execution reaches its step boundary. */
+  private settleInFlight(
+    callId: string,
+    outcome: { content: Array<{ type: string; text: string }> } | { error: string },
+  ): void {
+    const call = this.inFlight.get(callId);
+    if (call === undefined) return;
+    this.inFlight.delete(callId);
+    for (const message of this.store) {
+      if (message.id !== call.assistantMessageID) continue;
+      const content = Array.isArray(message.content) ? (message.content as Record<string, unknown>[]) : [];
+      for (const part of content) {
+        if (part.type !== "tool" || part.id !== callId) continue;
+        part.state =
+          "content" in outcome
+            ? { status: "completed", input: call.input, content: outcome.content }
+            : {
+                status: "error",
+                input: call.input,
+                error: { type: "permission.rejected", message: outcome.error },
+                content: [{ type: "text", text: outcome.error }],
+              };
+      }
+    }
+    if ("content" in outcome)
+      this.emitEvent("session.tool.success", {
+        sessionID: this.sessionID,
+        assistantMessageID: call.assistantMessageID,
+        id: callId,
+        content: outcome.content,
+        executed: true,
+      });
+    else
+      this.emitEvent("session.tool.failed", {
+        sessionID: this.sessionID,
+        assistantMessageID: call.assistantMessageID,
+        id: callId,
+        executed: false,
+        error: { type: "permission.rejected", message: outcome.error },
+        content: [{ type: "text", text: outcome.error }],
+      });
+    this.emitMessages();
+    this.stepBoundary();
+  }
+
+  /** The recorded server's execution reaches a step boundary once nothing is in
+   *  flight: a steer waiting there — the re-attach's continue — is the next user
+   *  turn, and the play goes on from it. */
+  private stepBoundary(): void {
+    if (this.running && this.inFlight.size === 0 && this.pendingSteers.length > 0 && !this.playing) void this.play();
   }
 
   /** The run this serve answers for, with the tool tables derived from it once. */
@@ -301,19 +567,31 @@ class ScriptedServe {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(obj),
     });
-    // A request to the port a previous generation's row recorded, not this
-    // generation's launch: the row's server is still up there only when the
-    // script says so; otherwise nothing listens and the connection is refused,
-    // as the container answers for a port with no server.
-    if (req.port !== this.container.freePort) {
-      if (this.script.processAliveOnResume) return j(200, { healthy: true, version: OPENCODE_VERSION, pid: 77 });
-      throw new HarnessContainerError(
-        "request",
-        `curl: (7) Failed to connect to 127.0.0.1 port ${req.port}: Connection refused`,
-      );
+    if (this.role === "recorded") {
+      // The dead generation's server guards every route with the password its
+      // launch derived from the bearer: a probe without it is answered 401 (up,
+      // as `find` reads it), a re-attach with it is let in — unless the fault says
+      // the password is refused whatever is shown.
+      const expected = openCodeAuthHeader(openCodePassword(BEARER));
+      if (this.reattach.refusePassword || req.secretHeaders?.Authorization !== expected)
+        return { status: 401, headers: { "www-authenticate": 'Basic realm="Secure Area"' }, body: "" };
+      // The run is registered again by the time the harness probes: the plugin's re-ask reaches the relay.
+      this.reaskRelayed();
+      if (req.method === "GET" && req.path === "/api/health")
+        return j(200, { healthy: true, version: this.reattach.otherVersion ?? OPENCODE_VERSION, pid: 77 });
+      if (this.reattach.refuseSession && req.path.startsWith(`/api/session/${this.sessionID}/`))
+        return j(404, { error: "no such session" });
     }
     if (req.method === "GET" && req.path === "/api/health")
       return j(200, { healthy: true, version: OPENCODE_VERSION, pid: 77 });
+    // The store and the pending asks as the server holds them: what a re-attach reads back.
+    if (req.method === "GET" && req.path.split("?")[0] === `/api/session/${this.sessionID}/message`)
+      return j(200, {
+        data: [...this.store],
+        cursor: this.role === "recorded" && this.reattach.endlessStore ? { next: "more" } : {},
+      });
+    if (req.method === "GET" && req.path === `/api/session/${this.sessionID}/permission`)
+      return j(200, { data: [...this.pendingAsks.values()] });
     if (req.method === "GET" && req.path === "/api/config") {
       // The document the launch actually wrote, so readiness holds the run's own config.
       const written = this.container.files.get(this.configPath());
@@ -341,6 +619,9 @@ class ScriptedServe {
         // record it as undelivered and hand it back to the inbox, never as read.
         if (this.steerPostFails) return j(500, { error: "the store hiccuped" });
         this.pendingSteers.push(text);
+        // A steer into the recorded server's execution lands at its next step
+        // boundary: at once when nothing is in flight, else when the calls settle.
+        this.stepBoundary();
       } else {
         // A rebuild's prompt is the continue that triggers the session; the
         // imported record already holds the conversation and the settlement, so
@@ -359,14 +640,33 @@ class ScriptedServe {
         this.replyFailuresLeft--;
         return j(500, { error: "the store hiccuped" });
       }
+      const body = parseBody(req.body);
+      const decision: Decision = {
+        reply: body.reply === "reject" ? "reject" : "once",
+        ...(typeof body.message === "string" ? { message: body.message } : {}),
+      };
+      // An ask pending since the death, decided now: the tool runs or fails on
+      // the recorded server as it would have under the dead generation's reply.
+      const pending = this.pendingAsks.get(reply[1]);
+      if (pending !== undefined) {
+        this.pendingAsks.delete(reply[1]);
+        const callId = String((pending.source as { id?: string } | undefined)?.id ?? reply[1]);
+        const call = this.inFlight.get(callId);
+        this.emitPermissions([...this.pendingAsks.values()]);
+        this.emitEvent("permission.replied", { sessionID: this.sessionID, requestID: reply[1], reply: decision.reply });
+        if (call !== undefined)
+          this.settleInFlight(
+            callId,
+            decision.reply === "once"
+              ? { content: [{ type: "text", text: ownToolResultText(openCodeToolNameWord(call.name), call.input) }] }
+              : { error: decision.message ?? "The user rejected permission to use this specific tool call." },
+          );
+        return { status: 204, headers: {}, body: "" };
+      }
       const resolve = this.replies.get(reply[1]);
       if (resolve) {
         this.replies.delete(reply[1]);
-        const body = parseBody(req.body);
-        resolve({
-          reply: body.reply === "reject" ? "reject" : "once",
-          ...(typeof body.message === "string" ? { message: body.message } : {}),
-        });
+        resolve(decision);
       }
       return { status: 204, headers: {}, body: "" };
     }
@@ -404,6 +704,7 @@ class ScriptedServe {
   }
 
   private async play(): Promise<void> {
+    this.playing = true;
     if (this.script.unknownEventKind) this.emitEvent(this.script.unknownEventKind, { sessionID: this.sessionID });
     for (let t = 0; t < this.script.turns.length && !this.interrupted; t++) {
       // A hard stop before this model call (`hardStopBeforeModelCall`): request
@@ -708,6 +1009,46 @@ function parseBody(body: string | undefined): Record<string, unknown> {
   }
 }
 
+/** The container's loopback as the harness sees it: this generation's launch
+ *  answers on the free port; the port a row recorded for a dead generation's
+ *  server answers as that server only when the script says it is still up
+ *  (`processAliveOnResume`) — the same scripted serve in its `recorded` role —
+ *  and refuses the connection otherwise, as the container answers for a port
+ *  nothing listens on. The recorded server's feed is the dead generation's: the
+ *  readiness notes, then whatever the fault names as written before the row's
+ *  offset, then the in-flight call's records the recorded server seeds. */
+function bindServes(
+  container: FakeHarnessContainer,
+  script: RunScript,
+  live: ScriptedServe,
+  recorded: ScriptedServe | undefined,
+  options: FakeServeOptions,
+): void {
+  container.onRequest = (req) => {
+    if (req.port === container.freePort) return live.onRequest(req);
+    if (recorded !== undefined) return recorded.onRequest(req);
+    throw new HarnessContainerError(
+      "request",
+      `curl: (7) Failed to connect to 127.0.0.1 port ${req.port}: Connection refused`,
+    );
+  };
+  container.emit(...TAILER_READY_NOTES);
+  for (const record of options.reattach?.feedBefore ?? []) container.emit(record);
+  if (script.processAliveOnResume && script.resume?.facts !== undefined) {
+    const facts = script.resume.facts;
+    container.alivePids.add(facts.pid);
+    if (facts.harness === "opencode" && facts.tailerPid !== undefined && !options.reattach?.tailerDead)
+      container.alivePids.add(facts.tailerPid);
+  }
+  recorded?.seedFeed();
+  for (const record of options.reattach?.feedAfter ?? []) container.emit(record);
+  if (options.reattach?.feedUnreadable)
+    container.failNext = {
+      operation: "read",
+      error: new HarnessContainerError("read", "tail: cannot open 'feed.jsonl' for reading: No such file or directory"),
+    };
+}
+
 /** Plants the sentinel under the bot's provider-key variables for the run's
  *  dialect, so a harness that forwarded one would leak it into the child's env. */
 function plantProviderKeys(providerType: ProviderConfig["type"]): () => void {
@@ -809,6 +1150,7 @@ async function runOpenCode(script: RunScript, options: FakeServeOptions = {}): P
     bearer: BEARER,
     harnessUrl: HARNESS_URL,
     registry,
+    ...(options.bearers ? { bearers: options.bearers } : {}),
     clock: () => NOW,
     sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 2))),
     pollMs: 1,
@@ -817,26 +1159,23 @@ async function runOpenCode(script: RunScript, options: FakeServeOptions = {}): P
   };
 
   const harness = new OpenCodeHarness();
-  const serve = new ScriptedServe(
-    container,
-    () => ({
-      runId: run.runId,
-      root: openCodeRunPaths(run.runId).dir,
-      identity: run.agent.identity,
-      tools: run.tools,
-      model: run.model,
-      system: run.system,
-      maxTokens: run.agent.maxTokens,
-      control: run.control,
-    }),
-    script,
-    { registry, sleep: deps.sleep, ...(deps.tickMs !== undefined ? { tickMs: deps.tickMs } : {}) },
-    options,
-  );
-  container.onRequest = (req) => serve.onRequest(req);
-  // The tailer's readiness note, as a subscribed tailer would have written it.
-  container.emit({ feed: "tailer", at: 0, note: "started" });
-  container.emit({ feed: "tailer", at: 1, note: "connected", connections: 1 });
+  const source = () => ({
+    runId: run.runId,
+    root: openCodeRunPaths(run.runId).dir,
+    identity: run.agent.identity,
+    tools: run.tools,
+    model: run.model,
+    system: run.system,
+    maxTokens: run.agent.maxTokens,
+    control: run.control,
+  });
+  const serveDeps = { registry, sleep: deps.sleep, ...(deps.tickMs !== undefined ? { tickMs: deps.tickMs } : {}) };
+  const serve = new ScriptedServe(container, source, script, serveDeps, options);
+  const recorded = script.processAliveOnResume
+    ? new ScriptedServe(container, source, script, serveDeps, options, "recorded")
+    : undefined;
+  bindServes(container, script, serve, recorded, options);
+  options.inspectContainer?.(container);
 
   const restore = plantProviderKeys(run.model.providerType);
   let outcome: DrivenRun["outcome"];
@@ -861,7 +1200,8 @@ async function runOpenCode(script: RunScript, options: FakeServeOptions = {}): P
     killed: container.killed,
     removed: container.removed,
     requests: container.requests,
-    modelCalls: serve.modelCalls,
+    // The model's calls in the order they happened: the recorded server's (the session continued) before this generation's launch's.
+    modelCalls: [...(recorded?.modelCalls ?? []), ...serve.modelCalls],
     statusReports,
   };
 }
@@ -932,9 +1272,6 @@ export function scriptOpenCodeServe(
     },
     opts.options,
   );
-  container.onRequest = (req) => serve.onRequest(req);
-  // The tailer's readiness note, as a subscribed tailer would have written it.
-  container.emit({ feed: "tailer", at: 0, note: "started" });
-  container.emit({ feed: "tailer", at: 1, note: "connected", connections: 1 });
+  bindServes(container, opts.script, serve, undefined, opts.options ?? {});
   return serve;
 }

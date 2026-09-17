@@ -33,6 +33,7 @@ import {
   type PiHarnessFacts,
 } from "../contract.js";
 import {
+  CONTINUE_PROMPT,
   HARD_STOP_MESSAGE,
   SOFT_STOP_INSTRUCTION,
   hardStopNote,
@@ -102,8 +103,6 @@ const FINALE_TIMEOUT_MS = 3 * 60_000;
  *  ticks of the harness's own sleep so a fixed clock cannot stall it. */
 const CALL_SEEN_WAIT_MS = 3_000;
 const CALL_SEEN_TICK_MS = 50;
-const CONTINUE_PROMPT =
-  "Continue where you left off: the bot restarted mid-run, so re-check the effects of your last command before relying on them.";
 /** The prompt that re-drives pi after a transient provider failure: the failed
  *  call produced nothing, so the model simply picks up where it stood. */
 const PROVIDER_RETRY_PROMPT =
