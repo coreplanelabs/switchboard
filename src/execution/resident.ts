@@ -802,8 +802,15 @@ export class ResidentExecutor implements Executor {
     // echo (harness-pi item 16), never the replaced verdict. NOT a
     // replacement, so `swapIncarnation`/relaunch never fire off it. The
     // idempotent routes below re-attach once and re-issue, a re-read being safe.
+    // The one rule for a control reset's re-issue: a route outside
+    // `CONTROL_RESET_REISSUE_ROUTES` — `/exec`, whose command may have started
+    // and must never run again blindly — is the typed unknown outcome at once;
+    // a route inside it re-attaches once and re-issues below. Stated here alone,
+    // so a route added to the call sites is judged by the set, not by the order
+    // of the checks that follow.
     const controlResetUnderThread = (data: Record<string, unknown>): void => {
-      if (route === "/exec" && saysControlReset(data)) throw new ExecControlResetError(String(data.error).trim());
+      if (!CONTROL_RESET_REISSUE_ROUTES.has(route) && saysControlReset(data))
+        throw new ExecControlResetError(String(data.error).trim());
     };
     let r = await this.call(route, body, callTimeoutMs, signal, span);
     if (isContainerRolling(r.data.error)) {
@@ -830,12 +837,10 @@ export class ResidentExecutor implements Executor {
       if (r.data.needs === "attach") throw stillGone(r.data);
     }
     if (saysControlReset(r.data)) {
-      // The DO is fresh after its reset, so re-attach once and re-issue — but
-      // only a route whose second landing is harmless (`/read`, idempotent by
-      // shape; `/write`, a full-content put): `CONTROL_RESET_REISSUE_ROUTES`
-      // names them. Any other route's outcome is unknown and is never re-run
-      // blindly, never infra. Still reset after the re-issue → the unknown outcome.
-      if (!CONTROL_RESET_REISSUE_ROUTES.has(route)) throw new ExecControlResetError(String(r.data.error).trim());
+      // A route the set names (`controlResetUnderThread` threw for any other):
+      // the DO is fresh after its reset, so re-attach once and re-issue — a
+      // second landing is harmless here (`/read`, idempotent by shape; `/write`,
+      // a full-content put). Still reset after the re-issue → the unknown outcome.
       await this.attach(span); // the recovery rides the same trace as the op it rescues
       r = await this.call(route, body, callTimeoutMs, signal, span);
       if (saysControlReset(r.data)) throw new ExecControlResetError(String(r.data.error).trim());
