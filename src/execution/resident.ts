@@ -23,6 +23,7 @@ import type { ResidentStep } from "./residentStepTrace.js";
 import { sanitizeGraftedSteps, withResidentTrace } from "./residentTrace.js";
 import { repoResourceId } from "../core/residentAdmin.js";
 import { EXEC_CALL_MARGIN_MS, clampBashTimeout } from "./bashTimeout.js";
+import { DISK_PRESSURE_REASON } from "./residentDiskBudget.js";
 import {
   BASH_TIMEOUT_MS,
   ExecControlResetError,
@@ -117,12 +118,10 @@ export function residentAnswerReason(status: number, data: Record<string, unknow
     // `stateReason` — never `reason`, which is the answer's OWN word
     // (`mirror-busy`, `disk-pressure`, `image-stale`, `not-serviceable`'s
     // detail) and would read a busy mirror on a degraded-but-serviceable
-    // resident as a repo failure. A Worker predating `stateReason` gives the
-    // state alone, read as a state with no reason.
-    if (typeof data.state === "string") {
-      const stateReason = typeof data.stateReason === "string" ? data.stateReason : "";
-      return isWakeable(data.state, stateReason) ? "worker-unavailable" : "refused";
-    }
+    // resident as a repo failure (`lifecycleReasonOf` holds the one reading,
+    // and the fallback for a Worker predating the field).
+    if (typeof data.state === "string")
+      return isWakeable(data.state, lifecycleReasonOf(data)) ? "worker-unavailable" : "refused";
     // The fetch handler's catch-all 500 says whether the throw it wrapped was
     // the platform's own transient (a Durable Object reset by a deploy, a lost
     // connection, a storage operation that did not complete): a re-probe
@@ -133,6 +132,34 @@ export function residentAnswerReason(status: number, data: Record<string, unknow
   }
   if (typeof data.error === "string" && data.error) return "answered";
   return infraReasonOfStatus(status);
+}
+
+/** The words a resident answer uses for ITSELF in `reason` — never a lifecycle
+ *  reason: the mirror held (`mirror-busy`), the disk full (`disk-pressure`),
+ *  the container restarting (`image-stale`), the resource unregistered, the
+ *  runtime replaced or the DO reset under the command. */
+const ANSWER_OWN_WORDS: ReadonlySet<string> = new Set([
+  "mirror-busy",
+  DISK_PRESSURE_REASON,
+  "image-stale",
+  "unregistered",
+  "runtime-replaced",
+  "control-reset",
+]);
+
+/** The lifecycle reason on a resident answer: `stateReason` where the Worker
+ *  names it (every 503 that carries `state`); on a Worker that predates the
+ *  field, the `reason` its not-serviceable answers carried the lifecycle
+ *  reason in — unless it is one of the answer's own words, which
+ *  say nothing about the lifecycle. So a bot deployed ahead of its resident
+ *  still waits through a `degraded (github-unreachable)` resident's
+ *  not-serviceable 503 instead of refusing every degraded answer for the skew
+ *  window; only the old Worker's mirror-busy on a degraded resident stays
+ *  unreadable (no lifecycle reason on it at all). */
+function lifecycleReasonOf(data: Record<string, unknown>): string {
+  if (typeof data.stateReason === "string") return data.stateReason;
+  if (typeof data.reason === "string" && !ANSWER_OWN_WORDS.has(data.reason)) return data.reason;
+  return "";
 }
 
 /** What the wake path's strike says to the harness's one more command, from
@@ -1041,12 +1068,15 @@ export class ResidentExecutor implements Executor {
     if (typeof data.error === "string" && data.error) {
       // post-validation failure (exitCode 127 shape) — legible, never retried.
       // Infra (the exec transport failed), not a command exit: counts toward
-      // fail-fast. Typed by the status first, the words after
-      // (`residentAnswerReason`): a 5xx is the resident unavailable for a
-      // moment unless it names a refusal; the resident's words on any other
-      // status — the SDK's text forwarded, a named refusal — mean what they
-      // say, and the harness's seam reads the container-down ones.
-      throw classifyError(new ExecInfraError(`resident /exec: ${data.error}`, residentAnswerReason(status, data)), {
+      // fail-fast. Typed by the fields the resident put on the answer
+      // (`residentAnswerReason`): /exec streams its refusals over HTTP 200 with
+      // the answer's own status IN the body (as /attach does), so a streamed
+      // 503 is read as the 503 it is — the resident unavailable for a moment
+      // unless it names a refusal; the resident's words on any other status —
+      // the SDK's text forwarded, a named refusal — mean what they say, and the
+      // harness's seam reads the container-down ones.
+      const said = typeof data.status === "number" ? data.status : status;
+      throw classifyError(new ExecInfraError(`resident /exec: ${data.error}`, residentAnswerReason(said, data)), {
         kind: "infra",
       });
     }

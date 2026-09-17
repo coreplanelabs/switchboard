@@ -48,4 +48,17 @@ describe("the resident's not-serviceable answers name what the client cannot wai
     expect(source).not.toMatch(/\(err\) => \(\{ error: errMsg\(err\), status: 500 \}\)/);
     expect(source).not.toMatch(/json\(\{ error: errMsg\(err\) \}, 500\)/);
   });
+
+  it("the /exec stream forwards the lifecycle pair, the answer's own status and the catch-all's `transient` beside `state` and `reason`, so a refusal streamed over HTTP 200 is typed by the client like the JSON routes' 503 and never read as a deterministic answer", () => {
+    const stream = source.slice(source.indexOf("function streamThreadExec("));
+    const mapping = stream.slice(0, stream.indexOf("exitCode: 127"));
+    for (const forwarded of [
+      "state: result.state",
+      "stateReason: result.stateReason",
+      "reason: result.reason",
+      "status: result.status",
+      "transient: result.transient",
+    ])
+      expect(mapping, forwarded).toContain(forwarded);
+  });
 });

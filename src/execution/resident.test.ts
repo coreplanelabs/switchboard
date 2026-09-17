@@ -1414,6 +1414,42 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     expect(calls.map(route)).toEqual(["/exec", "/status", "/status", "/attach"]);
   });
 
+  it("a refusal streamed by /exec over HTTP 200 is typed by the status and the lifecycle pair IN the document, as the Worker's stream writes them: a busy mirror on a degraded-but-serviceable resident is the resident unavailable, never a deterministic answer; a definite state refuses", async () => {
+    const streamed = (state: string, stateReason: string) => ({
+      body: {
+        error: "mirror-busy: mutex not acquired within 30000ms",
+        state,
+        stateReason,
+        reason: "mirror-busy",
+        status: 503,
+        stdout: "",
+        stderr: "mirror-busy: mutex not acquired within 30000ms",
+        exitCode: 127,
+      },
+    });
+    stubFetch(streamed("degraded", "github-unreachable: fetch failed"));
+    const busy = await new ResidentExecutor(OPTS).exec("true").catch((e: unknown) => e);
+    expect(busy).toBeInstanceOf(ExecInfraError);
+    expect((busy as Error).message).toBe("resident /exec: mirror-busy: mutex not acquired within 30000ms");
+    expect((busy as ExecInfraError).reason).toBe("worker-unavailable");
+    stubFetch(streamed("down", "no-snapshot: nothing to rehydrate from"));
+    const down = await new ResidentExecutor(OPTS).exec("true").catch((e: unknown) => e);
+    expect((down as ExecInfraError).reason).toBe("refused");
+    // A Worker predating the fields streams neither status nor stateReason: the document is read as it always was, an answer.
+    stubFetch({
+      body: {
+        error: "not-serviceable: degraded",
+        state: "degraded",
+        reason: "x",
+        stdout: "",
+        stderr: "",
+        exitCode: 127,
+      },
+    });
+    const old = await new ResidentExecutor(OPTS).exec("true").catch((e: unknown) => e);
+    expect((old as ExecInfraError).reason).toBe("answered");
+  });
+
   it("a refusal that does not name a rolling container keeps the old rule: one strike, no probe", async () => {
     const { calls } = stubFetch({
       body: { ...JUST_EXITED, error: "not-serviceable: registry record or repo facts missing" },

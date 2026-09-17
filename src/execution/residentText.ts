@@ -38,7 +38,12 @@ export function residentErrorText(text: string): string {
   return redactAndCap(stripAnsi(text), RESIDENT_ERROR_CAP);
 }
 
-const SANITIZED_FIELDS = ["error", "reason", "summary"] as const;
+/** The free-text fields a resident body carries: `error` (the reply), `reason`
+ *  (the answer's own word or a lifecycle reason), `stateReason` (the lifecycle
+ *  reason beside `state` on a thread route's 503 — the same remote text
+ *  `reason` used to carry there, item 62), `summary`. A field added to a
+ *  resident answer that carries remote output is added HERE first. */
+const SANITIZED_FIELDS = ["error", "reason", "stateReason", "summary"] as const;
 
 /** How deep the sanitizer descends. The deepest resident shape today is
  *  `/residents` → `residents[]` → `live` → `reason` (depth 3); the bound exists
@@ -48,8 +53,8 @@ const SANITIZE_DEPTH = 4;
 /** A parsed resident body with its free-text fields made safe, at every level:
  *  `/residents` nests each resident's `state`/`reason` (or an `error`) under
  *  `residents[].live`, and `repo list` renders those. In each plain object only
- *  `error`, `reason` and `summary` are touched (when strings) — `error` at the
- *  reply-sized cap, the other two at the card-sized one; `stderr` is
+ *  `error`, `reason`, `stateReason` and `summary` are touched (when strings) —
+ *  `error` at the reply-sized cap, the others at the card-sized one; `stderr` is
  *  rewritten only when it mirrors `error` (the thread routes' failure shape
  *  copies the error into stderr). Every other field — `needs`, `state`,
  *  `stdout`, `status`, bindings, numbers — passes through untouched. Arrays are
