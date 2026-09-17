@@ -55,7 +55,7 @@ import { attachmentSuffix, composeRunLabel, humanizeMessageText, isMrkdwnChannel
 import { contextMessageTexts, type TextTurn } from "./messages.js";
 import { ROUTED_CARD_FOOTER, routedLabel, routedPartLines, type RouteDecided } from "./route.js";
 import type { HarnessProcessDeps } from "./run.js";
-import { harnessForPreset } from "../harness/roster.js";
+import { harnessNamed } from "../harness/roster.js";
 import type { ReferencedConversation } from "../references/types.js";
 
 /** What the provision stage reads off the dispatcher's dependencies. A run's
@@ -67,8 +67,8 @@ export interface ProvisionDeps
   extends RecordDeps, Pick<AdmissionDeps, "runLedger">, Pick<AuthorizeDeps, "capabilities"> {
   config: ConfigStore;
   /** The harnesses the process drives runs with (docs/reference/specs/harness.md
-   *  items 8 and 10), for the name `run_meta` carries — the one the preset's
-   *  configuration word picks; absent in a process that starts no run (a test
+   *  items 8 and 10), for the name `run_meta` carries — the one the scopes'
+   *  word for the preset picks; absent in a process that starts no run (a test
    *  of the stages before the loop), and the meta names none. */
   harness?: HarnessProcessDeps;
   /** where runtime state (sandboxes.json) lives; default ./data */
@@ -506,12 +506,18 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
       model: resolved.modelRef,
       traceId: root.traceId,
       // The harness the run is driven by (harness.md items 8 and 10): the
-      // object the preset's configuration word picks off the roster, by its
-      // own name, so a record can be told from another harness's; none in a
-      // process that starts no run. A resumed run publishes no meta (above),
-      // and its harness is its row's, not the word's.
+      // object the scopes' word for the preset picks off the roster — the
+      // requester's own scope, the channel's or the deployment's block, pi
+      // when none names it — by its own name, and the scope whose word it
+      // was, so a record can be told from another harness's and a reader
+      // never guesses whose override put a run there; none in a process that
+      // starts no run. A resumed run publishes no meta (above), and its
+      // harness is its row's, not the word's.
       ...(deps.harness
-        ? { harness: harnessForPreset(deps.harness.harnesses, deps.config.config.harness, agent.name).name }
+        ? {
+            harness: harnessNamed(deps.harness.harnesses, resolved.harness?.name).name,
+            ...(resolved.harness ? { harnessScope: resolved.harness.scope } : {}),
+          }
         : {}),
       ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
       ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
@@ -997,6 +1003,9 @@ export async function composePrompt(deps: ProvisionDeps, ctx: PromptContext): Pr
     // The boundary in force and the budget this run actually has — the same
     // values the gate judged, so "how long do you have?" is answered from fact.
     ...(resolved.boundary ? { boundary: resolved.boundary } : {}),
+    // The harness and whose word picked it — the same word the loop opens the
+    // run on, so "why am I on OpenCode?" is answered from the scope.
+    ...(resolved.harness ? { harness: resolved.harness } : {}),
     budget: {
       minutes: profile.minutes,
       presetMinutes: agent.maxMinutes,

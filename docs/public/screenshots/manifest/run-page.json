@@ -7,7 +7,7 @@
   "now": 1788877800000,
   "inputs": {
     "scripts/screenshots.mts": "8d507868382af4fdd9ebbad5a93fbd47db331dd9d303aad0c6f1fc651f153b2f",
-    "scripts/web-preview.ts": "669be68c9917aff5e0fe4a301a839a2ae5cdf75b9d4a00efb98b0641b52079f4",
+    "scripts/web-preview.ts": "b038824db5beeab766990d0fe10c6325429cf3cb8e7ab05b844e2086ca20fe77",
     "src/channels/webShell.ts": "5eab7aae4b16bad384c4863ddb8b3d644470cba2421e56d7649bd2fd95b26d92",
     "src/docs/screenshotManifest.ts": "12ae2476806a42b394da7d8698464df43afd94270b13ebd521c9f022e998c06c",
     "web/src/App.vue": "e95e58c24d31cd6de4b5d701b4c44ce9752c5278b7d6afd9c9e7028104ae2122",
@@ -48,7 +48,7 @@
     "web/src/lib/navSections.ts": "dd842db8c9b0fc1d7cc592f145803622047d03131d876e7681710c28f4f348db",
     "web/src/lib/prReviewCollector.ts": "28037e215c9f05e95889ca10be6ccb58e5845aa35ab9cde1989fb21b1471412e",
     "web/src/lib/reviewAbridge.ts": "4c14627f7f3e0eac38b0395e716ccb7c1393ccd7f36a457906e45a2972c2fd70",
-    "web/src/lib/runPageModel.ts": "4b5ceb9a433c82d46521a601612d1b020c94878892056ffe2711958c9cf4f32c",
+    "web/src/lib/runPageModel.ts": "f450b4b690ac0ec812355a55ae2dd94144a3490f6d514025860b5fe77a0e7851",
     "web/src/lib/runStream.ts": "3ee9f3758a47682f846ba8b9f11462df4898cd3b2e4dc0e4d8ea08227a312369",
     "web/src/lib/seed.ts": "b2fff894798801b6e062ec734b510b717ba879495fdc6fa1ebb69418c74cb75e",
     "web/src/lib/sseReplay.ts": "d769aca1ef4a0b383daaed1ad8882b408a38d03950a5c8c4a60b1832c928afe5",
@@ -66,7 +66,7 @@
     "web/src/modules/pr-review/files.ts": "4d20c305e836df6ecb55ac4434b9ef944b5dcee1003d9df90820d5c0ac900b4f",
     "web/src/modules/pr-review/types.ts": "c2f796770a1005788bd8274489026d93ff658326bbb8352f084c699c04c68e96",
     "web/src/pages/NotFoundPage.vue": "00e0cc2cdb3a07a1a5f90b5cdbde67327924ace2f6e7cd4780f3916ea2afc6d9",
-    "web/src/pages/RunPage.vue": "d9102ade97eb467ac7d2d8a38d48a22e9aed91ec61bff6a0066a35edb77f9a27",
+    "web/src/pages/RunPage.vue": "119d0341ad01c6f022ef9cfc0497d860fb9d21b3309f085c312db8f0d423a5c6",
     "web/src/pages/RunRoutePage.vue": "dea45fee32921a6b9c88b480214b81eeffe10755060569826128541febe0c745",
     "web/src/routes.ts": "e30b01a01fef6eb8f3be948de3e9b925565c4570d01713a203aaaf6f40ab826d",
     "web/vite.config.ts": "9383938ec67bd57d645a9361990b0cab36d6a1d33eab5c4431180abd886692d0"

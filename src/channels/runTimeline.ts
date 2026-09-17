@@ -22,6 +22,7 @@
 // dashboard bundle imports it as an ordinary module.
 
 import { formatDuration } from "../core/time/formatDuration.js";
+import { isHarnessScope, type HarnessScope } from "../core/harness/scope.js";
 
 export interface TimelineResult {
   ok: boolean;
@@ -84,12 +85,15 @@ export type TimelineChange =
    *  ("12.3k in", "800 out", "11.2k cached") when the event carries usage;
    *  `spanId` the turn's own span, so the page can address the step it heads. */
   | { kind: "turn"; spanId: string; label: string; facts: string[]; durationMs: number; model?: string; at?: number }
-  /** What the run is about (item 19): agent, model and the resolved repo context, for the Request head. */
+  /** What the run is about (item 19): agent, model, the harness and whose word
+   *  put the run on it (harness.md item 10), and the resolved repo context, for the Request head. */
   | {
       kind: "meta";
       agent: string;
       model: string;
       effort?: string;
+      harness?: string;
+      harnessScope?: HarnessScope;
       repo?: string;
       ref?: string;
       pr?: number;
@@ -359,6 +363,8 @@ export function createRunTimeline(): RunTimeline {
         // A command run's meta names no model (docs/reference/specs/tracing.md).
         const meta: TimelineChange = { kind: "meta", agent: str(e.agent), model: str(e.model), at: num(e.at) };
         if (str(e.effort)) meta.effort = str(e.effort);
+        if (str(e.harness)) meta.harness = str(e.harness);
+        if (isHarnessScope(e.harnessScope)) meta.harnessScope = e.harnessScope;
         if (str(e.repo)) meta.repo = str(e.repo);
         if (str(e.ref)) meta.ref = str(e.ref);
         if (num(e.pr) !== undefined && Number.isInteger(e.pr) && (e.pr as number) > 0) meta.pr = e.pr as number;

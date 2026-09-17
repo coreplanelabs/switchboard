@@ -100,10 +100,16 @@ defaults:
 #       maxMinutes: 45
 #       maxIdentity: read
 
-# Static per-user defaults (user ID -> scope).
+# Static per-user defaults (user ID -> scope). A user's `harness` puts that
+# person's runs of a preset on another harness (docs/reference/specs/harness.md
+# item 8) — every run of it they request, in any channel, and nobody else's; the
+# same words as the top-level `harness` block, which they override (a channel's
+# `harness` sits between). From chat: `config set me --harness.coding opencode`.
 # users:
 #   slack:U012345:
 #     model: openai/gpt-5
+#     harness:
+#       coding: opencode
 
 # Authorization (docs/reference/specs/authorization.md item 9, docs/reference/authorization.md):
 # two blocks. `restrict` names what is CLOSED unless granted — an agent listed
@@ -327,17 +333,22 @@ workspaceDir: ./workspaces
 #                     # a finding at or above it sends the round into a fix step instead of merge-ready.
 #                     # Per channel/user: config set … --ship.addressSeverity; per run: severity:<level>.
 
-# Which harness each preset's runs are driven by (docs/reference/specs/harness.md
-# item 8): a mapping of preset to a harness's name. Two exist — `pi` (the pi
-# coding agent, the default for every preset) and `opencode` (OpenCode's server,
-# `opencode serve`) — each started inside the run's own execution container (or
-# as a child of the bot for a preset without a workspace) with the run's
-# model-proxy bearer as its only key, every tool call decided in the bot, every
-# event on the run's record. A preset the block does not name runs on pi;
-# nothing defaults to OpenCode. A run keeps the harness it started on, so
-# changing a word moves the next run, never one in flight. Any other word
-# (`native`, the deleted loop; `codex`) fails the load naming the two, as does
-# an unknown preset. How-to: docs/how-to/put-a-preset-on-opencode.md.
+# Which harness each preset's runs are driven by, deployment-wide
+# (docs/reference/specs/harness.md item 8): a mapping of preset to a harness's
+# name. Two exist — `pi` (the pi coding agent, the default for every preset)
+# and `opencode` (OpenCode's server, `opencode serve`) — each started inside
+# the run's own execution container (or as a child of the bot for a preset
+# without a workspace) with the run's model-proxy bearer as its only key, every
+# tool call decided in the bot, every event on the run's record. This block is
+# the defaults layer of the per-scope `harness` setting: a channel's or a
+# user's `harness` (above, or `config set channel|me --harness.<preset> …`)
+# overrides it for the runs in that scope, user over channel over here. A
+# preset no layer names runs on pi; nothing defaults to OpenCode. A run keeps
+# the harness it started on, so changing a word moves the next run, never one
+# in flight. Any other word (`native`, the deleted loop; `codex`) fails the
+# load naming the two, as does an unknown preset, in every layer; a
+# `defaults.harness` key is refused pointing here. How-to:
+# docs/how-to/put-a-preset-on-opencode.md.
 # harness:
 #   coding: opencode   # coding runs on OpenCode
 #   review: pi         # the default, written out

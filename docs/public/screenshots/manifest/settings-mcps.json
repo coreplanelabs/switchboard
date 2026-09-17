@@ -7,7 +7,7 @@
   "now": 1788877800000,
   "inputs": {
     "scripts/screenshots.mts": "8d507868382af4fdd9ebbad5a93fbd47db331dd9d303aad0c6f1fc651f153b2f",
-    "scripts/web-preview.ts": "669be68c9917aff5e0fe4a301a839a2ae5cdf75b9d4a00efb98b0641b52079f4",
+    "scripts/web-preview.ts": "b038824db5beeab766990d0fe10c6325429cf3cb8e7ab05b844e2086ca20fe77",
     "src/channels/webShell.ts": "5eab7aae4b16bad384c4863ddb8b3d644470cba2421e56d7649bd2fd95b26d92",
     "src/docs/screenshotManifest.ts": "12ae2476806a42b394da7d8698464df43afd94270b13ebd521c9f022e998c06c",
     "web/src/App.vue": "e95e58c24d31cd6de4b5d701b4c44ce9752c5278b7d6afd9c9e7028104ae2122",
@@ -18,7 +18,7 @@
     "web/src/components/DocsLink.vue": "1f7f5d4b34758ae9c7febafde0ab94a0812fb15ce5fe4bc5af6fed1ff58b756e",
     "web/src/components/SettingsLink.vue": "467f56fd73f816d58bffbfd5dd7039a183b118cba05d0c7249c097798b3a8018",
     "web/src/components/ThemeToggle.vue": "025a9a0c7ccc2983772c1888f7426ec161feb3ffaea87c914c65d15bdfd740d3",
-    "web/src/components/settings/ChannelsPanel.vue": "29122c466a9779e51d703852c422fd2cd28ded7c07c82664301856a9529ca486",
+    "web/src/components/settings/ChannelsPanel.vue": "562dd3124b8359f817641860e20b008cd14fc84a16bd7dd58d35e2e7ea7fdef5",
     "web/src/components/settings/InstallationPanel.vue": "2cf8d9d7fb30f3e1c060de2e67adc8abbafca8237e8a87610c1793c0c9a42a19",
     "web/src/components/settings/McpServersPanel.vue": "249a6a71d581d419127920f6adb710fe417d6ff6518b12ef4f3117ba36e55a4c",
     "web/src/components/settings/SettingsTabs.vue": "531831c0221c81496f316cb438836d6d8fc635b69a707160cc15191e874c6dcd",

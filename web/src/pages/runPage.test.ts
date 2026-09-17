@@ -588,6 +588,8 @@ describe("RunPage — history mode", () => {
           agent: "review",
           model: "anthropic/claude-fable-5",
           effort: "high",
+          harness: "opencode",
+          harnessScope: "user",
           repo: "acme/web",
           ref: "main",
           pr: 12,
@@ -600,6 +602,8 @@ describe("RunPage — history mode", () => {
     expect(meta.text()).toContain("review");
     expect(meta.text()).toContain("anthropic/claude-fable-5");
     expect(meta.text()).toContain("high effort");
+    // The harness and whose word put the run there (harness.md item 10): a reader never guesses which override did.
+    expect(meta.find(".harness").text()).toBe("opencode harness (user scope)");
     const hrefs = meta.findAll("a").map((a) => a.attributes("href"));
     expect(hrefs).toEqual([
       "https://github.com/acme/web",

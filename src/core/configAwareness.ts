@@ -1,6 +1,7 @@
-import { fmtEffectiveBoundary, type Scope } from "../config.js";
+import { fmtEffectiveBoundary, type ResolvedHarness, type Scope } from "../config.js";
 import { clipSourceLabel, type BoundaryScope, type EffectiveBoundary } from "../config/profile.js";
 import { EFFORT_LEVELS, type Effort } from "../effort.js";
+import { HARNESS_NAMES, type HarnessScope } from "./harness/roster.js";
 
 // Config awareness (docs/reference/specs/routing-and-config.md behavior 8). The config
 // system — per-user / per-channel / per-agent layers, runtime overrides,
@@ -48,6 +49,11 @@ export interface ConfigAwarenessInput {
    *  run — so an agent never says "I cannot load MCPs" when a user can add one.
    *  Absent → no line (byte-identical to before the feature). */
   mcp?: { registryOn: boolean; served: string[]; unavailable: string[] };
+  /** The harness this run is driven by and the scope whose word picked it
+   *  (docs/reference/specs/harness.md item 8), when a scope names the run's
+   *  preset. Absent → no line: every run is on pi by default, and the block
+   *  is byte-identical to before the word was a scope setting. */
+  harness?: ResolvedHarness;
 }
 
 type DirectiveSet = { agent?: string; model?: string; effort?: Effort; budget?: number };
@@ -140,6 +146,16 @@ export function configAwarenessBlock(i: ConfigAwarenessInput): string {
     lines.push(`This message's \`budget:${i.budget.directive}\` narrowed nothing: the run's budget is ${stands}.`);
   }
 
+  // The harness driving this run and whose word put it there (harness.md item
+  // 8): a person moves their own runs with `config set me` and nobody else's,
+  // so an agent asked "why am I on OpenCode?" answers from the scope, not a guess.
+  if (i.harness) {
+    lines.push(
+      `Harness: ${i.harness.name} (${harnessScopeLabel(i.harness.scope)}) — the process running this run's model loop. ` +
+        `Users move their own runs with \`config set me --harness.<agent> <${HARNESS_NAMES.join("|")}>\` (your own runs only; nobody else's move) and back with \`config clear me\`; \`config set channel --harness.…\` moves a channel's.`,
+    );
+  }
+
   const channelGate = i.canEditChannelConfig ? "per-channel" : "per-channel; restricted for this user — ask an admin";
   // The level list is the ladder itself, so a level added to EFFORT_LEVELS is
   // advertised here without anyone remembering to retype it. Stated once (the
@@ -169,7 +185,24 @@ function fmtScopeOverride(label: "channel" | "user", s: Scope): string | undefin
   if (perAgentEffort.length > 0) {
     parts.push(`efforts ${perAgentEffort.map(([agent, e]) => `${agent}=\`${e}\``).join(", ")}`);
   }
+  const perAgentHarness = Object.entries(s.harness ?? {});
+  if (perAgentHarness.length > 0) {
+    parts.push(`harness ${perAgentHarness.map(([agent, h]) => `${agent}=\`${h}\``).join(", ")}`);
+  }
   return parts.length > 0 ? `${label} override: ${parts.join(", ")}` : undefined;
+}
+
+/** The scope whose harness word won, as the block names it to the model acting
+ *  for the requester: their own scope, the channel's, or the deployment's. */
+function harnessScopeLabel(scope: HarnessScope): string {
+  switch (scope) {
+    case "user":
+      return "your scope";
+    case "channel":
+      return "the channel's scope";
+    case "defaults":
+      return "the deployment's defaults";
+  }
 }
 
 function fmtDirective(d: DirectiveSet): string | undefined {

@@ -14,6 +14,8 @@ flowchart TB
 
 Commands: [Configure your defaults](../how-to/configure-your-defaults.md). Record: [decision 0005](../decisions/0005-layered-config-effort-first-class.md).
 
+The harness — which process drives a preset's runs, `pi` or `opencode` — rides the three scope layers only: `config set me --harness.<agent> opencode` moves your own runs of that preset and nobody else's, a channel's word moves its runs, and the deployment's top-level `harness:` block is the defaults layer. There is no directive for it and a thread does not carry it; a run that is already going keeps the harness it started on ([harness.md](../reference/specs/harness.md) item 8).
+
 When no layer above the installation defaults names the agent, the request router picks the preset before the defaults do — on unless the deployment sets `routing: { auto: false }`; a directive, the sticky preset, a user `agent` or a channel `agent` each skip it ([routing-and-config item 21](../reference/specs/routing-and-config.md)).
 
 ## The thread layer has no storage

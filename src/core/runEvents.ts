@@ -2,6 +2,7 @@
 // the node-free contract the memory Worker and web app compile with their own
 // tsconfigs — importing prDescription.ts would drag zod into those graphs.
 import type { PrDescription, RenderedTourStep } from "./prDescriptionTypes.js";
+import type { HarnessScope } from "./harness/scope.js";
 
 /** The `pr_description` review artifact minus the event envelope
  *  (docs/reference/specs/reading-diff.md item 7). */
@@ -525,9 +526,15 @@ export type RunEvent =
       /** The request's trace id (docs/reference/specs/tracing.md), once the root exists. */
       traceId?: string;
       /** The harness the run is driven by (`Harness.name`; docs/reference/specs/harness.md
-       *  item 8): `pi` today. Absent on a command run, which starts no process,
+       *  items 8 and 10): the word the scopes resolved for the preset, `pi`
+       *  when none named it. Absent on a command run, which starts no process,
        *  and on a record written before the seam existed. Additive. */
       harness?: string;
+      /** Whose word put the run on that harness (item 10): the requester's own
+       *  scope, the channel's, or the deployment's top-level block. Absent when
+       *  no scope named the preset — the roster's default — and on records
+       *  written before the word was a scope setting. */
+      harnessScope?: HarnessScope;
       effort?: string;
       repo?: string;
       ref?: string;

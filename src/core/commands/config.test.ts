@@ -8,6 +8,7 @@ import { chatCallerFor } from "../commandChat.js";
 import { CommandRegistry, bindCommands, renderText, type Caller, type CommandInvoker } from "../commandRegistry.js";
 import { callerWith } from "../testing/callers.js";
 import { EFFORT_LEVELS } from "../../effort.js";
+import { HARNESS_NAMES } from "../harness/roster.js";
 import { helpRows, parseInvocation, tokenize } from "../commandSurface.js";
 import {
   configCommands,
@@ -745,6 +746,85 @@ describe("config `me` for a linked dashboard session (record 0042)", () => {
     expect(shown).toMatchObject({ ok: true, value: { user: { agent: "review" } } });
     expect(await commands.invoke("config.clear", { args: ["me"] }, me)).toMatchObject({ ok: true });
     expect(config.scopes("slack:CX", "slack:UX").user).toEqual({});
+  });
+});
+
+// Feature: docs/reference/specs/routing-and-config.md item 5; harness.md item 8
+// — the harness word is set from chat like every other scope setting:
+// `--harness.<agent> pi|opencode` on `config set`, `me` self-service (a
+// person's own runs move, nobody else's), the channel form under
+// `config:write`; a word that is not a harness or a preset the registry does
+// not know is refused by name without echoing the value; `config show`
+// renders the effective harness with the scope that set it; `config clear me`
+// drops it with the rest.
+describe("config set --harness.<agent> and config show's effective harness", () => {
+  it("`me` is self-service: the word lands on the user scope, resolves for that person's runs, shows with its scope, and clears with the rest", async () => {
+    const config = store();
+    const commands = bind(config);
+    const me = chat(config, "slack:UX");
+    const { text } = await say(commands, "config set me --harness.coding opencode", me);
+    expect(text).toBe('Updated your scope. Now: {"harness":{"coding":"opencode"}}');
+    expect(config.scopes("slack:CX", "slack:UX").user).toEqual({ harness: { coding: "opencode" } });
+    const coding = { channelId: "slack:CX", request: { agent: "coding" } };
+    expect(config.resolve({ ...coding, userId: "slack:UX" }).harness).toEqual({ name: "opencode", scope: "user" });
+    expect(config.resolve({ ...coding, userId: "slack:UY" }).harness).toBeUndefined(); // nobody else's runs move
+    const shown = await say(commands, "config show", me);
+    expect(shown.text).toContain("*Effective harness:* coding `opencode` (user)");
+    expect(shown.text).toContain("*Your scope:* harness `coding=opencode`");
+    expect(shown.text).toBe(config.describe("slack:CX", "slack:UX"));
+    expect((await say(commands, "config clear me", me)).text).toBe("Cleared your overrides.");
+    expect(config.scopes("slack:CX", "slack:UX").user).toEqual({});
+    expect(config.resolve({ ...coding, userId: "slack:UX" }).harness).toBeUndefined();
+    expect((await say(commands, "config show", me)).text).not.toContain("harness");
+  });
+
+  it("the channel form rides config:write like every channel write; the dotted form nests through the shared grammar", async () => {
+    const gated = store();
+    const commands = bind(gated);
+    expect(parseInvocation(commands.get("config.set")!, ["channel", "--harness.coding", "opencode"])).toEqual({
+      kind: "invoke",
+      input: { args: ["channel"], options: { harness: { coding: "opencode" } } },
+    });
+    expect(
+      await commands.invoke(
+        "config.set",
+        { args: ["channel"], options: { harness: { coding: "opencode" } } },
+        chat(gated, "slack:UX"),
+      ),
+    ).toMatchObject({ ok: false, error: "unauthorized", message: "Channel config changes are restricted." });
+    expect(gated.scopes("slack:CX", "slack:UX").channel).toEqual({});
+    const { text } = await say(commands, "config set channel --harness.coding opencode", chat(gated, "slack:UADMIN"));
+    expect(text).toBe('Updated channel scope. Now: {"harness":{"coding":"opencode"}}');
+    expect(gated.scopes("slack:CX", "slack:UY").channel).toEqual({ harness: { coding: "opencode" } });
+    expect(gated.resolve({ channelId: "slack:CX", userId: "slack:UY", request: { agent: "coding" } }).harness).toEqual({
+      name: "opencode",
+      scope: "channel",
+    });
+  });
+
+  it("a word that is not a harness and a preset the registry does not know are refused by name, never echoing the value; the derived help names the roster's words", async () => {
+    const config = store();
+    const commands = bind(config);
+    const me = chat(config, "slack:UX");
+    const bad = await commands.invoke("config.set", { args: ["me"], options: { harness: { coding: "codex" } } }, me);
+    expect(bad).toMatchObject({
+      ok: false,
+      error: "invalid_input",
+      message: 'harness.coding: expected one of "pi", "opencode"',
+    });
+    expect(JSON.stringify(bad)).not.toContain("codex");
+    expect(
+      await commands.invoke("config.set", { args: ["me"], options: { harness: { wizard: "pi" } } }, me),
+    ).toMatchObject({
+      ok: false,
+      error: "invalid_input",
+      message: "harness.wizard: expected an agent name (one of general, review, coding)",
+    });
+    expect(config.scopes("slack:CX", "slack:UX").user).toEqual({});
+    const options = helpRows(configSet).options;
+    const harness = options.find((r) => r.form.startsWith("--harness "))!;
+    for (const word of HARNESS_NAMES) expect(harness.describe).toMatch(new RegExp(`\\b${word}\\b`));
+    expect(configSet.describe).toContain("--harness.<agent>");
   });
 });
 

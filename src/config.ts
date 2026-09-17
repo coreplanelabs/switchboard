@@ -32,6 +32,7 @@ import {
   validateBoundaries,
   validateConfig,
   validateGrants,
+  validateHarnessWords,
   validateInstructions,
   validateMcpServers,
   validateRestrict,
@@ -39,6 +40,7 @@ import {
   type RouteAnswerMode,
 } from "./config/validate.js";
 import type { HarnessName } from "./core/harness/contract.js";
+import type { HarnessScope } from "./core/harness/roster.js";
 import type { OpenCodeCompactionConfig } from "./core/harness/opencode/process.js";
 import {
   intersectBoundaries,
@@ -66,6 +68,20 @@ export interface Scope {
   effort?: Effort;
   /** Per-agent effort overrides for this scope (same shape as `models`). */
   efforts?: Record<string, Effort>;
+  /**
+   * Which harness drives each preset's fresh runs requested in this scope, by
+   * the roster's word — `pi` or `opencode` (docs/reference/specs/harness.md
+   * item 8; same shape as `models`). The same ladder as the per-agent model:
+   * user > channel > the deployment's top-level `harness` block, which is the
+   * defaults layer of this setting; no request directive and no thread
+   * stickiness. A user's word moves every run of that preset the user
+   * requests, in any channel — the coding children a ship run spawns for them
+   * included — and nobody else's; a resumed run keeps the harness its row
+   * names whatever the scopes say now. Validated at load and on write
+   * against the roster's names. Set with
+   * `config set me|channel --harness.<agent> pi|opencode`.
+   */
+  harness?: Record<string, HarnessName>;
   /**
    * A cap on what any run in this scope may have (docs/decisions/0026-capability-profiles-and-request-routing.md):
    * `maxMinutes`, `maxIdentity` (`none < read < write`), `machines`. Unlike
@@ -309,14 +325,17 @@ export interface AppConfig {
    */
   references?: ReferencesConfig;
   /**
-   * Which harness each preset's runs are driven by (docs/reference/specs/harness.md
-   * item 8): a mapping of preset to a harness's name — `pi` or `opencode`, the
-   * roster's words, which are the names the harness objects declare. A preset
-   * the block does not name runs on pi; nothing defaults to OpenCode. A run
-   * keeps the harness it started on — its row's facts name it across restarts
-   * — so changing a preset's word moves the next run, never one in flight.
-   * Validated at load against the roster's names: any other word fails by
-   * name, as does a preset the registry does not know.
+   * Which harness each preset's runs are driven by, deployment-wide
+   * (docs/reference/specs/harness.md item 8): a mapping of preset to a
+   * harness's name — `pi` or `opencode`, the roster's words, which are the
+   * names the harness objects declare. This block IS the defaults layer of
+   * `Scope.harness` under its one spelling (`defaults.harness` is refused by
+   * name): a channel's or a user's `harness.<preset>` overrides it for the
+   * runs in that scope. A preset no layer names runs on pi; nothing defaults
+   * to OpenCode. A run keeps the harness it started on — its row's facts name
+   * it across restarts — so changing a word moves the next run, never one in
+   * flight. Validated at load against the roster's names: any other word
+   * fails by name, as does a preset the registry does not know.
    */
   harness?: Record<string, HarnessName>;
   /**
@@ -568,6 +587,14 @@ export interface ResolvedMcpServer {
  *  `default` (docs/reference/specs/routing-and-config.md item 21). */
 export type AgentLayer = "request" | "user" | "channel" | "default";
 
+/** The harness word the scopes resolved for a request's preset and the scope
+ *  whose word won (docs/reference/specs/harness.md item 8): what a fresh run
+ *  opens on, what `run_meta` names and what the config block tells the model. */
+export interface ResolvedHarness {
+  name: HarnessName;
+  scope: HarnessScope;
+}
+
 export interface ResolvedRequest {
   agentName: string;
   /** Which layer set `agentName`. */
@@ -582,6 +609,11 @@ export interface ResolvedRequest {
    *  did before boundaries existed. The effective profile is computed from it
    *  once the preset is known (`src/core/dispatch/resolve.ts`). */
   boundary?: EffectiveBoundary;
+  /** The harness word for the resolved preset through the scopes (user >
+   *  channel > the deployment's `harness` block) with the scope that set it;
+   *  absent when no layer names the preset — the loop then opens a fresh run
+   *  on the roster's default, pi. A resumed row keeps its own regardless. */
+  harness?: ResolvedHarness;
 }
 
 /** Where runtime overrides are persisted, chosen from `config.yaml` (item 12):
@@ -735,6 +767,7 @@ export class ConfigStore {
     validateInstructions(doc, `overrides (${this.backing.describe()})`);
     validateScopeEfforts(doc, `overrides (${this.backing.describe()})`);
     validateBoundaries(doc, `overrides (${this.backing.describe()})`);
+    validateHarnessWords(doc, `overrides (${this.backing.describe()})`);
     validateMcpServers(
       { channels: doc.channels, users: doc.users, defaults: doc.org },
       `overrides (${this.backing.describe()})`,
@@ -885,6 +918,11 @@ export class ConfigStore {
    * Model:    request directive > (user > channel) forced model
    *           > (user > channel > defaults) per-agent model.
    * Effort:   the same ladder as model; unset at every layer → undefined.
+   * Harness:  the per-agent ladder without the request layer — user > channel
+   *           > the deployment's top-level `harness` block — each naming the
+   *           scope whose word won; no directive, no thread stickiness; unset
+   *           at every layer → absent (a fresh run opens on pi). A resumed row
+   *           keeps its own harness whatever this answers (harness.md item 8).
    * Boundary: NOT a ladder — the defaults', the channel's and the user's
    *           boundaries intersect (the smallest budget, the lowest identity,
    *           the classes every layer allows), so a scope can only tighten what
@@ -929,13 +967,50 @@ export class ConfigStore {
       ch.efforts?.[agentName] ??
       this.config.defaults.efforts?.[agentName];
 
+    const harness = this.harnessFor(agentName, ch, us);
+
     return {
       agentName,
       agentLayer,
       modelRef,
       ...(effort !== undefined ? { effort } : {}),
       ...(boundary !== undefined ? { boundary } : {}),
+      ...(harness !== undefined ? { harness } : {}),
     };
+  }
+
+  /** The harness word for a preset through the scopes (docs/reference/specs/harness.md
+   *  item 8): the user's `harness.<preset>`, else the channel's, else the
+   *  deployment's top-level block — each naming the scope whose word won, so
+   *  the record and the config block can say whose word put a run where. */
+  private harnessFor(preset: string, channel: Scope, user: Scope): ResolvedHarness | undefined {
+    const layers: Array<[HarnessScope, Record<string, HarnessName> | undefined]> = [
+      ["user", user.harness],
+      ["channel", channel.harness],
+      ["defaults", this.config.harness],
+    ];
+    for (const [scope, words] of layers) {
+      const name = words?.[preset];
+      if (name !== undefined) return { name, scope };
+    }
+    return undefined;
+  }
+
+  /** Every preset a scope on this path names a harness for, each resolved
+   *  through the ladder — `config show`'s effective harness line; empty when
+   *  no scope names one. */
+  private effectiveHarnesses(channel: Scope, user: Scope): Record<string, ResolvedHarness> {
+    const presets = new Set([
+      ...Object.keys(this.config.harness ?? {}),
+      ...Object.keys(channel.harness ?? {}),
+      ...Object.keys(user.harness ?? {}),
+    ]);
+    const out: Record<string, ResolvedHarness> = {};
+    for (const preset of [...presets].sort()) {
+      const resolved = this.harnessFor(preset, channel, user);
+      if (resolved) out[preset] = resolved;
+    }
+    return out;
   }
 
   /** The boundary layers on a path, in resolution order, keeping only the
@@ -1096,20 +1171,25 @@ export class ConfigStore {
    *  store cannot see — the `config.show` handler adds it. */
   describeConfig(channelId: string, userId: string): Omit<ConfigDescription, "channelConfigRestricted"> {
     const resolved = this.resolve({ channelId, userId, request: {} });
+    const channel = this.channelScope(channelId);
+    const user = this.userScope(userId);
+    const harness = this.effectiveHarnesses(channel, user);
     return {
       effective: {
         agent: resolved.agentName,
         model: resolved.modelRef,
         ...(resolved.effort ? { effort: resolved.effort } : {}),
         ...(resolved.boundary ? { boundary: resolved.boundary } : {}),
+        ...(Object.keys(harness).length > 0 ? { harness } : {}),
       },
       defaults: {
         agent: this.config.defaults.agent,
         models: this.config.defaults.models,
         ...(this.config.defaults.efforts ? { efforts: this.config.defaults.efforts } : {}),
+        ...(this.config.harness ? { harness: this.config.harness } : {}),
       },
-      channel: this.channelScope(channelId),
-      user: this.userScope(userId),
+      channel,
+      user,
       org: this.orgScope(),
       restrictedAgents: this.restrictedAgentsFor(userId),
       adminsHint: this.adminsHint(),
@@ -1155,9 +1235,23 @@ export interface ChannelScopeIndexRow {
 }
 
 export interface ConfigDescription {
-  /** The boundary is the intersection of every scope's, each axis naming the scope that set it. */
-  effective: { agent: string; model: string; effort?: Effort; boundary?: EffectiveBoundary };
-  defaults: { agent: string; models: Record<string, string>; efforts?: Record<string, Effort> };
+  /** The boundary is the intersection of every scope's, each axis naming the
+   *  scope that set it; `harness` is every preset a scope names a harness for,
+   *  each with the scope whose word won — absent when none does. */
+  effective: {
+    agent: string;
+    model: string;
+    effort?: Effort;
+    boundary?: EffectiveBoundary;
+    harness?: Record<string, ResolvedHarness>;
+  };
+  /** `harness` is the deployment's top-level block: the defaults layer of the word. */
+  defaults: {
+    agent: string;
+    models: Record<string, string>;
+    efforts?: Record<string, Effort>;
+    harness?: Record<string, HarnessName>;
+  };
   channel: Scope;
   user: Scope;
   /** The org tier's runtime-visible settings (today `mcpServers`), for `config show`. */
@@ -1175,6 +1269,9 @@ export function formatConfigDescription(d: ConfigDescription): string {
     `agent \`${d.defaults.agent}\`, models ${fmtModels(d.defaults.models)}` +
     (d.defaults.efforts && Object.keys(d.defaults.efforts).length > 0
       ? `, efforts ${fmtModels(d.defaults.efforts)}`
+      : "") +
+    (d.defaults.harness && Object.keys(d.defaults.harness).length > 0
+      ? `, harness ${fmtModels(d.defaults.harness)}`
       : "");
   const orgMcp =
     d.org?.mcpServers && Object.keys(d.org.mcpServers).length > 0
@@ -1185,6 +1282,7 @@ export function formatConfigDescription(d: ConfigDescription): string {
   const lines = [
     `*Effective for you in this channel:* ${effective}`,
     ...(d.effective.boundary ? [`*Effective boundary:* ${fmtEffectiveBoundary(d.effective.boundary)}`] : []),
+    ...(d.effective.harness ? [`*Effective harness:* ${fmtEffectiveHarness(d.effective.harness)}`] : []),
     `*Defaults:* ${defaults}${orgMcp}`,
     `*Channel scope:* ${fmtScope(d.channel)}`,
     `*Your scope:* ${fmtScope(d.user)}`,
@@ -1206,6 +1304,7 @@ function fmtScope(s: Scope): string {
   if (s.models && Object.keys(s.models).length > 0) parts.push(`models ${fmtModels(s.models)}`);
   if (s.effort) parts.push(`effort \`${s.effort}\``);
   if (s.efforts && Object.keys(s.efforts).length > 0) parts.push(`efforts ${fmtModels(s.efforts)}`);
+  if (s.harness && Object.keys(s.harness).length > 0) parts.push(`harness ${fmtModels(s.harness)}`);
   if (s.mcpServers && Object.keys(s.mcpServers).length > 0)
     parts.push(
       `mcp ${Object.keys(s.mcpServers)
@@ -1236,6 +1335,15 @@ export function fmtEffectiveBoundary(b: EffectiveBoundary): string {
       `machines ${b.machines.value.map((m) => `\`${m}\``).join(", ")} (${b.machines.by.map((l) => l.scope).join(", ")})`,
     );
   return parts.join(", ");
+}
+
+/** The effective harness per named preset with the scope whose word won —
+ *  `coding \`opencode\` (user), review \`pi\` (defaults)` — what `config show`
+ *  prints; the awareness block names the run's own the same way. */
+export function fmtEffectiveHarness(h: Record<string, ResolvedHarness>): string {
+  return Object.entries(h)
+    .map(([preset, r]) => `${preset} \`${r.name}\` (${r.scope})`)
+    .join(", ");
 }
 
 function fmtModels(m: Record<string, string>): string {

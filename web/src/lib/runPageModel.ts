@@ -228,6 +228,9 @@ export interface MetaVm {
   agent: string;
   model: string;
   effort?: string;
+  /** The harness driving the run and whose word put it there (`user`, `channel`, `defaults`); the scope is absent when no scope named the preset. */
+  harness?: string;
+  harnessScope?: string;
   repo?: string;
   ref?: string;
   pr?: number;
@@ -726,6 +729,8 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
           agent: change.agent,
           model: change.model,
           ...(change.effort ? { effort: change.effort } : {}),
+          ...(change.harness ? { harness: change.harness } : {}),
+          ...(change.harnessScope ? { harnessScope: change.harnessScope } : {}),
           ...(change.repo ? { repo: change.repo } : {}),
           ...(change.ref ? { ref: change.ref } : {}),
           ...(change.pr !== undefined ? { pr: change.pr } : {}),
