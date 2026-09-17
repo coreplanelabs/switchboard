@@ -70,11 +70,15 @@ describe("the reasons are read as the resident's, never the repo's", () => {
 });
 
 describe("the fault injection and the read view", () => {
-  it("`infra-streak` sets the row's count (0 deletes it) and `break-mirror` removes the mirror's objects under its own step name; both are admin-only by construction", () => {
+  it("`infra-streak` sets the row's count (0 deletes it) and `break-mirror` removes the mirror's config — a fault the wake check does not heal — under its own step name; both are admin-only by construction", () => {
     expect(method("debugSetInfraStreak")).toMatch(
       /if \(count === 0\) \{\s*await this\.ctx\.storage\.delete\(INFRA_STREAK_KEY\)/,
     );
-    expect(method("debugBreakMirror")).toMatch(/\["rm", "-rf", `\$\{MIRROR_DIR\}\/objects`\], "break-mirror"/);
+    // The fault must survive the wake check (`readyStamp` tests `objects/`
+    // and `.git`): removing the mirror's `config` leaves both and makes the
+    // fetch fail — `'origin' does not appear to be a git repository`.
+    expect(method("debugBreakMirror")).toMatch(/\["rm", "-f", `\$\{MIRROR_DIR\}\/config`\], "break-mirror"/);
+    expect(method("debugBreakMirror")).not.toMatch(/objects/);
     const readOps = /^const READ_DEBUG_OPS = new Set\(\[([^\]]*)\]\);$/m.exec(source);
     expect(readOps).not.toBeNull();
     expect(readOps![1]).not.toMatch(/infra-streak|break-mirror/);
