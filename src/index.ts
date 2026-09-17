@@ -447,12 +447,16 @@ export async function runBot(): Promise<void> {
   // resident admin client the config names. ---
   // One RunsService for every surface: the command registry (HTTP/MCP/chat), the
   // /runs pages, and the run tools a spawning run holds (the dispatcher's `runs`).
+  // The `costs:` block, parsed once: the price table every finished run is priced through (costs.md
+  // item 4c) and, below, the service the costs page reads.
+  const costsCfg = parseCostsConfig(config.config.costs);
   const runsService = createRunsService({
     registry: defaultRunRegistry,
     store: runStore,
     ledger: ledgerClient,
     sessions: ledgerClient,
     units: coordinatorInstances,
+    prices: costsCfg?.prices,
   });
   deps.runs = runsService;
   // Scheduled firings are recorded on the state Worker's ScheduleDO;
@@ -486,7 +490,6 @@ export async function runBot(): Promise<void> {
   // `costs:` block or the Cloudflare token the null service has no group and
   // the page says so (503). Both keys are revealed into their source's
   // constructor and held nowhere else here.
-  const costsCfg = parseCostsConfig(config.config.costs);
   const costs =
     capabilities.costs && costsCfg
       ? costsFromConfig(costsCfg, config.config, {

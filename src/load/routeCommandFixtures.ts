@@ -175,6 +175,11 @@ export const ROUTE_COMMAND_FIXTURES: readonly RouteCommandFixture[] = [
       options: {},
     },
   ),
+  f("c35h", "happy", "what did each user spend on runs over the last 7 days", "costs.by", {
+    args: ["user"],
+    options: { days: 7 },
+  }),
+  f("c35p", "paraphrase", "break the run spend down by agent", "costs.by", { args: ["agent"], options: {} }),
 ];
 
 const d = (id: string, text: string, command: string, allow?: readonly string[]): RouteCommandDecoy => ({
@@ -221,6 +226,7 @@ export const ROUTE_COMMAND_DECOYS: readonly RouteCommandDecoy[] = [
   d("c32d", "are we shipping fast enough this quarter?", "delivery.report", ["delivery.report"]),
   d("c33d", "why did our spend jump yesterday?", "costs.snapshot"),
   d("c34d", "was the reviewer right to decline the fix on acme/api#42?", "runs.findings"),
+  d("c35d", "is the review agent worth what it costs us?", "costs.by"),
 ];
 
 /** Every example of the command half, fixtures then decoys, for one replay. */

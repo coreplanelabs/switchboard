@@ -25,6 +25,8 @@ import type { LiveRunRow } from "./runLedger/types.js";
 import { snippetOf } from "./runLedger/sessionLog.js";
 import { activityOfEvents } from "./runRegistry/activity.js";
 import { parseUnitKey, unitKeyOf } from "./coordinator/contract.js";
+import { NO_PRICES, runCostOf, type ModelPriceTable, type RunCost } from "./modelPricing.js";
+import type { RunUsage } from "./runUsage.js";
 import type { CoordinatorInstanceStore } from "./coordinator/instanceStore.js";
 import type { CoordinatorInstance } from "./coordinator/contract.js";
 import { instanceFactsOf, unitFactsOf, unitRunsOf, type UnitFacts, type UnitRunsView } from "./unitRuns.js";
@@ -148,6 +150,12 @@ export interface RunView {
    *  2), the fact a follow-up in the thread continues from
    *  (resident-repos item 29); as the artifacts above, from the store. */
   pr?: RunRecord["pr"];
+  /** What the run cost in tokens, per model (`RunRecord.usage`, run-history
+   *  item 56), and what that is in dollars through the price table
+   *  (`runCostOf`; costs.md item 4c) — on a finished run whose record the store
+   *  holds; a live run has neither, its usage is summed at finish. */
+  usage?: RunUsage;
+  cost?: RunCost;
   /** True once the durable store holds this run (registry flag or store row). */
   persisted?: boolean;
   /** The generation driving this run when it is not this process (run-history
@@ -390,6 +398,9 @@ export interface RunsServiceDeps {
    *  belongs to and the unit rows a unit listing is cut by. Null or absent:
    *  every unit is `not_found`. */
   units?: Pick<CoordinatorInstanceStore, "get" | "listUnits"> | null;
+  /** The price table a finished run's tokens are priced through (costs.md item
+   *  4c): `costs.prices` over the Anthropic list; absent → the list alone. */
+  prices?: ModelPriceTable;
 }
 
 /** A live row of the run ledger as a view (run-history item 41): the row's meta
@@ -460,8 +471,14 @@ function liveView(s: RunSummary): RunView {
   };
 }
 
-function persistedView(item: RunListItem): RunView {
-  return { ...item, finished: true, persisted: true };
+/** A stored row as a view: finished, persisted, and priced when it carries usage. */
+function persistedView(item: RunListItem, prices: ModelPriceTable): RunView {
+  return { ...item, finished: true, persisted: true, ...costOf(item, prices) };
+}
+
+/** The record's dollars (costs.md item 4c): nothing for a record written before usage existed. */
+function costOf(item: Pick<RunListItem, "usage">, prices: ModelPriceTable): Pick<RunView, "cost"> {
+  return item.usage ? { cost: runCostOf(item.usage, prices) } : {};
 }
 
 /** The merged list order — the store's own key, so a page is a true top-N of
@@ -528,6 +545,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
   const sessions = deps.sessions ?? null;
   const units = deps.units ?? null;
   const analyze = deps.analyze ?? ((events, opts) => analyzeRunFriction(events, opts));
+  const prices = deps.prices ?? NO_PRICES;
   const clock = deps.clock ?? systemClock;
   const warn = deps.warn ?? ((m: string) => console.warn(m));
   const describe = (err: unknown): string => (err instanceof Error ? err.message : String(err));
@@ -608,7 +626,9 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
    *  nothing; a store that throws is one warning and nothing. */
   const storedArtifacts = async (
     id: string,
-  ): Promise<Pick<RunView, "verdict" | "reviewHead" | "reviewPost" | "dispositions" | "handoff" | "pr">> => {
+  ): Promise<
+    Pick<RunView, "verdict" | "reviewHead" | "reviewPost" | "dispositions" | "handoff" | "pr" | "usage" | "cost">
+  > => {
     let row: RunListItem | null;
     try {
       row = await storeSummary(id);
@@ -626,6 +646,9 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       ...(row.dispositions !== undefined ? { dispositions: row.dispositions } : {}),
       ...(row.handoff !== undefined ? { handoff: row.handoff } : {}),
       ...(row.pr !== undefined ? { pr: row.pr } : {}),
+      // The run's tokens and their price (costs.md item 4c): summed at finish, so only the record has them.
+      ...(row.usage !== undefined ? { usage: row.usage } : {}),
+      ...costOf(row, prices),
     };
   };
 
@@ -698,7 +721,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
             ...(opts.before !== undefined ? { before: opts.before } : {}),
             ...(opts.beforeId !== undefined ? { beforeId: opts.beforeId } : {}),
           });
-          for (const row of rows) if (!unfinished.has(row.id)) byId.set(row.id, persistedView(row));
+          for (const row of rows) if (!unfinished.has(row.id)) byId.set(row.id, persistedView(row, prices));
         } catch (err) {
           // Degrade to live rows — never a whole-command failure — but say so
           // in the log: the message only (a store error names a route or an
@@ -772,12 +795,12 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       // read whole to answer "what is this run".
       if (opts.include !== "messages") {
         const summary = await storeSummary(id);
-        return summary ? { ok: true, value: persistedView(summary) } : notFound;
+        return summary ? { ok: true, value: persistedView(summary, prices) } : notFound;
       }
       const record = await storeGet(id);
       if (!record) return notFound;
       const { events, ...rest } = record;
-      const view: RunRecordView = persistedView(rest);
+      const view: RunRecordView = persistedView(rest, prices);
       view.events = events;
       return { ok: true, value: view };
     },

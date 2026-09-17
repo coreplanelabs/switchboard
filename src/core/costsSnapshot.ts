@@ -8,8 +8,9 @@ import {
   type CostReportMeta,
   type LlmCostSource,
 } from "./costs.js";
-import { buildUserCostReport, type UserCostReport } from "./costsByUser.js";
+import { buildCostsByReport, type CostDimension, type CostsByReport } from "./costsBy.js";
 import type { CostsSnapshot, CostsSnapshotStore } from "./costsSnapshotStore.js";
+import { NO_PRICES, type ModelPriceTable } from "./modelPricing.js";
 import { NullRunStore, type RunStore } from "./runStore.js";
 import type { RunUsageReport } from "./runUsage.js";
 import { untilText } from "./snapshotAge.js";
@@ -125,9 +126,9 @@ const message = (err: unknown): string => (err instanceof Error ? err.message : 
 /** The run history's per-user usage over the window, asked again while rows are
  *  still being priced (each call heals a few hundred) so the snapshot is whole. */
 async function readRunUsage(store: RunStore, sinceMs: number, untilMs: number): Promise<RunUsageReport> {
-  let report = await store.usageByUser({ sinceMs, untilMs });
+  let report = await store.usage({ sinceMs, untilMs });
   for (let round = 1; report.pending > 0 && round < MAX_USAGE_BACKFILL_ROUNDS; round++) {
-    report = await store.usageByUser({ sinceMs, untilMs });
+    report = await store.usage({ sinceMs, untilMs });
   }
   return report;
 }
@@ -180,21 +181,23 @@ export function reportFromSnapshot(
 
 /** The by-user report over the snapshot's run usage for the daily report's range (the daily
  *  report is the cloud to allocate and the LLM to reconcile against). Run usage absent = history off. */
-export function usersReportFromSnapshot(
+export function byReportFromSnapshot(
   snapshot: CostsSnapshot,
   daily: CostReport,
-  viewer: { viewerUserIds: string[]; matchedByEmail: boolean },
-): UserCostReport {
+  dimension: CostDimension,
+  opts: { viewer?: { userIds: string[]; matchedByEmail: boolean }; prices?: ModelPriceTable } = {},
+): CostsByReport {
   return {
-    ...buildUserCostReport({
+    ...buildCostsByReport({
       group: daily.group,
+      dimension,
       range: daily.range,
       usage: snapshot.runUsage ?? { rows: [], pending: 0, retentionDays: 0 },
       days: daily.days,
       historyOn: snapshot.runUsage !== null,
-      viewerUserIds: viewer.viewerUserIds,
-      matchedByEmail: viewer.matchedByEmail,
+      ...(opts.viewer ? { viewer: opts.viewer } : {}),
       generatedAt: Date.parse(snapshot.takenAt),
+      prices: opts.prices ?? NO_PRICES,
     }),
     snapshot: stampOf(snapshot),
   };

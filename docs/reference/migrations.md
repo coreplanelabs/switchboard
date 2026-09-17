@@ -4,6 +4,10 @@ What an operator changes when a release breaks something: one section per such r
 
 A section says, in this order: what no longer works as it did, what replaces it, and the smallest edit that gets an installation from one to the other — a config key to rename, a command to re-run, a secret to add. Nothing else: history and reasons live in the changelog and the [decision records](../explanation/design-decisions.md).
 
+## 1.243.0
+
+- The state Worker's `POST /runs/usage-by-user` route is gone; the bot asks `POST /runs/usage` for one row per run and does the arithmetic itself ([run-history](specs/run-history.md) item 56). The bot and the memory Worker ship in the same release, so `deploy all --affected` carries both; a bot deployed against a memory Worker still on the old route fails its costs snapshot take with `route missing` (the status line and `costs.snapshot.alertChannel` say so, the previous snapshot keeps serving) until the Worker is deployed. A stored costs snapshot from before this release holds the old per-user rows and is refused on read, so the first minute after the deploy shows the costs page with no snapshot and then the loop takes a fresh one; nothing to edit.
+
 ## 1.241.0
 
 - The dashboard has a new gated section, the chat at `/threads` ([web-chat.md](specs/web-chat.md), [dashboard-routes.md](dashboard-routes.md)), and `/` now answers `302 /threads` instead of `302 /runs`. Under `dashboard.auth: access` the Cloudflare Access application lists path prefixes, and a prefix it does not list is served a bare `403` by the bot's own gate: add `threads` to the application's paths (beside `runs`, `residents`, `costs`, `delivery`, `settings`, `api`, `mcp/connect`) before or with this deploy, or every visit to the home page ends in that `403`. Bookmarks to `/runs` are unchanged; the runs page keeps every operator control.

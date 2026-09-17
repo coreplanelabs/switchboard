@@ -7,7 +7,7 @@ import {
   type CostGroupConfig,
   type LlmCostRow,
 } from "./costs.js";
-import { buildUserCostReport } from "./costsByUser.js";
+import { buildCostsByReport } from "./costsBy.js";
 import {
   ALERT_AFTER_FAILURES,
   COSTS_SNAPSHOT_EVERY_HOURS,
@@ -19,7 +19,7 @@ import {
   SNAPSHOT_DAYS,
   SNAPSHOT_TICK_MS,
   takeCostsSnapshot,
-  usersReportFromSnapshot,
+  byReportFromSnapshot,
   type CostsSnapshotSources,
 } from "./costsSnapshot.js";
 import { InMemoryCostsSnapshotStore, type CostsSnapshot, type CostsSnapshotStore } from "./costsSnapshotStore.js";
@@ -84,6 +84,9 @@ const RUN_USAGE: RunUsageReport = {
       userId: "slack:UALICE",
       userName: "alice",
       day: SEP_16,
+      threadKey: "slack:C1:1.0",
+      channelId: "slack:C1",
+      agent: "general",
       runs: 2,
       wallMs: 3_600_000,
       usage: {
@@ -120,13 +123,13 @@ function clock(start = T0, stepMs = 0) {
   };
 }
 
-/** A run store answering `usageByUser` from a queue of reports, recording the queries. */
+/** A run store answering `usage` from a queue of reports, recording the queries. */
 function runStoreOf(answers: RunUsageReport[]): { store: RunStore; queries: RunUsageQuery[] } {
   const queries: RunUsageQuery[] = [];
   const queue = [...answers];
-  // Only `usageByUser` is read here; the Null Object would read as history off.
+  // Only `usage` is read here; the Null Object would read as history off.
   const store = {
-    usageByUser: async (q: RunUsageQuery) => {
+    usage: async (q: RunUsageQuery) => {
       queries.push(q);
       return queue.length > 1 ? queue.shift()! : queue[0]!;
     },
@@ -227,7 +230,7 @@ describe("takeCostsSnapshot", () => {
 
 // ---- reports from a snapshot ---------------------------------------------------
 
-describe("reportFromSnapshot / usersReportFromSnapshot", () => {
+describe("reportFromSnapshot / byReportFromSnapshot", () => {
   const snapshot: CostsSnapshot = {
     takenAt: new Date(T0).toISOString(),
     takenBy: "schedule",
@@ -256,31 +259,33 @@ describe("reportFromSnapshot / usersReportFromSnapshot", () => {
     expect(week.generatedAt).toBe(T0);
   });
 
-  it("the by-user report is the builder over the snapshot's run usage for the range, history on; with run usage absent the history is off and nothing is attributed", () => {
+  it("a dimension's report is the builder over the snapshot's run usage for the range on that dimension, history on, the viewer on the user dimension alone; with run usage absent the history is off and nothing is attributed", () => {
     const daily = reportFromSnapshot(snapshot, "switchboard", GROUP, "7", meta);
-    const expected = buildUserCostReport({
+    const viewer = { userIds: ["slack:UALICE"], matchedByEmail: true };
+    const expected = buildCostsByReport({
       group: "switchboard",
+      dimension: "user",
       range: daily.range,
       usage: RUN_USAGE,
       days: daily.days,
       historyOn: true,
-      viewerUserIds: ["slack:UALICE"],
-      matchedByEmail: true,
+      viewer,
       generatedAt: T0,
     });
-    const got = usersReportFromSnapshot(snapshot, daily, { viewerUserIds: ["slack:UALICE"], matchedByEmail: true });
+    const got = byReportFromSnapshot(snapshot, daily, "user", { viewer });
     expect(got).toEqual({
       ...expected,
       snapshot: { takenAt: snapshot.takenAt, takenBy: "schedule", durationMs: 31_000 },
     });
-    expect(got.users.map((u) => u.userId)).toEqual(["slack:UALICE"]);
+    expect(got.rows.map((u) => u.key)).toEqual(["slack:UALICE"]);
+    const byAgent = byReportFromSnapshot(snapshot, daily, "agent", {});
+    expect(byAgent.dimension).toBe("agent");
+    expect(byAgent.rows.map((r) => r.key)).toEqual(["general"]);
+    expect(byAgent.viewer).toBeUndefined();
 
-    const off = usersReportFromSnapshot({ ...snapshot, runUsage: null }, daily, {
-      viewerUserIds: [],
-      matchedByEmail: false,
-    });
+    const off = byReportFromSnapshot({ ...snapshot, runUsage: null }, daily, "user", {});
     expect(off.coverage.historyOn).toBe(false);
-    expect(off.users).toEqual([]);
+    expect(off.rows).toEqual([]);
   });
 });
 

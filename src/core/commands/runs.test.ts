@@ -539,6 +539,48 @@ describe("runs.get / runs.events / runs.friction", () => {
     expect(JSON.stringify(full)).not.toMatch(/tok-/);
   });
 
+  // costs.md item 4c: the record's dollars ride `runs get` on every surface.
+  it("runs.get renders the run's cost on the text surfaces — dollars per model, or unpriced — and carries it as JSON", async () => {
+    const { registry, store, deps } = await setup();
+    const tokens = (input: number) => ({
+      turns: 1,
+      inputTokens: input,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+    });
+    const machine = { channelId: "mcp:X", channelVisibility: "machine" as const };
+    await store.put(
+      record("fin-mixed", NOW - 500, {
+        ...machine,
+        usage: { turns: 2, byModel: { "anthropic/claude-haiku-4-5": tokens(1_000_000), "mystery/model-x": tokens(5) } },
+      }),
+    );
+    await store.put(
+      record("fin-priced", NOW - 400, {
+        ...machine,
+        usage: { turns: 1, byModel: { "anthropic/claude-haiku-4-5": tokens(1_000_000) } },
+      }),
+    );
+    const get = runsCommands.find((c) => c.id === "runs.get")!;
+    const mixed = await registry.invoke("runs.get", { args: ["fin-mixed"], options: {} }, reader, deps);
+    const view = value<{ cost: { usd: number | null; byModel: Record<string, { usd: number | null }> } }>(mixed);
+    expect(view.cost.usd).toBeNull();
+    expect(view.cost.byModel["anthropic/claude-haiku-4-5"].usd).toBeCloseTo(1, 9);
+    expect(view.cost.byModel["mystery/model-x"].usd).toBeNull();
+    const text = renderText(get, mixed.ok ? mixed.value : null);
+    expect(text).toContain("cost: unpriced · anthropic/claude-haiku-4-5 $1.00 · mystery/model-x unpriced");
+    expect(text).not.toMatch(/cost: \$0/);
+    expect(text).toContain("id: fin-mixed"); // the other fields keep their key: value lines
+    const priced = await registry.invoke("runs.get", { args: ["fin-priced"], options: {} }, reader, deps);
+    expect(renderText(get, priced.ok ? priced.value : null)).toContain(
+      "cost: $1.00 · anthropic/claude-haiku-4-5 $1.00",
+    );
+    // A record from before usage existed has no cost line at all.
+    const old = await registry.invoke("runs.get", { args: ["fin-x"], options: {} }, reader, deps);
+    expect(renderText(get, old.ok ? old.value : null)).not.toContain("cost:");
+  });
+
   it("wrapEvent wraps a tool result's output and a span end's error too; a span with no error is returned as is", () => {
     const wrapped = wrapEvent({ type: "tool_result", tool: "bash", ok: true, summary: "ok", output: "raw out" });
     expect((wrapped as { output: string }).output).toContain(UNTRUSTED_OPEN);

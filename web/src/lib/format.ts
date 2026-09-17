@@ -4,6 +4,7 @@
 export { formatDateTime, formatRelative, splitRunLabel } from "@core/channels/indexFormat.js";
 export { formatDuration } from "@core/core/time/formatDuration.js";
 export { formatLocalIso } from "@core/channels/localIso.js";
+export { formatUsd } from "@core/core/modelPricing.js";
 
 /** The timeline clock: `5:19:57 PM PDT` — the viewer's 12-hour wall time with
  *  their zone's short name (falls back to bare time where the runtime has no

@@ -308,7 +308,7 @@ function ledgerBackedStore(ledger: InMemoryRunLedger, store: RunStore): RunStore
       return store.events(id, opts);
     },
     delete: (id) => store.delete(id),
-    usageByUser: (query) => store.usageByUser(query),
+    usage: (query) => store.usage(query),
   };
 }
 
@@ -2509,7 +2509,7 @@ describe("review post-step", () => {
         list: (o) => inner.list(o),
         events: (id, o) => inner.events(id, o),
         delete: (id) => inner.delete(id),
-        usageByUser: (q) => inner.usageByUser(q),
+        usage: (q) => inner.usage(q),
       };
       deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), fakeIO().io);

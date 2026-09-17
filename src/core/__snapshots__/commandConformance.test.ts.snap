@@ -238,6 +238,37 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "costs:read",
+    "args": [
+      {
+        "name": "dimension",
+        "required": true,
+        "type": "enum",
+      },
+    ],
+    "effect": "read",
+    "id": "costs.by",
+    "options": [
+      {
+        "name": "days",
+        "required": false,
+        "type": "integer",
+      },
+      {
+        "name": "group",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
     "action": "costs:write",
     "args": [],
     "effect": "write",

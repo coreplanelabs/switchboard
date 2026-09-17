@@ -40,7 +40,7 @@ import { createReviewAbridge } from "../lib/reviewAbridge";
 import PrReviewPanel from "../modules/pr-review/PrReviewPanel.vue";
 import { panelTitle } from "../modules/pr-review/types";
 import { durationTone, heatStyle } from "../lib/durationTone";
-import { formatClock, formatDateTime, formatDuration, formatLocalIso } from "../lib/format";
+import { formatClock, formatDateTime, formatDuration, formatLocalIso, formatUsd } from "../lib/format";
 import { githubCommitUrl, githubPrUrl, githubRepoUrl, githubTreeUrl, shortSha } from "../lib/githubLinks";
 import { phasePaint } from "../lib/termPaint";
 import { statusLabel } from "../lib/indexRow";
@@ -132,6 +132,19 @@ const delivery = computed(() =>
   ),
 );
 const endDuration = computed(() => (endMs.value === undefined ? "" : formatDuration(endMs.value, "clock")));
+/** The run's dollars beside its duration (costs.md item 4c): the record's cost through the
+ *  price table, `unpriced` when a model it ran on has no price, nothing for a record without
+ *  usage; each model's figure is the hover text. A live page has none — usage is summed at finish. */
+const cost = computed(() => (isHistory && seed?.mode === "history" ? seed.cost : undefined));
+const dollars = (usd: number | null): string => (usd === null ? "unpriced" : formatUsd(usd));
+const costText = computed(() => (cost.value ? dollars(cost.value.usd) : ""));
+const costTitle = computed(() =>
+  cost.value
+    ? Object.entries(cost.value.byModel)
+        .map(([ref, m]) => `${ref} ${dollars(m.usd)}`)
+        .join("\n")
+    : undefined,
+);
 // The header's total is painted on the run scale (item 24): a 40-minute run
 // announces itself before the reader scrolls to find where the time went.
 const endHeat = computed(() => durationTone(endMs.value, "run"));
@@ -459,6 +472,9 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
             :style="endPaint"
             :data-heat="endHeat.level"
             >{{ endDuration }}</span
+          >
+          <span v-if="costText" id="cost" class="cost text-xs tabular-nums text-muted" :title="costTitle"
+            >· {{ costText }}</span
           >
           <span v-if="delivery" id="delivery" class="text-xs text-muted">· {{ delivery }}</span>
         </template>

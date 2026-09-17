@@ -10,7 +10,7 @@ What is deliberately off, narrow on purpose, not yet proven, or a known wart, so
 ## Narrow on purpose
 
 - **Self-improvement proposes, never fixes.** Its only side effect is a labelled issue.
-- **No per-run cost accounting.** The cost-spike proxy is a run at twice the median time.
+- **A run's cost is list price, not the invoice.** Every finished run carries its tokens per model and is priced at `costs.prices` over the Anthropic list — on its page, in `runs get`, and summed by user, thread, channel, agent and model on the costs page. A model neither table knows reads `unpriced`, never $0; the per-run figure is never tied to the provider's bill (the costs page's reconciliation line does that per day, for the group).
 - **`review` is read-only by convention.** The hard boundary is the execution plane.
 - **DM scopes** are the manifest's choice.
 - **The friction ledger is run history.** `friction report` and `friction propose` see only what `runHistory` retains.

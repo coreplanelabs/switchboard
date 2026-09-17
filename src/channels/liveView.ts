@@ -906,6 +906,8 @@ export function createLiveViewHandler(
             ...(view.sealedAt !== undefined ? { sealedAt: view.sealedAt } : {}),
             ...(view.replyOk !== undefined ? { replyOk: view.replyOk } : {}),
             ...(runDurationMs(view) !== undefined ? { durationMs: runDurationMs(view) } : {}),
+            // The run's dollars beside its duration (costs.md item 4c); a record without usage has none.
+            ...(view.cost !== undefined ? { cost: view.cost } : {}),
             ...(view.truncated !== undefined ? { truncated: view.truncated } : {}),
             // Tokenless: the files are read under the same decision as this page (item 26).
             ...artifactsSeed(route.id),

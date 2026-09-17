@@ -20,7 +20,7 @@ declare module 'vue' {
     ChatComposer: typeof import('./src/components/home/ChatComposer.vue')['default']
     ConversationRail: typeof import('./src/components/home/ConversationRail.vue')['default']
     CostChart: typeof import('./src/components/costs/CostChart.vue')['default']
-    CostsByUser: typeof import('./src/components/costs/CostsByUser.vue')['default']
+    CostsByDimension: typeof import('./src/components/costs/CostsByDimension.vue')['default']
     DocsLink: typeof import('./src/components/DocsLink.vue')['default']
     EmptyState: typeof import('./src/components/home/EmptyState.vue')['default']
     ExpandableText: typeof import('./src/components/ExpandableText.vue')['default']

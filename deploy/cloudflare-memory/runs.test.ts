@@ -2,7 +2,6 @@ import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare
 import { describe, expect, it } from "vitest";
 import type { RunRecord } from "../../src/core/runRecord.ts";
 import { FRICTION_CATEGORIES } from "../../src/core/runFriction.ts";
-import { dayOf } from "../../src/core/runUsage.ts";
 import { RUN_EVENT_INSERT_BATCH, RunHistoryDO } from "./worker.ts";
 
 // Feature: docs/reference/specs/run-history.md — the RunHistoryDO: the durable
@@ -100,11 +99,11 @@ const putDirect = (
   proposal?: { policy: Record<string, number>; policyUpdatedAt: number },
 ) => runInDurableObject(stubOf(key), (inst: RunHistoryDO) => inst.put(rec, proposal));
 
-// docs/reference/specs/costs.md (cost by user): the record's usage is stored beside
-// the row; the by-user aggregate sums per requester and UTC day, bills a child
-// to its parent's requester, and fills in a record written before the field
-// from its stored model.turn events as it answers.
-describe("run usage by user", () => {
+// docs/reference/specs/run-history.md item 56: the record's usage is stored beside
+// the row; `/runs/usage` answers one row per run with its thread, channel and
+// agent, names the parents outside the batch, and fills in a record written
+// before the field from its stored model.turn events as it answers.
+describe("run usage", () => {
   const T = Date.UTC(2026, 8, 15, 5, 0, 0);
   const modelTurn = (seq: number, model: string, inputTokens: number, outputTokens: number) =>
     ({
@@ -119,7 +118,7 @@ describe("run usage by user", () => {
       seq,
     }) as unknown as RunRecord["events"][number];
 
-  it("put stores the record's usage; usage-by-user sums per user and day, bills a child to its parent, backfills a usage-less record from its events, and bounds the range to what is held", async () => {
+  it("put stores the record's usage; /runs/usage answers one row per run with its thread, channel and agent, names a parent outside the batch, backfills a usage-less record from its events, and bounds the range to what is held", async () => {
     const key = storeKey();
     const usage = (input: number, output: number) => ({
       turns: 1,
@@ -133,15 +132,22 @@ describe("run usage by user", () => {
         },
       },
     });
-    // Alice's run, with usage as every record written since carries it.
+    // Alice's run, with usage as every record written since carries it — finished a week before the range.
     await post("/runs/put", {
       storeKey: key,
-      record: record("alice-1", T + 60_000, { usage: usage(100, 10), userName: "alice" }),
+      record: record("alice-1", T - DAY, { usage: usage(100, 10), userName: "alice" }),
     });
-    // A child the coordinator started for alice: its own user_id is the coordinator's.
+    // A child the coordinator started for alice, in the unit's thread on the coding agent: its own
+    // user_id is the coordinator's, and its parent is outside the range asked below.
     await post("/runs/put", {
       storeKey: key,
-      record: record("child-1", T + 20_000, { userId: "http:coordinator", parentRunId: "alice-1", usage: usage(1, 1) }),
+      record: record("child-1", T + 20_000, {
+        userId: "http:coordinator",
+        parentRunId: "alice-1",
+        threadKey: "slack:C1:9",
+        agent: "coding",
+        usage: usage(1, 1),
+      }),
     });
     // Bob's record from before the field existed: no usage, but the turn is in its events.
     const legacy = record("bob-old", T + 120_000, {
@@ -160,29 +166,28 @@ describe("run usage by user", () => {
       record: record("alice-2", T + 86_400_000, { usage: usage(5, 5), userName: "alice" }),
     });
 
-    const first = await post("/runs/usage-by-user", { storeKey: key, sinceMs: T - 1, untilMs: T + 2 * 86_400_000 });
+    const first = await post("/runs/usage", { storeKey: key, sinceMs: T - 1, untilMs: T + 2 * 86_400_000 });
     expect(first.status).toBe(200);
-    const rows = first.data.rows as Array<Record<string, unknown>>;
-    expect(rows.map((r) => `${r.day} ${r.userId} runs=${r.runs}`)).toEqual([
-      `${dayOf(T)} slack:UALICE runs=2`,
-      `${dayOf(T)} slack:UBOB runs=1`,
-      `${dayOf(T + 86_400_000)} slack:UALICE runs=1`,
+    const runs = first.data.runs as Array<Record<string, unknown>>;
+    // One row per run, oldest finish first, each with its own requester, thread, channel and agent.
+    expect(runs.map((r) => `${r.id} ${r.userId} ${r.threadKey} ${r.channelId} ${r.agent}`)).toEqual([
+      "child-1 http:coordinator slack:C1:9 slack:C1 coding",
+      "bob-old slack:UBOB slack:C1:1 slack:C1 review",
+      "alice-2 slack:UALICE slack:C1:1 slack:C1 review",
     ]);
-    const alice15 = rows[0] as {
-      usage: { turns: number; byModel: Record<string, { inputTokens: number }> };
-      userName: string;
-      wallMs: number;
-    };
-    expect(alice15.userName).toBe("alice");
-    expect(alice15.usage.turns).toBe(2);
-    expect(alice15.usage.byModel["anthropic/claude-fable-5"].inputTokens).toBe(101);
-    expect(alice15.wallMs).toBe(5000 + 5000); // each fixture run is 5 s wall clock
+    const child = runs[0] as { parentRunId: string; usage: { turns: number }; startedAt: number; finishedAt: number };
+    expect(child.parentRunId).toBe("alice-1");
+    expect(child.usage.turns).toBe(1);
+    expect(child.finishedAt - child.startedAt).toBe(5000); // each fixture run is 5 s wall clock
+    // The parent outside the range is named so the bot can bill the child to alice.
+    expect(first.data.parents).toEqual({ "alice-1": { userId: "slack:UALICE", userName: "alice" } });
     // Bob's legacy row was priced from its events on this read: not pending, and written back.
-    const bob = rows[1] as { usage: { byModel: Record<string, { inputTokens: number }> } };
+    const bob = runs[1] as { userName: string; usage: { byModel: Record<string, { inputTokens: number }> } };
+    expect(bob.userName).toBe("bob");
     expect(bob.usage.byModel["anthropic/claude-haiku-4-5"].inputTokens).toBe(40);
     expect(first.data.pending).toBe(0);
     expect(first.data.retentionDays).toBe(30);
-    expect(first.data.earliestFinishedAt).toBe(T + 20_000);
+    expect(first.data.earliestFinishedAt).toBe(T - DAY);
     const stored = await runInDurableObject(
       stubOf(key),
       async (_inst: RunHistoryDO, state) =>
@@ -191,25 +196,24 @@ describe("run usage by user", () => {
           .one().usage_json,
     );
     expect(JSON.parse(stored ?? "null")).toMatchObject({ turns: 1 });
-    // The range is honoured: the second day alone.
-    const second = await post("/runs/usage-by-user", {
+    // The range is honoured: the second day alone, and no parent to name.
+    const second = await post("/runs/usage", {
       storeKey: key,
       sinceMs: T + 86_000_000,
       untilMs: T + 2 * 86_400_000,
     });
-    expect((second.data.rows as unknown[]).length).toBe(1);
+    expect((second.data.runs as Array<{ id: string }>).map((r) => r.id)).toEqual(["alice-2"]);
+    expect(second.data.parents).toEqual({});
   });
 
   it("refuses a malformed range by name", async () => {
     const key = storeKey();
-    expect((await post("/runs/usage-by-user", { storeKey: key, sinceMs: 10, untilMs: 5 })).status).toBe(400);
-    expect((await post("/runs/usage-by-user", { storeKey: key, sinceMs: 0, untilMs: 400 * 86_400_000 })).status).toBe(
-      400,
-    );
-    expect((await post("/runs/usage-by-user", { storeKey: key, sinceMs: "x", untilMs: 5 })).status).toBe(400);
-    const empty = await post("/runs/usage-by-user", { storeKey: key, sinceMs: 0, untilMs: 1 });
+    expect((await post("/runs/usage", { storeKey: key, sinceMs: 10, untilMs: 5 })).status).toBe(400);
+    expect((await post("/runs/usage", { storeKey: key, sinceMs: 0, untilMs: 400 * 86_400_000 })).status).toBe(400);
+    expect((await post("/runs/usage", { storeKey: key, sinceMs: "x", untilMs: 5 })).status).toBe(400);
+    const empty = await post("/runs/usage", { storeKey: key, sinceMs: 0, untilMs: 1 });
     expect(empty.status).toBe(200);
-    expect(empty.data).toMatchObject({ rows: [], pending: 0 });
+    expect(empty.data).toMatchObject({ runs: [], parents: {}, pending: 0 });
   });
 });
 

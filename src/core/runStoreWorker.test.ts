@@ -181,35 +181,54 @@ describe("WorkerRunStore", () => {
     expect(item.diagnosis.byCategory.slow_tool).toEqual({ count: 0, durationMs: 0 });
   });
 
-  it("usageByUser posts /runs/usage-by-user with the range and re-validates the report; a malformed report is a PermanentStoreError", async () => {
-    const report = {
-      rows: [
+  it("usage posts /runs/usage with the range, re-validates the per-run rows and folds them into the cells — a child billed to the parent the Worker named; a malformed answer is a PermanentStoreError", async () => {
+    const usage = {
+      turns: 2,
+      byModel: {
+        "anthropic/m": { turns: 2, inputTokens: 3, outputTokens: 4, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      },
+    };
+    const rows = {
+      runs: [
         {
-          userId: "slack:UALICE",
-          userName: "alice",
-          day: dayOf(0),
-          runs: 2,
-          wallMs: 10_000,
-          usage: {
-            turns: 2,
-            byModel: {
-              "anthropic/m": { turns: 2, inputTokens: 3, outputTokens: 4, cacheReadTokens: 0, cacheWriteTokens: 0 },
-            },
-          },
+          id: "child-1",
+          userId: "http:coordinator",
+          parentRunId: "alice-old",
+          threadKey: "slack:C1:9",
+          channelId: "slack:C1",
+          agent: "coding",
+          startedAt: 0,
+          finishedAt: 10_000,
+          usage,
+        },
+        {
+          id: "bob-legacy",
+          userId: "slack:UBOB",
+          threadKey: "slack:C1:2",
+          channelId: "slack:C1",
+          startedAt: 0,
+          finishedAt: 5_000,
         },
       ],
+      parents: { "alice-old": { userId: "slack:UALICE", userName: "alice" } },
       pending: 1,
       earliestFinishedAt: 5,
       retentionDays: 30,
     };
-    const { fetch, calls } = fakeFetch(() => ({ status: 200, body: report }));
+    const { fetch, calls } = fakeFetch(() => ({ status: 200, body: rows }));
     const store = new WorkerRunStore({ ...OPTS, fetch });
-    expect(await store.usageByUser({ sinceMs: 1, untilMs: 100 })).toEqual(report);
-    expect(calls[0].url).toBe("https://state.example/runs/usage-by-user");
+    const report = await store.usage({ sinceMs: 1, untilMs: 100 });
+    expect(report.rows.map((r) => `${r.day} ${r.userId} ${r.threadKey} ${r.agent}`)).toEqual([
+      `${dayOf(0)} slack:UALICE slack:C1:9 coding`,
+      `${dayOf(0)} slack:UBOB slack:C1:2 unknown`,
+    ]);
+    expect(report.rows[0]).toMatchObject({ userName: "alice", channelId: "slack:C1", runs: 1, wallMs: 10_000, usage });
+    expect(report).toMatchObject({ pending: 1, earliestFinishedAt: 5, retentionDays: 30 });
+    expect(calls[0].url).toBe("https://state.example/runs/usage");
     expect(calls[0].body).toEqual({ storeKey: "runs:default", sinceMs: 1, untilMs: 100 });
     expect(calls[0].body.policy).toBeUndefined();
-    const bad = new WorkerRunStore({ ...OPTS, fetch: fakeFetch(() => ({ status: 200, body: { rows: "no" } })).fetch });
-    await expect(bad.usageByUser({ sinceMs: 1, untilMs: 100 })).rejects.toBeInstanceOf(PermanentStoreError);
+    const bad = new WorkerRunStore({ ...OPTS, fetch: fakeFetch(() => ({ status: 200, body: { runs: "no" } })).fetch });
+    await expect(bad.usage({ sinceMs: 1, untilMs: 100 })).rejects.toBeInstanceOf(PermanentStoreError);
   });
 
   it("rejects a bad id locally without a request", async () => {

@@ -82,6 +82,10 @@ export const POLICY: readonly Rule[] = [
   { action: "friction:write", resource: "command", when: [grant("friction:write")] },
 
   // ── costs ────────────────────────────────────────────────────────────────
+  // `costs by` reads the snapshot's arithmetic: what every browser session
+  // holds (every group's read) and what a Slack user or a token is granted —
+  // never a chat baseline, since a by-user table names who spent what.
+  { action: "costs:read", resource: "command", when: [grant("costs:read")] },
   // `costs snapshot` reads both billing providers and replaces what every
   // viewer of the costs page sees: the grant, never a baseline (the admins'
   // `all` and a named `grants` entry hold it).

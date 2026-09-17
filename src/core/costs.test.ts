@@ -1,9 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  ANTHROPIC_PRICES,
   AnthropicCostReportSource,
-  anthropicPriceOf,
-  anthropicTokensCostUsd,
   CLOUDFLARE_PRICES,
   COSTS_SNAPSHOT_EVERY_HOURS,
   CloudflareGraphqlUsageSource,
@@ -514,6 +511,17 @@ describe("parseCostsConfig", () => {
         /costs\.snapshot\.alertChannel must be a platform-namespaced channel id/,
       );
   });
+  // costs.md item 4b: the operator's price table rides the block and is validated with it.
+  it("prices is the empty table when absent, a table of per-million rates keyed by provider/model when given, and a malformed one is refused by name", () => {
+    const base = { cloudflareAccountId: "x", groups: { g: { workers: ["w"] } } };
+    expect(parseCostsConfig(base)?.prices).toEqual({});
+    const gpt = { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0 };
+    expect(parseCostsConfig({ ...base, prices: { "openai/gpt-5": gpt } })?.prices).toEqual({ "openai/gpt-5": gpt });
+    expect(() => parseCostsConfig({ ...base, prices: { "openai/gpt-5": { input: 1 } } })).toThrow(
+      /costs\.prices\.openai\/gpt-5\.output must be/,
+    );
+    expect(() => parseCostsConfig({ ...base, prices: "cheap" })).toThrow(/costs\.prices must be a mapping/);
+  });
   it("returns undefined for absent config and throws on a malformed one (never a silent half-config)", () => {
     expect(parseCostsConfig(undefined)).toBeUndefined();
     expect(() => parseCostsConfig({ groups: {} })).toThrow(/cloudflareAccountId/);
@@ -677,50 +685,6 @@ describe("CloudflareGraphqlUsageSource", () => {
 });
 
 const RANGE = { from: AUG_1, to: AUG_28, days: 28, partialLastDay: true };
-
-describe("Anthropic list prices", () => {
-  it("resolves a model id to its family's prices, a dated id included, the longest family winning", () => {
-    expect(anthropicPriceOf("claude-haiku-4-5-20251001")).toBe(ANTHROPIC_PRICES["claude-haiku-4-5"]);
-    expect(anthropicPriceOf("claude-fable-5")).toBe(ANTHROPIC_PRICES["claude-fable-5"]);
-    // 5.1 is not "5 with a suffix": a dated suffix is eight digits, nothing else.
-    expect(anthropicPriceOf("claude-fable-5-1")).toBe(ANTHROPIC_PRICES["claude-fable-5-1"]);
-    expect(anthropicPriceOf("claude-fable-5-1-20260901")).toBe(ANTHROPIC_PRICES["claude-fable-5-1"]);
-    expect(ANTHROPIC_PRICES["claude-fable-5-1"].cacheRead).not.toBe(ANTHROPIC_PRICES["claude-fable-5"].cacheRead);
-    expect(anthropicPriceOf("claude-fable-5-turbo")).toBeUndefined();
-    expect(anthropicPriceOf("gpt-9")).toBeUndefined();
-  });
-
-  it("prices a million of each token kind at the family's per-MTok rates; an unknown model prices to undefined, never 0", () => {
-    const million = 1_000_000;
-    expect(
-      anthropicTokensCostUsd("claude-fable-5", {
-        uncachedInput: million,
-        output: million,
-        cacheRead: million,
-        cacheWrite5m: million,
-        cacheWrite1h: million,
-      }),
-    ).toBeCloseTo(10 + 50 + 1 + 12.5 + 20, 9);
-    expect(
-      anthropicTokensCostUsd("claude-haiku-4-5-20251001", {
-        uncachedInput: 32_975,
-        output: 4_056,
-        cacheRead: 173_049,
-        cacheWrite5m: 192_754,
-        cacheWrite1h: 0,
-      }),
-    ).toBeCloseTo((32_975 * 1 + 4_056 * 5 + 173_049 * 0.1 + 192_754 * 1.25) / million, 9);
-    expect(
-      anthropicTokensCostUsd("claude-future-9", {
-        uncachedInput: 1,
-        output: 1,
-        cacheRead: 0,
-        cacheWrite5m: 0,
-        cacheWrite1h: 0,
-      }),
-    ).toBeUndefined();
-  });
-});
 
 describe("AnthropicCostReportSource", () => {
   /** One hourly usage bucket of the Admin usage report, as the API spells it. */

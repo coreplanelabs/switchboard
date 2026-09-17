@@ -21,9 +21,10 @@ import { wrapUntrusted } from "../src/core/untrusted.js";
 import type { UnitFacts } from "../src/core/unitRuns.js";
 import { ALL_CAPABILITIES, NO_CAPABILITIES } from "../src/core/capabilities.js";
 import type { CostReport, DailyCost } from "../src/core/costs.js";
-import { buildUserCostReport } from "../src/core/costsByUser.js";
+import { buildCostsByReport, type CostDimension, type CostsByReport } from "../src/core/costsBy.js";
+import { DIMENSION_OF_VIEW, type CostsByView, type CostsView } from "../src/channels/costsView.js";
 import type { CostsSnapshotStatus } from "../src/core/costsSnapshot.js";
-import type { RunUsage, UserDayUsage } from "../src/core/runUsage.js";
+import type { RunUsage, UsageRow } from "../src/core/runUsage.js";
 import { buildDeliveryReport, resolveDeliveryRange, type PullRequestFacts } from "../src/core/delivery.js";
 import { FAVICON_ICO_SVG } from "../src/channels/favicon.js";
 import { isRunSchedule, SCHEDULES } from "../src/core/schedules.js";
@@ -1143,13 +1144,18 @@ const previewUsage = (
   },
 });
 const COSTS_USERS_FROM = 10;
-const COSTS_USER_ROWS: UserDayUsage[] = COSTS_DAYS.slice(COSTS_USERS_FROM).flatMap((d, j) => {
+const COSTS_CHANNEL = "slack:C0PREVIEW";
+const COSTS_USER_ROWS: UsageRow[] = COSTS_DAYS.slice(COSTS_USERS_FROM).flatMap((d, j) => {
   const i = j + COSTS_USERS_FROM;
-  const rows: UserDayUsage[] = [
+  // One thread a day per person, each on the agent they mostly use.
+  const rows: UsageRow[] = [
     {
       userId: "slack:U0ALICE00",
       userName: "alice",
       day: d.date,
+      threadKey: `${COSTS_CHANNEL}:1710000000.${String(i).padStart(6, "0")}`,
+      channelId: COSTS_CHANNEL,
+      agent: "coding",
       runs: 3 + (i % 3),
       wallMs: (40 + (i % 5) * 6) * 60_000,
       usage: previewUsage("claude-fable-5", 600_000 + i * 20_000, 90_000 + i * 3_000, 2_400_000, 500_000),
@@ -1158,6 +1164,9 @@ const COSTS_USER_ROWS: UserDayUsage[] = COSTS_DAYS.slice(COSTS_USERS_FROM).flatM
       userId: "slack:U0SAM0000",
       userName: "sam",
       day: d.date,
+      threadKey: `${COSTS_CHANNEL}:1710000000.${String(100 + i).padStart(6, "0")}`,
+      channelId: COSTS_CHANNEL,
+      agent: "review",
       runs: 1 + (i % 2),
       wallMs: (15 + (i % 4) * 5) * 60_000,
       usage: previewUsage("claude-haiku-4-5-20251001", 900_000, 120_000, 3_000_000, 400_000),
@@ -1168,27 +1177,32 @@ const COSTS_USER_ROWS: UserDayUsage[] = COSTS_DAYS.slice(COSTS_USERS_FROM).flatM
       userId: "slack:U0PRIYA00",
       userName: "priya",
       day: d.date,
+      threadKey: `slack:D0PRIYA0:1710000000.${String(200 + i).padStart(6, "0")}`,
+      channelId: "slack:D0PRIYA0",
+      agent: "general",
       runs: 1,
       wallMs: 25 * 60_000,
       usage: previewUsage("claude-legacy-2", 300_000, 40_000, 0, 0),
     });
   return rows;
 });
-const COSTS_USERS = buildUserCostReport({
-  group: COSTS.group,
-  range: COSTS.range,
-  usage: {
-    rows: COSTS_USER_ROWS,
-    pending: 2,
-    earliestFinishedAt: NOW - (29 - COSTS_USERS_FROM) * 86_400_000,
-    retentionDays: 30,
-  },
-  days: COSTS_DAYS,
-  historyOn: true,
-  viewerUserIds: ["slack:U0ALICE00"],
-  matchedByEmail: true,
-  generatedAt: NOW,
-});
+/** One dimension's report over the same cells (costs.md items 10–10a): the same builder the bot runs. */
+const costsBy = (dimension: CostDimension): CostsByReport =>
+  buildCostsByReport({
+    group: COSTS.group,
+    dimension,
+    range: COSTS.range,
+    usage: {
+      rows: COSTS_USER_ROWS,
+      pending: 2,
+      earliestFinishedAt: NOW - (29 - COSTS_USERS_FROM) * 86_400_000,
+      retentionDays: 30,
+    },
+    days: COSTS_DAYS,
+    historyOn: true,
+    viewer: { userIds: ["slack:U0ALICE00"], matchedByEmail: true },
+    generatedAt: NOW,
+  });
 
 // The delivery page's four weeks, built through the real aggregation so the
 // fixture cannot drift from the report shape: eight merged pull requests of
@@ -2264,6 +2278,20 @@ function page(
         events: HIST_STREAM as never,
         status: "completed",
         eventCount: HIST_STREAM.length + 3,
+        // The run's dollars beside its duration (costs.md item 4c): one model, priced at list.
+        cost: {
+          usd: 0.4185,
+          byModel: {
+            "anthropic/claude-fable-5-1": {
+              turns: 9,
+              inputTokens: 18_400,
+              outputTokens: 3_150,
+              cacheReadTokens: 214_000,
+              cacheWriteTokens: 1_900,
+              usd: 0.4185,
+            },
+          },
+        },
         receivedAt: RECEIVED_AT,
         startedAt: NOW - 2_400_000,
         finishedAt: HIST_FINISHED_AT,
@@ -2319,29 +2347,20 @@ function page(
   if (pathname.startsWith("/residents/"))
     return { title: "acme/web", seed: { page: "resident", slug: "acme/web", record: RESIDENTS.residents[0] } };
   if (pathname.startsWith("/costs")) {
-    const users = new URLSearchParams(search).get("view") === "users";
+    const asked = new URLSearchParams(search).get("view");
+    const view: CostsView = asked !== null && asked in DIMENSION_OF_VIEW ? (asked as CostsByView) : "daily";
     return {
       title: "Switchboard spend",
-      seed: users
-        ? {
-            page: "costs",
-            group: COSTS.group,
-            report: COSTS,
-            groups: ["api", "web"],
-            view: "users",
-            users: COSTS_USERS,
-            snapshot: COSTS_SNAPSHOT,
-            canSnapshot: true,
-          }
-        : {
-            page: "costs",
-            group: COSTS.group,
-            report: COSTS,
-            groups: ["api", "web"],
-            view: "daily",
-            snapshot: COSTS_SNAPSHOT,
-            canSnapshot: true,
-          },
+      seed: {
+        page: "costs",
+        group: COSTS.group,
+        report: COSTS,
+        groups: ["api", "web"],
+        view,
+        ...(view === "daily" ? {} : { by: costsBy(DIMENSION_OF_VIEW[view]) }),
+        snapshot: COSTS_SNAPSHOT,
+        canSnapshot: true,
+      },
     };
   }
   if (pathname.startsWith("/settings")) {

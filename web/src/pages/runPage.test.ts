@@ -313,6 +313,33 @@ describe("RunPage — the timeline (item 25)", () => {
 });
 
 describe("RunPage — history mode", () => {
+  // costs.md item 4c: the run's dollars beside the duration, the per-model figures on hover.
+  it("heads with the run's cost beside the duration (item 22): dollars, unpriced for a model without a price, nothing without usage; the per-model figures on hover", () => {
+    const fable = { turns: 3, inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0, usd: 0.0384 };
+    const priced = mountApp(RunPage, {
+      seed: historySeed([], {
+        status: "completed",
+        durationMs: 147_000,
+        cost: { usd: 0.0384, byModel: { "anthropic/claude-fable-5-1": fable } },
+      }),
+    });
+    expect(priced.find(".conn .dur").text()).toBe("2m 27s");
+    expect(priced.find(".conn #cost").text()).toBe("· $0.038");
+    expect(priced.find(".conn #cost").attributes("title")).toBe("anthropic/claude-fable-5-1 $0.038");
+    const unpriced = mountApp(RunPage, {
+      seed: historySeed([], {
+        status: "completed",
+        cost: { usd: null, byModel: { "anthropic/claude-fable-5-1": fable, "openai/gpt-5": { ...fable, usd: null } } },
+      }),
+    });
+    expect(unpriced.find(".conn #cost").text()).toBe("· unpriced");
+    expect(unpriced.find(".conn #cost").attributes("title")).toBe(
+      "anthropic/claude-fable-5-1 $0.038\nopenai/gpt-5 unpriced",
+    );
+    const none = mountApp(RunPage, { seed: historySeed([], { status: "completed", durationMs: 4000 }) });
+    expect(none.find(".conn #cost").exists()).toBe(false);
+  });
+
   // docs/reference/specs/thread-admission.md item 2: a steered follow-up is a second `input`
   // on the same run — its own block in the timeline where the run read it,
   // never in the request's place.

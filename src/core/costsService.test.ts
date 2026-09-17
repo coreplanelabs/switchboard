@@ -51,12 +51,15 @@ const USAGE: CloudflareUsage = {
   ],
 };
 const LLM: LlmCostRow[] = [{ date: AUG_28, workspaceId: null, amountUsd: 40 }];
+/** The one thread every Slack cell of the fixture is in. */
+const WHERE = { threadKey: "slack:C1:1.0", channelId: "slack:C1", agent: "general" };
 const usageReport: RunUsageReport = {
   rows: [
     {
       userId: "slack:UALICE",
       userName: "alice",
       day: AUG_28,
+      ...WHERE,
       runs: 2,
       wallMs: 3_600_000,
       usage: {
@@ -76,16 +79,27 @@ const usageReport: RunUsageReport = {
       userId: "slack:UBOB",
       userName: "bob",
       day: AUG_28,
+      ...WHERE,
       runs: 1,
       wallMs: 3_600_000,
       usage: { turns: 0, byModel: {} },
     },
-    { userId: "http:ops", day: AUG_29, runs: 1, wallMs: 1_000, usage: { turns: 0, byModel: {} } },
+    {
+      userId: "http:ops",
+      day: AUG_29,
+      threadKey: "http:ops:1",
+      channelId: "http:ops",
+      agent: "general",
+      runs: 1,
+      wallMs: 1_000,
+      usage: { turns: 0, byModel: {} },
+    },
     // An app nobody was found behind (slack-channel.md item 13): a requester, never a viewer.
     {
       userId: "slack:bot:B0CLAUDE",
       userName: "Claude [ci]",
       day: AUG_29,
+      ...WHERE,
       runs: 1,
       wallMs: 1_000,
       usage: { turns: 0, byModel: {} },
@@ -97,7 +111,7 @@ const usageReport: RunUsageReport = {
 };
 
 function snapshotterWith(runUsage: RunUsageReport | null = usageReport, at = T0) {
-  const runStore = runUsage ? ({ usageByUser: async () => runUsage } as unknown as RunStore) : undefined;
+  const runStore = runUsage ? ({ usage: async () => runUsage } as unknown as RunStore) : undefined;
   return new CostsSnapshotter(
     {
       cloudflare: { fetchUsage: async () => USAGE },
@@ -114,7 +128,7 @@ describe("NullCostsService — the service of a process without cost reporting",
     const service = new NullCostsService();
     expect(service.groups()).toEqual([]);
     await expect(service.report("switchboard", null)).rejects.toThrow(COSTS_OFF_MESSAGE);
-    await expect(service.usersReport("switchboard", null, undefined)).rejects.toThrow(COSTS_OFF_MESSAGE);
+    await expect(service.byReport("switchboard", null, "user", undefined)).rejects.toThrow(COSTS_OFF_MESSAGE);
     await expect(service.snapshot("casey")).rejects.toThrow(COSTS_OFF_MESSAGE);
     expect(service.status()).toEqual({
       snapshot: null,
@@ -131,7 +145,7 @@ describe("createCostsService", () => {
   it("before the first snapshot lands both reports refuse with NoCostsSnapshotError — nothing reads a source in the request — and the status says none", async () => {
     const service = createCostsService(cfg, snapshotterWith());
     await expect(service.report("switchboard", "7")).rejects.toBeInstanceOf(NoCostsSnapshotError);
-    await expect(service.usersReport("switchboard", "7", undefined)).rejects.toThrow(/no cost snapshot yet/);
+    await expect(service.byReport("switchboard", "7", "user", undefined)).rejects.toThrow(/no cost snapshot yet/);
     expect(service.status().snapshot).toBeNull();
     await expect(service.report("nope", null)).rejects.toThrow(/unknown cost group/);
   });
@@ -168,11 +182,11 @@ describe("createCostsService", () => {
     const service = createCostsService(cfg, snapshots, {
       emailOfSlackUser: async (id) => (looked.push(id), emails[id]),
     });
-    const r = await service.usersReport("switchboard", "3", { sub: "s1", email: "alice@example.com" });
+    const r = await service.byReport("switchboard", "3", "user", { sub: "s1", email: "alice@example.com" });
     expect(r.range).toEqual({ from: AUG_28, to: AUG_30, days: 3, partialLastDay: true });
     expect(r.coverage).toMatchObject({ from: AUG_28, historyOn: true, retentionDays: 30, clamped: false });
-    expect(r.users.map((u) => u.userId)).toEqual(["slack:UALICE", "slack:UBOB", "http:ops", "slack:bot:B0CLAUDE"]);
-    expect(r.users[0].llmUsd).toBeCloseTo(1, 9); // 1M haiku input at $1/MTok
+    expect(r.rows.map((u) => u.key)).toEqual(["slack:UALICE", "slack:UBOB", "http:ops", "slack:bot:B0CLAUDE"]);
+    expect(r.rows[0].llmUsd).toBeCloseTo(1, 9); // 1M haiku input at $1/MTok
     expect(r.pending).toBe(1);
     expect(r.viewer).toEqual({ userIds: ["slack:UALICE"], matchedByEmail: true });
     expect(r.snapshot?.takenBy).toBe("schedule");
@@ -180,31 +194,69 @@ describe("createCostsService", () => {
     // A second read looks up only the user whose email was unknown: a known
     // email is cached for the process, an unknown one is never pinned.
     emails["slack:UBOB"] = "bob@example.com";
-    const again = await service.usersReport("switchboard", "3", { sub: "s2", email: "bob@example.com" });
+    const again = await service.byReport("switchboard", "3", "user", { sub: "s2", email: "bob@example.com" });
     expect(looked.sort()).toEqual(["slack:UALICE", "slack:UBOB", "slack:UBOB"]);
     expect(again.viewer).toEqual({ userIds: ["slack:UBOB"], matchedByEmail: true });
+  });
+
+  // costs.md item 10a: the other dimensions are the same snapshot keyed differently; no viewer, no lookups.
+  it("the thread, channel, agent and model reports come from the same snapshot keyed by the dimension, with no viewer and no email lookup spent", async () => {
+    const looked: string[] = [];
+    const snapshots = snapshotterWith();
+    await snapshots.refresh("schedule");
+    const service = createCostsService(cfg, snapshots, {
+      emailOfSlackUser: async (id) => (looked.push(id), "alice@example.com"),
+    });
+    const byThread = await service.byReport("switchboard", "3", "thread", { sub: "s1", email: "alice@example.com" });
+    expect(byThread.dimension).toBe("thread");
+    expect(byThread.rows.map((r) => r.key)).toEqual(["slack:C1:1.0", "http:ops:1"]);
+    expect(byThread.viewer).toBeUndefined();
+    expect(looked).toEqual([]);
+    const byChannel = await service.byReport("switchboard", "3", "channel", undefined);
+    expect(byChannel.rows.map((r) => r.key)).toEqual(["slack:C1", "http:ops"]);
+    const byAgent = await service.byReport("switchboard", "3", "agent", undefined);
+    expect(byAgent.rows.map((r) => r.key)).toEqual(["general"]);
+    const byModel = await service.byReport("switchboard", "3", "model", undefined);
+    expect(byModel.cloudAllocated).toBe(false);
+    expect(byModel.rows.map((r) => [r.key, r.turns, r.llmUsd])).toEqual([["anthropic/claude-haiku-4-5", 1, 1]]);
+    expect(byModel.snapshot?.takenBy).toBe("schedule");
   });
 
   it("with no viewer email, or no lookup wired, nothing is matched and the report says so; with run history off the report is empty and says so", async () => {
     const snapshots = snapshotterWith();
     await snapshots.refresh("schedule");
     const noLookup = createCostsService(cfg, snapshots);
-    expect((await noLookup.usersReport("switchboard", null, { sub: "s1", email: "alice@example.com" })).viewer).toEqual(
-      {
-        userIds: [],
-        matchedByEmail: false,
-      },
-    );
+    expect(
+      (await noLookup.byReport("switchboard", null, "user", { sub: "s1", email: "alice@example.com" })).viewer,
+    ).toEqual({
+      userIds: [],
+      matchedByEmail: false,
+    });
     const withLookup = createCostsService(cfg, snapshots, { emailOfSlackUser: async () => "x@y" });
-    expect((await withLookup.usersReport("switchboard", null, { sub: "svc" })).viewer).toEqual({
+    expect((await withLookup.byReport("switchboard", null, "user", { sub: "svc" })).viewer).toEqual({
       userIds: [],
       matchedByEmail: false,
     });
     const offSnapshots = snapshotterWith(null);
     await offSnapshots.refresh("schedule");
-    const r = await createCostsService(cfg, offSnapshots).usersReport("switchboard", null, undefined);
-    expect(r.users).toEqual([]);
+    const r = await createCostsService(cfg, offSnapshots).byReport("switchboard", null, "user", undefined);
+    expect(r.rows).toEqual([]);
     expect(r.coverage.historyOn).toBe(false);
+  });
+
+  // costs.md item 4b: the by-user report prices through the configured table.
+  it("prices the by-user report at `costs.prices` where the table names a ref, the list elsewhere", async () => {
+    const priced = parseCostsConfig({
+      cloudflareAccountId: "acct-example",
+      groups: { switchboard: { workers: ["switchboard"], containerApps: { "app-bot": "bot" } } },
+      prices: { "anthropic/claude-haiku-4-5": { input: 2, output: 5, cacheRead: 0.1, cacheWrite: 1.25 } },
+    })!;
+    const snapshots = snapshotterWith();
+    await snapshots.refresh("schedule");
+    const r = await createCostsService(priced, snapshots).byReport("switchboard", "3", "user", undefined);
+    expect(r.rows[0].llmUsd).toBeCloseTo(2, 9); // 1M haiku input at the configured $2/MTok, not the list's $1
+    const list = await createCostsService(cfg, snapshots).byReport("switchboard", "3", "user", undefined);
+    expect(list.rows[0].llmUsd).toBeCloseTo(1, 9);
   });
 
   it("costsFromConfig: the production wiring from the block and the env — off without the Cloudflare token, the LLM line on with the admin key, the snapshot kept in memory (with a warning) when no `*.worker` block names the state Worker", () => {

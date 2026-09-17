@@ -337,9 +337,9 @@ function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION
       expect(await store.get("old")).toBeNull();
     });
 
-    // docs/reference/specs/costs.md (cost by user): a local store aggregates over its
-    // records, pricing a record without usage from its events (they are at hand).
-    it("usageByUser sums per requester and UTC day within the range, bills a child to its parent's requester, and prices a usage-less record from its events", async () => {
+    // docs/reference/specs/costs.md items 10–10a: a local store aggregates over its
+    // records into the usage cells, pricing a record without usage from its events (they are at hand).
+    it("usage sums per requester, thread, channel, agent and UTC day within the range, bills a child to its parent's requester, and prices a usage-less record from its events", async () => {
       const { store } = make();
       const turn = (seq: number, inputTokens: number) =>
         ({
@@ -353,22 +353,35 @@ function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION
           seq,
         }) as unknown as RunRecord["events"][number];
       await store.put(record("alice-1", NOW - 3_600_000, { userName: "alice", events: [turn(1, 100)] }));
+      // The child ran in the unit's own thread on the coding agent: its own cell, billed to alice.
       await store.put(
-        record("child", NOW - 3_500_000, { userId: "http:coordinator", parentRunId: "alice-1", events: [turn(1, 5)] }),
+        record("child", NOW - 3_500_000, {
+          userId: "http:coordinator",
+          parentRunId: "alice-1",
+          threadKey: "slack:C1:9",
+          agent: "coding",
+          events: [turn(1, 5)],
+        }),
       );
-      await store.put(record("bob-1", NOW - 3_000_000, { userId: "slack:UBOB", events: [turn(1, 7)] }));
+      await store.put(
+        record("bob-1", NOW - 3_000_000, { userId: "slack:UBOB", agent: undefined, events: [turn(1, 7)] }),
+      );
       await store.put(record("out-of-range", NOW - 10 * 86_400_000, { events: [turn(1, 999)] }));
-      const report = await store.usageByUser({ sinceMs: NOW - 86_400_000, untilMs: NOW });
+      const report = await store.usage({ sinceMs: NOW - 86_400_000, untilMs: NOW });
       expect(report.pending).toBe(0);
       expect(report.retentionDays).toBeGreaterThan(0);
       expect(report.earliestFinishedAt).toBe(NOW - 10 * 86_400_000);
-      expect(report.rows.map((r) => `${r.userId} runs=${r.runs}`)).toEqual([
-        "slack:UALICE runs=2",
-        "slack:UBOB runs=1",
+      expect(report.rows.map((r) => `${r.userId} ${r.threadKey} ${r.agent} runs=${r.runs}`)).toEqual([
+        "slack:UALICE slack:C1:1 review runs=1",
+        "slack:UALICE slack:C1:9 coding runs=1",
+        "slack:UBOB slack:C1:1 unknown runs=1",
       ]);
       expect(report.rows[0].userName).toBe("alice");
-      expect(report.rows[0].usage.byModel["anthropic/m"].inputTokens).toBe(105);
-      expect(report.rows[0].wallMs).toBe(10_000);
+      expect(report.rows[0].channelId).toBe("slack:C1");
+      expect(report.rows[0].usage.byModel["anthropic/m"].inputTokens).toBe(100);
+      expect(report.rows[0].wallMs).toBe(5_000);
+      expect(report.rows[1].userName).toBe("alice");
+      expect(report.rows[1].usage.byModel["anthropic/m"].inputTokens).toBe(5);
     });
 
     it("rewritten is true only when an existing record changed", async () => {
