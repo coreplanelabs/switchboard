@@ -1,15 +1,21 @@
 import type { RunEvent } from "./runEvents.js";
 
-// What a run cost in tokens, and who it belongs to — the data behind "cost by
-// user" on the costs page (docs/reference/specs/costs.md). Every provider call a
-// run makes is one `model.turn` span with the provider's own token counts as
-// attrs (metered by the model proxy or the runner; docs/reference/specs/tracing.md), so a
-// run's usage is the sum of those spans, per model. It is computed ONCE, at
-// finish, from the events still in memory (`assembleRunRecord`), and rides the
-// record — a record's events may be cut to fit the byte budget, so an aggregate
-// taken then is more faithful than one re-read later. A record written before
-// the field existed has none; the store fills it in from the run's stored
-// events on demand (the lazy backfill), and reports how many still wait.
+// What a run cost in tokens, and who it belongs to — the data behind the cost
+// dimensions of the costs page (docs/reference/specs/costs.md items 10–10a) and
+// the dollars on a run's own page. Every provider call a run makes is one
+// `model.turn` span with the provider's own token counts as attrs (metered by
+// the model proxy or the runner; docs/reference/specs/tracing.md), so a run's
+// usage is the sum of those spans, per model. It is computed ONCE, at finish,
+// from the events still in memory (`assembleRunRecord`), and rides the record —
+// a record's events may be cut to fit the byte budget, so an aggregate taken
+// then is more faithful than one re-read later. A record written before the
+// field existed has none; the store fills it in from the run's stored events
+// on demand (the lazy backfill), and reports how many still wait.
+//
+// The store answers one row per run (`RunUsageRows`); the bot folds them into
+// cells (`aggregateUsage`) — one per requester, thread, channel, agent and UTC
+// day of finish — so a snapshot holds the cube every dimension is read from
+// and never a row per run.
 
 export interface ModelUsage {
   turns: number;
@@ -27,6 +33,9 @@ export interface RunUsage {
 }
 
 export const UNKNOWN_MODEL = "unknown";
+
+/** The agent of a cell whose record names none (a record written before the field, a hand-built one). */
+export const UNKNOWN_AGENT = "unknown";
 
 const MODEL_TURN = "model.turn";
 
@@ -96,7 +105,7 @@ export function isRunUsage(v: unknown): v is RunUsage {
   return Object.values(u.byModel).every(isModelUsage);
 }
 
-// ---- the aggregate: who spent what, per UTC day ---------------------------------------
+// ---- the store's answer: one row per run -------------------------------------------------
 
 /** One finished run as the aggregate sees it — the record's identity fields and its usage. */
 export interface UsageRun {
@@ -105,22 +114,19 @@ export interface UsageRun {
   userName?: string;
   /** A child run is billed to whoever started its parent (run-history item 46). */
   parentRunId?: string;
+  /** The thread the run ran in and the channel it belongs to (platform-namespaced, invariant 4). */
+  threadKey: string;
+  channelId: string;
+  /** The agent the run resolved to; absent on a record that names none. */
+  agent?: string;
   startedAt: number;
   finishedAt: number;
   /** Absent on a record written before usage existed and not yet backfilled. */
   usage?: RunUsage;
 }
 
-export interface UserDayUsage {
-  userId: string;
-  userName?: string;
-  /** The UTC day the run finished, `YYYY-MM-DD`. */
-  day: string;
-  runs: number;
-  /** Summed wall-clock of the runs (finish − start), for allocating shared cloud spend. */
-  wallMs: number;
-  usage: RunUsage;
-}
+/** Whose run it is, as far as billing goes. */
+export type UsageIdentity = Pick<UsageRun, "userId" | "userName">;
 
 export interface RunUsageQuery {
   /** Runs that finished at or after this epoch ms … */
@@ -129,8 +135,43 @@ export interface RunUsageQuery {
   untilMs: number;
 }
 
+/** What the store answers (`POST /runs/usage`): the runs that finished in the
+ *  range, oldest finish first, and the identity of every parent a child names
+ *  that is outside the batch and known to the store — so the bot can bill the
+ *  child without a second read. */
+export interface RunUsageRows {
+  runs: UsageRun[];
+  parents: Record<string, UsageIdentity>;
+  /** Runs in range whose usage is not known yet (written before the field; backfill outstanding). */
+  pending: number;
+  /** The oldest finish the store still holds, so a page can bound its range to the data. */
+  earliestFinishedAt?: number;
+  retentionDays: number;
+}
+
+// ---- the aggregate: the usage cube --------------------------------------------------------
+
+/** One cell: the runs one requester was billed for in one thread, one channel,
+ *  on one agent, finishing on one UTC day. Every cost dimension is a sum over
+ *  these — by user, thread, channel or agent along a key, by model inside `usage`. */
+export interface UsageRow {
+  /** The UTC day the runs finished, `YYYY-MM-DD`. */
+  day: string;
+  /** The requester billed (a child's parent's). */
+  userId: string;
+  userName?: string;
+  threadKey: string;
+  channelId: string;
+  /** The agent, or `unknown` when the record names none. */
+  agent: string;
+  runs: number;
+  /** Summed wall-clock of the runs (finish − start), for allocating shared cloud spend. */
+  wallMs: number;
+  usage: RunUsage;
+}
+
 export interface RunUsageReport {
-  rows: UserDayUsage[];
+  rows: UsageRow[];
   /** Runs in range whose usage is not known yet (written before the field; backfill outstanding). */
   pending: number;
   /** The oldest finish the store still holds, so a page can bound its range to the data. */
@@ -140,34 +181,51 @@ export interface RunUsageReport {
 
 export const dayOf = (epochMs: number): string => new Date(epochMs).toISOString().slice(0, 10);
 
+const identityOf = (who: UsageIdentity): UsageIdentity => ({
+  userId: who.userId,
+  ...(who.userName ? { userName: who.userName } : {}),
+});
+
 /** Who a run is billed to: its parent's requester when it is a child and the
  *  parent is known (in the batch, or through `lookupParent`), else its own. */
 export function billedTo(
   run: UsageRun,
   batch: ReadonlyMap<string, UsageRun>,
-  lookupParent: (id: string) => Pick<UsageRun, "userId" | "userName"> | undefined,
-): Pick<UsageRun, "userId" | "userName"> {
-  if (!run.parentRunId) return { userId: run.userId, ...(run.userName ? { userName: run.userName } : {}) };
+  lookupParent: (id: string) => UsageIdentity | undefined,
+): UsageIdentity {
+  if (!run.parentRunId) return identityOf(run);
   const parent = batch.get(run.parentRunId) ?? lookupParent(run.parentRunId);
-  if (!parent) return { userId: run.userId, ...(run.userName ? { userName: run.userName } : {}) };
-  return { userId: parent.userId, ...(parent.userName ? { userName: parent.userName } : {}) };
+  return identityOf(parent ?? run);
 }
 
-/** Pure: the runs summed per (billed user, UTC day of finish). A run without
- *  usage counts as pending and contributes its run and wall-clock only. Rows
- *  come out oldest day first, then by user id. */
-export function aggregateUsageByUser(
+const CELL_ORDER = ["day", "userId", "threadKey", "channelId", "agent"] as const;
+
+/** Pure: the runs summed into cells — per (billed user, thread, channel, agent,
+ *  UTC day of finish). A run without usage counts as pending and contributes its
+ *  run and wall-clock only. Rows come out oldest day first, then by user id,
+ *  thread, channel and agent. */
+export function aggregateUsage(
   runs: readonly UsageRun[],
-  lookupParent: (id: string) => Pick<UsageRun, "userId" | "userName"> | undefined = () => undefined,
-): { rows: UserDayUsage[]; pending: number } {
+  lookupParent: (id: string) => UsageIdentity | undefined = () => undefined,
+): { rows: UsageRow[]; pending: number } {
   const batch = new Map(runs.map((r) => [r.id, r]));
-  const rows = new Map<string, UserDayUsage>();
+  const rows = new Map<string, UsageRow>();
   let pending = 0;
   for (const run of runs) {
     const who = billedTo(run, batch, lookupParent);
     const day = dayOf(run.finishedAt);
-    const key = `${day} ${who.userId}`;
-    const row = rows.get(key) ?? { userId: who.userId, day, runs: 0, wallMs: 0, usage: emptyUsage() };
+    const agent = run.agent ?? UNKNOWN_AGENT;
+    const key = JSON.stringify([day, who.userId, run.threadKey, run.channelId, agent]);
+    const row = rows.get(key) ?? {
+      day,
+      userId: who.userId,
+      threadKey: run.threadKey,
+      channelId: run.channelId,
+      agent,
+      runs: 0,
+      wallMs: 0,
+      usage: emptyUsage(),
+    };
     if (who.userName && !row.userName) row.userName = who.userName;
     row.runs += 1;
     row.wallMs += Math.max(0, run.finishedAt - run.startedAt);
@@ -175,25 +233,78 @@ export function aggregateUsageByUser(
     else pending += 1;
     rows.set(key, row);
   }
+  const sorted = [...rows.values()].sort((a, b) => {
+    for (const k of CELL_ORDER) {
+      if (a[k] < b[k]) return -1;
+      if (a[k] > b[k]) return 1;
+    }
+    return 0;
+  });
+  return { rows: sorted, pending };
+}
+
+/** The bot's fold over the store's answer: the cells, the parents outside the batch consulted. */
+export function reportOfUsageRows(rows: RunUsageRows): RunUsageReport {
+  const { rows: cells, pending } = aggregateUsage(rows.runs, (id) => rows.parents[id]);
   return {
-    rows: [...rows.values()].sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : a.userId < b.userId ? -1 : 1)),
-    pending,
+    rows: cells,
+    // The store counts what it could not price; the fold sees the same runs without `usage`.
+    pending: Math.max(pending, rows.pending),
+    ...(rows.earliestFinishedAt !== undefined ? { earliestFinishedAt: rows.earliestFinishedAt } : {}),
+    retentionDays: rows.retentionDays,
   };
 }
 
+const isIdentity = (v: unknown): v is UsageIdentity =>
+  typeof v === "object" &&
+  v !== null &&
+  typeof (v as UsageIdentity).userId === "string" &&
+  ((v as UsageIdentity).userName === undefined || typeof (v as UsageIdentity).userName === "string");
+
+function isUsageRun(v: unknown): v is UsageRun {
+  if (!isIdentity(v)) return false;
+  const r = v as UsageRun;
+  return (
+    typeof r.id === "string" &&
+    typeof r.threadKey === "string" &&
+    typeof r.channelId === "string" &&
+    (r.agent === undefined || typeof r.agent === "string") &&
+    (r.parentRunId === undefined || typeof r.parentRunId === "string") &&
+    typeof r.startedAt === "number" &&
+    typeof r.finishedAt === "number" &&
+    (r.usage === undefined || isRunUsage(r.usage))
+  );
+}
+
+function hasReportTail(r: Record<string, unknown>): boolean {
+  if (typeof r.pending !== "number" || typeof r.retentionDays !== "number") return false;
+  return r.earliestFinishedAt === undefined || typeof r.earliestFinishedAt === "number";
+}
+
+/** The store's wire shape, as the Worker client re-validates it. */
+export function isRunUsageRows(v: unknown): v is RunUsageRows {
+  if (typeof v !== "object" || v === null) return false;
+  const r = v as Record<string, unknown>;
+  if (!Array.isArray(r.runs) || !r.runs.every(isUsageRun)) return false;
+  if (typeof r.parents !== "object" || r.parents === null || Array.isArray(r.parents)) return false;
+  if (!Object.values(r.parents).every(isIdentity)) return false;
+  return hasReportTail(r);
+}
+
+/** The cells' wire shape, as the snapshot guard re-validates it. */
 export function isRunUsageReport(v: unknown): v is RunUsageReport {
   if (typeof v !== "object" || v === null) return false;
   const r = v as Record<string, unknown>;
-  if (!Array.isArray(r.rows) || typeof r.pending !== "number" || typeof r.retentionDays !== "number") return false;
-  if (r.earliestFinishedAt !== undefined && typeof r.earliestFinishedAt !== "number") return false;
+  if (!Array.isArray(r.rows) || !hasReportTail(r)) return false;
   return r.rows.every(
     (row) =>
-      typeof row === "object" &&
-      row !== null &&
-      typeof (row as UserDayUsage).userId === "string" &&
-      typeof (row as UserDayUsage).day === "string" &&
-      typeof (row as UserDayUsage).runs === "number" &&
-      typeof (row as UserDayUsage).wallMs === "number" &&
-      isRunUsage((row as UserDayUsage).usage),
+      isIdentity(row) &&
+      typeof (row as UsageRow).day === "string" &&
+      typeof (row as UsageRow).threadKey === "string" &&
+      typeof (row as UsageRow).channelId === "string" &&
+      typeof (row as UsageRow).agent === "string" &&
+      typeof (row as UsageRow).runs === "number" &&
+      typeof (row as UsageRow).wallMs === "number" &&
+      isRunUsage((row as UsageRow).usage),
   );
 }

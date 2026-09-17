@@ -23,7 +23,7 @@ import { ALL_CAPABILITIES, NO_CAPABILITIES } from "../src/core/capabilities.js";
 import type { CostReport, DailyCost } from "../src/core/costs.js";
 import { buildCostsByReport } from "../src/core/costsBy.js";
 import type { CostsSnapshotStatus } from "../src/core/costsSnapshot.js";
-import type { RunUsage, UserDayUsage } from "../src/core/runUsage.js";
+import type { RunUsage, UsageRow } from "../src/core/runUsage.js";
 import { buildDeliveryReport, resolveDeliveryRange, type PullRequestFacts } from "../src/core/delivery.js";
 import { FAVICON_ICO_SVG } from "../src/channels/favicon.js";
 import { isRunSchedule, SCHEDULES } from "../src/core/schedules.js";
@@ -1143,13 +1143,18 @@ const previewUsage = (
   },
 });
 const COSTS_USERS_FROM = 10;
-const COSTS_USER_ROWS: UserDayUsage[] = COSTS_DAYS.slice(COSTS_USERS_FROM).flatMap((d, j) => {
+const COSTS_CHANNEL = "slack:C0PREVIEW";
+const COSTS_USER_ROWS: UsageRow[] = COSTS_DAYS.slice(COSTS_USERS_FROM).flatMap((d, j) => {
   const i = j + COSTS_USERS_FROM;
-  const rows: UserDayUsage[] = [
+  // One thread a day per person, each on the agent they mostly use.
+  const rows: UsageRow[] = [
     {
       userId: "slack:U0ALICE00",
       userName: "alice",
       day: d.date,
+      threadKey: `${COSTS_CHANNEL}:1710000000.${String(i).padStart(6, "0")}`,
+      channelId: COSTS_CHANNEL,
+      agent: "coding",
       runs: 3 + (i % 3),
       wallMs: (40 + (i % 5) * 6) * 60_000,
       usage: previewUsage("claude-fable-5", 600_000 + i * 20_000, 90_000 + i * 3_000, 2_400_000, 500_000),
@@ -1158,6 +1163,9 @@ const COSTS_USER_ROWS: UserDayUsage[] = COSTS_DAYS.slice(COSTS_USERS_FROM).flatM
       userId: "slack:U0SAM0000",
       userName: "sam",
       day: d.date,
+      threadKey: `${COSTS_CHANNEL}:1710000000.${String(100 + i).padStart(6, "0")}`,
+      channelId: COSTS_CHANNEL,
+      agent: "review",
       runs: 1 + (i % 2),
       wallMs: (15 + (i % 4) * 5) * 60_000,
       usage: previewUsage("claude-haiku-4-5-20251001", 900_000, 120_000, 3_000_000, 400_000),
@@ -1168,6 +1176,9 @@ const COSTS_USER_ROWS: UserDayUsage[] = COSTS_DAYS.slice(COSTS_USERS_FROM).flatM
       userId: "slack:U0PRIYA00",
       userName: "priya",
       day: d.date,
+      threadKey: `slack:D0PRIYA0:1710000000.${String(200 + i).padStart(6, "0")}`,
+      channelId: "slack:D0PRIYA0",
+      agent: "general",
       runs: 1,
       wallMs: 25 * 60_000,
       usage: previewUsage("claude-legacy-2", 300_000, 40_000, 0, 0),

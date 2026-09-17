@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { DailyCost, DateRange } from "./costs.js";
 import { buildCostsByReport, coverageFrom, llmUsdOfUsage, modelIdOf } from "./costsBy.js";
-import type { RunUsage, RunUsageReport, UserDayUsage } from "./runUsage.js";
+import type { RunUsage, RunUsageReport, UsageRow } from "./runUsage.js";
 
 // Feature: docs/reference/specs/costs.md item 10 — cost by user: run tokens priced at
 // list per model, each day's cloud spend split by run wall-clock, the range
@@ -46,10 +46,14 @@ const day = (date: string, cloudUsd: number, llmUsd: number): DailyCost => ({
   total: cloudUsd + llmUsd,
 });
 
-const row = (d: string, userId: string, wallMs: number, u: RunUsage, userName?: string, runs = 1): UserDayUsage => ({
+/** One cell: the user's runs in one thread of one channel on one agent that day (the thread named after the user). */
+const row = (d: string, userId: string, wallMs: number, u: RunUsage, userName?: string, runs = 1): UsageRow => ({
   userId,
   ...(userName ? { userName } : {}),
   day: d,
+  threadKey: `${userId.split(":")[0]}:C1:${userId}`,
+  channelId: `${userId.split(":")[0]}:C1`,
+  agent: "general",
   runs,
   wallMs,
   usage: u,
@@ -159,6 +163,47 @@ describe("buildCostsByReport", () => {
     expect(r.days[0].cloudUsd).toBeCloseTo(2, 9);
     expect(r.pending).toBe(2);
     expect(r.viewer).toEqual({ userIds: ["slack:UALICE"], matchedByEmail: true });
+  });
+
+  it("a user's cells across threads, channels and agents on one day fold into one per-day row and one user row", () => {
+    const split: RunUsageReport = {
+      ...report,
+      rows: [
+        row(d0, "slack:UALICE", 1 * H, usage("anthropic/claude-fable-5", 400_000, 0), "alice", 2),
+        {
+          ...row(d0, "slack:UALICE", 1 * H, usage("anthropic/claude-fable-5", 600_000, 0), undefined, 1),
+          agent: "review",
+        },
+        {
+          ...row(d0, "slack:UALICE", 0, usage("anthropic/claude-haiku-4-5", 1_000_000, 0), "alice", 1),
+          threadKey: "slack:C2:9.0",
+          channelId: "slack:C2",
+        },
+        row(d0, "slack:UBOB", 1 * H, usage("anthropic/claude-haiku-4-5", 1_000_000, 0), "bob"),
+      ],
+    };
+    const r = buildCostsByReport({
+      group: "switchboard",
+      range,
+      usage: split,
+      days: [day(d0, 3, 12)],
+      historyOn: true,
+      viewerUserIds: [],
+      matchedByEmail: false,
+      generatedAt,
+    });
+    expect(r.days.map((d) => `${d.day} ${d.userId} runs=${d.runs}`)).toEqual([
+      `${d0} slack:UALICE runs=4`,
+      `${d0} slack:UBOB runs=1`,
+    ]);
+    const alice = r.users.find((u) => u.userId === "slack:UALICE")!;
+    expect(alice.userName).toBe("alice");
+    expect(alice.runs).toBe(4);
+    expect(alice.llmUsd).toBeCloseTo(4 + 6 + 1, 9);
+    expect(alice.byModel["anthropic/claude-fable-5"].inputTokens).toBe(1_000_000);
+    // $3 of cloud split 2h:1h between alice's threads together and bob.
+    expect(alice.cloudUsd).toBeCloseTo(2, 9);
+    expect(r.users).toHaveLength(2);
   });
 
   it("reconciles: attributed LLM vs the group's figure for the covered days, and cloud allocated vs unallocated", () => {

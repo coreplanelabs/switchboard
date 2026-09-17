@@ -1,11 +1,19 @@
 import type { DailyCost, DateRange } from "./costs.js";
 import { anthropicTokensCostUsd } from "./modelPricing.js";
-import { dayOf, type ModelUsage, type RunUsage, type RunUsageReport, type UserDayUsage } from "./runUsage.js";
+import {
+  addUsage,
+  emptyUsage,
+  type ModelUsage,
+  type RunUsage,
+  type RunUsageReport,
+  type UsageRow,
+} from "./runUsage.js";
 
 // Cost by user (docs/reference/specs/costs.md item 10): who spent what, built from the
-// run history's per-user, per-day usage (run-history.md item 56) and the
-// group's own daily cost report. Pure — every dollar of arithmetic is here and
-// unit-tested; the service only fetches the two inputs and resolves the viewer.
+// run history's usage cells (run-history.md item 56 — one per requester,
+// thread, channel, agent and UTC day) and the group's own daily cost report.
+// Pure — every dollar of arithmetic is here and unit-tested; the service only
+// fetches the two inputs and resolves the viewer.
 //
 // Dollars: a user's tokens priced at Anthropic list per model (the same table
 // the page prices the open day with), cache writes at the 5-minute rate — the
@@ -127,10 +135,36 @@ export function llmUsdOfUsage(usage: RunUsage): {
  *  its retention cutoff, whichever is latest. */
 export function coverageFrom(range: DateRange, usage: RunUsageReport, generatedAt: number): string {
   const candidates = [range.from];
-  if (usage.earliestFinishedAt !== undefined) candidates.push(dayOf(usage.earliestFinishedAt));
-  if (usage.retentionDays > 0) candidates.push(dayOf(generatedAt - usage.retentionDays * DAY_MS));
+  if (usage.earliestFinishedAt !== undefined) candidates.push(dayOfMs(usage.earliestFinishedAt));
+  if (usage.retentionDays > 0) candidates.push(dayOfMs(generatedAt - usage.retentionDays * DAY_MS));
   const from = candidates.reduce((m, d) => (d > m ? d : m));
   return from > range.to ? range.to : from;
+}
+
+const dayOfMs = (epochMs: number): string => new Date(epochMs).toISOString().slice(0, 10);
+
+/** The cells folded per (day, user): a user's runs across every thread, channel and agent that day. */
+function cellsPerUserDay(cells: readonly UsageRow[]): UsageRow[] {
+  const out = new Map<string, UsageRow>();
+  for (const c of cells) {
+    const key = `${c.day} ${c.userId}`;
+    const acc = out.get(key) ?? {
+      day: c.day,
+      userId: c.userId,
+      threadKey: "",
+      channelId: "",
+      agent: "",
+      runs: 0,
+      wallMs: 0,
+      usage: emptyUsage(),
+    };
+    if (c.userName && !acc.userName) acc.userName = c.userName;
+    acc.runs += c.runs;
+    acc.wallMs += c.wallMs;
+    acc.usage = addUsage(acc.usage, c.usage);
+    out.set(key, acc);
+  }
+  return [...out.values()];
 }
 
 export function buildCostsByReport(input: {
@@ -147,7 +181,7 @@ export function buildCostsByReport(input: {
   const { range, usage } = input;
   const from = coverageFrom(range, usage, input.generatedAt);
   const covered = (day: string) => day >= from && day <= range.to;
-  const rowsIn = usage.rows.filter((r) => covered(r.day));
+  const rowsIn = cellsPerUserDay(usage.rows.filter((r) => covered(r.day)));
   const wallByDay = new Map<string, number>();
   for (const r of rowsIn) wallByDay.set(r.day, (wallByDay.get(r.day) ?? 0) + r.wallMs);
   const cloudByDay = new Map(input.days.filter((d) => covered(d.date)).map((d) => [d.date, d.cloudUsd]));
@@ -155,7 +189,7 @@ export function buildCostsByReport(input: {
   let cloudUnallocatedUsd = 0;
   for (const [day, cloud] of cloudByDay) if ((wallByDay.get(day) ?? 0) <= 0) cloudUnallocatedUsd += cloud;
 
-  const days: CostsByDay[] = rowsIn.map((r: UserDayUsage) => {
+  const days: CostsByDay[] = rowsIn.map((r) => {
     const priced = llmUsdOfUsage(r.usage);
     const wall = wallByDay.get(r.day) ?? 0;
     const cloudUsd = wall > 0 ? (cloudByDay.get(r.day) ?? 0) * (r.wallMs / wall) : 0;

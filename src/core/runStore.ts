@@ -2,10 +2,11 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, sta
 import { join, resolve } from "node:path";
 import type { RunEvent } from "./runEvents.js";
 import {
-  aggregateUsageByUser,
+  aggregateUsage,
   usageOfEvents,
   type RunUsageQuery,
   type RunUsageReport,
+  type UsageIdentity,
   type UsageRun,
 } from "./runUsage.js";
 import type { TraceOptions } from "./trace/types.js";
@@ -92,11 +93,12 @@ export interface RunStore {
   events(id: string, opts: RunEventsOptions): Promise<RunEventsPage | null>;
   /** Remove a run and its events (the incident lever for a redaction miss). Unknown id is a no-op. */
   delete(id: string): Promise<void>;
-  /** Who spent what, per UTC day, over the runs that finished in the range
-   *  (docs/reference/specs/costs.md, cost by user): a child billed to its parent's
+  /** What the runs that finished in the range cost, as the cells every cost
+   *  dimension reads (docs/reference/specs/costs.md items 10–10a): per requester,
+   *  thread, channel, agent and UTC day, a child billed to its parent's
    *  requester; a record written before usage existed counted as `pending`
    *  (the Worker store fills those in from stored events as it answers). */
-  usageByUser(query: RunUsageQuery): Promise<RunUsageReport>;
+  usage(query: RunUsageQuery): Promise<RunUsageReport>;
 }
 
 /** The aggregate over records a local store holds: a record without usage is
@@ -105,7 +107,7 @@ export interface RunStore {
 export function usageReportOfRecords(
   records: readonly RunRecord[],
   query: RunUsageQuery,
-  lookupParent: (id: string) => Pick<UsageRun, "userId" | "userName"> | undefined,
+  lookupParent: (id: string) => UsageIdentity | undefined,
   retentionDays: number,
 ): RunUsageReport {
   const inRange = records.filter((r) => r.finishedAt >= query.sinceMs && r.finishedAt < query.untilMs);
@@ -114,11 +116,14 @@ export function usageReportOfRecords(
     userId: r.userId,
     ...(r.userName ? { userName: r.userName } : {}),
     ...(r.parentRunId ? { parentRunId: r.parentRunId } : {}),
+    threadKey: r.threadKey,
+    channelId: r.channelId,
+    ...(r.agent ? { agent: r.agent } : {}),
     startedAt: r.startedAt,
     finishedAt: r.finishedAt,
     usage: r.usage ?? usageOfEvents(r.events),
   }));
-  const { rows, pending } = aggregateUsageByUser(runs, lookupParent);
+  const { rows, pending } = aggregateUsage(runs, lookupParent);
   const earliest = records.reduce<number | undefined>(
     (m, r) => (m === undefined || r.finishedAt < m ? r.finishedAt : m),
     undefined,
@@ -149,7 +154,7 @@ export class NullRunStore implements RunStore {
   async delete(_id: string): Promise<void> {
     // nothing is held
   }
-  async usageByUser(_query: RunUsageQuery): Promise<RunUsageReport> {
+  async usage(_query: RunUsageQuery): Promise<RunUsageReport> {
     return { rows: [], pending: 0, retentionDays: 0 };
   }
 }
@@ -276,7 +281,7 @@ export class InMemoryRunStore implements RunStore {
     this.records.delete(id);
   }
 
-  async usageByUser(query: RunUsageQuery): Promise<RunUsageReport> {
+  async usage(query: RunUsageQuery): Promise<RunUsageReport> {
     const kept = new Set(this.retained().map((r) => r.id));
     const records = [...this.records.values()].map((e) => e.record).filter((r) => kept.has(r.id));
     const parent = (id: string) => {
@@ -434,7 +439,7 @@ export class FileRunStore implements RunStore {
     return record ? pageEvents(record.events, opts) : null;
   }
 
-  async usageByUser(query: RunUsageQuery): Promise<RunUsageReport> {
+  async usage(query: RunUsageQuery): Promise<RunUsageReport> {
     // Opens the record files in range (a dev store; the Worker store answers
     // this from its own table) — and the parent of a child outside it.
     const items = this.retainedIntact();

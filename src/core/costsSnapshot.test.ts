@@ -84,6 +84,9 @@ const RUN_USAGE: RunUsageReport = {
       userId: "slack:UALICE",
       userName: "alice",
       day: SEP_16,
+      threadKey: "slack:C1:1.0",
+      channelId: "slack:C1",
+      agent: "general",
       runs: 2,
       wallMs: 3_600_000,
       usage: {
@@ -120,13 +123,13 @@ function clock(start = T0, stepMs = 0) {
   };
 }
 
-/** A run store answering `usageByUser` from a queue of reports, recording the queries. */
+/** A run store answering `usage` from a queue of reports, recording the queries. */
 function runStoreOf(answers: RunUsageReport[]): { store: RunStore; queries: RunUsageQuery[] } {
   const queries: RunUsageQuery[] = [];
   const queue = [...answers];
-  // Only `usageByUser` is read here; the Null Object would read as history off.
+  // Only `usage` is read here; the Null Object would read as history off.
   const store = {
-    usageByUser: async (q: RunUsageQuery) => {
+    usage: async (q: RunUsageQuery) => {
       queries.push(q);
       return queue.length > 1 ? queue.shift()! : queue[0]!;
     },

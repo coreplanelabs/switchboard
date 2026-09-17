@@ -154,7 +154,7 @@ describe("doorReport — hand-backs, the pastes that followed and the rate, per 
       },
       events: (id, opts) => store.events(id, opts),
       delete: (id) => store.delete(id),
-      usageByUser: (query) => store.usageByUser(query),
+      usage: (query) => store.usage(query),
     };
     const service = createRunsService({ registry, store: broken, clock: () => NOW, warn: () => {} });
     const report = await doorReport(service);

@@ -125,9 +125,9 @@ const message = (err: unknown): string => (err instanceof Error ? err.message : 
 /** The run history's per-user usage over the window, asked again while rows are
  *  still being priced (each call heals a few hundred) so the snapshot is whole. */
 async function readRunUsage(store: RunStore, sinceMs: number, untilMs: number): Promise<RunUsageReport> {
-  let report = await store.usageByUser({ sinceMs, untilMs });
+  let report = await store.usage({ sinceMs, untilMs });
   for (let round = 1; report.pending > 0 && round < MAX_USAGE_BACKFILL_ROUNDS; round++) {
-    report = await store.usageByUser({ sinceMs, untilMs });
+    report = await store.usage({ sinceMs, untilMs });
   }
   return report;
 }

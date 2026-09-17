@@ -57,6 +57,9 @@ const snapshot = (over: Record<string, unknown> = {}) => ({
         userId: "slack:UALICE",
         userName: "alice",
         day: SEP_16,
+        threadKey: "slack:C1:1.0",
+        channelId: "slack:C1",
+        agent: "general",
         runs: 2,
         wallMs: 60_000,
         usage: {

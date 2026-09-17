@@ -60,11 +60,11 @@ import {
 } from "../../src/core/runLedger/sessionLog.ts";
 import type { RunEvent } from "../../src/core/runEvents.ts";
 import {
-  aggregateUsageByUser,
   isRunUsage,
   usageOfEvents,
   type RunUsage,
-  type RunUsageReport,
+  type RunUsageRows,
+  type UsageIdentity,
   type UsageRun,
 } from "../../src/core/runUsage.ts";
 import {
@@ -2230,28 +2230,32 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   /**
-   * Who spent what, per UTC day (costs.md, cost by user), over the runs that
-   * finished in [sinceMs, untilMs) and are inside the retention window. A row
-   * written before `usage_json` existed is filled in here from its stored
-   * `model.turn` events — up to USAGE_BACKFILL_PER_CALL a call, the rest
-   * reported as `pending` — so the history heals as it is read, with no
+   * What the runs that finished in [sinceMs, untilMs) and are inside the
+   * retention window cost (costs.md items 10–10a; run-history item 56): one row
+   * per run — its requester, thread, channel, agent and usage — plus the
+   * identity of every parent a child names that is outside the batch, so the
+   * bot bills the child without a second read. The arithmetic is the bot's; the
+   * Worker only reads its rows. A row written before `usage_json` existed is
+   * filled in here from its stored `model.turn` events — up to
+   * USAGE_BACKFILL_PER_CALL a call, the rest answered without `usage` and
+   * counted in `pending` — so the history heals as it is read, with no
    * operator step; a run without turns is written back as the zero usage so it
-   * is not re-read. A child is billed to its parent's requester; a parent
-   * outside the range is looked up by id.
+   * is not re-read.
    */
-  usageByUser(sinceMs: number, untilMs: number): RunUsageReport {
+  usage(sinceMs: number, untilMs: number): RunUsageRows {
     const now = systemClock();
     const { policy } = this.policyState();
     const cutoff = now - policy.retentionDays * 86_400_000;
     const rows = this.sql
       .exec<UsageRow>(
-        `SELECT run_id, user_id, started_at, finished_at, usage_json, summary_json FROM runs
+        `SELECT run_id, user_id, agent, channel_id, thread_key, started_at, finished_at, usage_json, summary_json FROM runs
           WHERE finished_at >= ? AND finished_at < ? ORDER BY finished_at ASC, run_id ASC`,
         Math.max(sinceMs, cutoff),
         untilMs,
       )
       .toArray();
     let backfilled = 0;
+    let pending = 0;
     const runs: UsageRun[] = rows.map((row) => {
       let usage = parseUsageJson(row.usage_json);
       if (usage === undefined && backfilled < USAGE_BACKFILL_PER_CALL) {
@@ -2259,31 +2263,38 @@ export class RunHistoryDO extends DurableObject<Env> {
         this.sql.exec(`UPDATE runs SET usage_json = ? WHERE run_id = ?`, JSON.stringify(usage), row.run_id);
         backfilled += 1;
       }
+      if (usage === undefined) pending += 1;
       const who = identityOfSummary(row.summary_json);
       return {
         id: row.run_id,
         userId: row.user_id,
         ...(who.userName ? { userName: who.userName } : {}),
         ...(who.parentRunId ? { parentRunId: who.parentRunId } : {}),
+        threadKey: row.thread_key,
+        channelId: row.channel_id,
+        ...(row.agent ? { agent: row.agent } : {}),
         startedAt: row.started_at,
         finishedAt: row.finished_at,
         ...(usage ? { usage } : {}),
       };
     });
-    const lookupParent = (id: string) => {
+    // The parents a child names that are not in the batch: looked up once each, known or not.
+    const inBatch = new Set(runs.map((r) => r.id));
+    const parents: Record<string, UsageIdentity> = {};
+    for (const id of new Set(runs.map((r) => r.parentRunId).filter((p): p is string => !!p && !inBatch.has(p)))) {
       const p = this.sql
         .exec<{ user_id: string; summary_json: string }>(`SELECT user_id, summary_json FROM runs WHERE run_id = ?`, id)
         .toArray()[0];
-      if (!p) return undefined;
+      if (!p) continue;
       const who = identityOfSummary(p.summary_json);
-      return { userId: p.user_id, ...(who.userName ? { userName: who.userName } : {}) };
-    };
-    const { rows: out, pending } = aggregateUsageByUser(runs, lookupParent);
+      parents[id] = { userId: p.user_id, ...(who.userName ? { userName: who.userName } : {}) };
+    }
     const earliest = this.sql
       .exec<{ m: number | null }>(`SELECT MIN(finished_at) AS m FROM runs WHERE finished_at >= ?`, cutoff)
       .one().m;
     return {
-      rows: out,
+      runs,
+      parents,
       pending,
       ...(earliest !== null ? { earliestFinishedAt: earliest } : {}),
       retentionDays: policy.retentionDays,
@@ -2450,6 +2461,9 @@ const USAGE_BACKFILL_PER_CALL = 200;
 type UsageRow = {
   run_id: string;
   user_id: string;
+  agent: string | null;
+  channel_id: string;
+  thread_key: string;
   started_at: number;
   finished_at: number;
   usage_json: string | null;
@@ -3843,13 +3857,13 @@ async function handleRuns(pathname: string, body: unknown, env: Env): Promise<Re
     );
     return json(result ?? { events: null });
   }
-  if (pathname === "/runs/usage-by-user") {
+  if (pathname === "/runs/usage") {
     const parsed = parseRunUsageQuery(body);
     if (!parsed.ok) return json({ error: parsed.error }, 400);
     const { storeKey, sinceMs, untilMs } = parsed.value;
-    const report = await stub(storeKey).usageByUser(sinceMs, untilMs);
-    console.log(`[runs/usage-by-user] ${storeKey} -> ${report.rows.length} rows, ${report.pending} pending`);
-    return json(report);
+    const rows = await stub(storeKey).usage(sinceMs, untilMs);
+    console.log(`[runs/usage] ${storeKey} -> ${rows.runs.length} runs, ${rows.pending} pending`);
+    return json(rows);
   }
   // /runs/delete
   const parsed = parseRunTarget(body);
@@ -3874,7 +3888,7 @@ const ROUTES = new Set([
   "/runs/summary",
   "/runs/list",
   "/runs/events",
-  "/runs/usage-by-user",
+  "/runs/usage",
   "/runs/delete",
   ...LEDGER_ROUTES,
 ]);

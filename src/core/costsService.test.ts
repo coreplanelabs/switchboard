@@ -51,12 +51,15 @@ const USAGE: CloudflareUsage = {
   ],
 };
 const LLM: LlmCostRow[] = [{ date: AUG_28, workspaceId: null, amountUsd: 40 }];
+/** The one thread every Slack cell of the fixture is in. */
+const WHERE = { threadKey: "slack:C1:1.0", channelId: "slack:C1", agent: "general" };
 const usageReport: RunUsageReport = {
   rows: [
     {
       userId: "slack:UALICE",
       userName: "alice",
       day: AUG_28,
+      ...WHERE,
       runs: 2,
       wallMs: 3_600_000,
       usage: {
@@ -76,16 +79,27 @@ const usageReport: RunUsageReport = {
       userId: "slack:UBOB",
       userName: "bob",
       day: AUG_28,
+      ...WHERE,
       runs: 1,
       wallMs: 3_600_000,
       usage: { turns: 0, byModel: {} },
     },
-    { userId: "http:ops", day: AUG_29, runs: 1, wallMs: 1_000, usage: { turns: 0, byModel: {} } },
+    {
+      userId: "http:ops",
+      day: AUG_29,
+      threadKey: "http:ops:1",
+      channelId: "http:ops",
+      agent: "general",
+      runs: 1,
+      wallMs: 1_000,
+      usage: { turns: 0, byModel: {} },
+    },
     // An app nobody was found behind (slack-channel.md item 13): a requester, never a viewer.
     {
       userId: "slack:bot:B0CLAUDE",
       userName: "Claude [ci]",
       day: AUG_29,
+      ...WHERE,
       runs: 1,
       wallMs: 1_000,
       usage: { turns: 0, byModel: {} },
@@ -97,7 +111,7 @@ const usageReport: RunUsageReport = {
 };
 
 function snapshotterWith(runUsage: RunUsageReport | null = usageReport, at = T0) {
-  const runStore = runUsage ? ({ usageByUser: async () => runUsage } as unknown as RunStore) : undefined;
+  const runStore = runUsage ? ({ usage: async () => runUsage } as unknown as RunStore) : undefined;
   return new CostsSnapshotter(
     {
       cloudflare: { fetchUsage: async () => USAGE },
