@@ -87,8 +87,10 @@ import {
   SEED_ABANDONED_RESTORE_WAIT_MS,
   seedFixupScript,
   seedMarkerText,
+  type RestorePhases,
   type SandboxSeed,
   type SeedAnswer,
+  type SeedPhases,
   type SeedStep,
 } from "../../src/execution/seedPlan.js";
 import { shellQuote } from "../../src/execution/shellQuote.js";
@@ -450,12 +452,13 @@ export class SwitchboardSandbox extends Sandbox<Env> {
       // marker for another handle.
       await this.runRoot(["sh", "-c", `${unmountAllRestoresScript()}\n${this.seedSweep()}`], 60_000);
       let t = systemClock();
-      await this.restoreSeedInto(seed.checkoutBackupId, SEED_CHECKOUT_DIR, deadline, "checkout");
+      const checkout = await this.restoreSeedInto(seed.checkoutBackupId, SEED_CHECKOUT_DIR, deadline, "checkout");
       steps.restore = systemClock() - t;
+      const phases: SeedPhases = { checkout, deps: null };
       if (seed.depsBackupId) {
         step = "deps";
         t = systemClock();
-        await this.restoreSeedInto(seed.depsBackupId, SEED_DEPS_STAGING_DIR, deadline, "deps");
+        phases.deps = await this.restoreSeedInto(seed.depsBackupId, SEED_DEPS_STAGING_DIR, deadline, "deps");
         steps.deps = systemClock() - t;
       }
       step = "fixup";
@@ -480,9 +483,27 @@ export class SwitchboardSandbox extends Sandbox<Env> {
       );
       const ms = systemClock() - t0;
       console.log(
-        JSON.stringify({ event: "sandbox.seeded", slug: seed.slug, ref: seed.fetchRef ?? seed.ref, sha, steps, ms }),
+        JSON.stringify({
+          event: "sandbox.seeded",
+          slug: seed.slug,
+          ref: seed.fetchRef ?? seed.ref,
+          sha,
+          steps,
+          phases,
+          ms,
+        }),
       );
-      return { seeded: true, cached: false, slug: seed.slug, ref: seed.fetchRef ?? seed.ref, sha, from, steps, ms };
+      return {
+        seeded: true,
+        cached: false,
+        slug: seed.slug,
+        ref: seed.fetchRef ?? seed.ref,
+        sha,
+        from,
+        steps,
+        phases,
+        ms,
+      };
     } catch (err) {
       const shape = thrownShape(err);
       // A half seed never survives either: the run that follows goes cold
@@ -510,7 +531,12 @@ export class SwitchboardSandbox extends Sandbox<Env> {
    *  a staging sibling, the wait is judged by bytes arriving (the SDK's call
    *  takes no timeout) against the seed's one deadline, then the extract
    *  script puts a real tree in place and the target appears last. */
-  private async restoreSeedInto(id: string, targetDir: string, deadlineMs: number, what: string): Promise<void> {
+  private async restoreSeedInto(
+    id: string,
+    targetDir: string,
+    deadlineMs: number,
+    what: string,
+  ): Promise<RestorePhases> {
     const attempt = crypto.randomUUID().slice(0, 8);
     const mountDir = restoreMountDir(targetDir, attempt);
     const backup: DirectoryBackup = { id, dir: mountDir };
@@ -535,11 +561,18 @@ export class SwitchboardSandbox extends Sandbox<Env> {
       const verdict = judgeRestoreProgress({ startedMs, nowMs: systemClock(), samples, deadlineMs });
       if (verdict.verdict !== "wait") throw new Error(`${what} restore ${verdict.verdict}: ${verdict.detail}`);
     }
+    const download = systemClock() - startedMs;
+    const extractStartedMs = systemClock();
     const r = await this.runRoot(
       ["sh", "-c", extractRestoreScript({ mountDir, backupId: id, archivePath: restoreArchivePath(id), targetDir })],
       Math.max(60_000, deadlineMs - systemClock()),
     );
     if (r.exitCode !== 0) throw new Error(`${what} extract exited ${r.exitCode}: ${tail(r.stderr || r.stdout)}`);
+    const extract = systemClock() - extractStartedMs;
+    console.log(
+      JSON.stringify({ event: "sandbox.seed-restore", what, id, download, extract, method: r.stdout.trim() }),
+    );
+    return { download, extract };
   }
 
   /** Restores this object started that have not settled: what a failure

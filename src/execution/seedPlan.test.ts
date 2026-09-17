@@ -165,6 +165,24 @@ describe("the seeded sandbox wiring (static)", () => {
     );
   });
 
+  it("every restore answers its two phases — the download judged by bytes, then the extraction — and the seed carries them as `phases` in its answer and its log line", () => {
+    const restore = worker.slice(
+      worker.indexOf("private async restoreSeedInto("),
+      worker.indexOf("private readonly pendingRestores"),
+    );
+    expect(restore).toContain("): Promise<RestorePhases> {");
+    expect(restore.indexOf("const download = systemClock() - startedMs;")).toBeLessThan(
+      restore.indexOf("extractRestoreScript({"),
+    );
+    expect(restore).toContain("const extract = systemClock() - extractStartedMs;");
+    expect(restore).toContain('event: "sandbox.seed-restore"');
+    expect(restore).toContain("return { download, extract };");
+    const seedNow = worker.slice(worker.indexOf("private async seedNow("), worker.indexOf("private seedSweep("));
+    expect(seedNow).toContain("const phases: SeedPhases = { checkout, deps: null };");
+    expect(seedNow).toMatch(/event: "sandbox\.seeded",[\s\S]*?phases,/);
+    expect(seedNow).toMatch(/return \{\s*seeded: true,\s*cached: false,[\s\S]*?phases,[\s\S]*?\};/);
+  });
+
   it("every restore is judged by bytes against the seed's one deadline and extracted onto the disk; a failure sweeps mounts, tree and marker and is classified missing or failed", () => {
     expect(worker).toMatch(/judgeRestoreProgress\(\{ startedMs, nowMs: systemClock\(\), samples, deadlineMs \}\)/);
     expect(worker).toMatch(
