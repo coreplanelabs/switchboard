@@ -53,7 +53,14 @@ import {
   type ReplacedCondition,
   type ReplacedVerdict,
 } from "../container.js";
-import { saysContainerReplaced } from "../pi/harness.js";
+import {
+  classifyLoopFailure,
+  controlResetBoundMessage,
+  controlResetResumedNote,
+  MAX_INPLACE_REATTACHES,
+  reattachTransport,
+  WORD_ALIVE_REATTACH_NOTE,
+} from "../reattach.js";
 import { describePiToolCall, piBashExit } from "../pi/bridge.js";
 import { PiMirror } from "../pi/mirror.js";
 import { PiRpcTransport } from "../pi/transport.js";
@@ -1118,6 +1125,10 @@ export interface OpenCodeConnection {
   password: string;
   sessionID: string;
   feedOffset: number;
+  /** The server's own pid — the process the ask-2 probe checks against the
+   *  executor's replaced word (harness-pi item 16): alive here, the word
+   *  was wrong and the run re-attaches in place instead of the verdict. */
+  pid: number;
   /** The pid the feed transport polls for liveness (the tailer's). */
   tailerPid: number;
   /** The container's word at launch, for the replaced verdict's `was`; absent on a container that cannot name itself. */
@@ -1230,7 +1241,7 @@ export async function driveOpenCode(
       secretHeaders: auth,
       ...(body !== undefined ? { headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {}),
     });
-  const transport = new PiRpcTransport({
+  let transport = new PiRpcTransport({
     container: conn.container,
     paths: { ...conn.paths.tailer, log: conn.paths.feed },
     pid: conn.tailerPid,
@@ -1501,26 +1512,68 @@ export async function driveOpenCode(
     }
     if (delivery === "queue") awaiting = { phase: `the ${promptPhase}`, since: now() };
     check();
-    const iterator = transport.lines[Symbol.asyncIterator]();
+    let iterator = transport.lines[Symbol.asyncIterator]();
     let pending: Promise<IteratorResult<string>> | undefined;
+    /** Re-attach to the still-live server in the container the run holds — the
+     *  resident's control plane reset under it, or a replaced word the server's
+     *  pid refuted (ask 2): a fresh tailer feed reader from the last
+     *  record boundary, so the same session continues, `relaunches` untouched. */
+    const reattachInPlace = (): void => {
+      // The old transport is closed so none of its queued reads land after the
+      // re-attach; the fresh one reads on from the last record boundary.
+      transport = reattachTransport(transport, {
+        container: conn.container,
+        paths: { ...conn.paths.tailer, log: conn.paths.feed },
+        pid: conn.tailerPid,
+        pollMs: deps.pollMs ?? 250,
+        sleep: deps.sleep,
+      });
+      iterator = transport.lines[Symbol.asyncIterator]();
+      pending = undefined;
+    };
+    /** A runaway guard on in-place re-attaches with no record read between them (harness-pi item 16). */
+    let reattaches = 0;
     for (; ended === undefined;) {
       pending ??= iterator.next();
       const tick = deps.sleep(deps.tickMs ?? 1000).then(() => "tick" as const);
       // A read that fails because the container was replaced under the run is
-      // the verdict below (the survival clause's ceiling); a read that fails
-      // on its transport with no word (the platform's replacement closes the
-      // WebSocket under it before any word can come) takes the one more
-      // command, which waits through a container that is down, before it is
-      // judged; any other failure propagates to the finally, which closes the
-      // transport, as before.
+      // the verdict below (the survival clause's ceiling); a Durable Object
+      // control reset or a replaced word the server's pid refutes is a
+      // re-attach in place; a read that fails on its transport with no word
+      // (the platform's replacement closes the WebSocket under it before any
+      // word can come) takes the one more command, which waits through a
+      // container that is down, before it is judged; any other failure
+      // propagates to the finally, which closes the transport, as before.
       let next: IteratorResult<string> | "tick";
       try {
         next = await Promise.race([pending, tick]);
       } catch (err) {
-        if (err instanceof Error && saysContainerReplaced(err)) {
-          replacedBy = { condition: "word", said: err };
+        // A control reset (container unchanged) or the executor's replaced word
+        // the server's pid still refutes (ask 2): both re-attach in place — the
+        // feed reader is read-only, so there is no write to resolve. One rule
+        // for both, shared with pi (`classifyLoopFailure`). A same-kernel
+        // replacement keeps the boot id, so only the row's pid refutes the word;
+        // gone → the verdict. A control reset the bound cannot ride to progress
+        // fails the run by name, noted as pi does — never a silent throw.
+        const outcome = await classifyLoopFailure(err, { container: conn.container, pid: conn.pid, reattaches });
+        if (outcome.kind === "control-reset" || outcome.kind === "word-alive") {
+          if (outcome.kind === "control-reset" && reattaches >= MAX_INPLACE_REATTACHES) {
+            const msg = controlResetBoundMessage(reattaches);
+            note("harness_error", msg);
+            throw new Error(msg, { cause: err });
+          }
+          reattaches++;
+          note("resumed", outcome.kind === "word-alive" ? WORD_ALIVE_REATTACH_NOTE : controlResetResumedNote());
+          reattachInPlace();
+          continue;
+        }
+        if (outcome.kind === "word-gone") {
+          replacedBy = { condition: "word", said: outcome.said };
           break;
         }
+        // A read that fails on its transport with no word takes the one more
+        // command (which waits through a container that is down) before the
+        // verdict; any other failure propagates to the finally.
         if (!(err instanceof Error && saysTransportLost(err))) throw err;
         transportLost = err;
         replacedBy = await replacedVerdict(conn.container, conn.containerWord, probe);
@@ -1533,6 +1586,7 @@ export async function driveOpenCode(
         continue;
       }
       pending = undefined;
+      reattaches = 0; // a record read: the transport made progress, so a re-attach is not spinning
       if (next.done) {
         // The feed ended: OpenCode's tailer is dead and no read failed with the
         // word. The platform's rollout kills the container's processes first

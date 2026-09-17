@@ -239,6 +239,17 @@ export function piDriver(): HarnessDriver {
             if (script.hardStopDuringProbeWait) container.onDownProbe = () => control.requestStop("hard");
             return true;
           }
+          // The executor says replaced once while this call is in flight, but
+          // pi still answers alive (ask 2): the call is NOT held (it
+          // completes, the run answers) and the next drained read fails once
+          // with the word while `alive` keeps answering yes, so the harness
+          // re-attaches in place rather than judging the container replaced.
+          if (script.replacedWordWithPidAlive === turn + 1) {
+            container.failReadOnceThenAlive = new HarnessContainerRuntimeReplacedError(
+              "read",
+              "runtime-replaced: the sandbox was replaced under the run",
+            );
+          }
           return false;
         },
         ...(script.bypassGate ? { bypassGate: true } : {}),

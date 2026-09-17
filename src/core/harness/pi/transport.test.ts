@@ -140,6 +140,59 @@ describe("PiRpcTransport", () => {
     await expect(collect(t, 1)).rejects.toThrow("worktree evicted");
   });
 
+  it("a failed send records the command it carried as `pendingSend`, so a re-attach can resolve the write by pi's echo", async () => {
+    const c = new FakeHarnessContainer();
+    await c.start({ paths, command: "pi", args: [], env: {} });
+    const { t } = transport(c);
+    expect(t.pendingSend).toBeUndefined();
+    c.failNext = { operation: "send", error: new Error("control-reset: the resident's Durable Object was reset") };
+    t.send({ id: "p", type: "prompt", message: "go" });
+    await t.flushed();
+    expect(t.pendingSend).toEqual({ id: "p", type: "prompt", message: "go" });
+    // The first failure's command is kept; a second failed send does not replace it.
+    c.failNext = { operation: "send", error: new Error("another failure") };
+    t.send({ type: "steer", message: "later" });
+    await t.flushed();
+    expect(t.pendingSend).toEqual({ id: "p", type: "prompt", message: "go" });
+  });
+
+  it("abandon() drops every write still queued behind the one in flight, so none of the old transport's writes land after a re-attach re-sends (harness-pi item 16)", async () => {
+    const c = new FakeHarnessContainer();
+    await c.start({ paths, command: "pi", args: [], env: {} });
+    // Hold the first write in flight (past the drop check, inside writeLine) so
+    // a second queues behind it — the shape a re-attach's `abandon()` finds.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const realWrite = c.writeLine.bind(c);
+    let held = false;
+    c.writeLine = async (p, line) => {
+      if (!held) {
+        held = true;
+        await gate;
+      }
+      return realWrite(p, line);
+    };
+    const { t } = transport(c);
+    t.send({ type: "prompt", message: "in flight" });
+    t.send({ type: "steer", message: "queued behind it" });
+    await new Promise((r) => setImmediate(r)); // let the first write reach the gate, past the drop check
+    t.abandon(); // the re-attach's close: drop what is still queued
+    release();
+    await t.flushed();
+    // The in-flight write landed (already committed); the queued one never did.
+    expect(c.stdin).toEqual(['{"type":"prompt","message":"in flight"}']);
+  });
+
+  it("close() still flushes a write queued just before it — a gate-bypass abort lands even as the transport closes", async () => {
+    const c = new FakeHarnessContainer();
+    await c.start({ paths, command: "pi", args: [], env: {} });
+    const { t } = transport(c);
+    t.send({ type: "abort" });
+    t.close();
+    await t.flushed();
+    expect(c.stdin).toEqual(['{"type":"abort"}']);
+  });
+
   it("a re-attach starts reading at the offset it was handed", async () => {
     const c = new FakeHarnessContainer();
     await c.start({ paths, command: "pi", args: [], env: {} });

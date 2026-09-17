@@ -1231,6 +1231,9 @@ describe("the pi harness — the container replaced under a living bot: the rela
       // the wake, re-attaches to the replacement — which names itself anew —
       // and hands the next log read back as the restart (resident-repos item 65).
       c.vm = "vm-new";
+      // The old container's pid is gone with it: the ask-2 probe on the word
+      // finds it dead, so the verdict stands and the loop relaunches.
+      c.alive = async () => false;
       const read = c.readLog.bind(c);
       c.readLog = async (path, offset, max) => {
         const chunk = await read(path, offset, max);
@@ -3484,6 +3487,8 @@ describe("the relaunch ceiling — the mid-run re-attach spike (the record's fir
         { type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: { command: "npm test" } },
       );
       authorizeToolCall(registry.get("run-l")!, { toolCallId: "c1", tool: "bash", input: { command: "npm test" } });
+      // The old container's pid is gone with it: the ask-2 probe on the word finds it dead.
+      c.alive = async () => false;
       const read = c.readLog.bind(c);
       c.readLog = async (path, offset, max) => {
         const chunk = await read(path, offset, max);

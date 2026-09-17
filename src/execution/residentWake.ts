@@ -121,6 +121,16 @@ export function saysContainerGone(data: Record<string, unknown>): boolean {
   return data.needs === "attach" && typeof data.error === "string" && data.error.startsWith("worktree-missing:");
 }
 
+/** Whether a thread route's answer says the resident's own Durable Object reset
+ *  under the command (a Worker-code deploy) while the container kept running
+ *  (resident-repos item 43; harness-pi item 16): its own `reason:"control-reset"`,
+ *  distinct from `runtime-replaced`. The container is unchanged and the
+ *  command's outcome is unknown, so the client re-sends an idempotent op or
+ *  resolves a write by echo — never the replaced verdict. */
+export function saysControlReset(data: Record<string, unknown>): boolean {
+  return data.reason === "control-reset";
+}
+
 /** What the caller is told when `/exec` met a container gone under the
  *  thread: the resident's own words, and that the command was not re-issued —
  *  it may have started before the runtime was swapped, and the replacement is

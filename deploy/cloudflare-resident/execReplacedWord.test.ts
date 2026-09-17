@@ -112,14 +112,21 @@ describe("the /exec answer says runtime-replaced only when the resident knows th
     expect(vouches).toMatch(/StaleProcessHandleError/);
     expect(vouches).toMatch(/RuntimeIdentityInactiveError/);
     expect(vouches).toMatch(/RUNTIME_REPLACED_REASONS\.has/);
-    expect(vouches).toMatch(/isDurableObjectCodeUpdateReset/);
     expect(vouches).toMatch(/RUNTIME_MOVED_WORDING\.test/);
     expect(vouches).not.toMatch(/RUNTIME_REPLACEMENT_WORDING/);
     expect(vouches).not.toMatch(/STOPPED_CONTAINER_WORDING/);
     expect(vouches).not.toMatch(/RPCTransportError/);
+    // A DO code-update reset becomes a `ControlResetError` in `run()` before any
+    // `RuntimeReplacedError`, so it can never be a vouching reason: the vouching
+    // set does not list the isolate reset (`controlReset.test.ts` proves the
+    // predicate lives in `isControlReset` alone, off both the gate and the union).
+    expect(vouches).not.toMatch(/isDurableObjectCodeUpdateReset/);
     const replacement = functionOf("isRuntimeReplacement");
     expect(replacement).toMatch(/RUNTIME_REPLACEMENT_WORDING\.test/);
     expect(replacement).toMatch(/RPC_TRANSPORT_LOSS_KINDS\.has/);
+    // The union too is immune to the isolate reset now (the /exec path never
+    // swaps the incarnation on a DO reset); the restore path folds it in by name.
+    expect(replacement).not.toMatch(/isDurableObjectCodeUpdateReset/);
   });
 
   it("the idempotent routes keep item 43's answer as it was: read, the bytes read and write say the word unconditionally — there it drives the client's re-attach-and-retry, never a verdict — and none of them consults the gate", () => {

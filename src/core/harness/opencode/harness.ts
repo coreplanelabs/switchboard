@@ -479,6 +479,7 @@ export async function openOpenCodeRun(
       password: server.password,
       sessionID: server.sessionID,
       feedOffset: server.feedOffset,
+      pid: server.pid,
       tailerPid: server.tailerPid,
       ...(here !== undefined ? { containerWord: here } : {}),
       writeUp,

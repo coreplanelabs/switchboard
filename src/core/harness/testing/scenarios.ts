@@ -19,6 +19,7 @@ import type { CompletionRequest, CompletionResult } from "../../provider.js";
 import type { RunEvent } from "../../runEvents.js";
 import type { StepReport } from "../../runLedger/stepReport.js";
 import { identityChangedCondition, type HarnessRequest, type HarnessStart } from "../container.js";
+import { WORD_ALIVE_REATTACH_NOTE } from "../reattach.js";
 import {
   HarnessContainerReplacedError,
   HarnessMismatchError,
@@ -140,6 +141,20 @@ export interface RunScript {
   /** A hard stop requested the moment the one more command first finds the
    *  container down: the wait must end at once and the run end as the stop. */
   hardStopDuringProbeWait?: boolean;
+  /** The executor says replaced (a read/feed poll fails with the word) while the
+   *  previous turn's tool call is in flight, before the model call of this
+   *  1-based number — but the row's process still ANSWERS alive (ask 2):
+   *  the driver arms the read to fail once with the word while keeping the pid
+   *  alive and does NOT hold the call open, so the harness re-attaches in place,
+   *  records the disagreement, and the run goes on to its answer with
+   *  `relaunches` untouched, never the replaced verdict. */
+  replacedWordWithPidAlive?: number;
+  /** The resident's control plane keeps resetting the feed with no progress from
+   *  this 1-based model call on — every drained read fails with a control reset
+   *  over the unchanged container (harness-pi item 16). The driver arms a
+   *  persistent reset, so the loop re-attaches until the runaway bound closes
+   *  the run by name (a `harness_error`), never the replaced verdict. */
+  controlResetBoundOnFeed?: number;
   /** The row's process (named by the resume's facts) is still alive in this same
    *  container on the resume — the survival clause's alive-here: `open` finds it
    *  before anything is started and re-attaches to it when the row carries what
@@ -975,6 +990,36 @@ export const SCENARIOS: readonly ScenarioRow[] = [
       // Nothing of the old process is in the container that answers now.
       assert.deepEqual(run.killed, [], "a pid was ended in the replacement");
       assert.deepEqual(run.removed, [], "a root was removed in the replacement");
+    },
+  },
+  {
+    id: "survival-replaced-word-with-pi-alive",
+    clause: "survival",
+    title:
+      "the executor says replaced while the recorded pid still answers alive: the word does not outrank the live process (a same-kernel replacement keeps the boot id, so only the process refutes the word) — the harness re-attaches in place, records the disagreement in one resumed note, the run answers, no relaunch and no verdict, `relaunches` untouched and one process",
+    script: {
+      turns: [call("c1", "bash", { command: "echo one" }), text("answered after re-attach")],
+      replacedWordWithPidAlive: 2,
+    },
+    check: (run) => {
+      // The word was refuted by the live pid: the run answered, never the verdict.
+      assert.equal(answered(run), "answered after re-attach");
+      const resumed = notes(run).filter((n) => n.kind === "resumed");
+      assert.ok(
+        resumed.some((n) => n.summary === WORD_ALIVE_REATTACH_NOTE),
+        `no resumed note records the disagreement in the exact wording; got ${JSON.stringify(resumed.map((n) => n.summary))}`,
+      );
+      assert.equal(
+        notes(run).filter((n) => n.kind === "sandbox_restarted").length,
+        0,
+        "a sandbox_restarted note (the replaced verdict) was written though the pid answered alive",
+      );
+      // One process, no relaunch: the row's relaunch count is never bumped and nothing is ended for a fresh start.
+      assert.ok(
+        run.facts.length > 0 && run.facts.every((f) => f.relaunches === 0),
+        "the relaunch count was bumped on a re-attach",
+      );
+      assert.equal(run.starts.length, 1, "a second process was started for what should have been a re-attach");
     },
   },
   {

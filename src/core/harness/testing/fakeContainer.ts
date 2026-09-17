@@ -53,11 +53,29 @@ export class FakeHarnessContainer implements HarnessContainer {
   vm: string | undefined = "vm-fake";
   /** Set to make the next operation fail as the executor would report it. */
   failNext: { operation: string; error: Error } | undefined;
+  /** Set to fail the next `writeLine` whose command `type` matches, ONCE — a
+   *  control reset (or any error) on a specific send, for the write-resolution
+   *  paths (harness-pi item 16). */
+  failSendType: { type: string; error: Error } | undefined;
   /** Set to make a log read fail once the log is drained — after the records
    *  already written were read — as the container replaced under the run does
    *  (harness-pi item 16): the poll for the next output reaches the replacement
-   *  and fails with the executor's word, with the last turn's call in flight. */
+   *  and fails with the executor's word, with the last turn's call in flight.
+   *  A replaced container has no live pid, so `alive` answers `false` while this
+   *  is armed (the ask-2 probe finds the process gone). */
   failOnceDrained: Error | undefined;
+  /** Set to make the NEXT drained read fail ONCE with the executor's word and
+   *  then recover — the pid stays alive throughout (ask 2): the executor
+   *  said replaced, but the row's process still answers, so the harness
+   *  re-attaches in place and the run goes on rather than judging it replaced. */
+  failReadOnceThenAlive: Error | undefined;
+  /** Set to make EVERY drained read fail with a control reset — the resident's
+   *  Durable Object resetting over an unchanged container again and again with
+   *  no new record between the re-attaches (harness-pi item 16): the loop
+   *  re-attaches until the runaway bound closes the run by name. Persistent
+   *  (unlike `failReadOnceThenAlive`), so it drives the bound; the pid is
+   *  irrelevant, since a control reset never probes `alive`. */
+  resetOnDrain: Error | undefined;
   /** Pids a previous generation's process left running that this generation
    *  finds alive besides the one this container started — a row's OpenCode or
    *  pi still up in this container on a resume, for `alive`/`find`. */
@@ -167,6 +185,14 @@ export class FakeHarnessContainer implements HarnessContainer {
 
   async writeLine(paths: HarnessPaths, line: string): Promise<void> {
     this.maybeFail("send");
+    if (this.failSendType !== undefined) {
+      const parsed = JSON.parse(line) as { type?: unknown };
+      if (parsed.type === this.failSendType.type) {
+        const err = this.failSendType.error;
+        this.failSendType = undefined;
+        throw err;
+      }
+    }
     if (this.fifoPath !== undefined && paths.fifo !== this.fifoPath)
       throw new HarnessContainerError("send", `sh: 1: cannot create ${paths.fifo}: Directory nonexistent`);
     this.stdin.push(line);
@@ -178,14 +204,31 @@ export class FakeHarnessContainer implements HarnessContainer {
     if (this.logPath !== undefined && path !== this.logPath)
       throw new HarnessContainerError("read", `tail: cannot open '${path}' for reading: No such file or directory`);
     const chunk = this.log.subarray(offset, Math.min(this.log.length, offset + maxBytes));
+    // The resident's control plane keeps resetting over the unchanged container:
+    // every drained read fails with a control reset, so the loop re-attaches
+    // with no progress until the runaway bound closes the run by name.
+    if (this.resetOnDrain !== undefined && chunk.length === 0) throw this.resetOnDrain;
     // The container was replaced under the run: the records already written are
     // read (the last turn's call among them), then the poll for the next output
     // reaches the replacement and fails with the executor's word.
     if (this.failOnceDrained !== undefined && chunk.length === 0) throw this.failOnceDrained;
+    // The executor said replaced once, but the pid stays alive (ask 2):
+    // one drained read fails with the word, then the harness re-attaches and the
+    // reads recover, delivering the records the run went on to write.
+    if (this.failReadOnceThenAlive !== undefined && chunk.length === 0) {
+      const err = this.failReadOnceThenAlive;
+      this.failReadOnceThenAlive = undefined;
+      throw err;
+    }
     return new Uint8Array(chunk);
   }
 
   async alive(pid: number): Promise<boolean> {
+    // A container replaced under the run (`failOnceDrained` armed) has no
+    // process at the row's pid: the ask-2 probe on the executor's word finds it
+    // gone, so the verdict stands (harness-pi item 16). An alive pid is
+    // only for a container still standing.
+    if (this.failOnceDrained !== undefined) return false;
     return (this.live && pid === this.pid) || this.alivePids.has(pid);
   }
 

@@ -6,6 +6,7 @@ import {
   isContainerRolling,
   sandboxRestartedMessage,
   saysContainerGone,
+  saysControlReset,
   wakeDecision,
   wakeWaitBudget,
 } from "./residentWake.js";
@@ -149,6 +150,8 @@ describe("saysContainerGone: the answers that say the container under the thread
       { error: "not-serviceable: The container just exited", state: "warm" },
       { error: "worktree-missing: mentioned without needs" },
       { stdout: "fine", exitCode: 0 },
+      // A DO control reset leaves the container standing: never container-gone.
+      { error: "control-reset: the DO was reset", reason: "control-reset" },
       {},
     ]) {
       expect(saysContainerGone(data), JSON.stringify(data)).toBe(false);
@@ -159,5 +162,20 @@ describe("saysContainerGone: the answers that say the container under the thread
     expect(containerGoneMessage(" runtime-replaced: deploy ")).toBe(
       "runtime-replaced: deploy; the command was not run again",
     );
+  });
+});
+
+describe("saysControlReset: a DO reset over a live container, distinct from a replacement", () => {
+  it("is exactly the resident's control-reset reason, and never a runtime-replaced, a worktree-missing or a plain result", () => {
+    expect(saysControlReset({ error: "control-reset: the DO was reset", reason: "control-reset" })).toBe(true);
+    for (const data of [
+      { error: "runtime-replaced: the resident runtime was replaced", reason: "runtime-replaced" },
+      { error: "worktree-missing: recycled", needs: "attach" },
+      { error: "the text says control-reset but the reason does not", reason: "runtime-replaced" },
+      { stdout: "fine", exitCode: 0 },
+      {},
+    ]) {
+      expect(saysControlReset(data), JSON.stringify(data)).toBe(false);
+    }
   });
 });

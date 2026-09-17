@@ -18,7 +18,12 @@
 // lines the harness names filtered at the source. A bearer reaches the process
 // through the exec's env channel and is never part of a command.
 
-import { ExecInfraError, ExecSandboxRestartedError, type Executor } from "../../execution/executor.js";
+import {
+  ExecControlResetError,
+  ExecInfraError,
+  ExecSandboxRestartedError,
+  type Executor,
+} from "../../execution/executor.js";
 import { STOPPED_CONTAINER_WORDING } from "../../execution/residentRefresh.js";
 import { CONTAINER_GONE_WORDING } from "../../execution/residentWake.js";
 import { SANDBOX_START_BACKOFF_MS, SANDBOX_START_WAIT_MAX_MS } from "../../execution/sandboxErrors.js";
@@ -575,6 +580,50 @@ export function saysTransportLost(err: unknown): boolean {
   return err instanceof HarnessContainerDownError || CONTAINER_DOWN_WORDING.test(err.message);
 }
 
+/** A container operation met the resident's Durable Object resetting under it
+ *  (a Worker deploy) while the container kept running (`ExecControlResetError`,
+ *  harness-pi item 16): the container and the run's process are unchanged and
+ *  the operation's outcome is unknown. Raised by the seam only for an operation
+ *  it will NOT re-send — a write, or an idempotent op the seam already re-sent
+ *  once and met again — so the harness resolves it as an outcome-unknown case,
+ *  never the replaced verdict. Deliberately distinct from
+ *  `HarnessContainerRuntimeReplacedError`, and `isContainerGone` never matches
+ *  it: a control reset is not a container gone. */
+export class HarnessContainerControlResetError extends HarnessContainerError {
+  constructor(operation: string, detail: string) {
+    super(operation, detail);
+    this.name = "HarnessContainerControlResetError";
+  }
+}
+
+/** Whether an error is a Durable Object control reset over a live container
+ *  (harness-pi item 16): the executor's typed word (`ExecControlResetError`),
+ *  or the seam's own for an operation it did not re-send. The harness reads it
+ *  as outcome-unknown-container-unchanged, never a replacement — checked
+ *  BEFORE `saysContainerReplaced`/`isContainerGone`, which never match it. */
+export function isControlReset(err: unknown): err is ExecControlResetError | HarnessContainerControlResetError {
+  return err instanceof ExecControlResetError || err instanceof HarnessContainerControlResetError;
+}
+
+/** Whether a container command's failure says the runtime under it was
+ *  replaced. The condition is typed first: the resident client's
+ *  `ExecSandboxRestartedError` — its one word for every answer that says the
+ *  container under the thread is gone, thrown before any recovery
+ *  (resident-repos items 65, 43 and 27: the container exited inside a rollout,
+ *  a deploy swapped the runtime under the command, the container disk was
+ *  recycled) — and the seam's `HarnessContainerRuntimeReplacedError`, an executor
+ *  that handed the word back as a command's text. Then the words themselves,
+ *  `runtime-replaced` or `runtime-unreachable` (the sandbox's word for a
+ *  control port nothing answers, execution item 9), anywhere in a failure's
+ *  text: the executors write their own sentence around the word (`exit 127:`
+ *  and a newline, `resident /exec: …`), an anchor at the head misses it, and
+ *  the seam's own commands never print it, so a failure carrying it is the
+ *  executor's. A failure without any of that is the failure it was. */
+export function saysContainerReplaced(err: unknown): boolean {
+  if (err instanceof ExecSandboxRestartedError || err instanceof HarnessContainerRuntimeReplacedError) return true;
+  return err instanceof Error && RUNTIME_WORD.test(err.message);
+}
+
 /** What a replaced verdict rests on, as a tag a reader of the error and of the
  *  record compares — never a sentence to parse: `word`, the executor's word on
  *  a failing container command (the condition as it always was, `said`
@@ -648,6 +697,31 @@ export async function replacedVerdict(
       if (isContainerGone(err)) {
         if (startedAt !== undefined) probe?.note?.(containerAnswered(waited()));
         return { condition: "word", said: err };
+      }
+      // A control reset over the one more command is the container unchanged
+      // (harness-pi item 16), never a judgement: re-send it, waiting through the
+      // reset as the down-wait does — ended by the run's stop and the clock's
+      // bound alike. Without a probe there is nothing to wait with, so it
+      // decides nothing, as any other failure.
+      if (isControlReset(err) && probe !== undefined) {
+        if (startedAt === undefined) {
+          startedAt = probe.now();
+          probe.note?.(
+            "the one more command met the resident's control plane reset (the container is unchanged); re-sending it, up to " +
+              seconds(PROBE_WAIT_MAX_MS),
+          );
+        }
+        const pause = PROBE_WAIT_BACKOFF_MS[Math.min(attempt, PROBE_WAIT_BACKOFF_MS.length - 1)];
+        const stop = waitEnds(probe, waited(), pause);
+        if (stop !== undefined) {
+          probe.note?.(stop);
+          return undefined;
+        }
+        if (!(await sleepUnlessStopped(probe, pause))) {
+          probe.note?.(waitEndedBecause(waited(), "a hard stop was requested"));
+          return undefined;
+        }
+        continue;
       }
       if (err instanceof HarnessContainerDownError && probe !== undefined) {
         if (startedAt === undefined) {
@@ -776,11 +850,11 @@ export class ExecHarnessContainer implements HarnessContainer {
   }
 
   async writeFile(path: string, content: string): Promise<void> {
-    for (const script of writeFileScripts(path, content)) stdoutOf("write", await this.exec(script));
+    for (const script of writeFileScripts(path, content)) stdoutOf("write", await this.execWrite("write", script));
   }
 
   async start(start: HarnessStart): Promise<HarnessStarted> {
-    const out = stdoutOf("start", await this.exec(startScript(start), start.env)).trim();
+    const out = stdoutOf("start", await this.execWrite("start", startScript(start), start.env)).trim();
     const lines = out.split("\n");
     const pid = Number(lines[lines.length - 1]);
     if (!Number.isInteger(pid) || pid <= 0)
@@ -796,14 +870,14 @@ export class ExecHarnessContainer implements HarnessContainer {
   async writeLine(paths: HarnessPaths, line: string): Promise<void> {
     if (line.length <= INLINE_LINE_CHARS) {
       await this.onControlFile("send", paths.fifo, paths, async () =>
-        stdoutOf("send", await this.exec(writeLineScript(paths.fifo, line))),
+        stdoutOf("send", await this.execWrite("send", writeLineScript(paths.fifo, line))),
       );
       return;
     }
     const file = `${paths.commandDir}/${++this.commandNo}.json`;
     await this.onControlFile("write", file, paths, () => this.writeFile(file, line));
     await this.onControlFile("send", paths.fifo, paths, async () =>
-      stdoutOf("send", await this.exec(feedFileScript(paths.fifo, file))),
+      stdoutOf("send", await this.execWrite("send", feedFileScript(paths.fifo, file))),
     );
   }
 
@@ -828,12 +902,12 @@ export class ExecHarnessContainer implements HarnessContainer {
   }
 
   async readLog(path: string, offset: number, maxBytes: number): Promise<Uint8Array> {
-    const b64 = stdoutOf("read", await this.exec(readLogScript(path, offset, maxBytes))).trim();
+    const b64 = stdoutOf("read", await this.execIdempotent("read", readLogScript(path, offset, maxBytes))).trim();
     return b64 ? new Uint8Array(Buffer.from(b64, "base64")) : new Uint8Array(0);
   }
 
   async alive(pid: number): Promise<boolean> {
-    return stdoutOf("alive", await this.exec(aliveScript(pid))).trim() === "alive";
+    return stdoutOf("alive", await this.execIdempotent("alive", aliveScript(pid))).trim() === "alive";
   }
 
   /** One word or nothing: an empty answer, a malformed one or a command the
@@ -851,10 +925,16 @@ export class ExecHarnessContainer implements HarnessContainer {
    *  wants a name for the record reads it through `identityOrNothing`. */
   async identity(): Promise<string | undefined> {
     try {
-      const word = stdoutOf("identity", await this.exec(identityScript())).trim();
+      const word = stdoutOf("identity", await this.execIdempotent("identity", identityScript())).trim();
       return IDENTITY_WORD.test(word) ? word : undefined;
     } catch (err) {
       if (isContainerGone(err)) throw err;
+      // A control reset over the probe (the resident's Durable Object reset, so
+      // `execIdempotent` re-sent once and a second reset came) is the container
+      // unchanged, never a container with no name: it is thrown for the caller
+      // to re-send, never returned as `undefined` (which reads as a judgement)
+      // and never read as a container merely down.
+      if (isControlReset(err)) throw err;
       if (saysContainerDown(err) || (err instanceof ExecInfraError && WORKER_UNREACHABLE_WORDING.test(err.message)))
         throw new HarnessContainerDownError("identity", (err as Error).message);
       return undefined;
@@ -874,26 +954,69 @@ export class ExecHarnessContainer implements HarnessContainer {
       await this.writeFile(bodyFile, req.body);
     }
     const env = requestEnv(req);
-    return requestOutcome(await this.exec(requestScript(req, bodyFile), Object.keys(env).length > 0 ? env : undefined));
+    const script = requestScript(req, bodyFile);
+    const opEnv = Object.keys(env).length > 0 ? env : undefined;
+    // A read is idempotent (re-send once on a control reset); a write is not
+    // (its outcome is unknown, resolved by the harness). A request whose HTTP
+    // answer already came back never met a control reset — that is thrown by
+    // the exec, before `requestOutcome` reads a body.
+    const idempotent = /^(?:GET|HEAD|OPTIONS)$/i.test(req.method);
+    return requestOutcome(
+      idempotent ? await this.execIdempotent("request", script, opEnv) : await this.execWrite("request", script, opEnv),
+    );
   }
 
   async kill(pid: number): Promise<void> {
-    stdoutOf("kill", await this.exec(killScript(pid)));
+    stdoutOf("kill", await this.execIdempotent("kill", killScript(pid)));
   }
 
   async tail(path: string, bytes: number): Promise<string> {
     try {
-      return stdoutOf("tail", await this.exec(tailScript(path, bytes)));
+      return stdoutOf("tail", await this.execIdempotent("tail", tailScript(path, bytes)));
     } catch {
       return "";
     }
   }
 
   async remove(paths: HarnessPaths): Promise<void> {
-    stdoutOf("remove", await this.exec(removeScript(paths.dir)));
+    stdoutOf("remove", await this.execIdempotent("remove", removeScript(paths.dir)));
   }
 
   private exec(script: string, env?: Record<string, string>): Promise<string> {
     return this.executor.exec(script, { timeoutMs: OP_TIMEOUT_MS, ...(env ? { env } : {}) });
+  }
+
+  /** Run an idempotent container operation, re-sending it ONCE if the executor
+   *  answers a control reset — the resident's Durable Object reset over a live
+   *  container (harness-pi item 16): the container is unchanged and a re-read is
+   *  safe. A second control reset is the outcome-unknown case, raised as the
+   *  seam's own `HarnessContainerControlResetError` for the harness to judge —
+   *  never the replaced verdict. */
+  private async execIdempotent(operation: string, script: string, env?: Record<string, string>): Promise<string> {
+    try {
+      return await this.exec(script, env);
+    } catch (err) {
+      if (!(err instanceof ExecControlResetError)) throw err;
+      try {
+        return await this.exec(script, env);
+      } catch (again) {
+        if (again instanceof ExecControlResetError)
+          throw new HarnessContainerControlResetError(operation, again.message);
+        throw again;
+      }
+    }
+  }
+
+  /** Run a container WRITE, never re-sending it: on a control reset the write's
+   *  outcome is unknown, so it is raised as the seam's own for the harness to
+   *  resolve by pi's echo (harness-pi item 16) — a blind re-send would duplicate
+   *  a prompt or steer, a corruption. */
+  private async execWrite(operation: string, script: string, env?: Record<string, string>): Promise<string> {
+    try {
+      return await this.exec(script, env);
+    } catch (err) {
+      if (err instanceof ExecControlResetError) throw new HarnessContainerControlResetError(operation, err.message);
+      throw err;
+    }
   }
 }
