@@ -335,10 +335,13 @@
 
 /*
  * The composer's ring sweep (web-chat.md rule 8): on focus, and once as the
- * page lands, a light travels one turn around the box's hairline — a rotating
- * conic gradient masked to a 1px ring, 700 ms, then gone. Nothing moves; the
- * ring is the only thing that changes. The second and last exception to the
- * 8px rule, beside the mark's draw. Off under prefers-reduced-motion.
+ * page lands, a line of colour travels one turn around the box's hairline — a
+ * rotating conic gradient masked to a 1px ring, 700 ms — and fades as it
+ * arrives, leaving the ink border the focus already drew. The colour is the
+ * mark's own (the ok green, the one accent the page carries), so the line is
+ * seen to move and then settle to white. Nothing else moves; the ring is the
+ * only thing that changes. The second and last exception to the 8px rule,
+ * beside the mark's draw. Off under prefers-reduced-motion.
  */
 @property --sb-angle {
   syntax: "<angle>";
@@ -354,8 +357,9 @@
   background: conic-gradient(
     from var(--sb-angle),
     transparent 0deg,
-    transparent 250deg,
-    var(--ui-primary) 320deg,
+    transparent 200deg,
+    var(--ui-success) 300deg,
+    var(--ui-primary) 340deg,
     transparent 360deg
   );
   -webkit-mask:

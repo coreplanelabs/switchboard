@@ -329,9 +329,16 @@ export function createWebChatHandler(
     const groups = threadsOf(listed.runs);
     const rows = await Promise.all(
       groups.map(async (g): Promise<HomeConversationRowSeed> => {
+        // The thread's first request, from the oldest run that recorded one: a
+        // run refused before its request was published (a died ship attempt)
+        // has no `input`, and its label is the card's head, not a title.
+        let request = "";
+        for (const run of g.runs) {
+          const read = await deps.service.getRun(run.id, { include: "messages" });
+          request = read.ok ? turnOf(read.value).request : "";
+          if (request !== "") break;
+        }
         const first = g.runs[0];
-        const read = await deps.service.getRun(first.id, { include: "messages" });
-        const request = read.ok ? turnOf(read.value).request : "";
         return {
           id: conversationIdOf(sub, g.threadKey),
           title: threadTitle(request || first.label || first.id),
