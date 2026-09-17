@@ -10,6 +10,7 @@
 //   npm run load -- pi --checkout ../repo --task all --provider anthropic --model <id> --key-env ANTHROPIC_API_KEY
 //   npm run load -- pi --suite review --checkout ../repo --task all --provider anthropic --model <id>   (merged PRs reviewed, verdicts recorded)
 //   npm run load -- route --since <date> --limit 200 --provider anthropic --model <id>   (singles + the compound and imperative sets)
+//   npm run load -- route --verify --limit 0 --provider anthropic --model <id>   (the checked-in sets, plus the verifier on every write-class bind)
 //   npm run load -- door --since <date>                                    (the door's hand-backs and pastes, printed)
 //
 // Every command but `door` writes `load-results/<command>-<runId>.json` (the
@@ -87,6 +88,7 @@ import {
   renderConfusion,
   renderCounters,
   renderImperative,
+  renderVerifier,
   replayCommands,
   replayCompound,
   replayImperative,
@@ -95,6 +97,8 @@ import {
   tableWritePreset,
   tallyingProvider,
   typedLabels,
+  verifierScore,
+  verifyCommands,
 } from "../src/load/routeReplay.js";
 import { ROUTE_COMPOUND_FIXTURES } from "../src/load/routeCompoundFixtures.js";
 import { ROUTE_IMPERATIVE_FIXTURES } from "../src/load/routeImperativeFixtures.js";
@@ -161,6 +165,10 @@ commands
              and the terse imperatives scored on theirs (src/load/routeImperativeFixtures.ts)
              --provider NAME  --model ID  [--key-env VAR  --base-url URL  --since DATE  --limit N  --default-agent NAME
              --concurrency N  --max-parts N (the compound cap, default spawn.maxChildren's 3)]
+             [--verify: one more call on every bind of a write- or destructive-class command in the checked-in command set,
+             shown the sentence and the bound line and asked whether the line does what was asked; printed beside the command
+             rows as write misbinds removed and correct binds rejected — a measurement for the production decision, never a
+             verdict row; nothing in production calls it]
              env: SWITCHBOARD_STATE_WORKER_URL, MEMORY_TOKEN (or --state-url / --token-env); the model key as for pi
   door       the door's hand-backs, the pastes that followed and the paste-through rate, per day and per command,
              read off the run store's command records; printed, nothing invoked, no receipt file
@@ -220,6 +228,7 @@ function flags(argv: string[]): Flags {
       "default-agent": { type: "string" },
       concurrency: { type: "string" },
       "max-parts": { type: "string" },
+      verify: { type: "boolean" },
       help: { type: "boolean" },
     },
   });
@@ -1111,8 +1120,13 @@ async function piReviewSuite(f: Flags): Promise<boolean> {
  *  few — on detection, their count printed.
  *  Then the imperative half: the checked-in set of terse imperatives (twenty,
  *  five read-only decoys, six review-shaped) scored on reaching the table's write preset and on
- *  no look-alike reaching a write preset. Live model spend: one small call per
- *  request, the key from the environment. */
+ *  no look-alike reaching a write preset. Then the command half: the checked-in
+ *  command set bound and parsed, never invoked; under `--verify`, one more
+ *  call on every bind of a write- or destructive-class command (record 0044's
+ *  verifier), scored as write misbinds removed and correct binds rejected and
+ *  printed beside the command rows, never a verdict row. Live model spend: one
+ *  small call per request — two on a verified bind — the key from the
+ *  environment. */
 async function routeReplay(f: Flags): Promise<boolean> {
   const id = runId();
   const startedAt = new Date(systemClock()).toISOString();
@@ -1154,6 +1168,7 @@ async function routeReplay(f: Flags): Promise<boolean> {
   const defaultPreset = str(f, "default-agent", "general");
   const concurrency = num(f, "concurrency", 4);
   const maxParts = num(f, "max-parts", DEFAULT_MAX_CHILDREN);
+  const verify = f.verify === true;
 
   // Newest first, one record at a time, until `limit` labelled requests or
   // the store runs out: a record is a few KB, and most rows are labelled.
@@ -1254,6 +1269,20 @@ async function routeReplay(f: Flags): Promise<boolean> {
     menu.map((c) => c.def),
   );
   const command = commandScore(commandResults);
+  // The verifier (record 0044; load-harness item 17), under --verify alone:
+  // one more call through the same model on every bind of a write- or
+  // destructive-class command, scored as write misbinds removed and correct
+  // binds rejected, printed beside the command rows and never a verdict row —
+  // the production decision is the maintainer's, taken off the two numbers.
+  const verified = verify
+    ? await verifyCommands(
+        commandResults,
+        model,
+        menu.map((c) => c.def),
+        { concurrency, now: systemClock, timeoutMs: ROUTE_TIMEOUT_MS },
+      )
+    : undefined;
+  const verifier = verified === undefined ? undefined : verifierScore(verified);
   const samples: Sample[] = [
     ...[...results, ...stickyResults, ...unstampedResults].map((r): Sample => ({
       op: "route",
@@ -1287,6 +1316,19 @@ async function routeReplay(f: Flags): Promise<boolean> {
       status: r.bound?.id ?? r.routed ?? "none",
       ...(r.bound === undefined && r.routed === undefined ? { reason: "no-route" } : {}),
     })),
+    ...(verified ?? []).flatMap((r): Sample[] =>
+      r.verdict === undefined
+        ? []
+        : [
+            {
+              op: "route-verify",
+              startedAt: systemClock(),
+              ms: r.verdict.ms,
+              ok: true,
+              status: r.verdict.agrees ? "agrees" : "rejects",
+            },
+          ],
+    ),
   ];
   const summary = summarize(samples);
   const answered = results.filter((r) => r.routed !== undefined).length;
@@ -1302,6 +1344,7 @@ async function routeReplay(f: Flags): Promise<boolean> {
     writePreset,
     command: { score: command, bars: { command: 1.0, input: 0.9 } },
   });
+  if (verifier !== undefined) process.stdout.write(`${renderVerifier(verifier)[0]}\n`);
   process.stdout.write(`${renderCounters(counters)}\n`);
   const bySource: Record<string, number> = {};
   for (const r of requests) bySource[r.labelSource] = (bySource[r.labelSource] ?? 0) + 1;
@@ -1337,6 +1380,13 @@ async function routeReplay(f: Flags): Promise<boolean> {
     "",
     `checked-in command set (${command.fixtures} fixtures over ${menu.length} offered commands, ${command.decoys} decoys; bound and parsed, never invoked):`,
     ...renderCommands(command),
+    ...(verifier === undefined
+      ? []
+      : [
+          "",
+          `the same binds under --verify (${verifier.asked} write- or destructive-class bind(s), one verifier call each through the same model; a read bind, an exec bind and an unbound decoy are never asked):`,
+          ...renderVerifier(verifier),
+        ]),
     "",
     renderCounters(counters),
     "",
@@ -1361,7 +1411,7 @@ async function routeReplay(f: Flags): Promise<boolean> {
     "route",
     id,
     startedAt,
-    { stateUrl: base, model: modelRef, since: f.since, limit, defaultPreset, concurrency, maxParts, keyEnv },
+    { stateUrl: base, model: modelRef, since: f.since, limit, defaultPreset, concurrency, maxParts, keyEnv, verify },
     summary,
     checks,
     {
@@ -1375,6 +1425,7 @@ async function routeReplay(f: Flags): Promise<boolean> {
       },
       imperative: { ...imperative, misses: imperative.misses.map(redacted), results: imperativeResults.map(redacted) },
       command: { ...command, misses: command.misses.map(redacted), results: commandResults.map(redacted) },
+      ...(verifier === undefined ? {} : { verifier: { ...verifier, rejected: verifier.rejected.map(redacted) } }),
       counters,
       skipped,
     },

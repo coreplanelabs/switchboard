@@ -2,18 +2,22 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { CommandRegistry, type CommandDef, type CommandInput } from "../core/commandRegistry.js";
 import { registerCoreCommands, type CoreCommandDeps } from "../core/commands/all.js";
-import { mcpToolName } from "../core/commandSurface.js";
-import type { Provider } from "../core/provider.js";
+import { chatInvocation, mcpToolName } from "../core/commandSurface.js";
+import type { CompletionRequest, Provider } from "../core/provider.js";
 import { AGENTS } from "../agents/registry.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunRecord } from "../core/runRecord.js";
 import type { RunEvent } from "../core/runEvents.js";
 import {
+  providerRouteModel,
   routableCommands,
   routablePresets,
   route,
+  VERIFY_TOOL_NAME,
   type RouteDecision,
   type RouteModel,
+  type RoutePrompt,
+  type RouteToolCall,
 } from "../core/dispatch/route.js";
 import {
   ROUTE_COMMAND_DECOYS,
@@ -41,6 +45,7 @@ import {
   emptyCounters,
   renderCommands,
   renderCounters,
+  renderVerifier,
   replayCommands,
   replayCompound,
   replayImperative,
@@ -52,6 +57,9 @@ import {
   type ReplayRequest,
   type ReplayResult,
   typedLabels,
+  verifierScore,
+  verifyBind,
+  verifyCommands,
 } from "./routeReplay.js";
 
 // `load:route` (docs/reference/specs/load-harness.md item 17): the router
@@ -1225,6 +1233,238 @@ describe("the checked-in command set through route() over a scripted model", () 
         forms.some((f) => f.threadRepo !== undefined),
         command,
       ).toBe(true);
+    }
+  });
+});
+
+describe("the verifier on the command replay — one more call on every write-class bind (record 0044)", () => {
+  const registry = new CommandRegistry<CoreCommandDeps>({ audit: () => {} });
+  registerCoreCommands(registry);
+  const menu = routableCommands(registry);
+  const defs = menu.map((c) => c.def);
+  const byId = new Map(menu.map((c) => [c.id, c.def]));
+  const presets = routablePresets();
+  const allowed = presets.map((p) => p.name);
+  const byText = new Map(ROUTE_COMMAND_EXAMPLES.map((e) => [e.text, e]));
+  const textOf = (prompt: { user: string }) => /<request>\n([\s\S]*)\n<\/request>/.exec(prompt.user)![1]!;
+  const lineOf = (prompt: { user: string }) => /^The line the router bound it to: (.*)$/m.exec(prompt.user)![1]!;
+  const pick = (...ids: string[]) => ids.map((id) => ROUTE_COMMAND_EXAMPLES.find((e) => e.id === id)!);
+  const fixture = (id: string) => ROUTE_COMMAND_FIXTURES.find((f) => f.id === id)!;
+  const now = () => 0;
+
+  /** An input spelled the way a tool call carries it: one object, argument
+   *  names beside camelCase options. */
+  const namedOf = (commandId: string, input: CommandInput): Record<string, unknown> => {
+    const def = byId.get(commandId)!;
+    const named: Record<string, unknown> = { ...(input.options ?? {}) };
+    (def.args ?? []).forEach((arg, i) => {
+      const v = (input.args ?? [])[i];
+      if (v !== undefined) named[arg.name] = v;
+    });
+    return named;
+  };
+
+  /** A router that binds every fixture to its own command and input, routes
+   *  every decoy to general, and binds the examples `binds` names as it says
+   *  — a wrong command, a wrong input, a decoy bound to a write. */
+  const router = (binds: Record<string, { command: string; input: CommandInput }> = {}) => {
+    const model: RouteModel = async (prompt) => {
+      const example = byText.get(textOf(prompt))!;
+      const bind =
+        binds[example.id] ??
+        (example.kind === "decoy" ? undefined : { command: example.command, input: example.input });
+      if (bind === undefined) return JSON.stringify({ preset: "general", reason: "a judgement, not a command" });
+      return { tool: mcpToolName(bind.command), input: namedOf(bind.command, bind.input) };
+    };
+    return (text: string, threadRepo?: string): Promise<RouteDecision> =>
+      route(
+        {
+          text,
+          recentDirectives: {},
+          presets,
+          allowed,
+          fallback: "general",
+          commands: menu,
+          ...(threadRepo ? { threadRepo } : {}),
+        },
+        model,
+      );
+  };
+
+  /** A verifier that answers `agrees(line, text)` through the forced call and
+   *  remembers every prompt it was handed. */
+  const verifier = (agrees: (line: string, text: string) => boolean) => {
+    const prompts: RoutePrompt[] = [];
+    const model: RouteModel = async (prompt) => {
+      prompts.push(prompt);
+      return { tool: VERIFY_TOOL_NAME, input: { agrees: agrees(lineOf(prompt), textOf(prompt)), reason: "scripted" } };
+    };
+    return { model, prompts };
+  };
+
+  it("is asked only about a write- or destructive-class bind — a read bind, an exec bind and an unbound decoy never reach it — and the call carries the sentence and the bound chat line; nothing is invoked", async () => {
+    const invoke = vi.spyOn(registry, "invoke");
+    const examples = pick("c01h", "c21h", "c06h", "c10h", "c09d");
+    const results = await replayCommands(examples, router(), { now }, defs);
+    expect(results.map((r) => r.bound?.id)).toEqual(["help.show", "repo.test", "config.set", "runs.stop", undefined]);
+    const v = verifier(() => true);
+    const verified = await verifyCommands(results, v.model, defs, { now });
+    expect(v.prompts.map(textOf)).toEqual([fixture("c06h").text, fixture("c10h").text]);
+    expect(lineOf(v.prompts[0]!)).toBe(chatInvocation(byId.get("config.set")!, fixture("c06h").input));
+    expect(lineOf(v.prompts[1]!)).toBe("runs stop r-123 --mode soft");
+    expect(verified.map((r) => r.id)).toEqual(examples.map((e) => e.id));
+    expect(verified.map((r) => r.verdict?.agrees)).toEqual([undefined, undefined, true, true, undefined]);
+    expect(verified[2]!.verdict).toEqual({ agrees: true, reason: "scripted", line: lineOf(v.prompts[0]!), ms: 0 });
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("a wrong write bind the verifier rejects is a write misbind removed; a right write bind it rejects is a correct bind rejected; a bind it agrees with is neither; a read bind enters no count", async () => {
+    // c06h bound to config.clear — a write, the wrong command; c07h and c10h bound right; c01h a read.
+    const results = await replayCommands(
+      pick("c01h", "c06h", "c07h", "c10h"),
+      router({ c06h: { command: "config.clear", input: { args: ["channel"], options: {} } } }),
+      { now },
+      defs,
+    );
+    expect(commandScore(results).misses.map((m) => m.id)).toEqual(["c06h"]);
+    const v = verifier((line) => !line.startsWith("config clear"));
+    const score = verifierScore(await verifyCommands(results, v.model, defs, { now }));
+    expect(v.prompts).toHaveLength(3);
+    expect(score).toMatchObject({ asked: 3, misbinds: 1, misbindsRemoved: 1, correct: 2, correctRejected: 1 });
+    expect(score.removedRate).toBe(1);
+    expect(score.rejectedRate).toBe(0.5);
+    expect(score.rejected.map((r) => r.id)).toEqual(["c06h", "c07h"]);
+  });
+
+  it("a decoy bound to a write outside its allow list and a right command with the wrong post-parse input are write misbinds too: the verifier removing them counts, agreeing with them counts nothing", async () => {
+    const results = await replayCommands(
+      pick("c06d", "c10h", "c06h"),
+      router({
+        c06d: { command: "config.set", input: { args: ["channel"], options: { models: { coding: "any/model" } } } },
+        c10h: { command: "runs.stop", input: { args: ["r-123"], options: { mode: "hard" } } },
+      }),
+      { now },
+      defs,
+    );
+    expect(commandScore(results).misses.map((m) => m.id)).toEqual(["c06d", "c10h"]);
+    const removing = verifier((_line, text) => text === fixture("c06h").text);
+    expect(verifierScore(await verifyCommands(results, removing.model, defs, { now }))).toMatchObject({
+      asked: 3,
+      misbinds: 2,
+      misbindsRemoved: 2,
+      correct: 1,
+      correctRejected: 0,
+    });
+    const agreeing = verifier(() => true);
+    expect(verifierScore(await verifyCommands(results, agreeing.model, defs, { now }))).toMatchObject({
+      asked: 3,
+      misbinds: 2,
+      misbindsRemoved: 0,
+      correct: 1,
+      correctRejected: 0,
+      rejected: [],
+    });
+  });
+
+  it("a verifier that fails, calls another tool or answers prose is a disagreement naming why — never a silent agreement — so a broken verifier shows as rejections on the line", async () => {
+    const results = await replayCommands(pick("c06h", "c07h", "c10h"), router(), { now }, defs);
+    const answers: Array<() => Promise<RouteToolCall | string>> = [
+      async () => {
+        throw new Error("boom");
+      },
+      async () => ({ tool: "route", input: { preset: "general", reason: "x" } }),
+      async () => "yes, looks right",
+    ];
+    let i = 0;
+    const broken: RouteModel = async () => answers[i++]!();
+    const verified = await verifyCommands(results, broken, defs, { now, concurrency: 1 });
+    expect(verified.map((r) => r.verdict?.agrees)).toEqual([false, false, false]);
+    expect(verified[0]!.verdict!.reason).toBe("verifier failed: boom");
+    expect(verified[1]!.verdict!.reason).toMatch(/verifier called tool "route", not verify/);
+    expect(verified[2]!.verdict!.reason).toMatch(/not a single JSON object: yes, looks right/);
+    expect(verifierScore(verified)).toMatchObject({ asked: 3, misbinds: 0, correct: 3, correctRejected: 3 });
+  });
+
+  it("the line beside the command rows: removed n of m write misbinds · rejected k of j correct write binds, the two ratios, the record's bar named and not judged, and every rejected bind with its reason", async () => {
+    const results = await replayCommands(
+      pick("c06h", "c07h", "c10h", "c24h"),
+      router({ c06h: { command: "config.clear", input: { args: ["channel"], options: {} } } }),
+      { now },
+      defs,
+    );
+    const v = verifier((line) => !line.startsWith("config clear"));
+    const lines = renderVerifier(verifierScore(await verifyCommands(results, v.model, defs, { now })));
+    expect(lines[0]).toBe(
+      "verifier: removed 1 of 1 write misbinds · rejected 1 of 3 correct write binds (4 write-class binds asked; removed 100%, rejected 33.3%; the bar for the production decision is at least half removed under one in twenty rejected — not judged here)",
+    );
+    expect(lines[1]).toBe("");
+    expect(lines[2]).toBe("rejected (2):");
+    expect(lines[3]).toBe(
+      `- c06h: happy, a misbind — bound config clear channel, expected config.set {"args":["channel"],"options":{"models":{"coding":"anthropic/claude-opus-5"}}} — scripted — "${fixture("c06h").text}"`,
+    );
+    expect(lines[4]).toBe(
+      `- c07h: happy, a correct bind — bound config clear me — scripted — "${fixture("c07h").text}"`,
+    );
+    expect(lines).toHaveLength(5);
+  });
+
+  it("no write-class bind in the run: the verifier is never called, both counters read zero and the line still prints", async () => {
+    const results = await replayCommands(pick("c01h", "c09h", "c21h", "c09d"), router(), { now }, defs);
+    const v = verifier(() => false);
+    const score = verifierScore(await verifyCommands(results, v.model, defs, { now }));
+    expect(v.prompts).toHaveLength(0);
+    expect(score).toEqual({
+      asked: 0,
+      misbinds: 0,
+      misbindsRemoved: 0,
+      removedRate: NaN,
+      correct: 0,
+      correctRejected: 0,
+      rejectedRate: NaN,
+      rejected: [],
+    });
+    expect(renderVerifier(score)).toEqual([
+      "verifier: removed 0 of 0 write misbinds · rejected 0 of 0 correct write binds (0 write-class binds asked; removed —, rejected —; the bar for the production decision is at least half removed under one in twenty rejected — not judged here)",
+      "",
+      "rejected: none",
+    ]);
+  });
+
+  it("one verifier call rides the router's seam — providerRouteModel forces the verify tool alone, the prompt's two halves as system and the one user turn — so the tallying provider counts it beside the router's calls", async () => {
+    const counters = emptyCounters();
+    const requests: CompletionRequest[] = [];
+    const inner: Provider = {
+      name: "fake",
+      complete: async (req) => {
+        requests.push(req);
+        return {
+          content: [
+            {
+              type: "tool_use",
+              id: "t1",
+              name: VERIFY_TOOL_NAME,
+              input: { agrees: true, reason: "the same command and value" },
+            },
+          ],
+          stopReason: "tool_use",
+          usage: { inputTokens: 10, outputTokens: 5 },
+        };
+      },
+    };
+    const model = providerRouteModel(tallyingProvider(inner, counters), "fast-model");
+    const set = fixture("c06h");
+    const verdict = await verifyBind(set.text, byId.get("config.set")!, set.input, model);
+    expect(verdict).toEqual({ agrees: true, reason: "the same command and value", line: lineOfSet() });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.tools?.map((t) => t.name)).toEqual([VERIFY_TOOL_NAME]);
+    expect(requests[0]!.toolChoice).toEqual({ type: "tool", name: VERIFY_TOOL_NAME });
+    expect(requests[0]!.system).toMatch(/^You check one binding\./);
+    expect(requests[0]!.messages[0]!.content).toEqual([
+      { type: "text", text: `<request>\n${set.text}\n</request>\n\nThe line the router bound it to: ${lineOfSet()}` },
+    ]);
+    expect(counters).toMatchObject({ calls: 1, inputTokens: 10 });
+    function lineOfSet() {
+      return chatInvocation(byId.get("config.set")!, set.input);
     }
   });
 });

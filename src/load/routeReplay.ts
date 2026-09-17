@@ -13,14 +13,29 @@
 // detection alone, their count printed. The
 // imperative half (the same item): the checked-in set of terse imperatives —
 // an order to change code with no detail to route on — scored on reaching the
-// write preset, its read-only look-alikes on never reaching one. Pure over
+// write preset, its read-only look-alikes on never reaching one. The command
+// half (the same item): the checked-in command set bound and parsed, never
+// invoked; under `--verify`, one more call on every bind of a write- or
+// destructive-class command (record 0044's verifier), scored as write
+// misbinds removed and correct binds rejected. Pure over
 // records and a `RouteDecision` function; the entrypoint (`scripts/load.ts`)
 // pages the run store and picks the model.
 import { AGENTS, COMPOUND_PRESET } from "../agents/registry.js";
 import { stripDirectiveTokens } from "../directives.js";
-import { parseInput, type CommandDef, type CommandInput } from "../core/commandRegistry.js";
+import { blastRadius, parseInput, type CommandDef, type CommandInput } from "../core/commandRegistry.js";
+import { chatInvocation } from "../core/commandSurface.js";
 import type { Provider } from "../core/provider.js";
-import type { RouteDecision } from "../core/dispatch/route.js";
+import { oneLine, redactAndCap } from "../core/redact.js";
+import {
+  parseVerifierAnswer,
+  ROUTE_MIN_OUTPUT_TOKENS,
+  ROUTE_REASON_CAP,
+  ROUTE_TIMEOUT_MS,
+  verifierPrompt,
+  type RouteDecision,
+  type RouteModel,
+  type VerifierAnswer,
+} from "../core/dispatch/route.js";
 import type { SloCheck } from "./aggregate.js";
 import type { RouteCompoundFixture } from "./routeCompoundFixtures.js";
 import type { RouteCommandExample } from "./routeCommandFixtures.js";
@@ -739,6 +754,162 @@ export function renderCommands(score: CommandScore, opts: { textCap?: number } =
     ...score.misses.map(
       (m) =>
         `- ${m.id}: ${m.kind}, expected ${expectedOf(m)}, bound ${boundOf(m)} — ${m.reason} — "${snippet(m.text)}"`,
+    ),
+  ];
+}
+
+/** The verifier's verdict on one write-class bind (record 0044): the answer,
+ *  the line it was shown — the bound chat form — and the call's wall time. */
+export interface BindVerdict extends VerifierAnswer {
+  line: string;
+  ms: number;
+}
+
+/** A command result with the verifier's verdict where it was asked: a bind
+ *  whose command's blast radius is `write` or `destructive` (`verifierAsked`).
+ *  A read bind, an exec bind and an example that bound nothing carry none. */
+export type VerifiedCommandResult = CommandReplayResult & { verdict?: BindVerdict };
+
+/** Whether the verifier is asked about a bind to `def`: the classes the door
+ *  confirms rather than runs — `write` and `destructive` off `blastRadius`
+ *  (record 0044); a read and an exec-class write run at once and are never
+ *  asked. */
+export function verifierAsked(def: Pick<CommandDef<unknown>, "effect" | "action" | "annotations">): boolean {
+  const radius = blastRadius(def);
+  return radius === "write" || radius === "destructive";
+}
+
+/** One verifier call: the sentence and the bound chat form (`chatInvocation`,
+ *  the line the person would type, returned as `line`) through the same seam
+ *  the router used, so the replay scores the call path the door would make;
+ *  the answer read by `parseVerifierAnswer`. A call that fails is a
+ *  disagreement with the failure as its reason — the conservative side,
+ *  legible on the line. Invokes nothing: the line is text. */
+export async function verifyBind(
+  text: string,
+  def: CommandDef<unknown>,
+  input: CommandInput,
+  model: RouteModel,
+  opts: { timeoutMs?: number } = {},
+): Promise<VerifierAnswer & { line: string }> {
+  const line = chatInvocation(def, input);
+  try {
+    const answer = await model(verifierPrompt({ text, line }), {
+      maxTokens: ROUTE_MIN_OUTPUT_TOKENS,
+      signal: AbortSignal.timeout(opts.timeoutMs ?? ROUTE_TIMEOUT_MS),
+    });
+    return { ...parseVerifierAnswer(answer), line };
+  } catch (err) {
+    const why = err instanceof Error ? err.message : String(err);
+    return { agrees: false, reason: oneLine(redactAndCap(`verifier failed: ${why}`, ROUTE_REASON_CAP)), line };
+  }
+}
+
+/**
+ * The verifier over the command replay (record 0044; load-harness item 17):
+ * asked about every bind of a write- or destructive-class command,
+ * `concurrency` at a time, its verdict beside the result in replay order;
+ * every other result passes through without one. The class is read off the
+ * BOUND command — what would run — never off the fixture's expectation, so a
+ * decoy the router bound to a write is asked and a write fixture it bound to
+ * a read is not.
+ */
+export async function verifyCommands(
+  results: readonly CommandReplayResult[],
+  model: RouteModel,
+  commands: readonly CommandDef<unknown>[],
+  opts: { concurrency?: number; now: () => number; timeoutMs?: number },
+): Promise<VerifiedCommandResult[]> {
+  const byId = new Map(commands.map((c) => [c.id, c]));
+  const out: VerifiedCommandResult[] = [...results];
+  const asked = results.flatMap((r, i) => {
+    const def = r.bound === undefined ? undefined : byId.get(r.bound.id);
+    return def !== undefined && r.bound !== undefined && verifierAsked(def) ? [{ i, def, input: r.bound.input }] : [];
+  });
+  const concurrency = Math.max(1, opts.concurrency ?? 4);
+  let next = 0;
+  const worker = async () => {
+    for (;;) {
+      const job = asked[next++];
+      if (job === undefined) return;
+      const result = results[job.i]!;
+      const started = opts.now();
+      const verdict = await verifyBind(result.text, job.def, job.input, model, opts);
+      out[job.i] = { ...result, verdict: { ...verdict, ms: Math.max(0, opts.now() - started) } };
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, asked.length) }, worker));
+  return out;
+}
+
+/** The verifier's two counters over the command replay (record 0044): among
+ *  the write-class binds it was asked about, the misbinds — a bind
+ *  `commandScore` marks wrong: a wrong command, a right command with the
+ *  wrong post-parse input, or a decoy bound outside its `allow` — that it
+ *  rejected (**write misbinds removed**), and the correct binds it rejected
+ *  (**correct binds rejected**). The two ratios are the terms of the record's
+ *  bar; the bar is not judged here — no verdict row — the decision is the
+ *  maintainer's. */
+export interface VerifierScore {
+  /** Write- or destructive-class binds the verifier was asked about. */
+  asked: number;
+  misbinds: number;
+  misbindsRemoved: number;
+  /** `misbindsRemoved / misbinds`; NaN with no misbind. */
+  removedRate: number;
+  correct: number;
+  correctRejected: number;
+  /** `correctRejected / correct`; NaN with no correct bind. */
+  rejectedRate: number;
+  /** Every bind the verifier rejected, misbinds and correct ones, in replay order. */
+  rejected: VerifiedCommandResult[];
+}
+
+export function verifierScore(results: readonly VerifiedCommandResult[]): VerifierScore {
+  const asked = results.filter((r) => r.verdict !== undefined);
+  const misbinds = asked.filter((r) => !r.inputHit);
+  const correct = asked.filter((r) => r.inputHit);
+  const rejected = (rs: readonly VerifiedCommandResult[]) => rs.filter((r) => r.verdict?.agrees === false);
+  return {
+    asked: asked.length,
+    misbinds: misbinds.length,
+    misbindsRemoved: rejected(misbinds).length,
+    removedRate: misbinds.length === 0 ? NaN : rejected(misbinds).length / misbinds.length,
+    correct: correct.length,
+    correctRejected: rejected(correct).length,
+    rejectedRate: correct.length === 0 ? NaN : rejected(correct).length / correct.length,
+    rejected: rejected(asked),
+  };
+}
+
+/** Record 0044's bar for the production decision, named on the verifier's
+ *  line so the reader knows what the two ratios are for — and never judged
+ *  by the replay. */
+export const VERIFIER_BAR = "at least half removed under one in twenty rejected";
+
+/** The verifier's line beside the command rows — the two counters, the two
+ *  ratios, the bar named — and every rejected bind with the line it was shown,
+ *  what was expected when it was a misbind, and the verifier's reason, as
+ *  markdown lines for the receipt's notes. */
+export function renderVerifier(score: VerifierScore, opts: { textCap?: number } = {}): string[] {
+  const cap = opts.textCap ?? 80;
+  const snippet = (text: string) => {
+    const one = text.replace(/\s+/g, " ").trim();
+    return one.length > cap ? `${one.slice(0, cap - 1)}…` : one;
+  };
+  const expectedOf = (r: VerifiedCommandResult) =>
+    r.kind === "decoy"
+      ? `no command${r.allow ? ` (or ${r.allow.join("/")})` : ""}`
+      : `${r.command} ${stableJson(r.input)}`;
+  return [
+    `verifier: removed ${score.misbindsRemoved} of ${score.misbinds} write misbinds · rejected ${score.correctRejected} of ${score.correct} correct write binds (${score.asked} write-class binds asked; removed ${pct(score.removedRate)}, rejected ${pct(score.rejectedRate)}; the bar for the production decision is ${VERIFIER_BAR} — not judged here)`,
+    "",
+    score.rejected.length === 0 ? "rejected: none" : `rejected (${score.rejected.length}):`,
+    ...score.rejected.map(
+      (r) =>
+        `- ${r.id}: ${r.kind}, ${r.inputHit ? "a correct bind" : "a misbind"} — bound ${r.verdict!.line}${
+          r.inputHit ? "" : `, expected ${expectedOf(r)}`
+        } — ${r.verdict!.reason} — "${snippet(r.text)}"`,
     ),
   ];
 }
