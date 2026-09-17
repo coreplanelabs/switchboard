@@ -2163,6 +2163,7 @@ function page(
             view: "users",
             users: COSTS_USERS,
             snapshot: COSTS_SNAPSHOT,
+            canSnapshot: true,
           }
         : {
             page: "costs",
@@ -2171,6 +2172,7 @@ function page(
             groups: ["api", "web"],
             view: "daily",
             snapshot: COSTS_SNAPSHOT,
+            canSnapshot: true,
           },
     };
   }

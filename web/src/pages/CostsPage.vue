@@ -1,15 +1,21 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
+import type { CostReport } from "@core/core/costs.js";
+import type { UserCostReport } from "@core/core/costsByUser.js";
+import type { CostsSnapshotStatus } from "@core/core/costsSnapshot.js";
 import AppShell from "../components/AppShell.vue";
 import CostChart from "../components/costs/CostChart.vue";
 import CostsByUser from "../components/costs/CostsByUser.vue";
+import { useEventSourceFactory, type EventSourceLike } from "../lib/eventSource";
 import { useSeed } from "../lib/seed";
+import { postCommand } from "../lib/settingsApi";
 import { useWallClock } from "../lib/wallClock";
 import {
   accountLabelOf,
   DO_LABEL,
   linksOf,
   LLM_LABEL,
+  parseStatusFrame,
   PLATFORM_LABEL,
   resourceSplitOf,
   seriesOf,
@@ -29,19 +35,97 @@ import {
 // light/sans outlier).
 
 const seed = useSeed("costs");
-const report = computed(() => seed?.report ?? null);
+/** The report and the by-user report start as the seed's and are replaced when a new snapshot lands (below). */
+const report = ref<CostReport | null>(seed?.report ?? null);
 const groups = computed(() => seed?.groups ?? []);
 /** The group the page is for — from the seed even when there is no report yet to name it. */
 const group = computed(() => seed?.group ?? report.value?.group ?? "");
-/** The snapshot's status: its stamp, a take in flight, when the next is due. */
-const status = computed(() => seed?.snapshot ?? null);
+/** The snapshot's status: its stamp, a take in flight, when the next is due — the seed's first, then the feed's. */
+const status = ref<CostsSnapshotStatus | null>(seed?.snapshot ?? null);
 /** The snapshot's age ticks by the minute while the page is open. */
 const now = useWallClock(undefined, 60_000);
 const snapshotLine = computed(() => (status.value ? snapshotLineOf(status.value, now.value) : ""));
 /** Which tab is open: the daily tables, or cost by user (`?view=users`, the
  *  by-user report riding along in the seed). */
 const view = computed<"daily" | "users">(() => seed?.view ?? "daily");
-const users = computed(() => (view.value === "users" ? (seed?.users ?? null) : null));
+const users = ref<UserCostReport | null>(seed?.view === "users" ? (seed?.users ?? null) : null);
+
+// The status feed (costs.md item 8b): `/costs/<group>?stream=1` streams the
+// snapshot's status — a take starting, landing or failing — so every viewer
+// sees the line move without reloading. When a new snapshot lands (its
+// `takenAt` differs from the one the figures came from) the page re-reads its
+// JSON twins for the range it shows and repaints; the tiles never go blank.
+const canSnapshot = computed(() => seed?.canSnapshot === true);
+const daysParam = computed(() =>
+  typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("days"),
+);
+const twinUrl = (path: string) => `/costs/${group.value}${path}${daysParam.value ? `?days=${daysParam.value}` : ""}`;
+/** The stamp the figures on screen were built from, and the newest stamp the feed has announced. */
+let shownTakenAt: string | null = seed?.snapshot?.snapshot?.takenAt ?? null;
+let announcedTakenAt: string | null = shownTakenAt;
+let refetching: Promise<void> | null = null;
+/** Re-read the twins; true when the daily report was replaced. A failure leaves the figures as they were. */
+async function refetchReports(): Promise<boolean> {
+  try {
+    const [daily, byUser] = await Promise.all([
+      fetch(twinUrl(".json"), { credentials: "same-origin" }),
+      view.value === "users" ? fetch(twinUrl("/users.json"), { credentials: "same-origin" }) : Promise.resolve(null),
+    ]);
+    if (!daily.ok) return false;
+    report.value = (await daily.json()) as CostReport;
+    if (byUser?.ok) users.value = (await byUser.json()) as UserCostReport;
+    return true;
+  } catch {
+    return false;
+  }
+}
+/** Bring the figures up to the announced stamp: one re-read at a time, keyed on the stamp it is
+ *  for — a snapshot landing while a re-read is in flight is re-read after it (the earlier read may
+ *  have been served before it landed), and a failed re-read leaves the shown stamp behind so the
+ *  next frame retries rather than looping here. */
+function reconcile(): void {
+  if (refetching || announcedTakenAt === null || announcedTakenAt === shownTakenAt) return;
+  const stamp = announcedTakenAt;
+  refetching = refetchReports()
+    .then((ok) => {
+      if (ok) shownTakenAt = stamp;
+    })
+    .finally(() => {
+      refetching = null;
+      if (announcedTakenAt !== stamp) reconcile();
+    });
+}
+function onStatus(next: CostsSnapshotStatus): void {
+  status.value = next;
+  const landed = next.snapshot?.takenAt ?? null;
+  if (landed) {
+    announcedTakenAt = landed;
+    reconcile();
+  }
+}
+const makeEventSource = useEventSourceFactory();
+let es: EventSourceLike | null = null;
+onMounted(() => {
+  if (!group.value) return;
+  es = makeEventSource(`/costs/${group.value}?stream=1`);
+  es.onmessage = (m) => {
+    const frame = parseStatusFrame(m.data);
+    if (frame) onStatus(frame);
+  };
+});
+onUnmounted(() => es?.close());
+
+// **Snapshot now** (`costs:write` holders): posts the command the CLI and chat
+// run; the feed shows the take to everyone, this button only reports a refusal.
+const taking = ref(false);
+const takeError = ref("");
+async function takeSnapshot(): Promise<void> {
+  taking.value = true;
+  takeError.value = "";
+  const answer = await postCommand(fetch, "costs.snapshot", {});
+  if (!answer.ok) takeError.value = answer.failure.message;
+  taking.value = false;
+}
 /** The same page for another group, range or tab — the two other pills keep the third. */
 function hrefOf(group: string, days: number, v: "daily" | "users"): string {
   const q = [`days=${days}`];
@@ -170,10 +254,22 @@ function monthDay(date: string): string {
           · today partial</template
         >
       </p>
-      <!-- Every figure below is as of this snapshot: say which, how old, and when the next is due. -->
-      <p v-if="snapshotLine" class="basis-full font-mono text-xs tabular-nums text-dimmed" data-snapshot-status>
-        {{ snapshotLine }}
-      </p>
+      <!-- Every figure below is as of this snapshot: say which, how old, and when the next is due;
+           a costs:write holder can take one now. -->
+      <div v-if="snapshotLine" class="flex basis-full flex-wrap items-center gap-x-3 gap-y-1">
+        <p class="font-mono text-xs tabular-nums text-dimmed" data-snapshot-status>{{ snapshotLine }}</p>
+        <button
+          v-if="canSnapshot"
+          type="button"
+          class="rounded-md border border-default px-2 py-0.5 text-xs text-muted hover:bg-elevated hover:text-highlighted disabled:cursor-not-allowed disabled:opacity-60"
+          :disabled="taking || status?.inFlight !== null"
+          data-snapshot-now
+          @click="takeSnapshot"
+        >
+          {{ status?.inFlight ? "Taking…" : "Snapshot now" }}
+        </button>
+        <span v-if="takeError" class="text-xs text-error" role="status" data-snapshot-error>{{ takeError }}</span>
+      </div>
     </div>
 
     <section class="mb-5 grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] gap-3">
@@ -508,10 +604,23 @@ function monthDay(date: string): string {
     </div>
     <section class="mb-5 grid gap-2 rounded-lg border border-default bg-elevated px-5 py-4">
       <h2 class="text-sm font-medium text-highlighted">Nothing to show yet</h2>
-      <p class="font-mono text-xs tabular-nums text-muted" data-snapshot-status>{{ snapshotLine }}</p>
+      <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <p class="font-mono text-xs tabular-nums text-muted" data-snapshot-status>{{ snapshotLine }}</p>
+        <button
+          v-if="canSnapshot"
+          type="button"
+          class="rounded-md border border-default px-2 py-0.5 text-xs text-muted hover:bg-elevated hover:text-highlighted disabled:cursor-not-allowed disabled:opacity-60"
+          :disabled="taking || status?.inFlight !== null"
+          data-snapshot-now
+          @click="takeSnapshot"
+        >
+          {{ status?.inFlight ? "Taking…" : "Snapshot now" }}
+        </button>
+        <span v-if="takeError" class="text-xs text-error" role="status" data-snapshot-error>{{ takeError }}</span>
+      </div>
       <p class="text-xs text-dimmed">
-        The page prices a stored snapshot of both billing sources, never a live read; reload once one has been taken, or
-        take one now with <code>costs snapshot</code>.
+        The page prices a stored snapshot of both billing sources, never a live read; the figures appear here the moment
+        the first one lands (this page listens for it), or take one now with <code>costs snapshot</code>.
       </p>
     </section>
   </AppShell>

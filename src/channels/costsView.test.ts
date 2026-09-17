@@ -3,7 +3,8 @@ import type { CostReport } from "../core/costs.js";
 import type { UserCostReport } from "../core/costsByUser.js";
 import type { CostsSnapshotStatus } from "../core/costsSnapshot.js";
 import { NoCostsSnapshotError, NullCostsService, type CostsService } from "../core/costsService.js";
-import { createCostsViewHandler, parseCostsRoute } from "./costsView.js";
+import { ACTORS } from "../core/authz/testing.js";
+import { createCostsViewHandler, parseCostsRoute, type CostsViewContext } from "./costsView.js";
 import { makeShellRenderer } from "./webShell.js";
 import { ALL_CAPABILITIES } from "../core/capabilities.js";
 import { SEED_ELEMENT_ID, type CostsSeed } from "./webSeed.js";
@@ -149,7 +150,15 @@ function fakeReqRes(method: string, url: string) {
   let status = 0;
   let outHeaders: Record<string, string> = {};
   const chunks: string[] = [];
-  const req = { method, url, headers: {}, on: () => undefined };
+  const closers: Array<() => void> = [];
+  const req = {
+    method,
+    url,
+    headers: {},
+    on: (event: string, cb: () => void) => {
+      if (event === "close") closers.push(cb);
+    },
+  };
   const res = {
     writeHead: (s: number, h?: Record<string, string>) => {
       status = s;
@@ -170,6 +179,8 @@ function fakeReqRes(method: string, url: string) {
       return outHeaders;
     },
     body: () => chunks.join(""),
+    /** The client leaving: what node:http fires `close` for. */
+    close: () => closers.forEach((cb) => cb()),
   };
 }
 const tick = () => new Promise((r) => setTimeout(r, 0));
@@ -209,6 +220,25 @@ describe("parseCostsRoute", () => {
     });
     expect(parseCostsRoute("/costs/../users.json")).toBeNull();
     expect(parseCostsRoute("/costs/switchboard/other.json")).toBeNull();
+  });
+  // costs.md item 8b: the status feed rides the page route with `?stream=1`.
+  it("matches the status feed (?stream=1) on the bare index and a group page; a twin never streams", () => {
+    expect(parseCostsRoute("/costs", "?stream=1")).toEqual({ kind: "stream", group: null, view: "daily" });
+    expect(parseCostsRoute("/costs/switchboard", "?stream=1&view=users")).toEqual({
+      kind: "stream",
+      group: "switchboard",
+      view: "users",
+    });
+    expect(parseCostsRoute("/costs/switchboard", "?stream=0")).toEqual({
+      kind: "page",
+      group: "switchboard",
+      view: "daily",
+    });
+    expect(parseCostsRoute("/costs/switchboard.json", "?stream=1")).toEqual({
+      kind: "json",
+      group: "switchboard",
+      view: "daily",
+    });
   });
   it("rejects anything else, including traversal-shaped and over-long slugs", () => {
     expect(parseCostsRoute("/costsX")).toBeNull();
@@ -393,6 +423,57 @@ describe("createCostsViewHandler", () => {
       expect(twin.headers["retry-after"]).toBe("60");
       expect(twin.body()).toContain("no cost snapshot yet");
     }
+  });
+
+  // costs.md item 8b: the seed says whether the viewer may take a snapshot — the
+  // same `costs:write` row `/api/costs.snapshot` decides on — and the feed
+  // streams the status, the current one first, then every transition.
+  it("seeds canSnapshot from the viewer's actor: true for a `costs:write` holder, false for a member and for no actor", async () => {
+    const h = createCostsViewHandler(
+      fakeService(() => Promise.resolve(report())),
+      shell,
+    );
+    const seedFor = async (actor: CostsViewContext["actor"]) => {
+      const io = fakeReqRes("GET", "/costs");
+      h(io.req, io.res, { identity: { sub: "s" }, ...(actor ? { actor } : {}) });
+      await tick();
+      return seedOf(io.body()).canSnapshot;
+    };
+    expect(await seedFor(ACTORS.admin)).toBe(true);
+    expect(await seedFor(ACTORS.member)).toBe(false);
+    expect(await seedFor(ACTORS.browser)).toBe(false);
+    expect(await seedFor(undefined)).toBe(false);
+  });
+
+  it("?stream=1 serves the status feed: SSE headers, the current status as the first frame, then one frame per transition until the client leaves", async () => {
+    const listeners = new Set<(s: CostsSnapshotStatus) => void>();
+    const service: CostsService = {
+      ...fakeService(() => Promise.resolve(report())),
+      subscribe: (l) => {
+        listeners.add(l);
+        return () => void listeners.delete(l);
+      },
+    };
+    const h = createCostsViewHandler(service, shell);
+    const io = fakeReqRes("GET", "/costs/switchboard?stream=1");
+    expect(h(io.req, io.res)).toBe(true);
+    expect(io.status).toBe(200);
+    expect(io.headers["content-type"]).toContain("text/event-stream");
+    const frames = () =>
+      io
+        .body()
+        .split("\n\n")
+        .filter((f) => f.startsWith("data: "))
+        .map((f) => JSON.parse(f.slice("data: ".length)) as Record<string, unknown>);
+    expect(frames()).toEqual([{ type: "status", ...STATUS }]);
+    expect(listeners.size).toBe(1);
+    const taking = { ...STATUS, inFlight: { startedAt: "2026-08-29T21:30:00.000Z", by: "casey" } };
+    for (const l of listeners) l(taking);
+    expect(frames()).toHaveLength(2);
+    expect(frames()[1]).toEqual({ type: "status", ...taking });
+    // The client leaving unsubscribes: nothing more is written.
+    io.close();
+    expect(listeners.size).toBe(0);
   });
 
   it("passes ?days through and 404s an unknown group", async () => {

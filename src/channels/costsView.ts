@@ -1,7 +1,11 @@
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
+import { authorize } from "../core/authz/authorize.js";
+import type { Actor } from "../core/authz/types.js";
 import type { CostReport } from "../core/costs.js";
 import type { UserCostReport } from "../core/costsByUser.js";
+import type { CostsSnapshotStatus } from "../core/costsSnapshot.js";
 import { COSTS_OFF_MESSAGE, NoCostsSnapshotError, type CostsService, type CostsViewer } from "../core/costsService.js";
+import { nodeSseSink, SSE_HEADERS, SSE_PRELUDE, startSseHeartbeat, type SseSink } from "./liveView/sse.js";
 import type { ShellRenderer } from "./webShell.js";
 import { WEB_HTML_HEADERS } from "./webShell.js";
 
@@ -26,24 +30,67 @@ import { WEB_HTML_HEADERS } from "./webShell.js";
 // this handler serves the shared shell with the report + group list as the
 // seed. The JSON twins are exactly the seed's report / users.
 
-export type CostsRoute = { kind: "page" | "json" | "users-json"; group: string | null; view: "daily" | "users" };
+/** `stream` is the page's status feed (`?stream=1`, costs.md item 8b): the snapshot's status as SSE. */
+export type CostsRoute = {
+  kind: "page" | "json" | "users-json" | "stream";
+  group: string | null;
+  view: "daily" | "users";
+};
 
 const GROUP_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
 
 export function parseCostsRoute(pathname: string, search = ""): CostsRoute | null {
-  const view = new URLSearchParams(search).get("view") === "users" ? "users" : "daily";
-  if (pathname === "/costs" || pathname === "/costs/") return { kind: "page", group: null, view };
+  const params = new URLSearchParams(search);
+  const view = params.get("view") === "users" ? "users" : "daily";
+  const page = params.get("stream") === "1" ? "stream" : "page";
+  if (pathname === "/costs" || pathname === "/costs/") return { kind: page, group: null, view };
   if (pathname === "/costs.json") return { kind: "json", group: null, view: "daily" };
   const users = /^\/costs\/([^/]+?)\/users\.json\/?$/.exec(pathname);
   if (users) return GROUP_RE.test(users[1]) ? { kind: "users-json", group: users[1], view: "users" } : null;
   const m = /^\/costs\/([^/]+?)(\.json)?\/?$/.exec(pathname);
   if (!m || !GROUP_RE.test(m[1])) return null;
-  return m[2] ? { kind: "json", group: m[1], view: "daily" } : { kind: "page", group: m[1], view };
+  return m[2] ? { kind: "json", group: m[1], view: "daily" } : { kind: page, group: m[1], view };
 }
 
-/** What the gate hands the handler: the verified Access identity, when there is one. */
+/** What the gate hands the handler: the verified Access identity, when there is
+ *  one, and the actor it resolves to (record 0042) — what decides whether the
+ *  page offers the **Snapshot now** button. */
 export interface CostsViewContext {
   identity?: CostsViewer;
+  actor?: Actor;
+}
+
+/** The command the page's button posts; the same row `costs snapshot` is admitted by. */
+const SNAPSHOT_COMMAND = { type: "command", id: "costs.snapshot" } as const;
+
+/** Whether this viewer may take a snapshot: the `costs:write` row, asked exactly as `/api/costs.snapshot` will ask it. */
+export function canSnapshot(actor: Actor | undefined): boolean {
+  return actor !== undefined && authorize(actor, "costs:write", SNAPSHOT_COMMAND).allow;
+}
+
+/** One SSE frame of the status feed. */
+export type CostsStatusFrame = { type: "status" } & CostsSnapshotStatus;
+
+/**
+ * Serve the snapshot's status as SSE (costs.md item 8b): the current status
+ * first, then one frame per transition — a take starting, landing or failing —
+ * for as long as the client listens. Transport-free (`SseSink`), like the runs
+ * index feed; the node:http caller starts the heartbeat once the stream is live.
+ */
+export function serveCostsStatus(
+  current: CostsSnapshotStatus,
+  subscribe: (listener: (status: CostsSnapshotStatus) => void) => () => void,
+  sink: SseSink,
+  onLive?: () => void,
+): void {
+  const frame = (status: CostsSnapshotStatus): string =>
+    `data: ${JSON.stringify({ type: "status", ...status } satisfies CostsStatusFrame)}\n\n`;
+  sink.writeHead(200, SSE_HEADERS);
+  sink.write(SSE_PRELUDE);
+  sink.write(frame(current));
+  const unsubscribe = subscribe((status) => sink.write(frame(status)));
+  sink.onClose(unsubscribe);
+  onLive?.();
 }
 
 // ---- handler ----------------------------------------------------------------------------
@@ -101,6 +148,15 @@ export function createCostsViewHandler(
       plain(res, 404, `no cost group named ${route.group ?? "(none)"}`);
       return true;
     }
+    if (route.kind === "stream") {
+      serveCostsStatus(
+        service.status(),
+        (listener) => service.subscribe(listener),
+        nodeSseSink(req, res),
+        () => startSseHeartbeat(req, res),
+      );
+      return true;
+    }
     const days = url.searchParams.get("days");
     const failed = (err: unknown) => {
       if (err instanceof NoCostsSnapshotError) {
@@ -142,6 +198,7 @@ export function createCostsViewHandler(
             view: route.view,
             ...(usersReport ? { users: usersReport } : {}),
             snapshot: service.status(),
+            canSnapshot: canSnapshot(ctx.actor),
           }),
         );
       })

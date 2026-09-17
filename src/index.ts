@@ -933,7 +933,7 @@ export async function runBot(): Promise<void> {
             // --- /mcp/connect/<nonce>: the credential page, identity-bound. ---
             if (mcpConnectView(req, res, gate.identity)) return;
             if (residentsView(req, res, { actor })) return;
-            if (costsView(req, res, { identity: gate.identity })) return;
+            if (costsView(req, res, { identity: gate.identity, actor })) return;
             if (deliveryView(req, res, { actor })) return;
             if (settingsView(req, res, { identity: gate.identity })) return;
             res.writeHead(200, { "content-type": "text/plain" });

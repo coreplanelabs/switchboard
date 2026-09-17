@@ -9,6 +9,22 @@ import { snapshotTime } from "./delivery";
 
 export const DO_LABEL = "Durable Objects";
 
+/** One frame of the page's status feed (`/costs/<group>?stream=1`, costs.md item 8b): the status, or null for
+ *  anything else on the wire — a heartbeat comment never reaches here, a foreign frame is ignored. */
+export function parseStatusFrame(data: string): CostsSnapshotStatus | null {
+  let frame: unknown;
+  try {
+    frame = JSON.parse(data);
+  } catch {
+    return null;
+  }
+  if (typeof frame !== "object" || frame === null) return null;
+  const f = frame as Record<string, unknown>;
+  if (f.type !== "status" || typeof f.everyHours !== "number") return null;
+  const { type: _type, ...status } = f;
+  return status as unknown as CostsSnapshotStatus;
+}
+
 /** Who a take is credited to in the status line: the loop's takes read `on schedule`, a person's `by <name>`. */
 const takerText = (by: string): string => (by === "schedule" ? "on schedule" : `by ${by}`);
 

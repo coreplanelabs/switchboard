@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CostsSnapshotStatus } from "@core/core/costsSnapshot.js";
-import { snapshotLineOf } from "./costs";
+import { parseStatusFrame, snapshotLineOf } from "./costs";
 
 // costs.md item 6 — the one line the page shows about its snapshot.
 
@@ -12,6 +12,16 @@ const status = (over: Partial<CostsSnapshotStatus> = {}): CostsSnapshotStatus =>
   nextAt: "2026-09-17T06:15:00Z",
   lastFailure: null,
   ...over,
+});
+
+describe("parseStatusFrame", () => {
+  it("reads a status frame off the feed and ignores anything else on the wire", () => {
+    expect(parseStatusFrame(JSON.stringify({ type: "status", ...status() }))).toEqual(status());
+    expect(parseStatusFrame(JSON.stringify({ type: "hb" }))).toBeNull();
+    expect(parseStatusFrame(JSON.stringify({ type: "status" }))).toBeNull();
+    expect(parseStatusFrame("not json")).toBeNull();
+    expect(parseStatusFrame("null")).toBeNull();
+  });
 });
 
 describe("snapshotLineOf", () => {

@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import CostsPage from "./CostsPage.vue";
+import { fakeEventSourceFactory } from "../testing/fakeEventSource";
 import { mountApp } from "../testing/mount";
 import type { CostReport } from "@core/core/costs.js";
 import type { UserCostReport } from "@core/core/costsByUser.js";
@@ -78,6 +79,7 @@ const seed = (
   r: CostReport | null = report(),
   groups: string[] = ["switchboard", "other"],
   snapshot: CostsSnapshotStatus = STATUS,
+  canSnapshot = false,
 ): CostsSeed => ({
   page: "costs",
   group: r?.group ?? "switchboard",
@@ -85,6 +87,7 @@ const seed = (
   groups,
   view: "daily",
   snapshot,
+  canSnapshot,
 });
 
 /** The by-user report for the same three days: two Slack users, one of them the
@@ -145,13 +148,13 @@ const usersSeed = (users: UserCostReport | null = usersReport()): CostsSeed => (
 
 describe("CostsPage", () => {
   it("renders a hostile label as text, never as markup", () => {
-    const w = mountApp(CostsPage, { seed: seed() });
+    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
     expect(w.find("h1").text()).toContain("Switchboard <b> spend");
     expect(w.find("h1 b").exists()).toBe(false);
   });
 
   it("leads with the summary tiles: yesterday (last FULL day), 7-day average, projected month, LLM spend in dollars", () => {
-    const w = mountApp(CostsPage, { seed: seed() });
+    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
     const t = w.text();
     expect(t).toContain("Yesterday");
     expect(t).toContain("$14.10"); // 2026-08-28: 1.3 + 0.3 + 12.5 — not the partial day
@@ -166,7 +169,7 @@ describe("CostsPage", () => {
   });
 
   it("projects the month from cloud and LLM run-rates added together, and says what each is based on", () => {
-    const w = mountApp(CostsPage, { seed: seed() });
+    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
     const t = w.text();
     // Cloud: the two full days average (0.6 + 1.6) / 2 = $1.10 a day. LLM: the
     // two closed days with LLM data average (4 + 12.5) / 2 = $8.25 a day.
@@ -181,6 +184,7 @@ describe("CostsPage", () => {
     const r = report();
     const days = r.days.map((d, i) => (i < 2 ? { ...d, llmUsd: 0, total: d.cloudUsd } : d));
     const w = mountApp(CostsPage, {
+      eventSource: fakeEventSourceFactory().factory,
       seed: seed({ ...r, days, totals: { ...r.totals, llmUsd: 3, total: days.reduce((s, d) => s + d.total, 0) } }),
     });
     const t = w.text();
@@ -192,7 +196,7 @@ describe("CostsPage", () => {
   });
 
   it("names the Cloudflare account and links every figure to where it can be dug into", () => {
-    const w = mountApp(CostsPage, { seed: seed() });
+    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
     const hrefs = w.findAll("a").map((a) => a.attributes("href") ?? "");
     expect(w.text()).toContain("acme-infra");
     expect(hrefs).toContain("https://dash.cloudflare.com/acct-example");
@@ -212,7 +216,10 @@ describe("CostsPage", () => {
 
   it("falls back to the account id when no account name is configured", () => {
     const r = report();
-    const w = mountApp(CostsPage, { seed: seed({ ...r, account: { ...r.account, name: undefined } }) });
+    const w = mountApp(CostsPage, {
+      eventSource: fakeEventSourceFactory().factory,
+      seed: seed({ ...r, account: { ...r.account, name: undefined } }),
+    });
     expect(w.text()).toContain("acct-exa…");
   });
 
@@ -220,6 +227,7 @@ describe("CostsPage", () => {
     const r = report();
     const today = r.days[2];
     const w = mountApp(CostsPage, {
+      eventSource: fakeEventSourceFactory().factory,
       seed: seed({
         ...r,
         range: { from: today.date, to: today.date, days: 1, partialLastDay: true },
@@ -240,19 +248,19 @@ describe("CostsPage", () => {
   });
 
   it("lists the daily table newest first, the open day on top", () => {
-    const w = mountApp(CostsPage, { seed: seed() });
+    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
     const dates = w.findAll("table.data tbody td[title]").map((td) => td.attributes("title"));
     expect(dates).toEqual([...report().days].reverse().map((d) => d.date));
   });
 
   it("says which day's LLM figure is an estimate from the usage report", () => {
-    const w = mountApp(CostsPage, { seed: seed() });
+    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
     expect(w.find("table.data").text()).toContain("LLM estimated");
     expect(w.text()).toContain("usage report");
   });
 
   it("says what share of the account's whole Cloudflare spend this group is, and what was attributed to it", () => {
-    const w = mountApp(CostsPage, { seed: seed() });
+    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
     const t = w.text();
     expect(t).toContain("Share of account");
     expect(t).toContain("25%"); // the group is a quarter of the account
@@ -263,7 +271,7 @@ describe("CostsPage", () => {
   });
 
   it("stacks the small platform meters (Workers, SQLite rows and storage, R2) as one series and lists each in the split", () => {
-    const w = mountApp(CostsPage, { seed: seed() });
+    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
     expect(w.find(".legend").text()).toContain("Workers · storage · R2");
     const fullDay = report().days[1].date;
     const dayTitle = w
@@ -283,14 +291,14 @@ describe("CostsPage", () => {
   });
 
   it("draws one stacked bar per day as inline SVG, one rect per day × component, with no per-segment tooltip competing with the day's", () => {
-    const w = mountApp(CostsPage, { seed: seed() });
+    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
     const segs = w.findAll("rect.seg");
     expect(segs.length).toBeGreaterThanOrEqual(6); // 3 days × (bot + DO + LLM)
     expect(w.findAll("rect.seg title").length).toBe(0);
   });
 
   it("one hover target per day carries the whole day's breakdown — every series and the total — as its accessible label", () => {
-    const w = mountApp(CostsPage, { seed: seed() });
+    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
     const days = w.findAll("rect.day");
     expect(days.length).toBe(3);
     const labels = days.map((n) => n.attributes("aria-label") ?? "");
@@ -307,7 +315,7 @@ describe("CostsPage", () => {
   });
 
   it("hovering a day shows a compact tooltip: the day and its total on top, then one row per component, largest first, the estimate tagged; leaving hides it", async () => {
-    const w = mountApp(CostsPage, { seed: seed() });
+    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
     expect(w.find(".chart-tip").exists()).toBe(false);
     const [, , openDay] = w.findAll("rect.day");
     await openDay.trigger("pointerenter", { clientX: 300, clientY: 120 });
@@ -336,7 +344,7 @@ describe("CostsPage", () => {
   });
 
   it("the tooltip lives outside the chart's scroll box, has a fixed width, and flips to the left near the right edge instead of growing the card", async () => {
-    const w = mountApp(CostsPage, { seed: seed() });
+    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
     const host = w.find(".chart-host");
     // The scroll box is a child of the host; the tip is the host's child, never the scroll box's.
     Object.defineProperty(host.element, "clientWidth", { value: 800, configurable: true });
@@ -362,7 +370,7 @@ describe("CostsPage", () => {
   });
 
   it("includes a legend and a table view so identity is never color-alone; dates read human with the ISO on hover", () => {
-    const w = mountApp(CostsPage, { seed: seed() });
+    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
     expect(w.find(".legend").text()).toContain("LLM (Anthropic)");
     expect(w.find("table.data").exists()).toBe(true);
     expect(w.find("table.data").text()).toContain("Aug 27");
@@ -370,19 +378,19 @@ describe("CostsPage", () => {
   });
 
   it("marks the partial day and states the method", () => {
-    const w = mountApp(CostsPage, { seed: seed() });
+    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
     expect(w.text()).toContain("partial day");
     expect(w.text()).toMatch(/vCPU[^<]*active use/i);
     expect(w.text()).toContain("containersUsageAdaptiveGroups");
   });
 
   it("carries the shared site nav with Costs current", () => {
-    const w = mountApp(CostsPage, { seed: seed() });
+    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
     expect(w.find('nav.site a[aria-current="page"]').attributes("href")).toBe("/costs");
   });
 
   it("offers the range switch with the current range as text, the others as links", () => {
-    const w = mountApp(CostsPage, { seed: seed() });
+    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
     const hrefs = w.findAll("a").map((a) => a.attributes("href"));
     expect(hrefs).toContain("/costs/switchboard?days=1");
     expect(hrefs).toContain("/costs/switchboard?days=7");
@@ -396,21 +404,24 @@ describe("CostsPage", () => {
   });
 
   it("links sibling groups when more than one is configured", () => {
-    const w = mountApp(CostsPage, { seed: seed() });
+    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
     // A sibling opens on the same range (and, below, the same tab).
     expect(w.findAll("a").map((a) => a.attributes("href"))).toContain("/costs/other?days=3");
-    const single = mountApp(CostsPage, { seed: seed(report(), ["switchboard"]) });
+    const single = mountApp(CostsPage, {
+      eventSource: fakeEventSourceFactory().factory,
+      seed: seed(report(), ["switchboard"]),
+    });
     expect(single.findAll("a").some((a) => (a.attributes("href") ?? "").startsWith("/costs/other"))).toBe(false);
   });
 
   it("says LLM spend is not configured instead of showing $0 when there is no source", () => {
     const r = report({ llmAvailable: false, totals: { ...report().totals, llmUsd: 0 } });
-    const w = mountApp(CostsPage, { seed: seed(r, ["switchboard"]) });
+    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed(r, ["switchboard"]) });
     expect(w.text()).toContain("LLM spend not configured");
   });
 
   it("names the JSON twin", () => {
-    const w = mountApp(CostsPage, { seed: seed() });
+    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
     expect(w.text()).toContain("GET /costs/switchboard.json");
   });
 
@@ -418,7 +429,7 @@ describe("CostsPage", () => {
   // how old, who took it and when the next is due; a take in flight is said
   // where the age is; before the first snapshot the status stands alone.
   it("says which snapshot the figures are from, how old it is, that the loop took it and when the next is due; the method names the snapshot, not a live read", () => {
-    const w = mountApp(CostsPage, { seed: seed() });
+    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
     const line = w.find("[data-snapshot-status]").text();
     expect(line).toContain("Snapshot from Aug 29, 21:00 UTC");
     expect(line).toMatch(/ago on schedule · next /);
@@ -428,6 +439,7 @@ describe("CostsPage", () => {
 
   it("while a take is in flight the status line says so and who started it, with the figures of the current snapshot still shown", () => {
     const w = mountApp(CostsPage, {
+      eventSource: fakeEventSourceFactory().factory,
       seed: seed(report(), ["switchboard"], {
         ...STATUS,
         inFlight: { startedAt: "2026-08-29T21:30:00Z", by: "casey" },
@@ -440,6 +452,157 @@ describe("CostsPage", () => {
     expect(w.find("table.data").exists()).toBe(true);
   });
 
+  // costs.md item 8b: the status feed and the button.
+  it("opens the group's status feed and repaints the line from its frames; when a new snapshot lands the twins are re-read for the shown range and the figures repaint without a reload", async () => {
+    const { created, factory } = fakeEventSourceFactory();
+    const newer = report({
+      totals: { ...report().totals, cloudUsd: 99, total: 199 },
+      snapshot: { takenAt: "2026-08-30T21:00:00.000Z", takenBy: "casey", durationMs: 4_000 },
+    });
+    const fetched: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        fetched.push(url);
+        return { ok: true, json: async () => newer };
+      }),
+    );
+    const w = mountApp(CostsPage, { seed: seed(), eventSource: factory });
+    expect(created.map((e) => e.url)).toEqual(["/costs/switchboard?stream=1"]);
+    const before = w.find("[data-snapshot-status]").text();
+    expect(before).toContain("on schedule");
+    // A take starts: the line says so at once; nothing is re-read yet.
+    created[0].emitMessage({
+      type: "status",
+      ...STATUS,
+      inFlight: { startedAt: "2026-08-29T21:30:00.000Z", by: "casey" },
+    });
+    await w.vm.$nextTick();
+    expect(w.find("[data-snapshot-status]").text()).toContain("Taking a snapshot now");
+    expect(fetched).toEqual([]);
+    // It lands: the line names the new stamp and the twin is re-read for the page's range.
+    created[0].emitMessage({
+      type: "status",
+      snapshot: { takenAt: "2026-08-30T21:00:00.000Z", takenBy: "casey", durationMs: 4_000 },
+      inFlight: null,
+      everyHours: 24,
+      nextAt: "2026-08-31T21:00:00.000Z",
+      lastFailure: null,
+    });
+    await vi.waitFor(() => expect(fetched).toEqual(["/costs/switchboard.json"]));
+    await vi.waitFor(() => expect(w.text()).toContain("$99.00"));
+    expect(w.find("[data-snapshot-status]").text()).toContain("by casey");
+    // A frame that is not a status is ignored; the same stamp again re-reads nothing.
+    created[0].emitMessage({ type: "hb" });
+    created[0].emitMessage({
+      type: "status",
+      ...STATUS,
+      snapshot: { takenAt: "2026-08-30T21:00:00.000Z", takenBy: "casey", durationMs: 4_000 },
+    });
+    await w.vm.$nextTick();
+    expect(fetched).toHaveLength(1);
+    w.unmount();
+    expect(created[0].closed).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  it("a snapshot landing while a re-read is in flight is re-read after it, and a failed re-read is retried on the next frame — never looped", async () => {
+    const { created, factory } = fakeEventSourceFactory();
+    const stampA = "2026-08-30T21:00:00.000Z";
+    const stampB = "2026-08-30T22:00:00.000Z";
+    const reportFor = (stamp: string, cloud: number) =>
+      report({
+        totals: { ...report().totals, cloudUsd: cloud, total: cloud + 100 },
+        snapshot: { takenAt: stamp, takenBy: "casey", durationMs: 4_000 },
+      });
+    const pending: Array<(r: { ok: boolean; json: () => Promise<unknown> }) => void> = [];
+    const fetched: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (url: string) =>
+          new Promise<{ ok: boolean; json: () => Promise<unknown> }>((resolve) => {
+            fetched.push(url);
+            pending.push(resolve);
+          }),
+      ),
+    );
+    const w = mountApp(CostsPage, { seed: seed(), eventSource: factory });
+    const frame = (stamp: string) => ({
+      type: "status",
+      snapshot: { takenAt: stamp, takenBy: "casey", durationMs: 4_000 },
+      inFlight: null,
+      everyHours: 24,
+      nextAt: "2026-08-31T21:00:00.000Z",
+      lastFailure: null,
+    });
+    // A lands: one re-read starts. B lands while it is in flight: nothing new starts yet.
+    created[0].emitMessage(frame(stampA));
+    await vi.waitFor(() => expect(fetched).toHaveLength(1));
+    created[0].emitMessage(frame(stampB));
+    await w.vm.$nextTick();
+    expect(fetched).toHaveLength(1);
+    // A's read settles (with A's figures, served before B landed): B is re-read right after.
+    pending[0]!({ ok: true, json: async () => reportFor(stampA, 50) });
+    await vi.waitFor(() => expect(fetched).toHaveLength(2));
+    await vi.waitFor(() => expect(w.text()).toContain("$50.00"));
+    // B's read fails: the figures stay A's and nothing loops…
+    pending[1]!({ ok: false, json: async () => ({}) });
+    await w.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(fetched).toHaveLength(2);
+    // …until the next frame with B's stamp, which retries and lands B's figures.
+    created[0].emitMessage(frame(stampB));
+    await vi.waitFor(() => expect(fetched).toHaveLength(3));
+    pending[2]!({ ok: true, json: async () => reportFor(stampB, 75) });
+    await vi.waitFor(() => expect(w.text()).toContain("$75.00"));
+    // The same stamp again re-reads nothing.
+    created[0].emitMessage(frame(stampB));
+    await w.vm.$nextTick();
+    expect(fetched).toHaveLength(3);
+    vi.unstubAllGlobals();
+  });
+
+  it("offers Snapshot now only to a costs:write holder; a click posts /api/costs.snapshot, a refusal is shown beside it, and the button reads Taking… while a take is in flight", async () => {
+    const { factory } = fakeEventSourceFactory();
+    const viewer = mountApp(CostsPage, { seed: seed(), eventSource: factory });
+    expect(viewer.find("[data-snapshot-now]").exists()).toBe(false);
+
+    const posted: Array<{ url: string; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        posted.push({ url, init });
+        return {
+          ok: false,
+          status: 503,
+          json: async () => ({ error: "busy", message: "costs snapshot not taken: cloudflare graphql 502" }),
+        };
+      }),
+    );
+    const admin = mountApp(CostsPage, { seed: seed(report(), ["switchboard"], STATUS, true), eventSource: factory });
+    const button = admin.find("[data-snapshot-now]");
+    expect(button.text()).toBe("Snapshot now");
+    await button.trigger("click");
+    await vi.waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0].url).toBe("/api/costs.snapshot");
+    expect(posted[0].init?.method).toBe("POST");
+    await vi.waitFor(() => expect(admin.find("[data-snapshot-error]").text()).toContain("costs snapshot not taken"));
+
+    const busy = mountApp(CostsPage, {
+      seed: seed(
+        report(),
+        ["switchboard"],
+        { ...STATUS, inFlight: { startedAt: "2026-08-29T21:30:00.000Z", by: "casey" } },
+        true,
+      ),
+      eventSource: factory,
+    });
+    expect(busy.find("[data-snapshot-now]").text()).toBe("Taking…");
+    expect(busy.find("[data-snapshot-now]").attributes("disabled")).toBeDefined();
+    vi.unstubAllGlobals();
+  });
+
   it("before the first snapshot there is no report: the page names the group, keeps the group switcher, says no snapshot has landed and how to take one, and prices nothing", () => {
     const none: CostsSnapshotStatus = {
       snapshot: null,
@@ -448,7 +611,10 @@ describe("CostsPage", () => {
       nextAt: null,
       lastFailure: null,
     };
-    const w = mountApp(CostsPage, { seed: seed(null, ["switchboard", "other"], none) });
+    const w = mountApp(CostsPage, {
+      eventSource: fakeEventSourceFactory().factory,
+      seed: seed(null, ["switchboard", "other"], none),
+    });
     expect(w.text()).toContain("Nothing to show yet");
     expect(w.find("[data-snapshot-status]").text()).toContain("No snapshot yet");
     expect(w.text()).toContain("costs snapshot");
@@ -459,7 +625,7 @@ describe("CostsPage", () => {
   });
 
   it("offers Daily and By user as tabs above the tables; the daily tab shows the daily tables and no user table", () => {
-    const w = mountApp(CostsPage, { seed: seed() });
+    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
     const tabs = w.find('nav[aria-label="View"]');
     expect(tabs.exists()).toBe(true);
     expect(tabs.find('[aria-current="page"]').text()).toBe("Daily");
@@ -471,7 +637,7 @@ describe("CostsPage", () => {
 
 describe("CostsPage · By user", () => {
   it("lists one row per user largest first — name, runs, LLM, allocated cloud, total, share of what was attributed — and marks the viewer's row", () => {
-    const w = mountApp(CostsPage, { seed: usersSeed() });
+    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: usersSeed() });
     expect(w.find('nav[aria-label="View"] [aria-current="page"]').text()).toBe("By user");
     // The daily tables step aside; the tiles and the chart stay as the group's context.
     expect(w.find("table.data").exists()).toBe(false);
@@ -495,7 +661,7 @@ describe("CostsPage · By user", () => {
   });
 
   it("filters by name or id, and the me toggle keeps only the signed-in viewer's rows; the shown subtotal appears when rows are hidden", async () => {
-    const w = mountApp(CostsPage, { seed: usersSeed() });
+    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: usersSeed() });
     await w.find("input.user-filter").setValue("ali");
     let rows = w.findAll("table.users tbody tr.user-row");
     expect(rows.map((r) => r.find("td").text())).toEqual([expect.stringContaining("alice")]);
@@ -517,7 +683,10 @@ describe("CostsPage · By user", () => {
   });
 
   it("disables the me toggle, and says why in visible text the input describes, when the viewer matched no run user", () => {
-    const w = mountApp(CostsPage, { seed: usersSeed(usersReport({ viewer: { userIds: [], matchedByEmail: false } })) });
+    const w = mountApp(CostsPage, {
+      eventSource: fakeEventSourceFactory().factory,
+      seed: usersSeed(usersReport({ viewer: { userIds: [], matchedByEmail: false } })),
+    });
     const input = w.find(".me-toggle input");
     expect(input.attributes("disabled")).toBeDefined();
     // The reason is on the page, not in a hover-only title, and the input points at it.
@@ -527,15 +696,16 @@ describe("CostsPage · By user", () => {
     expect(w.find(".me-toggle").attributes("title")).toBeUndefined();
     expect(w.findAll("tr.is-me").length).toBe(0);
     // With a match the hint is gone and the toggle is live.
-    const on = mountApp(CostsPage, { seed: usersSeed() });
+    const on = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: usersSeed() });
     expect(on.find(".me-toggle .me-hint").exists()).toBe(false);
     expect(on.find(".me-toggle input").attributes("aria-describedby")).toBeUndefined();
   });
 
   it("states the coverage plainly: where the data begins, a clamped range, runs still being priced; and with history off, that there is nothing to attribute", () => {
-    const w = mountApp(CostsPage, { seed: usersSeed() });
+    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: usersSeed() });
     expect(w.find(".coverage").text()).toBe("runs from Aug 27 to Aug 29");
     const clamped = mountApp(CostsPage, {
+      eventSource: fakeEventSourceFactory().factory,
       seed: usersSeed(
         usersReport({
           coverage: { from: report().days[1].date, retentionDays: 30, clamped: true, historyOn: true },
@@ -548,6 +718,7 @@ describe("CostsPage · By user", () => {
     expect(t).toContain("past the history's 30-day window");
     expect(t).toContain("3 runs still being priced");
     const off = mountApp(CostsPage, {
+      eventSource: fakeEventSourceFactory().factory,
       seed: usersSeed(
         usersReport({
           coverage: { from: report().days[2].date, retentionDays: 0, clamped: true, historyOn: false },
@@ -561,7 +732,7 @@ describe("CostsPage · By user", () => {
   });
 
   it("carries one reconciliation line: attributed LLM against the workspace figure, the unattributed remainder, cloud allocated and unallocated", () => {
-    const w = mountApp(CostsPage, { seed: usersSeed() });
+    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: usersSeed() });
     const line = w.find(".reconciliation").text().replace(/\s+/g, " ");
     expect(line).toContain("LLM attributed $15.75 of $19.50 on the workspace over 3 days");
     expect(line).toContain("$3.75 unattributed");
@@ -569,6 +740,7 @@ describe("CostsPage · By user", () => {
     expect(line).toContain("cloud allocated $2.00");
     expect(line).toContain("$1.40 on days with no runs");
     const tidy = mountApp(CostsPage, {
+      eventSource: fakeEventSourceFactory().factory,
       seed: usersSeed(usersReport({ reconciliation: { ...usersReport().reconciliation, cloudUnallocatedUsd: 0 } })),
     });
     expect(tidy.find(".reconciliation").text()).not.toContain("days with no runs");
@@ -577,6 +749,7 @@ describe("CostsPage · By user", () => {
   it("days whose runs spent tokens against a zero workspace figure are named apart from the tie-out, and a range with no figure at all says so instead of comparing", () => {
     const rec = usersReport().reconciliation;
     const partly = mountApp(CostsPage, {
+      eventSource: fakeEventSourceFactory().factory,
       seed: usersSeed(
         usersReport({
           reconciliation: {
@@ -598,6 +771,7 @@ describe("CostsPage · By user", () => {
     );
     expect(line).not.toContain("-$");
     const none = mountApp(CostsPage, {
+      eventSource: fakeEventSourceFactory().factory,
       seed: usersSeed(
         usersReport({
           reconciliation: {
@@ -621,6 +795,7 @@ describe("CostsPage · By user", () => {
   it("a compared range where more was attributed than the workspace shows says so in words, never as a negative dollar", () => {
     const rec = usersReport().reconciliation;
     const over = mountApp(CostsPage, {
+      eventSource: fakeEventSourceFactory().factory,
       seed: usersSeed(
         usersReport({
           reconciliation: { ...rec, attributedLlmUsd: 21.5, workspaceLlmUsd: 19.5, unattributedLlmUsd: -2 },
@@ -636,13 +811,13 @@ describe("CostsPage · By user", () => {
   });
 
   it("keeps the tab on the range and group pills, names the by-user JSON twin, and says so when the by-user report did not come with the page", () => {
-    const w = mountApp(CostsPage, { seed: usersSeed() });
+    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: usersSeed() });
     const hrefs = w.findAll("a").map((a) => a.attributes("href"));
     expect(hrefs).toContain("/costs/switchboard?days=7&view=users");
     expect(hrefs).toContain("/costs/other?days=3&view=users");
     expect(hrefs).toContain("/costs/switchboard?days=3"); // the Daily tab
     expect(w.text()).toContain("GET /costs/switchboard/users.json");
-    const missing = mountApp(CostsPage, { seed: usersSeed(null) });
+    const missing = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: usersSeed(null) });
     expect(missing.text()).toContain("by-user report did not load");
     expect(missing.find("table.users").exists()).toBe(false);
   });
