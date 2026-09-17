@@ -54,13 +54,16 @@ describe("RunRow", () => {
     expect(mountRow(row()).find("li.run").attributes("data-persisted")).toBeUndefined();
   });
 
-  it("renders the label as agent chip (hue allow-listed) · repo tag (name only, linked, slug on hover) · snippet", () => {
+  it("renders the label as agent chip (hue allow-listed) · repo tag (owner dimmed, then the name — it must read as a repository, not as another surface label; linked, slug on hover) · snippet", () => {
     const w = mountRow(row());
     const agent = w.find(".agent");
     expect(agent.text()).toBe("coding");
     expect(agent.attributes("data-agent-hue")).toBe("coding");
     const repo = w.find("a.repo");
-    expect(repo.text()).toBe("web");
+    expect(repo.text()).toBe("acme/web");
+    expect(repo.find(".owner").text()).toBe("acme/");
+    expect(repo.find(".owner").classes()).toContain("text-dimmed");
+    expect(repo.find(".name").text()).toBe("web");
     expect(repo.attributes("href")).toBe("https://github.com/acme/web");
     expect(repo.attributes("rel")).toBe("noopener noreferrer");
     expect(w.find(".snippet").text()).toBe("fix the build");
@@ -145,6 +148,10 @@ describe("RunRow", () => {
   it("leads the requester with the surface's name as a text label — the channel id's prefix word, readable text, never a glyph — so the same person's Slack, HTTP and CLI runs read apart", () => {
     const slack = mountRow(row({ userName: "ada" }));
     expect(slack.find(".who .surface").text()).toBe("slack");
+    // one width for every surface word, so the name after it starts at the same x on every row
+    expect(slack.find(".who .surface").classes()).toEqual(
+      expect.arrayContaining(["inline-block", "w-[3.6em]", "text-center"]),
+    );
     expect(slack.find(".who .surface").attributes("aria-hidden")).toBeUndefined(); // real text, read by everyone
     expect(slack.find(".who").attributes("data-surface")).toBe("slack");
     expect(slack.find(".who .glyph").exists()).toBe(false);

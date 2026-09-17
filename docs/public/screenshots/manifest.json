@@ -44,7 +44,7 @@
     "web/src/components/run/StepItems.vue": "3e938d23cbd54d1fd4bd9ff523cdbd52da26949c9e7252c4b2e4b276d3ddba26",
     "web/src/components/run/TimelineSection.vue": "86cdfb1c1ecf7bcadff76a9594ca79f56eef8797538b2f7b36cfcab1de988652",
     "web/src/components/runs/RunFoldRow.vue": "7d92c8ac44c93a0148686f9e97a4936b408ef7ec4ac608641ecb98b1e2bf6734",
-    "web/src/components/runs/RunRow.vue": "bb7080d7d5b91ed7c6bf6c52c4570ee4ccca2e00d61a85531b5d930e01123737",
+    "web/src/components/runs/RunRow.vue": "a9b4d3bdde686bf84f1bd5636bb2acc5f9ff9c3219415cf4f254bf95862b0583",
     "web/src/components/runs/RunsTabs.vue": "b20205f3e70f5c043f26d937cf90905e9411584b4289dd546621d58ece044d41",
     "web/src/components/runs/SourceMark.vue": "437844bb6d5ea4a3461afe465d2540deec87414a68efcaedd0eec5a7fbf3c757",
     "web/src/components/settings/ChannelsPanel.vue": "29122c466a9779e51d703852c422fd2cd28ded7c07c82664301856a9529ca486",

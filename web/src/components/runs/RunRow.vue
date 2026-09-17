@@ -184,9 +184,9 @@ function onRowClick(ev: MouseEvent): void {
           :class="run.finished ? 'text-dimmed' : 'text-muted'"
           :data-user-id="run.userId"
           :data-surface="src.kind"
-          ><span class="surface mr-1.5 rounded border border-accented px-1 font-mono text-[0.62rem] text-dimmed">{{
-            src.kind
-          }}</span
+          ><span
+            class="surface mr-1.5 inline-block w-[3.6em] rounded border border-accented text-center font-mono text-[0.62rem] text-dimmed"
+            >{{ src.kind }}</span
           ><span class="name">{{ who }}</span></span
         >
       </UTooltip>
@@ -204,7 +204,8 @@ function onRowClick(ev: MouseEvent): void {
           :href="`https://github.com/${repo}`"
           target="_blank"
           rel="noopener noreferrer"
-          >{{ repo.slice(repo.indexOf("/") + 1) }}</a
+          ><span class="owner font-normal text-dimmed">{{ repo.slice(0, repo.indexOf("/") + 1) }}</span
+          ><span class="name">{{ repo.slice(repo.indexOf("/") + 1) }}</span></a
         >
       </UTooltip>
       <span
