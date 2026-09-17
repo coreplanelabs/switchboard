@@ -50,13 +50,14 @@ const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
 const DESCRIPTION = {
   title: "Fix the login redirect",
   tldr: "Restores the session cookie on login. Users can sign in again.",
-  whatWhy: "The handler dropped the cookie after the session refactor; this restores it.",
-  tour: [
-    { title: "The fix", description: "The cookie is set again.", anchor: { path: "src/login.ts", from: 10, to: 20 } },
+  why: "The handler dropped the cookie after the session refactor; this restores it.",
+  pointers: [
+    { label: "The fix", text: "The cookie is set again.", anchor: { path: "src/login.ts", from: 10, to: 20 } },
   ],
-  remaining: [],
+  feedbackWanted: "Nothing in particular.",
+  verified: "See validation.",
   decisions: [],
-  risks: "none",
+  risk: "none",
   validation: { criteria: [{ criterion: "auth suite green", proof: "npm test — 24 passing" }] },
 };
 
@@ -112,14 +113,14 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     expect(fetchRepoInfo).not.toHaveBeenCalled();
   });
 
-  // Feature: docs/reference/specs/reading-diff.md item 7 — the Tour as data is persisted at
+  // Feature: docs/reference/specs/reading-diff.md item 7 — the map as data is persisted at
   // its source: the object the body was rendered from lands on the coding
   // run's stream as a `submitted` pr_description artifact, right after
   // `pr_opened`, with the PR number GitHub answered and the head the anchors
   // were rendered at.
   it("the golden description → a `submitted` pr_description artifact right after pr_opened: the PR number GitHub answered, the render head on every anchor, the rendered body, complete", async () => {
     const golden = parsePrDescription(
-      JSON.parse(readFileSync(new URL("./testing/goldenTour.description.json", import.meta.url), "utf8")),
+      JSON.parse(readFileSync(new URL("./testing/goldenMap.description.json", import.meta.url), "utf8")),
     );
     const spy = openSpy({ number: 329, htmlUrl: "https://github.com/acme/api/pull/329", created: false });
     const events: RunEvent[] = [];
@@ -145,14 +146,13 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       title: golden.title,
       tldr: golden.tldr,
       body: renderPrDescriptionMarkdown(golden, { repo: "acme/api", headSha: HEAD }),
-      remaining: golden.remaining,
       decisions: golden.decisions,
       complete: true,
       problems: [],
       truncated: false,
       at: expect.any(Number),
     });
-    expect(artifact.tour).toEqual(golden.tour.map((s) => ({ ...s, anchor: { ...s.anchor, sha: HEAD } })));
+    expect(artifact.pointers).toEqual(golden.pointers.map((p) => ({ ...p, anchor: { ...p.anchor, sha: HEAD } })));
     expect(spy.calls[0].body).toBe(artifact.body); // the body on GitHub and the body in the record are one rendering
   });
 

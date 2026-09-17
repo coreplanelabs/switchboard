@@ -5,10 +5,10 @@ import type { RunStore } from "./runStore.js";
 import { systemClock } from "./trace/clock.js";
 
 // The PR's description as data on the run stream (docs/reference/specs/reading-diff.md
-// item 7): the `pr_description` review artifact — the TL;DR, the Tour's steps
-// with their anchors, the Remaining-changes list and the decisions — so the
-// run page's panel can render a collapsed description and a Tour that jumps
-// to files and lines in the diff. Two sources, one shape:
+// item 7): the `pr_description` review artifact — the TL;DR, the why, the
+// map's pointers with their anchors and the decisions — so the run page's
+// panel can render the description and a later surface can jump to files
+// and lines in the diff. Two sources, one shape:
 //   - `submitted`: the typed object a coding run submitted, published by the
 //     coding PR post-step at the moment the PR is opened or edited, with the
 //     head the body was rendered at (`submittedPrDescriptionArtifact`).
@@ -41,8 +41,8 @@ export function submittedPrDescriptionArtifact(
     title: clean.title,
     body: sanitize(ctx.body),
     tldr: clean.tldr,
-    tour: clean.tour.map((s) => ({ ...s, anchor: { ...s.anchor, sha: ctx.headSha } })),
-    remaining: clean.remaining,
+    why: clean.why,
+    pointers: clean.pointers.map((p) => ({ ...p, anchor: { ...p.anchor, sha: ctx.headSha } })),
     decisions: clean.decisions,
     complete: true,
     problems: [],
@@ -74,8 +74,8 @@ export function parsedPrDescriptionArtifact(
     title: sanitize(facts.title),
     body,
     ...(d.tldr !== undefined ? { tldr: d.tldr } : {}),
-    tour: d.tour,
-    remaining: d.remaining ?? [],
+    ...(d.why !== undefined ? { why: d.why } : {}),
+    pointers: d.pointers,
     decisions: d.decisions ?? [],
     complete: problems.length === 0,
     problems,

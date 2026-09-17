@@ -872,17 +872,18 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     const DESCRIPTION: PrDescription = {
       title: "ci(deps): bump the action, refresh its hygiene allowlist",
       tldr: "Bumps the action and refreshes the allowlist lines its pin moved. CI is green again.",
-      whatWhy: "Dependabot moved the pin; the allowlist matches lines by content.",
-      tour: [
+      why: "Dependabot moved the pin; the allowlist matches lines by content.",
+      pointers: [
         {
-          title: "The allowlist",
-          description: "Three entries at the new pin.",
+          label: "The allowlist",
+          text: "Three entries at the new pin.",
           anchor: { path: "scripts/a", from: 1, to: 3 },
         },
       ],
-      remaining: [],
-      decisions: [{ title: "Keep dependabot's notes", rationale: "They are still true; they moved into whatWhy." }],
-      risks: "none",
+      feedbackWanted: "Nothing in particular.",
+      verified: "See validation.",
+      decisions: [{ title: "Keep dependabot's notes", rationale: "They are still true; they moved into why." }],
+      risk: "none",
       validation: { criteria: [{ criterion: "hygiene:check", proof: "ok — 201 files" }] },
     };
     const container = new FakeHarnessContainer();
@@ -2808,11 +2809,12 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     const description: PrDescription = {
       title: "Fix the login redirect",
       tldr: "Restores the session cookie on login. Users can sign in again.",
-      whatWhy: "The handler dropped the cookie; this restores it.",
-      tour: [{ title: "The fix", description: "The cookie is set again.", anchor: { path: "src/a", from: 1, to: 2 } }],
-      remaining: [],
+      why: "The handler dropped the cookie; this restores it.",
+      pointers: [{ label: "The fix", text: "The cookie is set again.", anchor: { path: "src/a", from: 1, to: 2 } }],
+      feedbackWanted: "Nothing in particular.",
+      verified: "See validation.",
       decisions: [{ title: "Keep it small", rationale: "One-line fix." }],
-      risks: "none",
+      risk: "none",
       validation: { criteria: [{ criterion: "tests", proof: "green" }] },
     };
     const executor = {
@@ -2869,11 +2871,12 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     const description: PrDescription = {
       title: "Fix the login redirect",
       tldr: "Restores the session cookie on login. Users can sign in again.",
-      whatWhy: "The handler dropped the cookie; this restores it.",
-      tour: [{ title: "The fix", description: "The cookie is set again.", anchor: { path: "src/a", from: 1, to: 2 } }],
-      remaining: [],
+      why: "The handler dropped the cookie; this restores it.",
+      pointers: [{ label: "The fix", text: "The cookie is set again.", anchor: { path: "src/a", from: 1, to: 2 } }],
+      feedbackWanted: "Nothing in particular.",
+      verified: "See validation.",
       decisions: [{ title: "Keep it small", rationale: "One-line fix." }],
-      risks: "none",
+      risk: "none",
       validation: { criteria: [{ criterion: "tests", proof: "green" }] },
     };
     const executor = {

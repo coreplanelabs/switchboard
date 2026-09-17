@@ -81,6 +81,6 @@ export function taskPrompt(task: PiTask, branch: { name: string; created: boolea
     "",
     `Prove it: run \`${task.proof}\` and make it pass.`,
     "",
-    `When the change is complete: commit it on \`${branch.name}\` with a conventional-commit message (type(scope): what a reader can now do), do not push, and call the \`submit_pr_description\` tool exactly once with the typed object — title, tldr, whatWhy, a tour with one step per hunk anchored by repo-relative path and 1-based line range in your commit, remaining, decisions, risks, and validation with the criteria you actually proved. Never merge, never approve, never open a pull request yourself: the tool call is the deliverable. Stop after the tool call.`,
+    `When the change is complete: commit it on \`${branch.name}\` with a conventional-commit message (type(scope): what a reader can now do), do not push, and call the \`submit_pr_description\` tool exactly once with the typed object — title, tldr, why, pointers (at most seven, each anchored by repo-relative path and 1-based line range in your commit), feedbackWanted, risk, verified, decisions, and validation with the criteria you actually proved. Never merge, never approve, never open a pull request yourself: the tool call is the deliverable. Stop after the tool call.`,
   ].join("\n");
 }

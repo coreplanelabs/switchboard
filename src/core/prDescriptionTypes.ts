@@ -6,49 +6,54 @@
 // types and enforces (via its annotated parse return) that the zod output
 // stays assignable to them. Add a field here first, then to the schema.
 
-/** A hunk the reader is pointed at: a path + inclusive 1-based line range in
- *  the PR head. The sha is NOT stored here — it is supplied at render time. */
-export interface TourAnchor {
+/** The lines a pointer sends the reader to: a path + inclusive 1-based line
+ *  range in the PR head. The sha is NOT stored here — it is supplied at render
+ *  time. */
+export interface PrAnchor {
   path: string;
   from: number;
   to: number;
 }
 
-/** One Tour step, reader-first: heading (what the change is), the explanation,
- *  an optional "look for" pointer, then the code. */
-export interface TourStep {
-  title: string;
-  description: string;
-  lookFor?: string;
-  anchor: TourAnchor;
+/** One row of the map's "Where to look": a linked label, one sentence, an
+ *  optional risk (rendered as ⚠), and the lines the label links to. */
+export interface Pointer {
+  label: string;
+  text: string;
+  risk?: string;
+  anchor: PrAnchor;
 }
 
-/** A Tour anchor with the sha its permalink was rendered at — what a reader
- *  gets back from a rendered body (or from a submitted object at the head it
- *  was rendered for), so a surface can tell whether the anchors are at the
- *  head it is looking at. */
-export interface RenderedTourAnchor extends TourAnchor {
+/** An anchor with the sha its permalink was rendered at — what a reader gets
+ *  back from a rendered body (or from a submitted object at the head it was
+ *  rendered for), so a surface can tell whether the pointers are at the head
+ *  it is looking at. */
+export interface RenderedPrAnchor extends PrAnchor {
   sha: string;
 }
 
-/** A Tour step whose anchor carries its render sha. Assignable to `TourStep`. */
-export interface RenderedTourStep extends TourStep {
-  anchor: RenderedTourAnchor;
+/** A pointer whose anchor carries its render sha. Assignable to `Pointer`. */
+export interface RenderedPointer extends Pointer {
+  anchor: RenderedPrAnchor;
 }
 
+/** The PR description as data (docs/decisions/0050): the map above the fold
+ *  (tldr, why, pointers, feedbackWanted, risk, verified), every field capped
+ *  so the map's size does not grow with the diff, and the collapsed half
+ *  (decisions, validation, agentNotes) below it. */
 export interface PrDescription {
   /** The PR title's single source. Metadata for the PR's own title field —
    *  never rendered into the body (GitHub shows the title itself). */
   title: string;
   tldr: string;
-  whatWhy: string;
-  tour: TourStep[];
-  /** Every touched file the Tour steps did not cover, one line each. */
-  remaining: { path: string; note: string }[];
+  why: string;
+  pointers: Pointer[];
+  feedbackWanted: string;
+  risk: string;
+  verified: string;
   decisions: { title: string; rationale: string }[];
-  risks: string;
   validation: {
-    summary?: string;
     criteria: { criterion: string; proof: string }[];
   };
+  agentNotes?: string;
 }

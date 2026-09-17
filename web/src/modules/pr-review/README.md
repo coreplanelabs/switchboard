@@ -73,7 +73,7 @@ fills it, scrolling the content under the header and the tabs.
   component's own width the list folds above the diff behind a
   `N files changed` row and the diff reads inline whatever the choice — two
   columns of code have no room.
-- **Description** — the TL;DR and, under its own heading, the What & why, as
+- **Description** — the TL;DR and, under its own heading, the Why, as
   markdown through `MarkdownText`; a muted note when the copy was read back
   from the PR body and came up short, or was cut before it was read
   (`descriptionNote`).

@@ -725,6 +725,36 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
     expect(h.opens[0]).toMatchObject({ repo: "acme/api", headBranch: "plan/orchestration/u12", base: "main" });
     expect(h.opens[0]!.body).toContain("ended before it could open the pull request");
 
+    // The record holds a description: title and body come from it — the why
+    // from `why`, or from `whatWhy` on a record written under the previous
+    // contract; a record with neither renders no "undefined" paragraph.
+    const RUN = "11111111-1111-4111-8111-111111111111";
+    const describe = (description: Record<string, unknown>) =>
+      record(RUN, {
+        agent: "coding",
+        threadKey: "slack:C1:2.0",
+        parentInstanceId: INSTANCE.id,
+        events: [{ type: "pr_description", description, seq: 1 } as unknown as RunRecord["events"][number]],
+      });
+    for (const [description, expectedWhy] of [
+      [{ title: "U12: the fix", tldr: "Two sentences.", why: "Because the gate leaked." }, "Because the gate leaked."],
+      [{ title: "U12: the fix", tldr: "Two sentences.", whatWhy: "Legacy why." }, "Legacy why."],
+      [{ title: "U12: the fix", tldr: "Two sentences." }, undefined],
+    ] as const) {
+      const d = harness();
+      await d.instances.put(INSTANCE);
+      await d.store.put(describe(description));
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, { parentInstanceId: INSTANCE.id, recover: { runId: RUN } }),
+        d.deps,
+      );
+      expect(d.opens[0]!.title).toBe("U12: the fix");
+      expect(d.opens[0]!.body.startsWith("Two sentences.\n\n")).toBe(true);
+      expect(d.opens[0]!.body).not.toContain("undefined");
+      if (expectedWhy) expect(d.opens[0]!.body).toContain(`\n\n${expectedWhy}\n\n_Rendered by the plan runner`);
+      else expect(d.opens[0]!.body).toContain("Two sentences.\n\n_Rendered by the plan runner");
+    }
+
     // Nothing pushed: GitHub refuses the create, and the check answers `none` as before.
     const refused = harness({ openPr: new Error("PR create failed: HTTP 422 no commits between main and the head") });
     await refused.instances.put(INSTANCE);

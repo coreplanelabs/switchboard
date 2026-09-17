@@ -249,7 +249,7 @@ describe("classifyPath", () => {
       "src/core/dispatcher.ts",
       "web/package.json",
       "web/src/App.vue",
-      "skills/pr-tour/SKILL.md",
+      "skills/pr-description/SKILL.md",
     ]) {
       expect(classifyPath(p), p).toEqual({ kind: "input", workers: ["bot"] });
     }

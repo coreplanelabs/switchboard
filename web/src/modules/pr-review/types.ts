@@ -38,8 +38,8 @@ export interface PrDescriptionData {
   /** The PR's title: the header's text. */
   title: string;
   tldr?: string;
-  /** The "What & why" prose, when the host could separate it from the body. */
-  whatWhy?: string;
+  /** The "Why" prose, when the host could separate it from the body. */
+  why?: string;
   /** `submitted`: the typed object the PR was opened from; `parsed`: read back
    *  from the PR body, possibly short of sections. */
   origin: "submitted" | "parsed";

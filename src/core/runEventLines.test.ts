@@ -193,7 +193,7 @@ describe("parseRunEventLines", () => {
     expect(skipped).toBe(1);
   });
 
-  it("accepts a `pr_description` review_artifact (known origin, repo, pr, title, body, tour array), skips it otherwise", () => {
+  it("accepts a `pr_description` review_artifact (known origin, repo, pr, title, body, a pointers array — or `tour` on a record written under the previous contract), skips it otherwise", () => {
     const ok = {
       type: "review_artifact",
       artifact: "pr_description",
@@ -202,21 +202,22 @@ describe("parseRunEventLines", () => {
       pr: 42,
       title: "t",
       body: "b",
-      tour: [],
-      remaining: [],
+      pointers: [],
       decisions: [],
       complete: false,
-      problems: ["no `## Tour` section"],
+      problems: ["no `**Why:**` line"],
       truncated: false,
       at: 1,
     };
+    const { pointers: _p, ...rest } = ok;
+    const legacy = { ...rest, tour: [], remaining: [] }; // history replays
     const badOrigin = { ...ok, origin: "guessed" };
-    const noTour = { ...ok, tour: "none" };
+    const noPointers = { ...rest, pointers: "none" };
     const noPr = { ...ok, pr: "42" };
     const { events, skipped } = parseRunEventLines(
-      [ok, badOrigin, noTour, noPr].map((e) => JSON.stringify(e)).join("\n"),
+      [ok, legacy, badOrigin, noPointers, noPr].map((e) => JSON.stringify(e)).join("\n"),
     );
-    expect(events).toEqual([ok]);
+    expect(events).toEqual([ok, legacy]);
     expect(skipped).toBe(3);
   });
 

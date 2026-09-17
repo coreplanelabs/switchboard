@@ -476,31 +476,39 @@ describe("review prompts: structured findings through submit_verdict (agent-ship
 describe("coding prompts: the PR-description content contract (submitted object)", () => {
   const SECTIONS = [
     "**TL;DR**",
-    "**What & why**",
-    "**Tour**",
+    "**Why**",
+    "**Where to look**",
+    "**Feedback wanted**",
+    "**Risk**",
+    "**Verified**",
     "**Decisions**",
-    "**Risks & implications**",
     "**Validation**",
+    "**For agents**",
   ];
   const FIELDS = [
     "**title**",
     "`tldr`",
-    "`whatWhy`",
-    "`tour`",
-    "`remaining`",
+    "`why`",
+    "`pointers`",
+    "`feedbackWanted`",
+    "`risk`",
+    "`verified`",
     "`decisions`",
-    "`risks`",
     "`validation`",
+    "`agentNotes`",
   ];
 
-  it("both coding prompts map every rendered section to its object field", () => {
+  it("both coding prompts map every rendered field of the map and the folds to its object field, with the caps", () => {
     for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {
       for (const section of SECTIONS) expect(sys, section).toContain(section);
       for (const field of FIELDS) expect(sys, field).toContain(field);
+      expect(sys).toMatch(/≤300/);
+      expect(sys).toMatch(/1 to 7/);
+      expect(sys).toMatch(/visible characters/);
     }
   });
 
-  it("no markdown-body authoring instructions remain (the renderer owns headings and layout)", () => {
+  it("no markdown-body authoring instructions remain (the renderer owns the labels and the folds)", () => {
     for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {
       expect(sys).not.toMatch(/## <Section>/);
       expect(sys).not.toMatch(/## TL;DR/);
@@ -508,27 +516,27 @@ describe("coding prompts: the PR-description content contract (submitted object)
     }
   });
 
-  // The Tour replaced the prose "Changes" + "How to review" sections: a
-  // walkthrough that never points at code is what made PR bodies hard to
-  // consume. Its steps are anchored to line permalinks that GitHub renders as
-  // embedded code, so the reader sees the hunk beside the explanation.
-  it("the Tour supersedes the prose Changes / How-to-review sections", () => {
+  // docs/decisions/0050: the map replaced the Tour (a per-hunk walkthrough with
+  // embedded code) and, before it, the prose "Changes" + "How to review"
+  // sections. None of the three is asked for anymore.
+  it("the map supersedes the Tour and the prose Changes / How-to-review sections", () => {
     for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {
       expect(sys).not.toContain("**Changes**");
       expect(sys).not.toContain("**How to review**");
+      expect(sys).not.toContain("**Tour**");
+      expect(sys).not.toMatch(/`tour`|`remaining`|`whatWhy`|`risks`|pr-tour/);
     }
   });
 
-  // The Tour's craft moved into the first-party `pr-tour` skill (pinned by
-  // src/skills/prTourSkill.test.ts); the contract keeps the section and makes
-  // loading the skill mandatory, so every coding run's Tour is a visible
-  // skill_use event and the rules live in one place.
-  it("the Tour field requires loading the pr-tour skill before authoring its steps", () => {
+  // The description's craft lives in the first-party `pr-description` skill
+  // (pinned by src/skills/prDescriptionSkill.test.ts); the contract keeps the
+  // field list and makes loading the skill mandatory, so every coding run's
+  // description is a visible skill_use event and the rules live in one place.
+  it("the pointers require loading the pr-description skill before they are authored", () => {
     for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {
-      expect(sys).toMatch(/\*\*Tour\*\*/);
       expect(sys).toMatch(/use_skill/);
-      expect(sys).toMatch(/`pr-tour` skill/);
-      expect(sys).toMatch(/BEFORE authoring the Tour/i);
+      expect(sys).toMatch(/`pr-description` skill/);
+      expect(sys).toMatch(/BEFORE authoring the pointers/i);
       // the craft is in the skill, not duplicated in the contract
       expect(sys).not.toMatch(/blob\/<head sha>\/<path>#L<from>-L<to>/);
       expect(sys).not.toMatch(/### N\. <what this change is>/);

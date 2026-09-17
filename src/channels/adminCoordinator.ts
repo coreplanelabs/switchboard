@@ -889,7 +889,16 @@ async function recoverPushedBranch(
       const desc = descEvent?.type === "pr_description" ? descEvent.description : undefined;
       if (desc !== undefined) {
         title = desc.title;
-        prBody = `${desc.tldr}\n\n${desc.whatWhy}\n\n_Rendered by the plan runner from the coding run's submitted description; the run ended before it could open the pull request itself._`;
+        // A record written under the previous contract carries the why as
+        // `whatWhy`; a body with neither gets no second paragraph, never "undefined".
+        const why = desc.why ?? (desc as { whatWhy?: string }).whatWhy;
+        prBody = [
+          desc.tldr,
+          why,
+          "_Rendered by the plan runner from the coding run's submitted description; the run ended before it could open the pull request itself._",
+        ]
+          .filter((part) => part !== undefined && part !== "")
+          .join("\n\n");
       }
     }
   } catch {
