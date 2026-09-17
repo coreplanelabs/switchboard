@@ -452,9 +452,9 @@ describe("replacedVerdict — the one more command waits through a container tha
     };
   }
 
-  it("the bound and the backoff are the executor's own start wait (execution.md item 23): 5 min in total, re-sent after 5 s, 10 s, then 15 s", () => {
-    expect(PROBE_WAIT_MAX_MS).toBe(SANDBOX_START_WAIT_MAX_MS);
+  it("the backoff is the executor's own start backoff (execution.md item 23), the bound the seam's own five minutes — shorter than a fresh run's start budget, since a run's work is in flight", () => {
     expect(PROBE_WAIT_MAX_MS).toBe(5 * 60_000);
+    expect(PROBE_WAIT_MAX_MS).toBeLessThan(SANDBOX_START_WAIT_MAX_MS);
     expect(PROBE_WAIT_BACKOFF_MS).toBe(SANDBOX_START_BACKOFF_MS);
     expect(PROBE_WAIT_BACKOFF_MS).toEqual([5_000, 10_000, 15_000]);
   });

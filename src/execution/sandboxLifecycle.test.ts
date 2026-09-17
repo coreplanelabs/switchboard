@@ -252,6 +252,13 @@ describe("sandbox Worker wiring (static)", () => {
   // item 23: every route passes through the start gate, whose warm-up is one
   // trivial command through the SDK inside the idle ledger; a route answers
   // the token (exec shape in-body, 503 on the file routes) while it starts.
+  it("the instance grant is asked for with a ten-second limit, so a refused start under a burst reaches the gate in seconds", () => {
+    expect(worker).toMatch(/const INSTANCE_GET_TIMEOUT_MS = 10_000;/);
+    expect(worker).toMatch(
+      /getSandbox\(env\.Sandbox, threadKey, \{\s*containerTimeouts: \{[\s\S]*?instanceGetTimeoutMS: INSTANCE_GET_TIMEOUT_MS,\s*\},\s*\}\)/,
+    );
+  });
+
   it("every route goes through the start gate; the warm-up is `true` through the SDK inside the idle ledger", () => {
     expect(worker.match(/this\.gate\.through\(/g)).toHaveLength(5);
     expect(worker).toMatch(

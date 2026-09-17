@@ -730,12 +730,12 @@ describe("CloudflareSandboxExecutor sandbox-starting wait", () => {
     expect(err).toBeInstanceOf(ExecCapacityError);
     expect(err).not.toBeInstanceOf(ExecInfraError);
     expect((err as Error).message).toBe(
-      "sandbox not ready — the thread's container did not finish starting within 300s; try again in a few minutes",
+      "sandbox not ready — the thread's container did not finish starting within 600s; try again in a few minutes",
     );
-    // 5 + 10 + 15×19 = 300 s → 21 waits, 22 sends, then no more
-    expect(calls).toHaveLength(22);
+    // 5 + 10 + 15×39 = 600 s → 41 waits, 42 sends, then no more
+    expect(calls).toHaveLength(42);
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(calls).toHaveLength(22);
+    expect(calls).toHaveLength(42);
   });
 
   it("a /read answered HTTP 503 with reason sandbox-starting is the same wait", async () => {
@@ -764,9 +764,29 @@ describe("CloudflareSandboxExecutor sandbox-starting wait", () => {
     expect(err).toBeInstanceOf(ExecCapacityError);
     expect((err as Error).message).toContain("sandbox fleet busy");
     expect((err as Error).message).toContain("after waiting 20s");
-    // sends at 0 (starting), 5 (busy: the second backoff step is the fleet's 20 s, capped at the 15 s left),
-    // 20 (busy, the budget spent), then the throw
+    // sends at 0 (starting), 5 (busy: the fleet's ladder restarts at its first step, 10 s), 15 (busy: its
+    // second step, 20 s, capped at the 5 s left), 20 (busy, the budget spent), then the throw
+    expect(calls).toHaveLength(4);
+  });
+
+  // A refused start under a burst is learned as fleet-busy after a starting
+  // answer or two; the fleet's ladder then begins at 10 s, not at the 30 s
+  // step the start's ladder had climbed to — 20–40 s less dead time per
+  // refused start, which a burst repeats for every thread past the seventh.
+  it("a token change restarts the backoff ladder: starting → starting → busy re-sends after 10 s, not 30 s", async () => {
+    const { calls } = scriptedFetch([
+      { body: STARTING_EXEC },
+      { body: STARTING_EXEC },
+      { body: BUSY_EXEC },
+      { body: OK },
+    ]);
+    const outcome = new CloudflareSandboxExecutor(OPTS).exec("echo hi", { timeoutMs: 120_000 });
+    // starting at 0 → 5 s; starting at 5 → 10 s; busy at 15 → the fleet's FIRST step, 10 s; ok at 25
+    await vi.advanceTimersByTimeAsync(24_000);
     expect(calls).toHaveLength(3);
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(calls).toHaveLength(4);
+    await expect(outcome).resolves.toBe("ok");
   });
 });
 

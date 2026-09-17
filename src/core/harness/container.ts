@@ -27,7 +27,8 @@ import {
 } from "../../execution/executor.js";
 import { STOPPED_CONTAINER_WORDING } from "../../execution/residentRefresh.js";
 import { CONTAINER_GONE_WORDING } from "../../execution/residentWake.js";
-import { SANDBOX_START_BACKOFF_MS, SANDBOX_START_WAIT_MAX_MS } from "../../execution/sandboxErrors.js";
+import { SANDBOX_START_BACKOFF_MS } from "../../execution/sandboxErrors.js";
+import { HARNESS_PROBE_WAIT_MS } from "../budgets.js";
 import { shellQuote } from "../../execution/shellQuote.js";
 import { parseExitPrefix, redactAndCap } from "../runEvents.js";
 
@@ -365,14 +366,18 @@ export const OP_TIMEOUT_MS = 60_000;
 export const CURL_MAX_TIME_S = 55;
 
 /** How long the one more command (`replacedVerdict`) waits for a container
- *  that is down under it to answer, and the pauses between its re-sends: the
- *  executor's own bound on a container's start and its backoff (the start
- *  gate, execution.md item 23 — a starting container is a wait the executor
- *  re-sends through, whatever the command's budget), reused rather than a
- *  bound of the seam's own. The platform rebuilt a replaced resident
- *  container in about a minute; a wait that runs out decides nothing, and the
- *  failure that opened the question stands. */
-export const PROBE_WAIT_MAX_MS = SANDBOX_START_WAIT_MAX_MS;
+ *  that is down under it to answer, and the pauses between its re-sends. The
+ *  backoff is the executor's own start backoff (the start gate, execution.md
+ *  item 23 — a starting container is a wait the executor re-sends through,
+ *  whatever the command's budget). The bound is the seam's own, five minutes:
+ *  the platform rebuilt a replaced resident container in about a minute, and
+ *  a run already under way should not hang on a container that is not coming
+ *  back for as long as a fresh run may wait for its first container (the
+ *  start budget is ten minutes since a burst was seen granting containers
+ *  five minutes late — a wait before anything ran, not a wait with a run's
+ *  work in flight). A wait that runs out decides nothing, and the failure
+ *  that opened the question stands. */
+export const PROBE_WAIT_MAX_MS = HARNESS_PROBE_WAIT_MS;
 export const PROBE_WAIT_BACKOFF_MS = SANDBOX_START_BACKOFF_MS;
 
 /** The environment variable a secret header's value rides to curl under: `SWITCHBOARD_REQUEST_H<n>`, in the header's order. */

@@ -111,6 +111,13 @@ const SDK_PIN: string = sandboxPkg.dependencies["@cloudflare/sandbox"];
 
 const WORKDIR = "/workspace";
 
+/** How long the SDK waits for the platform to grant a container instance
+ *  before its start fails (docs/reference/specs/execution.md item 23). The
+ *  SDK's default is 30 s and it retries, so a burst that the platform would
+ *  not admit took 63 s to say so; at 10 s (the SDK allows 5 s to 300 s) the
+ *  refusal reaches the start gate — and the executor's wait — in seconds. */
+const INSTANCE_GET_TIMEOUT_MS = 10_000;
+
 // Default per-command time limit, enforced by coreutils `timeout` inside the
 // sandbox. The tuned 280s applies when the body carries no timeoutMs (an older
 // bot); a caller-supplied timeoutMs is clamped server-side to the shared
@@ -806,7 +813,16 @@ export default {
     // One sandbox per thread; the DO name is the thread key. The stub's own
     // methods (`runCommand`, `readText`, …) are what the routes call — the
     // work happens in the Durable Object, the data comes back over RPC.
-    const sandbox = getSandbox(env.Sandbox, threadKey);
+    const sandbox = getSandbox(env.Sandbox, threadKey, {
+      containerTimeouts: {
+        // A refused instance grant is learned in seconds, not after the SDK's
+        // 30 s default and its retries (63 s to "no container instance" under
+        // a burst, docs/reference/specs/execution.md item 23): the gate turns
+        // it into the wait token and the executor re-sends. A grant that is
+        // merely slow is re-asked on the next send, which finds it made.
+        instanceGetTimeoutMS: INSTANCE_GET_TIMEOUT_MS,
+      },
+    });
 
     const url = new URL(request.url);
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;

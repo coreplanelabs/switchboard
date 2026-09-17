@@ -154,10 +154,15 @@ export const SANDBOX_STARTING_EXPLANATION =
   "the thread's sandbox container is starting (image pull, boot, runtime) — nothing ran yet; the request is re-sent once it is up";
 
 /** The executor waits at most this long for a container to start, whatever
- *  the command's own budget: the platform's own start allowances (30 s for an
- *  instance, 90 s for the port) plus a slow image pull fit inside it, and a
- *  60 s command is never killed by a two-minute start it did not cause. */
-export const SANDBOX_START_WAIT_MAX_MS = 5 * 60_000;
+ *  the command's own budget: the platform's own start allowances (the
+ *  instance grant, 90 s for the port) plus a slow image pull fit inside it,
+ *  and a 60 s command is never killed by a two-minute start it did not cause.
+ *  Ten minutes, not five: under a midday burst the platform admitted about
+ *  seven starts at once and granted the rest 2.5 to 5 minutes later — two
+ *  threads of twenty-four died at the five-minute mark with their container
+ *  a minute away. A run that waits ten minutes for its container starts; one
+ *  that dies at five does not, and nothing else in the run was in progress. */
+export const SANDBOX_START_WAIT_MAX_MS = 10 * 60_000;
 
 /** Backoff between re-sends while a container starts: 5 s, 10 s, then 15 s.
  *  A start takes tens of seconds, not minutes, so the poll is denser than the

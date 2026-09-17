@@ -128,7 +128,8 @@ describe("the sandbox-starting answer shapes the Worker sends", () => {
   });
 
   it("the start budget covers the platform's own start allowances with room, and its poll is denser than the fleet wait's", () => {
-    expect(SANDBOX_START_WAIT_MAX_MS).toBe(5 * 60_000);
+    // ten minutes: a midday burst granted containers 2.5–5 min late and two threads died at five
+    expect(SANDBOX_START_WAIT_MAX_MS).toBe(10 * 60_000);
     expect(SANDBOX_START_WAIT_MAX_MS).toBeGreaterThan(30_000 + 90_000); // instance grant + port ready, the SDK's defaults
     expect(SANDBOX_START_BACKOFF_MS).toEqual([5_000, 10_000, 15_000]);
     expect(startWaitExhaustedMessage(300_000)).toBe(
