@@ -35,6 +35,8 @@ export const manifestSchema = z.object({
           .union([z.boolean(), z.array(z.enum(DEPLOY_ORDER as [WorkerName, ...WorkerName[]])).min(1)])
           .optional(),
         note: z.string().optional(),
+        /** False for credentials used only by the bot's edge Worker. */
+        forwardToContainer: z.boolean().optional(),
       }),
     )
     .min(1),
