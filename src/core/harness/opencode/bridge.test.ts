@@ -29,6 +29,7 @@ import { CONFORMANCE_MAX_MINUTES, FAILED_MODEL_CALL_ERROR } from "../testing/sce
 import {
   finaleAbortReason,
   finaleTimedOutNote,
+  HARD_STOP_MESSAGE,
   MODEL_CALL_IN_FLIGHT,
   softStopAnswer,
   softStopNote,
@@ -1105,6 +1106,23 @@ describe("an OpenCode whose container command fails on its transport with no wor
     ]);
     expect(r.killed.length).toBeGreaterThan(0);
     expect(r.removed).toEqual([openCodeRunPaths("run-c").dir]);
+  });
+
+  it("the wait observes the run: a hard stop requested while the container is down ends the wait at once and the run ends as the hard stop — the abort line as the answer, one stopped note in mode hard, the wait's note saying why, no verdict, the server and its tailer ended", async () => {
+    const r = await run({
+      ...oneCallOpen,
+      transportLostThen: "same",
+      containerDownForProbes: 50,
+      hardStopDuringProbeWait: true,
+    });
+    expect(r.outcome).toEqual({ kind: "answered", answer: HARD_STOP_MESSAGE });
+    expect(noteSummaries(r, "sandbox_restarted")).toEqual([]);
+    expect(notes(r.events).filter((n) => n.kind === "stopped")).toEqual([expect.objectContaining({ mode: "hard" })]);
+    expect(noteSummaries(r, "harness_error")).toEqual([
+      expect.stringMatching(/^the one more command finds the container down/),
+      "the wait ended after 0s: a hard stop was requested",
+    ]);
+    expect(r.killed.length).toBeGreaterThan(0);
   });
 
   it("the one more command waits through a container that is down — 'The container is not running' from the probe itself is re-sent after the executor's backoff, never judged — and the container that then answers the same identity leaves the failure standing with the wait on the record", async () => {

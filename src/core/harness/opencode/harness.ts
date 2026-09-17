@@ -32,7 +32,13 @@ import type { Identity } from "../../../agents/registry.js";
 import type { Effort } from "../../../effort.js";
 import { followUpMessageId, followUpPrompt, followUpSnippet } from "../../threadAdmission.js";
 import { redactAndCap, redactSecrets, type RunEvent, type RunNoteKind } from "../../runEvents.js";
-import { isContainerGone, LOG_READ_BYTES, type HarnessContainer, type HarnessResponse } from "../container.js";
+import {
+  identityOrNothing,
+  isContainerGone,
+  LOG_READ_BYTES,
+  type HarnessContainer,
+  type HarnessResponse,
+} from "../container.js";
 import {
   HarnessContainerReplacedError,
   type Finding,
@@ -131,7 +137,7 @@ export class OpenCodeHarness implements Harness {
   async find(facts: OpenCodeHarnessFacts | { harness: string }, container: HarnessContainer): Promise<Finding> {
     if (facts.harness !== "opencode") return "another-harness";
     const oc = facts as OpenCodeHarnessFacts;
-    const here = await container.identity();
+    const here = await identityOrNothing(container);
     if (oc.container !== undefined && here !== undefined && oc.container !== here) return "another-container";
     try {
       const paths = openCodeRunPathsAt(oc.root);

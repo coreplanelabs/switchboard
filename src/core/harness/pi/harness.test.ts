@@ -2147,8 +2147,14 @@ describe("runPiHarness — the container replaced under a live run", () => {
   });
 
   it("the one more command waits through a container that is down — 'The container is not running' from the probe itself is re-sent after the executor's backoff (5 s, 10 s), never judged — and the container that then answers decides: the same identity leaves the failure standing with the wait on the record; the word after the wait is the verdict", async () => {
+    // The harness's sleep advances its clock: the wait's bound and its notes are read on that clock.
     const slept: number[] = [];
-    const same = world({ sleep: async (ms) => void slept.push(ms) });
+    const clock = { now: NOW };
+    const sleep = async (ms: number) => {
+      slept.push(ms);
+      clock.now += ms;
+    };
+    const same = world({ clock, sleep });
     piMidCall(same, (c) => c.loseTransport("same", "vm-new", 2));
     const err = await same.start().catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ExecInfraError);
@@ -2164,7 +2170,13 @@ describe("runPiHarness — the container replaced under a live run", () => {
     expect(noteSummaries(same)[2]).toMatch(/the one more command named no replacement, so the failure stands$/);
     expect(same.container.killed).toEqual([4242]);
 
-    const word = world({ sleep: async (ms) => void slept.push(ms) });
+    const clock2 = { now: NOW };
+    const word = world({
+      clock: clock2,
+      sleep: async (ms) => {
+        clock2.now += ms;
+      },
+    });
     piMidCall(word, (c) => c.loseTransport("word", "vm-new", 1));
     const verdict = await word.start().catch((e: unknown) => e);
     expect(verdict).toBeInstanceOf(PiContainerReplacedError);
@@ -2173,6 +2185,119 @@ describe("runPiHarness — the container replaced under a live run", () => {
     expect(noteKinds(word)).toEqual(["harness_error", "harness_error", "sandbox_restarted"]);
     expect(word.container.killed).toEqual([]);
     expect(word.container.removed).toEqual([]);
+  });
+
+  it("the wait observes the run: a hard stop requested while the container is down ends the wait at once — no further probe, no pause waited out — and the run ends as the hard stop it was: the abort line as the answer, one stopped note in mode hard, the wait's note saying why it ended, pi ended", async () => {
+    const slept: number[] = [];
+    const w = world({ sleep: async (ms) => void slept.push(ms) });
+    piMidCall(w, (c) => {
+      c.loseTransport("same", "vm-new", 50);
+      // The operator stops the run the moment the container is first found down.
+      c.onDownProbe = () => w.control.requestStop("hard");
+    });
+    const answer = await w.start();
+    expect(answer).toBe(HARD_STOP_MESSAGE);
+    // The launch's name, then exactly one probe: the stop ended the wait before any re-send.
+    expect(w.container.identityAsked).toBe(2);
+    expect(slept.filter((ms) => ms >= 5_000)).toEqual([]);
+    expect(noteKinds(w)).toEqual(["harness_error", "harness_error", "stopped"]);
+    expect(noteSummaries(w)[1]).toBe("the wait ended after 0s: a hard stop was requested");
+    expect(w.events.find((e) => e.type === "run_note" && e.kind === "stopped")).toMatchObject({ mode: "hard" });
+    expect(noteKinds(w)).not.toContain("sandbox_restarted");
+    expect(w.container.killed).toEqual([4242]);
+  });
+
+  it("the wind-down owns the ending: a transport loss (or the word) met while the finale was being aborted is noted, never judged — no probe, no verdict, no thrown transport error — and the budget answer stands", async () => {
+    const clock = { now: NOW };
+    const w = world({ clock, agent: { maxMinutes: 20 } });
+    scriptedPi(w.container, (_n, c) => {
+      bashTurn(w, "c1", "ls", "a");
+      clock.now += 13 * MINUTE_MS;
+      setImmediate(() => {
+        clock.now += ALLOWANCES.writeUp * MINUTE_MS + 1_000; // past the finale bound with no write-up
+      });
+      // The abort the finale's timeout sends meets a container the platform is
+      // killing: the next read fails on its transport with no word.
+      const onStdin = c.onStdin;
+      c.onStdin = (line, container) => {
+        if ((JSON.parse(line) as { type: string }).type === "abort") {
+          container.loseTransport("word", "vm-new");
+          return;
+        }
+        onStdin?.(line, container);
+      };
+    });
+    const answer = await w.start();
+    expect(answer).toBe(
+      "Stopped at the 20-minute budget without finishing. Partial work may exist in the workspace — narrow the task and try again.",
+    );
+    expect(w.notes).toContain("finale timed out — closing the run without a write-up");
+    expect(noteKinds(w)).not.toContain("sandbox_restarted");
+    expect(noteSummaries(w)).toContainEqual(
+      expect.stringMatching(
+        /^a container command failed on its transport \(resident \/exec: Peer closed WebSocket: 1006 .*\) while the finale was being aborted; the wind-down's answer stands$/,
+      ),
+    );
+    // Not judged: the one more command was never taken (the launch's own name is the only ask).
+    expect(w.container.identityAsked).toBe(1);
+    expect(w.container.killed).toEqual([4242]);
+  });
+
+  it("a follow-up turn meets the three shapes as the loop does: a read that fails on its transport takes the one more command — the word on it is the replaced verdict thrown from the turn with the record, the same identity leaves the turn failing with the transport error named and a harness_error note, and pi is ended", async () => {
+    const word = world();
+    scriptedPi(word.container, (n, c) => {
+      if (n === 0) {
+        bashTurn(word, "call_0", "npm test", "ok");
+        finalTurn(c, "All green.");
+        return;
+      }
+      // The turn's call opens, the gate decides it, and the container dies under it.
+      const msg = assistant([{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "npm test" } }]);
+      c.emit(
+        { type: "turn_start" },
+        { type: "message_end", message: msg },
+        { type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: { command: "npm test" } },
+      );
+      authorizeToolCall(word.registry.get("run-7")!, {
+        toolCallId: "c1",
+        tool: "bash",
+        input: { command: "npm test" },
+      });
+      c.loseTransport("word", "vm-new");
+    });
+    const session = await word.open();
+    expect(session.answer).toBe("All green.");
+    const err = await session
+      .followUp({ text: "one more", maxTurns: 4, maxMinutes: 5, toolContext: { executor } })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PiContainerReplacedError);
+    expect(err).toMatchObject({ condition: "word" });
+    expect(noteKinds(word)).toContain("sandbox_restarted");
+    expect(word.container.killed).toEqual([]);
+    expect(word.container.removed).toEqual([]);
+
+    const same = world();
+    scriptedPi(same.container, (n, c) => {
+      if (n === 0) {
+        bashTurn(same, "call_0", "npm test", "ok");
+        finalTurn(c, "All green.");
+        return;
+      }
+      c.emit({ type: "turn_start" });
+      c.loseTransport("same", "vm-new");
+    });
+    const s2 = await same.open();
+    const err2 = await s2
+      .followUp({ text: "one more", maxTurns: 4, maxMinutes: 5, toolContext: { executor } })
+      .catch((e: unknown) => e);
+    expect(err2).toBeInstanceOf(ExecInfraError);
+    expect((err2 as Error).message).toBe(TRANSPORT_LOST_TEXT);
+    expect(noteSummaries(same)).toContainEqual(
+      expect.stringMatching(/the one more command named no replacement, so the failure stands$/),
+    );
+    expect(noteKinds(same)).not.toContain("sandbox_restarted");
+    await s2.end();
+    expect(same.container.killed).toEqual([4242]);
   });
 
   it("saysContainerReplaced reads the executors' typed word first — the resident's ExecSandboxRestartedError, the seam's HarnessContainerRuntimeReplacedError — then the word `runtime-replaced` or `runtime-unreachable` anywhere in a failure's text, behind any prefix; a failure without the word is not one, and a bare string never is", () => {

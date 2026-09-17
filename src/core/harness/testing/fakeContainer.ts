@@ -196,11 +196,15 @@ export class FakeHarnessContainer implements HarnessContainer {
     this.identityAsked++;
     if (this.downForProbes > 0) {
       this.downForProbes--;
+      this.onDownProbe?.();
       throw new HarnessContainerDownError("identity", CONTAINER_DOWN_TEXT);
     }
     this.maybeFail("identity");
     return this.vm;
   }
+
+  /** Runs each time `identity` finds the container down — a test's operator stopping the run while it waits. */
+  onDownProbe: (() => void) | undefined;
 
   async request(_paths: HarnessPaths, req: HarnessRequest): Promise<HarnessResponse> {
     this.maybeFail("request");

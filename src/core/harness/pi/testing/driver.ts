@@ -235,6 +235,8 @@ export function piDriver(): HarnessDriver {
               REPLACED_WORD,
               script.containerDownForProbes ?? 0,
             );
+            // The operator stops the run the moment the container is first found down.
+            if (script.hardStopDuringProbeWait) container.onDownProbe = () => control.requestStop("hard");
             return true;
           }
           return false;
@@ -268,7 +270,12 @@ export function piDriver(): HarnessDriver {
         harnessUrl: "https://bot.example.com",
         registry,
         clock: () => clock.now,
-        sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 5))),
+        // A sleep advances the run's clock by what it asked for (the probe's wait
+        // is bounded and narrated on that clock) and takes five real milliseconds at most.
+        sleep: async (ms) => {
+          clock.now += ms;
+          await new Promise((r) => setTimeout(r, Math.min(ms, 5)));
+        },
         pollMs: 1,
         tickMs: 5,
       };

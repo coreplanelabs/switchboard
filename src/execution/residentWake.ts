@@ -33,8 +33,10 @@ export const WAKE_PROBE_TIMEOUT_MS = 5_000;
  *  incident's `The container just exited`, and the SDK's answer while the
  *  replacement boots. The runtime-replacement wordings the refresh classifier
  *  and the exec path share (`RUNTIME_REPLACEMENT_WORDING`) are the same
- *  condition seen from inside the wake path. */
-const CONTAINER_GONE_WORDING = /the container just exited|container is starting/i;
+ *  condition seen from inside the wake path. Exported for the harness's
+ *  container seam, which composes it into its own container-down list
+ *  (`CONTAINER_DOWN_WORDING`) rather than keep a second copy that drifts. */
+export const CONTAINER_GONE_WORDING = /the container just exited|container is starting/i;
 
 /** Whether a resident refusal names a container that is gone for a moment: a
  *  `not-serviceable:` answer whose detail is the platform's exited/starting

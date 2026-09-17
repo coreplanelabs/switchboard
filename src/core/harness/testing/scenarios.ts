@@ -137,6 +137,9 @@ export interface RunScript {
    *  the window while the platform rebuilds it — before it answers what
    *  `transportLostThen` says; the harness waits through them. 0 unless said. */
   containerDownForProbes?: number;
+  /** A hard stop requested the moment the one more command first finds the
+   *  container down: the wait must end at once and the run end as the stop. */
+  hardStopDuringProbeWait?: boolean;
   /** The row's process (named by the resume's facts) is still alive in this same
    *  container on the resume — the survival clause's alive-here: `open` finds it
    *  before anything is started and re-attaches to it when the row carries what
@@ -1056,6 +1059,38 @@ export const SCENARIOS: readonly ScenarioRow[] = [
       containerDownForProbes: 2,
     },
     check: (run) => checkTransportLostStands(run, true),
+  },
+  {
+    id: "survival-transport-lost-wait-stopped",
+    clause: "survival",
+    title:
+      "the in-flight container command fails on its transport with no word, the one more command finds the container not running, and a hard stop is requested while it is down: the wait ends at once — no pause waited out, no further probe — and the run ends as the hard stop it was, the abort line as the answer, one stopped note in mode hard, the wait's note saying why it ended, no verdict, the process ended",
+    script: {
+      turns: [call("c1", "bash", { command: "echo one" }), text("never")],
+      transportLostBeforeModelCall: 2,
+      transportLostThen: "same",
+      containerDownForProbes: 50,
+      hardStopDuringProbeWait: true,
+    },
+    check: (run) => {
+      assert.equal(answered(run), HARD_STOP_MESSAGE);
+      const stopped = notes(run).filter((n) => n.kind === "stopped");
+      assert.equal(stopped.length, 1, `${stopped.length} stopped notes, not one`);
+      assert.equal(stopped[0].mode, "hard");
+      assert.equal(
+        notes(run).filter((n) => n.kind === "sandbox_restarted").length,
+        0,
+        "a verdict was reached under a stop",
+      );
+      const errors = notes(run)
+        .filter((n) => n.kind === "harness_error")
+        .map((n) => n.summary);
+      assert.ok(
+        errors.some((s) => /^the wait ended after 0s: a hard stop was requested$/.test(s)),
+        `no note says the wait ended on the stop at once: ${JSON.stringify(errors)}`,
+      );
+      assert.ok(run.killed.length > 0, "the process was not ended");
+    },
   },
   {
     id: "survival-foreign-row-refused",

@@ -49,6 +49,7 @@ import {
   replacedVerdict,
   saysTransportLost,
   type HarnessContainer,
+  type ProbeWait,
   type ReplacedCondition,
   type ReplacedVerdict,
 } from "../container.js";
@@ -1245,8 +1246,16 @@ export async function driveOpenCode(
    *  and the failure stands, named as it was, when that command named no
    *  replacement. */
   let transportLost: Error | undefined;
-  /** What the one more command waits with: the harness's sleep, the notes on the record. */
-  const probe = { sleep: deps.sleep, note: (text: string) => note("harness_error", text) };
+  /** What the one more command waits with: the harness's sleep and clock, the
+   *  notes on the record, and the run itself — its hard-stop signal and its
+   *  deadline end the wait as they end the run. */
+  const probe: ProbeWait = {
+    sleep: deps.sleep,
+    now,
+    note: (text: string) => note("harness_error", text),
+    ...(run.control ? { signal: run.control.hardSignal } : {}),
+    deadline,
+  };
   // The base of the record a relaunch rebuilds from: the seed with its request,
   // or the resumed transcript, which the mirror's rows follow.
   const recordBase = {
@@ -1460,6 +1469,8 @@ export async function driveOpenCode(
         if (!(err instanceof Error && saysTransportLost(err))) throw err;
         transportLost = err;
         replacedBy = await replacedVerdict(conn.container, conn.containerWord, probe);
+        // The wait ends with the run's own stop: read it here once it has.
+        check();
         break;
       }
       if (next === "tick") {
@@ -1474,6 +1485,7 @@ export async function driveOpenCode(
         // before the crash judgement: the word on it, or the container's
         // changed identity, is the verdict below; nothing on it, the crash.
         replacedBy = await replacedVerdict(conn.container, conn.containerWord, probe);
+        check();
         break;
       }
       // The byte after this record: the row's offset once a refill's steps
@@ -1587,8 +1599,9 @@ export async function driveOpenCode(
   // The read failed on its transport and the one more command named no
   // replacement: the failure stands, named as the transport error it was —
   // never a crash judgement of the harness's own — and the caller ends the
-  // server, its tailer and the root as after any failed run.
-  if (transportLost !== undefined) {
+  // server, its tailer and the root as after any failed run. A wait the run's
+  // own stop ended is the stop's ending, below, not this failure's.
+  if (transportLost !== undefined && ended !== "hard") {
     note(
       "harness_error",
       `a container command failed on its transport (${redactAndCap(transportLost.message, 240)}); the one more command named no replacement, so the failure stands`,

@@ -61,11 +61,13 @@ import { PiBridge } from "./bridge.js";
 import {
   HarnessContainerRuntimeReplacedError,
   HarnessControlFileLostError,
+  identityOrNothing,
   replacedBecause,
   replacedVerdict,
   RUNTIME_WORD,
   saysTransportLost,
   type HarnessContainer,
+  type ProbeWait,
   type ReplacedCondition,
 } from "../container.js";
 import { PiMirror, piSessionFile, type LedgerTail } from "./mirror.js";
@@ -680,8 +682,10 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
      *  pid in this container is a stranger's. */
     let elsewhere: string | undefined;
     // Which container this is, asked once: compared with the row's word on a
-    // resume, recorded on the facts of every pi started here.
-    const here = await container.identity();
+    // resume, recorded on the facts of every pi started here. A container down
+    // or unreachable under the question names nothing here; only the one more
+    // command (`replacedVerdict`) waits on that answer.
+    const here = await identityOrNothing(container);
     /** The bearer pi holds is the one the generation that started it revealed
      *  (model-proxy item 2): this generation's proxy honours it only once the
      *  hash the row carries joins the run's entry — the entry this generation
@@ -1252,57 +1256,84 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     // A steer pi never echoed was never read: pi reads a queued steer at its
     // next turn boundary and had none. Back to the inbox, for the fresh turn.
     requeueUnechoed();
+    /** What the one more command waits with: the harness's sleep and clock,
+     *  the notes on the record, and the run itself — its hard-stop signal and
+     *  its deadline end the wait as they end the run. */
+    const probe: ProbeWait = {
+      sleep: deps.sleep,
+      now,
+      note: (text) => note("harness_error", text),
+      ...(run.control ? { signal: run.control.hardSignal } : {}),
+      deadline,
+    };
+    /** pi is gone before the run settled, or its container stopped answering.
+     *  A container replaced under the run (item 16) — the executor's word on a
+     *  container command — ends the run by the redispatch path: the call in
+     *  flight is settled with the restart note, the record says what happened,
+     *  and the run loop closes the run `interrupted` and runs the request
+     *  again. pi found dead with no command having failed with the word takes
+     *  one more command before the judgement: the platform's rollout kills the
+     *  container's processes first while exec still answers, so the alive
+     *  probe finds pi gone before any command could return the word — that
+     *  command failing with the word is the executor's word after all, and
+     *  the container answering another identity than the one recorded when pi
+     *  started is the condition in the word's place (a renamed container with
+     *  a dead pi is a replaced one). Only past both did pi die where it ran:
+     *  the failure it always was. A command that failed on its transport with
+     *  no word takes the same one more command; the command waits through a
+     *  container that is down (the restore window) rather than judging by its
+     *  silence, and ends its wait with the run's own stop — then nothing is
+     *  thrown here, and the run ends as the stop below; past both the failure
+     *  stands, named as the transport error it was. */
+    const judgeUnsettled = async (): Promise<void> => {
+      replaced = await containerReplaced(containerSaid);
+      if (replaced === undefined) {
+        const verdict = await replacedVerdict(container, facts?.container, probe);
+        if (verdict?.condition === "word") replaced = await containerReplaced(verdict.said);
+        else if (verdict?.condition === "identity")
+          replaced = new PiContainerReplacedError(undefined, verdict.was, verdict.now, recordNow(), "identity");
+      }
+      if (replaced) {
+        bridge.closeOpenSpans((open) => replacedCallNote(open.tool));
+        note("sandbox_restarted", replaced.message);
+        throw replaced;
+      }
+      if (run.control?.requested === "hard") return;
+      if (transportLost !== undefined) {
+        note(
+          "harness_error",
+          `a container command failed on its transport (${redactAndCap(transportLost.message, 240)}); the one more command named no replacement, so the failure stands`,
+        );
+        throw transportLost;
+      }
+      // The loop ran, so pi was started and its paths are on the row (the
+      // narrowing above does not reach into this closure).
+      const tail = paths ? await container.tail(paths.errLog, 2000) : "";
+      throw new Error(`pi exited before the run settled${tail.trim() ? `: ${redactAndCap(tail.trim(), 400)}` : ""}`);
+    };
     let answer: string;
+    // The wind-down owns the ending (item 15): a transport loss, or the word,
+    // met while the finale was being aborted is said on the record and never
+    // judged — no probe, no verdict, no thrown transport error — and the
+    // wind-down's answer stands below.
+    if (finaleAborted && !settled && (containerSaid ?? transportLost) !== undefined) {
+      const met = (containerSaid ?? transportLost)!;
+      note(
+        "harness_error",
+        `${containerSaid !== undefined ? "the executor said the container was replaced" : "a container command failed on its transport"} (${redactAndCap(met.message, 240)}) while the finale was being aborted; the wind-down's answer stands`,
+      );
+    }
+    if (!hardStopped && !settled && !finaleAborted && !bypass) {
+      // The judgement below waits on the container; the wait ends with the
+      // run's own stop, read here once it has.
+      await judgeUnsettled();
+      if (run.control?.requested === "hard") hardStopped = true;
+    }
     if (hardStopped) {
       note("stopped", hardStopNote(), "hard");
       answer = HARD_STOP_MESSAGE;
     } else {
       if (bypass) throw bypass;
-      if (!settled && !finaleAborted) {
-        // pi is gone before the run settled, or its container stopped
-        // answering. A container replaced under the run (item 16) — the
-        // executor's word on a container command — ends the run by the
-        // redispatch path: the call in flight is settled with the restart
-        // note, the record says what happened, and the run loop closes the
-        // run `interrupted` and runs the request again. pi found dead with
-        // no command having failed with the word takes one more command
-        // before the judgement: the platform's rollout kills the container's
-        // processes first while exec still answers, so the alive probe finds
-        // pi gone before any command could return the word — that command
-        // failing with the word is the executor's word after all, and the
-        // container answering another identity than the one recorded when
-        // pi started is the condition in the word's place (a renamed
-        // container with a dead pi is a replaced one). Only past both did pi
-        // die where it ran: the failure it always was. A command that failed
-        // on its transport with no word takes the same one more command; the
-        // command waits through a container that is down (the restore window)
-        // rather than judging by its silence; and past both the failure
-        // stands, named as the transport error it was.
-        replaced = await containerReplaced(containerSaid);
-        if (replaced === undefined) {
-          const verdict = await replacedVerdict(container, facts?.container, {
-            sleep: deps.sleep,
-            note: (text) => note("harness_error", text),
-          });
-          if (verdict?.condition === "word") replaced = await containerReplaced(verdict.said);
-          else if (verdict?.condition === "identity")
-            replaced = new PiContainerReplacedError(undefined, verdict.was, verdict.now, recordNow(), "identity");
-        }
-        if (replaced) {
-          bridge.closeOpenSpans((open) => replacedCallNote(open.tool));
-          note("sandbox_restarted", replaced.message);
-          throw replaced;
-        }
-        if (transportLost !== undefined) {
-          note(
-            "harness_error",
-            `a container command failed on its transport (${redactAndCap(transportLost.message, 240)}); the one more command named no replacement, so the failure stands`,
-          );
-          throw transportLost;
-        }
-        const tail = await container.tail(paths.errLog, 2000);
-        throw new Error(`pi exited before the run settled${tail.trim() ? `: ${redactAndCap(tail.trim(), 400)}` : ""}`);
-      }
       if (providerError !== undefined) {
         if (providerRefusal) throw policyRefused(providerError);
         throw new Error(
@@ -1402,13 +1433,33 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           startWriteUp({ kind: "turns", pace }, turnGuardInstruction(pace));
         }
       };
+      /** The turn's read failed saying the container was replaced (the word), or on its transport with no word: judged after the loop as the loop's own are. */
+      let turnContainerSaid: Error | undefined;
+      let turnTransportLost: Error | undefined;
       try {
         rpc.send({ id, type: "prompt", message: input.text });
         turnCheck();
         for (;;) {
           pending ??= iterator.next();
           const tick = deps.sleep(deps.tickMs ?? 1000).then(() => "tick" as const);
-          const next = await Promise.race([pending, tick]);
+          let next: IteratorResult<string> | "tick";
+          try {
+            next = await Promise.race([pending, tick]);
+          } catch (err) {
+            // The three shapes, as the loop reads them (item 16): the word is
+            // the verdict, a transport loss takes the one more command, and
+            // any other failure is the turn's, as it always was.
+            if (err instanceof HarnessControlFileLostError) note("harness_error", err.message);
+            if (err instanceof Error && saysContainerReplaced(err)) {
+              turnContainerSaid = err;
+              break;
+            }
+            if (err instanceof Error && saysTransportLost(err)) {
+              turnTransportLost = err;
+              break;
+            }
+            throw err;
+          }
           if (next === "tick") {
             turnCheck();
             if (hardStopped) break;
@@ -1452,6 +1503,30 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         }
         if (bypass) throw bypass;
         if (!turnSettled && !finaleAborted) {
+          // The turn's container was replaced under it, or its read failed on
+          // its transport: the same one more command as the loop's, the same
+          // verdict thrown for the caller to read by type, the same failure
+          // standing named when the container answers as recorded.
+          let turnReplaced = await containerReplaced(turnContainerSaid);
+          if (turnReplaced === undefined && (turnContainerSaid ?? turnTransportLost) !== undefined) {
+            const verdict = await replacedVerdict(container, facts?.container, probe);
+            if (verdict?.condition === "word") turnReplaced = await containerReplaced(verdict.said);
+            else if (verdict?.condition === "identity")
+              turnReplaced = new PiContainerReplacedError(undefined, verdict.was, verdict.now, recordNow(), "identity");
+          }
+          if (turnReplaced) {
+            replaced = turnReplaced;
+            bridge.closeOpenSpans((open) => replacedCallNote(open.tool));
+            note("sandbox_restarted", turnReplaced.message);
+            throw turnReplaced;
+          }
+          if (turnTransportLost !== undefined) {
+            note(
+              "harness_error",
+              `a container command failed on its transport (${redactAndCap(turnTransportLost.message, 240)}); the one more command named no replacement, so the failure stands`,
+            );
+            throw turnTransportLost;
+          }
           const tail = await container.tail(root.errLog, 2000);
           throw new Error(
             `pi exited before the turn settled${tail.trim() ? `: ${redactAndCap(tail.trim(), 400)}` : ""}`,

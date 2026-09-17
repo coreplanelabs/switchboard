@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CONTAINER_GONE_WORDING,
   WAKE_WAIT_MAX_MS,
   containerGoneMessage,
   isContainerRolling,
@@ -17,6 +18,13 @@ import {
 // back, and how long the wait may take.
 
 describe("isContainerRolling: the refusals that name a container gone for a moment", () => {
+  it("the platform's gone-for-a-moment wording is one exported list, so the harness's container seam composes it instead of keeping a second copy", () => {
+    expect(CONTAINER_GONE_WORDING.test("The container just exited")).toBe(true);
+    expect(CONTAINER_GONE_WORDING.test("Container is starting. Please retry in a moment.")).toBe(true);
+    expect(CONTAINER_GONE_WORDING.test("The container is not running, consider calling start()")).toBe(false);
+    expect(CONTAINER_GONE_WORDING.flags).toBe("i");
+  });
+
   it("recognizes the incident's answer and its rollout siblings", () => {
     for (const error of [
       "not-serviceable: The container just exited",

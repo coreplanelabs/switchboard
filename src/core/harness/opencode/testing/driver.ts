@@ -1012,6 +1012,15 @@ class ScriptedServe {
           this.replacedWord,
           this.script.containerDownForProbes ?? 0,
         );
+        // The operator stops the run the moment the container is first found down.
+        if (this.script.hardStopDuringProbeWait) {
+          const control = this.run.control;
+          if (control === undefined)
+            throw new Error(
+              "hardStopDuringProbeWait needs the run's control: hand the serve a run, not a bare container",
+            );
+          this.container.onDownProbe = () => control.requestStop("hard");
+        }
         return;
       }
     }
@@ -1451,7 +1460,12 @@ async function runOpenCode(script: RunScript, options: FakeServeOptions = {}): P
     registry,
     ...(options.bearers ? { bearers: options.bearers } : {}),
     clock: () => clock.now,
-    sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 2))),
+    // A sleep advances the run's clock by what it asked for (the probe's wait is
+    // bounded and narrated on that clock) and takes two real milliseconds at most.
+    sleep: async (ms) => {
+      clock.now += ms;
+      await new Promise((r) => setTimeout(r, Math.min(ms, 2)));
+    },
     pollMs: 1,
     tickMs: 5,
   };
