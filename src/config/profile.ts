@@ -73,10 +73,40 @@ export function budgetedAgent(agent: AgentDef, profile: RunProfile): AgentDef {
 
 // ---- boundaries: a scope caps, never grants -----------------------------------
 
+/** The blast-radius classes a scope may name as its `confirm`
+ *  (docs/decisions/0044-a-routed-write-is-confirmed-in-proportion-to-its-blast-radius.md):
+ *  the first class on the ladder the door hands back instead of running.
+ *  `exec` is on the ladder for the comparison but not settable — a test or
+ *  build never asks — and `never` is refused until the door's write misbind
+ *  rate has been measured; the validator names both reasons. */
+export type ConfirmClass = "write" | "destructive";
+export const CONFIRM_CLASSES: readonly ConfirmClass[] = ["write", "destructive"];
+
+/** The classes on the door's ladder — the command registry's `BlastRadius`,
+ *  spelled here rather than imported: a type import still drags the registry's
+ *  whole graph into every program that compiles this near-leaf module, the
+ *  Workers included. The door indexes the ladder with the registry's type
+ *  (`routedRunsAtOnce`), so a class added there without a rung here fails to
+ *  compile at the one place the two vocabularies meet. */
+export type ConfirmLadderClass = "read" | "exec" | "write" | "destructive";
+
+/** The ladder the door compares on, `read < exec < write < destructive`: among
+ *  the last three, from asking most to asking least — a `confirm` of `write`
+ *  hands back every write and every destructive write, `destructive` only the
+ *  destructive ones. A read is on the order so the comparison is total, but the
+ *  door never asks for one. */
+export const CONFIRM_ORDER: Record<ConfirmLadderClass, number> = { read: 0, exec: 1, write: 2, destructive: 3 };
+
+/** The door's confirm class when no scope sets one: every routed write is
+ *  handed back, a read or a test run at once — the door as it was before the
+ *  axis existed. Attributed to `built-in`, a word that appears in no config. */
+export const BUILT_IN_CONFIRM: ConfirmClass = "write";
+
 /** A cap on the three axes that any scope may set (`defaults`, `channels.<id>`,
- *  `users.<id>`; docs/reference/specs/routing-and-config.md item 2). An absent
- *  axis caps nothing. A boundary never grants: it is not a fourth grants axis,
- *  and the policy table's one question (who may run a preset) is unchanged. */
+ *  `users.<id>`; docs/reference/specs/routing-and-config.md item 2), and the
+ *  door's `confirm` beside them. An absent axis caps nothing. A boundary never
+ *  grants: it is not a fourth grants axis, and the policy table's one question
+ *  (who may run a preset) is unchanged. */
 export interface Boundary {
   /** The most a run may have, in minutes; at least 2 (the bash tool keeps a 60 s reserve). */
   maxMinutes?: number;
@@ -84,6 +114,11 @@ export interface Boundary {
   maxIdentity?: Identity;
   /** The machine classes a run may execute on; a preset's class must be in every layer's set. */
   machines?: MachineClass[];
+  /** The first blast-radius class a command the router bound is handed back
+   *  at instead of run (record 0044). Not a run cap: it rides the boundary for
+   *  its scopes and its intersection-toward-caution, is read by the door alone
+   *  (`effectiveConfirm`), and never enters `intersectBoundaries` or a profile. */
+  confirm?: ConfirmClass;
 }
 
 /** One layer's boundary with the scope it came from, in resolution order:
@@ -141,6 +176,36 @@ export function intersectBoundaries(layers: readonly ScopedBoundary[]): Effectiv
     }
   }
   return out.maxMinutes || out.maxIdentity || out.machines ? out : undefined;
+}
+
+/** Where the door's confirm class came from: a scope that set it, or the
+ *  built-in default when none did. Local to the confirm axis — `BoundaryScope`
+ *  itself is unchanged, since no run cap is ever attributed to `built-in`. */
+export type ConfirmScope = BoundaryScope | "built-in";
+
+/** The door's decision on the confirm axis: the class and the scope it names. */
+export interface EffectiveConfirm {
+  value: ConfirmClass;
+  scope: ConfirmScope;
+}
+
+/**
+ * The confirm axis intersected over a request's path, apart from the run caps:
+ * the earliest class on `CONFIRM_ORDER` any layer named — the most cautious,
+ * since a scope's value is the most permissive answer it allows and the org's
+ * is therefore a floor no layer below it can loosen — attributed to the layer
+ * that set it (on a tie the first layer named keeps it, the least specific
+ * scope, as `intersectBoundaries` does). No layer set one: the built-in
+ * `write`, attributed to `built-in`. Pure over the same layers `intersectBoundaries` takes.
+ */
+export function effectiveConfirm(layers: readonly ScopedBoundary[]): EffectiveConfirm {
+  let out: EffectiveConfirm | undefined;
+  for (const { scope, boundary } of layers) {
+    if (boundary.confirm !== undefined && (!out || CONFIRM_ORDER[boundary.confirm] < CONFIRM_ORDER[out.value])) {
+      out = { value: boundary.confirm, scope };
+    }
+  }
+  return out ?? { value: BUILT_IN_CONFIRM, scope: "built-in" };
 }
 
 /**

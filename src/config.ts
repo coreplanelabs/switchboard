@@ -43,10 +43,12 @@ import type { HarnessName } from "./core/harness/contract.js";
 import type { HarnessScope } from "./core/harness/roster.js";
 import type { OpenCodeCompactionConfig } from "./core/harness/opencode/process.js";
 import {
+  effectiveConfirm,
   intersectBoundaries,
   type Boundary,
   type BoundaryScope,
   type EffectiveBoundary,
+  type EffectiveConfirm,
   type ScopedBoundary,
 } from "./config/profile.js";
 
@@ -944,7 +946,7 @@ export class ConfigStore {
           : ch.agent !== undefined
             ? [ch.agent, "channel"]
             : [this.config.defaults.agent, "default"];
-    const boundary = intersectBoundaries(this.boundaryLayers(ch, us));
+    const boundary = intersectBoundaries(this.boundaryLayers(opts.channelId, opts.userId));
 
     const modelRef =
       opts.request.model ??
@@ -1013,13 +1015,15 @@ export class ConfigStore {
     return out;
   }
 
-  /** The boundary layers on a path, in resolution order, keeping only the
-   *  scopes that set one — `intersectBoundaries` names each axis's scope from it. */
-  private boundaryLayers(channel: Scope, user: Scope): ScopedBoundary[] {
+  /** The boundary layers on a request's path, in resolution order (`defaults`,
+   *  `channel`, `user`), keeping only the scopes that set one — what
+   *  `intersectBoundaries` names each run cap's scope from, and what the door
+   *  reads its confirm class from (`effectiveConfirm`, record 0044). */
+  boundaryLayers(channelId: string, userId: string): ScopedBoundary[] {
     const layers: Array<[BoundaryScope, Boundary | undefined]> = [
       ["defaults", this.config.defaults.boundary],
-      ["channel", channel.boundary],
-      ["user", user.boundary],
+      ["channel", this.channelScope(channelId).boundary],
+      ["user", this.userScope(userId).boundary],
     ];
     return layers.flatMap(([scope, boundary]) => (boundary ? [{ scope, boundary }] : []));
   }
@@ -1174,12 +1178,14 @@ export class ConfigStore {
     const channel = this.channelScope(channelId);
     const user = this.userScope(userId);
     const harness = this.effectiveHarnesses(channel, user);
+    const confirm = effectiveConfirm(this.boundaryLayers(channelId, userId));
     return {
       effective: {
         agent: resolved.agentName,
         model: resolved.modelRef,
         ...(resolved.effort ? { effort: resolved.effort } : {}),
         ...(resolved.boundary ? { boundary: resolved.boundary } : {}),
+        ...(confirm.scope !== "built-in" ? { confirm } : {}),
         ...(Object.keys(harness).length > 0 ? { harness } : {}),
       },
       defaults: {
@@ -1236,13 +1242,18 @@ export interface ChannelScopeIndexRow {
 
 export interface ConfigDescription {
   /** The boundary is the intersection of every scope's, each axis naming the
-   *  scope that set it; `harness` is every preset a scope names a harness for,
-   *  each with the scope whose word won — absent when none does. */
+   *  scope that set it; `confirm` is the door's decision on the confirm axis
+   *  (record 0044) once a scope set one — the most cautious class named with
+   *  that scope — and absent under the built-in default, which is the door's
+   *  own word and appears in no config; `harness` is every preset a scope
+   *  names a harness for, each with the scope whose word won — absent when
+   *  none does. */
   effective: {
     agent: string;
     model: string;
     effort?: Effort;
     boundary?: EffectiveBoundary;
+    confirm?: EffectiveConfirm;
     harness?: Record<string, ResolvedHarness>;
   };
   /** `harness` is the deployment's top-level block: the defaults layer of the word. */
@@ -1282,6 +1293,7 @@ export function formatConfigDescription(d: ConfigDescription): string {
   const lines = [
     `*Effective for you in this channel:* ${effective}`,
     ...(d.effective.boundary ? [`*Effective boundary:* ${fmtEffectiveBoundary(d.effective.boundary)}`] : []),
+    ...(d.effective.confirm ? [`*Effective confirm:* ${fmtConfirm(d.effective.confirm)}`] : []),
     ...(d.effective.harness ? [`*Effective harness:* ${fmtEffectiveHarness(d.effective.harness)}`] : []),
     `*Defaults:* ${defaults}${orgMcp}`,
     `*Channel scope:* ${fmtScope(d.channel)}`,
@@ -1315,13 +1327,23 @@ function fmtScope(s: Scope): string {
   return parts.length > 0 ? parts.join(", ") : "_none_";
 }
 
-/** One scope's own boundary, axis by axis: `maxMinutes=45 maxIdentity=read machines=none,repo-cold`. */
+/** One scope's own boundary, field by field: `maxMinutes=45 maxIdentity=read
+ *  machines=none,repo-cold confirm=destructive`; `(caps nothing)` only when no
+ *  field at all is set — a scope that sets only `confirm` caps no run, but it
+ *  did set something. */
 function fmtBoundary(b: Boundary): string {
   const parts: string[] = [];
   if (b.maxMinutes !== undefined) parts.push(`maxMinutes=${b.maxMinutes}`);
   if (b.maxIdentity !== undefined) parts.push(`maxIdentity=${b.maxIdentity}`);
   if (b.machines !== undefined) parts.push(`machines=${b.machines.join(",")}`);
+  if (b.confirm !== undefined) parts.push(`confirm=${b.confirm}`);
   return parts.length > 0 ? parts.join(" ") : "(caps nothing)";
+}
+
+/** The door's confirm decision with the scope that made it — `` `write` (defaults) ``
+ *  — in the shape the effective boundary's axes print. */
+function fmtConfirm(c: EffectiveConfirm): string {
+  return `\`${c.value}\` (${c.scope})`;
 }
 
 /** The intersected boundary with each axis's scope: what `config show` and the

@@ -2,10 +2,13 @@ import { describe, expect, it } from "vitest";
 import { AGENTS } from "../agents/registry.js";
 import {
   BOUNDARY_SCOPES,
+  BUILT_IN_CONFIRM,
   boundedByParent,
   budgetedAgent,
   clipSourceLabel,
+  CONFIRM_ORDER,
   declaredProfile,
+  effectiveConfirm,
   effectiveProfile,
   identityWithin,
   intersectBoundaries,
@@ -228,5 +231,85 @@ describe("declaredProfile and budgetedAgent", () => {
     const budgeted = budgetedAgent(AGENTS.coding, { machine: "repo-resident", identity: "write", minutes: 10 });
     expect(budgeted.maxMinutes).toBe(10);
     expect(budgeted.maxTurns).toBe(60);
+  });
+});
+
+// Feature: docs/reference/specs/routing-and-config.md item 2 (record 0044, the
+// confirm axis) — `boundary.confirm` names the first blast-radius class the door
+// hands back instead of running. It is a field of the boundary with its OWN
+// intersection beside the three run caps: the earliest class any layer named
+// wins, attributed to that layer, and the run caps never see it.
+describe("effectiveConfirm — the confirm axis: the earliest class any layer named, attributed; the built-in write when none did", () => {
+  it("the ladder runs read < exec < write < destructive — asking most to asking least among the last three, reads never on it", () => {
+    expect(CONFIRM_ORDER.read).toBeLessThan(CONFIRM_ORDER.exec);
+    expect(CONFIRM_ORDER.exec).toBeLessThan(CONFIRM_ORDER.write);
+    expect(CONFIRM_ORDER.write).toBeLessThan(CONFIRM_ORDER.destructive);
+    expect(BUILT_IN_CONFIRM).toBe("write");
+  });
+
+  it("`write` beats `destructive` whatever layer named it and whichever came first: the most cautious value wins with its scope", () => {
+    expect(
+      effectiveConfirm([layer("defaults", { confirm: "destructive" }), layer("channel", { confirm: "write" })]),
+    ).toEqual({ value: "write", scope: "channel" });
+    expect(
+      effectiveConfirm([layer("defaults", { confirm: "write" }), layer("user", { confirm: "destructive" })]),
+    ).toEqual({
+      value: "write",
+      scope: "defaults",
+    });
+    expect(
+      effectiveConfirm([
+        layer("defaults", { confirm: "destructive" }),
+        layer("channel", { confirm: "destructive" }),
+        layer("user", { confirm: "write" }),
+      ]),
+    ).toEqual({ value: "write", scope: "user" });
+  });
+
+  it("on a tie the first layer named — the least specific scope — keeps the attribution, as the run caps do", () => {
+    expect(
+      effectiveConfirm([layer("channel", { confirm: "destructive" }), layer("user", { confirm: "destructive" })]),
+    ).toEqual({ value: "destructive", scope: "channel" });
+    expect(
+      effectiveConfirm([
+        layer("defaults", { confirm: "write" }),
+        layer("channel", { confirm: "write" }),
+        layer("user", { confirm: "write" }),
+      ]),
+    ).toEqual({ value: "write", scope: "defaults" });
+  });
+
+  it("no layer set one — no layers at all, or layers that cap only the run axes — answers the built-in `write`, attributed to `built-in`", () => {
+    expect(effectiveConfirm([])).toEqual({ value: "write", scope: "built-in" });
+    expect(effectiveConfirm([layer("defaults", { maxMinutes: 30 }), layer("user", { maxIdentity: "read" })])).toEqual({
+      value: "write",
+      scope: "built-in",
+    });
+  });
+
+  it("a layer that sets only `confirm` is invisible to the run caps: `intersectBoundaries` is undefined, the profile is the preset's own and a parent's clock is the only cap", () => {
+    const confirmOnly = [layer("channel", { confirm: "destructive" }), layer("user", { confirm: "write" })];
+    expect(intersectBoundaries(confirmOnly)).toBeUndefined();
+    expect(effectiveProfile(AGENTS.coding, {}, intersectBoundaries(confirmOnly))).toEqual({
+      kind: "profile",
+      profile: declaredProfile(AGENTS.coding),
+    });
+    expect(boundedByParent(intersectBoundaries(confirmOnly), 5 * 60_000)).toEqual({
+      maxMinutes: { value: 5, scope: "parent" },
+    });
+  });
+
+  it("`confirm` beside the run axes changes nothing of their intersection: the same effective boundary with and without it", () => {
+    const withConfirm = [
+      layer("defaults", { maxMinutes: 60, confirm: "write" }),
+      layer("channel", { maxIdentity: "read", confirm: "destructive" }),
+    ];
+    const without = [layer("defaults", { maxMinutes: 60 }), layer("channel", { maxIdentity: "read" })];
+    expect(intersectBoundaries(withConfirm)).toEqual(intersectBoundaries(without));
+    expect(intersectBoundaries(withConfirm)).toEqual({
+      maxMinutes: { value: 60, scope: "defaults" },
+      maxIdentity: { value: "read", scope: "channel" },
+    });
+    expect(effectiveConfirm(withConfirm)).toEqual({ value: "write", scope: "defaults" });
   });
 });

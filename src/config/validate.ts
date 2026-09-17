@@ -22,7 +22,7 @@ import type { Grants } from "../core/authz/types.js";
 import { AGENTS, IDENTITIES, MACHINE_CLASSES, type Identity, type MachineClass } from "../agents/registry.js";
 import { HARNESS_NAMES, isHarnessName } from "../core/harness/roster.js";
 import type { OpenCodeCompactionConfig } from "../core/harness/opencode/process.js";
-import type { Boundary } from "./profile.js";
+import { CONFIRM_CLASSES, type Boundary, type ConfirmClass } from "./profile.js";
 import { assertUrlAllowed } from "../tools/web.js";
 import {
   isMcpServerEntry,
@@ -144,20 +144,27 @@ export function validateScopeEfforts(
 }
 
 /** The keys a boundary may carry — held equal to `Boundary` by the type checker. */
-const BOUNDARY_KEYS: Record<keyof Boundary, true> = { maxMinutes: true, maxIdentity: true, machines: true };
+const BOUNDARY_KEYS: Record<keyof Boundary, true> = {
+  maxMinutes: true,
+  maxIdentity: true,
+  machines: true,
+  confirm: true,
+};
 
 /** The smallest budget a boundary may set: the bash tool keeps a 60-second
  *  reserve before the deadline, so a shorter run could never run a command. */
 export const MIN_BOUNDARY_MINUTES = 2;
 
 /**
- * One boundary, wherever config can carry it: a mapping of the three axes and
- * nothing else — `maxMinutes` an integer of at least `MIN_BOUNDARY_MINUTES`,
- * `maxIdentity` one of `IDENTITIES`, `machines` a list naming at least one of
- * `MACHINE_CLASSES` (an empty list would refuse every preset, which is a
- * lockout, not a cap — `restrict.agents` is the tool for that). Every finding
- * names the path; the caller decides what to do with it (the load throws, the
- * chat command refuses by name).
+ * One boundary, wherever config can carry it: a mapping of the three run axes
+ * and the door's `confirm`, nothing else — `maxMinutes` an integer of at least
+ * `MIN_BOUNDARY_MINUTES`, `maxIdentity` one of `IDENTITIES`, `machines` a list
+ * naming at least one of `MACHINE_CLASSES` (an empty list would refuse every
+ * preset, which is a lockout, not a cap — `restrict.agents` is the tool for
+ * that), `confirm` one of `CONFIRM_CLASSES` — `exec` and `never` refused with
+ * their own reasons (record 0044: a test or build never asks; `never` waits on
+ * the door's measured misbind rate). Every finding names the path; the caller
+ * decides what to do with it (the load throws, the chat command refuses by name).
  */
 export function boundaryProblem(path: string, raw: unknown): string | undefined {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return `${path} must be a mapping`;
@@ -177,6 +184,13 @@ export function boundaryProblem(path: string, raw: unknown): string | undefined 
       if (!MACHINE_CLASSES.includes(m as MachineClass))
         return `${path}.machines names "${String(m)}" — valid classes: ${MACHINE_CLASSES.join(", ")}`;
     }
+  }
+  if (b.confirm !== undefined) {
+    if (b.confirm === "exec") return `${path}.confirm is "exec" — a test or build never asks (record 0044)`;
+    if (b.confirm === "never")
+      return `${path}.confirm is "never" — not allowed until the door's write misbind rate has been measured over a period (record 0044, open question 2)`;
+    if (!CONFIRM_CLASSES.includes(b.confirm as ConfirmClass))
+      return `${path}.confirm is "${String(b.confirm)}" — valid classes: ${CONFIRM_CLASSES.join(", ")}`;
   }
   return undefined;
 }

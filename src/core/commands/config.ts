@@ -6,7 +6,7 @@ import {
   type Scope,
 } from "../../config.js";
 import { boundaryProblem, MAX_INSTRUCTIONS_LENGTH, MIN_BOUNDARY_MINUTES } from "../../config/validate.js";
-import type { Boundary } from "../../config/profile.js";
+import { CONFIRM_CLASSES, type Boundary } from "../../config/profile.js";
 import { IDENTITIES, MACHINE_CLASSES, type MachineClass } from "../../agents/registry.js";
 import { EFFORT_LEVELS, type Effort } from "../../effort.js";
 import type { HarnessName } from "../harness/contract.js";
@@ -114,6 +114,15 @@ const boundaryOption = z
       .string()
       .optional()
       .describe(`the machine classes runs may execute on, comma-separated from ${MACHINE_CLASSES.join(", ")}`),
+    // A loose string, like `machines`: the word is held to the two classes by
+    // `boundaryProblem` on write, so `never` and `exec` are refused with the
+    // validator's own reasons rather than a schema message.
+    confirm: z
+      .string()
+      .optional()
+      .describe(
+        `the first blast-radius class a command the router bound is handed back at instead of run <${CONFIRM_CLASSES.join("|")}> — a channel or user can only ask more than the layers above it`,
+      ),
   })
   .optional();
 
@@ -334,11 +343,13 @@ export const configSet = defineCommand({
     if (options.harness) patch.harness = options.harness as Record<string, HarnessName>;
     if (options.ship?.addressSeverity !== undefined) patch.ship = { addressSeverity: options.ship.addressSeverity };
     if (options.boundary) {
-      // The list arrives as one comma-separated token; the boundary is then
-      // held to the load-time rule, so a typo is refused by name here exactly
-      // as it would be in config.yaml — and the value is never echoed.
-      const { machines, ...axes } = options.boundary;
-      const boundary: Boundary = { ...axes };
+      // The list arrives as one comma-separated token and the confirm class as
+      // a bare word; the whole boundary is then held to the load-time rule, so
+      // a typo is refused by name here exactly as it would be in config.yaml
+      // (a class list value is never echoed; `never` and `exec` get the
+      // validator's reasons) — and only what passed is typed as a `Boundary`.
+      const { machines, ...fields } = options.boundary;
+      const raw: Record<string, unknown> = { ...fields };
       if (machines !== undefined) {
         const classes = machines.split(",").map((m) => m.trim());
         if (classes.length === 0 || classes.some((m) => !MACHINE_CLASSES.includes(m as MachineClass)))
@@ -346,16 +357,17 @@ export const configSet = defineCommand({
             "invalid_input",
             `boundary.machines: expected a comma-separated list of ${MACHINE_CLASSES.join(", ")}`,
           );
-        boundary.machines = classes as MachineClass[];
+        raw.machines = classes;
       }
-      const problem = boundaryProblem("boundary", boundary);
+      const problem = boundaryProblem("boundary", raw);
       if (problem) throw new CommandError("invalid_input", problem);
+      const boundary = raw as Boundary;
       if (Object.keys(boundary).length > 0) patch.boundary = boundary;
     }
     if (Object.keys(patch).length === 0)
       throw new CommandError(
         "invalid_input",
-        "nothing to set: pass --agent, --model, --models.<agent>, --effort, --efforts.<agent>, --harness.<agent>, or --boundary.<maxMinutes|maxIdentity|machines>",
+        "nothing to set: pass --agent, --model, --models.<agent>, --effort, --efforts.<agent>, --harness.<agent>, or --boundary.<maxMinutes|maxIdentity|machines|confirm>",
       );
     let effective: Scope;
     if (args.scope === "channel") {

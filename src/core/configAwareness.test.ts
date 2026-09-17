@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { EFFORT_LEVELS } from "../effort.js";
+import { intersectBoundaries } from "../config/profile.js";
+import type { Scope } from "../config.js";
 import { configAwarenessBlock } from "./configAwareness.js";
 
 // Feature: docs/reference/specs/routing-and-config.md — config awareness (behavior 8): the
@@ -308,5 +310,45 @@ describe("configAwarenessBlock — boundaries and the budget", () => {
     expect(configAwarenessBlock({ ...base, budget: { minutes: 5, presetMinutes: 5 } })).toBe(
       configAwarenessBlock(base),
     );
+  });
+});
+
+// Feature: docs/reference/specs/routing-and-config.md item 8 with item 2's
+// confirm axis (record 0044): the block reads the intersected run caps alone,
+// so a scope's `confirm` — the door's setting, not a run's — leaves the model's
+// configuration block byte-identical, alone or beside the run axes.
+describe("configAwarenessBlock — the confirm axis is invisible to the model", () => {
+  const blockFor = (channel: Scope, user: Scope) => {
+    const layers = [
+      ...(channel.boundary ? [{ scope: "channel" as const, boundary: channel.boundary }] : []),
+      ...(user.boundary ? [{ scope: "user" as const, boundary: user.boundary }] : []),
+    ];
+    const boundary = intersectBoundaries(layers);
+    return configAwarenessBlock({
+      ...base,
+      channel,
+      user,
+      ...(boundary ? { boundary } : {}),
+      budget: { minutes: 45, presetMinutes: 45 },
+    });
+  };
+
+  it("a channel boundary that sets only `confirm` renders the block with no boundary at all — byte-identical to no boundary", () => {
+    expect(blockFor({ boundary: { confirm: "destructive" } }, {})).toBe(blockFor({}, {}));
+    expect(blockFor({ boundary: { confirm: "write" } }, { boundary: { confirm: "destructive" } })).toBe(
+      configAwarenessBlock(base),
+    );
+    expect(blockFor({ boundary: { confirm: "destructive" } }, {})).not.toContain("confirm");
+  });
+
+  it("`confirm` beside the run axes renders exactly the block the run axes alone render", () => {
+    const withConfirm = blockFor(
+      { boundary: { maxMinutes: 10, confirm: "destructive" } },
+      { boundary: { maxIdentity: "read", confirm: "write" } },
+    );
+    const without = blockFor({ boundary: { maxMinutes: 10 } }, { boundary: { maxIdentity: "read" } });
+    expect(withConfirm).toBe(without);
+    expect(withConfirm).toContain("Boundary in force: maxMinutes 10 (channel), maxIdentity `read` (user)");
+    expect(withConfirm).not.toContain("confirm");
   });
 });

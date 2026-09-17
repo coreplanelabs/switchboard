@@ -22,7 +22,7 @@ import {
   type Scope,
 } from "./config.js";
 import { MAX_INSTRUCTIONS_LENGTH, validateHarnessWords } from "./config/validate.js";
-import { declaredProfile, effectiveProfile } from "./config/profile.js";
+import { declaredProfile, effectiveConfirm, effectiveProfile } from "./config/profile.js";
 import { AGENTS } from "./agents/registry.js";
 import { hasAction } from "./core/authz/authorize.js";
 import { resolveChatActor } from "./core/authz/actor.js";
@@ -1981,6 +1981,101 @@ describe("boundaries (Scope.boundary): a scope caps, never grants", () => {
     );
     expect(shown).toMatch(/\*Your scope:\*.*boundary maxMinutes=60 maxIdentity=read machines=none,repo-resident/);
     expect(store().describe("slack:CX", "slack:UX")).not.toMatch(/boundary/i);
+  });
+
+  // record 0044, the confirm axis: a fourth field of the boundary with its own
+  // intersection, read by the door and printed by `config show`; the run caps
+  // and the model's configuration block never see it.
+  describe("the confirm axis (record 0044)", () => {
+    const CONFIRMED = YAML_FIXTURE.replace("defaults:\n", "defaults:\n  boundary:\n    confirm: write\n")
+      .replace("channels:\n", `channels:\n  "slack:CCONF":\n    boundary:\n      confirm: destructive\n`)
+      .replace(
+        "users:\n",
+        `users:\n  "slack:UCONF":\n    boundary:\n      maxMinutes: 30\n      confirm: destructive\n`,
+      );
+
+    it("boundaryLayers() is the path in resolution order keeping the scopes that set a boundary, and effectiveConfirm over it names the most cautious layer", () => {
+      const s = store(CONFIRMED);
+      expect(s.boundaryLayers("slack:CCONF", "slack:UCONF")).toEqual([
+        { scope: "defaults", boundary: { confirm: "write" } },
+        { scope: "channel", boundary: { confirm: "destructive" } },
+        { scope: "user", boundary: { maxMinutes: 30, confirm: "destructive" } },
+      ]);
+      expect(effectiveConfirm(s.boundaryLayers("slack:CCONF", "slack:UCONF"))).toEqual({
+        value: "write",
+        scope: "defaults",
+      });
+      expect(s.boundaryLayers("slack:CX", "slack:UX")).toEqual([{ scope: "defaults", boundary: { confirm: "write" } }]);
+      expect(store().boundaryLayers("slack:CX", "slack:UX")).toEqual([]);
+      expect(effectiveConfirm(store().boundaryLayers("slack:CX", "slack:UX"))).toEqual({
+        value: "write",
+        scope: "built-in",
+      });
+    });
+
+    it("a scope that sets only `confirm` caps no run: resolve() carries no boundary key, and one that sets it beside a cap resolves the cap alone", () => {
+      const s = store(CONFIRMED);
+      expect(s.resolve({ channelId: "slack:CCONF", userId: "slack:UX", request: {} }).boundary).toBeUndefined();
+      expect(s.resolve({ channelId: "slack:CCONF", userId: "slack:UCONF", request: {} }).boundary).toEqual({
+        maxMinutes: { value: 30, scope: "user" },
+      });
+    });
+
+    it("config show prints a confirm-only scope's line as `boundary confirm=<class>` — never `(caps nothing)` — and the effective confirm with the deciding scope; nothing new when no layer set it", () => {
+      const s = store(CONFIRMED);
+      const shown = s.describe("slack:CCONF", "slack:UCONF");
+      expect(shown).toMatch(/\*Channel scope:\* boundary confirm=destructive$/m);
+      expect(shown).toMatch(/\*Your scope:\* boundary maxMinutes=30 confirm=destructive$/m);
+      expect(shown).not.toContain("(caps nothing)");
+      expect(shown).toContain("*Effective confirm:* `write` (defaults)");
+      expect(shown).toContain("*Effective boundary:* maxMinutes 30 (user)");
+      // The channel alone: the intersection of the run caps is empty, so no
+      // effective boundary line, while the confirm line names the org's floor.
+      const channelOnly = s.describe("slack:CCONF", "slack:UX");
+      expect(channelOnly).not.toContain("*Effective boundary:*");
+      expect(channelOnly).toContain("*Effective confirm:* `write` (defaults)");
+      // Nothing set anywhere: the description is what it was, the built-in
+      // default printing no line of its own.
+      const plain = store().describe("slack:CX", "slack:UX");
+      expect(plain).not.toMatch(/confirm/i);
+      expect(plain).not.toMatch(/boundary/i);
+    });
+
+    it("a stored `never` or `exec` stops the load with its reason, an unknown class with the two classes — under defaults, a channel, a user and a hand-edited overrides document alike", () => {
+      expect(() => store(withChannelBoundary("      confirm: never\n"))).toThrow(
+        /channels\.slack:CBAD\.boundary\.confirm is "never" — not allowed until the door's write misbind rate has been measured over a period \(record 0044, open question 2\)/,
+      );
+      expect(() => store(YAML_FIXTURE.replace("defaults:\n", "defaults:\n  boundary:\n    confirm: exec\n"))).toThrow(
+        /defaults\.boundary\.confirm is "exec" — a test or build never asks \(record 0044\)/,
+      );
+      expect(() =>
+        store(YAML_FIXTURE.replace("users:\n", `users:\n  "slack:UBAD":\n    boundary:\n      confirm: read\n`)),
+      ).toThrow(/users\.slack:UBAD\.boundary\.confirm is "read" — valid classes: write, destructive/);
+      const dir = mkdtempSync(join(tmpdir(), "swb-config-"));
+      const cfg = join(dir, "config.yaml");
+      writeFileSync(cfg, YAML_FIXTURE);
+      const overrides = join(dir, "overrides.json");
+      writeFileSync(overrides, JSON.stringify({ channels: { "slack:CX": { boundary: { confirm: "never" } } } }));
+      expect(() => new ConfigStore(cfg, overrides)).toThrow(
+        /overrides.*channels\.slack:CX\.boundary\.confirm is "never"/,
+      );
+    });
+
+    it("a runtime boundary carrying `confirm` replaces the scope's static one whole and clears with it, like every other setting", async () => {
+      const s = store(CONFIRMED);
+      await s.setChannelOverride("slack:CCONF", { boundary: { maxMinutes: 20 } });
+      expect(s.boundaryLayers("slack:CCONF", "slack:UX")).toEqual([
+        { scope: "defaults", boundary: { confirm: "write" } },
+        { scope: "channel", boundary: { maxMinutes: 20 } },
+      ]);
+      await s.setUserOverride("slack:UX", { boundary: { confirm: "destructive" } });
+      expect(effectiveConfirm(s.boundaryLayers("slack:CCONF", "slack:UX"))).toEqual({
+        value: "write",
+        scope: "defaults",
+      });
+      await s.clearChannelOverride("slack:CCONF");
+      expect(s.scopes("slack:CCONF", "slack:UX").channel.boundary).toEqual({ confirm: "destructive" });
+    });
   });
 });
 

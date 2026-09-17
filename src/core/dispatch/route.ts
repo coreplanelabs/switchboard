@@ -32,11 +32,12 @@
 // derived from the registry (`routableCommands`: the MCP name, the description,
 // the JSON schema — the same derivation the MCP adapter lists), and may call one
 // of them instead of routing. A command call binds the request to a typed
-// input; the stage then decides by `routedRunsAtOnce` — a read, or a write
-// whose action class is `exec` (a repository's own test or build, which
-// changes nothing of Switchboard's own), runs through the registry as the
-// message's user with the receipt line first; every other write is handed back
-// as the line to paste and never run from prose — and on any failure replies
+// input; the stage then decides by `routedRunsAtOnce` over the command's blast
+// radius and the path's confirm class (record 0044) — a read runs, and so does
+// every command whose class is before the confirm class on the ladder (under
+// the built-in `write`: a repository's own test or build, which changes
+// nothing of Switchboard's own); a command at or after it is handed back as
+// the line to paste and never run from prose — and on any failure replies
 // the command's own error line and the override footer and stops — one model
 // call, never a second route.
 import { AGENTS, COMPOUND_PRESET, type Identity, type MachineClass } from "../../agents/registry.js";
@@ -44,6 +45,7 @@ import { HAND_BACK_PREFIX } from "./handBack.js";
 import { chatActorOf } from "../authz/actor.js";
 import { TOOLSETS } from "../../tools/toolsets.js";
 import { routingOn, type ConfigStore, type ResolvedRequest } from "../../config.js";
+import { CONFIRM_ORDER, effectiveConfirm, type ConfirmClass } from "../../config/profile.js";
 import type { RouteAnswerMode } from "../../config/validate.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
 import { parseModelRef, type Provider, type ToolDef } from "../provider.js";
@@ -113,17 +115,26 @@ export { HAND_BACK_PREFIX };
 
 /**
  * Whether a command the router bound runs at once or is handed back as the
- * line to type (record 0039 as amended; record 0044). The command's blast
- * radius decides — `blastRadius(def)`, derived from the definition, never a
- * list in code: a `read` runs; an `exec` runs (`repo:exec` — `repo test`,
- * `repo build`: a run of the repository's own checks that changes nothing of
- * Switchboard's own, so a misread sentence costs one wasted run and nothing
- * to undo); a `write` or a `destructive` command is handed back, because a
- * write bound from prose is a write nobody typed.
+ * line to type (record 0039 as amended; record 0044). Two pure inputs decide:
+ * the command's blast radius — `blastRadius(def)`, derived from the
+ * definition, never a list in code — and the path's confirm class, the first
+ * class on the ladder `read < exec < write < destructive` that asks
+ * (`effectiveConfirm` over the request's boundary layers; the built-in `write`
+ * when no scope set one). A `read` never asks. Every other command runs when
+ * its class is before the confirm class and is handed back at or after it,
+ * because a write bound from prose is a write nobody typed. Under the
+ * built-in: an `exec` runs (`repo:exec` — `repo test`, `repo build`: a run of
+ * the repository's own checks that changes nothing of Switchboard's own, so a
+ * misread sentence costs one wasted run and nothing to undo), a `write` or a
+ * `destructive` command is handed back — the door exactly as it was. Under
+ * `destructive`, the one other settable class, a `write` runs too.
  */
-export function routedRunsAtOnce(def: Pick<CommandDef<unknown>, "effect" | "action" | "annotations">): boolean {
+export function routedRunsAtOnce(
+  def: Pick<CommandDef<unknown>, "effect" | "action" | "annotations">,
+  confirm: ConfirmClass,
+): boolean {
   const radius = blastRadius(def);
-  return radius === "read" || radius === "exec";
+  return radius === "read" || CONFIRM_ORDER[radius] < CONFIRM_ORDER[confirm];
 }
 
 /** The receipt of a bound command as the reply leads with it and the record
@@ -1101,7 +1112,7 @@ export async function routeRequest(deps: RouteDeps, ctx: RouteStageContext): Pro
     ),
   );
   if (decision.preset === undefined && decision.command && ctx.command && deps.commands)
-    return answerCommand(deps.commands, ctx.command, msg, decision.command, modelRef, root);
+    return answerCommand(deps, deps.commands, ctx.command, msg, decision.command, modelRef, root);
   if (decision.preset === undefined) {
     console.log(`[route] ${msg.threadKey} not routed (${decision.reason}) — running ${cfg.defaults.agent}`);
     return decision.compoundRejected
@@ -1129,25 +1140,30 @@ export async function routeRequest(deps: RouteDeps, ctx: RouteStageContext): Pro
 }
 
 /**
- * The command branch (record 0036, unit 2; record 0039 as amended): what
- * happens once the router called a command instead of routing. The command's
- * own definition decides, through `routedRunsAtOnce` — no new field, no list
- * in code. Handed back: the request is answered as the line to paste (`To run
- * this: <chat form>`) and nothing runs, because a write bound from prose is a
- * write nobody typed. Runs at once (a read, or an exec-class write such as
- * `repo test`): the command runs through the same machinery a typed command
- * does (`runChatCommand`), as the message's user — authorized before it is
- * parsed, the per-repository allowlist inside the handler — with `source:
- * route` on the audit line and the decision on the run's record as its `route`
- * event; the reply leads with the receipt (`routed: <chat form>`, the same
- * words the card uses for a preset) so the person sees what was bound and can
- * paste it to run it again. On any failure — a refusal, a bad value, a
- * repository with no resident, a backend that cannot serve, a handler error —
- * the reply is the receipt, the command's own error line and the override
- * footer, and the dispatch ends: one model call, never a second route, nothing
- * handed to an agent. Every field the record gains is redacted and capped.
+ * The command branch (record 0036, unit 2; record 0039 as amended; record
+ * 0044): what happens once the router called a command instead of routing.
+ * The command's own definition and the path's confirm class decide, through
+ * `routedRunsAtOnce` — the blast radius derived from the definition, the
+ * class read off the request's boundary layers (`effectiveConfirm`; the
+ * built-in `write` when no scope set one), no list in code. Handed back: the
+ * request is answered as the line to paste (`To run this: <chat form>`) and
+ * nothing runs, because a write bound from prose is a write nobody typed. Runs
+ * at once (a read, or a command before the confirm class — under the built-in,
+ * an exec-class write such as `repo test`): the command runs through the same
+ * machinery a typed command does (`runChatCommand`), as the message's user —
+ * authorized before it is parsed, the per-repository allowlist inside the
+ * handler — with `source: route` on the audit line and the decision on the
+ * run's record as its `route` event; the reply leads with the receipt
+ * (`routed: <chat form>`, the same words the card uses for a preset) so the
+ * person sees what was bound and can paste it to run it again. On any failure
+ * — a refusal, a bad value, a repository with no resident, a backend that
+ * cannot serve, a handler error — the reply is the receipt, the command's own
+ * error line and the override footer, and the dispatch ends: one model call,
+ * never a second route, nothing handed to an agent. Every field the record
+ * gains is redacted and capped.
  */
 async function answerCommand(
+  routeDeps: RouteDeps,
   commands: ChatCommands,
   branch: CommandBranchContext,
   msg: IncomingMessage,
@@ -1173,8 +1189,14 @@ async function answerCommand(
     input: redactedInput(decided.input),
     receipt,
   };
-  if (!routedRunsAtOnce(def)) {
-    console.log(`[route] ${msg.threadKey} handed back ${def.id} on ${modelRef}: ${receipt}`);
+  // The confirm class on this request's path (record 0044): the earliest class
+  // any of the defaults', the channel's and the user's boundaries named, or the
+  // built-in `write` — read here, at the one place the door decides.
+  const confirm = effectiveConfirm(routeDeps.config.boundaryLayers(msg.channelId, msg.userId));
+  if (!routedRunsAtOnce(def, confirm.value)) {
+    console.log(
+      `[route] ${msg.threadKey} handed back ${def.id} on ${modelRef} (${blastRadius(def)} at or after confirm ${confirm.value}, ${confirm.scope}): ${receipt}`,
+    );
     // The hand-back is a record (record 0044): the same decision a routed
     // read's run carries, with `outcome: hand_back`, invoking nothing and
     // telling no surface of the run — so the reply below is the line it was.

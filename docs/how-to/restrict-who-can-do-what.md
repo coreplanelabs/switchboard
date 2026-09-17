@@ -69,6 +69,8 @@ Or from chat, with `config:write`: `@switchboard config set channel --boundary.m
 
 A boundary is not a grant and not a restriction: `restrict` says who may run a preset, a boundary says how much any run in the scope may have — its wall-clock budget, the credential it acts as (`none < read < write`), the machine class its tools execute on. A budget above the cap is clipped and the card says so; an identity or class above the cap is refused before a card, a thread claim or an executor exists, naming the preset, the cap and whose boundary it is. Boundaries intersect across `defaults`, the channel and the user — the smallest budget, the lowest identity, the classes every layer allows — so nobody can widen one from below: `config set me --boundary.…` is open to everyone because it can only tighten.
 
+A boundary's fourth field, `confirm`, is the front door's rather than a run's: it names the first blast-radius class a command the router bound from a plain sentence is handed back at (`To run this: …`) instead of run — `write`, the built-in, hands back every write and lets a read or a repository's own test run; `destructive` lets a write run at once and holds back only a destructive one. It intersects the same way, toward caution, so an installation's `confirm: write` is a floor no channel or user can loosen. `exec` and `never` are refused by name.
+
 ## Allow channel configuration
 
 ```yaml

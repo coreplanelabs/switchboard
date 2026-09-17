@@ -14866,3 +14866,115 @@ describe("the door's counts through dispatch(): a hand-back and its paste are ru
     expect(page.runs).toEqual([]);
   });
 });
+
+// Feature: docs/reference/specs/routing-and-config.md items 2 and 21 (record
+// 0044, the confirm axis): the door's decision reads `boundary.confirm` off the
+// request's path — the earliest class any layer named, the built-in `write`
+// when none did — and hands a command back when its blast radius is at or
+// after it. Under the default this is exactly the door as it was; a channel
+// that sets `destructive` is the one setting that lets a routed write run.
+describe("the confirm axis through dispatch(): the door hands back at or after the effective confirm class (record 0044)", () => {
+  const HAND_BACK_LINE = "To run this: config set channel --models.coding anthropic/claude-opus-5";
+  const RECEIPT_LINE = "routed: config set channel --models.coding anthropic/claude-opus-5";
+  const call = (tool: string, input: unknown) => vi.fn<RouteModel>(async () => ({ tool, input }));
+  /** The routed fixture with a confirm on the layers named: the defaults' block, the request's channel, the requesting user. */
+  const confirmYaml = (layers: { defaults?: string; channel?: string; user?: string }) =>
+    ROUTING_ON_YAML.replace(
+      "defaults:\n",
+      layers.defaults ? `defaults:\n  boundary:\n    confirm: ${layers.defaults}\n` : "defaults:\n",
+    ) +
+    (layers.channel ? `channels:\n  "slack:CX":\n    boundary:\n      confirm: ${layers.channel}\n` : "") +
+    (layers.user ? `users:\n  "slack:UADMIN":\n    boundary:\n      confirm: ${layers.user}\n` : "");
+  const wired = (yaml: string) => {
+    const registry = new RunRegistry({ genId: () => "r1", genToken: () => "t" });
+    const provider = capturingProvider();
+    const deps = makeDeps(yaml, provider);
+    deps.runRegistry = registry;
+    deps.admission = new ThreadAdmission();
+    return { deps, registry, provider };
+  };
+  const bindsConfigSet = () => call("config_set", { scope: "channel", models: { coding: "anthropic/claude-opus-5" } });
+  const codingModelIn = (deps: TestDeps) =>
+    deps.config.resolve({ channelId: "slack:CX", userId: "slack:UADMIN", request: { agent: "coding" } }).modelRef;
+
+  it("an org `write` is a floor: a routed write is handed back with the line as it always was even when the user set `destructive`, and nothing is written", async () => {
+    const { deps, provider } = wired(confirmYaml({ defaults: "write", user: "destructive" }));
+    deps.routeModel = bindsConfigSet();
+    const { io, replies, statuses } = fakeIO();
+    await dispatch(deps, msg("use opus for coding in this channel", "slack:UADMIN"), io);
+    expect(replies).toEqual([HAND_BACK_LINE]);
+    expect(deps.invoked).toEqual([]);
+    expect(statuses).toEqual([]);
+    expect(provider.requests).toEqual([]);
+    expect(codingModelIn(deps)).toBe("anthropic/coding-model");
+  });
+
+  it("a channel `destructive` is the one setting that lets a routed write run: the bound `config set` runs at once as the requester, the receipt first and the command's own text under it, and the channel's config changes", async () => {
+    const { deps, provider, registry } = wired(confirmYaml({ channel: "destructive" }));
+    deps.routeModel = bindsConfigSet();
+    const { io, replies, statuses } = fakeIO();
+    await dispatch(deps, msg("use opus for coding in this channel", "slack:UADMIN"), io);
+    expect(deps.routeModel).toHaveBeenCalledTimes(1);
+    expect(deps.invoked).toEqual(["config.set"]);
+    expect(replies).toHaveLength(1);
+    const [first, ...rest] = replies[0]!.split("\n");
+    expect(first).toBe(RECEIPT_LINE);
+    // The command's own reply: the channel's effective scope, its static confirm beside the new model.
+    expect(rest.join("\n")).toBe(
+      'Updated channel scope. Now: {"boundary":{"confirm":"destructive"},"models":{"coding":"anthropic/claude-opus-5"}}',
+    );
+    expect(replies[0]).not.toMatch(/^To run this: /);
+    expect(statuses).toEqual([]);
+    expect(provider.requests).toEqual([]);
+    // No card, no agent run: the command is a log-only one, so no run either.
+    expect(registry.snapshotById("r1")).toBeNull();
+    expect(codingModelIn(deps)).toBe("anthropic/claude-opus-5");
+  });
+
+  it("a destructive command is handed back under every settable class — `destructive` on the channel included — with today's line", async () => {
+    for (const channel of ["write", "destructive"] as const) {
+      const { deps } = wired(confirmYaml({ channel }));
+      deps.routeModel = call("mcp_remove", { name: "linear" });
+      const { io, replies } = fakeIO();
+      await dispatch(deps, msg("remove the linear server", "slack:UADMIN"), io);
+      expect(replies, channel).toEqual(["To run this: mcp remove linear"]);
+      expect(deps.invoked, channel).toEqual([]);
+    }
+  });
+
+  it("`repo test` runs at once under every settable class and under the built-in default: an exec is never on the asking side of the ladder", async () => {
+    for (const layers of [
+      {},
+      { defaults: "write" },
+      { channel: "destructive" },
+      { defaults: "write", user: "destructive" },
+    ]) {
+      const { deps } = wired(confirmYaml(layers));
+      const calls: Array<{ op: string; repo: string }> = [];
+      deps.operations = {
+        async run(op: import("./operations.js").OpName, req: { repo: string; ref?: string }) {
+          calls.push({ op, repo: req.repo });
+          return { kind: "result", ok: true, summary: "test passed", output: "1 passing" } as const;
+        },
+      } as unknown as Operations;
+      deps.routeModel = call("repo_test", { slug: "acme/api", ref: "main" });
+      const { io, replies } = fakeIO();
+      await dispatch(deps, msg("run the tests on main in acme/api", "slack:UADMIN"), io);
+      const label = JSON.stringify(layers);
+      expect(deps.invoked, label).toEqual(["repo.test"]);
+      expect(calls, label).toEqual([{ op: "test", repo: "acme/api" }]);
+      expect(replies[0]!.split("\n")[0], label).toBe("routed: repo test acme/api main");
+    }
+  });
+
+  it("a read runs under every settable class: `config show` is never on the ladder", async () => {
+    for (const layers of [{ defaults: "write" }, { channel: "destructive" }]) {
+      const { deps } = wired(confirmYaml(layers));
+      deps.routeModel = call("config_show", {});
+      const { io, replies } = fakeIO();
+      await dispatch(deps, msg("show me the config for this channel", "slack:UADMIN"), io);
+      expect(deps.invoked, JSON.stringify(layers)).toEqual(["config.show"]);
+      expect(replies[0]!.split("\n")[0], JSON.stringify(layers)).toBe("routed: config show");
+    }
+  });
+});

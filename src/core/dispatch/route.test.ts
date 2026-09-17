@@ -10,6 +10,7 @@ import { jsonSchemaFor } from "../commandSurface.js";
 import { TOOLSETS } from "../../tools/toolsets.js";
 import { ROUTE_ATTACH_FIXTURES } from "../../load/routeAttachFixtures.js";
 import { ConfigStore } from "../../config.js";
+import { BUILT_IN_CONFIRM, CONFIRM_CLASSES } from "../../config/profile.js";
 import type { CompletionRequest, CompletionResult, Provider, ToolDef } from "../provider.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import type { IncomingMessage } from "../types.js";
@@ -1726,36 +1727,74 @@ describe("redactedInput — the bound input as the record may carry it (record 0
 // write whose class is `write` is handed back, because a write bound from
 // prose is a write nobody typed.
 describe("routedRunsAtOnce — a read or an exec-class write runs when routed; a state-changing write is handed back", () => {
-  it("read → runs; write on an :exec action → runs; write on a :write action → handed back", () => {
-    expect(routedRunsAtOnce({ effect: "read", action: "runs:read" })).toBe(true);
-    expect(routedRunsAtOnce({ effect: "read", action: "config:read" })).toBe(true);
-    expect(routedRunsAtOnce({ effect: "write", action: "repo:exec" })).toBe(true);
-    expect(routedRunsAtOnce({ effect: "write", action: "config:write" })).toBe(false);
-    expect(routedRunsAtOnce({ effect: "write", action: "repo:write" })).toBe(false);
-    expect(routedRunsAtOnce({ effect: "write", action: "mcp:write" })).toBe(false);
+  it("under the built-in confirm: read → runs; write on an :exec action → runs; write on a :write action → handed back", () => {
+    expect(routedRunsAtOnce({ effect: "read", action: "runs:read" }, BUILT_IN_CONFIRM)).toBe(true);
+    expect(routedRunsAtOnce({ effect: "read", action: "config:read" }, BUILT_IN_CONFIRM)).toBe(true);
+    expect(routedRunsAtOnce({ effect: "write", action: "repo:exec" }, BUILT_IN_CONFIRM)).toBe(true);
+    expect(routedRunsAtOnce({ effect: "write", action: "config:write" }, BUILT_IN_CONFIRM)).toBe(false);
+    expect(routedRunsAtOnce({ effect: "write", action: "repo:write" }, BUILT_IN_CONFIRM)).toBe(false);
+    expect(routedRunsAtOnce({ effect: "write", action: "mcp:write" }, BUILT_IN_CONFIRM)).toBe(false);
   });
 
   it("the rule reads the action's class, not its group: any group's :exec runs and any group's :write is handed back", () => {
-    expect(routedRunsAtOnce({ effect: "write", action: "deploy:exec" })).toBe(true);
-    expect(routedRunsAtOnce({ effect: "write", action: "runs:write" })).toBe(false);
-    expect(routedRunsAtOnce({ effect: "write", action: "friction:write" })).toBe(false);
+    expect(routedRunsAtOnce({ effect: "write", action: "deploy:exec" }, BUILT_IN_CONFIRM)).toBe(true);
+    expect(routedRunsAtOnce({ effect: "write", action: "runs:write" }, BUILT_IN_CONFIRM)).toBe(false);
+    expect(routedRunsAtOnce({ effect: "write", action: "friction:write" }, BUILT_IN_CONFIRM)).toBe(false);
   });
 
-  it("restated on blastRadius, the rule agrees with the two-field reading on every command the router is offered: a read or an exec runs, a write or a destructive write is handed back", () => {
+  // record 0044, the confirm axis: the command is handed back when its blast
+  // radius is at or after the effective confirm class on the ladder
+  // `read < exec < write < destructive`; a read is never on the ladder.
+  it("the ladder against each settable class: a read never asks; an exec never asks; a write asks under `write` and not under `destructive`; a destructive write asks under both", () => {
+    const read = { effect: "read", action: "runs:read" } as const;
+    const exec = { effect: "write", action: "repo:exec" } as const;
+    const write = { effect: "write", action: "config:write", annotations: { destructive: false } } as const;
+    const destructive = { effect: "write", action: "mcp:write", annotations: { destructive: true } } as const;
+    for (const confirm of CONFIRM_CLASSES) {
+      expect(routedRunsAtOnce(read, confirm), `read under ${confirm}`).toBe(true);
+      expect(routedRunsAtOnce(exec, confirm), `exec under ${confirm}`).toBe(true);
+      expect(routedRunsAtOnce(destructive, confirm), `destructive under ${confirm}`).toBe(false);
+    }
+    expect(routedRunsAtOnce(write, "write")).toBe(false);
+    expect(routedRunsAtOnce(write, "destructive")).toBe(true);
+  });
+
+  it("restated on blastRadius, the rule under the built-in confirm agrees with the two-field reading on every command the router is offered: a read or an exec runs, a write or a destructive write is handed back", () => {
     const registry = new CommandRegistry<CoreCommandDeps>({ audit: () => {} });
     registerCoreCommands(registry);
     const offered = routableCommands({ list: () => registry.list() as CommandDef<unknown>[] });
     expect(offered.length).toBeGreaterThan(20);
     for (const { def } of offered) {
       const radius = blastRadius(def);
-      expect(routedRunsAtOnce(def), `${def.id} is ${radius}`).toBe(radius === "read" || radius === "exec");
-      expect(routedRunsAtOnce(def), `${def.id} under the two-field reading`).toBe(
+      expect(routedRunsAtOnce(def, BUILT_IN_CONFIRM), `${def.id} is ${radius}`).toBe(
+        radius === "read" || radius === "exec",
+      );
+      expect(routedRunsAtOnce(def, BUILT_IN_CONFIRM), `${def.id} under the two-field reading`).toBe(
         def.effect === "read" || def.action.endsWith(":exec"),
       );
     }
-    const runsAtOnce = offered.filter((c) => routedRunsAtOnce(c.def));
+    const runsAtOnce = offered.filter((c) => routedRunsAtOnce(c.def, BUILT_IN_CONFIRM));
     expect(runsAtOnce.filter((c) => c.def.effect === "write").map((c) => c.id)).toEqual(["repo.test", "repo.build"]);
-    expect(offered.filter((c) => !routedRunsAtOnce(c.def)).map((c) => blastRadius(c.def))).not.toContain("read");
-    expect(offered.filter((c) => !routedRunsAtOnce(c.def)).map((c) => blastRadius(c.def))).not.toContain("exec");
+    const handedBack = offered.filter((c) => !routedRunsAtOnce(c.def, BUILT_IN_CONFIRM)).map((c) => blastRadius(c.def));
+    expect(handedBack).not.toContain("read");
+    expect(handedBack).not.toContain("exec");
+  });
+
+  it("under `destructive` every offered command runs at once except the destructive ones, which are exactly the commands the definitions label so", () => {
+    const registry = new CommandRegistry<CoreCommandDeps>({ audit: () => {} });
+    registerCoreCommands(registry);
+    const offered = routableCommands({ list: () => registry.list() as CommandDef<unknown>[] });
+    const handedBack = offered.filter((c) => !routedRunsAtOnce(c.def, "destructive"));
+    expect(handedBack.length).toBeGreaterThan(0);
+    expect(handedBack.map((c) => blastRadius(c.def))).toEqual(handedBack.map(() => "destructive"));
+    expect(handedBack.map((c) => c.id).sort()).toEqual(
+      offered
+        .filter((c) => blastRadius(c.def) === "destructive")
+        .map((c) => c.id)
+        .sort(),
+    );
+    // What `destructive` lets through is exactly the set `write` holds back minus the destructive ones.
+    const underWrite = new Set(offered.filter((c) => !routedRunsAtOnce(c.def, "write")).map((c) => c.id));
+    for (const c of handedBack) expect(underWrite.has(c.id), c.id).toBe(true);
   });
 });

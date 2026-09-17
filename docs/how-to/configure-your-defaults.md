@@ -56,8 +56,9 @@ Every message here now defaults to `review` unless a directive or the sender's o
 | `--boundary.maxMinutes <n>` | the wall-clock budget of every run, in minutes (at least 2); a preset asking for more is clipped, and the card says so |
 | `--boundary.maxIdentity <none\|read\|write>` | the credential a run acts as; a preset above it (`ship` needs `write`) is refused by name before anything starts |
 | `--boundary.machines <a,b>` | the machine classes a run may execute on (`none`, `blank`, `repo-cold`, `repo-resident`); a preset outside the list is refused |
+| `--boundary.confirm <write\|destructive>` | not a run's cap but the front door's: the first blast-radius class a command the router bound from a plain sentence is handed back at (`To run this: …`) instead of run — `write` (the built-in: every write is handed back, a read or a repository's test runs) or `destructive` (a write runs at once; only a destructive one is handed back) |
 
-A boundary caps and never grants: it cannot let you run an agent you are not granted. Boundaries are the one setting that does not override — yours intersects with the channel's and the installation's (the smallest budget, the lowest identity, the classes every one allows), so you can only tighten what they allow. `config show` prints the effective boundary once one is in force.
+A boundary caps and never grants: it cannot let you run an agent you are not granted. Boundaries are the one setting that does not override — yours intersects with the channel's and the installation's (the smallest budget, the lowest identity, the classes every one allows, the most cautious confirm class), so you can only tighten what they allow: under an installation `confirm: write`, your own `destructive` changes nothing. `config show` prints the effective boundary once one is in force, and the effective confirm with the scope that set it once any scope did.
 
 ## Add instructions in plain language
 
