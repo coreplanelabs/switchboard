@@ -1,4 +1,5 @@
 import type { LinearWebhookEvent } from "./webhook.js";
+import { object } from "./api.js";
 
 export interface LinearDelivery {
   event: LinearWebhookEvent;
@@ -11,8 +12,11 @@ export interface LinearDelivery {
 }
 
 export interface LinearInbox {
-  accept(event: LinearWebhookEvent): Promise<boolean>;
+  accept(event: LinearWebhookEvent, options?: { acknowledge?: boolean }): Promise<boolean>;
   claim(now: number, leaseMs: number, lease: string): Promise<LinearDelivery | undefined>;
+  claimAck(now: number, leaseMs: number, lease: string): Promise<LinearDelivery | undefined>;
+  acknowledge(key: string, lease: string, at: number): Promise<boolean>;
+  hasPendingAcks(): Promise<boolean>;
   begin(key: string, lease: string): Promise<boolean>;
   bind(key: string, lease: string, runId: string): Promise<boolean>;
   renew(key: string, lease: string, until: number): Promise<boolean>;
@@ -69,29 +73,48 @@ export class SqlLinearInbox implements LinearInbox {
     );
   }
 
-  async accept(event: LinearWebhookEvent): Promise<boolean> {
+  async accept(event: LinearWebhookEvent, options: { acknowledge?: boolean } = {}): Promise<boolean> {
     return (
       this.sql
         .exec(
-          "INSERT INTO linear_deliveries (event_key, payload, received_at) VALUES (?, ?, ?) ON CONFLICT(event_key) DO NOTHING RETURNING event_key",
+          "INSERT INTO linear_deliveries (event_key, payload, received_at, phase) VALUES (?, ?, ?, ?) ON CONFLICT(event_key) DO NOTHING RETURNING event_key",
           event.key,
           JSON.stringify(event.payload),
           event.receivedAt,
+          options.acknowledge ? "pending_ack" : "pending",
         )
         .toArray().length === 1
     );
   }
 
-  async claim(now: number, leaseMs: number, lease: string): Promise<LinearDelivery | undefined> {
+  claim(now: number, leaseMs: number, lease: string): Promise<LinearDelivery | undefined> {
+    return this.take(now, leaseMs, lease, false);
+  }
+  claimAck(now: number, leaseMs: number, lease: string): Promise<LinearDelivery | undefined> {
+    return this.take(now, leaseMs, lease, true);
+  }
+  private async take(now: number, leaseMs: number, lease: string, ack: boolean): Promise<LinearDelivery | undefined> {
     const [row] = this.sql
       .exec<Row>(
         `UPDATE linear_deliveries
-      SET phase = 'processing', lease = ?, available_at = ?, attempts = attempts + 1
-      WHERE sequence = (SELECT sequence FROM linear_deliveries WHERE phase != 'done' AND available_at <= ? ORDER BY sequence LIMIT 1)
+      SET phase = ?, lease = ?, available_at = ?, attempts = attempts + 1
+      WHERE sequence = (SELECT candidate.sequence FROM linear_deliveries candidate
+        WHERE candidate.phase IN (?, ?) AND candidate.available_at <= ?
+        AND (? = 1 OR json_extract(candidate.payload, '$.type') != 'AgentSessionEvent' OR NOT EXISTS (
+          SELECT 1 FROM linear_deliveries prior WHERE prior.sequence < candidate.sequence
+          AND prior.phase != 'done' AND prior.begun = 0
+          AND json_extract(prior.payload, '$.type') = 'AgentSessionEvent'
+          AND json_extract(prior.payload, '$.organizationId') = json_extract(candidate.payload, '$.organizationId')
+          AND json_extract(prior.payload, '$.agentSession.id') = json_extract(candidate.payload, '$.agentSession.id')
+        )) ORDER BY candidate.sequence LIMIT 1)
       RETURNING event_key, payload, received_at, lease, attempts, run_id, begun`,
+        ack ? "processing_ack" : "processing",
         lease,
         now + leaseMs,
+        ack ? "pending_ack" : "pending",
+        ack ? "processing_ack" : "processing",
         now,
+        ack ? 1 : 0,
       )
       .toArray();
     if (!row) return undefined;
@@ -106,6 +129,26 @@ export class SqlLinearInbox implements LinearInbox {
       ...(row.begun ? { begun: true } : {}),
       ...(row.run_id ? { runId: row.run_id } : {}),
     };
+  }
+
+  async acknowledge(key: string, lease: string, at: number): Promise<boolean> {
+    return (
+      this.sql
+        .exec(
+          "UPDATE linear_deliveries SET phase = 'pending', lease = NULL, available_at = ? WHERE event_key = ? AND lease = ? AND phase = 'processing_ack' RETURNING event_key",
+          at,
+          key,
+          lease,
+        )
+        .toArray().length === 1
+    );
+  }
+  async hasPendingAcks(): Promise<boolean> {
+    return (
+      this.sql
+        .exec("SELECT 1 FROM linear_deliveries WHERE phase IN ('pending_ack', 'processing_ack') LIMIT 1")
+        .toArray().length > 0
+    );
   }
 
   async begin(key: string, lease: string): Promise<boolean> {
@@ -149,7 +192,7 @@ export class SqlLinearInbox implements LinearInbox {
     return (
       this.sql
         .exec(
-          "UPDATE linear_deliveries SET phase = 'pending', lease = NULL, available_at = ? WHERE event_key = ? AND lease = ? AND phase = 'processing' RETURNING event_key",
+          "UPDATE linear_deliveries SET phase = CASE phase WHEN 'processing_ack' THEN 'pending_ack' ELSE 'pending' END, lease = NULL, available_at = ? WHERE event_key = ? AND lease = ? AND phase IN ('processing', 'processing_ack') RETURNING event_key",
           at,
           key,
           lease,
@@ -161,7 +204,7 @@ export class SqlLinearInbox implements LinearInbox {
     return (
       this.sql
         .exec(
-          "UPDATE linear_deliveries SET phase = 'done', payload = NULL, lease = NULL, finished_at = ? WHERE event_key = ? AND lease = ? AND phase = 'processing' RETURNING event_key",
+          "UPDATE linear_deliveries SET phase = 'done', payload = NULL, lease = NULL, finished_at = ? WHERE event_key = ? AND lease = ? AND phase IN ('processing', 'processing_ack') RETURNING event_key",
           at,
           key,
           lease,
@@ -186,7 +229,7 @@ export class SqlLinearInbox implements LinearInbox {
 
 type MemoryRow = {
   event?: LinearWebhookEvent;
-  phase: "pending" | "processing" | "done";
+  phase: "pending" | "processing" | "pending_ack" | "processing_ack" | "done";
   availableAt: number;
   lease?: string;
   attempts: number;
@@ -198,15 +241,40 @@ type MemoryRow = {
 export class InMemoryLinearInbox implements LinearInbox {
   private readonly rows = new Map<string, MemoryRow>();
 
-  async accept(event: LinearWebhookEvent): Promise<boolean> {
+  async accept(event: LinearWebhookEvent, options: { acknowledge?: boolean } = {}): Promise<boolean> {
     if (this.rows.has(event.key)) return false;
-    this.rows.set(event.key, { event: structuredClone(event), phase: "pending", availableAt: 0, attempts: 0 });
+    this.rows.set(event.key, {
+      event: structuredClone(event),
+      phase: options.acknowledge ? "pending_ack" : "pending",
+      availableAt: 0,
+      attempts: 0,
+    });
     return true;
   }
-  async claim(now: number, leaseMs: number, lease: string): Promise<LinearDelivery | undefined> {
+  claim(now: number, leaseMs: number, lease: string): Promise<LinearDelivery | undefined> {
+    return this.take(now, leaseMs, lease, false);
+  }
+  claimAck(now: number, leaseMs: number, lease: string): Promise<LinearDelivery | undefined> {
+    return this.take(now, leaseMs, lease, true);
+  }
+  private async take(now: number, leaseMs: number, lease: string, ack: boolean): Promise<LinearDelivery | undefined> {
+    const blocked = new Set<string>();
     for (const row of this.rows.values()) {
-      if (row.phase === "done" || row.availableAt > now || !row.event) continue;
-      row.phase = "processing";
+      if (row.phase === "done" || !row.event) continue;
+      const session =
+        row.event.payload.type === "AgentSessionEvent"
+          ? `${row.event.payload.organizationId}:${String(object(row.event.payload.agentSession).id)}`
+          : undefined;
+      const follows = session !== undefined && blocked.has(session);
+      if (session && !row.begun) blocked.add(session);
+      if (
+        row.availableAt > now ||
+        (ack
+          ? !["pending_ack", "processing_ack"].includes(row.phase)
+          : follows || !["pending", "processing"].includes(row.phase))
+      )
+        continue;
+      row.phase = ack ? "processing_ack" : "processing";
       row.lease = lease;
       row.availableAt = now + leaseMs;
       row.attempts++;
@@ -220,9 +288,22 @@ export class InMemoryLinearInbox implements LinearInbox {
     }
     return undefined;
   }
-  private owned(key: string, lease: string): MemoryRow | undefined {
+  private owned(key: string, lease: string, ack = false): MemoryRow | undefined {
     const row = this.rows.get(key);
-    return row?.phase === "processing" && row.lease === lease ? row : undefined;
+    return (row?.phase === "processing" || (ack && row?.phase === "processing_ack")) && row.lease === lease
+      ? row
+      : undefined;
+  }
+  async acknowledge(key: string, lease: string, at: number): Promise<boolean> {
+    const row = this.owned(key, lease, true);
+    if (row?.phase !== "processing_ack") return false;
+    row.phase = "pending";
+    row.lease = undefined;
+    row.availableAt = at;
+    return true;
+  }
+  async hasPendingAcks(): Promise<boolean> {
+    return [...this.rows.values()].some((row) => row.phase === "pending_ack" || row.phase === "processing_ack");
   }
   async begin(key: string, lease: string): Promise<boolean> {
     const row = this.owned(key, lease);
@@ -243,15 +324,15 @@ export class InMemoryLinearInbox implements LinearInbox {
     return true;
   }
   async retry(key: string, lease: string, at: number): Promise<boolean> {
-    const row = this.owned(key, lease);
+    const row = this.owned(key, lease, true);
     if (!row) return false;
-    row.phase = "pending";
+    row.phase = row.phase === "processing_ack" ? "pending_ack" : "pending";
     row.lease = undefined;
     row.availableAt = at;
     return true;
   }
   async complete(key: string, lease: string, at: number): Promise<boolean> {
-    const row = this.owned(key, lease);
+    const row = this.owned(key, lease, true);
     if (!row) return false;
     row.phase = "done";
     row.event = undefined;

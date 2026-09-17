@@ -1,9 +1,9 @@
 # Connect Linear
 
 The Linear integration is being built in stages. OAuth, durable webhook intake,
-native conversations, dispatcher consumption and lifecycle cancellation are
-wired. Timely edge acknowledgement, issue tools, files and live deployment
-verification remain in progress. Do not install the app for end users until
+native conversations, edge acknowledgements, dispatcher consumption and lifecycle
+cancellation are wired. Issue tools, files and live deployment verification remain
+in progress. Do not install the app for end users until
 the completed channel
 is deployed. See the [delivery plan](../plans/2026-09-17-001-linear-channel.md).
 
@@ -50,7 +50,10 @@ The bridge is disabled without that bearer.
 The bot starts its consumer when `LINEAR_BRIDGE_TOKEN` is configured. It requires
 the durable run-history Worker and run ledger, so a container replacement can
 rebuild the conversation and reconcile admitted work. It stops intake during
-drain; pending deliveries survive in the edge inbox. If a request entered the
+drain; pending deliveries survive in the edge inbox. The edge acknowledges new sessions
+with a native thought before releasing them to the consumer. An alarm retries
+failed acknowledgements under the same activity id, so container startup does
+not delay the first response. If a request entered the
 dispatcher but its durable admission cannot be proven, Switchboard reports the
 interruption instead of repeating a possibly completed command.
 

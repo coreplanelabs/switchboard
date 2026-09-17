@@ -35,6 +35,7 @@ for (const kind of ["memory", "sqlite"] as const) {
       await inbox.accept({ ...event, key: "org:session:prompted:p1", receivedAt: 101 });
       const first = await inbox.claim(200, 1000, "lease-a");
       expect(first).toMatchObject({ event, lease: "lease-a", attempts: 1 });
+      await inbox.begin(event.key, "lease-a");
       expect((await inbox.claim(200, 1000, "lease-b"))?.event.key).toBe("org:session:prompted:p1");
       expect(await inbox.claim(1199, 1000, "lease-c")).toBeUndefined();
       expect(await inbox.claim(1200, 1000, "lease-c")).toMatchObject({ event, lease: "lease-c", attempts: 2 });
@@ -83,10 +84,50 @@ for (const kind of ["memory", "sqlite"] as const) {
       expect((await inbox.claim(300, 100, "b"))?.event.key).toBe("other");
       expect((await inbox.claim(300, 100, "c"))?.event.key).toBe("revoke");
     });
+    it("holds dispatch and later turns until acknowledgement succeeds, retaining failed acknowledgements", async () => {
+      const inbox = make();
+      await inbox.accept(event, { acknowledge: true });
+      await inbox.accept({ ...event, key: "follow" });
+      expect(await inbox.hasPendingAcks()).toBe(true);
+      expect(await inbox.claim(200, 100, "consumer")).toBeUndefined();
+      expect(await inbox.claimAck(200, 100, "edge")).toMatchObject({ event, lease: "edge" });
+      expect(await inbox.acknowledge(event.key, "wrong", 201)).toBe(false);
+      expect(await inbox.retry(event.key, "edge", 250)).toBe(true);
+      expect(await inbox.claimAck(249, 100, "retry")).toBeUndefined();
+      expect(await inbox.claimAck(250, 100, "retry")).toMatchObject({ event });
+      expect(await inbox.acknowledge(event.key, "retry", 251)).toBe(true);
+      expect(await inbox.hasPendingAcks()).toBe(false);
+      expect(await inbox.claim(251, 100, "consumer")).toMatchObject({ event });
+      expect(await inbox.claim(251, 100, "follow")).toBeUndefined();
+      await inbox.begin(event.key, "consumer");
+      expect((await inbox.claim(251, 100, "follow"))?.event.key).toBe("follow");
+    });
+    it("does not let a retrying pre-dispatch request be overtaken in its session", async () => {
+      const inbox = make();
+      await inbox.accept(event);
+      await inbox.accept({ ...event, key: "follow" });
+      await inbox.accept({ ...event, key: "other", payload: { ...event.payload, agentSession: { id: "other" } } });
+      await inbox.claim(200, 100, "first");
+      await inbox.retry(event.key, "first", 400);
+      expect((await inbox.claim(300, 100, "next"))?.event.key).toBe("other");
+      expect(await inbox.claim(300, 100, "later")).toBeUndefined();
+      expect((await inbox.claim(400, 100, "retry"))?.event.key).toBe(event.key);
+    });
   });
 }
 
 describe("durable Linear event recovery", () => {
+  it("restores an unfinished acknowledgement before making its request dispatchable", async () => {
+    const { sql, inbox } = sqlStore();
+    await inbox.accept(event, { acknowledge: true });
+    await inbox.claimAck(200, 100, "old");
+    const restored = new SqlLinearInbox(sql);
+    expect(await restored.claim(300, 100, "consumer")).toBeUndefined();
+    expect(await restored.claimAck(300, 100, "new")).toMatchObject({ event, attempts: 2 });
+    expect(await restored.acknowledge(event.key, "old", 301)).toBe(false);
+    expect(await restored.acknowledge(event.key, "new", 301)).toBe(true);
+    expect(await restored.claim(301, 100, "consumer")).toMatchObject({ event });
+  });
   it("restores a leased event and its run after host replacement without truncating large context", async () => {
     const { sql, inbox } = sqlStore();
     const large = { ...event, payload: { ...event.payload, promptContext: "説明".repeat(80_000) } };

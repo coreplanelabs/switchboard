@@ -167,13 +167,46 @@ export class DirectLinearApi implements LinearApi {
     content: LinearContent,
     options: { ephemeral?: boolean; id?: string } = {},
   ): Promise<void> {
-    const data = await this.query(
-      `mutation SwitchboardActivity($input: AgentActivityCreateInput!) {
+    try {
+      const data = await this.query(
+        `mutation SwitchboardActivity($input: AgentActivityCreateInput!) {
       agentActivityCreate(input: $input) { success }
     }`,
-      { input: { agentSessionId: sessionId, content, ...options } },
-    );
-    if (object(data.agentActivityCreate).success !== true) throw new Error("linear_activity_failed");
+        { input: { agentSessionId: sessionId, content, ...options } },
+      );
+      if (object(data.agentActivityCreate).success !== true) throw new Error("linear_activity_failed");
+    } catch (error) {
+      if (!options.id) throw error;
+      // A create may have committed even when its response was lost. A stable
+      // id lets the caller retry without treating a duplicate as a new activity.
+      // Never accept an existing id belonging to different work or content.
+      try {
+        const data = await this.query(
+          `query SwitchboardActivityReceipt($id: String!) {
+          agentActivity(id: $id) { id agentSession { id } user { id } content {
+            ... on AgentActivityThoughtContent { type body }
+            ... on AgentActivityResponseContent { type body }
+            ... on AgentActivityErrorContent { type body }
+            ... on AgentActivityElicitationContent { type body }
+            ... on AgentActivityActionContent { type action parameter result }
+          } }
+        }`,
+          { id: options.id },
+        );
+        const activity = object(data.agentActivity),
+          saved = object(activity.content);
+        if (
+          activity.id === options.id &&
+          object(activity.agentSession).id === sessionId &&
+          object(activity.user).id === this.deps.appUserId &&
+          Object.entries(content).every(([key, value]) => saved[key] === value)
+        )
+          return;
+      } catch {
+        /* The original operation's sanitized failure is the retry signal. */
+      }
+      throw error;
+    }
   }
 
   async link(sessionId: string, link: { url: string; label: string }): Promise<void> {

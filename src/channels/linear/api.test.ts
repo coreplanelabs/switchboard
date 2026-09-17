@@ -2,6 +2,36 @@ import { describe, expect, it, vi } from "vitest";
 import { DirectLinearApi } from "./api.js";
 
 describe("Linear API boundary", () => {
+  it("reconciles a lost activity mutation only against the same app, session and content", async () => {
+    for (const changed of [
+      {},
+      { user: { id: "other" } },
+      { agentSession: { id: "other" } },
+      { content: { type: "thought", body: "different" } },
+    ]) {
+      const fetch = vi
+        .fn<typeof globalThis.fetch>()
+        .mockRejectedValueOnce(new Error("response lost"))
+        .mockResolvedValueOnce(
+          Response.json({
+            data: {
+              agentActivity: {
+                id: "activity",
+                agentSession: { id: "s" },
+                user: { id: "bot" },
+                content: { type: "thought", body: "Received" },
+                ...changed,
+              },
+            },
+          }),
+        );
+      const api = new DirectLinearApi({ organizationId: "org", appUserId: "bot", token: async () => "secret", fetch });
+      const result = api.activity("s", { type: "thought", body: "Received" }, { id: "activity" });
+      if (Object.keys(changed).length === 0) await expect(result).resolves.toBeUndefined();
+      else await expect(result).rejects.toThrow("linear_api_unavailable");
+      expect(fetch).toHaveBeenCalledTimes(2);
+    }
+  });
   it("checks the current workspace and session owner without exposing credentials", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async () =>
       Response.json({

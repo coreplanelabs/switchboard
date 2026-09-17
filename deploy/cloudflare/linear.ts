@@ -9,6 +9,7 @@ import { DirectLinearApi } from "../../src/channels/linear/api.js";
 import { handleLinearBridge, LINEAR_BRIDGE_PATH } from "../../src/channels/linear/bridge.js";
 import { StoredLinearStore, type LinearOAuthState } from "../../src/channels/linear/store.js";
 import { SqlLinearInbox } from "../../src/channels/linear/inbox.js";
+import { LinearAcknowledgements } from "../../src/channels/linear/acknowledgement.js";
 import { revokeLinearInstallation } from "../../src/channels/linear/lifecycle.js";
 import { boundedBody, handleLinearWebhook, LINEAR_WEBHOOK_PATH } from "../../src/channels/linear/webhook.js";
 import { LINEAR_TIMING } from "../../src/core/budgets.js";
@@ -66,6 +67,7 @@ export class LinearState extends DurableObject<LinearEnv> {
   private readonly store: StoredLinearStore;
   private readonly inbox: SqlLinearInbox;
   private readonly tokens: LinearTokenProvider;
+  private readonly acknowledgements: LinearAcknowledgements;
 
   constructor(ctx: DurableObjectState, env: LinearEnv) {
     super(ctx, env);
@@ -78,6 +80,31 @@ export class LinearState extends DurableObject<LinearEnv> {
       fetch: (input, init) => fetch(input, init),
       clock: systemClock,
     });
+    this.acknowledgements = new LinearAcknowledgements({
+      inbox: this.inbox,
+      api: (organizationId) => this.api(organizationId),
+      clock: systemClock,
+      warn: (message) => console.warn(message),
+    });
+  }
+
+  private async api(organizationId: string): Promise<DirectLinearApi> {
+    if (this.env.LINEAR_ORGANIZATION_ID && organizationId !== this.env.LINEAR_ORGANIZATION_ID)
+      throw new Error("linear_wrong_installation");
+    const installation = await this.store.getInstallation(organizationId);
+    if (!installation) throw new Error("linear_not_installed");
+    return new DirectLinearApi({
+      organizationId,
+      appUserId: installation.appUserId,
+      token: () => this.tokens.accessToken(organizationId),
+      fetch: (input, init) => fetch(input, init),
+    });
+  }
+
+  private async armAlarm(delay: number): Promise<void> {
+    const next = systemClock() + delay;
+    const current = await this.ctx.storage.getAlarm();
+    if (current === null || current > next) await this.ctx.storage.setAlarm(next);
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -100,18 +127,7 @@ export class LinearState extends DurableObject<LinearEnv> {
           token: env.LINEAR_BRIDGE_TOKEN,
           inbox: this.inbox,
           clock: systemClock,
-          api: async (organizationId) => {
-            if (env.LINEAR_ORGANIZATION_ID && organizationId !== env.LINEAR_ORGANIZATION_ID)
-              throw new Error("linear_wrong_installation");
-            const installation = await this.store.getInstallation(organizationId);
-            if (!installation) throw new Error("linear_not_installed");
-            return new DirectLinearApi({
-              organizationId,
-              appUserId: installation.appUserId,
-              token: () => this.tokens.accessToken(organizationId),
-              fetch: (input, init) => fetch(input, init),
-            });
-          },
+          api: (organizationId) => this.api(organizationId),
         });
       if (path === LINEAR_WEBHOOK_PATH)
         return await handleLinearWebhook(request, {
@@ -124,7 +140,19 @@ export class LinearState extends DurableObject<LinearEnv> {
               if (!(await revokeLinearInstallation(this.store, event))) return false;
               await this.inbox.cancelOrganization(event.payload.organizationId, event.receivedAt);
             }
-            return this.inbox.accept(event);
+            const acknowledge = event.payload.type === "AgentSessionEvent" && event.payload.action === "created";
+            const accepted = await this.inbox.accept(event, { acknowledge });
+            if (acknowledge) {
+              // The alarm is durable before HTTP 200; network work runs outside
+              // the response lifetime and never waits for the bot container.
+              await this.armAlarm(LINEAR_TIMING.progressMs);
+              this.ctx.waitUntil(
+                this.acknowledgements.flush().catch(() => {
+                  console.warn("[linear] acknowledgement sweep unavailable; alarm will retry");
+                }),
+              );
+            }
+            return accepted;
           },
         });
       if (path === LINEAR_AUTHORIZE_PATH) {
@@ -156,8 +184,12 @@ export class LinearState extends DurableObject<LinearEnv> {
   }
 
   async alarm(): Promise<void> {
-    await this.pruneStates();
-    await this.inbox.prune(systemClock() - LINEAR_TIMING.deliveryRetentionMs);
-    await this.ctx.storage.setAlarm(systemClock() + LINEAR_TIMING.oauthStateMs);
+    try {
+      await this.acknowledgements.flush();
+      await this.pruneStates();
+      await this.inbox.prune(systemClock() - LINEAR_TIMING.deliveryRetentionMs);
+    } finally {
+      await this.armAlarm((await this.inbox.hasPendingAcks()) ? LINEAR_TIMING.progressMs : LINEAR_TIMING.oauthStateMs);
+    }
   }
 }

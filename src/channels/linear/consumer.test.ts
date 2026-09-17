@@ -200,6 +200,8 @@ describe("Linear event consumer", () => {
     await f.store.accept(follow);
     await f.consumer.poll();
     expect(f.deps.dispatch).toHaveBeenCalledTimes(1);
+    await f.consumer.poll();
+    expect(f.deps.dispatch).toHaveBeenCalledTimes(1);
     admitted();
     await vi.waitFor(() => expect(f.deps.dispatch).toHaveBeenCalledTimes(2));
     finished();

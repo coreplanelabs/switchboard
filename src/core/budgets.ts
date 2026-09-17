@@ -33,6 +33,7 @@ export const LINEAR_TIMING = {
   refreshMarginMs: 5 * MINUTE_MS,
   webhookSkewMs: MINUTE_MS,
   deliveryLeaseMs: 2 * MINUTE_MS,
+  ackLeaseMs: MINUTE_MS,
   deliveryRetentionMs: 14 * DAY_MS,
 } as const;
 
