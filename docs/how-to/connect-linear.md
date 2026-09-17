@@ -1,10 +1,9 @@
 # Connect Linear
 
 The Linear integration is being built in stages. OAuth, durable webhook intake,
-native conversations, edge acknowledgements, dispatcher consumption and lifecycle
-cancellation are wired. Issue tools, files and live deployment verification remain
-in progress. Do not install the app for end users until
-the completed channel
+native conversations, edge acknowledgements, dispatcher consumption, outbound
+files and lifecycle cancellation are wired. Issue tools, inbound files and live
+deployment verification remain in progress. Do not install the app for end users until the completed channel
 is deployed. See the [delivery plan](../plans/2026-09-17-001-linear-channel.md).
 
 ## Register the application
@@ -68,6 +67,14 @@ Native Stop uses the same `runs:write` grant and run-visibility policy as
 `runs stop`. A Linear session does not establish team-wide membership; configure
 the actor's channel grants explicitly. Revocation and access removal are
 infrastructure cancellations and require no new grant from the former requester.
+
+Coding runs can return files through `attach_file`. With an artifact store,
+the executor streams the file to a private Linear upload using a short-lived
+signed ticket; the bot never holds its bytes or gives the executor a Linear
+token. Without an artifact store, the existing bounded byte-upload path is
+available. Images render inline in native progress and other files appear as
+links; the run's final answer still determines completion. Inbound private file
+retrieval remains in progress.
 
 The edge's `LINEAR_STATE` binding is independent of the bot container. Deploy
 the Worker migration before using the OAuth endpoints. Once the full channel

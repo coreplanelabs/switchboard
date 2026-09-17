@@ -20,6 +20,7 @@ function fixture() {
   let now = 100;
   const inbox = new InMemoryLinearInbox();
   const api: LinearApi = {
+    upload: vi.fn(),
     session: vi.fn(async (id) => ({ id, appUserId: "bot", creatorId: "alice" })),
     activity: vi.fn(async () => {}),
     activities: vi.fn(),

@@ -29,6 +29,7 @@ function fixture() {
     complete: vi.fn((key: string, lease: string) => store.complete(key, lease, now)),
   };
   const api: LinearApi = {
+    upload: vi.fn(),
     session: vi.fn(async (id) => ({ id, appUserId: "bot", creatorId: "alice" })),
     activity: vi.fn(async () => {}),
     activities: vi.fn(async () => []),

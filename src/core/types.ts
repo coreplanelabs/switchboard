@@ -215,11 +215,15 @@ export interface OpenedThread {
 }
 
 /** A minted one-shot upload (`ChannelIO.uploadTicket`): where the container
- *  POSTs the bytes, and the call that shares the uploaded file into the
- *  conversation once the POST succeeded. */
+ *  streams the bytes, and the call that shares the uploaded file into the
+ *  conversation once the upload succeeded. */
 export interface UploadTicket {
-  /** Accepts one POST of exactly the ticketed size; single use, short-lived. */
+  /** Accepts exactly the ticketed size; single use, short-lived. */
   url: string;
+  /** Defaults to POST for existing channels. */
+  method?: "POST" | "PUT";
+  /** Storage-signed headers; never an installation credential. */
+  headers?: Record<string, string>;
   /** Share the uploaded file into the conversation with `lead` as its message. */
   complete(lead: string): Promise<void>;
 }

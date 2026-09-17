@@ -94,13 +94,20 @@ export function parsePutReport(output: string): { httpCode: number; sentBytes: n
   return m ? { httpCode: Number(m[1]), sentBytes: Number(m[2]) } : null;
 }
 
-/** The command the container runs to POST the file to the channel's ticket.
- *  `--upload-file` streams the file from disk with its Content-Length; `-X POST`
+/** The command the container runs to upload the file to the channel's ticket.
+ *  `--upload-file` streams the file from disk with its Content-Length; `-X`
  *  keeps the method the one-shot URL expects. `--data-binary @file` would read
  *  the whole file into memory first — a 1 GiB attach died of
  *  "curl: option --data-binary: out of memory" live. */
-export function postCommandFor(path: string, url: string): string {
-  return `curl -fsS --upload-file ${shellQuote(path)} -X POST ${shellQuote(url)}`;
+export function postCommandFor(
+  path: string,
+  url: string,
+  options: Pick<UploadTicket, "method" | "headers"> = {},
+): string {
+  const headers = Object.entries(options.headers ?? {})
+    .map(([key, value]) => ` -H ${shellQuote(`${key}: ${value}`)}`)
+    .join("");
+  return `curl -fsS --upload-file ${shellQuote(path)} -X ${options.method === "PUT" ? "PUT" : "POST"}${headers} ${shellQuote(url)}`;
 }
 
 /** The store path (record 0033). Returns the tool's result text. */
@@ -184,7 +191,7 @@ async function attachThroughStore(
   } catch (err) {
     return `error: the channel refused an upload ticket for ${name}: ${describe(err)}; ${kept}`;
   }
-  const postOut = await exec(postCommandFor(path, ticket.url), timeoutMs);
+  const postOut = await exec(postCommandFor(path, ticket.url, ticket), timeoutMs);
   if (parseExitPrefix(postOut).failed) {
     return `error: the upload of ${name} to the channel failed: ${postOut.trim()}; ${kept}`;
   }

@@ -87,6 +87,11 @@ the human assignee.
     alarm with a stable activity id; a lost mutation response is reconciled
     against that activity's app, session and content. Dispatch cannot overtake
     its acknowledgement or an earlier, not-yet-admitted turn in the session.
+15. Outbound files use private Linear uploads scoped to a freshly checked
+    session. Only a single-file signed URL and its required headers cross to
+    the executor; the installation token stays at the edge. Upload completion
+    posts a native activity with an inline image or file link. A failed upload
+    never posts a success link or closes the active run.
 
 ## Proof
 
@@ -104,4 +109,5 @@ the human assignee.
 | 12: dispatch consumption, control and recovery | `[unit]` `src/channels/linear/consumer.test.ts::*`, `src/channels/linear/control.test.ts::*`, `src/channels/linear/recovery.test.ts::*` |
 | 13: revocation and lifecycle cancellation | `[unit]` `src/channels/linear/lifecycle.test.ts::*` |
 | 14: durable acknowledgement and activity reconciliation | `[unit]` `src/channels/linear/acknowledgement.test.ts::*`, `src/channels/linear/inbox.test.ts::*`, `src/channels/linear/api.test.ts::*` |
-| Issue actions, files and deployed installation | `[gap]` Delivery plan acceptance ledger; not implemented by OAuth alone |
+| 15: private file tickets, session checks and native sharing | `[unit]` `src/channels/linear/api.test.ts::*`, `src/channels/linear/bridge.test.ts::*`, `src/channels/linear/io.test.ts::*` |
+| Issue actions, inbound files and deployed installation | `[gap]` Delivery plan acceptance ledger; not implemented by OAuth alone |

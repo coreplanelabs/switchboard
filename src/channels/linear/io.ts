@@ -5,10 +5,12 @@ import type {
   RunReceipt,
   StatusHandle,
   StatusUpdate,
+  UploadTicket,
 } from "../../core/types.js";
 import type { Clock } from "../../core/trace/types.js";
 import { LINEAR_TIMING } from "../../core/budgets.js";
 import type { LinearApi, LinearContent } from "./api.js";
+import { contentTypeFor, INLINE_IMAGE_TYPES } from "../../artifacts/contentType.js";
 
 /** One native session is one Switchboard conversation. No Slack formatting,
  *  comment scraping or installation credential crosses this boundary. */
@@ -30,6 +32,7 @@ export class LinearChannelIO implements ChannelIO {
       initial?: boolean;
       clock: Clock;
       warn(message: string): void;
+      uploadFetch?: typeof fetch;
     },
   ) {}
 
@@ -54,6 +57,42 @@ export class LinearChannelIO implements ChannelIO {
 
   async attach(file: { name: string; text: string; lead: string }): Promise<void> {
     await this.reply(`${file.lead}\n\n**${file.name}**\n\n${file.text}`);
+  }
+
+  async uploadTicket(file: { name: string; size: number }): Promise<UploadTicket> {
+    const upload = await this.deps.api.upload(this.deps.sessionId, file);
+    // The signed storage capability is limited to one file. Linear's OAuth
+    // credential never reaches the host or the executor uploading the bytes.
+    return {
+      url: upload.uploadUrl,
+      method: "PUT",
+      headers: upload.headers,
+      complete: (lead) =>
+        this.enqueue(() => {
+          const label = file.name.replace(/[\\[\]]/g, "\\$&");
+          const url = upload.assetUrl.replace(/[<>\r\n]/g, (char) => encodeURIComponent(char));
+          const link = `${INLINE_IMAGE_TYPES.has(contentTypeFor(file.name)) ? "!" : ""}[${label}](<${url}>)`;
+          return this.send({ type: "thought", body: `${lead}\n\n${link}` });
+        }),
+    };
+  }
+
+  async attachFile(file: { name: string; bytes: Uint8Array; lead: string }): Promise<void> {
+    const ticket = await this.uploadTicket({ name: file.name, size: file.bytes.byteLength });
+    let response: Response;
+    try {
+      response = await (this.deps.uploadFetch ?? fetch)(ticket.url, {
+        method: "PUT",
+        redirect: "error",
+        headers: ticket.headers,
+        body: new Uint8Array(file.bytes),
+        signal: AbortSignal.timeout(LINEAR_TIMING.apiTimeoutMs),
+      });
+    } catch {
+      throw new Error("linear_upload_failed");
+    }
+    if (!response.ok) throw new Error("linear_upload_failed");
+    await ticket.complete(file.lead);
   }
 
   async offer(offer: ConfirmationOffer): Promise<void> {

@@ -2,6 +2,68 @@ import { describe, expect, it, vi } from "vitest";
 import { DirectLinearApi } from "./api.js";
 
 describe("Linear API boundary", () => {
+  it("mints private file uploads and preserves signed storage headers without forwarding the OAuth token", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      Response.json({
+        data: {
+          fileUpload: {
+            success: true,
+            uploadFile: {
+              uploadUrl: "https://storage.example/file?signature=one-file",
+              assetUrl: "https://uploads.linear.app/file",
+              headers: [
+                { key: "Content-Disposition", value: "attachment; filename=plot.png" },
+                { key: "x-goog-content-length-range", value: "12,12" },
+              ],
+            },
+          },
+        },
+      }),
+    );
+    const api = new DirectLinearApi({ organizationId: "org", appUserId: "bot", token: async () => "secret", fetch });
+    const upload = await api.upload("s", { name: "plot.png", size: 12 });
+    expect(JSON.parse(String(fetch.mock.calls[0]?.[1]?.body)).variables).toEqual({
+      contentType: "image/png",
+      filename: "plot.png",
+      size: 12,
+      metaData: { agentSessionId: "s" },
+    });
+    expect(String(fetch.mock.calls[0]?.[1]?.body)).toContain("makePublic: false");
+    expect(upload.headers).toMatchObject({
+      "Content-Type": "image/png",
+      "Content-Disposition": "attachment; filename=plot.png",
+      "x-goog-content-length-range": "12,12",
+    });
+    expect(JSON.stringify(upload)).not.toContain("secret");
+  });
+  it("rejects invalid upload requests before minting and refuses unsafe storage responses", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>();
+    const api = new DirectLinearApi({ organizationId: "org", appUserId: "bot", token: async () => "secret", fetch });
+    for (const file of [
+      { name: "../file", size: 1 },
+      { name: "file", size: 0 },
+      { name: "file", size: 2 ** 30 + 1 },
+    ])
+      await expect(api.upload("s", file)).rejects.toThrow("linear_invalid_file");
+    expect(fetch).not.toHaveBeenCalled();
+    for (const uploadUrl of ["http://storage.example/file", "https://user:pass@storage.example/file"]) {
+      fetch.mockResolvedValueOnce(
+        Response.json({
+          data: {
+            fileUpload: {
+              success: true,
+              uploadFile: {
+                uploadUrl,
+                assetUrl: "https://uploads.linear.app/file",
+                headers: [],
+              },
+            },
+          },
+        }),
+      );
+      await expect(api.upload("s", { name: "file", size: 1 })).rejects.toThrow("linear_invalid_response");
+    }
+  });
   it("reconciles a lost activity mutation only against the same app, session and content", async () => {
     for (const changed of [
       {},

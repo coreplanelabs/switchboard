@@ -32,6 +32,7 @@ describe("Linear lifecycle", () => {
   });
   const fixture = () => {
     const api: LinearApi = {
+      upload: vi.fn(),
       session: vi.fn(async (id) => ({ id, appUserId: "bot" })),
       activities: vi.fn(),
       activity: vi.fn(),

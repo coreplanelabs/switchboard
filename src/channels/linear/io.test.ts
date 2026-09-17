@@ -5,6 +5,7 @@ import type { LinearApi } from "./api.js";
 function fixture() {
   let now = 100;
   const api: LinearApi = {
+    upload: vi.fn(),
     session: vi.fn(),
     activities: vi.fn(async () => []),
     activity: vi.fn(async () => {}),
@@ -21,6 +22,54 @@ function fixture() {
 }
 
 describe("Linear channel output", () => {
+  it("shares an uploaded image as native progress without closing the session", async () => {
+    const { api, io } = fixture();
+    vi.mocked(api.upload).mockResolvedValue({
+      uploadUrl: "https://storage.example/file",
+      assetUrl: "https://uploads.linear.app/file",
+      headers: { "Content-Disposition": "attachment" },
+    });
+    const ticket = await io.uploadTicket({ name: "plot[1].png", size: 3 });
+    expect(ticket).toMatchObject({ method: "PUT", headers: { "Content-Disposition": "attachment" } });
+    expect(api.activity).not.toHaveBeenCalled();
+    await ticket.complete("The plot");
+    expect(api.activity).toHaveBeenCalledWith(
+      "s",
+      { type: "thought", body: "The plot\n\n![plot\\[1\\].png](<https://uploads.linear.app/file>)" },
+      undefined,
+    );
+  });
+  it("uploads inline bytes with signed headers and never shares a failed upload", async () => {
+    const { api } = fixture();
+    vi.mocked(api.upload).mockResolvedValue({
+      uploadUrl: "https://storage.example/file",
+      assetUrl: "https://uploads.linear.app/file",
+      headers: { "Content-Type": "text/plain" },
+    });
+    const uploadFetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(new Response(null, { status: 403 }))
+      .mockResolvedValueOnce(new Response(null, { status: 200 }));
+    const io = new LinearChannelIO({ api, sessionId: "s", clock: () => 1, warn: vi.fn(), uploadFetch });
+    const file = { name: "report.txt", bytes: new Uint8Array([1, 2, 3]), lead: "Report" };
+    await expect(io.attachFile(file)).rejects.toThrow("linear_upload_failed");
+    expect(api.activity).not.toHaveBeenCalled();
+    await io.attachFile(file);
+    expect(uploadFetch).toHaveBeenCalledWith(
+      "https://storage.example/file",
+      expect.objectContaining({
+        method: "PUT",
+        redirect: "error",
+        headers: { "Content-Type": "text/plain" },
+        body: file.bytes,
+      }),
+    );
+    expect(api.activity).toHaveBeenCalledWith(
+      "s",
+      { type: "thought", body: "Report\n\n[report.txt](<https://uploads.linear.app/file>)" },
+      undefined,
+    );
+  });
   it("coalesces progress, adds the run link, and sends the answer as a native response", async () => {
     const { io, api, tick } = fixture();
     const status = await io.status({ title: "Working", link: { url: "https://bot.example/runs/r", label: "Run" } });

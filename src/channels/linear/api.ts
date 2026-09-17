@@ -1,4 +1,11 @@
 import { LINEAR_TIMING } from "../../core/budgets.js";
+import { contentTypeFor } from "../../artifacts/contentType.js";
+
+export interface LinearUpload {
+  uploadUrl: string;
+  assetUrl: string;
+  headers: Record<string, string>;
+}
 
 export interface LinearSession {
   id: string;
@@ -34,6 +41,7 @@ export interface LinearApi {
   activities(sessionId: string): Promise<LinearActivity[]>;
   activity(sessionId: string, content: LinearContent, options?: { ephemeral?: boolean; id?: string }): Promise<void>;
   link(sessionId: string, link: { url: string; label: string }): Promise<void>;
+  upload(sessionId: string, file: { name: string; size: number }): Promise<LinearUpload>;
 }
 
 export const object = (value: unknown): Record<string, unknown> =>
@@ -217,5 +225,52 @@ export class DirectLinearApi implements LinearApi {
       { id: sessionId, input: { addedExternalUrls: [link] } },
     );
     if (object(data.agentSessionUpdate).success !== true) throw new Error("linear_session_update_failed");
+  }
+
+  async upload(sessionId: string, file: { name: string; size: number }): Promise<LinearUpload> {
+    if (
+      !file.name ||
+      file.name.length > 255 ||
+      /[/\\]/.test(file.name) ||
+      [...file.name].some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127) ||
+      !Number.isSafeInteger(file.size) ||
+      file.size <= 0 ||
+      file.size > 2 ** 30
+    )
+      throw new Error("linear_invalid_file");
+    const contentType = contentTypeFor(file.name);
+    const data = await this.query(
+      `mutation SwitchboardUpload($contentType: String!, $filename: String!, $size: Int!, $metaData: JSON) {
+      fileUpload(contentType: $contentType, filename: $filename, size: $size, makePublic: false, metaData: $metaData) {
+        success uploadFile { uploadUrl assetUrl headers { key value } }
+      }
+    }`,
+      { contentType, filename: file.name, size: file.size, metaData: { agentSessionId: sessionId } },
+    );
+    const payload = object(data.fileUpload),
+      upload = object(payload.uploadFile);
+    if (payload.success !== true) throw new Error("linear_upload_failed");
+    const secureUrl = (value: unknown): string => {
+      const url = new URL(required(value));
+      if (url.protocol !== "https:" || url.username || url.password) throw new Error("linear_invalid_response");
+      return url.href;
+    };
+    const uploadUrl = secureUrl(upload.uploadUrl),
+      assetUrl = secureUrl(upload.assetUrl);
+    if (!Array.isArray(upload.headers)) throw new Error("linear_invalid_response");
+    const headers: Record<string, string> = Object.create(null);
+    const names = new Set<string>();
+    for (const entry of upload.headers) {
+      const row = object(entry),
+        key = required(row.key),
+        value = required(row.value);
+      if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(key) || /[\r\n]/.test(value) || names.has(key.toLowerCase()))
+        throw new Error("linear_invalid_response");
+      names.add(key.toLowerCase());
+      headers[key] = value;
+    }
+    if (!names.has("content-type")) headers["Content-Type"] = contentType;
+    if (!names.has("cache-control")) headers["Cache-Control"] = "public, max-age=31536000";
+    return { uploadUrl, assetUrl, headers };
   }
 }

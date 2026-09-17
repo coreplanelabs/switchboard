@@ -7,6 +7,7 @@ import {
   type LinearApi,
   type LinearContent,
   type LinearSession,
+  type LinearUpload,
 } from "./api.js";
 import type { LinearDelivery, LinearInbox } from "./inbox.js";
 import { boundedBody } from "./webhook.js";
@@ -59,6 +60,9 @@ export class RemoteLinearApi implements LinearApi {
   }
   link(sessionId: string, link: { url: string; label: string }): Promise<void> {
     return call(this.transport, { op: "link", organizationId: this.organizationId, sessionId, link });
+  }
+  upload(sessionId: string, file: { name: string; size: number }): Promise<LinearUpload> {
+    return call(this.transport, { op: "upload", organizationId: this.organizationId, sessionId, file });
   }
 }
 
@@ -146,9 +150,19 @@ export async function handleLinearBridge(
   }
   const op = body.op;
   if (
-    !["claim", "begin", "bind", "renew", "retry", "complete", "session", "activities", "activity", "link"].includes(
-      String(op),
-    )
+    ![
+      "claim",
+      "begin",
+      "bind",
+      "renew",
+      "retry",
+      "complete",
+      "session",
+      "activities",
+      "activity",
+      "link",
+      "upload",
+    ].includes(String(op))
   )
     return answer(400, { error: "unknown_operation" });
   try {
@@ -178,6 +192,10 @@ export async function handleLinearBridge(
           ...(typeof options.ephemeral === "boolean" ? { ephemeral: options.ephemeral } : {}),
           ...(typeof options.id === "string" ? { id: options.id } : {}),
         });
+      } else if (op === "upload") {
+        const file = object(body.file);
+        if (typeof file.size !== "number") return answer(400, { error: "invalid_file" });
+        result = await api.upload(id, { name: required(file.name), size: file.size });
       } else if (op === "link") {
         const link = object(body.link),
           url = new URL(required(link.url));

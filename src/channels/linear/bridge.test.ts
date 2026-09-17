@@ -6,6 +6,7 @@ import type { LinearApi } from "./api.js";
 function fixture() {
   const inbox = new InMemoryLinearInbox();
   const api: LinearApi = {
+    upload: vi.fn(),
     session: vi.fn(async (id) => ({ id, appUserId: "bot" })),
     activities: vi.fn(async () => []),
     activity: vi.fn(async () => {}),
@@ -17,6 +18,22 @@ function fixture() {
 }
 
 describe("Linear edge bridge", () => {
+  it("mints upload tickets only after checking session ownership and current access", async () => {
+    const { api, transport } = fixture();
+    const remote = new RemoteLinearApi(transport, "org");
+    vi.mocked(api.upload).mockResolvedValue({
+      uploadUrl: "https://storage.example/file",
+      assetUrl: "https://uploads.linear.app/file",
+      headers: {},
+    });
+    expect(await remote.upload("s", { name: "file.txt", size: 3 })).toHaveProperty("uploadUrl");
+    expect(api.upload).toHaveBeenCalledWith("s", { name: "file.txt", size: 3 });
+    vi.mocked(api.session).mockRejectedValueOnce(new Error("access revoked"));
+    await expect(remote.upload("s", { name: "file.txt", size: 3 })).rejects.toThrow("linear_bridge_unavailable");
+    vi.mocked(api.session).mockResolvedValueOnce({ id: "s", appUserId: "bot", dismissedAt: new Date(0).toISOString() });
+    await expect(remote.upload("s", { name: "file.txt", size: 3 })).rejects.toThrow("linear_bridge_unavailable");
+    expect(api.upload).toHaveBeenCalledTimes(1);
+  });
   it("rejects unauthenticated requests before parsing or accessing the inbox", async () => {
     const { deps } = fixture();
     expect(
