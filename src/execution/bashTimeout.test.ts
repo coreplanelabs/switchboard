@@ -9,6 +9,7 @@ import {
   bashTimeoutNote,
   clampBashTimeout,
 } from "./bashTimeout.js";
+import { ATTACH_REQUEST_MIN_MS } from "../core/budgets.js";
 
 // Feature: docs/reference/specs/execution.md item 11 — the per-call bash timeout policy.
 // One clamp, shared by the tool layer, every executor, and both deploy
@@ -74,16 +75,28 @@ describe("attachBoundWithinRun", () => {
       kind: "bounded",
       timeoutMs: 3 * 60_000 - RUN_DEADLINE_RESERVE_MS,
     });
-    expect(attachBoundWithinRun(RUN_DEADLINE_RESERVE_MS + 1_000)).toEqual({ kind: "bounded", timeoutMs: 1_000 });
+    expect(attachBoundWithinRun(RUN_DEADLINE_RESERVE_MS + ATTACH_REQUEST_MIN_MS)).toEqual({
+      kind: "bounded",
+      timeoutMs: ATTACH_REQUEST_MIN_MS,
+    });
   });
 
-  it("exhausted inside the write-up reserve — at its edge, within it, past the lease — and under the one-second floor past it (60.5 s left is not a bound anyone meant), the same floor `bashBudgetWithinRun` keeps; the note names the run's clock, so no request is opened for a run that cannot wait", () => {
-    for (const left of [RUN_DEADLINE_RESERVE_MS + 500, RUN_DEADLINE_RESERVE_MS, 30_000, 0, -5_000]) {
+  it("exhausted inside the write-up reserve — at its edge, within it, past the lease — and under an attach's floor past it (61 s left is not a bound an attach can finish under, and a request cut mid-clone would be struck as a rollout); the note names the run's clock and the floor, so no request is opened for a run that cannot wait", () => {
+    for (const left of [
+      RUN_DEADLINE_RESERVE_MS + ATTACH_REQUEST_MIN_MS - 1,
+      RUN_DEADLINE_RESERVE_MS + 1_000,
+      RUN_DEADLINE_RESERVE_MS + 500,
+      RUN_DEADLINE_RESERVE_MS,
+      30_000,
+      0,
+      -5_000,
+    ]) {
       const bound = attachBoundWithinRun(left);
       expect(bound.kind, `${left}`).toBe("exhausted");
       if (bound.kind === "exhausted") {
         expect(bound.note).toContain(`${Math.max(0, Math.round(left / 1000))}s of wall clock left`);
         expect(bound.note).toContain(`inside the ${RUN_DEADLINE_RESERVE_MS / 1000}s write-up reserve`);
+        expect(bound.note).toContain(`under the ${ATTACH_REQUEST_MIN_MS / 1000}s an attach needs`);
         expect(bound.note).toContain("no attach was opened");
       }
     }

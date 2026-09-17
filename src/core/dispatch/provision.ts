@@ -799,14 +799,15 @@ async function attachRound(
 export async function reattachWorkspace(
   deps: Pick<ProvisionDeps, "config" | "dataDir">,
   ctx: AttachContext & { reattach: WorkspaceBinding },
-): Promise<WorkspaceReattach | { kind: "lease_spent"; why: string }> {
+): Promise<WorkspaceReattach | { kind: "lease_spent"; leftMs: number }> {
   try {
     return { kind: "attached", round: await attachRound(deps, ctx) };
   } catch (err) {
-    // The run's lease is inside its write-up reserve (execution.md item 9): the
-    // factory asked for nothing, and the caller ends the run on its budget —
-    // never a refusal that restarts it from its request.
-    if (err instanceof WorkspaceReattachLeaseSpentError) return { kind: "lease_spent", why: err.why };
+    // The run's lease is inside its write-up reserve, or ran into it under the
+    // re-attach's waits (execution.md item 9): the factory asked for nothing
+    // more, and the caller ends the run on its budget — never a refusal that
+    // restarts it from its request. `leftMs` is the run's clock at the decision.
+    if (err instanceof WorkspaceReattachLeaseSpentError) return { kind: "lease_spent", leftMs: err.leftMs };
     // The run's workspace is where its row says or nowhere (item 54): the
     // factory tried that backend alone and refused by name.
     if (err instanceof WorkspaceReattachRefusedError) return { kind: "reattach_refused", why: err.why };

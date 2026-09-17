@@ -84,9 +84,11 @@ export type RelaunchDecision =
   | { kind: "refused"; interruption: HarnessInterruptedError }
   /** The run's own stop ended the re-attach: nothing is written or rotated, and the run ends stopped. */
   | { kind: "stopped" }
-  /** The run is inside its write-up reserve (execution.md item 9): its workspace
-   *  was never asked for, nothing is written or rotated, and the run ends on
-   *  its budget — never `workspace_lost`, never a new run from the request. */
+  /** The run is inside its write-up reserve, or ran into it under the
+   *  re-attach's waits (execution.md item 9): its workspace was not asked for,
+   *  nothing is written or rotated, and the run ends on its budget — never
+   *  `workspace_lost`, never a new run from the request. `why` is the budget
+   *  note's line: what happened, and why there was no write-up. */
   | { kind: "lease_spent"; why: string };
 
 /**
@@ -149,7 +151,9 @@ export async function prepareRelaunch(
     if (reattached.kind === "lease_spent")
       return {
         kind: "lease_spent",
-        why: `the container was replaced under the run with its lease inside the write-up reserve (${reattached.why}); its workspace was not re-attached and pi was not relaunched — the run ends on its budget`,
+        why:
+          `the container was replaced with ${Math.max(0, Math.round(reattached.leftMs / 1000))}s of the run's lease left, ` +
+          "inside the write-up reserve; no re-attach was opened and no write-up ran",
       };
     if (reattached.kind === "reattach_refused")
       return refuse(

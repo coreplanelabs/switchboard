@@ -42,6 +42,15 @@ export const CONFIRMATION_TTL_MS = 10 * MINUTE_MS;
  *  inside it runs to the attach's own timeout. The run's own stop ends any of
  *  it at once. Read by the executor factory. */
 export const FIRST_ATTACH_WAIT_MS = MINUTE_MS;
+/** The least an attach REQUEST is opened with (docs/reference/specs/execution.md
+ *  item 9): a re-attach that recreates the worktree clones from the resident's
+ *  local mirror and may install deps, so a bound under this could not finish
+ *  and a request cut mid-clone is struck as a rollout — the strike this floor
+ *  exists to stop counting. A run with less than this left past its write-up
+ *  reserve opens no attach at all (`attachBoundWithinRun`: `exhausted`). Half
+ *  a minute: the one-second floor a COMMAND keeps (`BASH_TIMEOUT_MIN_MS`) is
+ *  the model's to choose; an attach is opened on the run's behalf. */
+export const ATTACH_REQUEST_MIN_MS = 30_000;
 /** How long a harness's one more command waits for a container that is down
  *  under a live run to answer (docs/reference/specs/harness-pi.md item 16):
  *  the platform rebuilt a replaced resident container in about a minute, and

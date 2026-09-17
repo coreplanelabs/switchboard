@@ -1049,11 +1049,6 @@ export class ResidentExecutor implements Executor {
     return { ok: true, binding: this.lastBinding };
   }
 
-  /** The legible error for a refused attach, by the refusal the service
-   *  named: needs-ref typed for the ask-once flow, not onboarded, anything
-   *  else with its own words. The steps the resident ran before refusing ride
-   *  the error (docs/reference/specs/tracing.md item 19): the dispatcher grafts
-   *  them under its attach span. */
   /** The bound on one attach request this executor opens (`attachOnce`), by
    *  whether it carries the run's clock (execution.md item 9): the attach's own
    *  default clipped to the run's remaining wall clock (`attachBoundWithinRun`),
@@ -1070,6 +1065,11 @@ export class ResidentExecutor implements Executor {
     throw new ResidentLeaseSpentError(route, bound.note, left);
   }
 
+  /** The legible error for a refused attach, by the refusal the service
+   *  named: needs-ref typed for the ask-once flow, not onboarded, anything
+   *  else with its own words. The steps the resident ran before refusing ride
+   *  the error (docs/reference/specs/tracing.md item 19): the dispatcher grafts
+   *  them under its attach span. */
   private attachRefusal(answer: { status: number; data: Record<string, unknown> }): Error {
     const { status, data } = answer;
     const err = refusalWords(answer);

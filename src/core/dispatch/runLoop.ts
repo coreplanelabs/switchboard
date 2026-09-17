@@ -644,6 +644,13 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   let harnessSession: HarnessSession | undefined;
   /** The budget's answer when a relaunch found the run inside its write-up reserve (`lease_spent`): the run ends on its budget with no process to write up. */
   let leaseSpentDuringRelaunch: string | undefined;
+  /** The relaunch's re-attach ended the run — a stop, or the lease spent — so
+   *  no process runs and the executor is the replaced container's, whose
+   *  worktree was never re-attached: the tail's workspace observation and the
+   *  push-before-abort salvage would each be a `/exec` the resident answers
+   *  `needs: attach` and the recovery refuses inside the reserve, spent for a
+   *  tree nobody asked for. Both are skipped, as a hard stop skips them. */
+  let relaunchEndedRun = false;
   // Give the workspace back now rather than at the inactivity sweep: a
   // resident's pool user is a scarce slot (docs/reference/specs/resident-repos.md item
   // 16a). The release mode is paired to the round's agent by the attach
@@ -1048,7 +1055,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             // restarted from the request. The registration left for the
             // relaunch goes with it.
             harnessDeps.registry.forget(run.id);
-            leaseSpentDuringRelaunch = undefined;
+            relaunchEndedRun = true;
             // The stop's own note kind, with its mode — never a second
             // `sandbox_restarted`, which every reader counts as a replaced
             // container's verdict: the harness's note already said that.
@@ -1068,11 +1075,13 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             // own note and answer, the status `completed` — never `workspace_lost`
             // (the worktree was never asked for) and never a new run from the
             // request with a fresh lease. The registration left for the relaunch
-            // goes with it.
+            // goes with it. The note (which `onEvent` reads as the budget's end)
+            // says what happened and why there was no write-up; the answer is the
+            // budget's "without finishing" form, no label around empty text.
             harnessDeps.registry.forget(run.id);
-            budgetEnded = true;
+            relaunchEndedRun = true;
             onEvent({ type: "run_note", kind: "time_budget_exhausted", summary: decision.why });
-            leaseSpentDuringRelaunch = timeBudgetAnswer("", agent.maxMinutes, "the container was replaced inside it");
+            leaseSpentDuringRelaunch = timeBudgetAnswer("", agent.maxMinutes);
             break;
           }
           if (decision.round !== undefined) {
@@ -1251,7 +1260,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       ...(planBaseLost ? { planBaseLost: true } : {}),
       ...(ownPr !== undefined ? { ownPr } : {}),
     };
-    if (isCodingPrRun && run.control.requested !== "hard") await observeWorkspaceNow();
+    if (isCodingPrRun && run.control.requested !== "hard" && !relaunchEndedRun) await observeWorkspaceNow();
     // Push-before-abort (agent-ship.md item 8): a ship coding child (a
     // coordinator's spawn) whose loop ended at the time budget commits and
     // pushes what the observation found still in the tree to the unit's own
@@ -1261,7 +1270,13 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // skipped, so a re-issue starts from the partial work instead of zero.
     // The note is the record's; a push moves the observation, so it is read
     // again.
-    if (isCodingPrRun && coordinator !== undefined && budgetEnded && run.control.requested !== "hard") {
+    if (
+      isCodingPrRun &&
+      coordinator !== undefined &&
+      budgetEnded &&
+      run.control.requested !== "hard" &&
+      !relaunchEndedRun
+    ) {
       const target = salvageTargetOf({
         pushedBranch: pushes.branch(),
         checkedOut: observedCheckedOut,
@@ -1304,7 +1319,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // and asks nothing — the post-step's note then says the description was
     // not resubmitted.
     let descriptionTurnRan = false;
-    if (isCodingPrRun && run.control.requested !== "hard" && prDescription === undefined) {
+    if (isCodingPrRun && run.control.requested !== "hard" && !relaunchEndedRun && prDescription === undefined) {
       const turnTarget = await descriptionTurnTarget({
         observed: {
           head: observedHead,

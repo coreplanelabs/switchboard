@@ -15,6 +15,7 @@ import {
   residentSlugsLister,
   workspaceBindingFor,
   workspaceBindingOf,
+  WorkspaceReattachLeaseSpentError,
   WorkspaceReattachRefusedError,
   type ExecutorFactoryOptions,
   type WorkspaceBinding,
@@ -1158,18 +1159,25 @@ describe("makeExecutor resident selection", () => {
   });
 
   it("an edge 5xx on the selection's /attach is the same blip: `attach()` waits it through and the next serving view binds, instead of a plain error that falls cold a minute after the probe waited", async () => {
-    stubEnvs();
-    const { calls } = stubFetch(
-      { body: { state: "warm", reason: "" } },
-      { status: 502, raw: "<html><head><title>502 Bad Gateway</title></head><body>cloudflare</body></html>" },
-      { body: { state: "warm", reason: "", inFlight: 0 } },
-      { body: { workspace: "/workspace/threads/x/master", ref: "master", sha: "abc", user: "worker2" } },
-    );
-    const { executor, note, binding } = await makeExecutor(residentOpts(), repoCtx());
-    expect(executor).toBeInstanceOf(ResidentExecutor);
-    expect(binding).toMatchObject({ ref: "master", sha: "abc", wokeAfterMs: 0 });
-    expect(note).toBe("resident · jshttp/vary · master@abc");
-    expect(calls).toEqual(["/status", "/attach", "/status", "/attach"]);
+    // Fake timers: the wait's clock is the system clock, and the at-once
+    // re-attach is 0 ms only on a clock that does not move by itself.
+    vi.useFakeTimers();
+    try {
+      stubEnvs();
+      const { calls } = stubFetch(
+        { body: { state: "warm", reason: "" } },
+        { status: 502, raw: "<html><head><title>502 Bad Gateway</title></head><body>cloudflare</body></html>" },
+        { body: { state: "warm", reason: "", inFlight: 0 } },
+        { body: { workspace: "/workspace/threads/x/master", ref: "master", sha: "abc", user: "worker2" } },
+      );
+      const { executor, note, binding } = await makeExecutor(residentOpts(), repoCtx());
+      expect(executor).toBeInstanceOf(ResidentExecutor);
+      expect(binding).toMatchObject({ ref: "master", sha: "abc", wokeAfterMs: 0 });
+      expect(note).toBe("resident · jshttp/vary · master@abc");
+      expect(calls).toEqual(["/status", "/attach", "/status", "/attach"]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("the executor a dispatch builds carries the run's clock (`ExecutorContext.remainingMs` → `ResidentExecutorOptions.remainingMs`): a container op it runs later with 90s of run left meets a rollout and its re-attach is struck at 30s, never held for the five-minute default", async () => {
@@ -1497,6 +1505,50 @@ describe("makeExecutor resident selection", () => {
           "resident unreachable (probe HTTP 500: internal error) after waiting 60s",
         );
         expect(calls).toHaveLength(14);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("a resumed run's waits are clipped to its lease, and a lease spent under them is the lease's end, never a refusal: with two minutes left a blip waited a minute is `WorkspaceReattachLeaseSpentError` at the reserve's edge, not `workspace_lost`; with 100 s left a blip that clears at 15 s leaves too little for the attach to open, and the executor's own lease-spent refusal is read as the same end", async () => {
+      vi.useFakeTimers();
+      try {
+        stubEnvs();
+        const transient = { status: 500, body: { error: "internal error", status: 500, transient: true } };
+        // (a) 2 min left: the probe's budget is clipped to 60 s (the lease less the reserve); the blip never clears.
+        const a = stubFetch(...Array.from({ length: 14 }, () => transient));
+        const startA = Date.now();
+        let settledA: unknown;
+        const pA = makeExecutor(residentOpts(), {
+          ...repoCtx(),
+          reattach: recorded,
+          remainingMs: () => 120_000 - (Date.now() - startA),
+        }).catch((e: unknown) => (settledA = e));
+        await vi.advanceTimersByTimeAsync(60_000);
+        await pA;
+        expect(settledA).toBeInstanceOf(WorkspaceReattachLeaseSpentError);
+        expect((settledA as WorkspaceReattachLeaseSpentError).leftMs).toBe(60_000);
+        expect((settledA as WorkspaceReattachLeaseSpentError).why).toBe(
+          "the run has 60s of its lease left, inside the 60s write-up reserve or under what an attach needs; no re-attach was opened",
+        );
+        expect(a.calls).toHaveLength(14);
+        expect(a.calls.every((c) => c === "/status")).toBe(true);
+        // (b) 100 s left: the blip clears at t = 15 s with 85 s left — 25 s past the
+        // reserve, under what an attach needs — so the attach is not opened, and the
+        // executor's `ResidentLeaseSpentError` is the lease's end here too.
+        const b = stubFetch(transient, transient, transient, transient, { body: { state: "warm", reason: "" } });
+        const startB = Date.now();
+        let settledB: unknown;
+        const pB = makeExecutor(residentOpts(), {
+          ...repoCtx(),
+          reattach: recorded,
+          remainingMs: () => 100_000 - (Date.now() - startB),
+        }).catch((e: unknown) => (settledB = e));
+        await vi.advanceTimersByTimeAsync(15_000);
+        await pB;
+        expect(settledB).toBeInstanceOf(WorkspaceReattachLeaseSpentError);
+        expect((settledB as WorkspaceReattachLeaseSpentError).leftMs).toBe(85_000);
+        expect(b.calls).toEqual(["/status", "/status", "/status", "/status", "/status"]);
       } finally {
         vi.useRealTimers();
       }
