@@ -1,6 +1,6 @@
 ---
 title: Viewing as a person borrows their ceiling and keeps your name on the line
-status: proposed
+status: accepted
 date: 2026-09-17
 pattern: Narrowing by intersection (the existing on-behalf-of relation), a read-only door, identity never delegated — an admin sees what a person sees and writes nothing as them
 ---
@@ -110,3 +110,16 @@ One PR: actor field, resolver branch, door predicate and audit field, cookie rou
 - [authorization.md](../reference/specs/authorization.md) items 1, 4, 6, 7, 14: the actor model, the differential, membership, the on-behalf-of relation.
 - [Record 0044](0044-a-routed-write-is-confirmed-in-proportion-to-its-blast-radius.md), where a future "act as" write would be confirmed.
 - PostgreSQL `SET ROLE` / `NOINHERIT`: the borrowed shape.
+
+## Accepted 2026-09-17
+
+*Re-evaluation.* The bet was that an admin could see the dashboard as another person by borrowing that person's ceiling through the existing on-behalf-of intersection, read-only, with the admin's own name kept on every audit line, so nothing could widen and the policy table needed no new word. One PR built it and the first release carried it; the live receipt on the PR shows the picker narrowing an admin's page to a member's public-channel rows, the banner on every page, a stop refused in the one sentence, and Exit restoring the admin's own view.
+
+What changed since the proposal, checked against the reasoning above:
+
+- **The person's actor is their dashboard session's, not their Slack identity's** (amendment under "The shape"): built from the Slack grants the view would have shown no runs at all, since that baseline lacks `runs:read`, and it would have shown a config grant the person's browser never holds. The narrowing argument is unchanged, since the intersection is still no wider than the admin's `all`, and the differential test now proves the equality against the person's dashboard actor.
+- **The `/api` door's early refusal** answered the grant sentence instead of this record's sentence on the first live write, because the adapter spares an unauthorized body before the registry door speaks. Fixed in a follow-up the same day; the graceful-degradation condition ("a refused write is a sentence, never a broken page") held throughout, only the words were wrong.
+- **The membership half is still unobserved**, now for want of data rather than of a person: no run in a private channel exists in the retained history. The first such run makes it a one-click check, and the receipt lands on the authorization ledger when it does.
+- **The picker's people**, the first open question: it offers the requesters of the rows on the page and a typed id; while viewing, that is the person's page. A directory-wide people list was not needed on the first day and stays open.
+
+The record's validation rows carry their proofs; the human-gated row's receipt is on the PR.
