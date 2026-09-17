@@ -83,15 +83,18 @@ interface BoundFields {
   userName?: string;
 }
 
-/** The actor id whose grants govern a chat message: the credential that
- *  authenticated it when it was bound to a person (`authenticatedAs`), else
- *  the sender. Every `canRunAgent` / `canUseRepo` / `canManageRepos` /
- *  `canEditChannelConfig` question in the dispatch path asks about THIS id,
- *  never `msg.userId`: naming the person on a run must not lend the run the
- *  person's grants (authorization.md item 15). A relayed message (`postedBy`)
- *  is out of scope here — its gates are item 14's. */
-export function grantsSubject(msg: { userId: string; authenticatedAs?: string }): string {
-  return msg.authenticatedAs ?? msg.userId;
+/** The actor every gate in the dispatch path decides on: `resolveChatActor`
+ *  over the message, with config's grants lookup. Every `canRunAgent` /
+ *  `canUseRepo` / `canManageRepos` / `canEditChannelConfig` question asks
+ *  about THIS actor, never `msg.userId`: a relayed message (`postedBy`,
+ *  authorization.md item 14) decides on the app ∩ the person, a bound
+ *  credential (`authenticatedAs`, item 15) on the credential alone — naming
+ *  a person on a run never lends the run the person's grants. */
+export function chatActorOf(
+  config: { grantsFor: GrantsLookup },
+  msg: { userId: string; channelId: string; threadKey: string; postedBy?: string } & BoundFields,
+): Actor {
+  return resolveChatActor(msg, (id) => config.grantsFor(id));
 }
 
 const CHAT_SURFACES: Readonly<Record<string, ActorSurface>> = {

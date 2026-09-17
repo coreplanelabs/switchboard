@@ -72,4 +72,13 @@ describe("durable inbox — staged references (record 0033)", () => {
     expect("authenticatedAs" in durableInboxMessage(base, base.text, 1)).toBe(false);
     expect("authenticatedAs" in (messageFromInbox(durableInboxMessage(base, base.text, 1), 0)?.msg ?? {})).toBe(false);
   });
+
+  // authorization.md item 14: the relaying app rides the row too, so a restart decides on app ∩ person.
+  it("a relayed message's `postedBy` rides the row and reads back; absent otherwise", () => {
+    const relayed = { ...base, postedBy: "slack:bot:B0CLAUDE" };
+    const row = durableInboxMessage(relayed, relayed.text, 1);
+    expect(row.postedBy).toBe("slack:bot:B0CLAUDE");
+    expect(messageFromInbox(row, 0)?.msg.postedBy).toBe("slack:bot:B0CLAUDE");
+    expect("postedBy" in (messageFromInbox(durableInboxMessage(base, base.text, 1), 0)?.msg ?? {})).toBe(false);
+  });
 });

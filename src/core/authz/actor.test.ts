@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CLI_ACTOR, actorIdFor, grantsSubject, resolveActor, resolveChatActor } from "./actor.js";
+import { CLI_ACTOR, actorIdFor, chatActorOf, resolveActor, resolveChatActor } from "./actor.js";
 import { effectiveGrants, principalOf } from "./authorize.js";
 import {
   ALL_GRANTS,
@@ -277,10 +277,15 @@ describe("resolveChatActor — a chat message's namespaced user id chooses the s
     );
   });
 
-  it("grantsSubject: the credential when bound, else the sender — the id every dispatch gate asks about", () => {
-    expect(grantsSubject({ userId: "slack:UADMIN", authenticatedAs: "http:alice" })).toBe("http:alice");
-    expect(grantsSubject({ userId: "slack:UADMIN" })).toBe("slack:UADMIN");
-    expect(grantsSubject({ userId: "http:ci" })).toBe("http:ci");
+  it("chatActorOf: the actor every dispatch gate decides on — resolveChatActor over config's grants lookup, so a relay is app ∩ person and a bound credential is the credential", () => {
+    const config = { grantsFor: lookup };
+    expect(chatActorOf(config, msg("slack:UADMIN"))).toEqual(resolveChatActor(msg("slack:UADMIN"), lookup));
+    const relayed = chatActorOf(config, { ...msg("slack:UADMIN"), postedBy: "slack:bot:B0CLAUDE" });
+    expect(relayed.kind).toBe("agent");
+    expect(effectiveGrants(relayed).actions).toEqual(new Set(CHAT_OPEN_ACTIONS));
+    const bound = chatActorOf(config, { ...msg("slack:UADMIN", "http:ops"), authenticatedAs: "http:alice" });
+    expect(bound.id).toBe("http:alice");
+    expect(effectiveGrants(bound).actions).toEqual(set("dispatch", "runs:read"));
   });
 
   it("an unknown namespace stays a user with the id as given and whatever grants config names for it — never a crash, never widened", () => {

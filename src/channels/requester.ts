@@ -6,10 +6,10 @@ import type { IncomingMessage } from "../core/types.js";
 // credential to an email, the adapter resolves that email to the Slack person
 // the dashboard link already resolves (`resolvePersonByEmail`) and the message
 // names the person as `userId` and the credential as `authenticatedAs`. The
-// resolution is identity, never authority: every gate keeps asking about the
-// credential (`grantsSubject`), so a bound token holds exactly what config
-// grants it — no more because a person is named, no less because a person is
-// narrower. Fail-open to the credential alone: no email, no lookup, no match,
+// resolution is identity, never authority: every gate decides on the actor
+// `resolveChatActor` builds from the credential, so a bound token holds
+// exactly what config grants it — no more because a person is named, no less
+// because a person is narrower. Fail-open to the credential alone: no email, no lookup, no match,
 // a bot, a deleted user, a failure or a timeout leave the message exactly as
 // it was before the binding existed.
 

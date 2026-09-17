@@ -101,7 +101,7 @@ export type TellOutcome = SteerOutcome["kind"] | "parent_ended";
 export async function tellParent(
   deps: {
     runs: Pick<RunsService, "getRun">;
-    config: Pick<ConfigStore, "canRunAgent">;
+    config: Pick<ConfigStore, "canRunAgent" | "grantsFor">;
     runLedger: Pick<LedgerWriteThrough, "pushInbox">;
     clock?: Clock;
     admission: ThreadAdmission<DispatchFollowUp>;
@@ -120,6 +120,7 @@ export async function tellParent(
       userId: msg.userId,
       ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
       ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
+      ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
       channelId: msg.channelId,
       ...(msg.channelName !== undefined ? { channelName: msg.channelName } : {}),
       ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),

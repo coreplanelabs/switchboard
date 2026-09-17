@@ -9,7 +9,7 @@
 // workspace attach.
 import type { ConfigStore } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
-import { grantsSubject } from "../authz/actor.js";
+import { chatActorOf } from "../authz/actor.js";
 import type { BoundaryScope, ProfileRefusal, ProfileResolution, RunProfile } from "../../config/profile.js";
 import type { RequestDirectives } from "../../directives.js";
 import type { Capabilities } from "../capabilities.js";
@@ -76,7 +76,7 @@ export async function authorizeAgent(
   const { msg, io, refuse, agentName } = ctx;
   // Authorization gate: checked against the *resolved* agent and invoking
   // user, so no config layer (directives, user or channel scope) bypasses it.
-  if (!deps.config.canRunAgent(grantsSubject(msg), agentName)) {
+  if (!deps.config.canRunAgent(chatActorOf(deps.config, msg), agentName)) {
     await refuse("agent_allowlist", () =>
       io.reply(
         `🚫 You're not on the allowlist for the \`${agentName}\` agent. Ask ${deps.config.adminsHint()} for access.`,
@@ -249,7 +249,7 @@ export async function authorizeRepo(
     console.log(`[dispatch] ${msg.threadKey} not started: repo not onboarded (${slug})`);
     // `repo onboard` is admin-gated (canManageRepos, fail-closed): only tell
     // someone to run it if they can; everyone else is pointed at who can.
-    const onboardHint = deps.config.canManageRepos(grantsSubject(msg))
+    const onboardHint = deps.config.canManageRepos(chatActorOf(deps.config, msg))
       ? `Onboard it (\`repo onboard ${slug}\`)`
       : `Ask ${deps.config.adminsHint()} to onboard it (\`repo onboard ${slug}\`)`;
     await refuse("repo_not_onboarded", async () => {
@@ -296,7 +296,7 @@ export async function authorizeRepo(
   // Per-repo access gate: open unless `restrict.repos` names the repo;
   // a restricted repo refuses a user without a `repos` grant BY NAME — a
   // refused user must see why, never get a silent per-thread fallback.
-  if (needsRepo && repoCtx.repo && !deps.config.canUseRepo(grantsSubject(msg), repoCtx.repo)) {
+  if (needsRepo && repoCtx.repo && !deps.config.canUseRepo(chatActorOf(deps.config, msg), repoCtx.repo)) {
     const repo = repoCtx.repo;
     await refuse("repo_access", async () => {
       await card.done(

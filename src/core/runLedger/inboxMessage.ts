@@ -36,6 +36,7 @@ export function durableInboxMessage(
     // The credential behind a bound person rides the row (authorization.md item
     // 15): a restart must dispatch under the credential's grants, not the person's.
     ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
+    ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
     ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
     ...(msg.channelName !== undefined ? { channelName: msg.channelName } : {}),
     ...(msg.messageId !== undefined ? { messageId: msg.messageId } : {}),
@@ -106,6 +107,7 @@ export function messageFromInbox(
     return undefined;
   const userName = str("userName");
   const authenticatedAs = str("authenticatedAs");
+  const postedBy = str("postedBy");
   const sourceUrl = str("sourceUrl");
   const channelName = str("channelName");
   const messageId = str("messageId");
@@ -122,6 +124,7 @@ export function messageFromInbox(
     text: note ? `${text}\n\n${note}` : text,
     ...(userName !== undefined ? { userName } : {}),
     ...(authenticatedAs !== undefined ? { authenticatedAs } : {}),
+    ...(postedBy !== undefined ? { postedBy } : {}),
     ...(sourceUrl !== undefined ? { sourceUrl } : {}),
     ...(channelName !== undefined ? { channelName } : {}),
     ...(messageId !== undefined ? { messageId } : {}),

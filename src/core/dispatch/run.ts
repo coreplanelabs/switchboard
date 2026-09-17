@@ -29,7 +29,7 @@ import type { RunSeed } from "../runRecord.js";
 import type { RunStore } from "../runStore.js";
 import type { RunsService } from "../runsService.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
-import type { ChannelVisibility } from "../authz/types.js";
+import type { Actor, ChannelVisibility } from "../authz/types.js";
 import type { Clock, Span } from "../trace/types.js";
 import type { IncomingMessage, StatusHandle } from "../types.js";
 import type { AdmissionDeps, ResumeContext } from "./admission.js";
@@ -384,13 +384,15 @@ export const webCapability = () => (sharedWeb ??= makeWebCapability(processSecre
 
 /** The `github_*` tools' capability for one run (docs/reference/specs/github-tools.md):
  *  the process-wide REST client on the App credential (or the injected test
- *  double) plus the REQUESTING USER's per-repo write gate — `canUseRepo`, the
- *  same allowlist that admits a user to a repo's resident — so an issue
- *  write from a plain mention is authorized like a coding run on that repo. */
+ *  double) plus the REQUESTING ACTOR's per-repo write gate — `canUseRepo` on
+ *  the actor `resolveChatActor` yields (a relay's app ∩ person, a bound
+ *  credential's own grants), the same allowlist that admits a user to a
+ *  repo's resident — so an issue write from a plain mention is authorized
+ *  like a coding run on that repo. */
 let sharedGithubApi: GithubApi | undefined;
-export function githubCapabilityFor(deps: RunDeps, userId: string): GithubCapability {
+export function githubCapabilityFor(deps: RunDeps, actor: Actor): GithubCapability {
   const api = deps.githubApi ?? (sharedGithubApi ??= new RestGithubApi());
-  return { api, canWrite: (repo) => deps.config.canUseRepo(userId, repo) };
+  return { api, canWrite: (repo) => deps.config.canUseRepo(actor, repo) };
 }
 
 /** The notice the drain (src/index.ts) sets on SIGTERM from a deploy rollout.

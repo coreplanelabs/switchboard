@@ -18,6 +18,7 @@ import {
 import { NullRunHistoryWriter } from "../runHistoryWriter.js";
 import { NullRunStore } from "../runStore.js";
 import type { IncomingMessage } from "../types.js";
+import { chatActorOf } from "../authz/actor.js";
 import type { ResumeContext } from "./admission.js";
 import { resolveRun } from "./resolve.js";
 import {
@@ -214,13 +215,23 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
 });
 
 describe("githubCapabilityFor — the github_* tools' capability for one run", () => {
-  it("pairs the process's API with the requesting user's per-repo write gate", () => {
+  it("pairs the process's API with the requesting actor's per-repo write gate — a relay for an admin writes only where the app may too (item 14)", () => {
     const { deps } = setup();
-    const cap = githubCapabilityFor(deps, "slack:UDEV");
+    const actor = (userId: string, postedBy?: string) =>
+      chatActorOf(deps.config, {
+        userId,
+        channelId: "slack:CX",
+        threadKey: "slack:CX:1.0",
+        ...(postedBy ? { postedBy } : {}),
+      });
+    const cap = githubCapabilityFor(deps, actor("slack:UDEV"));
     expect(cap.api).toBe(deps.githubApi);
     expect(cap.canWrite("acme/api")).toBe(true);
     expect(cap.canWrite("acme/secret")).toBe(false);
-    expect(githubCapabilityFor(deps, "slack:UADMIN").canWrite("acme/secret")).toBe(true);
+    expect(githubCapabilityFor(deps, actor("slack:UADMIN")).canWrite("acme/secret")).toBe(true);
+    // An app relaying for the admin holds only the Slack baseline: the restricted repo is refused.
+    expect(githubCapabilityFor(deps, actor("slack:UADMIN", "slack:bot:B0CLAUDE")).canWrite("acme/secret")).toBe(false);
+    expect(githubCapabilityFor(deps, actor("slack:UADMIN", "slack:bot:B0CLAUDE")).canWrite("acme/api")).toBe(true);
   });
 });
 
