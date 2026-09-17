@@ -204,11 +204,11 @@
       "when": "After a `web/` change."
     },
     "screenshots:gen": {
-      "does": "Renders the dashboard's screenshots from the fixture preview, both themes, and records their inputs' hashes in `docs/public/screenshots/manifest.json`.",
+      "does": "Renders the dashboard screenshots whose inputs changed, both themes, recording each surface's input hashes in `docs/public/screenshots/manifest/` (`--force`: all).",
       "when": "After a `web/` or fixture change, once `screenshots:check` names it; needs `npx playwright-core install chromium`, so it is not part of `fix`."
     },
     "screenshots:check": {
-      "does": "The dashboard's source and fixtures still hash to what the screenshots were rendered from — no browser.",
+      "does": "Each surface's inputs still hash to what its screenshots were rendered from — no browser.",
       "when": "Part of `check:consistency`."
     },
     "load": {

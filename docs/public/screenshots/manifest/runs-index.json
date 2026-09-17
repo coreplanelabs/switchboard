@@ -1,0 +1,41 @@
+{
+  "viewport": {
+    "width": 1440,
+    "height": 900,
+    "deviceScaleFactor": 2
+  },
+  "now": 1788877800000,
+  "inputs": {
+    "scripts/screenshots.mts": "8d507868382af4fdd9ebbad5a93fbd47db331dd9d303aad0c6f1fc651f153b2f",
+    "scripts/web-preview.ts": "018d7ca1dd9520f4ae98cadd2a1e3570dc8b970db423119ec4e8b3cbf6d2dd3e",
+    "src/channels/webShell.ts": "5eab7aae4b16bad384c4863ddb8b3d644470cba2421e56d7649bd2fd95b26d92",
+    "src/docs/screenshotManifest.ts": "12ae2476806a42b394da7d8698464df43afd94270b13ebd521c9f022e998c06c",
+    "web/src/App.vue": "e95e58c24d31cd6de4b5d701b4c44ce9752c5278b7d6afd9c9e7028104ae2122",
+    "web/src/assets/main.css": "70d26c1f8c4eb5e28789ab1cc112db76a9c22969554b1cab06372832a39ec3d2",
+    "web/src/components/AppNav.vue": "6d40882ef54bbf19f3efed3075010d9bf99e60aaa312fbb1930e7d11923d753c",
+    "web/src/components/AppShell.vue": "18854492cac372920a662dd775b612368df86cb9bd0ac4e2b64c8a905cee9270",
+    "web/src/components/BrandMark.vue": "affc84525ad56464eb207dd178fc01643380818e677609f3e8b480bfe3ac5898",
+    "web/src/components/DocsLink.vue": "1f7f5d4b34758ae9c7febafde0ab94a0812fb15ce5fe4bc5af6fed1ff58b756e",
+    "web/src/components/SettingsLink.vue": "467f56fd73f816d58bffbfd5dd7039a183b118cba05d0c7249c097798b3a8018",
+    "web/src/components/SlackMark.vue": "ad9152ad369de2e078a73e2d49a765e34b6ba52eaf401ce06afb3906a70ae0f5",
+    "web/src/components/StatusDot.vue": "e31004d149370c7455a11e6aa63553327b2b219b3d224bc45cfd99c0843c58e7",
+    "web/src/components/ThemeToggle.vue": "025a9a0c7ccc2983772c1888f7426ec161feb3ffaea87c914c65d15bdfd740d3",
+    "web/src/components/runs/RunRow.vue": "a9b4d3bdde686bf84f1bd5636bb2acc5f9ff9c3219415cf4f254bf95862b0583",
+    "web/src/components/runs/RunsTabs.vue": "b20205f3e70f5c043f26d937cf90905e9411584b4289dd546621d58ece044d41",
+    "web/src/components/runs/SourceMark.vue": "437844bb6d5ea4a3461afe465d2540deec87414a68efcaedd0eec5a7fbf3c757",
+    "web/src/lib/browser.ts": "5a3b7dd6a2395fb2823ba262cf59d3c4f15e849cdaf2063b5d00a59c06c23b85",
+    "web/src/lib/capabilities.ts": "0e485825f48786605345f6a7298763790b7468595d9a828b615a245ab4a6aecd",
+    "web/src/lib/durationTone.ts": "9e5bbcf765a307f3c05cf1fd807697bf1957e03acbf95f38883b5db4d4b8f3c1",
+    "web/src/lib/eventSource.ts": "56cee4056941a052433f8b19d2ce2f8eaf43ba483080d0e836afa19794900f9c",
+    "web/src/lib/format.ts": "2fb0710b6c23b24138259aa1f27529740f65b139adbcfebb4825d5518382af4f",
+    "web/src/lib/indexRow.ts": "efeb8b4cdc741cf75d6596e5880339667f0f752c551f94032179a4dd08d29075",
+    "web/src/lib/markPulse.ts": "df29e8abee12f0827e8e1295f8fcb1184530240139790da7bffb5929fad8f647",
+    "web/src/lib/navSections.ts": "dd842db8c9b0fc1d7cc592f145803622047d03131d876e7681710c28f4f348db",
+    "web/src/lib/seed.ts": "b2fff894798801b6e062ec734b510b717ba879495fdc6fa1ebb69418c74cb75e",
+    "web/src/lib/wallClock.ts": "d81d36cd618a94540500e6ae2b6e867156dcad0e910b644cb6d7bf619a501c6f",
+    "web/src/main.ts": "43c95547c4e4d9ecb88e9a0e7428417cda86764bdbfdab76c1c926b722f1deee",
+    "web/src/pages/RunsIndexPage.vue": "404553cbf4941883d9d0f6925cfa9ae8a1370ef05a44b8367ae2429cd998b176",
+    "web/src/routes.ts": "e30b01a01fef6eb8f3be948de3e9b925565c4570d01713a203aaaf6f40ab826d",
+    "web/vite.config.ts": "9383938ec67bd57d645a9361990b0cab36d6a1d33eab5c4431180abd886692d0"
+  }
+}
