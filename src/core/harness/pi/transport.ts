@@ -53,6 +53,11 @@ export class PiRpcTransport implements PiTransport {
    *  left unknown is resolved — so pi sees the loop's order, and no write is
    *  silently lost or landed out of turn (harness-pi item 16). */
   private queued: Record<string, unknown>[] = [];
+  /** The writes handed to `send` not yet settled — queued for their turn or in
+   *  flight on the FIFO. While one is pending a direct abort can overtake it,
+   *  so `sendAbort` also appends an abort behind it; at zero nothing can be
+   *  overtaken, the direct write alone is the abort, and pi sees exactly one. */
+  private pendingWrites = 0;
   private sending: Promise<void> = Promise.resolve();
   private sendError: Error | undefined;
   private buffer = Buffer.alloc(0);
@@ -69,8 +74,13 @@ export class PiRpcTransport implements PiTransport {
    *  nothing sent after it, lands on this transport — it waits for the re-attach. */
   send(command: Record<string, unknown>): void {
     if (this.closed) return;
+    // An abort never queues (`sendAbort`): written directly whatever the
+    // chain's state, so a write in flight that fails after it was asked for
+    // cannot swallow it, and no re-attach can ever replay it from `takeUnsent`.
+    if (command.type === "abort") return this.sendAbort();
     const line = JSON.stringify(command);
     this.queued.push(command);
+    this.pendingWrites++;
     this.sending = this.sending
       .then(() => {
         // Decided when this write's turn on the chain comes, not when it was
@@ -89,24 +99,39 @@ export class PiRpcTransport implements PiTransport {
       .catch((err: unknown) => {
         this.sendError ??= err instanceof Error ? err : new Error(String(err));
         this.pendingSend ??= command;
+      })
+      .finally(() => {
+        this.pendingWrites--;
       });
   }
 
-  /** The hard stop's abort: through the chain while it is live — in its place
-   *  behind the writes in flight — and written directly once a failed write
-   *  spent the chain (`sendError`), since a write queued behind a failure never
-   *  lands here (it waits for a re-attach that a stop is not making) and the
-   *  stop's abort must reach a pi the one more command may have found alive
-   *  and mid-turn. Never queued for `takeUnsent`: a re-attach must not replay
-   *  an abort. A failure of the direct write is nobody's — the transport is
-   *  being left. */
+  /** The abort — a hard stop's, the finale's, a gate bypass's — the one write
+   *  that never waits, written twice where once could be wrong (harness-pi
+   *  item 16). Directly, at once, whatever the chain's state: a write in flight
+   *  can fail with the very reset a moment after the abort was asked for, and
+   *  an abort queued behind it would then never land (the chain is spent, and
+   *  it waits for a re-attach a stop is not making) and a re-attach would
+   *  replay it. AND, while a write is pending on a live chain — queued for its
+   *  turn or in flight — once more in its place behind it: the direct write can
+   *  overtake a prompt whose `writeLine` is still a pending continuation — pi
+   *  would abort an idle session, then receive the prompt and run the turn
+   *  unwatched — so whichever order the FIFO takes, an abort follows the
+   *  prompt. An idle chain has nothing to overtake, so there the direct write
+   *  is the one abort pi sees. An abort is idempotent and the duplicate
+   *  harmless; never queued for `takeUnsent`; a failed write is nobody's — the
+   *  transport is being left, the process ended by `kill`. */
   sendAbort(): void {
     if (this.closed) return;
-    if (this.sendError === undefined) {
-      this.send({ type: "abort" });
-      return;
-    }
-    void this.deps.container.writeLine(this.deps.paths, JSON.stringify({ type: "abort" })).catch(() => undefined);
+    const line = JSON.stringify({ type: "abort" });
+    void this.deps.container.writeLine(this.deps.paths, line).catch(() => undefined);
+    if (this.sendError !== undefined || this.pendingWrites === 0) return;
+    this.sending = this.sending
+      .then(() =>
+        this.sendError !== undefined || this.heldForReattach
+          ? undefined
+          : this.deps.container.writeLine(this.deps.paths, line),
+      )
+      .catch(() => undefined);
   }
 
   /** The writes whose turn never came — queued behind a failed one, or still
@@ -131,8 +156,10 @@ export class PiRpcTransport implements PiTransport {
 
   /** Close for teardown: a write already queued still lands — unless an
    *  earlier write failed, when it is held (`takeUnsent`) and this transport
-   *  delivers nothing more. Teardown owes nothing to such a write: the process
-   *  is ended by `kill`, never by the abort the loop sent it. */
+   *  delivers nothing more of the chain. An abort is the one exception: written
+   *  directly (`sendAbort`), a teardown's abort still reaches pi even then; the
+   *  process is ended by `kill` regardless, so teardown owes nothing to a held
+   *  write. */
   close(): void {
     this.closed = true;
   }

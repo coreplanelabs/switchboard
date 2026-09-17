@@ -5,6 +5,7 @@ import { ExecInfraError, ExecSandboxRestartedError, type Executor } from "../../
 import { ResidentExecutor } from "../../../execution/resident.js";
 import type { ChatMessage } from "../../chatMessage.js";
 import {
+  finaleTimedOutNote,
   HARD_STOP_MESSAGE,
   SOFT_STOP_INSTRUCTION,
   timeBudgetInstruction,
@@ -42,10 +43,11 @@ import {
   saysContainerReplaced,
   type HarnessContainer,
 } from "../container.js";
+import { readFileSync } from "node:fs";
 import {
   CONTROL_RESET_RESUMED_NOTE,
   MAX_INPLACE_REATTACHES,
-  PROMPT_ECHO_WAIT_TICKS,
+  PROMPT_ECHO_WAIT_MS,
   resolveControlResetWrite,
   WORD_ALIVE_REATTACH_NOTE,
 } from "../reattach.js";
@@ -317,6 +319,21 @@ function world(
     start,
     clock,
   };
+}
+
+/** A world whose clock advances with every sleep — the loop's ticks and the
+ *  transport's polls alike — so the wall-clock echo bound elapses under it
+ *  (harness-pi item 16); the fixed-clock `world` never reaches it. */
+function tickingWorld(opts: Parameters<typeof world>[0] = {}) {
+  const clock = { now: NOW };
+  return world({
+    ...opts,
+    clock,
+    sleep: (ms) => {
+      clock.now += ms;
+      return new Promise<void>((r) => setImmediate(r));
+    },
+  });
 }
 
 describe("runPiHarness — a run on pi from the first file to the answer", () => {
@@ -2523,11 +2540,11 @@ describe("runPiHarness — the resident's control plane reset under a live pi", 
       .map((e) => (e as { summary: string }).summary);
 
   it("a control reset on the prompt send whose echo never comes: the re-attach waits the bound, then re-sends the prompt steer-delivered once — the run answers, one resumed note names the reset, relaunches untouched, never the replaced verdict", async () => {
-    const w = world();
+    const w = tickingWorld();
     scriptedPi(w.container, (_n, c) => finalTurn(c, "ok"));
     // The prompt's send meets the reset before its bytes reached pi (the fake
     // throws before it pushes the line), so pi never echoes the prompt id: the
-    // re-attach waits `PROMPT_ECHO_WAIT_TICKS`, sees no echo, and re-sends it
+    // re-attach waits the bound on the clock, sees no echo, and re-sends it
     // steer-delivered — exactly once, never a duplicate (finding 2).
     w.container.failSendType = { type: "prompt", error: controlReset() };
     const answer = await w.start();
@@ -2626,7 +2643,7 @@ describe("runPiHarness — the resident's control plane reset under a live pi", 
     expect(w.container.commands().filter((c) => c.type === "prompt")).toHaveLength(1);
   });
 
-  it("the echo wait counts the loop's ticks, never its events: a catch-up burst of records after the re-attach does not re-send the prompt, and the echo one poll later cancels the re-send (finding 7)", async () => {
+  it("the echo wait is the clock, never an event count: a catch-up burst of records after the re-attach is no time and does not re-send the prompt, and the echo one poll later cancels the re-send (finding 7)", async () => {
     const w = world();
     scriptedPi(w.container, () => {});
     const scripted = w.container.onStdin!;
@@ -2649,7 +2666,7 @@ describe("runPiHarness — the resident's control plane reset under a live pi", 
       if (phase === 0) {
         // After the re-attach: more records than the tick bound, none the echo.
         phase = 1;
-        w.container.emit(...Array.from({ length: PROMPT_ECHO_WAIT_TICKS + 2 }, () => ({ type: "agent_start" })));
+        w.container.emit(...Array.from({ length: 5 }, () => ({ type: "agent_start" })));
         return realRead(path, offset, max);
       }
       if (phase === 1) {
@@ -2697,7 +2714,7 @@ describe("runPiHarness — the resident's control plane reset under a live pi", 
   });
 
   it("a write in flight when the READ meets the reset: the re-attach waits for every write to settle before it resolves, so the prompt whose exec fails a moment after the read's is re-sent — never left unresolved on the abandoned transport", async () => {
-    const w = world();
+    const w = tickingWorld();
     scriptedPi(w.container, (_n, c) => finalTurn(c, "ok"));
     const realWrite = w.container.writeLine.bind(w.container);
     const realRead = w.container.readLog.bind(w.container);
@@ -2739,7 +2756,7 @@ describe("runPiHarness — the resident's control plane reset under a live pi", 
   });
 
   it("every write sent while a prompt awaits its echo is held behind it in order: a follow-up drained during the hold reaches pi after the re-sent prompt and after the write queued behind the prompt at the reset", async () => {
-    const w = world();
+    const w = tickingWorld();
     scriptedPi(w.container, (_n, c) => finalTurn(c, "ok"));
     // A follow-up already in the inbox: its steer S1 queues behind the seed prompt P1.
     w.inbox.push({ text: "S1 first", userId: "user:test", at: NOW });
@@ -2771,6 +2788,409 @@ describe("runPiHarness — the resident's control plane reset under a live pi", 
               : "other",
       );
     expect(order).toEqual(["P1", "S1", "S2"]);
+  });
+
+  it("an abort bypasses the gate: a hard stop while a prompt in doubt holds it, under a pi that streams a record on every poll (the loop never ticks), aborts pi at once — never after the turn it was meant to cut short — and the run ends as the stop", async () => {
+    const w = tickingWorld();
+    scriptedPi(w.container, () => {});
+    w.container.failSendType = { type: "prompt", error: controlReset() }; // P1 in doubt, holding the gate
+    const realRead = w.container.readLog.bind(w.container);
+    let streamed = 0;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length > 0 || resumedSummaries(w).length === 0) return chunk;
+      // pi streams: every poll returns a record, so the loop's tick branch never runs.
+      streamed++;
+      if (streamed === 3) w.control.requestStop("hard");
+      w.container.emit({ type: "agent_start" });
+      return realRead(path, offset, max);
+    };
+    const answer = await w.start();
+    expect(answer).toBe(HARD_STOP_MESSAGE);
+    const commands = w.container.commands();
+    expect(commands.filter((c) => c.type === "abort")).toHaveLength(1); // delivered past the hold, at once
+    expect(commands.filter((c) => c.type === "prompt")).toHaveLength(0); // the held prompt was never re-sent: the run ended first
+    expect(streamed).toBeLessThanOrEqual(4); // the stop landed within a few records, not after the bound
+  });
+
+  it("a streaming pi cannot stall a held prompt: with a record on every poll and no loop tick, the prompt in doubt is still re-sent once the bound has elapsed on the clock, and the run answers", async () => {
+    const w = tickingWorld();
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "ok"));
+    w.container.failSendType = { type: "prompt", error: controlReset() };
+    const realRead = w.container.readLog.bind(w.container);
+    let streamed = 0;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length > 0 || resumedSummaries(w).length === 0) return chunk;
+      if (w.container.commands().some((c) => c.type === "prompt")) return chunk; // re-sent: pi answered
+      streamed++;
+      w.container.emit({ type: "agent_start" });
+      return realRead(path, offset, max);
+    };
+    const answer = await w.start();
+    expect(answer).toBe("ok");
+    const prompts = w.container.commands().filter((c) => c.type === "prompt");
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0].streamingBehavior).toBe("steer");
+    expect(streamed).toBeGreaterThan(10); // the stream ran the whole hold, never a tick
+  });
+
+  it("the gate reads the clock AFTER the record just read is observed: pi's echo of the prompt in doubt arriving in the very poll on which its bound elapses lands the prompt — never a steer-delivered re-send racing an echo already in hand", async () => {
+    const w = tickingWorld();
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "ok"));
+    const scripted = w.container.onStdin!;
+    let landedPromptId: string | undefined;
+    // The prompt's bytes reach pi, the write rejecting with the reset after: pi WILL echo it.
+    w.container.onStdin = (line, c) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "prompt" && cmd.streamingBehavior === undefined && landedPromptId === undefined) {
+        landedPromptId = String(cmd.id);
+        throw controlReset();
+      }
+      scripted(line, c);
+    };
+    const realRead = w.container.readLog.bind(w.container);
+    let echoed = false;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length === 0 && landedPromptId !== undefined && resumedSummaries(w).length > 0 && !echoed) {
+        echoed = true;
+        // The bound elapses on the clock in the same poll that carries the echo:
+        // a tick judged before the record is observed would re-send the prompt.
+        w.clock.now += PROMPT_ECHO_WAIT_MS;
+        w.container.emit(
+          { id: landedPromptId, type: "response", command: "prompt", success: true },
+          { type: "agent_start" },
+        );
+        finalTurn(w.container, "ok");
+        return realRead(path, offset, max);
+      }
+      return chunk;
+    };
+    const answer = await w.start();
+    expect(answer).toBe("ok");
+    const prompts = w.container.commands().filter((c) => c.type === "prompt");
+    expect(prompts).toHaveLength(1); // the original only: the echo in hand won over the clock
+    expect(prompts[0].streamingBehavior).toBeUndefined();
+  });
+
+  it("the wait for an in-flight write to settle observes the run's stop: a hard stop while the write hangs ends the run as the stop at once, never after the exec's own timeout", async () => {
+    const w = tickingWorld();
+    scriptedPi(w.container, () => {});
+    const realWrite = w.container.writeLine.bind(w.container);
+    const realRead = w.container.readLog.bind(w.container);
+    let promptInFlight = false;
+    w.container.writeLine = async (p, line) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "prompt") {
+        promptInFlight = true;
+        await new Promise<void>(() => {}); // the write hangs for good
+      }
+      return realWrite(p, line);
+    };
+    let readFailed = false;
+    w.container.readLog = async (path, offset, max) => {
+      if (promptInFlight && !readFailed) {
+        readFailed = true;
+        setImmediate(() => w.control.requestStop("hard")); // the person stops the run while the write hangs
+        throw new HarnessContainerControlResetError(
+          "read",
+          "control-reset: the resident's Durable Object was reset (a deploy); the container and its processes are as they were; the command's outcome is unknown",
+        );
+      }
+      return realRead(path, offset, max);
+    };
+    const answer = await w.start();
+    expect(answer).toBe(HARD_STOP_MESSAGE);
+    expect(noteKinds(w)).toContain("stopped");
+  });
+
+  it("the in-flight settle wait from a follow-up turn is bounded by the TURN's end — its deadline plus its finale allowance, since a turn's write-up runs past its deadline — never the run's: a prompt write hung under a control reset fails the turn by name four minutes in, with most of the run's lease still unspent", async () => {
+    const w = tickingWorld();
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0) finalTurn(c, "All green.");
+    });
+    const session = await w.open();
+    const realWrite = w.container.writeLine.bind(w.container);
+    const realRead = w.container.readLog.bind(w.container);
+    let promptInFlight = false;
+    w.container.writeLine = async (p, line) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "prompt") {
+        promptInFlight = true;
+        await new Promise<void>(() => {}); // the turn's prompt hangs for good
+      }
+      return realWrite(p, line);
+    };
+    let readFailed = false;
+    w.container.readLog = async (path, offset, max) => {
+      if (promptInFlight && !readFailed) {
+        readFailed = true;
+        throw new HarnessContainerControlResetError(
+          "read",
+          "control-reset: the resident's Durable Object was reset (a deploy); the container and its processes are as they were; the command's outcome is unknown",
+        );
+      }
+      return realRead(path, offset, max);
+    };
+    const turnStartedAt = w.clock.now;
+    await expect(
+      session.followUp({ text: "one more", maxTurns: 4, maxMinutes: 1, toolContext: { executor } }),
+    ).rejects.toThrow(/did not settle before the deadline/);
+    const waited = w.clock.now - turnStartedAt;
+    const turnEnd = MINUTE_MS + ALLOWANCES.writeUp * MINUTE_MS; // the turn's own minute (`turnLeaseMs` never under one) plus its finale
+    expect(waited).toBeGreaterThanOrEqual(turnEnd);
+    expect(waited).toBeLessThan(turnEnd + MINUTE_MS); // never the run's forty-five
+    expect(noteKinds(w)).toContain("harness_error");
+  });
+
+  it("a control reset during a follow-up turn's finale re-attaches when the write in flight settles within the finale's allowance: the wait is judged only after the write was raced once, and gives up at the turn's END, never at the deadline its write-up runs past — so no fail-by-name with the write settled and the allowance unspent", async () => {
+    const w = tickingWorld();
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0) finalTurn(c, "All green.");
+      // The turn's prompt (n === 1): pi works on; the test drives its deadline, the reset and the wrap-up.
+    });
+    const session = await w.open();
+    const realWrite = w.container.writeLine.bind(w.container);
+    const realRead = w.container.readLog.bind(w.container);
+    let releaseSteer: (() => void) | undefined;
+    w.container.writeLine = async (p, line) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "steer" && cmd.message === timeBudgetInstruction()) {
+        // The finale's steer is the write in flight when the control plane resets.
+        await new Promise<void>((r) => (releaseSteer = r));
+      }
+      return realWrite(p, line);
+    };
+    let phase = 0;
+    w.container.readLog = async (path, offset, max) => {
+      if (phase === 0 && w.container.commands().some((c) => c.type === "prompt" && c.message === "one more")) {
+        phase = 1;
+        w.clock.now += MINUTE_MS; // the turn's deadline passes: turnCheck starts the write-up
+        return realRead(path, offset, max);
+      }
+      if (phase === 1 && releaseSteer !== undefined) {
+        phase = 2;
+        // The read fails with the reset while the steer hangs; the steer settles a few ticks later — inside the finale's allowance.
+        const release = releaseSteer;
+        setImmediate(() => setImmediate(() => setImmediate(release)));
+        throw new HarnessContainerControlResetError(
+          "read",
+          "control-reset: the resident's Durable Object was reset (a deploy); the container and its processes are as they were; the command's outcome is unknown",
+        );
+      }
+      if (phase === 2 && resumedSummaries(w).length > 0) {
+        phase = 3;
+        finalTurn(w.container, "wrapped up"); // pi finishes the write-up on the re-attached transport
+        return realRead(path, offset, max);
+      }
+      return realRead(path, offset, max);
+    };
+    const answer = await session.followUp({ text: "one more", maxTurns: 4, maxMinutes: 1, toolContext: { executor } });
+    expect(answer).toMatch(/wrapped up/); // the time-budget answer, with the write-up pi gave
+    expect(resumedSummaries(w)).toEqual([CONTROL_RESET_RESUMED_NOTE]);
+    expect(noteKinds(w)).not.toContain("harness_error"); // never "did not settle before the deadline"
+    expect(w.notes).not.toContain(finaleTimedOutNote("turn"));
+  });
+
+  it("what the gate still holds when the loop ends is dropped, never delivered into a follow-up turn: a follow-up drained during the hold goes back to the inbox and runs once, the loop's prompt in doubt is never re-sent, and the turn's first prompt is not held behind the dead loop's bound", async () => {
+    const w = tickingWorld();
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "done"));
+    w.inbox.push({ text: "S1 first", userId: "user:test", at: NOW });
+    w.container.failSendType = { type: "prompt", error: controlReset() }; // P1 in doubt, holding the gate
+    const realRead = w.container.readLog.bind(w.container);
+    let polls = 0;
+    let settledEarly = false;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length > 0 || resumedSummaries(w).length === 0 || settledEarly) return chunk;
+      // A few polls in — S1 drained on a tick and held behind P1 — pi settles, long before P1's bound.
+      if (++polls < 6) return chunk;
+      settledEarly = true;
+      finalTurn(w.container, "ok");
+      return realRead(path, offset, max);
+    };
+    const session = await w.open();
+    expect(w.clock.now - NOW).toBeLessThan(PROMPT_ECHO_WAIT_MS); // the loop ended inside the hold
+    const sentBefore = w.container.stdin.length;
+    const turnStartedAt = w.clock.now;
+    const answer = await session.followUp({ text: "one more", maxTurns: 4, maxMinutes: 5, toolContext: { executor } });
+    expect(answer).toBe("done");
+    const inTurn = w.container.commands().slice(sentBefore);
+    // Nothing of the dead loop's: no steer-delivered P1, no S1 steer — the turn's prompt alone, at once.
+    expect(inTurn.filter((c) => c.type === "prompt").map((c) => [c.message, c.streamingBehavior])).toEqual([
+      ["one more", undefined],
+    ]);
+    expect(inTurn.some((c) => c.type === "steer" && String(c.message).includes("S1 first"))).toBe(false);
+    expect(w.clock.now - turnStartedAt).toBeLessThan(PROMPT_ECHO_WAIT_MS); // not held behind P1's bound
+    // S1 runs once: requeued for the run stage's fresh turn, never also steered by the gate.
+    expect(w.inbox.drain().map((i) => i.text)).toEqual(["S1 first"]);
+  });
+
+  it("the loop's wind-down steer still held when the loop ends is dropped with the rest: a follow-up turn's prompt goes out at once, nothing of the dead loop's — its prompt in doubt, its wind-down steer — reaches pi inside the turn, and the turn's finale clock is its own even past the allowance", async () => {
+    // The turn guard fires on the loop's first check (`maxTurns: 0`): the
+    // wind-down steer is sent while P1's write is failing, comes back unsent
+    // on the re-attach and is held behind P1 — the shape of a loop that ends
+    // with its finale steer still in the gate.
+    const w = tickingWorld({ agent: { maxTurns: 0 } });
+    scriptedPi(w.container, () => {}); // pi works; the test settles each turn
+    w.container.failSendType = { type: "prompt", error: controlReset() }; // P1 in doubt, holding the gate
+    const realRead = w.container.readLog.bind(w.container);
+    let phase = 0;
+    let polls = 0;
+    let turnPromptSeenAt: number | undefined;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length > 0) return chunk;
+      if (phase === 0 && resumedSummaries(w).length > 0 && ++polls >= 6) {
+        phase = 1;
+        finalTurn(w.container, "ok"); // pi settles inside the hold: the loop ends with its wind-down steer still held
+        return realRead(path, offset, max);
+      }
+      if (phase === 2 && w.container.commands().some((c) => c.type === "prompt" && c.message === "one more")) {
+        phase = 3;
+        turnPromptSeenAt = w.clock.now;
+        w.clock.now += ALLOWANCES.writeUp * MINUTE_MS + 1; // past a finale's allowance, inside the turn's own lease
+        finalTurn(w.container, "done");
+        return realRead(path, offset, max);
+      }
+      return chunk;
+    };
+    const session = await w.open();
+    expect(noteKinds(w)).toContain("turn_budget_exhausted");
+    expect(w.clock.now - NOW).toBeLessThan(PROMPT_ECHO_WAIT_MS); // the loop ended inside the hold
+    expect(w.container.commands().some((c) => c.type === "steer")).toBe(false); // its wind-down steer never reached pi
+    const sentBefore = w.container.stdin.length;
+    const turnStartedAt = w.clock.now;
+    phase = 2;
+    const answer = await session.followUp({ text: "one more", maxTurns: 4, maxMinutes: 5, toolContext: { executor } });
+    expect(answer).toBe("done");
+    const inTurn = w.container.commands().slice(sentBefore);
+    expect(inTurn[0]).toMatchObject({ type: "prompt", message: "one more" }); // first: nothing of the dead loop's ahead of it
+    expect(inTurn.some((c) => c.type === "steer")).toBe(false); // the dead loop's wind-down steer, never
+    expect(inTurn.some((c) => c.type === "prompt" && c.streamingBehavior === "steer")).toBe(false); // nor its P1
+    expect(turnPromptSeenAt! - turnStartedAt).toBeLessThan(PROMPT_ECHO_WAIT_MS); // at once, not at P1's bound
+    expect(w.notes).not.toContain(finaleTimedOutNote("turn"));
+  });
+
+  it("a second reset while the gate holds keeps holding: nothing new is in doubt, one resumed note per reset, and P1 then S1 is the order once the bound elapses", async () => {
+    const w = tickingWorld();
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "ok"));
+    w.inbox.push({ text: "S1 first", userId: "user:test", at: NOW });
+    w.container.failSendType = { type: "prompt", error: controlReset() };
+    const realRead = w.container.readLog.bind(w.container);
+    let secondReset = false;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length === 0 && resumedSummaries(w).length === 1 && !secondReset) {
+        secondReset = true;
+        throw new HarnessContainerControlResetError(
+          "read",
+          "control-reset: the resident's Durable Object was reset (a deploy); the container and its processes are as they were; the command's outcome is unknown",
+        );
+      }
+      return chunk;
+    };
+    const answer = await w.start();
+    expect(answer).toBe("ok");
+    expect(resumedSummaries(w)).toEqual([CONTROL_RESET_RESUMED_NOTE, CONTROL_RESET_RESUMED_NOTE]);
+    const order = w.container
+      .commands()
+      .filter((c) => c.type === "prompt" || c.type === "steer")
+      .map((c) => (c.type === "prompt" ? "P1" : String(c.message).includes("S1 first") ? "S1" : "other"));
+    expect(order).toEqual(["P1", "S1"]);
+  });
+
+  it("a gate reply posted while a prompt in doubt holds the gate lands at once — it answers an ask pi already made, so pi's tool is never blocked behind the hold — while the held prompt keeps waiting for its echo", async () => {
+    const w = tickingWorld();
+    scriptedPi(w.container, () => {});
+    w.container.failSendType = { type: "prompt", error: controlReset() }; // P1 in doubt, holding the gate
+    const realRead = w.container.readLog.bind(w.container);
+    let phase = 0;
+    let promptsWhenReplyLanded = -1;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length > 0 || resumedSummaries(w).length === 0) return chunk;
+      if (phase === 0) {
+        // pi asks the gate mid-turn while P1 is still held.
+        phase = 1;
+        w.container.emit({ type: "extension_ui_request", id: "d1", method: "confirm", title: "Trust?" });
+        return realRead(path, offset, max);
+      }
+      if (phase === 1) {
+        // One poll later the reply must already be with pi — past the hold.
+        phase = 2;
+        const commands = w.container.commands();
+        if (commands.some((c) => c.type === "extension_ui_response" && c.id === "d1"))
+          promptsWhenReplyLanded = commands.filter((c) => c.type === "prompt").length;
+        finalTurn(w.container, "ok");
+        return realRead(path, offset, max);
+      }
+      return chunk;
+    };
+    const answer = await w.start();
+    expect(answer).toBe("ok");
+    expect(promptsWhenReplyLanded).toBe(0); // the reply landed, and before any prompt: the hold did not delay it
+  });
+
+  it("a gate reply the reset left unresolved, and one queued behind its failed write, take the reply's exit on the re-attach too: re-sent past the hold at once on the fresh transport, never held behind the prompt in doubt", async () => {
+    const w = tickingWorld();
+    scriptedPi(w.container, () => {});
+    w.container.failSendType = { type: "prompt", error: controlReset() }; // P1 in doubt, holding the gate
+    const realRead = w.container.readLog.bind(w.container);
+    let phase = 0;
+    let promptsWhenRepliesLanded = -1;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length > 0 || resumedSummaries(w).length === 0) return chunk;
+      if (phase === 0) {
+        phase = 1;
+        // pi asks twice in one record batch; the first reply's write fails with a
+        // second reset (it is `pendingSend`), the second is queued behind it (unsent).
+        w.container.failSendType = { type: "extension_ui_response", error: controlReset() };
+        w.container.emit(
+          { type: "extension_ui_request", id: "d1", method: "confirm", title: "Trust?" },
+          { type: "extension_ui_request", id: "d2", method: "confirm", title: "Sure?" },
+        );
+        return realRead(path, offset, max);
+      }
+      if (phase === 1 && resumedSummaries(w).length === 2) {
+        phase = 2; // the re-attach: one poll later both replies must be with pi
+        return chunk;
+      }
+      if (phase === 2) {
+        phase = 3;
+        const commands = w.container.commands();
+        const replied = commands.filter((c) => c.type === "extension_ui_response").map((c) => c.id);
+        if (replied.includes("d1") && replied.includes("d2"))
+          promptsWhenRepliesLanded = commands.filter((c) => c.type === "prompt").length;
+        finalTurn(w.container, "ok");
+        return realRead(path, offset, max);
+      }
+      return chunk;
+    };
+    const answer = await w.start();
+    expect(answer).toBe("ok");
+    expect(resumedSummaries(w)).toEqual([CONTROL_RESET_RESUMED_NOTE, CONTROL_RESET_RESUMED_NOTE]);
+    expect(promptsWhenRepliesLanded).toBe(0); // both replies with pi one poll after the re-attach, before any prompt
+  });
+
+  it("every write to pi takes the gate, with exactly two exits: the abort, the one write that leaves the loop only through sendAbort() (never the gate, never the chain's queue), and the gate reply, which passes the hold through sendNow but rides the chain — the loop has one direct transport.send (the gate's deliver)", () => {
+    const src = readFileSync(new URL("./harness.ts", import.meta.url), "utf8");
+    expect(src.match(/transport!?\.send\(/g) ?? []).toHaveLength(1);
+    expect(src).toMatch(/new HeldSends\(\(command\) => transport!\.send\(command\)\)/);
+    // The abort never enters the gate — not as a send, not as a sendNow.
+    expect(src).not.toMatch(/sends\.send(?:Now)?\(\{ type: "abort" \}\)/);
+    expect((src.match(/transport!?\.sendAbort\(\)/g) ?? []).length).toBeGreaterThanOrEqual(1);
+    // The gate reply passes the hold at both sites (the loop's and a turn's) and nowhere is it a held send.
+    expect(src.match(/for \(const reply of obs\.replies\) sends\.sendNow\(reply\);/g) ?? []).toHaveLength(2);
+    expect(src).not.toMatch(/sends\.send\(reply\)/);
+    // The transport redirects an abort handed to `send` to the direct path, so no caller can queue one.
+    const transportSrc = readFileSync(new URL("./transport.ts", import.meta.url), "utf8");
+    expect(transportSrc).toMatch(/if \(command\.type === "abort"\) return this\.sendAbort\(\);/);
+    // And the gate's pass-the-hold exit is the one method, delivering through the same deliver.
+    const gateSrc = readFileSync(new URL("../reattach.ts", import.meta.url), "utf8");
+    expect(gateSrc).toMatch(/sendNow\(command: Record<string, unknown>\): void \{\s*this\.deliver\(command\);\s*\}/);
   });
 
   it("a control reset on a control command (get_state) re-attaches and re-sends it as it was — the run answers, one resumed note, never the verdict", async () => {
@@ -2837,7 +3257,7 @@ describe("runPiHarness — the resident's control plane reset under a live pi", 
 });
 
 describe("the control-reset write-resolution rules (harness-pi item 16)", () => {
-  it("resolveControlResetWrite: a read reset and a landed steer need nothing; a prompt awaits its echo; the id-carrying control commands, the gate reply and the abort re-send as they were; an unknown write has no echo and fails the run by name", () => {
+  it("resolveControlResetWrite: a read reset, a landed steer and an abort need nothing (an abort is never in doubt: written directly, never pendingSend); a prompt awaits its echo; the id-carrying control commands and the gate reply re-send as they were; an unknown write has no echo and fails the run by name", () => {
     // A read reset (nothing in flight) and a steer (its landed copy pi echoes,
     // its unlanded copy the loop requeues) are never re-sent — a landed steer
     // must not double.
@@ -2853,14 +3273,15 @@ describe("the control-reset write-resolution rules (harness-pi item 16)", () => 
     // The id-carrying control commands re-send as they were (their response id dedups).
     for (const type of ["set_auto_retry", "get_state"])
       expect(resolveControlResetWrite({ id: "x", type }), type).toEqual({ kind: "resend", command: { id: "x", type } });
-    // The gate reply and the abort re-send too, never fail (findings 1 & 4): pi
-    // ignores a duplicate response for a settled id, and a second abort is the
-    // stop it already was.
+    // The gate reply re-sends too, never fails: pi ignores a duplicate response
+    // for a settled id.
     expect(resolveControlResetWrite({ id: "d1", type: "extension_ui_response", response: {} })).toEqual({
       kind: "resend",
       command: { id: "d1", type: "extension_ui_response", response: {} },
     });
-    expect(resolveControlResetWrite({ type: "abort" })).toEqual({ kind: "resend", command: { type: "abort" } });
+    // An abort is never the write in doubt — `sendAbort` writes it directly and
+    // records no failure — so the rule says one thing of it: nothing to resolve.
+    expect(resolveControlResetWrite({ type: "abort" })).toEqual({ kind: "none" });
     // A prompt with no id has no echo to key on, so it cannot be awaited: fail by name (finding 6).
     expect(resolveControlResetWrite({ type: "prompt", message: "go" }).kind).toBe("fail");
     // A command whose id pi already echoed landed: nothing to re-send (finding 1).
@@ -2944,7 +3365,7 @@ describe("runPiHarnessOpen — a follow-up turn meets the control plane's reset 
   });
 
   it("a control reset on the follow-up turn's prompt send re-attaches in place and, its echo never coming, re-sends the prompt steer-delivered once: the turn answers, one resumed note, pi neither killed nor relaunched (case B)", async () => {
-    const w = world();
+    const w = tickingWorld();
     scriptedPi(w.container, (n, c) => finalTurn(c, n === 0 ? "loop done" : "turn done"));
     const session = await w.open();
     expect(session.answer).toBe("loop done");
@@ -2963,7 +3384,7 @@ describe("runPiHarnessOpen — a follow-up turn meets the control plane's reset 
   });
 
   it("a control reset that raced the provider-retry prompt after it landed: pi's echo carries the retry prompt's own id, which cancels the deferred re-send — the retry runs once, never twice (finding 6)", async () => {
-    const w = world();
+    const w = tickingWorld();
     const streamError = {
       type: "message_end",
       message: {
@@ -2999,9 +3420,10 @@ describe("runPiHarnessOpen — a follow-up turn meets the control plane's reset 
         w.container.emit({ id: retryId, type: "response", command: "prompt", success: true }, { type: "agent_start" });
         return realRead(path, offset, max);
       }
-      if (drainedAfterReattach === 2 * PROMPT_ECHO_WAIT_TICKS + 2) {
-        // …and pi answers only well past the tick bound, so a re-send keyed on
-        // the wrong id would have gone out by now.
+      if (drainedAfterReattach === 200) {
+        // …and pi answers only well past the echo bound on this ticking clock
+        // (200 polls of 10 ms each, ticks besides), so a re-send keyed on the
+        // wrong id would have gone out by now.
         finalTurn(w.container, "recovered");
         return realRead(path, offset, max);
       }
