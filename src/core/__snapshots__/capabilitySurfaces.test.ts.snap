@@ -91,6 +91,7 @@ commands:
   status show          — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
   config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
   config overrides     — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
+  config channels      — The channels you may pick settings or MCP servers for, by name: the channels the bot is in that you may read, plus any that already carry a scope; \`listed: false\` says the bot could not list its channels and only the scoped ones are here.
   config set           — Set the agent, model, effort, harness or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
   config clear         — Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.
   config instructions  — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
@@ -142,6 +143,7 @@ commands:
 
 exports[`capability surfaces — cloud-full > HTTP catalogue: the /api/<id> routes that answer an admin 1`] = `
 [
+  "config.channels",
   "config.clear",
   "config.instructions",
   "config.overrides",
@@ -187,6 +189,7 @@ exports[`capability surfaces — cloud-full > HTTP catalogue: the /api/<id> rout
 
 exports[`capability surfaces — cloud-full > MCP tools/list names 1`] = `
 [
+  "config_channels",
   "config_clear",
   "config_instructions",
   "config_overrides",
@@ -244,6 +247,7 @@ exports[`capability surfaces — cloud-full > help commands on chat 1`] = `
 *config*
 • \`config show\` — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
 • \`config overrides\` — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
+• \`config channels\` — The channels you may pick settings or MCP servers for, by name: the channels the bot is in that you may read, plus any that already carry a scope; \`listed: false\` says the bot could not list its channels and only the scoped ones are here.
 • \`config set\` — Set the agent, model, effort, harness or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
 • \`config clear\` — Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.
 • \`config instructions\` — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
@@ -340,6 +344,7 @@ commands:
   status show          — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
   config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
   config overrides     — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
+  config channels      — The channels you may pick settings or MCP servers for, by name: the channels the bot is in that you may read, plus any that already carry a scope; \`listed: false\` says the bot could not list its channels and only the scoped ones are here.
   config set           — Set the agent, model, effort, harness or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
   config clear         — Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.
   config instructions  — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
@@ -382,6 +387,7 @@ commands:
 
 exports[`capability surfaces — local-full > HTTP catalogue: the /api/<id> routes that answer an admin 1`] = `
 [
+  "config.channels",
   "config.clear",
   "config.instructions",
   "config.overrides",
@@ -418,6 +424,7 @@ exports[`capability surfaces — local-full > HTTP catalogue: the /api/<id> rout
 
 exports[`capability surfaces — local-full > MCP tools/list names 1`] = `
 [
+  "config_channels",
   "config_clear",
   "config_instructions",
   "config_overrides",
@@ -466,6 +473,7 @@ exports[`capability surfaces — local-full > help commands on chat 1`] = `
 *config*
 • \`config show\` — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
 • \`config overrides\` — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
+• \`config channels\` — The channels you may pick settings or MCP servers for, by name: the channels the bot is in that you may read, plus any that already carry a scope; \`listed: false\` says the bot could not list its channels and only the scoped ones are here.
 • \`config set\` — Set the agent, model, effort, harness or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
 • \`config clear\` — Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.
 • \`config instructions\` — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
@@ -550,6 +558,7 @@ commands:
   status show          — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
   config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
   config overrides     — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
+  config channels      — The channels you may pick settings or MCP servers for, by name: the channels the bot is in that you may read, plus any that already carry a scope; \`listed: false\` says the bot could not list its channels and only the scoped ones are here.
   config set           — Set the agent, model, effort, harness or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
   config clear         — Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.
   config instructions  — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
@@ -580,6 +589,7 @@ commands:
 
 exports[`capability surfaces — minimal > HTTP catalogue: the /api/<id> routes that answer an admin 1`] = `
 [
+  "config.channels",
   "config.clear",
   "config.instructions",
   "config.overrides",
@@ -604,6 +614,7 @@ exports[`capability surfaces — minimal > HTTP catalogue: the /api/<id> routes 
 
 exports[`capability surfaces — minimal > MCP tools/list names 1`] = `
 [
+  "config_channels",
   "config_clear",
   "config_instructions",
   "config_overrides",
@@ -640,6 +651,7 @@ exports[`capability surfaces — minimal > help commands on chat 1`] = `
 *config*
 • \`config show\` — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
 • \`config overrides\` — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
+• \`config channels\` — The channels you may pick settings or MCP servers for, by name: the channels the bot is in that you may read, plus any that already carry a scope; \`listed: false\` says the bot could not list its channels and only the scoped ones are here.
 • \`config set\` — Set the agent, model, effort, harness or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
 • \`config clear\` — Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.
 • \`config instructions\` — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.

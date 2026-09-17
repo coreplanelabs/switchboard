@@ -34,10 +34,16 @@ const form = reactive({
   name: "",
   url: "",
   scope: (props.mcps.channel ? "channel" : "me") as Tier,
+  /** The channel a channel-tier add targets when no channel is open: picked in the form. */
+  channel: "",
   agents: new Set<string>(SELF_SERVE_AGENTS),
   auth: "" as "" | "oauth" | "bearer" | "none",
 });
 const channelField = ref(props.mcps.channel ?? "");
+/** The channels the viewer may pick a tier for, by name (`config channels`). */
+const pickable = computed(() => props.mcps.pickable?.channels ?? []);
+const pickerLabel = (c: { channelId: string; channelName?: string; visibility: string }): string =>
+  `${c.channelName ? `#${c.channelName}` : c.channelId}${c.visibility === "private" ? " · private" : ""}`;
 const busy = ref(false);
 /** The last action's outcome, shown under the form: a connect link, or the handler's refusal as is. */
 const notice = ref<{ kind: "ok" | "error"; text: string; connectUrl?: string } | null>(null);
@@ -83,7 +89,13 @@ function watchRow(name: string, scopeKey: string, was: McpServerView["state"] | 
 
 /** `me` is every session's own to write (the browser baseline carries `mcp:write`). */
 const canAdd = computed(() =>
-  form.scope === "org" ? props.mcps.canWrite.org : form.scope === "channel" ? props.mcps.canWrite.channel : true,
+  form.scope === "org"
+    ? props.mcps.canWrite.org
+    : form.scope === "channel"
+      ? props.mcps.channel
+        ? props.mcps.canWrite.channel
+        : form.channel !== ""
+      : true,
 );
 /** A user-tier row is the viewer's own when it is the session's, or the linked person's. */
 const canWriteRow = (s: McpServerView) =>
@@ -128,7 +140,7 @@ function toggleAgent(agent: string, on: boolean): void {
 
 /** The target tier's options, by name as the command takes them; `me` is the caller's own, whoever the handler resolves it to. */
 function tier(scope: Tier): Record<string, unknown> {
-  if (scope === "channel") return { scope: "channel", channel: props.mcps.channel };
+  if (scope === "channel") return { scope: "channel", channel: form.channel || props.mcps.channel };
   return { scope };
 }
 const tierOf = (s: McpServerView): Tier => (s.scope === "user" ? "me" : s.scope);
@@ -265,7 +277,24 @@ async function probe(s: McpServerView): Promise<void> {
 
     <form class="flex flex-wrap items-center gap-2 text-sm" @submit.prevent="openChannel">
       <label class="text-muted" for="mcp-channel">Channel</label>
+      <select
+        v-if="pickable.length > 0"
+        id="mcp-channel"
+        v-model="channelField"
+        :class="SELECT_CLASS"
+        class="w-64 text-xs"
+        aria-label="channel whose MCP servers to list"
+      >
+        <option value="">— the org's and your own —</option>
+        <option v-for="c in pickable" :key="c.channelId" :value="c.channelId" :title="c.channelId">
+          {{ pickerLabel(c) }}
+        </option>
+        <option v-if="mcps.channel && !pickable.some((c) => c.channelId === mcps.channel)" :value="mcps.channel">
+          {{ openChannelLabel }} · not in the list
+        </option>
+      </select>
       <input
+        v-else
         id="mcp-channel"
         v-model="channelField"
         :class="INPUT_CLASS"
@@ -277,6 +306,17 @@ async function probe(s: McpServerView): Promise<void> {
       <span class="text-xs text-dimmed" :title="mcps.channel">{{
         mcps.channel ? `Listing the ${openChannelLabel} tier beside the rest.` : "Blank: the org's and your own."
       }}</span>
+      <details v-if="pickable.length > 0" class="basis-full text-xs text-dimmed">
+        <summary class="cursor-pointer">Not listed? Open a channel by its id</summary>
+        <input
+          id="mcp-channel-id"
+          v-model="channelField"
+          :class="INPUT_CLASS"
+          class="mt-1 w-64 font-mono text-xs"
+          placeholder="slack:C0123… or http:ops"
+          aria-label="channel id whose MCP servers to list"
+        />
+      </details>
     </form>
 
     <p v-if="mcps.unavailable" class="unavailable rounded-md border border-warn/30 bg-warn/10 px-3 py-2 text-sm">
@@ -462,10 +502,25 @@ async function probe(s: McpServerView): Promise<void> {
             me — {{ linked ? `your own runs, as ${asUser!.name ?? asUser!.id}` : "your own runs from this dashboard" }}
           </option>
           <option value="org">org — every run; may name coding, review, ship</option>
-          <option value="channel" :disabled="!mcps.channel">
-            channel — {{ mcps.channel ? openChannelLabel : "open a channel above first" }}
+          <option value="channel" :disabled="!mcps.channel && pickable.length === 0">
+            channel — {{ mcps.channel ? openChannelLabel : "one channel's runs; pick it below" }}
           </option>
         </select>
+        <template v-if="form.scope === 'channel' && !mcps.channel">
+          <span class="text-sm text-muted sm:pt-1">Channel</span>
+          <select
+            id="mcp-add-channel"
+            v-model="form.channel"
+            :class="SELECT_CLASS"
+            class="sm:max-w-md"
+            aria-label="channel the server belongs to"
+          >
+            <option value="" disabled>Pick a channel…</option>
+            <option v-for="c in pickable" :key="c.channelId" :value="c.channelId" :title="c.channelId">
+              {{ pickerLabel(c) }}
+            </option>
+          </select>
+        </template>
         <span class="text-sm text-muted sm:pt-1">Agents</span>
         <div class="flex flex-wrap gap-x-4 gap-y-1.5 pt-1 text-sm">
           <label v-for="a in vocabulary.agents" :key="a" class="inline-flex items-center gap-1.5 font-mono text-xs">

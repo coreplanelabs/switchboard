@@ -18,7 +18,9 @@ import {
 // on any failure, and a non-Slack actor is the fallback's answer.
 
 type Info = { is_im?: boolean; is_mpim?: boolean; is_private?: boolean };
-/** A person's channels as `users.conversations` pages them: one inner array per page. */
+/** A person's channels as `users.conversations` pages them: one inner array per page; an entry
+ *  `C1!` is a private channel (the bot's own listing carries `is_private`). The key `"*"` is the
+ *  bot's own list (a call without `user`). */
 type Pages = string[][] | Error;
 
 /** A `users` API that must never be asked. */
@@ -36,15 +38,18 @@ function fakeClient(answers: Record<string, Info | Error | null>, members: Recor
     if (a === undefined) throw new Error(`unexpected lookup of ${channel}`);
     return { channel: a };
   });
-  const conversations = vi.fn(async ({ user, cursor, limit }: { user: string; cursor?: string; limit: number }) => {
-    const pages = members[user];
+  const conversations = vi.fn(async ({ user, cursor, limit }: { user?: string; cursor?: string; limit: number }) => {
+    const pages = members[user ?? "*"];
     if (pages instanceof Error) throw pages;
-    if (pages === undefined) throw new Error(`unexpected users.conversations for ${user}`);
+    if (pages === undefined) throw new Error(`unexpected users.conversations for ${user ?? "the bot"}`);
     const at = cursor ? Number(cursor) : 0;
     const page = pages[at] ?? [];
     expect(page.length).toBeLessThanOrEqual(limit);
     const next = at + 1 < pages.length ? String(at + 1) : "";
-    return { channels: page.map((id) => ({ id })), response_metadata: { next_cursor: next } };
+    return {
+      channels: page.map((entry) => ({ id: entry.replace(/!$/, ""), is_private: entry.endsWith("!") })),
+      response_metadata: { next_cursor: next },
+    };
   });
   const client: SlackDirectoryClient = { conversations: { info }, users: { conversations } };
   return { client, info, conversations };
@@ -250,6 +255,89 @@ describe("SlackChannelDirectory.channelsOf — a person's channels from users.co
     await dir.channelsOf("slack:UP4"); // evicts UP0
     await dir.channelsOf("slack:UP0");
     expect(conversations).toHaveBeenCalledTimes(6);
+  });
+});
+
+describe("SlackChannelDirectory.channels — the bot's own channels, with their visibility", () => {
+  it("lists every channel the bot is in as slack: ids with public or private from the listing, paged by cursor; cached for the TTL and again after; forgetAll forgets it", async () => {
+    const { client, conversations } = fakeClient({}, { "*": [["CPUB1", "CPRIV1!"], ["GPRIV2!"]] });
+    const c = clock();
+    const dir = new SlackChannelDirectory(client, { now: c.now, ttlMs: 1000 });
+    expect(await dir.channels()).toEqual([
+      { id: "slack:CPUB1", visibility: "public" },
+      { id: "slack:CPRIV1", visibility: "private" },
+      { id: "slack:GPRIV2", visibility: "private" },
+    ]);
+    expect(conversations).toHaveBeenCalledTimes(2);
+    expect(conversations.mock.calls[0]?.[0]).not.toHaveProperty("user"); // the bot's own list
+    await dir.channels();
+    expect(conversations).toHaveBeenCalledTimes(2); // cached
+    dir.forgetAll();
+    await dir.channels();
+    expect(conversations).toHaveBeenCalledTimes(4); // forgotten: listed again
+    c.advance(1001);
+    await dir.channels();
+    expect(conversations).toHaveBeenCalledTimes(6); // the TTL passed
+  });
+
+  it("concurrent first asks share one listing; a failure is unknown for the TTL with one warning; past the page cap is unknown", async () => {
+    let release!: (v: { channels: { id: string }[] }) => void;
+    const slow = vi.fn(() => new Promise<{ channels: { id: string }[] }>((resolve) => (release = resolve)));
+    const shared = new SlackChannelDirectory(
+      { conversations: { info: async () => ({}) }, users: { conversations: slow } },
+      { now: clock().now },
+    );
+    const a = shared.channels();
+    const b = shared.channels();
+    release({ channels: [{ id: "C1" }] });
+    expect(await a).toEqual([{ id: "slack:C1", visibility: "public" }]);
+    expect(await b).toEqual([{ id: "slack:C1", visibility: "public" }]);
+    expect(slow).toHaveBeenCalledTimes(1);
+
+    const warnings: string[] = [];
+    const { client, conversations } = fakeClient({}, { "*": new Error("missing_scope") });
+    const failing = new SlackChannelDirectory(client, { now: clock().now, warn: (m) => warnings.push(m) });
+    expect(await failing.channels()).toBe("unknown");
+    expect(await failing.channels()).toBe("unknown");
+    expect(conversations).toHaveBeenCalledTimes(1);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("missing_scope");
+
+    const endless = Array.from({ length: 11 }, (_, i) => [`C${i}`]);
+    const capped = new SlackChannelDirectory(fakeClient({}, { "*": endless }).client, {
+      now: clock().now,
+      warn: () => {},
+    });
+    expect(await capped.channels()).toBe("unknown");
+  });
+});
+
+describe("SlackChannelDirectory — a forget during a lookup wins", () => {
+  it("a forgetAll or forgetMember while a listing is in flight lets the flight answer its caller but caches nothing, so the next ask goes to Slack", async () => {
+    let releaseOwn!: (v: { channels: { id: string }[] }) => void;
+    let releaseMember!: (v: { channels: { id: string }[] }) => void;
+    const conversations = vi.fn(
+      ({ user }: { user?: string }) =>
+        new Promise<{ channels: { id: string }[] }>((resolve) => {
+          if (user === undefined) releaseOwn = resolve;
+          else releaseMember = resolve;
+        }),
+    );
+    const dir = new SlackChannelDirectory(
+      { conversations: { info: async () => ({}) }, users: { conversations } },
+      { now: clock().now },
+    );
+    const own = dir.channels();
+    const member = dir.channelsOf("slack:UFLY");
+    dir.forgetAll(); // the bot's reach moved while both listings were in flight
+    releaseOwn({ channels: [{ id: "COLD" }] });
+    releaseMember({ channels: [{ id: "COLD" }] });
+    expect(await own).toEqual([{ id: "slack:COLD", visibility: "public" }]); // the caller still gets an answer
+    expect(await member).toEqual(new Set(["slack:COLD"]));
+    expect(conversations).toHaveBeenCalledTimes(2);
+    void dir.channels(); // not cached: Slack is asked again
+    void dir.channelsOf("slack:UFLY");
+    expect(conversations).toHaveBeenCalledTimes(4);
   });
 });
 

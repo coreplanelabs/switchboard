@@ -1912,6 +1912,16 @@ const SETTINGS_INDEX: NonNullable<SettingsSeed["channels"]>["index"] = [
   { channelId: "slack:CACME0002", channelName: "acme-ops", settings: ["models"], source: "config" },
 ];
 
+/** The channels the fixture's viewer may pick (`config channels`): the two configured ones and one more. */
+const SETTINGS_PICKABLE: NonNullable<NonNullable<SettingsSeed["channels"]>["pickable"]> = {
+  listed: true,
+  channels: [
+    { channelId: "slack:CACME0002", channelName: "acme-ops", visibility: "public" },
+    { channelId: "slack:CACME0003", channelName: "design", visibility: "private" },
+    { channelId: SETTINGS_CHANNEL, channelName: "payments", visibility: "public" },
+  ],
+};
+
 const SETTINGS_SCOPE: NonNullable<NonNullable<SettingsSeed["channels"]>["selected"]>["scope"] = {
   effective: {
     agent: "review",
@@ -1961,6 +1971,7 @@ function settingsSeed(pathname: string, search: string): SettingsSeed | null {
       mcps: {
         channel,
         ...(channel === SETTINGS_CHANNEL ? { channelName: "payments" } : {}),
+        pickable: SETTINGS_PICKABLE,
         allTiers: true,
         servers: SETTINGS_SERVERS,
         canWrite: { org: true, channel: true },
@@ -1986,6 +1997,7 @@ function settingsSeed(pathname: string, search: string): SettingsSeed | null {
         user: { effort: "medium", boundary: { maxMinutes: 30 } },
       },
       index: SETTINGS_INDEX,
+      pickable: SETTINGS_PICKABLE,
       ...(selected
         ? {
             selected: {

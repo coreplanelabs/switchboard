@@ -196,4 +196,14 @@ export interface ChannelDirectory {
   /** Every channel the actor is in, platform-namespaced — what the resolver puts on
    *  `Actor.memberOf`; `unknown` when the adapter cannot say (fail-closed). */
   channelsOf(actorId: string): Promise<ReadonlySet<string> | "unknown">;
+  /** Every channel the bot itself is in, with its visibility — the channels a person can
+   *  pick a scope or an MCP tier for (settings-page.md item 7); `unknown` when the adapter
+   *  cannot list them, and the surfaces fall back to the channels that already carry a scope. */
+  channels(): Promise<readonly ListedChannel[] | "unknown">;
+}
+
+/** One channel the bot is in, as the directory lists it. */
+export interface ListedChannel {
+  id: string;
+  visibility: ChannelVisibility;
 }

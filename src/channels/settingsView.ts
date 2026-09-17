@@ -1,5 +1,6 @@
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import type { ChannelScopeIndexRow, ConfigDescription, Scope } from "../config.js";
+import type { PickableChannel } from "../core/commands/config.js";
 import { authorize } from "../core/authz/authorize.js";
 import type { Capabilities } from "../core/capabilities.js";
 import type { Caller, CommandInvoker, InvokeResult } from "../core/commandRegistry.js";
@@ -145,6 +146,13 @@ export function createSettingsViewHandler(
    *  config they may read — the same per-channel question `config overrides` answers — the
    *  honest cut until membership exists. */
   const names = deps.names ?? NO_NAMES;
+  /** The channels the viewer may pick (`config channels`); a refusal or failure offers nothing rather than failing the tab. */
+  async function pickableFor(caller: Caller): Promise<{ channels: PickableChannel[]; listed: boolean } | undefined> {
+    const answer = await deps.commands.invoke("config.channels", {}, caller);
+    if (!answer.ok) return undefined;
+    const value = answer.value as unknown as { channels: PickableChannel[]; listed: boolean };
+    return { channels: value.channels, listed: value.listed };
+  }
   /** One channel's name, when the directory knows it — never a throw, never a hash. */
   const channelNameOf = (id: string): Promise<string | undefined> => names.channel(id).catch(() => undefined);
 
@@ -154,17 +162,19 @@ export function createSettingsViewHandler(
       channel: channel !== undefined && canWrite(caller, "mcp:write", "channel", channel),
     };
     // The channel's name is asked beside the list, never before it: one round trip, not two.
-    const [channelName, listed] = await Promise.all([
+    const [channelName, listed, pickable] = await Promise.all([
       channel ? channelNameOf(channel) : Promise.resolve(undefined),
       deps.commands.invoke(
         "mcp.list",
         write.org ? { options: { all: true } } : channel ? { options: { channel } } : {},
         caller,
       ),
+      pickableFor(caller),
     ]);
-    const named = (rest: Omit<NonNullable<SettingsSeed["mcps"]>, "channel" | "channelName">) => ({
+    const named = (rest: Omit<NonNullable<SettingsSeed["mcps"]>, "channel" | "channelName" | "pickable">) => ({
       ...(channel ? { channel } : {}),
       ...(channelName ? { channelName } : {}),
+      ...(pickable ? { pickable } : {}),
       ...rest,
     });
     if (!listed.ok) return named({ servers: [], unavailable: failureText(listed), canWrite: write });
@@ -185,11 +195,13 @@ export function createSettingsViewHandler(
     caller: Caller,
     channel: string | undefined,
   ): Promise<NonNullable<SettingsSeed["channels"]>> {
-    const [indexed, mine, shown] = await Promise.all([
+    const [indexed, mine, shown, pickable] = await Promise.all([
       deps.commands.invoke("config.overrides", {}, caller),
       // The viewer's own settings, always: a settings page never has "no data" (record 0041).
       deps.commands.invoke("config.show", {}, caller),
       channel ? deps.commands.invoke("config.show", { options: { channel } }, caller) : Promise.resolve(undefined),
+      // The channels the viewer may open, by name (item 7): the picker's options.
+      pickableFor(caller),
     ]);
     const rows = indexed.ok
       ? (((indexed.value as { channels?: ChannelScopeIndexRow[] }).channels ?? []) as ChannelScopeIndexRow[])
@@ -205,6 +217,7 @@ export function createSettingsViewHandler(
       : { index: [], unavailable: failureText(indexed) };
     if (mine.ok) out.viewer = viewerSettingsView(mine.value as unknown as ConfigDescription);
     else out.viewerUnavailable = failureText(mine);
+    if (pickable) out.pickable = pickable;
     if (channel && shown) {
       const write = canWrite(caller, "config:write", "channel", channel);
       out.selected = withName(

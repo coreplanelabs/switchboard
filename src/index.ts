@@ -546,6 +546,8 @@ export async function runBot(): Promise<void> {
     memory: () => memory,
     // `config show --channel`: the same directory the run stamp reads, wired below once the Slack adapter is up.
     channelDirectory: () => deps.channelDirectory,
+    // `config channels`: the channels by name, through the same directory the settings page reads.
+    names: () => names,
     // `status show`: the same facts /healthz serves, read when asked (inFlight and
     // draining are defined below and change over the process's life).
     status: () => ({
