@@ -11,6 +11,8 @@ import {
   RUNAWAY_TURNS_PER_MINUTE,
   runawayTurnCap,
   FENCED_CONTENT_RULE,
+  statusCardRule,
+  type AgentDef,
 } from "./registry.js";
 
 // Features: docs/reference/specs/agent-general.md, docs/reference/specs/agent-review.md,
@@ -1043,5 +1045,41 @@ describe("seeded prompt variants", () => {
     expect(AGENTS.review.seededSystem!).toContain("gh pr view");
     expect(AGENTS.review.seededSystem!).toContain("git diff origin/<base>...HEAD");
     expect(AGENTS.review.seededSystem!).toContain("REVIEW THE PR'S OWN HEAD");
+  });
+});
+
+// docs/reference/specs/run-visibility.md item 2: the status-card rule is one
+// sentence, carried by every preset that runs commands, so a checklist can
+// never lawfully show ✓ on an item whose command the card shows still running.
+describe("the status-card rule is one sentence for every tool-running preset", () => {
+  const prompts = (a: AgentDef): string[] =>
+    Object.values(a).filter((v): v is string => typeof v === "string" && v.includes("update_status"));
+
+  it("every prompt naming update_status — the conductor aside, whose items are children — says ✱ on the first command, ✓ only after the result is read, never in the same turn", () => {
+    const presets = Object.entries(AGENTS).filter(([name]) => name !== "conductor");
+    const carrying = presets.filter(([, a]) => prompts(a).length > 0);
+    expect(carrying.map(([name]) => name).sort()).toEqual(["coding", "explore", "general", "research", "review"]);
+    for (const [, a] of carrying) {
+      for (const sys of prompts(a)) {
+        expect(sys).toContain("Mark an item ✱ when you issue the first command that does it");
+        expect(sys).toContain("✓ only after you have read the result that proves it happened");
+        expect(sys).toContain("never in the same turn as the command");
+        expect(sys).toContain("reads as a lie");
+        expect(sys).toContain("never commands");
+      }
+    }
+  });
+
+  it("the conductor's rule is the same fact-not-intention rule in its own vocabulary: a child is ✓ only once await_runs or get_run_status said so", () => {
+    expect(AGENTS.conductor.system).toMatch(/✓ finished — only once await_runs or get_run_status said so/);
+  });
+
+  it("the rule keeps each preset's own outcome examples, so the phrasing guides the plan without changing the rule", () => {
+    expect(statusCardRule('"A", "B"')).toContain('Items are short outcomes ("A", "B"), never commands.');
+    expect(AGENTS.explore.system).toContain('"Clone and install", "Time the full suite"');
+    expect(AGENTS.coding.system).toContain('"Clone repo and read the diff", "Run the test suite"');
+    expect(AGENTS.coding.residentSystem ?? AGENTS.coding.seededSystem ?? "").toContain(
+      '"Implement the fix", "Run the test suite"',
+    );
   });
 });

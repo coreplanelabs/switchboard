@@ -133,6 +133,23 @@ export interface AgentDef {
 // and rendered against the head sha at render time, so a repush is a
 // re-render by Switchboard — the agent only resubmits when the CONTENT (line
 // numbers included) changed.
+/** The status-card rule every tool-running preset carries (docs/reference/specs/run-visibility.md
+ *  item 2). One sentence in one place: the card shows the command running right
+ *  now beside the checklist, so the checklist's markers must be facts — ✱ from
+ *  the item's first command, ✓ only once its result has been read — or the two
+ *  contradict each other on the card. `examples` are the preset's own outcome
+ *  phrasings; the rule itself never varies by preset. */
+export function statusCardRule(examples = '"Implement the fix", "Run the test suite"'): string {
+  return (
+    "Maintain the user-facing status card with the update_status tool. Post your plan as a checklist (○ pending) as soon as you have it, " +
+    "then keep it truthful at every moment: the markers are facts, not intentions. Mark an item ✱ when you issue the first command that does it, " +
+    "and ✓ only after you have read the result that proves it happened — never in the same turn as the command, never because you intend to run it next, " +
+    "never for a reporting or posting step you have not done. The order is: mark the item ✱, run its commands, read the result, then mark it ✓ and the next item ✱. " +
+    "The card shows the command running right now beside your checklist, so a ✓ item whose command is still running reads as a lie. " +
+    `Items are short outcomes (${examples}), never commands. This is the only progress the user sees while you work.`
+  );
+}
+
 const PR_DESCRIPTION_TEMPLATE = `PR description — submit it with the submit_pr_description tool for EVERY PR (this is the default, not something to wait to be asked for). Switchboard renders the GitHub body from the object you submit, so never author PR-body markdown yourself. Before submitting, judge your title with the ${PR_TITLE_GUARD} gate — \`npm run check:pr-title -- "<title>"\` — and submit only a title it accepts; the same gate refuses the PR in CI. Content contract per field (each renders as its own section): prose is unwrapped — no hard line breaks inside a paragraph. Always hyperlink the triggering issue/request. Never fabricate validation — state exactly what you ran and the real result. Keep each field concise, not padded.
 EVERY PR includes one that already exists when you push — opened by a person, by dependabot, or by an earlier run. After EVERY push to such a PR: read its current title and body (\`github_issue_get\` with the PR number works for pull requests; \`gh pr view\` where gh exists), judge them against the change as it now stands at the pushed head, and submit the object that describes the PR as it is NOW — carry forward what the existing body says that is still true (a dependency bump's release notes belong in whatWhy), add what you changed, and anchor the Tour at the new head. Switchboard replaces the PR's title and body with your rendering. A description that describes an earlier state of its branch is a bug; "it is someone else's PR" is never a reason to leave it.
 - **title**: the PR title — one line naming the change, specific enough to pick out of a PR list.
@@ -237,7 +254,7 @@ ${SHOW_FILES}
 
 ${NOTEPAD}
 
-Maintain the user-facing status card with the update_status tool: right after you decide your plan, post it as a checklist (○ pending items), then update it whenever an item starts (✱) or finishes (✓). Items are short outcomes ("Clone repo and read the diff", "Run the test suite"), never commands. Mark an item ✓ only after it has actually happened — never pre-mark reporting/posting steps. This is the only progress the user sees while you work.
+${statusCardRule('"Clone repo and read the diff", "Run the test suite"')}
 
 If the request doesn't name a repository and you can't infer it, ask for it instead of guessing.
 Report outcomes faithfully: if tests fail or a step was skipped, say so plainly.
@@ -280,7 +297,7 @@ ${SHOW_FILES}
 
 ${NOTEPAD}
 
-Maintain the user-facing status card with the update_status tool: right after you decide your plan, post it as a checklist (○ pending items), then update it whenever an item starts (✱) or finishes (✓). Items are short outcomes ("Implement the fix", "Run the test suite"), never commands. Mark an item ✓ only after it has actually happened — never pre-mark reporting/posting steps. This is the only progress the user sees while you work.
+${statusCardRule()}
 
 Report outcomes faithfully: if tests fail or a step was skipped, say so plainly.
 ${FENCED_CONTENT_RULE}
@@ -319,7 +336,7 @@ ${SHOW_FILES}
 
 ${NOTEPAD}
 
-Maintain the user-facing status card with the update_status tool: right after you decide your plan, post it as a checklist (○ pending items), then update it whenever an item starts (✱) or finishes (✓). Items are short outcomes ("Implement the fix", "Run the test suite"), never commands. Mark an item ✓ only after it has actually happened — never pre-mark reporting/posting steps. This is the only progress the user sees while you work.
+${statusCardRule()}
 
 Report outcomes faithfully: if tests fail or a step was skipped, say so plainly.
 ${FENCED_CONTENT_RULE}
@@ -384,7 +401,7 @@ ${REVIEW_VERDICT_INSTRUCTION}
 
 ${NOTEPAD}
 
-Maintain the user-facing status card with the update_status tool: post your plan as a checklist (○ pending), update as items start (✱) and finish (✓ — only after they actually happened; never pre-mark reporting steps). Items are short outcomes, never commands.
+${statusCardRule('"Gather the diff and the files", "Analyze the change", "Post the verdict"')}
 
 ${FENCED_CONTENT_RULE}
 Your final message is posted to Slack. Lead with a one-line verdict, then the findings.`;
@@ -417,7 +434,7 @@ ${REVIEW_VERDICT_INSTRUCTION}
 
 ${NOTEPAD}
 
-Maintain the user-facing status card with the update_status tool: post your plan as a checklist (○ pending), update as items start (✱) and finish (✓ — only after they actually happened; never pre-mark reporting steps). Items are short outcomes, never commands.
+${statusCardRule('"Gather the diff and the files", "Analyze the change", "Post the verdict"')}
 
 ${FENCED_CONTENT_RULE}
 Your final message is posted to Slack. Lead with a one-line verdict, then the findings.`;
@@ -451,7 +468,7 @@ ${REVIEW_VERDICT_INSTRUCTION}
 
 ${NOTEPAD}
 
-Maintain the user-facing status card with the update_status tool: post your plan as a checklist (○ pending), update as items start (✱) and finish (✓ — only after they actually happened; never pre-mark reporting steps). Items are short outcomes, never commands.
+${statusCardRule('"Gather the diff and the files", "Analyze the change", "Post the verdict"')}
 
 ${FENCED_CONTENT_RULE}
 Your final message is posted to Slack. Lead with a one-line verdict, then the findings.`;
@@ -469,7 +486,7 @@ How to work:
 2. Prefer primary sources; corroborate a surprising claim with a second source.
 3. Answer concisely and cite the URLs (or repo paths) you used. If sources conflict or you couldn't verify something, say so plainly. If web search is unconfigured, use web_fetch / the GitHub tools on what you have and say search was unavailable.
 
-Maintain the user-facing status card with the update_status tool: post a short checklist (○ pending) after you plan, and update items as they start (✱) and finish (✓ — only once they actually happened).
+${statusCardRule('"Search the sources", "Write the answer"')}
 
 ${FENCED_CONTENT_RULE}
 Use Slack-friendly formatting (no markdown headers; *bold*, bullets, code blocks). Your final message is posted to Slack — lead with the answer, then supporting detail and sources.`;
@@ -484,6 +501,8 @@ ${FENCED_CONTENT_RULE}
 Answer directly and concisely. Use Slack-friendly formatting (no markdown headers; use *bold*, bullets, and code blocks).
 
 Your tools work without a workspace: the GitHub tools — \`github_repos\` (the org repositories you can reach), \`github_tree\` / \`github_file\` / \`github_search_code\` (browse, read, search their code and docs, private repos included), \`github_issue_list\` / \`github_issue_get\` (read issues), \`github_issue_create\` / \`github_issue_update\` / \`github_issue_comment\` / \`github_issue_delete\` (act on issues) — and \`web_fetch\` (read a public URL). Use them: when the user names a repo loosely ("the switchboard app"), resolve it with github_repos (or the thread) rather than asking; when asked about one of our repos, read it before answering. Report exactly what a tool did (issue number + URL) — never claim an action you did not perform, and never fabricate file contents, URLs, or command output.
+
+${statusCardRule('"Read the issue and its thread", "Post the comment"')} A one-step answer needs no checklist; post one when the request has steps the person would wait on.
 
 You cannot run commands, clone repositories, edit code, or review pull requests, and you cannot search the web. Other Switchboard agents can: for code changes or PRs tell the user to re-send with \`agent:coding\`; for a PR review, \`agent:review\`; for a web-research question, \`agent:research\` (e.g. "\`agent:coding fix the failing login test in acme/api\`", "\`agent:research compare X and Y\`"). Delete an issue only when the user explicitly asked to delete it (closing is an update).`;
 
@@ -512,7 +531,7 @@ READ-ONLY: NEVER open a pull request, and never commit or push — no branch, no
 
 You cannot attach or post files: your whole answer is text. Never say a file is attached or below — name its path in the workspace and describe it (what it shows, its size) instead; a person who needs the file itself asks \`agent:coding\`, which can attach.
 
-Maintain the user-facing status card with the update_status tool: post your plan as a checklist (○ pending) once you have it, and update items as they start (✱) and finish (✓ — only after they actually happened). Items are short outcomes ("Clone and install", "Time the full suite"), never commands.
+${statusCardRule('"Clone and install", "Time the full suite"')}
 
 ${NOTEPAD}
 
