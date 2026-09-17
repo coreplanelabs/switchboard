@@ -600,8 +600,22 @@ export type UnitEnding =
 /** What a transition tells the driver beyond the next action: a round boundary
  *  the card draws (`shipRoundHeader`) and the run stream records, and the end. */
 export type CoordinatorNote =
-  | { type: "round"; index: number; agent: ChildPreset; outcome: ShipRoundOutcome }
+  | {
+      type: "round";
+      index: number;
+      agent: ChildPreset;
+      outcome: ShipRoundOutcome;
+      /** The severity gate fired on this approve (agent-ship item 9): the
+       *  findings at or above the level in force, as `id (severity)`. The
+       *  child's own verdict parser holds an approve to the same level
+       *  (agent-review item 5a), so this should never be set — when it is, the
+       *  verdict was parsed at another level (a lost directive, an older
+       *  record, a harness around `submit_verdict`) and the row, the card and
+       *  the log say so instead of routing silently into the findings step. */
+      gate?: { level: AddressSeverity; findings: string[] };
+    }
   | { type: "ended"; ending: UnitEnding };
+type RoundNote = Extract<CoordinatorNote, { type: "round" }>;
 
 /** How the pipeline's budget went, in ms: the coding rounds' (round 0 and the
  *  findings steps), the review rounds', and everything else (branching,
@@ -939,7 +953,10 @@ function end(s: UnitPipelineState, ending: UnitEnding, notes: CoordinatorNote[] 
   return { state: { ...s, phase: ENDED, ending }, notes: [...notes, { type: "ended", ending }] };
 }
 
-const roundNote = (round: RoundRef, outcome: ShipRoundOutcome): CoordinatorNote => ({
+/** A gated finding as the gate note names it: `F1 (minor)`. */
+const gateLabel = (f: Finding): string => `${f.id} (${f.severity})`;
+
+const roundNote = (round: RoundRef, outcome: ShipRoundOutcome): RoundNote => ({
   type: "round",
   index: round.index,
   agent: presetOf(round.kind),
@@ -1114,6 +1131,10 @@ function settleReview(
     const level = next.input.addressSeverity ?? DEFAULT_ADDRESS_SEVERITY;
     const gated = findingsAtOrAbove(verdict.findings, level);
     if (gated.length > 0) {
+      // The gate fired — which the child's parser should have made impossible
+      // (agent-review item 5a): the round note carries what it caught, so the
+      // mismatch is seen and not just routed around.
+      notes[0] = { ...roundNote(round, verdict.verdict), gate: { level, findings: gated.map(gateLabel) } };
       if (mode !== undefined)
         return end(
           next,

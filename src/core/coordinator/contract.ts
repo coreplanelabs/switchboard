@@ -9,7 +9,7 @@
 // routes decide on.
 //
 import type { Grant, GrantSource } from "../budgets.js";
-import type { AddressSeverity, AddressSeveritySource } from "../ship/coordinator.js";
+import { isAddressSeverity, type AddressSeverity, type AddressSeveritySource } from "../ship/coordinator.js";
 
 // A coordinator is a Workflow instance in the shim Worker whose children are
 // ordinary `dispatch()` runs as the requesting user. It holds no credential of
@@ -215,6 +215,12 @@ export interface UnitSegment {
  *  reaches it — its thread, its pull request, the round boundaries the card
  *  drew and how it ended. One row a person can read for "what happened to this
  *  unit". */
+/** What the severity gate caught on a round: the level in force and the gated findings as `id (severity)`. */
+export interface RoundGate {
+  level: AddressSeverity;
+  findings: string[];
+}
+
 export interface CoordinatorUnit {
   instanceId: string;
   /** `U<n>` as the plan spells it. */
@@ -251,8 +257,12 @@ export interface CoordinatorUnit {
    *  renews the same segment twice. `from` is the sha the segment continues
    *  from, `runId` the coding run whose write-up briefs it. */
   segments?: UnitSegment[];
-  /** The round boundaries the coordinator reported, oldest first (the `ship_round` vocabulary). */
-  rounds: Array<{ index: number; agent: string; outcome: string; at: number }>;
+  /** The round boundaries the coordinator reported, oldest first (the `ship_round`
+   *  vocabulary). `gate` rides an approve the machine's severity check caught
+   *  carrying a finding at or above the level in force ([agent-ship](../../../docs/reference/specs/agent-ship.md)
+   *  item 9) — a mismatch to be seen, since the child's parser holds an approve
+   *  to the same level. */
+  rounds: Array<{ index: number; agent: string; outcome: string; at: number; gate?: RoundGate }>;
   /** How the unit ended: the ending's kind and the thread's report, when it has. */
   ending?: { kind: string; report: string; at: number };
   startedAt?: number;
@@ -303,6 +313,13 @@ export function isCoordinatorInstance(v: unknown): v is CoordinatorInstance {
 }
 
 /** Structural check on a unit row from outside the process. */
+/** A round's gate: a level on the ladder and string findings. */
+const isRoundGate = (v: unknown): boolean =>
+  isObject(v) &&
+  isAddressSeverity(v.level) &&
+  Array.isArray(v.findings) &&
+  v.findings.every((f) => typeof f === "string");
+
 const isSegment = (v: unknown): boolean =>
   isObject(v) &&
   typeof v.index === "number" &&
@@ -328,7 +345,15 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   if (
     !Array.isArray(r.rounds) ||
     r.rounds.length > MAX_ROUNDS ||
-    !r.rounds.every((x) => isObject(x) && isFinite(x.index) && isText(x.agent) && isText(x.outcome) && isFinite(x.at))
+    !r.rounds.every(
+      (x) =>
+        isObject(x) &&
+        isFinite(x.index) &&
+        isText(x.agent) &&
+        isText(x.outcome) &&
+        isFinite(x.at) &&
+        (x.gate === undefined || isRoundGate(x.gate)),
+    )
   )
     return false;
   if (

@@ -1804,6 +1804,20 @@ describe("the severity gate — an approve's findings held to the level in force
       T0 + 20 * MIN,
     );
     expect(a).toMatchObject({ type: "spawn", round: { index: 1, kind: "findings" }, preset: "coding" });
+    // The gate firing is a detector, not a routine branch: the child's own
+    // verdict parser holds an approve to the same level (agent-review item 5a),
+    // so an approve that still carries a gated finding was parsed at another
+    // level — the round note says what it caught, for the row, the card and
+    // the run stream.
+    expect(d.notes.filter((n) => n.type === "round" && n.outcome === "approve")).toEqual([
+      {
+        type: "round",
+        index: 1,
+        agent: "review",
+        outcome: "approve",
+        gate: { level: "minor", findings: ["F1 (minor)"] },
+      },
+    ]);
   });
 
   it("an approve whose findings all sit below the level ends merge_ready, and the report names the level, its source and the skipped findings", () => {
@@ -1828,6 +1842,8 @@ describe("the severity gate — an approve's findings held to the level in force
     );
     expect(d.action).toMatchObject({ type: "end", ending: { kind: "merge_ready" } });
     const report = renderUnitReport(d.state);
+    // Below the level nothing fired: the approve's round note carries no gate.
+    expect(d.notes.find((n) => n.type === "round" && n.outcome === "approve")).not.toHaveProperty("gate");
     expect(report).toContain("Severity addressed: major and above (set by user).");
     expect(report).toContain("Findings below major, left as-is: F1 (minor) — naming; F2 (nit) — t");
     // The grant, as the instance carries it: absent reads as the org's zero.
