@@ -1,6 +1,6 @@
 ---
 title: The PR body is a fixed-size map for the reader, and everything for agents sits below a fold
-status: proposed
+status: accepted
 date: 2026-09-17
 pattern: The human part of a PR description is a capped map (a TL;DR, the why, at most seven linked pointers, the feedback wanted, the risk, one line of verification) whose size is enforced by the schema and does not grow with the diff; pointers are inline links, never embedded code; decisions, proofs and notes for agents render collapsed below the map; anchors stay mechanical and render at the head
 ---
@@ -10,6 +10,8 @@ pattern: The human part of a PR description is a capped map (a TL;DR, the why, a
 **The ask.** Decide (the maintainer, before the code PR is written): replace the Tour with a capped **map** as the PR description contract, across the typed object, its renderer and inverse parser, the tool schemas, the coding prompt, the first-party skill and the specs; rename the skill from `pr-tour` to `pr-description` so it owns the whole body; keep the mechanical anchor rules. Reader: an engineer who knows the coding agent's PR post-step and has not read the PR bodies it produces. Frame assumed from the maintainer's "totally useless for humans, this needs to be rethought from the ground up" and "being able to jump to the code based on some text is useful, but look how long these tours are".
 
 Success criteria: (1) the part of a body a person reads is the same size for a 1-file and an 80-file PR and fits on one screen; (2) a reader can jump from a sentence to the code it describes, at the pushed head, for the main files of the change; (3) nothing in the body is a copy of what the diff already shows; (4) the reviewer agent, the run page and the record keep everything they read today; (5) a body written by a person, or by the previous contract, still parses without a throw.
+
+**Accepted 2026-09-17**, built and live: the contract shipped in one pull request (#1518, release 1.243.0) and every criterion below is bound; the two `[agent]` rows are receipted on that pull request from the first two coding runs under the new shape, where the cap refused a 202-character feedback line once and the map re-rendered at the new head after a follow-up push. The caps stay revisable on the evidence named under What would change our mind; the size stamp stays open.
 
 ## TL;DR
 
