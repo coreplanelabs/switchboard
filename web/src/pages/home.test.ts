@@ -1,8 +1,10 @@
+import { enableAutoUnmount } from "@vue/test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { nextTick } from "vue";
 import type { HomeSeed, HomeTurnSeed } from "@core/channels/webSeed.js";
 import HomePage from "./HomePage.vue";
 import AppShell from "../components/AppShell.vue";
+import ThreadTip from "../components/home/ThreadTip.vue";
 import { browser } from "../lib/browser";
 import { fakeEventSourceFactory } from "../testing/fakeEventSource";
 import { mountApp } from "../testing/mount";
@@ -40,10 +42,19 @@ const seed = (over: Partial<HomeSeed> = {}): HomeSeed => ({
   conversation: "conv-1",
   turns: [],
   conversations: [
-    { id: "conv-1", title: "review PR 1391", lastAt: NOW - 466_000, runs: 1, live: false, surface: "web" },
+    {
+      id: "conv-1",
+      title: "review PR 1391",
+      excerpt: "review PR 1391",
+      lastAt: NOW - 466_000,
+      runs: 1,
+      live: false,
+      surface: "web",
+    },
     {
       id: "conv-2",
       title: "what changed in the last deploy?",
+      excerpt: "what changed in the last deploy?",
       lastAt: NOW - 86_400_000,
       runs: 2,
       live: true,
@@ -52,6 +63,7 @@ const seed = (over: Partial<HomeSeed> = {}): HomeSeed => ({
     {
       id: "slack:C1:1712.34",
       title: "bump the SDK",
+      excerpt: "bump the SDK",
       lastAt: NOW - 30 * 86_400_000,
       runs: 1,
       live: false,
@@ -99,9 +111,14 @@ async function send(wrapper: ReturnType<typeof mountApp>, text: string) {
   await flush();
 }
 
+// Every page is unmounted after its test: a page left on the body keeps its
+// window listeners, and a ⌘K meant for one page would land in another's rail.
+enableAutoUnmount(afterEach);
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  // The rail's remembered width and state never leak between tests.
+  localStorage.clear();
 });
 
 describe("HomePage — the empty state (rules 6, 7)", () => {
@@ -162,12 +179,155 @@ describe("HomePage — the empty state (rules 6, 7)", () => {
     expect(rows[0].attributes("aria-current")).toBe("page");
     expect(rows[0].find(".bar").exists()).toBe(true);
     expect(rows[1].find(".dot").exists()).toBe(true);
-    // A thread from another channel wears its surface's word label; a web conversation wears none.
-    expect(rows.map((r) => r.find(".surface").exists())).toEqual([false, false, true]);
-    expect(rows[2].find(".surface").text()).toBe("slack");
+    // The row is the title and a short distance; the channel, the date and the
+    // count moved into the row's tooltip (ThreadTip), so no row wears a tag.
+    expect(rows.map((r) => r.find(".surface").exists())).toEqual([false, false, false]);
+    expect(rows.map((r) => r.find(".when").text())).toEqual(["7m", "1d", "Oct 15"]);
+    expect(rows.every((r) => r.attributes("data-state") === "closed")).toBe(true);
+    expect(rows.every((r) => r.attributes("title") === undefined)).toBe(true);
     expect(wrapper.find("aside [data-testid=all-runs]").attributes("href")).toBe("/runs");
     expect(wrapper.find("aside p.retention").text()).toMatch(/30 days/);
     expect(wrapper.find("aside p.label").text()).toBe("Recent");
+  });
+});
+
+describe("ThreadTip — a row's tooltip (item 7)", () => {
+  it("says the full first line, the date and time, the channel, the count and whether a run is live", () => {
+    const row = seed().conversations[2];
+    const tip = mountApp(ThreadTip, {
+      props: {
+        row: {
+          ...row,
+          excerpt: "bump the SDK to 4.2 across every workspace before the release train leaves",
+          live: true,
+        },
+        now: NOW,
+      },
+    });
+    expect(tip.find(".tip-title").text()).toBe(
+      "bump the SDK to 4.2 across every workspace before the release train leaves",
+    );
+    expect(tip.find(".tip-when").text()).toMatch(/^Oct 15, \d{1,2}:\d{2} [AP]M$/);
+    expect(tip.find(".tip-source").text()).toBe("Slack · read-only here");
+    expect(tip.find(".tip-runs").text()).toBe("1 run");
+    expect(tip.find(".tip-live").exists()).toBe(true);
+    const web = mountApp(ThreadTip, { props: { row: seed().conversations[0], now: NOW } });
+    expect(web.find(".tip-source").text()).toBe("Web");
+    expect(web.find(".tip-live").exists()).toBe(false);
+  });
+});
+
+describe("HomePage — the rail's width and collapse (item 7)", () => {
+  const handle = (wrapper: ReturnType<typeof mountApp>) => wrapper.find("aside [data-testid=rail-handle]");
+  const width = (wrapper: ReturnType<typeof mountApp>) =>
+    (wrapper.find("div.home").element as HTMLElement).style.getPropertyValue("--rail-w");
+
+  it("opens at the default width, and a drag on the handle follows the pointer within the band and is remembered on release", async () => {
+    const write = vi.spyOn(browser, "writePref").mockImplementation(() => {});
+    const wrapper = mountApp(HomePage, { seed: seed() });
+    expect(width(wrapper)).toBe("288px");
+    const h = handle(wrapper);
+    expect(h.attributes("role")).toBe("separator");
+    expect(h.attributes("aria-orientation")).toBe("vertical");
+    expect(h.attributes("aria-valuenow")).toBe("288");
+    await h.trigger("pointerdown", { clientX: 288, pointerId: 1, button: 0 });
+    window.dispatchEvent(new MouseEvent("pointermove", { clientX: 350 }));
+    await nextTick();
+    expect(width(wrapper)).toBe("350px");
+    expect(write).not.toHaveBeenCalled();
+    window.dispatchEvent(new MouseEvent("pointermove", { clientX: 900 }));
+    await nextTick();
+    expect(width(wrapper)).toBe("448px");
+    window.dispatchEvent(new MouseEvent("pointerup", { clientX: 900 }));
+    await nextTick();
+    expect(write).toHaveBeenCalledWith("sb.rail.width", "448");
+    // A move after release moves nothing.
+    window.dispatchEvent(new MouseEvent("pointermove", { clientX: 300 }));
+    await nextTick();
+    expect(width(wrapper)).toBe("448px");
+  });
+
+  it("the handle answers the keyboard: arrows step 16px, Home and End are the band's edges, a double-click resets", async () => {
+    const write = vi.spyOn(browser, "writePref").mockImplementation(() => {});
+    const wrapper = mountApp(HomePage, { seed: seed() });
+    const h = handle(wrapper);
+    await h.trigger("keydown", { key: "ArrowRight" });
+    expect(width(wrapper)).toBe("304px");
+    await h.trigger("keydown", { key: "ArrowLeft" });
+    await h.trigger("keydown", { key: "ArrowLeft" });
+    expect(width(wrapper)).toBe("272px");
+    await h.trigger("keydown", { key: "Home" });
+    expect(width(wrapper)).toBe("224px");
+    await h.trigger("keydown", { key: "End" });
+    expect(width(wrapper)).toBe("448px");
+    expect(write).toHaveBeenLastCalledWith("sb.rail.width", "448");
+    await h.trigger("dblclick");
+    expect(width(wrapper)).toBe("288px");
+    expect(write).toHaveBeenLastCalledWith("sb.rail.width", "288");
+  });
+
+  it("from md up the header's panel button hides and shows the column and remembers it; a phone's button opens the sheet instead", async () => {
+    const write = vi.spyOn(browser, "writePref").mockImplementation(() => {});
+    const wide = vi.spyOn(browser, "mediaMatches").mockReturnValue(true);
+    const wrapper = mountApp(HomePage, { seed: seed() });
+    const toggle = wrapper.find("button.rail-toggle");
+    expect(toggle.attributes("aria-label")).toBe("Hide recent threads");
+    expect(wrapper.find("div.home").attributes("data-rail")).toBe("shown");
+    await toggle.trigger("click");
+    expect(wrapper.find("aside").exists()).toBe(false);
+    expect(wrapper.find("div.home").attributes("data-rail")).toBe("hidden");
+    expect(wrapper.find("button.rail-toggle").attributes("aria-label")).toBe("Show recent threads");
+    expect(write).toHaveBeenLastCalledWith("sb.rail.collapsed", "1");
+    expect(document.querySelector("[role=dialog]")).toBeNull();
+    await wrapper.find("button.rail-toggle").trigger("click");
+    expect(wrapper.find("aside").exists()).toBe(true);
+    expect(write).toHaveBeenLastCalledWith("sb.rail.collapsed", "0");
+
+    wide.mockReturnValue(false);
+    write.mockClear();
+    await wrapper.find("button.rail-toggle").trigger("click");
+    await flush();
+    expect(wrapper.find("aside").exists()).toBe(true);
+    expect(write).not.toHaveBeenCalled();
+    expect(document.querySelector("[role=dialog]")).not.toBeNull();
+  });
+
+  it("the button's label follows the viewport across a resize, and the page stops following on unmount", async () => {
+    let follow: ((matches: boolean) => void) | null = null;
+    const stop = vi.fn();
+    vi.spyOn(browser, "mediaMatches").mockReturnValue(true);
+    vi.spyOn(browser, "onMediaChange").mockImplementation((_query, handler) => {
+      follow = handler;
+      return stop;
+    });
+    const wrapper = mountApp(HomePage, { seed: seed() });
+    expect(wrapper.find("button.rail-toggle").attributes("aria-label")).toBe("Hide recent threads");
+    follow!(false);
+    await nextTick();
+    expect(wrapper.find("button.rail-toggle").attributes("aria-label")).toBe("Recent threads");
+    expect(wrapper.find("button.rail-toggle").attributes("aria-expanded")).toBeUndefined();
+    follow!(true);
+    await nextTick();
+    expect(wrapper.find("button.rail-toggle").attributes("aria-label")).toBe("Hide recent threads");
+    wrapper.unmount();
+    expect(stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("what the browser remembered is where the page opens: a width, and the column hidden; ⌘K shows a hidden column again and lands in its filter", async () => {
+    vi.spyOn(browser, "mediaMatches").mockReturnValue(true);
+    const write = vi.spyOn(browser, "writePref").mockImplementation(() => {});
+    vi.spyOn(browser, "readPref").mockImplementation((key) =>
+      key === "sb.rail.width" ? "320" : key === "sb.rail.collapsed" ? "1" : null,
+    );
+    const wrapper = mountApp(HomePage, { seed: seed() });
+    expect(width(wrapper)).toBe("320px");
+    expect(wrapper.find("aside").exists()).toBe(false);
+    expect(wrapper.find("button.rail-toggle").attributes("aria-label")).toBe("Show recent threads");
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
+    await flush();
+    expect(wrapper.find("aside").exists()).toBe(true);
+    expect(document.activeElement).toBe(wrapper.find("aside label.filter input").element);
+    expect(write).toHaveBeenLastCalledWith("sb.rail.collapsed", "0");
   });
 });
 

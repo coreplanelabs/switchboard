@@ -1,4 +1,6 @@
 import { HAND_BACK_PREFIX } from "@core/core/dispatch/handBack.js";
+import { formatDateTime, formatRelative } from "./format";
+import { SURFACE_NAME } from "./indexRow";
 
 // The home page's pure rules (docs/reference/specs/web-chat.md; record 0043):
 // what the composer's one control is at any moment, what a run-less reply
@@ -55,6 +57,71 @@ export function conversationTitle(firstRequest: string, max = 60): string {
       ?.trim() ?? "";
   if (line.length <= max) return line || "New conversation";
   return `${line.slice(0, max - 1).trimEnd()}…`;
+}
+
+/** The rail row's distance (rule 7), short so the title keeps the room: `now`,
+ *  `3m`, `1h`, `2d`, then the date as the runs index writes it. The full moment
+ *  is the row's tooltip's (`threadTip`). */
+export function compactAge(at: number, now: number): string {
+  const delta = now - at;
+  if (!(delta > 45_000)) return "now";
+  const m = Math.floor(delta / 60_000);
+  if (m < 60) return `${Math.max(1, m)}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  const d = Math.floor(h / 24);
+  if (d < 7) return `${d}d`;
+  return formatRelative(at, now);
+}
+
+/** What a rail row says on hover (rule 7): the first request's line in full
+ *  (the excerpt; the cut title when the seed has none), the moment as a date
+ *  and time, the channel — `Web` for the person's own lane, else the surface's
+ *  name and that it is read-only here — the run count, and whether a run is
+ *  in flight. Facts only: the tooltip component lays them out. */
+export interface ThreadTipFacts {
+  title: string;
+  when: string;
+  source: string;
+  runs: string;
+  live: boolean;
+}
+export function threadTip(
+  row: { title: string; excerpt: string; lastAt: number; runs: number; live: boolean; surface?: string },
+  now: number,
+): ThreadTipFacts {
+  const surface = row.surface ?? "web";
+  const name = SURFACE_NAME[surface] ?? surface;
+  return {
+    title: row.excerpt || row.title,
+    when: formatDateTime(row.lastAt, now),
+    source: surface === "web" ? name : `${name} · read-only here`,
+    runs: `${row.runs} run${row.runs === 1 ? "" : "s"}`,
+    live: row.live,
+  };
+}
+
+/** The rail column's width band in CSS pixels (rule 7): 14 to 28 rem, 18 rem
+ *  to start, one arrow key one rem. */
+export const RAIL_WIDTH = { min: 224, default: 288, max: 448, step: 16 } as const;
+
+/** A width in the band; anything that is not a finite number is the default. */
+export function clampRailWidth(n: unknown): number {
+  const v = typeof n === "string" ? Number(n) : n;
+  if (typeof v !== "number" || !Number.isFinite(v)) return RAIL_WIDTH.default;
+  return Math.min(RAIL_WIDTH.max, Math.max(RAIL_WIDTH.min, Math.round(v)));
+}
+
+/** The two things the browser remembers about the rail, by their storage keys. */
+export const RAIL_PREF = { width: "sb.rail.width", collapsed: "sb.rail.collapsed" } as const;
+
+/** What the remembered strings mean: a width in the band (the default when
+ *  nothing or nonsense was kept) and whether the column is hidden (`"1"`). */
+export function railPrefs(stored: { width: string | null; collapsed: string | null }): {
+  width: number;
+  collapsed: boolean;
+} {
+  return { width: clampRailWidth(stored.width ?? undefined), collapsed: stored.collapsed === "1" };
 }
 
 /** The empty state's greeting names the person (rule 7) and the time of day,

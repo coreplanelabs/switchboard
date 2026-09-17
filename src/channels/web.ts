@@ -51,6 +51,9 @@ export const CONVERSATION_RUNS = 20;
 /** Own runs read to find the viewer's recent threads (a thread may hold several). */
 const RAIL_RUNS = 100;
 const TITLE_MAX = 60;
+/** The rail row's excerpt (its tooltip's full line): long enough to read a
+ *  whole ask, short enough that a pasted paragraph stays a tooltip. */
+export const EXCERPT_MAX = 240;
 const UPSTREAM_REASON_MAX = 400;
 
 export type ThreadsRoute = { kind: "new" } | { kind: "thread"; id: string } | { kind: "send"; id: string };
@@ -355,9 +358,11 @@ export function createWebChatHandler(
           if (request !== "") break;
         }
         const first = g.runs[0];
+        const line = request || first.label || first.id;
         return {
           id: conversationIdOf(sub, g.threadKey),
-          title: threadTitle(request || first.label || first.id),
+          title: threadTitle(line),
+          excerpt: threadTitle(line, EXCERPT_MAX),
           lastAt: g.lastAt,
           runs: g.runs.length,
           live: g.live,

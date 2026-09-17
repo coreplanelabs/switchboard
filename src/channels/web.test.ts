@@ -17,6 +17,7 @@ import {
   conversationIdOf,
   createWebChatHandler,
   historyOf,
+  EXCERPT_MAX,
   ownLane,
   paletteCommands,
   parseThreadsRoute,
@@ -275,6 +276,9 @@ describe("the projections — requester, turn, history, threads, title, palette,
     expect(threadTitle("\n\n  review PR 7  \nmore")).toBe("review PR 7");
     expect(threadTitle("x".repeat(80))).toBe(`${"x".repeat(59)}…`);
     expect(threadTitle("")).toBe("New conversation");
+    // The row's excerpt — what its tooltip says in full — is the same line cut at 240.
+    expect(threadTitle("x".repeat(300), EXCERPT_MAX)).toBe(`${"x".repeat(239)}…`);
+    expect(EXCERPT_MAX).toBe(240);
   });
 
   it("paletteCommands: the chat-exposed commands the actor may run, in chat form, by name; a chat-hidden or ungranted command is absent", () => {
@@ -577,17 +581,42 @@ describe("GET /threads and /threads/<id> — the seed from the runs service (ite
       [live.id, "re-review after the repush", undefined, undefined, false, live.token],
     ]);
     expect(seed.conversations).toEqual([
-      { id: "conv-1", title: "request of r-1", lastAt: NOW, runs: 3, live: true, surface: "web" },
+      {
+        id: "conv-1",
+        title: "request of r-1",
+        excerpt: "request of r-1",
+        lastAt: NOW,
+        runs: 3,
+        live: true,
+        surface: "web",
+      },
       {
         id: "slack:C1:1712.34",
         title: "request of s-1",
+        excerpt: "request of s-1",
         lastAt: NOW - 120_000,
         runs: 1,
         live: false,
         surface: "slack",
       },
-      { id: "conv-2", title: "request of o-1", lastAt: NOW - 3_600_000, runs: 1, live: false, surface: "web" },
-      { id: "conv-3", title: "request of d-1", lastAt: NOW - 7_000_000, runs: 2, live: false, surface: "web" },
+      {
+        id: "conv-2",
+        title: "request of o-1",
+        excerpt: "request of o-1",
+        lastAt: NOW - 3_600_000,
+        runs: 1,
+        live: false,
+        surface: "web",
+      },
+      {
+        id: "conv-3",
+        title: "request of d-1",
+        excerpt: "request of d-1",
+        lastAt: NOW - 7_000_000,
+        runs: 2,
+        live: false,
+        surface: "web",
+      },
     ]);
     // The tab title carries the live count, as the runs index does.
     expect(res.body).toMatch(/<title>\(1\) Threads<\/title>/);

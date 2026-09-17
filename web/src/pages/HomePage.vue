@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, provide, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, onUnmounted, provide, reactive, ref, watch } from "vue";
 import type { HomeTurnSeed } from "@core/channels/webSeed.js";
 import { retentionSentence } from "@core/channels/webSeed.js";
 import { FAVICON_IDLE, FAVICON_LIVE } from "@core/channels/favicon.js";
@@ -15,11 +15,15 @@ import { useSeed } from "../lib/seed";
 import { useWallClock } from "../lib/wallClock";
 import { MarkPulseKey } from "../lib/markPulse";
 import {
+  clampRailWidth,
   classifyReply,
   composerMode,
   conversationTitle,
   liveUrls,
   matchSteer,
+  RAIL_PREF,
+  RAIL_WIDTH,
+  railPrefs,
   shortcutFor,
   shouldFollow,
 } from "../lib/homeModel";
@@ -195,9 +199,76 @@ function onEnded(item: Item & { kind: "assistant" }): void {
 }
 
 // ---- the rail: a column from md up, a sheet on a phone; two shortcuts ------------
+// The column's width is the person's — dragged on the handle at its edge,
+// stepped with the arrows, reset with a double-click — and whether it is shown
+// is theirs too (the header's panel button); both are remembered by this
+// browser (item 7). The phone's sheet has neither: it is closed until opened and
+// its width is the sheet's.
+/** Tailwind's `md`: the rail is a column from here up. */
+const MD_UP = "(min-width: 48rem)";
+const remembered = railPrefs({
+  width: browser.readPref(RAIL_PREF.width),
+  collapsed: browser.readPref(RAIL_PREF.collapsed),
+});
+const railWidth = ref(remembered.width);
+const railHidden = ref(remembered.collapsed);
+/** The phone's sheet. */
 const railOpen = ref(false);
+/** Whether the viewport is a column's (the header button's label follows it, across a resize too). */
+const wide = ref(browser.mediaMatches(MD_UP));
+const stopFollowingWidth = browser.onMediaChange(MD_UP, (matches) => {
+  wide.value = matches;
+});
 const rail = ref<InstanceType<typeof ConversationRail> | null>(null);
 const sheetRail = ref<InstanceType<typeof ConversationRail> | null>(null);
+const toggleLabel = computed(() =>
+  !wide.value ? "Recent threads" : railHidden.value ? "Show recent threads" : "Hide recent threads",
+);
+function toggleRail(): void {
+  wide.value = browser.mediaMatches(MD_UP);
+  if (wide.value) {
+    railHidden.value = !railHidden.value;
+    browser.writePref(RAIL_PREF.collapsed, railHidden.value ? "1" : "0");
+    return;
+  }
+  railOpen.value = true;
+}
+function setRailWidth(px: number, remember: boolean): void {
+  railWidth.value = clampRailWidth(px);
+  if (remember) browser.writePref(RAIL_PREF.width, String(railWidth.value));
+}
+let drag: { startX: number; startWidth: number } | null = null;
+function onHandleMove(ev: PointerEvent): void {
+  if (!drag) return;
+  setRailWidth(drag.startWidth + (ev.clientX - drag.startX), false);
+}
+function onHandleUp(): void {
+  window.removeEventListener("pointermove", onHandleMove);
+  if (!drag) return;
+  drag = null;
+  browser.writePref(RAIL_PREF.width, String(railWidth.value));
+}
+function onHandleDown(ev: PointerEvent): void {
+  if (ev.button !== 0) return;
+  ev.preventDefault();
+  drag = { startX: ev.clientX, startWidth: railWidth.value };
+  (ev.currentTarget as HTMLElement | null)?.setPointerCapture?.(ev.pointerId);
+  window.addEventListener("pointermove", onHandleMove);
+  window.addEventListener("pointerup", onHandleUp, { once: true });
+}
+function onHandleKey(ev: KeyboardEvent): void {
+  if (ev.key === "ArrowRight") setRailWidth(railWidth.value + RAIL_WIDTH.step, true);
+  else if (ev.key === "ArrowLeft") setRailWidth(railWidth.value - RAIL_WIDTH.step, true);
+  else if (ev.key === "Home") setRailWidth(RAIL_WIDTH.min, true);
+  else if (ev.key === "End") setRailWidth(RAIL_WIDTH.max, true);
+  else return;
+  ev.preventDefault();
+}
+onBeforeUnmount(() => {
+  window.removeEventListener("pointermove", onHandleMove);
+  window.removeEventListener("pointerup", onHandleUp);
+  stopFollowingWidth();
+});
 function onKey(ev: KeyboardEvent): void {
   const shortcut = shortcutFor(ev);
   if (!shortcut) return;
@@ -206,9 +277,15 @@ function onKey(ev: KeyboardEvent): void {
     browser.navigate("/threads");
     return;
   }
-  // ⌘K: the filter — in the column, or in the sheet once it has opened.
+  // ⌘K: the filter — in the column (shown again if it was hidden), or in the sheet once it has opened.
   if (rail.value) {
     rail.value.focusFilter();
+    return;
+  }
+  if (railHidden.value && browser.mediaMatches(MD_UP)) {
+    railHidden.value = false;
+    browser.writePref(RAIL_PREF.collapsed, "0");
+    void nextTick().then(() => rail.value?.focusFilter());
     return;
   }
   railOpen.value = true;
@@ -276,20 +353,27 @@ const elsewhereLine = !elsewhere
 <template>
   <AppShell title="Threads" nav="home">
     <template #leading>
-      <!-- The phone's way to the rail: a sheet from the left. -->
+      <!-- The rail's one button: hides and shows the column from md up; opens the sheet on a phone. -->
       <UButton
-        class="rail-toggle -ml-1 md:hidden"
+        class="rail-toggle -ml-1"
         size="xs"
         color="neutral"
         variant="ghost"
-        icon="i-lucide-panel-left"
-        aria-label="Recent threads"
-        @click="railOpen = true"
+        :icon="wide && !railHidden ? 'i-lucide-panel-left-close' : 'i-lucide-panel-left'"
+        :aria-label="toggleLabel"
+        :aria-expanded="wide ? !railHidden : undefined"
+        @click="toggleRail"
       />
     </template>
     <div v-if="!seed" class="mx-auto my-12 max-w-xl text-center text-toned">This page needs its seed.</div>
-    <div v-else class="home gap-8 md:grid md:grid-cols-[14rem_minmax(0,1fr)]">
-      <aside class="hidden md:block">
+    <div
+      v-else
+      class="home gap-8 md:grid"
+      :class="railHidden ? 'md:grid-cols-[minmax(0,1fr)]' : 'md:grid-cols-[var(--rail-w)_minmax(0,1fr)]'"
+      :style="{ '--rail-w': `${railWidth}px` }"
+      :data-rail="railHidden ? 'hidden' : 'shown'"
+    >
+      <aside v-if="!railHidden" class="relative hidden md:block">
         <ConversationRail
           ref="rail"
           class="sticky top-20"
@@ -298,6 +382,28 @@ const elsewhereLine = !elsewhere
           :now="now"
           :retention="retention"
         />
+        <!-- The handle: the column's right edge, sitting in the gap. A drag follows the pointer within
+             the band, the arrows step it, Home and End are the edges, a double-click resets; its
+             hairline shows on hover and focus. Nothing here transitions the width: it follows the hand. -->
+        <div
+          class="handle group/handle absolute inset-y-0 -right-5 flex w-3 cursor-col-resize touch-none select-none justify-center outline-none"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize the recent threads column"
+          :aria-valuemin="RAIL_WIDTH.min"
+          :aria-valuemax="RAIL_WIDTH.max"
+          :aria-valuenow="railWidth"
+          tabindex="0"
+          data-testid="rail-handle"
+          @pointerdown="onHandleDown"
+          @keydown="onHandleKey"
+          @dblclick="setRailWidth(RAIL_WIDTH.default, true)"
+        >
+          <span
+            class="w-px rounded-full bg-(--ui-border-accented) opacity-0 transition-opacity duration-150 ease-out group-hover/handle:opacity-100 group-focus-visible/handle:opacity-100"
+            aria-hidden="true"
+          />
+        </div>
       </aside>
       <USlideover v-model:open="railOpen" side="left" title="Recent threads" :ui="{ content: 'max-w-xs' }">
         <template #body>
