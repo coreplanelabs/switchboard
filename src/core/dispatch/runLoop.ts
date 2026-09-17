@@ -559,6 +559,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
    *  calls, and handed to the release, which tears the workspace down for it
    *  rather than pair it (harness.md item 13). */
   let commandInFlight = false;
+  /** The registry's retained backlog, copied at the call (a shallow copy of the
+   *  event references, `snapshotOf`). */
   const recordEvents = () => registry.snapshot(run.id, run.token)?.events ?? [];
   // The failure by name (run-history item 57), when the harness's throw has
   // one: the record says it, so the session's next seed can act on it.
@@ -585,19 +587,44 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             ? "stopped_soft"
             : "completed";
   };
-  const readCallsInFlight = (): void => {
-    const calls = callsInFlight(recordEvents(), statusNow());
-    commandInFlight = calls.length > 0;
-    if (commandInFlight)
-      registry.publish(run.id, {
-        type: "run_note",
-        kind: "workspace_torn_down",
-        summary: redactAndCap(
-          `a command may still be running in the workspace, so it is torn down rather than paired: ${calls.map((c) => c.summary).join("; ")}`,
-          ENDING_NOTE_MAX,
-        ),
-        at: clock(),
-      });
+  /** The harness session's end, once: the process ended (a no-op when the
+   *  harness handed no session over), then what its ending left running read
+   *  off the record — under the run's status at that moment, which is the
+   *  ending's. Called on the loop's way out and again from its catch, since
+   *  either may come first; the second call does nothing, so a throw after a
+   *  clean end (a publish, a join) fails the run without re-reading the record
+   *  under `failed` — which would count a relayed call's unpaired line as a
+   *  command in flight, and note a cut call's tear-down twice. An end that
+   *  throws is no clean end: the process may still be running with its
+   *  command, since the end failed before it could cut or kill anything, so
+   *  a run not already interrupted is failed BEFORE the read — an open call is
+   *  then a command that may run on — and the end's error is thrown on to the
+   *  caller. An interrupted run stays interrupted: that status already reads
+   *  an open call as in flight, and the card, the finish and the restart must
+   *  say one thing. */
+  let harnessEnded = false;
+  const endHarness = async (): Promise<void> => {
+    if (harnessEnded) return;
+    harnessEnded = true;
+    try {
+      await harnessSession?.end();
+    } catch (err) {
+      if (interrupted === undefined) runFailed = true;
+      throw err;
+    } finally {
+      const calls = callsInFlight(recordEvents(), statusNow());
+      commandInFlight = calls.length > 0;
+      if (commandInFlight)
+        registry.publish(run.id, {
+          type: "run_note",
+          kind: "workspace_torn_down",
+          summary: redactAndCap(
+            `a command may still be running in the workspace, so it is torn down rather than paired: ${calls.map((c) => c.summary).join("; ")}`,
+            ENDING_NOTE_MAX,
+          ),
+          at: clock(),
+        });
+    }
   };
   let runDiagnosis: FrictionDiagnosis | undefined; // the finish-site diagnosis: the done card's shape line
   // The run keeps its harness process alive past the loop (harness-pi item
@@ -1274,9 +1301,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     }
     // The last prompt on the run's pi has been sent: pi ends here, before the
     // post-step and before the workspace it runs in can be released; what its
-    // ending left running is read off the record once it has.
-    await harnessSession?.end();
-    readCallsInFlight();
+    // ending left running is read off the record once it has — here, once,
+    // whatever the post-step does next.
+    await endHarness();
     // What the run leaves uncommitted or unpushed does not outlive it: a run
     // starts from a clean tree (resident-repos item 17), and the release that
     // follows the reply discards the tree. Said HERE — on the record, before
@@ -1419,10 +1446,25 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         summary: redactAndCap(err instanceof Error ? err.message : String(err), ENDING_NOTE_MAX),
       });
     }
-    // pi first: it runs in the workspace released next (a no-op once ended);
-    // what the ending left running is read off the record once it has.
-    await harnessSession?.end();
-    readCallsInFlight();
+    // pi first: it runs in the workspace released next; what the ending left
+    // running is read off the record once it has — unless the loop's way out
+    // ended it already and the throw came after (then that read stands). An
+    // end that fails here is the harness's own error, said on the record as
+    // every failure of that shape is (a `harness_error` note: the cause, where
+    // the `workspace_torn_down` note says the consequence) and logged: the
+    // record was read all the same, the release below must run whatever the
+    // end did, and the loop's own error — the one the record names as the
+    // run's — is the one that propagates.
+    await endHarness().catch((endErr: unknown) => {
+      const detail = `the harness session's end failed after the loop's own error: ${endErr instanceof Error ? endErr.message : String(endErr)}`;
+      console.warn(`[run] ${msg.threadKey} ${detail}`);
+      registry.publish(run.id, {
+        type: "run_note",
+        kind: "harness_error",
+        summary: redactAndCap(detail, ENDING_NOTE_MAX),
+        at: clock(),
+      });
+    });
     await root.span("post.workspace_release", (span) => releaseWorkspace(span));
     if (!interrupted) throw err;
     // The interruption is the loop's own outcome: answered from here, the

@@ -21,6 +21,7 @@ import { bearerHashOf, RunBearerStore } from "../modelProxy/runBearers.js";
 import { RUN_BEARER_ENV } from "../harness/pi/process.js";
 import {
   HarnessGateBypassedError,
+  HarnessMismatchError,
   openThroughSeam,
   type Finding,
   type Harness,
@@ -215,6 +216,8 @@ function setup(
     session?: SessionCapability;
     /** Who asked; `slack:UX` unless a test needs a second person's scope. */
     userId?: string;
+    /** The registry's per-run backlog bound in events, when a test needs the run's early events evicted. */
+    backlogLimit?: number;
   } = {},
 ) {
   const config = configStore(opts.yaml);
@@ -264,7 +267,11 @@ function setup(
     { msg: message, directives: { text: "hello there", ...(opts.agent ? { agent: opts.agent } : {}) }, history: [] },
   );
   const agent = getAgent(resolved.agentName);
-  const registry = new RunRegistry({ genId: () => "run-l", genToken: () => "tok" });
+  const registry = new RunRegistry({
+    genId: () => "run-l",
+    genToken: () => "tok",
+    ...(opts.backlogLimit !== undefined ? { backlogLimit: opts.backlogLimit } : {}),
+  });
   const run = registry.create(`${agentName} · #CX · UX`, {
     agent: agentName,
     model: resolved.modelRef,
@@ -570,10 +577,11 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       .filter((e) => e.type === "run_note" && e.kind === "workspace_torn_down")
       .map((e) => (e.type === "run_note" ? e.summary : ""));
   };
-  const endingIn = (open: Harness["open"]) =>
+  const endingIn = (open: Harness["open"], extra: Partial<Parameters<typeof setup>[1]> = {}) =>
     setup("", {
       agent: "coding",
       yaml: YAML + "harness:\n  coding: pi\n",
+      ...extra,
       harness: {
         harnesses: roster({ ...watched(piHarness).harness, open }),
         registry: new HarnessRegistry(),
@@ -582,9 +590,13 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       },
       bearer: "sbr_run-l.s3cret",
     });
-  const sessionAnswering = (answer: string, end: () => Promise<void> = async () => {}): HarnessSession => ({
+  const sessionAnswering = (
+    answer: string,
+    end: () => Promise<void> = async () => {},
+    followUp: HarnessSession["followUp"] = async () => "",
+  ): HarnessSession => ({
     answer,
-    followUp: async () => "",
+    followUp,
     remainingMs: () => 0,
     end,
   });
@@ -662,6 +674,191 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("the gate was bypassed");
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "failed" });
     expect(s.releases).toEqual(["torn-down"]);
+  });
+
+  // The record the release reads is the registry's bounded backlog, which drops
+  // its oldest events past the bound (runRegistry/backlog.ts): on a long run the
+  // line of the command that hung early is gone by the end, its cut result not.
+  it("a long run whose hung command's line the backlog evicted before the end — its cut result the only trace: the workspace is torn down all the same, the note naming the call by its tool and id", async () => {
+    const s = endingIn(
+      async (_deps, run) => {
+        openToolCall(run);
+        for (let i = 0; i < 40; i++) run.onEvent?.({ type: "assistant", text: `narration ${i}` });
+        return sessionAnswering("the run ran out of time while a command was running", async () =>
+          cutOpenCallAtEnd(run),
+        );
+      },
+      { backlogLimit: 24 },
+    );
+    const out = answered(await runLoop(s.deps, s.ctx));
+    expect(s.registry.snapshot("run-l", "tok")!.events.some((e) => e.type === "tool_call")).toBe(false);
+    await out.releaseWorkspace();
+    expect(s.releases).toEqual(["torn-down"]);
+    expect(await tornDownNotes(s, true)).toEqual([expect.stringContaining("bash (call c-open)")]);
+  });
+
+  // What the ending left running is read once, when the harness session ends,
+  // under the run's status at that moment — the ending's. A throw after a clean
+  // end (the answer's publish here; nothing between the end and the try's close
+  // may throw by design, and each such site is the same window) fails the run,
+  // but does not re-read the record under `failed`.
+  const answerPublishThrows = (s: ReturnType<typeof setup>): void => {
+    const publish = s.ctx.publishText;
+    s.ctx.publishText = (type, text) => {
+      if (type === "answer") throw new Error("the answer's publish failed");
+      publish(type, text);
+    };
+  };
+
+  it("a throw after a clean harness end — a relayed tool's call unpaired on the record: the in-flight read stands as taken at the end, so the failed run's workspace is still paired and nothing claims a command may be running", async () => {
+    const s = endingIn(async (_deps, run) => {
+      openRelayedCall(run);
+      return sessionAnswering("done");
+    });
+    answerPublishThrows(s);
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("the answer's publish failed");
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "failed" });
+    expect(s.releases).toEqual(["paired"]);
+    expect(await tornDownNotes(s, undefined)).toEqual([]);
+  });
+
+  it("a throw after a clean harness end that cut a call: the workspace is torn down and the record says why once, not once per read", async () => {
+    const s = endingIn(async (_deps, run) => {
+      openToolCall(run);
+      return sessionAnswering("the run ran out of time while a command was running", async () => cutOpenCallAtEnd(run));
+    });
+    answerPublishThrows(s);
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("the answer's publish failed");
+    expect(s.releases).toEqual(["torn-down"]);
+    expect(await tornDownNotes(s, undefined)).toEqual([expect.stringContaining("$ sleep 600")]);
+  });
+
+  // A session whose `end()` throws is not a clean end: pi may still be running
+  // with its command, since the end failed before it could kill anything. The
+  // read is taken all the same, under `failed` — the end's failure is the run's.
+  it("a harness session whose end() throws with a call open — the end failed before it could cut or kill: the run fails on the end's error, the record is still read, under `failed`, and the workspace is torn down with the note", async () => {
+    const s = endingIn(async (_deps, run) => {
+      openToolCall(run);
+      return sessionAnswering("done", async () => {
+        throw new Error("the session's end failed: the transport would not close");
+      });
+    });
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("the session's end failed");
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "failed" });
+    expect(s.releases).toEqual(["torn-down"]);
+    expect(await tornDownNotes(s, undefined)).toEqual([expect.stringContaining("$ sleep 600")]);
+  });
+
+  // The loop's own failure with a live session — a re-review turn on the run's
+  // session that the resident's reset cut — then a session whose end() throws
+  // too: the release still runs and the loop's error is the one that propagates.
+  it("the loop throws with a live session and the session's end() throws too in the catch: the workspace is still released, torn down for the open call, and the loop's own error is what propagates and what the record says", async () => {
+    const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+    const NEW = "d75b5a51aba97d43c64a42c96e580dd9abbfd78e";
+    const list = (subjects: string[]): PrCommitList => ({
+      commits: subjects.map((message, i) => ({ sha: `${i + 1}`.repeat(40), message })),
+      files: ["src/x.ts"],
+      filesTruncated: false,
+    });
+    const s = endingIn(
+      async (_deps, run) => {
+        openToolCall(run);
+        return sessionAnswering(
+          "First review: fine.",
+          async () => {
+            throw new Error("the session's end failed: the transport would not close");
+          },
+          async () => {
+            throw new Error(
+              "the re-review's steer was in flight when the resident's control plane reset under the run",
+            );
+          },
+        );
+      },
+      {
+        agent: "review",
+        yaml: YAML + "harness:\n  review: pi\n",
+        // The workspace's head is the reviewed one, so the settle reads the PR's move and re-reviews on the session.
+        executor: { exec: async () => HEAD },
+        repoCtx: { repo: "o/r", pr: 42, baseRef: "main" } as RepoContext,
+        review: {
+          head: HEAD,
+          post: async () => {},
+          currentHead: NEW,
+          commits: (sha) =>
+            sha === HEAD ? list(["feat: the change"]) : list(["feat: the change", "fix: review nits"]),
+        },
+      },
+    );
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("the re-review's steer was in flight");
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "failed" });
+    expect(s.releases).toEqual(["torn-down"]);
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const rec = (await s.store.get("run-l"))!;
+    expect(rec.events.filter((e) => e.type === "run_note" && e.kind === "run_failed")).toEqual([
+      expect.objectContaining({ summary: expect.stringContaining("the re-review's steer was in flight") }),
+    ]);
+    // The end's own failure is on the record too, as the harness's error — not the run's.
+    expect(
+      rec.events
+        .filter((e) => e.type === "run_note" && e.kind === "harness_error")
+        .map((e) => (e.type === "run_note" ? e.summary : "")),
+    ).toEqual([expect.stringContaining("the harness session's end failed after the loop's own error")]);
+  });
+
+  // An interruption from a post-turn (the container replaced under the run, a
+  // row of another harness) followed by an end that throws: the run's status is
+  // the interruption's, and the card must say so too — a ❌ card over an
+  // `interrupted` status and a restart would contradict itself.
+  it("an interrupted run whose session's end() throws stays interrupted: the status, the card and the outcome agree on the restart, and the workspace is torn down for the open call", async () => {
+    const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+    const NEW = "d75b5a51aba97d43c64a42c96e580dd9abbfd78e";
+    const list = (subjects: string[]): PrCommitList => ({
+      commits: subjects.map((message, i) => ({ sha: `${i + 1}`.repeat(40), message })),
+      files: ["src/x.ts"],
+      filesTruncated: false,
+    });
+    const s = endingIn(
+      async (_deps, run) => {
+        openToolCall(run);
+        return sessionAnswering(
+          "First review: fine.",
+          async () => {
+            throw new Error("the session's end failed: the transport would not close");
+          },
+          async () => {
+            throw new HarnessMismatchError("pi", "opencode");
+          },
+        );
+      },
+      {
+        agent: "review",
+        yaml: YAML + "harness:\n  review: pi\n",
+        executor: { exec: async () => HEAD },
+        repoCtx: { repo: "o/r", pr: 42, baseRef: "main" } as RepoContext,
+        review: {
+          head: HEAD,
+          post: async () => {},
+          currentHead: NEW,
+          commits: (sha) =>
+            sha === HEAD ? list(["feat: the change"]) : list(["feat: the change", "fix: review nits"]),
+        },
+      },
+    );
+    const out = await runLoop(s.deps, s.ctx);
+    expect(out.kind).toBe("interrupted");
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "interrupted" });
+    expect(s.releases).toEqual(["torn-down"]);
+    expect(s.closes).toHaveLength(1);
+    const close = JSON.stringify(s.closes[0]);
+    expect(close).toContain("🔁");
+    expect(close).not.toContain("❌");
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const rec = (await s.store.get("run-l"))!;
+    expect(rec.status).toBe("interrupted");
+    expect(rec.events.filter((e) => e.type === "run_note" && e.kind === "run_failed")).toEqual([]);
   });
 
   // docs/reference/specs/run-history.md item 15: a failed run carries its reason
