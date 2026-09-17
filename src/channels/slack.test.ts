@@ -3,7 +3,10 @@ import { Secret } from "../secrets.js";
 import {
   catchUpDelayNote,
   classifyMessage,
+  CLICK_FAILED_LINE,
+  clickSlackIO,
   createStatusClient,
+  handleConfirmClick,
   resumeSlackIO,
   SlackIO,
   stripMention,
@@ -11,9 +14,26 @@ import {
 } from "./slack.js";
 import { fetchImages } from "./slack/attachments.js";
 import { createStatusBudget, type StatusBudget } from "../core/statusBudget.js";
+import { dispatchClick, type CoreDeps } from "../core/dispatcher.js";
+import {
+  OFFER_CANCELLED_LINE,
+  OFFER_EXPIRED_LINE,
+  OFFER_FOREIGN_LINE,
+  OFFER_USED_LINE,
+} from "../core/dispatch/confirm.js";
+import { NO_GRANTS } from "../core/authz/index.js";
 
 // Feature: docs/reference/specs/slack-channel.md — trigger gating (which events start a
 // run) and the channel IO over the Slack Web API.
+
+// Only the click's entry into the core is mocked (item 14): the consume, the
+// requester check and the command run are the dispatcher's tests; the
+// adapter's claim ends at the hand-off and starts again at the reply.
+vi.mock("../core/dispatcher.js", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("../core/dispatcher.js")>();
+  return { ...mod, dispatchClick: vi.fn(async () => ({ status: "completed" })) };
+});
+const dispatchClickMock = vi.mocked(dispatchClick);
 
 const BOT = "U0BOT";
 
@@ -650,5 +670,303 @@ describe("SlackIO.status — status budget", () => {
     handle.update({ title: "⚡" });
     expect(status.update).toHaveBeenCalledTimes(1);
     expect(status.update.mock.calls[0]![0]).toMatchObject({ channel: "C1", ts: "9.9" });
+  });
+});
+
+// Feature: docs/reference/specs/slack-channel.md item 14 (record 0044) — a routed
+// write the door offers as a confirmation is two buttons in the thread. The
+// offer shows the exact line to run; the click enters the core through
+// `dispatchClick` and its reply completes the offer message.
+describe("SlackIO.offer (docs/reference/specs/slack-channel.md item 14)", () => {
+  const ev = { channel: "C1", user: "UA", text: "use opus here", ts: "3.0", threadTs: "1.0", botUserId: "UBOT" };
+  type Client = ConstructorParameters<typeof SlackIO>[0];
+  const LINE = "config set channel --models.coding anthropic/claude-opus-5";
+  const RISK = "changes the scope's settings for everyone in it until reset";
+  const FOOTER = "confirmation required by the built-in default";
+  const client = () => {
+    const postMessage = vi.fn(async (_o: Record<string, unknown>) => ({ ok: true, ts: "4.0" }));
+    return { c: { chat: { postMessage } } as unknown as Client, postMessage };
+  };
+  type Block = { type: string; text?: { type: string; text: string }; elements?: Array<Record<string, unknown>> };
+  const blocksOf = (call: Record<string, unknown>) => call.blocks as Block[];
+
+  it("posts one message in the thread: the line as a code span, the risk and the footer as context, Run (primary) and Cancel carrying the id, and a text fallback that carries the line", async () => {
+    const { c, postMessage } = client();
+    await new SlackIO(c, ev).offer({ id: "c-1", line: LINE, risk: RISK, footer: FOOTER, expiresAt: 600_000 });
+    expect(postMessage).toHaveBeenCalledTimes(1);
+    const call = postMessage.mock.calls[0]![0];
+    expect(call).toMatchObject({ channel: "C1", thread_ts: "1.0" });
+    expect(String(call.text)).toContain(LINE);
+    const blocks = blocksOf(call);
+    expect(blocks.map((b) => b.type)).toEqual(["section", "context", "actions"]);
+    expect(blocks[0]!.text).toEqual({ type: "mrkdwn", text: `\`${LINE}\`` });
+    expect(blocks[1]!.elements).toEqual([
+      { type: "mrkdwn", text: RISK },
+      { type: "mrkdwn", text: FOOTER },
+    ]);
+    expect(blocks[2]!.elements).toEqual([
+      {
+        type: "button",
+        action_id: "confirm.run",
+        text: { type: "plain_text", text: "Run" },
+        style: "primary",
+        value: "c-1",
+      },
+      { type: "button", action_id: "confirm.cancel", text: { type: "plain_text", text: "Cancel" }, value: "c-1" },
+    ]);
+  });
+
+  it("a command that declares no risk gets the footer alone in the context; a line with a backtick rides as a fenced block; `&`, `<` and `>` are escaped for Slack, in the span and in the fallback", async () => {
+    const { c, postMessage } = client();
+    await new SlackIO(c, ev).offer({ id: "c-2", line: LINE, risk: "", footer: FOOTER, expiresAt: 600_000 });
+    expect(blocksOf(postMessage.mock.calls[0]![0])[1]!.elements).toEqual([{ type: "mrkdwn", text: FOOTER }]);
+    const tricky = 'config instructions channel "use `npm` & <nothing> else"';
+    await new SlackIO(c, ev).offer({ id: "c-3", line: tricky, risk: RISK, footer: FOOTER, expiresAt: 600_000 });
+    const call = postMessage.mock.calls[1]![0];
+    expect(blocksOf(call)[0]!.text!.text).toBe(
+      '```\nconfig instructions channel "use `npm` &amp; &lt;nothing&gt; else"\n```',
+    );
+    expect(String(call.text)).toContain('"use `npm` &amp; &lt;nothing&gt; else"');
+    // The buttons still carry the id whatever the line looks like.
+    expect(blocksOf(call)[2]!.elements!.map((e) => e.value)).toEqual(["c-3", "c-3"]);
+  });
+});
+
+describe("handleConfirmClick — the action intake (docs/reference/specs/slack-channel.md item 14)", () => {
+  type Client = ConstructorParameters<typeof SlackIO>[0];
+  const LINE_SPAN = "`config set channel --models.coding anthropic/claude-opus-5`";
+  const FALLBACK =
+    "config set channel --models.coding anthropic/claude-opus-5\nchanges the scope's settings\nconfirmation required by the built-in default";
+  /** The offer message as Slack hands it back on the click: its blocks with the ids Slack stamped. */
+  const offerBlocks = [
+    { type: "section", block_id: "b1", text: { type: "mrkdwn", text: LINE_SPAN } },
+    {
+      type: "context",
+      block_id: "b2",
+      elements: [
+        { type: "mrkdwn", text: "changes the scope's settings" },
+        { type: "mrkdwn", text: "confirmation required by the built-in default" },
+      ],
+    },
+    {
+      type: "actions",
+      block_id: "b3",
+      elements: [
+        { type: "button", action_id: "confirm.run", value: "c-1", text: { type: "plain_text", text: "Run" } },
+        { type: "button", action_id: "confirm.cancel", value: "c-1", text: { type: "plain_text", text: "Cancel" } },
+      ],
+    },
+  ];
+  /** A scripted Web API that records the order of every call beside the ack. */
+  function scripted() {
+    const calls: string[] = [];
+    const update = vi.fn(async (_o: Record<string, unknown>) => {
+      calls.push("chat.update");
+      return { ok: true };
+    });
+    const postMessage = vi.fn(async (_o: Record<string, unknown>) => {
+      calls.push("chat.postMessage");
+      return { ok: true, ts: "5.0" };
+    });
+    const replies = vi.fn(async () => {
+      calls.push("conversations.replies");
+      return { ok: true, messages: [] };
+    });
+    const ack = vi.fn(async () => {
+      calls.push("ack");
+    });
+    const grantsFor = vi.fn(() => NO_GRANTS);
+    const deps = { config: { config: {}, grantsFor } } as unknown as CoreDeps;
+    const c = { chat: { update, postMessage }, conversations: { replies } } as unknown as Client;
+    return { calls, update, postMessage, replies, ack, grantsFor, deps, clients: { client: c, statusClient: c } };
+  }
+  /** A `block_actions` payload for one of the offer's buttons, as Bolt hands it to the listener. */
+  function payload(actionId: string, opts: { user?: string; value?: string | undefined; message?: object } = {}) {
+    const value = "value" in opts ? opts.value : "c-1";
+    const action = {
+      type: "button" as const,
+      block_id: "b3",
+      action_id: actionId,
+      action_ts: "4.5",
+      text: { type: "plain_text" as const, text: "Run" },
+      ...(value !== undefined ? { value } : {}),
+    };
+    const message =
+      "message" in opts
+        ? opts.message
+        : { type: "message", ts: "4.0", thread_ts: "1.0", text: FALLBACK, blocks: offerBlocks };
+    const body = {
+      type: "block_actions" as const,
+      user: { id: opts.user ?? "UA", username: "a" },
+      channel: { id: "C1", name: "general" },
+      ...(message !== undefined ? { message } : {}),
+      container: { type: "message", message_ts: "4.0", channel_id: "C1", thread_ts: "1.0", is_ephemeral: false },
+      actions: [action],
+      team: null,
+      token: "",
+      response_url: "",
+      trigger_id: "",
+      api_app_id: "",
+    };
+    return { body, action } as unknown as Pick<Parameters<typeof handleConfirmClick>[2], "body" | "action">;
+  }
+  /** The core's side of the hand-off: it answers through the handle it was given. */
+  const coreReplies = (text: string) =>
+    dispatchClickMock.mockImplementationOnce(async (_deps, click) => {
+      await click.io.reply(text);
+      return { status: "completed" };
+    });
+  type Block = { type: string; text?: { type: string; text: string } };
+  const blocksOf = (call: Record<string, unknown>) => call.blocks as Block[];
+
+  afterEach(() => {
+    dispatchClickMock.mockReset();
+    dispatchClickMock.mockResolvedValue({ status: "completed" });
+    vi.restoreAllMocks();
+  });
+
+  it("acknowledges first, resolves the clicker as the requester, builds the handle for the payload's channel and thread, and hands dispatchClick the id, kind confirm and the actor; the reply completes the offer message — line and context kept, buttons gone, the reply under them", async () => {
+    const s = scripted();
+    coreReplies("routed: config set channel --models.coding anthropic/claude-opus-5\n✅ set for this channel");
+    await handleConfirmClick(s.deps, s.clients, { ack: s.ack, ...payload("confirm.run") }, "UBOT");
+    // The ack is the first thing that happens — before any Web API call and before the core.
+    expect(s.calls[0]).toBe("ack");
+    expect(s.ack).toHaveBeenCalledTimes(1);
+    expect(dispatchClickMock).toHaveBeenCalledTimes(1);
+    const [, click] = dispatchClickMock.mock.calls[0]!;
+    expect(click).toMatchObject({ kind: "confirm", id: "c-1" });
+    // The clicker is resolved as a message's requester is: the person, namespaced, with the thread as origin.
+    expect(click.actor).toMatchObject({
+      kind: "user",
+      id: "slack:UA",
+      origin: { channelId: "slack:C1", threadKey: "slack:C1:1.0" },
+    });
+    expect(s.grantsFor).toHaveBeenCalledWith("slack:UA");
+    expect(click.io).toBeInstanceOf(SlackIO);
+    // The reply completed the offer message rather than posting a new one.
+    expect(s.update).toHaveBeenCalledTimes(1);
+    expect(s.postMessage).not.toHaveBeenCalled();
+    const call = s.update.mock.calls[0]![0];
+    expect(call).toMatchObject({ channel: "C1", ts: "4.0" });
+    const blocks = blocksOf(call);
+    expect(blocks.map((b) => b.type)).toEqual(["section", "context", "section"]);
+    expect(blocks[0]).toEqual(offerBlocks[0]);
+    expect(blocks[1]).toEqual(offerBlocks[1]);
+    expect(blocks[2]!.text!.text).toContain("✅ set for this channel");
+    expect(String(call.text)).toContain("config set channel --models.coding anthropic/claude-opus-5");
+    expect(String(call.text)).toContain("✅ set for this channel");
+  });
+
+  it("a later reply on the same handle — a deferred command's settle follow-up — posts in the offer's thread; the offer message is completed once", async () => {
+    const s = scripted();
+    coreReplies("routed: repo onboard acme/api\n⏳ onboarding started");
+    await handleConfirmClick(s.deps, s.clients, { ack: s.ack, ...payload("confirm.run") });
+    const io = dispatchClickMock.mock.calls[0]![1].io;
+    await io.reply("✅ acme/api onboarded");
+    expect(s.update).toHaveBeenCalledTimes(1);
+    expect(s.postMessage).toHaveBeenCalledTimes(1);
+    expect(s.postMessage.mock.calls[0]![0]).toMatchObject({
+      channel: "C1",
+      thread_ts: "1.0",
+      text: "✅ acme/api onboarded",
+    });
+  });
+
+  it("Cancel hands dispatchClick kind cancel with the same id, and the message reads `Cancelled; nothing ran` under the line", async () => {
+    const s = scripted();
+    coreReplies(OFFER_CANCELLED_LINE);
+    await handleConfirmClick(s.deps, s.clients, { ack: s.ack, ...payload("confirm.cancel") });
+    expect(dispatchClickMock.mock.calls[0]![1]).toMatchObject({ kind: "cancel", id: "c-1" });
+    const call = s.update.mock.calls[0]![0];
+    const blocks = blocksOf(call);
+    expect(blocks[0]).toEqual(offerBlocks[0]);
+    expect(blocks.some((b) => b.type === "actions")).toBe(false);
+    expect(blocks.at(-1)!.text!.text).toBe(OFFER_CANCELLED_LINE);
+  });
+
+  it.each([OFFER_EXPIRED_LINE, OFFER_FOREIGN_LINE, OFFER_USED_LINE])(
+    "a refusal reads its named line under the line, buttons gone: %s",
+    async (line) => {
+      const s = scripted();
+      coreReplies(line);
+      await handleConfirmClick(s.deps, s.clients, { ack: s.ack, ...payload("confirm.run") });
+      expect(s.update).toHaveBeenCalledTimes(1);
+      const blocks = blocksOf(s.update.mock.calls[0]![0]);
+      expect(blocks[0]).toEqual(offerBlocks[0]);
+      expect(blocks.some((b) => b.type === "actions")).toBe(false);
+      expect(blocks.at(-1)!.text!.text).toBe(line);
+    },
+  );
+
+  it("a click by someone who is not the requester reaches dispatchClick as that actor — the core decides `foreign`, the adapter decides nothing", async () => {
+    const s = scripted();
+    coreReplies(OFFER_FOREIGN_LINE);
+    await handleConfirmClick(s.deps, s.clients, { ack: s.ack, ...payload("confirm.run", { user: "UOTHER" }) });
+    expect(dispatchClickMock).toHaveBeenCalledTimes(1);
+    expect(dispatchClickMock.mock.calls[0]![1].actor).toMatchObject({ kind: "user", id: "slack:UOTHER" });
+    expect(s.grantsFor).toHaveBeenCalledWith("slack:UOTHER");
+    expect(blocksOf(s.update.mock.calls[0]![0]).at(-1)!.text!.text).toBe(OFFER_FOREIGN_LINE);
+  });
+
+  it("a throw out of the core is caught: logged, the offer message completed with the failure line, and the handler resolves", async () => {
+    const s = scripted();
+    dispatchClickMock.mockRejectedValueOnce(new Error("the store fell over"));
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(
+      handleConfirmClick(s.deps, s.clients, { ack: s.ack, ...payload("confirm.run") }),
+    ).resolves.toBeUndefined();
+    expect(s.ack).toHaveBeenCalledTimes(1);
+    expect(error.mock.calls.map((c) => String(c[0])).join("\n")).toContain("the store fell over");
+    expect(s.update).toHaveBeenCalledTimes(1);
+    const blocks = blocksOf(s.update.mock.calls[0]![0]);
+    expect(blocks[0]).toEqual(offerBlocks[0]);
+    expect(blocks.some((b) => b.type === "actions")).toBe(false);
+    expect(blocks.at(-1)!.text!.text).toBe(CLICK_FAILED_LINE);
+  });
+
+  it("a failure to complete the message after a throw is logged too and never escapes the handler", async () => {
+    const s = scripted();
+    dispatchClickMock.mockRejectedValueOnce(new Error("the store fell over"));
+    s.update.mockRejectedValueOnce(new Error("message_not_found"));
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(
+      handleConfirmClick(s.deps, s.clients, { ack: s.ack, ...payload("confirm.run") }),
+    ).resolves.toBeUndefined();
+    expect(error.mock.calls.map((c) => String(c[0])).join("\n")).toContain("message_not_found");
+  });
+
+  it("an action without a value, a `confirm.*` id the adapter does not know, or a payload without its message is acknowledged and ignored — nothing reaches the core, nothing is updated", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    for (const click of [
+      payload("confirm.run", { value: undefined }),
+      payload("confirm.other"),
+      payload("confirm.run", { message: undefined }),
+    ]) {
+      const s = scripted();
+      await handleConfirmClick(s.deps, s.clients, { ack: s.ack, ...click });
+      expect(s.ack).toHaveBeenCalledTimes(1);
+      expect(s.update).not.toHaveBeenCalled();
+      expect(s.postMessage).not.toHaveBeenCalled();
+    }
+    expect(dispatchClickMock).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledTimes(3);
+  });
+
+  it("clickSlackIO: a reply longer than a section carries completes the message with its first part and posts the rest in the thread", async () => {
+    const s = scripted();
+    const io = clickSlackIO(
+      s.clients.client,
+      { channel: "C1", threadTs: "1.0", user: "UA", offer: { ts: "4.0", text: FALLBACK, blocks: offerBlocks } },
+      { statusClient: s.clients.statusClient },
+    );
+    await io.reply(`${"x".repeat(3100)}\ntail`);
+    expect(s.update).toHaveBeenCalledTimes(1);
+    expect(blocksOf(s.update.mock.calls[0]![0]).at(-1)!.text!.text).toBe("x".repeat(3000));
+    expect(s.postMessage).toHaveBeenCalledTimes(1);
+    expect(s.postMessage.mock.calls[0]![0]).toMatchObject({
+      channel: "C1",
+      thread_ts: "1.0",
+      text: `${"x".repeat(100)}\ntail`,
+    });
   });
 });
