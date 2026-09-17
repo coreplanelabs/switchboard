@@ -66,7 +66,7 @@ describe("piRunPaths", () => {
   // commands.
   it("derives every path from the run id under one directory of the run's own directly under /var/tmp, a sibling of every other run's with no shared parent", () => {
     const p = piRunPaths("run-7");
-    // Outside the shared temp directory a suite or cleanup empties (issue #1465).
+    // Outside the shared temp directory a suite or cleanup empties, taking a live run's FIFO with it.
     expect(p.dir.startsWith("/tmp/")).toBe(false);
     expect(p.dir).toBe("/var/tmp/switchboard-pi-run-7");
     expect(p.agentDir).toBe("/var/tmp/switchboard-pi-run-7/agent");
