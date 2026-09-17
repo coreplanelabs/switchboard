@@ -22,7 +22,7 @@
     "web/src/components/costs/CostsByUser.vue": "df094fa42c3ff175c38f1ab1e2c1ad18e463f27f9a0313b49a4cfcf13c72f703",
     "web/src/lib/browser.ts": "5a3b7dd6a2395fb2823ba262cf59d3c4f15e849cdaf2063b5d00a59c06c23b85",
     "web/src/lib/capabilities.ts": "0e485825f48786605345f6a7298763790b7468595d9a828b615a245ab4a6aecd",
-    "web/src/lib/costs.ts": "5ee8d6f2fbf57b4dffca2036bf0dde00449a6a78c6aec7eeacbf9da4386bab54",
+    "web/src/lib/costs.ts": "cacac88f2afbdae2338ec2f139957f6cec6c40db20a94f250986e4d0432b4e3d",
     "web/src/lib/delivery.ts": "061d95b5f6ab8d7dbffb19af42c2228debf819a5f8c5e6ed8f25c7d3f04951ac",
     "web/src/lib/eventSource.ts": "56cee4056941a052433f8b19d2ce2f8eaf43ba483080d0e836afa19794900f9c",
     "web/src/lib/markPulse.ts": "df29e8abee12f0827e8e1295f8fcb1184530240139790da7bffb5929fad8f647",

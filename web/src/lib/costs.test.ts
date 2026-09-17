@@ -59,8 +59,25 @@ describe("snapshotLineOf", () => {
       "No snapshot yet — the first one is taken within a minute of startup",
     );
     const failed = status({
-      lastFailure: { at: "2026-09-16T09:00:00Z", by: "casey", message: "cloudflare graphql 502" },
+      lastFailure: { at: "2026-09-16T09:00:00Z", by: "casey", message: "cloudflare graphql 502", count: 1 },
     });
     expect(snapshotLineOf(failed, NOW)).toContain("· last attempt 15 minutes ago failed: cloudflare graphql 502");
+  });
+
+  it("failures in a row are counted on the line, and with no snapshot yet the line says when the loop tries again instead of promising the first within a minute", () => {
+    const failing = status({
+      snapshot: null,
+      nextAt: "2026-09-16T09:23:00Z",
+      lastFailure: { at: "2026-09-16T09:15:00Z", by: "schedule", message: "cloudflare graphql 502", count: 4 },
+    });
+    expect(snapshotLineOf(failing, NOW)).toBe(
+      "No snapshot yet — next attempt in 8 minutes · last attempt just now failed (4 in a row): cloudflare graphql 502",
+    );
+    const young = status({
+      lastFailure: { at: "2026-09-16T09:00:00Z", by: "casey", message: "cloudflare graphql 502", count: 2 },
+    });
+    expect(snapshotLineOf(young, NOW)).toBe(
+      "Snapshot from Sep 16, 06:15 UTC, 3 hours ago on schedule · next in 21 hours · last attempt 15 minutes ago failed (2 in a row): cloudflare graphql 502",
+    );
   });
 });

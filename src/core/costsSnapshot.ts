@@ -12,6 +12,7 @@ import { buildUserCostReport, type UserCostReport } from "./costsByUser.js";
 import type { CostsSnapshot, CostsSnapshotStore } from "./costsSnapshotStore.js";
 import { NullRunStore, type RunStore } from "./runStore.js";
 import type { RunUsageReport } from "./runUsage.js";
+import { untilText } from "./snapshotAge.js";
 import { systemClock } from "./trace/clock.js";
 
 // The snapshot in front of the billing reads (docs/reference/specs/costs.md item 6).
@@ -42,7 +43,13 @@ import { systemClock } from "./trace/clock.js";
 //     absent snapshot (a warning, then the next tick takes one); a store that
 //     refuses a write is a warning and the snapshot in memory still serves; a
 //     take that fails keeps the previous snapshot serving, with the failure
-//     named in the status until one succeeds.
+//     named in the status until one succeeds — and the loop backs off: the
+//     wait before its next attempt doubles per failure in a row (a tick, two,
+//     four … an hour at most), so a provider that is down is asked hourly, not
+//     every minute; a take on request is never held back by the backoff;
+//   - after `ALERT_AFTER_FAILURES` failures in a row the alert the caller wired
+//     (a Slack channel, `costs.snapshot.alertChannel`) is posted once, and once
+//     more when a take lands again; an alert that cannot be posted is a warning.
 
 /** The window a snapshot is read for: the widest range the page offers, ending on the take day. */
 export const SNAPSHOT_DAYS = MAX_DAYS;
@@ -55,6 +62,16 @@ export const SNAPSHOT_TICK_MS = 60_000;
 /** The run history prices its older rows as they are read, a few hundred a call; a take
  *  asks again while rows are still pending so the snapshot is whole, this many times at most. */
 export const MAX_USAGE_BACKFILL_ROUNDS = 25;
+
+/** The loop's longest wait between two attempts after failures in a row. */
+export const RETRY_BACKOFF_MAX_MS = 3_600_000;
+
+/** How many failed takes in a row post the alert (once; the recovery is posted once too). */
+export const ALERT_AFTER_FAILURES = 3;
+
+/** How long the loop waits after the `count`th failure in a row: a tick, doubled per failure, capped. */
+export const retryBackoffMs = (count: number): number =>
+  Math.min(RETRY_BACKOFF_MAX_MS, SNAPSHOT_TICK_MS * 2 ** Math.max(0, count - 1));
 
 /** Who takes the scheduled snapshots. */
 export const SCHEDULE_TAKER = "schedule";
@@ -74,10 +91,11 @@ export interface CostsSnapshotStatus {
   inFlight: { startedAt: string; by: string } | null;
   /** `costs.snapshot.everyHours`. */
   everyHours: number;
-  /** When the loop takes the next one (`takenAt` + the interval); null with no snapshot yet — the next tick takes one. */
+  /** When the loop takes the next one: `takenAt` + the interval, held back to the backoff after
+   *  failures in a row; null with no snapshot and no failure yet — the next tick takes one. */
   nextAt: string | null;
-  /** The last take that failed, until one succeeds. */
-  lastFailure: { at: string; by: string; message: string } | null;
+  /** The last take that failed, until one succeeds; `count` is how many have failed in a row. */
+  lastFailure: { at: string; by: string; message: string; count: number } | null;
 }
 
 /** What a take reads. `runStore` absent, or the Null Object, is run history off. */
@@ -187,6 +205,8 @@ export interface SnapshotterOptions {
   everyHours: number;
   now?: () => Date;
   warn?: (message: string) => void;
+  /** Where `ALERT_AFTER_FAILURES` failures in a row, and the recovery after them, are posted; absent → nobody is told beyond the status. */
+  alert?: (text: string) => Promise<void>;
 }
 
 export interface RefreshLoopOptions {
@@ -210,9 +230,12 @@ export class CostsSnapshotter {
   /** The take in flight: callers arriving meanwhile share it. */
   private taking: { promise: Promise<CostsSnapshot>; startedAt: string; by: string } | undefined;
   private lastFailure: CostsSnapshotStatus["lastFailure"] = null;
+  /** When the current run of failures began; undefined while takes are landing. */
+  private failingSince: string | undefined;
   private readonly listeners = new Set<SnapshotListener>();
   private readonly now: () => Date;
   private readonly warn: (message: string) => void;
+  private readonly alert: ((text: string) => Promise<void>) | undefined;
   private readonly everyHours: number;
 
   constructor(
@@ -223,6 +246,7 @@ export class CostsSnapshotter {
     this.everyHours = opts.everyHours;
     this.now = opts.now ?? (() => new Date(systemClock()));
     this.warn = opts.warn ?? (() => undefined);
+    this.alert = opts.alert;
   }
 
   /** The snapshot as this process knows it: memory, else the store, read once. */
@@ -247,23 +271,35 @@ export class CostsSnapshotter {
 
   /** Take a snapshot now, keep it in memory and store it. One take at a time: a caller
    *  arriving while one runs shares it. Rejects with the read's error; the previous
-   *  snapshot keeps serving and the failure is named in the status until one succeeds. */
+   *  snapshot keeps serving and the failure is named in the status until one succeeds.
+   *  Never held back by the loop's backoff — that is the loop's own restraint. */
   refresh(by: string): Promise<CostsSnapshot> {
     if (this.taking) return this.taking.promise;
     const startedAt = this.now();
     const promise = takeCostsSnapshot(this.sources, { by, startedAt, now: this.now })
       .then(async (snapshot) => {
         this.memory = snapshot;
+        const failed = this.lastFailure;
         this.lastFailure = null;
+        this.failingSince = undefined;
         try {
           await this.store.put(snapshot);
         } catch (err) {
           this.warn(`costs snapshot not stored: ${message(err)}`);
         }
+        // Posted beside the take, not before it resolves: a slow Slack call never delays the callers sharing it.
+        if (failed && failed.count >= ALERT_AFTER_FAILURES)
+          void this.post(
+            `Costs snapshot recovered: taken ${snapshot.takenAt} by ${snapshot.takenBy} after ${failed.count} failed takes.`,
+          );
         return snapshot;
       })
-      .catch((err: unknown) => {
-        this.lastFailure = { at: this.now().toISOString(), by, message: message(err) };
+      .catch(async (err: unknown) => {
+        const at = this.now().toISOString();
+        const count = (this.lastFailure?.count ?? 0) + 1;
+        const since = (this.failingSince ??= at);
+        this.lastFailure = { at, by, message: message(err), count };
+        if (count === ALERT_AFTER_FAILURES) void this.post(this.alertText(err, count, since));
         throw err;
       })
       .finally(() => {
@@ -281,9 +317,44 @@ export class CostsSnapshotter {
       snapshot,
       inFlight: this.taking ? { startedAt: this.taking.startedAt, by: this.taking.by } : null,
       everyHours: this.everyHours,
-      nextAt: snapshot ? new Date(Date.parse(snapshot.takenAt) + this.everyHours * 3_600_000).toISOString() : null,
+      nextAt: this.nextAt(),
       lastFailure: this.lastFailure,
     };
+  }
+
+  /** The loop's next attempt: the scheduled one (`takenAt` + the interval), and no sooner than the
+   *  backoff after the last failure; null with nothing to wait for — the next tick takes one. */
+  private nextAt(): string | null {
+    const scheduled = this.memory ? Date.parse(this.memory.takenAt) + this.everyHours * 3_600_000 : undefined;
+    const retry = this.lastFailure
+      ? Date.parse(this.lastFailure.at) + retryBackoffMs(this.lastFailure.count)
+      : undefined;
+    const next = scheduled === undefined ? retry : retry === undefined ? scheduled : Math.max(scheduled, retry);
+    return next === undefined ? null : new Date(next).toISOString();
+  }
+
+  /** The alert's line: how many failed since when, the last error, when the loop tries next, what serves. */
+  private alertText(err: unknown, count: number, since: string): string {
+    const next = this.nextAt();
+    const nowMs = this.now().getTime();
+    return [
+      `Costs snapshot: ${count} takes in a row have failed since ${since}; the last: ${message(err)}.`,
+      next ? `The loop tries again ${untilText(next, nowMs)}; \`costs snapshot\` takes one at once.` : "",
+      this.memory ? `The snapshot from ${this.memory.takenAt} still serves.` : "No snapshot serves yet.",
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  /** Post to the alert when one is wired, beside the take rather than in its path; a post that
+   *  fails is a warning, never a failed take. */
+  private async post(text: string): Promise<void> {
+    if (!this.alert) return;
+    try {
+      await this.alert(text);
+    } catch (err) {
+      this.warn(`costs snapshot alert not posted: ${message(err)}`);
+    }
   }
 
   /** Hear every status transition; the returned function stops it. */
@@ -297,15 +368,16 @@ export class CostsSnapshotter {
    * holds the process open) takes one when none is stored or the stored one is
    * older than `everyHours`, and runs once at start so a stale snapshot after a
    * restart is refreshed at once and a young one is left alone. A failing take
-   * is a warning; the next tick tries again. `tick()` is the pass itself, for tests.
+   * is a warning; the loop tries again after the backoff (`retryBackoffMs` of
+   * the failures in a row) — what `nextAt` says. `tick()` is the pass itself, for tests.
    */
   startRefreshLoop(opts: RefreshLoopOptions = {}): { stop(): void; tick(): Promise<void> } {
     let running: Promise<void> | undefined;
     const pass = async (): Promise<void> => {
       try {
-        const current = await this.current();
-        const ageMs = current ? this.now().getTime() - Date.parse(current.takenAt) : Infinity;
-        if (ageMs < this.everyHours * 3_600_000) return;
+        await this.current();
+        const next = this.nextAt();
+        if (next !== null && Date.parse(next) > this.now().getTime()) return;
         await this.refresh(SCHEDULE_TAKER);
       } catch (err) {
         this.warn(`costs snapshot not refreshed: ${message(err)}`);

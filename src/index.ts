@@ -202,6 +202,8 @@ export async function runBot(): Promise<void> {
   // per-run tool source. Requester emails come from Slack once the app exists.
   let slackEmailLookup: ((userId: string) => Promise<string | undefined>) | undefined;
   let slackNameLookup: ((userId: string) => Promise<string | undefined>) | undefined;
+  /** A plain line into a Slack channel by its bare id — the costs snapshot alert's poster, bound once the app exists. */
+  let slackPost: ((channel: string, text: string) => Promise<void>) | undefined;
   let slackPersonByEmail: PersonLookup | undefined;
   const personByEmail: PersonLookup = (email) =>
     slackPersonByEmail ? slackPersonByEmail(email) : Promise.resolve(undefined);
@@ -488,6 +490,13 @@ export async function runBot(): Promise<void> {
           runStore,
           // Cost by user (costs.md item 10): the Slack email lookup that matches the viewer to their runs.
           emailOfSlackUser: (userId) => (slackEmailLookup ? slackEmailLookup(userId) : Promise.resolve(undefined)),
+          // `costs.snapshot.alertChannel` (item 6): a Slack channel by its namespaced id; any other
+          // namespace, or a Slack app not up yet, rejects — the snapshotter warns and the status still says.
+          notify: (channelId, text) => {
+            if (!channelId.startsWith("slack:")) return Promise.reject(new Error(`no poster for ${channelId}`));
+            if (!slackPost) return Promise.reject(new Error("the Slack app is not up yet"));
+            return slackPost(channelId.slice("slack:".length), text);
+          },
           warn: (m) => console.warn(`[costs] ${m}`),
         })
       : undefined;
@@ -573,6 +582,9 @@ export async function runBot(): Promise<void> {
     userId.startsWith("slack:")
       ? resolveUserName(app.client, userId.slice("slack:".length))
       : Promise.resolve(undefined);
+  slackPost = async (channel, text) => {
+    await app.client.chat.postMessage({ channel, text: mdToMrkdwn(text) });
+  };
   // The dashboard link (record 0042): a browser session's Access email names
   // its Slack person, resolved once per gate pass through a cached reverse
   // lookup — identity, never authority.

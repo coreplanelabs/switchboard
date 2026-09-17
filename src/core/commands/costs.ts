@@ -36,9 +36,11 @@ export interface CostsSnapshotTaken {
   nextAt: string | null;
 }
 
-/** Who a take is billed to in the stamp: the linked person's name, else the caller's id. */
-export function takerLabel(caller: { id: string; actor: { asUser?: { name?: string } } }): string {
-  return caller.actor.asUser?.name ?? caller.id;
+/** Who a take is credited to in the stamp: the linked person's name (a dashboard session), else the
+ *  name the caller's adapter resolved (a Slack profile name), else the caller's id — never `slack:U…`
+ *  when Slack knew the person's name. */
+export function takerLabel(caller: { id: string; name?: string; actor: { asUser?: { name?: string } } }): string {
+  return caller.actor.asUser?.name ?? caller.name ?? caller.id;
 }
 
 function renderTaken(output: JsonValue): string {

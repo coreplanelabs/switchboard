@@ -46,13 +46,18 @@ export function snapshotLineOf(status: CostsSnapshotStatus, nowMs: number): stri
       `Snapshot from ${snapshotTime(status.snapshot.takenAt)}, ${snapshotAgeText(status.snapshot.takenAt, nowMs)} ${takerText(status.snapshot.takenBy)}`,
     );
     if (status.nextAt) parts.push(`next ${untilText(status.nextAt, nowMs)}`);
+  } else if (status.nextAt) {
+    // No snapshot and a next attempt: the takes so far failed, and the loop's backoff says when it tries again.
+    parts.push(`No snapshot yet — next attempt ${untilText(status.nextAt, nowMs)}`);
   } else {
     parts.push("No snapshot yet — the first one is taken within a minute of startup");
   }
-  if (status.lastFailure && !status.inFlight)
+  if (status.lastFailure && !status.inFlight) {
+    const inARow = status.lastFailure.count > 1 ? ` (${status.lastFailure.count} in a row)` : "";
     parts.push(
-      `last attempt ${snapshotAgeText(status.lastFailure.at, nowMs)} failed: ${status.lastFailure.message.slice(0, 120)}`,
+      `last attempt ${snapshotAgeText(status.lastFailure.at, nowMs)} failed${inARow}: ${status.lastFailure.message.slice(0, 120)}`,
     );
+  }
   return parts.join(" · ");
 }
 /** Workers requests + CPU, SQLite rows + storage, R2, Workflows — the meters

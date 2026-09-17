@@ -72,6 +72,9 @@ export interface CostsConfig {
   snapshot: {
     /** Hours between two reads of the billing sources. */
     everyHours: number;
+    /** The platform-namespaced channel (`slack:C…`) told when takes keep failing and when they
+     *  land again (`ALERT_AFTER_FAILURES` in a row); absent → the status alone says so. */
+    alertChannel?: string;
   };
 }
 
@@ -82,13 +85,15 @@ const DEFAULT_ANTHROPIC_ADMIN_ENV = "ANTHROPIC_ADMIN_KEY";
  *  default — both sources bucket by UTC day, and the page is read about as often. */
 export const COSTS_SNAPSHOT_EVERY_HOURS = Object.freeze({ default: 24, min: 1, max: 168 });
 
-/** `costs.snapshot`: absent → the default interval; a value outside the bounds or not a whole number throws by name. */
+/** `costs.snapshot`: absent → the default interval and no alert channel; a value outside the
+ *  bounds or not a whole number throws by name; `alertChannel`, when given, is a platform-namespaced id. */
 function snapshotConfig(raw: unknown): CostsConfig["snapshot"] {
   if (raw === undefined) return { everyHours: COSTS_SNAPSHOT_EVERY_HOURS.default };
   if (typeof raw !== "object" || raw === null || Array.isArray(raw))
     throw new Error("costs.snapshot must be a mapping");
-  const every = (raw as Record<string, unknown>).everyHours;
-  if (every === undefined) return { everyHours: COSTS_SNAPSHOT_EVERY_HOURS.default };
+  const r = raw as Record<string, unknown>;
+  // `undefined` alone defaults: a bare `everyHours:` key (null) is a malformed value, refused below by name.
+  const every = r.everyHours === undefined ? COSTS_SNAPSHOT_EVERY_HOURS.default : r.everyHours;
   if (
     typeof every !== "number" ||
     !Number.isInteger(every) ||
@@ -98,7 +103,10 @@ function snapshotConfig(raw: unknown): CostsConfig["snapshot"] {
     throw new Error(
       `costs.snapshot.everyHours must be a whole number of hours between ${COSTS_SNAPSHOT_EVERY_HOURS.min} and ${COSTS_SNAPSHOT_EVERY_HOURS.max}`,
     );
-  return { everyHours: every };
+  if (r.alertChannel === undefined) return { everyHours: every };
+  if (typeof r.alertChannel !== "string" || !/^[a-z]+:.+$/.test(r.alertChannel))
+    throw new Error("costs.snapshot.alertChannel must be a platform-namespaced channel id (`slack:C…`)");
+  return { everyHours: every, alertChannel: r.alertChannel };
 }
 
 function labelMap(raw: unknown, what: string): Record<string, string> {

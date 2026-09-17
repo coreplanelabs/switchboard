@@ -20,6 +20,10 @@ Right after a fresh installation starts there is no snapshot yet: the page says 
 
 Click **Snapshot now** beside the status line (it is there when your session holds `costs:write`), ask the bot for `costs snapshot` in Slack, or run `switchboard costs snapshot` on the CLI. Every open costs page shows the take as it happens — the line reads `Taking a snapshot now…` and the figures repaint when it lands, no reload needed. The take reads both billing sources and the run history once (a few seconds, half a minute in a bad one), stores the result, and the page shows it on the next load with your name on the status line. The command needs the `costs:write` grant — an admin's `all` or a `grants` entry that names it — because a take reads two providers and replaces what every viewer sees.
 
+## When a take fails
+
+The previous snapshot keeps serving and the status line names the failure (`last attempt 5 minutes ago failed (3 in a row): …`) until a take lands. The bot retries by itself, waiting longer after each failure in a row — a minute, two, four, up to an hour — so a provider outage is not hammered; the line says when the next attempt is due. Set `costs.snapshot.alertChannel` (`slack:C…`) to have the bot post one line to a channel after three failed takes in a row, and one more when a take lands again. `costs snapshot` is never held back by the retry wait.
+
 ## Narrow to one group
 
 Open `/costs/<group>`.

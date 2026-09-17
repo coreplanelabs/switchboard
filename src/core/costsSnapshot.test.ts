@@ -9,10 +9,13 @@ import {
 } from "./costs.js";
 import { buildUserCostReport } from "./costsByUser.js";
 import {
+  ALERT_AFTER_FAILURES,
   COSTS_SNAPSHOT_EVERY_HOURS,
   CostsSnapshotter,
   MAX_USAGE_BACKFILL_ROUNDS,
   reportFromSnapshot,
+  RETRY_BACKOFF_MAX_MS,
+  retryBackoffMs,
   SNAPSHOT_DAYS,
   SNAPSHOT_TICK_MS,
   takeCostsSnapshot,
@@ -383,10 +386,145 @@ describe("CostsSnapshotter", () => {
       at: new Date(T0).toISOString(),
       by: "casey",
       message: "cloudflare graphql 502",
+      count: 1,
     });
     fail = false;
     await flaky.s.refresh("casey");
     expect(flaky.s.status().lastFailure).toBeNull();
+  });
+
+  it("failures in a row push the loop's next attempt back — a tick, doubled per failure, an hour at most — never sooner than the schedule; a take on request is not held back; a landing take resets the count", async () => {
+    const c = clock(T0, 0);
+    let fail = true;
+    const calls = { usage: 0 };
+    const { s } = snapshotter({
+      clock: c,
+      everyHours: 24,
+      sources: {
+        cloudflare: {
+          fetchUsage: async () => {
+            calls.usage += 1;
+            if (fail) throw new Error("cloudflare graphql 502");
+            return USAGE;
+          },
+        },
+        llm: { fetchDailyCost: async () => LLM },
+      },
+    });
+    const loop = s.startRefreshLoop({ setInterval: () => ({}), clearInterval: () => undefined });
+    // No snapshot, no failure yet: the first pass takes; it fails → the next attempt is a tick away.
+    await loop.tick();
+    expect(calls.usage).toBe(1);
+    expect(s.status().lastFailure?.count).toBe(1);
+    expect(s.status().nextAt).toBe(new Date(T0 + SNAPSHOT_TICK_MS).toISOString());
+    // A tick before the backoff has elapsed does nothing.
+    c.set(T0 + SNAPSHOT_TICK_MS - 1);
+    await loop.tick();
+    expect(calls.usage).toBe(1);
+    // Once elapsed → attempted again; the second failure waits two ticks, the third four.
+    c.set(T0 + SNAPSHOT_TICK_MS);
+    await loop.tick();
+    expect(calls.usage).toBe(2);
+    expect(s.status().lastFailure?.count).toBe(2);
+    expect(s.status().nextAt).toBe(new Date(T0 + SNAPSHOT_TICK_MS + 2 * SNAPSHOT_TICK_MS).toISOString());
+    c.set(T0 + 3 * SNAPSHOT_TICK_MS);
+    await loop.tick();
+    expect(calls.usage).toBe(3);
+    expect(retryBackoffMs(3)).toBe(4 * SNAPSHOT_TICK_MS);
+    expect(s.status().nextAt).toBe(new Date(T0 + 3 * SNAPSHOT_TICK_MS + 4 * SNAPSHOT_TICK_MS).toISOString());
+    // The backoff caps at an hour.
+    expect(retryBackoffMs(7)).toBe(RETRY_BACKOFF_MAX_MS);
+    expect(retryBackoffMs(30)).toBe(RETRY_BACKOFF_MAX_MS);
+    // A take on request goes at once, backoff or not — and, landing, resets the count.
+    fail = false;
+    const t4 = T0 + 4 * SNAPSHOT_TICK_MS;
+    c.set(t4);
+    await s.refresh("casey");
+    expect(calls.usage).toBe(4);
+    expect(s.status().lastFailure).toBeNull();
+    expect(s.status().nextAt).toBe(new Date(t4 + 24 * 3_600_000).toISOString());
+    // A young snapshot with a failed take on request: the next attempt stays the scheduled one, not the backoff.
+    fail = true;
+    c.set(t4 + 60_000);
+    await expect(s.refresh("casey")).rejects.toThrow();
+    expect(s.status().lastFailure?.count).toBe(1);
+    expect(s.status().nextAt).toBe(new Date(t4 + 24 * 3_600_000).toISOString());
+  });
+
+  it("the alert is posted once after ALERT_AFTER_FAILURES failures in a row — naming the count, the last error, the next attempt and what still serves — and once more when a take lands again; an alert that cannot be posted is a warning; none wired, nobody is told", async () => {
+    const c = clock(T0, 0);
+    let fail = false;
+    const posted: string[] = [];
+    let refusePost = false;
+    const warnings: string[] = [];
+    const s = new CostsSnapshotter(
+      {
+        cloudflare: {
+          fetchUsage: async () => {
+            if (fail) throw new Error("cloudflare graphql 502");
+            return USAGE;
+          },
+        },
+        llm: { fetchDailyCost: async () => LLM },
+      },
+      new InMemoryCostsSnapshotStore(),
+      {
+        everyHours: 24,
+        now: c.now,
+        warn: (m) => warnings.push(m),
+        alert: async (text) => {
+          if (refusePost) throw new Error("channel_not_found");
+          posted.push(text);
+        },
+      },
+    );
+    await s.refresh("schedule");
+    fail = true;
+    const failures = ALERT_AFTER_FAILURES;
+    for (let i = 1; i <= failures + 1; i++) {
+      c.set(T0 + i * 3_600_000);
+      await expect(s.refresh("schedule")).rejects.toThrow();
+      // Posted on the third, not before and not again on the fourth.
+      expect(posted).toHaveLength(i >= failures ? 1 : 0);
+    }
+    // The snapshot is three hours young, so the loop's next attempt is the scheduled one, not the backoff.
+    expect(posted[0]).toBe(
+      `Costs snapshot: ${failures} takes in a row have failed since ${new Date(T0 + 3_600_000).toISOString()}; the last: cloudflare graphql 502. ` +
+        `The loop tries again in 21 hours; \`costs snapshot\` takes one at once. The snapshot from ${new Date(T0).toISOString()} still serves.`,
+    );
+    fail = false;
+    c.set(T0 + 6 * 3_600_000);
+    await s.refresh("casey");
+    expect(posted).toHaveLength(2);
+    expect(posted[1]).toBe(
+      `Costs snapshot recovered: taken ${new Date(T0 + 6 * 3_600_000).toISOString()} by casey after ${failures + 1} failed takes.`,
+    );
+    // A recovery after fewer failures than the alert threshold posts nothing.
+    fail = true;
+    await expect(s.refresh("schedule")).rejects.toThrow();
+    fail = false;
+    await s.refresh("schedule");
+    expect(posted).toHaveLength(2);
+    // The post itself failing is a warning; the take's own error is what the caller sees.
+    fail = true;
+    refusePost = true;
+    for (let i = 0; i < failures; i++) await expect(s.refresh("schedule")).rejects.toThrow("cloudflare graphql 502");
+    expect(warnings).toContain("costs snapshot alert not posted: channel_not_found");
+    expect(posted).toHaveLength(2);
+    // Nothing wired: the failures are the status's alone.
+    const quiet = snapshotter({
+      sources: {
+        cloudflare: {
+          fetchUsage: async () => {
+            throw new Error("down");
+          },
+        },
+        llm: { fetchDailyCost: async () => LLM },
+      },
+    });
+    for (let i = 0; i < failures; i++) await expect(quiet.s.refresh("schedule")).rejects.toThrow("down");
+    expect(quiet.s.status().lastFailure?.count).toBe(failures);
+    expect(quiet.warnings).toEqual([]);
   });
 
   it("status(): nothing yet → no snapshot, nothing in flight, no next time; a snapshot → its stamp and the next take at takenAt + everyHours; while one is being taken → who started it and when", async () => {
@@ -449,7 +587,7 @@ describe("CostsSnapshotter", () => {
     expect(heard).toHaveLength(4);
   });
 
-  it("startRefreshLoop: a tick takes a snapshot when none is stored or the stored one is older than everyHours, leaves a young one alone, runs once at start, and a failing take is a warning the next tick retries", async () => {
+  it("startRefreshLoop: a tick takes a snapshot when none is stored or the stored one is older than everyHours, leaves a young one alone, runs once at start, and a failing take is a warning retried once the backoff has elapsed", async () => {
     const c = clock(T0, 0);
     const store = new InMemoryCostsSnapshotStore();
     let fail = false;
@@ -490,7 +628,7 @@ describe("CostsSnapshotter", () => {
     fire?.();
     await loop.tick();
     expect(calls.usage).toBe(1);
-    // Past the interval → taken again; a failure is a warning, retried next tick.
+    // Past the interval → taken again; a failure is a warning, retried once the backoff (one tick after the first) has elapsed.
     c.set(T0 + 25 * 3_600_000);
     fail = true;
     await loop.tick();
@@ -499,8 +637,11 @@ describe("CostsSnapshotter", () => {
     expect((await store.get())?.takenAt).toBe(new Date(T0).toISOString());
     fail = false;
     await loop.tick();
+    expect(calls.usage).toBe(2);
+    c.set(T0 + 25 * 3_600_000 + SNAPSHOT_TICK_MS);
+    await loop.tick();
     expect(calls.usage).toBe(3);
-    expect((await store.get())?.takenAt).toBe(new Date(T0 + 25 * 3_600_000).toISOString());
+    expect((await store.get())?.takenAt).toBe(new Date(T0 + 25 * 3_600_000 + SNAPSHOT_TICK_MS).toISOString());
     loop.stop();
     expect(cleared).toBe(true);
   });

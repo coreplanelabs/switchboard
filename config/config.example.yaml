@@ -411,6 +411,8 @@ workspaceDir: ./workspaces
 #   snapshot:                                  # the page serves a snapshot of both billing sources, never a live read;
 #     everyHours: 24                           #   how often the bot reads them (1–168, default 24). `costs snapshot`
 #                                              #   takes one now. Kept on the state Worker any `*.worker` block names
+#     alertChannel: slack:C0123ABCD            #   optional: a line there after three failed takes in a row, and one
+#                                              #   when a take lands again; otherwise only the page's status line says
 #   groups:
 #     myapp:
 #       label: My App

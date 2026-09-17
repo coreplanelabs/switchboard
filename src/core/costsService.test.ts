@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { EMPTY_USAGE, parseCostsConfig, resolveRange, type CloudflareUsage, type LlmCostRow } from "./costs.js";
-import { CostsSnapshotter, SNAPSHOT_DAYS } from "./costsSnapshot.js";
+import { ALERT_AFTER_FAILURES, CostsSnapshotter, SNAPSHOT_DAYS } from "./costsSnapshot.js";
 import { InMemoryCostsSnapshotStore, type CostsSnapshot } from "./costsSnapshotStore.js";
 import {
   COSTS_OFF_MESSAGE,
@@ -226,6 +226,45 @@ describe("createCostsService", () => {
     );
     expect(both?.llmOn).toBe(true);
     expect(warnings).toHaveLength(1);
+  });
+
+  it("costsFromConfig: `snapshot.alertChannel` is told through the process's poster after the failures in a row the snapshotter counts; a channel with no poster is a warning at wiring time and no alert", async () => {
+    const secrets = { named: (n: string) => (n === "CF_ANALYTICS_TOKEN" ? { reveal: () => "cf" } : undefined) };
+    const alertCfg = { ...cfg, snapshot: { everyHours: 24, alertChannel: "slack:COPS" } };
+    const posted: Array<[string, string]> = [];
+    const warnings: string[] = [];
+    // The wired snapshotter's alert is the poster on the configured channel: drive it through failures
+    // with the network stubbed out (the sources bind `fetch` when built) — every take fails offline,
+    // which is what the alert is for.
+    vi.stubGlobal("fetch", async () => {
+      throw new Error("offline");
+    });
+    try {
+      const wired = costsFromConfig(
+        alertCfg,
+        {},
+        {
+          secrets,
+          notify: async (channel, text) => void posted.push([channel, text]),
+          warn: (m) => warnings.push(m),
+        },
+      );
+      for (let i = 0; i < ALERT_AFTER_FAILURES; i++)
+        await expect(wired?.snapshots.refresh("schedule")).rejects.toThrow("offline");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.[0]).toBe("slack:COPS");
+    expect(posted[0]?.[1]).toMatch(
+      /^Costs snapshot: 3 takes in a row have failed since .*offline.*No snapshot serves yet\.$/,
+    );
+
+    const noPoster = costsFromConfig(alertCfg, {}, { secrets, warn: (m) => warnings.push(m) });
+    expect(noPoster).toBeDefined();
+    expect(
+      warnings.some((w) => w.includes("costs.snapshot.alertChannel slack:COPS is set but this process cannot post")),
+    ).toBe(true);
   });
 
   it("reads the snapshot the store holds after a restart: a service over a fresh snapshotter and the same store serves without a take", async () => {

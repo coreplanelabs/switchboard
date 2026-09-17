@@ -83,6 +83,10 @@ export interface Caller {
    *  only): what a connect ticket the session mints binds to, linked to a person or not
    *  (record 0042). Identity, NOT authority — read by no gate. */
   email?: string;
+  /** The caller's display name as its adapter resolved it (a chat message's `userName`: the
+   *  Slack profile name, cached), for what a command credits to a person by name — `costs snapshot`'s
+   *  stamp. Identity, NOT authority — read by no gate; absent when the adapter resolved none. */
+  name?: string;
 }
 
 /** One positional argument: `name` addresses it on the JSON surfaces (HTTP
