@@ -924,11 +924,12 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
      *  prompt — is held behind it in the order it was sent, and a second prompt
      *  in doubt is appended, never overwriting the first, so pi sees the order
      *  the loop sent. Its two exits answer what pi already did, each enforced
-     *  where the write is made: an abort never reaches it (the transport's
-     *  `send` diverts it to `sendAbort`), a gate reply passes the hold inside
-     *  the gate's own `send`, by type. The gate writes to `transport` as it is
-     *  at that moment, so a re-attach's fresh transport is what a held write
-     *  reaches, and learns each write's landing from it. */
+     *  where the write is made: an abort and a gate reply pass the hold inside
+     *  the gate's own `send`, by type (`PASSES_HOLD`), and the transport writes
+     *  an abort as its own step (`write`'s abort step) — every abort the loop sends,
+     *  the hard stop's included, goes this one way. The gate writes to
+     *  `transport` as it is at that moment, so a re-attach's fresh transport
+     *  is what a held write reaches, and learns each write's landing from it. */
     const sends = new HeldSends((command) => transport!.write(command));
     /** The gate's clock read, on every iteration after the event just read is
      *  observed (an echo in hand lands its prompt before the bound is judged)
@@ -965,22 +966,35 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     /** The model call the wind-down waited on failed (the finale's abort
      *  included): the answer names it where the write-up would have been. */
     let writeUpFailed: string | undefined;
+    /** Every abort the loop or a turn sends goes this one way, and is told
+     *  its landing: `dropped` — nothing kept it, so pi was never told to stop
+     *  — is noted as the harness's error, never silent. No path reaches it
+     *  today: every abort's sender is the loop or the turn, suspended in the
+     *  recovery that abandons a transport, and after `end()` nothing sends
+     *  one — the note is what makes that seen rather than assumed. */
+    const abortPi = (): void => {
+      sends.send({ type: "abort" }, (landing) => {
+        if (landing === "dropped")
+          note("harness_error", "the abort was dropped: no transport kept it, so pi was never told to stop");
+      });
+    };
     /** The hard stop, once, on every tick and at every end of a wait — the
      *  loop's `check`, a turn's `turnCheck`, the read after `judgeUnsettled`'s
      *  wait, after a follow-up turn's, and after the wait for an in-flight write
      *  to settle: the flag, and one abort to pi, since the one more command may
      *  have found pi alive and mid-turn, and left alone it would go on
-     *  generating and calling tools until `end()`. The abort never takes the
-     *  gate: the tick that sends it also breaks the loop on the flag, so a held
-     *  abort would never be released, and a streaming pi starves the tick
-     *  besides — it is written directly (`sendAbort`), idempotent and harmless
-     *  to duplicate, so it reaches pi at once whatever the gate holds and
-     *  whatever the chain's state. The `stopped` note and the abort line as the
-     *  answer stay with the path that ends. */
+     *  generating and calling tools until `end()`. The abort never waits at
+     *  the gate: the tick that sends it also breaks the loop on the flag, so a
+     *  held abort would never be released, and a streaming pi starves the tick
+     *  besides — the gate passes it by type (`PASSES_HOLD`) and the transport
+     *  writes it as its own step (`write`'s abort step), idempotent and harmless to
+     *  duplicate, so it reaches pi whatever the gate holds and whatever the
+     *  chain's state. The `stopped` note and the abort line as the answer stay
+     *  with the path that ends. */
     const hardStop = (): void => {
       if (hardStopped) return;
       hardStopped = true;
-      transport?.sendAbort();
+      abortPi();
     };
     const startWriteUp = (kind: WriteUp, instruction: string) => {
       writeUp = kind;
@@ -1001,16 +1015,36 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       // transport carries it once re-attached — the clock starting when that
       // one lands. A steer still held when its loop ends is dropped with the
       // rest (`dropHeld` at the loop's and a turn's end) and the label with it.
+      // The landing belongs to the steer this write-up currently owns
+      // (`writeUpSteer`, set by every ask, cleared with the write-up and when
+      // the loop or turn it was asked for ends — `dropHeld`): a loop's steer
+      // whose write is still in flight when the loop ends (dispatched, so not
+      // held, so not dropped) may settle after — in the window before a
+      // follow-up turn, or inside one that has its own write-up by then — and
+      // its landing is then nobody's: never the turn's clock, never a failure
+      // noted after the answer, never a re-ask of the loop's instruction onto
+      // the spent chain for the turn's re-attach to carry to pi; so is the
+      // landing of a steer this write-up already asked again.
       const ask = (): void => {
         const steer = { type: "steer", message: instruction };
         writeUpSteer = steer;
         sends.send(steer, (landing) => {
+          if (writeUpSteer !== steer) return;
           if (landing === "landed") {
             writeUpAt = now();
             return;
           }
-          note("wrap_up", wrapUpWriteFailedNote(kind.kind, windingDown));
-          ask();
+          if (landing === "failed") {
+            note("wrap_up", wrapUpWriteFailedNote(kind.kind, windingDown));
+            ask();
+            return;
+          }
+          // Dropped: nothing kept the steer and nothing will re-send it — and
+          // a steer meets that only after `end()` closed the transport under
+          // teardown (a transport abandoned to a re-attach holds a steer for
+          // the fresh one; the transport exists before the gate does), the
+          // run over and its answer computed, so there is nothing to bound
+          // or to say.
         });
       };
       ask();
@@ -1019,11 +1053,21 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
      *  delivering nothing — and if the wrap-up steer was among it, pi never
      *  saw the instruction and finished on its own, so the write-up is cleared
      *  (the answer wears no time/turn/soft label for a wrap-up that never went)
-     *  and the record says so. */
+     *  and the record says so. A wrap-up steer still in flight instead is the
+     *  write-up's no longer: its landing, whenever it comes, is nobody's. */
     const dropHeld = (closes: "run" | "turn"): void => {
       const dropped = sends.dropHeld();
-      if (writeUp === undefined || writeUpSteer === undefined || !dropped.includes(writeUpSteer)) return;
-      note("wrap_up", wrapUpUndeliveredNote(writeUp.kind, closes));
+      const undelivered =
+        writeUp !== undefined && writeUpSteer !== undefined && dropped.includes(writeUpSteer) ? writeUp : undefined;
+      // Whatever the steer's write is still doing, the loop or turn it was
+      // asked for is over: a write in flight that fails with a reset in the
+      // window before the next turn must neither note a failure after the
+      // answer nor re-ask the instruction onto the spent chain, whence the
+      // turn's re-attach would carry it to pi. The write-up itself stays
+      // where it was not dropped: the answer's label reads it.
+      writeUpSteer = undefined;
+      if (undelivered === undefined) return;
+      note("wrap_up", wrapUpUndeliveredNote(undelivered.kind, closes));
       clearWriteUp();
     };
     // Steers go out in the order their follow-ups were drained: the staging of one
@@ -1081,8 +1125,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             note("follow_up", `staging the follow-up's files failed: ${redactSecrets(stagedLine)}`);
           }
         }
-        if (settled || loopEnded) {
-          // pi settled, or the loop ended some other way, before the steer
+        if (loopEnded) {
+          // The loop ended — pi settled, a stop, a throw — before the steer
           // could go: the follow-ups are the run stage's to run as a fresh
           // turn, exactly as ones the loop never drained — never sent through
           // the emptied gate into a pi being ended or a later turn.
@@ -1125,7 +1169,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           writeUpAt = undefined;
           finaleAborted = true;
           run.onProgress?.(finaleTimedOutNote());
-          transport!.sendAbort();
+          abortPi();
         }
         return;
       }
@@ -1260,7 +1304,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           const msg =
             "the write in flight when the resident's control plane reset did not settle before the deadline; the run cannot continue";
           note("harness_error", msg);
-          transport!.sendAbort();
+          abortPi();
           throw new Error(msg, { cause: err });
         }
       }
@@ -1271,6 +1315,13 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       }
       reattaches++;
       note("resumed", outcome.kind === "word-alive" ? WORD_ALIVE_REATTACH_NOTE : CONTROL_RESET_RESUMED_NOTE);
+      // No second wait on the chain before the abandon: nothing chained since
+      // the wait began can be an abort — every abort's sender is this loop or
+      // the turn, suspended in the wait itself — and a follow-up steer chained
+      // meanwhile is the fresh transport's (`takeUnsent`) or, failing in flight
+      // on this one, stays unechoed and is handed back at the loop's end; a
+      // second wait would observe neither the stop nor `until`, holding a
+      // person's stop for as long as that steer's hung write takes.
       const unsent = reattachInPlace();
       // Through the one gate (`sends`): the resolved write first — re-sent as it
       // was, or a prompt awaiting its echo — then the writes whose turn never
@@ -1386,7 +1437,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         // run fails naming the call once the loop is left.
         bypass = new GateBypassed(obs.gateBypassed.tool, obs.gateBypassed.callId);
         note("harness_error", `${bypass.message} — the run is stopped`);
-        transport!.sendAbort();
+        abortPi();
         break;
       }
       if (obs.response) {
@@ -1669,7 +1720,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             writeUpAt = undefined;
             finaleAborted = true;
             run.onProgress?.(finaleTimedOutNote("turn"));
-            transport!.sendAbort();
+            abortPi();
           }
           return;
         }
@@ -1749,7 +1800,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           if (obs.gateBypassed) {
             bypass = new GateBypassed(obs.gateBypassed.tool, obs.gateBypassed.callId);
             note("harness_error", `${bypass.message} — the turn is stopped`);
-            transport!.sendAbort();
+            abortPi();
             break;
           }
           if (obs.response) noteEcho(obs.response);
@@ -1811,8 +1862,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           // more command may have found the container alive with pi mid-turn
           // (the same identity, no word), and left alone pi would go on
           // generating and calling tools until `end()` — delivered now, since
-          // nothing ticks the gate any more, and written directly when the
-          // turn's own failed write spent the transport's chain.
+          // nothing ticks the gate any more: through the gate's exit that never
+          // holds it, onto the transport's own step, which the turn's own
+          // failed write spending the chain does not stop.
           if (run.control?.requested === "hard") {
             hardStop();
             note("stopped", hardStopNote(), "hard");
