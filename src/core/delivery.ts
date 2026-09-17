@@ -1,4 +1,5 @@
 import { snapshotAgeText } from "./snapshotAge.js";
+import { DAY_MS } from "./budgets.js";
 import { systemClock } from "./trace/clock.js";
 
 // Delivery indicators: what the run history and the pull requests' own facts
@@ -225,7 +226,6 @@ export function weekIncomplete(report: Pick<DeliveryReport, "truncated" | "compl
 
 // ---- the arithmetic ---------------------------------------------------------------------
 
-const DAY_MS = 86_400_000;
 const HOUR_MS = 3_600_000;
 
 /** Add `n` calendar days to a UTC date (`YYYY-MM-DD`). */

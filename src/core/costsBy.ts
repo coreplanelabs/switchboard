@@ -1,5 +1,6 @@
 import type { DailyCost, DateRange } from "./costs.js";
 import { llmUsdOfUsage, type ModelPriceTable, type PricedModelUsage } from "./modelPricing.js";
+import { DAY_MS } from "./budgets.js";
 import { addUsage, emptyUsage, type RunUsage, type RunUsageReport, type UsageRow } from "./runUsage.js";
 
 // Cost by dimension (docs/reference/specs/costs.md items 10–10a): what the runs
@@ -116,8 +117,6 @@ export interface CostsByReport {
   /** The snapshot the report was built from (src/core/costsSnapshot.ts); absent on a report built straight from the sources. */
   snapshot?: { takenAt: string; takenBy: string; durationMs: number };
 }
-
-const DAY_MS = 86_400_000;
 
 /** Where the data begins: the range's start, the history's oldest finish and
  *  its retention cutoff, whichever is latest. */
