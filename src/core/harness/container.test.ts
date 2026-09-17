@@ -11,6 +11,7 @@ import {
   OP_TIMEOUT_MS,
   identityChangedCondition,
   isContainerGone,
+  HarnessControlFileLostError,
   replacedBecause,
   replacedVerdict,
   PORT_ARG,
@@ -69,10 +70,10 @@ function recordingExecutor(answers: Array<string | Error> = []) {
 }
 
 describe("the container scripts", () => {
-  it("writes a file with printf in chunks a command can carry: exact bytes, the first creating its directories at 700 (the umask before the mkdir, so the run's root under /tmp is the caller's alone)", () => {
+  it("writes a file with printf in chunks a command can carry: exact bytes, the first creating its directories at 700 (the umask before the mkdir, so the run's root under /var/tmp is the caller's alone)", () => {
     const [one] = writeFileScripts(`${paths.agentDir}/SYSTEM.md`, "hello 'quoted'\nline two");
     expect(one).toBe(
-      `umask 077 && mkdir -p '/tmp/switchboard-pi-run-7/agent' && printf '%s' 'hello '\\''quoted'\\''\nline two' > '/tmp/switchboard-pi-run-7/agent/SYSTEM.md'`,
+      `umask 077 && mkdir -p '/var/tmp/switchboard-pi-run-7/agent' && printf '%s' 'hello '\\''quoted'\\''\nline two' > '/var/tmp/switchboard-pi-run-7/agent/SYSTEM.md'`,
     );
     const big = "x".repeat(WRITE_CHUNK_CHARS * 2 + 5);
     const scripts = writeFileScripts("/tmp/f", big);
@@ -89,7 +90,7 @@ describe("the container scripts", () => {
   // its descriptors (execution.md item 24).
   it("pi's start is the script the seam wrote before the program, the filter and the layout were inputs, with the wrapper's stdio redirected away from the exec's pipes", () => {
     expect(startScript(piStart(["--mode", "rpc", "-e", paths.extension], { X: "1" }))).toBe(
-      "(umask 077 && mkdir -p '/tmp/switchboard-pi-run-7' '/tmp/switchboard-pi-run-7/agent/sessions' '/tmp/switchboard-pi-run-7/cmd') && rm -f '/tmp/switchboard-pi-run-7/rpc.in' && mkfifo -m 600 '/tmp/switchboard-pi-run-7/rpc.in' && : > '/tmp/switchboard-pi-run-7/rpc.log' && : > '/tmp/switchboard-pi-run-7/rpc.err' && setsid -f sh -c 'exec 3<>'\\''/tmp/switchboard-pi-run-7/rpc.in'\\''; echo $$ > '\\''/tmp/switchboard-pi-run-7/pi.pid'\\''; pi '\\''--mode'\\'' '\\''rpc'\\'' '\\''-e'\\'' '\\''/tmp/switchboard-pi-run-7/extension.js'\\'' <&3 2>>'\\''/tmp/switchboard-pi-run-7/rpc.err'\\'' | grep --line-buffered -v '\\''\"type\":\"message_update\"'\\'' >> '\\''/tmp/switchboard-pi-run-7/rpc.log'\\''' </dev/null >/dev/null 2>&1 && sleep 0.3 && cat '/tmp/switchboard-pi-run-7/pi.pid'",
+      "(umask 077 && mkdir -p '/var/tmp/switchboard-pi-run-7' '/var/tmp/switchboard-pi-run-7/agent/sessions' '/var/tmp/switchboard-pi-run-7/cmd') && rm -f '/var/tmp/switchboard-pi-run-7/rpc.in' && mkfifo -m 600 '/var/tmp/switchboard-pi-run-7/rpc.in' && : > '/var/tmp/switchboard-pi-run-7/rpc.log' && : > '/var/tmp/switchboard-pi-run-7/rpc.err' && setsid -f sh -c 'exec 3<>'\\''/var/tmp/switchboard-pi-run-7/rpc.in'\\''; echo $$ > '\\''/var/tmp/switchboard-pi-run-7/pi.pid'\\''; pi '\\''--mode'\\'' '\\''rpc'\\'' '\\''-e'\\'' '\\''/var/tmp/switchboard-pi-run-7/extension.js'\\'' <&3 2>>'\\''/var/tmp/switchboard-pi-run-7/rpc.err'\\'' | grep --line-buffered -v '\\''\"type\":\"message_update\"'\\'' >> '\\''/var/tmp/switchboard-pi-run-7/rpc.log'\\''' </dev/null >/dev/null 2>&1 && sleep 0.3 && cat '/var/tmp/switchboard-pi-run-7/pi.pid'",
     );
   });
 
@@ -428,6 +429,44 @@ describe("ExecHarnessContainer — each operation is one command over the execut
     expect(calls[calls.length - 1].command).toBe(feedFileScript(paths.fifo, `${paths.commandDir}/1.json`));
   });
 
+  it("a send that fails because the FIFO is gone is the control-file-lost failure by name, with the file and the root; any other send failure stays what it was", async () => {
+    const { executor } = recordingExecutor([`exit 1: bash: line 4: ${paths.fifo}: No such file or directory`]);
+    const c = new ExecHarnessContainer(executor);
+    const err = await c.writeLine(paths, '{"type":"abort"}').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HarnessControlFileLostError);
+    expect((err as HarnessControlFileLostError).file).toBe(paths.fifo);
+    expect((err as HarnessControlFileLostError).root).toBe(paths.dir);
+    expect((err as Error).message).toContain(`${paths.fifo} under ${paths.dir} vanished while the run was live`);
+    // Never the replaced-container verdict: the container answered the command.
+    expect(isContainerGone(err)).toBe(false);
+    const other = recordingExecutor(["exit 1: bash: something else went wrong"]);
+    await expect(new ExecHarnessContainer(other.executor).writeLine(paths, "x")).rejects.toThrow(
+      /^harness container: send failed — exit 1: bash: something else/,
+    );
+  });
+
+  it("a long line whose command-file write fails because the file's directory is gone names the command file, not the FIFO; the feed into a gone FIFO after a good write names the FIFO", async () => {
+    const long = JSON.stringify({ type: "prompt", message: "m".repeat(INLINE_LINE_CHARS + 1) });
+    const file = `${paths.commandDir}/1.json`;
+    const write = recordingExecutor([`exit 1: bash: line 1: ${file}: No such file or directory`]);
+    const lostOnWrite = await new ExecHarnessContainer(write.executor).writeLine(paths, long).catch((e: unknown) => e);
+    expect(lostOnWrite).toBeInstanceOf(HarnessControlFileLostError);
+    expect((lostOnWrite as HarnessControlFileLostError).file).toBe(file);
+    expect((lostOnWrite as HarnessControlFileLostError).root).toBe(paths.dir);
+    expect((lostOnWrite as Error).message).toMatch(/^harness container: write failed — /);
+    expect(write.calls).toHaveLength(1);
+
+    const feed = recordingExecutor([
+      "(no output)",
+      "(no output)",
+      `exit 1: bash: line 4: ${paths.fifo}: No such file or directory`,
+    ]);
+    const lostOnFeed = await new ExecHarnessContainer(feed.executor).writeLine(paths, long).catch((e: unknown) => e);
+    expect(lostOnFeed).toBeInstanceOf(HarnessControlFileLostError);
+    expect((lostOnFeed as HarnessControlFileLostError).file).toBe(paths.fifo);
+    expect(feed.calls[feed.calls.length - 1].command).toBe(feedFileScript(paths.fifo, file));
+  });
+
   it("readLog decodes the base64 answer to exact bytes, and an empty answer to none", async () => {
     const { executor } = recordingExecutor([
       Buffer.from('{"type":"agent_start"}\n').toString("base64") + "\n",
@@ -528,10 +567,10 @@ describe("ExecHarnessContainer — each operation is one command over the execut
   });
 
   it("remove takes the run's directory down as one tree, and nothing else", async () => {
-    expect(removeScript(paths.dir)).toBe(`rm -rf '/tmp/switchboard-pi-run-7'`);
+    expect(removeScript(paths.dir)).toBe(`rm -rf '/var/tmp/switchboard-pi-run-7'`);
     const { executor, calls } = recordingExecutor();
     await new ExecHarnessContainer(executor).remove(paths);
-    expect(calls.map((c) => c.command)).toEqual([`rm -rf '/tmp/switchboard-pi-run-7'`]);
+    expect(calls.map((c) => c.command)).toEqual([`rm -rf '/var/tmp/switchboard-pi-run-7'`]);
   });
 
   it("a command the executor reports as failed is a HarnessContainerError naming the operation", async () => {
@@ -554,6 +593,8 @@ class FakeDirectoryTree {
   readonly dirs = new Map<string, { owner: string; mode: number }>([
     ["/", { owner: "root", mode: 0o755 }],
     ["/tmp", { owner: "root", mode: 0o1777 }],
+    ["/var", { owner: "root", mode: 0o755 }],
+    ["/var/tmp", { owner: "root", mode: 0o1777 }],
   ]);
 
   /** `mkdir -p <path>` as `user`: the line mkdir would print, or nothing on success. */
@@ -622,7 +663,7 @@ describe("ExecHarnessContainer on a resident, two thread users on one container"
     );
   });
 
-  it("two runs as two users both write their files, start their process and remove their root: each run's root is its own directly under /tmp, made 700 by the user running it, so neither mkdir meets a parent the other owns", async () => {
+  it("two runs as two users both write their files, start their process and remove their root: each run's root is its own directly under /var/tmp, made 700 by the user running it, so neither mkdir meets a parent the other owns", async () => {
     const tree = new FakeDirectoryTree();
     const runs = [
       { user: "worker2", paths: piRunPaths("run-a") },
@@ -633,18 +674,18 @@ describe("ExecHarnessContainer on a resident, two thread users on one container"
       await container.writeFile(`${p.agentDir}/SYSTEM.md`, "the prompt");
       await expect(container.start({ ...piStart([]), paths: p })).resolves.toEqual({ pid: 4242 });
     }
-    expect(tree.dirs.get("/tmp/switchboard-pi-run-a")).toEqual({ owner: "worker2", mode: 0o700 });
-    expect(tree.dirs.get("/tmp/switchboard-pi-run-b")).toEqual({ owner: "worker3", mode: 0o700 });
-    expect(tree.dirs.has("/tmp/switchboard-pi-run-a/agent/sessions")).toBe(true);
-    expect(tree.dirs.has("/tmp/switchboard-pi-run-b/cmd")).toBe(true);
+    expect(tree.dirs.get("/var/tmp/switchboard-pi-run-a")).toEqual({ owner: "worker2", mode: 0o700 });
+    expect(tree.dirs.get("/var/tmp/switchboard-pi-run-b")).toEqual({ owner: "worker3", mode: 0o700 });
+    expect(tree.dirs.has("/var/tmp/switchboard-pi-run-a/agent/sessions")).toBe(true);
+    expect(tree.dirs.has("/var/tmp/switchboard-pi-run-b/cmd")).toBe(true);
     // Nothing between /tmp and a run's root, shared or per user.
-    const made = [...tree.dirs.keys()].filter((d) => d !== "/" && d !== "/tmp");
-    expect(made.every((d) => d.startsWith("/tmp/switchboard-pi-run-"))).toBe(true);
-    expect(tree.dirs.has("/tmp/switchboard-pi")).toBe(false);
-    expect(tree.dirs.has("/tmp/switchboard-pi-worker2")).toBe(false);
+    const made = [...tree.dirs.keys()].filter((d) => d !== "/" && d !== "/tmp" && d !== "/var" && d !== "/var/tmp");
+    expect(made.every((d) => d.startsWith("/var/tmp/switchboard-pi-run-"))).toBe(true);
+    expect(tree.dirs.has("/var/tmp/switchboard-pi")).toBe(false);
+    expect(tree.dirs.has("/var/tmp/switchboard-pi-worker2")).toBe(false);
     // Each run takes its own root down when it ends, and /tmp is as it was.
     for (const { user, paths: p } of runs) await new ExecHarnessContainer(tree.executorAs(user)).remove(p);
-    expect([...tree.dirs.keys()]).toEqual(["/", "/tmp"]);
+    expect([...tree.dirs.keys()]).toEqual(["/", "/tmp", "/var", "/var/tmp"]);
   });
 });
 
@@ -656,7 +697,7 @@ describe("ExecHarnessContainer.makeRoot", () => {
   it("answers the root the harness proposed, without running a command", async () => {
     const { executor, calls } = recordingExecutor();
     expect(await new ExecHarnessContainer(executor).makeRoot(piRunPaths("run-7").dir)).toBe(
-      "/tmp/switchboard-pi-run-7",
+      "/var/tmp/switchboard-pi-run-7",
     );
     expect(await new ExecHarnessContainer(executor).makeRoot("/tmp/switchboard-oc-run-7")).toBe(
       "/tmp/switchboard-oc-run-7",

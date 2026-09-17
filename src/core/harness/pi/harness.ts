@@ -58,6 +58,7 @@ import { followUpMessageId, followUpPrompt, followUpSnippet, type FollowUpInput 
 import { PiBridge } from "./bridge.js";
 import {
   HarnessContainerRuntimeReplacedError,
+  HarnessControlFileLostError,
   replacedBecause,
   replacedVerdict,
   RUNTIME_WORD,
@@ -1091,8 +1092,12 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         next = await Promise.race([pending, tick]);
       } catch (err) {
         // The read failed under the loop: the executor's word that the runtime
-        // under pi was replaced is the verdict below; any other failure is the
-        // run's, as it always was.
+        // under pi was replaced is the verdict below; a control file that
+        // vanished under a live run fails the run by name, the note saying
+        // which file under which root is gone (issue-shaped: a suite or a
+        // cleanup emptied the run's root); any other failure is the run's, as
+        // it always was.
+        if (err instanceof HarnessControlFileLostError) note("harness_error", err.message);
         if (!(err instanceof Error && saysContainerReplaced(err))) throw err;
         containerSaid = err;
         break;
@@ -1413,6 +1418,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         return text || "_(no response)_";
       } catch (err) {
         turnFailed = true;
+        // The same fail-by-name as the loop's: the note carries the vanished
+        // control file onto the record before the turn fails with it.
+        if (err instanceof HarnessControlFileLostError) note("harness_error", err.message);
         throw err;
       } finally {
         live.toolContext = runContext;

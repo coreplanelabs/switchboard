@@ -161,6 +161,30 @@ export class HarnessContainerError extends Error {
   }
 }
 
+/** A control file of the run's own vanished from under a live run: a command
+ *  on it — the send into the FIFO, or the write of the command file a long line
+ *  goes through — failed with the shell's "No such file or directory" while the
+ *  container itself is alive and answering — something in the container (a
+ *  cleanup, a suite) removed the run's root. The run fails fast with the file
+ *  and the root named, never a replaced-container verdict: `isContainerGone`
+ *  and `saysContainerReplaced` do not match it. */
+export class HarnessControlFileLostError extends HarnessContainerError {
+  constructor(
+    operation: string,
+    /** The control file that is gone: the run's FIFO, or the command file the line was going through. */
+    readonly file: string,
+    /** The run's root the file lived under. */
+    readonly root: string,
+  ) {
+    super(operation, `the run's control file ${file} under ${root} vanished while the run was live`);
+    this.name = "HarnessControlFileLostError";
+  }
+}
+
+/** What the shell says of a redirect into a path that is gone: the mark that
+ *  turns a failed send into `HarnessControlFileLostError`. */
+const NO_SUCH_FILE = /No such file or directory/;
+
 /** The most content one write command carries: under the resident's command
  *  cap (64,000 chars) with room for the quoting and the path. */
 export const WRITE_CHUNK_CHARS = 40_000;
@@ -562,12 +586,36 @@ export class ExecHarnessContainer implements HarnessContainer {
 
   async writeLine(paths: HarnessPaths, line: string): Promise<void> {
     if (line.length <= INLINE_LINE_CHARS) {
-      stdoutOf("send", await this.exec(writeLineScript(paths.fifo, line)));
+      await this.onControlFile("send", paths.fifo, paths, async () =>
+        stdoutOf("send", await this.exec(writeLineScript(paths.fifo, line))),
+      );
       return;
     }
     const file = `${paths.commandDir}/${++this.commandNo}.json`;
-    await this.writeFile(file, line);
-    stdoutOf("send", await this.exec(feedFileScript(paths.fifo, file)));
+    await this.onControlFile("write", file, paths, () => this.writeFile(file, line));
+    await this.onControlFile("send", paths.fifo, paths, async () =>
+      stdoutOf("send", await this.exec(feedFileScript(paths.fifo, file))),
+    );
+  }
+
+  /** Runs one command on a control file of the run's. The shell's "No such
+   *  file or directory" while the container is alive is that file gone from
+   *  under the live run, thrown by name with the file the command was about
+   *  and the run's root; the container answered the command, so it is never
+   *  the replaced verdict, and every other failure stays what it was. */
+  private async onControlFile<T>(
+    operation: string,
+    file: string,
+    paths: HarnessPaths,
+    command: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await command();
+    } catch (err) {
+      if (!isContainerGone(err) && err instanceof HarnessContainerError && NO_SUCH_FILE.test(err.message))
+        throw new HarnessControlFileLostError(operation, file, paths.dir);
+      throw err;
+    }
   }
 
   async readLog(path: string, offset: number, maxBytes: number): Promise<Uint8Array> {

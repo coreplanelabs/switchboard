@@ -103,9 +103,10 @@ function evaluate(action: string, rules: readonly OpenCodePermissionRule[]): Ope
 const decodeConfig = Schema.decodeUnknownResult(ConfigInfo, { errors: "all" });
 
 describe("openCodeRunPaths", () => {
-  it("files the run directly under /tmp, every path derived from the run id, the XDG roots among the directories the start makes; HOME is left the container user's", () => {
+  it("files the run directly under /var/tmp, outside the shared temp directory, every path derived from the run id, the XDG roots among the directories the start makes; HOME is left the container user's", () => {
     const p = openCodeRunPaths("run-7");
-    expect(p.dir).toBe("/tmp/switchboard-oc-run-7");
+    expect(p.dir.startsWith("/tmp/")).toBe(false);
+    expect(p.dir).toBe("/var/tmp/switchboard-oc-run-7");
     expect(p.dirs[0]).toBe(p.dir);
     expect(p.dirs).toEqual(
       expect.arrayContaining([p.xdg.data, p.xdg.config, p.xdg.cache, p.xdg.state, p.pluginDir, p.commandDir]),
@@ -147,7 +148,7 @@ describe("openCodeRunPaths", () => {
     const recorded = openCodeRunPathsAt("/tmp/switchboard-oc-run-7-k3");
     expect(recorded.feed).toBe("/tmp/switchboard-oc-run-7-k3/feed.jsonl");
     expect(recorded.config).toBe("/tmp/switchboard-oc-run-7-k3/opencode.json");
-    expect(openCodeRunPathsAt("/tmp/switchboard-oc-run-7")).toEqual(openCodeRunPaths("run-7"));
+    expect(openCodeRunPathsAt("/var/tmp/switchboard-oc-run-7")).toEqual(openCodeRunPaths("run-7"));
   });
 });
 
@@ -574,7 +575,7 @@ describe("launchOpenCode — the server started through the seam and found ready
       tailerPid: 4243,
       logOffset: 120,
       sessionID: "ses_1",
-      root: "/tmp/switchboard-oc-run-7",
+      root: "/var/tmp/switchboard-oc-run-7",
       bearerHash: bearerHashOf(BEARER),
       container: "vm-fake",
       relaunches: 1,
@@ -588,7 +589,7 @@ describe("launchOpenCode — the server started through the seam and found ready
   it("files under the root the container makes when it is not the one proposed, and the facts name that root", async () => {
     const h = harness({ feed: false });
     h.container.makeRoot = async (wanted) => `${wanted}-k3`;
-    const placed = openCodeRunPathsAt("/tmp/switchboard-oc-run-7-k3");
+    const placed = openCodeRunPathsAt("/var/tmp/switchboard-oc-run-7-k3");
     h.container.onRequest = h.serverFor({ ...spec, paths: placed });
     h.feedConnected();
     const started = await launchOpenCode(h.deps, spec, BEARER);
@@ -597,7 +598,7 @@ describe("launchOpenCode — the server started through the seam and found ready
     expect(h.container.starts[0].paths).toEqual(placed);
     expect(h.container.starts[0].env.OPENCODE_CONFIG).toBe(placed.config);
     expect(openCodeFacts(started, { sessionID: "s", logOffset: 0, relaunches: 0 }).root).toBe(
-      "/tmp/switchboard-oc-run-7-k3",
+      "/var/tmp/switchboard-oc-run-7-k3",
     );
   });
 
