@@ -7,6 +7,19 @@ const text = "https://uploads.linear.app/org/code";
 const refs = fileReferences(`![screen.png](${png}) [guide.pdf](<${pdf}>) [example.ts](${text})`);
 
 describe("Linear private file ingestion", () => {
+  it("encodes binary attachments in an edge runtime without Node Buffer", async () => {
+    const response = new Response(new Uint8Array([0, 1, 2, 255]), { headers: { "content-type": "image/png" } });
+    vi.stubGlobal("Buffer", undefined);
+    try {
+      const files = await downloadLinearFiles([refs[0]!], {
+        fetch: vi.fn(async () => response),
+        token: async () => "secret",
+      });
+      expect(files[0]?.image?.data).toBe("AAEC/w==");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
   it("bounds the total bytes across files and refuses declared oversize before reading", async () => {
     const cancel = vi.fn();
     const payload = new Uint8Array(7 * 1024 * 1024);
@@ -44,32 +57,38 @@ describe("Linear private file ingestion", () => {
     );
     expect(getReader).not.toHaveBeenCalled();
   });
-  it("rejects credential names from encoded headers and never follows redirects or authenticates another host", async () => {
-    const fetch = vi.fn<typeof globalThis.fetch>(
-      async () =>
-        new Response("private", {
-          headers: { "content-type": "application/pdf", "content-disposition": "attachment; filename*=UTF-8''%2Eenv" },
-        }),
-    );
-    const result = await downloadLinearFiles(
-      [
-        { url: text, name: "guide.pdf" },
-        { url: "https://other.example/file", name: "file.txt" },
-      ],
-      { fetch, token: async () => "secret" },
-    );
-    expect(result[0]?.skipped).toContain("credential");
-    expect(result[1]?.skipped).toContain("invalid");
-    expect(fetch).toHaveBeenCalledOnce();
-    fetch.mockResolvedValueOnce(
-      new Response(null, { status: 302, headers: { location: "https://other.example/file" } }),
-    );
-    expect((await downloadLinearFiles([refs[0]!], { fetch, token: async () => "secret" }))[0]?.skipped).toContain(
-      "not available",
-    );
-    expect(fetch).toHaveBeenCalledTimes(2);
-    expect(fetch.mock.calls[1]?.[1]?.redirect).toBe("error");
-  });
+  it.each(["", "en"])(
+    "rejects credential names from encoded headers (%s) and never follows redirects or authenticates another host",
+    async (language) => {
+      const fetch = vi.fn<typeof globalThis.fetch>(
+        async () =>
+          new Response("private", {
+            headers: {
+              "content-type": "application/pdf",
+              "content-disposition": `attachment; filename* = UTF-8'${language}'%2Eenv`,
+            },
+          }),
+      );
+      const result = await downloadLinearFiles(
+        [
+          { url: text, name: "guide.pdf" },
+          { url: "https://other.example/file", name: "file.txt" },
+        ],
+        { fetch, token: async () => "secret" },
+      );
+      expect(result[0]?.skipped).toContain("credential");
+      expect(result[1]?.skipped).toContain("invalid");
+      expect(fetch).toHaveBeenCalledOnce();
+      fetch.mockResolvedValueOnce(
+        new Response(null, { status: 302, headers: { location: "https://other.example/file" } }),
+      );
+      expect((await downloadLinearFiles([refs[0]!], { fetch, token: async () => "secret" }))[0]?.skipped).toContain(
+        "not available",
+      );
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(fetch.mock.calls[1]?.[1]?.redirect).toBe("error");
+    },
+  );
   it("extracts canonical private references without accepting other origins or retaining signatures", () => {
     expect(
       fileReferences(

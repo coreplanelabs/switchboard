@@ -46,11 +46,7 @@ export function linearMessage(event: LinearWebhookEvent, current: LinearSession,
     user = session.creatorId;
     if (user !== current.creatorId) throw new Error("linear_wrong_creator");
     name = string(object(session.creator).name);
-    text =
-      string(payload.promptContext) ??
-      (current.issue
-        ? `${current.issue.identifier}: ${current.issue.title}\n\n${current.issue.description ?? ""}`
-        : string(object(session.comment).body));
+    text = string(payload.promptContext) ?? linearSessionContext(current) ?? string(object(session.comment).body);
   } else if (payload.action === "prompted") {
     const activity = object(payload.agentActivity),
       content = object(activity.content);
@@ -82,4 +78,16 @@ export function linearMessage(event: LinearWebhookEvent, current: LinearSession,
       ...(current.url ? { sourceUrl: current.url } : {}),
     },
   };
+}
+
+/** A created session need not retain a user activity. Rebuild its issue and
+ * initiating comment together, so later turns retain the mention's files. */
+export function linearSessionContext(session: LinearSession): string | undefined {
+  const parts = [
+    session.issue
+      ? `Linear issue ${session.issue.identifier}: ${session.issue.title}\n\n${session.issue.description ?? ""}`
+      : undefined,
+    session.comment?.body ? `Comment that started this session:\n${session.comment.body}` : undefined,
+  ].filter((part) => part !== undefined);
+  return parts.length ? parts.join("\n\n") : undefined;
 }

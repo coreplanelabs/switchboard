@@ -25,6 +25,29 @@ function fixture() {
 }
 
 describe("Linear channel output", () => {
+  it("restores an initial mention's comment attachment when no user activity was created", async () => {
+    const { api, io } = fixture();
+    const url = "https://uploads.linear.app/org/log";
+    vi.mocked(api.session).mockResolvedValue({
+      id: "s",
+      appUserId: "bot",
+      issue: { id: "issue", identifier: "EX-1", title: "Fix it", teamId: "team" },
+      comment: { body: `Inspect [log.txt](${url})` },
+    });
+    vi.mocked(api.activities).mockResolvedValue([
+      { id: "a", at: 1, userId: "bot", type: "response", body: "I found the error." },
+    ]);
+    vi.mocked(api.files).mockResolvedValue([
+      { url, name: "log.txt", document: { mediaType: "text/plain", data: "error details" } },
+    ]);
+    await io.checkAccess("linear:org:alice");
+    const history = await io.history();
+    expect(history[0]).toMatchObject({
+      role: "user",
+      text: expect.stringContaining("Inspect [log.txt]"),
+      documents: [{ mediaType: "text/plain", data: "error details" }],
+    });
+  });
   it("rebuilds private history files for the checked requester, newest first without duplicating bytes", async () => {
     const { api, io } = fixture();
     const url = "https://uploads.linear.app/org/image";

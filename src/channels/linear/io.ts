@@ -1,3 +1,4 @@
+import { linearSessionContext } from "./session.js";
 import { applyLinearFiles, fileReferences } from "./files.js";
 import type {
   ChannelIO,
@@ -201,9 +202,7 @@ export class LinearChannelIO implements ChannelIO {
       const session = await this.deps.api.session(this.deps.sessionId);
       history.unshift({
         role: "user",
-        text: session.issue
-          ? `Linear issue ${session.issue.identifier}: ${session.issue.title}\n\n${session.issue.description ?? ""}`
-          : "Earlier assistant messages in this Linear session follow.",
+        text: linearSessionContext(session) ?? "Earlier assistant messages in this Linear session follow.",
       });
     }
     const urls = [

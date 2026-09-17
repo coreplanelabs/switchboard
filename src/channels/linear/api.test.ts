@@ -204,13 +204,19 @@ describe("Linear API boundary", () => {
             appUser: { id: "bot" },
             creator: { id: "alice" },
             url: "https://linear.app/s",
+            comment: { body: "Inspect [log.txt](https://uploads.linear.app/org/log)" },
             issue: null,
           },
         },
       }),
     );
     const api = new DirectLinearApi({ organizationId: "org", appUserId: "bot", token: async () => "secret", fetch });
-    expect(await api.session("s")).toMatchObject({ id: "s", appUserId: "bot", creatorId: "alice" });
+    expect(await api.session("s")).toMatchObject({
+      id: "s",
+      appUserId: "bot",
+      creatorId: "alice",
+      comment: { body: "Inspect [log.txt](https://uploads.linear.app/org/log)" },
+    });
     expect(fetch.mock.calls[0]?.[1]).toMatchObject({ redirect: "error", headers: { authorization: "Bearer secret" } });
     const other = new DirectLinearApi({
       organizationId: "other",

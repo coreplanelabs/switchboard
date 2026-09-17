@@ -23,6 +23,7 @@ export interface LinearSession {
   creatorId?: string;
   url?: string;
   dismissedAt?: string;
+  comment?: { body: string };
   issue?: {
     id: string;
     identifier: string;
@@ -68,7 +69,7 @@ export function required(value: unknown): string {
 
 const SESSION_QUERY = `query SwitchboardSession($id: String!) {
   organization { id }
-  agentSession(id: $id) { id url dismissedAt appUser { id } creator { id }
+  agentSession(id: $id) { id url dismissedAt appUser { id } creator { id } comment { body }
     issue { id identifier title description team { id } delegate { id } } }
 }`;
 const HISTORY_QUERY = `query SwitchboardHistory($id: String!, $before: String) {
@@ -231,6 +232,7 @@ export class DirectLinearApi implements LinearApi {
       ...(string(object(session.creator).id) ? { creatorId: string(object(session.creator).id) } : {}),
       ...(string(session.url) ? { url: string(session.url) } : {}),
       ...(string(session.dismissedAt) ? { dismissedAt: string(session.dismissedAt) } : {}),
+      ...(string(object(session.comment).body) ? { comment: { body: required(object(session.comment).body) } } : {}),
       ...(session.issue
         ? {
             issue: {

@@ -28,6 +28,8 @@ export const DAY_MS = 24 * 60 * MINUTE_MS;
  *  webhook freshness, consumer leases and completed-delivery deduplication. */
 export const LINEAR_TIMING = {
   apiTimeoutMs: 10_000,
+  /** One authenticated batch can read 20 files, each with its own API deadline. */
+  fileBridgeTimeoutMs: 4 * MINUTE_MS,
   progressMs: 5_000,
   oauthStateMs: 10 * MINUTE_MS,
   refreshMarginMs: 5 * MINUTE_MS,

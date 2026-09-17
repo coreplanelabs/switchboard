@@ -24,6 +24,15 @@ const event: LinearWebhookEvent = {
 };
 
 describe("Linear session input", () => {
+  it("retains the source comment and its file when promptContext is absent", () => {
+    const body = "Please inspect [log.txt](https://uploads.linear.app/org/log)";
+    const input = linearMessage(
+      { ...event, payload: { ...event.payload, promptContext: undefined } },
+      { ...session, comment: { body } },
+      "bot",
+    );
+    expect(input).toMatchObject({ kind: "message", msg: { text: expect.stringContaining(body) } });
+  });
   it("preserves the signed responsible person, team scope and session identity", () => {
     expect(linearMessage(event, session, "bot")).toMatchObject({
       kind: "message",

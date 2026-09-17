@@ -21,6 +21,33 @@ function fixture() {
 }
 
 describe("Linear edge bridge", () => {
+  it("allows an authenticated file batch to finish beyond a single API call deadline", async () => {
+    vi.useFakeTimers();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation((ms) => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), ms);
+      return controller.signal;
+    });
+    try {
+      const fetch = vi.fn<typeof globalThis.fetch>(
+        (_url, init) =>
+          new Promise((resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+            setTimeout(() => resolve(Response.json({ result: [] })), 15_000);
+          }),
+      );
+      const remote = new RemoteLinearApi({ baseUrl: "https://bot.example", token: "bridge", fetch }, "org");
+      const result = remote.files("s", "linear:org:alice", ["https://uploads.linear.app/org/image"]);
+      const check = expect(result).resolves.toEqual([]);
+      await vi.advanceTimersByTimeAsync(15_000);
+      await check;
+    } finally {
+      timeout.mockRestore();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it("binds file downloads to a session and requester without accepting arbitrary fetch options", async () => {
     const { api, transport } = fixture();
     const remote = new RemoteLinearApi(transport, "org");

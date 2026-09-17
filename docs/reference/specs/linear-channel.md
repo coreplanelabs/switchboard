@@ -142,7 +142,11 @@ the human assignee.
     without redirects, and bounds count and streamed bytes. Credential-shaped
     files are never read. Permanent omissions are named in the prompt; transient
     download failures before dispatch leave the delivery retryable. History restores
-    attachments with a shared budget that favors recent turns.
+    attachments with a shared budget that favors recent turns. When a mention has
+    no initial user activity, history restores its initiating comment alongside the
+    issue, including the comment's files. The bridge allows
+    four minutes for the batch; each individual upstream request keeps its ten-second
+    deadline, and the consumer renews the delivery lease while it waits.
 
 ## Proof
 

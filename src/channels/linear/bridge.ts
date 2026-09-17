@@ -45,7 +45,7 @@ async function call<T>(transport: LinearTransport, body: Record<string, unknown>
     response = await transport.fetch(url, {
       method: "POST",
       redirect: "error",
-      signal: AbortSignal.timeout(LINEAR_TIMING.apiTimeoutMs),
+      signal: AbortSignal.timeout(body.op === "files" ? LINEAR_TIMING.fileBridgeTimeoutMs : LINEAR_TIMING.apiTimeoutMs),
       headers: { "content-type": "application/json", authorization: `Bearer ${transport.token}` },
       body: JSON.stringify(body),
     });

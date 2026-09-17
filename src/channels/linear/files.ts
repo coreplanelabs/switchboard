@@ -75,7 +75,7 @@ export function fileReferences(text: string): LinearFileReference[] {
 
 function responseName(header: string | null): string | undefined {
   if (!header) return;
-  const encoded = /filename\*=UTF-8''([^;]+)/i.exec(header)?.[1];
+  const encoded = /filename\*\s*=\s*UTF-8'[^']*'([^;]+)/i.exec(header)?.[1];
   if (encoded) {
     try {
       return filename(decodeURIComponent(encoded));
@@ -83,7 +83,7 @@ function responseName(header: string | null): string | undefined {
       return;
     }
   }
-  const plain = /filename=(?:"([^"]*)"|([^;]+))/i.exec(header);
+  const plain = /filename\s*=\s*(?:"([^"]*)"|([^;]+))/i.exec(header);
   return plain ? filename((plain[1] ?? plain[2]!).trim()) : undefined;
 }
 
@@ -119,6 +119,16 @@ async function readLimited(response: Response, limit: number): Promise<Uint8Arra
     offset += chunk.byteLength;
   }
   return bytes;
+}
+
+/** Web APIs only: the credential-holding Worker does not enable Node globals.
+ * Chunk conversion also avoids spreading a multi-megabyte file onto the stack. */
+function base64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 32 * 1024;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize)
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  return btoa(binary);
 }
 
 /** Called only after the edge has proved these references belong to the
@@ -187,7 +197,7 @@ export async function downloadLinearFiles(
         continue;
       }
       total += bytes.byteLength;
-      const data = image || kind === "pdf" ? Buffer.from(bytes).toString("base64") : new TextDecoder().decode(bytes);
+      const data = image || kind === "pdf" ? base64(bytes) : new TextDecoder().decode(bytes);
       if (image) file.image = { name: file.name, mediaType, data };
       else file.document = { name: file.name, mediaType, data };
     } catch {
