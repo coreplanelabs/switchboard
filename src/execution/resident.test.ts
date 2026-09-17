@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ExecControlResetError, ExecInfraError, ExecSandboxRestartedError } from "./executor.js";
+import { ExecControlResetError, ExecInfraError, ExecSandboxRestartedError, infraMayClear } from "./executor.js";
 import { ResidentExecutor, ResidentNeedsRefError, ResidentOperations, ResidentReuseRefusedError } from "./resident.js";
+import { classificationOf } from "../core/trace/classify.js";
 import { residentTraceOf } from "./residentTrace.js";
 import { createTracer } from "../core/trace/tracer.js";
 import { recordingSink } from "../core/testing/recordingSink.js";
@@ -1412,6 +1413,191 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     expect((err as Error).message).toContain("fetch failed");
     expect((err as ExecInfraError).reason).toBe("worker-unavailable");
     expect(calls.map(route)).toEqual(["/exec", "/status", "/status", "/attach"]);
+  });
+
+  it("a hard stop while the re-attach inside the wait is in flight aborts that request too — the run's signal rides into the re-attach as it rides into every other send — and the failure is the call's own `aborted` error, classified as the stop it is, never a wake strike counted as a container exit; nothing waits on a run that was stopped", async () => {
+    const canned = [{ body: JUST_EXITED }, restoring(), status("warm")];
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: unknown, init?: RequestInit) => {
+        calls.push({ url: String(url), init: init ?? {} });
+        const next = canned.shift();
+        if (next) return Promise.resolve(new Response(JSON.stringify(next.body), { status: 200 }));
+        // The re-attach: no answer until the send's signal aborts, as a real fetch behaves.
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          if (signal?.aborted) reject(signal.reason);
+          else signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      }),
+    );
+    const control = new AbortController();
+    const executor = new ResidentExecutor(OPTS);
+    const p = executor.exec("git status", { signal: control.signal }).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(calls.map(route)).toEqual(["/exec", "/status", "/status", "/attach"]);
+    control.abort();
+    // A re-attach the stop did not reach would sit out its clipped deadline instead.
+    await vi.advanceTimersByTimeAsync(180_000);
+    const err = await p;
+    // The call's own error, unchanged: `aborted`, classified `transport` as its
+    // request site does for every aborted send, the request-failed sentence —
+    // not the wake strike's `infra`/`container-exited` for an exit that did not happen.
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as ExecInfraError).reason).toBe("aborted");
+    expect(infraMayClear(err as ExecInfraError)).toBe(false);
+    expect(classificationOf(err)).toEqual({ kind: "transport" });
+    expect((err as Error).message).toMatch(/^resident worker \/attach request failed \(/);
+    expect((err as Error).message).not.toContain("the re-attach after");
+    expect(calls[3].init.signal?.aborted).toBe(true);
+  });
+
+  it("a re-attach inside the wait whose 500 the Worker typed transient (the Durable Object reset or lost under the attach) keeps the wait going — the next probe and re-attach follow — instead of ending it in the attach's own error", async () => {
+    // The streamed document `catchAllErr(err, "attach-failed")` writes over
+    // HTTP 200; the words are the platform's (`TRANSIENT_PLATFORM_WORDING`,
+    // deploy/cloudflare-resident/worker.ts), never read: the field decides.
+    const transientAttach = {
+      body: { error: "attach-failed: Network connection lost.", status: 500, transient: true },
+    };
+    const { calls } = stubFetch({ body: JUST_EXITED }, restoring(), status("warm"), transientAttach, status("warm"), {
+      body: ATTACH_OK,
+    });
+    const p = new ResidentExecutor(OPTS).exec("git status").catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(10_000);
+    const err = await p;
+    expect(err).toBeInstanceOf(ExecSandboxRestartedError);
+    expect(calls.map(route)).toEqual(["/exec", "/status", "/status", "/attach", "/status", "/attach"]);
+  });
+
+  it("attach: a 500 the Worker typed transient is the resident unavailable — infra a wait clears, so the harness's one more command waits on it, classified for its span as the attach's — while a deterministic 500 stays the attach's own legible error, judged at once", async () => {
+    stubFetch({ body: { error: "attach-failed: Network connection lost.", status: 500, transient: true } });
+    const transient = await new ResidentExecutor(OPTS).attach().catch((e: unknown) => e);
+    expect(transient).toBeInstanceOf(ExecInfraError);
+    expect((transient as ExecInfraError).reason).toBe("worker-unavailable");
+    expect(infraMayClear(transient as ExecInfraError)).toBe(true);
+    expect(classificationOf(transient)).toEqual({ kind: "infra", code: "attach" });
+    expect((transient as Error).message).toBe(
+      "resident attach failed for repo:jshttp/vary: attach-failed: Network connection lost.",
+    );
+    stubFetch({ body: { error: "attach-failed at clone: exit 128", status: 500 } });
+    const deterministic = await new ResidentExecutor(OPTS).attach().catch((e: unknown) => e);
+    expect(deterministic).toBeInstanceOf(Error);
+    expect(deterministic).not.toBeInstanceOf(ExecInfraError);
+    expect((deterministic as Error).message).toBe(
+      "resident attach failed for repo:jshttp/vary: attach-failed at clone: exit 128",
+    );
+  });
+
+  it("a hard stop while a /status probe inside the wait is in flight aborts that probe too — the run's signal rides into the probe as into every send — and the wait ends with the plain stop error the pause throws, never a strike on the unreachable view the stop itself produced", async () => {
+    const canned = [{ body: JUST_EXITED }, restoring()];
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: unknown, init?: RequestInit) => {
+        calls.push({ url: String(url), init: init ?? {} });
+        const next = canned.shift();
+        if (next) return Promise.resolve(new Response(JSON.stringify(next.body), { status: 200 }));
+        // The second probe: no answer until the send's signal aborts, as a real fetch behaves.
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          if (signal?.aborted) reject(signal.reason);
+          else signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      }),
+    );
+    const control = new AbortController();
+    const p = new ResidentExecutor(OPTS).exec("git status", { signal: control.signal }).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(calls.map(route)).toEqual(["/exec", "/status", "/status"]);
+    control.abort();
+    await vi.advanceTimersByTimeAsync(0);
+    const err = await p;
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toBe("stopped waiting for the resident to wake: the run was stopped");
+    expect(calls[2].init.signal?.aborted).toBe(true);
+  });
+
+  it("a /read whose Durable Object stub rejected with the SDK's stopped-container sentence is answered with the replaced word, as the method answers it inside (unconditional on /read and /write on purpose), so the client re-attaches once and re-issues — never a bare 409 it would read as a deterministic answer", async () => {
+    // The document `threadRejectionErr(err, "/read")` writes: `runtimeReplacedErr`
+    // over a RuntimeReplacedError in its `call` phase (deploy/cloudflare-resident/
+    // worker.ts), its cause the SDK's stopped-container sentence
+    // (`STOPPED_CONTAINER_WORDING`, src/execution/residentRefresh.ts).
+    const replaced = {
+      status: 409,
+      body: {
+        error:
+          "runtime-replaced: the resident runtime was replaced (a deploy) while this command was pending at the Worker; its output is lost (The container is not running, consider calling start())",
+        reason: "runtime-replaced",
+      },
+    };
+    const { calls } = stubFetch(replaced, { body: ATTACH_OK }, { body: { content: "back", truncated: false } });
+    await expect(new ResidentExecutor(OPTS).readFile("f.txt")).resolves.toBe("back");
+    expect(calls.map(route)).toEqual(["/read", "/attach", "/read"]);
+  });
+
+  it("a pending /exec whose Durable Object stub rejected with the SDK's own moved-runtime sentence streams the replaced word (the SDK vouched, by the DO's own rule applied to the text that survives the stub boundary), so the client hands the run the typed restart; the stopped-container sentence, which only the DO's restore knowledge could vouch for, streams the SDK's words on a bare 409 and is the resident's answer for the harness seam's one more command to judge", async () => {
+    // The two documents `threadRejectionErr(err, "/exec")` writes: the word over
+    // a RuntimeReplacedError in its `call` phase (deploy/cloudflare-resident/
+    // worker.ts) with a `RUNTIME_MOVED_WORDING` sentence as its cause, and the
+    // bare 409 carrying a `STOPPED_CONTAINER_WORDING` sentence (both from
+    // src/execution/residentRefresh.ts).
+    const moved =
+      "runtime-replaced: the resident runtime was replaced (a deploy) while this command was pending at the Worker; its output is lost (Process handle refers to a previous runtime incarnation)";
+    stubFetch({
+      body: { error: moved, reason: "runtime-replaced", status: 409, stdout: "", stderr: moved, exitCode: 127 },
+    });
+    const restart = await new ResidentExecutor(OPTS).exec("git status").catch((e: unknown) => e);
+    expect(restart).toBeInstanceOf(ExecSandboxRestartedError);
+    const stopped = "The container is not running, consider calling start()";
+    stubFetch({ body: { error: stopped, status: 409, stdout: "", stderr: stopped, exitCode: 127 } });
+    const withheld = await new ResidentExecutor(OPTS).exec("git status").catch((e: unknown) => e);
+    expect(withheld).toBeInstanceOf(ExecInfraError);
+    expect((withheld as ExecInfraError).reason).toBe("answered");
+    // This exact sentence is what the harness seam reads as the transport lost
+    // and probes on (`saysTransportLost`, src/core/harness/container.test.ts).
+    expect((withheld as Error).message).toBe(`resident /exec: ${stopped}`);
+  });
+
+  it("a pending /exec whose Durable Object stub rejected with the DO's own code-update reset streams the DO's own word — `control-reset` on its 409, as `execThreadImpl` answers the same fact inside — so the client's control-reset rule fires (the typed ExecControlResetError the harness seam resolves) and a write's unknown outcome is never a wait on the resident", async () => {
+    // The document `execFailureDocument(threadRejectionErr(err))` writes: the
+    // ControlResetError's message in its `call` phase (class ControlResetError,
+    // deploy/cloudflare-resident/worker.ts), its cause the fragment the SDK's
+    // reset predicate matches (`SUPERSEDED_ISOLATE_PATTERN`, the pinned
+    // @cloudflare/sandbox's `isDurableObjectCodeUpdateReset`).
+    const words =
+      "control-reset: the resident's Durable Object was reset (a deploy) while this command was pending at the Worker; the container and its processes are as they were; the command's outcome is unknown (reset because its code was updated)";
+    stubFetch({
+      body: { error: words, reason: "control-reset", status: 409, stdout: "", stderr: words, exitCode: 127 },
+    });
+    const err = await new ResidentExecutor(OPTS).exec("printf x > f").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExecControlResetError);
+    expect(err).not.toBeInstanceOf(ExecInfraError);
+    expect(err).not.toBeInstanceOf(ExecSandboxRestartedError);
+    expect((err as Error).message).toBe(words);
+  });
+
+  it("a pending /exec whose Durable Object stub REJECTED — the stub reset by a code update, a storage operation that did not complete, the runtime unreachable — streams the catch-all's 500 in the same document over HTTP 200, so the client types it by its `transient`: the platform's transient is the resident unavailable (a re-probe clears it), a deterministic throw is the resident's answer; a Worker predating the fields streams the words alone, read as the answer it always was", async () => {
+    // The words are the platform's — one of the terms the Worker's
+    // `TRANSIENT_PLATFORM_WORDING` (deploy/cloudflare-resident/worker.ts)
+    // names — and the client never reads them: the field decides.
+    const rejected = (error: string, transient: boolean) => ({
+      body: { error, status: 500, transient, stdout: "", stderr: error, exitCode: 127 },
+    });
+    stubFetch(rejected("Network connection lost.", true));
+    const lost = await new ResidentExecutor(OPTS).exec("true").catch((e: unknown) => e);
+    expect(lost).toBeInstanceOf(ExecInfraError);
+    expect((lost as Error).message).toBe("resident /exec: Network connection lost.");
+    expect((lost as ExecInfraError).reason).toBe("worker-unavailable");
+    stubFetch(rejected("TypeError: Cannot read properties of undefined", false));
+    const bug = await new ResidentExecutor(OPTS).exec("true").catch((e: unknown) => e);
+    expect((bug as ExecInfraError).reason).toBe("answered");
+    stubFetch({
+      body: { error: "Network connection lost.", stdout: "", stderr: "Network connection lost.", exitCode: 127 },
+    });
+    const old = await new ResidentExecutor(OPTS).exec("true").catch((e: unknown) => e);
+    expect((old as ExecInfraError).reason).toBe("answered");
   });
 
   it("a refusal streamed by /exec over HTTP 200 is typed by the status and the lifecycle pair IN the document, as the Worker's stream writes them: a busy mirror on a degraded-but-serviceable resident is the resident unavailable, never a deterministic answer; a definite state refuses", async () => {

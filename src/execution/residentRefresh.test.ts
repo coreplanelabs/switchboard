@@ -773,6 +773,20 @@ describe("runtime-unreachable (a container whose control port never answers is n
   it("nothing else is: a command's own abort, a timeout, a replacement, a crash, a non-error", () => {
     expect(isRuntimeUnreachableSignal(new Error("exit 134: Aborted (core dumped)"))).toBe(false);
     expect(isRuntimeUnreachableSignal(new Error("exit 143 (timed out): killed"))).toBe(false);
+    // `AbortSignal.timeout`'s own DOMException (`TimeoutError`; the text is the
+    // runtime's, measured on Node) — a route's bound on a slow GitHub: the SDK's
+    // sentence is a prefix of it, and only the whole message is the signal.
+    expect(
+      isRuntimeUnreachableSignal({ name: "TimeoutError", message: "The operation was aborted due to timeout" }),
+    ).toBe(false);
+    expect(isRuntimeUnreachableSignal(new Error("The operation was aborted due to timeout"))).toBe(false);
+    expect(
+      isRuntimeUnreachableSignal(
+        new Error("github-token-mint-failed: timed out after 10s contacting api.github.com", {
+          cause: new DOMException("The operation was aborted due to timeout", "TimeoutError"),
+        }),
+      ),
+    ).toBe(false);
     expect(isRuntimeUnreachableSignal({ name: "ProcessWaitTimeoutError", message: "Process wait timed out" })).toBe(
       false,
     );

@@ -57,7 +57,10 @@ describe("the /exec answer says runtime-replaced only when the resident knows th
     // One decision, made where the failure is classified; the gate re-judges nothing.
     expect(gate).not.toMatch(/sdkVouchesRuntimeMoved|knowsContainerGone/);
     expect(source).toMatch(
-      /class RuntimeReplacedError extends Error \{\s*constructor\(\s*readonly phase: "spawn" \| "collect",\s*readonly cause: unknown,(?:\s*\/\*\*[\s\S]*?\*\/)?\s*readonly known: boolean,/,
+      // The phase names where the replacement was met — the command's spawn or
+      // collect inside the DO, or the Worker's own call into it (a rejected
+      // stub, `threadRejectionErr`) — and `known` rides beside it either way.
+      /class RuntimeReplacedError extends Error \{\s*constructor\((?:\s*\/\*\*[\s\S]*?\*\/)?\s*readonly phase: "spawn" \| "collect" \| "call",\s*readonly cause: unknown,(?:\s*\/\*\*[\s\S]*?\*\/)?\s*readonly known: boolean,/,
     );
   });
 
