@@ -413,6 +413,17 @@ function seedHandleOf(snapshot: unknown): ResidentSeedHandle | undefined {
 export type ResidentRestoreWait =
   { kind: "status"; state: string; reason: string } | { kind: "unsupported" } | { kind: "unreachable"; error: string };
 
+/** The routes whose call is re-issued once when the resident answers
+ *  `control-reset` (its Durable Object reset under the call; the container and
+ *  the outcome unknown) — only a route whose second landing is harmless:
+ *  `/read` is idempotent by shape, and `/write` is a full-content put (the path
+ *  and the whole content, never an offset, an append, a mode change or a hook),
+ *  so the same bytes landing twice are the file once. `/exec` is never here (it
+ *  is the typed `ExecControlResetError` at once), and any route that ever
+ *  writes by delta must leave this set — a control reset on it is then the
+ *  unknown outcome, never a blind re-run. */
+const CONTROL_RESET_REISSUE_ROUTES = new Set(["/read", "/write"]);
+
 export class ResidentExecutor implements Executor {
   /** Consecutive `runtime-replaced` answers on the idempotent routes (/read,
    *  /write) with no successful op between them. One is a deploy that swapped
@@ -796,9 +807,12 @@ export class ResidentExecutor implements Executor {
       if (r.data.needs === "attach") throw stillGone(r.data);
     }
     if (saysControlReset(r.data)) {
-      // An idempotent route (/exec threw above): the DO is fresh after its
-      // reset, so re-attach once and re-issue — a re-read is safe. Still reset
-      // → the outcome is unknown; never re-run blindly, never infra.
+      // The DO is fresh after its reset, so re-attach once and re-issue — but
+      // only a route whose second landing is harmless (`/read`, idempotent by
+      // shape; `/write`, a full-content put): `CONTROL_RESET_REISSUE_ROUTES`
+      // names them. Any other route's outcome is unknown and is never re-run
+      // blindly, never infra. Still reset after the re-issue → the unknown outcome.
+      if (!CONTROL_RESET_REISSUE_ROUTES.has(route)) throw new ExecControlResetError(String(r.data.error).trim());
       await this.attach(span); // the recovery rides the same trace as the op it rescues
       r = await this.call(route, body, callTimeoutMs, signal, span);
       if (saysControlReset(r.data)) throw new ExecControlResetError(String(r.data.error).trim());

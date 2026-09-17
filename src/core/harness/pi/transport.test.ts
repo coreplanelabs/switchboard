@@ -193,6 +193,27 @@ describe("PiRpcTransport", () => {
     expect(c.stdin).toEqual(['{"type":"abort"}']);
   });
 
+  it("a failed send stops the chain: a write queued behind the failure never lands on this transport, nor one sent after it — the loop re-sends from pendingSend and the inbox, in order, on the fresh transport (harness-pi item 16)", async () => {
+    const c = new FakeHarnessContainer();
+    await c.start({ paths, command: "pi", args: [], env: {} });
+    const { t } = transport(c);
+    c.failNext = { operation: "send", error: new Error("control-reset: the resident's Durable Object was reset") };
+    t.send({ id: "p", type: "prompt", message: "go" });
+    t.send({ type: "steer", message: "queued behind the failure" });
+    await t.flushed();
+    // The first write failed and is the pending one; the steer queued behind it
+    // never landed here — landing it would put it ahead of the re-sent prompt.
+    expect(t.pendingSend).toEqual({ id: "p", type: "prompt", message: "go" });
+    expect(c.stdin).toEqual([]);
+    // A send after the failure is held back too: this transport is spent.
+    t.send({ type: "abort" });
+    await t.flushed();
+    expect(c.stdin).toEqual([]);
+    // Neither is lost: the re-attach takes them, in order, for the fresh transport — once.
+    expect(t.takeUnsent()).toEqual([{ type: "steer", message: "queued behind the failure" }, { type: "abort" }]);
+    expect(t.takeUnsent()).toEqual([]);
+  });
+
   it("a re-attach starts reading at the offset it was handed", async () => {
     const c = new FakeHarnessContainer();
     await c.start({ paths, command: "pi", args: [], env: {} });
