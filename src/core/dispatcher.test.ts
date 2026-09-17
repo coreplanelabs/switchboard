@@ -7278,14 +7278,24 @@ describe("run history write path", () => {
   });
 
   it("a reply slower than the registry TTL: the finished run stays unsealed (readable, its stream open) through the reply, is sealed after it with replyOk true, and its full record carries the seal; the TTL then runs from the seal", async () => {
-    const registry = new RunRegistry({ genId: () => "run-h", genToken: () => "tok", ttlMs: 10 });
-    const { deps, store, writer } = wired(toolThenAnswer(), { registry });
+    // The registry and the store run on the test's clock: the TTL is ten ticks
+    // from the seal and only the test moves the clock, so the sealed row is
+    // read before the clock reaches the TTL, whatever the host is doing. On the
+    // wall clock a 10 ms TTL raced the writer's settle — a settle slower than
+    // the TTL found the row already swept. The store shares the clock so its
+    // retention window is measured from the same epoch the record is stamped in.
+    let clock = 1_700_000_000_000;
+    const registry = new RunRegistry({ genId: () => "run-h", genToken: () => "tok", ttlMs: 10, now: () => clock });
+    const { deps, store, writer } = wired(toolThenAnswer(), {
+      registry,
+      store: new InMemoryRunStore({ now: () => clock }),
+    });
     const { io, replies } = fakeIO();
     let unsealedDuringReply: boolean | undefined;
     const slow: ChannelIO = {
       ...io,
       reply: async (t) => {
-        await new Promise((r) => setTimeout(r, 40));
+        clock += 40; // the reply outlives the TTL
         unsealedDuringReply =
           registry.getById("run-h")?.finished === true && registry.getById("run-h")?.sealedAt === undefined;
         replies.push(t);
@@ -7300,7 +7310,9 @@ describe("run history write path", () => {
     const rec = await store.get("run-h");
     expect(rec?.status).toBe("completed");
     expect(rec).toMatchObject({ sealedAt: row!.sealedAt, replyOk: true });
-    await new Promise((r) => setTimeout(r, 15));
+    clock = row!.sealedAt! + 9;
+    expect(registry.snapshot("run-h", "tok")).not.toBeNull(); // one tick short of the TTL: still readable
+    clock = row!.sealedAt! + 10;
     expect(registry.snapshot("run-h", "tok")).toBeNull(); // evicted at sealedAt + TTL
     expect(textEventsOf(rec!.events).map((m) => m.type)).toEqual(["input", "answer"]);
     expect(rec!.events.length).toBeGreaterThan(2);
