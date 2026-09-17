@@ -156,7 +156,7 @@ describe("PiRpcTransport", () => {
     expect(t.pendingSend).toEqual({ id: "p", type: "prompt", message: "go" });
   });
 
-  it("abandon() drops every write still queued behind the one in flight, so none of the old transport's writes land after a re-attach re-sends (harness-pi item 16)", async () => {
+  it("abandon() holds every write still queued behind the one in flight for the fresh transport, so none of the old transport's writes land out of turn after a re-attach (harness-pi item 16)", async () => {
     const c = new FakeHarnessContainer();
     await c.start({ paths, command: "pi", args: [], env: {} });
     // Hold the first write in flight (past the drop check, inside writeLine) so
@@ -179,8 +179,10 @@ describe("PiRpcTransport", () => {
     t.abandon(); // the re-attach's close: drop what is still queued
     release();
     await t.flushed();
-    // The in-flight write landed (already committed); the queued one never did.
+    // The in-flight write landed (already committed); the queued one never did —
+    // it is held for the fresh transport, in order, not dropped.
     expect(c.stdin).toEqual(['{"type":"prompt","message":"in flight"}']);
+    expect(t.takeUnsent()).toEqual([{ type: "steer", message: "queued behind it" }]);
   });
 
   it("close() still flushes a write queued just before it — a gate-bypass abort lands even as the transport closes", async () => {
@@ -212,6 +214,20 @@ describe("PiRpcTransport", () => {
     // Neither is lost: the re-attach takes them, in order, for the fresh transport — once.
     expect(t.takeUnsent()).toEqual([{ type: "steer", message: "queued behind the failure" }, { type: "abort" }]);
     expect(t.takeUnsent()).toEqual([]);
+  });
+
+  it("the contracts after a failed send: flushed() resolves once every later write is held (not landed), and a plain close() delivers nothing more — the held writes are the re-attach's to take, never a teardown's to flush", async () => {
+    const c = new FakeHarnessContainer();
+    await c.start({ paths, command: "pi", args: [], env: {} });
+    const { t } = transport(c);
+    c.failNext = { operation: "send", error: new Error("control-reset: the resident's Durable Object was reset") };
+    t.send({ id: "p", type: "prompt", message: "go" });
+    t.send({ type: "abort" }); // a teardown abort behind the failure
+    t.close();
+    await t.flushed(); // settles: the failure recorded, the abort held — never a hang
+    expect(t.pendingSend).toEqual({ id: "p", type: "prompt", message: "go" });
+    expect(c.stdin).toEqual([]);
+    expect(t.takeUnsent()).toEqual([{ type: "abort" }]);
   });
 
   it("a re-attach starts reading at the offset it was handed", async () => {

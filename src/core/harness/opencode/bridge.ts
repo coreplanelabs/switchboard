@@ -1778,7 +1778,7 @@ export async function driveOpenCode(
         const outcome = await classifyLoopFailure(err, { container: conn.container, pid: conn.pid });
         if (outcome.kind === "control-reset" || outcome.kind === "word-alive") {
           if (reattaches >= MAX_INPLACE_REATTACHES) {
-            const msg = reattachBoundMessage(outcome.kind, reattaches);
+            const msg = reattachBoundMessage(outcome.kind, reattaches, "OpenCode");
             note("harness_error", msg);
             throw new Error(msg, { cause: err });
           }

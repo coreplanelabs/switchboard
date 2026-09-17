@@ -55,11 +55,11 @@ export type ReattachKind = "control-reset" | "word-alive";
  *  the pid still answers was never refuted by a record — and is never turned
  *  into the verdict at the bound, since that would relaunch beside a live pi
  *  (the orphan the guard exists to prevent). */
-export function reattachBoundMessage(kind: ReattachKind, reattaches: number): string {
+export function reattachBoundMessage(kind: ReattachKind, reattaches: number, process: string): string {
   return kind === "control-reset"
     ? `the resident's control plane reset under the run ${reattaches} times with no progress; the run cannot continue safely`
-    : `the executor said replaced ${reattaches} times with no progress while the row's pi answered alive in this container; ` +
-        "the word was never refuted by a record, and the run cannot continue safely — never a relaunch beside a live pi";
+    : `the executor said replaced ${reattaches} times with no progress while the row's ${process} answered alive in this container; ` +
+        `the word was never refuted by a record, and the run cannot continue safely — never a relaunch beside a live ${process}`;
 }
 
 /** What the loop does about the container command that failed under it, decided
@@ -91,7 +91,10 @@ export async function classifyLoopFailure(
  *  where records were handed out, the write the failure left unresolved is
  *  resolved first (`resolveControlResetWrite`), and `unsent` — the writes that
  *  never reached pi, in the loop's order — is for the caller to send on the
- *  fresh transport behind it, so pi sees the order the loop sent. */
+ *  fresh transport behind it, through the gate (`HeldSends`), so pi sees the
+ *  order the loop sent. The caller awaits `old.flushed()` BEFORE resolving: a
+ *  write in flight when the read failed can fail with the same reset a moment
+ *  later, and is neither `pendingSend` nor queued until it settles. */
 export function reattachTransport(
   old: PiRpcTransport,
   deps: Pick<PiRpcTransportDeps, "container" | "paths" | "pid" | "pollMs" | "sleep">,
@@ -155,4 +158,83 @@ export function resolveControlResetWrite(
       `a ${type} command was in flight when the resident's control plane reset under the run; its outcome is unknown ` +
       "and it has no echo to resolve it by, so the run cannot continue safely",
   };
+}
+
+/** One write to pi, as the gate holds it: to send when its turn comes, a prompt
+ *  in doubt awaiting its echo, or one whose echo came (landed — nothing to send). */
+interface HeldSend {
+  command: Record<string, unknown>;
+  state: "send" | "await" | "landed";
+}
+
+/** The one gate every write to pi takes after a re-attach (harness-pi item 16).
+ *  While a prompt a failure left in doubt awaits its echo, every later write —
+ *  a follow-up's steer, the wrap-up, an abort, a gate reply, a turn's prompt —
+ *  is held behind it in the order it was sent, and a second prompt in doubt is
+ *  appended behind the first, never overwriting it. The gate moves on by the
+ *  echo (the prompt landed: nothing to send, the writes behind it go out) or by
+ *  the bound of the loop's ticks (the prompt is re-sent steer-delivered once,
+ *  then the writes behind it go out) — so pi sees the order the loop sent, and
+ *  no request is delivered twice or lost. `deliver` writes to the transport as
+ *  it is at that moment, so a re-attach's fresh transport is what a held write
+ *  reaches. */
+export class HeldSends {
+  private readonly queue: HeldSend[] = [];
+  private ticks = 0;
+
+  constructor(private readonly deliver: (command: Record<string, unknown>) => void) {}
+
+  /** Whether a prompt in doubt is holding the gate. */
+  get holding(): boolean {
+    return this.queue.length > 0;
+  }
+
+  /** Send now — or, while a prompt in doubt holds the gate, hold behind it in order. */
+  send(command: Record<string, unknown>): void {
+    if (!this.holding) this.deliver(command);
+    else this.queue.push({ command, state: "send" });
+  }
+
+  /** A prompt whose landing a failure left in doubt: awaited until its echo or
+   *  the bound. Appended behind an earlier one, never overwriting it; its own
+   *  wait starts once it is the head. */
+  await(command: Record<string, unknown>): void {
+    this.queue.push({ command, state: "await" });
+    if (this.queue.length === 1) this.ticks = 0;
+  }
+
+  /** pi echoed `id`: a prompt in doubt under that id landed — never re-sent,
+   *  and if it held the gate, the writes behind it go out now. */
+  echoed(id: string): void {
+    let landed = false;
+    for (const held of this.queue) {
+      if (held.state !== "await" || held.command.id !== id) continue;
+      held.state = "landed";
+      landed = true;
+    }
+    if (landed) this.release();
+  }
+
+  /** One of the loop's ticks — never one of its events, a catch-up burst of
+   *  records being no time: past `PROMPT_ECHO_WAIT_TICKS` the awaited prompt
+   *  is re-sent steer-delivered once (pi takes it mid-turn) and the gate moves on. */
+  tick(): void {
+    const head = this.queue[0];
+    if (head === undefined || head.state !== "await" || this.ticks++ < PROMPT_ECHO_WAIT_TICKS) return;
+    this.queue.shift();
+    this.ticks = 0;
+    this.deliver({ ...head.command, streamingBehavior: "steer" });
+    this.release();
+  }
+
+  /** Deliver from the head until the next prompt still awaiting its echo, whose wait starts now. */
+  private release(): void {
+    while (this.queue.length > 0) {
+      const head = this.queue[0];
+      if (head.state === "await") return;
+      this.queue.shift();
+      this.ticks = 0;
+      if (head.state === "send") this.deliver(head.command);
+    }
+  }
 }

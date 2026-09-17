@@ -2659,6 +2659,83 @@ describe("runPiHarness — the resident's control plane reset under a live pi", 
     expect(w.container.starts).toHaveLength(1);
   });
 
+  it("a write in flight when the READ meets the reset: the re-attach waits for every write to settle before it resolves, so the prompt whose exec fails a moment after the read's is re-sent — never left unresolved on the abandoned transport", async () => {
+    const w = world();
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "ok"));
+    const realWrite = w.container.writeLine.bind(w.container);
+    const realRead = w.container.readLog.bind(w.container);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let promptInFlight = false;
+    // The seed prompt's exec is in flight when the poll's read meets the reset:
+    // both are commands to the same Durable Object and one reset fails both, the
+    // read's error surfacing first. The write fails too — a macrotask later,
+    // after the loop has seen the read's failure — and never landed.
+    w.container.writeLine = async (p, line) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "prompt" && cmd.streamingBehavior === undefined) {
+        promptInFlight = true;
+        await gate;
+        throw controlReset();
+      }
+      return realWrite(p, line);
+    };
+    let readFailed = false;
+    w.container.readLog = async (path, offset, max) => {
+      if (promptInFlight && !readFailed) {
+        readFailed = true;
+        setImmediate(release);
+        throw new HarnessContainerControlResetError(
+          "read",
+          "control-reset: the resident's Durable Object was reset (a deploy); the container and its processes are as they were; the command's outcome is unknown",
+        );
+      }
+      return realRead(path, offset, max);
+    };
+    const answer = await w.start();
+    expect(answer).toBe("ok");
+    expect(resumedSummaries(w)).toEqual([CONTROL_RESET_RESUMED_NOTE]);
+    // The prompt that never landed was resolved (no echo → re-sent once, steer-delivered): pi got exactly one.
+    const prompts = w.container.commands().filter((c) => c.type === "prompt");
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0].streamingBehavior).toBe("steer");
+  });
+
+  it("every write sent while a prompt awaits its echo is held behind it in order: a follow-up drained during the hold reaches pi after the re-sent prompt and after the write queued behind the prompt at the reset", async () => {
+    const w = world();
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "ok"));
+    // A follow-up already in the inbox: its steer S1 queues behind the seed prompt P1.
+    w.inbox.push({ text: "S1 first", userId: "user:test", at: NOW });
+    // P1 never lands (the reset meets its send): P1 is in doubt, S1 is held behind it.
+    w.container.failSendType = { type: "prompt", error: controlReset() };
+    const realRead = w.container.readLog.bind(w.container);
+    let pushed = false;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length === 0 && resumedSummaries(w).length > 0 && !pushed) {
+        pushed = true;
+        // Drained on the next tick, while P1 still awaits its echo.
+        w.inbox.push({ text: "S2 second", userId: "user:test", at: NOW });
+      }
+      return chunk;
+    };
+    const answer = await w.start();
+    expect(answer).toBe("ok");
+    const order = w.container
+      .commands()
+      .filter((c) => c.type === "prompt" || c.type === "steer")
+      .map((c) =>
+        c.type === "prompt"
+          ? "P1"
+          : String(c.message).includes("S1 first")
+            ? "S1"
+            : String(c.message).includes("S2 second")
+              ? "S2"
+              : "other",
+      );
+    expect(order).toEqual(["P1", "S1", "S2"]);
+  });
+
   it("a control reset on a control command (get_state) re-attaches and re-sends it as it was — the run answers, one resumed note, never the verdict", async () => {
     const w = world();
     scriptedPi(w.container, (_n, c) => finalTurn(c, "done"));
