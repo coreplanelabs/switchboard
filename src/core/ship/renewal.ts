@@ -24,8 +24,12 @@ export interface ProgressInput {
   /** The heads the segment's coding run pushed (`RunRecord.pushed`). */
   pushed: readonly PushedHeadFact[];
   /** The head the segment started from — the previous segment's recorded sha.
-   *  Absent on a fresh branch, where any push is progress. */
+   *  Absent on a fresh branch, where the base head stands in for it. */
   startHead?: string;
+  /** The base branch's head the unit's branch was created at. On a fresh
+   *  branch (no `startHead`) a push of this head is the branch's creation,
+   *  not the unit's progress; with neither known, any push is progress. */
+  baseHead?: string;
   /** When the segment's lease began; a push stamped before it is not this segment's. */
   leaseStartedAt?: number;
   /** The previous segment's handoff and this one's, when both exist. */
@@ -53,7 +57,10 @@ export function progressOf(input: ProgressInput): Progress {
   if (last !== undefined) {
     const newerThanLease =
       input.leaseStartedAt === undefined || last.at === undefined || last.at >= input.leaseStartedAt;
-    const moved = input.startHead === undefined || !sameSha(last.sha, input.startHead);
+    // A fresh branch starts at the base head, so that head is the bar a push
+    // must move past when no segment recorded a start.
+    const startHead = input.startHead ?? input.baseHead;
+    const moved = startHead === undefined || !sameSha(last.sha, startHead);
     if (newerThanLease && moved) return { progressed: true, by: "push", sha: last.sha };
   }
   const pushWhy = `no head newer than the lease's start was pushed to \`${input.branch}\``;
@@ -95,7 +102,7 @@ export function renewalDecision(input: RenewalInput): RenewalDecision {
     const detail =
       input.grant.renewals === 0
         ? "the grant holds no renewals"
-        : `the grant's ${input.grant.renewals} renewal${input.grant.renewals === 1 ? "" : "s"} are spent`;
+        : `the grant's ${input.grant.renewals} renewal${input.grant.renewals === 1 ? " is" : "s are"} spent`;
     return { renew: false, why: "grant_exhausted", detail, renewalsLeft };
   }
   const cap = input.grant.costCapUsd;
