@@ -146,6 +146,12 @@ const PROVIDER_RETRY_BACKOFF_MS = 5_000;
  *  bare number inside an id or a count), `terminated` only as undici's whole
  *  bare message or a terminated connection/stream (never "request terminated:
  *  invalid api key"), and `network` only as a named network error. */
+/** pi's word for a model call its own abort ended: the turn a tool cut was
+ *  in closes with this, before the steered write-up runs as the next turn. */
+export function isAbortedProviderError(message: string): boolean {
+  return /\baborted\b/i.test(message);
+}
+
 export function isTransientProviderError(message: string): boolean {
   return (
     /stream ended before message_stop|ended before completion/i.test(message) ||
@@ -976,6 +982,12 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     /** The finale bound aborted pi during a write-up: the run ends by the
      *  wind-down's answer, and the aborted call's failure is not the run's. */
     let finaleAborted = false;
+    /** The loop's end cut a tool call: the abort that cuts it also fails the
+     *  turn it was in, and pi reports that as an aborted model call before it
+     *  takes the write-up's steer (measured live on the first cut). That
+     *  failure is the cut's own, never the write-up's — the write-up is the
+     *  turn that follows. */
+    let cutAborted = false;
     /** The model call the wind-down waited on failed (the finale's abort
      *  included): the answer names it where the write-up would have been. */
     let writeUpFailed: string | undefined;
@@ -1209,6 +1221,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         // is left to answer: the steer lands at its turn boundary as today.
         if (doing !== undefined && doing.startsWith("running ")) {
           note("tool_cut", toolCutNote(doing));
+          cutAborted = true;
           abortPi();
         }
         return;
@@ -1539,6 +1552,12 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             "harness_error",
             `the model call failed (${obs.providerError}) — that looks transient; retrying once after ${PROVIDER_RETRY_BACKOFF_MS / 1000}s`,
           );
+        } else if (cutAborted && !finaleAborted && isAbortedProviderError(obs.providerError)) {
+          // The cut turn closing on the cut's own abort (decision 0046, unit
+          // seven): pi ends the turn the cut tool was in as an aborted model
+          // call and goes on with the steered write-up as its next turn. The
+          // `tool_cut` note already says so; nothing failed under the wind-down.
+          cutAborted = false;
         } else if (writeUp || finaleAborted) {
           // The run is already winding down (a budget, the turn guard, a soft
           // stop) — a model call that fails now, the finale bound's own abort
