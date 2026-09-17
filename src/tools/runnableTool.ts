@@ -33,6 +33,8 @@ import type { WebCapability } from "./web.js";
 import type { WorkItems } from "../core/workItems.js";
 
 export interface ToolContext {
+  /** Record a question for the turn’s reply, without posting it mid-run. */
+  onQuestion?: (question: string) => void;
   /** Work tracking bound to this run's resolved actor by its channel. */
   workItems?: WorkItems;
   executor: Executor;

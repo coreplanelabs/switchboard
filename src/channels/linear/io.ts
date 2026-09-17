@@ -121,6 +121,10 @@ export class LinearChannelIO implements ChannelIO {
     );
   }
 
+  question(body: string): Promise<void> {
+    return this.elicit(body);
+  }
+
   async elicit(body: string): Promise<void> {
     await this.enqueue(() => this.send({ type: "elicitation", body }));
   }
@@ -178,7 +182,7 @@ export class LinearChannelIO implements ChannelIO {
       const cutoff = activities[at]!.at;
       activities = activities.filter((activity) => activity.at < cutoff);
     }
-    return activities.flatMap((activity): HistoryItem[] => {
+    const history = activities.flatMap((activity): HistoryItem[] => {
       if (!activity.body) return [];
       if (activity.type === "prompt" && activity.userId !== appUserId)
         return [{ role: "user", text: activity.body, at: activity.at }];
@@ -186,6 +190,18 @@ export class LinearChannelIO implements ChannelIO {
         return [{ role: "assistant", text: activity.body, at: activity.at }];
       return [];
     });
+    if (history[0]?.role === "assistant") {
+      // A delegation need not create a user activity. Preserve an opening
+      // question even when the provider requires a user turn first.
+      const session = await this.deps.api.session(this.deps.sessionId);
+      history.unshift({
+        role: "user",
+        text: session.issue
+          ? `Linear issue ${session.issue.identifier}: ${session.issue.title}\n\n${session.issue.description ?? ""}`
+          : "Earlier assistant messages in this Linear session follow.",
+      });
+    }
+    return history;
   }
 }
 

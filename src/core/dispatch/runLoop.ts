@@ -1,3 +1,4 @@
+import { questionText } from "../question.js";
 // The run stage's loop (docs/decisions/0024-dispatcher-as-a-staged-pipeline.md):
 // the model turn and everything that rides on it. The card frame the loop
 // paints (checklist, activity line, the shutdown notice); the run on the pi
@@ -109,6 +110,7 @@ const RUN_FAILED_NOTE_MAX = 500;
  *  reply stage calls after the answer landed. The review post-step runs
  *  inside the loop (agent-review.md item 18), so its inputs stay here. */
 export interface RunOutcome {
+  awaitingInput?: true;
   kind: "answered";
   answer: string;
   reviewHead: string | undefined;
@@ -317,6 +319,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // the checklist the card shows, the verdict/description already submitted,
   // the branch already pushed.
   const restored = resume?.row.state ?? {};
+  let question = questionText(restored.question);
+  const onQuestion = (text: string) => {
+    question = text;
+    ledgerRun?.setState({ question: text });
+  };
   let checklist: string | undefined = typeof restored.checklist === "string" ? restored.checklist : undefined;
   // Typed (`StatusActivity`): a bash call rides as its full command, which
   // the Slack card draws as a code block; everything else as its one line.
@@ -368,6 +375,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // via `registry.snapshot` — there is no second copy to drift from it.
   let recordedPushedBranch: string | undefined;
   const onEvent = (e: RunEvent) => {
+    if (e.type === "input" && question !== undefined) {
+      question = undefined;
+      ledgerRun?.setState({ question: null });
+    }
     registry.publish(run.id, e); // feed the external live-view stream
     if (isSpanRecord(e)) return; // timing, not activity (docs/reference/specs/tracing.md): the card and its clock ignore it
     if (e.type === "lease") return; // the harness's clocks: head material for the record (harness-pi item 15), not activity — the card and its clock ignore it
@@ -641,6 +652,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     : undefined;
   const toolContext = {
     executor,
+    onQuestion,
     workItems: io.workItems?.(chatActorOf(deps.config, msg)),
     reportProgress,
     ...(attachFile ? { attach: attachFile } : {}),
@@ -962,235 +974,93 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       }
       answer = harnessSession.answer;
     }
-    // Reviewed-head settle (docs/reference/specs/agent-review.md items 8 + 12,
-    // settleReviewedHead in reviewRound.ts): for a PR review, read the
-    // workspace HEAD NOW — after the model is done, BEFORE the finally
-    // below releases the workspace — and reconcile a PR head that moved
-    // during the run: adopt the current head when the run reviewed it,
-    // carry the review across a rebase of the same commits, or void the
-    // verdict and re-review ONCE at the new head (worktree moved, one more
-    // prompt on the run's own pi session, harness-pi item 14). A hard stop
-    // observes nothing and settles nothing; a verdict already posted before a
-    // restart is settled (it landed at its head) and is not re-reviewed; a
-    // `finish` plan has no session, so a move it finds is left to the post
-    // gate (agent-review item 10).
-    if (
-      isPrReview &&
-      repoCtx.repo &&
-      repoCtx.pr !== undefined &&
-      run.control.requested !== "hard" &&
-      postedBefore === undefined
-    ) {
-      const settled = await settleReviewedHead({
-        span: root,
-        pr: { repo: repoCtx.repo, number: repoCtx.pr },
-        baseRef: repoCtx.baseRef,
-        reviewHead,
-        verdict,
-        answer,
-        messages,
-        executor,
-        turn: {
-          agent,
-          toolContext,
-          onEvent,
-          control: run.control,
-          ...(harnessSession ? { followUp: harnessSession.followUp } : {}),
-        },
-        fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
-        fetchPrCommits: deps.fetchPrCommits ?? prCommitsSince,
-        notify: {
-          reply: (text) => io.reply(text),
-          headMoved: (suffix) => {
-            shell.setLabel(`${shell.label} · ${suffix}`);
-            card.update(currentFrame());
-          },
-        },
-        logKey: msg.threadKey,
-      });
-      answer = settled.answer;
-      verdict = settled.verdict;
-      reviewHead = settled.reviewHead;
-      observedHead = settled.observedHead;
-      carried = settled.carried;
+    if (run.control.requested) {
+      question = undefined;
+      ledgerRun?.setState({ question: null });
     }
-    // The verdict turn (agent-review item 5, verdictTurn.ts): the review prompt
-    // requires submit_verdict before the final message and the post step is
-    // fail-closed without it, but a prompt rule alone can be skipped — a run
-    // has approved in prose and never called the tool. So a review that will
-    // post to a pull request and still has NO verdict after the head settle
-    // (whose re-review turn asks for a fresh verdict itself, so a moved head
-    // is never nudged twice) gets ONE bounded extra model turn asking for the
-    // call, before the post step builds the body. The verdict arrives through
-    // the same onVerdict hook the loop fed (so the ledger row sees it) and is
-    // also returned. A hard stop asks nothing; a request that opted out of the
-    // GitHub post has no body to lead and asks nothing; a `finish` plan has no
-    // session and asks nothing — the body then carries the no-verdict line as
-    // before.
-    if (
-      isPrReview &&
-      repoCtx.repo &&
-      repoCtx.pr !== undefined &&
-      run.control.requested !== "hard" &&
-      postedBefore === undefined &&
-      verdict === undefined &&
-      !reviewPostOptedOut(ctx.requestText)
-    ) {
-      const reviewOf = { repo: repoCtx.repo, number: repoCtx.pr };
-      const turned = await root.span("run.verdict_turn", (span) =>
-        runVerdictTurn({
-          span,
-          target: reviewOf,
+    if (question !== undefined) {
+      answer = question;
+      await harnessSession?.end();
+    } else {
+      // Reviewed-head settle (docs/reference/specs/agent-review.md items 8 + 12,
+      // settleReviewedHead in reviewRound.ts): for a PR review, read the
+      // workspace HEAD NOW — after the model is done, BEFORE the finally
+      // below releases the workspace — and reconcile a PR head that moved
+      // during the run: adopt the current head when the run reviewed it,
+      // carry the review across a rebase of the same commits, or void the
+      // verdict and re-review ONCE at the new head (worktree moved, one more
+      // prompt on the run's own pi session, harness-pi item 14). A hard stop
+      // observes nothing and settles nothing; a verdict already posted before a
+      // restart is settled (it landed at its head) and is not re-reviewed; a
+      // `finish` plan has no session, so a move it finds is left to the post
+      // gate (agent-review item 10).
+      if (
+        isPrReview &&
+        repoCtx.repo &&
+        repoCtx.pr !== undefined &&
+        run.control.requested !== "hard" &&
+        postedBefore === undefined
+      ) {
+        const settled = await settleReviewedHead({
+          span: root,
+          pr: { repo: repoCtx.repo, number: repoCtx.pr },
+          baseRef: repoCtx.baseRef,
+          reviewHead,
+          verdict,
+          answer,
+          messages,
+          executor,
           turn: {
             agent,
             toolContext,
-            onProgress,
             onEvent,
-            ...(harnessSession ? { followUp: harnessSession.followUp, remainingMs: harnessSession.remainingMs } : {}),
+            control: run.control,
+            ...(harnessSession ? { followUp: harnessSession.followUp } : {}),
+          },
+          fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
+          fetchPrCommits: deps.fetchPrCommits ?? prCommitsSince,
+          notify: {
+            reply: (text) => io.reply(text),
+            headMoved: (suffix) => {
+              shell.setLabel(`${shell.label} · ${suffix}`);
+              card.update(currentFrame());
+            },
           },
           logKey: msg.threadKey,
-        }),
-      );
-      if (turned.verdict !== undefined) verdict = turned.verdict;
-    }
-    // PR post-step observation (docs/reference/specs/pr-description.md item 5): for a
-    // writable coding run, read the workspace's head branch — the one the
-    // run's `git push` named, else the checkout — its tip, and the remote's
-    // head for that branch NOW — after the model is done, BEFORE the
-    // finally below can release the workspace (a resident re-attach would
-    // show the ref's current tip, not what this run pushed). The cold path
-    // clones into a SUBDIRECTORY of the workspace root, so a failed root
-    // HEAD probe discovers the single clone and re-probes inside it; with
-    // no dispatch-resolved repo the origin remote is read too (an
-    // agent-discovered repo). Best-effort: a failed probe leaves its field
-    // undefined and the post-step reports honestly instead of guessing. A
-    // hard stop tore the work down mid-flight — nothing observed, nothing
-    // posted.
-    const observeWorkspaceNow = async () => {
-      const pushedBranch = pushes.branch();
-      const observed = await root.span("run.observe_workspace", (span) =>
-        observeCodingWorkspace(
-          executor,
-          {
-            probeRemote: repoCtx.repo === undefined,
-            ...(pushedBranch !== undefined ? { pushedBranch } : {}),
-          },
-          span,
-        ),
-      );
-      observedHead = observed.head;
-      observedBranch = observed.branch;
-      observedCheckedOut = observed.checkedOut;
-      observedRemoteHead = observed.remoteHead;
-      observedRemoteRepo = observed.remoteRepo;
-      observedUncommitted = observed.uncommittedChanges;
-      observedUnpushed = observed.unpushedCommits;
-    };
-    // Where the post-step's PR would open (CodingPrTarget), in order: the PR's
-    // true base ref when the thread's context came from a PR (a fix round
-    // repushes the PR's own head branch — the PR, not the thread, knows its
-    // base), else the base a coordinator's spawn put on the tag (its child is
-    // dispatched AT the unit branch so the resident attaches there, which
-    // makes the binding ref the branch itself, and a PR whose base is its own
-    // head cannot open — the plan's base is the only signal that names the
-    // target, and only the tag carries it), else the resident binding ref,
-    // else the dispatch's resolved ref. Shared by the description turn's
-    // decision and the post-step below. `ownPr`: the pull request the thread's
-    // own run opened — open, or merged or closed since — where a description
-    // resubmitted without a push lands even from a workspace on the base or
-    // on that pull request's own head branch (pr-description.md item 5).
-    const ownPr = recordPrOf(repoCtx);
-    // The plan's base for a coordinator's child (run-history item 48a),
-    // resolved once above before the harness session opened. Still unknown
-    // after the tag and the store, the base is LOST, not resolvable: the
-    // binding ref is the unit branch itself and the repo default is not the
-    // plan's base, so neither may stand in — the post-step says so with a
-    // `pr_not_opened` note instead of opening against the wrong branch. The
-    // flag rides only a coding PR run's target, the one the post-step reads.
-    const planBase = await coordinatorBase;
-    const planBaseLost =
-      isCodingPrRun && coordinator !== undefined && repoCtx.baseRef === undefined && planBase === undefined;
-    const prTarget = {
-      repo: repoCtx.repo,
-      baseRef: repoCtx.baseRef ?? planBase,
-      bindingRef: binding?.ref,
-      resolvedRef: repoCtx.ref,
-      ...(planBaseLost ? { planBaseLost: true } : {}),
-      ...(ownPr !== undefined ? { ownPr } : {}),
-    };
-    if (isCodingPrRun && run.control.requested !== "hard") await observeWorkspaceNow();
-    // Push-before-abort (agent-ship.md item 8): a ship coding child (a
-    // coordinator's spawn) whose loop ended at the time budget commits and
-    // pushes what the observation found still in the tree to the unit's own
-    // branch — never the plan's base, and nowhere when the base cannot be
-    // named, since the branch might then be it — or says plainly that it had
-    // nothing, that the tree could not be measured, or why the salvage was
-    // skipped, so a re-issue starts from the partial work instead of zero.
-    // The note is the record's; a push moves the observation, so it is read
-    // again.
-    if (isCodingPrRun && coordinator !== undefined && budgetEnded && run.control.requested !== "hard") {
-      const target = salvageTargetOf({
-        pushedBranch: pushes.branch(),
-        checkedOut: observedCheckedOut,
-        base: repoCtx.baseRef ?? planBase,
-      });
-      const work =
-        "skipped" in target
-          ? undefined
-          : salvageWorkOf(
-              { uncommittedChanges: observedUncommitted, unpushedCommits: observedUnpushed },
-              target.branch,
-            );
-      const salvaged =
-        "skipped" in target
-          ? { pushed: false, summary: target.skipped }
-          : work !== undefined && !work.work
-            ? { pushed: false, summary: work.summary }
-            : await root.span("run.budget_salvage", (span) =>
-                salvageBudgetPush(executor, { branch: target.branch }, span),
-              );
-      onEvent({ type: "run_note", kind: "budget_salvage", summary: salvaged.summary });
-      // The salvaged head is a fact of the run (run-history item 2): what renewal reads.
-      if (salvaged.pushed && "head" in salvaged && salvaged.head !== undefined && !("skipped" in target))
-        onEvent({ type: "pushed_head", ref: target.branch, sha: salvaged.head, by: "salvage" });
-      if (salvaged.pushed) await observeWorkspaceNow();
-    }
-    // The description turn (docs/reference/specs/pr-description.md item 5,
-    // descriptionTurn.ts): the coding prompt requires a resubmitted
-    // description after EVERY push to a PR that already exists (agent-coding.md
-    // item 3), and a prompt rule alone can be rationalized away. So a run
-    // whose loop ended with a proven push onto a branch that already heads
-    // an open PR and NO submit_pr_description call gets ONE bounded extra
-    // model turn asking for it — here, after the model is done and BEFORE
-    // the answer lands or the workspace is released. The description arrives
-    // through the same onPrDescription hook the first turn fed (so
-    // `prDescription` and the ledger row see it); the workspace is observed
-    // again afterwards in case the turn pushed. A hard stop asks nothing. The
-    // turn is one more prompt on the run's own pi session (harness-pi item
-    // 14), the same hook fed through the relay; a `finish` plan has no session
-    // and asks nothing — the post-step's note then says the description was
-    // not resubmitted.
-    let descriptionTurnRan = false;
-    if (isCodingPrRun && run.control.requested !== "hard" && prDescription === undefined) {
-      const turnTarget = await descriptionTurnTarget({
-        observed: {
-          head: observedHead,
-          branch: observedBranch,
-          checkedOut: observedCheckedOut,
-          remoteHead: observedRemoteHead,
-          remoteRepo: observedRemoteRepo,
-        },
-        description: prDescription,
-        target: prTarget,
-        findOpenPr: deps.findOpenPrByHead ?? findOpenPrByHead,
-        logKey: msg.threadKey,
-      });
-      if (turnTarget) {
-        descriptionTurnRan = true;
-        await root.span("run.description_turn", (span) =>
-          runDescriptionTurn({
+        });
+        answer = settled.answer;
+        verdict = settled.verdict;
+        reviewHead = settled.reviewHead;
+        observedHead = settled.observedHead;
+        carried = settled.carried;
+      }
+      // The verdict turn (agent-review item 5, verdictTurn.ts): the review prompt
+      // requires submit_verdict before the final message and the post step is
+      // fail-closed without it, but a prompt rule alone can be skipped — a run
+      // has approved in prose and never called the tool. So a review that will
+      // post to a pull request and still has NO verdict after the head settle
+      // (whose re-review turn asks for a fresh verdict itself, so a moved head
+      // is never nudged twice) gets ONE bounded extra model turn asking for the
+      // call, before the post step builds the body. The verdict arrives through
+      // the same onVerdict hook the loop fed (so the ledger row sees it) and is
+      // also returned. A hard stop asks nothing; a request that opted out of the
+      // GitHub post has no body to lead and asks nothing; a `finish` plan has no
+      // session and asks nothing — the body then carries the no-verdict line as
+      // before.
+      if (
+        isPrReview &&
+        repoCtx.repo &&
+        repoCtx.pr !== undefined &&
+        run.control.requested !== "hard" &&
+        postedBefore === undefined &&
+        verdict === undefined &&
+        !reviewPostOptedOut(ctx.requestText)
+      ) {
+        const reviewOf = { repo: repoCtx.repo, number: repoCtx.pr };
+        const turned = await root.span("run.verdict_turn", (span) =>
+          runVerdictTurn({
             span,
-            target: turnTarget,
+            target: reviewOf,
             turn: {
               agent,
               toolContext,
@@ -1201,61 +1071,128 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             logKey: msg.threadKey,
           }),
         );
-        // Re-read, not narrowed: a hard stop may have landed during the turn.
-        if (!run.control.hardSignal.aborted) await observeWorkspaceNow();
+        if (turned.verdict !== undefined) verdict = turned.verdict;
       }
-    }
-    // The last prompt on the run's pi has been sent: pi ends here, before the
-    // post-step and before the workspace it runs in can be released.
-    await harnessSession?.end();
-    // What the run leaves uncommitted or unpushed does not outlive it: a run
-    // starts from a clean tree (resident-repos item 17), and the release that
-    // follows the reply discards the tree. Said HERE — on the record, before
-    // the finally below finish()es the stream to content, and on the card's
-    // label before it closes — because the release runs after the record is
-    // sealed and could not say it anywhere a person reads. Read off the last
-    // observation above (after the description turn, in case it pushed); a
-    // hard stop observed nothing and has its own ⛔.
-    const leftBehind =
-      isCodingPrRun && run.control.requested !== "hard"
-        ? workLeftBehindOf({ uncommittedChanges: observedUncommitted, unpushedCommits: observedUnpushed })
-        : undefined;
-    if (leftBehind) {
-      registry.publish(run.id, {
-        type: "run_note",
-        kind: "work_left_behind",
-        summary: oneLine(workLeftBehindSummary(leftBehind)),
-        at: clock(),
-      });
-      shell.setLabel(`${shell.label} · ${workLeftBehindLabel(leftBehind)}`);
-    }
-    // The accepted PrDescription is a fact of the run: publish it as a typed
-    // event BEFORE the finally below finish()es the stream, string fields
-    // redacted like every payload, so the run page's review panel renders
-    // the same object the GitHub body is rendered from.
-    if (prDescription) {
-      registry.publish(run.id, {
-        type: "pr_description",
-        description: redactPrDescription(prDescription),
-        at: clock(),
-      });
-    }
-    // Deterministic coding PR post-step (docs/reference/specs/pr-description.md item 5,
-    // agent-coding.md item 2, runCodingPrPostStep in codingPrPostStep.ts):
-    // a writable coding run that pushed a branch and submitted its typed
-    // PrDescription gets its PR opened — or edited, the open-or-edit
-    // idempotency lives in githubPulls — HERE, in the bot process, BEFORE
-    // the finally below finish()es the stream, so the outcome lands in the
-    // run record as a typed `pr_opened` event and not only in a console
-    // line. The base is `prTarget`'s (above): the PR's true base ref, else
-    // the coordinator tag's, else the thread's resident binding ref, else
-    // the dispatch's resolved ref — binding is only ever set on the resident
-    // path (factory.ts), so no resident check is needed. The note rides on
-    // the final reply below. A hard stop observed nothing above and posts
-    // nothing.
-    if (isCodingPrRun && run.control.requested !== "hard") {
-      prNote = await root.span("run.pr_post_step", () =>
-        runCodingPrPostStep({
+      // PR post-step observation (docs/reference/specs/pr-description.md item 5): for a
+      // writable coding run, read the workspace's head branch — the one the
+      // run's `git push` named, else the checkout — its tip, and the remote's
+      // head for that branch NOW — after the model is done, BEFORE the
+      // finally below can release the workspace (a resident re-attach would
+      // show the ref's current tip, not what this run pushed). The cold path
+      // clones into a SUBDIRECTORY of the workspace root, so a failed root
+      // HEAD probe discovers the single clone and re-probes inside it; with
+      // no dispatch-resolved repo the origin remote is read too (an
+      // agent-discovered repo). Best-effort: a failed probe leaves its field
+      // undefined and the post-step reports honestly instead of guessing. A
+      // hard stop tore the work down mid-flight — nothing observed, nothing
+      // posted.
+      const observeWorkspaceNow = async () => {
+        const pushedBranch = pushes.branch();
+        const observed = await root.span("run.observe_workspace", (span) =>
+          observeCodingWorkspace(
+            executor,
+            {
+              probeRemote: repoCtx.repo === undefined,
+              ...(pushedBranch !== undefined ? { pushedBranch } : {}),
+            },
+            span,
+          ),
+        );
+        observedHead = observed.head;
+        observedBranch = observed.branch;
+        observedCheckedOut = observed.checkedOut;
+        observedRemoteHead = observed.remoteHead;
+        observedRemoteRepo = observed.remoteRepo;
+        observedUncommitted = observed.uncommittedChanges;
+        observedUnpushed = observed.unpushedCommits;
+      };
+      // Where the post-step's PR would open (CodingPrTarget), in order: the PR's
+      // true base ref when the thread's context came from a PR (a fix round
+      // repushes the PR's own head branch — the PR, not the thread, knows its
+      // base), else the base a coordinator's spawn put on the tag (its child is
+      // dispatched AT the unit branch so the resident attaches there, which
+      // makes the binding ref the branch itself, and a PR whose base is its own
+      // head cannot open — the plan's base is the only signal that names the
+      // target, and only the tag carries it), else the resident binding ref,
+      // else the dispatch's resolved ref. Shared by the description turn's
+      // decision and the post-step below. `ownPr`: the pull request the thread's
+      // own run opened — open, or merged or closed since — where a description
+      // resubmitted without a push lands even from a workspace on the base or
+      // on that pull request's own head branch (pr-description.md item 5).
+      const ownPr = recordPrOf(repoCtx);
+      // The plan's base for a coordinator's child (run-history item 48a),
+      // resolved once above before the harness session opened. Still unknown
+      // after the tag and the store, the base is LOST, not resolvable: the
+      // binding ref is the unit branch itself and the repo default is not the
+      // plan's base, so neither may stand in — the post-step says so with a
+      // `pr_not_opened` note instead of opening against the wrong branch. The
+      // flag rides only a coding PR run's target, the one the post-step reads.
+      const planBase = await coordinatorBase;
+      const planBaseLost =
+        isCodingPrRun && coordinator !== undefined && repoCtx.baseRef === undefined && planBase === undefined;
+      const prTarget = {
+        repo: repoCtx.repo,
+        baseRef: repoCtx.baseRef ?? planBase,
+        bindingRef: binding?.ref,
+        resolvedRef: repoCtx.ref,
+        ...(planBaseLost ? { planBaseLost: true } : {}),
+        ...(ownPr !== undefined ? { ownPr } : {}),
+      };
+      if (isCodingPrRun && run.control.requested !== "hard") await observeWorkspaceNow();
+      // Push-before-abort (agent-ship.md item 8): a ship coding child (a
+      // coordinator's spawn) whose loop ended at the time budget commits and
+      // pushes what the observation found still in the tree to the unit's own
+      // branch — never the plan's base, and nowhere when the base cannot be
+      // named, since the branch might then be it — or says plainly that it had
+      // nothing, that the tree could not be measured, or why the salvage was
+      // skipped, so a re-issue starts from the partial work instead of zero.
+      // The note is the record's; a push moves the observation, so it is read
+      // again.
+      if (isCodingPrRun && coordinator !== undefined && budgetEnded && run.control.requested !== "hard") {
+        const target = salvageTargetOf({
+          pushedBranch: pushes.branch(),
+          checkedOut: observedCheckedOut,
+          base: repoCtx.baseRef ?? planBase,
+        });
+        const work =
+          "skipped" in target
+            ? undefined
+            : salvageWorkOf(
+                { uncommittedChanges: observedUncommitted, unpushedCommits: observedUnpushed },
+                target.branch,
+              );
+        const salvaged =
+          "skipped" in target
+            ? { pushed: false, summary: target.skipped }
+            : work !== undefined && !work.work
+              ? { pushed: false, summary: work.summary }
+              : await root.span("run.budget_salvage", (span) =>
+                  salvageBudgetPush(executor, { branch: target.branch }, span),
+                );
+        onEvent({ type: "run_note", kind: "budget_salvage", summary: salvaged.summary });
+        // The salvaged head is a fact of the run (run-history item 2): what renewal reads.
+        if (salvaged.pushed && "head" in salvaged && salvaged.head !== undefined && !("skipped" in target))
+          onEvent({ type: "pushed_head", ref: target.branch, sha: salvaged.head, by: "salvage" });
+        if (salvaged.pushed) await observeWorkspaceNow();
+      }
+      // The description turn (docs/reference/specs/pr-description.md item 5,
+      // descriptionTurn.ts): the coding prompt requires a resubmitted
+      // description after EVERY push to a PR that already exists (agent-coding.md
+      // item 3), and a prompt rule alone can be rationalized away. So a run
+      // whose loop ended with a proven push onto a branch that already heads
+      // an open PR and NO submit_pr_description call gets ONE bounded extra
+      // model turn asking for it — here, after the model is done and BEFORE
+      // the answer lands or the workspace is released. The description arrives
+      // through the same onPrDescription hook the first turn fed (so
+      // `prDescription` and the ledger row see it); the workspace is observed
+      // again afterwards in case the turn pushed. A hard stop asks nothing. The
+      // turn is one more prompt on the run's own pi session (harness-pi item
+      // 14), the same hook fed through the relay; a `finish` plan has no session
+      // and asks nothing — the post-step's note then says the description was
+      // not resubmitted.
+      let descriptionTurnRan = false;
+      if (isCodingPrRun && run.control.requested !== "hard" && prDescription === undefined) {
+        const turnTarget = await descriptionTurnTarget({
           observed: {
             head: observedHead,
             branch: observedBranch,
@@ -1265,15 +1202,101 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           },
           description: prDescription,
           target: prTarget,
-          openPullRequest: deps.openPullRequest ?? openPullRequest,
           findOpenPr: deps.findOpenPrByHead ?? findOpenPrByHead,
-          updatePullRequest: deps.updatePullRequest ?? updatePullRequest,
-          fetchRepoInfo: deps.fetchRepoShipInfo ?? fetchRepoShipInfo,
-          descriptionTurnRan,
-          publish: (e) => registry.publish(run.id, e),
           logKey: msg.threadKey,
-        }),
-      );
+        });
+        if (turnTarget) {
+          descriptionTurnRan = true;
+          await root.span("run.description_turn", (span) =>
+            runDescriptionTurn({
+              span,
+              target: turnTarget,
+              turn: {
+                agent,
+                toolContext,
+                onProgress,
+                onEvent,
+                ...(harnessSession
+                  ? { followUp: harnessSession.followUp, remainingMs: harnessSession.remainingMs }
+                  : {}),
+              },
+              logKey: msg.threadKey,
+            }),
+          );
+          // Re-read, not narrowed: a hard stop may have landed during the turn.
+          if (!run.control.hardSignal.aborted) await observeWorkspaceNow();
+        }
+      }
+      // The last prompt on the run's pi has been sent: pi ends here, before the
+      // post-step and before the workspace it runs in can be released.
+      await harnessSession?.end();
+      // What the run leaves uncommitted or unpushed does not outlive it: a run
+      // starts from a clean tree (resident-repos item 17), and the release that
+      // follows the reply discards the tree. Said HERE — on the record, before
+      // the finally below finish()es the stream to content, and on the card's
+      // label before it closes — because the release runs after the record is
+      // sealed and could not say it anywhere a person reads. Read off the last
+      // observation above (after the description turn, in case it pushed); a
+      // hard stop observed nothing and has its own ⛔.
+      const leftBehind =
+        isCodingPrRun && run.control.requested !== "hard"
+          ? workLeftBehindOf({ uncommittedChanges: observedUncommitted, unpushedCommits: observedUnpushed })
+          : undefined;
+      if (leftBehind) {
+        registry.publish(run.id, {
+          type: "run_note",
+          kind: "work_left_behind",
+          summary: oneLine(workLeftBehindSummary(leftBehind)),
+          at: clock(),
+        });
+        shell.setLabel(`${shell.label} · ${workLeftBehindLabel(leftBehind)}`);
+      }
+      // The accepted PrDescription is a fact of the run: publish it as a typed
+      // event BEFORE the finally below finish()es the stream, string fields
+      // redacted like every payload, so the run page's review panel renders
+      // the same object the GitHub body is rendered from.
+      if (prDescription) {
+        registry.publish(run.id, {
+          type: "pr_description",
+          description: redactPrDescription(prDescription),
+          at: clock(),
+        });
+      }
+      // Deterministic coding PR post-step (docs/reference/specs/pr-description.md item 5,
+      // agent-coding.md item 2, runCodingPrPostStep in codingPrPostStep.ts):
+      // a writable coding run that pushed a branch and submitted its typed
+      // PrDescription gets its PR opened — or edited, the open-or-edit
+      // idempotency lives in githubPulls — HERE, in the bot process, BEFORE
+      // the finally below finish()es the stream, so the outcome lands in the
+      // run record as a typed `pr_opened` event and not only in a console
+      // line. The base is `prTarget`'s (above): the PR's true base ref, else
+      // the coordinator tag's, else the thread's resident binding ref, else
+      // the dispatch's resolved ref — binding is only ever set on the resident
+      // path (factory.ts), so no resident check is needed. The note rides on
+      // the final reply below. A hard stop observed nothing above and posts
+      // nothing.
+      if (isCodingPrRun && run.control.requested !== "hard") {
+        prNote = await root.span("run.pr_post_step", () =>
+          runCodingPrPostStep({
+            observed: {
+              head: observedHead,
+              branch: observedBranch,
+              checkedOut: observedCheckedOut,
+              remoteHead: observedRemoteHead,
+              remoteRepo: observedRemoteRepo,
+            },
+            description: prDescription,
+            target: prTarget,
+            openPullRequest: deps.openPullRequest ?? openPullRequest,
+            findOpenPr: deps.findOpenPrByHead ?? findOpenPrByHead,
+            updatePullRequest: deps.updatePullRequest ?? updatePullRequest,
+            fetchRepoInfo: deps.fetchRepoShipInfo ?? fetchRepoShipInfo,
+            descriptionTurnRan,
+            publish: (e) => registry.publish(run.id, e),
+            logKey: msg.threadKey,
+          }),
+        );
+      }
     }
     // The run record is the source of truth and Slack/GitHub are projections
     // of it: publish the final answer into the stream FIRST (redacted like
@@ -1316,7 +1339,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // verdict a previous generation posted before the restart is the outcome
     // already (`postedBefore`): the record carries it, GitHub is not asked twice.
     if (postedBefore) reviewPost = postedBefore;
-    else if (agent.name === "review" && run.control.requested !== "hard")
+    else if (question === undefined && agent.name === "review" && run.control.requested !== "hard")
       reviewPost = await root.span("run.review_post_step", () =>
         runReviewPostStep({
           agent,
@@ -1403,7 +1426,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // The channel's receipt (id + terminal status, never the token): a
     // single-shot channel hands it to its caller — the Worker shim records a
     // scheduled firing's run from it.
-    io.runFinished?.({ id: run.id, status });
+    io.runFinished?.({
+      id: run.id,
+      status,
+      ...(question !== undefined && status === "completed" ? { awaitingInput: true as const } : {}),
+    });
     // The run finished: it is sealed by the next drain (after the reply), and
     // its record — everything captured now, assembled after the seal — is
     // written by that drain. The card's total stops at the finish stamp.
@@ -1424,6 +1451,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       diagnosis,
       root,
       ledgerRun,
+      ...(question !== undefined && status === "completed" ? { awaitingInput: true as const } : {}),
       ...(handoff !== undefined ? { handoff } : {}),
       ...(verdict !== undefined ? { verdict } : {}),
       ...(reviewHead !== undefined ? { reviewHead } : {}),
@@ -1459,6 +1487,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   }
   return {
     kind: "answered",
+    ...(question !== undefined && !run.control.requested ? { awaitingInput: true as const } : {}),
     answer,
     reviewHead,
     prNote,

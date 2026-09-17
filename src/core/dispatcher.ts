@@ -1273,7 +1273,16 @@ export async function dispatch(
       console.log(`[dispatch] ${msg.threadKey} run ${run.id} restarts from its request: ${ran.note}`);
       return ended;
     }
-    const { answer, prNote, toolCalls, runDiagnosis, checklistAsLeft, checklistCheckedOff, releaseWorkspace } = ran;
+    const {
+      answer,
+      awaitingInput,
+      prNote,
+      toolCalls,
+      runDiagnosis,
+      checklistAsLeft,
+      checklistCheckedOff,
+      releaseWorkspace,
+    } = ran;
 
     // The card's final icon tells the stop apart from a normal finish: ⏹ soft
     // (a summary was written), ⛔ hard (aborted, no summary).
@@ -1284,6 +1293,7 @@ export async function dispatch(
     // ledger, the card close, the reply, the seal — the workspace released
     // after. A fenced run is another generation's now: nothing more from here.
     const delivery = await deliverAnswer({
+      ...(awaitingInput ? { awaitingInput } : {}),
       msg,
       io,
       agent,
@@ -1303,7 +1313,7 @@ export async function dispatch(
       releaseWorkspace,
       root,
     });
-    if (delivery.kind === "fenced") return ended;
+    if (delivery.kind === "fenced" || awaitingInput) return ended;
 
     // After the reply (dispatch/reply.ts): the memory reflection pass. The
     // review post-step ran inside the run loop, before the stream finished.

@@ -534,6 +534,7 @@ function watched(io: ChannelIO, on: { started: (id: string) => void; replied: (t
   if (io.attachFile) out.attachFile = (file) => io.attachFile!(file);
   if (io.uploadTicket) out.uploadTicket = (file) => io.uploadTicket!(file);
   if (io.workItems) out.workItems = (actor) => io.workItems!(actor);
+  if (io.question) out.question = (text) => io.question!(text);
   if (io.checkAccess) out.checkAccess = (userId) => io.checkAccess!(userId);
   if (io.isolateFollowUps) out.isolateFollowUps = true;
   if (io.acknowledge) out.acknowledge = (text) => io.acknowledge!(text);

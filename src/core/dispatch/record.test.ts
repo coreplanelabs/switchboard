@@ -477,6 +477,13 @@ describe("assembleRunRecord — the handoff on the record", () => {
     };
     const reclaimed = reclaimedRunRecord({ row, events: [], status: "interrupted", finishedAt: 5_000 });
     expect(reclaimed).toMatchObject({ id: "run-child", seed: "parent" });
+    row.state.question = "Which repository?";
+    expect(reclaimedRunRecord({ row, events: [], status: "completed", finishedAt: 5_000 })).toMatchObject({
+      awaitingInput: true,
+    });
+    expect(reclaimedRunRecord({ row, events: [], status: "interrupted", finishedAt: 5_000 })).not.toHaveProperty(
+      "awaitingInput",
+    );
     expect(isRunRecord(reclaimed)).toBe(true);
   });
 

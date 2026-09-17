@@ -14,6 +14,7 @@
 // relayed.
 
 import { WORK_ITEM_READ_TOOLS, WORK_ITEM_WRITE_TOOLS } from "./workItems.js";
+import { requestInputTool } from "./question.js";
 import { attachFileTool } from "./attach.js";
 import { diffDigestTool } from "./diffDigest.js";
 import { GITHUB_ISSUE_WRITE_TOOLS, GITHUB_READ_TOOLS } from "./github.js";
@@ -51,6 +52,7 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
   full: [
     attachFileTool,
     updateStatusTool,
+    requestInputTool,
     submitPrDescriptionTool,
     submitHandoffTool,
     submitDispositionsTool,
@@ -66,6 +68,7 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
   ],
   readonly: [
     updateStatusTool,
+    requestInputTool,
     submitVerdictTool,
     webFetchTool,
     diffDigestTool,
@@ -75,13 +78,14 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
     ...GITHUB_READ_TOOLS,
     ...SESSION_TOOLS,
   ],
-  web: [webFetchTool, webSearchTool, updateStatusTool, ...WORK_ITEM_READ_TOOLS, ...GITHUB_READ_TOOLS],
+  web: [webFetchTool, webSearchTool, updateStatusTool, requestInputTool, ...WORK_ITEM_READ_TOOLS, ...GITHUB_READ_TOOLS],
   /** The general agent: no workspace, no shell — GitHub reads + issue writes
    *  and URL reading, so a plain mention can answer from the repos and act on
    *  issues without being re-sent to another agent. */
   assistant: [
     webFetchTool,
     updateStatusTool,
+    requestInputTool,
     ...WORK_ITEM_READ_TOOLS,
     ...GITHUB_READ_TOOLS,
     ...WORK_ITEM_WRITE_TOOLS,
@@ -94,6 +98,7 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
    *  and the wall is the read-scoped credential its machine holds. */
   explore: [
     updateStatusTool,
+    requestInputTool,
     webFetchTool,
     webSearchTool,
     listSkillsTool,
@@ -107,7 +112,14 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
    *  steer or await a run — beside the GitHub reads, URL reading and the status
    *  card. No shell, no files, no writes: a conductor coordinates and never
    *  does a child's job. */
-  conductor: [...RUN_TOOLS, webFetchTool, updateStatusTool, ...WORK_ITEM_READ_TOOLS, ...GITHUB_READ_TOOLS],
+  conductor: [
+    ...RUN_TOOLS,
+    webFetchTool,
+    updateStatusTool,
+    requestInputTool,
+    ...WORK_ITEM_READ_TOOLS,
+    ...GITHUB_READ_TOOLS,
+  ],
   none: [],
 };
 

@@ -335,6 +335,66 @@ function setup(
 }
 
 describe("runLoop — the model turn and everything that rides on it", () => {
+  it("keeps a typed question in the turn outcome, receipt and durable run record", async () => {
+    let turn = 0;
+    const provider: Provider = {
+      name: "fake",
+      complete: async () =>
+        ++turn === 1
+          ? {
+              content: [{ type: "tool_use", id: "q", name: "request_input", input: { question: "Which repository?" } }],
+              stopReason: "tool_use",
+            }
+          : { content: [{ type: "text", text: "Closing text" }], stopReason: "end_turn" },
+    };
+    const runFinished = vi.fn();
+    const h = setup("", { provider, io: { runFinished } });
+    const state = vi.fn();
+    const ledgerRun = new NullLedgerRun("run-l", h.store);
+    ledgerRun.setState = state;
+    const out = answered(await runLoop(h.deps, { ...h.ctx, ledgerRun }));
+    expect(out).toMatchObject({ answer: "Which repository?", awaitingInput: true });
+    expect(state).toHaveBeenCalledWith({ question: "Which repository?" });
+    expect(runFinished).toHaveBeenCalledWith({ id: "run-l", status: "completed", awaitingInput: true });
+    h.ending.drain(undefined);
+    await h.writer.settled();
+    expect(await h.store.get("run-l")).toMatchObject({ awaitingInput: true });
+  });
+
+  it("ends the model process when a question skips the publishing steps", async () => {
+    const fake = watched(piHarness);
+    const end = vi.fn(async () => {});
+    const open = fake.harness.open;
+    fake.harness.open = async (deps, run) => {
+      run.toolContext.onQuestion?.("Which repository?");
+      return { ...(await open(deps, run)), end };
+    };
+    const h = setup("");
+    h.deps.harness = { ...h.deps.harness!, harnesses: roster(fake.harness) };
+    const out = answered(await runLoop(h.deps, h.ctx));
+    expect(out.awaitingInput).toBe(true);
+    expect(end).toHaveBeenCalledExactlyOnceWith();
+    h.ending.drain(undefined);
+    await h.writer.settled();
+  });
+
+  it("clears a pending question when a follow-up arrives before the turn finishes", async () => {
+    const fake = watched(piHarness, { answer: "I used your answer." });
+    const open = fake.harness.open;
+    fake.harness.open = async (deps, run) => {
+      run.toolContext.onQuestion?.("Which repository?");
+      run.onEvent?.({ type: "input", messageId: "follow-up", text: "Use acme/api" });
+      return open(deps, run);
+    };
+    const h = setup("");
+    h.deps.harness = { ...h.deps.harness!, harnesses: roster(fake.harness) };
+    const out = answered(await runLoop(h.deps, h.ctx));
+    expect(out.answer).toBe("I used your answer.");
+    expect(out.awaitingInput).toBeUndefined();
+    h.ending.drain(undefined);
+    await h.writer.settled();
+  });
+
   it("binds work tracking to the resolved requester before a model can call an issue tool", async () => {
     const request = vi.fn(async () => ({ items: [] }));
     const workItems = vi.fn(() => ({ request }));
@@ -2226,6 +2286,7 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
     expect(tools).toEqual([
       "web_fetch",
       "update_status",
+      "request_input",
       "work_item_get",
       "work_items_delegated",
       "github_repos",
@@ -2415,6 +2476,7 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
       "web_fetch",
       "web_search",
       "update_status",
+      "request_input",
       "work_item_get",
       "work_items_delegated",
       ...GITHUB_READS,
@@ -2559,6 +2621,7 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
       "get_run_status",
       "web_fetch",
       "update_status",
+      "request_input",
       "work_item_get",
       "work_items_delegated",
       ...GITHUB_READS,
@@ -2728,6 +2791,42 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     ...(mode ? { mode } : {}),
     at: seq,
     seq,
+  });
+
+  it("an operator stop takes precedence over a restored question", async () => {
+    const s = setup("must not run");
+    const resume = finishing("Stopped summary", {
+      state: { question: "Which repository?" },
+      events: [
+        { type: "run_note", kind: "stop_requested", mode: "soft", summary: "stop", at: 1, seq: 1 },
+        { type: "run_note", kind: "stopped", mode: "soft", summary: "stopped", at: 2, seq: 2 },
+      ],
+    });
+    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    expect(out.awaitingInput).toBeUndefined();
+    expect(out.answer).not.toContain("Which repository?");
+    s.ending.drain(undefined);
+    await s.writer.settled();
+  });
+
+  it("restores a pending question without more model calls or automatic PR or review publication", async () => {
+    for (const agent of ["coding", "review"]) {
+      const post = vi.fn(async () => {});
+      const s = setup("must not run", {
+        agent,
+        ...(agent === "coding" ? { coding: true } : { review: { head: "abc", post } }),
+        repoCtx: { repo: "acme/api", pr: 1 },
+      });
+      const openPullRequest = vi.fn();
+      s.deps.openPullRequest = openPullRequest;
+      const resume = finishing("Closing text", { agent, state: { question: "Which repository?" } });
+      const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+      expect(out).toMatchObject({ answer: "Which repository?", awaitingInput: true });
+      expect(post).not.toHaveBeenCalled();
+      expect(openPullRequest).not.toHaveBeenCalled();
+      s.ending.drain(undefined);
+      await s.writer.settled();
+    }
   });
 
   it("the model is never called: the transcript's final turn is the answer, published and finished `completed`, and a `resumed` note on the stream says the loop had ended before the restart", async () => {

@@ -411,6 +411,7 @@ export type Delivery = { kind: "delivered" } | { kind: "fenced" };
 
 /** What `deliverAnswer` reads off the dispatch. */
 export interface DeliveryContext {
+  awaitingInput?: true;
   msg: IncomingMessage;
   io: ChannelIO;
   agent: AgentDef;
@@ -445,6 +446,7 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
     agent,
     run,
     answer,
+    awaitingInput,
     liveUrl,
     prNote,
     stopped,
@@ -509,13 +511,18 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
           card.done(
             shell.close({
               kind: "done",
-              icon: stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : "✅",
-              detail: stopped ? checklistAsLeft() : checklistCheckedOff(),
+              icon: stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : awaitingInput ? "❓" : "✅",
+              detail: stopped || awaitingInput ? checklistAsLeft() : checklistCheckedOff(),
               ...doneLines(runDiagnosis),
             }),
           ),
         ),
-      () => root.span("post.reply", () => io.reply(prNote ? `${channelAnswer}\n\n${prNote}` : channelAnswer)),
+      () =>
+        root.span("post.reply", () =>
+          awaitingInput && !stopped && io.question
+            ? io.question(channelAnswer)
+            : io.reply(prNote ? `${channelAnswer}\n\n${prNote}` : channelAnswer),
+        ),
       // A null channel's reply resolves but reaches nobody: the seal says
       // `replyOk: false` with the reason (run-history.md item 38).
       io.undeliverable !== undefined ? { undelivered: io.undeliverable } : undefined,

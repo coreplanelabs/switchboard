@@ -59,6 +59,8 @@ export interface RunReference {
 }
 
 export interface RunRecord {
+  /** This completed turn asked a question; the task still needs user input. */
+  awaitingInput?: true;
   /** The run registry id (unguessable; safe to print — it is not the view token). */
   id: string;
   /** The human run label from the runs index. */

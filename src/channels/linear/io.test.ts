@@ -8,7 +8,7 @@ function fixture() {
     workItems: vi.fn(),
     canRead: vi.fn(async () => true),
     upload: vi.fn(),
-    session: vi.fn(),
+    session: vi.fn(async () => ({ id: "s", appUserId: "bot" })),
     activities: vi.fn(async () => []),
     activity: vi.fn(async () => {}),
     link: vi.fn(async () => {}),
@@ -24,6 +24,30 @@ function fixture() {
 }
 
 describe("Linear channel output", () => {
+  it("preserves an opening question when delegation created no initial user activity", async () => {
+    const { api, io } = fixture();
+    vi.mocked(api.session).mockResolvedValue({
+      id: "s",
+      appUserId: "bot",
+      issue: { id: "issue", identifier: "EX-1", title: "Fix the build", teamId: "team" },
+    });
+    vi.mocked(api.activities).mockResolvedValue([
+      { id: "q", at: 1, userId: "bot", type: "elicitation", body: "Which repository?" },
+    ]);
+    expect(await io.history()).toEqual([
+      { role: "user", text: "Linear issue EX-1: Fix the build\n\n" },
+      { role: "assistant", text: "Which repository?", at: 1 },
+    ]);
+  });
+  it("asks for clarification as elicitation without a completion response", async () => {
+    const { api, io } = fixture();
+    await io.question("Which repository?");
+    expect(api.activity).toHaveBeenCalledExactlyOnceWith(
+      "s",
+      { type: "elicitation", body: "Which repository?" },
+      undefined,
+    );
+  });
   it("checks access for the transport requester on the bound session", async () => {
     const { api, io } = fixture();
     vi.mocked(api.canRead).mockResolvedValueOnce(false);

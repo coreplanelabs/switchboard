@@ -85,6 +85,12 @@ that person’s grants after the active run finishes. Stop bypasses waiting prom
 If a run fails with an unread follow-up and its next turn cannot check access,
 Switchboard reports that the follow-up has not started and asks you to resend it.
 
+An agent that needs missing information can call `request_input`. Switchboard
+posts the question as a native elicitation, leaving the Linear session waiting
+for input. Reply in that session to continue. The completed turn records that
+it is awaiting input and preserves unfinished checklist items; it does not
+publish an automatic PR or review verdict. Questions survive a bot restart.
+
 Native Stop lets a person cancel their own active work through the shared
 `runs:stop` policy. Stopping another person's work requires `runs:write` and
 visibility of that run. A Linear session does not establish team-wide membership;

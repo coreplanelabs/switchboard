@@ -15656,3 +15656,66 @@ describe("current channel access before dispatch", () => {
     expect(replies).toEqual(["allowed"]);
   });
 });
+
+describe("clarification through dispatch", () => {
+  it("reports a model failure instead of sending a pending question", async () => {
+    let calls = 0;
+    const provider: Provider = {
+      name: "fake",
+      complete: async () => {
+        if (++calls === 1)
+          return {
+            content: [{ type: "tool_use", id: "q1", name: "request_input", input: { question: "Which repository?" } }],
+            stopReason: "tool_use",
+          };
+        throw new Error("model unavailable");
+      },
+    };
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const { io, replies } = fakeIO();
+    io.question = vi.fn();
+    io.runFinished = vi.fn();
+    expect(await dispatch(deps, msg("look into the issue"), io)).toMatchObject({ status: "failed" });
+    expect(io.question).not.toHaveBeenCalled();
+    expect(io.runFinished).toHaveBeenCalledWith(expect.objectContaining({ status: "failed" }));
+    expect(replies.join("\n")).toContain("model unavailable");
+  });
+  it("asks the recorded question and continues from the next reply without announcing completion", async () => {
+    let calls = 0;
+    const requests: CompletionRequest[] = [];
+    const provider: Provider = {
+      name: "fake",
+      complete: async (request) => {
+        requests.push(structuredClone(request));
+        if (++calls === 1)
+          return {
+            content: [{ type: "tool_use", id: "q1", name: "request_input", input: { question: "Which repository?" } }],
+            stopReason: "tool_use",
+          };
+        return {
+          content: [{ type: "text", text: calls === 2 ? "The model's closing text" : "Using that repository." }],
+          stopReason: "end_turn",
+        };
+      },
+    };
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const first = fakeIO();
+    const questions: string[] = [];
+    first.io.question = async (text) => {
+      questions.push(text);
+    };
+    first.io.runFinished = vi.fn();
+    await dispatch(deps, msg("look into the issue"), first.io);
+    expect(questions).toEqual(["Which repository?"]);
+    expect(first.replies).toEqual([]);
+    expect(first.io.runFinished).toHaveBeenCalledWith(expect.objectContaining({ awaitingInput: true }));
+    const second = fakeIO([
+      { role: "user", text: "look into the issue" },
+      { role: "assistant", text: questions[0]! },
+    ]);
+    await dispatch(deps, msg("Use acme/api"), second.io);
+    expect(second.replies).toEqual(["Using that repository."]);
+    expect(JSON.stringify(requests.at(-1)?.messages)).toContain("Which repository?");
+    expect(JSON.stringify(requests.at(-1)?.messages)).toContain("Use acme/api");
+  });
+});

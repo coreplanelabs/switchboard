@@ -200,6 +200,8 @@ export type RunFinalStatus = "completed" | "failed" | "stopped_soft" | "stopped_
  *  run id (the `/runs/:id` record) and its terminal status. Never the view
  *  token — a receipt names the run, it does not grant access to it. */
 export interface RunReceipt {
+  /** The turn finished by asking for input; its task is still waiting. */
+  awaitingInput?: true;
   id: string;
   status: RunFinalStatus;
 }
@@ -245,6 +247,8 @@ export interface ConfirmationOffer {
 }
 
 export interface ChannelIO {
+  /** Ask for input without marking the channel’s session complete. */
+  question?(text: string): Promise<void>;
   /** Refresh platform access before reading context or running a command.
    * False refuses the request; a failed lookup defers it for durable retry. */
   checkAccess?(userId: string): Promise<boolean>;
