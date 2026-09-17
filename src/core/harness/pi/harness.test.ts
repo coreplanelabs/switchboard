@@ -43,8 +43,9 @@ import {
   type HarnessContainer,
 } from "../container.js";
 import {
-  controlResetResumedNote,
+  CONTROL_RESET_RESUMED_NOTE,
   MAX_INPLACE_REATTACHES,
+  PROMPT_ECHO_WAIT_TICKS,
   resolveControlResetWrite,
   WORD_ALIVE_REATTACH_NOTE,
 } from "../reattach.js";
@@ -929,6 +930,10 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     const prompts = w.container.commands().filter((c) => c.type === "prompt");
     expect(prompts).toHaveLength(2);
     expect(prompts[1]).toMatchObject({ message: expect.stringContaining("failed mid-stream") });
+    // The retry prompt carries its own id, so a reset that races its send is
+    // resolved by its echo like the seed's (finding 6) — never an id-less write.
+    expect(typeof prompts[1].id).toBe("string");
+    expect(prompts[1].id).not.toBe(prompts[0].id);
   });
 
   it("a retry that also fails ends the run saying it is retryable in plain words; a non-transient error is never retried", async () => {
@@ -2469,7 +2474,7 @@ describe("runPiHarness — the resident's control plane reset under a live pi", 
     w.container.failSendType = { type: "prompt", error: controlReset() };
     const answer = await w.start();
     expect(answer).toBe("ok");
-    expect(resumedSummaries(w)).toEqual([controlResetResumedNote()]);
+    expect(resumedSummaries(w)).toEqual([CONTROL_RESET_RESUMED_NOTE]);
     expect(noteKinds(w)).not.toContain("sandbox_restarted"); // never the replaced verdict
     expect(w.facts.every((f) => f.relaunches === 0)).toBe(true); // a re-attach is not a relaunch
     // The prompt landed exactly once on the re-attach, steer-delivered (pi takes
@@ -2516,12 +2521,121 @@ describe("runPiHarness — the resident's control plane reset under a live pi", 
     };
     const answer = await w.start();
     expect(answer).toBe("ok");
-    expect(resumedSummaries(w)).toEqual([controlResetResumedNote()]);
+    expect(resumedSummaries(w)).toEqual([CONTROL_RESET_RESUMED_NOTE]);
     expect(noteKinds(w)).not.toContain("sandbox_restarted");
     // The original prompt only — never a second, steer-delivered re-send.
     const prompts = w.container.commands().filter((c) => c.type === "prompt");
     expect(prompts).toHaveLength(1);
     expect(prompts[0].streamingBehavior).toBeUndefined();
+  });
+
+  it("a control reset whose echo sits in the chunk the loop reads BEFORE it observes the send failure: the echoed id is remembered at the consume, so the re-attach resolves the prompt as landed and never re-sends it (finding 1)", async () => {
+    const w = world();
+    scriptedPi(w.container, () => {}); // pi echoes the prompt and starts, but does not answer yet
+    const realWrite = w.container.writeLine.bind(w.container);
+    let landed = false;
+    // The prompt's bytes reach pi and pi echoes its id AT ONCE — the echo is in
+    // the log before the harness's next read — and only then does the write
+    // reject with the reset. The transport throws its sendError at the top of
+    // its NEXT read iteration, so the chunk holding the echo is consumed first.
+    w.container.writeLine = async (p, line) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "prompt" && !landed) {
+        landed = true;
+        await realWrite(p, line);
+        await new Promise((r) => setImmediate(r));
+        await new Promise((r) => setImmediate(r));
+        throw controlReset();
+      }
+      return realWrite(p, line);
+    };
+    const realRead = w.container.readLog.bind(w.container);
+    let answered = false;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      // pi answers once the loop has re-attached past the echo it already read.
+      if (chunk.length === 0 && resumedSummaries(w).length > 0 && !answered) {
+        answered = true;
+        finalTurn(w.container, "ok");
+        return realRead(path, offset, max);
+      }
+      return chunk;
+    };
+    const answer = await w.start();
+    expect(answer).toBe("ok");
+    expect(resumedSummaries(w)).toEqual([CONTROL_RESET_RESUMED_NOTE]);
+    // The echo was read before the failure was seen: the prompt landed, so it is never re-sent.
+    expect(w.container.commands().filter((c) => c.type === "prompt")).toHaveLength(1);
+  });
+
+  it("the echo wait counts the loop's ticks, never its events: a catch-up burst of records after the re-attach does not re-send the prompt, and the echo one poll later cancels the re-send (finding 7)", async () => {
+    const w = world();
+    scriptedPi(w.container, () => {});
+    const scripted = w.container.onStdin!;
+    let promptId: string | undefined;
+    // The prompt lands (its line is pushed) but the write rejects with the
+    // reset before pi's echo is written: the echo comes later, after a burst.
+    w.container.onStdin = (line, c) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "prompt" && promptId === undefined) {
+        promptId = String(cmd.id);
+        throw controlReset();
+      }
+      scripted(line, c);
+    };
+    const realRead = w.container.readLog.bind(w.container);
+    let phase = 0;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length > 0 || resumedSummaries(w).length === 0) return chunk;
+      if (phase === 0) {
+        // After the re-attach: more records than the tick bound, none the echo.
+        phase = 1;
+        w.container.emit(...Array.from({ length: PROMPT_ECHO_WAIT_TICKS + 2 }, () => ({ type: "agent_start" })));
+        return realRead(path, offset, max);
+      }
+      if (phase === 1) {
+        // One poll later: pi's echo of the prompt that landed, then its answer.
+        phase = 2;
+        w.container.emit({ id: promptId, type: "response", command: "prompt", success: true });
+        finalTurn(w.container, "ok");
+        return realRead(path, offset, max);
+      }
+      return chunk;
+    };
+    const answer = await w.start();
+    expect(answer).toBe("ok");
+    // The burst did not count as ticks, so the echo arrived first: one prompt, never a steer-delivered second.
+    expect(w.container.commands().filter((c) => c.type === "prompt")).toHaveLength(1);
+  });
+
+  it("the replaced word repeating with no progress while the row's pid answers alive fails the run by name at the bound — never the replaced verdict, so never a second pi beside the live one (finding 3)", async () => {
+    const w = world();
+    scriptedPi(w.container, () => {}); // pi starts its turn and never settles
+    const realRead = w.container.readLog.bind(w.container);
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length > 0) return chunk;
+      // Every drained read meets the executor's word while pi stays alive: a
+      // flapping resident, or a stranger's pid answering alive (the pid-reuse gap).
+      throw new HarnessContainerRuntimeReplacedError(
+        "read",
+        "runtime-replaced: the sandbox was replaced under the run",
+      );
+    };
+    const err = await w.start().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(PiContainerReplacedError);
+    expect((err as Error).message).toMatch(
+      /the executor said replaced \d+ times with no progress while the row's pi answered alive/,
+    );
+    expect(noteKinds(w)).toContain("harness_error");
+    expect(noteKinds(w)).not.toContain("sandbox_restarted"); // never the verdict, so nothing relaunches beside a live pi
+    // The bound's worth of re-attaches with no record between them (a re-attach
+    // before the first records was progress, and does not count against it).
+    expect(resumedSummaries(w).length).toBeGreaterThanOrEqual(MAX_INPLACE_REATTACHES);
+    expect(resumedSummaries(w).every((s) => s === WORD_ALIVE_REATTACH_NOTE)).toBe(true);
+    expect(w.container.starts).toHaveLength(1);
   });
 
   it("a control reset on a control command (get_state) re-attaches and re-sends it as it was — the run answers, one resumed note, never the verdict", async () => {
@@ -2530,7 +2644,7 @@ describe("runPiHarness — the resident's control plane reset under a live pi", 
     w.container.failSendType = { type: "get_state", error: controlReset() };
     const answer = await w.start();
     expect(answer).toBe("done");
-    expect(resumedSummaries(w)).toEqual([controlResetResumedNote()]);
+    expect(resumedSummaries(w)).toEqual([CONTROL_RESET_RESUMED_NOTE]);
     expect(noteKinds(w)).not.toContain("sandbox_restarted");
   });
 
@@ -2612,6 +2726,16 @@ describe("the control-reset write-resolution rules (harness-pi item 16)", () => 
       command: { id: "d1", type: "extension_ui_response", response: {} },
     });
     expect(resolveControlResetWrite({ type: "abort" })).toEqual({ kind: "resend", command: { type: "abort" } });
+    // A prompt with no id has no echo to key on, so it cannot be awaited: fail by name (finding 6).
+    expect(resolveControlResetWrite({ type: "prompt", message: "go" }).kind).toBe("fail");
+    // A command whose id pi already echoed landed: nothing to re-send (finding 1).
+    const echoed = (id: string) => id === "p";
+    expect(resolveControlResetWrite({ id: "p", type: "prompt", message: "go" }, echoed)).toEqual({ kind: "none" });
+    expect(resolveControlResetWrite({ id: "q", type: "prompt", message: "go" }, echoed)).toEqual({
+      kind: "await-echo",
+      command: { id: "q", type: "prompt", message: "go" },
+    });
+    expect(resolveControlResetWrite({ id: "p", type: "get_state" }, echoed)).toEqual({ kind: "none" });
     // An unknown write has no echo to resolve its outcome by, so the run cannot continue.
     const franchise = resolveControlResetWrite({ type: "franchise" });
     expect(franchise.kind).toBe("fail");
@@ -2625,7 +2749,135 @@ describe("the control-reset write-resolution rules (harness-pi item 16)", () => 
     expect(WORD_ALIVE_REATTACH_NOTE).toBe(
       "the executor said replaced; the row's pi answers alive in this container; re-attached",
     );
-    expect(controlResetResumedNote()).toMatch(/^the resident's control plane reset under the run/);
+    expect(CONTROL_RESET_RESUMED_NOTE).toMatch(/^the resident's control plane reset under the run/);
+  });
+});
+
+// Feature: docs/reference/specs/harness-pi.md item 16 — a follow-up turn meets
+// the control plane's reset and the refuted replaced word as the loop does
+// (finding 2): the turn re-attaches in place on the same pi instead of taking
+// the replaced verdict (a relaunch beside a live pi, the orphan) or failing on
+// the reset's send error (and killing a healthy pi at end()).
+describe("runPiHarnessOpen — a follow-up turn meets the control plane's reset and the refuted word as the loop does", () => {
+  const controlReset = () =>
+    new HarnessContainerControlResetError(
+      "send",
+      "control-reset: the resident's Durable Object was reset (a deploy); the container and its processes are as they were; the command's outcome is unknown",
+    );
+  const noteKinds = (w: ReturnType<typeof world>) =>
+    w.events.filter((e) => e.type === "run_note").map((e) => (e as { kind: string }).kind);
+  const resumedSummaries = (w: ReturnType<typeof world>) =>
+    w.events
+      .filter((e) => e.type === "run_note" && (e as { kind: string }).kind === "resumed")
+      .map((e) => (e as { summary: string }).summary);
+  const turn = { text: "one more", maxTurns: 3, maxMinutes: 5, toolContext: { executor } };
+
+  it("the executor says replaced on a turn's read while the row's pi answers alive: the turn re-attaches in place and answers on the same pi — one resumed note in the exact wording, no sandbox_restarted, one process, nothing killed before end() (case A)", async () => {
+    const w = world();
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0) finalTurn(c, "loop done"); // the turn's prompt: pi starts and answers only after the word
+    });
+    const session = await w.open();
+    expect(session.answer).toBe("loop done");
+    const realRead = w.container.readLog.bind(w.container);
+    let phase = 0;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length > 0) return chunk;
+      if (phase === 0) {
+        phase = 1; // the word once, pi alive throughout
+        throw new HarnessContainerRuntimeReplacedError(
+          "read",
+          "runtime-replaced: the sandbox was replaced under the run",
+        );
+      }
+      if (phase === 1) {
+        phase = 2;
+        finalTurn(w.container, "turn done");
+        return realRead(path, offset, max);
+      }
+      return chunk;
+    };
+    const answer = await session.followUp(turn);
+    expect(answer).toBe("turn done");
+    expect(resumedSummaries(w)).toEqual([WORD_ALIVE_REATTACH_NOTE]);
+    expect(noteKinds(w)).not.toContain("sandbox_restarted");
+    expect(w.container.starts).toHaveLength(1);
+    expect(w.container.killed).toEqual([]);
+    await session.end();
+    expect(w.container.killed).toHaveLength(1);
+  });
+
+  it("a control reset on the follow-up turn's prompt send re-attaches in place and, its echo never coming, re-sends the prompt steer-delivered once: the turn answers, one resumed note, pi neither killed nor relaunched (case B)", async () => {
+    const w = world();
+    scriptedPi(w.container, (n, c) => finalTurn(c, n === 0 ? "loop done" : "turn done"));
+    const session = await w.open();
+    expect(session.answer).toBe("loop done");
+    // The turn's prompt meets the reset before its bytes reach pi.
+    w.container.failSendType = { type: "prompt", error: controlReset() };
+    const answer = await session.followUp(turn);
+    expect(answer).toBe("turn done");
+    expect(resumedSummaries(w)).toEqual([CONTROL_RESET_RESUMED_NOTE]);
+    expect(noteKinds(w)).not.toContain("sandbox_restarted");
+    const prompts = w.container.commands().filter((c) => c.type === "prompt");
+    expect(prompts).toHaveLength(2); // the loop's, then the turn's — re-sent exactly once
+    expect(prompts[1]).toMatchObject({ message: "one more", streamingBehavior: "steer" });
+    expect(w.container.starts).toHaveLength(1);
+    expect(w.container.killed).toEqual([]);
+    await session.end();
+  });
+
+  it("a control reset that raced the provider-retry prompt after it landed: pi's echo carries the retry prompt's own id, which cancels the deferred re-send — the retry runs once, never twice (finding 6)", async () => {
+    const w = world();
+    const streamError = {
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [],
+        stopReason: "error",
+        errorMessage: "Anthropic stream ended before message_stop",
+      },
+    };
+    let retryId: string | undefined;
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0) c.emit(streamError, { type: "agent_settled" });
+    });
+    const scripted = w.container.onStdin!;
+    // The retry prompt lands (its line is pushed) but the write rejects before
+    // pi's echo is written; pi echoes it — with the retry's own id — later.
+    w.container.onStdin = (line, c) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "prompt" && String(cmd.message).includes("failed mid-stream") && retryId === undefined) {
+        retryId = String(cmd.id);
+        throw controlReset();
+      }
+      scripted(line, c);
+    };
+    const realRead = w.container.readLog.bind(w.container);
+    let drainedAfterReattach = 0;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length > 0 || retryId === undefined || resumedSummaries(w).length === 0) return chunk;
+      drainedAfterReattach++;
+      if (drainedAfterReattach === 1) {
+        // The echo, under the retry's own id: it landed, so the re-send must be cancelled…
+        w.container.emit({ id: retryId, type: "response", command: "prompt", success: true }, { type: "agent_start" });
+        return realRead(path, offset, max);
+      }
+      if (drainedAfterReattach === 2 * PROMPT_ECHO_WAIT_TICKS + 2) {
+        // …and pi answers only well past the tick bound, so a re-send keyed on
+        // the wrong id would have gone out by now.
+        finalTurn(w.container, "recovered");
+        return realRead(path, offset, max);
+      }
+      return chunk;
+    };
+    const answer = await w.start();
+    expect(answer).toBe("recovered");
+    const prompts = w.container.commands().filter((c) => c.type === "prompt");
+    expect(prompts).toHaveLength(2); // the seed's, the retry's — the retry never doubled
+    expect(typeof retryId).toBe("string");
+    expect(retryId).not.toBe("undefined");
   });
 });
 

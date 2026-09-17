@@ -63,7 +63,6 @@ import {
   isControlReset,
   replacedBecause,
   replacedVerdict,
-  saysContainerReplaced,
   saysTransportLost,
   type HarnessContainer,
   type ProbeWait,
@@ -71,13 +70,14 @@ import {
 } from "../container.js";
 import {
   classifyLoopFailure,
-  controlResetBoundMessage,
-  controlResetResumedNote,
+  CONTROL_RESET_RESUMED_NOTE,
   MAX_INPLACE_REATTACHES,
   PROMPT_ECHO_WAIT_TICKS,
+  reattachBoundMessage,
   reattachTransport,
   resolveControlResetWrite,
   WORD_ALIVE_REATTACH_NOTE,
+  type ReattachOutcome,
 } from "../reattach.js";
 import { PiMirror, piSessionFile, type LedgerTail } from "./mirror.js";
 import {
@@ -1066,14 +1066,6 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         note("wrap_up", wrapUpNote(minutesLeft));
         transport!.send({ type: "steer", message: wrapUpInstruction(minutesLeft) });
       }
-      // A prompt a reset left in doubt: pi echoes its id when it landed (the
-      // response, below), so a silence past the bound is a prompt that did not
-      // land — re-send it steer-delivered once, never before, so a prompt that
-      // did land is not delivered twice.
-      if (pendingPromptEcho !== undefined && pendingPromptEcho.ticks++ >= PROMPT_ECHO_WAIT_TICKS) {
-        transport!.send({ ...pendingPromptEcho.command, streamingBehavior: "steer" });
-        pendingPromptEcho = undefined;
-      }
       drainFollowUps();
     };
 
@@ -1084,18 +1076,22 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
      *  word the row's pid refuted (ask 2): a fresh transport from the
      *  last record boundary, so the same session continues where it left off
      *  with the row's `relaunches` untouched (no relaunch, no verdict). */
-    const reattachInPlace = (): void => {
-      // The old transport is closed so none of its queued writes land after the
-      // re-attach; the fresh one reads on from the last record boundary.
-      transport = reattachTransport(transport!, {
+    const reattachInPlace = (): Record<string, unknown>[] => {
+      // The old transport is abandoned: the writes whose turn never came on it
+      // are handed back for the fresh one to send, in order, behind the write
+      // the failure left unknown; the fresh one reads on from the last record
+      // boundary.
+      const fresh = reattachTransport(transport!, {
         container,
         paths: paths!,
         pid: pid!,
         pollMs: deps.pollMs ?? 750,
         sleep: deps.sleep,
       });
+      transport = fresh.transport;
       iterator = transport.lines[Symbol.asyncIterator]();
       pending = undefined;
+      return fresh.unsent;
     };
     /** A runaway guard on in-place re-attaches with no record read between them:
      *  a control reset or a refuted word converges in one — the next read
@@ -1105,7 +1101,75 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     /** A `prompt` a reset left in doubt after a re-attach: re-sent only if pi
      *  does not echo its id within `PROMPT_ECHO_WAIT_TICKS`, so a reset that
      *  raced the send's finish never delivers the request twice (item 16). */
-    let pendingPromptEcho: { command: Record<string, unknown>; ticks: number } | undefined;
+    let pendingPromptEcho:
+      { command: Record<string, unknown>; ticks: number; then: Record<string, unknown>[] } | undefined;
+    /** Every response id pi has echoed on this session: the fact a re-attach
+     *  resolves a write by (item 16). Recorded at the consume, so an echo that
+     *  sat in the very chunk read before the transport surfaced its send error
+     *  still counts — the transport throws that error only at the top of its
+     *  next read iteration, after the chunk's every line was handed out. */
+    const echoedIds = new Set<string>();
+    const noteEcho = (response: unknown): void => {
+      const id = (response as { id?: unknown }).id;
+      if (typeof id !== "string") return;
+      echoedIds.add(id);
+      // The prompt a reset left in doubt was echoed under its own id — it
+      // landed, so the deferred re-send is cancelled (never a second delivery)
+      // and the writes held behind it go out now, in their order.
+      if (pendingPromptEcho?.command.id !== id) return;
+      const { then } = pendingPromptEcho;
+      pendingPromptEcho = undefined;
+      for (const command of then) transport!.send(command);
+    };
+    /** One of the loop's ticks — never one of its events, a catch-up burst of
+     *  records being no time at all — for the prompt a reset left in doubt: pi
+     *  echoes its id when it landed (`noteEcho`), so a silence past the bound
+     *  is a prompt that did not land — re-sent steer-delivered once, never
+     *  before, so a prompt that did land is not delivered twice. */
+    const promptEchoTick = (): void => {
+      if (pendingPromptEcho === undefined || pendingPromptEcho.ticks++ < PROMPT_ECHO_WAIT_TICKS) return;
+      const { command, then } = pendingPromptEcho;
+      pendingPromptEcho = undefined;
+      transport!.send({ ...command, streamingBehavior: "steer" });
+      for (const held of then) transport!.send(held); // the writes held behind the prompt, in their order
+    };
+    /** The loop's and every follow-up turn's one answer to a read that failed
+     *  under them (item 16). A control reset (the container unchanged) or the
+     *  executor's replaced word the row's pid still refutes (ask 2) re-attaches
+     *  in place on this same pi and resolves the write the failure left unknown
+     *  by pi's echo — one rule for both (`classifyLoopFailure`,
+     *  `resolveControlResetWrite`). Past the bound with no record read between
+     *  the re-attaches the run fails by name, whichever word it met: a stuck
+     *  control plane, or a word nothing refuted by a record — never turned into
+     *  the verdict, which would relaunch a second pi beside the live one. The
+     *  word the pid cannot refute, and every other failure, is the caller's. */
+    const recoverInPlace = async (err: unknown): Promise<ReattachOutcome> => {
+      const outcome = await classifyLoopFailure(err, { container, pid });
+      if (outcome.kind !== "control-reset" && outcome.kind !== "word-alive") return outcome;
+      if (reattaches >= MAX_INPLACE_REATTACHES) {
+        const msg = reattachBoundMessage(outcome.kind, reattaches);
+        note("harness_error", msg);
+        throw new Error(msg, { cause: err });
+      }
+      const res = resolveControlResetWrite(transport!.pendingSend, (id) => echoedIds.has(id));
+      if (res.kind === "fail") {
+        note("harness_error", res.message);
+        throw new Error(res.message, { cause: err });
+      }
+      reattaches++;
+      note("resumed", outcome.kind === "word-alive" ? WORD_ALIVE_REATTACH_NOTE : CONTROL_RESET_RESUMED_NOTE);
+      const unsent = reattachInPlace();
+      // The write, resolved on the fresh transport: an idempotent one re-sent
+      // as it was, a prompt deferred to its id's echo, a steer left to the
+      // inbox, one already echoed left landed — never a blind re-send. The
+      // writes whose turn never came on the old transport follow it, in their
+      // order — behind the prompt's echo or re-send when one is awaited, so pi
+      // sees the order the loop sent.
+      if (res.kind === "resend") transport!.send(res.command);
+      if (res.kind === "await-echo") pendingPromptEcho = { command: res.command, ticks: 0, then: unsent };
+      else for (const command of unsent) transport!.send(command);
+      return outcome;
+    };
     let providerError: string | undefined;
     /** The failed call was refused under the provider's usage policy: the failure by name (item 6). */
     let providerRefusal = false;
@@ -1154,31 +1218,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         // A control reset (the container unchanged) or the executor's replaced
         // word the row's pid still refutes (ask 2): both re-attach in place and
         // resolve the write the reset left unknown by pi's echo — one rule for
-        // both (`classifyLoopFailure`, `resolveControlResetWrite`). The word the
-        // process cannot refute is the verdict; a control reset the bound cannot
-        // ride to progress fails the run by name.
-        const outcome = await classifyLoopFailure(err, { container, pid, reattaches });
-        if (outcome.kind === "control-reset" || outcome.kind === "word-alive") {
-          if (outcome.kind === "control-reset" && reattaches >= MAX_INPLACE_REATTACHES) {
-            const msg = controlResetBoundMessage(reattaches);
-            note("harness_error", msg);
-            throw new Error(msg, { cause: err });
-          }
-          const res = resolveControlResetWrite(transport!.pendingSend);
-          if (res.kind === "fail") {
-            note("harness_error", res.message);
-            throw new Error(res.message, { cause: err });
-          }
-          reattaches++;
-          note("resumed", outcome.kind === "word-alive" ? WORD_ALIVE_REATTACH_NOTE : controlResetResumedNote());
-          reattachInPlace();
-          // The write, resolved on the fresh transport: an idempotent one
-          // re-sent as it was, a prompt deferred to its id's echo, a steer left
-          // to the inbox — never a blind re-send that could double.
-          if (res.kind === "resend") transport.send(res.command);
-          else if (res.kind === "await-echo") pendingPromptEcho = { command: res.command, ticks: 0 };
-          continue;
-        }
+        // both, shared with every follow-up turn (`recoverInPlace`). The word
+        // the process cannot refute is the verdict; past the bound the run
+        // fails by name, whichever word it met.
+        const outcome = await recoverInPlace(err);
+        if (outcome.kind === "control-reset" || outcome.kind === "word-alive") continue;
         if (outcome.kind === "word-gone") {
           containerSaid = outcome.said;
           break;
@@ -1194,6 +1238,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         throw err;
       }
       if (next === "tick") {
+        promptEchoTick();
         check();
         if (hardStopped) break;
         continue;
@@ -1219,6 +1264,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       }
       if (obs.response) {
         const r = obs.response;
+        noteEcho(r);
         if (
           r.id === ids.state &&
           r.success === true &&
@@ -1232,9 +1278,6 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           save();
         }
         if (r.id === ids.prompt) {
-          // The prompt a reset left in doubt was echoed — it landed, so the
-          // deferred re-send is cancelled (never a second delivery).
-          pendingPromptEcho = undefined;
           catchingUp = false;
           if (r.success === false) throw new PromptRefused(String(r.error ?? "no reason"));
           // pi echoes the prompt as the first user message of the turn that
@@ -1304,11 +1347,12 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       if (obs.settled && !catchingUp) {
         if (retriedProviderError !== undefined && providerError === undefined && !retryPromptSent && !hardStopped) {
           // pi settled on the failed call: back off, then re-drive it. The
-          // retry's prompt id is fresh, so nothing mistakes its response for
-          // the seed's.
+          // retry's prompt carries its own id, so nothing mistakes its response
+          // for the seed's — and a reset that races its send is resolved by
+          // that id's echo like the seed's (item 16), never an id-less write.
           retryPromptSent = true;
           await deps.sleep(PROVIDER_RETRY_BACKOFF_MS);
-          transport.send({ type: "prompt", message: PROVIDER_RETRY_PROMPT });
+          transport.send({ id: `${ids.prompt}:retry`, type: "prompt", message: PROVIDER_RETRY_PROMPT });
           check();
           if (hardStopped) break;
           continue;
@@ -1422,8 +1466,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     // The loop is over: its `run.agent` ends here, as the native loop's does,
     // before any follow-up turn — each of those opens a `run.agent` of its own.
     agentSpan?.end(hardStopped ? "error" : "ok");
-    // What a follow-up turn drives: the transport and the root the loop settled on.
-    const rpc = transport;
+    // What a follow-up turn drives: the root the loop settled on, and the live
+    // transport — `transport` itself, never a copy, so a turn that re-attaches
+    // in place (`recoverInPlace`) goes on writing to the fresh one.
     const root = paths;
     /** One more `prompt` on this session (item 14): the same transport, bridge
      *  and relay entry as the loop, its own budget and its own `run.agent`
@@ -1470,7 +1515,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         if (run.control?.requested === "hard") {
           if (!hardStopped) {
             hardStopped = true;
-            rpc.send({ type: "abort" });
+            transport!.send({ type: "abort" });
           }
           return;
         }
@@ -1479,7 +1524,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             writeUpAt = undefined;
             finaleAborted = true;
             run.onProgress?.(finaleTimedOutNote("turn"));
-            rpc.send({ type: "abort" });
+            transport!.send({ type: "abort" });
           }
           return;
         }
@@ -1507,7 +1552,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       // (model-proxy item 6): the list trimmed to them, or the whole table.
       deps.bearers?.markTurn(run.runId, input.tools);
       try {
-        rpc.send({ id, type: "prompt", message: input.text });
+        transport!.send({ id, type: "prompt", message: input.text });
         turnCheck();
         for (;;) {
           pending ??= iterator.next();
@@ -1516,12 +1561,18 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           try {
             next = await Promise.race([pending, tick]);
           } catch (err) {
-            // The three shapes, as the loop reads them (item 16): the word is
-            // the verdict, a transport loss takes the one more command, and
-            // any other failure is the turn's, as it always was — a control
-            // file lost among them, noted once by the turn's own catch below.
-            if (err instanceof Error && saysContainerReplaced(err)) {
-              turnContainerSaid = err;
+            // The same answers as the loop's (item 16): a control reset, or
+            // the replaced word the row's pid refutes, re-attaches in place on
+            // this same pi — never the verdict (a relaunch beside a live pi,
+            // the orphan) and never the turn's failure (which would end() a
+            // healthy pi); the word the pid cannot refute is the verdict, a
+            // transport loss takes the one more command, and any other failure
+            // is the turn's, as it always was — a control file lost among
+            // them, noted once by the turn's own catch below.
+            const outcome = await recoverInPlace(err);
+            if (outcome.kind === "control-reset" || outcome.kind === "word-alive") continue;
+            if (outcome.kind === "word-gone") {
+              turnContainerSaid = outcome.said;
               break;
             }
             if (err instanceof Error && saysTransportLost(err)) {
@@ -1531,6 +1582,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             throw err;
           }
           if (next === "tick") {
+            promptEchoTick();
             turnCheck();
             if (hardStopped) break;
             continue;
@@ -1539,14 +1591,16 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           if (next.done) break;
           const event = parsePiLine(next.value);
           if (!event) continue;
+          reattaches = 0; // a record read: a re-attach made progress
           const obs = bridge.observe(event);
-          for (const reply of obs.replies) rpc.send(reply);
+          for (const reply of obs.replies) transport!.send(reply);
           if (obs.gateBypassed) {
             bypass = new GateBypassed(obs.gateBypassed.tool, obs.gateBypassed.callId);
             note("harness_error", `${bypass.message} — the turn is stopped`);
-            rpc.send({ type: "abort" });
+            transport!.send({ type: "abort" });
             break;
           }
+          if (obs.response) noteEcho(obs.response);
           if (obs.response?.id === id && obs.response.success === false)
             throw new PromptRefused(String(obs.response.error ?? "no reason"));
           if (obs.providerError !== undefined) {

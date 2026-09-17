@@ -55,9 +55,9 @@ import {
 } from "../container.js";
 import {
   classifyLoopFailure,
-  controlResetBoundMessage,
-  controlResetResumedNote,
+  CONTROL_RESET_RESUMED_NOTE,
   MAX_INPLACE_REATTACHES,
+  reattachBoundMessage,
   reattachTransport,
   WORD_ALIVE_REATTACH_NOTE,
 } from "../reattach.js";
@@ -1521,13 +1521,15 @@ export async function driveOpenCode(
     const reattachInPlace = (): void => {
       // The old transport is closed so none of its queued reads land after the
       // re-attach; the fresh one reads on from the last record boundary.
-      transport = reattachTransport(transport, {
+      // The feed reader never writes on this transport, so nothing is unsent
+      // to carry over; the bridge's writes are HTTP requests of their own.
+      ({ transport } = reattachTransport(transport, {
         container: conn.container,
         paths: { ...conn.paths.tailer, log: conn.paths.feed },
         pid: conn.tailerPid,
         pollMs: deps.pollMs ?? 250,
         sleep: deps.sleep,
-      });
+      }));
       iterator = transport.lines[Symbol.asyncIterator]();
       pending = undefined;
     };
@@ -1553,17 +1555,19 @@ export async function driveOpenCode(
         // feed reader is read-only, so there is no write to resolve. One rule
         // for both, shared with pi (`classifyLoopFailure`). A same-kernel
         // replacement keeps the boot id, so only the row's pid refutes the word;
-        // gone → the verdict. A control reset the bound cannot ride to progress
-        // fails the run by name, noted as pi does — never a silent throw.
-        const outcome = await classifyLoopFailure(err, { container: conn.container, pid: conn.pid, reattaches });
+        // gone → the verdict. Past the bound with no record read between the
+        // re-attaches the run fails by name, noted as pi does — never a silent
+        // throw, and never the verdict for a word the pid still refutes (that
+        // would relaunch a second server beside the live one).
+        const outcome = await classifyLoopFailure(err, { container: conn.container, pid: conn.pid });
         if (outcome.kind === "control-reset" || outcome.kind === "word-alive") {
-          if (outcome.kind === "control-reset" && reattaches >= MAX_INPLACE_REATTACHES) {
-            const msg = controlResetBoundMessage(reattaches);
+          if (reattaches >= MAX_INPLACE_REATTACHES) {
+            const msg = reattachBoundMessage(outcome.kind, reattaches);
             note("harness_error", msg);
             throw new Error(msg, { cause: err });
           }
           reattaches++;
-          note("resumed", outcome.kind === "word-alive" ? WORD_ALIVE_REATTACH_NOTE : controlResetResumedNote());
+          note("resumed", outcome.kind === "word-alive" ? WORD_ALIVE_REATTACH_NOTE : CONTROL_RESET_RESUMED_NOTE);
           reattachInPlace();
           continue;
         }
