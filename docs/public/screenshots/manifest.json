@@ -7,7 +7,7 @@
   "now": 1788877800000,
   "inputs": {
     "scripts/screenshots.mts": "2aec7f1618040fad2ae4740f5b4213b6f7731a9a5d0b041b684d50d30521e067",
-    "scripts/web-preview.ts": "0bc60b42660f65e4f8512f14d705e3177451e5e62023475447d96cbe449096b3",
+    "scripts/web-preview.ts": "1e6ccc1b2712043ce379906f0c01141571aabb2e1f10c40d7255e4197ed281a7",
     "src/channels/webShell.ts": "5eab7aae4b16bad384c4863ddb8b3d644470cba2421e56d7649bd2fd95b26d92",
     "src/docs/screenshotManifest.ts": "867610f2df36b63706774eba3a4efcff9215309e6b964245429ed2e43fee3fff",
     "web/src/App.vue": "e95e58c24d31cd6de4b5d701b4c44ce9752c5278b7d6afd9c9e7028104ae2122",
@@ -43,7 +43,7 @@
     "web/src/components/run/StepItems.vue": "3e938d23cbd54d1fd4bd9ff523cdbd52da26949c9e7252c4b2e4b276d3ddba26",
     "web/src/components/run/TimelineSection.vue": "86cdfb1c1ecf7bcadff76a9594ca79f56eef8797538b2f7b36cfcab1de988652",
     "web/src/components/runs/RunFoldRow.vue": "7d92c8ac44c93a0148686f9e97a4936b408ef7ec4ac608641ecb98b1e2bf6734",
-    "web/src/components/runs/RunRow.vue": "5aa620ad936ee401be3c8b86c0fddf4bc881c8c25f3c3a896d882e514173fdc4",
+    "web/src/components/runs/RunRow.vue": "6d43a87fde1eee879cdfff481bcda35b040405af35e93ad3995f978aac34a308",
     "web/src/components/runs/RunsTabs.vue": "b20205f3e70f5c043f26d937cf90905e9411584b4289dd546621d58ece044d41",
     "web/src/components/runs/SourceMark.vue": "bc1c8701265452c6f1899a895fbee2721d0964ed351ee8c07746ccb1731acc90",
     "web/src/components/settings/ChannelsPanel.vue": "b245c4b492e3ac8e749819f2c021c4dd02e7ecc53b6974cae3e927ccc4e3ac1c",

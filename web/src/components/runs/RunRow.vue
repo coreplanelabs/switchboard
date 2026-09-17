@@ -77,10 +77,11 @@ const stopBadge = computed(() =>
 
 const disabled = reactive({ soft: false, hard: false });
 
-/** The phone's run-actions menu: everything the desktop grid offers through
- *  hover states, as finger-sized menu items — the thread link (the desktop
- *  source mark is hover-revealed) and Stop/Kill. */
-const stopMenuItems = computed(() => [
+/** The row's actions menu, the one control at every width (a pair of Stop and
+ *  Kill buttons per row cost 7.6em of every line for two rarely used actions):
+ *  the thread link (the desktop source mark is hover-revealed) and, while the
+ *  run is stoppable, Stop/Kill — each disabled while its POST is in flight. */
+const actionItems = computed(() => [
   ...(sourceUrl.value
     ? [
         {
@@ -93,11 +94,17 @@ const stopMenuItems = computed(() => [
     : []),
   ...(stoppable.value
     ? [
-        { label: "Stop (soft)", icon: "i-lucide-octagon-pause", onSelect: () => requestStop("soft") },
+        {
+          label: "Stop (soft)",
+          icon: "i-lucide-octagon-pause",
+          disabled: disabled.soft,
+          onSelect: () => requestStop("soft"),
+        },
         {
           label: "Kill (hard)",
           icon: "i-lucide-octagon-x",
           color: "error" as const,
+          disabled: disabled.hard,
           onSelect: () => requestStop("hard"),
         },
       ]
@@ -145,10 +152,9 @@ function onRowClick(ev: MouseEvent): void {
          one-line grid — dot · started · chip · scope · snippet · badges ·
          source · facts · actions. Below sm the SAME cells wrap into a card via
          max-sm order/basis overrides: line 1 = dot · chip · scope · stopwatch
-         · a finger-sized ⋯ menu; line 2 = the snippet (clamped); line 3 =
-         started · events · badges. Only the leaf control swaps (hover-sized
-         buttons ↔ the touch menu, which also carries the hover-only thread
-         link). -->
+         · the ⋮ actions menu; line 2 = the snippet (clamped); line 3 =
+         started · events · badges. The menu is the same control at every
+         width (it also carries the hover-only thread link for touch). -->
     <div
       class="body pointer-events-none relative z-[1] flex min-w-0 flex-wrap items-center gap-x-2.5 px-2 max-sm:gap-y-1.5 max-sm:py-3 sm:flex-nowrap sm:py-2"
       :class="[run.finished ? 'text-muted' : '', leaving ? 'opacity-85' : '']"
@@ -167,10 +173,13 @@ function onRowClick(ev: MouseEvent): void {
       <!-- Who asked (record 0042, runs page): the resolved name, always visible — the
            source mark's hover kept saying it only to a pointer — led by the surface's
            glyph, so a person's Slack, HTTP and CLI runs read apart without a hover
-           (authorization.md item 15: one person, several credentials). -->
+           (authorization.md item 15: one person, several credentials). A fixed-width
+           column from sm (item 29): every row's agent chip starts at the same x
+           whatever the name's length, a long name truncates and reads in full
+           on hover, and a row that names nobody keeps the empty cell. -->
       <UTooltip v-if="who" :text="sourceTip(run)">
         <span
-          class="who pointer-events-auto min-w-0 shrink-0 truncate text-[0.8rem] max-sm:order-7 max-sm:text-xs sm:max-w-[10em]"
+          class="who pointer-events-auto min-w-0 shrink-0 truncate text-[0.8rem] max-sm:order-7 max-sm:text-xs sm:w-[12em]"
           :class="run.finished ? 'text-dimmed' : 'text-muted'"
           :data-user-id="run.userId"
           :data-surface="src.kind"
@@ -180,6 +189,7 @@ function onRowClick(ev: MouseEvent): void {
           ><span class="name">{{ who }}</span></span
         >
       </UTooltip>
+      <span v-else class="who shrink-0 max-sm:hidden sm:w-[12em]" aria-hidden="true"></span>
       <span
         v-if="parts.agent"
         class="agent shrink-0 rounded border px-1.5 font-mono text-[0.68rem] font-medium uppercase tracking-wider max-sm:order-2"
@@ -249,42 +259,21 @@ function onRowClick(ev: MouseEvent): void {
           {{ countText(run) }}
         </span>
       </UTooltip>
-      <span class="actions hidden min-w-[7.6em] shrink-0 justify-end gap-1.5 whitespace-nowrap sm:flex">
-        <template v-if="stoppable">
-          <UTooltip text="Soft stop: no new steps, the agent writes up what it has">
-            <UButton
-              class="pointer-events-auto"
-              size="xs"
-              color="neutral"
-              variant="outline"
-              label="Stop"
-              :disabled="disabled.soft"
-              @click="requestStop('soft')"
-            />
-          </UTooltip>
-          <UTooltip text="Hard stop: abort now, no summary, free the sandbox">
-            <UButton
-              class="pointer-events-auto"
-              size="xs"
-              color="error"
-              variant="outline"
-              label="Kill"
-              :disabled="disabled.hard"
-              @click="requestStop('hard')"
-            />
-          </UTooltip>
-        </template>
+      <!-- The actions cell: one ⋮ menu at every width (Stop/Kill while the run
+           is stoppable, the thread link when there is one), in a fixed-width
+           cell so the facts columns line up on rows with no menu at all. -->
+      <span class="actions flex shrink-0 justify-end max-sm:order-5 sm:w-[2em]">
+        <UDropdownMenu v-if="actionItems.length > 0" :items="actionItems" :content="{ align: 'end' }">
+          <UButton
+            class="pointer-events-auto -my-1.5 -mr-1"
+            size="sm"
+            color="neutral"
+            variant="ghost"
+            icon="i-lucide-ellipsis-vertical"
+            aria-label="Run actions"
+          />
+        </UDropdownMenu>
       </span>
-      <UDropdownMenu v-if="stopMenuItems.length > 0" :items="stopMenuItems" :content="{ align: 'end' }">
-        <UButton
-          class="pointer-events-auto -my-1.5 -mr-1 max-sm:order-5 sm:hidden"
-          size="md"
-          color="neutral"
-          variant="ghost"
-          icon="i-lucide-ellipsis-vertical"
-          aria-label="Run actions"
-        />
-      </UDropdownMenu>
     </div>
   </li>
 </template>
