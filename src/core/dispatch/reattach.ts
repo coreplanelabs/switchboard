@@ -121,14 +121,22 @@ export async function abandonLostWorkspace(ctx: LostWorkspaceContext): Promise<I
  *  list it. */
 export interface RestartTurn {
   msg: IncomingMessage;
-  opts: { trace: RequestTrace; restartOf?: string };
+  opts: { trace: RequestTrace; restartOf?: string; coordinator?: CoordinatorTag };
 }
 
 export function prepareRestartTurn(
   deps: RequestTraceDeps,
-  ctx: { request: IncomingMessage; pending: PersonFollowUp[]; clock: Clock; restartOf?: string },
+  ctx: {
+    request: IncomingMessage;
+    pending: PersonFollowUp[];
+    clock: Clock;
+    restartOf?: string;
+    /** The tag the interrupted run carried (run-history item 48a): the
+     *  restart is the same instance's child, or no coordinator's. */
+    coordinator?: CoordinatorTag;
+  },
 ): RestartTurn {
-  const { request, pending, clock, restartOf } = ctx;
+  const { request, pending, clock, restartOf, coordinator } = ctx;
   const merged = mergeFollowUps(pending);
   const receivedAt = clock();
   const msg: IncomingMessage = {
@@ -147,5 +155,12 @@ export function prepareRestartTurn(
     originAt: undefined,
   };
   const trace = startRequestRoot(deps, { channel: channelOf(msg.channelId), receivedAt });
-  return { msg, opts: { trace, ...(restartOf !== undefined ? { restartOf } : {}) } };
+  return {
+    msg,
+    opts: {
+      trace,
+      ...(restartOf !== undefined ? { restartOf } : {}),
+      ...(coordinator !== undefined ? { coordinator } : {}),
+    },
+  };
 }

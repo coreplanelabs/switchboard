@@ -1339,6 +1339,32 @@ describe("the pi harness — the container replaced under a living bot: the rela
     expect(registry.get("run-l")).toBeUndefined();
   });
 
+  it("a coordinator's child that restarts from its request hands the dispatcher its coordinator tag with the interruption, so the restart is dispatched as the same instance's child — the unit branch its own, the plan's base protected", async () => {
+    const registry = new HarnessRegistry();
+    const a = new FakeHarnessContainer();
+    a.onStdin = piThatMeetsTheRoll(registry);
+    const coordinator = { parentInstanceId: "plan-p", idempotencyKey: "plan-p:u1/0/coding", base: "main" };
+    const s = setup("unused", {
+      agent: "coding",
+      yaml: YAML + "harness:\n  coding: pi\n",
+      harness: harnessOver(registry, () => a),
+      coordinator,
+      binding: {
+        ref: "plan/p/u1",
+        sha: "0123456",
+        workspace: "/workspace/threads/t/plan-p-u1",
+        user: "worker2",
+      } as ResidentBinding,
+    });
+    const round = { ...s.ctx.round, selection: { ...s.ctx.round.selection, backend: "resident" as const } };
+    const out = await runLoop(s.deps, { ...s.ctx, round });
+    expect(out).toMatchObject({
+      kind: "interrupted",
+      refusal: "workspace_lost",
+      restart: { request: s.ctx.msg, restartOf: "run-l", coordinator },
+    });
+  });
+
   it("the worktree refused by name: no relaunch — the run closes interrupted with the refusal workspace_lost, the record saying why after pi's verdict, the relay forgotten, the workspace released, the card 🔁 — and the request runs again as a new run", async () => {
     const registry = new HarnessRegistry();
     const a = new FakeHarnessContainer();

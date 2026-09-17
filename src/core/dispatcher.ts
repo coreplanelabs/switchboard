@@ -337,7 +337,7 @@ export async function dispatch(
   // 54; harness-pi item 16), and the run it restarts — the one this dispatch
   // closed `interrupted`, which admission must never steer the request into
   // (thread-admission item 5). Undefined until a restart is decided.
-  let restartRequest: { request: IncomingMessage; restartOf?: string } | undefined;
+  let restartRequest: { request: IncomingMessage; restartOf?: string; coordinator?: CoordinatorTag } | undefined;
   const reservationHooks = {
     onStop: (mode: StopMode) => void registered?.control.requestStop(mode),
     onFenced: () => {
@@ -910,7 +910,15 @@ export async function dispatch(
           ledgerRun,
           why: attach.why,
         });
-        if (request) restartRequest = { request, restartOf: resume.row.runId };
+        // The restart is the same instance's child (run-history item 48a): the
+        // tag rebuilt from the row and its event rides along, as the run loop's
+        // interruption carries the tag it ran under.
+        if (request)
+          restartRequest = {
+            request,
+            restartOf: resume.row.runId,
+            ...(coordinator !== undefined ? { coordinator } : {}),
+          };
         resumeRowClosed = true;
       }
       return ended;
@@ -1373,6 +1381,7 @@ export async function dispatch(
         pending,
         clock,
         ...(restartRequest.restartOf !== undefined ? { restartOf: restartRequest.restartOf } : {}),
+        ...(restartRequest.coordinator !== undefined ? { coordinator: restartRequest.coordinator } : {}),
       });
       await dispatch(deps, restart.msg, io, restart.opts).catch((err: unknown) =>
         console.error(
