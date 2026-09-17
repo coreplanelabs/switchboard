@@ -510,6 +510,7 @@ export async function openOpenCodeRun(
       knownMessageIds: known,
       writes: { seq: 0, ownPrompts: new Map<string, number>(), imported },
       boundaries: new StepBoundaries(),
+      failure: {},
       paths: server.paths,
       port: server.port,
       password: server.password,
@@ -765,9 +766,28 @@ function drainFollowUps(
      *  order: never steered again by this loop, requeued to the front of the
      *  inbox once the loop has left, for the run stage's fresh-turn path. */
     const deferred: FollowUpInput[] = [];
+    /** Whose follow-up: the person's, or a parent run's steer (thread-admission item 7). */
+    const senderOf = (input: FollowUpInput): string =>
+      input.from !== undefined ? `run:${input.from.runId}` : `user:${input.userId}`;
     while (running()) {
       const inputs = run.inbox?.drain() ?? [];
       for (const input of inputs) {
+        // Once a person's follow-up is held for the fresh turn, that person's
+        // later ones are held behind it, in order: the model never reads a
+        // person's later follow-up before an earlier one, and the fresh turn
+        // carries them in order. Another sender's still goes out: nothing of
+        // theirs is waiting. A parent run's steer is never held — a program's
+        // steer gets no fresh turn (the settlement sets it aside, thread-
+        // admission item 7), so one waiting behind a lost one would never be
+        // read; a lost one is handed back and noted as any lost steer is.
+        if (input.from === undefined && deferred.some((held) => senderOf(held) === senderOf(input))) {
+          deferred.push(input);
+          note(
+            "follow_up",
+            `follow-up held for a fresh turn behind an earlier one from the same sender the server did not take: ${redactSecrets(followUpSnippet(input))}`,
+          );
+          continue;
+        }
         let stagedLine = "";
         if (run.stageFollowUps) {
           try {
@@ -833,8 +853,12 @@ function drainFollowUps(
         // the store there — before the execution's terminal event, the
         // execution running a step for it — and a steer arriving after the end
         // starts a new execution at once, its row in the store before the
-        // answer; so the idle marker newest since the steer with no row, read
-        // after the terminal event, is the server's word that it took nothing.
+        // answer; a steer enqueued when the execution is interrupted is
+        // dropped with it (no `session.inbox.delivered`, no row, no new
+        // execution), and one enqueued when the execution fails is delivered
+        // into a new execution the server starts at once; so the idle marker
+        // newest since the steer with no row, read after any terminal
+        // transition, is the server's word that it took nothing.
         // The loop leaving the feed with no row and the store still showing the
         // execution under way (a hung tool the finale interrupts) is the steer
         // unresolved. Unresolved — that, or a store that cannot be read —
@@ -947,12 +971,20 @@ function drainFollowUps(
         } catch (err) {
           if (err instanceof OpenCodeWriteUnresolvedError) {
             note("harness_error", `${err.message} — the run is stopped`);
-            run.control?.requestStop("hard");
-            // The follow-ups held for the fresh turn, then the batch's after
-            // this one, never posted: back to the inbox for the run stage's
-            // fresh-turn path, never dropped. This one may have landed, so it
-            // is not.
-            run.inbox?.requeue([...deferred.splice(0), ...inputs.slice(inputs.indexOf(input) + 1)]);
+            // The loop ends by the failure's name through the connection — no
+            // stop is asked of the run's control, so the record carries no
+            // `stopped` note, the sandbox is released as after any named
+            // failure and the dispatcher's settlement, seeing no stop, hands
+            // the follow-ups handed back below on for the fresh turn.
+            conn.failure.error = err;
+            // The follow-ups held for the fresh turn, this one, and the batch's
+            // after it, never posted: back to the inbox for the run stage's
+            // fresh-turn path, never dropped. This one may have reached the
+            // server — but the run fails by name here and its session is over,
+            // so a row the server took reaches no model call now; the fresh
+            // turn repeating it is the record's word kept, the harness_error
+            // above naming the steer.
+            run.inbox?.requeue([...deferred.splice(0), ...inputs.slice(inputs.indexOf(input))]);
           }
           throw err;
         }
@@ -973,11 +1005,12 @@ function drainFollowUps(
           // A steer the store told lost is no refusal — the server took
           // nothing — but it is never steered again by this loop: were the
           // server still holding it, a second steer would reach the model
-          // twice. It is held with the batch behind it, in order (the thread's
-          // order kept within what one drain brought), for the run stage's
-          // fresh turn; the drainer goes on with what later drains bring.
-          deferred.push(...rest);
-          break;
+          // twice. It is held for the run stage's fresh turn, and the same
+          // sender's later follow-ups — the rest of this batch and later drains'
+          // — are held behind it (above), so that sender's order holds across
+          // the fresh turn; another sender's follow-ups go on being steered.
+          deferred.push(input);
+          continue;
         }
         const source = {
           ...(input.sourceUrl ? { url: input.sourceUrl } : {}),

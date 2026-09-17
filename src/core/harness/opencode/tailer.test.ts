@@ -206,7 +206,7 @@ const STEP_END = (sessionID: string, id: string) => ({
 });
 
 describe("the tailer", () => {
-  it("writes every event as one record in the order fed, with the pin's Basic auth on every request, and at a step's end appends the session's pending asks and every message of the store, following the store's pages", async () => {
+  it("writes every event as one record in the order fed, with the pin's Basic auth on every request, and at a step's end appends the session's pending asks as they answer and every message of the store, following the store's pages", async () => {
     const fake = await fakeServe();
     fake.permissions.ses_1 = [
       {
@@ -252,6 +252,9 @@ describe("the tailer", () => {
     expect(notes(records).slice(0, 2)).toEqual(["started", "connected"]);
     expect(events(records)).toEqual([{ id: "evt_0", type: "server.connected", data: {} }, e1, e2, e3]);
     const refills = records.filter((r) => r.feed === "permissions" || r.feed === "messages");
+    // The pending asks first — emitted the moment their read answers, since an
+    // unanswered ask holds the server's turn — then the store's messages after
+    // its pages; the bridge holds an ask whose call the store has not named yet.
     expect(refills.map((r) => r.feed)).toEqual(["permissions", "messages"]);
     expect(refills[0]).toMatchObject({
       feed: "permissions",
@@ -270,6 +273,7 @@ describe("the tailer", () => {
       records.findIndex((r) => r.feed === "event" && r.event.id === "evt_3"),
     );
     for (const r of fake.requests) expect(r.authorization).toBe(openCodeAuthHeader(PASSWORD));
+    // Both reads go out at once, the asks' first.
     expect(fake.requests.map((r) => r.line)).toEqual([
       "GET /api/event",
       "GET /api/session/ses_1/permission",

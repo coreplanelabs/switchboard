@@ -293,21 +293,24 @@ export interface FakeServeOptions {
   steerAnswersNoId?: "landed" | "dropped";
   /** Every `GET …/message` meets the control plane's reset: the store cannot be listed. */
   storeListingResets?: boolean;
+  /** With `storeListingResets`: the operator's hard stop is requested the moment
+   *  the store's listing meets the reset — the same tick as the drainer's
+   *  failure by name, the stop's request landing first, the failure a few
+   *  microtasks after — so the loop reads both at once. */
+  hardStopOnStoreReset?: boolean;
   /** A thread follow-up arrives in the run's inbox as the first ask of the
    *  first play is raised — an execution under way — so the drainer steers it
    *  into a running execution (the row landing at the next step boundary). */
   followUpAtFirstAsk?: string;
+  /** The follow-up `followUpAtFirstAsk` times is a parent run's steer (thread-admission
+   *  item 7) from this run id, not a person's — another sender than the thread's person. */
+  followUpAtFirstAskFrom?: string;
   /** A thread follow-up arrives in the run's inbox as the loop's first `queue`
    *  prompt is admitted, and the prompt's answer is held until the drainer's
    *  steer has been posted: the steer meets the execution the prompt started
    *  while the loop's own write is still unanswered — the two writes around one
    *  reset (`controlResetOnPrompt` + `controlResetOnSteer`). */
   followUpAtPrompt?: string;
-  /** The first play's first ask is held (its tool not settling) until this
-   *  many steer POSTs have reached the serve: the execution stays under way
-   *  for a steer the drainer posts on a later tick — a later follow-up's — a
-   *  shape a play shorter than the drainer's tick would never exercise. */
-  firstAskWaitsForSteers?: number;
   /** The resident's control plane resets under the run's first `queue` prompt
    *  POST (a control reset, the container unchanged): `landed`, the server took
    *  the prompt before the reset cut the answer; `lost`, the prompt never
@@ -471,12 +474,12 @@ class ScriptedServe {
   private readonly steerAnswersNoId: "landed" | "dropped" | undefined;
   private steerAnsweredNoId = false;
   private readonly storeListingResets: boolean;
+  private readonly hardStopOnStoreReset: boolean;
   private readonly followUpAtFirstAsk: string | undefined;
+  private readonly followUpAtFirstAskFrom: string | undefined;
   private readonly followUpAtPrompt: string | undefined;
-  private readonly firstAskWaitsForSteers: number | undefined;
-  private firstAskHeld = false;
   private followUpPushed = false;
-  /** Steer POSTs that have reached the serve (`firstAskWaitsForSteers`). */
+  /** Steer POSTs that have reached the serve: the timed follow-up's ask is held until its own has. */
   private steers = 0;
   /** A steer POST has reached the serve (`followUpAtFirstAsk` waits on it). */
   private steerSeen = false;
@@ -549,9 +552,10 @@ class ScriptedServe {
     this.steerLandsAfterNextPrompt = options.steerLandsAfterNextPrompt === true;
     this.steerAnswersNoId = options.steerAnswersNoId;
     this.storeListingResets = options.storeListingResets === true;
+    this.hardStopOnStoreReset = options.hardStopOnStoreReset === true;
     this.followUpAtFirstAsk = options.followUpAtFirstAsk;
     this.followUpAtPrompt = options.followUpAtPrompt;
-    this.firstAskWaitsForSteers = options.firstAskWaitsForSteers;
+    this.followUpAtFirstAskFrom = options.followUpAtFirstAskFrom;
     this.interruptAnswersAfterKill = options.interruptAnswersAfterKill ?? false;
     this.interruptPostFails = options.interruptPostFails === true;
     this.mutate = options.mutate;
@@ -650,7 +654,11 @@ class ScriptedServe {
       const request = this.asksOfInFlight.get(`per_${callId}`);
       if (request !== undefined) this.emitEvent("permission.asked", request);
     }
-    if (this.pendingAsks.size > 0) this.emitPermissions([...this.pendingAsks.values()]);
+    if (this.pendingAsks.size > 0) {
+      // The reconnect refill, in the tailer's order: the asks the moment they answer, the store after its pages.
+      this.emitPermissions([...this.pendingAsks.values()]);
+      this.emitMessages();
+    }
     if (this.reattach.answeredWhileAway)
       for (const [callId, call] of [...this.inFlight]) {
         if (call.relayed) continue;
@@ -834,7 +842,10 @@ class ScriptedServe {
     // rows unless `limit` — at most 200, a 400 above — and a `cursor.next` to
     // the following page. The fake's store is its insertion order.
     if (req.method === "GET" && req.path.split("?")[0] === `/api/session/${this.sessionID}/message`) {
-      if (this.storeListingResets) throw controlReset("request");
+      if (this.storeListingResets) {
+        if (this.hardStopOnStoreReset) this.run.control?.requestStop("hard");
+        throw controlReset("request");
+      }
       const query = new URLSearchParams(req.path.split("?")[1] ?? "");
       const limit = query.has("limit") ? Number(query.get("limit")) : 50;
       if (!Number.isInteger(limit) || limit < 1 || limit > 200)
@@ -1050,6 +1061,7 @@ class ScriptedServe {
         const callId = String((pending.source as { id?: string } | undefined)?.id ?? reply[1]);
         const call = this.inFlight.get(callId);
         this.emitPermissions([...this.pendingAsks.values()]);
+        this.emitMessages();
         this.emitEvent("permission.replied", { sessionID: this.sessionID, requestID: reply[1], reply: decision.reply });
         if (call !== undefined)
           this.settleInFlight(
@@ -1207,8 +1219,8 @@ class ScriptedServe {
 
   /** The execution fails as the real server fails one: the failure event with
    *  the provider's words, then the two refills its terminal transition causes
-   *  — the pending asks (none) and the store with the idle marker the failure
-   *  left — and NO `session.idle`. */
+   *  — the pending asks (none), then the store with the idle marker the failure
+   *  left, the tailer's order — and NO `session.idle`. */
   private failExecution(type: string, message: string, status?: number): void {
     this.emitEvent("session.execution.failed", {
       sessionID: this.sessionID,
@@ -1438,9 +1450,12 @@ class ScriptedServe {
       outcome: this.interrupted ? "interrupted" : "succeeded",
       time: { created: NOW },
     });
-    // An interrupted execution's terminal transition causes its refills, in the
-    // measured order: the pending asks (none now) and the store, after the end.
+    // An interrupted execution's terminal transition causes its refills after
+    // the end, in the tailer's order: the pending asks (none now), then the
+    // store. A steer enqueued into the interrupted execution is dropped with it
+    // (measured: no `session.inbox.delivered`, no row, no new execution).
     if (this.interrupted) {
+      this.pendingSteers.splice(0);
       this.emitPermissions([]);
       this.emitMessages();
     }
@@ -1610,23 +1625,28 @@ class ScriptedServe {
       });
       return this.toolContent(callId, ask.name, input, "completed", content);
     }
+    // A refill carrying the ask, in the tailer's order: the asks first, the store after.
     this.emitPermissions([request]);
+    this.emitMessages();
     this.liveAsks.set(requestID, request);
     const timedFollowUp = this.followUpAtFirstAsk !== undefined && !this.followUpPushed;
+    const steersBefore = this.steers;
     if (timedFollowUp) {
       this.followUpPushed = true;
-      this.deps.inbox?.push({ text: this.followUpAtFirstAsk!, userId: "user:conformance", at: NOW });
+      const from = this.followUpAtFirstAskFrom;
+      this.deps.inbox?.push({
+        text: this.followUpAtFirstAsk!,
+        userId: from !== undefined ? `run:${from}` : "user:conformance",
+        at: NOW,
+        ...(from !== undefined ? { from: { runId: from } } : {}),
+      });
     }
-    const holdForSteers = this.firstAskWaitsForSteers !== undefined && !this.firstAskHeld;
-    if (holdForSteers) this.firstAskHeld = true;
     const decision = await this.waitReply(requestID);
-    // The execution stays under way until the drainer's steer for that follow-up
-    // has been posted, so the steer meets a running execution, as the option says.
-    if (timedFollowUp) for (let i = 0; i < 400 && !this.steerSeen; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
-    // …or until the steers the option counts have reached the serve (`firstAskWaitsForSteers`).
-    if (holdForSteers)
-      for (let i = 0; i < 400 && this.steers < (this.firstAskWaitsForSteers ?? 0); i++)
-        await this.deps.sleep(this.deps.tickMs ?? 1);
+    // The execution stays under way until the drainer's steer for THAT follow-up
+    // has been posted — one more steer than the serve had seen when it was
+    // pushed — so the steer meets a running execution, as the option says.
+    if (timedFollowUp)
+      for (let i = 0; i < 400 && this.steers === steersBefore; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
     this.liveAsks.delete(requestID);
     if (this.interruptedAsks.has(requestID)) {
       // The interrupt dropped the ask while it was pending: the binary emits no
@@ -1643,6 +1663,7 @@ class ScriptedServe {
       return this.toolContent(callId, ask.name, input, "error", "Tool execution interrupted", "aborted");
     }
     this.emitPermissions([]);
+    this.emitMessages();
     this.emitEvent("permission.replied", { sessionID: this.sessionID, requestID, reply: decision.reply });
     // The allowed tool never settles (`hangToolCall`): the run's first play
     // alone hangs here with the call open — the clock passes the loop's end,
@@ -1920,7 +1941,13 @@ async function runOpenCode(script: RunScript, options: FakeServeOptions = {}): P
   container.freePort = PORT;
   const control = new RunControl();
   const inbox = new FollowUpInbox();
-  if (script.followUp !== undefined) inbox.push({ text: script.followUp, userId: "user:conformance", at: NOW });
+  if (script.followUp !== undefined)
+    inbox.push({
+      text: script.followUp,
+      userId: script.followUpFrom !== undefined ? `run:${script.followUpFrom}` : "user:conformance",
+      at: NOW,
+      ...(script.followUpFrom !== undefined ? { from: { runId: script.followUpFrom } } : {}),
+    });
   if (script.followUpToo !== undefined) inbox.push({ text: script.followUpToo, userId: "user:conformance", at: NOW });
   const events: RunEvent[] = [];
   const steps: StepReport[] = [];
@@ -2029,6 +2056,7 @@ async function runOpenCode(script: RunScript, options: FakeServeOptions = {}): P
     harness: "opencode",
     outcome,
     inboxLeft: inbox.drain().map((i) => ({ text: i.text })),
+    stopRequested: control.requested,
     events,
     steps,
     facts,

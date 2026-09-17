@@ -815,7 +815,7 @@ describe("the model reference on every request that carries one names the config
     // …admitted at the prompt…
     expect((await post("/api/session/ses_run-c/prompt", { text: "go", delivery: "queue" })).status).toBe(200);
     await new Promise((r) => setTimeout(r, 20));
-    // …and the execution fails at once, in the server's words, with the refills and no idle event after it.
+    // …and the execution fails at once, in the server's words, with the refills (the pending asks, then the store — the tailer's order) and no idle event after it.
     const kinds = (await feedFrom(before)).map((r) => (r.feed === "event" ? r.event!.type : r.feed));
     expect(kinds).toEqual(["session.execution.started", "session.execution.failed", "permissions", "messages"]);
     const failed = (await feedFrom(before)).find((r) => r.event?.type === "session.execution.failed");
@@ -1358,7 +1358,7 @@ describe("OpenCodeHarness — the resident's control plane resets under a write"
     expect(notes(r).some((n) => n.kind === "follow_up" && /folded in/.test(n.summary))).toBe(false);
   });
 
-  it("a steer the server answered without a message id into a RUNNING execution that never reaches a step boundary before the loop leaves: unresolved by the same name — never noted as not delivered and handed back for a second delivery, never folded in", async () => {
+  it("a steer the server answered without a message id into a RUNNING execution that never reaches a step boundary before the loop leaves: unresolved by the same name — never noted as not delivered, never folded in; handed back for the fresh turn with the run's failure, since the session it may have reached is over", async () => {
     const r = await openCodeDriver({
       steerAnswersNoId: "landed",
       followUpAtFirstAsk: "also check the docs",
@@ -1377,7 +1377,7 @@ describe("OpenCodeHarness — the resident's control plane resets under a write"
     ).toBe(true);
     expect(notes(r).some((n) => n.kind === "follow_up" && /not delivered/.test(n.summary))).toBe(false);
     expect(notes(r).some((n) => n.kind === "follow_up" && /folded in/.test(n.summary))).toBe(false);
-    expect(r.inboxLeft).toEqual([]);
+    expect(r.inboxLeft.map((i) => i.text)).toEqual(["also check the docs"]);
   });
 
   it("a follow-up's steer into a RUNNING execution the reset cut before the server took it: no row when its execution ends — the idle marker newest since the steer, the store's word — is the steer lost: handed back to the inbox, the run continuing, the model never shown it", async () => {
@@ -1463,21 +1463,63 @@ describe("OpenCodeHarness — the resident's control plane resets under a write"
     expect(modelSaw(r, "second words")).toBe(false);
   });
 
-  it("a follow-up arriving after a lost one — a later drain of the inbox — is still steered by this loop and folded in; the lost one alone waits for the fresh turn", async () => {
-    // The first ask is held until the later follow-up's steer has reached the serve: a play this short ends before the drainer's next tick otherwise.
+  it("a parent run's steer arriving after a person's lost follow-up is another sender's: it is not held behind the person's — steered and folded in — while the person's alone waits for the fresh turn", async () => {
     const r = await openCodeDriver({
       steerAnswersNoId: "dropped",
-      followUpAtFirstAsk: "second words",
-      firstAskWaitsForSteers: 2,
+      followUpAtFirstAsk: "the coordinator's steer",
+      followUpAtFirstAskFrom: "run-parent",
     }).run({ ...toolTurn, followUp: "first words" });
     expect(answered(r)).toBe("done");
     const followUps = notes(r)
       .filter((n) => n.kind === "follow_up")
       .map((n) => n.summary);
-    expect(followUps.filter((s) => /folded in/.test(s))).toEqual(["follow-up folded in: second words"]);
+    expect(followUps.filter((s) => /folded in/.test(s))).toEqual(["follow-up folded in: the coordinator's steer"]);
     expect(followUps.filter((s) => /not delivered/.test(s))).toHaveLength(1);
     expect(r.inboxLeft.map((i) => i.text)).toEqual(["first words"]);
-    expect(modelSaw(r, "second words")).toBe(true);
+    expect(modelSaw(r, "the coordinator's steer")).toBe(true);
+    expect(modelSaw(r, "first words")).toBe(false);
+  });
+
+  it("a parent run's later steer is never held behind its earlier one the store told lost: a program's steer gets no fresh turn (the settlement sets it aside), so the second is steered and folded in while the first is handed back and noted as today", async () => {
+    const r = await openCodeDriver({
+      steerAnswersNoId: "dropped",
+      followUpAtFirstAsk: "parent's second",
+      followUpAtFirstAskFrom: "run-parent",
+    }).run({ ...toolTurn, followUp: "parent's first", followUpFrom: "run-parent" });
+    expect(answered(r)).toBe("done");
+    const followUps = notes(r)
+      .filter((n) => n.kind === "follow_up")
+      .map((n) => n.summary);
+    expect(followUps.filter((s) => /folded in/.test(s))).toEqual(["follow-up folded in: parent's second"]);
+    expect(followUps.filter((s) => /not delivered/.test(s))).toHaveLength(1);
+    expect(followUps.filter((s) => /held for a fresh turn/.test(s))).toEqual([]);
+    expect(
+      posts(r, "/prompt").filter((q) => (JSON.parse(q.body ?? "{}") as { delivery?: string }).delivery === "steer"),
+    ).toHaveLength(2);
+    expect(r.inboxLeft.map((i) => i.text)).toEqual(["parent's first"]);
+    expect(modelSaw(r, "parent's second")).toBe(true);
+  });
+
+  it("a person's follow-up arriving after a lost one — a later drain of the inbox, the same sender — is held behind it, never steered by this loop: the fresh turn carries both in order, so the model never reads the later one before the earlier", async () => {
+    const r = await openCodeDriver({ steerAnswersNoId: "dropped", followUpAtFirstAsk: "second words" }).run({
+      ...toolTurn,
+      followUp: "first words",
+    });
+    expect(answered(r)).toBe("done");
+    const followUps = notes(r)
+      .filter((n) => n.kind === "follow_up")
+      .map((n) => n.summary);
+    expect(followUps.filter((s) => /folded in/.test(s))).toEqual([]);
+    expect(followUps.filter((s) => /not delivered/.test(s))).toHaveLength(1);
+    // The held follow-up leaves its trace: the record says it waits for the fresh turn behind the earlier one.
+    expect(followUps.filter((s) => /held for a fresh turn/.test(s))).toEqual([
+      "follow-up held for a fresh turn behind an earlier one from the same sender the server did not take: second words",
+    ]);
+    expect(
+      posts(r, "/prompt").filter((q) => (JSON.parse(q.body ?? "{}") as { delivery?: string }).delivery === "steer"),
+    ).toHaveLength(1);
+    expect(r.inboxLeft.map((i) => i.text)).toEqual(["first words", "second words"]);
+    expect(modelSaw(r, "second words")).toBe(false);
     expect(modelSaw(r, "first words")).toBe(false);
   });
 
@@ -1500,14 +1542,37 @@ describe("OpenCodeHarness — the resident's control plane resets under a write"
     expect(notes(r).filter((n) => n.kind === "harness_error")).toEqual([]);
   });
 
-  it("a batch of two follow-ups whose first steer ends unresolved: the second, never posted, is handed back to the inbox with the run's failure — not dropped", async () => {
+  it("a batch of two follow-ups whose first steer ends unresolved: both are handed back to the inbox with the run's failure, in order — the unresolved one too, since the run it may have reached is over — and no stop is asked of the run's control (the loop ends by the failure's name, no stopped note), so the dispatcher's settlement hands them on for the fresh turn rather than drop them as an operator's stop would; never a follow-up dropped", async () => {
     const r = await openCodeDriver({ controlResetOnSteer: "landed", storeListingResets: true }).run({
       ...oneTurn,
       followUp: "also check the docs",
       followUpToo: "and the tests",
     });
     expect(r.outcome.kind).toBe("failed");
-    expect(r.inboxLeft.map((i) => i.text)).toEqual(["and the tests"]);
+    // No stop is asked of the control: the run fails by name through the loop, so the dispatcher's settlement sees no stop and hands the follow-ups on.
+    expect(r.stopRequested).toBeUndefined();
+    expect(notes(r).filter((n) => n.kind === "stopped")).toEqual([]);
+    expect(r.inboxLeft.map((i) => i.text)).toEqual(["also check the docs", "and the tests"]);
+    expect(notes(r).some((n) => n.kind === "harness_error" && /the follow-up's steer/.test(n.summary))).toBe(true);
+  });
+
+  it("a harness failure by name and an operator's hard stop landing in one tick — both while the loop waits on its prompt's answer, so its next check reads them together: the stop's `stopped` note is written all the same (the stop wins the settlement's reading), the failure stays on the record and names the run's end, the interrupt posted once", async () => {
+    // The prompt's answer is held until the follow-up's steer has been posted (`followUpAtPrompt`); the steer's
+    // resolution meets the store's reset, which fails it by name and requests the stop in one go, before the loop
+    // reads anything again.
+    const r = await openCodeDriver({
+      controlResetOnSteer: "landed",
+      storeListingResets: true,
+      hardStopOnStoreReset: true,
+      followUpAtPrompt: "also check the docs",
+    }).run(toolTurn);
+    expect(r.outcome.kind).toBe("failed");
+    const err = r.outcome.kind === "failed" ? r.outcome.error : undefined;
+    expect(err?.name).toBe("OpenCodeWriteUnresolvedError");
+    expect(r.stopRequested).toBe("hard");
+    expect(notes(r).filter((n) => n.kind === "stopped")).toHaveLength(1);
+    expect(notes(r).some((n) => n.kind === "harness_error" && /the follow-up's steer/.test(n.summary))).toBe(true);
+    expect(posts(r, "/interrupt")).toHaveLength(1);
   });
 
   it("a follow-up's steer the reset cut before the server took it is handed back to the inbox, as any steer the server never took", async () => {
