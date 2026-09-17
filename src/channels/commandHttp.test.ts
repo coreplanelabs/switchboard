@@ -414,6 +414,31 @@ describe("createCommandHttpHandler — caller resolution", () => {
     expect(stopNotes(reg, live.id)).toHaveLength(0);
   });
 
+  // Feature: docs/decisions/0053 — a write from a session viewing as a person is refused in the one sentence, whatever the person's grants say.
+  it("a session viewing as a person (record 0053) reads on runs.list and is refused POST runs.stop before the body is read with the view-as sentence, not the grant refusal; the same session without the cookie stops the run", async () => {
+    const table = { grants: native(OPERATOR_AND_READER), commandGroups: ["runs"] };
+    const { handler, reg, live } = await fixture({
+      grantsFor: (id) => (id === "access:admin" ? ALL_GRANTS : grantsFor(id, table)),
+    });
+    const viewing: AccessIdentity = { sub: "admin", viewAs: "slack:UIVY" };
+    const list = fakeReqRes({ method: "GET", url: "/api/runs.list?status=all" });
+    await handler(list.req, list.res, viewing);
+    expect(list.status).toBe(200);
+    const stop = stopPost(live.id);
+    await handler(stop.req, stop.res, viewing);
+    expect(stop.status).toBe(403);
+    expect(stop.json()).toEqual({
+      error: "You are viewing as slack:UIVY; writes are your own to make — exit view-as to write.",
+      code: "unauthorized",
+    });
+    expect(stop.bodyRead).toBe(false);
+    expect(stopNotes(reg, live.id)).toHaveLength(0);
+    const own = stopPost(live.id);
+    await handler(own.req, own.res, { sub: "admin" });
+    expect(own.status).toBe(200);
+    expect(stopNotes(reg, live.id)).toHaveLength(1);
+  });
+
   it("a service token is honored with exactly its configured scopes: reader-bot reads, cannot stop; an unlisted token holds nothing", async () => {
     const { handler, live } = await fixture();
     const list = fakeReqRes({ method: "GET", url: "/api/runs.list?status=all" });
