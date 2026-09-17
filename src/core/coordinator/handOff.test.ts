@@ -225,6 +225,24 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     expect(await wordy.instances.get("plan-make-the-runner-warm-the-eaaa45")).toMatchObject({ merge: "person" });
   });
 
+  it("a task's urls reach the unit: a Slack `<url|label>` link is unwrapped to its bare url and kept in the unit's title and id text, the `in <repo>:` prefix alone is dropped — the entry probe's stripped text is never the unit", async () => {
+    const h = harness();
+    const out = await handOffToCoordinator(
+      h.deps,
+      input({
+        entry: { repo: "acme/api", base: "main" },
+        requestText: "in acme/api: point the redirect at <https://calendar.acme.test/TrrMBAg7|calendar.acme.test/…>",
+      }),
+    );
+    expect(out.status).toBe("completed");
+    const [id] = h.created;
+    const [row] = await h.instances.listUnits(id!);
+    // The title is the text's first line (cut at 80 by unitTitleOf); the child's
+    // contract carries the whole text (briefs.test.ts).
+    expect(row!.title).toBe("point the redirect at https://calendar.acme.test/TrrMBAg7");
+    expect(id).toMatch(/^plan-point-the-redirect-at-ht-[0-9a-f]{6}$/);
+  });
+
   it("a generated plan is re-issued by its id: the same text after `U1` merged is refused as merged already; after `U1` ended `merge_ready` it is attempt 2 under `plan-<id>-2` with `U1` selected on the same branch", async () => {
     const id = "plan-warm-the-cache-on-wake-dfa06c";
     const req = input({

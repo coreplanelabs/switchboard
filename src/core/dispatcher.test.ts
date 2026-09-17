@@ -65,7 +65,7 @@ import { REFERENCE_REFUSAL } from "./dispatch/references.js";
 import type { ContentPart } from "./chatMessage.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import type { OpenedPullRequest, PullRequestFacts, PullRequestTarget } from "../execution/githubPulls.js";
-import { shipTaskText } from "./ship/preflight.js";
+import { shipUnitText } from "./ship/preflight.js";
 import { generatedPlanId, unitBranch } from "./ship/coordinator.js";
 import type { GithubIdentity } from "../execution/githubApp.js";
 import { InMemoryMemoryStore, NullMemoryStore, type MemoryRecord } from "./memory/index.js";
@@ -8416,7 +8416,7 @@ describe("agent:ship (the hand-off to the plan runner)", () => {
   const HEAD_A = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
   const PR_URL = "https://github.com/acme/api/pull/7";
   const TASK_MSG = "agent:ship in acme/api: fix the login redirect";
-  const SHIP_PLAN_ID = generatedPlanId(shipTaskText("in acme/api: fix the login redirect", "acme/api"), "slack:CX:1.0");
+  const SHIP_PLAN_ID = generatedPlanId(shipUnitText("in acme/api: fix the login redirect", "acme/api"), "slack:CX:1.0");
   const SHIP_BRANCH = unitBranch(SHIP_PLAN_ID, "u1");
 
   const SHIP_YAML = `
@@ -8782,7 +8782,7 @@ workspaceDir: __WORKDIR__
     const { instance, unit } = await handed(instances, "run-shiprouted");
     expect(instance).toMatchObject({ merge: "person" });
     expect(instance?.plan?.id).toBe(
-      generatedPlanId(shipTaskText("fix the login redirect", "acme/api"), "slack:CX:1.0"),
+      generatedPlanId(shipUnitText("fix the login redirect", "acme/api"), "slack:CX:1.0"),
     );
     expect(unit).toBeDefined();
     expect(created).toHaveLength(1);
@@ -8840,7 +8840,7 @@ workspaceDir: __WORKDIR__
       baseRef: "main",
     });
     deps.fetchPrFacts = vi.fn(async () => openBotPr({ author: { login: "alice", id: 42 } }));
-    const branch = unitBranch(generatedPlanId(shipTaskText(TASK, "acme/api"), "slack:CX:1.0"), "u1");
+    const branch = unitBranch(generatedPlanId(shipUnitText(TASK, "acme/api"), "slack:CX:1.0"), "u1");
     const registry = new RunRegistry({ genId: () => "run-shipcite", genToken: () => "tok" });
     deps.runRegistry = registry;
     const { io, replies } = fakeIO();
@@ -8872,7 +8872,7 @@ workspaceDir: __WORKDIR__
       baseRef: "main",
     });
     deps.fetchPrFacts = vi.fn(async () => undefined); // transient fetch failure
-    const branch = unitBranch(generatedPlanId(shipTaskText(TASK, "acme/api"), "slack:CX:1.0"), "u1");
+    const branch = unitBranch(generatedPlanId(shipUnitText(TASK, "acme/api"), "slack:CX:1.0"), "u1");
     const registry = new RunRegistry({ genId: () => "run-shipfail", genToken: () => "tok" });
     deps.runRegistry = registry;
     const { io, replies } = fakeIO();
