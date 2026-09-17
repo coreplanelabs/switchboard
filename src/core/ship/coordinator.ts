@@ -554,10 +554,10 @@ export type CoordinatorNote =
  *  person can see whether the cap or the child is the problem. */
 export type ShipBudgetSpent = Readonly<Record<"coding" | "review" | "waiting", number>>;
 
-/** The severity ship must address before an approve stands ('s
- *  gate): an approve carrying a finding at or above this level continues into
- *  the findings step exactly as a request_changes does. Ordered most to least
- *  severe; an unlabeled finding counts as `minor`. */
+/** The severity ship must address before an approve stands (agent-ship item
+ *  9's gate): an approve carrying a finding at or above this level continues
+ *  into the findings step exactly as a request_changes does. Ordered most to
+ *  least severe. */
 export const ADDRESS_SEVERITIES = ["blocking", "major", "minor", "nit"] as const;
 export type AddressSeverity = (typeof ADDRESS_SEVERITIES)[number];
 /** Where the level in force came from, most specific wins: a `severity:` directive on the request (`run`), the user's or the channel's config scope, the org's `ship.addressSeverity` (or its default). */
@@ -567,13 +567,12 @@ export const isAddressSeverity = (v: unknown): v is AddressSeverity =>
   (ADDRESS_SEVERITIES as readonly unknown[]).includes(v);
 
 const severityRank = (s: AddressSeverity): number => ADDRESS_SEVERITIES.indexOf(s);
-/** A finding's effective severity for the gate: an unlabeled one counts as minor. */
-const findingRank = (f: Finding): number =>
-  isAddressSeverity(f.severity) ? severityRank(f.severity) : severityRank("minor");
-/** The findings the gate acts on at `level`: at or above it (fyi and anything
- *  outside the ladder is never actionable — it counts as minor only when unlabeled). */
+/** The findings the gate acts on at `level`: at or above it. Every parsed
+ *  finding carries one of the ladder's four levels — the verdict parser
+ *  (`parseVerdictInput`) drops an entry with any other severity, `fyi` or none,
+ *  with a note — so nothing outside the ladder ever reaches the gate. */
 export function findingsAtOrAbove(findings: readonly Finding[], level: AddressSeverity): Finding[] {
-  return findings.filter((f) => findingRank(f) <= severityRank(level));
+  return findings.filter((f) => severityRank(f.severity) <= severityRank(level));
 }
 
 export interface UnitPipelineInput {
