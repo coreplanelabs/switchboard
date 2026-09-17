@@ -180,11 +180,15 @@ export function killStaleBuildProcessesCommand(user: string, dir: string): strin
 }
 
 /** Signature of a step killed from OUTSIDE its own budget: the exit status of
- *  SIGTERM (128 + 15), bash's "Session terminated" on a killed login shell, or
- *  a tool naming the signal. A bare "killed" is NOT enough — compilers and
- *  OOM messages say it too — and a step the cycle itself timed out is a real
- *  failure however it died. */
-const INTERRUPTION_SIGNATURE = /\bexit 143\b|Session terminated|SIGTERM|^restore-interrupted:/;
+ *  SIGTERM (128 + 15) — as a shell reports it (`exit 143`) or as the platform
+ *  words a container that died under a short exec ("Container exited with
+ *  unexpected exit code: 143"; seen live on the wake path's ready-stamp probe
+ *  when a stop landed on it) — bash's "Session terminated" on a killed login
+ *  shell, or a tool naming the signal. Only 143: the platform's same wording
+ *  with any other code (1, 137, 139) is a genuine crash and stays a failure.
+ *  A bare "killed" is NOT enough — compilers and OOM messages say it too —
+ *  and a step the cycle itself timed out is a real failure however it died. */
+const INTERRUPTION_SIGNATURE = /\bexit 143\b|exit code: 143\b|Session terminated|SIGTERM|^restore-interrupted:/;
 
 /** The wordings git gives when the MIRROR itself is broken: its `origin`
  *  remote gone from `config`, the repository not a repository, an object store
