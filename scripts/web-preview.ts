@@ -1952,22 +1952,52 @@ const HOME_CONVERSATIONS = [
   {
     id: "conv-1",
     title: "review https://github.com/acme/api/pull/61 — the retry-queue…",
+    excerpt: "review https://github.com/acme/api/pull/61 — the retry-queue backoff cap",
     lastAt: NOW - 6 * 60_000 + 21_000,
     runs: 3,
     live: false,
     surface: "web",
   },
-  { id: "conv-live", title: "re-review after the repush", lastAt: NOW - 252_000, runs: 2, live: true, surface: "web" },
-  // A thread from another channel the person requested runs in (record 0043, amended): the rail lists it by its whole key, with its glyph.
+  {
+    id: "conv-live",
+    title: "re-review after the repush",
+    excerpt: "re-review after the repush",
+    lastAt: NOW - 252_000,
+    runs: 2,
+    live: true,
+    surface: "web",
+  },
+  // A thread from another channel the person requested runs in (record 0043, amended): the rail lists
+  // it by its whole key; its channel reads in the row's tooltip.
   {
     id: "slack:CHANNEL:1758040000.000100",
     title: "why did the deploy roll back?",
+    excerpt: "why did the deploy roll back?",
     lastAt: NOW - 26 * 3_600_000,
     runs: 1,
     live: false,
     surface: "slack",
   },
-  { id: "conv-3", title: "bump the SDK", lastAt: NOW - 29.5 * 86_400_000, runs: 1, live: false, surface: "web" },
+  // A long ask: the row truncates, the tooltip reads it whole.
+  {
+    id: "conv-4",
+    title: "in acme/web: the abridge poller never stops on a repeated c…",
+    excerpt:
+      "in acme/web: the abridge poller never stops on a repeated cursor — find the loop, add the test that pins it, and ship the fix",
+    lastAt: NOW - 3 * 86_400_000,
+    runs: 2,
+    live: false,
+    surface: "web",
+  },
+  {
+    id: "conv-3",
+    title: "bump the SDK",
+    excerpt: "bump the SDK",
+    lastAt: NOW - 29.5 * 86_400_000,
+    runs: 1,
+    live: false,
+    surface: "web",
+  },
 ];
 // What Switchboard does well, one chip each, and one that asks what it can do.
 const HOME_SUGGESTIONS = [

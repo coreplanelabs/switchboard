@@ -472,4 +472,8 @@
   .rail .new:hover {
     transform: none;
   }
+  /* A finger has no hairline to catch: the column keeps its width on touch. */
+  .home .handle {
+    display: none;
+  }
 }

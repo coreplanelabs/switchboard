@@ -1,17 +1,23 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import type { HomeConversationRowSeed } from "@core/channels/webSeed.js";
-import { formatRelative } from "../../lib/format";
-import { filterRows } from "../../lib/homeModel";
-import { SURFACE_NAME } from "../../lib/indexRow";
+import ThreadTip from "./ThreadTip.vue";
+import { compactAge, filterRows } from "../../lib/homeModel";
 
 // The rail (docs/reference/specs/web-chat.md item 7): the person's RECENT
 // threads across every channel — a `web:` conversation, a Slack thread they
-// requested runs in (its surface's word label beside it) — newest first, titled by
-// its first request. Bounded by the seed (the bot caps it), so there is nothing
-// to page: the way to everything is the `All runs` link at the foot. A filter
-// (⌘K) narrows the rows by a fuzzy match; the new-thread CTA carries its
-// shortcut (⇧⌘O). A full page load per conversation, like every section.
+// requested runs in — newest first, titled by its first request. A row is the
+// title and a short distance (`3m`, `1h`, `Sep 14`), so the title keeps the
+// room; the channel, the moment as a date, the run count and the request in
+// full read in the row's tooltip (ThreadTip) after a short hover. Bounded by
+// the seed (the bot caps it), so there is nothing to page: the way to
+// everything is the `All runs` link at the foot. A filter (⌘K) narrows the
+// rows by a fuzzy match; the new-thread CTA carries its shortcut (⇧⌘O). A full
+// page load per conversation, like every section.
+
+/** The hover before the tooltip: long enough that a pointer crossing the
+ *  rail opens nothing, short enough that a rest on a row is answered. */
+const TIP_DELAY_MS = 500;
 
 const props = defineProps<{
   rows: HomeConversationRowSeed[];
@@ -81,43 +87,43 @@ defineExpose({ focusFilter });
     <p class="label px-3 pb-1 font-mono text-[0.65rem] font-medium uppercase tracking-wider text-dimmed">Recent</p>
     <p v-if="rows.length === 0" class="empty px-3 py-1 text-xs text-dimmed">Nothing yet. Ask something.</p>
     <p v-else-if="shown.length === 0" class="nomatch px-3 py-1 text-xs text-dimmed">Nothing matches "{{ query }}".</p>
+    <!-- Each row is wrapped once for the TransitionGroup (a tooltip root renders no element of its own). -->
     <TransitionGroup name="sb-rise" tag="div" class="rows flex flex-col gap-0.5">
-      <a
-        v-for="row in shown"
-        :key="row.id"
-        class="row group relative flex items-baseline gap-2 rounded-lg px-3 py-1.5 no-underline transition-colors duration-150 ease-out hover:bg-(--ui-bg-muted) aria-[current=page]:bg-(--ui-bg-accented)"
-        :href="`/threads/${encodeURIComponent(row.id)}`"
-        :aria-current="row.id === current ? 'page' : undefined"
-        :title="`${row.runs} run${row.runs === 1 ? '' : 's'}`"
-      >
-        <!-- The active row's ink bar at the left edge. -->
-        <span
-          class="bar absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-primary opacity-0 transition-opacity duration-150 ease-out group-aria-[current=page]:opacity-100"
-          aria-hidden="true"
-        />
-        <span
-          v-if="row.live"
-          class="dot mt-px size-1.5 shrink-0 self-center rounded-full bg-ok motion-safe:animate-pulse"
-          aria-label="a run is in flight"
-        />
-        <!-- A thread from another channel wears its surface's word label (record 0043, amended): the
-             channel id's own prefix, as the runs index labels a requester — never a glyph a reader
-             would need a legend for. -->
-        <span
-          v-if="row.surface && row.surface !== 'web'"
-          class="surface shrink-0 self-center rounded border border-accented px-1 font-mono text-[0.6rem] text-dimmed"
-          :data-surface="row.surface"
-          :aria-label="`a ${SURFACE_NAME[row.surface] ?? row.surface} thread`"
-          >{{ row.surface }}</span
+      <div v-for="row in shown" :key="row.id">
+        <UTooltip
+          :delay-duration="TIP_DELAY_MS"
+          :content="{ side: 'right', sideOffset: 12, align: 'start' }"
+          :ui="{ content: 'h-auto max-w-xs px-2.5 py-2' }"
         >
-        <span
-          class="title min-w-0 flex-1 truncate text-toned group-hover:text-highlighted group-aria-[current=page]:text-highlighted"
-          >{{ row.title }}</span
-        >
-        <span class="when shrink-0 font-mono text-[0.7rem] tabular-nums text-dimmed">{{
-          formatRelative(row.lastAt, now)
-        }}</span>
-      </a>
+          <template #content>
+            <ThreadTip :row="row" :now="now" />
+          </template>
+          <a
+            class="row group relative flex items-baseline gap-2 rounded-lg px-3 py-1.5 no-underline transition-colors duration-150 ease-out hover:bg-(--ui-bg-muted) aria-[current=page]:bg-(--ui-bg-accented)"
+            :href="`/threads/${encodeURIComponent(row.id)}`"
+            :aria-current="row.id === current ? 'page' : undefined"
+            :data-surface="row.surface"
+          >
+            <!-- The active row's ink bar at the left edge. -->
+            <span
+              class="bar absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-primary opacity-0 transition-opacity duration-150 ease-out group-aria-[current=page]:opacity-100"
+              aria-hidden="true"
+            />
+            <span
+              v-if="row.live"
+              class="dot mt-px size-1.5 shrink-0 self-center rounded-full bg-ok motion-safe:animate-pulse"
+              aria-label="a run is in flight"
+            />
+            <span
+              class="title min-w-0 flex-1 truncate text-toned group-hover:text-highlighted group-aria-[current=page]:text-highlighted"
+              >{{ row.title }}</span
+            >
+            <span class="when shrink-0 font-mono text-[0.7rem] tabular-nums text-dimmed">{{
+              compactAge(row.lastAt, now)
+            }}</span>
+          </a>
+        </UTooltip>
+      </div>
     </TransitionGroup>
 
     <a

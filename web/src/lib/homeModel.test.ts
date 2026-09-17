@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  clampRailWidth,
   classifyReply,
+  compactAge,
   composerMode,
   conversationTitle,
   enterSubmits,
@@ -10,8 +12,11 @@ import {
   liveUrls,
   matchSteer,
   placeholderFor,
+  RAIL_WIDTH,
+  railPrefs,
   shortcutFor,
   shouldFollow,
+  threadTip,
 } from "./homeModel";
 
 // Feature: docs/reference/specs/web-chat.md — the home page's pure rules.
@@ -157,5 +162,80 @@ describe("placeholderFor — the placeholder guides the hand (rule 8)", () => {
     expect(placeholderFor("steer")).toMatch(/folds into the run/);
     expect(placeholderFor("stop")).toMatch(/steer it, or stop it/);
     expect(placeholderFor("send", "Enter runs it")).toBe("");
+  });
+});
+
+describe("compactAge — the rail's short distance (rule 7)", () => {
+  const NOW = Date.UTC(2026, 8, 16, 20, 0, 0);
+  it("now, minutes, hours, days, then the date", () => {
+    expect(compactAge(NOW - 10_000, NOW)).toBe("now");
+    expect(compactAge(NOW - 3 * 60_000, NOW)).toBe("3m");
+    expect(compactAge(NOW - 59 * 60_000, NOW)).toBe("59m");
+    expect(compactAge(NOW - 60 * 60_000, NOW)).toBe("1h");
+    expect(compactAge(NOW - 23 * 3_600_000, NOW)).toBe("23h");
+    expect(compactAge(NOW - 24 * 3_600_000, NOW)).toBe("1d");
+    expect(compactAge(NOW - 6 * 86_400_000, NOW)).toBe("6d");
+    expect(compactAge(NOW - 8 * 86_400_000, NOW)).toMatch(/^Sep \d+$/);
+    expect(compactAge(NOW - 400 * 86_400_000, NOW)).toMatch(/^\w{3} \d+, 2025$/);
+  });
+});
+
+describe("threadTip — what a row says on hover (rule 7)", () => {
+  const NOW = Date.UTC(2026, 8, 16, 20, 0, 0);
+  it("the full first line, the date and time, the source, the run count and whether a run is live", () => {
+    const tip = threadTip(
+      {
+        title: "please review https://github.com/acme/api/pull/61 — the retry…",
+        excerpt: "please review https://github.com/acme/api/pull/61 — the retry queue caps its backoff",
+        lastAt: NOW - 3 * 60_000,
+        runs: 3,
+        live: true,
+        surface: "slack",
+      },
+      NOW,
+    );
+    expect(tip.title).toBe("please review https://github.com/acme/api/pull/61 — the retry queue caps its backoff");
+    expect(tip.when).toMatch(/^Sep 16, \d{1,2}:\d{2} [AP]M$/);
+    expect(tip.source).toBe("Slack · read-only here");
+    expect(tip.runs).toBe("3 runs");
+    expect(tip.live).toBe(true);
+  });
+  it("a web conversation names no channel; one run is singular; no excerpt falls back to the title", () => {
+    const tip = threadTip(
+      {
+        title: "bump the SDK",
+        excerpt: "bump the SDK",
+        lastAt: NOW - 86_400_000,
+        runs: 1,
+        live: false,
+        surface: "web",
+      },
+      NOW,
+    );
+    expect(tip.title).toBe("bump the SDK");
+    expect(tip.source).toBe("Web");
+    expect(tip.runs).toBe("1 run");
+    expect(tip.live).toBe(false);
+    expect(threadTip({ title: "x", excerpt: "", lastAt: NOW, runs: 2, live: false }, NOW)).toMatchObject({
+      title: "x",
+      source: "Web",
+    });
+  });
+});
+
+describe("clampRailWidth / railPrefs — the rail's width and whether it is shown (rule 7)", () => {
+  it("clamps to the band, and anything unreadable is the default", () => {
+    expect(RAIL_WIDTH).toEqual({ min: 224, default: 288, max: 448, step: 16 });
+    expect(clampRailWidth(300)).toBe(300);
+    expect(clampRailWidth(10)).toBe(224);
+    expect(clampRailWidth(9_999)).toBe(448);
+    expect(clampRailWidth(Number.NaN)).toBe(288);
+    expect(clampRailWidth(undefined)).toBe(288);
+    expect(clampRailWidth("312")).toBe(312);
+  });
+  it("reads what the browser remembered: a width in the band and a collapsed flag; nothing remembered is the default, shown", () => {
+    expect(railPrefs({ width: "320", collapsed: "1" })).toEqual({ width: 320, collapsed: true });
+    expect(railPrefs({ width: null, collapsed: null })).toEqual({ width: 288, collapsed: false });
+    expect(railPrefs({ width: "abc", collapsed: "0" })).toEqual({ width: 288, collapsed: false });
   });
 });

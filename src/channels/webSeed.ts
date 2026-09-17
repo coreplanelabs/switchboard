@@ -180,6 +180,8 @@ export interface HomeConversationRowSeed {
   id: string;
   /** The first request's first line, cut to 60 characters. */
   title: string;
+  /** The same line cut to 240 characters: what the row's tooltip says in full. */
+  excerpt: string;
   lastAt: number;
   runs: number;
   live: boolean;
