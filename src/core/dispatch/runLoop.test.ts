@@ -1020,7 +1020,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     expect(out.answer).toBe("pi says done");
     expect(container.starts[0].paths.dir).toBe("/var/tmp/switchboard-pi-run-l");
     expect(container.files.get("/var/tmp/switchboard-pi-run-l/agent/SYSTEM.md")).toContain("the system prompt");
-    const roots = [...container.files.keys()].map((f) => f.split("/").slice(0, 3).join("/"));
+    const roots = [...container.files.keys()].map((f) => f.split("/").slice(0, 4).join("/"));
     expect(new Set(roots)).toEqual(new Set(["/var/tmp/switchboard-pi-run-l"]));
     expect(container.removed).toEqual(["/var/tmp/switchboard-pi-run-l"]);
   });
@@ -1717,7 +1717,7 @@ describe("the OpenCode harness — the container replaced under a living bot, re
       bearerHash: bearerHashOf(rotated),
       sessionID: expect.any(String),
       port: expect.any(Number),
-      root: "/tmp/switchboard-oc-run-l",
+      root: "/var/tmp/switchboard-oc-run-l",
     });
     expect(facts.filter((f) => f.relaunches === 0).every((f) => f.bearerHash === bearerHashOf(bearer))).toBe(true);
     // The row learns the binding the relaunch re-attached on, as a resumed row does.
@@ -3019,7 +3019,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     port: 41000,
     logOffset: 0,
     sessionID: "ses_1",
-    root: "/tmp/switchboard-oc-run-l",
+    root: "/var/tmp/switchboard-oc-run-l",
     bearerHash: "h",
     container: "vm-1",
     relaunches: 0,
