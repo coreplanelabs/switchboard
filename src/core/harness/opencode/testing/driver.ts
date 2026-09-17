@@ -236,6 +236,19 @@ export interface FakeServeOptions {
   /** The `queue` prompt POST of this 1-based number (1 the run's request or a
    *  resume's continue, 2 the first post-turn's) answers 500: nothing starts. */
   promptPostFails?: number;
+  /** The `queue` prompt POST of this 1-based number fails on its transport — the
+   *  connection reset under the request — so the harness holds no answer at all. */
+  promptPostThrows?: number;
+  /** The model call of this 1-based turn is refused by the proxy's turn budget
+   *  (its 403 and its words), the execution failing on it as the real server
+   *  hands the refusal on — a live execution's end, not a late tail's; the next
+   *  play continues at the turn after it. */
+  budgetRefusalAtModelCall?: number;
+  /** A steer on the idle session starts a new execution at once, as the pinned
+   *  binary does (measured: a steer arriving after the end starts an execution,
+   *  its row in the store before the answer); off, the fake's default, the
+   *  execution is not modelled and the next play reads the row. */
+  steerOnIdleStartsExecution?: boolean;
   /** The `queue` prompt of this 1-based number is admitted (200) and nothing
    *  of the session's execution follows on the feed — no execution start, no
    *  step — while the feed still carries what a wedged server's does: the
@@ -290,6 +303,27 @@ export interface FakeServeOptions {
    *  the loop-end cut owes then lands in the bridge's own mode, where a bridge
    *  reading it as its own settle would end the loop on the previous answer. */
   lateTailAfterNextStart?: boolean;
+  /** The interrupted execution's tail (`interruptSettlesLate`) is serialized
+   *  BEFORE the interrupt's own answer — the mirror ordering, no more pinned
+   *  than the other: the end lands in the loop's own mode with the answer
+   *  still in flight, where a bridge owing nothing yet would settle the loop
+   *  on the previous answer. */
+  interruptAnswersAfterTail?: boolean;
+  /** The interrupted execution's end is never serialized: its tail carries the
+   *  step failing `aborted` and the usage, no `session.execution.interrupted`
+   *  and no refills — so whatever ends next on the feed is the write-up's own. */
+  owedEndNeverSerialized?: boolean;
+  /** The tool call of this 1-based turn hangs at its ASK: the ask never
+   *  reaches the feed (no event, no refill), so the bot decides nothing for the
+   *  call; the clock passes the loop's end with the ask pending, and the
+   *  interrupt drops it — the tool failing `aborted` before it ran, `executed:
+   *  false`, the measured shape of a pending ask at the interrupt. The run's
+   *  first play alone. */
+  hangAtAsk?: number;
+  /** An operator's hard stop is requested on the loop-end interrupt's request
+   *  and the interrupt answers `interrupted: true` at once — so the stop is on
+   *  the control, unread by the loop's next check, when the answer lands. */
+  hardStopBeforeCutAnswer?: boolean;
   /** The cut tool's own outcome (`hangToolCall`) rides the interrupted
    *  execution's tail itself — before the next execution starts, in the
    *  bridge's `earlier` mode — instead of landing after that start
@@ -485,6 +519,9 @@ class ScriptedServe {
   private readonly steerPostFails: boolean;
   private readonly primePostFails: boolean;
   private readonly promptPostFails: number | undefined;
+  private readonly promptPostThrows: number | undefined;
+  private readonly budgetRefusalAtModelCall: number | undefined;
+  private readonly steerOnIdleStartsExecution: boolean;
   private readonly silentAfterPrompt: number | undefined;
   private readonly interruptSettlesLate: "interrupted" | "failed" | "budget" | undefined;
   private readonly lateTailNoise: boolean;
@@ -507,6 +544,12 @@ class ScriptedServe {
   private readonly hungToolSettlesDuringInterrupt: boolean;
   private readonly hardStopOnCutInterrupt: boolean;
   private readonly lateTailAfterNextStart: boolean;
+  private readonly interruptAnswersAfterTail: boolean;
+  private readonly owedEndNeverSerialized: boolean;
+  private readonly hangAtAsk: number | undefined;
+  private readonly hardStopBeforeCutAnswer: boolean;
+  /** The step the run's first play hung in (`hangModelCall`, `hangToolCall`, `hangAtAsk`): the late tail's aborted step is that step's, as the binary's is. */
+  private hungStep: string | undefined;
   private readonly hungToolSettlesInTail: boolean;
   private readonly bypassGateAtTurn: number | undefined;
   private readonly dropStreamAtSettle: number | undefined;
@@ -600,13 +643,17 @@ class ScriptedServe {
     this.steerPostFails = options.steerPostFails === true;
     this.primePostFails = options.primePostFails === true;
     this.promptPostFails = options.promptPostFails;
+    this.promptPostThrows = options.promptPostThrows;
+    this.budgetRefusalAtModelCall = options.budgetRefusalAtModelCall;
+    this.steerOnIdleStartsExecution = options.steerOnIdleStartsExecution === true;
     this.silentAfterPrompt = options.silentAfterPrompt;
     // A hung tool's interrupt owes the interrupted execution's tail at the next
     // queue prompt, as measured: the row's script (or a test's option) says the
     // tool hangs, the measured shape follows unless a test names another late end.
     this.hangToolCall = options.hangToolCall ?? script.hangToolCall;
     this.interruptSettlesLate =
-      options.interruptSettlesLate ?? (this.hangToolCall !== undefined ? "interrupted" : undefined);
+      options.interruptSettlesLate ??
+      (this.hangToolCall !== undefined || options.hangAtAsk !== undefined ? "interrupted" : undefined);
     this.lateTailNoise = options.lateTailNoise === true;
     this.controlResetOnPrompt = options.controlResetOnPrompt;
     this.controlResetOnReply = options.controlResetOnReply;
@@ -614,6 +661,10 @@ class ScriptedServe {
     this.hungToolSettlesDuringInterrupt = options.hungToolSettlesDuringInterrupt === true;
     this.hardStopOnCutInterrupt = options.hardStopOnCutInterrupt === true;
     this.lateTailAfterNextStart = options.lateTailAfterNextStart === true;
+    this.interruptAnswersAfterTail = options.interruptAnswersAfterTail === true;
+    this.owedEndNeverSerialized = options.owedEndNeverSerialized === true;
+    this.hangAtAsk = options.hangAtAsk;
+    this.hardStopBeforeCutAnswer = options.hardStopBeforeCutAnswer === true;
     this.hungToolSettlesInTail = options.hungToolSettlesInTail === true;
     this.bypassGateAtTurn = options.bypassGateAtTurn;
     this.dropStreamAtSettle = options.dropStreamAtSettle;
@@ -1003,6 +1054,13 @@ class ScriptedServe {
         // A steer into the recorded server's execution lands at its next step
         // boundary: at once when nothing is in flight, else when the calls settle.
         this.stepBoundary();
+        // On the idle session the steer starts an execution at once
+        // (`steerOnIdleStartsExecution`, the measured shape), continuing the
+        // conversation where the last execution left it.
+        if (inStore && this.steerOnIdleStartsExecution) {
+          this.interrupted = false;
+          void this.play();
+        }
         if (steerReset === "landed") throw controlReset("request");
         if (noId === "landed") return j(200, { data: { sessionID: this.sessionID, type: "user", payload: { text } } });
         return j(200, { data: { id, sessionID: this.sessionID, type: "user", payload: { text }, delivery: "steer" } });
@@ -1025,6 +1083,9 @@ class ScriptedServe {
         this.queuePrompts++;
         // The prompt the server refuses (the harness must fail by name, not wait on the feed).
         if (this.promptPostFails === this.queuePrompts) return j(500, { error: "the store hiccuped" });
+        // The prompt lost on its transport: no answer, nothing started.
+        if (this.promptPostThrows === this.queuePrompts)
+          throw new HarnessContainerError("request", "curl: (56) Recv failure: Connection reset by peer");
         // The prompt the server admits and never acts on: the feed stays silent
         // for the session — the tailer's own note is not the server's word —
         // the error logs say what a reader would find there, and the clock
@@ -1186,6 +1247,10 @@ class ScriptedServe {
       // now, this loop-end interrupt's answer held until the loop has read the
       // stop and posted its OWN ending interrupt (a second request), so the loop
       // reads the stop before this answer lands — deterministic, no race.
+      // The stop requested on the request and the interrupt answered at once
+      // (`hardStopBeforeCutAnswer`): the loop's next check has not read it when
+      // the answer lands.
+      if (this.hanging && this.hardStopBeforeCutAnswer) this.run.control?.requestStop("hard");
       const stopFirst = this.hanging && this.hardStopOnCutInterrupt && this.run.control !== undefined;
       if (stopFirst) {
         this.run.control?.requestStop("hard");
@@ -1195,12 +1260,15 @@ class ScriptedServe {
           return j(200, { interrupted: true });
         })();
       }
+      // The tail serialized before the answer (`interruptAnswersAfterTail`): owed
+      // now, on the request, not at the next prompt.
+      const tailFirst = this.hanging && this.interruptAnswersAfterTail;
       if (this.hanging) {
         // Decided here, on the request: the write-up's queued prompt lands right
         // after and starts the next play, which continues after the cut turn.
         this.cutPlay = this.hangingPlay;
         this.resumeTurn = (this.hungTool?.turn ?? -1) + 1;
-        if (this.interruptSettlesLate !== undefined) this.lateSettle = true;
+        if (this.interruptSettlesLate !== undefined && !tailFirst) this.lateSettle = true;
       }
       for (const [requestID, resolve] of this.replies) {
         this.interruptedAsks.add(requestID);
@@ -1229,6 +1297,15 @@ class ScriptedServe {
           this.container.onKill = () =>
             reject(new HarnessContainerError("request", "curl: (56) Recv failure: Connection reset by peer"));
         });
+      if (tailFirst) {
+        // The interrupted execution's tail on the feed first, the answer a few
+        // ticks later, so the loop reads the end with the answer still in flight.
+        this.emitLateTail();
+        return (async () => {
+          for (let i = 0; i < 8; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+          return j(200, { interrupted: true });
+        })();
+      }
       return j(200, { interrupted: running });
     }
     return j(404, { error: "no such route" });
@@ -1281,7 +1358,8 @@ class ScriptedServe {
    *  too. Every record names the session; none is the next prompt's execution. */
   private emitLateTail(): void {
     const sessionID = this.sessionID;
-    const assistantMessageID = "msg_a_late";
+    // The aborted step is the one the play hung in, as the binary's tail names it.
+    const assistantMessageID = this.hungStep ?? "msg_a_late";
     this.emitEvent("session.step.failed", {
       sessionID,
       assistantMessageID,
@@ -1316,6 +1394,8 @@ class ScriptedServe {
       if (this.hungToolSettlesInTail) settle();
       else this.settleAfterStart = settle;
     }
+    // The end never serialized (`owedEndNeverSerialized`): the tail stops here.
+    if (this.owedEndNeverSerialized) return;
     if (this.interruptSettlesLate === "failed") {
       this.failExecution("provider.error", LATE_FAILURE_ERROR);
       return;
@@ -1486,6 +1566,7 @@ class ScriptedServe {
         if (this.deps.advanceClock === undefined || this.deps.finaleMs === undefined)
           throw new Error("hangModelCall needs the driver's clock: hand the serve `advanceClock` and `finaleMs`");
         this.recordModelCall();
+        this.hungStep = this.stepId(t);
         this.emitEvent("session.step.started", {
           sessionID: this.sessionID,
           assistantMessageID: this.stepId(t),
@@ -1506,6 +1587,15 @@ class ScriptedServe {
         this.hanging = true;
         for (let i = 0; i < 2000 && !this.interrupted; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
         this.hanging = false;
+        return;
+      }
+      if (this.budgetRefusalAtModelCall === t + 1) {
+        // The proxy refuses this model call on its turn budget: the execution
+        // fails on the refusal as the server hands it on, and a steer that
+        // follows continues at the next turn.
+        this.recordModelCall();
+        this.resumeTurn = t + 1;
+        this.failExecution("provider.error", LATE_BUDGET_REFUSAL, 403);
         return;
       }
       if (this.script.failModelCall === t + 1) {
@@ -1738,6 +1828,37 @@ class ScriptedServe {
       resources: ask.resources,
       source: { type: "tool", messageID: assistantMessageID, id: callId },
     };
+    // The ask pending at the cut (`hangAtAsk`): never on the feed — no event, no
+    // refill — so the bot decides nothing; the clock passes the loop's end and
+    // the play waits for the interrupt, which drops the ask below.
+    const pendsAtCut = this.hangAtAsk === turnIndex + 1 && this.plays === 1;
+    if (pendsAtCut) {
+      if (this.deps.spendBudget === undefined)
+        throw new Error("hangAtAsk needs the driver's clock: hand the serve `spendBudget`");
+      // The call's own events reach the loop before the clock moves, as with a
+      // hung tool: the budget note names the tool in flight.
+      for (let i = 0; i < 8; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+      this.hungTool = { callId, assistantMessageID, turn: turnIndex };
+      this.hungStep = assistantMessageID;
+      this.hangingPlay = this.plays;
+      this.hanging = true;
+      this.deps.spendBudget();
+      const dropped = await this.waitReply(requestID);
+      this.hanging = false;
+      // The interrupt dropped the ask (`interruptedAsks`): the tool fails
+      // `aborted` before it ran, and no late success is owed for it.
+      this.interruptedAsks.delete(requestID);
+      this.hungTool = undefined;
+      void dropped;
+      this.emitEvent("session.tool.failed", {
+        sessionID: this.sessionID,
+        assistantMessageID,
+        id: callId,
+        executed: false,
+        error: { type: "aborted", message: "Tool execution interrupted" },
+      });
+      return this.toolContent(callId, ask.name, input, "error", "Tool execution interrupted", "aborted");
+    }
     if (!dropped) this.emitEvent("permission.asked", request);
     // The declared cannot: the model's shell forges a `once` under the real
     // request id before the bot's reply lands; the server runs the tool against
@@ -1815,6 +1936,7 @@ class ScriptedServe {
       // Owed before the wait: the interrupt's late tail may be read at the next
       // prompt before this play has ticked on.
       this.hungTool = { callId, assistantMessageID, turn: turnIndex };
+      this.hungStep = assistantMessageID;
       this.hangingPlay = this.plays;
       this.hanging = true;
       this.deps.spendBudget();
