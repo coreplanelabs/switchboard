@@ -114,6 +114,9 @@ export async function attachRoundWorkspace(input: {
     /** A resumed run's recorded binding (run-history item 54): the factory
      *  re-attaches there and never provisions again. */
     reattach?: WorkspaceBinding;
+    /** The run's hard stop, where the caller holds a run control: the first
+     *  attach's wake wait ends on it at once (execution.md item 9). */
+    stopSignal?: AbortSignal;
   };
   logKey: string;
   /** The caller's `dispatch.workspace.attach` span: the probe and the attach
@@ -132,6 +135,7 @@ export async function attachRoundWorkspace(input: {
       headSha: input.round.headSha,
       ...(input.round.ownPr !== undefined ? { ownPr: input.round.ownPr } : {}),
       ...(input.round.reattach !== undefined ? { reattach: input.round.reattach } : {}),
+      ...(input.round.stopSignal !== undefined ? { stopSignal: input.round.stopSignal } : {}),
     },
     input.span,
   );
@@ -509,12 +513,15 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
         input.notify.headMoved(`head moved → ${current.slice(0, 7)}`);
         await input.notify.reply(headRereviewNote({ where, reviewed: expected, current, move })).catch(() => {});
         // Resident: move the worktree ourselves (one re-attach at the new
-        // head). Anything else — no moveTo, a refusal, a tip that moved
-        // again under the re-attach — leaves the model to check it out.
+        // head), the round's hard stop riding in so a move that waits on the
+        // resident ends with the stop. Anything else — no moveTo, a refusal,
+        // a tip that moved again under the re-attach — leaves the model to
+        // check it out.
         let worktreeMoved = false;
         if (executor.moveTo) {
           try {
-            const at = normalizeHead((await executor.moveTo(current, trace)).sha);
+            const moved = await executor.moveTo(current, { ...trace, signal: turn.control.hardSignal });
+            const at = normalizeHead(moved.sha);
             worktreeMoved = at !== undefined && sameCommit(at, current);
             console.log(
               `[review] ${logKey} worktree moved to ${at?.slice(0, 7) ?? "?"}${worktreeMoved ? "" : " (not the expected head)"}`,

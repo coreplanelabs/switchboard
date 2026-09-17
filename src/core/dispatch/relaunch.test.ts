@@ -1,7 +1,7 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { getAgent } from "../../agents/registry.js";
 import { ConfigStore } from "../../config.js";
 import { declaredProfile } from "../../config/profile.js";
@@ -16,6 +16,27 @@ import {
 import { bearerHashOf, RunBearerStore } from "../modelProxy/runBearers.js";
 import type { RepoContext } from "../repoContext.js";
 import { prepareRelaunch, RelaunchRefusedError } from "./relaunch.js";
+
+// The re-attach as the run's stop ends it: the provision stage's own answer
+// (`stopped`, provision.test.ts proves the mapping) handed to the relaunch,
+// with the context the relaunch passed kept for the test.
+const reattachState = vi.hoisted(() => ({
+  answer: undefined as { kind: "stopped" } | undefined,
+  contexts: [] as Array<{ stopSignal?: AbortSignal }>,
+}));
+vi.mock("./provision.js", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("./provision.js")>();
+  return {
+    ...mod,
+    reattachWorkspace: async (
+      deps: Parameters<typeof mod.reattachWorkspace>[0],
+      ctx: Parameters<typeof mod.reattachWorkspace>[1],
+    ) => {
+      reattachState.contexts.push({ stopSignal: ctx.stopSignal });
+      return reattachState.answer ?? mod.reattachWorkspace(deps, ctx);
+    },
+  };
+});
 
 // Feature: docs/reference/specs/harness.md item 6 (the survival clause's
 // ceiling), docs/reference/specs/model-proxy.md item 2 (a relaunch rotates),
@@ -126,7 +147,8 @@ describe("prepareRelaunch — the relaunch decided and prepared", () => {
     d.runBearers.consumeTurn("run-1");
     const { ctx, saves } = context({ facts: facts(0, bearerHashOf(old)), binding: { backend: "local" } });
     const decision = await prepareRelaunch(d, ctx);
-    if (decision.kind !== "relaunch") throw new Error(decision.interruption.message);
+    if (decision.kind !== "relaunch")
+      throw new Error(decision.kind === "refused" ? decision.interruption.message : decision.kind);
     // The row: one write, inside the rotation, the new hash and the count.
     expect(saves).toHaveLength(1);
     expect(saves[0]).toEqual({ ...facts(1), bearerHash: bearerHashOf(decision.bearer!) });
@@ -155,7 +177,8 @@ describe("prepareRelaunch — the relaunch decided and prepared", () => {
     const d = deps();
     const { ctx, saves } = context({ facts: facts(1, "ab".repeat(32)) });
     const decision = await prepareRelaunch({ config: d.config, dataDir: d.dataDir }, ctx);
-    if (decision.kind !== "relaunch") throw new Error(decision.interruption.message);
+    if (decision.kind !== "relaunch")
+      throw new Error(decision.kind === "refused" ? decision.interruption.message : decision.kind);
     expect(saves).toEqual([facts(2, "ab".repeat(32))]);
     expect(decision.bearer).toBeUndefined();
     expect(decision.round).toBeUndefined();
@@ -219,6 +242,27 @@ describe("prepareRelaunch — the relaunch decided and prepared", () => {
     expect(saves).toEqual([]);
     expect(d.runBearers.verify(old).ok).toBe(true);
     expect(d.runBearers.grantOf("run-1")?.bearers).toBe(1);
+  });
+
+  it("the run's hard stop rides into the re-attach, and a stop that ended its wait is the decision `stopped`, before the rotation: nothing is written, the bearers stand, nothing relaunches and nothing restarts", async () => {
+    const d = deps();
+    const old = grant(d.runBearers);
+    const control = new AbortController();
+    reattachState.answer = { kind: "stopped" };
+    try {
+      const { ctx, saves } = context({
+        binding: { backend: "resident", workspace: "/workspace/threads/t/main", user: "worker2" },
+        stopSignal: control.signal,
+      });
+      const decision = await prepareRelaunch(d, ctx);
+      expect(decision).toEqual({ kind: "stopped" });
+      expect(reattachState.contexts.at(-1)?.stopSignal).toBe(control.signal);
+      expect(saves).toEqual([]);
+      expect(d.runBearers.verify(old).ok).toBe(true);
+      expect(d.runBearers.grantOf("run-1")?.bearers).toBe(1);
+    } finally {
+      reattachState.answer = undefined;
+    }
   });
 
   it("a row write that throws inside the rotation propagates as the failure it is: nothing is relaunched, and the store keeps both secrets verifying", async () => {

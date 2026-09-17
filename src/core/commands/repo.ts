@@ -11,7 +11,7 @@ import {
   type JsonObject,
   type JsonValue,
 } from "../commandRegistry.js";
-import type { Operations, OpName } from "../operations.js";
+import type { OperationResult, Operations, OpName } from "../operations.js";
 import {
   parseSlug,
   repoResourceId,
@@ -585,8 +585,10 @@ function defineOp(op: Extract<OpName, "test" | "build">) {
       const ops = await deps.repo.operations(caller);
       if (!ops) throw new CommandError("unavailable", NO_OPS_BACKEND_MESSAGE);
       const req = { repo: args.slug, ...(args.ref !== undefined ? { ref: args.ref } : {}) };
-      const result = await ops.run(op, req).catch((err: unknown) => ({
-        kind: "error" as const,
+      // A throw is the backend's error outcome too — the same shape, so the
+      // reader below judges one type, not a union of two `error` variants.
+      const result = await ops.run(op, req).catch((err: unknown): OperationResult => ({
+        kind: "error",
         message: err instanceof Error ? err.message : String(err),
       }));
       switch (result.kind) {
@@ -610,7 +612,15 @@ function defineOp(op: Extract<OpName, "test" | "build">) {
             `\`${args.slug}\` is not onboarded as a resident, so \`repo ${op}\` has nothing to run against — \`repo onboard ${args.slug}\` first, or ask the coding agent directly.`,
           );
         case "error":
-          throw new CommandError("unavailable", result.message);
+          // The backend's one signal for a platform blip is the field; the
+          // words are this reader's, so a resident unavailable for a moment is
+          // told apart from a failure in the op.
+          throw new CommandError(
+            "unavailable",
+            result.transient === true
+              ? `${result.message} — the resident was unavailable for a moment; re-run the command`
+              : result.message,
+          );
       }
     },
   });

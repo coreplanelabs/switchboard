@@ -3374,12 +3374,12 @@ describe("the relaunch ceiling — the mid-run re-attach spike (the record's fir
     // recorded local backend answers the thread's own directory, made once.
     const dir = localWorkspaceDir(workspaceDir, THREAD);
     const first = await reattachWorkspace(provisionDeps, { ...attachCtx, reattach: { backend: "local" } });
-    if (first.kind !== "attached") throw new Error(first.why);
+    if (first.kind !== "attached") throw new Error(first.kind === "reattach_refused" ? first.why : first.kind);
     expect(first.round.selection.backend).toBe("local");
     expect(existsSync(dir)).toBe(true);
     expect((await first.round.selection.executor.exec("pwd")).trim().endsWith("slack_CX_1.0")).toBe(true);
     const again = await reattachWorkspace(provisionDeps, { ...attachCtx, reattach: { backend: "local" } });
-    if (again.kind !== "attached") throw new Error(again.why);
+    if (again.kind !== "attached") throw new Error(again.kind === "reattach_refused" ? again.why : again.kind);
     expect((await again.round.selection.executor.exec("pwd")).trim()).toBe(
       (await first.round.selection.executor.exec("pwd")).trim(),
     );

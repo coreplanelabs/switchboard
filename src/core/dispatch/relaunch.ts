@@ -59,6 +59,10 @@ export interface RelaunchContext {
   facts: HarnessFacts | undefined;
   /** The run's recorded workspace, re-attached before the process starts; none for a run without one. */
   binding: WorkspaceBinding | undefined;
+  /** The run's hard stop (`run.control.hardSignal`): it rides into the re-attach's
+   *  wake wait, so a stop while the replacement is being re-attached ends it at
+   *  once and the run ends stopped, never relaunched (execution.md item 9). */
+  stopSignal?: AbortSignal;
   /** The row's write for the harness facts — issued inside the rotation, as its contract requires. */
   saveFacts: (facts: HarnessFacts) => void;
 }
@@ -73,7 +77,9 @@ export type RelaunchDecision =
       /** The re-attached round, whose executor the run holds from here; none for a run without a workspace. */
       round?: RoundWorkspace;
     }
-  | { kind: "refused"; interruption: HarnessInterruptedError };
+  | { kind: "refused"; interruption: HarnessInterruptedError }
+  /** The run's own stop ended the re-attach: nothing is written or rotated, and the run ends stopped. */
+  | { kind: "stopped" };
 
 /**
  * The relaunch, decided and prepared: refused by name, or the resume the
@@ -123,7 +129,11 @@ export async function prepareRelaunch(
       root: ctx.root,
       clock: ctx.clock,
       reattach: ctx.binding,
+      ...(ctx.stopSignal !== undefined ? { stopSignal: ctx.stopSignal } : {}),
     });
+    // The stop that ended the re-attach's wait is the run's end, decided before
+    // the rotation: nothing is written, the bearers stand, nothing relaunches.
+    if (reattached.kind === "stopped") return { kind: "stopped" };
     if (reattached.kind === "reattach_refused")
       return refuse(
         `the run's workspace could not be re-attached in the replacement container (${reattached.why}); the run restarts from its request as a new run in this thread`,

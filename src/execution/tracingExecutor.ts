@@ -1,6 +1,6 @@
 import type { Backend } from "../core/trace/attrs.js";
 import type { Span } from "../core/trace/types.js";
-import type { ExecOptions, Executor, ReleaseMode, ReleaseResult } from "./executor.js";
+import type { ExecOptions, Executor, MoveOptions, ReleaseMode, ReleaseResult } from "./executor.js";
 
 // The executor as the run's spans see it (docs/reference/specs/tracing.md): every
 // operation a tool asks of the workspace runs inside a log-only `exec.*` span
@@ -12,7 +12,7 @@ import type { ExecOptions, Executor, ReleaseMode, ReleaseResult } from "./execut
 
 export class TracingExecutor implements Executor {
   release?: (mode: ReleaseMode) => Promise<ReleaseResult>;
-  moveTo?: (sha: string) => Promise<{ sha: string }>;
+  moveTo?: (sha: string, opts?: MoveOptions) => Promise<{ sha: string }>;
   readBytes?: (path: string) => Promise<Uint8Array>;
 
   constructor(
@@ -23,7 +23,9 @@ export class TracingExecutor implements Executor {
     const innerRelease = inner.release?.bind(inner);
     if (innerRelease) this.release = (mode) => this.timed("exec.release", (s) => innerRelease(mode, { span: s }));
     const innerMoveTo = inner.moveTo?.bind(inner);
-    if (innerMoveTo) this.moveTo = (sha) => this.timed("exec.move_to", (s) => innerMoveTo(sha, { span: s }));
+    // The move's options ride through (the round's stop, `MoveOptions.signal`); only the span is this wrapper's.
+    if (innerMoveTo)
+      this.moveTo = (sha, opts) => this.timed("exec.move_to", (s) => innerMoveTo(sha, { ...opts, span: s }));
     const innerReadBytes = inner.readBytes?.bind(inner);
     if (innerReadBytes)
       this.readBytes = (path) => this.timed("exec.read_bytes", (s) => innerReadBytes(path, { span: s }));

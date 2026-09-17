@@ -24,6 +24,7 @@ import {
   withTimeout,
   isRuntimeUnreachableReason,
   isRuntimeUnreachableSignal,
+  selfAndCauses,
   RUNTIME_UNREACHABLE_DOWN_AT,
   RUNTIME_UNREACHABLE_RECREATE_AT,
   RUNTIME_UNREACHABLE_STOP_AT,
@@ -37,6 +38,7 @@ import {
 } from "./residentRefresh.js";
 import { DISK_FULL_FREE_KIB } from "./residentDisk.js";
 import { degradedIsServiceable } from "./residentState.js";
+import { installedSdkSource } from "./testing/installedSdkSource.js";
 
 const require = createRequire(import.meta.url);
 
@@ -753,14 +755,19 @@ describe("planWakeDepsBudget (item 61 PR B: the wake's deps materialization live
   });
 });
 
-/** The installed SDK's dist, as text (its exports map hides package.json). */
-function installedSdkSource(): string {
-  const dist = path.dirname(require.resolve("@cloudflare/sandbox"));
-  return readdirSync(dist)
-    .filter((f) => f.endsWith(".js"))
-    .map((f) => readFileSync(path.join(dist, f), "utf8"))
-    .join("\n");
-}
+describe("selfAndCauses — the one cause-chain walker every reader of a throw's chain shares", () => {
+  it("yields the throw and each `cause` beneath it in order, stops at a link that is null or undefined, is bounded at eight links, and yields a non-object throw alone", () => {
+    const inner = new Error("inner");
+    const outer = new Error("outer", { cause: new Error("middle", { cause: inner }) });
+    expect([...selfAndCauses(outer)].map((l) => (l as Error).message)).toEqual(["outer", "middle", "inner"]);
+    expect([...selfAndCauses(new Error("no cause"))]).toHaveLength(1);
+    expect([...selfAndCauses("a string")]).toEqual(["a string"]);
+    expect([...selfAndCauses(null)]).toEqual([]);
+    let deep: Error = new Error("0");
+    for (let i = 1; i < 12; i++) deep = new Error(String(i), { cause: deep });
+    expect([...selfAndCauses(deep)]).toHaveLength(8);
+  });
+});
 
 describe("runtime-unreachable (a container whose control port never answers is named, never a command failure)", () => {
   // The production failure, verbatim from the resident Worker's log: every
@@ -784,6 +791,10 @@ describe("runtime-unreachable (a container whose control port never answers is n
     expect(isRuntimeUnreachableSignal(production)).toBe(true);
     expect(isRuntimeUnreachableSignal({ name: "AbortError", message: "" })).toBe(true);
     expect(isRuntimeUnreachableSignal(new Error("The operation was aborted"))).toBe(true);
+    // The exact sentence with a period, as a wrapper might copy it; a wrapper
+    // that pasted it into a longer message is read by its `cause`, not its text.
+    expect(isRuntimeUnreachableSignal(new Error("The operation was aborted."))).toBe(true);
+    expect(isRuntimeUnreachableSignal(new Error("connect failed: The operation was aborted"))).toBe(false);
   });
 
   it("nothing else is: a command's own abort, a timeout, a replacement, a crash, a non-error", () => {

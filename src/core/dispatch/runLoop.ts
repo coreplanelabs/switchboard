@@ -32,7 +32,7 @@ import { harnessContainerFor } from "../harness/botHostContainer.js";
 import { workspaceBindingFor } from "../../execution/factory.js";
 import { isContainerGone } from "../harness/container.js";
 import { ModelPolicyRefusedError } from "../harness/pi/harness.js";
-import { softStopAnswer, timeBudgetAnswer } from "../harness/windDown.js";
+import { HARD_STOP_MESSAGE, softStopAnswer, timeBudgetAnswer } from "../harness/windDown.js";
 import { loopEndingOf, reviewPostedBefore, type LoopEnding } from "../runLedger/resume.js";
 import type { RouteDecided } from "./route.js";
 import {
@@ -926,6 +926,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               replaced: err,
               facts: lastFacts,
               binding: workspaceBinding,
+              stopSignal: run.control.hardSignal,
               saveFacts,
             });
           } catch (failed) {
@@ -943,6 +944,21 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             onEvent({ type: "run_note", kind: "sandbox_restarted", summary: decision.interruption.message });
             throw decision.interruption;
           }
+          if (decision.kind === "stopped") {
+            // An operator's hard stop ended the re-attach's wait: the run ends
+            // as a hard-stopped run does — the stop's one-line answer, the
+            // finally's `stopped_hard` — with no process relaunched and nothing
+            // restarted from the request. The registration left for the
+            // relaunch goes with it.
+            harnessDeps.registry.forget(run.id);
+            onEvent({
+              type: "run_note",
+              kind: "sandbox_restarted",
+              summary:
+                "the container was replaced under the run, and the run was stopped while its workspace was being re-attached in the replacement",
+            });
+            break;
+          }
           if (decision.round !== undefined) {
             // The run holds the re-attached round's executor and binding from
             // here: the next relaunch re-attaches what this one bound, and the
@@ -959,7 +975,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           harnessResume = decision.resume;
         }
       }
-      answer = harnessSession.answer;
+      // No session only when a stop ended the relaunch's re-attach: the stop's answer is the run's.
+      answer = harnessSession?.answer ?? HARD_STOP_MESSAGE;
     }
     // Reviewed-head settle (docs/reference/specs/agent-review.md items 8 + 12,
     // settleReviewedHead in reviewRound.ts): for a PR review, read the

@@ -30,6 +30,19 @@ export const DAY_MS = 24 * 60 * MINUTE_MS;
  *  which stamps the expiry on its own clock. */
 export const CONFIRMATION_TTL_MS = 10 * MINUTE_MS;
 
+/** How long a dispatch's FIRST attach to a resident — a fresh run's, or a
+ *  resumed run's re-attach to its recorded worktree — waits for the resident
+ *  to wake when the Worker typed its refusal as the platform's transient
+ *  (docs/reference/specs/execution.md item 9): a Durable Object reset or lost
+ *  under the attach clears in seconds, so a minute is generous, and far under
+ *  the wake ceiling a mid-run re-attach may take — the card is silent while
+ *  this wait runs, then names it. It bounds the PROBING: past it no further
+ *  probe is made and, with nothing bound, a fresh run falls cold and a resumed
+ *  run is refused, the wait named either way; a re-attach already opened
+ *  inside it runs to the attach's own timeout. The run's own stop ends any of
+ *  it at once. Read by the executor factory. */
+export const FIRST_ATTACH_WAIT_MS = MINUTE_MS;
+
 /** The presets that run the tool loop, and the one pipeline preset. */
 export const LOOP_PRESETS = ["general", "coding", "review", "research", "explore", "conductor"] as const;
 export type LoopPreset = (typeof LOOP_PRESETS)[number];

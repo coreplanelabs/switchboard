@@ -22,7 +22,8 @@ import { piRunPaths, RUN_BEARER_ENV } from "./harness/pi/process.js";
 import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
 import { makeExecutor } from "../execution/factory.js";
 import { InMemoryArtifactStore } from "../artifacts/store.js";
-import { ExecSandboxRestartedError } from "../execution/executor.js";
+import { ExecInfraError, ExecSandboxRestartedError } from "../execution/executor.js";
+import { classifyError } from "./trace/classify.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
 import type { ChannelIO, HistoryItem, RunReceipt, StatusUpdate } from "./types.js";
 import { activeRunCount, dispatch, dispatchClick, type CoreDeps, type DispatchOutcome } from "./dispatcher.js";
@@ -622,6 +623,146 @@ describe("executor provisioning by agent resources", () => {
     expect(replies.some((r) => r.includes("late"))).toBe(false);
     expect(statuses.at(-1)?.title).toContain("⛔");
     expect(registry.listActive()[0].stop).toEqual({ mode: "hard", state: "stopped" });
+  });
+
+  // Feature: docs/reference/specs/execution.md item 9 — the run's stop rides
+  // into the first attach's wait, and a stop that ends the attach ends the
+  // request as what it is: stopped before the run started, not a setup failure.
+  it("a hard stop during the first attach's wait ends the request `stopped` — the card says the run was stopped before it started, no error reply, no cold fallback — never `setup_failed`", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const registry = new RunRegistry({ genId: () => "r1", genToken: () => "t1" });
+    const provider: Provider = {
+      name: "never",
+      complete: async () => {
+        throw new Error("the provider must not be called: the run never started");
+      },
+    };
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    const { io, replies, statuses } = fakeIO();
+    let stopSignal: AbortSignal | undefined;
+    // The factory's attach waiting through a transient refusal, as it ends when
+    // the run's stop arrives: the stop's own typed error (`wakeStopped`).
+    vi.mocked(makeExecutor).mockImplementationOnce(
+      (_opts, ctx) =>
+        new Promise((_resolve, reject) => {
+          stopSignal = ctx.stopSignal;
+          ctx.stopSignal?.addEventListener(
+            "abort",
+            () =>
+              reject(
+                classifyError(
+                  new ExecInfraError(
+                    "resident /attach: stopped waiting for the resident to wake: the run was stopped",
+                    "aborted",
+                  ),
+                  { kind: "transport" },
+                ),
+              ),
+            { once: true },
+          );
+        }),
+    );
+    const run = dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    while (!stopSignal) await new Promise((r) => setTimeout(r, 5));
+    expect(registry.requestStop("r1", "t1", "hard")).toEqual({ ok: true, mode: "hard" });
+    const ended = await run;
+    expect(ended.status).toBe("stopped");
+    const last = JSON.stringify(statuses.at(-1));
+    expect(last).toContain("⛔");
+    expect(last).toContain("stopped before the run started");
+    expect(last).not.toContain("setup failed");
+    expect(replies).toEqual([]);
+    // A run that never started is not listed as one that did.
+    expect(registry.listActive()).toEqual([]);
+  });
+
+  it("a follow-up queued during the first attach's wait is dropped with the ⛔ note when the stop ends the attach — never handed on as a fresh run on the stopped thread", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    let ids = 0;
+    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
+    const provider: Provider = {
+      name: "never",
+      complete: async () => {
+        throw new Error("the provider must not be called: no run started");
+      },
+    };
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.admission = new ThreadAdmission();
+    const first = fakeIO();
+    let stopSignal: AbortSignal | undefined;
+    vi.mocked(makeExecutor).mockImplementationOnce(
+      (_opts, ctx) =>
+        new Promise((_resolve, reject) => {
+          stopSignal = ctx.stopSignal;
+          ctx.stopSignal?.addEventListener(
+            "abort",
+            () =>
+              reject(
+                classifyError(
+                  new ExecInfraError(
+                    "resident /attach: stopped waiting for the resident to wake: the run was stopped",
+                    "aborted",
+                  ),
+                  { kind: "transport" },
+                ),
+              ),
+            { once: true },
+          );
+        }),
+    );
+    const run = dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), first.io);
+    while (!stopSignal) await new Promise((r) => setTimeout(r, 5));
+    const second = fakeIO();
+    await dispatch(deps, msg("and also the numbers", "slack:UADMIN"), second.io);
+    expect(second.replies[0]).toMatch(/^↪/);
+    expect(registry.requestStop("r1", "t", "hard")).toEqual({ ok: true, mode: "hard" });
+    const ended = await run;
+    expect(ended.status).toBe("stopped");
+    expect(second.replies).toHaveLength(2);
+    expect(second.replies[1]).toMatch(/^⛔ .*stopped before it read this follow-up/);
+    expect(first.replies).toEqual([]);
+    expect(registry.listActive()).toEqual([]);
+  });
+
+  it("a provisioning failure beside a pending stop is the failure, not the stop: the card says setup failed and the error is replied — only the executor's typed aborted error reads as the stop", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const registry = new RunRegistry({ genId: () => "r1", genToken: () => "t1" });
+    const provider: Provider = {
+      name: "never",
+      complete: async () => {
+        throw new Error("the provider must not be called: the run never started");
+      },
+    };
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    const { io, replies, statuses } = fakeIO();
+    let stopSignal: AbortSignal | undefined;
+    vi.mocked(makeExecutor).mockImplementationOnce(
+      (_opts, ctx) =>
+        new Promise((_resolve, reject) => {
+          stopSignal = ctx.stopSignal;
+          ctx.stopSignal?.addEventListener(
+            "abort",
+            () => reject(new Error("execution.resident is configured but RESIDENT_OPERATOR_TOKEN is not set")),
+            { once: true },
+          );
+        }),
+    );
+    const run = dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    while (!stopSignal) await new Promise((r) => setTimeout(r, 5));
+    expect(registry.requestStop("r1", "t1", "hard")).toEqual({ ok: true, mode: "hard" });
+    const ended = await run;
+    expect(ended.status).not.toBe("stopped");
+    const last = JSON.stringify(statuses.at(-1));
+    expect(last).toContain("setup failed");
+    expect(last).not.toContain("stopped before the run started");
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("RESIDENT_OPERATOR_TOKEN is not set");
   });
 
   it("a soft stop keeps the normal release policy (if-idle for coding) and marks the card stopped", async () => {
@@ -2898,6 +3039,31 @@ describe("review post-step", () => {
         .content.map((p) => (p.type === "text" ? p.text : ""))
         .join("");
       expect(followUp).toContain("git fetch origin");
+    });
+
+    it("the worktree move carries the run's hard stop: the signal `moveTo` receives is the run's own, so a stop requested while the move waits on the resident ends it", async () => {
+      const provider = turnsProvider([{ answer: "first" }, { answer: "second" }]);
+      const registry = new RunRegistry({ genId: () => "r1", genToken: () => "t1" });
+      const seen: { signal?: unknown; abortedByStop?: boolean } = {};
+      vi.mocked(makeExecutor).mockResolvedValueOnce({
+        executor: {
+          exec: async (cmd: string) => (/git rev-parse HEAD/.test(cmd) ? `${PR_HEAD}\n` : ""),
+          readFile: async () => "",
+          writeFile: async () => "",
+          moveTo: async (_sha: string, o?: { signal?: AbortSignal }) => {
+            seen.signal = o?.signal;
+            registry.requestStop("r1", "t1", "hard");
+            seen.abortedByStop = o?.signal?.aborted;
+            return { sha: OTHER_HEAD };
+          },
+        } as never,
+      });
+      const { deps } = setup({ provider, heads: [OTHER_HEAD], commits: CHANGED });
+      deps.runRegistry = registry;
+      const { io } = fakeIO();
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+      expect(seen.signal).toBeInstanceOf(AbortSignal);
+      expect(seen.abortedByStop).toBe(true);
     });
 
     it("reviewed head ≠ resolved head but = the PR's CURRENT head (the resident re-attached at a newer tip) → posted, pinned to it, no refusal", async () => {
@@ -10563,6 +10729,102 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(ledger.finished.get("run-old")?.status).toBe("completed");
   });
 
+  // Feature: execution.md item 9 over run-history.md item 54 — a hard stop that
+  // ends a resumed run's re-attach wait ends the request `stopped`, and the
+  // adopted row closes with the stop's status, not `interrupted` with a note
+  // that reads like a crash: the row is what the run page and the sweep read.
+  it("a resumed run hard-stopped while its re-attach waits through a transient refusal ends `stopped` and closes its row `stopped_hard` — never `interrupted`, never re-dispatched", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    let stopRun: (() => void) | undefined;
+    residentFetchStub({
+      attach: () => {
+        // The re-attach meets a blip the Worker typed transient; the operator stops the run in that wait.
+        stopRun?.();
+        return new Response(
+          JSON.stringify({ error: "attach-failed: Network connection lost.", status: 500, transient: true }),
+          { status: 200 },
+        );
+      },
+    });
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const request = msg("agent:coding fix it", "slack:UADMIN");
+    await ledger.claim({
+      runId: "run-old",
+      threadKey: "slack:CX:1.0",
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      meta: {
+        channelId: "slack:CX",
+        userId: "slack:UADMIN",
+        threadKey: "slack:CX:1.0",
+        agent: "coding",
+        model: "anthropic/coding-model",
+        repo: "acme/api",
+        ref: "main",
+        request: durableInboxMessage(request, request.text, 4_000),
+      },
+      system: "sys",
+      tools: [],
+      state: { binding: { backend: "resident", workspace: "/workspace/threads/t/main", user: "worker2" } },
+    });
+    await ledger.seed("run-old", "gen-OLD", [
+      { idx: 0, message: { role: "user", content: [{ type: "text", text: "fix it" }] } },
+    ]);
+    await ledger.step(
+      "run-old",
+      "gen-OLD",
+      {
+        step: 0,
+        seq: 0,
+        turnIndex: 1,
+        inFlight: [],
+        inboxConsumedSeq: 0,
+        remainingMs: 20 * 60_000,
+        turn: 0,
+        iteration: 0,
+      },
+      [],
+    );
+    ledger.live.get("run-old")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+    const provider = capturingProvider("must not run");
+    const { deps, registry, writer } = wired(provider, { ledger, yaml: RESIDENT_YAML_FIXTURE });
+    stopRun = () => void registry.requestStop("run-old", "tok", "hard");
+    const plan = planResume({
+      transcript: {
+        complete: true,
+        compactions: [],
+        turns: 1,
+        messages: [{ role: "user", content: [{ type: "text", text: "fix it" }] }],
+      },
+      lastStep: reclaimed.lastStep!,
+      tools: knownToolsFor(getAgent("coding")),
+    });
+    if (plan.kind !== "resume") throw new Error(plan.kind === "interrupted" ? plan.why : plan.kind);
+    const { io, replies } = ioWithCard();
+    const outcome = await dispatch(deps, resumeMessage(reclaimed.row, "fix it"), io, {
+      resume: {
+        row: reclaimed.row,
+        lastStep: reclaimed.lastStep!,
+        plan,
+        events: [],
+        lastSeq: 0,
+        repoCtx: { repo: "acme/api", ref: "main" },
+        inbox: [],
+      },
+    });
+    await writer.settled();
+    expect(outcome.status).toBe("stopped");
+    expect(replies.some((r) => r.startsWith("❌"))).toBe(false);
+    expect(provider.requests).toEqual([]);
+    expect(registry.listActive()).toEqual([]);
+    expect(ledger.live.has("run-old")).toBe(false);
+    expect(ledger.finished.get("run-old")?.status).toBe("stopped_hard");
+  });
+
   it("a resume whose recorded resident refuses to reuse the worktree provisions no sandbox: the resumed row closes interrupted with the note that says why, and the request runs again as a new run once the thread is free (item 54)", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
@@ -10847,6 +11109,53 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(ledger.live.size).toBe(0);
     expect(registry.getById("run-1")).toMatchObject({ finished: true, status: "completed" });
     expect(registry.getById("run-2")).toBeNull();
+  });
+
+  // Feature: execution.md item 9 on harness-pi.md item 16 — the run's hard stop
+  // rides into the relaunch's re-attach: a stop while the replacement is being
+  // re-attached ends the wait at once, and the run ends as a hard-stopped run
+  // does — never relaunched, never restarted from its request, never failed.
+  it("a hard stop while the relaunch re-attaches the run's worktree ends the run stopped: the stop's answer, the record `stopped_hard` with the note saying so, no pi relaunched, no second run", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    let stopRun: (() => void) | undefined;
+    const { deps, provider, registry, writer, containers } = replacedContainerWorld(ledger, {
+      attach: (body) => {
+        if (body.reuse !== true)
+          return new Response(
+            JSON.stringify({ workspace: "/workspace/threads/t/main", ref: "main", sha: "abc", user: "worker2" }),
+            { status: 200 },
+          );
+        // The relaunch's re-attach meets a blip the Worker typed transient; the operator stops the run in that wait.
+        stopRun?.();
+        return new Response(
+          JSON.stringify({ error: "attach-failed: Network connection lost.", status: 500, transient: true }),
+          { status: 200 },
+        );
+      },
+    });
+    stopRun = () => void registry.requestStop("run-1", "tok-1", "hard");
+    const { io, replies } = ioWithCard();
+    const outcome = await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    await writer.settled();
+    expect(outcome).toEqual({ status: "stopped" });
+    const record = ledger.finished.get("run-1");
+    expect(record?.status).toBe("stopped_hard");
+    const notes = (record?.events ?? []).filter((e) => e.type === "run_note") as Array<{
+      kind: string;
+      summary: string;
+    }>;
+    expect(notes.filter((n) => n.kind === "sandbox_restarted").map((n) => n.summary)).toEqual([
+      "the container running pi was replaced (vm-fake → vm-new; the executor said: the sandbox restarted under the run (waited 42 s))",
+      "the container was replaced under the run, and the run was stopped while its workspace was being re-attached in the replacement",
+    ]);
+    expect(notes.some((n) => n.kind === "resumed")).toBe(false);
+    expect(replies.some((r) => r.startsWith("❌"))).toBe(false);
+    expect(replies.at(-1)).toContain("aborted by an operator");
+    // No pi in the replacement: the first container's alone, and no second run.
+    expect(containers).toHaveLength(1);
+    expect(provider.requests).toHaveLength(0);
+    expect(registry.getById("run-2")).toBeNull();
+    expect(ledger.live.size).toBe(0);
   });
 
   // Feature: docs/reference/specs/thread-admission.md item 5, harness-pi.md

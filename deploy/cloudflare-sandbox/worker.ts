@@ -49,7 +49,11 @@ import {
 import { envFromRequest } from "../../src/execution/sandboxEnv.js";
 import { IdleGuard, type IdleGuardHost } from "../../src/execution/sandboxIdle.js";
 import { StartGate, type StartGateHost, type StartingCause } from "../../src/execution/sandboxStart.js";
-import { RUNTIME_REPLACEMENT_WORDING, isRuntimeUnreachableSignal } from "../../src/execution/residentRefresh.js";
+import {
+  RUNTIME_REPLACEMENT_WORDING,
+  isRuntimeUnreachableSignal,
+  selfAndCauses,
+} from "../../src/execution/residentRefresh.js";
 import {
   fleetBusyAnswer,
   fleetBusyExecAnswer,
@@ -148,15 +152,6 @@ const RUNTIME_REPLACED_REASONS = new Set([
 /** The transport losses that mean the same: the control connection's peer
  *  closed (a runtime crash or stop), the socket failed, the upgrade failed. */
 const RPC_TRANSPORT_LOSS_KINDS = new Set(["peer_closed", "connection_failed", "upgrade_failed", "session_disposed"]);
-
-/** `err` and its `cause` chain, bounded like the SDK's own walk. */
-function* selfAndCauses(err: unknown): Generator<unknown> {
-  let link: unknown = err;
-  for (let depth = 0; link !== null && link !== undefined && depth < 8; depth++) {
-    yield link;
-    link = typeof link === "object" ? (link as { cause?: unknown }).cause : undefined;
-  }
-}
 
 /** Did the container's runtime change under the command? Typed first (the
  *  Durable Object sees the SDK's own classes, so `instanceof` holds here), the

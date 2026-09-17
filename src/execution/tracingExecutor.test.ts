@@ -66,12 +66,20 @@ describe("TracingExecutor", () => {
       readFile: async () => "x",
       writeFile: async () => "x",
       release: async (mode) => ({ released: true, mode }) as never,
-      moveTo: async (sha) => ({ sha }),
+      moveTo: async (sha, opts) => {
+        moveOpts = opts;
+        return { sha };
+      },
       readBytes: async () => new Uint8Array([9]),
     };
+    let moveOpts: { signal?: AbortSignal; span?: unknown } | undefined;
     const { log, call } = traced();
     const ex = new TracingExecutor(inner, call);
-    expect(await ex.moveTo!("abc123")).toEqual({ sha: "abc123" });
+    const control = new AbortController();
+    expect(await ex.moveTo!("abc123", { signal: control.signal })).toEqual({ sha: "abc123" });
+    // The round's stop reaches the inner executor through the wrapper, beside the wrapper's span.
+    expect(moveOpts?.signal).toBe(control.signal);
+    expect(moveOpts?.span).toBeDefined();
     await ex.release!("always");
     expect(Array.from(await ex.readBytes!("shot.png"))).toEqual([9]);
     await expect(ex.exec("boom")).rejects.toBeInstanceOf(ExecInfraError);
