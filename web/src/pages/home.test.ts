@@ -505,44 +505,95 @@ describe("AppShell — the mark is the way home (item 1)", () => {
 describe("HomePage — the / palette and the placeholder (item 8)", () => {
   const COMMANDS = [
     { chat: "help", describe: "What Switchboard can do, and how to ask" },
-    { chat: "config set", describe: "Set a scope's agent, model, effort or boundary" },
+    {
+      chat: "config set",
+      describe: "Set a scope's agent, model, effort or boundary",
+      args: ["<scope>"],
+      options: [{ form: "--effort <level>", describe: "low, medium, high" }],
+    },
+    { chat: "config show", describe: "The agent and model a run here gets" },
     { chat: "mcp add", describe: "Add an MCP server to a tier" },
   ];
+  const labels = (wrapper: ReturnType<typeof mountApp>) =>
+    wrapper.findAll("[data-testid=palette] .item").map((b) => b.attributes("data-label"));
+  const ghost = (wrapper: ReturnType<typeof mountApp>) => {
+    const g = wrapper.find("[data-testid=ghost]");
+    return g.exists() ? [g.find(".text-dimmed").text(), g.attributes("data-acceptable")] : null;
+  };
+  const value = (wrapper: ReturnType<typeof mountApp>) =>
+    (wrapper.find("textarea.box").element as HTMLTextAreaElement).value;
 
-  it("`/` opens the palette with every command; typing narrows it; the arrows move; Enter inserts the chat form and closes it", async () => {
+  it("`/` lists the groups with the best match as ghost text; a settled word opens the next level; Tab accepts the ghost; the arrows change it", async () => {
     const wrapper = mountApp(HomePage, { seed: seed({ commands: COMMANDS }) });
     expect(wrapper.find("[data-testid=palette]").exists()).toBe(false);
     const box = await type(wrapper, "/");
-    expect(wrapper.findAll("[data-testid=palette] .item").map((b) => b.attributes("data-chat"))).toEqual([
-      "help",
-      "config set",
-      "mcp add",
-    ]);
-    await box.setValue("/mc");
-    expect(wrapper.findAll("[data-testid=palette] .item").map((b) => b.attributes("data-chat"))).toEqual(["mcp add"]);
-    await box.setValue("/");
+    expect(labels(wrapper)).toEqual(["/help", "/config", "/mcp"]);
+    expect(ghost(wrapper)).toEqual(["help", "1"]);
+    await box.setValue("/co");
+    expect(labels(wrapper)).toEqual(["/config"]);
+    expect(ghost(wrapper)).toEqual(["nfig", "1"]);
+    // Tab takes the ghost and opens the verbs; the palette stays.
+    await box.trigger("keydown", { key: "Tab" });
+    await nextTick();
+    expect(value(wrapper)).toBe("/config ");
+    expect(labels(wrapper)).toEqual(["/config set", "/config show"]);
+    expect(ghost(wrapper)).toEqual(["set", "1"]);
     await box.trigger("keydown", { key: "ArrowDown" });
-    expect(wrapper.find('[data-testid=palette] .item[aria-selected="true"]').attributes("data-chat")).toBe(
-      "config set",
+    expect(wrapper.find('[data-testid=palette] .item[aria-selected="true"]').attributes("data-label")).toBe(
+      "/config show",
     );
+    expect(ghost(wrapper)).toEqual(["show", "1"]);
+    await box.trigger("keydown", { key: "ArrowUp" });
     await box.trigger("keydown", { key: "Enter", shiftKey: false });
     await nextTick();
-    expect((wrapper.find("textarea.box").element as HTMLTextAreaElement).value).toBe("config set ");
-    expect(wrapper.find("[data-testid=palette]").exists()).toBe(false);
-    // Nothing was sent: the slash was a lookup, not a message.
+    // Enter accepted the match, sent nothing, and the command's usage is the ghost now — not acceptable.
+    expect(value(wrapper)).toBe("/config set ");
     expect(wrapper.find(".turn.person").exists()).toBe(false);
+    expect(labels(wrapper)).toEqual(["/config set"]);
+    expect(wrapper.find("[data-testid=palette] .item").attributes("data-kind")).toBe("usage");
+    expect(ghost(wrapper)).toEqual(["<scope> [--effort <level>]", "0"]);
+    // A dash completes the options; a used positional leaves the usage.
+    await box.setValue("/config set me --e");
+    expect(labels(wrapper)).toEqual(["--effort <level>"]);
+    expect(ghost(wrapper)).toEqual(["ffort", "1"]);
+    await box.trigger("keydown", { key: "Tab" });
+    await nextTick();
+    expect(value(wrapper)).toBe("/config set me --effort ");
   });
 
-  it("Escape closes the palette; a tap on a row inserts it; a slash mid-sentence opens nothing; no match says so", async () => {
+  it("→ at the end of the text accepts the ghost; Enter on a complete command sends it without the slash", async () => {
+    const calls = fakeFetch({ status: 200, body: { reply: "Updated your scope." } });
+    const wrapper = mountApp(HomePage, { seed: seed({ commands: COMMANDS }) });
+    const box = await type(wrapper, "/co");
+    const el = box.element as HTMLTextAreaElement;
+    el.setSelectionRange(el.value.length, el.value.length);
+    await box.trigger("keydown", { key: "ArrowRight" });
+    await nextTick();
+    expect(value(wrapper)).toBe("/config ");
+    await box.setValue("/config set me --effort low");
+    expect(ghost(wrapper)).toBeNull();
+    await box.trigger("keydown", { key: "Enter", shiftKey: false });
+    await flush();
+    expect(calls).toEqual([{ url: "/threads/conv-1/send", body: { text: "config set me --effort low" } }]);
+    expect(wrapper.find(".turn.person .bubble").text()).toBe("config set me --effort low");
+  });
+
+  it("Escape closes the palette until the next word; a tap on a row accepts it; a slash mid-sentence or a word that settles on nothing opens nothing; no match at a level says so", async () => {
     const wrapper = mountApp(HomePage, { seed: seed({ commands: COMMANDS }) });
     const box = await type(wrapper, "/co");
     await box.trigger("keydown", { key: "Escape" });
     expect(wrapper.find("[data-testid=palette]").exists()).toBe(false);
+    await box.setValue("/con");
+    expect(wrapper.find("[data-testid=palette]").exists()).toBe(false);
+    await box.setValue("/config ");
+    expect(wrapper.find("[data-testid=palette]").exists()).toBe(true);
     await box.setValue("/he");
-    await wrapper.find('[data-testid=palette] .item[data-chat="help"]').trigger("click");
+    await wrapper.find('[data-testid=palette] .item[data-insert="help"]').trigger("click");
     await nextTick();
-    expect((wrapper.find("textarea.box").element as HTMLTextAreaElement).value).toBe("help ");
+    expect(value(wrapper)).toBe("/help ");
     await box.setValue("review /x");
+    expect(wrapper.find("[data-testid=palette]").exists()).toBe(false);
+    await box.setValue("/zzz go");
     expect(wrapper.find("[data-testid=palette]").exists()).toBe(false);
     await box.setValue("/zzz");
     expect(wrapper.find("[data-testid=palette]").text()).toContain('No command matches "/zzz"');

@@ -2,8 +2,8 @@ import { randomBytes } from "node:crypto";
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { allOf, authorize, ownedBy, type Actor } from "../core/authz/index.js";
 import type { Capabilities } from "../core/capabilities.js";
-import type { CommandDef, CommandInvoker } from "../core/commandRegistry.js";
-import { chatForm } from "../core/commandSurface.js";
+import { acceptsUndefined, type CommandDef, type CommandInvoker } from "../core/commandRegistry.js";
+import { chatForm, helpRows } from "../core/commandSurface.js";
 import { dispatch as realDispatch, type CoreDeps } from "../core/dispatcher.js";
 import { startRequestRoot } from "../core/requestTrace.js";
 import type { RunRegistry } from "../core/runRegistry.js";
@@ -206,7 +206,23 @@ export function paletteCommands(list: readonly CommandDef<unknown>[], actor: Act
   return list
     .filter((cmd) => cmd.surfaces?.chat !== false)
     .filter((cmd) => authorize(actor, cmd.action, { type: "command", id: cmd.id }).allow)
-    .map((cmd) => ({ chat: chatForm(cmd.id), describe: cmd.describe }))
+    .map((cmd): HomeCommandSeed => {
+      // The words that may follow the command, as `help` prints them: the
+      // completer offers them level by level after the verb.
+      const rows = helpRows(cmd);
+      const args = (cmd.args ?? []).map((a) => {
+        const name = a.rest ? `${a.name}…` : a.name;
+        return acceptsUndefined(a.schema) ? `[${name}]` : `<${name}>`;
+      });
+      return {
+        chat: chatForm(cmd.id),
+        describe: cmd.describe,
+        ...(args.length > 0 ? { args } : {}),
+        ...(rows.options.length > 0
+          ? { options: rows.options.map((o) => ({ form: o.form, describe: o.describe })) }
+          : {}),
+      };
+    })
     .sort((a, b) => a.chat.localeCompare(b.chat));
 }
 

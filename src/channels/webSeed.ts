@@ -216,11 +216,18 @@ export interface HomeSeed {
   commands: HomeCommandSeed[];
 }
 
-/** One row of the composer's `/` palette: the chat form to insert and one line on what it does. */
+/** One command as the composer's `/` completer walks it: the chat form, one line on
+ *  what it does, and the words that may follow it — its positional arguments as usage
+ *  forms (`<repo>`, `[scope]`) and its options as flag forms with their descriptions
+ *  (`--channel <id>`), the same rows `help` prints. */
 export interface HomeCommandSeed {
   /** The chat form, `<group> <verb>` (what the fast path recognizes at the start of a message). */
   chat: string;
   describe: string;
+  /** Positional arguments in order, as usage forms; absent when the command takes none. */
+  args?: string[];
+  /** Options as `--flag <type>` (or `--flag` for a boolean) with the option's own description. */
+  options?: { form: string; describe: string }[];
 }
 
 /** The admin /residents listing, passed through as received (the view renders

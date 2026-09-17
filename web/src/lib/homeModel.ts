@@ -140,40 +140,6 @@ export function shortcutFor(ev: {
   return null;
 }
 
-/** The `/` palette (rule 8): a message that is nothing but `/` and one word so
- *  far is a command being looked up; the word after the slash is the query.
- *  Anything else — prose, a second line, a slash mid-sentence — is not. */
-export function slashQuery(text: string): string | null {
-  const m = /^\/(\S*)$/.exec(text);
-  return m ? m[1] : null;
-}
-
-/** The palette's rows for a query: every command whose chat form or description
- *  matches the fuzzy filter, tightest first, the catalogue's order on ties. */
-export function filterCommands<T extends { chat: string; describe: string }>(
-  commands: readonly T[],
-  query: string,
-): T[] {
-  if (query === "") return [...commands];
-  return commands
-    .map((c, i) => {
-      const a = fuzzyScore(query, c.chat);
-      const b = fuzzyScore(query, c.describe);
-      const score = a === null ? b : b === null ? a : Math.min(a, b);
-      return { c, i, score };
-    })
-    .filter((x): x is { c: T; i: number; score: number } => x.score !== null)
-    .sort((a, b) => a.score - b.score || a.i - b.i)
-    .map((x) => x.c);
-}
-
-/** Picking a row replaces the `/query` with the command's chat form and a
- *  space, so the person types its arguments next; the slash never reaches the
- *  bot (the fast path reads `<group> <verb>` at the start of a message). */
-export function completeCommand(chat: string): string {
-  return `${chat} `;
-}
-
 /** The placeholder guides the hand (rule 8): what to ask while nothing is live,
  *  what the box does while a run is, and the one thing to do after a hand-back. */
 export function placeholderFor(mode: ComposerMode, hint?: string): string {

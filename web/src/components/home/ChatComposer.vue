@@ -1,14 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import type { HomeCommandSeed } from "@core/channels/webSeed.js";
-import {
-  completeCommand,
-  enterSubmits,
-  filterCommands,
-  placeholderFor,
-  slashQuery,
-  type ComposerMode,
-} from "../../lib/homeModel";
+import { enterSubmits, placeholderFor, type ComposerMode } from "../../lib/homeModel";
+import { acceptRow, slashGhost, slashState, type SlashRow } from "../../lib/slashCompleter";
 
 // The composer (docs/reference/specs/web-chat.md rules 5 and 8): one box, one
 // control. The box is focused on load and grows with its text to eight lines;
@@ -16,10 +10,13 @@ import {
 // ring (the one place the page borrows a little motion from the best chat
 // composers — a rotation of a gradient, no element moves). Its placeholder
 // guides the hand by state. Enter sends (or steers), Shift+Enter breaks a
-// line. `/` at the start opens the PALETTE: the chat commands the viewer may
-// run, each with the command's own description, filtered as they type; arrows
-// move, Enter or a tap inserts the chat form (the slash never reaches the bot),
-// Escape closes. The control is `send` while nothing is live in the
+// line. `/` at the start opens the PALETTE, a level-aware completer over the
+// chat commands the viewer may run (lib/slashCompleter.ts): `/` offers the
+// groups, `/config ` the verbs, `/config set ` the arguments and options; at
+// every level the best match is GHOST text after the caret, Tab or → accepts
+// it and moves on, the arrows change which match is the ghost, Enter accepts a
+// match or — once the words are a command — sends; Escape closes. The slash
+// never reaches the bot (the page strips it). The control is `send` while nothing is live in the
 // conversation, `stop` while a run is and the box is empty, `steer` while a run
 // is and there is text — never disabled while a run is live; its icon
 // crossfades between the three. The hint line under the box is always laid out
@@ -61,24 +58,35 @@ const hintText = computed(() => {
 });
 const hintShown = computed(() => focused.value || props.hint !== undefined || props.mode !== "send");
 
-// ---- the palette ---------------------------------------------------------------------
-const query = computed(() => (props.commands && props.commands.length > 0 ? slashQuery(props.modelValue) : null));
-const matches = computed(() => (query.value === null ? [] : filterCommands(props.commands ?? [], query.value)));
-const open = computed(() => query.value !== null && !dismissed.value);
+// ---- the palette: the level-aware completer -----------------------------------------
+const slash = computed(() => slashState(props.modelValue, props.commands ?? []));
+const matches = computed(() => slash.value?.rows ?? []);
 const dismissed = ref(false);
 const index = ref(0);
-watch(query, (q) => {
-  dismissed.value = false;
-  index.value = 0;
-  void q;
-});
+const open = computed(() => slash.value !== null && !dismissed.value);
+/** The grey rest of the selected match, after the caret; a usage hint once the words are a command. */
+const ghost = computed(() => (open.value && slash.value ? slashGhost(slash.value, index.value) : null));
+// A new word (or a new level) reopens the palette and resets the selection to the best match.
+watch(
+  () => `${slash.value?.level ?? ""}|${slash.value?.head ?? ""}`,
+  () => {
+    dismissed.value = false;
+    index.value = 0;
+  },
+);
 watch(matches, (m) => {
   if (index.value >= m.length) index.value = Math.max(0, m.length - 1);
 });
-function pick(chat: string): void {
-  emit("update:modelValue", completeCommand(chat));
-  dismissed.value = true;
+/** Accept a row: the word becomes the row's and the next level opens on the space. */
+function pick(row: SlashRow): void {
+  if (!slash.value || !row.acceptable) return;
+  emit("update:modelValue", acceptRow(slash.value, row));
   focus();
+}
+/** True when the caret sits at the end of the text — where → means "take the ghost". */
+function caretAtEnd(): boolean {
+  const el = box.value;
+  return !el || (el.selectionStart === el.value.length && el.selectionEnd === el.value.length);
 }
 
 function onInput(ev: Event): void {
@@ -101,13 +109,22 @@ function onKeydown(ev: KeyboardEvent): void {
       dismissed.value = true;
       return;
     }
-    if ((ev.key === "Enter" && !ev.shiftKey) || ev.key === "Tab") {
-      const hit = matches.value[index.value];
-      if (hit) {
-        ev.preventDefault();
-        pick(hit.chat);
-        return;
-      }
+    const hit = matches.value[index.value];
+    if (ev.key === "Tab" && hit?.acceptable) {
+      ev.preventDefault();
+      pick(hit);
+      return;
+    }
+    if (ev.key === "ArrowRight" && ghost.value?.acceptable && hit && caretAtEnd()) {
+      ev.preventDefault();
+      pick(hit);
+      return;
+    }
+    // Enter accepts a match; once the words are a command (a usage row, or no row), it sends.
+    if (ev.key === "Enter" && !ev.shiftKey && hit?.acceptable) {
+      ev.preventDefault();
+      pick(hit);
+      return;
     }
   }
   if (!enterSubmits(ev)) return;
@@ -165,23 +182,31 @@ defineExpose({ focus });
         data-testid="palette"
       >
         <p v-if="matches.length === 0" class="px-3 py-2 font-mono text-xs text-dimmed">
-          No command matches "/{{ query }}".
+          No command matches "{{ modelValue }}".
         </p>
         <button
           v-for="(c, i) in matches"
-          :key="c.chat"
+          :key="c.label"
           type="button"
           role="option"
           class="item flex w-full items-baseline gap-3 rounded-lg px-3 py-1.5 text-left transition-colors duration-150 ease-out"
           :class="i === index ? 'bg-(--ui-bg-accented)' : 'hover:bg-(--ui-bg-muted)'"
           :aria-selected="i === index ? 'true' : 'false'"
-          :data-chat="c.chat"
+          :data-insert="c.insert"
+          :data-kind="c.kind"
+          :data-label="c.label"
           @mousedown.prevent
-          @click="pick(c.chat)"
+          @click="pick(c)"
           @mouseenter="index = i"
         >
-          <span class="chat shrink-0 font-mono text-[0.8rem] font-medium text-highlighted">/{{ c.chat }}</span>
+          <span class="chat shrink-0 font-mono text-[0.8rem] font-medium text-highlighted">{{ c.label }}</span>
           <span class="describe min-w-0 flex-1 truncate text-[0.8rem] text-muted">{{ c.describe }}</span>
+          <kbd
+            v-if="i === index && c.acceptable"
+            class="shrink-0 rounded border border-default px-1 font-mono text-[0.62rem] text-dimmed"
+            aria-hidden="true"
+            >Tab</kbd
+          >
         </button>
       </div>
     </Transition>
@@ -193,22 +218,36 @@ defineExpose({ focus });
         :data-mode="mode"
         @submit.prevent="act"
       >
-        <textarea
-          ref="box"
-          class="box min-h-6 flex-1 resize-none bg-transparent py-1 text-[0.875rem] leading-normal text-highlighted outline-none placeholder:text-dimmed"
-          :rows="rows"
-          :value="modelValue"
-          :placeholder="placeholder"
-          :autofocus="autofocus"
-          aria-label="Message"
-          :aria-expanded="open ? 'true' : undefined"
-          autocomplete="off"
-          spellcheck="true"
-          @input="onInput"
-          @keydown="onKeydown"
-          @focus="onFocus"
-          @blur="focused = false"
-        />
+        <!-- The ghost: the typed text repeated invisibly so the grey completion lands right
+             after the caret, in the same face and wrap; behind the box, never a target. -->
+        <div class="relative min-w-0 flex-1">
+          <div
+            v-if="ghost"
+            class="ghost pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words py-1 text-[0.875rem] leading-normal"
+            aria-hidden="true"
+            data-testid="ghost"
+            :data-acceptable="ghost.acceptable ? '1' : '0'"
+          >
+            <span class="invisible">{{ modelValue }}</span
+            ><span class="text-dimmed">{{ ghost.text }}</span>
+          </div>
+          <textarea
+            ref="box"
+            class="box relative min-h-6 w-full resize-none bg-transparent py-1 text-[0.875rem] leading-normal text-highlighted outline-none placeholder:text-dimmed"
+            :rows="rows"
+            :value="modelValue"
+            :placeholder="placeholder"
+            :autofocus="autofocus"
+            aria-label="Message"
+            :aria-expanded="open ? 'true' : undefined"
+            autocomplete="off"
+            spellcheck="true"
+            @input="onInput"
+            @keydown="onKeydown"
+            @focus="onFocus"
+            @blur="focused = false"
+          />
+        </div>
         <UButton
           type="submit"
           class="control shrink-0 rounded-full transition-transform duration-150 ease-out active:scale-95"

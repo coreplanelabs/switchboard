@@ -1,11 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyReply,
-  completeCommand,
   composerMode,
   conversationTitle,
   enterSubmits,
-  filterCommands,
   filterRows,
   fuzzyScore,
   greeting,
@@ -13,7 +11,6 @@ import {
   matchSteer,
   placeholderFor,
   shortcutFor,
-  slashQuery,
   shouldFollow,
 } from "./homeModel";
 
@@ -150,31 +147,6 @@ describe("shortcutFor — the page's two shortcuts (rule 7)", () => {
     expect(shortcutFor({ key: "k", metaKey: true, ctrlKey: false, shiftKey: true })).toBeNull();
     expect(shortcutFor({ key: "o", metaKey: true, ctrlKey: false, shiftKey: false })).toBeNull();
     expect(shortcutFor({ key: "k", metaKey: false, ctrlKey: false, shiftKey: false })).toBeNull();
-  });
-});
-
-describe("slashQuery / filterCommands / completeCommand — the / palette (rule 8)", () => {
-  it("a message that is `/` and one word is a lookup; prose, a second line or a slash mid-sentence is not", () => {
-    expect(slashQuery("/")).toBe("");
-    expect(slashQuery("/con")).toBe("con");
-    expect(slashQuery("/config set")).toBeNull();
-    expect(slashQuery("review /x")).toBeNull();
-    expect(slashQuery("/con\nfig")).toBeNull();
-    expect(slashQuery("hello")).toBeNull();
-  });
-  it("narrows by the chat form or the description, tightest first; an empty query keeps every command", () => {
-    const cmds = [
-      { chat: "help", describe: "What Switchboard can do" },
-      { chat: "config set", describe: "Set a scope's agent, model, effort" },
-      { chat: "mcp add", describe: "Add an MCP server to a tier" },
-    ];
-    expect(filterCommands(cmds, "").map((c) => c.chat)).toEqual(["help", "config set", "mcp add"]);
-    expect(filterCommands(cmds, "mcp").map((c) => c.chat)).toEqual(["mcp add"]);
-    expect(filterCommands(cmds, "agent").map((c) => c.chat)).toEqual(["config set"]);
-    expect(filterCommands(cmds, "zzz")).toEqual([]);
-  });
-  it("a pick inserts the chat form and a space, never the slash", () => {
-    expect(completeCommand("config set")).toBe("config set ");
   });
 });
 
