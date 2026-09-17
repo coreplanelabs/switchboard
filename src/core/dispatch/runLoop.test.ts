@@ -2554,6 +2554,8 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
       "github_search_code",
       "github_issue_list",
       "github_issue_get",
+      "github_actions_run",
+      "github_actions_job_log",
       "github_issue_create",
       "github_issue_update",
       "github_issue_comment",
@@ -2612,6 +2614,8 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
     "github_search_code",
     "github_issue_list",
     "github_issue_get",
+    "github_actions_run",
+    "github_actions_job_log",
   ];
   const rpcAnswers = (cmd: Record<string, unknown>, c: FakeHarnessContainer) => {
     if (cmd.type === "set_auto_retry" || cmd.type === "get_state")

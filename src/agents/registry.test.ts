@@ -56,6 +56,8 @@ describe("agent registry matches the feature specs", () => {
       "github_issue_create",
       "github_issue_update",
       "github_issue_delete",
+      "github_actions_run",
+      "github_actions_job_log",
       "web_fetch",
     ])
       expect(AGENTS.general.system).toContain(tool);
@@ -69,7 +71,14 @@ describe("agent registry matches the feature specs", () => {
   it("research's prompt names the GitHub read tools and forbids concluding a private repo is inaccessible from a public 404", () => {
     // A public-web 404 says nothing about a private repo the App credential can
     // reach, so the prompt forbids the "inaccessible" conclusion.
-    for (const tool of ["github_repos", "github_tree", "github_file", "github_search_code", "github_issue_list"])
+    for (const tool of [
+      "github_repos",
+      "github_tree",
+      "github_file",
+      "github_search_code",
+      "github_issue_list",
+      "github_actions_run",
+    ])
       expect(AGENTS.research.system).toContain(tool);
     expect(AGENTS.research.system).toMatch(/never conclude a repo is inaccessible from a public-web 404/);
     expect(AGENTS.research.system).not.toContain("github_issue_create");

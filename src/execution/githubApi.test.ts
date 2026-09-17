@@ -17,9 +17,15 @@ interface Call {
 }
 
 function fakeFetch(
-  routes: (
-    call: Call,
-  ) => { status: number; body?: unknown; text?: string; stream?: ReadableStream<Uint8Array> } | undefined,
+  routes: (call: Call) =>
+    | {
+        status: number;
+        body?: unknown;
+        text?: string;
+        stream?: ReadableStream<Uint8Array>;
+        headers?: Record<string, string>;
+      }
+    | undefined,
 ) {
   const calls: Call[] = [];
   const impl = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -31,7 +37,7 @@ function fakeFetch(
     const r = routes(call) ?? { status: 404, body: { message: "Not Found" } };
     return new Response(r.stream ?? r.text ?? (r.body === undefined ? "" : JSON.stringify(r.body)), {
       status: r.status,
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...(r.headers ?? {}) },
     });
   }) as typeof fetch;
   return { fetch: impl, calls };
@@ -578,5 +584,238 @@ describe("compareDiff — the unified diff of base...head", () => {
     await expect(gh.compareDiff("acme/api", "main", "nope")).rejects.toMatchObject({ status: 404 });
     await expect(gh.compareDiff("acme/api", "main", "huge")).rejects.toMatchObject({ status: 406 });
     await expect(gh.compareDiff("acme/other", "main", "abc")).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+// docs/reference/specs/github-tools.md item 9: the Actions reads behind the
+// triage tools. A run, its jobs with their steps, and one job's log — the log
+// endpoint answers a 302 to a signed blob URL, which is followed WITHOUT the
+// App credential (the URL is its own credential; the bearer must never reach a
+// third host), and the text is read as a tail window so a multi-MB log costs
+// the cap's memory and keeps its end, where a failed job's failure is.
+describe("RestGithubApi — Actions reads use the read token", () => {
+  const runRow = {
+    id: 123,
+    name: "CI",
+    display_title: "fix: the thing",
+    path: ".github/workflows/ci.yml",
+    status: "completed",
+    conclusion: "failure",
+    event: "pull_request",
+    head_branch: "fix-x",
+    head_sha: "abcdef0123456789abcdef0123456789abcdef01",
+    run_number: 77,
+    run_attempt: 2,
+    html_url: "https://github.com/acme/api/actions/runs/123",
+    created_at: "2026-09-17T20:00:00Z",
+    run_started_at: "2026-09-17T20:00:05Z",
+    updated_at: "2026-09-17T20:04:17Z",
+  };
+  const jobRow = (id: number, name: string, conclusion: string | null = "failure") => ({
+    id,
+    run_id: 123,
+    name,
+    status: "completed",
+    conclusion,
+    html_url: `https://github.com/acme/api/actions/runs/123/job/${id}`,
+    started_at: "2026-09-17T20:00:10Z",
+    completed_at: "2026-09-17T20:03:11Z",
+    runner_name: "depot-ubuntu-24.04-4",
+    steps: [
+      {
+        number: 1,
+        name: "Set up job",
+        status: "completed",
+        conclusion: "success",
+        started_at: "2026-09-17T20:00:10Z",
+        completed_at: "2026-09-17T20:00:12Z",
+      },
+      {
+        number: 2,
+        name: "Run npm test",
+        status: "completed",
+        conclusion,
+        started_at: "2026-09-17T20:00:12Z",
+        completed_at: "2026-09-17T20:03:10Z",
+      },
+    ],
+  });
+
+  it("getActionsRun GETs the run and its jobs (100-row pages until short, at most 3) on the read token and maps both", async () => {
+    const page1 = Array.from({ length: 100 }, (_, i) => jobRow(1000 + i, `shard ${i}`, "success"));
+    const { api: a, calls } = api((c) => {
+      if (c.url === "https://api.github.com/repos/acme/api/actions/runs/123") return { status: 200, body: runRow };
+      if (c.url === "https://api.github.com/repos/acme/api/actions/runs/123/jobs?per_page=100&page=1")
+        return { status: 200, body: { total_count: 101, jobs: page1 } };
+      if (c.url === "https://api.github.com/repos/acme/api/actions/runs/123/jobs?per_page=100&page=2")
+        return { status: 200, body: { total_count: 101, jobs: [jobRow(456, "test 2 of 4")] } };
+      return undefined;
+    });
+    const { run, jobs } = await a.getActionsRun("acme/api", 123);
+    expect(calls.map((c) => c.method)).toEqual(["GET", "GET", "GET"]);
+    for (const c of calls) expect(c.headers.authorization).toBe("Bearer tok-read");
+    expect(run).toEqual({
+      id: 123,
+      name: "CI",
+      displayTitle: "fix: the thing",
+      workflowPath: ".github/workflows/ci.yml",
+      status: "completed",
+      conclusion: "failure",
+      event: "pull_request",
+      headBranch: "fix-x",
+      headSha: "abcdef0123456789abcdef0123456789abcdef01",
+      runNumber: 77,
+      runAttempt: 2,
+      url: "https://github.com/acme/api/actions/runs/123",
+      createdAt: "2026-09-17T20:00:00Z",
+      runStartedAt: "2026-09-17T20:00:05Z",
+      updatedAt: "2026-09-17T20:04:17Z",
+    });
+    expect(jobs).toHaveLength(101);
+    expect(jobs[100]).toEqual({
+      id: 456,
+      runId: 123,
+      name: "test 2 of 4",
+      status: "completed",
+      conclusion: "failure",
+      url: "https://github.com/acme/api/actions/runs/123/job/456",
+      startedAt: "2026-09-17T20:00:10Z",
+      completedAt: "2026-09-17T20:03:11Z",
+      runnerName: "depot-ubuntu-24.04-4",
+      steps: [
+        {
+          number: 1,
+          name: "Set up job",
+          status: "completed",
+          conclusion: "success",
+          startedAt: "2026-09-17T20:00:10Z",
+          completedAt: "2026-09-17T20:00:12Z",
+        },
+        {
+          number: 2,
+          name: "Run npm test",
+          status: "completed",
+          conclusion: "failure",
+          startedAt: "2026-09-17T20:00:12Z",
+          completedAt: "2026-09-17T20:03:10Z",
+        },
+      ],
+    });
+  });
+
+  it("getActionsJob GETs one job; a missing run or job is a 404 GithubApiError", async () => {
+    const { api: a, calls } = api((c) => {
+      if (c.url === "https://api.github.com/repos/acme/api/actions/jobs/456")
+        return { status: 200, body: jobRow(456, "test") };
+      return undefined;
+    });
+    const job = await a.getActionsJob("acme/api", 456);
+    expect(job.name).toBe("test");
+    expect(job.steps).toHaveLength(2);
+    expect(calls[0].headers.authorization).toBe("Bearer tok-read");
+    await expect(a.getActionsJob("acme/api", 999)).rejects.toMatchObject({ status: 404 });
+    await expect(a.getActionsRun("acme/api", 999)).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("getActionsJobLog follows the 302 to the signed blob URL without the App credential and returns the text", async () => {
+    const { api: a, calls } = api((c) => {
+      if (c.url === "https://api.github.com/repos/acme/api/actions/jobs/456/logs")
+        return { status: 302, text: "", headers: { location: "https://blob.example/logs/456?sig=abc" } };
+      if (c.url === "https://blob.example/logs/456?sig=abc")
+        return {
+          status: 200,
+          text: "2026-09-17T20:00:10.1234567Z ##[group]Run npm test\n2026-09-17T20:03:10.0000000Z ##[error]Process completed with exit code 1.\n",
+        };
+      return undefined;
+    });
+    const log = await a.getActionsJobLog("acme/api", 456);
+    expect(calls).toHaveLength(2);
+    expect(calls[0].headers.authorization).toBe("Bearer tok-read");
+    expect(calls[1].headers.authorization).toBeUndefined();
+    expect(log).toEqual({
+      text: "2026-09-17T20:00:10.1234567Z ##[group]Run npm test\n2026-09-17T20:03:10.0000000Z ##[error]Process completed with exit code 1.\n",
+      complete: true,
+    });
+  });
+
+  it("getActionsJobLog keeps the LAST maxChars of a log past the cap and says it is incomplete; a direct 200 body needs no second request", async () => {
+    const body = Array.from({ length: 50 }, (_, i) => `line ${String(i).padStart(3, "0")}`).join("\n");
+    const { api: a, calls } = api((c) => {
+      if (c.url === "https://api.github.com/repos/acme/api/actions/jobs/456/logs") return { status: 200, text: body };
+      return undefined;
+    });
+    const log = await a.getActionsJobLog("acme/api", 456, 40);
+    expect(calls).toHaveLength(1);
+    expect(log.complete).toBe(false);
+    expect(log.text).toBe(body.slice(-40));
+    expect(log.text.endsWith("line 049")).toBe(true);
+  });
+
+  it("getActionsJobLog on a missing job is a 404 GithubApiError, and a 302 without a location is an error naming the status", async () => {
+    const { api: a } = api((c) => {
+      if (c.url === "https://api.github.com/repos/acme/api/actions/jobs/1/logs") return { status: 302, text: "" };
+      return undefined;
+    });
+    await expect(a.getActionsJobLog("acme/api", 999)).rejects.toMatchObject({ status: 404 });
+    await expect(a.getActionsJobLog("acme/api", 1)).rejects.toMatchObject({ status: 502 });
+  });
+});
+
+describe("InMemoryGithubApi — Actions", () => {
+  const seeded = () =>
+    new InMemoryGithubApi({
+      "acme/api": {
+        actions: [
+          {
+            id: 123,
+            name: "CI",
+            displayTitle: "fix: the thing",
+            workflowPath: ".github/workflows/ci.yml",
+            status: "completed",
+            conclusion: "failure",
+            event: "push",
+            headBranch: "main",
+            headSha: "abcdef0123456789abcdef0123456789abcdef01",
+            runNumber: 77,
+            runAttempt: 1,
+            url: "https://github.com/acme/api/actions/runs/123",
+            createdAt: "2026-09-17T20:00:00Z",
+            runStartedAt: "2026-09-17T20:00:05Z",
+            updatedAt: "2026-09-17T20:04:17Z",
+            jobs: [
+              {
+                id: 456,
+                runId: 123,
+                name: "test",
+                status: "completed",
+                conclusion: "failure",
+                url: "https://github.com/acme/api/actions/runs/123/job/456",
+                startedAt: "2026-09-17T20:00:10Z",
+                completedAt: "2026-09-17T20:03:11Z",
+                runnerName: null,
+                steps: [],
+                log: "2026-09-17T20:03:10.0000000Z ##[error]boom\n",
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+  it("serves the seeded run, its jobs and a job's log; unknown run/job/repo → 404 like GitHub", async () => {
+    const m = seeded();
+    const { run, jobs } = await m.getActionsRun("acme/api", 123);
+    expect(run.conclusion).toBe("failure");
+    expect(jobs.map((j) => j.id)).toEqual([456]);
+    expect((await m.getActionsJob("acme/api", 456)).name).toBe("test");
+    expect(await m.getActionsJobLog("acme/api", 456)).toEqual({
+      text: "2026-09-17T20:03:10.0000000Z ##[error]boom\n",
+      complete: true,
+    });
+    expect(await m.getActionsJobLog("acme/api", 456, 5)).toEqual({ text: "boom\n", complete: false });
+    await expect(m.getActionsRun("acme/api", 1)).rejects.toMatchObject({ status: 404 });
+    await expect(m.getActionsJob("acme/api", 1)).rejects.toMatchObject({ status: 404 });
+    await expect(m.getActionsJobLog("acme/api", 1)).rejects.toMatchObject({ status: 404 });
+    await expect(m.getActionsRun("acme/other", 123)).rejects.toMatchObject({ status: 404 });
   });
 });

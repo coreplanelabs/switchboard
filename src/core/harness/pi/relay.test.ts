@@ -454,6 +454,8 @@ describe("the research preset on pi: the web toolset relayed, run in the bot as 
       "github_search_code",
       "github_issue_list",
       "github_issue_get",
+      "github_actions_run",
+      "github_actions_job_log",
     ]);
   });
 
