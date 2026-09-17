@@ -537,7 +537,10 @@ function waitFor(
   opts: { control?: RunControl; inbox?: FollowUpInbox; hooks?: Array<() => void | "hold"> } = {},
 ) {
   let at = NOW;
-  const slept: Array<{ ms: number; signal: AbortSignal | undefined }> = [];
+  /** Each sleep as the wait asked for it, with whether its signal was already
+   *  aborted as it was entered — a tick the registry's replay ended before the
+   *  wait slept at all. */
+  const slept: Array<{ ms: number; signal: AbortSignal | undefined; abortedAtStart: boolean }> = [];
   const hooks = [...(opts.hooks ?? [])];
   const wait: WaitCapability = waitCapabilityFor({
     registry: w.registry,
@@ -546,7 +549,7 @@ function waitFor(
     clock: () => at,
     runId: "run-p",
     sleep: (ms, signal) => {
-      slept.push({ ms, signal });
+      slept.push({ ms, signal, abortedAtStart: signal?.aborted ?? false });
       const hook = hooks.shift();
       if (hook?.() === "hold")
         return new Promise((resolve) => {
@@ -878,6 +881,45 @@ describe("a child is its thread — the reads follow the thread's newest run", (
     expect(out.runs[0]).toMatchObject({ id: "r-first", agent: "research", status: "completed", continuedBy: later.id });
     expect(String(out.runs[0].finalReply)).toContain("Grants live in config.yaml.");
     expect(slept).toHaveLength(1); // one sleep, held — the continuation's end frame ended it
+  });
+
+  it("a finished child the registry still holds whose thread continued: the wait listens for the continuation's end, not the child's — the registry's replay of the finished child never ends a tick before it sleeps, so the wait sleeps once and the process's timers keep running until the continuation's end frame wakes it", async () => {
+    const w = world();
+    const threadKey = "slack:CX:child";
+    const inThread = { channelId: "slack:CX", userId: "slack:UALICE", threadKey, channelVisibility: "public" as const };
+    // The child ended in THIS process moments ago: its finished row is still in
+    // the registry (within the TTL), where the wait's subscribe-time replay sees it.
+    const first = w.registry.create("research · child", { agent: "research", parentRunId: "run-p", ...inThread });
+    w.registry.publish(first.id, { type: "answer", text: "A Durable Object is a single-instance coordination point." });
+    w.registry.finish(first.id, "completed");
+    w.registry.seal(first.id, { replyOk: true });
+    // …and a person's reply in its thread started a later run there, live now.
+    const later = w.registry.create("general · child", { agent: "general", parentRunId: "run-p", ...inThread });
+    // The continuation ends on a later turn of the event loop — as a real run
+    // ends, from outside the wait's own chain of reads — so a wait that spins
+    // on the replay without ever sleeping never sees it end.
+    const finishLaterFromTheLoop = () => {
+      setTimeout(() => {
+        w.registry.publish(later.id, { type: "answer", text: "Grants live in config.yaml." });
+        w.registry.finish(later.id, "completed");
+        w.registry.seal(later.id, { replyOk: true });
+      }, 0);
+      return "hold" as const;
+    };
+    const { wait, slept } = waitFor(w, { hooks: [finishLaterFromTheLoop] });
+    const out = report(
+      await awaitRunsTool.run(
+        { ids: [first.id] },
+        ctxFor(w, alice, { runId: "run-p", wait, remainingMs: () => 30 * 60_000 }),
+      ),
+    );
+    expect(out.ended).toBe("all_ended");
+    expect(out.runs[0]).toMatchObject({ id: first.id, agent: "research", status: "completed", continuedBy: later.id });
+    expect(String(out.runs[0].finalReply)).toContain("Grants live in config.yaml.");
+    // One sleep, entered with its signal live and held until the end frame:
+    // the finished child's replay did not end the tick before it slept.
+    expect(slept).toHaveLength(1);
+    expect(slept[0]!.abortedAtStart).toBe(false);
   });
 
   it("a finished child whose thread has no later run reads as before — no `continuedBy` — and a later run in the thread is followed whoever replied: the thread's, not the requester's", async () => {
