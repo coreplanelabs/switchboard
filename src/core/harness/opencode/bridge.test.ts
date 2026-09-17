@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../../chatMessage.js";
 import { analyzeRunFriction, isSetupInstallCommand } from "../../runFriction.js";
 import { planResume, type KnownTool } from "../../runLedger/resume.js";
+import { bearerHashOf } from "../../modelProxy/runBearers.js";
 import type { RunEvent } from "../../runEvents.js";
 import type { StepReport } from "../../runLedger/stepReport.js";
 import { piDriver } from "../pi/testing/driver.js";
@@ -462,6 +463,66 @@ describe("parity with pi — the mirror and the friction analyzer read OpenCode'
   });
 });
 
+// Feature: docs/reference/specs/harness.md item 13 — the join by message id.
+// The real tailer's refills carry only the messages that changed since its
+// previous refill of the session (the first carries the whole store); a
+// restarted tailer's first refill carries the whole store again. The bridge
+// upserts every refill into one store by message id and projects the whole,
+// so each turn lands on the ledger once whichever shape the refill has.
+describe("the store's join by message id — a refill of the changed messages alone, or of the whole store again, writes each step once", () => {
+  const user = { id: "msg_u0", type: "user", text: "do the thing", time: { created: NOW } };
+  const a1 = {
+    id: "msg_a1",
+    type: "assistant",
+    agent: "switchboard",
+    model: { providerID: "switchboard", id: "m" },
+    content: [
+      {
+        type: "tool",
+        id: "c1",
+        name: "shell",
+        state: { status: "completed", input: { command: "echo hi" }, content: [{ type: "text", text: "hi" }] },
+      },
+    ],
+    time: { created: NOW, completed: NOW },
+  };
+  const a2 = {
+    id: "msg_a2",
+    type: "assistant",
+    agent: "switchboard",
+    model: { providerID: "switchboard", id: "m" },
+    content: [{ type: "text", text: "all done" }],
+    time: { created: NOW, completed: NOW },
+  };
+  const refill = (data: unknown[]): OpenCodeFeedRecord =>
+    ({ feed: "messages", at: NOW, sessionID: "ses_run-c", reason: "session.step.ended", data }) as OpenCodeFeedRecord;
+
+  it("the second refill carrying only the new assistant message (the real tailer's shape) lands as the second step, and the answer is its text", async () => {
+    const h = harness();
+    h.bridge.observe(refill([user, a1]));
+    h.bridge.observe(refill([a2]));
+    await h.bridge.flush();
+    expect(h.steps.map((s) => s.turns.map((t) => t.role))).toEqual([["assistant"], ["user", "assistant"]]);
+    expect(h.steps[1].turns[0].content[0]).toMatchObject({ type: "tool_result", toolUseId: "c1", content: "hi" });
+    expect(h.bridge.answer()).toBe("all done");
+  });
+
+  it("a refill of the whole store again (a restarted tailer's first refill, the fake's every refill) writes nothing twice, and a message that changed is read in its place", async () => {
+    const h = harness();
+    const a1Running = {
+      ...a1,
+      content: [{ type: "tool", id: "c1", name: "shell", state: { status: "running", input: {} } }],
+    };
+    h.bridge.observe(refill([user, a1Running]));
+    h.bridge.observe(refill([user, a1, a2]));
+    h.bridge.observe(refill([user, a1, a2]));
+    await h.bridge.flush();
+    expect(h.steps).toHaveLength(2);
+    expect(h.steps[1].turns[0].content[0]).toMatchObject({ type: "tool_result", toolUseId: "c1", content: "hi" });
+    expect(h.bridge.answer()).toBe("all done");
+  });
+});
+
 describe("the loop — a reply that cannot be posted, and the narration's timing", () => {
   const oneCall: RunScript = {
     turns: [
@@ -578,10 +639,13 @@ describe("wind-down parity, an undelivered follow-up, and the alive-here reconci
     expect(r.statusReports).toEqual([]);
   });
 
-  it("MAJOR 2: a resume naming this container whose server still answers ends it and its tailer before a fresh start, removes nothing else, and says so", async () => {
+  it("MAJOR 2: a resume naming this container whose server still answers but refuses the session ends it and its tailer before a fresh start, removes nothing else, and says so", async () => {
     const root = openCodeRunPaths("run-c").dir;
-    const driver = openCodeDriver();
-    const rowFacts = { ...driver.facts({ pid: 999, container: driver.containerWord }), tailerPid: 888 };
+    const driver = openCodeDriver({ reattach: { refuseSession: true } });
+    const rowFacts = {
+      ...driver.facts({ pid: 999, container: driver.containerWord, bearerHash: bearerHashOf(driver.bearer) }),
+      tailerPid: 888,
+    };
     const r = await driver.run({
       turns: [{ content: [{ type: "text", text: "resumed" }], stopReason: "end_turn" }],
       processAliveOnResume: true,
@@ -595,9 +659,14 @@ describe("wind-down parity, an undelivered follow-up, and the alive-here reconci
       },
     });
     expect(answered(r)).toBe("resumed");
-    // The row's server was found on its recorded port — another than the fresh launch's — before anything was ended.
+    // The row's server was found on its recorded port — another than the fresh
+    // launch's — with the row's password, and refused the session there before
+    // anything was ended; nothing else was asked of it.
     const recordedPort = rowFacts.harness === "opencode" ? rowFacts.port : -1;
-    expect(r.requests.filter((q) => q.port === recordedPort).map((q) => q.path)).toEqual(["/api/health"]);
+    expect(r.requests.filter((q) => q.port === recordedPort).map((q) => q.path)).toEqual([
+      "/api/health",
+      "/api/session/ses_run-c/message?order=asc&limit=200",
+    ]);
     // Both the row's server and its tailer are ended before the fresh start.
     expect(r.killed).toContain(999);
     expect(r.killed).toContain(888);
@@ -605,8 +674,9 @@ describe("wind-down parity, an undelivered follow-up, and the alive-here reconci
     // Exactly one fresh OpenCode is started on the record.
     expect(r.starts).toHaveLength(1);
     const resumed = notes(r.events).find((n) => n.kind === "resumed");
-    expect(resumed?.summary).toMatch(/still answers/);
-    expect(resumed?.summary).toMatch(/ended it and its tailer/);
+    expect(resumed?.summary).toMatch(/still answers in this container but could not be re-attached/);
+    expect(resumed?.summary).toMatch(/the server refused the session \(404\)/);
+    expect(resumed?.summary).toMatch(/ended it and its tailer before a fresh start/);
   });
 });
 

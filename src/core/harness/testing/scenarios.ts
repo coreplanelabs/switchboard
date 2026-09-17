@@ -75,8 +75,9 @@ export interface RunScript {
   containerReplacedBeforeModelCall?: number;
   /** The row's process (named by the resume's facts) is still alive in this same
    *  container on the resume — the survival clause's alive-here: `open` finds it
-   *  before anything is started and reconciles with it (re-attaches to it, or
-   *  ends it before a fresh start). */
+   *  before anything is started and re-attaches to it when the row carries what
+   *  a re-attach needs (its root, the bearer's hash), ending it before a fresh
+   *  start only when it does not. */
   processAliveOnResume?: boolean;
   /** The container's word for itself; `null` for a container that cannot name itself. */
   containerWord?: string | null;
@@ -533,7 +534,7 @@ export const SCENARIOS: readonly ScenarioRow[] = [
     id: "survival-alive-here",
     clause: "survival",
     title:
-      "a resume whose facts name this same container reconciles with the process still alive here before a fresh one is placed: the run answers, a resumed note records whether it re-attached to the process or ended it for a fresh start, and no second process is started on a re-attach",
+      "a resume whose facts name this same container reconciles with the process still alive here before a fresh one is placed: the run answers, and the one resumed note says which honest path was taken — re-attached to the live process (no second process, the live one ended only at the session's end, its session continued) or ended it for a fresh start (one fresh process, the live one ended first)",
     script: (driver) => ({
       turns: [text("resumed here")],
       processAliveOnResume: true,
@@ -541,18 +542,26 @@ export const SCENARIOS: readonly ScenarioRow[] = [
     }),
     check: (run) => {
       assert.equal(answered(run), "resumed here");
-      const resumed = notes(run).find((n) => n.kind === "resumed");
-      assert.ok(resumed, "no resumed note for the alive-here reconciliation");
-      // Two honest reconciliations: a re-attach to the living process — no fresh
-      // start, the process not ended — or an end of it before a fresh start.
+      const resumed = notes(run).filter((n) => n.kind === "resumed");
+      assert.equal(resumed.length, 1, "not exactly one resumed note");
+      // Two honest reconciliations. The row here carries no bearer hash, so a
+      // harness whose re-attach needs one ends the process instead; a row that
+      // carries it is the harness's own re-attach test. Demanding the re-attach
+      // of every driver needs a double that plays an already-running pi — the
+      // follow-up.
       const reAttached = run.starts.length === 0;
       if (reAttached) {
-        assert.ok(!run.killed.includes(999), "a re-attach ended the live process");
-        assert.match(resumed.summary, /still (runs|answers)/);
+        assert.deepEqual(
+          run.killed.filter((pid) => pid === 999),
+          [999],
+          "the live process is ended once, at the session's end, never for a fresh start",
+        );
+        assert.match(resumed[0].summary, /still runs in the container \(pid 999/);
+        assert.match(resumed[0].summary, /continuing its session/);
       } else {
         assert.equal(run.starts.length, 1, "one fresh process was started on the record");
-        assert.ok(run.killed.includes(999), "the live process was not ended before the fresh start");
-        assert.match(resumed.summary, /ended|restart|start/);
+        assert.equal(run.killed[0], 999, "the live process was not ended before the fresh start");
+        assert.match(resumed[0].summary, /ended/);
       }
       assert.ok(!notes(run).some((n) => n.kind === "harness_error"), "a harness_error on a clean resume");
     },
