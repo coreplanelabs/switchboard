@@ -11,6 +11,12 @@ display_information:
   description: Agents in Slack — answer questions, review pull requests, ship code.
   background_color: "#1f2937"
 features:
+  # The Messages tab is where a person DMs the bot (docs/reference/specs/slack-channel.md
+  # item 1, trigger (b)); without it Slack shows "Sending messages to this app has been
+  # turned off" and the message.im subscription below never fires.
+  app_home:
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
   bot_user:
     display_name: switchboard
     always_online: false
