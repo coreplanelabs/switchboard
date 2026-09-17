@@ -759,7 +759,7 @@ describe("run history routes", () => {
     });
   });
 
-  it("list: newest-first, limit 1000 → at most 200 rows plus a cursor; before/sinceMs/agent/channel/threadKey/parentRunId filters; no events on the wire", async () => {
+  it("list: newest-first, limit 1000 → at most 200 rows plus a cursor; before/sinceMs/agent/channel/threadKey/parentRunId/pr filters; no events on the wire", async () => {
     const key = storeKey();
     const now = Date.now();
     for (let i = 0; i < 230; i++) {
@@ -771,6 +771,19 @@ describe("run history routes", () => {
           channelId: i % 5 ? "slack:C1" : "slack:C2",
           threadKey: i % 7 ? "slack:C1:t1" : "slack:C1:t2",
           ...(i % 11 === 0 ? { parentRunId: "parent-x" } : {}),
+          // run-history item 58: every 13th row names pull request 42 — a coding
+          // run through its `pr`, a review through its posted target; the rows
+          // between carry another number, another repository, or a skipped post.
+          repo: i % 13 === 5 ? "acme/web" : "acme/api",
+          ...(i % 13 === 0
+            ? i % 2
+              ? { reviewPost: { posted: true, target: { repo: "acme/api", number: 42 }, head: "a".repeat(40) } }
+              : { pr: { number: 42, url: "https://github.com/acme/api/pull/42" } }
+            : i % 13 === 5
+              ? { pr: { number: 42, url: "https://github.com/acme/web/pull/42" } }
+              : i % 13 === 7
+                ? { reviewPost: { posted: false, reason: "head moved" } }
+                : { pr: { number: 43, url: "https://github.com/acme/api/pull/43" } }),
         }),
       );
     }
@@ -822,6 +835,18 @@ describe("run history routes", () => {
     expect(children[0].id).toBe("r000");
     expect((await post("/runs/list", { storeKey: key, parentRunId: "parent-none" })).data.items).toEqual([]);
     expect((await post("/runs/list", { storeKey: key, parentRunId: "not a run id!" })).status).toBe(400);
+    // run-history item 58: the runs that name one pull request on one repository, newest first.
+    const named = (await post("/runs/list", { storeKey: key, pr: { repo: "acme/api", number: 42 } })).data
+      .items as Array<{ id: string; pr?: { number: number }; reviewPost?: { posted: boolean } }>;
+    expect(named.map((r) => r.id)).toEqual(Array.from({ length: 18 }, (_, k) => `r${String(k * 13).padStart(3, "0")}`));
+    expect(named.every((r) => r.pr?.number === 42 || r.reviewPost?.posted === true)).toBe(true);
+    expect((await post("/runs/list", { storeKey: key, pr: { repo: "acme/web", number: 42 } })).data.items).toHaveLength(
+      18,
+    );
+    expect((await post("/runs/list", { storeKey: key, pr: { repo: "acme/api", number: 99 } })).data.items).toEqual([]);
+    expect((await post("/runs/list", { storeKey: key, pr: { repo: "acme/api", number: 0 } })).status).toBe(400);
+    expect((await post("/runs/list", { storeKey: key, pr: { repo: "not a slug", number: 42 } })).status).toBe(400);
+    expect((await post("/runs/list", { storeKey: key, pr: "acme/api#42" })).status).toBe(400);
   }, 60_000);
 
   it("a table created before the parent column gains it, filled from each record's own `parentRunId`, so a child stored earlier still lists under its parent; a later put writes the column beside the row", async () => {
@@ -895,6 +920,85 @@ describe("run history routes", () => {
     const fresh = record("new-child", now - 500, { parentRunId: "parent-1", events: events(1) });
     expect((await post("/runs/put", { storeKey: key, record: fresh })).status).toBe(200);
     expect(await idsUnder("parent-1")).toEqual(["new-child", "legacy-child"]);
+  });
+
+  // run-history item 58: the pull request a run names is a column, so a
+  // findings listing is one indexed page — filled once from `summary_json` for
+  // rows written before the column, by the rule `pullRequestNumberOf` states.
+  it("a table created before the pull request column gains it, filled from each record's own `pr` or posted review target — a skipped post and a run naming none stay null — so a run stored earlier still lists under its pull request; a later put writes the column beside the row", async () => {
+    const key = storeKey();
+    const now = Date.now();
+    await runInDurableObject(stubOf(key), async (_inst: RunHistoryDO, state) => {
+      state.storage.sql.exec(`DROP INDEX IF EXISTS runs_pr`);
+      state.storage.sql.exec(`ALTER TABLE runs DROP COLUMN pr_number`);
+      const columns = state.storage.sql
+        .exec<{ name: string }>(`PRAGMA table_info(runs)`)
+        .toArray()
+        .map((c) => c.name);
+      expect(columns).not.toContain("pr_number");
+    });
+    const posted = { posted: true as const, target: { repo: "acme/api", number: 42 }, head: "b".repeat(40) };
+    await runInDurableObject(stubOf(key), async (_inst: RunHistoryDO, state) => {
+      for (const rec of [
+        record("legacy-coding", now - 1000, {
+          repo: "acme/api",
+          pr: { number: 42, url: "https://github.com/acme/api/pull/42" },
+        }),
+        record("legacy-review", now - 2000, { repo: "acme/api", reviewPost: posted }),
+        record("legacy-skipped", now - 3000, { repo: "acme/api", reviewPost: { posted: false, reason: "head moved" } }),
+        record("legacy-none", now - 4000, { repo: "acme/api" }),
+      ]) {
+        const { events: _e, ...summary } = rec;
+        state.storage.sql.exec(
+          `INSERT INTO runs (run_id, label, agent, model, channel_id, user_id, thread_key, channel_visibility, repo, started_at, finished_at, stored_at, status, event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          summary.id,
+          summary.label ?? null,
+          summary.agent ?? null,
+          summary.model ?? null,
+          summary.channelId,
+          summary.userId,
+          summary.threadKey,
+          summary.channelVisibility,
+          summary.repo ?? null,
+          summary.startedAt,
+          summary.finishedAt,
+          now,
+          summary.status,
+          0,
+          0,
+          0,
+          100,
+          JSON.stringify(summary.diagnosis),
+          JSON.stringify(summary),
+        );
+      }
+    });
+    await runInDurableObject(stubOf(key), (inst: RunHistoryDO) => inst.migrateRunsTable());
+    const columnOf = () =>
+      runInDurableObject(stubOf(key), async (_i: RunHistoryDO, state) =>
+        state.storage.sql
+          .exec<{ run_id: string; pr: number | null }>(`SELECT run_id, pr_number AS pr FROM runs ORDER BY run_id`)
+          .toArray(),
+      );
+    expect(await columnOf()).toEqual([
+      { run_id: "legacy-coding", pr: 42 },
+      { run_id: "legacy-none", pr: null },
+      { run_id: "legacy-review", pr: 42 },
+      { run_id: "legacy-skipped", pr: null },
+    ]);
+    const idsNaming = async (number: number) =>
+      (
+        (await post("/runs/list", { storeKey: key, pr: { repo: "acme/api", number } })).data.items as Array<{
+          id: string;
+        }>
+      ).map((r) => r.id);
+    expect(await idsNaming(42)).toEqual(["legacy-coding", "legacy-review"]);
+    await runInDurableObject(stubOf(key), (inst: RunHistoryDO) => inst.migrateRunsTable());
+    expect(await columnOf()).toHaveLength(4);
+    const fresh = record("new-review", now - 500, { repo: "acme/api", reviewPost: posted, events: events(1) });
+    expect((await post("/runs/put", { storeKey: key, record: fresh })).status).toBe(200);
+    expect(await idsNaming(42)).toEqual(["new-review", "legacy-coding", "legacy-review"]);
   });
 
   it("/runs/summary returns the listing row (no events, with bytes) for a kept run and {summary: null} otherwise, reading no event rows", async () => {

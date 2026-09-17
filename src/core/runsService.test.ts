@@ -1538,6 +1538,240 @@ describe("RunsService.listUnitRuns — a unit's runs in round order", () => {
   });
 });
 
+describe("RunsService.listFindings — a pull request's findings ledger from the records (agent-ship item 18)", () => {
+  const T0 = NOW - 100_000;
+  const PR = { repo: "acme/api", number: 42 };
+  const URL = "https://github.com/acme/api/pull/42";
+  const HEAD_A = "a".repeat(40);
+  const HEAD_B = "b".repeat(40);
+  const instance: CoordinatorInstance = {
+    id: "plan-p-1",
+    kind: "ship",
+    userId: "slack:UALICE",
+    channelId: "slack:C1",
+    threadKey: "slack:C1:parent",
+    repo: "acme/api",
+    branch: "plan/p/u1",
+    createdAt: T0 - 1_000,
+  };
+  const unit: CoordinatorUnit = {
+    instanceId: "plan-p-1",
+    unit: "U16",
+    slug: "u1",
+    branch: "plan/p/u1",
+    dependsOn: [],
+    threadKey: "slack:C1:u1",
+    reviewThread: { threadKey: "slack:C1:u1r" },
+    pr: { number: 42, url: URL },
+    rounds: [
+      { index: 0, agent: "coding", outcome: "started", at: T0 },
+      { index: 1, agent: "review", outcome: "started", at: T0 + 11_000 },
+      { index: 1, agent: "coding", outcome: "started", at: T0 + 21_000 },
+      { index: 2, agent: "review", outcome: "started", at: T0 + 31_000 },
+    ],
+  };
+  const child = (step: string): Partial<RunRecord> => ({
+    parentInstanceId: "plan-p-1",
+    idempotencyKey: `plan-p-1:U16/${step}`,
+  });
+  const F1 = { id: "F1", severity: "major" as const, file: "src/a.ts", line: 12, title: "null path unguarded" };
+  const F2 = { id: "F2", severity: "nit" as const, file: "src/b.ts", title: "typo in a comment" };
+  const inThread = (id: string, threadKey: string, agent: string, startedAt: number, over: Partial<RunRecord> = {}) =>
+    record(id, startedAt + 5_000, {
+      threadKey,
+      agent,
+      startedAt,
+      repo: "acme/api",
+      channelVisibility: "public",
+      ...over,
+    });
+
+  /** A ship unit through two review rounds, as the records tell it: the coding
+   *  round opened the pull request; review 1 raised two findings and posted;
+   *  the findings step answered both and edited the pull request; review 2
+   *  re-raised one — and its post was skipped, so only its thread names it. */
+  async function world(opts: { units?: boolean; store?: InMemoryRunStore } = {}) {
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await instances.put(instance);
+    await instances.putUnits([unit]);
+    const store = opts.store ?? new InMemoryRunStore({ now: () => NOW });
+    await store.put(
+      inThread("c0", "slack:C1:u1", "coding", T0 + 1_000, { pr: { number: 42, url: URL }, ...child("0/coding") }),
+    );
+    await store.put(
+      inThread("r1", "slack:C1:u1r", "review", T0 + 12_000, {
+        verdict: { verdict: "request_changes", summary: "two things", head: HEAD_A, findings: [F1, F2] },
+        reviewHead: HEAD_A,
+        reviewPost: {
+          posted: true,
+          target: { repo: "acme/api", number: 42 },
+          head: HEAD_A,
+          verdict: "request_changes",
+        },
+        ...child("1/review"),
+      }),
+    );
+    await store.put(
+      inThread("c1", "slack:C1:u1", "coding", T0 + 22_000, {
+        pr: { number: 42, url: URL, head: "plan/p/u1" },
+        dispositions: [
+          { findingId: "F1", disposition: "fixed", note: "guarded the null path" },
+          { findingId: "F2", disposition: "declined", note: "the comment quotes the library" },
+        ],
+        ...child("1/findings"),
+      }),
+    );
+    await store.put(
+      inThread("r2", "slack:C1:u1r", "review", T0 + 32_000, {
+        verdict: {
+          verdict: "request_changes",
+          summary: "one stays",
+          head: HEAD_B,
+          findings: [{ ...F1, title: "the guard moved but the null path stays" }],
+        },
+        reviewHead: HEAD_B,
+        reviewPost: { posted: false, reason: "head moved" },
+        ...child("2/review"),
+      }),
+    );
+    // Not the pull request's: another pull request on the repository, the same number elsewhere, the thread's past.
+    await store.put(
+      inThread("other", "slack:C1:o", "coding", T0 + 40_000, {
+        pr: { number: 43, url: "https://github.com/acme/api/pull/43" },
+      }),
+    );
+    await store.put(
+      inThread("elsewhere", "slack:C1:e", "coding", T0 + 41_000, {
+        repo: "acme/web",
+        pr: { number: 42, url: "https://github.com/acme/web/pull/42" },
+      }),
+    );
+    await store.put(inThread("before", "slack:C1:u1", "general", T0 - 50_000));
+    const { reg } = testRegistry();
+    const svc = createRunsService({ registry: reg, store, ...(opts.units === false ? {} : { units: instances }) });
+    return { svc, store, instances };
+  }
+
+  it("joins the runs that name the pull request with the unit's runs — each with its round, a review whose post was skipped reached through its thread — and answers the unit, the url, the runs oldest first and one row per finding id", async () => {
+    const { svc } = await world();
+    const res = await svc.listFindings(PR, ALL);
+    if (!res.ok) throw new Error("expected the ledger");
+    expect(res.value.repo).toBe("acme/api");
+    expect(res.value.pr).toEqual({ number: 42, url: URL });
+    expect(res.value.unit).toBe("plan-p-1:U16");
+    expect(res.value.runs).toEqual([
+      { id: "c0", agent: "coding", startedAt: T0 + 1_000, finishedAt: T0 + 6_000, round: 0 },
+      {
+        id: "r1",
+        agent: "review",
+        startedAt: T0 + 12_000,
+        finishedAt: T0 + 17_000,
+        head: HEAD_A,
+        round: 1,
+        verdict: "request_changes",
+        findings: 2,
+      },
+      { id: "c1", agent: "coding", startedAt: T0 + 22_000, finishedAt: T0 + 27_000, round: 1, dispositions: 2 },
+      {
+        id: "r2",
+        agent: "review",
+        startedAt: T0 + 32_000,
+        finishedAt: T0 + 37_000,
+        head: HEAD_B,
+        round: 2,
+        verdict: "request_changes",
+        findings: 1,
+      },
+    ]);
+    expect(res.value.findings).toEqual([
+      {
+        id: "F1",
+        severity: "major",
+        file: "src/a.ts",
+        line: 12,
+        title: "the guard moved but the null path stays",
+        raised: { runId: "r1", head: HEAD_A, round: 1 },
+        lastSeen: { runId: "r2", head: HEAD_B, round: 2 },
+        disposition: { kind: "fixed", note: "guarded the null path", runId: "c1", round: 1 },
+        status: "re-raised",
+        reRaisedAfter: "fixed",
+      },
+      {
+        id: "F2",
+        severity: "nit",
+        file: "src/b.ts",
+        title: "typo in a comment",
+        raised: { runId: "r1", head: HEAD_A, round: 1 },
+        lastSeen: { runId: "r1", head: HEAD_A, round: 1 },
+        disposition: { kind: "declined", note: "the comment quotes the library", runId: "c1", round: 1 },
+        status: "conceded",
+      },
+    ]);
+    expectNoToken(res.value);
+    expect(JSON.stringify(res.value)).not.toContain("UALICE");
+  });
+
+  it("without the coordinator's records the ledger is read from the records alone — no unit, no rounds, and the review that posted nothing is absent", async () => {
+    const { svc } = await world({ units: false });
+    const res = await svc.listFindings(PR, ALL);
+    if (!res.ok) throw new Error("expected the ledger");
+    expect(res.value.unit).toBeUndefined();
+    expect(res.value.runs.map((r) => [r.id, r.round])).toEqual([
+      ["c0", undefined],
+      ["r1", undefined],
+      ["c1", undefined],
+    ]);
+    expect(res.value.findings.map((r) => [r.id, r.status, r.raised?.round])).toEqual([
+      ["F1", "awaiting re-review", undefined],
+      ["F2", "awaiting re-review", undefined],
+    ]);
+  });
+
+  it("only runs the reader may see enter the join: a reader admitted to the public runs alone reads a ledger without the private review — its findings first raised by the later review, its dispositions answering ids no review it saw issued", async () => {
+    const store = new InMemoryRunStore({ now: () => NOW });
+    const { svc } = await world({ store });
+    const r1 = (await store.get("r1"))!;
+    await store.put({ ...r1, channelVisibility: "private" });
+    const PUBLIC: Predicate = { kind: "visibility-in", visibilities: new Set(["public"]) };
+    const res = await svc.listFindings(PR, PUBLIC);
+    if (!res.ok) throw new Error("expected the ledger");
+    expect(res.value.runs.map((r) => r.id)).toEqual(["c0", "c1", "r2"]);
+    expect(res.value.findings.map((r) => [r.id, r.status, r.raised?.runId, r.disposition])).toEqual([
+      ["F1", "open", "r2", undefined],
+      [
+        "F2",
+        "unknown id",
+        undefined,
+        { kind: "declined", note: "the comment quotes the library", runId: "c1", round: 1 },
+      ],
+    ]);
+  });
+
+  it("is not_found — one answer — for a pull request no run names, a reader outside every run that names it, a `none` predicate, and another repository's same number", async () => {
+    const { svc } = await world();
+    expect(await svc.listFindings({ repo: "acme/api", number: 99 }, ALL)).toEqual({ ok: false, error: "not_found" });
+    const C2: Predicate = { kind: "channels-in", channelIds: new Set(["slack:C2"]) };
+    expect(await svc.listFindings(PR, C2)).toEqual({ ok: false, error: "not_found" });
+    expect(await svc.listFindings(PR, { kind: "none" })).toEqual({ ok: false, error: "not_found" });
+    const web = await svc.listFindings({ repo: "acme/web", number: 42 }, ALL);
+    if (!web.ok) throw new Error("expected the ledger");
+    expect(web.value.runs.map((r) => r.id)).toEqual(["elsewhere"]);
+    expect(web.value.findings).toEqual([]);
+  });
+
+  it("the pull request rides down to the store as its own filter beside the predicate — nothing is loaded to be dropped afterwards", async () => {
+    const { svc, store } = await world();
+    const list = vi.spyOn(store, "list");
+    const C1: Predicate = { kind: "channels-in", channelIds: new Set(["slack:C1"]) };
+    const res = await svc.listFindings(PR, C1);
+    expect(res.ok).toBe(true);
+    expect(list.mock.calls[0][0]).toMatchObject({
+      pr: { repo: "acme/api", number: 42 },
+      visibleTo: { kind: "channels-in", channelIds: ["slack:C1"] },
+    });
+  });
+});
+
 describe("RunsService.listChildren — a conductor's children in start order", () => {
   it("lists the runs naming the parent — persisted and live — oldest started first, under the predicate, the store asked with the parent as its own filter; a run with no children, a reader outside the predicate and a `none` predicate are an empty list", async () => {
     const { reg } = testRegistry({ now: () => NOW - 1_000 });

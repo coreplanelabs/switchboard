@@ -58,6 +58,7 @@ Every registered command has an HTTP twin behind the same dashboard gate, plus a
 | `/api/runs.stop` | `POST` | `runs:write` | Request a live run to stop (`--mode soft` = finish the current step; `hard` = abort now). Records the caller as the actor. |
 | `/api/runs.unit` | `GET`, `POST` | `runs:read` | A ship unit's runs in round order — its coding thread's and its review thread's, live and finished, each with its round and thread — from one read. |
 | `/api/runs.children` | `GET`, `POST` | `runs:read` | The runs one run spawned — a conductor's children, live and finished — oldest started first. |
+| `/api/runs.findings` | `GET`, `POST` | `runs:read` | A pull request's findings ledger — every review finding by id with its severity, where it was raised, what the coding run recorded against it and whether the next review agreed — read from the run records alone. |
 | `/api/runs.search` | `GET`, `POST` | `runs:read` | Search one session's log — a thread's conversation on one agent, every run of it — for words: the matching turns in relevance order, each with its run; snippets wrapped as untrusted content. |
 | `/api/review.abridge` | `POST` | `review:write` | Abridge a finished PR review's reading diff with meat.dev on the bot host (one Opus-class call) and store it on the run; idempotent — a stored one is answered, not recomputed. |
 | `/api/friction.report` | `GET`, `POST` | `friction:read` | Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted. |

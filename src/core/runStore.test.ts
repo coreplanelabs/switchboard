@@ -130,6 +130,42 @@ function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION
       expect(await store.list({ parentRunId: "solo" })).toEqual([]);
     });
 
+    // docs/reference/specs/run-history.md item 58: the findings ledger reads the
+    // runs that name one pull request, so the store filters by `pr` — the
+    // coding runs that opened or edited it and the reviews that posted to it.
+    it("list filters by `pr` — the coding runs whose record names the pull request and the reviews posted to it, on that repository, newest first — never a review that posted nothing or another repository's run", async () => {
+      const { store } = make();
+      const posted = { posted: true as const, target: { repo: "acme/api", number: 42 }, head: "a".repeat(40) };
+      await store.put(
+        record("c0", NOW - 4000, { repo: "acme/api", pr: { number: 42, url: "https://github.com/acme/api/pull/42" } }),
+      );
+      await store.put(record("r1", NOW - 3000, { repo: "acme/api", reviewPost: posted }));
+      await store.put(
+        record("r-skipped", NOW - 2500, { repo: "acme/api", reviewPost: { posted: false, reason: "head moved" } }),
+      );
+      await store.put(
+        record("other-pr", NOW - 2000, {
+          repo: "acme/api",
+          pr: { number: 43, url: "https://github.com/acme/api/pull/43" },
+        }),
+      );
+      await store.put(
+        record("other-repo", NOW - 1500, {
+          repo: "acme/web",
+          pr: { number: 42, url: "https://github.com/acme/web/pull/42" },
+        }),
+      );
+      await store.put(
+        record("no-repo", NOW - 1200, { pr: { number: 42, url: "https://github.com/acme/api/pull/42" } }),
+      );
+      await store.put(record("solo", NOW - 500, { repo: "acme/api" }));
+      const pr = { repo: "acme/api", number: 42 };
+      expect((await store.list({ pr })).map((r) => r.id)).toEqual(["r1", "c0"]);
+      expect((await store.list({ pr, limit: 1 })).map((r) => r.id)).toEqual(["r1"]);
+      expect((await store.list({ pr, agent: "coding" })).map((r) => r.id)).toEqual([]);
+      expect(await store.list({ pr: { repo: "acme/api", number: 99 } })).toEqual([]);
+    });
+
     // 30 s timeout, not the 5 s default: the FileRunStore variant's 205 puts
     // each re-read the index, stat every kept record (compact's intact check),
     // and rewrite the index — O(n) I/O per put by design (self-healing index).

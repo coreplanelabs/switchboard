@@ -16,11 +16,20 @@ import {
   type JsonValue,
 } from "../commandRegistry.js";
 import { UNIT_KEY_PATTERN } from "../coordinator/contract.js";
+import { parsePullRequestRef, PULL_REQUEST_REF_PATTERN, type FindingRow } from "../findingsLedger.js";
 import type { RunEvent } from "../runEvents.js";
 import { SEARCH_MAX_HITS } from "../runLedger/sessionLog.js";
 import { RUN_ID_PATTERN, RUN_LIST_MAX_LIMIT, SESSION_KEY_PATTERN } from "../runRecord.js";
-import { MAX_EVENTS_PAGE, runResource, type Result, type RunRecordView, type RunsService } from "../runsService.js";
+import {
+  MAX_EVENTS_PAGE,
+  runResource,
+  type FindingsLedgerView,
+  type Result,
+  type RunRecordView,
+  type RunsService,
+} from "../runsService.js";
 import { systemClock } from "../trace/clock.js";
+import { unwrapUntrusted } from "../untrusted.js";
 
 // The `runs.*` registrations: thin wrappers that translate typed
 // arguments/options plus the resolved caller into `RunsService` calls.
@@ -39,14 +48,18 @@ import { systemClock } from "../trace/clock.js";
 // Surface forms (derived): `runs get <id> [--include messages]`,
 // `runs events <id> [--after-seq n] [--limit n]`, `runs friction <id>`,
 // `runs stop <id> --mode soft|hard`, `runs list [--status …] [--agent …] …`,
-// `runs unit <instance:unit>`, `runs children <id>`,
+// `runs unit <instance:unit>`, `runs children <id>`, `runs findings <owner/repo#N>`,
 // `runs search <session> <words…> [--limit n]`.
 //
 // The three listings that read across runs (the unit is the reading unit,
 // docs/reference/specs/agent-ship.md item 17) are the same shape as `runs
 // list`: `RunView`s the run page renders, under the caller's predicate, no
 // message text — except `runs search`, whose hits carry one line of the log
-// and leave wrapped as untrusted, as `runs events` does.
+// and leave wrapped as untrusted, as `runs events` does. `runs findings`
+// (agent-ship item 18) joins a pull request's records by finding id: a
+// finding's title and a disposition's note are the reviewer's and the coding
+// run's own words, so they leave the JSON surfaces wrapped the same way and
+// the text renderers unwrap them for the person reading the table.
 
 /** One denied point read, for the audit line: who, what, why — never which run
  *  (existence is not revealed even to the log, and the reason is a bare token). */
@@ -74,6 +87,11 @@ function unwrap<T>(res: Result<T>, what: "run" | "unit" = "run"): T {
   if (res.ok) return res.value;
   throw new CommandError(res.error, res.error === "not_found" ? `${what} not found` : "run already finished");
 }
+
+/** What `runs findings` says when no run the caller may see names the pull
+ *  request — an unknown one, one no run worked on and one whose runs are all
+ *  outside the predicate are one answer. */
+export const NO_RUNS_NAME_PR = "no runs name this pull request";
 
 /** How many hits `runs search` answers without `--limit`: a page a person reads, twice `recall`'s five. */
 export const SESSION_SEARCH_DEFAULT_HITS = 10;
@@ -332,6 +350,97 @@ export const runsChildren = defineCommand({
   renderChat: (output) => renderRuns("runs.children", output, "chat", childrenHeader),
 });
 
+const prArg = {
+  name: "pr",
+  schema: z.string().regex(PULL_REQUEST_REF_PATTERN),
+  describe: "the pull request — `owner/repo#N` or its GitHub URL",
+} as const;
+
+/** A finding's title and a disposition's note are stored free text (the
+ *  reviewer's words, the coding run's): fenced on the way out, as a search
+ *  snippet is. Everything else on a row is structured. */
+function wrapFinding(row: FindingRow): FindingRow {
+  return {
+    ...row,
+    ...(row.title !== undefined ? { title: wrapUntrusted(row.title) } : {}),
+    ...(row.disposition !== undefined
+      ? { disposition: { ...row.disposition, note: wrapUntrusted(row.disposition.note) } }
+      : {}),
+  };
+}
+
+export const runsFindings = defineCommand({
+  id: "runs.findings",
+  args: [prArg],
+  action: "runs:read",
+  effect: "read",
+  enabledWhen: (caps) => caps.runHistory,
+  describe:
+    "A pull request's findings ledger — every review finding by id with its severity, where it was raised, what the coding run recorded against it and whether the next review agreed — read from the run records alone.",
+  handler: async ({ args, caller, deps }) => {
+    const pr = parsePullRequestRef(args.pr);
+    if (!pr) throw new CommandError("invalid_input", "pr must be `owner/repo#N` or a pull request URL");
+    const visibleTo = predicateFor(caller.actor, "runs:read", "run");
+    const res = await (await deps.runs()).listFindings(pr, visibleTo);
+    if (!res.ok) throw new CommandError("not_found", NO_RUNS_NAME_PR);
+    const view: FindingsLedgerView = { ...res.value, findings: res.value.findings.map(wrapFinding) };
+    return asJson(view);
+  },
+  render: (output) => renderFindings(output, "text"),
+  renderChat: (output) => renderFindings(output, "chat"),
+});
+
+/** The text surfaces' ledger: a header naming the pull request, the unit when
+ *  one names it, and the status tally; then one line per finding — id,
+ *  severity, `file:line`, title, status (with the kind a re-raise answered) and
+ *  the disposition's note. The terminal gets aligned columns; chat gets one
+ *  bullet with ` · ` between the fields. Titles and notes are unwrapped here:
+ *  a person reads the table, the fence is for the JSON surfaces. */
+function renderFindings(output: JsonValue, surface: "chat" | "text"): string {
+  if (!isObject(output) || !Array.isArray(output.findings) || !isObject(output.pr)) {
+    return renderCompact("runs.findings", output);
+  }
+  const rows = output.findings.filter(isObject);
+  const tally = new Map<string, number>();
+  for (const r of rows) if (typeof r.status === "string") tally.set(r.status, (tally.get(r.status) ?? 0) + 1);
+  const counts = [...tally.entries()].map(([status, n]) => `${n} ${status}`).join(" · ");
+  const unit = typeof output.unit === "string" ? ` (unit ${output.unit})` : "";
+  const header = `findings for ${String(output.repo)}#${String(output.pr.number)}${unit} — ${rows.length} finding${rows.length === 1 ? "" : "s"}${counts ? `: ${counts}` : ""}`;
+  const cells = rows.map((r) => {
+    const disposition = isObject(r.disposition) ? r.disposition : undefined;
+    const status =
+      r.status === "re-raised" && typeof r.reRaisedAfter === "string"
+        ? `re-raised after ${r.reRaisedAfter}`
+        : String(r.status);
+    return {
+      id: String(r.id),
+      severity: typeof r.severity === "string" ? r.severity : "-",
+      where: typeof r.file === "string" ? (typeof r.line === "number" ? `${r.file}:${r.line}` : r.file) : "-",
+      title: typeof r.title === "string" ? unwrapUntrusted(r.title) : "-",
+      status,
+      note: disposition && typeof disposition.note === "string" ? unwrapUntrusted(disposition.note) : "",
+    };
+  });
+  if (surface === "chat") {
+    const lines = cells.map(
+      (c) => `• \`${c.id}\` · ${c.severity} · ${c.where} · ${c.title} · ${c.status}${c.note ? ` — ${c.note}` : ""}`,
+    );
+    return [header, ...(lines.length === 0 ? ["(none)"] : lines)].join("\n");
+  }
+  const width = (k: "id" | "severity" | "where" | "title" | "status") => Math.max(...cells.map((c) => c[k].length), 1);
+  const w = {
+    id: width("id"),
+    severity: width("severity"),
+    where: width("where"),
+    title: width("title"),
+    status: width("status"),
+  };
+  const lines = cells.map((c) =>
+    `${c.id.padEnd(w.id)}  ${c.severity.padEnd(w.severity)}  ${c.where.padEnd(w.where)}  ${c.title.padEnd(w.title)}  ${c.status.padEnd(w.status)}  ${c.note}`.trimEnd(),
+  );
+  return [header, ...(lines.length === 0 ? ["(none)"] : lines)].join("\n");
+}
+
 export const runsSearch = defineCommand({
   id: "runs.search",
   args: [
@@ -379,6 +488,7 @@ export const runsCommands: readonly CommandDef<RunsCommandDeps>[] = [
   runsStop,
   runsUnit,
   runsChildren,
+  runsFindings,
   runsSearch,
 ] as unknown as CommandDef<RunsCommandDeps>[];
 
