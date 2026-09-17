@@ -6,6 +6,8 @@ import { planResume, type KnownTool } from "../../runLedger/resume.js";
 import { bearerHashOf } from "../../modelProxy/runBearers.js";
 import type { RunEvent } from "../../runEvents.js";
 import type { StepReport } from "../../runLedger/stepReport.js";
+import { identityChangedCondition } from "../container.js";
+import { HarnessContainerReplacedError } from "../contract.js";
 import { piDriver } from "../pi/testing/driver.js";
 import type { DrivenRun, RunScript } from "../testing/scenarios.js";
 import type { OpenCodeFeedRecord } from "./client.js";
@@ -677,6 +679,92 @@ describe("wind-down parity, an undelivered follow-up, and the alive-here reconci
     expect(resumed?.summary).toMatch(/still answers in this container but could not be re-attached/);
     expect(resumed?.summary).toMatch(/the server refused the session \(404\)/);
     expect(resumed?.summary).toMatch(/ended it and its tailer before a fresh start/);
+  });
+});
+
+// Feature: docs/reference/specs/harness.md item 6 — one more command before the
+// crash judgement. The platform's rollout kills the container's processes first
+// while exec still answers, so OpenCode is found dead before any read has
+// failed with the executor's word; `driveOpenCode` takes one more container
+// command before judging, and reads the verdict off it.
+describe("an OpenCode found dead before any command returned the executor's word — one more container command before the crash judgement", () => {
+  const oneCallOpen: RunScript = {
+    turns: [
+      {
+        content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "echo one" } }],
+        stopReason: "tool_use",
+      },
+      { content: [{ type: "text", text: "never" }], stopReason: "end_turn" },
+    ],
+    deadWithoutWordBeforeModelCall: 2,
+  };
+  const verdictOf = (r: DrivenRun): HarnessContainerReplacedError => {
+    expect(r.outcome.kind).toBe("failed");
+    const err = r.outcome.kind === "failed" ? r.outcome.error : undefined;
+    expect(err).toBeInstanceOf(HarnessContainerReplacedError);
+    expect(err?.name).toBe("OpenCodeContainerReplacedError");
+    return err as HarnessContainerReplacedError;
+  };
+
+  it("the one more command failing with the word is the executor's word: the replaced verdict by type carrying the record with the open call settled, one sandbox_restarted note that is the verdict's message, the call's failed tool_result with the replaced note, the server and its tailer neither ended nor their root removed — never 'the OpenCode run ended before its execution settled'", async () => {
+    const r = await run(oneCallOpen);
+    const err = verdictOf(r);
+    expect(err.message).toMatch(
+      /^the container running OpenCode was replaced \(vm-conformance → vm-conformance; the executor said: harness container: identity failed — runtime-replaced: /,
+    );
+    expect(err).toMatchObject({ was: "vm-conformance", now: "vm-conformance", condition: "word" });
+    expect(err.said).toMatch(/runtime-replaced/);
+    expect(err.record.settlements).toEqual([
+      expect.objectContaining({ action: "synthetic", text: openCodeReplacedCallNote("bash") }),
+    ]);
+    expect(err.record.settlements[0].toolUse.id).toBe("c1");
+    expect(
+      notes(r.events)
+        .filter((n) => n.kind === "sandbox_restarted")
+        .map((n) => n.summary),
+    ).toEqual([err.message]);
+    expect(toolResults(r).filter((t) => t.callId === "c1")).toEqual([
+      expect.objectContaining({ ok: false, summary: openCodeReplacedCallNote("bash") }),
+    ]);
+    expect(r.killed).toEqual([]);
+    expect(r.removed).toEqual([]);
+  });
+
+  it("the one more command answering another identity than the launch recorded is the verdict too, the changed identity its condition — said in the note where the executor's words would be, `said` nothing — with the same record, settlement and nothing ended", async () => {
+    const r = await run({ ...oneCallOpen, deadWithoutWordThen: "renamed" });
+    const err = verdictOf(r);
+    expect(err.message).toBe(
+      `the container running OpenCode was replaced (vm-conformance → vm-conformance-2; ${identityChangedCondition()})`,
+    );
+    expect(err).toMatchObject({
+      was: "vm-conformance",
+      now: "vm-conformance-2",
+      said: undefined,
+      condition: "identity",
+    });
+    expect(err.record.settlements.map((s) => s.toolUse.id)).toEqual(["c1"]);
+    expect(
+      notes(r.events)
+        .filter((n) => n.kind === "sandbox_restarted")
+        .map((n) => n.summary),
+    ).toEqual([err.message]);
+    expect(toolResults(r).filter((t) => t.callId === "c1")).toEqual([
+      expect.objectContaining({ ok: false, summary: openCodeReplacedCallNote("bash") }),
+    ]);
+    expect(r.killed).toEqual([]);
+    expect(r.removed).toEqual([]);
+  });
+
+  it("the same identity on the one more command leaves the crash judgement standing: 'the OpenCode run ended before its execution settled', no sandbox_restarted note, the server and its tailer ended and the root removed", async () => {
+    const r = await run({ ...oneCallOpen, deadWithoutWordThen: "same" });
+    expect(r.outcome.kind).toBe("failed");
+    if (r.outcome.kind === "failed") {
+      expect(r.outcome.error).not.toBeInstanceOf(HarnessContainerReplacedError);
+      expect(r.outcome.error.message).toBe("the OpenCode run ended before its execution settled");
+    }
+    expect(notes(r.events).some((n) => n.kind === "sandbox_restarted")).toBe(false);
+    expect(r.killed.length).toBeGreaterThan(0);
+    expect(r.removed).toEqual([openCodeRunPaths("run-c").dir]);
   });
 });
 

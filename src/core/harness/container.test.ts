@@ -9,7 +9,10 @@ import {
   HarnessContainerRuntimeReplacedError,
   INLINE_LINE_CHARS,
   OP_TIMEOUT_MS,
+  identityChangedCondition,
   isContainerGone,
+  replacedBecause,
+  replacedVerdict,
   PORT_ARG,
   WRITE_CHUNK_CHARS,
   aliveScript,
@@ -307,6 +310,85 @@ describe("stdoutOf — an executor's answer as the operation's stdout", () => {
     expect(isContainerGone(new HarnessContainerRuntimeReplacedError("read", replaced))).toBe(true);
     expect(isContainerGone(new HarnessContainerError("read", "exit 1"))).toBe(false);
     expect(isContainerGone(new Error("runtime-replaced in a plain error"))).toBe(false);
+  });
+});
+
+// Feature: docs/reference/specs/harness.md item 6 — one more command before the
+// crash judgement: what a process found dead without the executor's word is
+// judged by, on the seam, before either harness reads a crash.
+describe("replacedVerdict — one more container command before a dead process is judged to have died where it ran", () => {
+  const answering = (identity: () => Promise<string | undefined>) => ({ identity });
+
+  it("the command failing with the executor's typed word — the resident's ExecSandboxRestartedError, the seam's HarnessContainerRuntimeReplacedError — is the verdict by the word, whatever was recorded", async () => {
+    const seam = new HarnessContainerRuntimeReplacedError("identity", "runtime-replaced: the runtime was replaced");
+    await expect(
+      replacedVerdict(
+        answering(async () => {
+          throw seam;
+        }),
+        "vm-a",
+      ),
+    ).resolves.toEqual({ condition: "word", said: seam });
+    const resident = new ExecSandboxRestartedError("the sandbox restarted under the run (waited 42 s)", 42_000);
+    await expect(
+      replacedVerdict(
+        answering(async () => {
+          throw resident;
+        }),
+        undefined,
+      ),
+    ).resolves.toEqual({ condition: "word", said: resident });
+  });
+
+  it("the command answering another word than the one recorded when the process started is the verdict by the changed identity, both words on it", async () => {
+    await expect(
+      replacedVerdict(
+        answering(async () => "vm-b"),
+        "vm-a",
+      ),
+    ).resolves.toEqual({
+      condition: "identity",
+      was: "vm-a",
+      now: "vm-b",
+    });
+  });
+
+  it("no verdict — the crash judgement stands — for the same word, no word recorded, no word answered, or a command that failed for any reason but the executor's word", async () => {
+    await expect(
+      replacedVerdict(
+        answering(async () => "vm-a"),
+        "vm-a",
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      replacedVerdict(
+        answering(async () => "vm-b"),
+        undefined,
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      replacedVerdict(
+        answering(async () => undefined),
+        "vm-a",
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      replacedVerdict(
+        answering(async () => {
+          throw new HarnessContainerError("identity", "exit 127: cat: not found");
+        }),
+        "vm-a",
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("replacedBecause derives the why from the condition's tag: the executor's words, whitespace folded and capped, for `word`; the changed identity's sentence for `identity`, whatever was said", () => {
+    expect(replacedBecause("word", "runtime-replaced:  the runtime\nwas replaced")).toBe(
+      "the executor said: runtime-replaced: the runtime was replaced",
+    );
+    expect(replacedBecause("identity", undefined)).toBe(identityChangedCondition());
+    expect(replacedBecause("identity", "ignored")).toBe(identityChangedCondition());
+    expect(identityChangedCondition()).toMatch(/^the changed identity was the condition: /);
   });
 });
 

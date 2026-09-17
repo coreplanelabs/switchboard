@@ -271,6 +271,10 @@ class ScriptedServe {
   /** The container was replaced with the last turn's call in flight: the play
    *  stops, having left that call open (no success event). */
   private replaced = false;
+  /** The platform's rollout with the last turn's call in flight: the server and
+   *  its tailer die with the call open and no read fails with the word; the play
+   *  stops there. */
+  private deadWithoutWord = false;
   private ordinal = 0;
   private replyFailuresLeft: number;
   private readonly replyPostThrows: boolean;
@@ -736,6 +740,14 @@ class ScriptedServe {
         );
         return;
       }
+      if (this.deadWithoutWord) {
+        // The platform's rollout: the server and its tailer are killed first
+        // while exec still answers, so the feed ends with this turn's call open
+        // and no read fails with the word; what the harness's one more command
+        // finds is the script's. No further turns.
+        this.container.dieWithoutWord(this.script.deadWithoutWordThen ?? "word", this.replacedWord);
+        return;
+      }
     }
     this.emitEvent(this.interrupted ? "session.execution.interrupted" : "session.execution.succeeded", {
       sessionID: this.sessionID,
@@ -902,6 +914,15 @@ class ScriptedServe {
       turnIndex === this.script.containerReplacedBeforeModelCall - 2
     ) {
       this.replaced = true;
+      return this.toolContent(callId, ask.name, input, "running", []);
+    }
+    // The platform's rollout with this call in flight (`deadWithoutWordBeforeModelCall`):
+    // the same open call, the process dead without the word once the turn is played.
+    if (
+      this.script.deadWithoutWordBeforeModelCall !== undefined &&
+      turnIndex === this.script.deadWithoutWordBeforeModelCall - 2
+    ) {
+      this.deadWithoutWord = true;
       return this.toolContent(callId, ask.name, input, "running", []);
     }
     // The gate clause switched off: a refused tool runs anyway (the bot's reject

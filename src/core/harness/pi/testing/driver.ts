@@ -143,13 +143,23 @@ export function piDriver(): HarnessDriver {
         // that would carry this call's result is `containerReplacedBeforeModelCall`,
         // so the call is the turn before it.
         holdCallOpen: ({ turn }) => {
-          if (script.containerReplacedBeforeModelCall !== turn + 1) return false;
-          container.vm = REPLACED_WORD;
-          container.failOnceDrained = new HarnessContainerRuntimeReplacedError(
-            "read",
-            "runtime-replaced: the sandbox was replaced under the run",
-          );
-          return true;
+          if (script.containerReplacedBeforeModelCall === turn + 1) {
+            container.vm = REPLACED_WORD;
+            container.failOnceDrained = new HarnessContainerRuntimeReplacedError(
+              "read",
+              "runtime-replaced: the sandbox was replaced under the run",
+            );
+            return true;
+          }
+          // The platform's rollout (`deadWithoutWordBeforeModelCall`): pi is
+          // killed first while exec still answers, so the alive probe finds it
+          // gone with this call open and no read has failed with the word; what
+          // the harness's one more command finds is the script's.
+          if (script.deadWithoutWordBeforeModelCall === turn + 1) {
+            container.dieWithoutWord(script.deadWithoutWordThen ?? "word", REPLACED_WORD);
+            return true;
+          }
+          return false;
         },
         ...(script.bypassGate ? { bypassGate: true } : {}),
         ...(script.unknownEventKind !== undefined ? { emitUnknownKind: script.unknownEventKind } : {}),

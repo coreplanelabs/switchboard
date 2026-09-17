@@ -8,6 +8,7 @@
 import {
   checkPortArg,
   HarnessContainerError,
+  HarnessContainerRuntimeReplacedError,
   PORT_ARG,
   type HarnessContainer,
   type HarnessPaths,
@@ -71,6 +72,25 @@ export class FakeHarnessContainer implements HarnessContainer {
   /** The process exited: the log is what it is, `alive` answers no from here. */
   die(): void {
     this.live = false;
+  }
+
+  /** The platform's rollout as the fake plays it: the process is dead (`alive`
+   *  answers no) and no command has failed with the executor's word — the
+   *  container's processes were killed first while exec still answered. What
+   *  the harness's one more command, `identity`, then finds is `then`: the
+   *  executor's runtime-replaced word thrown, the container renamed to
+   *  `renamedWord`, or the container as it was. */
+  dieWithoutWord(then: "word" | "renamed" | "same", renamedWord: string): void {
+    this.die();
+    if (then === "word")
+      this.failNext = {
+        operation: "identity",
+        error: new HarnessContainerRuntimeReplacedError(
+          "identity",
+          "runtime-replaced: the resident runtime was replaced (a deploy) while this command was starting; its output is lost",
+        ),
+      };
+    else if (then === "renamed") this.vm = renamedWord;
   }
 
   private maybeFail(operation: string): void {
@@ -137,7 +157,11 @@ export class FakeHarnessContainer implements HarnessContainer {
     return (this.live && pid === this.pid) || this.alivePids.has(pid);
   }
 
+  /** The container's word — or, armed with `failNext` for `identity`, the
+   *  failure the executor would report: the runtime-replaced word on the one
+   *  more command a process found dead without it takes. */
   async identity(): Promise<string | undefined> {
+    this.maybeFail("identity");
     return this.vm;
   }
 

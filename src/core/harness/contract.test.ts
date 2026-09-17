@@ -10,6 +10,7 @@ import { RunControl } from "../runRegistry/runControl.js";
 import { FollowUpInbox } from "../threadAdmission.js";
 import {
   factsBelongTo,
+  HarnessContainerReplacedError,
   HarnessInterruptedError,
   HarnessMismatchError,
   harnessFactsOf,
@@ -18,6 +19,7 @@ import {
   type HarnessDeps,
   type Harness,
   type HarnessFacts,
+  type HarnessRecord,
   type HarnessRun,
   type OpenCodeHarnessFacts,
   type PiHarnessFacts,
@@ -171,6 +173,41 @@ const piFactsIn = (container?: string): PiHarnessFacts => ({
   root: paths.dir,
   relaunches: 0,
   ...(container ? { container } : {}),
+});
+
+// Feature: docs/reference/specs/harness.md item 6 — the replaced verdict's
+// condition is a tag, and the executor's words are present exactly when the
+// tag says the word decided.
+describe("HarnessContainerReplacedError — the condition's tag and the words it carries", () => {
+  const record: HarnessRecord = {
+    messages: [],
+    compactions: [],
+    settlements: [],
+    turn: 0,
+    inboxConsumedSeq: 0,
+    deadline: 0,
+  };
+
+  it("a verdict by the executor's word carries them and is tagged `word` — the default, so the seam's existing constructions stand; a verdict by the changed identity carries none and is tagged `identity`", () => {
+    const byWord = new HarnessContainerReplacedError("replaced", "runtime-replaced", "vm-a", "vm-b", record);
+    expect(byWord).toMatchObject({
+      said: "runtime-replaced",
+      condition: "word",
+      reason: "container replaced under the run",
+    });
+    const byIdentity = new HarnessContainerReplacedError("replaced", undefined, "vm-a", "vm-b", record, "identity");
+    expect(byIdentity).toMatchObject({ said: undefined, condition: "identity", was: "vm-a", now: "vm-b" });
+    expect(byIdentity).toBeInstanceOf(HarnessInterruptedError);
+  });
+
+  it("the invariant is refused at construction: a verdict tagged `word` with no words, or tagged `identity` with words no command returned, is a harness bug named as such", () => {
+    expect(() => new HarnessContainerReplacedError("replaced", undefined, "vm-a", "vm-b", record, "word")).toThrow(
+      "a replaced verdict by the executor's word carries no words",
+    );
+    expect(() => new HarnessContainerReplacedError("replaced", "said", "vm-a", "vm-b", record, "identity")).toThrow(
+      "a replaced verdict by the changed identity carries words no command returned",
+    );
+  });
 });
 
 describe("harnessFactsOf — a row's facts, read by the harness that wrote them", () => {

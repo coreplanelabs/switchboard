@@ -442,8 +442,73 @@ export class HarnessContainerRuntimeReplacedError extends HarnessContainerError 
  *  it: the executor's typed word (`ExecSandboxRestartedError`), or the seam's
  *  own for the word handed back as a command's text. What `identity` and
  *  `request` rethrow instead of answering. */
-export function isContainerGone(err: unknown): boolean {
+export function isContainerGone(err: unknown): err is ExecSandboxRestartedError | HarnessContainerRuntimeReplacedError {
   return err instanceof ExecSandboxRestartedError || err instanceof HarnessContainerRuntimeReplacedError;
+}
+
+/** What a replaced verdict rests on, as a tag a reader of the error and of the
+ *  record compares — never a sentence to parse: `word`, the executor's word on
+ *  a failing container command (the condition as it always was, `said`
+ *  present); `identity`, the container's changed identity on the one more
+ *  command a wordless death takes (`said` absent, no command returned it). */
+export type ReplacedCondition = "word" | "identity";
+
+/** How a process found dead without the executor's word was judged replaced
+ *  after all (`replacedVerdict`): `word` — the one more command failed with
+ *  the executor's word, the condition as it always was; `identity` — the
+ *  command answered another word for the container than the one recorded when
+ *  the process started, the changed identity the condition (`was` → `now`). */
+export type ReplacedVerdict =
+  | { condition: Extract<ReplacedCondition, "word">; said: Error }
+  | { condition: Extract<ReplacedCondition, "identity">; was: string; now: string };
+
+/** One more container command before a dead process is judged to have died
+ *  where it ran. The condition for the replaced verdict is the executor's word
+ *  on a failing container command (harness-pi.md item 16), and the platform's
+ *  rollout has a window that misses it: the container's processes are killed
+ *  first while exec still answers, so the alive probe finds the process gone
+ *  before any command has failed with the word — and the harness would judge a
+ *  crash where the container was in fact replaced (the word came to another
+ *  thread's command half a second later). So a process found dead WITHOUT
+ *  the word takes exactly one more command, `identity`, before the judgement:
+ *  the command failing with the word is the executor's word, the verdict
+ *  replaced as it would have been had the word come on the failing read; the
+ *  command answering another word than `recorded` — the container's identity
+ *  when the process started — is the verdict too, by the changed identity
+ *  (a renamed container with a dead process is a replaced one; the boot id
+ *  corroborates a verdict the word made and decides only here, where no word
+ *  can come); anything else — the same word, no word on either side, a command
+ *  that failed for another reason — leaves the crash judgement standing, and
+ *  the caller makes it. `undefined` is that judgement's cue. */
+export async function replacedVerdict(
+  container: Pick<HarnessContainer, "identity">,
+  recorded: string | undefined,
+): Promise<ReplacedVerdict | undefined> {
+  let now: string | undefined;
+  try {
+    now = await container.identity();
+  } catch (err) {
+    if (isContainerGone(err)) return { condition: "word", said: err };
+    return undefined;
+  }
+  if (recorded !== undefined && now !== undefined && now !== recorded)
+    return { condition: "identity", was: recorded, now };
+  return undefined;
+}
+
+/** The note's sentence for a verdict reached by the changed identity
+ *  (`condition: "identity"`): what the `sandbox_restarted` note says in place
+ *  of `the executor said: …`, since no command returned the word. */
+export function identityChangedCondition(): string {
+  return "the changed identity was the condition: the process was found dead before any command returned the executor's word";
+}
+
+/** A replaced verdict's why, as its message and the `sandbox_restarted` note
+ *  say it, derived from the condition's tag: the executor's words for `word`
+ *  (`said`, folded and capped), the changed identity's sentence for `identity`. */
+export function replacedBecause(condition: ReplacedCondition, said: string | undefined): string {
+  if (condition === "identity") return identityChangedCondition();
+  return `the executor said: ${redactAndCap((said ?? "").replace(/\s+/g, " ").trim(), 240)}`;
 }
 
 /** The stdout of an executor's answer: the executors' runtime word anywhere in
