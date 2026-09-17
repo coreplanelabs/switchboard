@@ -53,6 +53,12 @@ const FLEET_BUSY_PATTERNS: readonly RegExp[] = [
   // pool matches on this exact phrase. Seen live passing through as a plain
   // in-body error and ending two reviews in under a minute each.
   /Maximum number of running container instances exceeded/i,
+  // The platform's start-rate limit: a burst of fresh threads (twenty-four
+  // seeded sandboxes started within twenty seconds) had a third of its
+  // container starts refused with this text, and the Worker read it as a
+  // failed seed. It is capacity for a moment, like a full fleet: the
+  // executor waits and re-sends the identical request.
+  /too many containers per second/i,
 ];
 
 export function isFleetBusy(message: string): boolean {

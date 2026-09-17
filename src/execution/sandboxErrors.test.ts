@@ -53,6 +53,16 @@ describe("isFleetBusy", () => {
     expect(isFleetBusy('{"code":"CONTAINER_UNAVAILABLE","message":"…"}')).toBe(true);
   });
 
+  it("recognizes the platform's start-rate limit — a burst of fresh threads refused as too many containers per second — as capacity, not a failure", () => {
+    expect(isFleetBusy("You are requesting too many containers per second")).toBe(true);
+    expect(
+      isFleetBusyError({
+        name: "Error",
+        message: "Failed to start: You are requesting too many containers per second",
+      }),
+    ).toBe(true);
+  });
+
   it("recognizes the platform's max_instances wording on the 0.13 line — the text that ended two reviews in under a minute each", () => {
     expect(
       isFleetBusy(
