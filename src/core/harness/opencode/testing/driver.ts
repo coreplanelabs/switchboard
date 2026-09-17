@@ -419,6 +419,23 @@ class ScriptedServe {
         for (let i = 0; i < 200 && !this.interrupted; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
       }
       if (this.interrupted) break;
+      // The process is found dead before this model call with no command having
+      // said the word (the rollout's window): the server and its tailer die —
+      // the feed's alive probe ends the stream — and the NEXT container command
+      // (the identity the judgement takes) throws the executor's word from the
+      // replacement, which also names itself anew. No execution end is emitted.
+      if (this.script.deadWithoutWordBeforeModelCall === t + 1) {
+        this.container.vm = this.replacedWord;
+        this.container.failNext = {
+          operation: "identity",
+          error: new HarnessContainerRuntimeReplacedError(
+            "identity",
+            "runtime-replaced: the sandbox was replaced under the run",
+          ),
+        };
+        this.container.die();
+        return;
+      }
       this.flushSteers();
       this.recordModelCall();
       await this.playTurn(this.script.turns[t], t);

@@ -399,6 +399,30 @@ describe("the acceptance examples, end to end against the fake serve", () => {
     expect(notes(r.events).some((n) => n.kind === "harness_error" && /c1/.test(n.summary))).toBe(true);
     expect(r.killed.length).toBeGreaterThan(0);
   });
+
+  it("an OpenCode found dead without the word gets one more container command before the judgement: the identity that throws the runtime-replaced word is the executor's word and the replaced verdict follows — the open call settled with the replaced note, the sandbox_restarted note, nothing killed or removed — never the crash judgement", async () => {
+    // The platform rollout's window: the container's processes are killed
+    // before any command can return the word, so the feed's alive probe reads
+    // the process gone first; the next command reaches the replacement and
+    // gets the word.
+    const r = await run({
+      turns: [
+        { content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "ls" } }], stopReason: "tool_use" },
+        { content: [{ type: "text", text: "never" }], stopReason: "end_turn" },
+      ],
+      deadWithoutWordBeforeModelCall: 2,
+    });
+    expect(r.outcome.kind).toBe("failed");
+    if (r.outcome.kind === "failed") {
+      expect(r.outcome.error.name).toBe("OpenCodeContainerReplacedError");
+      expect(r.outcome.error.message).toMatch(
+        /^the container running OpenCode was replaced \(.+ → .+; the executor said: harness container: identity failed — runtime-replaced: /,
+      );
+    }
+    expect(notes(r.events).some((n) => n.kind === "sandbox_restarted")).toBe(true);
+    expect(r.killed).toEqual([]);
+    expect(r.removed).toEqual([]);
+  });
 });
 
 const TOOLS: KnownTool[] = [{ name: "bash" }, { name: "read", sideEffectFree: true }, { name: "update_status" }];

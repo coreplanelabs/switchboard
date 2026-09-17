@@ -73,6 +73,14 @@ export interface RunScript {
    *  executor's runtime-replaced word, so the harness reads the survival
    *  clause's ceiling with the words to corroborate it and settles the call. */
   containerReplacedBeforeModelCall?: number;
+  /** The harness's process is found dead before the model call of this 1-based
+   *  number WITHOUT any command having said the runtime was replaced — the
+   *  platform rollout's window, where the container's processes are killed
+   *  before any command can return the word — and the NEXT container command
+   *  throws `HarnessContainerRuntimeReplacedError`: the one extra command the
+   *  harness takes before judging must read it as the executor's word and the
+   *  replaced verdict, never the crash judgement. */
+  deadWithoutWordBeforeModelCall?: number;
   /** The row's process (named by the resume's facts) is still alive in this same
    *  container on the resume — the survival clause's alive-here: `open` finds it
    *  before anything is started and reconciles with it (re-attaches to it, or
@@ -651,6 +659,27 @@ export const SCENARIOS: readonly ScenarioRow[] = [
         /replaced|in flight|lost/,
         "the in-flight call's result on the stream does not carry the replaced note",
       );
+      // Nothing of the old process is in the container that answers now.
+      assert.deepEqual(run.killed, [], "a pid was ended in the replacement");
+      assert.deepEqual(run.removed, [], "a root was removed in the replacement");
+    },
+  },
+  {
+    id: "survival-dead-without-word-then-word",
+    clause: "survival",
+    title:
+      "dead without the word, then the word on the next command: the process is found dead with no command having said the runtime was replaced, and the one extra container command the harness takes before judging throws the executor's word — the replaced verdict follows with its sandbox_restarted note and nothing killed or removed, never the crash judgement",
+    script: {
+      turns: [call("c1", "bash", { command: "echo one" }), text("never")],
+      deadWithoutWordBeforeModelCall: 2,
+    },
+    check: (run) => {
+      const error = failed(run);
+      if (!(error instanceof HarnessContainerReplacedError))
+        return assert.fail(`not the seam's container-replaced verdict: ${error.constructor.name} — ${error.message}`);
+      assert.ok(error.said.length > 0, "the verdict carries no executor word");
+      const restarted = notes(run).find((n) => n.kind === "sandbox_restarted");
+      assert.ok(restarted, "no sandbox_restarted note");
       // Nothing of the old process is in the container that answers now.
       assert.deepEqual(run.killed, [], "a pid was ended in the replacement");
       assert.deepEqual(run.removed, [], "a root was removed in the replacement");

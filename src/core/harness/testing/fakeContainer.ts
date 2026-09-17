@@ -138,6 +138,7 @@ export class FakeHarnessContainer implements HarnessContainer {
   }
 
   async identity(): Promise<string | undefined> {
+    this.maybeFail("identity");
     return this.vm;
   }
 

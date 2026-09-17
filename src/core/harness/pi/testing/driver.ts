@@ -131,6 +131,24 @@ export function piDriver(): HarnessDriver {
         beforeModelCall: async () => {
           modelCalls++;
           if (script.hardStopBeforeModelCall === modelCalls) control.requestStop("hard");
+          // pi is found dead before this model call with no command having
+          // said the word (the rollout's window): the container's process dies,
+          // the double never answers again — the harness's alive probe ends the
+          // stream — and the NEXT container command (the identity the judgement
+          // takes) throws the executor's word from the replacement, which also
+          // names itself anew.
+          if (script.deadWithoutWordBeforeModelCall === modelCalls) {
+            container.vm = "vm-conformance-2";
+            container.failNext = {
+              operation: "identity",
+              error: new HarnessContainerRuntimeReplacedError(
+                "identity",
+                "runtime-replaced: the sandbox was replaced under the run",
+              ),
+            };
+            container.die();
+            await new Promise(() => {});
+          }
           await new Promise((r) => setTimeout(r, 15));
         },
         // The container is replaced under the run with this call in flight (the

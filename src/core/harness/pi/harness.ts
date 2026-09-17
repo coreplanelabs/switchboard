@@ -295,10 +295,18 @@ export function settlementAnswer(s: Settlement): RelayedToolAnswer {
  *  old disk. The loop and the dispatcher read the card's reason and the
  *  request's outcome off it, never its name. */
 export class PiContainerReplacedError extends HarnessContainerReplacedError {
-  constructor(said: string, was: string | undefined, now: string | undefined, record: HarnessRecord) {
+  constructor(
+    said: string,
+    was: string | undefined,
+    now: string | undefined,
+    record: HarnessRecord,
+    /** The clause after the containers' words: the executor's words unless the
+     *  condition was another — a changed identity with pi found dead. */
+    condition?: string,
+  ) {
     super(
-      `the container running pi was replaced (${was ?? "unknown"} → ${now ?? "unknown"}; the executor said: ` +
-        `${redactAndCap(said.replace(/\s+/g, " ").trim(), 240)})`,
+      `the container running pi was replaced (${was ?? "unknown"} → ${now ?? "unknown"}; ` +
+        `${condition ?? `the executor said: ${redactAndCap(said.replace(/\s+/g, " ").trim(), 240)}`})`,
       said,
       was,
       now,
@@ -306,6 +314,15 @@ export class PiContainerReplacedError extends HarnessContainerReplacedError {
     );
     this.name = "PiContainerReplacedError";
   }
+}
+
+/** The words for a replaced verdict whose condition is not the executor's word
+ *  but the container's own: the process was found dead without any command
+ *  saying the runtime was replaced, and the one extra command the harness takes
+ *  before judging answered an identity other than the one recorded at the
+ *  process's start. */
+export function identityChangedCondition(): string {
+  return "the container's identity changed — the changed identity was the condition";
 }
 
 /** What the thread reads when the provider refused the run's call under its
@@ -1201,21 +1218,41 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         // word died where it ran: the failure it always was, naming the
         // container's word when it changed so the record can be read.
         replaced = await containerReplaced(containerSaid);
+        // A pi found dead WITHOUT the word takes exactly one more container
+        // command before the judgement: at a platform rollout the container's
+        // processes are killed first and exec still answers for a moment, so
+        // the alive probe reads pi gone before any command can return the
+        // runtime-replaced word. The identity command either throws the word —
+        // the executor's word, the replaced verdict as any command's — or
+        // answers a word other than the one recorded at pi's start, which is
+        // the replaced verdict too, the changed identity the condition;
+        // otherwise the crash judgement stands, as it always did.
+        let now: string | undefined;
+        if (replaced === undefined) {
+          try {
+            now = await container.identity();
+          } catch (err) {
+            if (err instanceof Error && saysContainerReplaced(err)) replaced = await containerReplaced(err);
+          }
+          const was = facts?.container;
+          if (replaced === undefined && was !== undefined && now !== undefined && was !== now)
+            replaced = new PiContainerReplacedError(
+              identityChangedCondition(),
+              was,
+              now,
+              recordNow(),
+              `pi was found dead and ${identityChangedCondition()}`,
+            );
+        }
         if (replaced) {
           bridge.closeOpenSpans((open) => replacedCallNote(open.tool));
           note("sandbox_restarted", replaced.message);
           throw replaced;
         }
+        // A differing identity was judged replaced above, so a pi that
+        // reaches here died where it ran: the failure it always was.
         const tail = await container.tail(paths.errLog, 2000);
-        const was = facts?.container;
-        const now = await container.identity().catch(() => undefined);
-        const renamed =
-          was !== undefined && now !== undefined && was !== now
-            ? ` (the container names itself ${now} now; pi's was ${was})`
-            : "";
-        throw new Error(
-          `pi exited before the run settled${renamed}${tail.trim() ? `: ${redactAndCap(tail.trim(), 400)}` : ""}`,
-        );
+        throw new Error(`pi exited before the run settled${tail.trim() ? `: ${redactAndCap(tail.trim(), 400)}` : ""}`);
       }
       if (providerError !== undefined) {
         if (providerRefusal) throw policyRefused(providerError);

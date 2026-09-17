@@ -43,7 +43,7 @@ import type { Clock, Span } from "../../trace/types.js";
 import { HarnessContainerReplacedError, type HarnessDeps, type HarnessRecord, type HarnessRun } from "../contract.js";
 import type { ProxyRefusalCode } from "../../../channels/modelProxy.js";
 import type { HarnessContainer } from "../container.js";
-import { saysContainerReplaced } from "../pi/harness.js";
+import { identityChangedCondition, saysContainerReplaced } from "../pi/harness.js";
 import { describePiToolCall, piBashExit } from "../pi/bridge.js";
 import { PiMirror } from "../pi/mirror.js";
 import { PiRpcTransport } from "../pi/transport.js";
@@ -119,10 +119,18 @@ export class OpenCodeReplyFailedError extends Error {
  *  executor's word, the condition; `was`/`now` are the two containers' words,
  *  corroboration for the record and never the condition. */
 export class OpenCodeContainerReplacedError extends HarnessContainerReplacedError {
-  constructor(said: string, was: string | undefined, now: string | undefined, record: HarnessRecord) {
+  constructor(
+    said: string,
+    was: string | undefined,
+    now: string | undefined,
+    record: HarnessRecord,
+    /** The clause after the containers' words: the executor's words unless the
+     *  condition was another — a changed identity with the process found dead. */
+    condition?: string,
+  ) {
     super(
-      `the container running OpenCode was replaced (${was ?? "unknown"} → ${now ?? "unknown"}; the executor said: ` +
-        `${redactAndCap(said.replace(/\s+/g, " ").trim(), 240)})`,
+      `the container running OpenCode was replaced (${was ?? "unknown"} → ${now ?? "unknown"}; ` +
+        `${condition ?? `the executor said: ${redactAndCap(said.replace(/\s+/g, " ").trim(), 240)}`})`,
       said,
       was,
       now,
@@ -998,19 +1006,44 @@ export async function driveOpenCode(
   // container the run holds now — or closes the run `interrupted` for a restart
   // when the relaunch is refused. Nothing of the old process is in the container
   // that answers now, so the caller ends and removes nothing there.
-  if (containerSaid !== undefined) {
+  const replacedVerdict = (said: string, now2: string | undefined, condition?: string): never => {
     const record = bridge.record(recordBase, deadline);
     bridge.closeOpenSpans((open) => openCodeReplacedCallNote(open.tool));
-    const now2 = await conn.container.identity().catch(() => undefined);
-    const replaced = new OpenCodeContainerReplacedError(containerSaid.message, conn.containerWord, now2, record);
+    const replaced = new OpenCodeContainerReplacedError(said, conn.containerWord, now2, record, condition);
     note("sandbox_restarted", replaced.message);
     throw replaced;
-  }
+  };
+  if (containerSaid !== undefined)
+    replacedVerdict(containerSaid.message, await conn.container.identity().catch(() => undefined));
   if (bypass) throw bypass;
   if (replyFailed) throw replyFailed;
   if (hardStopped) return { answer: HARD_STOP_MESSAGE };
   if (providerError !== undefined) throw new Error(`the model call failed: ${providerError}`);
-  if (!settled) throw new Error("the OpenCode run ended before its execution settled");
+  if (!settled) {
+    // A process found dead WITHOUT the word takes exactly one more container
+    // command before the judgement (the survival clause's ceiling): at a
+    // platform rollout the container's processes are killed first and exec
+    // still answers for a moment, so the feed's alive probe reads the process
+    // gone before any command can return the runtime-replaced word. The
+    // identity command either throws the word — the executor's word, the
+    // replaced verdict as any command's — or answers a word other than the one
+    // recorded at the start, the replaced verdict too with the changed identity
+    // the condition; otherwise the crash judgement stands, as it always did.
+    let now2: string | undefined;
+    try {
+      now2 = await conn.container.identity();
+    } catch (err) {
+      if (err instanceof Error && saysContainerReplaced(err))
+        replacedVerdict(err.message, await conn.container.identity().catch(() => undefined));
+    }
+    if (conn.containerWord !== undefined && now2 !== undefined && now2 !== conn.containerWord)
+      replacedVerdict(
+        identityChangedCondition(),
+        now2,
+        `the run's process was found dead and ${identityChangedCondition()}`,
+      );
+    throw new Error("the OpenCode run ended before its execution settled");
+  }
   // Every refill the loop saw has landed as its steps, and the last text-only
   // turn is the answer.
   await bridge.flush();
