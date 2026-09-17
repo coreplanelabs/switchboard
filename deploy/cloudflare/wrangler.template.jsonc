@@ -56,7 +56,10 @@
     }
   ],
   "durable_objects": {
-    "bindings": [{ "name": "SWITCHBOARD", "class_name": "SwitchboardServer" }]
+    "bindings": [
+      { "name": "SWITCHBOARD", "class_name": "SwitchboardServer" },
+      { "name": "LINEAR_STATE", "class_name": "LinearState" }
+    ]
   },
   // The artifacts bucket (docs/reference/specs/execution.md item 20, record
   // 0033): where a run's files live by reference. Rendered only when the
@@ -69,7 +72,10 @@
   // {{#if artifacts}}
   "r2_buckets": [{ "binding": "ARTIFACTS", "bucket_name": "{{artifacts.bucket}}" }],
   // {{/if}}
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SwitchboardServer"] }],
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["SwitchboardServer"] },
+    { "tag": "v2", "new_sqlite_classes": ["LinearState"] }
+  ],
   // The ship coordinator as a Workflow (coordinator.ts, re-exported by
   // worker.ts; docs/reference/specs/http-ingress.md item 9): `POST
   // /admin/coordinator/instances` creates its instances and the state Worker's

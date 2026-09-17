@@ -24,6 +24,16 @@ export const MINUTE_MS = 60_000;
  *  as a literal where it is used. */
 export const DAY_MS = 24 * 60 * MINUTE_MS;
 
+/** Linear transport lifetimes: browser authorization, token renewal, signed
+ *  webhook freshness, consumer leases and completed-delivery deduplication. */
+export const LINEAR_TIMING = {
+  oauthStateMs: 10 * MINUTE_MS,
+  refreshMarginMs: 5 * MINUTE_MS,
+  webhookSkewMs: MINUTE_MS,
+  deliveryLeaseMs: 2 * MINUTE_MS,
+  deliveryRetentionMs: 14 * DAY_MS,
+} as const;
+
 /** How long the confirmation a routed write is offered as stays pending
  *  (docs/decisions/0044; docs/reference/specs/routing-and-config.md item 25):
  *  the connect ticket's ten minutes. The bot passes it to the config object,
