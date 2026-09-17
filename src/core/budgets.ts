@@ -42,6 +42,15 @@ export const CONFIRMATION_TTL_MS = 10 * MINUTE_MS;
  *  inside it runs to the attach's own timeout. The run's own stop ends any of
  *  it at once. Read by the executor factory. */
 export const FIRST_ATTACH_WAIT_MS = MINUTE_MS;
+/** How long a harness's one more command waits for a container that is down
+ *  under a live run to answer (docs/reference/specs/harness-pi.md item 16):
+ *  the platform rebuilt a replaced resident container in about a minute, and
+ *  a run with work in flight should not hang on a container that is not coming
+ *  back for as long as a fresh run may wait for its first container
+ *  (`SANDBOX_START_WAIT_MAX_MS`, ten minutes, execution.md item 23 — a wait
+ *  before anything ran). A wait that runs out decides nothing; the failure
+ *  that opened the question stands. */
+export const HARNESS_PROBE_WAIT_MS = 5 * MINUTE_MS;
 
 /** The presets that run the tool loop, and the one pipeline preset. */
 export const LOOP_PRESETS = ["general", "coding", "review", "research", "explore", "conductor"] as const;
