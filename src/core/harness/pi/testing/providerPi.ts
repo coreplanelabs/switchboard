@@ -248,7 +248,23 @@ export function scriptPiFromProvider(container: FakeHarnessContainer, opts: Prov
    *  — settles, as the double always did; the rows built on that stand. */
   function afterAbort(cutTool = false): void {
     if (cutTool && queued.length > 0) {
-      container.emit({ type: "agent_end", messages: [], willRetry: false });
+      // The real binary closes the cut turn with a failed assistant message
+      // ("This operation was aborted", measured on the first live cut) before
+      // it takes the steer: the harness must read that failure as the cut's
+      // own, never as the write-up's.
+      const cut = {
+        role: "assistant",
+        content: [],
+        stopReason: "error",
+        errorMessage: "This operation was aborted",
+        model: current().model,
+      };
+      container.emit(
+        { type: "message_start", message: { ...cut, stopReason: "pending" } },
+        { type: "message_end", message: cut },
+        { type: "turn_end", message: cut, toolResults: [] },
+        { type: "agent_end", messages: [], willRetry: false },
+      );
       const text = queued.shift()!;
       void run(text, []);
       return;
