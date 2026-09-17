@@ -196,6 +196,13 @@ export type RunNoteKind =
    *  item 7): the summary names the tool and the rule; the model read the same
    *  reason as the tool's result. Published by the bot's authorize route. */
   | "tool_refused"
+  /** An OpenCode tool settled under a step this loop never saw start and the
+   *  settle was set aside (harness.md item 13): an earlier execution's late
+   *  result — the pinned binary's ordinary shape after a hung call's interrupt
+   *  — or a step lost with the tailer's stream. The summary names the call and
+   *  the step. Information, not a failure of the harness: nothing ran that the
+   *  gate did not decide. Published by the OpenCode bridge in its own mode. */
+  | "settle_set_aside"
   /** A ship coding child's budget ended with work still in the tree: the run
    *  loop committed and pushed it to the unit's branch (or says plainly that
    *  there was nothing to push), so a re-issue starts from the partial work
@@ -235,6 +242,7 @@ export const RUN_NOTE_KINDS = [
   "harness_error",
   "policy_refusal",
   "tool_refused",
+  "settle_set_aside",
   "budget_salvage",
   "stuck_loop",
 ] as const satisfies readonly RunNoteKind[];

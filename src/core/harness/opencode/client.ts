@@ -340,19 +340,37 @@ export const STORE_PAGE_LIMIT = 200;
  *  does not end within them is refused, never continued on in part. */
 export const STORE_PAGES = 10_000;
 
-/** The session's store read whole, page by page from the oldest message
- *  (`order=asc&limit=STORE_PAGE_LIMIT`, `cursor.next` followed to the end) —
- *  what a re-attach aligns the mirror on and what a write the control plane's
- *  reset left unknown is resolved from. Refused by name, never partial: a page
- *  the server refuses, a page of another shape, a store that does not end
- *  within `STORE_PAGES`. `get` is the seam's GET (idempotent: the seam re-sends
- *  it once itself on a control reset). */
-export async function readSessionStore(
+/** What a store read answers: the rows taken, newest or oldest first as asked;
+ *  `newest`, the first row the listing answered whatever `take` said of it —
+ *  the store's newest under `desc`; and `stopped`, the row `take` ended the
+ *  read at, when one did. (An `idle` marker newest means no execution runs;
+ *  anything else, one is under way — the re-attach's rule.) */
+export type StoreRead =
+  | { ok: true; messages: OpenCodeMessage[]; newest?: OpenCodeMessage; stopped?: OpenCodeMessage }
+  | { ok: false; why: string };
+
+/** The store paged as the binary pages it: the order on every page (never the
+ *  route's default), `limit=STORE_PAGE_LIMIT`, `cursor.next` followed, each
+ *  row handed to `take` — it keeps the row and goes on, or ends the read
+ *  there. Refused by name, never partial: a page the server refuses, a page
+ *  of another shape, a store that does not end within `STORE_PAGES`. `get` is
+ *  the seam's GET (idempotent: the seam re-sends it once itself on a control
+ *  reset). Measured against the pinned binary: the listing's order is the
+ *  server's insertion order — an import stamped an hour AHEAD of the server's
+ *  clock still listed before the prompt posted after it under `order=asc`, and
+ *  after it under `order=desc`, and its client-minted ids (`msg_<session>_u0`)
+ *  sort nowhere near the server's — so neither the rows' ids nor their
+ *  `time.created` order the listing; a row known before a write was inserted
+ *  before it and is always the older in the listing. */
+async function readStorePages(
   get: (path: string) => Promise<{ status: number; body: string }>,
   sessionID: string,
-): Promise<{ ok: true; messages: OpenCodeMessage[] } | { ok: false; why: string }> {
+  order: "asc" | "desc",
+  take: (m: OpenCodeMessage) => boolean,
+): Promise<StoreRead> {
   const route = openCodeSessionRoutes(sessionID)["session.messages"].path;
   const messages: OpenCodeMessage[] = [];
+  let newest: OpenCodeMessage | undefined;
   let cursor: string | undefined;
   for (let page = 0; ; page++) {
     if (page === STORE_PAGES)
@@ -360,23 +378,53 @@ export async function readSessionStore(
         ok: false,
         why: `the session's store did not end within ${STORE_PAGES} pages; the run does not continue on a partial store`,
       };
-    const query = `${cursor !== undefined ? `cursor=${encodeURIComponent(cursor)}` : "order=asc"}&limit=${STORE_PAGE_LIMIT}`;
+    const query = `${cursor !== undefined ? `cursor=${encodeURIComponent(cursor)}&` : ""}order=${order}&limit=${STORE_PAGE_LIMIT}`;
     const res = await get(`${route}?${query}`);
     if (res.status < 200 || res.status >= 300)
       return { ok: false, why: `the server refused the session (${res.status})` };
     const listed = parseMessagesPage(res.body);
     if (listed === undefined)
       return { ok: false, why: "the session's messages answered something that is not the page shape" };
-    messages.push(...listed.data);
+    for (const m of listed.data) {
+      newest ??= m;
+      if (!take(m)) return { ok: true, messages, ...(newest ? { newest } : {}), stopped: m };
+      messages.push(m);
+    }
     cursor = listed.next;
-    if (cursor === undefined) return { ok: true, messages };
+    if (cursor === undefined) return { ok: true, messages, ...(newest ? { newest } : {}) };
   }
 }
 
-/** The id of the user message a `POST …/prompt` became (`data.id`; measured
- *  against the pinned binary for a `queue` prompt and a `steer` alike), or
- *  nothing for a body of another shape. */
-export function parseMessageId(body: string): string | undefined {
+/** The session's store read whole, oldest first (`order=asc`) — what a
+ *  re-attach aligns the mirror on. */
+export function readSessionStore(
+  get: (path: string) => Promise<{ status: number; body: string }>,
+  sessionID: string,
+): Promise<StoreRead> {
+  return readStorePages(get, sessionID, "asc", () => true);
+}
+
+/** The store's rows newer than any in `before`, newest first (`order=desc`),
+ *  the read ending at the first row in `before` — inserted before the write in
+ *  question, so everything older was there before — or at the store's end:
+ *  one page in practice, since what a loop looks for here (a prompt or a
+ *  steer it just posted) is among this generation's few rows; never the whole
+ *  store. `before` is what the store held before the write, not everything
+ *  known now: a row learned since (a steer posted after the write, known by
+ *  its answer) is newer than the write's and is read past. */
+export function readStoreSince(
+  get: (path: string) => Promise<{ status: number; body: string }>,
+  sessionID: string,
+  before: ReadonlySet<string>,
+): Promise<StoreRead> {
+  return readStorePages(get, sessionID, "desc", (m) => !before.has(m.id));
+}
+
+/** The id of the object a POST answered with (`data.id`): the session a create
+ *  made, the user message a prompt or a steer became (measured against the
+ *  pinned binary for a `queue` prompt and a `steer` alike), or nothing for a
+ *  body of another shape. */
+export function parseAnswerId(body: string): string | undefined {
   try {
     const value = JSON.parse(body) as { data?: { id?: unknown } } | null;
     return typeof value?.data?.id === "string" ? value.data.id : undefined;
