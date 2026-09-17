@@ -10,17 +10,19 @@ import { methodOf, readSource } from "./testing/sourceScan";
 // fails saying only that the container is DOWN — "The container is not
 // running, consider calling start()", "Process supervisor is closed", a
 // WebSocket closed under the call — is the word only when the resident knows
-// the container it held is gone: the container's exit as the platform's
-// monitor recorded it (the Container base's `stopped_with_code`, the rollout
-// signal's one programmatic trace) or a restore under way; otherwise the
-// answer says what the SDK said, with no word and no `reason`, and the
-// harness's one more command decides. An asleep or starting container answers
-// the same words, so the platform's view of `running` is never the evidence,
-// and the Container base's `onStop` — replayed at the next start for an idle
-// sleep as much as for a roll — is never a source. The same decision, made
-// once where `run()` classifies the failure, gates the incarnation swap. This
-// scan over the entry holds the line: plain Node, the file read as text, never
-// loaded — like lifecycle.test.ts.
+// the container it held is gone, and its one reliable knowledge is its own: a
+// restore under way for this resident; otherwise the answer says what the SDK
+// said, with no word and no `reason`, and the harness's one more command
+// decides. Not the Container base's exit state (read from the pinned
+// @cloudflare/containers 0.3.7: a roll's rejection writes `stopped` or nothing
+// once the wake replaced the monitor, while an idle stop's graceful exit writes
+// `stopped_with_code(0)` — it separates nothing), not the platform's `running`
+// flag (an asleep or starting container answers false too), not the base's
+// `onStop` (replayed at the next start for an idle sleep as much as for a
+// roll). The incarnation swap is unconditional at the choke point — every
+// classified replacement clears the memos and leases — and only the word is
+// gated. This scan over the entry holds the line: plain Node, the file read as
+// text, never loaded — like lifecycle.test.ts.
 
 const source = readSource("worker.ts");
 
@@ -62,18 +64,18 @@ describe("the /exec answer says runtime-replaced only when the resident knows th
     );
   });
 
-  it("what the resident knows: the container's exit as the platform's monitor recorded it (the Container base's `stopped_with_code`, the rollout signal's trace — never `stopped`, our own idle stop, nor `running`, a start under way) and a restore under way — never the platform's `running` flag, never a replayed `onStop`; a read that fails is no knowledge (the SDK's words, never an unhandled throw)", () => {
+  it("what the resident knows is a restore under way and nothing else: never the Container base's exit state (a roll writes `stopped` or nothing once the wake replaced the monitor, an idle stop's graceful exit writes `stopped_with_code(0)` — the state separates nothing), never the platform's `running` flag, never a replayed `onStop`; a read that fails is no knowledge (the SDK's words, never an unhandled throw)", () => {
     const knows = methodOf(source, "knowsContainerGone");
     expect(knows, "knowsContainerGone is declared").not.toBeNull();
-    expect(knows).toMatch(/\(await this\.getState\(\)\)\.status === "stopped_with_code"/);
     expect(knows).toMatch(/\(await this\.getStatus\(\)\)\.state === "restoring"/);
+    expect(knows).not.toMatch(/getState\(\)|stopped_with_code/);
     expect(knows).not.toMatch(/container\??\.running/);
     expect(knows).not.toMatch(/containerStop|onStop/);
-    // Each read sits inside a try whose catch keeps going or answers false, so
-    // the 409 is always produced and a failed read never becomes the word.
-    expect(knows.match(/try \{/g)).toHaveLength(2);
-    expect(knows.match(/\} catch \{/g)).toHaveLength(2);
-    expect(knows).toMatch(/return false;\s*\}\s*\}\s*$/);
+    // The one read sits inside a try whose catch answers false, so the 409 is
+    // always produced and a failed read never becomes the word.
+    expect(knows).toMatch(
+      /try \{\s*return \(await this\.getStatus\(\)\)\.state === "restoring";\s*\} catch \{\s*return false;\s*\}/,
+    );
     // The Container base replays onStop before a start (syncPendingStoppedEvents)
     // and never delivers the rollout live, so the entry keeps no stop record and
     // overrides no stop hook: an idle sleep's replayed stop cannot count.
@@ -81,15 +83,23 @@ describe("the /exec answer says runtime-replaced only when the resident knows th
     expect(source).not.toMatch(/containerStop\b/); // the teardown's `containerStopped` is another thing
   });
 
-  it("the incarnation swap is gated as the word is: run() swaps memos and leases only for a replacement the SDK vouched or the resident knows, and the error carries that decision (`known`) for the exec gate to read", () => {
+  it("the incarnation swap is unconditional at the choke point again — every RuntimeReplacedError clears the memos and the leases, as the per-incarnation memo block promises — while the word stays gated: the error still carries `known` for the exec gate", () => {
     const run = methodOf(source, "run");
     expect(run, "run is declared").not.toBeNull();
+    // Both sites: the swap first, unconditionally; then the decision the word reads.
+    expect(run.match(/this\.swapIncarnation\(\);/g)).toHaveLength(2);
+    expect(run).not.toMatch(/if \(known\) this\.swapIncarnation\(\)/);
     expect(run.match(/const known = await this\.replacementKnown\(err\);/g)).toHaveLength(2);
-    expect(run.match(/if \(known\) this\.swapIncarnation\(\);/g)).toHaveLength(2);
     expect(run).toMatch(/new RuntimeReplacedError\("spawn", err, known\)/);
     expect(run).toMatch(/new RuntimeReplacedError\("collect", err, known\)/);
-    expect(run).not.toMatch(
-      /^\s*this\.swapIncarnation\(\);\s*\/\/ the container this incarnation's memos described is gone$/m,
+    for (const site of run.matchAll(
+      /this\.swapIncarnation\(\);[\s\S]{0,400}?const known = await this\.replacementKnown\(err\);/g,
+    ))
+      expect(site[0]).not.toMatch(/if \(/);
+    // The memo block's invariant reads true again: a runtime replacement at the
+    // one exec choke point clears the memos, whatever the word will say.
+    expect(source).toMatch(
+      /a runtime replacement surfaces as RuntimeReplacedError at the\s*\/\/ ONE exec choke point \(`run\(\)`\)/,
     );
     const replacementKnown = methodOf(source, "replacementKnown");
     expect(replacementKnown, "replacementKnown is declared").not.toBeNull();
