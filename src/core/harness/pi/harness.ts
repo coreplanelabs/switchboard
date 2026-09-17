@@ -1294,9 +1294,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     /** A container command under the read failed saying the runtime was replaced (item 16): the loop ends for the judgement below. */
     let containerSaid: Error | undefined;
     /** A container command under the read failed on its transport with no word
-     *  (`saysTransportLost`; the third failure shape, harness.md item 6): the
-     *  loop ends for the one more command below, and the failure stands, named
-     *  as it was, when that command names no replacement. */
+     *  (`saysTransportLost`; the third failure shape, harness.md item 6 —
+     *  decided by the executor's typed reason first, the container-down words
+     *  only for an untyped or `answered` failure): the loop ends for the one
+     *  more command below, and the failure stands, named as it was, when that
+     *  command names no replacement. */
     let transportLost: Error | undefined;
     /** Item 16's judgement, once pi is found gone before the run settled. The
      *  condition is the executor's word: a container command failed saying

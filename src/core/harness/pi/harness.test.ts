@@ -42,6 +42,7 @@ import {
   HarnessControlFileLostError,
   HarnessContainerRuntimeReplacedError,
   identityChangedCondition,
+  PROBE_WAIT_BACKOFF_MS,
   saysContainerReplaced,
   type HarnessContainer,
 } from "../container.js";
@@ -52,7 +53,7 @@ import {
   resolveControlResetWrite,
   WORD_ALIVE_REATTACH_NOTE,
 } from "../reattach.js";
-import { FakeHarnessContainer, TRANSPORT_LOST_TEXT } from "../testing/fakeContainer.js";
+import { FakeHarnessContainer, NETWORK_LOST_TEXT, TRANSPORT_LOST_TEXT } from "../testing/fakeContainer.js";
 import {
   compactionSteer,
   isTransientProviderError,
@@ -2186,6 +2187,67 @@ describe("runPiHarness — the container replaced under a live run", () => {
     expect(w.container.identityAsked).toBe(2);
     expect(w.container.killed).toEqual([4242]);
     expect(w.container.removed).toEqual([paths.dir]);
+  });
+
+  it("the live shape, typed: the container command fails with the executor's `Network connection lost.` typed transport-lost at a rollout's onset — the third shape by the type, whatever the words: the one more command runs, waits through the container restoring, and the word after the wait is the replaced verdict with the record, never the run failed at once", async () => {
+    const slept: number[] = [];
+    const clock = { now: NOW };
+    const sleep = async (ms: number) => {
+      slept.push(ms);
+      clock.now += ms;
+    };
+    const w = world({ clock, sleep, withSpans: true });
+    piMidCall(w, (c) => c.loseTransport("word", "vm-new", 1, new ExecInfraError(NETWORK_LOST_TEXT, "transport-lost")));
+    const err = await w.start().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PiContainerReplacedError); // the verdict, for the run loop's relaunch from the record
+    expect(err).toMatchObject({ was: "vm-fake", now: "vm-fake", condition: "word" });
+    expect((err as Error).message).toMatch(/the executor said: harness container: identity failed — runtime-replaced/);
+    // The one more command ran and waited through the restore window: the launch's
+    // name, the down answer, the word, then the corroborating name for the note —
+    // one backoff pause of the start gate's between the down answer and the word.
+    expect(w.container.identityAsked).toBe(4);
+    expect(slept.filter((ms) => ms >= 5_000)).toEqual([PROBE_WAIT_BACKOFF_MS[0]]);
+    expect(w.events.filter((e) => e.type === "tool_result")).toEqual([
+      expect.objectContaining({ tool: "bash", ok: false, callId: "c1", summary: replacedCallNote("bash") }),
+    ]);
+    expect(noteKinds(w)).toEqual(["harness_error", "harness_error", "sandbox_restarted"]); // the wait began, the container answered, the verdict
+    expect(noteSummaries(w)[0]).toMatch(/^the one more command finds the container down .*; waiting for it to answer/);
+    expect(noteSummaries(w)[2]).toBe((err as Error).message);
+    expect(w.container.killed).toEqual([]);
+    expect(w.container.removed).toEqual([]);
+    expect(w.registry.get("run-7")).toBeDefined();
+  });
+
+  it("the live shape, untyped: the same `Network connection lost.` on a plain container error is the third shape by the SDK's words — the one more command runs; the recorded identity then leaves the failure standing, named as the transport error it was, with the note that no replacement was named", async () => {
+    const w = world();
+    const failure = new HarnessContainerError("read", NETWORK_LOST_TEXT);
+    piMidCall(w, (c) => c.loseTransport("same", "vm-new", 0, failure));
+    const err = await w.start().catch((e: unknown) => e);
+    expect(err).toBe(failure);
+    expect(noteKinds(w)).toEqual(["harness_error"]);
+    expect(noteSummaries(w)[0]).toMatch(
+      /^a container command failed on its transport \(harness container: read failed — resident \/exec: Network connection lost\.\); the one more command named no replacement, so the failure stands$/,
+    );
+    expect(w.container.identityAsked).toBe(2); // the launch's own name, then exactly one more command
+  });
+
+  it("a typed refusal or an answered failure whose words are not the container's is NOT the third shape, whatever its words: the run fails by name at once, no one more command spent, no wait, no verdict", async () => {
+    const refused = world();
+    const refusal = new ExecInfraError(NETWORK_LOST_TEXT, "refused"); // the words are the container's; the type says no wait clears it
+    piMidCall(refused, (c) => c.loseTransport("word", "vm-new", 0, refusal));
+    const err = await refused.start().catch((e: unknown) => e);
+    expect(err).toBe(refusal);
+    expect(noteKinds(refused)).toEqual([]);
+    expect(refused.container.identityAsked).toBe(1); // the launch's own name only: the probe never spent
+    expect(refused.container.failNext).toBeDefined(); // the word armed for the probe was never asked for
+
+    const answered = world();
+    const plain = new ExecInfraError("resident /exec: worktree evicted", "answered");
+    piMidCall(answered, (c) => c.loseTransport("word", "vm-new", 0, plain));
+    const err2 = await answered.start().catch((e: unknown) => e);
+    expect(err2).toBe(plain);
+    expect(noteKinds(answered)).toEqual([]);
+    expect(answered.container.identityAsked).toBe(1);
   });
 
   it("the one more command waits through a container that is down — 'The container is not running' from the probe itself is re-sent after the executor's backoff (5 s, 10 s), never judged — and the container that then answers decides: the same identity leaves the failure standing with the wait on the record; the word after the wait is the verdict", async () => {

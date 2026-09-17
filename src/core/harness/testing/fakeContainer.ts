@@ -25,6 +25,8 @@ export const TRANSPORT_LOST_TEXT =
   "resident /exec: Peer closed WebSocket: 1006 WebSocket disconnected without sending Close frame.";
 /** What the one more command meets while the platform rebuilds the container: the binding's not-running refusal, no word. */
 export const CONTAINER_DOWN_TEXT = "resident /exec: The container is not running, consider calling start()";
+/** The resident client's failure as the plan owner's live run met it at a rollout's onset: the SDK's connection-lost sentence forwarded by the resident, typed `transport-lost` by the client. */
+export const NETWORK_LOST_TEXT = "resident /exec: Network connection lost.";
 
 export class FakeHarnessContainer implements HarnessContainer {
   readonly files = new Map<string, string>();
@@ -128,9 +130,14 @@ export class FakeHarnessContainer implements HarnessContainer {
    *  close, no word — and, for `downForProbes` answers, the one more command
    *  finds the container not running (the restore window) before it finds
    *  `then`: the word, the renamed container, or the container as it was. */
-  loseTransport(then: "word" | "renamed" | "same", renamedWord: string, downForProbes = 0): void {
-    // The resident's answer as its client throws it: the SDK's words forwarded, typed `answered`.
-    this.failOnceDrained = new ExecInfraError(TRANSPORT_LOST_TEXT, "answered");
+  loseTransport(
+    then: "word" | "renamed" | "same",
+    renamedWord: string,
+    downForProbes = 0,
+    /** How the read fails; by default the resident's answer as its client throws it — the SDK's 1006 words forwarded, typed `answered`. */
+    failure: Error = new ExecInfraError(TRANSPORT_LOST_TEXT, "answered"),
+  ): void {
+    this.failOnceDrained = failure;
     this.downForProbes = downForProbes;
     this.thenOnProbe(then, renamedWord);
   }

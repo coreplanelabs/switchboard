@@ -30,8 +30,10 @@ import {
   PROBE_WAIT_BACKOFF_MS,
   PROBE_WAIT_MAX_MS,
   identityChangedCondition,
+  infraErrorOf,
   isContainerGone,
   HarnessControlFileLostError,
+  selfAndCauses,
   replacedBecause,
   replacedVerdict,
   saysTransportLost,
@@ -660,7 +662,27 @@ describe("replacedVerdict — the one more command waits through a container tha
 });
 
 describe("saysTransportLost — the third failure shape: a container command failed on its transport with no word", () => {
-  it("a failure whose words name the container's transport or the container down — the resident client's 1006 infra failure, not running, starting, just exited, its supervisor closed, the WebSocket closed without a frame, the connection reset — and the seam's typed down answer", () => {
+  it("the executor's typed word decides first: an infra failure whose reason a wait can clear — the transport lost, the deadline passed, the empty failure shape, the Worker unavailable — is the shape whatever its words, on the error or anywhere in its cause chain; the live shape, `Network connection lost.` typed transport-lost, among them", () => {
+    expect(saysTransportLost(new ExecInfraError("resident /exec: Network connection lost.", "transport-lost"))).toBe(
+      true,
+    );
+    expect(saysTransportLost(new ExecInfraError("resident /exec: fetch failed", "transport-lost"))).toBe(true);
+    expect(saysTransportLost(new ExecInfraError("resident /exec HTTP 502", "worker-unavailable"))).toBe(true);
+    expect(saysTransportLost(new ExecInfraError(sandboxNoAnswerMessage("/exec", 60_000), "deadline-passed"))).toBe(
+      true,
+    );
+    expect(saysTransportLost(new ExecInfraError(sandboxEmptyFailureMessage("/exec"), "empty-failure"))).toBe(true);
+    // Wrapped on the way up: the typed word sits in the cause chain, and decides.
+    const wrapped = new Error("the read failed", {
+      cause: new ExecInfraError("resident /exec: fetch failed", "transport-lost"),
+    });
+    expect(saysTransportLost(wrapped)).toBe(true);
+    expect(infraErrorOf(wrapped)?.reason).toBe("transport-lost");
+    expect(infraErrorOf(new Error("plain"))).toBeUndefined();
+    expect([...selfAndCauses(wrapped)]).toHaveLength(2);
+  });
+
+  it("a failure whose words name the container's transport or the container down — the resident client's 1006 infra failure typed answered, the SDK's `Network connection lost`, not running, starting, just exited, its supervisor closed, the WebSocket closed without a frame, the connection reset — and the seam's typed down answer: the words decide for an answered or untyped failure", () => {
     expect(
       saysTransportLost(
         new ExecInfraError(
@@ -669,6 +691,9 @@ describe("saysTransportLost — the third failure shape: a container command fai
         ),
       ),
     ).toBe(true);
+    expect(saysTransportLost(new ExecInfraError("resident /exec: Network connection lost.", "answered"))).toBe(true);
+    expect(saysTransportLost(new Error("resident /exec: Network connection lost."))).toBe(true);
+    expect(saysTransportLost(new HarnessContainerError("read", "resident /exec: Network connection lost"))).toBe(true);
     expect(saysTransportLost(new Error("resident /exec: The container is not running, consider calling start()"))).toBe(
       true,
     );
@@ -687,6 +712,9 @@ describe("saysTransportLost — the third failure shape: a container command fai
       "read ECONNRESET",
       "connection reset by peer",
       "socket hang up",
+      "Network connection lost.",
+      "Network connection lost",
+      "resident /exec: Network connection lost.",
     ])
       expect(CONTAINER_DOWN_WORDING.test(text), text).toBe(true);
     // One source for each platform wording: the resident client's gone-for-a-moment
@@ -697,11 +725,13 @@ describe("saysTransportLost — the third failure shape: a container command fai
     expect(CONTAINER_GONE_WORDING.test("Container is starting. Please retry in a moment.")).toBe(true);
   });
 
-  it("never the word (the typed gone errors, the word in a text), never a control file lost, never a command that failed as a command, never an infra failure that says nothing of the container (the Worker unreachable, an attach refused, a streak) — a probe that could not reach the container is never spent — never a bare string", () => {
-    expect(saysTransportLost(new ExecInfraError("resident /exec HTTP 502", "worker-unavailable"))).toBe(false);
-    expect(saysTransportLost(new ExecInfraError(sandboxNoAnswerMessage("/exec", 60_000), "deadline-passed"))).toBe(
-      false,
-    );
+  it("never the word (the typed gone errors, the word in a text), never a control file lost, never a command that failed as a command, never a typed refusal or the run's own stop whatever their words (an attach refused, a streak, a strike whose words are the container's, the abort) nor an answered failure whose words are not the container's — never a bare string", () => {
+    expect(
+      saysTransportLost(new ExecInfraError("resident /exec: Network connection lost.", "refused")),
+      "a refusal is no wait, whatever it says",
+    ).toBe(false);
+    expect(saysTransportLost(new ExecInfraError("resident /exec: The container just exited", "aborted"))).toBe(false);
+    expect(saysTransportLost(new ExecInfraError("resident /exec: worktree evicted", "answered"))).toBe(false);
     expect(
       saysTransportLost(
         new ExecInfraError("resident /exec: worktree still unavailable after a re-attach (evicted)", "refused"),
