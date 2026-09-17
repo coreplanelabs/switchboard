@@ -30,13 +30,20 @@ describe("the shim forwards the model proxy's paths to the container blind", () 
   });
 
   it("holds the model keys only to hand them into the container: each appears in the Env type and the forward list alone, never in a header, a URL or a fetch", () => {
-    const keyLines = source.split("\n").filter((line) => /ANTHROPIC_API_KEY|OPENAI_API_KEY/.test(line));
+    const keyLines = source
+      .split("\n")
+      .filter((line) => /ANTHROPIC_API_KEY|OPENAI_API_KEY|OPENROUTER_API_KEY/.test(line));
     expect(keyLines.length).toBeGreaterThan(0);
     for (const line of keyLines) {
       expect(line).toMatch(
-        /^\s+(?:ANTHROPIC_API_KEY: string;|OPENAI_API_KEY\?: string;|"OPENAI_API_KEY",|ANTHROPIC_API_KEY: env\.ANTHROPIC_API_KEY,)/,
+        /^\s+(?:ANTHROPIC_API_KEY: string;|OPENAI_API_KEY\?: string;|OPENROUTER_API_KEY\?: string;|"OPENAI_API_KEY",|"OPENROUTER_API_KEY",|ANTHROPIC_API_KEY: env\.ANTHROPIC_API_KEY,)/,
       );
     }
+    // The two optional provider keys the example config's blocks name are both forwarded: a
+    // key put on the Worker that the container never sees is `provider_key_missing` at the
+    // first model call on that block (the OpenRouter block shipped live without this line).
+    expect(source).toContain('"OPENAI_API_KEY",');
+    expect(source).toContain('"OPENROUTER_API_KEY",');
     expect(source).not.toMatch(/x-api-key/i);
     expect(source).not.toContain("api.anthropic.com");
     expect(source).not.toContain("ANTHROPIC_API_KEY_ENV");

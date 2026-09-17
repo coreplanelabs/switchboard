@@ -76,6 +76,7 @@ export interface Env {
   SLACK_APP_TOKEN: string;
   ANTHROPIC_API_KEY: string;
   OPENAI_API_KEY?: string;
+  OPENROUTER_API_KEY?: string;
   E2B_API_KEY?: string;
   SANDBOX_TOKEN?: string; // cloudflare execution: bearer for the sandbox Worker
   RESIDENT_OPERATOR_TOKEN?: string; // resident repos: operator bearer for the resident Worker
@@ -113,6 +114,7 @@ export interface Env {
  *  are forwarded only when set, so the bot sees "not configured" as absence. */
 const FORWARDED_OPTIONAL = [
   "OPENAI_API_KEY",
+  "OPENROUTER_API_KEY",
   "E2B_API_KEY",
   "SANDBOX_TOKEN",
   "RESIDENT_OPERATOR_TOKEN",
