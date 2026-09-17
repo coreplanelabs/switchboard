@@ -200,6 +200,13 @@ describe("threadTip — what a row says on hover (rule 7)", () => {
     expect(tip.runs).toBe("3 runs");
     expect(tip.live).toBe(true);
   });
+  it("a row that carries its channel's name says it after the surface: Slack #backend · read-only here", () => {
+    const tip = threadTip(
+      { title: "t", excerpt: "t", lastAt: NOW, runs: 2, live: false, surface: "slack", channelName: "backend" },
+      NOW,
+    );
+    expect(tip.source).toBe("Slack #backend · read-only here");
+  });
   it("a web conversation names no channel; one run is singular; no excerpt falls back to the title", () => {
     const tip = threadTip(
       {

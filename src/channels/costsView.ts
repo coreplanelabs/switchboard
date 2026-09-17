@@ -3,6 +3,7 @@ import { authorize } from "../core/authz/authorize.js";
 import type { Actor } from "../core/authz/types.js";
 import type { CostReport } from "../core/costs.js";
 import type { CostDimension, CostsByReport } from "../core/costsBy.js";
+import { NO_NAMES, namesOf, type NameDirectory } from "../core/names.js";
 import type { CostsSnapshotStatus } from "../core/costsSnapshot.js";
 import { COSTS_OFF_MESSAGE, NoCostsSnapshotError, type CostsService, type CostsViewer } from "../core/costsService.js";
 import { nodeSseSink, SSE_HEADERS, SSE_PRELUDE, startSseHeartbeat, type SseSink } from "./liveView/sse.js";
@@ -30,6 +31,27 @@ import { WEB_HTML_HEADERS } from "./webShell.js";
 // Rendering lives in the web app (web/src/pages/CostsPage.vue + lib/costs.ts):
 // this handler serves the shared shell with the report + group list as the
 // seed. The JSON twins are exactly the seed's report / by-dimension report.
+
+/** The report with a name on every user or channel row the directory can name and the
+ *  builder could not (a channel never has one from the records; a user has one when a run
+ *  recorded it): one ask per distinct key, concurrent; a failure leaves the id (record 0042,
+ *  the dashboard reads names). Every other dimension passes through untouched. */
+export async function labelled(report: CostsByReport, names: NameDirectory): Promise<CostsByReport> {
+  const lookup =
+    report.dimension === "user" ? names.person : report.dimension === "channel" ? names.channel : undefined;
+  if (!lookup) return report;
+  const unnamed = report.rows.filter((r) => !r.label).map((r) => r.key);
+  if (unnamed.length === 0) return report;
+  const found = await namesOf(lookup, unnamed);
+  if (found.size === 0) return report;
+  return {
+    ...report,
+    rows: report.rows.map((r) => {
+      const label = r.label ?? found.get(r.key);
+      return label ? { ...r, label } : r;
+    }),
+  };
+}
 
 /** The tabs a dimension opens on: the `?view=` value and the twin's name. */
 export type CostsByView = "users" | "threads" | "channels" | "agents" | "models";
@@ -148,7 +170,12 @@ const orNone = <T>(read: Promise<T>): Promise<T | null> =>
 export function createCostsViewHandler(
   service: CostsService,
   shell: ShellRenderer,
+  opts: {
+    /** Display names for the user and channel dimensions' keys (src/core/names.ts); absent → ids. */
+    names?: NameDirectory;
+  } = {},
 ): (req: HttpRequest, res: ServerResponse, ctx?: CostsViewContext) => boolean {
+  const names = opts.names ?? NO_NAMES;
   return (req, res, ctx = {}) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     const route = parseCostsRoute(url.pathname, url.search);
@@ -189,7 +216,7 @@ export function createCostsViewHandler(
       plain(res, 502, `cost report unavailable: ${reason}`);
     };
     const byReport = (view: CostsByView): Promise<CostsByReport> =>
-      service.byReport(group, days, DIMENSION_OF_VIEW[view], ctx.identity);
+      service.byReport(group, days, DIMENSION_OF_VIEW[view], ctx.identity).then((report) => labelled(report, names));
     if (route.kind === "by-json" && route.view !== "daily") {
       byReport(route.view)
         .then((report: CostsByReport) => json(res, report))

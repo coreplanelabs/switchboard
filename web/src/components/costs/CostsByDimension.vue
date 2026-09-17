@@ -57,7 +57,14 @@ const isMe = (r: CostsByRow): boolean => props.report.viewer?.userIds.includes(r
 const namespaced = computed(
   () => dimension.value === "user" || dimension.value === "thread" || dimension.value === "channel",
 );
-const labelOf = (r: CostsByRow): string => r.label ?? (namespaced.value ? r.key.replace(/^[a-z]+:/, "") : r.key);
+const labelOf = (r: CostsByRow): string =>
+  r.label
+    ? dimension.value === "channel"
+      ? `#${r.label}`
+      : r.label
+    : namespaced.value
+      ? r.key.replace(/^[a-z]+:/, "")
+      : r.key;
 const platformOf = (r: CostsByRow): string => (namespaced.value && r.key.includes(":") ? r.key.split(":")[0] : "");
 const dayCount = (n: number): string => `${n} day${n === 1 ? "" : "s"}`;
 const columns = computed(() => (showCloud.value ? 6 : 5));

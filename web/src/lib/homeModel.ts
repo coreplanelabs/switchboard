@@ -87,15 +87,25 @@ export interface ThreadTipFacts {
   live: boolean;
 }
 export function threadTip(
-  row: { title: string; excerpt: string; lastAt: number; runs: number; live: boolean; surface?: string },
+  row: {
+    title: string;
+    excerpt: string;
+    lastAt: number;
+    runs: number;
+    live: boolean;
+    surface?: string;
+    channelName?: string;
+  },
   now: number,
 ): ThreadTipFacts {
   const surface = row.surface ?? "web";
   const name = SURFACE_NAME[surface] ?? surface;
+  // The channel by name when the seed carries one (`Slack #backend`), the surface alone otherwise.
+  const where = row.channelName ? `${name} #${row.channelName}` : name;
   return {
     title: row.excerpt || row.title,
     when: formatDateTime(row.lastAt, now),
-    source: surface === "web" ? name : `${name} · read-only here`,
+    source: surface === "web" ? name : `${where} · read-only here`,
     runs: `${row.runs} run${row.runs === 1 ? "" : "s"}`,
     live: row.live,
   };

@@ -403,6 +403,68 @@ describe("createCostsViewHandler", () => {
 
   // costs.md item 6: before the first snapshot lands nothing reads a source in
   // the request — the page shows the status alone, the twins say come back.
+  it("a dimension report names its user and channel rows through the name directory — page and twin alike — and leaves the rest alone", async () => {
+    const row = (key: string, label?: string) => ({
+      key,
+      ...(label ? { label } : {}),
+      runs: 1,
+      turns: 1,
+      wallMs: 1_000,
+      llmUsd: 1,
+      cloudUsd: 0,
+      totalUsd: 1,
+      unpricedTokens: 0,
+      byModel: {},
+    });
+    const reports: Record<string, CostsByReport> = {
+      channel: { ...byReport("channel"), rows: [row("slack:C1"), row("slack:C9"), row("http:ops")] },
+      user: { ...byReport("user"), rows: [row("slack:UALICE", "alice"), row("slack:UBOB"), row("access:a1")] },
+      agent: { ...byReport("agent"), rows: [row("review")] },
+    };
+    const asked: string[] = [];
+    const h = createCostsViewHandler(
+      fakeService(
+        () => Promise.resolve(report()),
+        ["switchboard"],
+        (_g, _d, dimension) => Promise.resolve(reports[dimension]),
+      ),
+      shell,
+      {
+        names: {
+          person: async (id) => (asked.push(id), id === "slack:UBOB" ? "Bob" : undefined),
+          channel: async (id) => {
+            asked.push(id);
+            if (id === "slack:C9") throw new Error("slack down");
+            return id === "slack:C1" ? "backend" : undefined;
+          },
+        },
+      },
+    );
+    const identity = { sub: "access-sub-1", email: "alice@example.com" };
+    const channels = fakeReqRes("GET", "/costs/switchboard?view=channels");
+    h(channels.req, channels.res, { identity });
+    await tick();
+    expect(seedOf(channels.body()).by?.rows.map((r) => [r.key, r.label])).toEqual([
+      ["slack:C1", "backend"],
+      ["slack:C9", undefined],
+      ["http:ops", undefined],
+    ]);
+    const twin = fakeReqRes("GET", "/costs/switchboard/users.json");
+    h(twin.req, twin.res, { identity });
+    await tick();
+    expect((JSON.parse(twin.body()) as CostsByReport).rows.map((r) => [r.key, r.label])).toEqual([
+      ["slack:UALICE", "alice"], // the record's own name stands; the directory is not asked
+      ["slack:UBOB", "Bob"],
+      ["access:a1", undefined],
+    ]);
+    expect(asked).toEqual(["slack:C1", "slack:C9", "http:ops", "slack:UBOB", "access:a1"]);
+    const agents = fakeReqRes("GET", "/costs/switchboard?view=agents");
+    h(agents.req, agents.res, { identity });
+    await tick();
+    expect(seedOf(agents.body()).by).toEqual(reports.agent); // untouched: no directory ask for an agent
+    expect(asked).toHaveLength(5);
+  });
+
   it("before the first snapshot: the page is served with no report and the status (none yet, nothing in flight), a twin is a 503 with Retry-After — never a live read, never a 500", async () => {
     let taking: CostsSnapshotStatus = NONE_YET;
     const h = createCostsViewHandler(

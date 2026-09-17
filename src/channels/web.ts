@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { allOf, authorize, ownedBy, type Actor } from "../core/authz/index.js";
 import type { Capabilities } from "../core/capabilities.js";
+import { NO_NAMES, namesOf, type NameDirectory } from "../core/names.js";
 import { acceptsUndefined, type CommandDef, type CommandInvoker } from "../core/commandRegistry.js";
 import { chatForm, helpRows } from "../core/commandSurface.js";
 import { dispatch as realDispatch, type CoreDeps } from "../core/dispatcher.js";
@@ -285,6 +286,8 @@ export interface WebChatDeps {
   commands: Pick<CommandInvoker, "list">;
   shell: ShellRenderer;
   capabilities: Capabilities;
+  /** Display names for the rail's channels (src/core/names.ts); absent → ids only. */
+  names?: NameDirectory;
   /** null when run history is off (store: null). */
   retention: { retentionDays: number } | null;
   /** `PUBLIC_BASE_URL`, when set: the origin a send must come from. */
@@ -346,6 +349,14 @@ export function createWebChatHandler(
       limit: RAIL_RUNS,
     });
     const groups = threadsOf(listed.runs);
+    // The channel behind a thread from another surface, named when the directory knows it
+    // (record 0042, the dashboard reads names): one ask per distinct channel, concurrent.
+    const channelOf = (g: ThreadGroup): string | undefined =>
+      g.surface === PLATFORM ? undefined : (g.runs[0]?.channelId ?? undefined);
+    const channelNames = await namesOf(
+      (id) => (deps.names ?? NO_NAMES).channel(id),
+      groups.map(channelOf).filter((id): id is string => id !== undefined),
+    );
     const rows = await Promise.all(
       groups.map(async (g): Promise<HomeConversationRowSeed> => {
         // The thread's first request, from the oldest run that recorded one: a
@@ -359,6 +370,8 @@ export function createWebChatHandler(
         }
         const first = g.runs[0];
         const line = request || first.label || first.id;
+        const channelId = channelOf(g);
+        const channelName = channelId ? channelNames.get(channelId) : undefined;
         return {
           id: conversationIdOf(sub, g.threadKey),
           title: threadTitle(line),
@@ -367,6 +380,8 @@ export function createWebChatHandler(
           runs: g.runs.length,
           live: g.live,
           surface: g.surface,
+          ...(channelId ? { channelId } : {}),
+          ...(channelName ? { channelName } : {}),
         };
       }),
     );
