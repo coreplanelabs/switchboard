@@ -230,16 +230,20 @@ describe("RunRow", () => {
     expect(live.find('.actions button[aria-label="Run actions"]').exists()).toBe(true);
     expect(live.find('.actions button[aria-label="Run actions"]').classes()).not.toContain("sm:hidden");
     expect(live.findAll(".actions button")).toHaveLength(1);
-    expect(menuItems(live).map((i) => i.label)).toEqual(["Stop (soft)", "Kill (hard)"]);
+    expect(menuItems(live).map((i) => i.label)).toEqual(["Open thread", "Stop (soft)", "Kill (hard)"]);
+    // Every run's thread is a page here (web-chat.md item 4): the menu leads with it.
+    expect(item(live, "Open thread")?.to).toBe("/threads/slack%3AC1%3A1.0");
     const done = mountRow(finished("completed"));
     expect(done.find(".actions").exists()).toBe(true);
-    expect(done.findAll(".actions button")).toHaveLength(0);
-    expect(menu(done).exists()).toBe(false);
+    expect(menuItems(done).map((i) => i.label)).toEqual(["Open thread"]);
     const stopping = mountRow(row({ stop: { mode: "soft", state: "stopping" } }));
-    expect(menu(stopping).exists()).toBe(false);
+    expect(menuItems(stopping).map((i) => i.label)).toEqual(["Open thread"]);
+    // A row with no thread key and no source has no menu at all.
+    const bare = mountRow(finished("completed", { threadKey: undefined }));
+    expect(menu(bare).exists()).toBe(false);
     const doneWithThread = mountRow(finished("completed", { sourceUrl: "https://acme.slack.com/archives/C1/p1" }));
-    expect(menuItems(doneWithThread).map((i) => i.label)).toEqual(["Open Slack thread"]);
-    expect(item(doneWithThread, "Open Slack thread")?.to).toBe("https://acme.slack.com/archives/C1/p1");
+    expect(menuItems(doneWithThread).map((i) => i.label)).toEqual(["Open thread", "Open in Slack"]);
+    expect(item(doneWithThread, "Open in Slack")?.to).toBe("https://acme.slack.com/archives/C1/p1");
   });
 
   it("Stop POSTs the token-scoped soft stop; the item disables while in flight", async () => {

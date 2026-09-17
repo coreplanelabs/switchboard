@@ -2160,6 +2160,7 @@ const homeSeed = (conversation: string, turns: HomeTurnSeed[]): HomeSeed => ({
   conversations: HOME_CONVERSATIONS,
   viewer: { name: "alice" },
   sendUrl: `/threads/${conversation}/send`,
+  lane: "web:a1",
   now: NOW,
   retentionDays: 30,
   suggestions: HOME_SUGGESTIONS,
@@ -2446,9 +2447,29 @@ createServer((req, res) => {
     return;
   }
   if ((url.pathname === "/runs" || url.pathname === "/residents") && url.searchParams.get("stream") === "1") {
-    // The index feeds (runs, residents): open + heartbeats (rows stay as seeded).
+    // The index feeds (runs, residents): open + heartbeats (rows stay as seeded). The
+    // viewer's own feed (`mine=1`, what the Threads page follows for its dots) replays the
+    // one run of alice's in flight, the way the bot's feed replays the active set.
     res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache" });
     res.write("retry: 3000\n\n");
+    if (url.pathname === "/runs" && url.searchParams.get("mine") === "1") {
+      const live = HOME_LIVE_TURNS.find((t) => t.token !== undefined && !t.finished);
+      if (live) {
+        const { id, channelId, userId, userName, threadKey, finished, startedAt, eventCount } = live;
+        const run = {
+          id,
+          channelId,
+          userId,
+          userName,
+          threadKey,
+          finished,
+          startedAt,
+          eventCount,
+          label: `review · "${live.request}"`,
+        };
+        res.write(`data: ${JSON.stringify({ type: "upsert", run })}\n\n`);
+      }
+    }
     const hb = setInterval(() => res.write(": hb\n\n"), 15_000);
     res.on("close", () => clearInterval(hb));
     return;

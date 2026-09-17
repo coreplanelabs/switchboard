@@ -15,6 +15,7 @@ import RunChildrenBlock from "../components/run/RunChildrenBlock.vue";
 import { buildTimeline, type TimelinePhase } from "../lib/timelineVm";
 import { runOwnerOf } from "@core/core/runOwner.js";
 import { useSeed } from "../lib/seed";
+import { threadHref } from "../lib/indexRow";
 import { useWallClock } from "../lib/wallClock";
 import { browser } from "../lib/browser";
 import { useEventSourceFactory } from "../lib/eventSource";
@@ -417,6 +418,11 @@ function httpsUrl(url: string | undefined): string {
   return url && /^https?:\/\//.test(url) ? url : "";
 }
 const sourceUrl = computed(() => httpsUrl(state.request?.source?.url));
+/** The thread this run is a turn of, as a page here (web-chat.md item 4): a run is one
+ *  message's work, the thread is the conversation it belongs to. */
+const threadLink = computed(() =>
+  seed && (seed.mode === "live" || seed.mode === "history") && seed.threadKey ? threadHref(seed.threadKey) : null,
+);
 /** The REVIEW/CODING row's links (item 19): the repo, the branch, the head
  *  commit and the PR, each built only from a value whose shape was verified
  *  (`githubLinks.ts`) — an odd value renders as text, never as a link. */
@@ -639,6 +645,14 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
             </template>
             <span v-if="state.request.source.user">{{ state.request.source.user }}</span>
           </span>
+          <a
+            v-if="threadLink"
+            class="thread font-normal normal-case tracking-normal text-muted no-underline hover:text-primary hover:underline"
+            :href="threadLink"
+            title="the thread this run is a turn of"
+            data-testid="thread-link"
+            >in thread ›</a
+          >
           <span
             class="ts ml-auto select-none text-xs font-normal normal-case tracking-normal text-dimmed"
             :title="fmtTimeTitle(state.request.at)"

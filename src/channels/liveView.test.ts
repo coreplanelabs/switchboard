@@ -1603,6 +1603,7 @@ describe("live view on RunsService: history pages + index toggle", () => {
       expect(page.status).toBe(200);
       const seed = runSeedOf(page.body()) as RunHistorySeed;
       expect(seed.mode).toBe("history");
+      expect(seed.threadKey).toBe("slack:C9:far"); // the ledger's view names the thread (web-chat.md item 4)
       expect(seed.events.some((e) => "text" in e && e.text === "far away")).toBe(true);
       expect(seed.eventCount).toBe(2);
       expect(seed.finishedAt).toBeUndefined(); // live: no finish stamp, no duration
@@ -2038,6 +2039,7 @@ describe("live view on RunsService: history pages + index toggle", () => {
       expect(runSeedOf(page.body())).toMatchObject({
         mode: "live",
         eventsUrl: `/runs/${live.id}/events?t=${live.token}`,
+        threadKey: "t9", // the run's thread, for the page's link to it (web-chat.md item 4)
       });
       expect((await request(h, `/runs/${live.id}/friction?t=${live.token}`, nobody)).status).toBe(200);
       const stream = fakeReqRes("GET", `/runs/${live.id}/events?t=${live.token}`);

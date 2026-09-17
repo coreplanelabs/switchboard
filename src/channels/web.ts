@@ -391,6 +391,7 @@ export function createWebChatHandler(
       conversations: rail.rows,
       viewer: { name: ctx.actor.asUser?.name ?? ctx.identity.email ?? sub },
       sendUrl: `/threads/${encodeURIComponent(conversation)}/send`,
+      lane: `${PLATFORM}:${sub}`,
       ...(foreign
         ? {
             elsewhere: {

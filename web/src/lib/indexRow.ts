@@ -127,6 +127,17 @@ export function surfaceOf(run: IndexRow): { kind: string; identity: string } {
   return { kind, identity: ucolon === -1 ? uid : uid.slice(ucolon + 1) };
 }
 
+/** The thread a run belongs to, as a page on this dashboard: the Threads page takes a
+ *  whole thread key (`web:<sub>:<id>`, `slack:C…:1712.34`) as its `<id>`, and shows the
+ *  thread's runs as turns — read-only when the thread lives on another channel. */
+export function threadHref(threadKey: string): string {
+  return `/threads/${encodeURIComponent(threadKey)}`;
+}
+
+/** The runs index's two remembered toggles (live-view.md item 29): what this browser
+ *  keeps when the URL names neither; a URL that names one wins. */
+export const RUNS_PREF = { mine: "sb.runs.mine", all: "sb.runs.all" } as const;
+
 /** The surface's name in words, for tooltips and menu labels. The row itself
  *  labels a surface with the channel id's own prefix word (`slack`, `http`,
  *  `mcp`, `cli`) — a text label, never a glyph a reader would need a legend for. */

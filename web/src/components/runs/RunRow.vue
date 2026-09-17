@@ -10,6 +10,7 @@ import {
   agentHue,
   dotTip,
   SURFACE_NAME,
+  threadHref,
   elapsedText,
   expiresAt,
   LEAVING_WINDOW_MS,
@@ -50,6 +51,8 @@ const href = computed(() => runHref(props.run));
 const src = computed(() => surfaceOf(props.run));
 const who = computed(() => whoText(props.run));
 const sourceUrl = computed(() => safeSourceUrl(props.run));
+/** The run's thread as a page here (web-chat.md item 4), beside the source's own link. */
+const threadLink = computed(() => (props.run.threadKey ? threadHref(props.run.threadKey) : null));
 const expires = computed(() => expiresAt(props.run, props.retentionMs));
 const leaving = computed(() => expires.value !== undefined && expires.value - props.now <= LEAVING_WINDOW_MS);
 const stoppable = computed(() => !props.run.finished && !props.run.stop);
@@ -81,10 +84,11 @@ const disabled = reactive({ soft: false, hard: false });
  *  the thread link (the desktop source mark is hover-revealed) and, while the
  *  run is stoppable, Stop/Kill — each disabled while its POST is in flight. */
 const actionItems = computed(() => [
+  ...(threadLink.value ? [{ label: "Open thread", icon: "i-lucide-messages-square", to: threadLink.value }] : []),
   ...(sourceUrl.value
     ? [
         {
-          label: `Open ${SURFACE_NAME[src.value.kind] ?? src.value.kind} thread`,
+          label: `Open in ${SURFACE_NAME[src.value.kind] ?? src.value.kind}`,
           icon: "i-lucide-external-link",
           to: sourceUrl.value,
           target: "_blank",

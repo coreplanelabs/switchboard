@@ -8,7 +8,7 @@ import { useSeed } from "../lib/seed";
 import { useWallClock } from "../lib/wallClock";
 import { browser } from "../lib/browser";
 import { EVENT_SOURCE_CLOSED, useEventSourceFactory, type EventSourceLike } from "../lib/eventSource";
-import { expiresAt, feedAction, LEAVING_WINDOW_MS, mergeRow, type IndexRow } from "../lib/indexRow";
+import { expiresAt, feedAction, LEAVING_WINDOW_MS, mergeRow, RUNS_PREF, type IndexRow } from "../lib/indexRow";
 import { formatDateTime } from "../lib/format";
 import { retentionSentence } from "@core/channels/webSeed.js";
 import { FAVICON_IDLE, FAVICON_LIVE } from "@core/channels/favicon.js";
@@ -26,6 +26,15 @@ const showAll = seed?.all ?? false;
 // unlinked session, so "mine" would be an honest but useless empty list.
 const showMine = seed?.mine ?? false;
 const linked = seed?.asUser !== undefined;
+// The two toggles are remembered by this browser (item 29): a URL that names
+// neither opens the remembered view — one navigation, before the feed opens —
+// and a URL that names one wins, so a shared link shows what it says.
+const params = new URLSearchParams(browser.search());
+if (!params.has("mine") && !params.has("all") && seed) {
+  const wantMine = linked && browser.readPref(RUNS_PREF.mine) === "1";
+  const wantAll = browser.readPref(RUNS_PREF.all) === "1";
+  if (wantMine || wantAll) browser.navigate(viewHref(wantAll, wantMine));
+}
 const mineHint = linked
   ? `Only the runs ${seed?.asUser?.name ?? "you"} requested`
   : "Your session is not linked to a Slack user, so no run here is yours. Sign in with the email of your Slack account.";
@@ -77,11 +86,15 @@ watch(
 );
 
 function onToggleCompleted(ev: Event): void {
-  // The toggles switch the server view: a change navigates, keeping the other toggle.
-  browser.navigate(viewHref((ev.target as HTMLInputElement).checked, showMine));
+  // The toggles switch the server view: a change is remembered and navigates, keeping the other toggle.
+  const on = (ev.target as HTMLInputElement).checked;
+  browser.writePref(RUNS_PREF.all, on ? "1" : "0");
+  browser.navigate(viewHref(on, showMine));
 }
 function onToggleMine(ev: Event): void {
-  browser.navigate(viewHref(showAll, (ev.target as HTMLInputElement).checked));
+  const on = (ev.target as HTMLInputElement).checked;
+  browser.writePref(RUNS_PREF.mine, on ? "1" : "0");
+  browser.navigate(viewHref(showAll, on));
 }
 
 const olderThanLabel = computed(() => (seed?.olderThan !== undefined ? formatDateTime(seed.olderThan, now.value) : ""));
@@ -158,7 +171,7 @@ onUnmounted(() => {
               aria-describedby="minehint"
               @change="onToggleMine"
             />
-            Show mine
+            Show only mine
           </label>
         </UTooltip>
         <span id="minehint" class="sr-only">{{ mineHint }}</span>

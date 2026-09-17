@@ -1681,3 +1681,16 @@ describe("RunPage — history mode: the Findings link (agent-ship item 18)", () 
     expect(without.find("a.findings").exists()).toBe(false);
   });
 });
+
+describe("RunPage — the run's thread (web-chat.md item 4)", () => {
+  it("the Request header links to the run's thread on this dashboard when the seed names it, by its whole key; without one, no link", () => {
+    const input = { type: "input", text: "review PR 7", messageId: "m1", at: 1_500, seq: 1 } as const;
+    const withThread = mountApp(RunPage, { seed: historySeed([input], { threadKey: "web:a1:conv-1" }) });
+    expect(withThread.find("#request [data-testid=thread-link]").attributes("href")).toBe("/threads/web%3Aa1%3Aconv-1");
+    expect(withThread.find("#request [data-testid=thread-link]").text()).toBe("in thread ›");
+    const slack = mountApp(RunPage, { seed: historySeed([input], { threadKey: "slack:C1:1712.34" }) });
+    expect(slack.find("#request [data-testid=thread-link]").attributes("href")).toBe("/threads/slack%3AC1%3A1712.34");
+    const without = mountApp(RunPage, { seed: historySeed([input]) });
+    expect(without.find("#request [data-testid=thread-link]").exists()).toBe(false);
+  });
+});
