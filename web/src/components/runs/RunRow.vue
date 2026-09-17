@@ -138,7 +138,7 @@ function onRowClick(ev: MouseEvent): void {
 
 <template>
   <li
-    class="run group relative rounded-md border-b border-muted hover:bg-(--ui-bg-muted) focus-within:bg-(--ui-bg-muted)"
+    class="run group relative isolate rounded-md border-b border-muted hover:bg-(--ui-bg-muted) focus-within:bg-(--ui-bg-muted)"
     :class="[run.finished ? 'finished' : 'live', leaving ? 'leaving' : '']"
     :data-run-id="run.id"
     :data-started-at="String(run.startedAt)"
