@@ -4,6 +4,7 @@
 // its close lines, the live-run link, the one shape a failure is reported in,
 // and a command reply that outgrows one chat message. Pure string and shape
 // work over the core's own types — no channel SDK (AGENTS.md invariant 1).
+import { buildReviewChannelReply, type ReviewPost, type ReviewVerdict } from "../reviewVerdict.js";
 import { visibilityOf } from "../authz/channelDirectory.js";
 import type { ChannelIO, DocumentAttachment, ImageAttachment } from "../types.js";
 import type { ParsedChatCommand } from "../commandChat.js";
@@ -416,6 +417,10 @@ export interface DeliveryContext {
   agent: AgentDef;
   run: RunHandle;
   answer: string;
+  /** A review run's verdict and post outcome: the channel reply is rendered
+   *  from them (agent-review.md item 5b). Absent on every other run. */
+  verdict?: ReviewVerdict | undefined;
+  reviewPost?: ReviewPost | undefined;
   liveUrl: string | undefined;
   prNote: string | undefined;
   stopped: StopMode | undefined;
@@ -484,12 +489,21 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
       ending.drop(run.id);
       return { kind: "fenced" };
     }
-    // A review verdict carries its run link (as standard Markdown — each
-    // adapter renders its own dialect): the verdict message is what gets
-    // scanned in the review loop, and the card above scrolls away. Projection
-    // only — the `answer` event published above and the GitHub post body stay
-    // link-free.
-    const channelAnswer = agent.name === "review" && liveUrl ? `${answer}\n\n[Live run](${liveUrl})` : answer;
+    // A review's reply is rendered from its typed verdict (agent-review.md
+    // item 5b): the verdict line, the findings, where it was posted and the run
+    // link (as standard Markdown — each adapter renders its own dialect); the
+    // write-up rides along only when no GitHub post carries it. Projection
+    // only — the `answer` event published above stays the model's own words
+    // and link-free.
+    const channelAnswer =
+      agent.name === "review"
+        ? buildReviewChannelReply({
+            answer,
+            verdict: ctx.verdict,
+            posted: ctx.reviewPost?.posted ? ctx.reviewPost.target : undefined,
+            liveUrl,
+          })
+        : answer;
     // The PR note (post-step above) is a projection too: the `answer` event
     // stays the model's own words — the PR facts live in the pr_description
     // event and the [pr-post] log line.

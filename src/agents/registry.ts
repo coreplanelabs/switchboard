@@ -209,6 +209,14 @@ Text stays in your message; do not attach what you can say.`;
 // belongs in the agent's notes for the thread, and why — the one thing sure to
 // survive a compaction and reach the next run there — beside the reach `recall`
 // gives into every earlier turn. Said once so the prompts cannot drift on it.
+/** The one rule every preset carries about the length of what it says: the
+ *  answer is read in a chat thread, so it leads with the outcome and stops
+ *  when the outcome is said. Spelled the same in every prompt; the registry
+ *  test pins it. A review's verdict and findings are rendered by code from the
+ *  typed verdict, so there the rule governs the write-up alone. */
+export const BREVITY_RULE =
+  "SAY LESS. Your answer is read in a chat thread, often on a phone: lead with the answer or the outcome in one sentence, then only what the reader needs to act on it. Never restate the question or recap what was asked, never describe your method or list what you checked (that is your notes' job), never list options you are not recommending, never end with an offer or a question about what to do next — when the answer is complete, stop. One idea per sentence; a bullet only for items that are truly parallel, one line each; no headings. A question gets a few sentences; a refusal gets one sentence and the nearest thing you can do; a report gets its findings and nothing around them. Length is right only when the person asked for depth or the content is the list they asked for (a table, a diff, a plan).";
+
 /** The one rule every preset carries about text it did not receive from the
  *  person (record 0037): a linked thread, a stored record, a page someone
  *  else wrote, arrives inside the untrusted fence and is quoted data. Spelled
@@ -265,6 +273,7 @@ ${statusCardRule('"Clone repo and read the diff", "Run the test suite"')}
 
 If the request doesn't name a repository and you can't infer it, ask for it instead of guessing.
 Report outcomes faithfully: if tests fail or a step was skipped, say so plainly.
+${BREVITY_RULE}
 ${FENCED_CONTENT_RULE}
 Your final message is posted to Slack — keep it readable, lead with the outcome.`;
 
@@ -310,6 +319,7 @@ ${NOTEPAD}
 ${statusCardRule()}
 
 Report outcomes faithfully: if tests fail or a step was skipped, say so plainly.
+${BREVITY_RULE}
 ${FENCED_CONTENT_RULE}
 Your final message is posted to Slack — keep it readable, lead with the outcome.`;
 
@@ -352,6 +362,7 @@ ${NOTEPAD}
 ${statusCardRule()}
 
 Report outcomes faithfully: if tests fail or a step was skipped, say so plainly.
+${BREVITY_RULE}
 ${FENCED_CONTENT_RULE}
 Your final message is posted to Slack — keep it readable, lead with the outcome.`;
 
@@ -359,7 +370,13 @@ Your final message is posted to Slack — keep it readable, lead with the outcom
 // (docs/reference/specs/agent-ship.md item 6) lives here once — stable ids, the severity
 // vocabulary, the severity gate's downgrade (agent-review.md item 5a) — so the
 // sandbox and resident variants can never drift apart on it.
-const REVIEW_VERDICT_INSTRUCTION = `VERDICT: before your final message, call the submit_verdict tool exactly once with \`approve\` (no finding at or above the severity to address remains — the level in force for this run, \`minor\` by default: a major or a minor finding means \`request_changes\`; nits alone never block) or \`request_changes\`, a one-line summary, \`head\` = the output of \`git rev-parse HEAD\` in the checkout you reviewed, and \`findings\` — every issue you report as a structured entry with a stable id you assign in order (F1, F2, …), a severity of exactly blocking|major|minor|nit, the file (plus line when it points at one), and a one-line title. The findings array is the index of your review: the full explanation of each finding stays in your prose, keyed by the same ids. Switchboard writes the verdict as the first line of the GitHub comment itself and lists the findings under it; a review with no submitted verdict is posted as not approving, so never skip it. An \`approve\` carrying a finding at or above the severity to address is downgraded to \`request_changes\` and the tool's ack says so — approve only when every finding sits below the level. Do not write "LGTM" in your own text — the verdict line carries it.`;
+// The write-up is the review's text alone (docs/reference/specs/agent-review.md
+// item 5b): the verdict line and the findings list are rendered by code from
+// the submit_verdict call — on GitHub as the comment's head, in Slack as the
+// whole reply — so the prose never repeats them and never pads around them.
+const REVIEW_FINAL_MESSAGE = `YOUR FINAL MESSAGE IS THE REVIEW'S TEXT, NOTHING ELSE. Switchboard renders the verdict line and the findings list from your submit_verdict call — on GitHub as the head of the comment, in Slack as the whole reply — and folds your final message under them on GitHub as the full review. So write only what the list cannot carry: one short paragraph per finding, keyed by its id (what is wrong, the concrete failure, the fix). Do not restate the verdict or the findings, do not summarize what you read, do not list what you verified clean, do not describe your method — what you checked belongs in your notes, which the run page shows. A change with no findings needs one sentence, not a tour.`;
+
+const REVIEW_VERDICT_INSTRUCTION = `VERDICT: before your final message, call the submit_verdict tool exactly once with \`approve\` (no finding at or above the severity to address remains — the level in force for this run, \`minor\` by default: a major or a minor finding means \`request_changes\`; nits alone never block) or \`request_changes\`, a one-line summary, \`head\` = the output of \`git rev-parse HEAD\` in the checkout you reviewed, and \`findings\` — every issue you report as a structured entry with a stable id you assign in order (F1, F2, …), a severity of exactly blocking|major|minor|nit, the file (plus line when it points at one), and a one-line title. The findings array is the index of your review: the full explanation of each finding stays in your prose, keyed by the same ids. Switchboard writes the verdict as the first line of the GitHub comment itself, lists the findings under it and folds your text below them as the full review; a review with no submitted verdict is posted as not approving, so never skip it. An \`approve\` carrying a finding at or above the severity to address is downgraded to \`request_changes\` and the tool's ack says so — approve only when every finding sits below the level. Do not write "LGTM" in your own text — the verdict line carries it.`;
 
 // The diff-gated spec review (docs/reference/specs/agent-review.md item 14) and
 // the test guard under it (item 16; specs-coverage.md item 6), one text for
@@ -416,8 +433,9 @@ ${NOTEPAD}
 
 ${statusCardRule('"Gather the diff and the files", "Analyze the change", "Post the verdict"')}
 
+${BREVITY_RULE}
 ${FENCED_CONTENT_RULE}
-Your final message is posted to Slack. Lead with a one-line verdict, then the findings.`;
+${REVIEW_FINAL_MESSAGE}`;
 
 // Resident-path variant for review (docs/reference/specs/resident-repos.md): same
 // gather-once discipline, but against the ready worktree with git — the
@@ -449,8 +467,9 @@ ${NOTEPAD}
 
 ${statusCardRule('"Gather the diff and the files", "Analyze the change", "Post the verdict"')}
 
+${BREVITY_RULE}
 ${FENCED_CONTENT_RULE}
-Your final message is posted to Slack. Lead with a one-line verdict, then the findings.`;
+${REVIEW_FINAL_MESSAGE}`;
 
 // Seeded-sandbox variant for review (docs/reference/specs/execution.md item 26):
 // the gather-once discipline against a checkout that is already at the PR
@@ -483,8 +502,9 @@ ${NOTEPAD}
 
 ${statusCardRule('"Gather the diff and the files", "Analyze the change", "Post the verdict"')}
 
+${BREVITY_RULE}
 ${FENCED_CONTENT_RULE}
-Your final message is posted to Slack. Lead with a one-line verdict, then the findings.`;
+${REVIEW_FINAL_MESSAGE}`;
 
 // Research agent: no repo, no workspace — just web search + URL
 // reading, so a user can drop a link or ask a research question and get an
@@ -501,6 +521,7 @@ How to work:
 
 ${statusCardRule('"Search the sources", "Write the answer"')}
 
+${BREVITY_RULE}
 ${FENCED_CONTENT_RULE}
 Use Slack-friendly formatting (no markdown headers; *bold*, bullets, code blocks). Your final message is posted to Slack — lead with the answer, then supporting detail and sources.`;
 
@@ -510,6 +531,7 @@ Use Slack-friendly formatting (no markdown headers; *bold*, bullets, code blocks
 // everyday asks ("open an issue on X", "what does our resident system do?",
 // "what's in that link?") are answered here instead of bounced to a directive.
 const GENERAL_SYSTEM = `You are Switchboard, a helpful assistant answering requests from Slack.
+${BREVITY_RULE}
 ${FENCED_CONTENT_RULE}
 Answer directly and concisely. Use Slack-friendly formatting (no markdown headers; use *bold*, bullets, and code blocks).
 
@@ -548,6 +570,7 @@ ${statusCardRule('"Clone and install", "Time the full suite"')}
 
 ${NOTEPAD}
 
+${BREVITY_RULE}
 ${FENCED_CONTENT_RULE}
 Report outcomes faithfully: a check you could not run is "could not check", never a guess. Use Slack-friendly formatting (no markdown headers; *bold*, bullets, code blocks — render the claim table as aligned rows inside a code block). Your final message is posted to Slack: lead with the overall verdict in one line, then the claim table, then what a follow-up should do.`;
 
@@ -593,6 +616,7 @@ A CHILD IS ITS THREAD. People can reply in a child's thread. While the child run
 
 Maintain the user-facing status card with the update_status tool: one item per child (○ pending, ✱ running, ✓ finished — only once await_runs or get_run_status said so).
 
+${BREVITY_RULE}
 ${FENCED_CONTENT_RULE}
 Use Slack-friendly formatting (no markdown headers; *bold*, bullets, code blocks). Your final message is posted to Slack: lead with the outcome, then one line per child — its preset, its thread, its status and its result in a sentence — and what is still running, if anything.`;
 }

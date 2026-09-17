@@ -1,3 +1,4 @@
+import { buildReviewPostBody, parseVerdictInput } from "../reviewVerdict.js";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -2275,7 +2276,7 @@ describe("the pi harness — the review preset", () => {
     expect(posts).toEqual([
       {
         target: { repo: "o/r", number: 42, commitId: HEAD },
-        body: `LGTM: looks correct\n- [nit] F1 src/x.ts:3 — a name\n\nThe review: one nit, F1.`,
+        body: buildReviewPostBody("The review: one nit, F1.", parseVerdictInput(VERDICT)!, { repo: "o/r", head: HEAD }),
       },
     ]);
     expect(container.killed).toEqual([4242]);
@@ -2409,9 +2410,12 @@ describe("the pi harness — the review preset", () => {
     expect(posts).toEqual([
       {
         target: { repo: "o/r", number: 42, commitId: NEW },
-        body: "Changes requested: the new test is wrong\n\nSecond review: the new test is wrong.",
+        body: expect.stringContaining(
+          "<summary>Full review</summary>\n\nSecond review: the new test is wrong.\n\n</details>",
+        ),
       },
     ]);
+    expect(posts[0].body.startsWith("Changes requested: the new test is wrong\n\n> [!WARNING]\n")).toBe(true);
     expect(s.published).toEqual(["answer:Second review: the new test is wrong."]);
     expect(s.replies.some((r) => r.startsWith("🔀 o/r#42 moved during the run"))).toBe(true);
     // pi ended once, after the settle
@@ -3118,7 +3122,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     expect(posts).toEqual([
       {
         target: { repo: "o/r", number: 42, commitId: HEAD },
-        body: `LGTM: looks correct\n- [nit] F1 src/x.ts:3 — a name\n\nThe review: one nit, F1.`,
+        body: buildReviewPostBody("The review: one nit, F1.", parseVerdictInput(VERDICT)!, { repo: "o/r", head: HEAD }),
       },
     ]);
     s.ending.drain(true);

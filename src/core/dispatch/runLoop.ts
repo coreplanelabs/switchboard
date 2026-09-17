@@ -113,6 +113,10 @@ export interface RunOutcome {
   kind: "answered";
   answer: string;
   reviewHead: string | undefined;
+  /** The verdict the review submitted, and how its post-step ended — the
+   *  reply stage renders the channel reply from them (agent-review.md item 5b). */
+  verdict: ReviewVerdict | undefined;
+  reviewPost: ReviewPostOutcome | undefined;
   prNote: string | undefined;
   /** "Did real work" — the memory reflection gate. */
   toolCalls: number;
@@ -1620,6 +1624,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     kind: "answered",
     answer,
     reviewHead,
+    verdict,
+    reviewPost,
     prNote,
     toolCalls,
     runDiagnosis,

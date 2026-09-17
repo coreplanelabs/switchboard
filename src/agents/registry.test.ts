@@ -10,7 +10,9 @@ import {
   presetDoor,
   RUNAWAY_TURNS_PER_MINUTE,
   runawayTurnCap,
+  BREVITY_RULE,
   FENCED_CONTENT_RULE,
+  REVIEW_SYSTEM_SEEDED,
   statusCardRule,
   type AgentDef,
   CHECKS_BY_COST,
@@ -358,6 +360,20 @@ describe("distilled-diffs prompt behavior (resident variants)", () => {
       expect(sys).toMatch(/git diff <base>\.\.\.HEAD -- <path>/);
       expect(sys).toMatch(/Never judge from a partial diff/);
       expect(sys).toMatch(/does not post a verdict whose digest covered less/);
+    }
+  });
+});
+
+// Feature: docs/reference/specs/agent-review.md item 5b — the verdict line and the
+// findings are rendered by code on both surfaces, so the model's final message
+// is the review's text alone: the finding explanations, nothing else.
+describe("review final message: the write-up is the review's text alone (item 5b)", () => {
+  it("all three review prompts say Switchboard renders the verdict and the findings, ask for one paragraph per finding and forbid the padding; none asks the model to lead with a verdict", () => {
+    for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!, REVIEW_SYSTEM_SEEDED]) {
+      expect(sys).toMatch(/YOUR FINAL MESSAGE IS THE REVIEW'S TEXT, NOTHING ELSE/);
+      expect(sys).toMatch(/one short paragraph per finding, keyed by its id/);
+      expect(sys).toMatch(/do not summarize what you read, do not list what you verified clean/);
+      expect(sys).not.toMatch(/Lead with a one-line verdict/);
     }
   });
 });
@@ -1055,6 +1071,34 @@ describe("coding prompts: the title gate (check:pr-title before the description)
         expect(sys).not.toContain('npm run check:pr-title -- "<title>"');
       }
     }
+  });
+});
+
+// Feature: docs/reference/specs/routing-and-config.md item 26 — every preset
+// carries the one brevity rule, spelled identically, so an answer's length is
+// governed by one sentence in one place and cannot drift by prompt.
+describe("every preset carries the brevity rule", () => {
+  it("the brevity rule is in every system prompt and both resident variants, verbatim, and says lead with the answer, stop when it is complete, no closing offer", () => {
+    const prompts: Record<string, string> = {
+      coding: AGENTS.coding.system,
+      "coding resident": AGENTS.coding.residentSystem!,
+      "coding seeded": AGENTS.coding.seededSystem!,
+      review: AGENTS.review.system,
+      "review resident": AGENTS.review.residentSystem!,
+      "review seeded": AGENTS.review.seededSystem!,
+      research: AGENTS.research.system,
+      general: AGENTS.general.system,
+      explore: AGENTS.explore.system,
+      conductor: AGENTS.conductor.system,
+    };
+    for (const [name, sys] of Object.entries(prompts)) {
+      expect(sys, name).toContain(BREVITY_RULE);
+      expect(sys.split(BREVITY_RULE).length - 1, name).toBe(1);
+    }
+    expect(BREVITY_RULE).toMatch(/^SAY LESS\./);
+    expect(BREVITY_RULE).toMatch(/lead with the answer or the outcome in one sentence/);
+    expect(BREVITY_RULE).toMatch(/never end with an offer or a question about what to do next/);
+    expect(BREVITY_RULE).toMatch(/when the answer is complete, stop/);
   });
 });
 
