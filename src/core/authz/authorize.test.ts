@@ -489,6 +489,41 @@ describe("record 0042 — the self set is identity, not authority", () => {
 
 // Feature: docs/reference/specs/authorization.md items 4 and 7 — the
 // channels the directory says a person is in ride on the actor as `memberOf`, a
+// Feature: docs/decisions/0053 — the view-as actor is the admin on behalf of the person: the
+// intersection gives the person's grants, the root principal the person's identity facts, and
+// `viewingAs` is read by no rule.
+describe("record 0053 — viewing as a person borrows their ceiling", () => {
+  it("effective grants are the person's own; the principal is the person; the id stays the admin's", () => {
+    expect(effectiveGrants(A.viewingAsIvy)).toEqual(A.ivy.grants);
+    expect(principalOf(A.viewingAsIvy)).toBe(A.ivy);
+    expect(A.viewingAsIvy.id).toBe("access:admin");
+  });
+  it("the same decision as the person's own session on another person's run in her private channel (allowed), a dm run (denied) and a write the baseline lacks (denied) — while the admin alone is allowed all three", () => {
+    const theirs = run({ channel: "priv", userId: "slack:UERIN" });
+    const elsewhere = run({ channel: "dm", userId: "slack:UERIN" });
+    for (const [action, resource] of [
+      ["runs:read", theirs],
+      ["runs:read", elsewhere],
+      ["runs:write", theirs],
+      ["config:read", { type: "config-scope", kind: "channel", id: CHANNELS.priv.id }],
+    ] as const) {
+      expect(authorize(A.viewingAsIvy, action, resource).allow, `${action}`).toBe(
+        authorize(A.ivy, action, resource).allow,
+      );
+      expect(authorize(A.admin, action, resource).allow, `admin ${action}`).toBe(true);
+    }
+    expect(authorize(A.viewingAsIvy, "runs:read", theirs).allow).toBe(true);
+    expect(authorize(A.viewingAsIvy, "runs:read", elsewhere).allow).toBe(false);
+    expect(authorize(A.viewingAsIvy, "runs:write", theirs).allow).toBe(false);
+  });
+  it("`viewingAs` alone changes nothing: the same actor without it decides identically (no rule reads it)", () => {
+    const { viewingAs: _v, ...bare } = A.viewingAsIvy;
+    void _v;
+    for (const r of runFixture())
+      expect(authorize(bare as Actor, "runs:read", r).allow).toBe(authorize(A.viewingAsIvy, "runs:read", r).allow);
+  });
+});
+
 // fact beside the grants: `member-of` reads it, no grant check does.
 describe("issue 516 — memberOf is a directory fact beside the grants", () => {
   const member = A.memberBrowser; // in the private channel, per the directory

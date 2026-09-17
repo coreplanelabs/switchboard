@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { join } from "node:path";
 import { loadWebAssets } from "../src/channels/webAssets.js";
 import { makeShellRenderer, WEB_HTML_HEADERS } from "../src/channels/webShell.js";
+import type { Actor } from "../src/core/authz/types.js";
 import type {
   HomeCommandSeed,
   HomeSeed,
@@ -2226,11 +2227,41 @@ const HOME_LIVE_TURNS: HomeTurnSeed[] = [
   },
 ];
 
+/** The admin viewing as alice (record 0053): the shell stamps the banner from this viewer. */
+const VIEWING_AS_ALICE: Actor = {
+  kind: "user",
+  id: "access:admin",
+  grants: { actions: "all", channels: "all", repos: "all" },
+  viewingAs: { id: "slack:UALICE", name: "alice" },
+};
+
 function page(
   pathname: string,
   all: boolean,
   search: string,
-): { title: string; seed: PageSeed; status?: number } | null {
+): { title: string; seed: PageSeed; status?: number; viewer?: Actor } | null {
+  // The runs index as an admin sees it while viewing as alice (`?viewing=1`, preview only — the
+  // client routes by path, so the page stays /runs): the banner, the narrowed rows, the picker.
+  if (pathname === "/runs" && new URLSearchParams(search).get("viewing") === "1")
+    return {
+      title: all ? "All runs" : "(1) Live runs",
+      viewer: VIEWING_AS_ALICE,
+      seed: {
+        page: "runs",
+        all,
+        mine: false,
+        asUser: { id: "slack:UALICE", name: "alice" },
+        viewAs: {
+          people: [
+            { id: "slack:UALICE", name: "alice" },
+            { id: "slack:UBOB", name: "bob" },
+          ],
+        },
+        retentionDays: 30,
+        now: NOW,
+        rows: (all ? INDEX_ROWS : INDEX_ROWS.filter((r) => !r.finished)).filter((r) => r.userId === "slack:UALICE"),
+      },
+    };
   if (pathname === "/runs/unit/plan-acme-3:U13" || pathname === "/runs/unit/plan-acme-3%3AU13")
     return { title: "Unit U13", seed: { page: "unit", view: UNIT_U3, now: NOW, retentionDays: 30 } };
   if (pathname === "/runs/unit/plan-acme-3:U14" || pathname === "/runs/unit/plan-acme-3%3AU14")
@@ -2283,6 +2314,12 @@ function page(
         all,
         mine: false,
         asUser: { id: "slack:UALICE", name: "alice" },
+        viewAs: {
+          people: [
+            { id: "slack:UALICE", name: "alice" },
+            { id: "slack:UBOB", name: "bob" },
+          ],
+        },
         retentionDays: 30,
         now: NOW,
         rows: all ? INDEX_ROWS : INDEX_ROWS.filter((r) => !r.finished),
@@ -2591,5 +2628,5 @@ createServer((req, res) => {
       "frame-ancestors 'self'",
     ),
   });
-  res.end(shell(p.title, p.seed));
+  res.end(shell(p.viewer, p.title, p.seed));
 }).listen(PORT, "127.0.0.1", () => console.log(`web preview on http://localhost:${PORT}/runs (fixtures only, no bot)`));

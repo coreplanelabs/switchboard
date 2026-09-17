@@ -23,6 +23,7 @@ import {
   type Caller,
 } from "./commandRegistry.js";
 import { callerWith } from "./testing/callers.js";
+import type { Actor } from "./authz/types.js";
 import { ALL_CAPABILITIES, NO_CAPABILITIES, type Capabilities } from "./capabilities.js";
 
 // Feature: docs/reference/specs/command-registry.md — the one seam every surface adapts,
@@ -372,6 +373,74 @@ describe("CommandRegistry.invoke — auth before parse", () => {
       ok: false,
       error: "conflict",
     });
+  });
+
+  // Feature: docs/decisions/0053 — viewing as a person is read-only at the one door.
+  it("a caller viewing as a person (record 0053) runs a read under the person's grants and is refused every non-read effect — even one the person's own grants allow — in the one sentence, decided by the registry before parse, with the audit line naming the person and the reason viewing", async () => {
+    const { registry, audit, deps } = setup();
+    const ivy: Actor = {
+      kind: "user",
+      id: "slack:UIVY",
+      grants: { actions: new Set(["runs:read", "runs:write"]), channels: "all", repos: new Set() },
+      self: ["slack:UIVY"],
+    };
+    const admin = callerWith("access", "access:admin", "all");
+    const viewing: Caller = {
+      ...admin,
+      actor: {
+        ...admin.actor,
+        onBehalfOf: ivy,
+        asUser: { id: "slack:UIVY", name: "ivy" },
+        viewingAs: { id: "slack:UIVY", name: "ivy" },
+      },
+    };
+    expect(await registry.invoke("demo.echo", opts({ status: "all" }), viewing, deps)).toMatchObject({ ok: true });
+    let parses = 0;
+    const write = define({
+      id: "demo.write",
+      options: z.object({ status: z.string().refine(() => (parses++, true)) }),
+      action: "runs:write",
+      effect: "write",
+      describe: "a write ivy may make herself",
+      handler: async ({ deps }) => {
+        deps.hits.push("write");
+        return {};
+      },
+    });
+    registry.register(write);
+    // Ivy's own session may run it; the admin viewing as her may not.
+    expect(
+      await registry.invoke("demo.write", opts({ status: "x" }), { kind: "chat", id: ivy.id, actor: ivy }, deps),
+    ).toMatchObject({ ok: true });
+    const refused = await registry.invoke("demo.write", opts({ status: "x" }), viewing, deps);
+    expect(refused).toMatchObject({
+      ok: false,
+      error: "unauthorized",
+      status: 403,
+      decidedBy: "registry",
+      message: "You are viewing as ivy; writes are your own to make — exit view-as to write.",
+    });
+    expect(parses).toBe(1); // ivy's run parsed; the refused one never did
+    expect(deps.hits).toEqual(["echo", "write"]); // the viewing read ran; the refused write never did
+    expect(audit.mock.calls.at(-1)?.[0]).toEqual({
+      commandId: "demo.write",
+      callerKind: "access",
+      callerId: "access:admin",
+      asUser: "slack:UIVY",
+      viewingAs: "slack:UIVY",
+      effect: "write",
+      outcome: "unauthorized",
+      reason: "viewing",
+    });
+    // A read's audit line names the person too, and no line names one for an ordinary caller.
+    expect(audit.mock.calls[0]?.[0]).toMatchObject({
+      commandId: "demo.echo",
+      callerId: "access:admin",
+      viewingAs: "slack:UIVY",
+      outcome: "ok",
+    });
+    await registry.invoke("demo.echo", opts({ status: "all" }), admin, deps);
+    expect(audit.mock.calls.at(-1)?.[0]).not.toHaveProperty("viewingAs");
   });
 
   it("an Access service token is a machine caller: no implicit reads", async () => {

@@ -1,5 +1,5 @@
 import { inject, type InjectionKey } from "vue";
-import { SEED_ELEMENT_ID, type WebSeed } from "@core/channels/webSeed.js";
+import { SEED_ELEMENT_ID, type ViewablePerson, type WebSeed } from "@core/channels/webSeed.js";
 
 // The page's data, as the server embedded it (webShell.ts renders one JSON
 // island per page). App.vue reads it once and provides it; pages inject the
@@ -16,6 +16,13 @@ export function readSeed(doc: Document = document): WebSeed | null {
   } catch {
     return null;
   }
+}
+
+/** The person this session is viewing the page as (record 0053), as the shell stamped it on the
+ *  seed — the banner and every write control read THIS, never a page's own data. Null when the
+ *  session is its own. */
+export function useViewingAs(): ViewablePerson | null {
+  return inject(SeedKey, null)?.viewingAs ?? null;
 }
 
 /** The injected seed when it is the given page's, else null (a mismatched or

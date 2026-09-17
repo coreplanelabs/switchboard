@@ -96,6 +96,22 @@ const ADMIN: LiveViewContext = {
   actor: accessActor({ sub: "admin" }, (id) => grantsFor(id, { grants: new Map([["access:admin", ALL_GRANTS]]) })),
 };
 
+/** The admin viewing as ivy (record 0053): the admin's own `all` with ivy's dashboard actor hung under it. */
+const VIEWING_AS_IVY: LiveViewContext = {
+  actor: {
+    ...ADMIN.actor,
+    onBehalfOf: {
+      kind: "user",
+      id: "slack:UIVY",
+      grants: grantsFor("access:slack:UIVY", { commandGroups: ["runs"] }),
+      self: ["slack:UIVY"],
+      asUser: { id: "slack:UIVY", name: "ivy" },
+    },
+    asUser: { id: "slack:UIVY", name: "ivy" },
+    viewingAs: { id: "slack:UIVY", name: "ivy" },
+  },
+};
+
 type Handler = ReturnType<typeof createLiveViewHandler>;
 /** `createLiveViewHandler` with `ctx` defaulting to the admin viewer. */
 function adminByDefault(
@@ -769,6 +785,39 @@ describe("createLiveViewHandler (node:http)", () => {
     expect(t.body()).toContain("<title>(1) Live runs</title>"); // item 21: the tab carries the live count
   });
 
+  // Feature: docs/decisions/0053 — the picker is offered to a session holding `all`, to nobody else.
+  it("the index seed offers viewAs — the page's Slack requesters by name — to a viewer holding all, none of it to a narrower viewer, and to an admin already viewing the people the person's own page names", async () => {
+    const reg = fixedRegistry();
+    reg.create("coding · owner/repo", {
+      channelId: "slack:C1",
+      threadKey: "t1",
+      userId: "slack:UBOB",
+      userName: "bob",
+    });
+    reg.create("review · owner/repo", { channelId: "web:a1", threadKey: "t2", userId: "access:a1" });
+    const handler = liveOnlyHandler(reg);
+    const admin = fakeReqRes("GET", "/runs");
+    handler(admin.req, admin.res);
+    await admin.finished;
+    expect(indexSeedOf(admin.body()).viewAs).toEqual({ people: [{ id: "slack:UBOB", name: "bob" }] });
+    const reader = fakeReqRes("GET", "/runs");
+    handler(reader.req, reader.res, {
+      actor: accessActor({ sub: "alice" }, (id) => grantsFor(id, { commandGroups: ["runs"] })),
+    });
+    await reader.finished;
+    expect(indexSeedOf(reader.body())).not.toHaveProperty("viewAs");
+    expect(indexSeedOf(reader.body())).not.toHaveProperty("viewingAs");
+    // Viewing as bob: the shell stamps the banner's `viewingAs`, the index lists as ivy would, the picker stays (the admin's own `all`).
+    const viewing = fakeReqRes("GET", "/runs");
+    handler(viewing.req, viewing.res, VIEWING_AS_IVY);
+    await viewing.finished;
+    const seed = seedOf(viewing.body()) as WebSeed & RunsIndexSeed;
+    expect(seed.viewingAs).toEqual({ id: "slack:UIVY", name: "ivy" });
+    expect(seed.asUser).toEqual({ id: "slack:UIVY", name: "ivy" });
+    // The people it names are the requesters of the rows IVY sees — bob's private run is not one; a typed id or Exit is the way to him.
+    expect(seed.viewAs).toEqual({ people: [] });
+  });
+
   it("also serves the index at /runs/ (trailing slash)", async () => {
     const reg = fixedRegistry();
     reg.create();
@@ -963,6 +1012,22 @@ describe("run control: POST /runs/:id/stop", () => {
     expect(t.headers["cache-control"]).toBe("no-store");
     expect(JSON.parse(t.body())).toEqual({ id, mode: "soft", state: "stopping" });
     expect(control.requested).toBe("soft");
+    expect(control.hardSignal.aborted).toBe(false);
+  });
+
+  // Feature: docs/decisions/0053 — a stop is a write: refused while viewing, control untouched.
+  it("a viewer viewing as a person is refused the token-path stop with 403 and the one sentence, and the run's control is never touched", () => {
+    const reg = fixedRegistry();
+    const { id, token, control } = reg.create();
+    const t = fakeReqRes("POST", `/runs/${id}/stop?t=${token}&mode=hard`);
+    expect(liveOnlyHandler(reg)(t.req, t.res, VIEWING_AS_IVY)).toBe(true);
+    expect(t.status).toBe(403);
+    expect(t.headers["content-type"]).toContain("application/json");
+    expect(JSON.parse(t.body())).toEqual({
+      error: "unauthorized",
+      message: "You are viewing as ivy; writes are your own to make — exit view-as to write.",
+    });
+    expect(control.requested).toBeUndefined();
     expect(control.hardSignal.aborted).toBe(false);
   });
 
@@ -1513,6 +1578,20 @@ describe("live view on RunsService: history pages + index toggle", () => {
       await done(live);
       expect(live.status).toBe(404);
       expect(live.body()).toBe("run not found");
+      expect(run.control.requested).toBeUndefined();
+    });
+
+    it("the tokenless stop is refused while viewing as a person (403, the one sentence) before any run is consulted — a persisted run, a live one and an unknown id alike", async () => {
+      const h = harness();
+      await h.store!.put(record("r1"));
+      const run = h.registry.create();
+      for (const url of ["/runs/r1/stop?mode=soft", `/runs/${run.id}/stop?mode=hard`, "/runs/nope/stop?mode=soft"]) {
+        const t = fakeReqRes("POST", url);
+        h.handler(t.req, t.res, VIEWING_AS_IVY);
+        await done(t);
+        expect(t.status, url).toBe(403);
+        expect(JSON.parse(t.body()).message, url).toContain("You are viewing as ivy;");
+      }
       expect(run.control.requested).toBeUndefined();
     });
 

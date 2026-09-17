@@ -29,6 +29,7 @@ import { costsFromConfig, NullCostsService } from "./core/costsService.js";
 import { NullResidentAdminClient, residentAdminFromConfig } from "./core/residentAdmin.js";
 import { NO_FLEET, residentFleetWatcherFor, type ResidentFleetFacts } from "./core/residentFleet.js";
 import { httpJwksFetcher, JwksCache, parseAccessConfig, type VerifyDeps } from "./channels/accessAuth.js";
+import type { AccessIdentity } from "./channels/accessAuth.js";
 import { buildDashboardVerifier } from "./channels/dashboardAuth.js";
 import { defaultRunRegistry } from "./core/runRegistry.js";
 import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
@@ -36,6 +37,7 @@ import { buildMcp } from "./mcp/index.js";
 import { NullMcpToolSource } from "./mcp/source.js";
 import { buildConfirmationStore } from "./core/confirmations.js";
 import { createMcpConnectViewHandler, isConnectPath } from "./channels/mcpConnectView.js";
+import { createViewAsHandler, viewAsFromCookie } from "./channels/viewAs.js";
 import { resolvePersonByEmail, resolveUserEmail, resolveUserName } from "./channels/slack/lookups.js";
 import { slackNames } from "./channels/slackNames.js";
 import { NO_NAMES, type NameDirectory } from "./core/names.js";
@@ -229,6 +231,8 @@ export async function runBot(): Promise<void> {
   let slackChannelsOf: ((actorId: string) => Promise<ReadonlySet<string> | "unknown">) | undefined;
   const channelsOf = (actorId: string) =>
     slackChannelsOf ? slackChannelsOf(actorId) : Promise.resolve("unknown" as const);
+  /** The name the view-as banner and audit line give a person (record 0053). */
+  const personName = (personId: string) => names.person(personId);
   const mcpWiring = buildMcp(config, processSecrets, {
     publicBaseUrl: process.env.PUBLIC_BASE_URL,
     resolveEmail: (userId) => (slackEmailLookup ? slackEmailLookup(userId) : Promise.resolve(undefined)),
@@ -810,7 +814,7 @@ export async function runBot(): Promise<void> {
         commands,
         names,
         callerFor: (identity) =>
-          callerFor(identity, { grantsFor: (id) => config.grantsFor(id), personByEmail, channelsOf }),
+          callerFor(identity, { grantsFor: (id) => config.grantsFor(id), personByEmail, channelsOf, personName }),
         installation: () => installationSettings(config.config, capabilities),
         vocabulary: {
           agents: Object.keys(AGENTS),
@@ -932,8 +936,11 @@ export async function runBot(): Promise<void> {
       grantsFor: (id) => config.grantsFor(id),
       personByEmail,
       channelsOf,
+      personName,
       publicBaseUrl,
     });
+    // View-as (record 0053): the cookie's routes, under the Access-covered /runs prefix.
+    const viewAsRoutes = createViewAsHandler({ publicBaseUrl, secure: publicBaseUrl?.startsWith("https://") ?? false });
     const commandHttpState = `GET|POST /api/<group>.<verb> (${commands.list().length} commands)`;
     const mcpConnectView = createMcpConnectViewHandler({
       registry: () => mcpWiring.service,
@@ -1062,25 +1069,32 @@ export async function runBot(): Promise<void> {
               res.end("forbidden");
               return;
             }
+            // The view-as cookie's word rides the identity (record 0053); the resolver
+            // decides whether it counts — only for a session whose own actor holds `all`.
+            const viewAs = viewAsFromCookie(req.headers.cookie);
+            const identity: AccessIdentity = viewAs !== undefined ? { ...gate.identity, viewAs } : gate.identity;
             // --- /api/*: the command handler owns everything under it. ---
-            if (isCommandPath(path)) return commandHttp(req, res, gate.identity);
+            if (isCommandPath(path)) return commandHttp(req, res, identity);
             // --- end /api/* ---
             // The pages' actor: the same resolution `/api` makes, linked to its
-            // person when the session's email names one (record 0042).
-            const actor = await resolveAccessActor(gate.identity, {
+            // person when the session's email names one (record 0042), or viewing
+            // as one when an admin's cookie says so (record 0053).
+            const actor = await resolveAccessActor(identity, {
               grantsFor: (id) => config.grantsFor(id),
               personByEmail,
               channelsOf,
+              personName,
             });
+            if (viewAsRoutes(req, res, { actor })) return;
             if (liveView(req, res, { actor })) return;
             // --- /threads*: the web chat, the actor's own runs and lane (record 0043). ---
-            if (webChat(req, res, { actor, identity: gate.identity })) return;
+            if (webChat(req, res, { actor, identity })) return;
             // --- /mcp/connect/<nonce>: the credential page, identity-bound. ---
             if (mcpConnectView(req, res, gate.identity)) return;
             if (residentsView(req, res, { actor })) return;
-            if (costsView(req, res, { identity: gate.identity, actor })) return;
+            if (costsView(req, res, { identity, actor })) return;
             if (deliveryView(req, res, { actor })) return;
-            if (settingsView(req, res, { identity: gate.identity })) return;
+            if (settingsView(req, res, { identity })) return;
             res.writeHead(200, { "content-type": "text/plain" });
             res.end("ok");
           })

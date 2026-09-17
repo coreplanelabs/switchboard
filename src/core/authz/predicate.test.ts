@@ -43,6 +43,7 @@ const DIFFERENTIAL_ACTORS: readonly [string, Actor][] = [
   ["schedule with all-channels", A.schedule],
   ["agent on behalf of a non-member", A.agentForNonMember],
   ["linked browser whose person is in the private channel (memberOf)", A.memberBrowser],
+  ["admin viewing as ivy (record 0053)", A.viewingAsIvy],
   [
     "narrow agent on behalf of the admin",
     actor(
@@ -145,6 +146,36 @@ describe("predicateFor ⇔ authorize differential over runs", () => {
         unstamped.filter((r) => r.channelId === CHANNELS.pub2.id || r.userId === A.nonMember.id).map((r) => r.id),
       ),
     );
+  });
+});
+
+// Feature: docs/decisions/0053 — viewing as a person is the person's own session, read for read.
+describe("view-as ≡ the person (record 0053)", () => {
+  const runs: RunResource[] = runFixture();
+  const scopes: ScopeResource[] = scopeFixture();
+  it("the admin viewing as ivy lists exactly the runs and memory scopes ivy's own session lists, for every read and write action — by predicate and by point decision", () => {
+    for (const action of ["runs:read", "runs:write"]) {
+      expect(filterByPredicate(runs, predicateFor(A.viewingAsIvy, action, "run")), action).toEqual(
+        filterByPredicate(runs, predicateFor(A.ivy, action, "run")),
+      );
+      expect(filterByAuthorize(runs, A.viewingAsIvy, action), action).toEqual(filterByAuthorize(runs, A.ivy, action));
+    }
+    for (const kind of ["org", "user", "channel", "repo"] as const) {
+      const ofKind = scopes.filter((s) => s.kind === kind);
+      for (const action of ["memory:read", "memory:write"]) {
+        expect(filterByAuthorize(ofKind, A.viewingAsIvy, action), `${action}/${kind}`).toEqual(
+          filterByAuthorize(ofKind, A.ivy, action),
+        );
+      }
+    }
+  });
+  it("is not vacuous: ivy sees the private channel's runs the admin's own session would list among everything, and not the dm ones", () => {
+    const seen = filterByAuthorize(runs, A.viewingAsIvy, "runs:read");
+    const everything = filterByAuthorize(runs, A.admin, "runs:read");
+    expect(seen.size).toBeGreaterThan(0);
+    expect(seen.size).toBeLessThan(everything.size);
+    expect(runs.filter((r) => r.channelVisibility === "private").some((r) => seen.has(r.id))).toBe(true);
+    expect(runs.filter((r) => r.channelVisibility === "dm").some((r) => seen.has(r.id))).toBe(false);
   });
 });
 

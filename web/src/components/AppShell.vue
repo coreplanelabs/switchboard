@@ -15,13 +15,18 @@ import DocsLink, { DOCS_HREF, DOCS_ICON, DOCS_LABEL } from "./DocsLink.vue";
 import SettingsLink, { SETTINGS_HREF, SETTINGS_ICON, SETTINGS_LABEL } from "./SettingsLink.vue";
 import ThemeToggle from "./ThemeToggle.vue";
 import BrandMark from "./BrandMark.vue";
+import ViewAsBanner from "./ViewAsBanner.vue";
 import { browser } from "../lib/browser";
+import { useViewingAs } from "../lib/seed";
 import { useCapabilities } from "../lib/capabilities";
 
 const props = defineProps<{ title: string; nav: NavSection }>();
 
 const caps = useCapabilities();
 const sections = computed(() => navSections(caps, props.nav));
+// Viewing as a person (record 0053): the banner sits under the header on every
+// page, so the narrowed view is never mistaken for the session's own.
+const viewingAs = useViewingAs();
 
 const mode = useColorMode({ emitAuto: true });
 const THEMES = [
@@ -101,6 +106,7 @@ const menuItems = computed(() => [
         </UDropdownMenu>
       </span>
     </header>
+    <ViewAsBanner v-if="viewingAs" :person="viewingAs" />
     <slot />
   </div>
 </template>

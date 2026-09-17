@@ -127,7 +127,7 @@ export function createDeliveryViewHandler(
           res.end(body);
           return;
         }
-        const html = shell(`${report.repo} delivery`, { page: "delivery", report, repos });
+        const html = shell(ctx.actor, `${report.repo} delivery`, { page: "delivery", report, repos });
         res.writeHead(200, WEB_HTML_HEADERS);
         res.end(html);
       })

@@ -66,6 +66,14 @@ export interface Actor {
    * → nothing: fail-closed, exactly today's behaviour.
    */
   readonly memberOf?: ReadonlySet<string>;
+  /**
+   * The person an admin's dashboard session is viewing as (record 0053): set
+   * beside `onBehalfOf` = that person's actor, so the effective grants are the
+   * intersection (the person's) and `self`/`memberOf` are the person's, while
+   * `id` stays the admin's. Identity for the audit line and the banner; the
+   * registry door refuses every non-read effect while it is set. No rule reads it.
+   */
+  readonly viewingAs?: { readonly id: string; readonly name?: string };
 }
 
 /** `<group>:<read|write|exec>` plus the non-command actions. A plain

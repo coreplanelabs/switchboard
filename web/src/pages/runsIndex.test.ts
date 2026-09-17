@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import RunsIndexPage from "./RunsIndexPage.vue";
+import ViewAsPicker from "../components/runs/ViewAsPicker.vue";
 import { mountApp } from "../testing/mount";
 import { browser } from "../lib/browser";
 import { fakeEventSourceFactory } from "../testing/fakeEventSource";
@@ -106,6 +107,54 @@ describe("RunsIndexPage — toolbar, states, pager", () => {
     const { wrapper, es } = mountIndex(seed([done("c")], { all: true }));
     expect(wrapper.find("h1 .title").text()).toBe("All runs");
     expect(es().url).toBe("/runs?stream=1&all=1");
+  });
+
+  // Feature: docs/decisions/0053 — the picker is drawn for a viewer the seed says may view as a person.
+  it("the view-as picker is drawn only when the seed offers viewAs: the page's people by name with the id beside; a pick posts the person and navigates to the index; a typed id is offered as an item and posts too", async () => {
+    const nav = vi.spyOn(browser, "navigate").mockImplementation(() => {});
+    const plain = mountIndex(seed([]));
+    expect(plain.wrapper.findComponent(ViewAsPicker).exists()).toBe(false);
+    const people = [{ id: "slack:UBOB", name: "bob" }, { id: "slack:UANON" }];
+    const { wrapper } = mountIndex(seed([], { viewAs: { people } }));
+    const picker = wrapper.findComponent(ViewAsPicker);
+    expect(picker.exists()).toBe(true);
+    const menu = picker.findComponent({ name: "InputMenu" });
+    expect(menu.exists()).toBe(true);
+    expect(menu.props("items")).toEqual([
+      { label: "bob", value: "slack:UBOB", suffix: "slack:UBOB" },
+      { label: "slack:UANON", value: "slack:UANON" },
+    ]);
+    expect(menu.props("createItem")).toBe(true);
+    menu.vm.$emit("update:modelValue", "slack:UBOB");
+    await vi.waitFor(() => expect(nav).toHaveBeenCalledWith("/runs"));
+    expect(fetch).toHaveBeenCalledWith("/runs/view-as", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ person: "slack:UBOB" }),
+    });
+    menu.vm.$emit("create", " slack:UNEW ");
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    expect((fetch as ReturnType<typeof vi.fn>).mock.calls[1][1].body).toBe(JSON.stringify({ person: "slack:UNEW" }));
+    // An empty pick (the menu clearing) posts nothing.
+    menu.vm.$emit("update:modelValue", "");
+    await wrapper.vm.$nextTick();
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("a refused pick shows the server's sentence beside the picker and navigates nowhere", async () => {
+    const nav = vi.spyOn(browser, "navigate").mockImplementation(() => {});
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      json: async () => ({ error: "invalid_input", message: "person must be a Slack person id" }),
+    });
+    const { wrapper } = mountIndex(seed([], { viewAs: { people: [] } }));
+    wrapper.findComponent(ViewAsPicker).findComponent({ name: "InputMenu" }).vm.$emit("create", "nope");
+    await vi.waitFor(() =>
+      expect(wrapper.find(".view-as-picker .text-bad").text()).toBe("person must be a Slack person id"),
+    );
+    expect(nav).not.toHaveBeenCalled();
   });
 
   it("the Show completed checkbox reflects the view and navigates on change (a server mode, not a client filter)", async () => {
