@@ -486,3 +486,46 @@ describe("record 0042 — the self set is identity, not authority", () => {
     expect(effectiveGrants(linked)).toEqual(effectiveGrants(unlinked));
   });
 });
+
+// Feature: docs/reference/specs/authorization.md items 4 and 7 — the
+// channels the directory says a person is in ride on the actor as `memberOf`, a
+// fact beside the grants: `member-of` reads it, no grant check does.
+describe("issue 516 — memberOf is a directory fact beside the grants", () => {
+  const member = A.memberBrowser; // in the private channel, per the directory
+  const linked = A.linkedBrowser; // linked, no memberOf
+  const theirs = run({ channel: "priv", userId: "slack:UERIN" });
+  const elsewhere = run({ channel: "dm", userId: "slack:UERIN" });
+
+  it("member-of admits another person's run in a private channel the actor is in; without memberOf, or for a channel outside the set, it is denied", () => {
+    expect(authorize(member, "runs:read", theirs).allow).toBe(true);
+    expect(authorize(linked, "runs:read", theirs).allow).toBe(false);
+    expect(authorize(member, "runs:read", elsewhere).allow).toBe(false);
+    // The channel's own config scope (the settings MCPs tab reads it) follows the same relation.
+    const priv = { type: "config-scope", kind: "channel", id: CHANNELS.priv.id } as const;
+    expect(authorize(member, "config:read", priv).allow).toBe(true);
+    expect(authorize(linked, "config:read", priv).allow).toBe(false);
+  });
+
+  it("memberOf grants nothing: the effective grants and every command action answer the same with and without it", () => {
+    const without: Actor = { ...member, memberOf: undefined };
+    expect(effectiveGrants(member)).toEqual(effectiveGrants(without));
+    expect(authorize(member, "runs:write", theirs).allow).toBe(false); // in the channel, still not the write grant
+    const actions = new Set(POLICY.filter((r) => r.resource === "command").map((r) => r.action));
+    for (const action of actions) {
+      const decision = (a: Actor) => authorize(a, action, { type: "command", id: "x" }).allow;
+      expect(decision(member), action).toBe(decision(without));
+    }
+  });
+
+  it("memberOf is the root principal's, like self: an agent acting on behalf of the member reads through it, and holds nothing more", () => {
+    const agent = actor(
+      "agent",
+      "agent:coding",
+      { actions: new Set(["runs:read"]), channels: new Set() },
+      { onBehalfOf: member },
+    );
+    expect(authorize(agent, "runs:read", theirs).allow).toBe(true);
+    expect(authorize({ ...agent, onBehalfOf: linked }, "runs:read", theirs).allow).toBe(false);
+    expect(authorize(agent, "runs:write", theirs).allow).toBe(false);
+  });
+});

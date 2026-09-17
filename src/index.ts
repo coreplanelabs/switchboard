@@ -207,6 +207,10 @@ export async function runBot(): Promise<void> {
   let slackPersonByEmail: PersonLookup | undefined;
   const personByEmail: PersonLookup = (email) =>
     slackPersonByEmail ? slackPersonByEmail(email) : Promise.resolve(undefined);
+  /** A linked person's channels, bound to the Slack directory once the app exists; `unknown` before. */
+  let slackChannelsOf: ((actorId: string) => Promise<ReadonlySet<string> | "unknown">) | undefined;
+  const channelsOf = (actorId: string) =>
+    slackChannelsOf ? slackChannelsOf(actorId) : Promise.resolve("unknown" as const);
   const mcpWiring = buildMcp(config, processSecrets, {
     publicBaseUrl: process.env.PUBLIC_BASE_URL,
     resolveEmail: (userId) => (slackEmailLookup ? slackEmailLookup(userId) : Promise.resolve(undefined)),
@@ -535,7 +539,7 @@ export async function runBot(): Promise<void> {
   // registration, every surface.
   deps.commands = commands;
   // --- end command registry ---
-  const { app, statusClient } = createSlackApp(deps);
+  const { app, receiver, statusClient } = createSlackApp(deps);
   // A thread's channel handle rebuilt from a stored row's parts, with no
   // triggering event (run-history item 38): what a resumed run replies through
   // and what a coordinator's child is dispatched into. Slack from the key's
@@ -563,7 +567,39 @@ export async function runBot(): Promise<void> {
   // channel is public or private — cached per channel per TTL, `unknown` on any
   // failure — so a public channel's runs are readable by everyone and a private
   // channel's or DM's stay grants-only. Non-Slack ids keep the static answer.
-  deps.channelDirectory = new SlackChannelDirectory(app.client);
+  const channelDirectory = new SlackChannelDirectory(app.client);
+  deps.channelDirectory = channelDirectory;
+  // Membership: a dashboard session linked to its person carries the
+  // channels that person is in, from `users.conversations` cached per person. The
+  // events keep the cache fresh — a join or leave forgets that person, a move of
+  // the bot's own reach forgets everyone (the bot joining a channel makes that
+  // channel visible on every member's set at once), and so does a reconnect
+  // (Socket Mode replays nothing missed) — so the TTL is only the bound on a
+  // missed event.
+  slackChannelsOf = (actorId) => channelDirectory.channelsOf(actorId);
+  let directoryBotUserId: string | undefined;
+  const membershipMoved = async (user: string) => {
+    try {
+      directoryBotUserId ??= (await app.client.auth.test()).user_id ?? undefined;
+    } catch {
+      channelDirectory.forgetAll(); // who moved is unknown: forgetting more is always safe
+      return;
+    }
+    if (user === directoryBotUserId) channelDirectory.forgetAll();
+    else channelDirectory.forgetMember(`slack:${user}`);
+  };
+  app.event("member_joined_channel", async ({ event }) => membershipMoved(event.user));
+  app.event("member_left_channel", async ({ event }) => membershipMoved(event.user));
+  for (const moved of [
+    "channel_left",
+    "group_left",
+    "channel_archive",
+    "group_archive",
+    "channel_deleted",
+    "group_deleted",
+  ] as const)
+    app.event(moved, async () => channelDirectory.forgetAll());
+  receiver.client.on("connected", () => channelDirectory.forgetAll());
   // The conversation reader (record 0037): a permalink to another thread the
   // bot is in becomes a quoted, untrusted block on the request turn — this
   // workspace's URL grammar, one fresh `conversations.info` per classification,
@@ -745,7 +781,8 @@ export async function runBot(): Promise<void> {
     const settingsView = createSettingsViewHandler(
       {
         commands,
-        callerFor: (identity) => callerFor(identity, { grantsFor: (id) => config.grantsFor(id), personByEmail }),
+        callerFor: (identity) =>
+          callerFor(identity, { grantsFor: (id) => config.grantsFor(id), personByEmail, channelsOf }),
         installation: () => installationSettings(config.config, capabilities),
         vocabulary: {
           agents: Object.keys(AGENTS),
@@ -865,6 +902,7 @@ export async function runBot(): Promise<void> {
     const commandHttp = createCommandHttpHandler(commands, {
       grantsFor: (id) => config.grantsFor(id),
       personByEmail,
+      channelsOf,
       publicBaseUrl,
     });
     const commandHttpState = `GET|POST /api/<group>.<verb> (${commands.list().length} commands)`;
@@ -1003,6 +1041,7 @@ export async function runBot(): Promise<void> {
             const actor = await resolveAccessActor(gate.identity, {
               grantsFor: (id) => config.grantsFor(id),
               personByEmail,
+              channelsOf,
             });
             if (liveView(req, res, { actor })) return;
             // --- /threads*: the web chat, the actor's own runs and lane (record 0043). ---

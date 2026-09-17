@@ -619,6 +619,63 @@ describe("callerIdFor — one Access identity → caller id mapping for /api and
     expect(odd.self).toBeUndefined();
   });
 
+  // Feature: docs/reference/specs/authorization.md item 7 — the linked person's channels.
+  it("resolveAccessActor carries the linked person's channels as memberOf; no lookup, unknown, a failing lookup or an unlinked session carry none, and grants never change", async () => {
+    const grantsLookup = (id: string) => grantsFor(id, { commandGroups: ["runs"] });
+    const personByEmail = async () => ({ id: "slack:UALICE", name: "alice" });
+    const alice = { sub: "a1", email: "alice@example.test" };
+    const asked: string[] = [];
+    const channelsOf = async (actorId: string) => (asked.push(actorId), new Set(["slack:CPRIV", "slack:CPUB"]));
+    const withChannels = await resolveAccessActor(alice, { grantsFor: grantsLookup, personByEmail, channelsOf });
+    expect(withChannels.memberOf).toEqual(new Set(["slack:CPRIV", "slack:CPUB"]));
+    expect(asked).toEqual(["slack:UALICE"]); // the person's channels, never the session's id
+    expect(withChannels.grants).toEqual(accessActor(alice, grantsLookup).grants);
+    for (const opts of [
+      { grantsFor: grantsLookup, personByEmail },
+      { grantsFor: grantsLookup, personByEmail, channelsOf: async (): Promise<"unknown"> => "unknown" },
+      {
+        grantsFor: grantsLookup,
+        personByEmail,
+        channelsOf: async (): Promise<ReadonlySet<string>> => {
+          throw new Error("slack down");
+        },
+      },
+    ]) {
+      const actor = await resolveAccessActor(alice, opts);
+      expect(actor).not.toHaveProperty("memberOf");
+      expect(actor.self).toEqual(["access:a1", "slack:UALICE"]); // still linked
+    }
+    const unlinked = await resolveAccessActor({ sub: "a2" }, { grantsFor: grantsLookup, personByEmail, channelsOf });
+    expect(unlinked).not.toHaveProperty("memberOf");
+    expect(asked).toEqual(["slack:UALICE"]); // an unlinked session asks for nobody
+  });
+
+  it("resolveAccessActor bounds the channels wait: a lookup slower than the bound resolves the linked actor without memberOf, and its late rejection is swallowed", async () => {
+    const grantsLookup = (id: string) => grantsFor(id, { commandGroups: ["runs"] });
+    const personByEmail = async () => ({ id: "slack:UALICE", name: "alice" });
+    const alice = { sub: "a1", email: "alice@example.test" };
+    let fail!: (e: Error) => void;
+    const slow = new Promise<ReadonlySet<string>>((_, reject) => (fail = reject));
+    const late = await resolveAccessActor(alice, {
+      grantsFor: grantsLookup,
+      personByEmail,
+      channelsOf: () => slow,
+      channelsOfTimeoutMs: 10,
+    });
+    expect(late).not.toHaveProperty("memberOf");
+    expect(late.self).toEqual(["access:a1", "slack:UALICE"]);
+    fail(new Error("slack down, late")); // after the bound: nothing to observe, nothing unhandled
+    await new Promise((r) => setTimeout(r, 0));
+    // Within the bound the answer rides along.
+    const prompt = await resolveAccessActor(alice, {
+      grantsFor: grantsLookup,
+      personByEmail,
+      channelsOf: async () => new Set(["slack:CPRIV"]),
+      channelsOfTimeoutMs: 1000,
+    });
+    expect(prompt.memberOf).toEqual(new Set(["slack:CPRIV"]));
+  });
+
   it("is the id callerFor's Caller carries", async () => {
     const { handler, reg } = await fixture({
       grantsFor: (id) =>

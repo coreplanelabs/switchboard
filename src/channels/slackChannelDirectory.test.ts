@@ -3,7 +3,7 @@ import {
   CHANNEL_INFO_CACHE_MAX,
   CHANNEL_INFO_TTL_MS,
   SlackChannelDirectory,
-  type ConversationInfoClient,
+  type SlackDirectoryClient,
 } from "./slackChannelDirectory.js";
 
 // Feature: docs/reference/specs/authorization.md item 7, docs/reference/specs/slack-channel.md
@@ -13,10 +13,22 @@ import {
 // failure is `unknown` (never public — fail-closed) and remembered for the TTL so Slack is
 // asked and the failure logged once per channel per window. `slack:D…` and
 // non-Slack ids never reach the API — the id alone says what they are.
+// Membership: `users.conversations` lists a person's channels, paged,
+// cached per person for the TTL, forgotten on the events the bot wires; `unknown`
+// on any failure, and a non-Slack actor is the fallback's answer.
 
 type Info = { is_im?: boolean; is_mpim?: boolean; is_private?: boolean };
+/** A person's channels as `users.conversations` pages them: one inner array per page. */
+type Pages = string[][] | Error;
 
-function fakeClient(answers: Record<string, Info | Error | null>) {
+/** A `users` API that must never be asked. */
+const NO_USERS: SlackDirectoryClient["users"] = {
+  conversations: async ({ user }) => {
+    throw new Error(`unexpected users.conversations for ${user}`);
+  },
+};
+
+function fakeClient(answers: Record<string, Info | Error | null>, members: Record<string, Pages> = {}) {
   const info = vi.fn(async ({ channel }: { channel: string }) => {
     const a = answers[channel];
     if (a instanceof Error) throw a;
@@ -24,8 +36,18 @@ function fakeClient(answers: Record<string, Info | Error | null>) {
     if (a === undefined) throw new Error(`unexpected lookup of ${channel}`);
     return { channel: a };
   });
-  const client: ConversationInfoClient = { conversations: { info } };
-  return { client, info };
+  const conversations = vi.fn(async ({ user, cursor, limit }: { user: string; cursor?: string; limit: number }) => {
+    const pages = members[user];
+    if (pages instanceof Error) throw pages;
+    if (pages === undefined) throw new Error(`unexpected users.conversations for ${user}`);
+    const at = cursor ? Number(cursor) : 0;
+    const page = pages[at] ?? [];
+    expect(page.length).toBeLessThanOrEqual(limit);
+    const next = at + 1 < pages.length ? String(at + 1) : "";
+    return { channels: page.map((id) => ({ id })), response_metadata: { next_cursor: next } };
+  });
+  const client: SlackDirectoryClient = { conversations: { info }, users: { conversations } };
+  return { client, info, conversations };
 }
 
 function clock(start = 1_000_000) {
@@ -125,7 +147,7 @@ describe("SlackChannelDirectory.info — visibility from conversations.info", ()
   it("concurrent first lookups of one channel share a single API call", async () => {
     let release!: (v: { channel: Info }) => void;
     const info = vi.fn(() => new Promise<{ channel: Info }>((resolve) => (release = resolve)));
-    const dir = new SlackChannelDirectory({ conversations: { info } }, { now: clock().now });
+    const dir = new SlackChannelDirectory({ conversations: { info }, users: NO_USERS }, { now: clock().now });
     const a = dir.info("slack:C1");
     const b = dir.info("slack:C1");
     release({ channel: { is_private: false } });
@@ -135,12 +157,110 @@ describe("SlackChannelDirectory.info — visibility from conversations.info", ()
   });
 });
 
-describe("SlackChannelDirectory.isMember — the membership seam (not enumerated yet)", () => {
-  it("answers `unknown` for every actor and channel — not a member (fail-closed) — until conversations.members lands behind this seam", async () => {
-    const { client, info } = fakeClient({});
+describe("SlackChannelDirectory.channelsOf — a person's channels from users.conversations", () => {
+  it("lists every public and private channel the person is in as slack: ids, paged by cursor; asked once per person per TTL and again after it", async () => {
+    const { client, conversations, info } = fakeClient({}, { UA: [["C1", "C2"], ["G3"]], UB: [[]] });
+    const c = clock();
+    const dir = new SlackChannelDirectory(client, { now: c.now, ttlMs: 1000 });
+    expect(await dir.channelsOf("slack:UA")).toEqual(new Set(["slack:C1", "slack:C2", "slack:G3"]));
+    expect(conversations).toHaveBeenCalledTimes(2); // two pages, one ask
+    expect(conversations.mock.calls[0]?.[0]).toMatchObject({
+      user: "UA",
+      types: "public_channel,private_channel",
+      exclude_archived: true,
+    });
+    expect(conversations.mock.calls[1]?.[0]).toMatchObject({ user: "UA", cursor: "1" });
+    expect(await dir.channelsOf("slack:UA")).toEqual(new Set(["slack:C1", "slack:C2", "slack:G3"]));
+    expect(conversations).toHaveBeenCalledTimes(2); // cached
+    expect(await dir.channelsOf("slack:UB")).toEqual(new Set()); // in no channel the bot can see: an empty set, not unknown
+    c.advance(1001);
+    expect(await dir.channelsOf("slack:UA")).toEqual(new Set(["slack:C1", "slack:C2", "slack:G3"]));
+    expect(conversations).toHaveBeenCalledTimes(5); // the TTL passed: two pages again
+    expect(info).not.toHaveBeenCalled(); // membership never asks conversations.info
+  });
+
+  it("concurrent first asks for one person share a single API call", async () => {
+    let release!: (v: { channels: { id: string }[] }) => void;
+    const conversations = vi.fn(() => new Promise<{ channels: { id: string }[] }>((resolve) => (release = resolve)));
+    const dir = new SlackChannelDirectory(
+      { conversations: { info: async () => ({}) }, users: { conversations } },
+      { now: clock().now },
+    );
+    const a = dir.channelsOf("slack:UA");
+    const b = dir.channelsOf("slack:UA");
+    release({ channels: [{ id: "C1" }] });
+    expect(await a).toEqual(new Set(["slack:C1"]));
+    expect(await b).toEqual(new Set(["slack:C1"]));
+    expect(conversations).toHaveBeenCalledTimes(1);
+  });
+
+  it("fail-closed: an API failure is unknown for the TTL and logged once per person per window; a non-Slack actor, a bot or an app id never reaches the API", async () => {
+    const { client, conversations } = fakeClient({}, { UERR: new Error("missing_scope") });
+    const warnings: string[] = [];
+    const c = clock();
+    const dir = new SlackChannelDirectory(client, { now: c.now, ttlMs: 1000, warn: (m) => warnings.push(m) });
+    expect(await dir.channelsOf("slack:UERR")).toBe("unknown");
+    expect(await dir.channelsOf("slack:UERR")).toBe("unknown");
+    expect(conversations).toHaveBeenCalledTimes(1); // remembered for the TTL
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("slack:UERR");
+    expect(warnings[0]).toContain("missing_scope");
+    c.advance(1001);
+    expect(await dir.channelsOf("slack:UERR")).toBe("unknown");
+    expect(conversations).toHaveBeenCalledTimes(2);
+    expect(await dir.channelsOf("http:ops")).toBe("unknown");
+    expect(await dir.channelsOf("access:a1")).toBe("unknown");
+    expect(await dir.channelsOf("slack:B0BOT")).toBe("unknown");
+    expect(conversations).toHaveBeenCalledTimes(2);
+  });
+
+  it("forgetMember makes the next ask for that person go to Slack and leaves everyone else cached; forgetAll forgets everyone", async () => {
+    const { client, conversations } = fakeClient({}, { UA: [["C1"]], UB: [["C2"]] });
     const dir = new SlackChannelDirectory(client, { now: clock().now });
-    expect(await dir.isMember("slack:UA", "slack:C1")).toBe("unknown");
+    await dir.channelsOf("slack:UA");
+    await dir.channelsOf("slack:UB");
+    expect(conversations).toHaveBeenCalledTimes(2);
+    dir.forgetMember("slack:UA");
+    dir.forgetMember("slack:UNOBODY"); // nothing cached: a no-op
+    await dir.channelsOf("slack:UA");
+    await dir.channelsOf("slack:UB");
+    expect(conversations).toHaveBeenCalledTimes(3);
+    dir.forgetAll();
+    await dir.channelsOf("slack:UA");
+    await dir.channelsOf("slack:UB");
+    expect(conversations).toHaveBeenCalledTimes(5);
+  });
+
+  it("more pages than the cap is unknown — never a partial set presented as the whole — and the bounded cache evicts the oldest person", async () => {
+    const endless = Array.from({ length: 11 }, (_, i) => [`C${i}`]);
+    const people: Record<string, Pages> = { ULONG: endless };
+    for (let i = 0; i < 5; i++) people[`UP${i}`] = [[`C${i}`]];
+    const { client, conversations } = fakeClient({}, people);
+    const warnings: string[] = [];
+    const dir = new SlackChannelDirectory(client, { now: clock().now, maxEntries: 4, warn: (m) => warnings.push(m) });
+    expect(await dir.channelsOf("slack:ULONG")).toBe("unknown");
+    expect(conversations).toHaveBeenCalledTimes(10);
+    expect(warnings[0]).toContain("slack:ULONG");
+    expect(warnings[0]).toContain("pages");
+    conversations.mockClear();
+    for (let i = 0; i < 4; i++) await dir.channelsOf(`slack:UP${i}`);
+    expect(conversations).toHaveBeenCalledTimes(4);
+    await dir.channelsOf("slack:UP1"); // still cached (ULONG was the oldest and went at UP3)
+    expect(conversations).toHaveBeenCalledTimes(4);
+    await dir.channelsOf("slack:UP4"); // evicts UP0
+    await dir.channelsOf("slack:UP0");
+    expect(conversations).toHaveBeenCalledTimes(6);
+  });
+});
+
+describe("SlackChannelDirectory.isMember — the person's own channel set", () => {
+  it("is true for a channel in the set, false for one outside it, unknown when the set is unknown, and the fallback's unknown for a non-Slack actor", async () => {
+    const { client, conversations } = fakeClient({}, { UA: [["C1"]], UERR: new Error("down") });
+    const dir = new SlackChannelDirectory(client, { now: clock().now });
+    expect(await dir.isMember("slack:UA", "slack:C1")).toBe(true);
+    expect(await dir.isMember("slack:UA", "slack:C9")).toBe(false);
+    expect(await dir.isMember("slack:UERR", "slack:C1")).toBe("unknown");
     expect(await dir.isMember("http:ops", "http:ops")).toBe("unknown");
-    expect(info).not.toHaveBeenCalled();
+    expect(conversations).toHaveBeenCalledTimes(2); // one per person, shared with channelsOf
   });
 });

@@ -63,6 +63,14 @@ export function principalOf(actor: Actor): Actor {
   return current;
 }
 
+/** The channels the decision's person is in: the root principal's
+ *  `memberOf`, as `selfIdsOf` reads its `self` — a fact from the channel
+ *  directory, never a grant; absent → the empty set. */
+export function memberChannelsOf(actor: Actor): ReadonlySet<string> {
+  return principalOf(actor).memberOf ?? EMPTY_SET;
+}
+const EMPTY_SET: ReadonlySet<string> = new Set();
+
 /** The ids that mean "me" for a decision (record 0042): the root principal's
  *  `self` when it carries one — its own id and the person a dashboard session
  *  is linked to — else its id alone. Never read by a grant check. */
@@ -117,6 +125,7 @@ export function evaluateCondition(
   grants: Grants,
   selfIds: readonly string[],
   attributes: ResourceAttributes,
+  memberOf: ReadonlySet<string> = EMPTY_SET,
 ): boolean {
   switch (condition.kind) {
     case "has-grant": {
@@ -124,11 +133,13 @@ export function evaluateCondition(
       return grant !== undefined && hasAction(grants.actions, grant);
     }
     case "member-of":
-      // Granted the channel, or the channel is public (a run's stamped
+      // Granted the channel, in the channel (the directory's fact on the
+      // actor), or the channel is public (a run's stamped
       // visibility). `unknown` — no stamp, a directory failure — is never
       // public: fail-closed.
       return (
-        (attributes.channelId !== undefined && holds(grants.channels, attributes.channelId)) ||
+        (attributes.channelId !== undefined &&
+          (holds(grants.channels, attributes.channelId) || memberOf.has(attributes.channelId))) ||
         attributes.channelVisibility === "public"
       );
     case "is-self":
@@ -154,7 +165,8 @@ export function evaluateRule(rule: Rule, actor: Actor, resource: Resource): bool
   if (rule.originVisibility && !rule.originVisibility.includes(attributes.visibility)) return false;
   const grants = effectiveGrants(actor);
   const selfIds = selfIdsOf(actor);
-  return rule.when.every((condition) => evaluateCondition(condition, grants, selfIds, attributes));
+  const memberOf = memberChannelsOf(actor);
+  return rule.when.every((condition) => evaluateCondition(condition, grants, selfIds, attributes, memberOf));
 }
 
 /** `authorize` over an explicit (validated) table. Tests use it to drive
@@ -173,9 +185,10 @@ export function authorizeWith(rules: readonly Rule[], actor: Actor, action: Acti
   if (forOrigin.length === 0) return deny("origin-visibility");
   const grants = effectiveGrants(actor);
   const selfIds = selfIdsOf(actor);
+  const memberOf = memberChannelsOf(actor);
   let reason: DenyReason | undefined;
   for (const rule of forOrigin) {
-    const failed = rule.when.find((condition) => !evaluateCondition(condition, grants, selfIds, attributes));
+    const failed = rule.when.find((condition) => !evaluateCondition(condition, grants, selfIds, attributes, memberOf));
     if (!failed) return ALLOW;
     reason ??= FAILURE_REASON[failed.kind];
   }

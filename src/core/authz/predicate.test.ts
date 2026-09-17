@@ -42,6 +42,7 @@ const DIFFERENTIAL_ACTORS: readonly [string, Actor][] = [
   ["pinned service token", A.token],
   ["schedule with all-channels", A.schedule],
   ["agent on behalf of a non-member", A.agentForNonMember],
+  ["linked browser whose person is in the private channel (memberOf)", A.memberBrowser],
   [
     "narrow agent on behalf of the admin",
     actor(
@@ -111,6 +112,26 @@ describe("predicateFor ⇔ authorize differential over runs", () => {
     expect(
       filterByAuthorize(runs, actor("service", "http:ci", { actions: new Set(["runs:read"]) }), "runs:read"),
     ).toEqual(new Set(runs.filter(isPublic).map((r) => r.id)));
+  });
+  it("memberOf widens channels-in with the person's channels and nothing else: the member browser lists every private-channel run, the unlinked browser none of them", () => {
+    const privateRuns = runs.filter((r) => r.channelId === CHANNELS.priv.id);
+    expect(privateRuns.length).toBeGreaterThan(0);
+    const member = filterByPredicate(runs, predicateFor(A.memberBrowser, "runs:read", "run"));
+    const plain = filterByPredicate(runs, predicateFor(A.browser, "runs:read", "run"));
+    for (const r of privateRuns) {
+      expect(member.has(r.id), r.id).toBe(true);
+      expect(plain.has(r.id), r.id).toBe(false);
+    }
+    // Only that channel was added: a DM run of another person stays hidden from both.
+    const dmRuns = runs.filter((r) => r.channelId === CHANNELS.dm.id && r.userId !== "slack:UIVY");
+    for (const r of dmRuns) expect(member.has(r.id), r.id).toBe(false);
+    // The same vocabulary: one channels-in leaf carries the person's channel; the unlinked browser compiles none.
+    const leaves = (p: Predicate): Predicate[] => (p.kind === "or" || p.kind === "and" ? p.of.flatMap(leaves) : [p]);
+    const channelsIn = leaves(predicateFor(A.memberBrowser, "runs:read", "run")).filter(
+      (l) => l.kind === "channels-in",
+    );
+    expect(channelsIn).toEqual([{ kind: "channels-in", channelIds: new Set([CHANNELS.priv.id]) }]);
+    expect(leaves(predicateFor(A.browser, "runs:read", "run")).filter((l) => l.kind === "channels-in")).toEqual([]);
   });
   it("a record stamped `unknown` (or not stamped) never matches the public half — for every actor without the channel", () => {
     const unstamped: RunResource[] = runs.map((r) => ({ ...r, channelVisibility: "unknown" }));

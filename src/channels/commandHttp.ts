@@ -11,6 +11,7 @@ import {
   type InvokeErrorCode,
 } from "../core/commandRegistry.js";
 import { namedToInput } from "../core/commandSurface.js";
+import { CHANNEL_DIRECTORY_TIMEOUT_MS } from "../core/dispatch/record.js";
 import { isServiceToken, type AccessIdentity } from "./accessAuth.js";
 import { MAX_BODY_BYTES, readBody } from "./http.js";
 
@@ -53,6 +54,14 @@ export interface CommandHttpOptions {
    *  app up, the `token`/`none` strategies' identities have no email) → every
    *  session is unlinked, exactly as before the link existed. */
   personByEmail?: PersonLookup;
+  /** The channels a linked person is in: `ChannelDirectory.channelsOf`,
+   *  bound once the Slack app is up. Absent, `unknown` or failing → no `memberOf` on the
+   *  actor: the session reads what its grants and the public channels allow, as before. */
+  channelsOf?: (actorId: string) => Promise<ReadonlySet<string> | "unknown">;
+  /** Bound on one `channelsOf` wait (default `CHANNEL_DIRECTORY_TIMEOUT_MS`, the dispatcher's bound on
+   *  the same directory): past it the actor resolves without `memberOf`, and the lookup's late answer
+   *  still fills the directory's cache for the next request. */
+  channelsOfTimeoutMs?: number;
   /** `PUBLIC_BASE_URL`, when set: the origin writes must come from. */
   publicBaseUrl?: string;
   maxBodyBytes?: number;
@@ -143,24 +152,54 @@ export function serviceTokenAllowed(pathname: string, identity: AccessIdentity):
  */
 export async function resolveAccessActor(
   identity: AccessIdentity,
-  opts: Pick<CommandHttpOptions, "grantsFor" | "personByEmail">,
+  opts: Pick<CommandHttpOptions, "grantsFor" | "personByEmail" | "channelsOf" | "channelsOfTimeoutMs">,
 ): Promise<Actor> {
   const actor = accessActor(identity, opts.grantsFor);
   if (isServiceToken(identity) || !identity.email || !opts.personByEmail) return actor;
   const person = await opts.personByEmail(identity.email).catch(() => undefined);
   if (!person || !person.id.startsWith("slack:")) return actor;
+  // The person's channels: a directory fact about them, carried beside the
+  // grants and read by `member-of` alone — `unknown` carries nothing. The wait
+  // is bounded like the dispatcher's stamp: a slow Slack API costs a request
+  // its membership, never its answer.
+  const memberOf = opts.channelsOf
+    ? await boundedChannels(opts.channelsOf(person.id), opts.channelsOfTimeoutMs ?? CHANNEL_DIRECTORY_TIMEOUT_MS)
+    : "unknown";
   return {
     ...actor,
     self: [actor.id, person.id],
     asUser: { id: person.id, ...(person.name ? { name: person.name } : {}) },
+    ...(memberOf === "unknown" ? {} : { memberOf }),
   };
+}
+
+const LOOKUP_TIMED_OUT = Symbol("channelsOf timed out");
+
+/** The lookup's answer within `timeoutMs`, else `unknown`; a rejection — before or after the
+ *  bound — is `unknown` by the same path, never left unhandled. */
+async function boundedChannels(
+  lookup: Promise<ReadonlySet<string> | "unknown">,
+  timeoutMs: number,
+): Promise<ReadonlySet<string> | "unknown"> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const answer = await Promise.race([
+      lookup.catch((): "unknown" => "unknown"),
+      new Promise<typeof LOOKUP_TIMED_OUT>((resolve) => {
+        timer = setTimeout(() => resolve(LOOKUP_TIMED_OUT), timeoutMs);
+      }),
+    ]);
+    return answer === LOOKUP_TIMED_OUT ? "unknown" : answer;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /** The `/api` Caller for an Access identity: its caller id and the `Actor`
  *  the policy table decides on (`resolveAccessActor`: linked to its person when the email names one). */
 export async function callerFor(
   identity: AccessIdentity,
-  opts: Pick<CommandHttpOptions, "grantsFor" | "personByEmail">,
+  opts: Pick<CommandHttpOptions, "grantsFor" | "personByEmail" | "channelsOf" | "channelsOfTimeoutMs">,
 ): Promise<Caller> {
   return {
     kind: "access",
