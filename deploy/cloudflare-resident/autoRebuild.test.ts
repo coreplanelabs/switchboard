@@ -83,10 +83,12 @@ describe("the fault injection and the read view", () => {
     expect(source).toMatch(/stub\.debugForceDown\(reason, body\.transition === true\)/);
   });
 
-  it("`/debug info` carries the auto-rebuild instants", () => {
-    expect(method("getResidentInfo")).toMatch(
-      /autoRebuilds: \(map\.get\(AUTO_REBUILDS_KEY\) as string\[\] \| undefined\) \?\? \[\]/,
-    );
+  it("`/debug info` carries the auto-rebuild instants — and READS the row: the key is in the view's one storage.get list, or the view answers [] forever (the first live row caught exactly that)", () => {
+    const body = method("getResidentInfo");
+    expect(body).toMatch(/autoRebuilds: \(map\.get\(AUTO_REBUILDS_KEY\) as string\[\] \| undefined\) \?\? \[\]/);
+    const list = /const map = await this\.ctx\.storage\.get<unknown>\(\[([^\]]*)\]\)/.exec(body);
+    expect(list, "getResidentInfo reads its keys in one storage.get list").not.toBeNull();
+    expect(list![1]).toMatch(/\bAUTO_REBUILDS_KEY\b/);
   });
 });
 

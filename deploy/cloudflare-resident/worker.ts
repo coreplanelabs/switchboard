@@ -7067,6 +7067,7 @@ export class ResidentDO extends Sandbox<Env> {
       LIFECYCLE_KEY,
       REFRESH_INSTANCE_KEY,
       RUNTIME_UNREACHABLE_KEY,
+      AUTO_REBUILDS_KEY,
     ]);
     const facts = map.get(FACTS_KEY) as RepoFacts | undefined;
     const snap = map.get(SNAPSHOT_KEY) as SnapshotRecord | undefined;
