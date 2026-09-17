@@ -145,4 +145,4 @@ Combine freely: `agent:ship model:anthropic/claude-opus-5 effort:high in acme/ap
 
 ## Repo commands run no model turns
 
-`repo test` and `repo build` run the repo's onboarded command and report pass/fail with zero model calls — an operation, not an agent run. Natural-language equivalents ("run the tests on main in acme/api") are recognized too and route to the same zero-turn operation.
+`repo test` and `repo build` run the repo's onboarded command and report pass/fail with zero model calls — an operation, not an agent run. A plain sentence that means one ("run the tests on main in acme/api", or "run the tests on main" in a thread that already named the repository) routes to the same command: one fast model call binds it, the reply leads with a receipt line (`routed: repo test acme/api main`), and the operation runs at once. If the repository has no resident, the reply is that receipt, the command's own not-onboarded line and the `wrong preset? reply agent:<preset> to run it another way` footer — nothing runs.

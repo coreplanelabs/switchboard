@@ -35,6 +35,7 @@ import {
   ROUTE_COMMAND_VALUE_CAP,
   routeMaxOutputTokens,
   routableCommands,
+  routedRunsAtOnce,
   redactedInput,
   structuralRoute,
   routeTool,
@@ -1701,5 +1702,30 @@ describe("redactedInput — the bound input as the record may carry it (record 0
       when: '"1970-01-01T00:00:00.000Z"',
     });
     expect(redactedInput({})).toEqual({});
+  });
+});
+
+// Feature: docs/reference/specs/routing-and-config.md item 21, record 0039 as
+// amended — the one rule that decides whether a command the router bound runs
+// at once or is handed back as the line to type. Two fields every def already
+// carries decide it, never a list: a read runs; a write runs only when its
+// action class is `exec` (`repo:exec`: a repository's own test or build, which
+// changes nothing of Switchboard's own, so a misread costs one wasted run); a
+// write whose class is `write` is handed back, because a write bound from
+// prose is a write nobody typed.
+describe("routedRunsAtOnce — a read or an exec-class write runs when routed; a state-changing write is handed back", () => {
+  it("read → runs; write on an :exec action → runs; write on a :write action → handed back", () => {
+    expect(routedRunsAtOnce({ effect: "read", action: "runs:read" })).toBe(true);
+    expect(routedRunsAtOnce({ effect: "read", action: "config:read" })).toBe(true);
+    expect(routedRunsAtOnce({ effect: "write", action: "repo:exec" })).toBe(true);
+    expect(routedRunsAtOnce({ effect: "write", action: "config:write" })).toBe(false);
+    expect(routedRunsAtOnce({ effect: "write", action: "repo:write" })).toBe(false);
+    expect(routedRunsAtOnce({ effect: "write", action: "mcp:write" })).toBe(false);
+  });
+
+  it("the rule reads the action's class, not its group: any group's :exec runs and any group's :write is handed back", () => {
+    expect(routedRunsAtOnce({ effect: "write", action: "deploy:exec" })).toBe(true);
+    expect(routedRunsAtOnce({ effect: "write", action: "runs:write" })).toBe(false);
+    expect(routedRunsAtOnce({ effect: "write", action: "friction:write" })).toBe(false);
   });
 });
