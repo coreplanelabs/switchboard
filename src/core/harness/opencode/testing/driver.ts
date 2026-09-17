@@ -101,6 +101,35 @@ export const TAILER_READY_NOTES: readonly unknown[] = [
   { feed: "tailer", at: 0, note: "started" },
   { feed: "tailer", at: 1, note: "connected", connections: 1 },
 ];
+/** What the real tailer writes when its event stream reconnects (`connected()`
+ *  with `connections > 1`, `tailerSource.ts`): its own note, then for every
+ *  session it knows a permissions refill and a messages refill with reason
+ *  `reconnect`, emitted whether or not anything changed. Every record but the
+ *  note names the session, and none is the server's word that an execution is
+ *  under way — the first-event bound must lift on none of them. */
+export function tailerReconnectRecords(sessionID: string, store: readonly unknown[], at: number): unknown[] {
+  return [
+    { feed: "tailer", at, note: "reconnected", connections: 2 },
+    { feed: "permissions", at, sessionID, reason: "reconnect", data: [] },
+    { feed: "messages", at, sessionID, reason: "reconnect", data: [...store] },
+  ];
+}
+
+/** A server event that names no session — the catalogue refreshes the real
+ *  server emits at startup and on its own schedule (`catalog.updated`,
+ *  `config.updated`, …): feed traffic that is not the run's session's. */
+export function globalFeedEvent(at: number): unknown {
+  return { feed: "event", at, event: { id: "evt_catalog_global", type: "catalog.updated", created: at, data: {} } };
+}
+
+/** What the feed carries after a prompt the server admitted and never acted on
+ *  (`silentAfterPrompt`): the tailer's reconnect sweep and a global event —
+ *  the traffic a wedged server's feed still carries, none of it the session's
+ *  execution. The test reads the same records for the offset and the last one. */
+export function silentPromptRecords(sessionID: string, store: readonly unknown[], at: number): unknown[] {
+  return [...tailerReconnectRecords(sessionID, store, at), globalFeedEvent(at)];
+}
+
 /** How many feed bytes these records take as the fake writes them (one JSON line each): what a row's `logOffset` is computed from. */
 export function feedByteLength(records: readonly unknown[]): number {
   return records.reduce<number>((n, r) => n + Buffer.byteLength(JSON.stringify(r), "utf8") + 1, 0);
@@ -191,11 +220,24 @@ export interface FakeServeOptions {
    *  resume's continue, 2 the first post-turn's) answers 500: nothing starts. */
   promptPostFails?: number;
   /** The `queue` prompt of this 1-based number is admitted (200) and nothing
-   *  follows on the feed for the session — no step, no event — while the
-   *  server's and the tailer's error logs each hold a line and the tailer
-   *  writes one note of its own; the serve then moves the run's clock past
-   *  the first-event bound, so the harness's next tick finds the silence. */
+   *  of the session's execution follows on the feed — no execution start, no
+   *  step — while the feed still carries what a wedged server's does: the
+   *  tailer's reconnect sweep (its note and the two refills for the session,
+   *  as the real tailer writes them) and a global event of the server's; the
+   *  server's and the tailer's error logs each hold a line; the serve then
+   *  moves the run's clock past the first-event bound, so the harness's next
+   *  tick finds the silence. */
   silentAfterPrompt?: number;
+  /** A hung turn's interrupt is honoured late: the aborted execution's
+   *  `session.execution.interrupted` and its refills land only when the NEXT
+   *  `queue` prompt is posted (a post-turn's), before that prompt's execution
+   *  starts — as a slow turn's settle lands after the run loop has moved on
+   *  to the post-turn. Without it the hung turn is deaf: nothing ever comes. */
+  interruptSettlesLate?: boolean;
+  /** The interrupt POST answers only when the container kills the server —
+   *  and then as the connection reset the kill causes — so a note about it
+   *  after the loop left would be the kill's own effect on the record. */
+  interruptAnswersAfterKill?: boolean;
   /** The relay registry the run is opened on; a test hands one that already
    *  holds the run's registration with a relayed call still running, so a
    *  relaunch is seen to take it over rather than register anew. Fresh unless given. */
@@ -313,8 +355,14 @@ class ScriptedServe {
   private readonly primePostFails: boolean;
   private readonly promptPostFails: number | undefined;
   private readonly silentAfterPrompt: number | undefined;
+  private readonly interruptSettlesLate: boolean;
+  private readonly interruptAnswersAfterKill: boolean;
   /** How many `queue` prompts the serve has been posted. */
   private queuePrompts = 0;
+  /** How many plays have started: a scripted hang is the run's first play's, never a post-turn's replay. */
+  private plays = 0;
+  /** A hung turn's interrupt is owed its settle at the next queue prompt (`interruptSettlesLate`). */
+  private lateSettle = false;
   private readonly mutate: MutatedClause | undefined;
   private readonly replacedWord: string;
   private readonly reattach: ReattachOptions;
@@ -355,6 +403,8 @@ class ScriptedServe {
     this.primePostFails = options.primePostFails === true;
     this.promptPostFails = options.promptPostFails;
     this.silentAfterPrompt = options.silentAfterPrompt;
+    this.interruptSettlesLate = options.interruptSettlesLate === true;
+    this.interruptAnswersAfterKill = options.interruptAnswersAfterKill === true;
     this.mutate = options.mutate;
     this.replacedWord = options.replacedWord ?? REPLACED_WORD;
     this.reattach = options.reattach ?? {};
@@ -604,7 +654,7 @@ class ScriptedServe {
   /** Route one of the harness's writes: the readiness probes, the session
    *  import and create, the prompt (a queue starts the play, a steer injects a
    *  user turn), the permission reply, the interrupt, the wait. */
-  onRequest(req: HarnessRequest): HarnessResponse {
+  onRequest(req: HarnessRequest): HarnessResponse | Promise<HarnessResponse> {
     const j = (status: number, obj: unknown): HarnessResponse => ({
       status,
       headers: { "content-type": "application/json" },
@@ -686,7 +736,7 @@ class ScriptedServe {
             "provider: connect ETIMEDOUT 10.0.0.1:443 (the proxy did not answer)\n",
           );
           this.container.files.set(paths.tailer.errLog, "tailer: event stream idle; no records for the session\n");
-          this.container.emit({ feed: "tailer", at: NOW, note: "reconnected", connections: 2 });
+          this.container.emit(...silentPromptRecords(this.sessionID, this.store, NOW));
           void (async () => {
             for (let i = 0; i < 8; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
             this.deps.advanceClock?.(FIRST_EVENT_BOUND_MS + 1);
@@ -699,6 +749,18 @@ class ScriptedServe {
         // turn it primed). A fresh run's prompt is the request, a store turn.
         if (!this.script.resume)
           this.store.push({ id: `msg_u${this.store.length}`, type: "user", text, time: { created: NOW } });
+        // A hung turn's late settle (`interruptSettlesLate`): the aborted
+        // execution ends on the feed now — after the harness moved on, before
+        // this prompt's execution starts — as the real server serializes them.
+        if (this.lateSettle) {
+          this.lateSettle = false;
+          this.emitEvent("session.execution.interrupted", { sessionID: this.sessionID, reason: "user" });
+          this.emitPermissions([]);
+          this.emitMessages();
+        }
+        // An interrupt ends the execution it was sent to; a prompt admitted
+        // after it starts a fresh one, as the real server does.
+        this.interrupted = false;
         void this.play();
       }
       return j(200, { data: { id: `inb_${this.ordinal++}` } });
@@ -744,6 +806,13 @@ class ScriptedServe {
       this.interrupted = true;
       for (const resolve of this.replies.values()) resolve({ reply: "reject" });
       this.replies.clear();
+      // The interrupt the kill cuts: its request answers only once the server
+      // is killed, and then with the reset the kill caused.
+      if (this.interruptAnswersAfterKill)
+        return new Promise<HarnessResponse>((_, reject) => {
+          this.container.onKill = () =>
+            reject(new HarnessContainerError("request", "curl: (56) Recv failure: Connection reset by peer"));
+        });
       return j(200, { interrupted: true });
     }
     return j(404, { error: "no such route" });
@@ -816,6 +885,7 @@ class ScriptedServe {
 
   private async play(): Promise<void> {
     this.playing = true;
+    this.plays++;
     this.emitEvent("session.execution.started", { sessionID: this.sessionID });
     // The model reference is resolved when the execution asks for the model —
     // the real server's moment — and a reference the configuration cannot
@@ -869,14 +939,16 @@ class ScriptedServe {
         this.run.control.requestStop("soft");
         for (let i = 0; i < 200 && this.pendingSteers.length === 0; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
       }
-      if (this.script.hangModelCall === t + 1) {
+      if (this.script.hangModelCall === t + 1 && this.plays === 1) {
         // This model call never answers: the step opens and nothing follows —
         // not the answer, not a reaction to the wind-down's steer, not a
-        // `session.execution.interrupted` for the interrupt (a deaf turn). The
+        // `session.execution.interrupted` for the interrupt (a deaf turn,
+        // unless `interruptSettlesLate` owes one at the next prompt). The
         // wind-down is the soft stop above when the script names one, else the
         // budget: the clock passes the loop's end with the step open and the
         // write-up's steer is waited for. Then the clock passes the finale
-        // bound, and the play waits for the harness's interrupt and stops.
+        // bound, and the play waits for the harness's interrupt and stops. The
+        // run's first play alone hangs: a post-turn replays the script whole.
         if (this.deps.advanceClock === undefined || this.deps.finaleMs === undefined)
           throw new Error("hangModelCall needs the driver's clock: hand the serve `advanceClock` and `finaleMs`");
         this.recordModelCall();
@@ -894,6 +966,7 @@ class ScriptedServe {
         }
         this.deps.advanceClock(this.deps.finaleMs + 1);
         for (let i = 0; i < 2000 && !this.interrupted; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+        if (this.interruptSettlesLate) this.lateSettle = true;
         return;
       }
       if (this.script.failModelCall === t + 1) {
@@ -1450,8 +1523,12 @@ export interface ScriptOpenCodeServeOptions {
   registry: HarnessRegistry;
   bearers?: RunBearerStore;
   options?: FakeServeOptions;
-  /** The caller's hand on the run's clock, for a script that needs the clock moved (`silentAfterPrompt`). */
+  /** The caller's hand on the run's clock, for a script that needs the clock moved (`silentAfterPrompt`, `hangModelCall`). */
   advanceClock?: (ms: number) => void;
+  /** Moves the run's clock past the loop's end (`hangModelCall` without a soft stop); the caller knows the run's lease. */
+  spendBudget?: () => void;
+  /** The run's finale bound (`loopClock(...).finaleMs`), for a hung turn's clock. */
+  finaleMs?: number;
 }
 
 /** The scripted serve bound to a bare container, for a run the RUN LOOP opens
@@ -1507,6 +1584,8 @@ export function scriptOpenCodeServe(
       tickMs: 5,
       ...(opts.bearers ? { bearers: opts.bearers } : {}),
       ...(opts.advanceClock ? { advanceClock: opts.advanceClock } : {}),
+      ...(opts.spendBudget ? { spendBudget: opts.spendBudget } : {}),
+      ...(opts.finaleMs !== undefined ? { finaleMs: opts.finaleMs } : {}),
     },
     opts.options,
   );

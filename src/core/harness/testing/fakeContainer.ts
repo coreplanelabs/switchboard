@@ -65,7 +65,10 @@ export class FakeHarnessContainer implements HarnessContainer {
   /** Runs after each stdin line the harness writes — a scripted process answering. */
   onStdin: ((line: string, container: FakeHarnessContainer) => void) | undefined;
   /** Answers a request into the container — a scripted server; unset, no server listens. */
-  onRequest: ((req: HarnessRequest, container: FakeHarnessContainer) => HarnessResponse) | undefined;
+  onRequest:
+    ((req: HarnessRequest, container: FakeHarnessContainer) => HarnessResponse | Promise<HarnessResponse>) | undefined;
+  /** Runs when a pid is killed — a scripted server whose in-flight request the kill cuts. */
+  onKill: ((pid: number) => void) | undefined;
 
   /** The process wrote these records to its stdout, one line each: the harness reads them on its next poll. */
   emit(...events: unknown[]): void {
@@ -210,6 +213,7 @@ export class FakeHarnessContainer implements HarnessContainer {
   async kill(pid: number): Promise<void> {
     this.killed.push(pid);
     this.live = false;
+    this.onKill?.(pid);
   }
 
   async remove(paths: HarnessPaths): Promise<void> {

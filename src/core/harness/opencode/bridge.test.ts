@@ -23,7 +23,7 @@ import {
 import { OPENCODE_EVENT_DISPOSITION, openCodeDispositionCounts, openCodeDispositionOf } from "./dispositions.js";
 import { openCodeReplacedCallNote } from "./session.js";
 import { openCodeRunPaths } from "./process.js";
-import { feedByteLength, openCodeDriver, TAILER_READY_NOTES } from "./testing/driver.js";
+import { feedByteLength, openCodeDriver, silentPromptRecords, TAILER_READY_NOTES } from "./testing/driver.js";
 import { loopClock, MINUTE_MS } from "../../budgets.js";
 import { CONFORMANCE_MAX_MINUTES, FAILED_MODEL_CALL_ERROR } from "../testing/scenarios.js";
 import {
@@ -696,14 +696,15 @@ describe("the loop — a refused request, a silent server, and a hung turn", () 
     expect(posts(bare, "/prompt")).toHaveLength(0);
   });
 
-  it("an admitted prompt the feed then carries nothing for within the bound fails the run by name with the diagnostics — the phase, the session, the feed offset, the last feed record (the tailer's own note lifts nothing), both error logs' tails — the interrupt posted, the process ended, never a replaced verdict", async () => {
+  it("an admitted prompt whose execution never starts within the bound fails the run by name with the diagnostics — the tailer's reconnect sweep (its note and the session's two refills, as the real tailer writes them) and a global event lift nothing; the phase, the session, the feed offset, the last feed record and both error logs' tails on the note; the interrupt posted, the process ended, never a replaced verdict", async () => {
     const r = await openCodeDriver({ silentAfterPrompt: 1 }).run(oneTurn);
     const err = failedWith(r, "OpenCodeSilentError");
-    const reconnected = { feed: "tailer", at: NOW, note: "reconnected", connections: 2 };
-    const offset = feedByteLength([...TAILER_READY_NOTES, reconnected]);
+    // The feed after the admitted prompt: the reconnect's note, the two refills for the session, a catalogue event — none the session's execution.
+    const carried = silentPromptRecords("ses_run-c", [], NOW);
+    const offset = feedByteLength([...TAILER_READY_NOTES, ...carried]);
     expect(err.message).toBe(
       `OpenCode produced no event for session ses_run-c within ${FIRST_EVENT_BOUND_MS / 1000} s of the prompt — the server admitted it and nothing followed; ` +
-        `feed offset ${offset}, last feed record: ${JSON.stringify(reconnected)}; ` +
+        `feed offset ${offset}, last feed record: ${JSON.stringify(carried.at(-1))}; ` +
         "serve.err: provider: connect ETIMEDOUT 10.0.0.1:443 (the proxy did not answer); " +
         "tailer.err: tailer: event stream idle; no records for the session",
     );
@@ -792,6 +793,35 @@ describe("the loop — a refused request, a silent server, and a hung turn", () 
     expect(posts(r, "/interrupt")).toHaveLength(0);
     expect(r.killed.length).toBeGreaterThan(0);
     expect(r.removed).toEqual([openCodeRunPaths("run-c").dir]);
+  });
+
+  it("the interrupt an ending posts that answers only once the caller's kill cuts it leaves no note: the record carries the wind-down's harness_error alone, never the kill's own effect said as a failure", async () => {
+    const r = await openCodeDriver({ interruptAnswersAfterKill: true }).run(hung);
+    expect(answered(r)).toBe(timeBudgetAnswer("", CONFORMANCE_MAX_MINUTES, finaleAbortReason(FINALE_MS)));
+    expect(harnessErrors(r)).toEqual([windDownFailureNote(finaleAbortReason(FINALE_MS))]);
+    expect(posts(r, "/interrupt")).toHaveLength(1);
+    expect(r.killed.length).toBeGreaterThan(0);
+  });
+
+  it("a soft stop requested once the budget's write-up is under way is acknowledged: one stopped note in mode soft, no second steer, and the answer keeps the ending that was already under way — the budget's label", async () => {
+    const r = await run({
+      turns: [
+        {
+          content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "echo hi" } }],
+          stopReason: "tool_use",
+        },
+        { content: [{ type: "text", text: "findings so far" }], stopReason: "end_turn" },
+      ],
+      budgetBeforeModelCall: 2,
+      softStopBeforeModelCall: 2,
+    });
+    expect(answered(r)).toBe(timeBudgetAnswer("findings so far", CONFORMANCE_MAX_MINUTES));
+    expect(notes(r.events).filter((n) => n.kind === "time_budget_exhausted")).toHaveLength(1);
+    const stopped = notes(r.events).filter((n) => n.kind === "stopped");
+    expect(stopped).toHaveLength(1);
+    expect(stopped[0]).toMatchObject({ mode: "soft", summary: softStopNote() });
+    expect(steers(r)).toHaveLength(1);
+    expect(harnessErrors(r)).toEqual([]);
   });
 
   it("a write-up steer the server refuses is a harness_error at once, never swallowed, and the finale still ends the run by the wind-down", async () => {

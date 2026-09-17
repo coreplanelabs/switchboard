@@ -15,7 +15,10 @@ import {
 import { HarnessRegistry, relayToolCall, type LiveHarness } from "../pi/relay.js";
 import { PROXY_PROVIDER } from "../pi/process.js";
 import { FakeHarnessContainer } from "../testing/fakeContainer.js";
-import type { DrivenRun } from "../testing/scenarios.js";
+import type { DrivenRun, RunScript } from "../testing/scenarios.js";
+import { loopClock, MINUTE_MS } from "../../budgets.js";
+import { recordingSink } from "../../testing/recordingSink.js";
+import { finaleAbortReason, finaleTimedOutNote, timeBudgetAnswer, windDownFailureNote } from "../windDown.js";
 import { bearerHashOf, RunBearerStore, type RunBearerGrant } from "../../modelProxy/runBearers.js";
 import { createTracer } from "../../trace/tracer.js";
 import type { HarnessStart } from "../container.js";
@@ -824,45 +827,69 @@ describe("the model reference on every request that carries one names the config
 
 // Feature: docs/reference/specs/harness.md items 5 and 13 — a post-turn is one
 // more prompt on the run's session through the same loop, so its refusal and
-// its silence fail by the same names, the phase saying which prompt it was.
-describe("the post-turn's prompt — refused, or answered by silence — fails by its own name", () => {
+// its silence fail by the same names, the phase saying which prompt it was; and
+// the loop before it may have ended a hung turn at the finale, whose late
+// settle the post-turn must never read as its own.
+describe("the post-turn on the run's session — refused, answered by silence, or after a hung turn", () => {
   const NOW = 1_700_000_000_000;
   const executor = { exec: async () => "", readFile: async () => "", writeFile: async () => "" };
   const notes = (events: RunEvent[]) =>
     events.filter((e): e is Extract<RunEvent, { type: "run_note" }> => e.type === "run_note");
+  const oneTurn: RunScript = { turns: [{ content: [{ type: "text", text: "done" }], stopReason: "end_turn" }] };
+  const hung: RunScript = {
+    turns: [
+      {
+        content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "echo hi" } }],
+        stopReason: "tool_use",
+      },
+      { content: [{ type: "text", text: "never" }], stopReason: "end_turn" },
+    ],
+    hangModelCall: 2,
+  };
 
-  /** A run opened through the seam over the scripted serve's bare-container door, its loop answered, the session held open for a post-turn. */
-  async function openRun(options: FakeServeOptions) {
+  /** A run opened through the seam over the scripted serve's bare-container
+   *  door, its spans recorded, the session held open for a post-turn; the
+   *  serve has the run's clock and its lease for a script that moves them. */
+  function openRun(options: FakeServeOptions, script: RunScript = oneTurn) {
     const container = new FakeHarnessContainer();
     const registry = new HarnessRegistry();
     const clock = { now: NOW };
+    const agent = {
+      name: "post",
+      description: "",
+      system: "You are the post-turn run.",
+      toolset: "full",
+      machine: "repo-resident",
+      identity: "write",
+      maxTurns: 50,
+      maxTokens: 4096,
+      maxMinutes: 10,
+    } as const;
+    const lease = loopClock(NOW, agent.maxMinutes * MINUTE_MS, agent.name);
     scriptOpenCodeServe(container, {
-      script: { turns: [{ content: [{ type: "text", text: "done" }], stopReason: "end_turn" }] },
+      script,
       registry,
       options,
       advanceClock: (ms) => void (clock.now += ms),
+      spendBudget: () => void (clock.now = lease.loopEnd + 1),
+      finaleMs: lease.finaleMs,
     });
+    const sink = recordingSink();
+    const root = createTracer({ clock: () => clock.now }).start("request", { sinks: [sink] });
     const events: RunEvent[] = [];
+    const progress: string[] = [];
     const run: HarnessRun = {
       runId: "run-p",
-      agent: {
-        name: "post",
-        description: "",
-        system: "You are the post-turn run.",
-        toolset: "full",
-        machine: "repo-resident",
-        identity: "write",
-        maxTurns: 50,
-        maxTokens: 4096,
-        maxMinutes: 10,
-      },
+      agent,
       model: { id: "claude-fable-5", provider: "anthropic", providerType: "anthropic" },
-      system: "You are the post-turn run.",
+      system: agent.system,
       messages: [{ role: "user", content: [{ type: "text", text: "do the thing" }] }],
       tools: [updateStatusTool],
       toolContext: { executor },
       rules: { checkout: "/workspace/threads/t/main", protectedBranches: ["main"] },
+      span: root,
       onEvent: (e) => void events.push(e),
+      onProgress: (n) => void progress.push(n),
       onStep: async () => {},
     };
     const deps: HarnessDeps = {
@@ -875,37 +902,62 @@ describe("the post-turn's prompt — refused, or answered by silence — fails b
       pollMs: 1,
       tickMs: 5,
     };
-    const session = await openThroughSeam(new OpenCodeHarness(), deps, run);
-    expect(session.answer).toBe("done");
-    return { session, events, container };
+    return { opened: openThroughSeam(new OpenCodeHarness(), deps, run), events, progress, container, sink, lease };
   }
   const postTurn = { text: "describe the change", maxTurns: 5, maxMinutes: 5, toolContext: { executor } };
 
   it("refused: the turn throws OpenCodeRequestRefusedError naming the follow-up turn's prompt and the answer, the note is on the record, and the session still ends", async () => {
-    const { session, events, container } = await openRun({ promptPostFails: 2 });
+    const o = openRun({ promptPostFails: 2 });
+    const session = await o.opened;
+    expect(session.answer).toBe("done");
     await expect(session.followUp(postTurn)).rejects.toMatchObject({
       name: "OpenCodeRequestRefusedError",
       message: 'OpenCode refused the follow-up turn\'s prompt (500): {"error":"the store hiccuped"}',
     });
     expect(
-      notes(events).some(
+      notes(o.events).some(
         (n) => n.kind === "harness_error" && /refused the follow-up turn's prompt \(500\)/.test(n.summary),
       ),
     ).toBe(true);
     await session.end();
-    expect(container.killed.length).toBeGreaterThan(0);
+    expect(o.container.killed.length).toBeGreaterThan(0);
   });
 
   it("answered by silence: the turn throws OpenCodeSilentError naming the follow-up turn's prompt, with the diagnostics", async () => {
-    const { session, events } = await openRun({ silentAfterPrompt: 2 });
+    const o = openRun({ silentAfterPrompt: 2 });
+    const session = await o.opened;
+    expect(session.answer).toBe("done");
     await expect(session.followUp(postTurn)).rejects.toMatchObject({
       name: "OpenCodeSilentError",
       phase: "the follow-up turn's prompt",
     });
-    const silent = notes(events).find((n) => n.kind === "harness_error" && /no event for session/.test(n.summary));
+    const silent = notes(o.events).find((n) => n.kind === "harness_error" && /no event for session/.test(n.summary));
     expect(silent?.summary).toMatch(/ of the follow-up turn's prompt — /);
     expect(silent?.summary).toMatch(/serve\.err: provider: connect ETIMEDOUT/);
     await session.end();
+  });
+
+  it("after a hung turn: the loop ended at the finale and the aborted execution's settle lands only once the post-turn's prompt is posted — the post-turn sets it aside as an execution it did not start, waits for its own execution's start, and answers the turn's own text; no second harness_error", async () => {
+    const o = openRun({ interruptSettlesLate: true }, hung);
+    const session = await o.opened;
+    const reason = finaleAbortReason(o.lease.finaleMs);
+    expect(session.answer).toBe(timeBudgetAnswer("", 10, reason));
+    expect(o.progress).toContain(finaleTimedOutNote());
+    expect(await session.followUp(postTurn)).toBe("never");
+    expect(
+      notes(o.events)
+        .filter((n) => n.kind === "harness_error")
+        .map((n) => n.summary),
+    ).toEqual([windDownFailureNote(reason)]);
+    // The loop's span ended ok: the finale is the wind-down's ending, as on pi.
+    expect(o.sink.ended("run.agent")?.status).toBe("ok");
+    await session.end();
+  });
+
+  it("the run's span ends error on a failed model call, as the outcome says", async () => {
+    const o = openRun({}, { ...oneTurn, failModelCall: 1 });
+    await expect(o.opened).rejects.toThrow(/^the model call failed: /);
+    expect(o.sink.ended("run.agent")?.status).toBe("error");
   });
 });
 
