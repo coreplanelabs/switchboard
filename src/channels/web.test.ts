@@ -565,6 +565,7 @@ describe("GET /threads and /threads/<id> — the seed from the runs service (ite
       conversation: "fresh-1",
       turns: [],
       sendUrl: "/threads/fresh-1/send",
+      lane: "web:a1",
       viewer: { name: "alice@example.test" },
       now: NOW,
       retentionDays: 30,

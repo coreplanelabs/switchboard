@@ -12,6 +12,10 @@ export const browser = {
   pathname(): string {
     return window.location.pathname;
   },
+  /** The current address's query string, `?` included (empty when none). */
+  search(): string {
+    return window.location.search;
+  },
   /** Rewrite the address without a load or a history entry: a fresh
    *  conversation takes its own URL once it exists on the server. */
   replaceUrl(href: string): void {

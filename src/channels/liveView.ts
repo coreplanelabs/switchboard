@@ -687,6 +687,10 @@ export function createLiveViewHandler(
             page: "run",
             mode: "live",
             id: route.id,
+            ...(() => {
+              const key = index.listActive().find((s) => s.id === route.id)?.threadKey;
+              return key !== undefined ? { threadKey: key } : {};
+            })(),
             ...(children.length > 0 ? { children } : {}),
             // Stop control: same token, POST-only; `&mode=` is appended client-side.
             eventsUrl: `/runs/${encodeURIComponent(route.id)}/events?t=${encodeURIComponent(token)}`,
@@ -889,6 +893,7 @@ export function createLiveViewHandler(
             page: "run",
             mode: "history",
             id: route.id,
+            ...(view.threadKey !== undefined ? { threadKey: view.threadKey } : {}),
             ...(children.length > 0 ? { children: children.map((c) => withLiveToken(c, tokens)) } : {}),
             ...(units.length > 0 ? { units } : {}),
             ...(findingsLedger !== undefined ? { findingsLedger } : {}),

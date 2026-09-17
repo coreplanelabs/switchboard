@@ -1,5 +1,5 @@
 import { enableAutoUnmount } from "@vue/test-utils";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nextTick } from "vue";
 import type { HomeSeed, HomeTurnSeed } from "@core/channels/webSeed.js";
 import HomePage from "./HomePage.vue";
@@ -72,6 +72,7 @@ const seed = (over: Partial<HomeSeed> = {}): HomeSeed => ({
   ],
   viewer: { name: "alice" },
   sendUrl: "/threads/conv-1/send",
+  lane: "web:a1",
   now: NOW,
   retentionDays: 30,
   suggestions: ["review the open PR on acme/api", "investigate why the acme/web deploy rolled back", "help"],
@@ -92,6 +93,12 @@ function fakeFetch(answer: { status: number; body: unknown }) {
   vi.stubGlobal("fetch", fetchFn);
   return calls;
 }
+
+/** The run's stream among the sources the page opened: the rail's live feed opens first on mount. */
+const runStream = (created: ReturnType<typeof fakeEventSourceFactory>["created"]) =>
+  created.filter((es) => !es.url.startsWith("/runs?stream="))[0];
+const streams = (created: ReturnType<typeof fakeEventSourceFactory>["created"]): string[] =>
+  created.map((es) => es.url).filter((u) => !u.startsWith("/runs?stream="));
 
 const flush = async () => {
   await new Promise((r) => setTimeout(r, 0));
@@ -114,6 +121,20 @@ async function send(wrapper: ReturnType<typeof mountApp>, text: string) {
 // Every page is unmounted after its test: a page left on the body keeps its
 // window listeners, and a ⌘K meant for one page would land in another's rail.
 enableAutoUnmount(afterEach);
+beforeEach(() => {
+  // The rail's feed opens on every mount and jsdom has no EventSource: a quiet
+  // one stands in where a test does not pass its own factory.
+  vi.stubGlobal(
+    "EventSource",
+    class {
+      onopen: null | (() => void) = null;
+      onmessage: null | (() => void) = null;
+      onerror: null | (() => void) = null;
+      readyState = 0;
+      close(): void {}
+    },
+  );
+});
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -331,6 +352,93 @@ describe("HomePage — the rail's width and collapse (item 7)", () => {
   });
 });
 
+describe("HomePage — the rail follows the viewer's live feed (item 7)", () => {
+  it("says what a thread is, with a link to Runs", () => {
+    const wrapper = mountApp(HomePage, { seed: seed() });
+    const note = wrapper.find("aside [data-testid=what-is-a-thread]");
+    expect(note.text()).toBe(
+      "A thread is a conversation; each message you send is a run. Runs lists every run across everyone's threads.",
+    );
+    expect(note.find("a").attributes("href")).toBe("/runs");
+  });
+
+  it("opens the runs feed narrowed to the viewer; its upserts move the dots, the counts and the tab's live count, a finish clears them, and a thread started since gets a row", async () => {
+    const setTitle = vi.spyOn(browser, "setTitle");
+    const setFavicon = vi.spyOn(browser, "setFavicon");
+    const { created, factory } = fakeEventSourceFactory();
+    const wrapper = mountApp(HomePage, { seed: seed(), eventSource: factory });
+    const feed = created.find((es) => es.url === "/runs?stream=1&mine=1");
+    expect(feed).toBeDefined();
+    // Before the feed connects, the seed's picture stands: conv-2 is live.
+    const dots = () => wrapper.findAll("aside nav.rail a.row").map((r) => r.find(".dot").exists());
+    expect(dots()).toEqual([false, true, false]);
+    expect(setTitle).toHaveBeenLastCalledWith("Switchboard");
+    feed!.emitOpen();
+    await nextTick();
+    // Connected with nothing in flight: no dot, the tab quiet.
+    expect(dots()).toEqual([false, false, false]);
+    feed!.emitMessage(
+      {
+        type: "upsert",
+        run: {
+          id: "r-1",
+          threadKey: "web:a1:conv-1",
+          channelId: "web:a1",
+          startedAt: NOW,
+          finished: false,
+          eventCount: 1,
+        },
+      },
+      "1",
+    );
+    feed!.emitMessage(
+      {
+        type: "upsert",
+        run: {
+          id: "r-7",
+          threadKey: "slack:C9:7.7",
+          channelId: "slack:C9",
+          startedAt: NOW + 1,
+          finished: false,
+          eventCount: 1,
+          label: 'review · acme/api · "please review #7"',
+        },
+      },
+      "2",
+    );
+    await nextTick();
+    const rows = wrapper.findAll("aside nav.rail a.row");
+    expect(rows.map((r) => r.attributes("href"))).toEqual([
+      "/threads/slack%3AC9%3A7.7",
+      "/threads/conv-1",
+      "/threads/conv-2",
+      "/threads/slack%3AC1%3A1712.34",
+    ]);
+    expect(rows[0].find(".title").text()).toBe("please review #7");
+    expect(dots()).toEqual([true, true, false, false]);
+    expect(setTitle).toHaveBeenLastCalledWith("(2) Switchboard");
+    expect(setFavicon).toHaveBeenLastCalledWith(expect.stringContaining("data:"));
+    feed!.emitMessage({ type: "removed", id: "r-7" }, "3");
+    feed!.emitMessage(
+      {
+        type: "upsert",
+        run: {
+          id: "r-1",
+          threadKey: "web:a1:conv-1",
+          channelId: "web:a1",
+          startedAt: NOW,
+          finished: true,
+          eventCount: 3,
+        },
+      },
+      "4",
+    );
+    await nextTick();
+    expect(dots()).toEqual([false, false, false]);
+    expect(setTitle).toHaveBeenLastCalledWith("Switchboard");
+  });
+});
+
 describe("HomePage — the rail's filter and the shortcuts (item 7)", () => {
   it("the filter narrows the rows by a fuzzy match, says when nothing matches, and Escape clears it", async () => {
     const wrapper = mountApp(HomePage, { seed: seed() });
@@ -430,7 +538,7 @@ describe("HomePage — sending (rules 3, 5; items 2, 3)", () => {
     const turn = wrapper.find(".turn.assistant");
     expect(turn.attributes("data-live")).toBe("1");
     expect(turn.attributes("data-run-id")).toBe("r-9");
-    expect(created.map((es) => es.url)).toEqual(["/runs/r-9/events?t=tok9"]);
+    expect(streams(created)).toEqual(["/runs/r-9/events?t=tok9"]);
     // One control, two states: the box is empty and a run is live → stop.
     expect(wrapper.find("form.composer").attributes("data-mode")).toBe("stop");
   });
@@ -465,7 +573,7 @@ describe("HomePage — sending (rules 3, 5; items 2, 3)", () => {
     const { created, factory } = fakeEventSourceFactory();
     const wrapper = mountApp(HomePage, { seed: seed(), eventSource: factory });
     await send(wrapper, "review PR 1391");
-    const es = created[0];
+    const es = runStream(created);
     es.emitOpen();
     es.emitMessage({ type: "run_meta", agent: "review", model: "anthropic/claude-fable-5", seq: 1, at: NOW }, "1");
     es.emitMessage(
@@ -517,7 +625,7 @@ describe("HomePage — sending (rules 3, 5; items 2, 3)", () => {
     const { created, factory } = fakeEventSourceFactory();
     const wrapper = mountApp(HomePage, { seed: seed(), eventSource: factory });
     await send(wrapper, "review PR 1391");
-    const es = created[0];
+    const es = runStream(created);
     es.emitOpen();
     es.emitMessage({ type: "input", text: "review PR 1391", seq: 1, at: NOW }, "1");
     // The second message: the control reads steer as soon as there is text.
@@ -548,7 +656,7 @@ describe("HomePage — sending (rules 3, 5; items 2, 3)", () => {
     const { created, factory } = fakeEventSourceFactory();
     const wrapper = mountApp(HomePage, { seed: seed(), eventSource: factory });
     await send(wrapper, "review PR 1391");
-    const es = created[0];
+    const es = runStream(created);
     es.emitOpen();
     es.emitMessage({ type: "run_meta", agent: "review", model: "anthropic/claude-fable-5", seq: 1, at: NOW }, "1");
     es.emitError(true);
@@ -567,7 +675,7 @@ describe("HomePage — sending (rules 3, 5; items 2, 3)", () => {
     const { created, factory } = fakeEventSourceFactory();
     const wrapper = mountApp(HomePage, { seed: seed(), eventSource: factory });
     await send(wrapper, "review PR 1391");
-    const es = created[0];
+    const es = runStream(created);
     es.emitOpen();
     es.emitNamed("finished", JSON.stringify({ finishedAt: NOW + 3_000 }));
     await nextTick();
@@ -648,7 +756,7 @@ describe("HomePage — a live turn from the seed", () => {
       }),
       eventSource: factory,
     });
-    expect(created.map((es) => es.url)).toEqual(["/runs/r-2/events?t=tok2"]);
+    expect(streams(created)).toEqual(["/runs/r-2/events?t=tok2"]);
     expect(wrapper.find("form.composer").attributes("data-mode")).toBe("stop");
     expect(wrapper.find(".turn.assistant [data-testid=elapsed]").exists()).toBe(true);
   });

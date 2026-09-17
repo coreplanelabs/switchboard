@@ -41,6 +41,8 @@ let setTitle: ReturnType<typeof vi.spyOn>;
 let setFavicon: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
+  // The remembered toggles never leak between tests.
+  localStorage.clear();
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
   setTitle = vi.spyOn(browser, "setTitle").mockImplementation(() => {});
   setFavicon = vi.spyOn(browser, "setFavicon").mockImplementation(() => {});
@@ -55,6 +57,41 @@ function mountIndex(s: RunsIndexSeed) {
   const wrapper = mountApp(RunsIndexPage, { seed: s, eventSource: factory });
   return { wrapper, created, es: () => created[0] };
 }
+
+describe("RunsIndexPage — the toggles are remembered (item 29)", () => {
+  it("a toggle is written as a preference; a URL that names neither opens the remembered view once; a URL that names one wins; mine is remembered only where the session is linked", async () => {
+    const nav = vi.spyOn(browser, "navigate").mockImplementation(() => {});
+    const ann = { id: "slack:UA", name: "ann" };
+    // Nothing remembered: the bare view stays.
+    vi.spyOn(browser, "search").mockReturnValue("");
+    mountIndex(seed([], { asUser: ann }));
+    expect(nav).not.toHaveBeenCalled();
+    // A change writes the preference and navigates.
+    const w = mountIndex(seed([], { asUser: ann }));
+    const done = w.wrapper.find("#showdone");
+    (done.element as HTMLInputElement).checked = true;
+    await done.trigger("change");
+    expect(localStorage.getItem("sb.runs.all")).toBe("1");
+    const mine = w.wrapper.find("#showmine");
+    (mine.element as HTMLInputElement).checked = true;
+    await mine.trigger("change");
+    expect(localStorage.getItem("sb.runs.mine")).toBe("1");
+    nav.mockClear();
+    // A bare URL opens the remembered view, both toggles at once.
+    mountIndex(seed([], { asUser: ann }));
+    expect(nav).toHaveBeenCalledWith("/runs?all=1&mine=1");
+    nav.mockClear();
+    // A URL that names a toggle wins: what it says is what shows, no navigation.
+    vi.spyOn(browser, "search").mockReturnValue("?all=1");
+    mountIndex(seed([], { all: true, asUser: ann }));
+    expect(nav).not.toHaveBeenCalled();
+    // An unlinked session never navigates to `mine`, whatever the browser remembered.
+    vi.spyOn(browser, "search").mockReturnValue("");
+    localStorage.setItem("sb.runs.all", "0");
+    mountIndex(seed([]));
+    expect(nav).not.toHaveBeenCalled();
+  });
+});
 
 describe("RunsIndexPage — toolbar, states, pager", () => {
   it("counts the live rows, seeds the list newest-first, and opens the right feed", () => {
@@ -83,11 +120,13 @@ describe("RunsIndexPage — toolbar, states, pager", () => {
     expect((all.wrapper.find("#showdone").element as HTMLInputElement).checked).toBe(true);
   });
 
-  it("Show mine (record 0042): offered to a session linked to its Slack person — checked on ?mine=1, a change navigates keeping the other toggle, the feed and the pager stay in the view; an unlinked session sees it disabled with the reason", async () => {
+  it("Show only mine (record 0042): offered to a session linked to its Slack person — checked on ?mine=1, a change navigates keeping the other toggle, the feed and the pager stay in the view; an unlinked session sees it disabled with the reason", async () => {
     const nav = vi.spyOn(browser, "navigate").mockImplementation(() => {});
     const ann = { id: "slack:UA", name: "ann" };
     const linked = mountIndex(seed([], { asUser: ann }));
     const box = linked.wrapper.find("#showmine");
+    expect(linked.wrapper.find('label[for="showmine"], #showmine').exists()).toBe(true);
+    expect(linked.wrapper.find("#showmine").element.parentElement?.textContent?.trim()).toBe("Show only mine");
     expect((box.element as HTMLInputElement).checked).toBe(false);
     expect((box.element as HTMLInputElement).disabled).toBe(false);
     expect(linked.wrapper.find("#minehint").text()).toBe("Only the runs ann requested");

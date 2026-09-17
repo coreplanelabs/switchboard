@@ -83,6 +83,9 @@ export interface RunLiveSeed {
   page: "run";
   mode: "live";
   id: string;
+  /** The thread the run belongs to (`RunSummary.threadKey`), for the page's link to
+   *  it on `/threads/<key>` (web-chat.md item 4); absent when the registry row is gone. */
+  threadKey?: string;
   eventsUrl: string;
   stopUrl: string;
   artifacts?: ArtifactsSeed;
@@ -109,6 +112,8 @@ export interface RunHistorySeed {
   page: "run";
   mode: "history";
   id: string;
+  /** The thread the run belongs to (`RunView.threadKey`), for the page's link to it. */
+  threadKey?: string;
   events: LiveFrame[];
   status?: RunStatus;
   eventCount: number;
@@ -220,6 +225,9 @@ export interface HomeSeed {
   viewer: { name: string };
   /** Where the composer POSTs (`/threads/<conversation>/send`). */
   sendUrl: string;
+  /** The viewer's own lane, `web:<sub>`: the channel of every conversation the rail links by
+   *  its short id, so the page can join a live run's thread key to a rail row. */
+  lane: string;
   /** Set when the open thread lives on another channel (a Slack thread the
    *  viewer requested runs in): the page offers no composer — a reply belongs
    *  where the thread is. `url` is the thread's own link when a run recorded one. */

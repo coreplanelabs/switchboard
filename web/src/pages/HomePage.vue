@@ -30,6 +30,8 @@ import {
 import { formatDuration } from "../lib/format";
 import { SURFACE_NAME } from "../lib/indexRow";
 import { stripSlash } from "../lib/slashCompleter";
+import { useEventSourceFactory, type EventSourceLike } from "../lib/eventSource";
+import { applyIndexEvent, liveRailRows, railLiveState } from "../lib/railLive";
 
 // The home page (docs/reference/specs/web-chat.md; record 0043): a conversation
 // is the runs of one thread, drawn as the person's turns and the runs they
@@ -318,11 +320,48 @@ function jumpToNew(): void {
 onMounted(() => {
   window.addEventListener("scroll", onScroll, { passive: true });
   window.addEventListener("keydown", onKey);
+  if (seed) openFeed();
 });
 onUnmounted(() => {
   window.removeEventListener("scroll", onScroll);
   window.removeEventListener("keydown", onKey);
+  feed?.close();
 });
+
+// ---- the rail's live truth (item 7): the runs index's feed, narrowed to the viewer ----------
+// The seed's `live` flags are the picture at load; the feed keeps the dots, the
+// counts and the tab's live count current — every run of the viewer's in
+// flight anywhere, not only the open conversation's — and a thread started
+// since the page loaded gets a row.
+const liveState = reactive(railLiveState());
+const railRows = computed(() => liveRailRows(seed?.conversations ?? [], liveState, seed?.lane ?? ""));
+/** Live runs of the viewer's: the feed's, plus the open conversation's own if the feed has not named it yet. */
+const liveCount = computed(() => {
+  const own = liveItem.value?.turn.id;
+  return liveState.runs.size + (own && !liveState.runs.has(own) ? 1 : 0);
+});
+const makeEventSource = useEventSourceFactory();
+let feed: EventSourceLike | null = null;
+function openFeed(): void {
+  feed = makeEventSource("/runs?stream=1&mine=1");
+  let everOpened = false;
+  feed.onopen = () => {
+    // A reconnect replays the active set: forget the old picture so a finish the
+    // page missed while away does not stay live.
+    if (everOpened) liveState.runs.clear();
+    everOpened = true;
+    liveState.connected = true;
+  };
+  feed.onmessage = (m) => {
+    let ev: { type?: string; run?: import("@core/channels/webSeed.js").RunIndexRowSeed; id?: string };
+    try {
+      ev = JSON.parse(m.data) as typeof ev;
+    } catch {
+      return;
+    }
+    applyIndexEvent(liveState, ev);
+  };
+}
 
 // ---- the chrome --------------------------------------------------------------------
 const title = computed(() => {
@@ -330,10 +369,10 @@ const title = computed(() => {
   return first ? conversationTitle(first.text) : "Switchboard";
 });
 watch(
-  [title, liveItem],
-  ([t, live]) => {
-    browser.setTitle(live ? `(1) ${t}` : t);
-    browser.setFavicon(live ? FAVICON_LIVE : FAVICON_IDLE);
+  [title, liveCount],
+  ([t, n]) => {
+    browser.setTitle(n > 0 ? `(${n}) ${t}` : t);
+    browser.setFavicon(n > 0 ? FAVICON_LIVE : FAVICON_IDLE);
   },
   { immediate: true },
 );
@@ -377,7 +416,7 @@ const elsewhereLine = !elsewhere
         <ConversationRail
           ref="rail"
           class="sticky top-20"
-          :rows="seed.conversations"
+          :rows="railRows"
           :current="conversation"
           :now="now"
           :retention="retention"
@@ -409,7 +448,7 @@ const elsewhereLine = !elsewhere
         <template #body>
           <ConversationRail
             ref="sheetRail"
-            :rows="seed.conversations"
+            :rows="railRows"
             :current="conversation"
             :now="now"
             :retention="retention"

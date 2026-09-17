@@ -139,5 +139,11 @@ defineExpose({ focusFilter });
       />
     </a>
     <p class="retention px-3 pt-1 text-[0.7rem] leading-relaxed text-dimmed">{{ retention }}</p>
+    <!-- The one sentence on how the two pages relate (web-chat.md item 7): a thread is the
+         conversation, a run is one message's work, and Runs is every run on every thread. -->
+    <p class="model px-3 pt-2 text-[0.7rem] leading-relaxed text-dimmed" data-testid="what-is-a-thread">
+      A thread is a conversation; each message you send is a run.
+      <a class="text-muted hover:text-highlighted" href="/runs">Runs</a> lists every run across everyone's threads.
+    </p>
   </nav>
 </template>
