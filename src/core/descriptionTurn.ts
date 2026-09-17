@@ -42,7 +42,7 @@ import type { Span } from "./trace/types.js";
  *  (`postStepLease`, decision 0046). */
 export const DESCRIPTION_TURN_MAX_TURNS = 8;
 /** The tools the turn may call (model-proxy item 6): read the pull request
- *  and the change, submit the description, report on the card — never edit
+ *  and the change, submit the description, ask for missing input, report on the card — never edit
  *  or push. The proxy trims each request's tool list to these. */
 export const DESCRIPTION_TURN_TOOLS: readonly string[] = [
   "github_issue_get",
@@ -52,6 +52,7 @@ export const DESCRIPTION_TURN_TOOLS: readonly string[] = [
   "grep",
   "submit_pr_description",
   "update_status",
+  "request_input",
 ];
 
 /** What the turn is about: the pushed branch, its proven head, and the open
@@ -113,6 +114,7 @@ export function descriptionFollowUp(t: DescriptionTurnTarget): string {
     `2. Compare them with the change as it now stands at \`${short}\` (diff_digest where available; otherwise git diff against the base).`,
     `3. Call submit_pr_description with the object that describes the PR as it is NOW: carry forward what the existing body says that is still true (a dependency bump's release notes belong in why), add what you pushed, and anchor the pointers at \`${t.headSha}\`.`,
     `Do not push again and do not open a PR — Switchboard re-renders the PR's title and body from your object at ${short}. Then reply in one line.`,
+    "If missing information from the requester prevents an accurate description, call request_input with the question and end the turn. Switchboard waits for the answer before updating the PR.",
   ].join("\n");
 }
 

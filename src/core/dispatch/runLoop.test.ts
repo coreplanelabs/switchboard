@@ -8,6 +8,7 @@ import { getAgent } from "../../agents/registry.js";
 import { declaredProfile } from "../../config/profile.js";
 import { InMemoryGithubApi } from "../../execution/githubApi.js";
 import type { Provider } from "../provider.js";
+import { requestInputTool } from "../../tools/question.js";
 import { ExecSandboxRestartedError, type Executor } from "../../execution/executor.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import { createRunEnding } from "../runEnding.js";
@@ -354,6 +355,112 @@ function setup(
 }
 
 describe("runLoop — the model turn and everything that rides on it", () => {
+  it.each(["verdict", "description", "re-review"] as const)(
+    "delivers a question from the %s turn without another model turn or automatic publication",
+    async (stage) => {
+      const head = "a".repeat(40);
+      const moved = "b".repeat(40);
+      const commits = (sha: string): PrCommitList => ({
+        commits: [
+          { sha: head, message: "feat: the change" },
+          ...(sha === moved ? [{ sha: moved, message: "fix: the change" }] : []),
+        ],
+        files: ["src/x.ts"],
+        filesTruncated: false,
+      });
+      const post = vi.fn(async () => {});
+      const openPr = vi.fn();
+      const updatePr = vi.fn();
+      const fake = watched(piHarness, { answer: "Initial write-up" });
+      const end = vi.fn(async () => {});
+      const followUp = vi.fn<HarnessSession["followUp"]>(async (input) => {
+        await requestInputTool.run({ question: "Which behavior should this preserve?" }, input.toolContext);
+        if (stage === "description")
+          input.toolContext.onPrDescription?.({
+            title: "fix(core): preserve the requested behavior",
+            tldr: "Preserves the behavior.",
+            why: "The caller needs it.",
+            pointers: [{ label: "Behavior", text: "The change.", anchor: { path: "src/x.ts", from: 1, to: 1 } }],
+            feedbackWanted: "Confirm the behavior.",
+            verified: "Unit tests.",
+            decisions: [],
+            risk: "none",
+            validation: { criteria: [{ criterion: "Behavior", proof: "Unit tests" }] },
+          });
+        return "Closing prose must not replace the question.";
+      });
+      const open = fake.harness.open;
+      fake.harness.open = async (deps, run) => ({ ...(await open(deps, run)), followUp, end });
+      const h = setup("", {
+        agent: stage === "description" ? "coding" : "review",
+        coding: stage === "description",
+        executor: {
+          exec: async (cmd) => {
+            if (cmd.includes("--abbrev-ref HEAD")) return "feature/change";
+            if (cmd.includes("ls-remote")) return `${head}\trefs/heads/feature/change\n`;
+            return head;
+          },
+        },
+        repoCtx: {
+          repo: "o/r",
+          ref: "main",
+          baseRef: "main",
+          ...(stage === "description" ? {} : { pr: 42 }),
+        } as RepoContext,
+        review: { head, currentHead: stage === "re-review" ? moved : head, commits, post },
+      });
+      h.deps.harness = { ...h.deps.harness!, harnesses: roster(fake.harness) };
+      h.deps.findOpenPrByHead = async () => ({ number: 42, htmlUrl: "https://github.com/o/r/pull/42" });
+      h.deps.openPullRequest = openPr;
+      h.deps.updatePullRequest = updatePr;
+      const out = answered(await runLoop(h.deps, h.ctx));
+      expect(out).toMatchObject({ answer: "Which behavior should this preserve?", awaitingInput: true });
+      expect(followUp).toHaveBeenCalledTimes(1);
+      if (stage !== "re-review") expect(followUp.mock.calls[0]![0].tools).toContain("request_input");
+      expect(post).not.toHaveBeenCalled();
+      expect(openPr).not.toHaveBeenCalled();
+      expect(updatePr).not.toHaveBeenCalled();
+      expect(end).toHaveBeenCalledExactlyOnceWith();
+      h.ending.drain(undefined);
+      await h.writer.settled();
+      expect(await h.store.get("run-l")).toMatchObject({ awaitingInput: true });
+    },
+  );
+
+  it("a hard stop during a final question turn clears waiting state without posting a review", async () => {
+    const head = "a".repeat(40);
+    const post = vi.fn(async () => {});
+    const fake = watched(piHarness, { answer: "Initial write-up" });
+    const open = fake.harness.open;
+    fake.harness.open = async (deps, run) => ({
+      ...(await open(deps, run)),
+      followUp: async (input) => {
+        await requestInputTool.run({ question: "Which behavior?" }, input.toolContext);
+        run.control?.requestStop("hard");
+        return "Stopped.";
+      },
+    });
+    const h = setup("", {
+      agent: "review",
+      executor: { exec: async () => head },
+      repoCtx: { repo: "o/r", pr: 42 } as RepoContext,
+      review: { head, post },
+    });
+    h.deps.harness = { ...h.deps.harness!, harnesses: roster(fake.harness) };
+    const state = vi.fn();
+    const ledgerRun = new NullLedgerRun("run-l", h.store);
+    ledgerRun.setState = state;
+    const out = answered(await runLoop(h.deps, { ...h.ctx, ledgerRun }));
+    expect(out.awaitingInput).toBeUndefined();
+    expect(state).toHaveBeenLastCalledWith({ question: null });
+    expect(post).not.toHaveBeenCalled();
+    h.ending.drain(undefined);
+    await h.writer.settled();
+    const record = await h.store.get("run-l");
+    expect(record?.status).toBe("stopped_hard");
+    expect(record?.awaitingInput).toBeUndefined();
+  });
+
   it("keeps a typed question in the turn outcome, receipt and durable run record", async () => {
     let turn = 0;
     const provider: Provider = {

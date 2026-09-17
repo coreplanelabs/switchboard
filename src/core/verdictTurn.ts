@@ -36,8 +36,14 @@ import type { Span } from "./trace/types.js";
  *  decision 0046). */
 export const VERDICT_TURN_MAX_TURNS = 4;
 /** The tools the turn may call (model-proxy item 6): read the head, submit
- *  the verdict, report on the card — nothing that writes. */
-export const VERDICT_TURN_TOOLS: readonly string[] = ["bash", "read", "submit_verdict", "update_status"];
+ *  the verdict, ask for missing input, report on the card — nothing that writes. */
+export const VERDICT_TURN_TOOLS: readonly string[] = [
+  "bash",
+  "read",
+  "submit_verdict",
+  "update_status",
+  "request_input",
+];
 
 /** The pull request the review was of — what the turn names. */
 export interface VerdictTurnTarget {
@@ -52,6 +58,7 @@ export function verdictFollowUp(t: VerdictTurnTarget): string {
     `Your review of ${t.repo}#${t.number} ended without calling submit_verdict. Switchboard writes the verdict as the first line of the posted review from that call alone — without it the review posts as "No verdict submitted — not approving", whatever your write-up concluded.`,
     "Call submit_verdict now, exactly once, with the verdict your write-up already states: `approve` when you found no blocking issue (nits alone are not blocking), otherwise `request_changes`; a one-line summary; `head` = the output of `git rev-parse HEAD` in the checkout you reviewed; and `findings` — one structured entry per issue your write-up reports, with the ids you used (F1, F2, …), a severity of exactly blocking|major|minor|nit, the file (plus line when it points at one) and a one-line title.",
     "Do not re-read the diff and do not rewrite the review — your write-up stands as the review's text; only the verdict is missing. Then reply in one line.",
+    "If missing information from the requester prevents a verdict, call request_input with the question and end the turn. Switchboard waits for the answer before posting the review.",
   ].join("\n");
 }
 

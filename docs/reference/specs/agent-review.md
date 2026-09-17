@@ -48,6 +48,11 @@ Reviews a PR with the full change in context and reports ranked, evidence-anchor
 
 ## Validation criteria
 
+Final verdict and re-review turns can ask the requester for missing information
+through `request_input`. A pending question becomes the channel reply, prevents
+another verdict turn and skips automatic review publication until answered
+([Linear channel](linear-channel.md), criterion 19).
+
 | Criterion | Proof |
 |---|---|
 | Budgets and toolset as specified; the turn guard derived from the wall clock | `[unit]` `src/agents/registry.test.ts::review: readonly toolset, 25 min`, `::the turn cap is a runaway guard derived from the wall clock…::*`; the budget mechanics are [harness-pi.md](harness-pi.md) item 15's rows. |

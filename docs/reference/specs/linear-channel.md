@@ -124,6 +124,8 @@ the human assignee.
 19. `request_input` records a bounded question for the end of the turn, surviving
     a restart in the run ledger. Delivery uses the channel's question method and
     a waiting indicator with unfinished checklist items; Linear emits elicitation.
+    Questions from final verdict, description, and re-review turns have the same
+    behavior: no further model turn is requested while an answer is needed.
     Automatic PR/review publication and memory reflection are skipped, while the
     model process is still shut down. The turn record marks that it awaits input.
     An operator stop or failure takes precedence; a new in-turn prompt clears the
@@ -175,6 +177,8 @@ the human assignee.
 | 17: current requester access | `[unit]` `src/channels/linear/api.test.ts::Linear API boundary::rechecks the requesting human and current team access before a session can run`, `src/core/dispatcher.test.ts::current channel access before dispatch::*`, `src/core/dispatcher.test.ts::run ledger write-through (docs/reference/specs/run-history.md item 35)::rechecks restored channel access: denials close rows and outages leave them reclaimable` |
 | 18: unread prompt feedback | `[unit]` `src/core/dispatcher.test.ts::thread admission (docs/reference/specs/thread-admission.md)::reports an unconsumed follow-up that cannot restart while its access lookup is unavailable` |
 | 19: typed question and native delivery | `[unit]` `src/tools/question.test.ts::*`, `src/core/dispatcher.test.ts::clarification through dispatch::*`, `src/channels/linear/io.test.ts::*` |
+| 19: final-turn clarification | `[unit]` `src/core/dispatch/runLoop.test.ts::runLoop — the model turn and everything that rides on it::delivers a question from the %s turn without another model turn or automatic publication` |
+| 19: stop during final-turn clarification | `[unit]` `src/core/dispatch/runLoop.test.ts::runLoop — the model turn and everything that rides on it::a hard stop during a final question turn clears waiting state without posting a review` |
 | 19: question outcome and cleanup | `[unit]` `src/core/dispatch/runLoop.test.ts::runLoop — the model turn and everything that rides on it::keeps a typed question in the turn outcome, receipt and durable run record`, `src/core/dispatch/runLoop.test.ts::runLoop — the model turn and everything that rides on it::ends the model process when a question skips the publishing steps`, `src/core/dispatch/runLoop.test.ts::runLoop — the model turn and everything that rides on it::clears a pending question when a follow-up arrives before the turn finishes` |
 | 19: restored questions and stop precedence | `[unit]` `src/core/dispatch/runLoop.test.ts::a resume with the answer in hand (the \`finish\` plan)::restores a pending question without more model calls or automatic PR or review publication`, `src/core/dispatch/runLoop.test.ts::a resume with the answer in hand (the \`finish\` plan)::an operator stop takes precedence over a restored question` |
 | 20: stop while awaiting input | `[unit]` `src/channels/linear/control.test.ts::*` |

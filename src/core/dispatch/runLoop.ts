@@ -1200,6 +1200,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         repoCtx.pr !== undefined &&
         run.control.requested !== "hard" &&
         postedBefore === undefined &&
+        question === undefined &&
         verdict === undefined &&
         !reviewPostOptedOut(ctx.requestText)
       ) {
@@ -1377,7 +1378,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             }),
           );
           // Re-read, not narrowed: a hard stop may have landed during the turn.
-          if (!run.control.hardSignal.aborted) await observeWorkspaceNow();
+          if (!run.control.hardSignal.aborted && question === undefined) await observeWorkspaceNow();
         }
       }
       // The last prompt on the run's pi has been sent: pi ends here, before the
@@ -1430,7 +1431,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       // path (factory.ts), so no resident check is needed. The note rides on
       // the final reply below. A hard stop observed nothing above and posts
       // nothing.
-      if (isCodingPrRun && run.control.requested !== "hard") {
+      if (isCodingPrRun && run.control.requested !== "hard" && question === undefined) {
         prNote = await root.span("run.pr_post_step", () =>
           runCodingPrPostStep({
             observed: {
@@ -1453,6 +1454,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         );
       }
     }
+    // A final model turn can ask after the first question check. Keep that
+    // question as the answer; a stop during any of those turns still wins.
+    if (run.control.requested || relaunchEndedRun) {
+      question = undefined;
+      ledgerRun?.setState({ question: null });
+    } else if (question !== undefined) answer = question;
     // The run record is the source of truth and Slack/GitHub are projections
     // of it: publish the final answer into the stream FIRST (redacted like
     // every event, uncapped — a soft stop's "findings so far" included; a
