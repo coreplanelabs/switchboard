@@ -24,9 +24,11 @@ export interface SettleContext {
   msg: IncomingMessage;
   /** The thread slot this dispatch holds — undefined when admission never granted one. */
   admitted: LiveThread<DispatchFollowUp> | undefined;
-  /** True once the run loop owned the run: a stop relayed during an attach that
-   *  then refused stopped nothing, and the follow-ups run fresh. */
-  runLoopStarted: boolean;
+  /** True when a stop counts for this request: the run loop owned the run, or
+   *  the stop itself ended the attach (the request ends `stopped`). A stop
+   *  relayed during an attach that then refused stopped nothing, and the
+   *  follow-ups run fresh. */
+  stopCounts: boolean;
   /** The registered run's stop control; undefined when no run was created. */
   control: RunControl | undefined;
 }
@@ -61,19 +63,21 @@ export type Settlement =
  * after the reply) moves.
  */
 export function settleThread(deps: Pick<AdmissionDeps, "admission">, ctx: SettleContext): Settlement {
-  const { msg, admitted, runLoopStarted, control } = ctx;
+  const { msg, admitted, stopCounts, control } = ctx;
   const admission = deps.admission ?? defaultAdmission;
   const released = admitted ? admission.release(msg.threadKey, admitted) : [];
   const pending = released.filter(fromPerson);
   const fromRuns = released.length - pending.length;
   if (fromRuns > 0)
     console.log(`[dispatch] ${msg.threadKey} ${fromRuns} steer(s) from a parent run never read — not run fresh`);
-  // A stop counts once the run loop had the run: a stop relayed during an
-  // attach that then refused stopped nothing, and the follow-ups run fresh. A
-  // run a harness failed by name asked for no stop — it ended its loop through
-  // its own connection — so its follow-ups, handed back to the inbox, run fresh
-  // like those of a run that ended by itself.
-  const stopMode: StopMode | undefined = runLoopStarted ? control?.requested : undefined;
+  // A stop counts once the run loop had the run, or when the stop itself ended
+  // the attach — the request ends `stopped` either way, and a follow-up queued
+  // meanwhile is dropped with the note, never run fresh on the stopped thread.
+  // A stop relayed during an attach that then refused stopped nothing, and the
+  // follow-ups run fresh. A run a harness failed by name asked for no stop — it
+  // ended its loop through its own connection — so its follow-ups, handed back
+  // to the inbox, run fresh like those of a run that ended by itself.
+  const stopMode: StopMode | undefined = stopCounts ? control?.requested : undefined;
   if (pending.length > 0 && stopMode) {
     console.log(`[dispatch] ${msg.threadKey} ${pending.length} follow-up(s) dropped: run stopped (${stopMode})`);
     return { kind: "dropped", stopMode, pending };

@@ -330,6 +330,11 @@ export async function dispatch(
   let reserved: LedgerRun | undefined;
   let requestRow: Record<string, unknown> | undefined;
   let fencedWhileAttaching = false;
+  // A stop relayed during the attach that ended the attach itself (the attach's
+  // wait for a transient refusal reads the run's signal, execution.md item 9):
+  // the run never started, so `settleThread` reports no stop for it; this is
+  // the mode the request's status reads instead.
+  let stoppedWhileAttaching: StopMode | undefined;
   // A resumed run whose workspace could not be re-attached (run-history item
   // 54): its row was closed with the note that says why, and its request runs
   // again as a new run once this dispatch has freed the thread.
@@ -890,8 +895,36 @@ export async function dispatch(
       repoCtx,
       root,
       ...(reattach !== undefined ? { reattach } : {}),
+      // The run's control exists from the registry row above: a stop relayed
+      // during the attach ends its wake wait at once (execution.md item 9).
+      ...(registered ? { stopSignal: registered.control.hardSignal } : {}),
     });
     if (attach.kind === "refused") return ended;
+    if (attach.kind === "stopped") {
+      // The run's own stop ended the attach: not a failure (no `setup_failed`,
+      // no error reply) and never a cold fallback. A fence during the attach
+      // requested that stop too, and a fenced dispatch says nothing — the row
+      // is another generation's to restart (item 42); otherwise the card says
+      // the run was stopped before it started, the stop's card being the word,
+      // and the request ends `stopped`.
+      if (!fencedWhileAttaching) {
+        stoppedWhileAttaching = registered?.control.requested ?? "hard";
+        await root.span(
+          "dispatch.stop",
+          () =>
+            card.done(
+              shell.close({
+                kind: "not_started",
+                icon: "⛔",
+                reason: "stopped before the run started",
+                ...closeLines(clock(), false),
+              }),
+            ),
+          { attrs: { outcome: "stopped_while_attaching" } },
+        );
+      }
+      return ended;
+    }
     if (attach.kind === "reattach_refused") {
       // The run's work was on that backend or nowhere: the resumed run closes
       // saying why, and its request runs again as a new run in the thread,
@@ -1361,12 +1394,21 @@ export async function dispatch(
     // every lease interval forever.
     if (resume && ledgerRun && !runLoopStarted && !resumeRowClosed) {
       const adopted = ledgerRun;
-      await root.span("post.history_write", () =>
-        closeResumedRow(adopted, resume, "the resumed dispatch ended before the run started"),
-      );
-      console.log(
-        `[resume] ${msg.threadKey} run ${resume.row.runId} closed interrupted: the resumed dispatch ended before the run started`,
-      );
+      // The row says what the request says: a stop that ended the re-attach's
+      // wait closes it with the stop's status, not `interrupted` with a note
+      // that reads like a crash.
+      const why =
+        stoppedWhileAttaching !== undefined
+          ? "the resumed run was stopped before it started"
+          : "the resumed dispatch ended before the run started";
+      const status =
+        stoppedWhileAttaching === "hard"
+          ? "stopped_hard"
+          : stoppedWhileAttaching === "soft"
+            ? "stopped_soft"
+            : "interrupted";
+      await root.span("post.history_write", () => closeResumedRow(adopted, resume, why, status));
+      console.log(`[resume] ${msg.threadKey} run ${resume.row.runId} closed ${status}: ${why}`);
     }
     // Thread admission (dispatch/settle.ts; docs/reference/specs/thread-admission.md item 4):
     // free the thread, and settle what the run never consumed — handed on as
@@ -1374,9 +1416,16 @@ export async function dispatch(
     // sender when an operator stopped it. The fresh turn is an ordinary
     // dispatch: it claims the thread itself, and a follow-up arriving during it
     // steers into it.
-    const settled = settleThread(deps, { msg, admitted, runLoopStarted, control: registered?.control });
+    const settled = settleThread(deps, {
+      msg,
+      admitted,
+      // A stop that ended the attach counts as the loop's stop would: the
+      // request ends `stopped`, and a follow-up queued during the wait is told.
+      stopCounts: runLoopStarted || stoppedWhileAttaching !== undefined,
+      control: registered?.control,
+    });
     if (settled.kind === "dropped") await tellDropped(root, settled.pending);
-    const stopMode = settled.kind === "handed-on" ? undefined : settled.stopMode;
+    const stopMode = (settled.kind === "handed-on" ? undefined : settled.stopMode) ?? stoppedWhileAttaching;
     // The request is over: its root ends here, after the seal and the tail,
     // with how it went — before the fresh turn below starts a root of its own.
     // The same status is the caller's outcome.

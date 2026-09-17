@@ -361,11 +361,27 @@ export const SDK_RUNTIME_RECORD_KEY = "currentRuntimeIdentity";
 /** The DOMException the SDK's connect abort raises — `fetchUpgradeAttempt`
  *  calls `controller.abort()` with no reason when `DEFAULT_CONNECT_TIMEOUT_MS`
  *  passes, so the runtime's own `AbortError` with the message exactly `The
- *  operation was aborted`. Anchored on the WHOLE message, so a command's own
- *  `Aborted (core dumped)` never matches and neither does a `TimeoutError`'s
+ *  operation was aborted`. Anchored on the WHOLE message: a command's own
+ *  `Aborted (core dumped)` never matches, and neither does a `TimeoutError`'s
  *  `The operation was aborted due to timeout` — the text `AbortSignal.timeout`
- *  raises, a route's own bound on a slow GitHub, not a silent runtime. */
+ *  raises, a route's own bound on a slow GitHub, not a silent runtime. A
+ *  wrapper is read by its `cause`, where the DOMException rides whole; a
+ *  wrapper that only pasted the sentence into a longer message is not the
+ *  signal. */
 export const RUNTIME_UNREACHABLE_WORDING = /^The operation was aborted\.?$/;
+
+/** `err` and its `cause` chain, bounded like the SDK's own `selfAndCauses`
+ *  walker: the SDK wraps platform errors, so the telling message can sit one or
+ *  two links down. The one walker for every reader of a throw's chain — the
+ *  resident Worker's classifiers and its thread-error builders, the sandbox
+ *  Worker's — so the depth bound and the shape are decided once. */
+export function* selfAndCauses(err: unknown): Generator<unknown> {
+  let current = err;
+  for (let depth = 0; depth < 8 && current != null; depth++) {
+    yield current;
+    current = typeof current === "object" ? (current as { cause?: unknown }).cause : undefined;
+  }
+}
 
 /** Is this one link of an error's cause chain the SDK's connect abort? By
  *  name first (the DOMException's `AbortError`), by the DOMException's message

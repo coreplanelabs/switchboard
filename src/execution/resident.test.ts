@@ -933,6 +933,26 @@ describe("ResidentExecutor trace context — the recovery re-attach", () => {
 describe("ResidentOperations.run", () => {
   const OPS = { baseUrl: "https://resident.example", token: "op-token" };
 
+  it("a rejected op the Worker typed as the platform's transient carries `transient: true` on the error outcome — the one signal, the message the resident's words — while a failure the Worker did not type stays the plain error it was", async () => {
+    // The streamed document `/op`'s rejection mapper writes: `catchAllErr(err,
+    // "op-failed")` with its `status` shed (deploy/cloudflare-resident/worker.ts);
+    // the words are the platform's (`Network connection lost.`, the pinned SDK's own sentence).
+    stubFetch({ body: { error: "op-failed: Network connection lost.", transient: true } });
+    const transient = await new ResidentOperations(OPS).run("test", { repo: "jshttp/vary" });
+    // One signal: the field. The message stays the resident's words; the reader words the blip.
+    expect(transient).toEqual({
+      kind: "error",
+      transient: true,
+      message: "resident /op: op-failed: Network connection lost.",
+    });
+    stubFetch({ body: { error: "op-failed at test: exit 1", transient: false } });
+    const deterministic = await new ResidentOperations(OPS).run("test", { repo: "jshttp/vary" });
+    expect(deterministic).toEqual({ kind: "error", message: "resident /op: op-failed at test: exit 1" });
+    stubFetch({ body: { error: "op-failed: boom" } });
+    const untyped = await new ResidentOperations(OPS).run("test", { repo: "jshttp/vary" });
+    expect(untyped).toEqual({ kind: "error", message: "resident /op: op-failed: boom" });
+  });
+
   // Feature: docs/reference/specs/tracing.md item 19 — an op's step trace and total ride the result.
   it("carries the resident's step trace and total on the result, sanitized", async () => {
     stubFetch({
@@ -1057,6 +1077,26 @@ describe("ResidentOperations.run", () => {
 });
 
 describe("ResidentExecutor.probeStatus", () => {
+  it("carries the Worker's `transient` typing on a 5xx it did not answer with a state — the catch-all 500 for the Durable Object reset or lost under the probe — and never on a 4xx or an untyped 5xx", async () => {
+    stubFetch({ status: 500, body: { error: "internal error", status: 500, transient: true } });
+    const typed = await ResidentExecutor.probeStatus("https://resident.example", "t", "repo:x/y", 2000);
+    expect(typed).toEqual({
+      kind: "unreachable",
+      error: "probe HTTP 500: internal error",
+      transport: false,
+      status: 500,
+      transient: true,
+    });
+    stubFetch({ status: 502, body: { error: "bad gateway" } });
+    expect(await ResidentExecutor.probeStatus("https://resident.example", "t", "repo:x/y", 2000)).not.toHaveProperty(
+      "transient",
+    );
+    stubFetch({ status: 401, body: { error: "unauthorized", transient: true } });
+    expect(await ResidentExecutor.probeStatus("https://resident.example", "t", "repo:x/y", 2000)).not.toHaveProperty(
+      "transient",
+    );
+  });
+
   it("returns {state, reason} from GET /status", async () => {
     const { calls } = stubFetch({ body: { state: "restoring", reason: "rehydrating" } });
     const probe = await ResidentExecutor.probeStatus("https://resident.example", "op-token", "repo:jshttp/vary", 2000);
@@ -1191,6 +1231,32 @@ describe("ResidentExecutor.moveTo", () => {
     stubFetch({ body: ATTACH_OK }, { status: 503, body: { error: "not-serviceable: refreshing" } });
     const ex = await ResidentExecutor.open({ ...OPTS, refHint: "master" });
     await expect(ex.moveTo("d75b5a51aba97d43c64a42c96e580dd9abbfd78e")).rejects.toThrow(/not-serviceable/);
+  });
+
+  it("carries the run's stop into the move's re-attach: a hard stop during the wake wait a transient refusal began ends the move at once with the stop's typed error — never a wait to the wake ceiling the round cannot end", async () => {
+    vi.useFakeTimers();
+    try {
+      const { calls } = stubFetch(
+        { body: ATTACH_OK },
+        { body: { error: "attach-failed: Network connection lost.", status: 500, transient: true } },
+        { body: { state: "restoring", reason: "rehydrating", inFlight: 0 } },
+      );
+      const ex = await ResidentExecutor.open({ ...OPTS, refHint: "master" });
+      const control = new AbortController();
+      let settled: unknown;
+      void ex
+        .moveTo("d75b5a51aba97d43c64a42c96e580dd9abbfd78e", { signal: control.signal })
+        .catch((e: unknown) => (settled = e));
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(settled).toBeUndefined();
+      control.abort();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toBeInstanceOf(ExecInfraError);
+      expect((settled as ExecInfraError).reason).toBe("aborted");
+      expect(calls.map(route)).toEqual(["/attach", "/attach", "/status"]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -1410,7 +1476,7 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     expect((err as ExecInfraError).reason).toBe("refused");
   });
 
-  it("a re-attach that fails as infra inside the wait is a strike typed by the last engine view, not by the re-attach's own verdict: the attach ran under this client's clipped timeout, so its transport failure says nothing about a resident the engine still says is serving — unavailable, for the harness's longer wait", async () => {
+  it("a re-attach that fails as infra inside the wait is a strike typed by the last engine view, not by the re-attach's own verdict: its transport failure says nothing about a resident the engine still says is serving — unavailable, for the harness's longer wait", async () => {
     // The engine says restoring, then warm: the re-attach goes out and fails on its transport.
     const { calls } = stubFetch({ body: JUST_EXITED }, restoring(), status("warm"), { reject: "fetch failed" });
     const executor = new ResidentExecutor(OPTS);
@@ -1479,26 +1545,167 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     expect(calls.map(route)).toEqual(["/exec", "/status", "/status", "/attach", "/status", "/attach"]);
   });
 
-  it("attach: a 500 the Worker typed transient is the resident unavailable — infra a wait clears, so the harness's one more command waits on it, classified for its span as the attach's — while a deterministic 500 stays the attach's own legible error, judged at once", async () => {
-    stubFetch({ body: { error: "attach-failed: Network connection lost.", status: 500, transient: true } });
-    const transient = await new ResidentExecutor(OPTS).attach().catch((e: unknown) => e);
-    expect(transient).toBeInstanceOf(ExecInfraError);
-    expect((transient as ExecInfraError).reason).toBe("worker-unavailable");
-    expect(infraMayClear(transient as ExecInfraError)).toBe(true);
-    expect(classificationOf(transient)).toEqual({ kind: "infra", code: "attach" });
-    expect((transient as Error).message).toBe(
-      "resident attach failed for repo:jshttp/vary: attach-failed: Network connection lost.",
-    );
-    stubFetch({ body: { error: "attach-failed at clone: exit 128", status: 500 } });
-    const deterministic = await new ResidentExecutor(OPTS).attach().catch((e: unknown) => e);
-    expect(deterministic).toBeInstanceOf(Error);
-    expect(deterministic).not.toBeInstanceOf(ExecInfraError);
-    expect((deterministic as Error).message).toBe(
+  it("attach: a 500 the Worker typed transient enters the wake wait — a /status probe, then a re-attach as soon as the engine says it serves: at once when the first probe already says so, with no pause and no second probe — bounded by the wake budget, and binds when the resident answers, so the run's first attach and every re-attach alike never fall back cold on a hiccup a re-probe clears; a deterministic 500 stays the attach's own legible error, judged at once with no probe", async () => {
+    const transientAttach = {
+      body: { error: "attach-failed: Network connection lost.", status: 500, transient: true },
+    };
+    const { calls } = stubFetch(transientAttach, status("warm"), { body: ATTACH_OK });
+    const binding = await new ResidentExecutor(OPTS).attach();
+    expect(binding).toMatchObject({ ref: "master", sha: "1220b9c4", wokeAfterMs: 0 });
+    expect(calls.map(route)).toEqual(["/attach", "/status", "/attach"]);
+    const deterministic = stubFetch({ body: { error: "attach-failed at clone: exit 128", status: 500 } });
+    const err = await new ResidentExecutor(OPTS).attach().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toBe(
       "resident attach failed for repo:jshttp/vary: attach-failed at clone: exit 128",
     );
+    expect(deterministic.calls.map(route)).toEqual(["/attach"]);
   });
 
-  it("a hard stop while a /status probe inside the wait is in flight aborts that probe too — the run's signal rides into the probe as into every send — and the wait ends with the plain stop error the pause throws, never a strike on the unreachable view the stop itself produced", async () => {
+  it("attach: the wait is bounded by the wake budget — a resident still transient past it is the wake's own strike, the resident unavailable (`worker-unavailable`, infra a longer clock may still wait on), which the first attach's caller folds into its cold-fallback reason; and a `transient` flag on a non-5xx refusal is never a reason to wait (`isTransientRefusal`, one rule)", async () => {
+    const transientAttach = {
+      body: { error: "attach-failed: Network connection lost.", status: 500, transient: true },
+    };
+    const { calls } = stubFetch(
+      transientAttach,
+      status("warm"),
+      transientAttach,
+      status("warm"),
+      transientAttach,
+      status("warm"),
+      transientAttach,
+    );
+    let settled: unknown;
+    const p = new ResidentExecutor(OPTS).attach(undefined, { budgetMs: 10_000 }).catch((e: unknown) => (settled = e));
+    await vi.advanceTimersByTimeAsync(10_000);
+    await p;
+    expect(settled).toBeInstanceOf(ExecInfraError);
+    expect((settled as ExecInfraError).reason).toBe("worker-unavailable");
+    expect(infraMayClear(settled as ExecInfraError)).toBe(true);
+    // The wait's origin is the refusal the Worker typed transient, not a container's exit: the
+    // strike says so in its sentence and its classification, never `container-exited`.
+    expect((settled as Error).message).toContain("waited 10s for the resident to come back");
+    expect((settled as Error).message).not.toContain("to wake");
+    expect(classificationOf(settled)).toEqual({ kind: "infra", code: "transient-refusal" });
+    // A probe and a re-attach at t=0, 5 s and at the budget's edge; then the strike.
+    expect(calls.map(route)).toEqual(["/attach", "/status", "/attach", "/status", "/attach", "/status", "/attach"]);
+    const notTransient = stubFetch({
+      status: 409,
+      body: { error: "reuse-refused: the tree is gone", needs: "recreate", transient: true },
+    });
+    const refused = await new ResidentExecutor(OPTS).attach().catch((e: unknown) => e);
+    expect(refused).toBeInstanceOf(ResidentReuseRefusedError);
+    expect(notTransient.calls.map(route)).toEqual(["/attach"]);
+  });
+
+  it("an unreachable /status right after a transient refusal is the same platform blip, waited through — the Durable Object that lost the attach loses the probe too — so the wait goes on and the next probe's warm view lets the re-attach land; never the `refused` strike an unreachable Worker is on a wait a container's exit began", async () => {
+    const transientAttach = {
+      body: { error: "attach-failed: Network connection lost.", status: 500, transient: true },
+    };
+    const { calls } = stubFetch(transientAttach, { reject: "fetch failed" }, status("warm"), { body: ATTACH_OK });
+    const p = new ResidentExecutor(OPTS).attach();
+    await vi.advanceTimersByTimeAsync(5_000);
+    const binding = await p;
+    expect(binding).toMatchObject({ ref: "master", wokeAfterMs: 5_000 });
+    expect(calls.map(route)).toEqual(["/attach", "/status", "/status", "/attach"]);
+  });
+
+  it("probes that stay unreachable past the budget after a transient refusal end in the resident unavailable (`worker-unavailable`, infra a longer clock may wait on), never `refused`: nothing definite was ever seen", async () => {
+    const transientAttach = {
+      body: { error: "attach-failed: Network connection lost.", status: 500, transient: true },
+    };
+    const { calls } = stubFetch(
+      transientAttach,
+      { reject: "fetch failed" },
+      { reject: "fetch failed" },
+      { reject: "fetch failed" },
+    );
+    let settled: unknown;
+    const p = new ResidentExecutor(OPTS).attach(undefined, { budgetMs: 10_000 }).catch((e: unknown) => (settled = e));
+    await vi.advanceTimersByTimeAsync(10_000);
+    await p;
+    expect(settled).toBeInstanceOf(ExecInfraError);
+    expect((settled as ExecInfraError).reason).toBe("worker-unavailable");
+    expect(infraMayClear(settled as ExecInfraError)).toBe(true);
+    expect((settled as Error).message).toContain("waited 10s for the resident to come back (last seen unreachable (");
+    expect(classificationOf(settled)).toEqual({ kind: "infra", code: "transient-refusal" });
+    expect(calls.map(route)).toEqual(["/attach", "/status", "/status", "/status"]);
+  });
+
+  it("the run's stop rides into the first attach request itself, not only the wake wait's re-attach: a stop while it is in flight is the call's own aborted error at once", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: unknown, init?: RequestInit) => {
+        calls.push({ url: String(url), init: init ?? {} });
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          if (signal?.aborted) reject(signal.reason);
+          else signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      }),
+    );
+    const control = new AbortController();
+    const p = new ResidentExecutor(OPTS).attach(undefined, { signal: control.signal }).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(1_000);
+    control.abort();
+    const err = await p;
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as ExecInfraError).reason).toBe("aborted");
+    expect(calls.map(route)).toEqual(["/attach"]);
+    expect(calls[0].init.signal?.aborted).toBe(true);
+  });
+
+  it("one wake budget per operation: the wait for a rolling container and a recovery attach's wait for a transient refusal draw on the same clock, so a /read that spent 10s waking and then meets a transient re-attach has 170s of its budget left, not a fresh 180s", async () => {
+    const transientAttach = {
+      body: { error: "attach-failed: Network connection lost.", status: 500, transient: true },
+    };
+    const canned: Array<{ status?: number; body: unknown }> = [
+      { body: JUST_EXITED },
+      restoring(),
+      status("warm"),
+      transientAttach,
+      status("warm"),
+      { body: ATTACH_OK },
+      { status: 409, body: { error: "not-attached: no live worktree", needs: "attach" } },
+      transientAttach,
+    ];
+    const paths: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        const path = new URL(String(url)).pathname;
+        paths.push(path);
+        const next = canned.shift();
+        if (next) return new Response(JSON.stringify(next.body), { status: next.status ?? 200 });
+        // From here the resident stays warm and every re-attach stays transient, until the budget ends the wait.
+        const body = path === "/status" ? { state: "warm", reason: "", inFlight: 0 } : transientAttach.body;
+        return new Response(JSON.stringify(body), { status: 200 });
+      }),
+    );
+    let settled: unknown;
+    const p = new ResidentExecutor(OPTS).readFile("f.txt").catch((e: unknown) => (settled = e));
+    await vi.advanceTimersByTimeAsync(180_000);
+    await p;
+    expect(settled).toBeInstanceOf(ExecInfraError);
+    expect((settled as ExecInfraError).reason).toBe("worker-unavailable");
+    // The rolling wake took 10s (restoring, then a transient re-attach, then the binding);
+    // the recovery attach's wait had the remaining 170s, and says so.
+    expect((settled as Error).message).toContain("waited 170s for the resident to come back");
+    expect(paths.slice(0, 8)).toEqual([
+      "/read",
+      "/status",
+      "/status",
+      "/attach",
+      "/status",
+      "/attach",
+      "/read",
+      "/attach",
+    ]);
+  });
+
+  it("a hard stop while a /status probe inside the wait is in flight aborts that probe too — the run's signal rides into the probe as into every send — and the wait ends with the stop's one typed shape (`aborted`, classified as the transport), as the pause's and the re-attach's do, never a strike on the unreachable view the stop itself produced", async () => {
     const canned = [{ body: JUST_EXITED }, restoring()];
     const calls: Array<{ url: string; init: RequestInit }> = [];
     vi.stubGlobal(
@@ -1522,9 +1729,13 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     control.abort();
     await vi.advanceTimersByTimeAsync(0);
     const err = await p;
-    expect(err).toBeInstanceOf(Error);
-    expect(err).not.toBeInstanceOf(ExecInfraError);
-    expect((err as Error).message).toBe("stopped waiting for the resident to wake: the run was stopped");
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as ExecInfraError).reason).toBe("aborted");
+    expect(infraMayClear(err as ExecInfraError)).toBe(false);
+    expect(classificationOf(err)).toEqual({ kind: "transport" });
+    expect((err as Error).message).toBe(
+      "resident /exec: stopped waiting for the resident to wake: the run was stopped",
+    );
     expect(calls[2].init.signal?.aborted).toBe(true);
   });
 
@@ -1537,7 +1748,7 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
       status: 409,
       body: {
         error:
-          "runtime-replaced: the resident runtime was replaced (a deploy) while this command was pending at the Worker; its output is lost (The container is not running, consider calling start())",
+          "runtime-replaced: the resident runtime was replaced (a deploy) while this request was pending at the Worker; its outcome is unknown (The container is not running, consider calling start())",
         reason: "runtime-replaced",
       },
     };
@@ -1553,7 +1764,7 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     // bare 409 carrying a `STOPPED_CONTAINER_WORDING` sentence (both from
     // src/execution/residentRefresh.ts).
     const moved =
-      "runtime-replaced: the resident runtime was replaced (a deploy) while this command was pending at the Worker; its output is lost (Process handle refers to a previous runtime incarnation)";
+      "runtime-replaced: the resident runtime was replaced (a deploy) while this request was pending at the Worker; its outcome is unknown (Process handle refers to a previous runtime incarnation)";
     stubFetch({
       body: { error: moved, reason: "runtime-replaced", status: 409, stdout: "", stderr: moved, exitCode: 127 },
     });
@@ -1576,7 +1787,7 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     // reset predicate matches (`SUPERSEDED_ISOLATE_PATTERN`, the pinned
     // @cloudflare/sandbox's `isDurableObjectCodeUpdateReset`).
     const words =
-      "control-reset: the resident's Durable Object was reset (a deploy) while this command was pending at the Worker; the container and its processes are as they were; the command's outcome is unknown (reset because its code was updated)";
+      "control-reset: the resident's Durable Object was reset (a deploy) while this request was pending at the Worker; the container and its processes are as they were; the request's outcome is unknown (reset because its code was updated)";
     stubFetch({
       body: { error: words, reason: "control-reset", status: 409, stdout: "", stderr: words, exitCode: 127 },
     });
@@ -1664,8 +1875,10 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     await vi.advanceTimersByTimeAsync(1);
     await p;
     expect(settled).toBeInstanceOf(ExecInfraError);
-    expect((settled as Error).message).toContain("waited 20s");
+    expect((settled as Error).message).toContain("waited 20s for the resident to wake");
     expect((settled as Error).message).toContain("restoring");
+    // A container's exit began this wait: the strike is classified as that, and worded as the wake it waited for.
+    expect(classificationOf(settled)).toEqual({ kind: "infra", code: "container-exited" });
     // The resident was still coming back when this client's budget ran out: the
     // harness's one more command keeps waiting on it (its own five-minute
     // bound), so the strike is the resident unavailable, never a refusal.
@@ -1697,7 +1910,7 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     expect(calls.map(route)).toEqual(["/exec", "/status", "/status"]);
   });
 
-  it("a hard stop ends the wait at once, as a plain error the caller unwinds, never infra", async () => {
+  it("a hard stop during the pause ends the wait at once with the stop's one typed shape — `ExecInfraError` `aborted`, classified as the transport, what a stop during a probe or the re-attach's own call gives too — so a caller that counts infra failures sees one thing from every stop point, and nothing waits on a run that was stopped", async () => {
     stubFetch({ body: JUST_EXITED }, ...Array.from({ length: 5 }, restoring));
     const control = new AbortController();
     const executor = new ResidentExecutor(OPTS);
@@ -1705,9 +1918,13 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     await vi.advanceTimersByTimeAsync(2_000);
     control.abort();
     const err = await p;
-    expect(err).toBeInstanceOf(Error);
-    expect(err).not.toBeInstanceOf(ExecInfraError);
-    expect((err as Error).message).toMatch(/stopped/);
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as ExecInfraError).reason).toBe("aborted");
+    expect(infraMayClear(err as ExecInfraError)).toBe(false);
+    expect(classificationOf(err)).toEqual({ kind: "transport" });
+    expect((err as Error).message).toBe(
+      "resident /exec: stopped waiting for the resident to wake: the run was stopped",
+    );
   });
 
   it("a re-attach refused while the container is still rolling (image-stale) keeps waiting; the next one binds", async () => {
@@ -1720,6 +1937,9 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
         reason: "image-stale",
       },
     };
+    // After a container's exit the engine view lags: the first serving view is
+    // not re-attached into (a full /attach into a container still starting on
+    // every deploy); the first re-attach follows the first pause.
     const { calls } = stubFetch({ body: JUST_EXITED }, status("warm"), status("warm"), imageStale, status("warm"), {
       body: ATTACH_OK,
     });
@@ -1759,6 +1979,134 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     await vi.advanceTimersByTimeAsync(5_000);
     await expect(p).resolves.toBe("hello");
     expect(calls.map(route)).toEqual(["/read", "/status", "/status", "/attach", "/read"]);
+  });
+
+  /** A fetch whose canned answers may arrive late: `afterMs` delays the answer
+   *  on the fake clock, and the request's own signal (the call's deadline or
+   *  the run's stop) ends it first, as the platform would. */
+  function stubFetchLate(...responses: Array<{ status?: number; body: unknown; afterMs?: number }>) {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: unknown, init?: RequestInit) => {
+        calls.push({ url: String(url), init: init ?? {} });
+        const next = responses.shift();
+        return new Promise<Response>((resolve, reject) => {
+          if (!next) return reject(new TypeError(`unexpected fetch: ${String(url)}`));
+          const answer = () => resolve(new Response(JSON.stringify(next.body), { status: next.status ?? 200 }));
+          if (!next.afterMs) return answer();
+          const timer = setTimeout(answer, next.afterMs);
+          const signal = init?.signal;
+          signal?.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timer);
+              reject(signal.reason);
+            },
+            { once: true },
+          );
+        });
+      }),
+    );
+    return { calls };
+  }
+
+  it("the re-attach inside a first attach's wait runs under the attach's own timeout, which the wake ceiling never caps — the ceiling bounds the probing: a cold clone and deps install of 3.5 minutes after a blip still binds, so a resident still attaching is never struck 'did not answer' while the run is provisioned cold beside it", async () => {
+    const transientAttach = {
+      body: { error: "attach-failed: Network connection lost.", status: 500, transient: true },
+    };
+    const { calls } = stubFetchLate(transientAttach, status("warm"), { body: ATTACH_OK, afterMs: 210_000 });
+    const p = new ResidentExecutor(OPTS).attach(undefined, { budgetMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(210_000);
+    const binding = await p;
+    expect(binding).toMatchObject({ ref: "master", sha: "1220b9c4", wokeAfterMs: 210_000 });
+    expect(calls.map(route)).toEqual(["/attach", "/status", "/attach"]);
+  });
+
+  it("the wake clock starts at the first wait, never at the first call: an /exec whose call took 25s before the container's exit was answered still waits the command's whole budget for the wake", async () => {
+    const { calls } = stubFetchLate({ body: JUST_EXITED, afterMs: 25_000 }, ...Array.from({ length: 8 }, restoring));
+    let settled: unknown;
+    const p = new ResidentExecutor(OPTS).exec("sleep 5", { timeoutMs: 30_000 }).catch((e: unknown) => (settled = e));
+    await vi.advanceTimersByTimeAsync(54_999);
+    expect(settled).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    await p;
+    expect(settled).toBeInstanceOf(ExecInfraError);
+    expect((settled as Error).message).toContain("waited 30s");
+    expect(calls.map(route)).toEqual(["/exec", ...Array.from({ length: 7 }, () => "/status")]);
+  });
+
+  it("an operation's re-attach inside the wait is bounded by its own call bound where the budget's remainder is shorter — an /exec with a 30s budget whose re-attach hangs is struck at the call's 60s bound, never held to the attach's 5-minute default — so an operation never waits past its wall clock", async () => {
+    const { calls } = stubFetchLate({ body: JUST_EXITED }, status("warm"), status("warm"), {
+      body: ATTACH_OK,
+      afterMs: 10 * 60_000,
+    });
+    let settled: unknown;
+    const p = new ResidentExecutor(OPTS).exec("sleep 5", { timeoutMs: 30_000 }).catch((e: unknown) => (settled = e));
+    // The first pause (5 s), then the re-attach under the 60 s call bound.
+    await vi.advanceTimersByTimeAsync(64_999);
+    expect(settled).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    await p;
+    expect(settled).toBeInstanceOf(ExecInfraError);
+    expect((settled as ExecInfraError).reason).toBe("worker-unavailable");
+    expect((settled as Error).message).toContain("the re-attach after 65s did not answer");
+    expect(classificationOf(settled)).toEqual({ kind: "infra", code: "container-exited" });
+    expect(calls.map(route)).toEqual(["/exec", "/status", "/status", "/attach"]);
+  });
+
+  it("the re-attach inside the wait never runs past the wake ceiling, whatever the command's budget: a 20-minute /exec whose re-attach hangs is struck at the ceiling, not held for the command's twenty minutes", async () => {
+    const { calls } = stubFetchLate({ body: JUST_EXITED }, status("warm"), status("warm"), {
+      body: ATTACH_OK,
+      afterMs: 30 * 60_000,
+    });
+    let settled: unknown;
+    const p = new ResidentExecutor(OPTS)
+      .exec("sleep 5", { timeoutMs: 20 * 60_000 })
+      .catch((e: unknown) => (settled = e));
+    await vi.advanceTimersByTimeAsync(5_000 + 180_000 - 1);
+    expect(settled).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    await p;
+    expect(settled).toBeInstanceOf(ExecInfraError);
+    expect((settled as Error).message).toContain("the re-attach after 185s did not answer");
+    expect(calls.map(route)).toEqual(["/exec", "/status", "/status", "/attach"]);
+  });
+
+  it("a recovery attach after a worktree eviction has the attach default as its floor: a 30s /exec whose re-attach installs deps for two minutes on a healthy resident still re-issues and answers, never deadline-passed at the op's own call bound", async () => {
+    const { calls } = stubFetchLate(
+      { status: 409, body: { error: "not-attached: no live worktree", needs: "attach" } },
+      { body: ATTACH_OK, afterMs: 120_000 },
+      { body: { stdout: "ok", stderr: "", exitCode: 0, truncated: false } },
+    );
+    const p = new ResidentExecutor(OPTS).exec("true", { timeoutMs: 30_000 });
+    await vi.advanceTimersByTimeAsync(120_000);
+    await expect(p).resolves.toBe("ok");
+    expect(calls.map(route)).toEqual(["/exec", "/attach", "/exec"]);
+  });
+
+  it("after a transient refusal only an unanswered probe is the same blip — the transport failing, or the Worker answering /status with a 5xx; a 4xx there (an operator token no longer accepted) is the definite answer it always was, the strike at once", async () => {
+    const transientAttach = {
+      body: { error: "attach-failed: Network connection lost.", status: 500, transient: true },
+    };
+    const denied = stubFetch(transientAttach, { status: 401, body: { error: "unauthorized" } });
+    const err = await new ResidentExecutor(OPTS).attach().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as ExecInfraError).reason).toBe("refused");
+    expect((err as Error).message).toContain("probe HTTP 401");
+    expect(classificationOf(err)).toEqual({ kind: "infra", code: "transient-refusal" });
+    expect(denied.calls.map(route)).toEqual(["/attach", "/status"]);
+    const overloaded = stubFetch(
+      transientAttach,
+      { status: 503, body: { error: "Durable Object is overloaded" } },
+      status("warm"),
+      { body: ATTACH_OK },
+    );
+    const p = new ResidentExecutor(OPTS).attach();
+    await vi.advanceTimersByTimeAsync(5_000);
+    const binding = await p;
+    expect(binding).toMatchObject({ ref: "master", wokeAfterMs: 5_000 });
+    expect(overloaded.calls.map(route)).toEqual(["/attach", "/status", "/status", "/attach"]);
   });
 });
 

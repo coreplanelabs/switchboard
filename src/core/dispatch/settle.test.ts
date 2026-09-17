@@ -47,7 +47,7 @@ describe("settleThread — the thread when the request is over", () => {
     const s = setup();
     const out = settleThread(
       { admission: s.admission },
-      { msg, admitted: s.admitted, runLoopStarted: true, control: new RunControl() },
+      { msg, admitted: s.admitted, stopCounts: true, control: new RunControl() },
     );
     expect(out).toEqual({ kind: "quiet", stopMode: undefined });
     expect(s.admission.get(THREAD)).toBeUndefined();
@@ -58,7 +58,7 @@ describe("settleThread — the thread when the request is over", () => {
     const s = setup();
     const out = settleThread(
       { admission: s.admission },
-      { msg, admitted: undefined, runLoopStarted: false, control: undefined },
+      { msg, admitted: undefined, stopCounts: false, control: undefined },
     );
     expect(out).toEqual({ kind: "quiet", stopMode: undefined });
     expect(s.admission.get(THREAD)).toBe(s.admitted); // another dispatch's slot is untouched
@@ -72,7 +72,7 @@ describe("settleThread — the thread when the request is over", () => {
     s.admitted.inbox.push(followUp("and that", NOW + 2, b));
     const control = new RunControl();
     control.requestStop("soft");
-    const out = settleThread({ admission: s.admission }, { msg, admitted: s.admitted, runLoopStarted: true, control });
+    const out = settleThread({ admission: s.admission }, { msg, admitted: s.admitted, stopCounts: true, control });
     expect(out).toMatchObject({ kind: "dropped", stopMode: "soft" });
     expect((out as { pending: DispatchFollowUp[] }).pending.map((p) => p.text)).toEqual(["and this", "and that"]);
     expect(s.admission.get(THREAD)).toBeUndefined();
@@ -88,7 +88,7 @@ describe("settleThread — the thread when the request is over", () => {
     const a: string[] = [];
     s.admitted.inbox.push(followUp("and this", NOW + 1, a));
     const control = new RunControl();
-    const out = settleThread({ admission: s.admission }, { msg, admitted: s.admitted, runLoopStarted: true, control });
+    const out = settleThread({ admission: s.admission }, { msg, admitted: s.admitted, stopCounts: true, control });
     expect(out).toMatchObject({ kind: "handed-on", agent: s.admitted.agent });
     expect((out as { pending: DispatchFollowUp[] }).pending.map((p) => p.text)).toEqual(["and this"]);
     expect(s.admission.get(THREAD)).toBeUndefined();
@@ -110,7 +110,7 @@ describe("settleThread — the thread when the request is over", () => {
     s.admitted.inbox.push(fromRun);
     const alone = settleThread(
       { admission: s.admission },
-      { msg, admitted: s.admitted, runLoopStarted: true, control: new RunControl() },
+      { msg, admitted: s.admitted, stopCounts: true, control: new RunControl() },
     );
     expect(alone).toEqual({ kind: "quiet", stopMode: undefined });
     expect(s.admission.get(THREAD)).toBeUndefined();
@@ -121,7 +121,7 @@ describe("settleThread — the thread when the request is over", () => {
     t.admitted.inbox.push(followUp("and this", NOW + 2, replies));
     const handed = settleThread(
       { admission: t.admission },
-      { msg, admitted: t.admitted, runLoopStarted: true, control: new RunControl() },
+      { msg, admitted: t.admitted, stopCounts: true, control: new RunControl() },
     );
     expect(handed).toMatchObject({ kind: "handed-on", agent: "coding" });
     expect((handed as { pending: DispatchFollowUp[] }).pending.map((p) => p.text)).toEqual(["and this"]);
@@ -132,10 +132,7 @@ describe("settleThread — the thread when the request is over", () => {
     u.admitted.inbox.push(followUp("and that", NOW + 2, told));
     const control = new RunControl();
     control.requestStop("soft");
-    const dropped = settleThread(
-      { admission: u.admission },
-      { msg, admitted: u.admitted, runLoopStarted: true, control },
-    );
+    const dropped = settleThread({ admission: u.admission }, { msg, admitted: u.admitted, stopCounts: true, control });
     expect(dropped).toMatchObject({ kind: "dropped", stopMode: "soft" });
     expect((dropped as { pending: DispatchFollowUp[] }).pending.map((p) => p.text)).toEqual(["and that"]);
     await tellDropped(u.root, (dropped as { pending: PersonFollowUp[] }).pending);
@@ -148,7 +145,7 @@ describe("settleThread — the thread when the request is over", () => {
     s.admitted.inbox.push(followUp("and this", NOW + 1, replies));
     const control = new RunControl();
     control.requestStop("hard");
-    const out = settleThread({ admission: s.admission }, { msg, admitted: s.admitted, runLoopStarted: false, control });
+    const out = settleThread({ admission: s.admission }, { msg, admitted: s.admitted, stopCounts: false, control });
     expect(out).toMatchObject({ kind: "handed-on", agent: "coding" });
     expect((out as { pending: DispatchFollowUp[] }).pending.map((p) => p.text)).toEqual(["and this"]);
     expect(replies).toEqual([]);

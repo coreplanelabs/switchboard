@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { methodOf, readSource } from "./testing/sourceScan";
+import { RuntimeReplacedError } from "./threadErr";
 
 // The `/exec` answer says `runtime-replaced` only when the resident knows the
 // container it held is gone (docs/reference/specs/resident-repos.md item 43;
@@ -56,12 +57,15 @@ describe("the /exec answer says runtime-replaced only when the resident knows th
     expect(gate).not.toMatch(/reason:/);
     // One decision, made where the failure is classified; the gate re-judges nothing.
     expect(gate).not.toMatch(/sdkVouchesRuntimeMoved|knowsContainerGone/);
-    expect(source).toMatch(
-      // The phase names where the replacement was met — the command's spawn or
-      // collect inside the DO, or the Worker's own call into it (a rejected
-      // stub, `threadRejectionErr`) — and `known` rides beside it either way.
-      /class RuntimeReplacedError extends Error \{\s*constructor\((?:\s*\/\*\*[\s\S]*?\*\/)?\s*readonly phase: "spawn" \| "collect" \| "call",\s*readonly cause: unknown,(?:\s*\/\*\*[\s\S]*?\*\/)?\s*readonly known: boolean,/,
-    );
+    // The phase names where the replacement was met — the command's spawn or
+    // collect inside the DO, or the Worker's own call into it (a rejected
+    // stub, `threadRejectionErr`) — and `known` rides beside it either way.
+    for (const phase of ["spawn", "collect", "call"] as const) {
+      const err = new RuntimeReplacedError(phase, new Error("Process supervisor is closed"), phase !== "call");
+      expect(err.phase).toBe(phase);
+      expect(err.known).toBe(phase !== "call");
+      expect(err.message).toMatch(/^runtime-replaced: /);
+    }
   });
 
   it("what the resident knows is a restore under way and nothing else: never the Container base's exit state (a roll writes `stopped` or nothing once the wake replaced the monitor, an idle stop's graceful exit writes `stopped_with_code(0)` — the state separates nothing), never the platform's `running` flag, never a replayed `onStop`; a read that fails is no knowledge (the SDK's words, never an unhandled throw)", () => {

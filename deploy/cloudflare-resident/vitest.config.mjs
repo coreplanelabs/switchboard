@@ -17,8 +17,11 @@ import { defineConfig } from "vitest/config";
 // and for the /exec answer's runtime-replaced word being given only when the
 // resident knows the container it held is gone (execReplacedWord.test.ts), and
 // for the not-serviceable answers naming, as fields, the two refusals the
-// client cannot wait through (notServiceable.test.ts);
-// testing/sourceScan.ts is their helper. Every
+// client cannot wait through (notServiceable.test.ts), and for the thread
+// data plane's error builders, run with the SDK's real sentences
+// (threadErr.test.ts — the one test here that loads what it tests, since
+// threadErr.ts imports nothing workerd-only); testing/sourceScan.ts is their
+// helper. Every
 // test file of this directory is listed here — src/vitestWorkspace.test.ts
 // holds that.
 // worker.ts itself is covered by typecheck + the [agent] receipts in
@@ -48,6 +51,7 @@ export default defineConfig({
       "staleTip.test.ts",
       "execReplacedWord.test.ts",
       "opExecTimeout.test.ts",
+      "threadErr.test.ts",
     ],
   },
 });

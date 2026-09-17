@@ -33,6 +33,7 @@ import {
 } from "../threadAdmission.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
 import { reclaimedRunRecord } from "./record.js";
+import type { RunStatus } from "../runRecord.js";
 
 /** What thread admission reads off the dispatcher's dependencies. `CoreDeps`
  *  extends this; a caller's shape is unchanged. */
@@ -165,13 +166,20 @@ export async function closeRestartRow(adopted: LedgerRun, restart: RestartContex
 
 /** Close a reclaimed row this dispatch adopted but will never finish (item
  *  38): the record is the row plus the events published before the restart,
- *  status `interrupted`, through the adopted run's sink so the ledger's finish
+ *  status `interrupted` — or the stop's own status when an operator's stop is
+ *  what ended the dispatch before the run started, so the row says what the
+ *  request says — through the adopted run's sink so the ledger's finish
  *  removes the row. Best-effort: a failure is a warning, the sweep's next pass
  *  finds the row again. */
-export async function closeResumedRow(adopted: LedgerRun, resume: ResumeContext, why: string): Promise<void> {
+export async function closeResumedRow(
+  adopted: LedgerRun,
+  resume: ResumeContext,
+  why: string,
+  status: RunStatus = "interrupted",
+): Promise<void> {
   try {
     await adopted.sink.put(
-      reclaimedRunRecord({ row: resume.row, events: resume.events, status: "interrupted", finishedAt: systemClock() }),
+      reclaimedRunRecord({ row: resume.row, events: resume.events, status, finishedAt: systemClock() }),
     );
   } catch (err) {
     console.warn(
