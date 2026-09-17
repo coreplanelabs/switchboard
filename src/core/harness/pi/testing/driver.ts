@@ -26,6 +26,9 @@ const RUN_ID = "run-c";
 /** The bearer every conformance run is started with: the proxy's shape, a secret a row can look for. */
 const BEARER = "sbr_run-c.conformance-secret-no-row-may-carry";
 const CONTAINER_WORD = "vm-conformance";
+/** The word the container answers after it is replaced under the run, so the
+ *  replaced verdict's `was`/`now` are two distinct words. */
+const REPLACED_WORD = "vm-conformance-2";
 /** The bot's own provider-key variables, planted with a sentinel for the run's
  *  duration: a harness that forwards the bot's key to its process forwards the
  *  sentinel, and the credential row finds it in the process's environment. */
@@ -128,24 +131,25 @@ export function piDriver(): HarnessDriver {
         beforeModelCall: async () => {
           modelCalls++;
           if (script.hardStopBeforeModelCall === modelCalls) control.requestStop("hard");
-          // The container is replaced under the run before this model call, with
-          // the previous turn's tool call in flight (the survival clause's
-          // ceiling): the read that would carry the model this call's input fails
-          // with the executor's word, so the loop never reaches this call. Armed
-          // on the next read (the previous turn is fully mirrored — the harness
-          // awaited its record — so the record settles that turn's call), which
-          // fires before this call's turn is read, whatever the load.
-          if (script.containerReplacedBeforeModelCall === modelCalls) {
-            container.vm = "vm-conformance-2";
-            container.failNext = {
-              operation: "read",
-              error: new HarnessContainerRuntimeReplacedError(
-                "read",
-                "runtime-replaced: the sandbox was replaced under the run",
-              ),
-            };
-          }
           await new Promise((r) => setTimeout(r, 15));
+        },
+        // The container is replaced under the run with this call in flight (the
+        // survival clause's ceiling), as the fake serve replaces it under
+        // OpenCode's: the call stays open — the gate decided it, the tool
+        // started, its result never comes — the container renames itself, and
+        // the next read of the drained log fails with the executor's word, so
+        // the harness reads the verdict with the words to corroborate it and
+        // settles the open call with the replaced note. The 1-based model call
+        // that would carry this call's result is `containerReplacedBeforeModelCall`,
+        // so the call is the turn before it.
+        holdCallOpen: ({ turn }) => {
+          if (script.containerReplacedBeforeModelCall !== turn + 1) return false;
+          container.vm = REPLACED_WORD;
+          container.failOnceDrained = new HarnessContainerRuntimeReplacedError(
+            "read",
+            "runtime-replaced: the sandbox was replaced under the run",
+          );
+          return true;
         },
         ...(script.bypassGate ? { bypassGate: true } : {}),
         ...(script.unknownEventKind !== undefined ? { emitUnknownKind: script.unknownEventKind } : {}),

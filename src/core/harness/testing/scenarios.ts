@@ -66,10 +66,12 @@ export interface RunScript {
   /** A hard stop requested before the model call of this 1-based number. */
   hardStopBeforeModelCall?: number;
   /** The container the harness's process ran in is replaced under the run
-   *  before the model call of this 1-based number: the driver arms the next
-   *  feed read to fail with the executor's runtime-replaced word, and the
-   *  container renames itself, so the harness reads the survival clause's
-   *  ceiling with the words to corroborate it. */
+   *  with the previous turn's tool call in flight, before the model call of
+   *  this 1-based number would carry that call's result: the driver leaves the
+   *  call open (the gate decided it, its result never comes), the container
+   *  renames itself, and the next read of the drained feed fails with the
+   *  executor's runtime-replaced word, so the harness reads the survival
+   *  clause's ceiling with the words to corroborate it and settles the call. */
   containerReplacedBeforeModelCall?: number;
   /** The row's process (named by the resume's facts) is still alive in this same
    *  container on the resume — the survival clause's alive-here: `open` finds it
@@ -626,20 +628,29 @@ export const SCENARIOS: readonly ScenarioRow[] = [
       );
       // The in-flight call's settlement carries the replaced note — the result
       // the rebuilt transcript reads in its place, so the next model call sees a
-      // result for every call at the death. The row asserts the record's
-      // settlement, not a `tool_result` event, because the drivers differ on
-      // whether the call's span is open at the replacement: the fake serve holds
-      // the call open at the replacement (the strong case — it plays the ask and
-      // the bot's reply, then stops before the result), while pi's scripted
-      // double completes each call before the next model call, so on pi this row
-      // is the between-calls case and the in-flight settlement is proven in pi's
-      // own harness tests. What both settle identically is the RECORD — the last
-      // assistant turn's calls, the note in the result's place — which is what
-      // `prepareRelaunch` rebuilds the transcript from, so that is what this
-      // neutral row asserts.
+      // result for every call at the death. Every driver runs the strong case:
+      // each holds the call open at the replacement (the fake serve plays the
+      // ask and the bot's reply, then stops before the result; pi's scripted
+      // double is told to leave the call in flight), so the RECORD — the last
+      // assistant turn's calls, the note in the result's place, what
+      // `prepareRelaunch` rebuilds the transcript from — is asserted here and
+      // the run's own event of the settlement below it.
       const settlement = rec.settlements[0];
       assert.ok(settlement.action === "synthetic", "the settlement is not the synthetic replaced note");
       assert.match(settlement.text, /replaced|in flight|lost/, "the settlement does not carry the replaced note");
+      // The same settlement on the run's stream: the bridge ends the open call's
+      // span and puts one failed tool_result carrying the note where the result
+      // would have gone — the one result the call ever gets, since the tool died
+      // with the old container's disk. A driver that completed the call before
+      // the replacement would show the tool's own result here instead.
+      const results = toolResults(run).filter((r) => r.callId === "c1");
+      assert.equal(results.length, 1, `the in-flight call has ${results.length} results on the stream, not one`);
+      assert.equal(results[0].ok, false, "the in-flight call's result on the stream is not a failure");
+      assert.match(
+        results[0].summary,
+        /replaced|in flight|lost/,
+        "the in-flight call's result on the stream does not carry the replaced note",
+      );
       // Nothing of the old process is in the container that answers now.
       assert.deepEqual(run.killed, [], "a pid was ended in the replacement");
       assert.deepEqual(run.removed, [], "a root was removed in the replacement");
