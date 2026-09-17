@@ -24,6 +24,7 @@ import {
   withTimeout,
   isRuntimeUnreachableReason,
   isRuntimeUnreachableSignal,
+  selfAndCauses,
   RUNTIME_UNREACHABLE_DOWN_AT,
   RUNTIME_UNREACHABLE_RECREATE_AT,
   RUNTIME_UNREACHABLE_STOP_AT,
@@ -37,6 +38,7 @@ import {
 } from "./residentRefresh.js";
 import { DISK_FULL_FREE_KIB } from "./residentDisk.js";
 import { degradedIsServiceable } from "./residentState.js";
+import { installedSdkSource } from "./testing/installedSdkSource.js";
 
 const require = createRequire(import.meta.url);
 
@@ -288,6 +290,20 @@ describe("classifyRefreshFailure (a build SIGTERM'd by a deploy is an interrupti
     expect(classifyRefreshFailure({ step: "checkout-update", message: "exit 143: " }).interrupted).toBe(true);
   });
 
+  // Seen live: a container stopped under the wake path's short ready-stamp
+  // probe answered the platform's own words — not a shell's `exit 143` —
+  // and the cycle recorded `degraded(refresh-failed: …)` until the next cycle.
+  it("the platform's exit-code wording for a SIGTERMed container (Container exited with unexpected exit code: 143) is an interruption too, while any other exit code stays a genuine crash", () => {
+    const stopped = "Container exited with unexpected exit code: 143";
+    const f = classifyRefreshFailure({ step: "refresh", message: stopped });
+    expect(f.interrupted).toBe(true);
+    expect(f.reason).toBe(`refresh-interrupted: refresh ${stopped}`);
+    for (const code of [1, 2, 137, 139, 1430]) {
+      const crash = `Container exited with unexpected exit code: ${code}`;
+      expect(classifyRefreshFailure({ step: "refresh", message: crash }).interrupted, crash).toBe(false);
+    }
+  });
+
   it("SIGTERM / 'Session terminated' wording without the exit code still counts", () => {
     expect(
       classifyRefreshFailure({ step: "build", message: "exit 1: Session terminated, killing shell" }).interrupted,
@@ -436,6 +452,15 @@ describe("restoreFailureDisposition (a restore the runtime replacement interrupt
   // back a normal result — `exit 143: no output`, SIGTERM — and only the
   // cleanup execs 10 ms later carried the SDK's `container is not running`
   // wording, swallowed. The wake path read a snapshot failure and went `down`.
+  it("a container that exited with code 143 under the restore's own execs is interrupted too: SIGTERM's status in the platform's exit-code wording, never a crash", () => {
+    const stopped = "Container exited with unexpected exit code: 143";
+    expect(restoreFailureDisposition(stopped)).toEqual({
+      action: "interrupted",
+      reason: `restore-interrupted: ${stopped}`,
+    });
+    expect(restoreFailureDisposition("Container exited with unexpected exit code: 137").action).toBe("down");
+  });
+
   it("an extract killed by SIGTERM (exit 143, no output) is `interrupted` — the same kill signature the instance step's classifier already reads", () => {
     for (const msg of ["exit 143: no output", "exit 143: stderr: Terminated", "unsquashfs: SIGTERM received"]) {
       expect(restoreFailureDisposition(msg), msg).toEqual({
@@ -753,14 +778,19 @@ describe("planWakeDepsBudget (item 61 PR B: the wake's deps materialization live
   });
 });
 
-/** The installed SDK's dist, as text (its exports map hides package.json). */
-function installedSdkSource(): string {
-  const dist = path.dirname(require.resolve("@cloudflare/sandbox"));
-  return readdirSync(dist)
-    .filter((f) => f.endsWith(".js"))
-    .map((f) => readFileSync(path.join(dist, f), "utf8"))
-    .join("\n");
-}
+describe("selfAndCauses — the one cause-chain walker every reader of a throw's chain shares", () => {
+  it("yields the throw and each `cause` beneath it in order, stops at a link that is null or undefined, is bounded at eight links, and yields a non-object throw alone", () => {
+    const inner = new Error("inner");
+    const outer = new Error("outer", { cause: new Error("middle", { cause: inner }) });
+    expect([...selfAndCauses(outer)].map((l) => (l as Error).message)).toEqual(["outer", "middle", "inner"]);
+    expect([...selfAndCauses(new Error("no cause"))]).toHaveLength(1);
+    expect([...selfAndCauses("a string")]).toEqual(["a string"]);
+    expect([...selfAndCauses(null)]).toEqual([]);
+    let deep: Error = new Error("0");
+    for (let i = 1; i < 12; i++) deep = new Error(String(i), { cause: deep });
+    expect([...selfAndCauses(deep)]).toHaveLength(8);
+  });
+});
 
 describe("runtime-unreachable (a container whose control port never answers is named, never a command failure)", () => {
   // The production failure, verbatim from the resident Worker's log: every
@@ -784,6 +814,10 @@ describe("runtime-unreachable (a container whose control port never answers is n
     expect(isRuntimeUnreachableSignal(production)).toBe(true);
     expect(isRuntimeUnreachableSignal({ name: "AbortError", message: "" })).toBe(true);
     expect(isRuntimeUnreachableSignal(new Error("The operation was aborted"))).toBe(true);
+    // The exact sentence with a period, as a wrapper might copy it; a wrapper
+    // that pasted it into a longer message is read by its `cause`, not its text.
+    expect(isRuntimeUnreachableSignal(new Error("The operation was aborted."))).toBe(true);
+    expect(isRuntimeUnreachableSignal(new Error("connect failed: The operation was aborted"))).toBe(false);
   });
 
   it("nothing else is: a command's own abort, a timeout, a replacement, a crash, a non-error", () => {

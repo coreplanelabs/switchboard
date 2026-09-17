@@ -10,23 +10,31 @@ import { parseShipPlanRequest, isUnitBranch } from "./coordinator.js";
 
 // ---- naming -------------------------------------------------------
 
+// Slack link markup `<url>` / `<url|label>` → the bare url. Mirrors
+// repoContext.ts's unwrapSlack but deliberately case-insensitive: an
+// uppercase-scheme link (`<HTTPS://…|label>`) must unwrap here, while
+// repoContext's case-sensitive unwrap feeds regexes whose bindings would change
+// if it started unwrapping those — so the two stay separate rather than sharing
+// one regex with different semantics.
+const SLACK_LINK = /<((?:https?):\/\/[^|>\s]+)(?:\|[^>]*)?>/gi;
+const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 /**
- * The request text with the ship scaffolding stripped — the "new task text"
- * of the entry checks (spec item 10). Removes Slack link markup, every URL
- * (the PR link included), `owner/name#N` shorthand, the resolved repo slug
- * (and an `in <slug>:` prefix around it), then leading connective punctuation.
- * Deliberately conservative: ANY non-empty remainder counts as a new task —
- * a resume must carry only the directive + the PR reference.
+ * A PROBE, never the task: the request text with the ship scaffolding
+ * stripped — the "new task text" of the entry checks (spec item 10), asked
+ * only "is there a task here at all, or just a pull request reference?".
+ * Removes Slack link markup, every URL (the PR link included), `owner/name#N`
+ * shorthand, the resolved repo slug (and an `in <slug>:` prefix around it),
+ * then leading connective punctuation. Deliberately conservative: ANY
+ * non-empty remainder counts as a new task — a resume must carry only the
+ * directive + the PR reference. The unit a child implements is shipUnitText's,
+ * which keeps every URL — a probe that once doubled as the unit lost a task
+ * whose whole point was the address it named.
  */
 export function shipTaskText(requestText: string, repo: string): string {
-  // Mirrors repoContext.ts's unwrapSlack but deliberately case-insensitive:
-  // an uppercase-scheme link (`<HTTPS://…|label>`) must still strip to nothing
-  // here, while repoContext's case-sensitive unwrap feeds regexes whose
-  // bindings would change if it started unwrapping those — so the two stay
-  // separate rather than sharing one regex with different semantics.
-  let t = requestText.replace(/<((?:https?):\/\/[^|>\s]+)(?:\|[^>]*)?>/gi, " $1 ");
+  let t = requestText.replace(SLACK_LINK, " $1 ");
   t = t.replace(/https?:\/\/\S+/gi, " ");
-  const slug = repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const slug = escapeRegExp(repo);
   t = t.replace(new RegExp(`\\bin\\s+${slug}\\s*:?`, "gi"), " ");
   t = t.replace(new RegExp(`\\b${slug}(#\\d+)?\\b`, "gi"), " ");
   t = t.replace(/\b[a-z0-9][\w.-]*\/[\w.-]+#\d+\b/gi, " ");
@@ -35,6 +43,23 @@ export function shipTaskText(requestText: string, repo: string): string {
     .trim()
     .replace(/^[:,\-—.\s]+/, "")
     .trim();
+}
+
+/**
+ * The generated unit's text (spec item 16): the request as the person wrote
+ * it, minus only what addresses the bot rather than describes the task — a
+ * mention (`<@U…>`, `<@U…|name>`) and a leading `in <repo>:` — with Slack link
+ * markup unwrapped to the bare url so the child reads the address, not Slack's
+ * display label (`<https://…/TrrMBAg7|calendar.app.google/…>` shows an
+ * ellipsis where the path was). Nothing else goes: a url, an issue reference
+ * or the slug in prose is the task's own content. Directives are the caller's
+ * to strip (parseDirectives), as they are for shipTaskText.
+ */
+export function shipUnitText(requestText: string, repo: string): string {
+  let t = requestText.replace(SLACK_LINK, " $1 ");
+  t = t.replace(/<@[^>\s]+>/g, " ");
+  t = t.replace(new RegExp(`^\\s*in\\s+${escapeRegExp(repo)}\\s*:?`, "i"), " ");
+  return t.replace(/\s+/g, " ").trim();
 }
 
 // ---- preflight (spec items 1, 2, 9, 10) --------------------------------------

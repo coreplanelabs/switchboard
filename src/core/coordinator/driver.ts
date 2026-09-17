@@ -539,7 +539,13 @@ async function runUnit(
     state = transition.state;
     for (const note of transition.notes) {
       if (note.type === "round") {
-        const body = { ...tag, index: note.index, agent: note.agent, outcome: note.outcome };
+        const body = {
+          ...tag,
+          index: note.index,
+          agent: note.agent,
+          outcome: note.outcome,
+          ...(note.gate !== undefined ? { gate: note.gate } : {}),
+        };
         await step.do(`${prefix}/note/${++notes}`, STEP_CONFIG, () => call(bot, "round", body));
       } else {
         // A merge_ready ending names the pull request as it is at the APPROVED

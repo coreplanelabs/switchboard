@@ -52,6 +52,12 @@ export const SURFACES = [
     what: "the runs index, live and finished rows",
   },
   {
+    name: "runs-index-viewing-as",
+    path: "/runs?all=1&viewing=1",
+    page: "web/src/pages/RunsIndexPage.vue",
+    what: "the runs index while an admin views it as a person: the banner, that person's rows, the picker",
+  },
+  {
     name: "run-page",
     path: "/runs/hist-1",
     page: "web/src/pages/RunRoutePage.vue",

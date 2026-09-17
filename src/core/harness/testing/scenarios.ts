@@ -100,9 +100,11 @@ export interface RunScript {
   hangModelCall?: number;
   /** The tool call of this 1-based turn never returns: the driver holds it
    *  open and lands the clock past the loop's end with it in flight, so the
-   *  harness's next tick notes the budget with the tool named, steers the
-   *  write-up and cuts the call (decision 0046, unit seven) — its result lands
-   *  `aborted` — and the write-up runs with its whole allowance. */
+   *  harness's next tick notes the budget with the tool named and cuts the call
+   *  (decision 0046, unit seven) — pi steers the write-up and aborts, the
+   *  result landing `aborted`; OpenCode interrupts the hung step and queues the
+   *  write-up, the tool's own late outcome landing marked `cut` with the next
+   *  execution — and the write-up runs with its whole allowance. */
   hangToolCall?: number;
   /** The run's wall clock runs out before the model call of this 1-based
    *  number: the clock passes the deadline with that call under way, so the
@@ -777,12 +779,12 @@ export const SCENARIOS: readonly ScenarioRow[] = [
     id: "budget-cuts-the-tool-in-flight",
     clause: "conversation",
     title:
-      "a tool call in flight at the loop's end is cut: the budget note names it, a tool_cut note says why, its result lands aborted, and the write-up runs with its allowance and answers before the lease ends",
+      "a tool call in flight at the loop's end is cut: the budget note names it, a tool_cut note says why, its result lands marked cut (pi's abort fails it), and the write-up runs with its allowance and answers before the lease ends",
     script: {
       turns: [call("c1", "bash", { command: "sleep 900" }), text("findings so far: the sleep was cut")],
       hangToolCall: 1,
     },
-    check: (run) => {
+    check: (run, driver) => {
       assert.equal(answered(run), timeBudgetAnswer("findings so far: the sleep was cut", CONFORMANCE_MAX_MINUTES));
       assert.deepEqual(
         notes(run)
@@ -800,7 +802,15 @@ export const SCENARIOS: readonly ScenarioRow[] = [
       );
       assert.equal(notes(run).filter((n) => n.kind === "harness_error").length, 0, "the cut was recorded as a failure");
       const cut = toolResults(run).find((r) => r.callId === "c1");
-      assert.ok(cut !== undefined && cut.ok === false, "the cut call's result is not on the record as a failure");
+      assert.ok(cut !== undefined, "the cut call has no result on the record");
+      assert.equal(cut.cut, true, "the cut call's result is not marked cut: the release would read it as settled");
+      // pi's abort fails the tool it cuts (`aborted`, measured on its double);
+      // OpenCode's interrupt leaves the tool its own late outcome — the fake's
+      // recorded shape is a late success after the next execution's start;
+      // whether the pinned binary fails it `aborted` instead is the live
+      // probe's to say — and the cut mark, not the outcome, is what the
+      // release reads.
+      if (driver.harness === "pi") assert.equal(cut.ok, false, "pi's aborted tool is not on the record as a failure");
       const lease = run.events.find((e) => e.type === "lease");
       assert.ok(lease && lease.type === "lease", "no lease event");
       const last = Math.max(...run.events.map((e) => e.at ?? 0));

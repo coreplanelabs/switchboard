@@ -13,6 +13,8 @@ import {
   githubSearchCodeTool,
   githubTreeTool,
   githubIssueCommentTool,
+  githubActionsRunTool,
+  githubActionsJobLogTool,
 } from "./github.js";
 import { TOOLSETS } from "./toolsets.js";
 import { WORK_ITEM_READ_TOOLS, WORK_ITEM_WRITE_TOOLS } from "./workItems.js";
@@ -257,5 +259,224 @@ describe("toolset wiring", () => {
       ].sort(),
     );
     expect(names("explore").filter((n) => n.startsWith("submit_"))).toEqual([]);
+  });
+});
+
+// docs/reference/specs/github-tools.md item 9: "why did this run fail?" from a
+// pasted Actions URL, with no shell — the run and its jobs, then one job's log
+// as its errors and its tail, timestamps stripped, secrets redacted.
+describe("github_actions_* reads", () => {
+  const T = (h: number, m: number, s: number) =>
+    `2026-09-17T${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}Z`;
+  const step = (number: number, name: string, conclusion: string, from: string, to: string) => ({
+    number,
+    name,
+    status: "completed",
+    conclusion,
+    startedAt: from,
+    completedAt: to,
+  });
+  const logLines = [
+    `${T(20, 0, 12).slice(0, -1)}.1234567Z ##[group]Run npm test`,
+    `${T(20, 0, 12).slice(0, -1)}.2234567Z [32m> vitest run[0m`,
+    `${T(20, 3, 1).slice(0, -1)}.0000000Z  FAIL  src/x.test.ts > x > adds`,
+    `${T(20, 3, 1).slice(0, -1)}.1000000Z AssertionError: expected 2 to be 3`,
+    `${T(20, 3, 9).slice(0, -1)}.0000000Z Tests  1 failed | 41 passed`,
+    `${T(20, 3, 9).slice(0, -1)}.5000000Z token was ghp_abcdefghijklmnopqrstuvwxyz0123456789 in the log`,
+    `${T(20, 3, 10).slice(0, -1)}.0000000Z ##[error]Process completed with exit code 1.`,
+  ];
+  const actions = () =>
+    new InMemoryGithubApi({
+      "acme/api": {
+        actions: [
+          {
+            id: 123,
+            name: "CI",
+            displayTitle: "fix: the thing",
+            workflowPath: ".github/workflows/ci.yml",
+            status: "completed",
+            conclusion: "failure",
+            event: "pull_request",
+            headBranch: "fix-x",
+            headSha: "abcdef0123456789abcdef0123456789abcdef01",
+            runNumber: 7,
+            runAttempt: 1,
+            url: "https://github.com/acme/api/actions/runs/123",
+            createdAt: T(20, 0, 0),
+            runStartedAt: T(20, 0, 5),
+            updatedAt: T(20, 4, 17),
+            jobs: [
+              {
+                id: 455,
+                runId: 123,
+                name: "lint",
+                status: "completed",
+                conclusion: "success",
+                url: "https://github.com/acme/api/actions/runs/123/job/455",
+                startedAt: T(20, 0, 10),
+                completedAt: T(20, 1, 10),
+                runnerName: "depot-ubuntu-24.04-4",
+                steps: [
+                  step(1, "Set up job", "success", T(20, 0, 10), T(20, 0, 12)),
+                  step(2, "Run npm run lint", "success", T(20, 0, 12), T(20, 1, 10)),
+                ],
+              },
+              {
+                id: 456,
+                runId: 123,
+                name: "test 2 of 4",
+                status: "completed",
+                conclusion: "failure",
+                url: "https://github.com/acme/api/actions/runs/123/job/456",
+                startedAt: T(20, 0, 10),
+                completedAt: T(20, 3, 11),
+                runnerName: "depot-ubuntu-24.04-4",
+                steps: [
+                  step(1, "Set up job", "success", T(20, 0, 10), T(20, 0, 12)),
+                  step(2, "Run npm test", "failure", T(20, 0, 12), T(20, 3, 10)),
+                  step(3, "Post checkout", "skipped", T(20, 3, 10), T(20, 3, 10)),
+                ],
+                log: `${logLines.join("\n")}\n`,
+              },
+              {
+                id: 457,
+                runId: 123,
+                name: "test 3 of 4",
+                status: "in_progress",
+                conclusion: null,
+                url: "https://github.com/acme/api/actions/runs/123/job/457",
+                startedAt: T(20, 0, 10),
+                completedAt: null,
+                runnerName: null,
+                steps: [],
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+  it("both are side-effect-free reads and members of GITHUB_READ_TOOLS", () => {
+    expect(githubActionsRunTool.sideEffectFree).toBe(true);
+    expect(githubActionsJobLogTool.sideEffectFree).toBe(true);
+    expect(GITHUB_READ_TOOLS.map((t) => t.name)).toEqual(
+      expect.arrayContaining(["github_actions_run", "github_actions_job_log"]),
+    );
+  });
+
+  it("github_actions_run renders the run, every job's conclusion and duration, the failed steps, and points at the log tool for the failed job", async () => {
+    const out = await text(githubActionsRunTool, { repo: "acme/api", run: 123 }, ctxFor(actions()));
+    expect(out).toBe(
+      [
+        "acme/api · CI run #7 — failure (completed) · pull_request on fix-x @ abcdef0 · “fix: the thing”",
+        "https://github.com/acme/api/actions/runs/123 · started 2026-09-17T20:00:05Z, 4m12s to the last update · .github/workflows/ci.yml",
+        "",
+        "Jobs (3): 1 failure, 1 in_progress, 1 success",
+        "✗ test 2 of 4 — failure, 3m01s (job 456)",
+        "   failed step 2 “Run npm test” (2m58s); skipped step 3 “Post checkout”",
+        "   https://github.com/acme/api/actions/runs/123/job/456",
+        "· test 3 of 4 — in_progress (job 457)",
+        "   https://github.com/acme/api/actions/runs/123/job/457",
+        "✓ lint — success, 1m00s (job 455)",
+        "",
+        "Next: github_actions_job_log with job 456 shows the failed job's errors and the end of its log.",
+      ].join("\n"),
+    );
+  });
+
+  it("github_actions_run takes a run or job URL in place of repo + id, and refuses a repo that contradicts the URL", async () => {
+    const ctx = ctxFor(actions());
+    const byUrl = await text(
+      githubActionsRunTool,
+      { run: "https://github.com/Acme/API/actions/runs/123/job/456" },
+      ctx,
+    );
+    expect(byUrl).toMatch(/^acme\/api · CI run #7 — failure/);
+    expect(
+      await text(githubActionsRunTool, { run: "https://github.com/acme/api/actions/runs/123/attempts/1" }, ctx),
+    ).toMatch(/^acme\/api · CI run #7/);
+    expect(
+      await text(
+        githubActionsRunTool,
+        { repo: "acme/other", run: "https://github.com/acme/api/actions/runs/123" },
+        ctx,
+      ),
+    ).toBe("github_actions_run: the URL names acme/api but repo says acme/other — pass one or the other.");
+    expect(await text(githubActionsRunTool, { run: "abc" }, ctx)).toBe(
+      'github_actions_run: run must be a run id or a github.com/<owner>/<repo>/actions/runs/<id> URL (got "abc").',
+    );
+    expect(await text(githubActionsRunTool, { run: 123 }, ctx)).toBe(
+      "github_actions_run: repo is required when run is an id (owner/name), or pass the run's URL.",
+    );
+    expect(await text(githubActionsRunTool, { repo: "acme/api", run: 999 }, ctx)).toMatch(
+      /^github_actions_run: not found in acme\/api — the repo is outside the Switchboard GitHub App installation/,
+    );
+  });
+
+  it("github_actions_job_log renders the job's steps, its ##[error] lines and the end of the log — timestamps stripped, ANSI stripped, secrets redacted", async () => {
+    const out = await text(githubActionsJobLogTool, { repo: "acme/api", job: 456 }, ctxFor(actions()));
+    expect(out).toBe(
+      [
+        "acme/api · job “test 2 of 4” (456) of run 123 — failure, 3m01s · runner depot-ubuntu-24.04-4",
+        "https://github.com/acme/api/actions/runs/123/job/456",
+        "Steps: ✓ 1 Set up job (2s) · ✗ 2 Run npm test (2m58s) · – 3 Post checkout (skipped)",
+        "",
+        "Errors (1):",
+        "##[error]Process completed with exit code 1.",
+        "",
+        "Last 7 lines of 7:",
+        "##[group]Run npm test",
+        "> vitest run",
+        " FAIL  src/x.test.ts > x > adds",
+        "AssertionError: expected 2 to be 3",
+        "Tests  1 failed | 41 passed",
+        "token was «redacted-github-token» in the log",
+        "##[error]Process completed with exit code 1.",
+      ].join("\n"),
+    );
+    expect(out).not.toContain("ghp_");
+    expect(out).not.toContain("");
+    expect(out).not.toContain("2026-09-17T20:03:10.0000000Z");
+  });
+
+  it("github_actions_job_log: `lines` picks the tail's length (clamped to 2000), `match` filters lines instead of tailing", async () => {
+    const ctx = ctxFor(actions());
+    const two = await text(githubActionsJobLogTool, { repo: "acme/api", job: 456, lines: 2 }, ctx);
+    expect(two).toContain(
+      "Last 2 lines of 7:\ntoken was «redacted-github-token» in the log\n##[error]Process completed with exit code 1.",
+    );
+    const matched = await text(githubActionsJobLogTool, { repo: "acme/api", job: 456, match: "fail" }, ctx);
+    expect(matched).toContain(
+      'Lines matching "fail" (2 of 7):\n FAIL  src/x.test.ts > x > adds\nTests  1 failed | 41 passed',
+    );
+    expect(matched).not.toContain("Last ");
+    const none = await text(githubActionsJobLogTool, { repo: "acme/api", job: 456, match: "zzz" }, ctx);
+    expect(none).toContain('Lines matching "zzz" (0 of 7): none.');
+    const big = await text(githubActionsJobLogTool, { repo: "acme/api", job: 456, lines: 99999 }, ctx);
+    expect(big).toContain("Last 7 lines of 7:");
+  });
+
+  it("github_actions_job_log takes a job URL, refuses a run URL without a job, a bad id, and words a 404; a live job says its log is partial", async () => {
+    const ctx = ctxFor(actions());
+    expect(
+      await text(githubActionsJobLogTool, { job: "https://github.com/acme/api/actions/runs/123/job/456" }, ctx),
+    ).toMatch(/^acme\/api · job “test 2 of 4” \(456\)/);
+    expect(await text(githubActionsJobLogTool, { job: "https://github.com/acme/api/actions/runs/123" }, ctx)).toBe(
+      "github_actions_job_log: that URL names a run, not a job — github_actions_run lists its jobs with their ids.",
+    );
+    expect(await text(githubActionsJobLogTool, { repo: "acme/api", job: "x" }, ctx)).toBe(
+      'github_actions_job_log: job must be a job id or a github.com/<owner>/<repo>/actions/runs/<run>/job/<id> URL (got "x").',
+    );
+    expect(await text(githubActionsJobLogTool, { job: 456 }, ctx)).toBe(
+      "github_actions_job_log: repo is required when job is an id (owner/name), or pass the job's URL.",
+    );
+    expect(await text(githubActionsJobLogTool, { repo: "acme/api", job: 999 }, ctx)).toMatch(
+      /^github_actions_job_log: not found in acme\/api — the repo is outside the Switchboard GitHub App installation/,
+    );
+    const live = await text(githubActionsJobLogTool, { repo: "acme/api", job: 457 }, ctx);
+    expect(live).toMatch(/^acme\/api · job “test 3 of 4” \(457\) of run 123 — in_progress · runner unknown\n/);
+    expect(live).toContain("Steps: none reported yet");
+    expect(live).toContain("The job is still running; the log is what GitHub has so far.");
+    expect(live).toContain("Last 0 lines of 0:");
   });
 });

@@ -414,6 +414,31 @@ describe("createCommandHttpHandler — caller resolution", () => {
     expect(stopNotes(reg, live.id)).toHaveLength(0);
   });
 
+  // Feature: docs/decisions/0053 — a write from a session viewing as a person is refused in the one sentence, whatever the person's grants say.
+  it("a session viewing as a person (record 0053) reads on runs.list and is refused POST runs.stop before the body is read with the view-as sentence, not the grant refusal; the same session without the cookie stops the run", async () => {
+    const table = { grants: native(OPERATOR_AND_READER), commandGroups: ["runs"] };
+    const { handler, reg, live } = await fixture({
+      grantsFor: (id) => (id === "access:admin" ? ALL_GRANTS : grantsFor(id, table)),
+    });
+    const viewing: AccessIdentity = { sub: "admin", viewAs: "slack:UIVY" };
+    const list = fakeReqRes({ method: "GET", url: "/api/runs.list?status=all" });
+    await handler(list.req, list.res, viewing);
+    expect(list.status).toBe(200);
+    const stop = stopPost(live.id);
+    await handler(stop.req, stop.res, viewing);
+    expect(stop.status).toBe(403);
+    expect(stop.json()).toEqual({
+      error: "You are viewing as slack:UIVY; writes are your own to make — exit view-as to write.",
+      code: "unauthorized",
+    });
+    expect(stop.bodyRead).toBe(false);
+    expect(stopNotes(reg, live.id)).toHaveLength(0);
+    const own = stopPost(live.id);
+    await handler(own.req, own.res, { sub: "admin" });
+    expect(own.status).toBe(200);
+    expect(stopNotes(reg, live.id)).toHaveLength(1);
+  });
+
   it("a service token is honored with exactly its configured scopes: reader-bot reads, cannot stop; an unlisted token holds nothing", async () => {
     const { handler, live } = await fixture();
     const list = fakeReqRes({ method: "GET", url: "/api/runs.list?status=all" });
@@ -648,6 +673,83 @@ describe("callerIdFor — one Access identity → caller id mapping for /api and
     const unlinked = await resolveAccessActor({ sub: "a2" }, { grantsFor: grantsLookup, personByEmail, channelsOf });
     expect(unlinked).not.toHaveProperty("memberOf");
     expect(asked).toEqual(["slack:UALICE"]); // an unlinked session asks for nobody
+  });
+
+  // Feature: docs/decisions/0053 — a cookie's word narrows an admin and nobody else.
+  it("resolveAccessActor with viewAs: a session holding all becomes the admin on behalf of the person — the person's browser-baseline grants, self and directory channels under the admin's id, viewingAs named; anyone else, or a non-person id, resolves exactly as without the cookie", async () => {
+    const table = { grants: new Map([["access:admin", ALL_GRANTS]]), commandGroups: ["runs", "config"] };
+    const grantsLookup = (id: string) => grantsFor(id, table);
+    const asked: string[] = [];
+    const channelsOf = async (actorId: string) => (asked.push(actorId), new Set(["slack:CPRIV"]));
+    const personName = async (id: string) => (id === "slack:UIVY" ? "ivy" : undefined);
+    const personByEmail = async () => ({ id: "slack:UADMIN", name: "admin" });
+    const admin = { sub: "admin", email: "admin@example.test", viewAs: "slack:UIVY" };
+    const viewing = await resolveAccessActor(admin, { grantsFor: grantsLookup, personByEmail, channelsOf, personName });
+    const own = accessActor({ sub: "admin" }, grantsLookup);
+    expect(viewing).toEqual({
+      ...own,
+      onBehalfOf: {
+        kind: "user",
+        id: "slack:UIVY",
+        grants: grantsLookup("access:slack:UIVY"), // the browser baseline, never ivy's Slack grants
+        self: ["slack:UIVY"],
+        asUser: { id: "slack:UIVY", name: "ivy" },
+        memberOf: new Set(["slack:CPRIV"]),
+      },
+      asUser: { id: "slack:UIVY", name: "ivy" },
+      viewingAs: { id: "slack:UIVY", name: "ivy" },
+    });
+    expect(viewing.id).toBe("access:admin");
+    expect(viewing.grants).toEqual(ALL_GRANTS); // the admin's own; the intersection is the person's
+    expect(viewing.self).toBeUndefined(); // the admin's own link is not consulted while viewing
+    expect(asked).toEqual(["slack:UIVY"]); // the person's channels, never the admin's
+    // Without a name lookup or with a failing one, the id stands in.
+    const unnamed = await resolveAccessActor(admin, { grantsFor: grantsLookup, channelsOf });
+    expect(unnamed.viewingAs).toEqual({ id: "slack:UIVY" });
+    const failing = await resolveAccessActor(admin, {
+      grantsFor: grantsLookup,
+      personName: async () => {
+        throw new Error("slack down");
+      },
+    });
+    expect(failing.viewingAs).toEqual({ id: "slack:UIVY" });
+    expect(failing.onBehalfOf).not.toHaveProperty("memberOf");
+    // A session without `all` carrying the same cookie: its ordinary actor, its own link intact, nobody asked.
+    asked.length = 0;
+    const alice = { sub: "a1", email: "alice@example.test", viewAs: "slack:UIVY" };
+    const aliceByEmail = async () => ({ id: "slack:UALICE", name: "alice" });
+    const narrowed = await resolveAccessActor(alice, {
+      grantsFor: grantsLookup,
+      personByEmail: aliceByEmail,
+      channelsOf,
+    });
+    expect(narrowed).toEqual(
+      await resolveAccessActor(
+        { sub: "a1", email: "alice@example.test" },
+        { grantsFor: grantsLookup, personByEmail: aliceByEmail, channelsOf },
+      ),
+    );
+    expect(narrowed).not.toHaveProperty("viewingAs");
+    expect(narrowed.self).toEqual(["access:a1", "slack:UALICE"]);
+    // An admin whose cookie names something that is not a Slack person: as if it carried none.
+    for (const viewAs of ["access:other", "http:ops", "slack:C123", "", "slack:U<script>"]) {
+      const odd = await resolveAccessActor(
+        { ...admin, viewAs },
+        { grantsFor: grantsLookup, personByEmail, channelsOf },
+      );
+      expect(odd, viewAs).toEqual(
+        await resolveAccessActor(
+          { sub: "admin", email: "admin@example.test" },
+          { grantsFor: grantsLookup, personByEmail, channelsOf },
+        ),
+      );
+    }
+    // A service token never views as anyone.
+    const svc = await resolveAccessActor(
+      { sub: "", commonName: "ci", viewAs: "slack:UIVY" },
+      { grantsFor: grantsLookup },
+    );
+    expect(svc).not.toHaveProperty("viewingAs");
   });
 
   it("resolveAccessActor bounds the channels wait: a lookup slower than the bound resolves the linked actor without memberOf, and its late rejection is swallowed", async () => {

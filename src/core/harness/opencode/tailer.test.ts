@@ -33,6 +33,10 @@ interface Fake {
   messages: Record<string, Array<{ id: string; [k: string]: unknown }>>;
   /** Sessions whose next message refill answers 500, once: a refill that fails. */
   failMessagesOnce: Set<string>;
+  /** Sessions whose next permissions refill answers 500, once. */
+  failPermissionsOnce: Set<string>;
+  /** Sessions whose next permissions read answers `null` — JSON, but no object. */
+  nullPermissionsOnce: Set<string>;
   emit(event: Record<string, unknown>): void;
   heartbeat(): void;
   drop(): void;
@@ -50,6 +54,8 @@ async function fakeServe(opts: { password?: string } = {}): Promise<Fake> {
     permissions: {},
     messages: {},
     failMessagesOnce: new Set(),
+    failPermissionsOnce: new Set(),
+    nullPermissionsOnce: new Set(),
     emit(event) {
       for (const res of fake.streams) res.write(`data: ${JSON.stringify(event)}\n\n`);
     },
@@ -86,6 +92,16 @@ async function fakeServe(opts: { password?: string } = {}): Promise<Fake> {
     }
     const perm = /^\/api\/session\/([^/]+)\/permission$/.exec(url.pathname);
     if (req.method === "GET" && perm) {
+      if (fake.failPermissionsOnce.delete(perm[1])) {
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "asks unavailable" }));
+        return;
+      }
+      if (fake.nullPermissionsOnce.delete(perm[1])) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end("null");
+        return;
+      }
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ data: fake.permissions[perm[1]] ?? [] }));
       return;
@@ -120,26 +136,36 @@ interface Tailer {
   feed: string;
   dir: string;
   exited: Promise<number | null>;
+  /** What the tailer has said on stderr so far. */
+  stderr: () => string;
 }
 
-/** The tailer as the seam starts it: the source in the run's directory, node on it, its stdout appended to the feed. */
-function startTailer(port: number, env: Record<string, string> = {}): Tailer {
+/** The tailer as the seam starts it: the source in the run's directory, node on
+ *  it, its stdout appended to the feed — or, for the tests of a feed that refuses
+ *  its writes, the feed's file opened read-only under it (`refusing`: every write
+ *  fails EBADF) or a pipe the test can stop reading (`pipe`: EPIPE once it does). */
+function startTailer(
+  port: number,
+  env: Record<string, string> = {},
+  stdout: "feed" | "refusing" | "pipe" = "feed",
+): Tailer {
   const dir = mkdtempSync(join(tmpdir(), "switchboard-oc-tailer-"));
   const paths = openCodeRunPathsAt(dir);
   writeFileSync(paths.tailerScript, OPENCODE_TAILER_SOURCE);
-  const fd = openSync(paths.feed, "a");
+  if (stdout === "refusing") writeFileSync(paths.feed, "");
+  const fd = stdout === "pipe" ? undefined : openSync(paths.feed, stdout === "feed" ? "a" : "r");
   const child = spawn(process.execPath, [paths.tailerScript], {
     env: { PATH: process.env.PATH ?? "", SWITCHBOARD_HARNESS_PORT: String(port), OPENCODE_PASSWORD: PASSWORD, ...env },
-    stdio: ["ignore", fd, "pipe"],
+    stdio: ["ignore", fd ?? "pipe", "pipe"],
   });
-  closeSync(fd);
+  if (fd !== undefined) closeSync(fd);
   let stderr = "";
   child.stderr?.on("data", (c: Buffer) => (stderr += c.toString()));
   const exited = new Promise<number | null>((resolve) => child.once("exit", (code) => resolve(code)));
   child.once("exit", () => {
-    if (stderr) console.error("tailer stderr:", stderr);
+    if (stderr && stdout === "feed") console.error("tailer stderr:", stderr);
   });
-  return { child, feed: paths.feed, dir, exited };
+  return { child, feed: paths.feed, dir, exited, stderr: () => stderr };
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -359,6 +385,97 @@ describe("the tailer", () => {
     expect(messages[2].data).toEqual([]);
     expect(events(records).map((e) => e.id)).toEqual(["evt_0", "evt_1", "evt_0", "evt_4"]);
     expect(fake.requests.slice(before).map((r) => r.line)[0]).toBe("GET /api/event");
+  }, 15_000);
+
+  it("a refill that fails outright — both reads refused — is two tailer notes and never the end of refilling: the next step end's refill runs whole (the queue's chain never rejects; a record `emit` cannot throw either)", async () => {
+    const fake = await fakeServe();
+    fake.failMessagesOnce.add("ses_1");
+    fake.failPermissionsOnce.add("ses_1");
+    fake.permissions.ses_1 = [{ id: "per_1", sessionID: "ses_1", action: "shell", resources: ["echo hi"] }];
+    fake.messages.ses_1 = [{ id: "msg_u1", type: "user", time: { created: 1 } }];
+    const tailer = startTailer(fake.port);
+    scenario(fake, tailer);
+    await until(() => fake.streams.length === 1, "the tailer to subscribe");
+    fake.emit(STEP_END("ses_1", "evt_1"));
+    await until(
+      () => fake.requests.filter((r) => r.line.includes("/session/ses_1/")).length >= 2,
+      "the refill whose reads both fail",
+    );
+    await sleep(50);
+    fake.emit(STEP_END("ses_1", "evt_2"));
+    await until(
+      () => fake.requests.filter((r) => r.line.includes("/session/ses_1/message?")).length >= 2,
+      "the next refill to run",
+    );
+    await sleep(50);
+    await stop(tailer);
+    const records = await replay(tailer.feed);
+    expect(notes(records)).toContain("permission refill failed");
+    expect(notes(records)).toContain("message refill failed");
+    const refills = records.filter((r) => r.feed === "permissions" || r.feed === "messages");
+    expect(refills.map((r) => r.feed)).toEqual(["permissions", "messages"]);
+    expect((refills[0] as { data: unknown[] }).data).toEqual(fake.permissions.ses_1);
+    expect((refills[1] as { data: Array<{ id: string }> }).data.map((m) => m.id)).toEqual(["msg_u1"]);
+  }, 15_000);
+
+  it("a permissions read that answers no object — `null` — is the permission refill's own note, the messages record of that refill still written, never the chain's `refill failed`: the next refill runs whole", async () => {
+    const fake = await fakeServe();
+    fake.nullPermissionsOnce.add("ses_1");
+    fake.messages.ses_1 = [{ id: "msg_u1", type: "user", time: { created: 1 } }];
+    const tailer = startTailer(fake.port);
+    scenario(fake, tailer);
+    await until(() => fake.streams.length === 1, "the tailer to subscribe");
+    fake.emit(STEP_END("ses_1", "evt_1"));
+    await until(
+      () => fake.requests.filter((r) => r.line.includes("/session/ses_1/message?")).length >= 1,
+      "the refill whose asks answer null",
+    );
+    await sleep(50);
+    fake.emit(STEP_END("ses_1", "evt_2"));
+    await until(
+      () => fake.requests.filter((r) => r.line.includes("/session/ses_1/permission")).length >= 2,
+      "the next refill to run",
+    );
+    await sleep(50);
+    await stop(tailer);
+    const records = await replay(tailer.feed);
+    expect(notes(records)).toContain("permission refill failed");
+    expect(notes(records)).not.toContain("refill failed");
+    const refills = records.filter((r) => r.feed === "permissions" || r.feed === "messages");
+    expect(refills.map((r) => r.feed)).toEqual(["messages", "permissions", "messages"]);
+  }, 15_000);
+
+  // A write the feed refuses is not thrown from the write: node reports it on
+  // the stream's `error` event — for the file the seam appends the feed to as
+  // for a pipe — and an `error` nobody listens for is an uncaught exception.
+  // A descriptor gone bad or a reader gone stays that way for every later
+  // write, so the tailer says it and exits non-zero rather than live on mute.
+  it("a feed that refuses every write — its file opened read-only under the tailer — is said on stderr, and the tailer exits non-zero rather than live on mute: its pid gone, a re-attach restarts it", async () => {
+    const fake = await fakeServe();
+    const tailer = startTailer(fake.port, {}, "refusing");
+    scenario(fake, tailer);
+    await until(
+      () => /a record could not be written; the feed is gone, exiting: EBADF/.test(tailer.stderr()),
+      "the refused write's note",
+    );
+    expect(await tailer.exited).toBe(1);
+    expect(readFileSync(tailer.feed, "utf8")).toBe("");
+    expect(tailer.stderr()).not.toMatch(/Unhandled|tailer failed/);
+  }, 15_000);
+
+  it("a feed whose reader is gone — the tailer's stdout a pipe nobody reads any more — is the same failure on the same event: EPIPE said on stderr, the tailer exiting non-zero", async () => {
+    const fake = await fakeServe();
+    const tailer = startTailer(fake.port, {}, "pipe");
+    scenario(fake, tailer);
+    await until(() => fake.streams.length === 1, "the tailer to subscribe");
+    tailer.child.stdout!.destroy();
+    fake.emit(STEP_END("ses_1", "evt_1"));
+    await until(
+      () => /a record could not be written; the feed is gone, exiting: write EPIPE/.test(tailer.stderr()),
+      "the refused write's note",
+    );
+    expect(await tailer.exited).toBe(1);
+    expect(tailer.stderr()).not.toMatch(/Unhandled|tailer failed/);
   }, 15_000);
 
   it("a session whose only refill failed is still swept on reconnect: the failure is noted, the session is known from then on, and the reconnect's refill carries its messages", async () => {

@@ -43,8 +43,11 @@ export type OperationResult =
   | { kind: "refused"; reason: string }
   /** the repo has no resident — the command answers `not_found` naming `repo onboard` */
   | { kind: "not-onboarded" }
-  /** transport or backend failure — never rendered as a fake result */
-  | { kind: "error"; message: string };
+  /** transport or backend failure — never rendered as a fake result. `transient`
+   *  when the backend typed the failure as the platform's own transient (the
+   *  resident unavailable for a moment; the same op may succeed when re-run),
+   *  so a caller can say so instead of reporting a failure in the op. */
+  | { kind: "error"; message: string; transient?: boolean };
 
 export interface Operations {
   /** `trace.span`: the caller's span, when it has one — the backend's HTTP

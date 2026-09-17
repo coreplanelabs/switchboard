@@ -220,7 +220,7 @@ export function createResidentsViewHandler(
           runs: live,
         };
         res.writeHead(200, WEB_HTML_HEADERS);
-        res.end(shell("Resident repos", seed));
+        res.end(shell(ctx.actor, "Resident repos", seed));
         finish(200);
         return;
       }
@@ -230,7 +230,7 @@ export function createResidentsViewHandler(
         return;
       }
       res.writeHead(200, WEB_HTML_HEADERS);
-      res.end(shell(route.slug, { page: "resident", slug: route.slug, record }));
+      res.end(shell(ctx.actor, route.slug, { page: "resident", slug: route.slug, record }));
       finish(200);
     });
     return true;

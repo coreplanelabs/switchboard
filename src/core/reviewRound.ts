@@ -66,9 +66,22 @@ export type FetchPrCommits = (q: { repo: string; base: string; sha: string }) =>
  *  the run left uncommitted or unpushed is named — a run starts from a clean
  *  tree, so nothing in it survives the run (resident-repos item 16a). A hard
  *  stop means "tear it down now" (the abandoned command may still be running
- *  in there) → "always" regardless of the identity. */
-export function releaseModeFor(identity: Identity, opts: { hardStopped: boolean }): ReleaseMode {
-  return identity === "read" || opts.hardStopped ? "always" : "if-idle";
+ *  in there) → "always" regardless of the identity; so does a command the
+ *  run's ending may have left running (`callsInFlight` on the record: a call
+ *  the ending's abort or interrupt cut, a call open when the run failed, was
+ *  interrupted or hard-stopped — never a call a completed or softly stopped
+ *  run left unpaired, which ran in the bot or lost its result to a gap) — a
+ *  release that waits for idle would be
+ *  refused by the command and hold the workspace past the run — and so does
+ *  the gate's bypass, whatever is in flight: what ran in the workspace was
+ *  never vetted (harness.md item 13). */
+export function releaseModeFor(
+  identity: Identity,
+  opts: { hardStopped: boolean; commandInFlight?: boolean; gateBypassed?: boolean },
+): ReleaseMode {
+  return identity === "read" || opts.hardStopped || opts.commandInFlight === true || opts.gateBypassed === true
+    ? "always"
+    : "if-idle";
 }
 
 /** One round's workspace: the executor selection made for the round's agent,
@@ -82,6 +95,10 @@ export interface RoundWorkspace {
    */
   release(opts: {
     hardStopped: boolean;
+    /** The run's ending may have left a command running in the workspace (`callsInFlight` on the record). */
+    commandInFlight?: boolean;
+    /** The run failed on the gate's bypass (`HarnessGateBypassedError`): what ran in the workspace was never vetted. */
+    gateBypassed?: boolean;
     /** The `post.workspace_release` span: the executor's release becomes its child. */
     span?: Span;
     /** The branches the run pushed and the pull requests they head (resident-repos
@@ -114,6 +131,13 @@ export async function attachRoundWorkspace(input: {
     /** A resumed run's recorded binding (run-history item 54): the factory
      *  re-attaches there and never provisions again. */
     reattach?: WorkspaceBinding;
+    /** The run's hard stop, where the caller holds a run control: the first
+     *  attach's wake wait ends on it at once (execution.md item 9). */
+    stopSignal?: AbortSignal;
+    /** The run's remaining wall clock, where the caller holds a run control
+     *  (`RunControl.remainingMs`; undefined until the lease starts): every
+     *  attach the resident executor opens is clipped to it (execution.md item 9). */
+    remainingMs?: () => number | undefined;
   };
   logKey: string;
   /** The caller's `dispatch.workspace.attach` span: the probe and the attach
@@ -132,11 +156,15 @@ export async function attachRoundWorkspace(input: {
       headSha: input.round.headSha,
       ...(input.round.ownPr !== undefined ? { ownPr: input.round.ownPr } : {}),
       ...(input.round.reattach !== undefined ? { reattach: input.round.reattach } : {}),
+      ...(input.round.stopSignal !== undefined ? { stopSignal: input.round.stopSignal } : {}),
+      ...(input.round.remainingMs !== undefined ? { remainingMs: input.round.remainingMs } : {}),
     },
     input.span,
   );
   const release = async (opts: {
     hardStopped: boolean;
+    commandInFlight?: boolean;
+    gateBypassed?: boolean;
     span?: Span;
     pushed?: ReleaseOptions["pushed"];
   }): Promise<void> => {
@@ -509,12 +537,15 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
         input.notify.headMoved(`head moved → ${current.slice(0, 7)}`);
         await input.notify.reply(headRereviewNote({ where, reviewed: expected, current, move })).catch(() => {});
         // Resident: move the worktree ourselves (one re-attach at the new
-        // head). Anything else — no moveTo, a refusal, a tip that moved
-        // again under the re-attach — leaves the model to check it out.
+        // head), the round's hard stop riding in so a move that waits on the
+        // resident ends with the stop. Anything else — no moveTo, a refusal,
+        // a tip that moved again under the re-attach — leaves the model to
+        // check it out.
         let worktreeMoved = false;
         if (executor.moveTo) {
           try {
-            const at = normalizeHead((await executor.moveTo(current, trace)).sha);
+            const moved = await executor.moveTo(current, { ...trace, signal: turn.control.hardSignal });
+            const at = normalizeHead(moved.sha);
             worktreeMoved = at !== undefined && sameCommit(at, current);
             console.log(
               `[review] ${logKey} worktree moved to ${at?.slice(0, 7) ?? "?"}${worktreeMoved ? "" : " (not the expected head)"}`,
@@ -749,9 +780,8 @@ export async function runReviewPostStep(input: {
     const target: ReviewCommentTarget = { ...postTarget, commitId: pinned };
     // The verdict line is built here, by code — the model's prose never
     // decides whether the body starts with "LGTM:" (auto-approve contract).
-    const body = carried
-      ? `${buildReviewPostBody(input.answer, verdict)}\n\n${carriedFooter(carried)}`
-      : buildReviewPostBody(input.answer, verdict);
+    const rendered = buildReviewPostBody(input.answer, verdict, { repo: postTarget.repo, head: pinned });
+    const body = carried ? `${rendered}\n\n${carriedFooter(carried)}` : rendered;
     const where = `${postTarget.repo}#${postTarget.number}`;
     try {
       await input.post(target, body);

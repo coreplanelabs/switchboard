@@ -43,6 +43,37 @@ export const LINEAR_TIMING = {
  *  which stamps the expiry on its own clock. */
 export const CONFIRMATION_TTL_MS = 10 * MINUTE_MS;
 
+/** How long a dispatch's FIRST attach to a resident — a fresh run's, or a
+ *  resumed run's re-attach to its recorded worktree — waits for the resident
+ *  to wake when the Worker typed its refusal as the platform's transient
+ *  (docs/reference/specs/execution.md item 9): a Durable Object reset or lost
+ *  under the attach clears in seconds, so a minute is generous, and far under
+ *  the wake ceiling a mid-run re-attach may take — the card is silent while
+ *  this wait runs, then names it. It bounds the PROBING: past it no further
+ *  probe is made and, with nothing bound, a fresh run falls cold and a resumed
+ *  run is refused, the wait named either way; a re-attach already opened
+ *  inside it runs to the attach's own timeout. The run's own stop ends any of
+ *  it at once. Read by the executor factory. */
+export const FIRST_ATTACH_WAIT_MS = MINUTE_MS;
+/** The least an attach REQUEST is opened with (docs/reference/specs/execution.md
+ *  item 9): a re-attach that recreates the worktree clones from the resident's
+ *  local mirror and may install deps, so a bound under this could not finish
+ *  and a request cut mid-clone is struck as a rollout — the strike this floor
+ *  exists to stop counting. A run with less than this left past its write-up
+ *  reserve opens no attach at all (`attachBoundWithinRun`: `exhausted`). Half
+ *  a minute: the one-second floor a COMMAND keeps (`BASH_TIMEOUT_MIN_MS`) is
+ *  the model's to choose; an attach is opened on the run's behalf. */
+export const ATTACH_REQUEST_MIN_MS = 30_000;
+/** How long a harness's one more command waits for a container that is down
+ *  under a live run to answer (docs/reference/specs/harness-pi.md item 16):
+ *  the platform rebuilt a replaced resident container in about a minute, and
+ *  a run with work in flight should not hang on a container that is not coming
+ *  back for as long as a fresh run may wait for its first container
+ *  (`SANDBOX_START_WAIT_MAX_MS`, ten minutes, execution.md item 23 — a wait
+ *  before anything ran). A wait that runs out decides nothing; the failure
+ *  that opened the question stands. */
+export const HARNESS_PROBE_WAIT_MS = 5 * MINUTE_MS;
+
 /** The presets that run the tool loop, and the one pipeline preset. */
 export const LOOP_PRESETS = ["general", "coding", "review", "research", "explore", "conductor"] as const;
 export type LoopPreset = (typeof LOOP_PRESETS)[number];

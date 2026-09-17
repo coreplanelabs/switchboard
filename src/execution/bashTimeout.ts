@@ -4,7 +4,7 @@
 // Deliberately free of node: imports so wrangler can bundle it into Workers.
 // The numbers are rows of src/core/budgets.ts (docs/decisions/0046); this file
 // keeps their names for the readers that learned them here.
-import { ALLOWANCES, BASH_COMMAND, MINUTE_MS } from "../core/budgets.js";
+import { ALLOWANCES, ATTACH_REQUEST_MIN_MS, BASH_COMMAND, MINUTE_MS } from "../core/budgets.js";
 
 /** Default per-command budget when the caller passes no timeoutMs. */
 export const BASH_TIMEOUT_MS = BASH_COMMAND.defaultMinutes * MINUTE_MS;
@@ -50,8 +50,10 @@ export function clampBashTimeout(requested: unknown): number {
 export type RunBudget =
   { kind: "unchanged" } | { kind: "clipped"; timeoutMs: number; note: string } | { kind: "exhausted"; note: string };
 
+/** Whole seconds for the notes below, never negative: the two clip notes phrase the reserve alike. */
+const secs = (ms: number): number => Math.max(0, Math.round(ms / 1000));
+
 export function bashBudgetWithinRun(wantedMs: number, remainingMs: number): RunBudget {
-  const secs = (ms: number) => Math.max(0, Math.round(ms / 1000));
   const cap = Math.trunc(remainingMs - RUN_DEADLINE_RESERVE_MS);
   if (cap < BASH_TIMEOUT_MIN_MS) {
     return {
@@ -67,6 +69,35 @@ export function bashBudgetWithinRun(wantedMs: number, remainingMs: number): RunB
     timeoutMs: cap,
     note: `[timeout clipped to ${secs(cap)}s — the run's wall clock ends in ${secs(remainingMs)}s]`,
   };
+}
+
+/** The bound on an attach request an executor opens while its run has
+ *  `remainingMs` of wall clock left (`ResidentExecutorOptions.remainingMs`):
+ *  `bounded` by the attach's own default, `BASH_TIMEOUT_MS` — an attach may
+ *  clone and install deps — clipped to what the run has left less the same
+ *  write-up reserve a command keeps back, so an attach never holds a run past
+ *  its lease and the model keeps its write-up; never raised above the default.
+ *  Inside the reserve, or with less than an attach's floor past it
+ *  (`ATTACH_REQUEST_MIN_MS`: a bound too short to clone would be cut and
+ *  struck as a rollout), `exhausted`: the request is not opened at all — the
+ *  resident would run the attach to its end server-side for a run that is
+ *  ending, and the caller would get a deadline it could read as waitable — and
+ *  the note names the run's clock. The command's own budget never bounds an
+ *  attach: the attach is not the command, and the command's one-second floor
+ *  is the model's to choose. */
+export type AttachBound = { kind: "bounded"; timeoutMs: number } | { kind: "exhausted"; note: string };
+
+export function attachBoundWithinRun(remainingMs: number): AttachBound {
+  const left = Math.trunc(remainingMs - RUN_DEADLINE_RESERVE_MS);
+  if (left < ATTACH_REQUEST_MIN_MS) {
+    return {
+      kind: "exhausted",
+      note:
+        `the run has ${secs(remainingMs)}s of wall clock left, inside the ${secs(RUN_DEADLINE_RESERVE_MS)}s ` +
+        `write-up reserve or under the ${secs(ATTACH_REQUEST_MIN_MS)}s an attach needs, so no attach was opened`,
+    };
+  }
+  return { kind: "bounded", timeoutMs: Math.min(BASH_TIMEOUT_MS, left) };
 }
 
 /** The line a timed-out command shows the model: names the limit that fired

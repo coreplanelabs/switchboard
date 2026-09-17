@@ -1,4 +1,6 @@
 import { resolve } from "node:path";
+import { FIRST_ATTACH_WAIT_MS } from "../core/budgets.js";
+import { RUN_DEADLINE_RESERVE_MS, attachBoundWithinRun } from "./bashTimeout.js";
 import { oneLine } from "../core/redact.js";
 import type { Backend } from "../core/trace/attrs.js";
 import type { Span } from "../core/trace/types.js";
@@ -7,7 +9,7 @@ import { residentTraceOf, type ResidentTrace } from "./residentTrace.js";
 import { mkdirSync } from "node:fs";
 import type { AgentDef, Identity, MachineClass } from "../agents/registry.js";
 import type { RunProfile } from "../config/profile.js";
-import { LocalExecutor, type Executor } from "./executor.js";
+import { LocalExecutor, isRunStopError, type Executor } from "./executor.js";
 import { E2BExecutor } from "./e2b.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import {
@@ -22,7 +24,10 @@ import {
 } from "./seedPlan.js";
 import {
   ResidentExecutor,
+  ResidentLeaseSpentError,
   ResidentNeedsRefError,
+  waitOnStatus,
+  wakeStopped,
   type ResidentBinding,
   type ResidentExecutorOptions,
   type ResidentStatusProbe,
@@ -110,6 +115,17 @@ export interface ExecutorContext {
    *  unreachable backend is a `WorkspaceReattachRefusedError`, never a fallback.
    *  Absent for every fresh run, which provisions as it always did. */
   reattach?: WorkspaceBinding;
+  /** The run's hard stop (`RunControl.hardSignal`), where the caller has one:
+   *  the first attach's wake wait ends at once on it, and a stopped run is
+   *  never provisioned cold. Absent for a caller without a run control. */
+  stopSignal?: AbortSignal;
+  /** The run's remaining wall clock (`RunControl.remainingMs`; undefined until
+   *  the harness starts the lease), where the caller has one: the resident
+   *  executor built here carries it, so every attach it opens for the run's
+   *  life — a recovery attach, the wake wait's re-attach — is clipped to the
+   *  run (execution.md item 9). Absent for a caller without a run: the attach
+   *  default alone bounds. */
+  remainingMs?: () => number | undefined;
 }
 
 /** Where a run's workspace is (docs/reference/specs/run-history.md item 54):
@@ -176,6 +192,51 @@ export class WorkspaceReattachRefusedError extends Error {
     super(`the run's workspace on the ${recorded.backend} backend could not be re-attached: ${why}`);
     this.name = "WorkspaceReattachRefusedError";
   }
+}
+
+/** A resumed run's re-attach not opened, or not finished: the run's lease is
+ *  inside its write-up reserve, or under what an attach needs past it
+ *  (`attachBoundWithinRun` says `exhausted`; execution.md item 9) — read at the
+ *  entry, again after the probe's wait, and off the executor's own
+ *  `ResidentLeaseSpentError` when the lease ran out under the attach's wake
+ *  wait — so no request was made or none more will be: the resident would run
+ *  an attach to its end for a run that is ending. Not a refusal: the caller
+ *  ends the run on its budget instead of restarting it from its request.
+ *  `leftMs` is the run's wall clock when it was decided. Thrown only where the
+ *  lease has started (a relaunch's re-attach carries the run's clock); a
+ *  dispatch-time resume, before the lease, never meets it. */
+export class WorkspaceReattachLeaseSpentError extends Error {
+  readonly why: string;
+  constructor(
+    readonly recorded: WorkspaceBinding,
+    readonly leftMs: number,
+  ) {
+    const why =
+      `the run has ${Math.max(0, Math.round(leftMs / 1000))}s of its lease left, inside the ` +
+      `${Math.round(RUN_DEADLINE_RESERVE_MS / 1000)}s write-up reserve or under what an attach needs; no re-attach was opened`;
+    super(`the run's workspace on the ${recorded.backend} backend was not re-attached: ${why}`);
+    this.name = "WorkspaceReattachLeaseSpentError";
+    this.why = why;
+  }
+}
+
+/** The card's and the note's word for a wait the selection spent — the probe's
+ *  through a blip, the attach's through a wake — one wording on the fresh
+ *  selection, the attach-failed and the re-attach paths alike; nothing when
+ *  nothing was waited. */
+function waitedNote(waitedMs: number): string {
+  return waitedMs > 0 ? ` after waiting ${Math.round(waitedMs / 1000)}s` : "";
+}
+
+/** How long a resumed run's re-attach may PROBE — the first attach's budget,
+ *  clipped to what the run's lease has left past its write-up reserve where
+ *  the executor carries the run's clock (execution.md item 9), so the probe's
+ *  wait and the attach's wake wait cannot spend the run into the reserve and
+ *  hand the lease's end to a refusal. A fresh run's first attach, before the
+ *  lease starts, keeps the whole budget. */
+function leaseClippedBudget(remainingMs: number | undefined): number {
+  if (remainingMs === undefined) return FIRST_ATTACH_WAIT_MS;
+  return Math.max(0, Math.min(FIRST_ATTACH_WAIT_MS, Math.trunc(remainingMs - RUN_DEADLINE_RESERVE_MS)));
 }
 
 /** Executor selection result. `note` is present when resident selection fell
@@ -302,7 +363,12 @@ export async function makeExecutor(
     const token = processSecrets.named(tokenEnv);
     if (!token) throw new Error(`execution.resident is configured but ${tokenEnv} is not set`);
     const resource = repoResourceId(ctx.repo);
-    let probe: ResidentStatusProbe = await probeResident(resident, token, resource, span);
+    const through = await probeThroughBlip(resident, token, resource, span, ctx.stopSignal);
+    let probe: ResidentStatusProbe = through.probe;
+    /** How long the selection probe waited through a blip the Worker typed
+     *  transient (execution.md item 9): drawn from the first attach's budget
+     *  and named on the card with the attach's own wait. */
+    const probeWaitMs = through.waitedMs;
     /** Set when the run held the one /await-restore request (item 27) — the
      *  card names the wait whichever way the answer went. */
     let waitedForRestore = false;
@@ -364,9 +430,18 @@ export async function makeExecutor(
             readonly,
             sha: ctx.headSha,
             ...(ctx.ownPr !== undefined ? { ownPr: ctx.ownPr } : {}),
+            ...(ctx.remainingMs !== undefined ? { remainingMs: ctx.remainingMs } : {}),
           },
           nonWarm,
           span,
+          // A refusal the Worker typed transient is waited through here, under
+          // what the probe's wait left of the factory's own budget and the
+          // run's stop (item 9); the card names both waits' total.
+          {
+            signal: ctx.stopSignal,
+            budgetMs: Math.max(0, FIRST_ATTACH_WAIT_MS - probeWaitMs),
+            waitedMs: probeWaitMs,
+          },
         );
         // Item 27: the wait is on the card whichever state the restore landed on.
         return waitedForRestore
@@ -377,13 +452,23 @@ export async function makeExecutor(
           : selection;
       } catch (err) {
         if (err instanceof ResidentNeedsRefError) throw err;
+        // A stopped run is not a run to provision cold for: the stop that ended
+        // the attach's wait ends the dispatch, as the runner's stop path would.
+        // Read by the error's typed shape: another failure beside a pending stop
+        // is that failure, and falls cold as it always did.
+        if (isRunStopError(err)) throw err;
         failedAttach = residentTraceOf(err);
-        // Item 27: an attach that fails after the wait names the wait too.
-        const wait = waitedForRestore ? " after waiting for the resident's restore" : "";
-        reason = oneLine(`resident attach failed (${err instanceof Error ? err.message : String(err)})${wait}`);
+        // Item 27: an attach that fails after a wait names the wait too — the
+        // probe's through a typed blip (item 9) and the restore's alike, so a
+        // run that started late says why even when it then fell cold.
+        const restoreWait = waitedForRestore ? " after waiting for the resident's restore" : "";
+        reason = oneLine(
+          `resident attach failed (${err instanceof Error ? err.message : String(err)})${waitedNote(probeWaitMs)}${restoreWait}`,
+        );
       }
     } else if (probe.kind === "unreachable") {
-      reason = oneLine(`resident unreachable (${probe.error})`);
+      // A probe waited through a typed blip that never cleared names the wait.
+      reason = oneLine(`resident unreachable (${probe.error})${waitedNote(probeWaitMs)}`);
     } else if (probe.state !== "not-onboarded") {
       // Item 27: a restore that landed on a non-serviceable state still names the wait.
       const wait = waitedForRestore ? " after waiting for the resident's restore" : "";
@@ -504,6 +589,20 @@ async function reattachWorkspace(
   span?: Span,
 ): Promise<ExecutorSelection> {
   const refuse = (why: string) => new WorkspaceReattachRefusedError(recorded, oneLine(why));
+  // The run's lease first, and again after every wait below: inside the
+  // write-up reserve, or under what an attach needs past it, nothing is probed
+  // or asked for, whatever the backend — the run ends on its budget, and its
+  // caller reads this apart from a refusal (execution.md item 9). The clock is
+  // read each time, since the probe's wait and the attach's wake wait spend it.
+  const leaseSpent = (): WorkspaceReattachLeaseSpentError | undefined => {
+    const left = ctx.remainingMs?.();
+    if (left === undefined) return undefined;
+    return attachBoundWithinRun(left).kind === "exhausted"
+      ? new WorkspaceReattachLeaseSpentError(recorded, left)
+      : undefined;
+  };
+  const spentAtEntry = leaseSpent();
+  if (spentAtEntry) throw spentAtEntry;
   if (recorded.backend !== "resident") {
     const input =
       ctx.profile.machine === "blank"
@@ -518,10 +617,25 @@ async function reattachWorkspace(
   const token = processSecrets.named(tokenEnv);
   if (!token) throw new Error(`execution.resident is configured but ${tokenEnv} is not set`);
   const resource = repoResourceId(ctx.repo);
-  const probe = await probeResident(resident, token, resource, span);
-  if (probe.kind === "unreachable") throw refuse(`resident unreachable (${probe.error})`);
+  // The selection probe waited through a blip the Worker typed transient, as a
+  // fresh run's is (execution.md item 9): drawn from the first attach's budget
+  // clipped to the run's lease, the run's stop riding in, named on the note. A
+  // refusal at once here would close the run and dispatch its request again for
+  // a blip a re-probe clears; a wait that spent the lease is the lease's end.
+  const budgetMs = leaseClippedBudget(ctx.remainingMs?.());
+  const { probe, waitedMs: probeWaitMs } = await probeThroughBlip(
+    resident,
+    token,
+    resource,
+    span,
+    ctx.stopSignal,
+    budgetMs,
+  );
+  const spentProbing = leaseSpent();
+  if (spentProbing) throw spentProbing;
+  if (probe.kind === "unreachable") throw refuse(`resident unreachable (${probe.error})${waitedNote(probeWaitMs)}`);
   if (!isServiceable(probe.state, probe.reason))
-    throw refuse(`resident ${probe.state}${probe.reason ? ` (${probe.reason})` : ""}`);
+    throw refuse(`resident ${probe.state}${probe.reason ? ` (${probe.reason})` : ""}${waitedNote(probeWaitMs)}`);
   const nonWarm =
     probe.state === "warm" ? undefined : oneLine(`${probe.state}${probe.reason ? ` (${probe.reason})` : ""}`);
   const executor = new ResidentExecutor({
@@ -533,11 +647,26 @@ async function reattachWorkspace(
     readonly: ctx.profile.identity === "read" ? true : undefined,
     sha: ctx.headSha,
     reuse: true,
+    ...(ctx.remainingMs !== undefined ? { remainingMs: ctx.remainingMs } : {}),
   });
   let binding: ResidentBinding;
   try {
-    binding = await executor.attach(span);
+    // This dispatch's first attach, like a fresh run's: a refusal the Worker
+    // typed transient is waited through under what the probe's wait left of
+    // the same lease-clipped budget, and the run's stop ends the wait at once.
+    binding = await executor.attach(span, {
+      signal: ctx.stopSignal,
+      budgetMs: Math.max(0, budgetMs - probeWaitMs),
+    });
   } catch (err) {
+    // The run's own stop ended the attach: the executor's typed `aborted` error
+    // is that stop, never a re-attach refusal — which would close this run and
+    // dispatch its request again. The lease's end under the attach's wake wait
+    // (`ResidentLeaseSpentError`: the re-attach was not opened because the run
+    // is inside its reserve) is the run's end on its budget, never a refusal
+    // either. Any other failure beside a pending stop is the refusal it is.
+    if (isRunStopError(err)) throw err;
+    if (err instanceof ResidentLeaseSpentError) throw new WorkspaceReattachLeaseSpentError(recorded, err.leftMs);
     throw refuse(err instanceof Error ? err.message : String(err));
   }
   // The tree the resident answered must be the run's: the same worktree, the
@@ -552,6 +681,9 @@ async function reattachWorkspace(
     );
   }
   const where = `${resource.replace(/^repo:/, "")} · ${binding.ref}@${binding.sha.slice(0, 7)}`;
+  // The waits are on the note as a fresh run's are: the probe's and the attach's, one total.
+  const wokeSeconds = Math.round((probeWaitMs + (binding.wokeAfterMs ?? 0)) / 1000);
+  const woke = wokeSeconds > 0 ? ` · after waiting ${wokeSeconds}s for the resident` : "";
   return {
     executor,
     resident: true,
@@ -560,8 +692,8 @@ async function reattachWorkspace(
     ...(binding.attachMs !== undefined ? { attachMs: binding.attachMs } : {}),
     binding,
     note: nonWarm
-      ? `resident ${nonWarm} · ${where} · re-attached to the run's worktree`
-      : `resident · ${where} · re-attached to the run's worktree`,
+      ? `resident ${nonWarm} · ${where} · re-attached to the run's worktree${woke}`
+      : `resident · ${where} · re-attached to the run's worktree${woke}`,
   };
 }
 
@@ -582,21 +714,35 @@ async function openResident(
   /** `<state>[ (<reason>)]` of a serviceable non-warm resident; undefined when warm. */
   nonWarm?: string,
   span?: Span,
+  /** How a refusal the Worker typed transient is waited through: the run's
+   *  stop, which ends the wait at once, and the budget past which the attach
+   *  fails with the wake's strike; `waitedMs` is a wait the caller already
+   *  spent before this attach (the selection probe's), added to the total the
+   *  card names. */
+  wait: { signal?: AbortSignal; budgetMs?: number; waitedMs?: number } = {},
 ): Promise<ExecutorSelection> {
   let executor = new ResidentExecutor(opts);
   let binding: ResidentBinding;
   let byDefault = false;
+  // One budget across the attach and its retry by default: the second attach
+  // gets what the first's WAIT left — the time spent waiting for the wake, never
+  // the first request's own latency (a stale-mirror fetch before the 409 is the
+  // attach's, not the wake's) — and the card names the total waited.
   try {
-    binding = await executor.attach(span);
+    binding = await executor.attach(span, wait);
   } catch (err) {
     if (!(err instanceof ResidentNeedsRefError) || !err.defaultRef) throw err;
     byDefault = true;
+    const firstWaitMs = err.wokeAfterMs ?? 0;
+    const budgetLeft = wait.budgetMs === undefined ? undefined : Math.max(0, wait.budgetMs - firstWaitMs);
     // Said to the resident too (`refByDefault`), so the binding it makes is
     // recorded as bound by default — the one kind that may later move onto the
     // thread's own PR branch (item 16).
     executor = new ResidentExecutor({ ...opts, refHint: err.defaultRef, refByDefault: true });
     try {
-      binding = await executor.attach(span);
+      binding = await executor.attach(span, { ...wait, budgetMs: budgetLeft });
+      const totalWaitMs = firstWaitMs + (binding.wokeAfterMs ?? 0);
+      if (totalWaitMs > 0) binding = { ...binding, wokeAfterMs: totalWaitMs };
     } catch (again) {
       if (again instanceof ResidentNeedsRefError) {
         throw new Error(
@@ -616,6 +762,10 @@ async function openResident(
   const where = `${opts.resource.replace(/^repo:/, "")} · ${binding.ref}@${binding.sha.slice(0, 7)}`;
   const why = byDefault ? " (repo default — no branch named)" : "";
   const moved = rebindLabel(binding);
+  // The wake wait is on the card, as item 27's restore wait is: a run that
+  // started late says why. A blip cleared under a second started nobody late.
+  const wokeSeconds = Math.round(((wait.waitedMs ?? 0) + (binding.wokeAfterMs ?? 0)) / 1000);
+  const woke = wokeSeconds > 0 ? ` · after waiting ${wokeSeconds}s for the resident` : "";
   return {
     executor,
     resident: true,
@@ -624,8 +774,8 @@ async function openResident(
     ...(binding.attachMs !== undefined ? { attachMs: binding.attachMs } : {}),
     binding,
     note: nonWarm
-      ? `resident ${nonWarm} · ${where}${why}${moved} — attached to the last snapshot`
-      : `resident · ${where}${why}${moved}`,
+      ? `resident ${nonWarm} · ${where}${why}${moved} — attached to the last snapshot${woke}`
+      : `resident · ${where}${why}${moved}${woke}`,
   };
 }
 
@@ -724,6 +874,12 @@ async function probeResident(
   token: Secret,
   resource: string,
   span?: Span,
+  /** The run's stop, where the caller has one: it rides into every probe —
+   *  the selection's first and each re-probe of its blip wait alike. The
+   *  deadline is the selection's own, configured or 2 s, for every probe — an
+   *  operator who set it to keep a cold fallback fast gets that pace through
+   *  the wait too. */
+  stop?: AbortSignal,
 ): Promise<ResidentStatusProbe> {
   if (probeOutage && systemClock() < probeOutage.until) {
     return { kind: "unreachable", error: `${probeOutage.error}; probe skipped during outage window`, transport: true };
@@ -734,11 +890,100 @@ async function probeResident(
     resource,
     cfg.probeTimeoutMs ?? 2000,
     span,
+    stop,
   );
-  if (probe.kind === "unreachable" && probe.transport) {
-    probeOutage = { until: systemClock() + PROBE_OUTAGE_WINDOW_MS, error: probe.error };
-  }
+  // The run's own stop aborted the request: the stop's signal decides before
+  // the error's name, as at every send — the caller's stop, never the network,
+  // and no outage window for every other dispatch in the process.
+  if (probe.kind === "unreachable" && probe.transport && !stop?.aborted) armOutage(probe.error);
   return probe;
+}
+
+/** Open the outage window (resident-repos.md item 25): the resident service is
+ *  not answering — the transport failing, or the edge's own page for a whole
+ *  blip wait — so the next dispatches in the process fall cold without a probe. */
+function armOutage(error: string): void {
+  probeOutage = { until: systemClock() + PROBE_OUTAGE_WINDOW_MS, error };
+}
+
+/** The selection probe, waited through the platform's blip (execution.md
+ *  item 9) — a fresh run's selection and a resumed run's re-attach alike, one
+ *  function: a 5xx the Worker typed `transient` (the Durable Object reset or
+ *  lost under the probe, which the attach's own wait would have waited through
+ *  a moment later) or one carrying no Worker document at all (the edge's own
+ *  error page, where the Worker never ran) is re-probed on the wake path's one
+ *  loop (`waitOnStatus`): at once first — a blip already recovered from costs
+ *  no pause, as the wake wait's first view costs none — then every poll, under
+ *  the first attach's budget, each probe under the selection's own deadline,
+ *  the run's stop riding into the first probe and every re-probe and ending
+ *  the wait with its typed error. Every probe goes through `probeResident`,
+ *  so a transport failure met inside the wait opens the outage breaker
+ *  exactly as the first probe's would (a stop's abort never does); it, the
+ *  Worker's own untyped 5xx or any other answer ends the wait at once. A wait
+ *  SPENT on the edge's page — more of its views the edge's own page, no Worker
+ *  document, than the Worker's typed blip — opens the breaker too (item 25):
+ *  that is the platform not answering, and an outage costs one wait, not one
+ *  per concurrent dispatch; a wait spent on the Worker's own typed blip does
+ *  not, whatever view either ended on. Answers the last view and how long
+ *  was waited, on a clock that starts before the first probe — nothing when
+ *  the first view was not the blip. */
+async function probeThroughBlip(
+  cfg: ResidentExecutionConfig,
+  token: Secret,
+  resource: string,
+  span?: Span,
+  stopSignal?: AbortSignal,
+  /** How long the wait may probe: the first attach's budget, or what a resumed run's lease leaves of it (`leaseClippedBudget`). */
+  budgetMs: number = FIRST_ATTACH_WAIT_MS,
+): Promise<{ probe: ResidentStatusProbe; waitedMs: number }> {
+  const since = systemClock();
+  const first = await probeResident(cfg, token, resource, span, stopSignal);
+  // The stop aborted the probe: the stop's own typed error, as the loop throws
+  // it after each of its probes — never a cold fallback on the view the stop
+  // itself produced. A stop pending beside an answer is read where the
+  // dispatch reads it, at the attach (execution.md item 9).
+  if (first.kind === "unreachable" && first.transport && stopSignal?.aborted) throw wakeStopped("/status");
+  // The blip is an ANSWER the platform's transient — the Worker's typed 5xx or
+  // the edge's page — never the transport failing, which is the breaker's case
+  // and ends the wait at once (awaitWake reads the transport case differently:
+  // after a transient refusal it is the same blip there).
+  const blip = (view: ResidentStatusProbe): boolean => view.kind === "unreachable" && view.transient === true;
+  if (!blip(first)) return { probe: first, waitedMs: 0 };
+  let reprobed = false;
+  // What the wait was SPENT on, counted over every view it read: the edge's
+  // page (no Worker document) against the Worker's own typed blip. The
+  // breaker's case is the platform not answering for the wait, never the one
+  // view the wait happened to end on — an edge wait that ends on one typed
+  // view is still an edge wait; one edge page after a minute of typed blips is not.
+  let edgeViews = 0;
+  let typedViews = 0;
+  const count = (view: ResidentStatusProbe): void => {
+    if (view.kind === "unreachable" && view.edge) edgeViews++;
+    else typedViews++;
+  };
+  count(first);
+  return waitOnStatus<{ probe: ResidentStatusProbe; waitedMs: number }>({
+    first,
+    since,
+    probe: (signal) => probeResident(cfg, token, resource, span, signal),
+    budgetMs,
+    signal: stopSignal,
+    route: "/status",
+    judge: async (view, spent) => {
+      if (!blip(view)) return { end: { probe: view, waitedMs: spent() } };
+      if (reprobed) count(view); // the first view is counted once, above
+      const verdict = reprobed ? "wait" : "again";
+      reprobed = true;
+      return verdict;
+    },
+    spent: (last, spentMs) => {
+      if (edgeViews > typedViews)
+        armOutage(
+          `the resident host answered the edge's own page (no Worker document) for ${edgeViews} of ${edgeViews + typedViews} probes over ${Math.round(spentMs / 1000)}s`,
+        );
+      return { probe: last, waitedMs: spentMs };
+    },
+  });
 }
 
 /** The thread's local workspace directory under `baseDir`: the threadKey is

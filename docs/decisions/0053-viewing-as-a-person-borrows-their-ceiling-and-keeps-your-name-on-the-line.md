@@ -1,0 +1,125 @@
+---
+title: Viewing as a person borrows their ceiling and keeps your name on the line
+status: accepted
+date: 2026-09-17
+pattern: Narrowing by intersection (the existing on-behalf-of relation), a read-only door, identity never delegated — an admin sees what a person sees and writes nothing as them
+---
+
+# Viewing as a person borrows their ceiling and keeps your name on the line
+
+**The ask.** Decide (the maintainer, before the one PR that builds it): an admin on the dashboard may **view as** another person — every page then shows exactly what that person would see — and while viewing may write nothing, with every audit line naming the admin and the person both. Written for an engineer who knows the actor model ([authorization.md](../reference/specs/authorization.md) items 1, 4, 7, 14) and [record 0042](0042-a-dashboard-session-is-the-person-its-email-names-identity-not-authority.md). The maintainer asked for it on 2026-09-17 as the way to close a validation gap without a second login ("an impersonate feature for admins that lets them assume another role"), chose read-only after weighing the write half ("ok fine"), and set one condition: graceful degradation — a refused write is a sentence, never a broken page.
+
+Success criteria: (1) while viewing as a person, `/runs`, `/settings`, `/threads` and `/costs` list and show exactly what a session of that person would, private channels and DMs included; (2) no request an admin makes while viewing as a person is admitted that the person's own session would refuse, and no write is admitted at all; (3) every audit line of such a request carries the admin's caller id and the person's id; (4) a write attempted while viewing is refused with one sentence that names the person and how to exit, on every surface that could attempt one; (5) a session that does not hold `all` cannot enter view-as by any means, a forged cookie included.
+
+## TL;DR
+
+Admins hold `all`, so nothing on the dashboard exercises the rows an ordinary person is admitted by — the membership row landed with #1495 could not be observed live because this installation has no non-admin login. The bet is that the actor model already contains the answer: an actor `onBehalfOf` another has the **intersection** of both grant sets and reads `self` and `memberOf` from the root principal, so an admin acting on behalf of a person holds exactly the person's grants and the person's identity facts, with the admin's own id still on the actor. View-as is that actor, built by the resolver from a cookie the server sets for an admin's browser, plus one door rule: no effect but `read` passes while viewing. The cost is a resolver branch, a door predicate, a cookie route, a banner and a picker. What stays open: which people the picker offers, and whether a later "act as" with writes should exist at all.
+
+## Today at `41bee155`
+
+| Fact | Where |
+|---|---|
+| A dashboard session's actor is `accessActor(identity)` linked to its person: `self: [access:<sub>, slack:U…]`, `asUser`, `memberOf`; grants are the session's own, never the person's | `src/channels/commandHttp.ts` `resolveAccessActor` |
+| `effectiveGrants(actor)` is `actor.grants ∩ effectiveGrants(actor.onBehalfOf)`; `principalOf` walks to the root of the chain; `selfIdsOf` and `memberChannelsOf` read the root principal | `src/core/authz/authorize.ts` |
+| The relation exists for one case: an app relaying a person's request (`kind: "agent"`, `onBehalfOf: person`), authorization.md item 14 | `src/core/authz/actor.ts` `resolveChatActor` |
+| The registry's `invoke` is the one door for every dashboard write; its audit line carries `callerId` and, when linked, `asUser` | `src/core/commandRegistry.ts` |
+| The dashboard gate verifies the Access identity per request and hands `{ sub, email }` to the resolver; no cookie is read anywhere on the server | `src/index.ts`, `src/channels/accessAuth.ts` |
+| Every browser session in the reference installation holds `all` through the `access:*` grants entry | `config.production.yaml` (infrastructure), authorization.md item 7 |
+
+## The shape
+
+A **view-as** is the session's own actor with the person hung under it: `{ kind: "user", id: "access:<sub>", grants: <the admin's>, onBehalfOf: <the person's actor>, viewingAs: { id, name } }`, where the person's actor is the one the person's **own dashboard session** resolves to: the browser baseline every `access:<sub>` session holds, `self: [id]`, `memberOf` from the channel directory. Not the person's Slack identity: a Slack baseline holds no `runs:read`, and record 0042 keeps a config entry keyed to the person's Slack id off their browser, so view-as does the same — it mirrors the page the person would see, not the chat they would type in. Nothing in `authorize` changes: the intersection gives the person's grants, the root principal gives the person's `self` and channels, and `viewingAs` is identity, read by no rule. The closest known shape is a database's `SET ROLE` with `NOINHERIT`: you run under the narrower role, the session still belongs to you, and the log names you. The one way this differs: the narrower role cannot write at all, because the person's role includes writes to the person's own things, and those are the person's to make.
+
+The door adds one predicate: a command whose `effect` is not `read` is refused when `caller.actor.viewingAs` is set, with the sentence *"You are viewing as Ivy; writes are your own to make — exit view-as to write."* The audit line gains `viewingAs`. The carrier is a cookie (`sb-view-as`, `HttpOnly`, `SameSite=Strict`, path `/`, a session cookie) set by `POST /runs/view-as` and cleared by `POST /runs/view-as/exit` — under `/runs` because the Access application covers that prefix and a new one would 403 until it is listed — both admitted only to a session whose real actor holds `all`; the resolver honours the cookie under the same condition, so a forged or stale cookie on any other session is ignored. The banner is drawn by the web shell, which stamps `viewingAs` on every page's seed from the actor it was handed (a view cannot forget it); a picker on the runs index offers the requesters of the rows on the page, by the name each row already carries, and takes a typed Slack id for anyone else.
+
+*Amended (while proposed, before the PR): the first draft built the person's actor from their Slack grants. That would have shown an admin no runs at all for a person granted nothing by name, since the Slack baseline lacks `runs:read`, and it would have shown a config grant the person's own browser never holds. The person's dashboard session is the thing to mirror.*
+
+## One trace: an admin views as Ivy and looks at a private channel's runs
+
+Ivy is in `#leads`, a private channel; the admin is not, but holds `all`. The admin opens `/runs`, picks "Ivy" in the picker. `POST /runs/view-as { person: "slack:UIVY" }` reaches the gate; the resolver builds the admin's actor, sees `channels: all`, and sets the cookie. The page reloads. The gate reads the cookie, the resolver builds `admin onBehalfOf ivy`: `effectiveGrants` = `all ∩ ivy.grants` = Ivy's grants (the browser baseline — every group's read — nothing granted by name), `selfIdsOf` = `["slack:UIVY"]`, `memberChannelsOf` = `{ slack:C_LEADS, … }` from `users.conversations` for Ivy. `predicateFor(actor, "runs:read", "run")` compiles `member-of` to `channels-in({C_LEADS, …}) ∨ public`, ORed with `user-is(slack:UIVY)`: the index lists `#leads`' runs and the public ones, and the admin's own private DM runs are gone from the page, as they would be for Ivy. The audit line for `runs.list` reads `callerId: access:admin, asUser: slack:UIVY, viewingAs: slack:UIVY`. The admin opens `/settings/mcps` and clicks Remove on a row: the door sees `effect: write` and `viewingAs`, refuses with the sentence, the panel shows it as its notice, nothing else moves. The admin clicks Exit in the banner: `POST /runs/view-as/exit` clears the cookie, the next page is the admin's own again.
+
+## The difficulty map
+
+1. **Narrowing is provable** (below, "The line"): the intersection and the root-principal reads are the existing arithmetic; the differential test over the actor fixtures is what makes it a proof rather than a claim.
+2. **Writes** (below, "The door"): the person's grants include their own self-service writes, so without the door rule view-as would write the person's scope on the admin's say-so.
+3. **The carrier** (below, "The cookie"): what a forged or stale cookie can do, and why unsigned is enough.
+4. Everything else is plumbing: the banner, the picker, the audit field, the seed.
+
+## The line: this is not the mistake record 0042 forbids
+
+Record 0042 forbids treating identity as authority: a session must never gain a grant because of who it is linked to. View-as does the opposite. The admin's authority shrinks to the intersection with the person's; the person's identity facts (`self`, `memberOf`) are read for the decision, exactly as `is-self` and `member-of` read a linked session's today; the admin's identity stays on the actor's own `id` and on the audit line. A request view-as admits is one the person's own session admits, by construction: `effectiveGrants` cannot exceed the smaller set, and the root principal is the person. The differential test (authorization.md item 6) runs the view-as actor over the run and memory fixtures against the person's own actor: the two must list the same records for every read action. That test is the invariant's proof.
+
+Failure mode: a person with **more** grants than the admin (a token-like person, or a channel the admin is not granted while the person is) — the intersection is still no wider than the admin's `all`, so nothing is gained; the admin sees what the person sees only up to what the admin may see anyway, which for `all` is everything.
+
+## The door: read-only, refused in a sentence
+
+The person's grants include the two self-service writes every chat person holds (`memory:write`, `mcp:write`) and the `me` tier the `is-self` rows admit. Under the intersection the admin would hold them for the person's scope — a `config set me` while viewing as Ivy would set Ivy's effort, an `mcp add` would put a server in Ivy's tier whose connect ticket the connect page binds to whoever opens it — the admin, so Ivy's server would carry the admin's credential. None of that is view-as's purpose, and the second is a flow nobody has designed. So the door refuses every command whose `effect` is not `read` while `viewingAs` is set, before the handler runs, with a reason on the audit line (`viewing`). The refusal is the same shape as every other (`unauthorized`, one sentence), so every surface that already shows a refusal as its notice degrades the same way: the settings panels show the sentence under the form, the run page's status line carries it after a refused stop, the chat composer shows it, `/api` answers 403 with it, nothing throws. The controls themselves are not redrawn: the banner says read-only on every page, and a click answers with the sentence and the way out. Two writes live outside the registry door — the run page's stop route (token path and tokenless) and the chat's send — and refuse with the same sentence before any run is consulted; the MCP connect page is not one of them (it is the credential paste of whoever opens it, drawn without the shell, and view-as does not reach it).
+
+Alternative rejected: allow writes with a native confirm dialog. Cheaper only if the dialog is skipped; with it, it is a second confirmation mechanism beside record 0044's graded confirmation, and it makes the ticket-binding question real. If a case for writing a person's settings for them appears, it is an explicit "act as" through record 0044's door, a new record, not an edit here.
+
+## The cookie: unsigned, because it can only narrow
+
+The carrier is an `HttpOnly`, `SameSite=Strict` cookie naming the person's id, set and cleared by two routes the gate admits only to a real actor holding `all`. The resolver reads it under the same condition. Consequences: a non-admin who forges the cookie changes nothing, since the resolver never reads it for them; an admin who forges it names a person the resolver builds like any other, and holds less, not more; a stale cookie after an admin's grants are narrowed is ignored the moment the real actor stops holding `all`. A stolen or replayed cookie is a name, not a credential: in another browser it rides that browser's own Access session and narrows it only if that session holds `all` — exactly what typing the name into that session's picker would do. Signing would protect against nothing the condition does not already cover. The cookie is `Secure` on an https deployment and dies with the browser. Chat surfaces never see the cookie: Slack authenticates the person who typed, and view-as is a dashboard state only.
+
+Why the banner is stamped by the view, not read from the cookie by the browser: the banner must tell the truth about authority, and only the server knows whether the cookie was honoured. Each view's seed carries `viewingAs` off the actor it resolved; a page with no banner is a page served under the admin's own grants.
+
+## Why not X
+
+- **Why not a second, non-admin login for testing?** It proves one person's view once, needs a real account and an Access policy change, and leaves every other person's view unobservable. View-as makes any person's view a click for whoever holds `all`.
+- **Why not narrow the production grants and restart?** Two bot restarts and a lock-out risk to observe one row, and nothing reusable afterwards.
+- **Why not a new policy condition (`viewing-as`)?** The table needs no new word: the intersection and the root principal already express "the person's ceiling with the person's identity facts". A new condition would be a second definition of the same thing.
+- **Why not resolve the person's actor from a `?as=` query parameter?** Links between pages would drop it, and every page's URL would carry authority state. A cookie is per browser and per session, which is what view-as is.
+
+## Boundaries
+
+Non-goals: writing as a person (see "The door"); view-as on Slack or any chat surface; viewing as a service token or a schedule (the picker offers people); persisting view-as across browsers. Not seen: a config entry keyed to the person's own Access `sub` — this process cannot map a Slack id to a `sub`, so view-as shows the person as an unlisted session of theirs would be; a person with their own `access:` entry is seen without it. Owned elsewhere: the confirmation of writes (record 0044); membership itself (#1495); names (the name directory, #1562).
+
+## What would change our mind
+
+- If the differential test finds a read that view-as admits and the person's session does not, the arithmetic is wrong and the feature does not ship until it is right.
+- If the first month of use produces a real "fix it for them" need, the write half is designed as its own record through record 0044's door.
+- If a second person joins the installation with fewer grants, the membership row is observed directly and view-as keeps its value for the next person's view.
+
+## Rollout
+
+One PR: actor field, resolver branch, door predicate and audit field, cookie routes, seed field and banner, runs-index picker, tests, spec rows (authorization.md item 17, live-view.md item 30, settings-page.md the refused write), this record. Flag-free: the feature is inert for any session without `all`, and an admin who never clicks the picker sees nothing new but a control. The first live use is the membership receipt on #1495.
+
+## Open questions
+
+| Question | Owner | Resolves it | Needed before |
+|---|---|---|---|
+| The picker offers the requesters of the rows on the page (while viewing, the person's page) and a typed id. Should it also offer the directory's people by name? | the maintainer | the first day of use | never for this PR |
+| Should view-as also narrow the `/api` JSON twins a browser session fetches (it does, since they go through the same gate), and should a service token ever hold it (no) | decided: yes and no | this record | never |
+
+## Validation criteria
+
+| Criterion | Proof |
+|---|---|
+| A view-as actor's effective grants equal the person's; the principal is the person; the id stays the admin's; `viewingAs` is read by no rule; the differential over runs and memory scopes lists the same records as the person's own actor for every read and write action, and the view-as actor rides every differential loop | `[unit]` `src/core/authz/authorize.test.ts::record 0053 — viewing as a person borrows their ceiling::*`, `src/core/authz/predicate.test.ts::view-as ≡ the person (record 0053)::*`, `src/core/authz/predicate.test.ts::predicateFor ⇔ authorize differential over runs::runs:read::admin viewing as ivy (record 0053): predicate filter == point authorize` |
+| The resolver builds the view-as actor only for a session whose own actor holds `all` and whose cookie names a Slack person — the person's browser-baseline grants, self and directory channels under the admin's id, the name when the directory answers, the id otherwise; any other session resolves exactly as without the cookie, its own person link intact; a service token never views | `[unit]` `src/channels/commandHttp.test.ts::callerIdFor — one Access identity → caller id mapping for /api and the audit line::resolveAccessActor with viewAs: a session holding all becomes the admin on behalf of the person — the person's browser-baseline grants, self and directory channels under the admin's id, viewingAs named; anyone else, or a non-person id, resolves exactly as without the cookie` |
+| The door refuses every non-read command while viewing — one the person's own grants allow included — with the one sentence naming the person, before parse, audits `viewingAs` and reason `viewing`, and admits reads under the person's grants with `viewingAs` on their line | `[unit]` `src/core/commandRegistry.test.ts::CommandRegistry.invoke — auth before parse::a caller viewing as a person (record 0053) runs a read under the person's grants and is refused every non-read effect — even one the person's own grants allow — in the one sentence, decided by the registry before parse, with the audit line naming the person and the reason viewing` |
+| The two writes outside the door refuse while viewing with the same sentence: the stop route on the token path and tokenless before any run is consulted, control untouched; the chat's send with nothing dispatched; the `/api` adapter's early refusal answers the sentence too, never the grant refusal | `[unit]` `src/channels/commandHttp.test.ts::createCommandHttpHandler — caller resolution::a session viewing as a person (record 0053) reads on runs.list and is refused POST runs.stop before the body is read with the view-as sentence, not the grant refusal; the same session without the cookie stops the run`, `src/channels/liveView.test.ts::run control: POST /runs/:id/stop::a viewer viewing as a person is refused the token-path stop with 403 and the one sentence, and the run's control is never touched`, `src/channels/liveView.test.ts::live view on RunsService: history pages + index toggle::persisted run events, friction and stop::the tokenless stop is refused while viewing as a person (403, the one sentence) before any run is consulted — a persisted run, a live one and an unknown id alike`, `src/channels/web.test.ts::POST /threads/<id>/send — the body into dispatch() as this session (item 11)::a session viewing as a person is refused a send with 403 and the one sentence; nothing is dispatched` |
+| `POST /runs/view-as` sets the HttpOnly, SameSite=Strict, path-wide cookie for a session holding `all` (Secure on https) and is refused for anyone else before the body is read; a body naming no Slack person is 400; a foreign origin 403; `POST /runs/view-as/exit` clears it; the cookie parses back by name | `[unit]` `src/channels/viewAs.test.ts::viewAsFromCookie::*`, `src/channels/viewAs.test.ts::the view-as routes::*`, `src/channels/viewAs.test.ts::refuseWhileViewing::*` |
+| The shell stamps `viewingAs` on the seed from the viewer's actor and the index offers `viewAs` — the page's Slack requesters by name — to a viewer holding `all`, nothing of either to a narrower viewer | `[unit]` `src/channels/liveView.test.ts::createLiveViewHandler (node:http)::the index seed offers viewAs — the page's Slack requesters by name — to a viewer holding all, none of it to a narrower viewer, and to an admin already viewing the people the person's own page names`, `src/channels/viewAs.test.ts::requestersOf::*` |
+| The banner is drawn on every page while the seed carries `viewingAs`, names the person, says read-only, and its Exit posts the exit route and reloads; a refused exit shows the server's sentence; the picker is drawn only when the seed offers `viewAs`, posts a pick or a typed id and navigates to the index; a refused pick shows the sentence; a refused stop shows the server's sentence in the status | `[unit]` `web/src/components/AppNav.test.ts::AppShell::draws the view-as banner under the header when the seed carries viewingAs — the person by name with the id beside, read-only said plainly, an Exit that posts the exit route and reloads — and nothing of it otherwise`, `web/src/components/AppNav.test.ts::AppShell::a refused exit keeps the banner and shows the server's sentence; nothing reloads`, `web/src/pages/runsIndex.test.ts::RunsIndexPage — toolbar, states, pager::the view-as picker is drawn only when the seed offers viewAs: the page's people by name with the id beside; a pick posts the person and navigates to the index; a typed id is offered as an item and posts too`, `web/src/pages/runsIndex.test.ts::RunsIndexPage — toolbar, states, pager::a refused pick shows the server's sentence beside the picker and navigates nowhere`, `web/src/pages/runPage.test.ts::RunPage — live mode::a refused stop (403 with a message) shows that sentence in the status, not a bare HTTP code` |
+| Human-gated: the maintainer views as a person in a private channel and sees another member's run on `/runs` and the channel's tier on `/settings/mcps`; a Remove while viewing shows the sentence; Exit returns the admin's own page | `[agent]` receipt on the PR and the authorization receipts ledger |
+
+## Sources
+
+- [Record 0042](0042-a-dashboard-session-is-the-person-its-email-names-identity-not-authority.md), the line this record must not cross.
+- [authorization.md](../reference/specs/authorization.md) items 1, 4, 6, 7, 14: the actor model, the differential, membership, the on-behalf-of relation.
+- [Record 0044](0044-a-routed-write-is-confirmed-in-proportion-to-its-blast-radius.md), where a future "act as" write would be confirmed.
+- PostgreSQL `SET ROLE` / `NOINHERIT`: the borrowed shape.
+
+## Accepted 2026-09-17
+
+*Re-evaluation.* The bet was that an admin could see the dashboard as another person by borrowing that person's ceiling through the existing on-behalf-of intersection, read-only, with the admin's own name kept on every audit line, so nothing could widen and the policy table needed no new word. One PR built it and the first release carried it; the live receipt on the PR shows the picker narrowing an admin's page to a member's public-channel rows, the banner on every page, a stop refused in the one sentence, and Exit restoring the admin's own view.
+
+What changed since the proposal, checked against the reasoning above:
+
+- **The person's actor is their dashboard session's, not their Slack identity's** (amendment under "The shape"): built from the Slack grants the view would have shown no runs at all, since that baseline lacks `runs:read`, and it would have shown a config grant the person's browser never holds. The narrowing argument is unchanged, since the intersection is still no wider than the admin's `all`, and the differential test now proves the equality against the person's dashboard actor.
+- **The `/api` door's early refusal** answered the grant sentence instead of this record's sentence on the first live write, because the adapter spares an unauthorized body before the registry door speaks. Fixed in a follow-up the same day; the graceful-degradation condition ("a refused write is a sentence, never a broken page") held throughout, only the words were wrong.
+- **The membership half is still unobserved**, now for want of data rather than of a person: no run in a private channel exists in the retained history. The first such run makes it a one-click check, and the receipt lands on the authorization ledger when it does.
+- **The picker's people**, the first open question: it offers the requesters of the rows on the page and a typed id; while viewing, that is the person's page. A directory-wide people list was not needed on the first day and stays open.
+
+The record's validation rows carry their proofs; the human-gated row's receipt is on the PR.

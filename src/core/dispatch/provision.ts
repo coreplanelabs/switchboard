@@ -17,10 +17,12 @@ import { chatActorOf } from "../authz/actor.js";
 import { clipSourceLabel, type RunProfile } from "../../config/profile.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
 import {
+  WorkspaceReattachLeaseSpentError,
   WorkspaceReattachRefusedError,
   type ExecutorSelection,
   type WorkspaceBinding,
 } from "../../execution/factory.js";
+import { isRunStopError } from "../../execution/executor.js";
 import type { ResidentStep } from "../../execution/residentStepTrace.js";
 import { graftResidentSteps, residentTraceOf } from "../../execution/residentTrace.js";
 import { ResidentNeedsRefError } from "../../execution/resident.js";
@@ -561,6 +563,10 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
 export interface Reservation {
   reserved: LedgerRun | undefined;
   requestRow: Record<string, unknown>;
+  /** Set when the reservation waited for a finish this process was landing and
+   *  the row still stood (run-history item 54): why the ledger would not take
+   *  the run, for its own record and card. */
+  untracked?: string;
 }
 
 /** What `reserveRun` reads off the dispatch. */
@@ -623,6 +629,7 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
   } = ctx;
   if (!resume && !restart) {
     const requestRow = durableInboxMessage(msg, msg.text, receivedAt);
+    let untracked: string | undefined;
     const reserved = await root.span("dispatch.ledger_reserve", () =>
       deps.runLedger.reserve({
         runId,
@@ -653,6 +660,9 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
           request: requestRow,
         },
         card: card.handle ?? null,
+        onUntracked: (why: string) => {
+          untracked = why;
+        },
         ...hooks,
       }),
     );
@@ -663,7 +673,7 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
     // durable window "from the reserve on"), where naming the run earlier
     // would push to a row that may not exist yet and warn for nothing.
     admitted.runId = runId;
-    return { reserved, requestRow };
+    return { reserved, requestRow, ...(untracked !== undefined ? { untracked } : {}) };
   }
   return undefined;
 }
@@ -685,17 +695,34 @@ export interface AttachContext {
    *  workspace and never provisions again. Absent for a fresh run, and for a
    *  resumed row that recorded none. */
   reattach?: WorkspaceBinding;
+  /** The run's hard stop (its control's `hardSignal`, registered before the
+   *  attach): a stop during the attach's wake wait ends it at once, and a
+   *  stopped run is never provisioned cold (execution.md item 9). */
+  stopSignal?: AbortSignal;
+  /** The run's remaining wall clock (its control's `remainingMs`, read at each
+   *  attach the executor opens; undefined until the harness starts the lease):
+   *  every attach the run's resident executor opens is clipped to it
+   *  (execution.md item 9). Absent for a caller with no run control. */
+  remainingMs?: () => number | undefined;
 }
 
 /** How a recorded workspace's re-attach ended: the round's workspace
  *  (executor, selection, release), or the factory's refusal by name (run-history
  *  item 54): nothing else was provisioned, and the caller closes the run
  *  `interrupted` saying why and runs its request again. */
-export type WorkspaceReattach = { kind: "attached"; round: RoundWorkspace } | { kind: "reattach_refused"; why: string };
+export type WorkspaceReattach =
+  | { kind: "attached"; round: RoundWorkspace }
+  | { kind: "reattach_refused"; why: string }
+  /** The run's own stop ended the re-attach (its signal rode into the attach's wait): not a refusal, nothing restarts. */
+  | { kind: "stopped" };
 
 /** How the dispatch-time attach ended: a re-attach's two answers, or the
  *  ask-once refusal (no branch is bound and none was named). */
-export type WorkspaceAttach = WorkspaceReattach | { kind: "refused"; reason: "which_branch" };
+export type WorkspaceAttach =
+  | WorkspaceReattach
+  | { kind: "refused"; reason: "which_branch" }
+  /** The run's own stop ended the attach (its signal rode into the attach's wait): not a failure, never provisioned cold. */
+  | { kind: "stopped" };
 
 /**
  * The attach itself, under its `dispatch.workspace.attach` span naming the
@@ -710,7 +737,7 @@ async function attachRound(
   deps: Pick<ProvisionDeps, "config" | "dataDir">,
   ctx: AttachContext,
 ): Promise<RoundWorkspace> {
-  const { threadKey, agent, profile, repoCtx, root, clock, reattach } = ctx;
+  const { threadKey, agent, profile, repoCtx, root, clock, reattach, stopSignal, remainingMs } = ctx;
   const ownPr = ownPrOf(repoCtx);
   return root.span("dispatch.workspace.attach", async (span) => {
     // The resident's own steps (clone, install, the mutex wait…) graft under
@@ -743,6 +770,8 @@ async function attachRound(
           // repos item 16): the one reason the resident may move a binding.
           ...(ownPr !== undefined ? { ownPr } : {}),
           ...(reattach !== undefined ? { reattach } : {}),
+          ...(stopSignal !== undefined ? { stopSignal } : {}),
+          ...(remainingMs !== undefined ? { remainingMs } : {}),
         },
         logKey: threadKey,
         span,
@@ -770,13 +799,22 @@ async function attachRound(
 export async function reattachWorkspace(
   deps: Pick<ProvisionDeps, "config" | "dataDir">,
   ctx: AttachContext & { reattach: WorkspaceBinding },
-): Promise<WorkspaceReattach> {
+): Promise<WorkspaceReattach | { kind: "lease_spent"; leftMs: number }> {
   try {
     return { kind: "attached", round: await attachRound(deps, ctx) };
   } catch (err) {
+    // The run's lease is inside its write-up reserve, or ran into it under the
+    // re-attach's waits (execution.md item 9): the factory asked for nothing
+    // more, and the caller ends the run on its budget — never a refusal that
+    // restarts it from its request. `leftMs` is the run's clock at the decision.
+    if (err instanceof WorkspaceReattachLeaseSpentError) return { kind: "lease_spent", leftMs: err.leftMs };
     // The run's workspace is where its row says or nowhere (item 54): the
     // factory tried that backend alone and refused by name.
     if (err instanceof WorkspaceReattachRefusedError) return { kind: "reattach_refused", why: err.why };
+    // The run's own stop ended the re-attach's wait — the executor's typed
+    // `aborted` error, read by its shape as `attachWorkspace` reads it: the
+    // caller ends the run stopped, and nothing restarts from its request.
+    if (isRunStopError(err)) return { kind: "stopped" };
     throw err;
   }
 }
@@ -793,7 +831,8 @@ export async function attachWorkspace(
   deps: ProvisionDeps,
   ctx: GateContext & GateCard & Omit<AttachContext, "threadKey">,
 ): Promise<WorkspaceAttach> {
-  const { msg, io, refuse, card, shell, closeLines, clock, agent, profile, repoCtx, root, reattach } = ctx;
+  const { msg, io, refuse, card, shell, closeLines, clock, agent, profile, repoCtx, root, reattach, stopSignal } = ctx;
+  const { remainingMs } = ctx;
   let round: RoundWorkspace;
   try {
     round = await attachRound(deps, {
@@ -804,6 +843,8 @@ export async function attachWorkspace(
       root,
       clock,
       ...(reattach !== undefined ? { reattach } : {}),
+      ...(stopSignal !== undefined ? { stopSignal } : {}),
+      ...(remainingMs !== undefined ? { remainingMs } : {}),
     });
   } catch (err) {
     // Ask-once: the resident has no ref binding for this thread, the
@@ -831,6 +872,13 @@ export async function attachWorkspace(
     // the factory tried that backend alone and refused by name. The caller
     // closes this run saying why and dispatches its request again.
     if (err instanceof WorkspaceReattachRefusedError) return { kind: "reattach_refused", why: err.why };
+    // The run's own stop ended the attach — its signal rode into the attach's
+    // wait, and the executor's typed `aborted` error is that stop, not a setup
+    // failure. The dispatcher ends the request `stopped`; nothing is replied.
+    // Read by the error's typed shape, never by the signal's state: a
+    // provisioning failure that merely coincided with a pending stop stays the
+    // failure it is (`setup_failed`, the error replied).
+    if (isRunStopError(err)) return { kind: "stopped" };
     throw err;
   }
   return { kind: "attached", round };

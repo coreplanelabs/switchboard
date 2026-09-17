@@ -3,6 +3,7 @@ import { FAVICON_BY_TONE, FAVICON_DEFAULT, FAVICON_IDLE } from "./favicon.js";
 import { residentsFleetTone, type ResidentRecordView } from "./residentsModel.js";
 import { serializeSeed, SEED_ELEMENT_ID, type PageSeed, type WebSeed } from "./webSeed.js";
 import type { Capabilities } from "../core/capabilities.js";
+import type { Actor } from "../core/authz/types.js";
 
 // The one HTML document the server renders: a shell that mounts the web app
 // (web/, built by Vite into hashed assets under /assets/*) and hands it the
@@ -87,11 +88,19 @@ function pageFavicon(seed: WebSeed): string {
   }
 }
 
-/** A bound shell renderer: what the page handlers receive (they know the title
- *  and the page's seed; the assets and the process's capabilities are wired
- *  once at startup — a view never stamps `capabilities` itself). */
-export type ShellRenderer = (title: string, seed: PageSeed) => string;
+/** A bound shell renderer: what the page handlers receive (they know the
+ *  viewer, the title and the page's seed; the assets and the process's
+ *  capabilities are wired once at startup — a view never stamps `capabilities`
+ *  or `viewingAs` itself). The viewer is the request's actor: while it views as
+ *  a person (record 0053) every page wears the banner, so a view cannot forget
+ *  it. A surface without a viewer (a costs page in a test) passes `undefined`. */
+export type ShellRenderer = (viewer: Actor | undefined, title: string, seed: PageSeed) => string;
 
 export function makeShellRenderer(assets: ShellAssets, capabilities: Capabilities): ShellRenderer {
-  return (title, seed) => renderShell(title, { ...seed, capabilities }, assets);
+  return (viewer, title, seed) =>
+    renderShell(
+      title,
+      { ...seed, capabilities, ...(viewer?.viewingAs ? { viewingAs: viewer.viewingAs } : {}) },
+      assets,
+    );
 }

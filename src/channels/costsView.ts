@@ -243,7 +243,7 @@ export function createCostsViewHandler(
       .then(([report, byReport]) => {
         res.writeHead(200, WEB_HTML_HEADERS);
         res.end(
-          shell(`${report?.label ?? group} spend`, {
+          shell(ctx.actor, `${report?.label ?? group} spend`, {
             page: "costs",
             group,
             report,

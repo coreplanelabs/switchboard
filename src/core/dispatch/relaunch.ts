@@ -59,6 +59,14 @@ export interface RelaunchContext {
   facts: HarnessFacts | undefined;
   /** The run's recorded workspace, re-attached before the process starts; none for a run without one. */
   binding: WorkspaceBinding | undefined;
+  /** The run's hard stop (`run.control.hardSignal`): it rides into the re-attach's
+   *  wake wait, so a stop while the replacement is being re-attached ends it at
+   *  once and the run ends stopped, never relaunched (execution.md item 9). */
+  stopSignal?: AbortSignal;
+  /** The run's remaining wall clock (`run.control.remainingMs`, the lease the
+   *  relaunch continues): every attach the re-attached executor opens is
+   *  clipped to it (execution.md item 9). */
+  remainingMs?: () => number | undefined;
   /** The row's write for the harness facts — issued inside the rotation, as its contract requires. */
   saveFacts: (facts: HarnessFacts) => void;
 }
@@ -73,7 +81,15 @@ export type RelaunchDecision =
       /** The re-attached round, whose executor the run holds from here; none for a run without a workspace. */
       round?: RoundWorkspace;
     }
-  | { kind: "refused"; interruption: HarnessInterruptedError };
+  | { kind: "refused"; interruption: HarnessInterruptedError }
+  /** The run's own stop ended the re-attach: nothing is written or rotated, and the run ends stopped. */
+  | { kind: "stopped" }
+  /** The run is inside its write-up reserve, or ran into it under the
+   *  re-attach's waits (execution.md item 9): its workspace was not asked for,
+   *  nothing is written or rotated, and the run ends on its budget — never
+   *  `workspace_lost`, never a new run from the request. `why` is the budget
+   *  note's line: what happened, and why there was no write-up. */
+  | { kind: "lease_spent"; why: string };
 
 /**
  * The relaunch, decided and prepared: refused by name, or the resume the
@@ -123,7 +139,22 @@ export async function prepareRelaunch(
       root: ctx.root,
       clock: ctx.clock,
       reattach: ctx.binding,
+      ...(ctx.stopSignal !== undefined ? { stopSignal: ctx.stopSignal } : {}),
+      ...(ctx.remainingMs !== undefined ? { remainingMs: ctx.remainingMs } : {}),
     });
+    // The stop that ended the re-attach's wait is the run's end, decided before
+    // the rotation: nothing is written, the bearers stand, nothing relaunches.
+    if (reattached.kind === "stopped") return { kind: "stopped" };
+    // The lease inside its write-up reserve is the run's end, decided before
+    // any request and before the rotation: a re-dispatch with a fresh lease
+    // would be the run restarted from scratch seconds from its deadline.
+    if (reattached.kind === "lease_spent")
+      return {
+        kind: "lease_spent",
+        why:
+          `the container was replaced with ${Math.max(0, Math.round(reattached.leftMs / 1000))}s of the run's lease left, ` +
+          "inside the write-up reserve; no re-attach was opened and no write-up ran",
+      };
     if (reattached.kind === "reattach_refused")
       return refuse(
         `the run's workspace could not be re-attached in the replacement container (${reattached.why}); the run restarts from its request as a new run in this thread`,

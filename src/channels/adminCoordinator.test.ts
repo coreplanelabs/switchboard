@@ -1931,6 +1931,39 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     });
   });
 
+  it("round carries the gate when the coordinator's severity check fired — the row keeps it, the card names it, the log warns — and a malformed gate is 400", async () => {
+    const frames: StatusUpdate[] = [];
+    const h = await planHarness({
+      ioFor: (thread) => ({
+        reply: async () => {},
+        status: async (initial) => {
+          frames.push({ ...initial, cardTs: thread.cardTs } as StatusUpdate);
+          return { update: () => {}, done: async () => {} };
+        },
+        history: async () => [],
+      }),
+    });
+    await h.instances.putUnits([unitRow("U10", { threadKey: "slack:C1:2.0" })]);
+    const gate = { level: "minor", findings: ["F1 (minor)"] };
+    const boundary = { parentInstanceId: PLAN_INSTANCE.id, unit: "U10", index: 1, agent: "review", outcome: "approve" };
+    expect(await call(h, "round", { ...boundary, gate })).toEqual({ status: 200, body: { ok: true, at: NOW } });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0].rounds).toEqual([
+      { index: 1, agent: "review", outcome: "approve", at: NOW, gate },
+    ]);
+    expect(JSON.stringify(frames.at(-1))).toContain("gate fired");
+    expect(h.logs.some((l) => l.includes("severity gate fired") && l.includes("F1 (minor)"))).toBe(true);
+    for (const bad of [
+      { level: "huge", findings: ["F1"] },
+      { level: "minor", findings: "F1" },
+      { level: "minor" },
+      "minor",
+    ]) {
+      const res = await call(h, "round", { ...boundary, gate: bad });
+      expect(res.status, JSON.stringify(bad)).toBe(400);
+    }
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0].rounds).toHaveLength(1); // nothing malformed was appended
+  });
+
   it("round appends the boundary to the unit's row and redraws the card from the instance's card handle with one line per unit; a malformed boundary is 400", async () => {
     const frames: StatusUpdate[] = [];
     const h = await planHarness({

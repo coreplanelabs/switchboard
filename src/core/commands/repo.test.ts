@@ -333,6 +333,23 @@ describe("gates (fail-closed) and scopes", () => {
     });
     expect((await commands.invoke("repo.test", { args: ["acme/api"] }, mcp("repo:exec"))).ok).toBe(true);
   });
+
+  it("an op failure the backend typed as the platform's transient is `unavailable` with this reader's words for the blip — the resident was unavailable for a moment, re-run — while an untyped failure keeps the backend's message alone", async () => {
+    const transient = bind({
+      ops: fakeOps({ kind: "error", message: "resident /op: op-failed: Network connection lost.", transient: true })
+        .ops,
+    });
+    const blip = await transient.invoke("repo.test", { args: ["acme/api"] }, mcp("repo:exec"));
+    expect(blip).toMatchObject({ ok: false, error: "unavailable" });
+    expect(JSON.stringify(blip)).toContain(
+      "resident /op: op-failed: Network connection lost. — the resident was unavailable for a moment; re-run the command",
+    );
+    const plain = bind({ ops: fakeOps({ kind: "error", message: "resident /op: op-failed at test: exit 1" }).ops });
+    const failed = await plain.invoke("repo.test", { args: ["acme/api"] }, mcp("repo:exec"));
+    expect(failed).toMatchObject({ ok: false, error: "unavailable" });
+    expect(JSON.stringify(failed)).toContain("resident /op: op-failed at test: exit 1");
+    expect(JSON.stringify(failed)).not.toContain("unavailable for a moment");
+  });
 });
 
 describe("repo onboard", () => {

@@ -8,6 +8,7 @@ import { getAgent } from "../../agents/registry.js";
 import { declaredProfile } from "../../config/profile.js";
 import { parseDirectives } from "../../directives.js";
 import { WorkspaceReattachRefusedError, type WorkspaceBinding } from "../../execution/factory.js";
+import { ExecInfraError } from "../../execution/executor.js";
 import { ResidentNeedsRefError } from "../../execution/resident.js";
 import { NullMemoryStore } from "../memory/index.js";
 import { NullRunHistoryWriter } from "../runHistoryWriter.js";
@@ -62,6 +63,8 @@ const attachState = vi.hoisted(() => ({
   needsRef: undefined as string | undefined,
   reattached: undefined as import("../reviewRound.js").RoundWorkspace | undefined,
   refuseReattach: undefined as string | undefined,
+  /** The run's stop ended the re-attach's wait: the factory rethrows the executor's typed `aborted` error. */
+  stopReattach: false,
   rounds: [] as Array<Parameters<typeof import("../reviewRound.js").attachRoundWorkspace>[0]["round"]>,
 }));
 vi.mock("../reviewRound.js", async (importOriginal) => {
@@ -74,6 +77,11 @@ vi.mock("../reviewRound.js", async (importOriginal) => {
       if (input.round.reattach !== undefined) {
         if (attachState.refuseReattach !== undefined)
           throw new WorkspaceReattachRefusedError(input.round.reattach, attachState.refuseReattach);
+        if (attachState.stopReattach)
+          throw new ExecInfraError(
+            "resident /attach: stopped waiting for the resident to wake: the run was stopped",
+            "aborted",
+          );
         if (attachState.reattached !== undefined) return attachState.reattached;
       }
       return mod.attachRoundWorkspace(input);
@@ -264,6 +272,7 @@ beforeEach(() => {
   attachState.needsRef = undefined;
   attachState.reattached = undefined;
   attachState.refuseReattach = undefined;
+  attachState.stopReattach = false;
   attachState.rounds = [];
 });
 afterEach(() => vi.unstubAllEnvs());
@@ -831,6 +840,28 @@ describe("reattachWorkspace — the run's recorded workspace re-attached without
     expect(r.refusals).toEqual([]);
     expect(closes).toEqual([]);
     expect(replies).toEqual([]);
+  });
+
+  it("the run's own stop ending the re-attach's wait is `stopped`, read by the executor's typed aborted error — never a refusal that would restart the run from its request, never an unexpected throw", async () => {
+    const d = deps();
+    const r = request(d, "agent:coding fix it", "coding");
+    const repoCtx: RepoContext = { repo: "acme/api", ref: "main" };
+    attachState.stopReattach = true;
+    const control = new AbortController();
+    control.abort();
+    const mid = await reattachWorkspace(d, {
+      threadKey: THREAD,
+      agent: r.agent,
+      profile: r.profile,
+      repoCtx,
+      root: r.root,
+      clock: () => NOW,
+      reattach: binding,
+      stopSignal: control.signal,
+    });
+    expect(mid).toEqual({ kind: "stopped" });
+    // The stop rode into the attach: the round the factory was handed carries the signal.
+    expect(attachState.rounds.at(-1)?.stopSignal).toBe(control.signal);
   });
 
   it("a recorded workspace the factory refuses is reattach_refused with the factory's why on both paths — nothing else provisioned, no card closed, no reply, no refusal wrap: the caller closes the run saying why", async () => {

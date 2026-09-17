@@ -307,7 +307,8 @@ describe("runRelayedTool — the verdict path", () => {
     expect(answer).toEqual({ content: [{ type: "text", text: nativeText }], isError: false });
     const body = buildReviewPostBody("The review.", relayed[0]);
     expect(body).toBe(buildReviewPostBody("The review.", native[0]));
-    expect(body).toBe("LGTM: looks correct\n- [nit] F1 src/x.ts:3 — a name\n\nThe review.");
+    expect(body.startsWith("LGTM: looks correct\n\n> [!NOTE]\n")).toBe(true);
+    expect(body).toContain("| nit | **F1** a name | `src/x.ts:3` |");
   });
   // live-view.md item 26: a relayed tool sees the call it runs under, the same id
   // the call's tool_call/tool_result events carry — attach_file records its file under it.
@@ -457,6 +458,8 @@ describe("the research preset on pi: the web toolset relayed, run in the bot as 
       "github_search_code",
       "github_issue_list",
       "github_issue_get",
+      "github_actions_run",
+      "github_actions_job_log",
     ]);
   });
 

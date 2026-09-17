@@ -66,5 +66,7 @@ declare module 'vue' {
     USlideover: typeof import('./../node_modules/@nuxt/ui/dist/runtime/components/Slideover.vue')['default']
     UTabs: typeof import('./../node_modules/@nuxt/ui/dist/runtime/components/Tabs.vue')['default']
     UTooltip: typeof import('./../node_modules/@nuxt/ui/dist/runtime/components/Tooltip.vue')['default']
+    ViewAsBanner: typeof import('./src/components/ViewAsBanner.vue')['default']
+    ViewAsPicker: typeof import('./src/components/runs/ViewAsPicker.vue')['default']
   }
 }

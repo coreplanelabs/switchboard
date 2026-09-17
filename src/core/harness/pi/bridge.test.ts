@@ -202,6 +202,45 @@ describe("the bridge's spans — one tool.<name> per call under run.agent, ended
       summary: "the run was hard-stopped",
     });
   });
+
+  // harness.md item 13: `markOpenCallsCut` marks the calls open when the abort
+  // is SENT; pi handles it a moment later, and a tool that finishes in that
+  // window ends clean. Its result is a settle — the command exited — and the
+  // mark is spent on nothing; only an end that failed carries `cut`.
+  it("a call an abort was sent for ends marked `cut` when pi ends it as a failure, and unmarked — a settle, `ok` — when the tool exited clean in the window before pi handled the abort", () => {
+    const { bridge, events } = harness();
+    bridge.observe({
+      type: "tool_execution_start",
+      toolCallId: "c1",
+      toolName: "bash",
+      args: { command: "sleep 900" },
+    });
+    bridge.markOpenCallsCut();
+    bridge.observe({
+      type: "tool_execution_end",
+      toolCallId: "c1",
+      toolName: "bash",
+      result: { content: [{ type: "text", text: "Command exited with code 143" }] },
+      isError: true,
+    });
+    expect(events.at(-1)).toMatchObject({ type: "tool_result", callId: "c1", ok: false, exitCode: 143, cut: true });
+
+    bridge.observe({ type: "tool_execution_start", toolCallId: "c2", toolName: "bash", args: { command: "make" } });
+    bridge.markOpenCallsCut();
+    bridge.observe({
+      type: "tool_execution_end",
+      toolCallId: "c2",
+      toolName: "bash",
+      result: { content: [{ type: "text", text: "built" }] },
+      isError: false,
+    });
+    const clean = events.at(-1);
+    expect(clean).toMatchObject({ type: "tool_result", callId: "c2", ok: true, exitCode: 0 });
+    expect(clean !== undefined && "cut" in clean).toBe(false);
+    // The mark is spent either way: a later end for a call marked once is never read as cut.
+    expect(bridge.callOpen("c1")).toBe(false);
+    expect(bridge.callOpen("c2")).toBe(false);
+  });
 });
 
 describe("the gate's coverage — every call that ran was vetted", () => {

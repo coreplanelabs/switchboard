@@ -1,3 +1,4 @@
+import { buildReviewPostBody, parseVerdictInput } from "../reviewVerdict.js";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,11 +21,16 @@ import { reattachWorkspace } from "./provision.js";
 import { bearerHashOf, RunBearerStore } from "../modelProxy/runBearers.js";
 import { RUN_BEARER_ENV } from "../harness/pi/process.js";
 import {
+  HarnessContainerReplacedError,
+  HarnessGateBypassedError,
+  HarnessMismatchError,
   openThroughSeam,
   type Finding,
   type Harness,
   type HarnessFacts,
+  type HarnessRecord,
   type HarnessRun,
+  type HarnessSession,
 } from "../harness/contract.js";
 import type { HarnessRoster } from "../harness/roster.js";
 import { InMemoryRunStore, NullRunStore } from "../runStore.js";
@@ -213,6 +219,8 @@ function setup(
     session?: SessionCapability;
     /** Who asked; `slack:UX` unless a test needs a second person's scope. */
     userId?: string;
+    /** The registry's per-run backlog bound in events, when a test needs the run's early events evicted. */
+    backlogLimit?: number;
   } = {},
 ) {
   const config = configStore(opts.yaml);
@@ -262,7 +270,11 @@ function setup(
     { msg: message, directives: { text: "hello there", ...(opts.agent ? { agent: opts.agent } : {}) }, history: [] },
   );
   const agent = getAgent(resolved.agentName);
-  const registry = new RunRegistry({ genId: () => "run-l", genToken: () => "tok" });
+  const registry = new RunRegistry({
+    genId: () => "run-l",
+    genToken: () => "tok",
+    ...(opts.backlogLimit !== undefined ? { backlogLimit: opts.backlogLimit } : {}),
+  });
   const run = registry.create(`${agentName} · #CX · UX`, {
     agent: agentName,
     model: resolved.modelRef,
@@ -302,7 +314,14 @@ function setup(
         backend: "local" as const,
         ...(opts.binding ? { binding: opts.binding } : {}),
       },
-      release: async (opts: { hardStopped: boolean }) => void releases.push(opts.hardStopped ? "hard" : "paired"),
+      release: async (opts: { hardStopped: boolean; commandInFlight?: boolean; gateBypassed?: boolean }) =>
+        void releases.push(
+          opts.hardStopped
+            ? "hard"
+            : opts.commandInFlight === true || opts.gateBypassed === true
+              ? "torn-down"
+              : "paired",
+        ),
     },
     admitted: new ThreadAdmission<DispatchFollowUp>().claim(THREAD, { agent: agentName }).live,
     ledgerRun: undefined,
@@ -599,6 +618,330 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     s.ending.drain(undefined);
     await s.writer.settled();
     expect((await s.store.get("run-l"))!.status).toBe("failed");
+  });
+
+  // docs/reference/specs/harness.md item 13: the workspace's release reads the
+  // record. A command the run's ending may have left running in the workspace —
+  // a call the ending cut (its result marked `cut`: pi's abort, OpenCode's
+  // interrupt, the session's end), or a call open when the run failed or was
+  // interrupted — tears the workspace down as after a hard stop rather than hold
+  // it behind the command, and the record says so; a run that completed with a
+  // call unpaired (a relayed tool that ran in the bot) left nothing running and
+  // pairs the workspace as any orderly end does; a failure with nothing in
+  // flight pairs it too; a gate bypass tears it down whatever the record shows.
+  // The harness is a stub over the seam: what it puts on the record and how its
+  // `open` ends are the ending's two facts, and the loop reads nothing else.
+  const openToolCall = (run: HarnessRun): void =>
+    run.onEvent?.({ type: "tool_call", tool: "bash", summary: "$ sleep 600", command: "sleep 600", callId: "c-open" });
+  const settleToolCall = (run: HarnessRun): void =>
+    run.onEvent?.({ type: "tool_result", tool: "bash", ok: true, summary: "exit 0", callId: "c-open" });
+  // pi's aborted settle: the tool's own end after the loop's abort, which the
+  // bridge marks `cut` — on the record before the session ends.
+  const abortOpenCall = (run: HarnessRun): void =>
+    run.onEvent?.({ type: "tool_result", tool: "bash", ok: false, summary: "aborted", callId: "c-open", cut: true });
+  // What pi's `end()` does to every call still open (`closeOpenSpans`): a
+  // failed result marked `cut`.
+  const cutOpenCallAtEnd = (run: HarnessRun): void =>
+    run.onEvent?.({
+      type: "tool_result",
+      tool: "bash",
+      ok: false,
+      summary: "the run ended",
+      callId: "c-open",
+      cut: true,
+    });
+  // A relayed tool's call the record never paired: it ran in the bot, nothing in the workspace.
+  const openRelayedCall = (run: HarnessRun): void =>
+    run.onEvent?.({ type: "tool_call", tool: "update_status", summary: "update_status", callId: "c-relayed" });
+  const tornDownNotes = async (s: ReturnType<typeof setup>, ended: boolean | undefined) => {
+    s.ending.drain(ended);
+    await s.writer.settled();
+    return (await s.store.get("run-l"))!.events
+      .filter((e) => e.type === "run_note" && e.kind === "workspace_torn_down")
+      .map((e) => (e.type === "run_note" ? e.summary : ""));
+  };
+  const endingIn = (open: Harness["open"], extra: Partial<Parameters<typeof setup>[1]> = {}) =>
+    setup("", {
+      agent: "coding",
+      yaml: YAML + "harness:\n  coding: pi\n",
+      ...extra,
+      harness: {
+        harnesses: roster({ ...watched(piHarness).harness, open }),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+      bearer: "sbr_run-l.s3cret",
+    });
+  const sessionAnswering = (
+    answer: string,
+    end: () => Promise<void> = async () => {},
+    followUp: HarnessSession["followUp"] = async () => "",
+  ): HarnessSession => ({
+    answer,
+    followUp,
+    remainingMs: () => 0,
+    end,
+  });
+
+  it("the tool the finale interrupted — the run ends with its wind-down's answer, the call open on the record until the session's end cuts it as pi's does: the workspace is released `always`, torn down, not paired behind the command still running, and the record says why", async () => {
+    const s = endingIn(async (_deps, run) => {
+      openToolCall(run);
+      return sessionAnswering("the run ran out of time while a command was running", async () => cutOpenCallAtEnd(run));
+    });
+    const out = answered(await runLoop(s.deps, s.ctx));
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+    await out.releaseWorkspace();
+    expect(s.releases).toEqual(["torn-down"]);
+    expect(await tornDownNotes(s, true)).toEqual([expect.stringContaining("$ sleep 600")]);
+  });
+
+  it("the tool pi's abort settled — its own end, aborted, on the record before the session ends: the workspace is torn down all the same, the aborted settle a cut and not a settle", async () => {
+    const s = endingIn(async (_deps, run) => {
+      openToolCall(run);
+      abortOpenCall(run);
+      return sessionAnswering("the run ran out of time while a command was running");
+    });
+    const out = answered(await runLoop(s.deps, s.ctx));
+    await out.releaseWorkspace();
+    expect(s.releases).toEqual(["torn-down"]);
+  });
+
+  it("a clean completion with a relayed tool's call unpaired on the record — it ran in the bot, nothing in the workspace: the workspace is paired, released if idle, and nothing is said", async () => {
+    const s = endingIn(async (_deps, run) => {
+      openRelayedCall(run);
+      return sessionAnswering("done");
+    });
+    const out = answered(await runLoop(s.deps, s.ctx));
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+    await out.releaseWorkspace();
+    expect(s.releases).toEqual(["paired"]);
+    expect(await tornDownNotes(s, true)).toEqual([]);
+  });
+
+  it("a follow-up's steer unresolved with a command in flight: the failure propagates, the run is finished `failed`, the workspace is torn down and the record says why", async () => {
+    const s = endingIn(async (_deps, run) => {
+      openToolCall(run);
+      throw new Error("the follow-up's steer was in flight when the resident's control plane reset under the run");
+    });
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("the follow-up's steer");
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "failed" });
+    expect(s.releases).toEqual(["torn-down"]);
+    expect(await tornDownNotes(s, undefined)).toEqual([expect.stringContaining("$ sleep 600")]);
+  });
+
+  it("a server gone silent with a call open: the failure propagates and the workspace is torn down", async () => {
+    const s = endingIn(async (_deps, run) => {
+      openToolCall(run);
+      throw new Error("the feed carried nothing for the session past the bound");
+    });
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("carried nothing");
+    expect(s.releases).toEqual(["torn-down"]);
+  });
+
+  it("the opening prompt unresolved — nothing in flight: the run fails by name and the workspace is paired, released if idle", async () => {
+    const s = endingIn(async () => {
+      throw new Error("the prompt was in flight when the resident's control plane reset under the run");
+    });
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("the prompt was in flight");
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "failed" });
+    expect(s.releases).toEqual(["paired"]);
+  });
+
+  it("a gate bypass — the call already settled on the record, nothing in flight: the workspace is torn down all the same, what ran in it never vetted", async () => {
+    const s = endingIn(async (_deps, run) => {
+      openToolCall(run);
+      settleToolCall(run);
+      throw new HarnessGateBypassedError("the gate was bypassed: bash (call c-open) ran without asking the bot");
+    });
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("the gate was bypassed");
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "failed" });
+    expect(s.releases).toEqual(["torn-down"]);
+  });
+
+  // The record the release reads is the registry's bounded backlog, which drops
+  // its oldest events past the bound (runRegistry/backlog.ts): on a long run the
+  // line of the command that hung early is gone by the end, its cut result not.
+  it("a long run whose hung command's line the backlog evicted before the end — its cut result the only trace: the workspace is torn down all the same, the note naming the call by its tool and id", async () => {
+    const s = endingIn(
+      async (_deps, run) => {
+        openToolCall(run);
+        for (let i = 0; i < 40; i++) run.onEvent?.({ type: "assistant", text: `narration ${i}` });
+        return sessionAnswering("the run ran out of time while a command was running", async () =>
+          cutOpenCallAtEnd(run),
+        );
+      },
+      { backlogLimit: 24 },
+    );
+    const out = answered(await runLoop(s.deps, s.ctx));
+    expect(s.registry.snapshot("run-l", "tok")!.events.some((e) => e.type === "tool_call")).toBe(false);
+    await out.releaseWorkspace();
+    expect(s.releases).toEqual(["torn-down"]);
+    expect(await tornDownNotes(s, true)).toEqual([expect.stringContaining("bash (call c-open)")]);
+  });
+
+  // What the ending left running is read once, when the harness session ends,
+  // under the run's status at that moment — the ending's. A throw after a clean
+  // end (the answer's publish here; nothing between the end and the try's close
+  // may throw by design, and each such site is the same window) fails the run,
+  // but does not re-read the record under `failed`.
+  const answerPublishThrows = (s: ReturnType<typeof setup>): void => {
+    const publish = s.ctx.publishText;
+    s.ctx.publishText = (type, text) => {
+      if (type === "answer") throw new Error("the answer's publish failed");
+      publish(type, text);
+    };
+  };
+
+  it("a throw after a clean harness end — a relayed tool's call unpaired on the record: the in-flight read stands as taken at the end, so the failed run's workspace is still paired and nothing claims a command may be running", async () => {
+    const s = endingIn(async (_deps, run) => {
+      openRelayedCall(run);
+      return sessionAnswering("done");
+    });
+    answerPublishThrows(s);
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("the answer's publish failed");
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "failed" });
+    expect(s.releases).toEqual(["paired"]);
+    expect(await tornDownNotes(s, undefined)).toEqual([]);
+  });
+
+  it("a throw after a clean harness end that cut a call: the workspace is torn down and the record says why once, not once per read", async () => {
+    const s = endingIn(async (_deps, run) => {
+      openToolCall(run);
+      return sessionAnswering("the run ran out of time while a command was running", async () => cutOpenCallAtEnd(run));
+    });
+    answerPublishThrows(s);
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("the answer's publish failed");
+    expect(s.releases).toEqual(["torn-down"]);
+    expect(await tornDownNotes(s, undefined)).toEqual([expect.stringContaining("$ sleep 600")]);
+  });
+
+  // A session whose `end()` throws is not a clean end: pi may still be running
+  // with its command, since the end failed before it could kill anything. The
+  // read is taken all the same, under `failed` — the end's failure is the run's.
+  it("a harness session whose end() throws with a call open — the end failed before it could cut or kill: the run fails on the end's error, the record is still read, under `failed`, and the workspace is torn down with the note", async () => {
+    const s = endingIn(async (_deps, run) => {
+      openToolCall(run);
+      return sessionAnswering("done", async () => {
+        throw new Error("the session's end failed: the transport would not close");
+      });
+    });
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("the session's end failed");
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "failed" });
+    expect(s.releases).toEqual(["torn-down"]);
+    expect(await tornDownNotes(s, undefined)).toEqual([expect.stringContaining("$ sleep 600")]);
+  });
+
+  // The loop's own failure with a live session — a re-review turn on the run's
+  // session that the resident's reset cut — then a session whose end() throws
+  // too: the release still runs and the loop's error is the one that propagates.
+  it("the loop throws with a live session and the session's end() throws too in the catch: the workspace is still released, torn down for the open call, and the loop's own error is what propagates and what the record says", async () => {
+    const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+    const NEW = "d75b5a51aba97d43c64a42c96e580dd9abbfd78e";
+    const list = (subjects: string[]): PrCommitList => ({
+      commits: subjects.map((message, i) => ({ sha: `${i + 1}`.repeat(40), message })),
+      files: ["src/x.ts"],
+      filesTruncated: false,
+    });
+    const s = endingIn(
+      async (_deps, run) => {
+        openToolCall(run);
+        return sessionAnswering(
+          "First review: fine.",
+          async () => {
+            throw new Error("the session's end failed: the transport would not close");
+          },
+          async () => {
+            throw new Error(
+              "the re-review's steer was in flight when the resident's control plane reset under the run",
+            );
+          },
+        );
+      },
+      {
+        agent: "review",
+        yaml: YAML + "harness:\n  review: pi\n",
+        // The workspace's head is the reviewed one, so the settle reads the PR's move and re-reviews on the session.
+        executor: { exec: async () => HEAD },
+        repoCtx: { repo: "o/r", pr: 42, baseRef: "main" } as RepoContext,
+        review: {
+          head: HEAD,
+          post: async () => {},
+          currentHead: NEW,
+          commits: (sha) =>
+            sha === HEAD ? list(["feat: the change"]) : list(["feat: the change", "fix: review nits"]),
+        },
+      },
+    );
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("the re-review's steer was in flight");
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "failed" });
+    expect(s.releases).toEqual(["torn-down"]);
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const rec = (await s.store.get("run-l"))!;
+    expect(rec.events.filter((e) => e.type === "run_note" && e.kind === "run_failed")).toEqual([
+      expect.objectContaining({ summary: expect.stringContaining("the re-review's steer was in flight") }),
+    ]);
+    // The end's own failure is on the record too, as the harness's error — not the run's.
+    expect(
+      rec.events
+        .filter((e) => e.type === "run_note" && e.kind === "harness_error")
+        .map((e) => (e.type === "run_note" ? e.summary : "")),
+    ).toEqual([expect.stringContaining("the harness session's end failed after the loop's own error")]);
+  });
+
+  // An interruption from a post-turn (the container replaced under the run, a
+  // row of another harness) followed by an end that throws: the run's status is
+  // the interruption's, and the card must say so too — a ❌ card over an
+  // `interrupted` status and a restart would contradict itself.
+  it("an interrupted run whose session's end() throws stays interrupted: the status, the card and the outcome agree on the restart, and the workspace is torn down for the open call", async () => {
+    const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+    const NEW = "d75b5a51aba97d43c64a42c96e580dd9abbfd78e";
+    const list = (subjects: string[]): PrCommitList => ({
+      commits: subjects.map((message, i) => ({ sha: `${i + 1}`.repeat(40), message })),
+      files: ["src/x.ts"],
+      filesTruncated: false,
+    });
+    const s = endingIn(
+      async (_deps, run) => {
+        openToolCall(run);
+        return sessionAnswering(
+          "First review: fine.",
+          async () => {
+            throw new Error("the session's end failed: the transport would not close");
+          },
+          async () => {
+            throw new HarnessMismatchError("pi", "opencode");
+          },
+        );
+      },
+      {
+        agent: "review",
+        yaml: YAML + "harness:\n  review: pi\n",
+        executor: { exec: async () => HEAD },
+        repoCtx: { repo: "o/r", pr: 42, baseRef: "main" } as RepoContext,
+        review: {
+          head: HEAD,
+          post: async () => {},
+          currentHead: NEW,
+          commits: (sha) =>
+            sha === HEAD ? list(["feat: the change"]) : list(["feat: the change", "fix: review nits"]),
+        },
+      },
+    );
+    const out = await runLoop(s.deps, s.ctx);
+    expect(out.kind).toBe("interrupted");
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "interrupted" });
+    expect(s.releases).toEqual(["torn-down"]);
+    expect(s.closes).toHaveLength(1);
+    const close = JSON.stringify(s.closes[0]);
+    expect(close).toContain("🔁");
+    expect(close).not.toContain("❌");
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const rec = (await s.store.get("run-l"))!;
+    expect(rec.status).toBe("interrupted");
+    expect(rec.events.filter((e) => e.type === "run_note" && e.kind === "run_failed")).toEqual([]);
   });
 
   // docs/reference/specs/run-history.md item 15: a failed run carries its reason
@@ -2013,7 +2356,7 @@ describe("the pi harness — the review preset", () => {
     expect(posts).toEqual([
       {
         target: { repo: "o/r", number: 42, commitId: HEAD },
-        body: `LGTM: looks correct\n- [nit] F1 src/x.ts:3 — a name\n\nThe review: one nit, F1.`,
+        body: buildReviewPostBody("The review: one nit, F1.", parseVerdictInput(VERDICT)!, { repo: "o/r", head: HEAD }),
       },
     ]);
     expect(container.killed).toEqual([4242]);
@@ -2147,9 +2490,12 @@ describe("the pi harness — the review preset", () => {
     expect(posts).toEqual([
       {
         target: { repo: "o/r", number: 42, commitId: NEW },
-        body: "Changes requested: the new test is wrong\n\nSecond review: the new test is wrong.",
+        body: expect.stringContaining(
+          "<summary>Full review</summary>\n\nSecond review: the new test is wrong.\n\n</details>",
+        ),
       },
     ]);
+    expect(posts[0].body.startsWith("Changes requested: the new test is wrong\n\n> [!WARNING]\n")).toBe(true);
     expect(s.published).toEqual(["answer:Second review: the new test is wrong."]);
     expect(s.replies.some((r) => r.startsWith("🔀 o/r#42 moved during the run"))).toBe(true);
     // pi ended once, after the settle
@@ -2295,9 +2641,12 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
       "github_search_code",
       "github_issue_list",
       "github_issue_get",
+      "github_actions_run",
+      "github_actions_job_log",
       "work_item_update",
       "work_item_create_child",
       "work_item_comment",
+
       "github_issue_create",
       "github_issue_update",
       "github_issue_comment",
@@ -2356,6 +2705,8 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
     "github_search_code",
     "github_issue_list",
     "github_issue_get",
+    "github_actions_run",
+    "github_actions_job_log",
   ];
   const rpcAnswers = (cmd: Record<string, unknown>, c: FakeHarnessContainer) => {
     if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
@@ -2905,7 +3256,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     expect(posts).toEqual([
       {
         target: { repo: "o/r", number: 42, commitId: HEAD },
-        body: `LGTM: looks correct\n- [nit] F1 src/x.ts:3 — a name\n\nThe review: one nit, F1.`,
+        body: buildReviewPostBody("The review: one nit, F1.", parseVerdictInput(VERDICT)!, { repo: "o/r", head: HEAD }),
       },
     ]);
     s.ending.drain(true);
@@ -3417,6 +3768,131 @@ describe("the configuration word — harness.<preset> picks a fresh run's harnes
 // moving the deployment; two people's runs in one process open on different
 // harnesses off one roster. A resumed row keeps the harness its facts name
 // whatever the scopes say now.
+// Feature: docs/reference/specs/execution.md item 9 — the run control's lease
+// clock is started by the RUN LOOP on the harness's own `lease` event,
+// whichever harness published it (pi and OpenCode both do), so every attach
+// the run's resident executor opens is clipped to the run; a relaunch that
+// finds the run inside its write-up reserve asks for no workspace and ends the
+// run on its budget, never `workspace_lost`.
+describe("the run control's lease clock — started by the run loop on the harness's lease event, read by the relaunch", () => {
+  /** A harness of the roster whose `open` publishes the lease as the real ones
+   *  do and reads the control's clock before and after it; `then` runs on the
+   *  opened run before the scripted answer (a throw ends the open with it). */
+  function leasing(base: Harness, endsInMs: number, seen: Array<number | undefined>, then?: (run: HarnessRun) => void) {
+    const harness: Harness = {
+      name: base.name,
+      history: base.history,
+      dispositions: base.dispositions,
+      effort: (tier) => base.effort(tier),
+      builtinTools: (identity) => base.builtinTools(identity),
+      open: async (_deps, run) => {
+        seen.push(run.control?.remainingMs());
+        run.onEvent?.({ type: "lease", startedAt: NOW, endsAt: NOW + endsInMs, loopEndsAt: NOW + endsInMs, at: NOW });
+        seen.push(run.control?.remainingMs());
+        then?.(run);
+        return { answer: "Done.", followUp: async () => "", remainingMs: () => endsInMs, end: async () => {} };
+      },
+      find: async () => "alive-here",
+      end: async () => {},
+    };
+    return harness;
+  }
+  const harnessDeps = (h: Harness): HarnessProcessDeps => ({
+    harnesses: roster(h, h),
+    registry: new HarnessRegistry(),
+    harnessUrl: "https://bot.example.com",
+    loopbackUrl: "http://127.0.0.1:8080",
+    containerFor: () => new FakeHarnessContainer(),
+  });
+
+  it("an OpenCode run: the control's clock is undefined before the harness's `lease` event and the lease's remainder after it — the run loop started it on the event; the harness never touched the control", async () => {
+    const seen: Array<number | undefined> = [];
+    const s = setup("unused", {
+      agent: "general",
+      yaml: YAML + "harness:\n  general: opencode\n",
+      harness: harnessDeps(leasing(openCodeHarness, 5 * 60_000, seen)),
+    });
+    expect(s.run.control.remainingMs()).toBeUndefined(); // the dispatch's attach runs here, before the lease
+    const out = answered(await runLoop(s.deps, s.ctx));
+    expect(out.answer).toBe("Done.");
+    expect(seen).toEqual([undefined, 5 * 60_000]);
+    expect(s.run.control.remainingMs()).toBe(5 * 60_000);
+  });
+
+  it("a container replaced with the run inside its write-up reserve: the relaunch asks for no workspace and the run ends on its budget — the `time_budget_exhausted` note saying why, the budget's answer, the status `completed`; no `resumed`, no `sandbox_restarted` from the loop, no restart from the request", async () => {
+    const record: HarnessRecord = {
+      messages: [],
+      compactions: [],
+      settlements: [],
+      turn: 1,
+      inboxConsumedSeq: 0,
+      deadline: NOW + 30_000,
+    };
+    const facts: HarnessFacts = {
+      harness: "pi",
+      pid: 4242,
+      logOffset: 0,
+      root: "/tmp/switchboard-pi-run-l",
+      container: "vm-a",
+      relaunches: 0,
+    };
+    const seen: Array<number | undefined> = [];
+    let opens = 0;
+    // The first open dies with its container after leaving its facts; a second
+    // open would be the relaunch the decision must not make.
+    const replaced = leasing(piHarness, 30_000, seen, (run) => {
+      if (opens++ > 0) return;
+      run.saveFacts?.(facts);
+      throw new HarnessContainerReplacedError(
+        "the container running pi was replaced (vm-a → vm-b)",
+        "the sandbox restarted under the run (waited 42 s)",
+        "vm-a",
+        "vm-b",
+        record,
+      );
+    });
+    // A coding PR run: its round has a workspace to re-attach (the machine class
+    // of `general` has none, and a run without one never reaches the re-attach),
+    // and its tail would observe the workspace and salvage — both against the
+    // replaced container's executor, whose worktree was never re-attached.
+    const execs: string[] = [];
+    const s = setup("unused", {
+      agent: "coding",
+      coding: true,
+      yaml: YAML + "harness:\n  coding: pi\n",
+      harness: harnessDeps(replaced),
+      binding: { ref: "main", sha: "abc", workspace: "/workspace/threads/t/main", user: "worker2" },
+      executor: {
+        exec: async (command) => {
+          execs.push(command);
+          return "";
+        },
+      },
+    });
+    const { ledgerRun, record: recorded } = recordingLedgerRun();
+    const out = answered(await runLoop(s.deps, { ...s.ctx, ledgerRun }));
+    expect(opens).toBe(1);
+    expect(seen).toEqual([undefined, 30_000]);
+    // The budget's plain answer — the "without finishing" form, no label around empty text.
+    expect(out.answer).toMatch(/^Stopped at the \d+-minute budget without finishing\./);
+    expect(out.answer).not.toContain("the container was replaced");
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+    // Nothing drove the replaced container's executor after the end: no workspace observation, no salvage.
+    expect(execs).toEqual([]);
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const notes = (recorded().events as Array<{ type: string; kind?: string; summary?: string }>).filter(
+      (e) => e.type === "run_note",
+    );
+    expect(notes.filter((n) => n.kind === "time_budget_exhausted").map((n) => n.summary)).toEqual([
+      "the container was replaced with 30s of the run's lease left, inside the write-up reserve; no re-attach was opened and no write-up ran",
+    ]);
+    expect(
+      notes.some((n) => n.kind === "resumed" || n.kind === "sandbox_restarted" || n.kind === "budget_salvage"),
+    ).toBe(false);
+  });
+});
+
 describe("the harness word through the scopes — user beats channel beats the deployment's block", () => {
   const scoped = (block: string) => YAML + block;
   const roster2 = () => {
@@ -3507,12 +3983,12 @@ describe("the relaunch ceiling — the mid-run re-attach spike (the record's fir
     // recorded local backend answers the thread's own directory, made once.
     const dir = localWorkspaceDir(workspaceDir, THREAD);
     const first = await reattachWorkspace(provisionDeps, { ...attachCtx, reattach: { backend: "local" } });
-    if (first.kind !== "attached") throw new Error(first.why);
+    if (first.kind !== "attached") throw new Error(first.kind === "reattach_refused" ? first.why : first.kind);
     expect(first.round.selection.backend).toBe("local");
     expect(existsSync(dir)).toBe(true);
     expect((await first.round.selection.executor.exec("pwd")).trim().endsWith("slack_CX_1.0")).toBe(true);
     const again = await reattachWorkspace(provisionDeps, { ...attachCtx, reattach: { backend: "local" } });
-    if (again.kind !== "attached") throw new Error(again.why);
+    if (again.kind !== "attached") throw new Error(again.kind === "reattach_refused" ? again.why : again.kind);
     expect((await again.round.selection.executor.exec("pwd")).trim()).toBe(
       (await first.round.selection.executor.exec("pwd")).trim(),
     );

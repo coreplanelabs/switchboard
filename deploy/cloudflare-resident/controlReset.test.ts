@@ -1,24 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { methodOf, readSource } from "./testing/sourceScan";
+import { ControlResetError, RuntimeReplacedError, controlResetErr, runtimeReplacedErr } from "./threadErr";
 
 // Feature: docs/reference/specs/resident-repos.md item 43 (and harness-pi.md
 // item 16): the resident's own Durable Object resetting under a live command (a
 // Worker-code deploy) is NEVER the `runtime-replaced` word — the container and
 // its processes are unchanged, so it answers its own `control-reset` word and
 // the harness never orphans a live pi by relaunching it in the same container
-//. Plain Node, the entry read as text, never loaded — like
-// runtimeUnreachable.test.ts and lifecycle.test.ts.
+//. Plain Node: the entry read as text, never loaded — like
+// runtimeUnreachable.test.ts and lifecycle.test.ts — and the error classes and
+// their builders loaded from ./threadErr.ts, which imports nothing workerd-only.
 
 const source = readSource("worker.ts");
 const residentDO = source.slice(source.indexOf("export class ResidentDO"));
-
-/** The text of one top-level class declaration of the entry, to its closing brace at column 0. */
-function classOf(name: string): string {
-  const start = source.search(new RegExp(`^class ${name} extends Error \\{`, "m"));
-  expect(start, `worker.ts declares class ${name}`).toBeGreaterThan(-1);
-  const end = source.indexOf("\n}\n", start);
-  return source.slice(start, end + 3);
-}
 
 /** One top-level `function name(...) { ... }` of the entry, to its closing brace at column 0. */
 function functionOf(name: string): string {
@@ -30,22 +24,27 @@ function functionOf(name: string): string {
 
 describe("a DO code-update reset answers control-reset, distinct from runtime-replaced", () => {
   it("the two error classes carry two distinct words, neither one bleeding into the other", () => {
-    const control = classOf("ControlResetError");
-    expect(control).toMatch(/control-reset:/);
+    const control = new ControlResetError("collect", new Error("reset because its code was updated")).message;
+    expect(control).toMatch(/^control-reset:/);
     expect(control).toMatch(/the container and its processes are as they were/);
     expect(control).toMatch(/the command's outcome is unknown/);
     expect(control).not.toMatch(/runtime-replaced/);
 
-    const replaced = classOf("RuntimeReplacedError");
-    expect(replaced).toMatch(/runtime-replaced:/);
+    const replaced = new RuntimeReplacedError("collect", new Error("Process supervisor is closed"), true).message;
+    expect(replaced).toMatch(/^runtime-replaced:/);
     expect(replaced).not.toMatch(/control-reset/);
   });
 
   it("the two ThreadErr builders answer two distinct reasons the client keys on", () => {
-    expect(functionOf("runtimeReplacedErr")).toMatch(/reason: "runtime-replaced"/);
-    const controlReset = functionOf("controlResetErr");
-    expect(controlReset).toMatch(/reason: "control-reset"/);
-    expect(controlReset).not.toMatch(/reason: "runtime-replaced"/);
+    const replaced = runtimeReplacedErr(
+      new RuntimeReplacedError("spawn", new Error("Process supervisor is closed"), true),
+    );
+    expect(replaced).toMatchObject({ status: 409, reason: "runtime-replaced" });
+    const controlReset = controlResetErr(
+      new ControlResetError("spawn", new Error("reset because its code was updated")),
+    );
+    expect(controlReset).toMatchObject({ status: 409, reason: "control-reset" });
+    expect(controlReset.reason).not.toBe("runtime-replaced");
   });
 
   it("isControlReset is the DO code-update reset predicate, kept apart from the runtime-replacement classifier", () => {

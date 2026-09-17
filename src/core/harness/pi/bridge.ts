@@ -172,6 +172,11 @@ export class PiBridge {
   /** The calls under way: their span, their tool, and whether their end is
    *  judged against the gate (harness-pi item 7). */
   private readonly openTools = new Map<string, { span: Span | undefined; tool: string; judged: boolean }>();
+  /** The open calls an abort was sent for (`markOpenCallsCut`): their failed
+   *  end, when pi answers it, is the abort's cut and not a settle — the result
+   *  is marked `cut`, and the workspace's release reads the command as one that
+   *  may run on; a clean end in the abort's window is the command's own exit. */
+  private readonly cutCalls = new Set<string>();
   /** The calls the gate saw — the extension asked `/harness/authorize` for
    *  them (`gateSaw`) — not yet ended. */
   private readonly vetted = new Set<string>();
@@ -359,6 +364,7 @@ export class PiBridge {
     const callId = str(event.toolCallId);
     const open = this.openTools.get(callId);
     this.openTools.delete(callId);
+    const marked = this.cutCalls.delete(callId);
     const tool = open?.tool ?? str(event.toolName);
     const isError = event.isError === true;
     const text = piResultText(event.result);
@@ -370,6 +376,12 @@ export class PiBridge {
         ? piBashExit(text, isError)
         : { failed: isError || (this.deps.textFailing?.has(tool) === true && toolTextFailed(text)) };
     const ok = !exit.failed;
+    // The mark is set when the abort is SENT (`markOpenCallsCut`); pi handles
+    // it a moment later, and a tool that finished in that window ends clean —
+    // the command exited, and its result is a settle, not a cut (harness.md
+    // item 13: a `cut` result is a command that may run on). Only a marked
+    // call's failed end is the abort's.
+    const cut = marked && !ok;
     this.emit({
       type: "tool_result",
       tool,
@@ -378,6 +390,7 @@ export class PiBridge {
       ...(exit.exitCode !== undefined ? { exitCode: exit.exitCode } : {}),
       ...prepareToolResult(text),
       ...(open?.span ? { spanId: open.span.id } : {}),
+      ...(cut ? { cut: true as const } : {}),
     });
     open?.span?.end(ok ? "ok" : "error", {
       callId,
@@ -467,17 +480,40 @@ export class PiBridge {
     return this.modelCallOpen ? MODEL_CALL_IN_FLIGHT : undefined;
   }
 
+  /** An abort is being sent to pi: every call open now is cut by it, not
+   *  settled — its failed end, when pi answers, lands marked `cut` (harness.md
+   *  item 13: the command behind it may run on, and the workspace's release
+   *  reads it so); a tool that exits clean before pi handles the abort settles. */
+  markOpenCallsCut(): void {
+    for (const callId of this.openTools.keys()) this.cutCalls.add(callId);
+  }
+
   /** End whatever tool spans a stopped pi left open, so no span outlives the
    *  run; `reason` is each call's result summary — one for all, or the note
    *  each call is settled with (harness-pi item 16: the restart note, said of
-   *  the container). */
-  closeOpenSpans(reason: string | ((open: { callId: string; tool: string }) => string)): void {
+   *  the container). `cut` marks each result when the caller is the session's
+   *  end, where pi is gone but its tree persists and a relayed command may run
+   *  on — the workspace's release reads it as in flight (harness.md item 13);
+   *  the container-replaced verdict leaves it unmarked, the old container's
+   *  calls gone and the relayed ones taken over by the relaunch. */
+  closeOpenSpans(
+    reason: string | ((open: { callId: string; tool: string }) => string),
+    opts: { cut?: boolean } = {},
+  ): void {
     for (const [callId, open] of this.openTools) {
       open.span?.end("error", { callId, ok: false });
       const summary = typeof reason === "string" ? reason : reason({ callId, tool: open.tool });
-      this.emit({ type: "tool_result", tool: open.tool, ok: false, callId, summary: redactAndCap(summary) });
+      this.emit({
+        type: "tool_result",
+        tool: open.tool,
+        ok: false,
+        callId,
+        summary: redactAndCap(summary),
+        ...(opts.cut ? { cut: true as const } : {}),
+      });
     }
     this.openTools.clear();
+    this.cutCalls.clear();
     this.vetted.clear();
   }
 }

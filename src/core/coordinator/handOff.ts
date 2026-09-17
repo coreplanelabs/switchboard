@@ -18,7 +18,7 @@
 import { DEFAULT_GRANT, type Grant, type GrantSource } from "../budgets.js";
 import { unitTitleOf } from "../ship/contract.js";
 import type { ShipEntry } from "../ship/preflight.js";
-import { shipTaskText } from "../ship/preflight.js";
+import { shipTaskText, shipUnitText } from "../ship/preflight.js";
 import {
   generatedPlanId,
   openPlanCursor,
@@ -159,15 +159,19 @@ async function plan(
     runId: input.runId,
     label: input.label,
   };
+  // The probe (item 10): is there a task here at all? Never the unit's text.
   const taskText = shipTaskText(input.requestText, entry.repo);
   const request = parseShipPlanRequest(taskText);
   if (request === undefined) {
-    // A generated plan of one unit (agent-ship item 16): the request text is
-    // the unit, the id is deterministic per (thread, text), the branch the
-    // graph's `plan/<id>/u1` — the instance's absent `plan.path` is the mark
-    // that keeps its unit in the requesting thread. Its merge is a person's,
-    // whatever the request's words say.
-    const text = taskText || "Implement the task this thread's ship request describes.";
+    // A generated plan of one unit (agent-ship item 16): the request text AS
+    // WRITTEN is the unit — its urls included, which the probe strips — the id
+    // is deterministic per (thread, text), the branch the graph's
+    // `plan/<id>/u1` — the instance's absent `plan.path` is the mark that keeps
+    // its unit in the requesting thread. Its merge is a person's, whatever the
+    // request's words say.
+    const text =
+      (taskText ? shipUnitText(input.requestText, entry.repo) : "") ||
+      "Implement the task this thread's ship request describes.";
     const planId = generatedPlanId(text, msg.threadKey);
     const graph: PlanGraph = {
       planId,

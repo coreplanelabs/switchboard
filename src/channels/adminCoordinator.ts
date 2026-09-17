@@ -65,7 +65,7 @@ import type { CoordinatorInstanceStore } from "../core/coordinator/instanceStore
 import type { DispatchOptions } from "../core/dispatcher.js";
 import type { DispatchOutcome } from "../core/dispatch/outcome.js";
 import { childRequestText } from "../core/dispatch/spawn.js";
-import { CHANGES_TOKEN, LGTM_TOKEN, type ReviewVerdictKind } from "../core/reviewVerdict.js";
+import { CHANGES_TOKEN, isAddressSeverity, LGTM_TOKEN, type ReviewVerdictKind } from "../core/reviewVerdict.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunEvent, ShipRoundOutcome } from "../core/runEvents.js";
 import type { RunHistoryWriter } from "../core/runHistoryWriter.js";
@@ -1172,7 +1172,9 @@ function unitLines(
     const state = u.ending
       ? u.ending.kind
       : last
-        ? `${shipRoundHeader({ index: last.index, agent: last.agent }, severity)} · ${last.outcome}`
+        ? `${shipRoundHeader({ index: last.index, agent: last.agent }, severity)} · ${last.outcome}${
+            last.gate ? ` · ⚠️ gate fired: ${last.gate.findings.join(", ")} at or above ${last.gate.level}` : ""
+          }`
         : u.threadKey
           ? "starting"
           : "waiting";
@@ -1212,6 +1214,16 @@ async function drawCard(
   await handle.done(shell.close({ kind: "done", icon: close.icon, detail: detail.join("\n") }));
 }
 
+/** The gate a round boundary may carry, held to its shape: a level on the
+ *  ladder and the gated findings as strings. `null` names a malformed one. */
+function parseGate(raw: unknown): { level: AddressSeverity; findings: string[] } | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const g = raw as Record<string, unknown>;
+  if (!isAddressSeverity(g.level)) return null;
+  if (!Array.isArray(g.findings) || !g.findings.every((f) => typeof f === "string")) return null;
+  return { level: g.level, findings: g.findings as string[] };
+}
+
 /** A round boundary: appended to the unit's row and drawn on the card. */
 async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps): Promise<IngressResponse> {
   const id = parseInstanceId(body.parentInstanceId);
@@ -1224,6 +1236,16 @@ async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
     return json(400, { ok: false, error: "agent must be coding or review" });
   if (!ROUND_OUTCOMES.includes(body.outcome as ShipRoundOutcome))
     return json(400, { ok: false, error: `outcome must be one of ${ROUND_OUTCOMES.join(", ")}` });
+  // The gate note (agent-ship item 9): the machine's severity check caught an
+  // approve carrying a finding at or above the level in force — a verdict the
+  // child's own parser should have downgraded (agent-review item 5a). Optional;
+  // when present it is held to its shape, kept on the round and said out loud.
+  const gate = body.gate === undefined ? undefined : parseGate(body.gate);
+  if (gate === null)
+    return json(400, {
+      ok: false,
+      error: "gate must be { level: blocking|major|minor|nit, findings: string[] }",
+    });
   const at = (deps.clock ?? systemClock)();
   const instance = await deps.instances.get(id.value);
   if (!instance) return json(404, { ok: false, error: "unknown_instance" });
@@ -1232,9 +1254,16 @@ async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   if (!row) return json(404, { ok: false, error: "unit_not_found", unit: body.unit });
   const updated: CoordinatorUnit = {
     ...row,
-    rounds: [...row.rounds, { index: body.index, agent: body.agent, outcome: body.outcome as string, at }],
+    rounds: [
+      ...row.rounds,
+      { index: body.index, agent: body.agent, outcome: body.outcome as string, at, ...(gate ? { gate } : {}) },
+    ],
   };
   await deps.instances.putUnits([updated]);
+  if (gate)
+    (deps.log ?? console.warn)(
+      `[coordinator] ${instance.id} ${row.unit}: severity gate fired on round ${body.index} — the review's approve carried ${gate.findings.join(", ")} at or above ${gate.level}, the level in force; the verdict was parsed at another level (agent-ship item 9)`,
+    );
   await drawCard(
     deps,
     instance,
@@ -1554,6 +1583,7 @@ export function parentRunRecord(
         index: r.index,
         agent: r.agent,
         outcome: r.outcome as ShipRoundOutcome,
+        ...(r.gate !== undefined ? { gate: r.gate } : {}),
         at: r.at,
       })),
     ),

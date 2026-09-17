@@ -10,6 +10,7 @@ import {
   RUN_ID_PATTERN,
   applyRetention,
   clampRetentionPolicy,
+  callsInFlight,
   fitRecordToBudget,
   isRunListItem,
   isRunRecord,
@@ -899,6 +900,69 @@ describe("the pull request on the record (docs/reference/specs/run-history.md it
     ]);
     expect(pushedBranchesOf(events.slice(1, 2))).toEqual([]);
     expect(pushedBranchesOf([])).toEqual([]);
+  });
+});
+
+// docs/reference/specs/harness.md item 13: the workspace's release reads the
+// record for the commands a run's ending may have left running in it — a call
+// the ending cut (its result marked `cut`: pi's abort, OpenCode's interrupt, the
+// session's end), or a call left open when the run failed or was interrupted; a
+// run that completed with a call unpaired (a relayed tool that ran in the bot, a
+// result lost to a gap) left nothing running.
+describe("callsInFlight — the commands a run's ending may have left running (docs/reference/specs/harness.md item 13)", () => {
+  const call = (callId: string): RunEvent => ({
+    type: "tool_call",
+    tool: "bash",
+    summary: `$ sleep ${callId}`,
+    callId,
+  });
+  const result = (callId: string, mark: { infra?: true; cut?: true } = {}): RunEvent => ({
+    type: "tool_result",
+    tool: "bash",
+    ok: false,
+    summary: "exit 1",
+    callId,
+    ...mark,
+  });
+  const ids = (events: RunEvent[], status: Parameters<typeof callsInFlight>[1]) =>
+    callsInFlight(events, status).map((c) => c.callId);
+
+  it("callsInFlight reads the record for the commands a run's ending may have left running: a call whose result is marked `cut` is one whatever the status, and stays one whatever lands for it later; a call with no result is one when the run failed, was interrupted or hard-stopped and none when it completed or stopped softly; settled calls, infra settles and unmarked results for calls never opened are none — in the record's order, each named by its call's line", () => {
+    expect(ids([], "failed")).toEqual([]);
+    expect(ids([call("c1")], "completed")).toEqual([]);
+    expect(callsInFlight([call("c1")], "failed")).toEqual([{ callId: "c1", tool: "bash", summary: "$ sleep c1" }]);
+    expect(ids([call("c1")], "interrupted")).toEqual(["c1"]);
+    expect(ids([call("c1"), result("c1")], "failed")).toEqual([]);
+    expect(ids([call("c1"), result("c1"), call("c2")], "failed")).toEqual(["c2"]);
+    expect(ids([call("c1"), result("c1", { infra: true })], "failed")).toEqual([]);
+    expect(ids([call("c1"), result("c1", { cut: true })], "completed")).toEqual(["c1"]);
+    expect(ids([call("c1"), call("c2"), result("c1", { cut: true })], "completed")).toEqual(["c1"]);
+    expect(ids([call("c1"), call("c2"), result("c2", { cut: true })], "failed")).toEqual(["c1", "c2"]);
+    expect(ids([result("c9")], "failed")).toEqual([]);
+    // A call once cut stays cut: a later result for it — the post-turn's bridge
+    // reading the earlier execution's aborted settle as its own — is no settle.
+    expect(ids([call("c1"), result("c1", { cut: true }), result("c1")], "completed")).toEqual(["c1"]);
+    expect(ids([call("c1"), result("c1", { cut: true }), call("c1"), result("c1")], "completed")).toEqual(["c1"]);
+    // A soft stop ends in its write-up as a completion does; a hard stop leaves what it abandoned.
+    expect(ids([call("c1")], "stopped_soft")).toEqual([]);
+    expect(ids([call("c1")], "stopped_hard")).toEqual(["c1"]);
+  });
+
+  // The record read is the registry's bounded backlog (`DEFAULT_BACKLOG_LIMIT`,
+  // `DEFAULT_BACKLOG_BYTES`; runRegistry/backlog.ts drops the oldest event past
+  // either): on a long run the line of a command that hung early is the first
+  // to go, while its cut result — the ending's — lands last and survives.
+  it("a cut result whose call the record no longer holds counts by itself — the harness's own word that the call was ended and not settled — named by its tool and call id, and stays cut past a later unmarked result for the same call; an unmarked orphan still counts for nothing", () => {
+    expect(callsInFlight([result("c1", { cut: true })], "completed")).toEqual([
+      { callId: "c1", tool: "bash", summary: "bash (call c1)" },
+    ]);
+    expect(ids([result("c1", { cut: true }), result("c1")], "completed")).toEqual(["c1"]);
+    // Announced again after the orphan cut: the line is the record's now, the state is not.
+    expect(callsInFlight([result("c1", { cut: true }), call("c1"), result("c1")], "completed")).toEqual([
+      { callId: "c1", tool: "bash", summary: "$ sleep c1" },
+    ]);
+    expect(ids([call("c0"), result("c1", { cut: true })], "failed")).toEqual(["c0", "c1"]);
+    expect(ids([result("c9")], "completed")).toEqual([]);
   });
 });
 

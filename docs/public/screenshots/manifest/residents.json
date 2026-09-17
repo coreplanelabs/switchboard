@@ -7,18 +7,19 @@
   "now": 1788877800000,
   "inputs": {
     "scripts/screenshots.mts": "8d507868382af4fdd9ebbad5a93fbd47db331dd9d303aad0c6f1fc651f153b2f",
-    "scripts/web-preview.ts": "3c1a9bfc33e0aa6e31c304573648f8af9b49405a71b5792c5df3de75443c4cfd",
-    "src/channels/webShell.ts": "5eab7aae4b16bad384c4863ddb8b3d644470cba2421e56d7649bd2fd95b26d92",
-    "src/docs/screenshotManifest.ts": "06f7c876aded03455327868187620031c44844c322ec1a46b09462c8083344cc",
+    "scripts/web-preview.ts": "4af003acd910f833aea4b210eaae96402cdae6eff9b9d72e9b9a702aa0fb406e",
+    "src/channels/webShell.ts": "ff2d48c4d2e10354f2739b10cba43e7b410207aa9c405bb9f0d4389dd4b8deca",
+    "src/docs/screenshotManifest.ts": "2264febe9a4bdbaa1fa2757171020ef8faca6a0bb360e7837dcf96c5eafd1a8f",
     "web/src/App.vue": "e95e58c24d31cd6de4b5d701b4c44ce9752c5278b7d6afd9c9e7028104ae2122",
     "web/src/assets/main.css": "64d8dd8426df76b08c2b08cbe0098ae2e329a67e9c475a3ddb55f6fb292cdddd",
     "web/src/components/AppNav.vue": "6d40882ef54bbf19f3efed3075010d9bf99e60aaa312fbb1930e7d11923d753c",
-    "web/src/components/AppShell.vue": "18854492cac372920a662dd775b612368df86cb9bd0ac4e2b64c8a905cee9270",
+    "web/src/components/AppShell.vue": "f6ff7e82f07661cb7fadb26104f42d66be7745c6a2cfe7cc08b65bc84c5cd785",
     "web/src/components/BrandMark.vue": "affc84525ad56464eb207dd178fc01643380818e677609f3e8b480bfe3ac5898",
     "web/src/components/DocsLink.vue": "1f7f5d4b34758ae9c7febafde0ab94a0812fb15ce5fe4bc5af6fed1ff58b756e",
     "web/src/components/SettingsLink.vue": "467f56fd73f816d58bffbfd5dd7039a183b118cba05d0c7249c097798b3a8018",
     "web/src/components/StatusDot.vue": "e31004d149370c7455a11e6aa63553327b2b219b3d224bc45cfd99c0843c58e7",
     "web/src/components/ThemeToggle.vue": "025a9a0c7ccc2983772c1888f7426ec161feb3ffaea87c914c65d15bdfd740d3",
+    "web/src/components/ViewAsBanner.vue": "c31f753d698c3c9df6f7643fdff78eee122c2a5bacff2d71e2899dd841b9f474",
     "web/src/components/residents/ResidentRow.vue": "86a441a5b5d0a59b98abeb4af7318f880f9790795e0b3ebb954c3c3e3e4d6511",
     "web/src/lib/browser.ts": "d1fd4f9f5935c3ca65a7d7e38f362601576ae575406bb2b5ac87ad118ff05dc7",
     "web/src/lib/capabilities.ts": "0e485825f48786605345f6a7298763790b7468595d9a828b615a245ab4a6aecd",
@@ -27,11 +28,12 @@
     "web/src/lib/indexRow.ts": "14bfe15c9a4a18e2fb64e7310c633084bcfee21fd975e77b66a04804135f7c47",
     "web/src/lib/markPulse.ts": "df29e8abee12f0827e8e1295f8fcb1184530240139790da7bffb5929fad8f647",
     "web/src/lib/navSections.ts": "dd842db8c9b0fc1d7cc592f145803622047d03131d876e7681710c28f4f348db",
-    "web/src/lib/seed.ts": "b2fff894798801b6e062ec734b510b717ba879495fdc6fa1ebb69418c74cb75e",
+    "web/src/lib/seed.ts": "60c90678cf3620ba135236f13cb76ee3e941356ef6849da7095cd800ecbdb1a5",
+    "web/src/lib/viewAs.ts": "7907b58fbf6464532a1c3f2ba880b7ea791971ea3f4ce15efaf98da8b4219187",
     "web/src/lib/wallClock.ts": "d81d36cd618a94540500e6ae2b6e867156dcad0e910b644cb6d7bf619a501c6f",
     "web/src/main.ts": "43c95547c4e4d9ecb88e9a0e7428417cda86764bdbfdab76c1c926b722f1deee",
     "web/src/pages/ResidentsIndexPage.vue": "6c64b12641d7153e93d54b4a53f37092f40c62ddec6e53b1ca7c79579286d3c1",
     "web/src/routes.ts": "e30b01a01fef6eb8f3be948de3e9b925565c4570d01713a203aaaf6f40ab826d",
-    "web/vite.config.ts": "9383938ec67bd57d645a9361990b0cab36d6a1d33eab5c4431180abd886692d0"
+    "web/vite.config.ts": "eaec9946d776ac13e8a0c3715d909dbe94dc5d5c7c7093e8665ff4992b70297e"
   }
 }

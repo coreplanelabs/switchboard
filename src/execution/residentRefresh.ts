@@ -180,11 +180,15 @@ export function killStaleBuildProcessesCommand(user: string, dir: string): strin
 }
 
 /** Signature of a step killed from OUTSIDE its own budget: the exit status of
- *  SIGTERM (128 + 15), bash's "Session terminated" on a killed login shell, or
- *  a tool naming the signal. A bare "killed" is NOT enough — compilers and
- *  OOM messages say it too — and a step the cycle itself timed out is a real
- *  failure however it died. */
-const INTERRUPTION_SIGNATURE = /\bexit 143\b|Session terminated|SIGTERM|^restore-interrupted:/;
+ *  SIGTERM (128 + 15) — as a shell reports it (`exit 143`) or as the platform
+ *  words a container that died under a short exec ("Container exited with
+ *  unexpected exit code: 143"; seen live on the wake path's ready-stamp probe
+ *  when a stop landed on it) — bash's "Session terminated" on a killed login
+ *  shell, or a tool naming the signal. Only 143: the platform's same wording
+ *  with any other code (1, 137, 139) is a genuine crash and stays a failure.
+ *  A bare "killed" is NOT enough — compilers and OOM messages say it too —
+ *  and a step the cycle itself timed out is a real failure however it died. */
+const INTERRUPTION_SIGNATURE = /\bexit 143\b|exit code: 143\b|Session terminated|SIGTERM|^restore-interrupted:/;
 
 /** The wordings git gives when the MIRROR itself is broken: its `origin`
  *  remote gone from `config`, the repository not a repository, an object store
@@ -361,11 +365,27 @@ export const SDK_RUNTIME_RECORD_KEY = "currentRuntimeIdentity";
 /** The DOMException the SDK's connect abort raises — `fetchUpgradeAttempt`
  *  calls `controller.abort()` with no reason when `DEFAULT_CONNECT_TIMEOUT_MS`
  *  passes, so the runtime's own `AbortError` with the message exactly `The
- *  operation was aborted`. Anchored on the WHOLE message, so a command's own
- *  `Aborted (core dumped)` never matches and neither does a `TimeoutError`'s
+ *  operation was aborted`. Anchored on the WHOLE message: a command's own
+ *  `Aborted (core dumped)` never matches, and neither does a `TimeoutError`'s
  *  `The operation was aborted due to timeout` — the text `AbortSignal.timeout`
- *  raises, a route's own bound on a slow GitHub, not a silent runtime. */
+ *  raises, a route's own bound on a slow GitHub, not a silent runtime. A
+ *  wrapper is read by its `cause`, where the DOMException rides whole; a
+ *  wrapper that only pasted the sentence into a longer message is not the
+ *  signal. */
 export const RUNTIME_UNREACHABLE_WORDING = /^The operation was aborted\.?$/;
+
+/** `err` and its `cause` chain, bounded like the SDK's own `selfAndCauses`
+ *  walker: the SDK wraps platform errors, so the telling message can sit one or
+ *  two links down. The one walker for every reader of a throw's chain — the
+ *  resident Worker's classifiers and its thread-error builders, the sandbox
+ *  Worker's — so the depth bound and the shape are decided once. */
+export function* selfAndCauses(err: unknown): Generator<unknown> {
+  let current = err;
+  for (let depth = 0; depth < 8 && current != null; depth++) {
+    yield current;
+    current = typeof current === "object" ? (current as { cause?: unknown }).cause : undefined;
+  }
+}
 
 /** Is this one link of an error's cause chain the SDK's connect abort? By
  *  name first (the DOMException's `AbortError`), by the DOMException's message

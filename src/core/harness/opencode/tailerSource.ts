@@ -54,6 +54,38 @@ let pending = Promise.resolve();
 let backoffMs = MIN_BACKOFF_MS;
 let connections = 0;
 
+// A write the feed refuses is not thrown from the write: node reports it on the
+// stream's error event — for the file the seam appends the feed to (EBADF: a
+// descriptor opened without write) as for a pipe whose reader is gone (EPIPE)
+// — and an error event nobody listens for is an uncaught exception that kills
+// the tailer with no note anywhere. The listener is the guard: the refused
+// record is lost to the feed and said on stderr. A feed gone for good — its
+// descriptor bad (EBADF), its reader gone (EPIPE): every later write fails the
+// same way and the stream is not destroyed — ends the tailer non-zero once the
+// note is out, so its death is visible to the seam and a re-attach restarts it
+// (a mute tailer alive at its pid would be waited on to the run's silence
+// bound): the exit code is set first, the exit follows the note's write or a
+// short unref'd timer, whichever comes first, so a stderr that never drains
+// cannot keep the mute tailer alive either. Any other refusal — a full disk
+// (ENOSPC), which space can cure — is noted and the tailer goes on. A write on
+// stderr that fails has nothing left to say it to.
+const FEED_GONE = new Set(["EBADF", "EPIPE"]);
+const FEED_GONE_EXIT_MS = 1000;
+process.stdout.on("error", (err) => {
+  const gone = FEED_GONE.has(err && err.code);
+  if (gone) {
+    process.exitCode = 1;
+    setTimeout(() => process.exit(1), FEED_GONE_EXIT_MS).unref();
+  }
+  process.stderr.write(
+    "tailer: a record could not be written" + (gone ? "; the feed is gone, exiting" : "") + ": " + detailOf(err) + "\\n",
+    () => {
+      if (gone) process.exit(1);
+    },
+  );
+});
+process.stderr.on("error", () => {});
+
 function emit(record) {
   process.stdout.write(JSON.stringify(record) + "\\n");
 }
@@ -97,10 +129,14 @@ async function getJson(path) {
  *  rows that name its call is the bridge's to hold until they come. */
 async function refill(sessionID, reason) {
   const at = Date.now();
-  const asks = getJson("/api/session/" + sessionID + "/permission").then(
-    (answer) => emit({ feed: "permissions", at, sessionID, reason, data: Array.isArray(answer.data) ? answer.data : [] }),
-    (err) => note("permission refill failed", { sessionID, reason, detail: detailOf(err) }),
-  );
+  // Neither read nor what is done with its answer can reject out of here: the
+  // asks' chain catches its read's refusal and a malformed answer alike (null
+  // is JSON with no data), the messages' try its pages and its record — so
+  // refill never rejects and the queue below never ends (a write cannot throw:
+  // emit).
+  const asks = getJson("/api/session/" + sessionID + "/permission")
+    .then((answer) => emit({ feed: "permissions", at, sessionID, reason, data: Array.isArray(answer.data) ? answer.data : [] }))
+    .catch((err) => note("permission refill failed", { sessionID, reason, detail: detailOf(err) }));
   try {
     const all = [];
     let cursor;
@@ -132,8 +168,13 @@ async function refill(sessionID, reason) {
   await asks;
 }
 
+// One refill after another; a refill that still managed to reject is noted
+// and the chain goes on — a rejected chain would skip every later refill for
+// every session, silently, for the rest of the tailer's life.
 function queueRefill(sessionID, reason) {
-  pending = pending.then(() => refill(sessionID, reason));
+  pending = pending
+    .then(() => refill(sessionID, reason))
+    .catch((err) => note("refill failed", { sessionID, reason, detail: detailOf(err) }));
 }
 
 function onEvent(event) {

@@ -36,6 +36,13 @@ export interface ReleaseOptions extends ExecTraceOptions {
   pushed?: readonly PushedBranch[];
 }
 
+/** What a mid-run head move carries beside the trace: the run's hard stop,
+ *  so a move that meets a transient refusal and waits for the wake ends with
+ *  the stop, never past it. */
+export interface MoveOptions extends ExecTraceOptions {
+  signal?: AbortSignal;
+}
+
 export interface Executor {
   /** Run a shell command; returns combined output (never throws on non-zero
    *  exit). `opts.signal` is a hard run stop: an implementation that can
@@ -65,7 +72,7 @@ export interface Executor {
    *  commit the workspace is now at (which may differ if the ref moved again).
    *  Absent on executors whose workspace the model manages itself (a sandbox
    *  clone): the dispatcher then tells the model to check the commit out. */
-  moveTo?(sha: string, opts?: ExecTraceOptions): Promise<{ sha: string }>;
+  moveTo?(sha: string, opts?: MoveOptions): Promise<{ sha: string }>;
 }
 
 export interface ExecOptions extends ExecTraceOptions {
@@ -181,6 +188,15 @@ export const EXEC_INFRA_WAITABLE: ReadonlySet<ExecInfraReason> = new Set<ExecInf
   "empty-failure",
   "worker-unavailable",
 ]);
+
+/** The run's own stop, as every request site and the wake wait type it: an
+ *  `ExecInfraError` whose reason is `aborted`. The one shape a caller reads a
+ *  stop by — never the signal's state beside some other failure, which would
+ *  record a provisioning failure that merely coincided with a pending stop as
+ *  the stop. */
+export function isRunStopError(err: unknown): err is ExecInfraError {
+  return err instanceof ExecInfraError && err.reason === "aborted";
+}
 
 /** Whether a wait may clear this infra failure (`EXEC_INFRA_WAITABLE`). */
 export function infraMayClear(err: ExecInfraError): boolean {

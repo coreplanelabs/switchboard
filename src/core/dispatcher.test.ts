@@ -22,7 +22,8 @@ import { piRunPaths, RUN_BEARER_ENV } from "./harness/pi/process.js";
 import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
 import { makeExecutor } from "../execution/factory.js";
 import { InMemoryArtifactStore } from "../artifacts/store.js";
-import { ExecSandboxRestartedError } from "../execution/executor.js";
+import { ExecInfraError, ExecSandboxRestartedError } from "../execution/executor.js";
+import { classifyError } from "./trace/classify.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
 import type { ChannelIO, HistoryItem, RunReceipt, StatusUpdate } from "./types.js";
 import { activeRunCount, dispatch, dispatchClick, type CoreDeps, type DispatchOutcome } from "./dispatcher.js";
@@ -64,7 +65,7 @@ import { REFERENCE_REFUSAL } from "./dispatch/references.js";
 import type { ContentPart } from "./chatMessage.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import type { OpenedPullRequest, PullRequestFacts, PullRequestTarget } from "../execution/githubPulls.js";
-import { shipTaskText } from "./ship/preflight.js";
+import { shipUnitText } from "./ship/preflight.js";
 import { generatedPlanId, unitBranch } from "./ship/coordinator.js";
 import type { GithubIdentity } from "../execution/githubApp.js";
 import { InMemoryMemoryStore, NullMemoryStore, type MemoryRecord } from "./memory/index.js";
@@ -622,6 +623,146 @@ describe("executor provisioning by agent resources", () => {
     expect(replies.some((r) => r.includes("late"))).toBe(false);
     expect(statuses.at(-1)?.title).toContain("⛔");
     expect(registry.listActive()[0].stop).toEqual({ mode: "hard", state: "stopped" });
+  });
+
+  // Feature: docs/reference/specs/execution.md item 9 — the run's stop rides
+  // into the first attach's wait, and a stop that ends the attach ends the
+  // request as what it is: stopped before the run started, not a setup failure.
+  it("a hard stop during the first attach's wait ends the request `stopped` — the card says the run was stopped before it started, no error reply, no cold fallback — never `setup_failed`", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const registry = new RunRegistry({ genId: () => "r1", genToken: () => "t1" });
+    const provider: Provider = {
+      name: "never",
+      complete: async () => {
+        throw new Error("the provider must not be called: the run never started");
+      },
+    };
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    const { io, replies, statuses } = fakeIO();
+    let stopSignal: AbortSignal | undefined;
+    // The factory's attach waiting through a transient refusal, as it ends when
+    // the run's stop arrives: the stop's own typed error (`wakeStopped`).
+    vi.mocked(makeExecutor).mockImplementationOnce(
+      (_opts, ctx) =>
+        new Promise((_resolve, reject) => {
+          stopSignal = ctx.stopSignal;
+          ctx.stopSignal?.addEventListener(
+            "abort",
+            () =>
+              reject(
+                classifyError(
+                  new ExecInfraError(
+                    "resident /attach: stopped waiting for the resident to wake: the run was stopped",
+                    "aborted",
+                  ),
+                  { kind: "transport" },
+                ),
+              ),
+            { once: true },
+          );
+        }),
+    );
+    const run = dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    while (!stopSignal) await new Promise((r) => setTimeout(r, 5));
+    expect(registry.requestStop("r1", "t1", "hard")).toEqual({ ok: true, mode: "hard" });
+    const ended = await run;
+    expect(ended.status).toBe("stopped");
+    const last = JSON.stringify(statuses.at(-1));
+    expect(last).toContain("⛔");
+    expect(last).toContain("stopped before the run started");
+    expect(last).not.toContain("setup failed");
+    expect(replies).toEqual([]);
+    // A run that never started is not listed as one that did.
+    expect(registry.listActive()).toEqual([]);
+  });
+
+  it("a follow-up queued during the first attach's wait is dropped with the ⛔ note when the stop ends the attach — never handed on as a fresh run on the stopped thread", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    let ids = 0;
+    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
+    const provider: Provider = {
+      name: "never",
+      complete: async () => {
+        throw new Error("the provider must not be called: no run started");
+      },
+    };
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.admission = new ThreadAdmission();
+    const first = fakeIO();
+    let stopSignal: AbortSignal | undefined;
+    vi.mocked(makeExecutor).mockImplementationOnce(
+      (_opts, ctx) =>
+        new Promise((_resolve, reject) => {
+          stopSignal = ctx.stopSignal;
+          ctx.stopSignal?.addEventListener(
+            "abort",
+            () =>
+              reject(
+                classifyError(
+                  new ExecInfraError(
+                    "resident /attach: stopped waiting for the resident to wake: the run was stopped",
+                    "aborted",
+                  ),
+                  { kind: "transport" },
+                ),
+              ),
+            { once: true },
+          );
+        }),
+    );
+    const run = dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), first.io);
+    while (!stopSignal) await new Promise((r) => setTimeout(r, 5));
+    const second = fakeIO();
+    await dispatch(deps, msg("and also the numbers", "slack:UADMIN"), second.io);
+    expect(second.replies[0]).toMatch(/^↪/);
+    expect(registry.requestStop("r1", "t", "hard")).toEqual({ ok: true, mode: "hard" });
+    const ended = await run;
+    expect(ended.status).toBe("stopped");
+    expect(second.replies).toHaveLength(2);
+    expect(second.replies[1]).toMatch(/^⛔ .*stopped before it read this follow-up/);
+    expect(first.replies).toEqual([]);
+    expect(registry.listActive()).toEqual([]);
+  });
+
+  it("a provisioning failure beside a pending stop is the failure, not the stop: the card says setup failed and the error is replied — only the executor's typed aborted error reads as the stop", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const registry = new RunRegistry({ genId: () => "r1", genToken: () => "t1" });
+    const provider: Provider = {
+      name: "never",
+      complete: async () => {
+        throw new Error("the provider must not be called: the run never started");
+      },
+    };
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    const { io, replies, statuses } = fakeIO();
+    let stopSignal: AbortSignal | undefined;
+    vi.mocked(makeExecutor).mockImplementationOnce(
+      (_opts, ctx) =>
+        new Promise((_resolve, reject) => {
+          stopSignal = ctx.stopSignal;
+          ctx.stopSignal?.addEventListener(
+            "abort",
+            () => reject(new Error("execution.resident is configured but RESIDENT_OPERATOR_TOKEN is not set")),
+            { once: true },
+          );
+        }),
+    );
+    const run = dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    while (!stopSignal) await new Promise((r) => setTimeout(r, 5));
+    expect(registry.requestStop("r1", "t1", "hard")).toEqual({ ok: true, mode: "hard" });
+    const ended = await run;
+    expect(ended.status).not.toBe("stopped");
+    const last = JSON.stringify(statuses.at(-1));
+    expect(last).toContain("setup failed");
+    expect(last).not.toContain("stopped before the run started");
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("RESIDENT_OPERATOR_TOKEN is not set");
   });
 
   it("a soft stop keeps the normal release policy (if-idle for coding) and marks the card stopped", async () => {
@@ -2346,8 +2487,14 @@ describe("review post-step", () => {
     expect(replies).toContain("answer"); // Slack still gets the review
     // No submit_verdict call → fail-closed: the body leads with the explicit
     // non-approving line, never "LGTM".
+    expect(
+      spy.calls[0].body.startsWith(`${NO_VERDICT_LINE}\n\n> [!CAUTION]\n> **No verdict** · head \`e8e43f4\``),
+    ).toBe(true);
     expect(spy.calls).toEqual([
-      { target: { repo: "acme/api", number: 42, commitId: PR_HEAD }, body: `${NO_VERDICT_LINE}\n\nanswer` },
+      {
+        target: { repo: "acme/api", number: 42, commitId: PR_HEAD },
+        body: expect.stringContaining("<summary>Full review</summary>\n\nanswer\n\n</details>"),
+      },
     ]);
   });
 
@@ -2394,9 +2541,12 @@ describe("review post-step", () => {
     expect(spy.calls).toEqual([
       {
         target: { repo: "acme/api", number: 42, commitId: PR_HEAD },
-        body: `LGTM: the change is sound\n\nVerdict: approve — the change is sound.`,
+        body: expect.stringContaining(
+          "<summary>Full review</summary>\n\nVerdict: approve — the change is sound.\n\n</details>",
+        ),
       },
     ]);
+    expect(spy.calls[0].body.startsWith("LGTM: the change is sound\n\n> [!NOTE]\n")).toBe(true);
     expect(replies.some((r) => r.includes("Verdict: approve — the change is sound."))).toBe(true);
     expect(replies.some((r) => r.includes("Verdict submitted."))).toBe(false);
     const events = registry.snapshot("rv1", "tv1")?.events ?? [];
@@ -2758,7 +2908,7 @@ describe("review post-step", () => {
       expect(spy.calls).toHaveLength(1);
       expect(spy.calls[0].target).toEqual({ repo: "acme/api", number: 42, commitId: OTHER_HEAD });
       expect(spy.calls[0].body).toMatch(
-        /^LGTM: ok\n\nLooks solid\.\n\n_Reviewed at e8e43f4; the head moved to d75b5a5 during the review — a rebase of the same 2 commits — so this review is posted against d75b5a5\._$/,
+        /^LGTM: ok\n\n> \[!NOTE\]\n> \*\*Approved\*\* · head `d75b5a5`[\s\S]*<summary>Full review<\/summary>\n\nLooks solid\.\n\n<\/details>\n\n<!-- switchboard:verdict [^\n]* -->\n\n_Reviewed at e8e43f4; the head moved to d75b5a5 during the review — a rebase of the same 2 commits — so this review is posted against d75b5a5\._$/,
       );
       expect(commitAsks).toEqual([
         { base: "main", sha: PR_HEAD },
@@ -2804,13 +2954,20 @@ describe("review post-step", () => {
       // Posted once, pinned to the new head, with the SECOND verdict and answer — the first approve is void.
       expect(spy.calls).toHaveLength(1);
       expect(spy.calls[0].target).toEqual({ repo: "acme/api", number: 42, commitId: OTHER_HEAD });
-      expect(spy.calls[0].body).toBe("Changes requested: ok\n\nSecond review: the new test is wrong.");
+      expect(
+        spy.calls[0].body.startsWith("Changes requested: ok\n\n> [!WARNING]\n> **Changes requested** · head `d75b5a5`"),
+      ).toBe(true);
+      expect(spy.calls[0].body).toContain(
+        "<summary>Full review</summary>\n\nSecond review: the new test is wrong.\n\n</details>",
+      );
       // The thread: the 🔀 note at detection, the second answer as the reply, no stale-pin note.
       expect(replies).toContain(
         "🔀 acme/api#42 moved during the run: reviewed e8e43f4, head is now d75b5a5 — 1 → 2 commits (+ “fix: review nits”). Re-reviewing at d75b5a5 before posting.",
       );
-      expect(replies).toContain("Second review: the new test is wrong.");
-      expect(replies).not.toContain("First review: approve.");
+      // The reply is rendered from the verdict (item 5b); with no itemized
+      // findings the second write-up rides along — the first never reaches the thread.
+      expect(replies.some((r) => r.includes("Second review: the new test is wrong."))).toBe(true);
+      expect(replies.some((r) => r.includes("First review: approve."))).toBe(false);
       expect(replies.some((r) => r.includes("re-request"))).toBe(false);
       // The card said so while it happened, and the run stream carries the note.
       expect(statuses.some((s) => /head moved → d75b5a5/.test(s.title))).toBe(true);
@@ -2898,6 +3055,31 @@ describe("review post-step", () => {
         .content.map((p) => (p.type === "text" ? p.text : ""))
         .join("");
       expect(followUp).toContain("git fetch origin");
+    });
+
+    it("the worktree move carries the run's hard stop: the signal `moveTo` receives is the run's own, so a stop requested while the move waits on the resident ends it", async () => {
+      const provider = turnsProvider([{ answer: "first" }, { answer: "second" }]);
+      const registry = new RunRegistry({ genId: () => "r1", genToken: () => "t1" });
+      const seen: { signal?: unknown; abortedByStop?: boolean } = {};
+      vi.mocked(makeExecutor).mockResolvedValueOnce({
+        executor: {
+          exec: async (cmd: string) => (/git rev-parse HEAD/.test(cmd) ? `${PR_HEAD}\n` : ""),
+          readFile: async () => "",
+          writeFile: async () => "",
+          moveTo: async (_sha: string, o?: { signal?: AbortSignal }) => {
+            seen.signal = o?.signal;
+            registry.requestStop("r1", "t1", "hard");
+            seen.abortedByStop = o?.signal?.aborted;
+            return { sha: OTHER_HEAD };
+          },
+        } as never,
+      });
+      const { deps } = setup({ provider, heads: [OTHER_HEAD], commits: CHANGED });
+      deps.runRegistry = registry;
+      const { io } = fakeIO();
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+      expect(seen.signal).toBeInstanceOf(AbortSignal);
+      expect(seen.abortedByStop).toBe(true);
     });
 
     it("reviewed head ≠ resolved head but = the PR's CURRENT head (the resident re-attached at a newer tip) → posted, pinned to it, no refusal", async () => {
@@ -3016,7 +3198,10 @@ describe("review post-step", () => {
     const { io } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
     expect(spy.calls).toHaveLength(1);
-    expect(spy.calls[0].body).toBe("LGTM: no blocking issues\n\nLooks solid.\n- nit: naming");
+    expect(spy.calls[0].body.startsWith("LGTM: no blocking issues\n\n> [!NOTE]\n> **Approved** · head `ccccccc`")).toBe(
+      true,
+    );
+    expect(spy.calls[0].body).toContain("<summary>Full review</summary>\n\nLooks solid.\n- nit: naming\n\n</details>");
     // pinned to the reviewed head so the workflow's stale-review guard can bite
     expect(spy.calls[0].target).toEqual({ repo: "acme/api", number: 42, commitId: "c".repeat(40) });
   });
@@ -3069,7 +3254,7 @@ describe("review post-step", () => {
           "Changes requested: ship it [downgraded from approve: finding F3 (major) at or above minor, the severity to address]\n",
         ),
       ).toBe(true);
-      expect(spy.calls[0].body).toContain("- [major] F3 a.vue:149 — drops the first key's ref");
+      expect(spy.calls[0].body).toContain("| major | **F3** drops the first key's ref | ");
     });
 
     it("by default an `approve` whose only finding is a nit still posts `LGTM:`", async () => {
@@ -3077,7 +3262,44 @@ describe("review post-step", () => {
       const spy = review(deps);
       const { io } = fakeIO();
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
-      expect(spy.calls[0].body.startsWith("LGTM: one nit\n- [nit] F2 b.ts — a nit\n")).toBe(true);
+      expect(
+        spy.calls[0].body.startsWith(
+          "LGTM: one nit\n\n> [!NOTE]\n> **Approved** · head `e8e43f4` · 1 finding: 1 nit\n",
+        ),
+      ).toBe(true);
+      expect(spy.calls[0].body).toContain(
+        "| nit | **F2** a nit | [`b.ts`](https://github.com/acme/api/blob/e8e43f480a09b76989b85ebe6a2a254d99a4d2a3/b.ts) |",
+      );
+    });
+
+    // Feature: docs/reference/specs/agent-review.md item 5b — the thread reply is
+    // rendered from the typed verdict; the write-up stays on GitHub under
+    // `Full review` and on the answer event.
+    it("item 5b: the thread reply is the token line, the finding bullets and the post with its run link — the write-up is on GitHub under `Full review`, not in the thread", async () => {
+      vi.stubEnv("PUBLIC_BASE_URL", "https://bot.example");
+      const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "one nit", "F2: rename it.", undefined, [nit]));
+      const spy = review(deps);
+      const { io, replies } = fakeIO();
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+      const verdictReply = replies.find((r) => r.startsWith("LGTM:"));
+      expect(verdictReply).toMatch(
+        /^LGTM: one nit\n- \[nit\] F2 b\.ts — a nit\n\nPosted to acme\/api#42 · \[Live run\]\(https:\/\/bot\.example\/runs\/[^)]+\)$/,
+      );
+      expect(replies.some((r) => r.includes("F2: rename it."))).toBe(false);
+      expect(spy.calls[0].body).toContain("<summary>Full review</summary>\n\nF2: rename it.\n\n</details>");
+    });
+
+    it("item 5b: a Slack-only review (opt-out) keeps the write-up in the thread under the rendered head — the text lands nowhere else", async () => {
+      vi.stubEnv("PUBLIC_BASE_URL", "https://bot.example");
+      const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "one nit", "F2: rename it.", undefined, [nit]));
+      const spy = review(deps);
+      const { io, replies } = fakeIO();
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42 slack only"), io);
+      expect(spy.calls).toHaveLength(0);
+      const verdictReply = replies.find((r) => r.startsWith("LGTM:"));
+      expect(verdictReply).toMatch(
+        /^LGTM: one nit\n- \[nit\] F2 b\.ts — a nit\n\nF2: rename it\.\n\n\[Live run\]\(https:\/\/bot\.example\/runs\/[^)]+\)$/,
+      );
     });
 
     it("a `severity:major` directive on the request widens the gate: an approve over a minor finding posts `LGTM:`", async () => {
@@ -3213,7 +3435,7 @@ describe("review post-step", () => {
       const { io, replies } = fakeIO();
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
       expect(spy.fn).not.toHaveBeenCalled();
-      expect(replies).toContain("the findings"); // Slack still gets the review
+      expect(replies.some((r) => r.includes("the findings"))).toBe(true); // Slack still gets the review (item 5b: nothing posted → the write-up rides along)
       const note = replies.find((r) => /not posted to acme\/api#42/.test(r));
       expect(note).toMatch(
         new RegExp(`reviewed head ${OTHER_HEAD.slice(0, 7)} is not the PR head ${PR_HEAD.slice(0, 7)}`),
@@ -8250,7 +8472,7 @@ describe("agent:ship (the hand-off to the plan runner)", () => {
   const HEAD_A = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
   const PR_URL = "https://github.com/acme/api/pull/7";
   const TASK_MSG = "agent:ship in acme/api: fix the login redirect";
-  const SHIP_PLAN_ID = generatedPlanId(shipTaskText("in acme/api: fix the login redirect", "acme/api"), "slack:CX:1.0");
+  const SHIP_PLAN_ID = generatedPlanId(shipUnitText("in acme/api: fix the login redirect", "acme/api"), "slack:CX:1.0");
   const SHIP_BRANCH = unitBranch(SHIP_PLAN_ID, "u1");
 
   const SHIP_YAML = `
@@ -8616,7 +8838,7 @@ workspaceDir: __WORKDIR__
     const { instance, unit } = await handed(instances, "run-shiprouted");
     expect(instance).toMatchObject({ merge: "person" });
     expect(instance?.plan?.id).toBe(
-      generatedPlanId(shipTaskText("fix the login redirect", "acme/api"), "slack:CX:1.0"),
+      generatedPlanId(shipUnitText("fix the login redirect", "acme/api"), "slack:CX:1.0"),
     );
     expect(unit).toBeDefined();
     expect(created).toHaveLength(1);
@@ -8674,7 +8896,7 @@ workspaceDir: __WORKDIR__
       baseRef: "main",
     });
     deps.fetchPrFacts = vi.fn(async () => openBotPr({ author: { login: "alice", id: 42 } }));
-    const branch = unitBranch(generatedPlanId(shipTaskText(TASK, "acme/api"), "slack:CX:1.0"), "u1");
+    const branch = unitBranch(generatedPlanId(shipUnitText(TASK, "acme/api"), "slack:CX:1.0"), "u1");
     const registry = new RunRegistry({ genId: () => "run-shipcite", genToken: () => "tok" });
     deps.runRegistry = registry;
     const { io, replies } = fakeIO();
@@ -8706,7 +8928,7 @@ workspaceDir: __WORKDIR__
       baseRef: "main",
     });
     deps.fetchPrFacts = vi.fn(async () => undefined); // transient fetch failure
-    const branch = unitBranch(generatedPlanId(shipTaskText(TASK, "acme/api"), "slack:CX:1.0"), "u1");
+    const branch = unitBranch(generatedPlanId(shipUnitText(TASK, "acme/api"), "slack:CX:1.0"), "u1");
     const registry = new RunRegistry({ genId: () => "run-shipfail", genToken: () => "tok" });
     deps.runRegistry = registry;
     const { io, replies } = fakeIO();
@@ -10702,6 +10924,102 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(ledger.finished.get("run-old")?.status).toBe("completed");
   });
 
+  // Feature: execution.md item 9 over run-history.md item 54 — a hard stop that
+  // ends a resumed run's re-attach wait ends the request `stopped`, and the
+  // adopted row closes with the stop's status, not `interrupted` with a note
+  // that reads like a crash: the row is what the run page and the sweep read.
+  it("a resumed run hard-stopped while its re-attach waits through a transient refusal ends `stopped` and closes its row `stopped_hard` — never `interrupted`, never re-dispatched", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    let stopRun: (() => void) | undefined;
+    residentFetchStub({
+      attach: () => {
+        // The re-attach meets a blip the Worker typed transient; the operator stops the run in that wait.
+        stopRun?.();
+        return new Response(
+          JSON.stringify({ error: "attach-failed: Network connection lost.", status: 500, transient: true }),
+          { status: 200 },
+        );
+      },
+    });
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const request = msg("agent:coding fix it", "slack:UADMIN");
+    await ledger.claim({
+      runId: "run-old",
+      threadKey: "slack:CX:1.0",
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      meta: {
+        channelId: "slack:CX",
+        userId: "slack:UADMIN",
+        threadKey: "slack:CX:1.0",
+        agent: "coding",
+        model: "anthropic/coding-model",
+        repo: "acme/api",
+        ref: "main",
+        request: durableInboxMessage(request, request.text, 4_000),
+      },
+      system: "sys",
+      tools: [],
+      state: { binding: { backend: "resident", workspace: "/workspace/threads/t/main", user: "worker2" } },
+    });
+    await ledger.seed("run-old", "gen-OLD", [
+      { idx: 0, message: { role: "user", content: [{ type: "text", text: "fix it" }] } },
+    ]);
+    await ledger.step(
+      "run-old",
+      "gen-OLD",
+      {
+        step: 0,
+        seq: 0,
+        turnIndex: 1,
+        inFlight: [],
+        inboxConsumedSeq: 0,
+        remainingMs: 20 * 60_000,
+        turn: 0,
+        iteration: 0,
+      },
+      [],
+    );
+    ledger.live.get("run-old")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+    const provider = capturingProvider("must not run");
+    const { deps, registry, writer } = wired(provider, { ledger, yaml: RESIDENT_YAML_FIXTURE });
+    stopRun = () => void registry.requestStop("run-old", "tok", "hard");
+    const plan = planResume({
+      transcript: {
+        complete: true,
+        compactions: [],
+        turns: 1,
+        messages: [{ role: "user", content: [{ type: "text", text: "fix it" }] }],
+      },
+      lastStep: reclaimed.lastStep!,
+      tools: knownToolsFor(getAgent("coding")),
+    });
+    if (plan.kind !== "resume") throw new Error(plan.kind === "interrupted" ? plan.why : plan.kind);
+    const { io, replies } = ioWithCard();
+    const outcome = await dispatch(deps, resumeMessage(reclaimed.row, "fix it"), io, {
+      resume: {
+        row: reclaimed.row,
+        lastStep: reclaimed.lastStep!,
+        plan,
+        events: [],
+        lastSeq: 0,
+        repoCtx: { repo: "acme/api", ref: "main" },
+        inbox: [],
+      },
+    });
+    await writer.settled();
+    expect(outcome.status).toBe("stopped");
+    expect(replies.some((r) => r.startsWith("❌"))).toBe(false);
+    expect(provider.requests).toEqual([]);
+    expect(registry.listActive()).toEqual([]);
+    expect(ledger.live.has("run-old")).toBe(false);
+    expect(ledger.finished.get("run-old")?.status).toBe("stopped_hard");
+  });
+
   it("a resume whose recorded resident refuses to reuse the worktree provisions no sandbox: the resumed row closes interrupted with the note that says why, and the request runs again as a new run once the thread is free (item 54)", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
@@ -10919,7 +11237,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       tickMs: 5,
       sleep: realSleep,
     };
-    return { deps, provider, registry, writer, containers, calls };
+    return { deps, provider, registry, writer, store, containers, calls };
   }
 
   // Feature: docs/reference/specs/harness.md item 6 (the survival clause's
@@ -10986,6 +11304,62 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(ledger.live.size).toBe(0);
     expect(registry.getById("run-1")).toMatchObject({ finished: true, status: "completed" });
     expect(registry.getById("run-2")).toBeNull();
+  });
+
+  // Feature: execution.md item 9 on harness-pi.md item 16 — the run's hard stop
+  // rides into the relaunch's re-attach: a stop while the replacement is being
+  // re-attached ends the wait at once, and the run ends as a hard-stopped run
+  // does — never relaunched, never restarted from its request, never failed.
+  it("a hard stop while the relaunch re-attaches the run's worktree ends the run stopped: the stop's answer, the record `stopped_hard` with the note saying so, no pi relaunched, no second run", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    let stopRun: (() => void) | undefined;
+    const { deps, provider, registry, writer, containers } = replacedContainerWorld(ledger, {
+      attach: (body) => {
+        if (body.reuse !== true)
+          return new Response(
+            JSON.stringify({ workspace: "/workspace/threads/t/main", ref: "main", sha: "abc", user: "worker2" }),
+            { status: 200 },
+          );
+        // The relaunch's re-attach meets a blip the Worker typed transient; the operator stops the run in that wait.
+        stopRun?.();
+        return new Response(
+          JSON.stringify({ error: "attach-failed: Network connection lost.", status: 500, transient: true }),
+          { status: 200 },
+        );
+      },
+    });
+    stopRun = () => void registry.requestStop("run-1", "tok-1", "hard");
+    const { io, replies } = ioWithCard();
+    const outcome = await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    await writer.settled();
+    expect(outcome).toEqual({ status: "stopped" });
+    const record = ledger.finished.get("run-1");
+    expect(record?.status).toBe("stopped_hard");
+    const notes = (record?.events ?? []).filter((e) => e.type === "run_note") as Array<{
+      kind: string;
+      summary: string;
+    }>;
+    // One `sandbox_restarted` note — the harness's verdict — and the stop's own kind for the stop: a
+    // reader counting replaced containers by note kind sees one, not two.
+    expect(notes.filter((n) => n.kind === "sandbox_restarted").map((n) => n.summary)).toEqual([
+      "the container running pi was replaced (vm-fake → vm-new; the executor said: the sandbox restarted under the run (waited 42 s))",
+    ]);
+    expect(notes.filter((n) => n.kind === "stopped")).toEqual([
+      expect.objectContaining({
+        kind: "stopped",
+        mode: "hard",
+        summary:
+          "the run was stopped while its workspace was being re-attached in the replacement container; pi was not relaunched",
+      }),
+    ]);
+    expect(notes.some((n) => n.kind === "resumed")).toBe(false);
+    expect(replies.some((r) => r.startsWith("❌"))).toBe(false);
+    expect(replies.at(-1)).toContain("aborted by an operator");
+    // No pi in the replacement: the first container's alone, and no second run.
+    expect(containers).toHaveLength(1);
+    expect(provider.requests).toHaveLength(0);
+    expect(registry.getById("run-2")).toBeNull();
+    expect(ledger.live.size).toBe(0);
   });
 
   // Feature: docs/reference/specs/thread-admission.md item 5, harness-pi.md
@@ -11088,6 +11462,264 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(replies.at(-1)).toBe("started over and done");
     expect(inner.finished.get("run-2")).toMatchObject({ status: "completed", threadKey: "slack:CX:1.0" });
     expect(registry.getById("run-2")).toMatchObject({ finished: true, status: "completed" });
+  });
+
+  // The same road in the order the process really has: the closed run's
+  // finish is fire-and-forget through the history writer, and the restart is
+  // dispatched from that run's finally — so the restart's reservation reaches
+  // the ledger while the thread's live row is still the closed run's. Seen
+  // live on a resident roll: the reservation was refused `thread-live`, the
+  // restart ran untracked, and the store held only its start tombstone.
+  it("a restart whose reservation meets the closed run's row still live — its finish in flight from this same process — waits for that finish to land and claims again, so the restarted run is tracked as its predecessor was, never untracked with only its start tombstone in the store", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const order: string[] = [];
+    let claimAnswered!: () => void;
+    const answered = new Promise<void>((r) => (claimAnswered = r));
+    // The closed row's finish lands only AFTER the restart's first claim was
+    // answered — refused, in the order production has when the write is slower
+    // than the dispatch of the restart; an `ok` there lands it just the same.
+    const ledger = new Proxy(inner, {
+      get(target, prop) {
+        if (prop === "finish")
+          return async (runId: string, gen: string, record: RunRecord) => {
+            if (runId === "run-1") await answered;
+            order.push(`finish ${runId}`);
+            return target.finish(runId, gen, record);
+          };
+        if (prop === "claim")
+          return async (req: ClaimRequest) => {
+            const result = await target.claim(req);
+            if (req.runId !== "run-1") {
+              order.push(`claim ${req.runId} ${result.ok ? "ok" : result.reason}`);
+              claimAnswered(); // any answer: an `ok` here (a regression) fails the order assertion, never hangs the suite
+            }
+            return result;
+          };
+        const v = Reflect.get(target, prop) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    }) as InMemoryRunLedger;
+    const { deps, provider, writer, containers } = replacedContainerWorld(ledger, {
+      // The re-attach (`reuse`) finds the thread rebound onto another tree: refused by name, the run restarts.
+      attach: (body) =>
+        new Response(
+          JSON.stringify(
+            body.reuse
+              ? { workspace: "/workspace/threads/t/other", ref: "main", sha: "abc", user: "worker3" }
+              : { workspace: "/workspace/threads/t/main", ref: "main", sha: "abc", user: "worker2" },
+          ),
+          { status: 200 },
+        ),
+    });
+    deps.admission = new ThreadAdmission();
+    const { io, replies } = ioWithCard();
+    const outcome = await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    await writer.settled();
+    expect(outcome).toEqual({ status: "refused", refusal: "workspace_lost" });
+    expect(inner.finished.get("run-1")?.status).toBe("interrupted");
+    // The reservation met the closed run's live row, waited for its finish to
+    // land, and claimed again; then the prompt's promotion of that row (item
+    // 42: the same run and generation, `ok`), and the run's own finish.
+    expect(order).toEqual([
+      "claim run-2 thread-live",
+      "finish run-1",
+      "claim run-2 ok",
+      "claim run-2 ok",
+      "finish run-2",
+    ]);
+    expect(containers).toHaveLength(2);
+    expect(provider.requests).toHaveLength(1);
+    expect(replies.at(-1)).toBe("started over and done");
+    // Tracked as its predecessor was: the record went through the ledger's finish, and the row is closed.
+    expect(inner.finished.get("run-2")).toMatchObject({ status: "completed", threadKey: "slack:CX:1.0" });
+    expect(inner.live.has("run-2")).toBe(false);
+    // …and nothing on its record says otherwise.
+    expect(
+      inner.finished.get("run-2")!.events.filter((e) => e.type === "run_note" && e.kind === "ledger_untracked"),
+    ).toEqual([]);
+  });
+
+  // The OTHER dispatch a closed run's finally makes takes the same road: the
+  // fresh turn for the follow-ups the run never consumed (thread-admission item
+  // 4) carries no restart name and is dispatched a few lines after the finish
+  // was handed to the writer, so its reservation meets the same row — the gate
+  // is the finish in flight, not the request's shape.
+  it("the fresh turn for a closed run's unconsumed follow-ups meets that run's row still live — its finish in flight from this same process — waits for the finish and claims again, and is tracked as its own run", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const order: string[] = [];
+    let claimAnswered!: () => void;
+    const answered = new Promise<void>((r) => (claimAnswered = r));
+    const ledger = new Proxy(inner, {
+      get(target, prop) {
+        if (prop === "finish")
+          return async (runId: string, gen: string, record: RunRecord) => {
+            if (runId === "run-1") await answered;
+            order.push(`finish ${runId}`);
+            return target.finish(runId, gen, record);
+          };
+        if (prop === "claim")
+          return async (req: ClaimRequest) => {
+            const result = await target.claim(req);
+            if (req.runId !== "run-1") {
+              order.push(`claim ${req.runId} ${result.ok ? "ok" : result.reason}`);
+              claimAnswered();
+            }
+            return result;
+          };
+        const v = Reflect.get(target, prop) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    }) as InMemoryRunLedger;
+    // A provider whose first call waits for the test to fail it; the fresh turn's call answers at once.
+    let calls = 0;
+    let fail!: (err: Error) => void;
+    let onFirst!: () => void;
+    const firstStarted = new Promise<void>((r) => (onFirst = r));
+    const first = new Promise<CompletionResult>((_, reject) => (fail = reject));
+    const provider: Provider = {
+      name: "gated",
+      async complete() {
+        if (calls++ === 0) {
+          onFirst();
+          return first;
+        }
+        return { content: [{ type: "text", text: `answer ${calls}` }], stopReason: "end_turn" };
+      },
+    };
+    let n = 0;
+    const registry = new RunRegistry({ genId: () => `run-${++n}`, genToken: () => `tok-${n}` });
+    const writer = createRunHistoryWriter({
+      store: new InMemoryRunStore(),
+      warn: () => {},
+      onPersisted: (id) => registry.markPersisted(id),
+      sleep: async () => {},
+    });
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.runHistoryWriter = writer;
+    deps.runLedger = createLedgerWriteThrough({
+      ledger,
+      gen: "gen-T",
+      fallback: { put: async () => {} },
+      warn: () => {},
+    });
+    deps.admission = new ThreadAdmission();
+    const a = fakeIO();
+    const run = dispatch(
+      deps,
+      { ...msg("write the report"), sourceUrl: "https://slack.example/p2", userName: "ux" },
+      a.io,
+    );
+    await firstStarted;
+    const b = fakeIO();
+    await dispatch(
+      deps,
+      { ...msg("and also the numbers", "slack:UY"), sourceUrl: "https://slack.example/p2", userName: "uy" },
+      b.io,
+    );
+    expect(b.replies[0]).toMatch(/^↪/);
+    await vi.waitFor(() =>
+      expect(registry.snapshotById("run-1")?.events ?? []).toContainEqual(
+        expect.objectContaining({ type: "input", text: expect.stringContaining("and also the numbers") }),
+      ),
+    );
+    fail(new Error("provider exploded"));
+    await run;
+    await writer.settled();
+    expect(a.replies.some((r) => r.includes("provider exploded"))).toBe(true);
+    expect(b.replies.at(-1)).toBe("answer 2");
+    // The fresh turn's reservation met run-1's row, waited for its finish, claimed again, and its own finish went through the ledger.
+    expect(order).toEqual([
+      "claim run-2 thread-live",
+      "finish run-1",
+      "claim run-2 ok",
+      "claim run-2 ok",
+      "finish run-2",
+    ]);
+    expect(inner.finished.get("run-1")?.status).toBe("failed");
+    expect(inner.finished.get("run-2")).toMatchObject({ status: "completed", threadKey: "slack:CX:1.0" });
+    expect(
+      inner.finished.get("run-2")!.events.filter((e) => e.type === "run_note" && e.kind === "ledger_untracked"),
+    ).toEqual([]);
+    expect(inner.live.size).toBe(0);
+  });
+
+  // The same road when the predecessor's finish cannot land at all: the
+  // restart runs untracked — as the ledger's Phase 2 rule has always had it —
+  // but says so on its own record, not in the bot log alone.
+  it("a restart whose predecessor's finish keeps failing (the store client's timeout) claims once more the moment that finish settles, runs untracked, and carries exactly one ledger_untracked note naming the predecessor and the failure; its record reaches the plain store", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const order: string[] = [];
+    let claimAnswered!: () => void;
+    const answered = new Promise<void>((r) => (claimAnswered = r));
+    // The closed row's finish is in flight when the restart's first claim is
+    // answered, and then fails as the client fails when the state Worker
+    // answers nothing — every attempt the writer makes, so the row stands for
+    // good and the name is cleared only by the last attempt.
+    const ledger = new Proxy(inner, {
+      get(target, prop) {
+        if (prop === "finish")
+          return async (runId: string, gen: string, record: RunRecord) => {
+            if (runId !== "run-1") return target.finish(runId, gen, record);
+            await answered;
+            await new Promise((r) => realSetTimeout(r, 0)); // the claim's answer is read before this settles
+            order.push("finish run-1 threw");
+            throw new TransientStoreError("run ledger /runs/finish: The operation was aborted due to timeout");
+          };
+        if (prop === "claim")
+          return async (req: ClaimRequest) => {
+            const result = await target.claim(req);
+            if (req.runId !== "run-1") {
+              order.push(`claim ${req.runId} ${result.ok ? "ok" : result.reason}`);
+              claimAnswered(); // any answer: an `ok` here (a regression) fails the order assertion, never hangs the suite
+            }
+            return result;
+          };
+        const v = Reflect.get(target, prop) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    }) as InMemoryRunLedger;
+    const { deps, provider, registry, writer, store, containers } = replacedContainerWorld(ledger, {
+      attach: (body) =>
+        new Response(
+          JSON.stringify(
+            body.reuse
+              ? { workspace: "/workspace/threads/t/other", ref: "main", sha: "abc", user: "worker3" }
+              : { workspace: "/workspace/threads/t/main", ref: "main", sha: "abc", user: "worker2" },
+          ),
+          { status: 200 },
+        ),
+    });
+    deps.admission = new ThreadAdmission();
+    const { io, replies } = ioWithCard();
+    const outcome = await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    await writer.settled();
+    expect(outcome).toEqual({ status: "refused", refusal: "workspace_lost" });
+    // The re-claim happened the moment the finish's LAST attempt threw — the name
+    // stayed through the writer's two retries — and was refused again: the row still stands.
+    expect(order.slice(0, 5)).toEqual([
+      "claim run-2 thread-live",
+      "finish run-1 threw",
+      "finish run-1 threw",
+      "finish run-1 threw",
+      "claim run-2 thread-live",
+    ]);
+    expect(inner.live.has("run-1")).toBe(true);
+    expect(inner.finished.has("run-1")).toBe(false);
+    // The restart ran and answered untracked: no ledger row of its own, its record in the plain store…
+    expect(containers).toHaveLength(2);
+    expect(provider.requests).toHaveLength(1);
+    expect(replies.at(-1)).toBe("started over and done");
+    expect(inner.finished.has("run-2")).toBe(false);
+    expect(registry.getById("run-2")).toMatchObject({ finished: true, status: "completed" });
+    const stored = await store.get("run-2");
+    expect(stored?.status).toBe("completed");
+    // …and exactly one note on it says why, naming the predecessor and how its finish ended.
+    const notes = (stored?.events ?? []).filter((e) => e.type === "run_note" && e.kind === "ledger_untracked");
+    expect(notes).toHaveLength(1);
+    expect((notes[0] as { summary: string }).summary).toBe(
+      "not tracked by the run ledger: run run-1, whose finish was in flight in this process, still holds the thread's row: its finish did not land (run ledger /runs/finish: The operation was aborted due to timeout) — no handoff, resume or reclaim reaches this run; its record still reaches the store",
+    );
   });
 
   // Feature: docs/reference/specs/harness.md item 6, harness-pi.md items 8 and

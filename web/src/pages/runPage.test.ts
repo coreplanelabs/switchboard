@@ -1474,6 +1474,27 @@ describe("RunPage — live mode", () => {
     expect((wrapper.findAll("#actions button")[0].element as HTMLButtonElement).disabled).toBe(false);
   });
 
+  // Feature: docs/decisions/0053 — a refused stop says why, in the server's words.
+  it("a refused stop (403 with a message) shows that sentence in the status, not a bare HTTP code", async () => {
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: false,
+      status: 403,
+      json: async () => ({
+        error: "unauthorized",
+        message: "You are viewing as ivy; writes are your own to make — exit view-as to write.",
+      }),
+    });
+    const { wrapper, es } = mountLive();
+    es().emitOpen();
+    await wrapper.findAll("#actions button")[0].trigger("click");
+    await vi.waitFor(() =>
+      expect(wrapper.find("#state").text()).toBe(
+        "stop failed: You are viewing as ivy; writes are your own to make — exit view-as to write.",
+      ),
+    );
+    expect(wrapper.find("#actions").exists()).toBe(true);
+  });
+
   it("a stop note from the stream marks the run stopping for every viewer", async () => {
     const { wrapper, es } = mountLive();
     es().emitOpen();

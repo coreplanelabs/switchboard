@@ -247,14 +247,146 @@ export function formatDisposition(d: FindingDisposition): string {
   return `${d.findingId}: ${d.disposition}${d.note ? ` — ${d.note}` : ""}`;
 }
 
+/** Where the posted body's file links point: the PR's repository and the
+ *  head the review is pinned to (the post-step's `commitId`). */
+export interface ReviewBodyTarget {
+  /** `owner/name` */
+  repo: string;
+  /** The pinned head, full sha. */
+  head: string;
+}
+
+/** The verdict word the callout carries, per verdict kind (or its absence). */
+function verdictWord(verdict: ReviewVerdict | undefined): string {
+  if (!verdict) return "No verdict";
+  return verdict.verdict === "approve" ? "Approved" : "Changes requested";
+}
+
+/** GitHub's alert callout kind per verdict: an approve is a note, changes
+ *  requested a warning, a missing verdict a caution. */
+function calloutKind(verdict: ReviewVerdict | undefined): "NOTE" | "WARNING" | "CAUTION" {
+  if (!verdict) return "CAUTION";
+  return verdict.verdict === "approve" ? "NOTE" : "WARNING";
+}
+
+/** `2 findings: 1 minor, 1 nit` — counted on the ladder, most severe first;
+ *  an empty array is `no findings`, no array `findings not itemized`. */
+function findingCounts(findings: readonly Finding[] | undefined): string {
+  if (findings === undefined) return "findings not itemized";
+  if (findings.length === 0) return "no findings";
+  const by = FINDING_SEVERITIES.map((sev) => [sev, findings.filter((f) => f.severity === sev).length] as const)
+    .filter(([, n]) => n > 0)
+    .map(([sev, n]) => `${n} ${sev}`)
+    .join(", ");
+  return `${findings.length} finding${findings.length === 1 ? "" : "s"}: ${by}`;
+}
+
+/** A table cell: pipes escaped so the row holds, already one line. */
+const cell = (text: string): string => oneLine(text).replace(/\|/g, "\\|");
+
+/** Whether a finding's `file` is a path a blob URL can point at: no
+ *  whitespace, no backtick, not a URL. */
+const isRepoPath = (file: string): boolean => /^[^\s`]+$/.test(file) && !/^[a-z][a-z0-9+.-]*:\/\//i.test(file);
+
+/** The `Where` cell: the location in code, linked at the pinned head when the
+ *  file is a path and a target is known. */
+function whereCell(f: Finding, target: ReviewBodyTarget | undefined): string {
+  const location = f.line !== undefined ? `${f.file}:${f.line}` : f.file;
+  const label = `\`${cell(location)}\``;
+  if (!target || !isRepoPath(f.file)) return label;
+  const path = encodeURI(f.file).replace(/#/g, "%23").replace(/\?/g, "%3F");
+  const url = `https://github.com/${target.repo}/blob/${target.head}/${path}${f.line !== undefined ? `#L${f.line}` : ""}`;
+  return `[${label}](${url})`;
+}
+
+/** The machine-readable marker the body ends with — the verdict, the head and
+ *  the findings index as JSON inside an HTML comment, for a scanner that would
+ *  otherwise parse the token line. `-->` can never occur inside it. */
+function verdictMarker(verdict: ReviewVerdict | undefined, target: ReviewBodyTarget | undefined): string {
+  const head = target?.head ?? verdict?.head;
+  const payload = {
+    verdict: verdict?.verdict ?? "none",
+    ...(head ? { head } : {}),
+    ...(verdict?.findings
+      ? {
+          findings: verdict.findings.map((f) => ({
+            id: f.id,
+            severity: f.severity,
+            file: f.file,
+            ...(f.line !== undefined ? { line: f.line } : {}),
+          })),
+        }
+      : {}),
+  };
+  return `<!-- switchboard:verdict ${JSON.stringify(payload).replace(/-->/g, "--\\u003e")} -->`;
+}
+
 /**
- * Build the body posted to GitHub: the deterministic verdict line, the
- * compact findings list (when present), a blank line, then the model's
- * review text. Never starts with "LGTM" unless the verdict is `approve`.
+ * Build the body posted to GitHub, rendered from the typed verdict
+ * (docs/reference/specs/agent-review.md item 5b): the deterministic verdict
+ * line first (the auto-approve contract — never `LGTM:` unless the verdict is
+ * `approve`), a GitHub alert callout with the verdict word, the pinned head
+ * and the finding counts, the findings as a table (severity, id + title, the
+ * file linked at the head), the model's text folded under `Full review`, and
+ * the machine-readable marker last. The prose decides nothing above the fold.
  */
-export function buildReviewPostBody(answer: string, verdict: ReviewVerdict | undefined): string {
-  const head = [verdictLine(verdict), ...(verdict?.findings ?? []).map((f) => `- ${formatFinding(f)}`)];
-  return `${head.join("\n")}\n\n${answer.trim()}`;
+export function buildReviewPostBody(
+  answer: string,
+  verdict: ReviewVerdict | undefined,
+  target?: ReviewBodyTarget,
+): string {
+  const facts = [
+    `**${verdictWord(verdict)}**`,
+    ...(target ? [`head \`${target.head.slice(0, 7)}\``] : []),
+    verdict ? findingCounts(verdict.findings) : "the run ended without a submit_verdict call",
+  ];
+  const parts: string[] = [verdictLine(verdict), `> [!${calloutKind(verdict)}]\n> ${facts.join(" · ")}`];
+  const findings = verdict?.findings ?? [];
+  if (findings.length > 0) {
+    parts.push(
+      [
+        "| Severity | Finding | Where |",
+        "| --- | --- | --- |",
+        ...findings.map((f) => `| ${f.severity} | **${cell(f.id)}** ${cell(f.title)} | ${whereCell(f, target)} |`),
+      ].join("\n"),
+    );
+  }
+  const prose = answer.trim();
+  if (prose) parts.push(`<details>\n<summary>Full review</summary>\n\n${prose}\n\n</details>`);
+  parts.push(verdictMarker(verdict, target));
+  return parts.join("\n\n");
+}
+
+/**
+ * The channel reply for a review run, rendered from the typed verdict
+ * (agent-review.md item 5b): the verdict line, one bullet per finding, then
+ * where the review was posted and the run link. The model's write-up rides
+ * along only when it landed nowhere else — no GitHub post (Slack-only, an
+ * opt-out, a guard refusal) or findings not itemized (a list that says
+ * nothing is no substitute) — so the review's text is always somewhere a
+ * person reads it. No verdict → the bare answer with the link, as before.
+ */
+export function buildReviewChannelReply(input: {
+  answer: string;
+  verdict: ReviewVerdict | undefined;
+  /** The PR the post landed on, or undefined when nothing was posted. */
+  posted: { repo: string; number: number } | undefined;
+  liveUrl: string | undefined;
+}): string {
+  const { answer, verdict, posted, liveUrl } = input;
+  const tail = [
+    ...(posted && verdict ? [`Posted to ${posted.repo}#${posted.number}`] : []),
+    ...(liveUrl ? [`[Live run](${liveUrl})`] : []),
+  ].join(" · ");
+  const blocks: string[] = [];
+  if (!verdict) blocks.push(answer);
+  else {
+    blocks.push([verdictLine(verdict), ...(verdict.findings ?? []).map((f) => `- ${formatFinding(f)}`)].join("\n"));
+    const compact = posted !== undefined && verdict.findings !== undefined;
+    if (!compact && answer.trim()) blocks.push(answer.trim());
+  }
+  if (tail) blocks.push(tail);
+  return blocks.join("\n\n");
 }
 
 // --- Dispositions (the coding side's answer to findings) -------------------

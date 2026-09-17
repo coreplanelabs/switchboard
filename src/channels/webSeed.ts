@@ -31,6 +31,12 @@ export interface RunIndexRowSeed extends RunView {
   token?: string;
 }
 
+/** A person the view-as picker offers: the id the cookie will carry, the name the row shows. */
+export interface ViewablePerson {
+  id: string;
+  name?: string;
+}
+
 export interface RunsIndexSeed {
   page: "runs";
   /** `?all=1`: finished + persisted rows included; the feed keeps finished rows. */
@@ -43,6 +49,10 @@ export interface RunsIndexSeed {
    *  session's own runs are the ones it requested from the Threads chat under
    *  its `access:<sub>` (record 0043), and the toggle says so. */
   asUser?: { id: string; name?: string };
+  /** Present when the viewer may view the dashboard as another person (record 0053: a session
+   *  holding `all`): the people the page can name — the requesters of its rows — for the picker;
+   *  a typed id is offered too. Absent, the picker is not drawn. */
+  viewAs?: { people: ViewablePerson[] };
   /** Configured run-history retention; null when history is off. */
   retentionDays: number | null;
   /** The server clock the initial relative times/stopwatches paint from. */
@@ -423,7 +433,12 @@ export type PageSeed =
  *  (src/core/capabilities.ts) — stamped by the shell renderer (webShell.ts),
  *  never by a view — so the nav, the tabs and the meta lines paint only the
  *  surfaces that exist in this installation. */
-export type WebSeed = PageSeed & { capabilities: Capabilities };
+export type WebSeed = PageSeed & {
+  capabilities: Capabilities;
+  /** The person this session is viewing the page as (record 0053), stamped by the shell renderer
+   *  from the viewer's actor — the banner and every write control read it. Absent otherwise. */
+  viewingAs?: ViewablePerson;
+};
 
 /** The id of the `<script type="application/json">` seed island. */
 export const SEED_ELEMENT_ID = "sb-seed";

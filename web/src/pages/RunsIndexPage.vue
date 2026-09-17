@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import AppShell from "../components/AppShell.vue";
 import RunsTabs from "../components/runs/RunsTabs.vue";
 import RunRow from "../components/runs/RunRow.vue";
+import ViewAsPicker from "../components/runs/ViewAsPicker.vue";
 import StatusDot from "../components/StatusDot.vue";
 import { useSeed } from "../lib/seed";
 import { useWallClock } from "../lib/wallClock";
@@ -157,6 +158,7 @@ onUnmounted(() => {
     <div class="toolbar mb-1.5 flex items-center gap-4 px-2 text-xs text-muted">
       <span id="livecount" class="count font-mono tabular-nums">{{ liveCount }} running</span>
       <span class="filter ml-auto inline-flex items-center gap-4">
+        <ViewAsPicker v-if="seed?.viewAs" :people="seed.viewAs.people" />
         <UTooltip :text="mineHint">
           <label
             class="toggle inline-flex cursor-pointer select-none items-center gap-1.5 text-toned hover:text-highlighted"

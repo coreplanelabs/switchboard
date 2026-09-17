@@ -94,6 +94,10 @@ export type RunNoteKind =
   | "sandbox_restarted"
   | "stop_requested"
   | "stopped"
+  /** A stop the loop or turn had to ask pi for again reached it: the series a
+   *  failed abort's write opened (its `harness_error` line) closes here with
+   *  the count of re-asks (harness-pi item 16). Written by the pi harness. */
+  | "stop_landed"
   /** Setup spans the request's stream sink had to drop before this run was
    *  bound (docs/reference/specs/tracing.md): `summary` says how many, `from`/`to` the
    *  interval, which the partition reports as not recorded. */
@@ -142,6 +146,16 @@ export type RunNoteKind =
    *  after the attach, before the first turn, so the run page explains a
    *  sandbox run that shows resident steps. */
   | "cold_sandbox"
+  /** The run ledger would not track this run (docs/reference/specs/run-history.md
+   *  item 54): its reservation met the row of a run this process was closing
+   *  (a restart from its request, or the fresh turn for its follow-ups), waited
+   *  for that finish, and the row still stood — the finish failed or was
+   *  refused — so no handoff, resume or reclaim reaches this run, and its
+   *  record reaches the store when it finishes. The summary names that run and
+   *  how its finish ended; published by the dispatcher right after the
+   *  reservation, before the attach, and carried on the card's label — the bot
+   *  log's warning is not the only witness. */
+  | "ledger_untracked"
   /** The resident kept this thread's binding where it was instead of moving
    *  it onto the branch the thread's own run opened a pull request on
    *  (docs/reference/specs/resident-repos.md item 16): the summary names the
@@ -158,6 +172,13 @@ export type RunNoteKind =
    *  after the model's last turn — the release itself runs after the record
    *  is sealed — and set on the card's label too, so the loss is never silent. */
   | "work_left_behind"
+  /** The run's ending may have left a command running in its workspace — a
+   *  call cut by the ending's abort or interrupt, or open when the run failed —
+   *  so the release tears the workspace down rather than pair it for the
+   *  thread's next run (harness.md item 13). The summary names the calls.
+   *  Written by the run loop once the harness session has ended and before the
+   *  record is sealed; the release itself runs after. */
+  | "workspace_torn_down"
   /** A coding run submitted a PR description but the post-step opened no
    *  pull request because the branch it observed IS the base the pull
    *  request would target (docs/reference/specs/pr-description.md item 5) —
@@ -210,6 +231,11 @@ export type RunNoteKind =
    *  names the call and the step. Information, not a failure: the tool ran
    *  under the gate's decision either way. Published by the OpenCode bridge. */
   | "tool_unnamed"
+  /** An `external_directory` ask answered once its call's line was already on
+   *  the record (harness.md item 13): the line cannot be amended, so the
+   *  directory the call reached is said here, naming the call. Published by
+   *  the OpenCode bridge. */
+  | "directory_reached"
   /** A ship coding child's budget ended with work still in the tree: the run
    *  loop committed and pushed it to the unit's branch (or says plainly that
    *  there was nothing to push), so a re-issue starts from the partial work
@@ -236,6 +262,7 @@ export const RUN_NOTE_KINDS = [
   "sandbox_restarted",
   "stop_requested",
   "stopped",
+  "stop_landed",
   "spans_dropped",
   "head_moved",
   "run_failed",
@@ -246,8 +273,10 @@ export const RUN_NOTE_KINDS = [
   "description_turn",
   "verdict_turn",
   "cold_sandbox",
+  "ledger_untracked",
   "rebind_refused",
   "work_left_behind",
+  "workspace_torn_down",
   "pr_not_opened",
   "review_not_posted",
   "compacted",
@@ -256,6 +285,7 @@ export const RUN_NOTE_KINDS = [
   "tool_refused",
   "settle_set_aside",
   "tool_unnamed",
+  "directory_reached",
   "budget_salvage",
   "stuck_loop",
 ] as const satisfies readonly RunNoteKind[];
@@ -359,6 +389,7 @@ export function isHeadMaterial(event: RunEvent): boolean {
         event.kind === "mcp_unavailable" ||
         event.kind === "spans_dropped" ||
         event.kind === "cold_sandbox" ||
+        event.kind === "ledger_untracked" ||
         event.kind === "rebind_refused"
       );
     case "span_start":
@@ -465,7 +496,12 @@ export type RunEvent =
    *  executors' shared `exit N:` prefix, 0 for a clean run; absent when the code
    *  was not numeric). `output` is the tool's text — control-stripped, redacted,
    *  capped at TOOL_OUTPUT_CAP — for the run page's expandable card; the status
-   *  card and the friction analyzer keep reading `summary`. */
+   *  card and the friction analyzer keep reading `summary`. `cut` marks the
+   *  result of a call the run's ending cut rather than settled — pi's abort (the
+   *  tool's own end after it), OpenCode's interrupt (a call still open when its
+   *  loop left), a session's end (`closeOpenSpans`): the command behind it may
+   *  still be running, and the workspace's release reads it so (`callsInFlight`,
+   *  harness.md item 13). */
   | {
       type: "tool_result";
       tool: string;
@@ -475,6 +511,7 @@ export type RunEvent =
       exitCode?: number;
       output?: string;
       infra?: true;
+      cut?: true;
       spanId?: string;
       logIndex?: number;
       seq?: number;
@@ -774,7 +811,18 @@ export type RunEvent =
    *  round and its fix round share an index. Published by the ship pipeline
    *  straight to the registry (like `pr_opened`), never through the runner.
    *  Additive: unknown → ignored. */
-  | { type: "ship_round"; index: number; agent: string; outcome: ShipRoundOutcome; seq?: number; at?: number }
+  | {
+      type: "ship_round";
+      index: number;
+      agent: string;
+      outcome: ShipRoundOutcome;
+      /** The severity gate fired on this approve (agent-ship item 9): the level
+       *  in force and the gated findings as `id (severity)` — a mismatch the
+       *  child's own parser should have made impossible, kept visible. */
+      gate?: { level: string; findings: string[] };
+      seq?: number;
+      at?: number;
+    }
   /** The request router's decision (docs/reference/specs/routing-and-config.md
    *  item 21): the preset a plain message was routed to, the one-line reason
    *  the router gave (redacted, capped — the same text the card's `routed:`

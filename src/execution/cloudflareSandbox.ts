@@ -180,12 +180,24 @@ export class CloudflareSandboxExecutor implements Executor {
     // full fleet is judged by the fleet's budget from then on, and the time
     // already waited counts against it.
     let waited = 0;
-    for (let attempt = 0; ; attempt++) {
+    // The backoff ladder is the token's: a start that turns into a full
+    // fleet (or a refused start that becomes a start again) climbs the new
+    // token's ladder from its first step — the time already waited still
+    // counts against the budget, but a 10 s condition is not answered with
+    // the 30 s step an earlier condition had reached.
+    let attempt = 0;
+    let lastReason: WaitReason | undefined;
+    for (;;) {
       const answer = await this.send(route, sent, headers, budgetMs, signal, span);
       if (answer.kind === "ok") return answer.data;
       const plan = waitPlan(answer.reason, budgetMs);
       if (waited >= plan.budget) throw new ExecCapacityError(plan.exhausted(waited));
+      if (answer.reason !== lastReason) {
+        attempt = 0;
+        lastReason = answer.reason;
+      }
       const delay = Math.min(plan.backoff[Math.min(attempt, plan.backoff.length - 1)], plan.budget - waited);
+      attempt++;
       await waitForSlot(delay, waited, signal);
       waited += delay;
     }

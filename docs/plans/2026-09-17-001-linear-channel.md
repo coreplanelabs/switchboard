@@ -40,8 +40,8 @@ Registration alone is not completion.
 
 ## Acceptance ledger
 
-All rows currently need implementation and live proof. Unit proofs belong in
-`docs/reference/specs/linear-channel.md` as each behavior is built.
+Every row requires live proof before this integration is complete. Implementation
+progress and unit proofs are recorded in `docs/reference/specs/linear-channel.md`.
 
 | Requirement | Required evidence |
 |---|---|

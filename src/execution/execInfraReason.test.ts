@@ -15,6 +15,7 @@ import {
 import { sandboxEmptyFailureMessage, sandboxNoAnswerMessage } from "./cloudflareSandbox.js";
 import {
   answeredStatus,
+  isUnansweredProbe,
   residentAnswerReason,
   residentWakeBudgetStrike,
   residentWakeStrike,
@@ -22,6 +23,7 @@ import {
   type ResidentStatusProbe,
 } from "./resident.js";
 import { isWakeable } from "./residentWake.js";
+import { classificationOf } from "../core/trace/classify.js";
 
 // Feature: docs/reference/specs/execution.md item 9 and harness.md item 6 — an
 // executor's infra failure carries a typed reason, so the harness's one more
@@ -420,6 +422,71 @@ describe("ExecInfraError carries a typed reason, and the two remote executors na
     const gaveUpDown = residentWakeBudgetStrike("/exec", "not-serviceable: The container just exited", 60_000, down);
     expect(gaveUpDown.reason).toBe("refused");
     expect(infraMayClear(gaveUpDown)).toBe(false);
+    // The wait's origin is the strike's classification code and its sentence: a
+    // container's exit is `container-exited` and "to wake"; a refusal the Worker
+    // typed transient is `transient-refusal` and "to come back" — no container exited.
+    expect(classificationOf(strike)).toEqual({ kind: "infra", code: "container-exited" });
+    const afterTransient = residentWakeBudgetStrike(
+      "/attach",
+      "attach-failed: Network connection lost.",
+      60_000,
+      { kind: "status", state: "warm", reason: "" },
+      { origin: "transient-refusal" },
+    );
+    expect(afterTransient.message).toBe(
+      "resident /attach: attach-failed: Network connection lost.; waited 60s for the resident to come back (last seen warm) and gave up",
+    );
+    expect(afterTransient.reason).toBe("worker-unavailable");
+    expect(classificationOf(afterTransient)).toEqual({ kind: "infra", code: "transient-refusal" });
+    // In transient mode an unanswered last view is the resident unavailable, never a refusal; the code still says the origin.
+    const unansweredAfterTransient = residentWakeBudgetStrike("/attach", "attach-failed: x", 60_000, unreachable, {
+      origin: "transient-refusal",
+    });
+    expect(unansweredAfterTransient.reason).toBe("worker-unavailable");
+    // One rule for the unanswered view (`isUnansweredProbe`): the transport failing or a 5xx is the
+    // blip, waited on and struck `worker-unavailable`; a 4xx is an answer, definite — `refused`,
+    // as the wait's own decision reads it.
+    const denied: ResidentStatusProbe = {
+      kind: "unreachable",
+      error: "probe HTTP 401: unauthorized",
+      transport: false,
+      status: 401,
+    };
+    const gateway: ResidentStatusProbe = {
+      kind: "unreachable",
+      error: "probe HTTP 502: bad gateway",
+      transport: false,
+      status: 502,
+    };
+    // ...and the view is typed by the field the Worker put on it, never by its
+    // status class: a 5xx it typed `transient` is the blip, an untyped 5xx (a
+    // throw in the status route) is as definite as the 4xx.
+    const typed: ResidentStatusProbe = {
+      kind: "unreachable",
+      error: "probe HTTP 500: internal error",
+      transport: false,
+      status: 500,
+      transient: true,
+    };
+    expect(wakeStrikeReason(unreachable, true)).toBe("worker-unavailable");
+    expect(wakeStrikeReason(typed, true)).toBe("worker-unavailable");
+    expect(wakeStrikeReason(gateway, true)).toBe("refused");
+    expect(wakeStrikeReason(denied, true)).toBe("refused");
+    expect(wakeStrikeReason(denied, false)).toBe("refused");
+    expect(isUnansweredProbe(unreachable)).toBe(true);
+    expect(isUnansweredProbe(typed)).toBe(true);
+    expect(isUnansweredProbe(gateway)).toBe(false);
+    expect(isUnansweredProbe(denied)).toBe(false);
+    expect(isUnansweredProbe(restoring)).toBe(false);
+    expect(classificationOf(unansweredAfterTransient)).toEqual({ kind: "infra", code: "transient-refusal" });
+    const definiteAfterTransient = residentWakeStrike(
+      "/attach",
+      "attach-failed: x",
+      "the resident is down",
+      "refused",
+      "transient-refusal",
+    );
+    expect(classificationOf(definiteAfterTransient)).toEqual({ kind: "infra", code: "transient-refusal" });
     const definite = residentWakeStrike(
       "/exec",
       "not-serviceable: The container just exited",

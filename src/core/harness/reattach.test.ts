@@ -193,6 +193,43 @@ describe("HeldSends — the one gate every write to pi takes (harness-pi item 16
     expect(held.dropHeld()).toEqual([]);
   });
 
+  it("dropHeld forgets the callback of a write in flight too: the loop or turn that sent it has ended, so its landing — however late, whatever it is — runs nothing, while a send after the drop is heard as before", async () => {
+    const settles: ((landing: Landing) => void)[] = [];
+    const landings: string[] = [];
+    const held = new HeldSends(() => new Promise<Landing>((r) => settles.push(r)));
+    held.send(S1, (landing) => landings.push(`S1:${landing}`)); // dispatched at once: in flight, not held
+    expect(held.dropHeld()).toEqual([]); // nothing held — but the in-flight write's sender has ended
+    settles[0]("failed"); // its landing comes after the loop ended: nobody's
+    await landed();
+    expect(landings).toEqual([]);
+    held.send(S2, (landing) => landings.push(`S2:${landing}`));
+    settles[1]("landed");
+    await landed();
+    expect(landings).toEqual(["S2:landed"]);
+  });
+
+  it("a re-asked abort passes the hold ahead of an awaited prompt and the writes held behind it: the loop's tick asking again for a stop whose write the reset failed, under an await-echo resolution, the abort — a stop — is dispatched at once while the prompt in doubt and its followers stay held", () => {
+    const { sent, held } = gate();
+    held.await(P1); // the prompt in doubt holds the gate
+    held.send(S1); // an unsent steer, held behind P1
+    held.send(ABORT); // the tick's re-ask
+    expect(sent).toEqual([ABORT]); // the stop reaches pi at once, ahead of P1 and S1
+    expect(held.holding).toBe(true); // P1 still awaits its echo; S1 still behind it
+  });
+
+  it("dropHeld keeps an abort's callback alone: a stop in flight when the loop or turn ended is the one landing it still wants on the record, so its landing — failed or landed — still runs after the drop, while a steer's in flight is forgotten as before", async () => {
+    const settles: ((landing: Landing) => void)[] = [];
+    const landings: string[] = [];
+    const held = new HeldSends(() => new Promise<Landing>((r) => settles.push(r)));
+    held.send(S1, (landing) => landings.push(`S1:${landing}`)); // the steer, in flight
+    held.send(ABORT, (landing) => landings.push(`abort:${landing}`)); // the stop, in flight behind it
+    expect(held.dropHeld()).toEqual([]); // nothing held; both in flight when the loop ended
+    settles[0]("landed"); // the steer's landing: nobody's
+    settles[1]("failed"); // the stop's: still heard, so a swallowed stop is seen
+    await landed();
+    expect(landings).toEqual(["abort:failed"]);
+  });
+
   it("an echo under another id changes nothing", () => {
     const { sent, held } = gate();
     held.await(P1);
