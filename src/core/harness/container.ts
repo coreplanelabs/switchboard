@@ -507,9 +507,17 @@ export function isContainerGone(err: unknown): err is ExecSandboxRestartedError 
  *  (`HarnessContainerDownError`), which is a wait and never the judgement.
  *  The two platform lists are composed from their one source each — the
  *  resident's (`STOPPED_CONTAINER_WORDING`) and the resident client's wake
- *  decision (`CONTAINER_GONE_WORDING`) — so a platform reword lands once. */
+ *  decision (`CONTAINER_GONE_WORDING`) — so a platform reword lands once. The
+ *  SDK's own sentence for the Durable Object's connection to its container
+ *  dropping — `Network connection lost.` — is here too: @cloudflare/containers
+ *  0.3.7 answers a proxied request with it (`dist/lib/container.js` line 971,
+ *  "Container suddenly disconnected") and aborts its start wait on it (line
+ *  1409); the resident forwards it as `resident /exec: Network connection
+ *  lost.`, and the plan owner's live run met exactly that at a rollout's
+ *  onset. The typed paths never need these words (`saysTransportLost` decides
+ *  by the executor's reason first); they are for the untyped ones. */
 export const CONTAINER_DOWN_WORDING = new RegExp(
-  `${STOPPED_CONTAINER_WORDING.source}|${CONTAINER_GONE_WORDING.source}|peer closed websocket|without sending close frame|\\bECONNRESET\\b|connection reset|socket hang up`,
+  `${STOPPED_CONTAINER_WORDING.source}|${CONTAINER_GONE_WORDING.source}|peer closed websocket|without sending close frame|\\bECONNRESET\\b|connection reset|socket hang up|network connection lost`,
   "i",
 );
 
@@ -550,25 +558,54 @@ export function saysContainerDown(err: unknown): boolean {
   );
 }
 
+/** The error and every `cause` beneath it, nearest first — where an executor's
+ *  typed word may sit when something wrapped the throw on its way up. */
+export function* selfAndCauses(err: unknown): Generator<unknown> {
+  const seen = new Set<unknown>();
+  for (let e = err; e !== undefined && e !== null && !seen.has(e); e = (e as { cause?: unknown }).cause) {
+    seen.add(e);
+    yield e;
+  }
+}
+
+/** The executor's typed infra failure (`ExecInfraError`) on the error or
+ *  anywhere in its cause chain, nearest first; nothing for an untyped error. */
+export function infraErrorOf(err: unknown): ExecInfraError | undefined {
+  for (const e of selfAndCauses(err)) if (e instanceof ExecInfraError) return e;
+  return undefined;
+}
+
 /** The third failure shape of a container command, beside the word and the
  *  wordless death (harness.md item 6): the command failed on its transport
- *  with no word — a failure whose text names the container's transport or
- *  the container down (`CONTAINER_DOWN_WORDING`: the resident client's
- *  `resident /exec: Peer closed WebSocket: 1006 …`, the binding's not-running
- *  refusal, a connection reset), or the seam's own typed down answer. The
- *  platform's rollout closes the WebSocket under the process's command before
- *  any word can come, so a harness that judged this a plain failure lost the
- *  run where the container had in fact been replaced; it takes the one more
- *  command instead (`replacedVerdict`). Never the word (that is the verdict
- *  as it always was), never a control file lost (the container answered),
- *  never a command that failed as a command — and never an infra failure that
- *  says nothing of the container (the Worker unreachable, an attach refused,
- *  a deploy-storm streak): the executors' `ExecInfraError` is not the shape
- *  by type, only by its words, so a probe that could not reach the container
- *  anyway is never spent, and the failure stands at once as it always did. */
+ *  with no word. The platform's rollout kills the container under the
+ *  process's command — the transport dies with it, or the Durable Object's
+ *  connection to the container drops — before any word can come, so a harness
+ *  that judged this a plain failure lost the run where the container had in
+ *  fact been replaced; it takes the one more command instead
+ *  (`replacedVerdict`). Decided by the EXECUTOR'S TYPED WORD first, as the one
+ *  more command itself decides (`identity`): an `ExecInfraError` — on the
+ *  error or anywhere in its cause chain — whose reason a wait can clear
+ *  (`infraMayClear`: the transport lost, the deadline passed, the empty
+ *  failure shape, the Worker unavailable; execution.md item 9's waitable set,
+ *  which is what the one more command waits on) is the shape whatever its
+ *  words, and a typed refusal or the run's own stop is never the shape
+ *  whatever its words (no wait clears them). Only an `answered` failure,
+ *  whose meaning is in the resident's words, and an untyped one are read by
+ *  the words: the container's transport or the container down
+ *  (`CONTAINER_DOWN_WORDING`: the resident client's `resident /exec: Peer
+ *  closed WebSocket: 1006 …`, the SDK's `Network connection lost.`, the
+ *  binding's not-running refusal, a connection reset), or the seam's own typed
+ *  down answer. Never the word (that is the verdict as it always was), never a
+ *  control file lost (the container answered), never a command that failed as
+ *  a command. */
 export function saysTransportLost(err: unknown): boolean {
   if (!(err instanceof Error) || isContainerGone(err) || RUNTIME_WORD.test(err.message)) return false;
   if (err instanceof HarnessControlFileLostError) return false;
+  const typed = infraErrorOf(err);
+  if (typed !== undefined) {
+    if (infraMayClear(typed)) return true;
+    if (typed.reason !== "answered") return false;
+  }
   return err instanceof HarnessContainerDownError || CONTAINER_DOWN_WORDING.test(err.message);
 }
 
