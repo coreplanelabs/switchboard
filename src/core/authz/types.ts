@@ -57,6 +57,15 @@ export interface Actor {
   readonly self?: readonly string[];
   /** The linked person, for display and the audit line (`asUser`); absent when unlinked. */
   readonly asUser?: { readonly id: string; readonly name?: string };
+  /**
+   * The channels the platform says the actor's person is in: the
+   * channel directory's `channelsOf`, resolved once with the actor — a fact
+   * about the person, never a grant from config. `member-of` reads it beside
+   * `grants.channels`, so a private channel's runs and config open to the
+   * people in it. Absent (no directory, a lookup failure, an unlinked session)
+   * → nothing: fail-closed, exactly today's behaviour.
+   */
+  readonly memberOf?: ReadonlySet<string>;
 }
 
 /** `<group>:<read|write|exec>` plus the non-command actions. A plain
@@ -184,4 +193,7 @@ export type Predicate =
 export interface ChannelDirectory {
   info(channelId: string): Promise<{ visibility: ChannelVisibility }>;
   isMember(actorId: string, channelId: string): Promise<boolean | "unknown">;
+  /** Every channel the actor is in, platform-namespaced — what the resolver puts on
+   *  `Actor.memberOf`; `unknown` when the adapter cannot say (fail-closed). */
+  channelsOf(actorId: string): Promise<ReadonlySet<string> | "unknown">;
 }

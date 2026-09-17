@@ -141,6 +141,18 @@ export const ACTORS = {
     { actions: browserActions(COMMAND_GROUPS) },
     { self: ["access:linked", "slack:UHANK"], asUser: { id: "slack:UHANK", name: "hank" } },
   ),
+  /** The linked session whose person the directory says is in the private channel: the same
+   *  grants again, `memberOf` beside them. */
+  memberBrowser: actor(
+    "user",
+    "access:member",
+    { actions: browserActions(COMMAND_GROUPS) },
+    {
+      self: ["access:member", "slack:UIVY"],
+      asUser: { id: "slack:UIVY", name: "ivy" },
+      memberOf: new Set([CHANNELS.priv.id]),
+    },
+  ),
   /** An Access operator (granted every read + write with `channels: all`): fleet-wide, never exec. */
   operator: actor("user", "access:op", {
     actions: new Set(COMMAND_GROUPS.flatMap((g) => [`${g}:read`, `${g}:write`])),

@@ -5380,6 +5380,7 @@ const REFLECTION_REPLY = JSON.stringify({
 const PUBLIC_CHANNEL: ChannelDirectory = {
   info: async () => ({ visibility: "public" }),
   isMember: async () => "unknown",
+  channelsOf: async () => "unknown",
 };
 
 /** Provider that answers the run (optionally after one tool call) and then the
@@ -7048,6 +7049,7 @@ describe("run history write path", () => {
     injected.deps.channelDirectory = {
       info: async (id) => (asked.push(id), { visibility: "public" }),
       isMember: async () => "unknown",
+      channelsOf: async () => "unknown",
     };
     await dispatch(injected.deps, msg("hello there"), fakeIO().io);
     await injected.writer.settled();
@@ -7063,6 +7065,7 @@ describe("run history write path", () => {
         throw new Error("slack down");
       },
       isMember: async () => "unknown",
+      channelsOf: async () => "unknown",
     };
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await dispatch(failing.deps, msg("hello there"), fakeIO().io);
@@ -7080,7 +7083,10 @@ describe("run history write path", () => {
   // per channel, however many runs.
   it("Slack directory stamp: a public-channel run is visible to a plain Slack user's run reads, a private-channel or DM run is not; conversations.info is asked once per channel across runs", async () => {
     const info = vi.fn(async ({ channel }: { channel: string }) => ({ channel: { is_private: channel === "CPRIV" } }));
-    const directory = new SlackChannelDirectory({ conversations: { info } }, { now: () => 0 });
+    const directory = new SlackChannelDirectory(
+      { conversations: { info }, users: { conversations: async () => ({ channels: [] }) } },
+      { now: () => 0 },
+    );
     const plainUser: Actor = { kind: "user", id: "slack:UIVY", grants: NO_GRANTS };
     const readable = predicateFor(plainUser, "runs:read", "run");
     const records: RunRecord[] = [];
@@ -7109,7 +7115,11 @@ describe("run history write path", () => {
     const { deps, store, writer } = wired(capturingProvider(), {
       registry: new RunRegistry({ genId: () => "run-slow", genToken: () => "tok" }),
     });
-    deps.channelDirectory = { info: () => new Promise(() => {}), isMember: async () => "unknown" }; // never answers
+    deps.channelDirectory = {
+      info: () => new Promise(() => {}),
+      isMember: async () => "unknown",
+      channelsOf: async () => "unknown",
+    }; // never answers
     deps.channelDirectoryTimeoutMs = 20;
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { io, replies } = fakeIO();
@@ -7137,6 +7147,7 @@ describe("run history write path", () => {
     deps.channelDirectory = {
       info: () => new Promise((_, reject) => setTimeout(() => reject(new Error("slack down, late")), 60)),
       isMember: async () => "unknown",
+      channelsOf: async () => "unknown",
     };
     deps.channelDirectoryTimeoutMs = 20;
     const unhandled = vi.fn();
@@ -7166,6 +7177,7 @@ describe("run history write path", () => {
     deps.channelDirectory = {
       info: () => new Promise((_, reject) => setTimeout(() => reject(new Error("slack down, early")), 5)),
       isMember: async () => "unknown",
+      channelsOf: async () => "unknown",
     };
     deps.channelDirectoryTimeoutMs = 500;
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});

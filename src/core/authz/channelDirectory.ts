@@ -35,6 +35,10 @@ export class StaticChannelDirectory implements ChannelDirectory {
   async isMember(_actorId: string, _channelId: string): Promise<boolean | "unknown"> {
     return "unknown";
   }
+
+  async channelsOf(_actorId: string): Promise<ReadonlySet<string> | "unknown"> {
+    return "unknown";
+  }
 }
 
 /** The process-wide default a dispatcher without an adapter-supplied directory uses. */

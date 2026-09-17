@@ -113,6 +113,8 @@ The design: `mcp list` gains `--all` for an actor with org rights: every tier in
 
 Invariants: a non-admin never sees another person's user tier; `--all` needs the org right; names come from the same lookup, so a user without a resolvable name shows the id. Failure mode: a private channel the viewer is in but holds no grant for is missing from their list; the row for it appears once #516 lands, with no change here.
 
+> **Amendment, 2026-09-16 — #516 landed, as predicted.** Membership is now a fact on the actor: the resolver that links a session to its person also asks the channel directory for the person's channels (`users.conversations`, cached per person, kept fresh by Slack's membership events over the same socket, the TTL as the degraded path) and puts them on the actor as `memberOf`, which `member-of` reads beside the grants. The MCPs tab, `config overrides` and the runs index changed nothing: the row for a private channel the viewer is in appears through the same `config:read` question this section already asked. The line holds: `memberOf` is a directory fact about the person, never a grant — the actor with and without it holds the same effective grants and passes the same command rows ([authorization.md](../reference/specs/authorization.md) items 4 and 7). What this amends: the constraint sentence above (membership no longer answers `unknown`) and open question 2, which is closed.
+
 ## Why not X
 
 **Why not make the browser actor the Slack user, id and grants and all?** Two writes leak into every linked session, and the audit line can no longer say a browser did it. The line above.
@@ -140,7 +142,7 @@ Three independent PRs, each with its spec rows. **PR 1, the link:** `self`/`asUs
 | Question | Owner | Resolves it | Needed before |
 |---|---|---|---|
 | Should the run record carry the requester's email, so the owner column can show it beside the name? | the maintainer | whether an email on every persisted record is wanted (it is personal data the record does not hold today); the name ships without it | PR 2 |
-| Does "channels you are in" wait for #516 or does the read-right cut stand? | the maintainer | #516 landing; nothing here changes when it does | never for these PRs |
+| Does "channels you are in" wait for #516 or does the read-right cut stand? | the maintainer | closed 2026-09-16: the read-right cut stood and #516 landed behind it with no change here (amendment above) | never for these PRs |
 
 ## Validation criteria
 

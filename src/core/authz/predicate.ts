@@ -15,7 +15,15 @@
 // in-memory store runs, and what the differential test checks against
 // `authorize`.
 
-import { actsAsPerson, effectiveGrants, hasAction, holds, isKnownActorKind, selfIdsOf } from "./authorize.js";
+import {
+  actsAsPerson,
+  effectiveGrants,
+  hasAction,
+  holds,
+  isKnownActorKind,
+  memberChannelsOf,
+  selfIdsOf,
+} from "./authorize.js";
 import { POLICY, resolveGrant, ruleTarget } from "./policy.js";
 import { RESOURCE_KINDS, targetOf, type ResourceAttributes } from "./resource.js";
 import type {
@@ -83,7 +91,12 @@ export function ownedBy(actor: Actor): Predicate {
   return selfPredicate(selfIdsOf(actor));
 }
 
-function compileCondition(condition: Condition, grants: Grants, selfIds: readonly string[]): Predicate {
+function compileCondition(
+  condition: Condition,
+  grants: Grants,
+  selfIds: readonly string[],
+  memberOf: ReadonlySet<string>,
+): Predicate {
   switch (condition.kind) {
     case "has-grant": {
       if (grants.actions === "all") return ALL;
@@ -91,9 +104,13 @@ function compileCondition(condition: Condition, grants: Grants, selfIds: readonl
       const grant = resolveGrant(condition.grant, {});
       return grant !== undefined && hasAction(grants.actions, grant) ? ALL : NONE;
     }
-    case "member-of":
+    case "member-of": {
       if (grants.channels === "all") return ALL;
-      return anyOf([grants.channels.size === 0 ? NONE : { kind: "channels-in", channelIds: grants.channels }, PUBLIC]);
+      // The channels the actor may read by grant, plus the ones the directory says its
+      // person is in — one `channels-in`, the same vocabulary as before.
+      const channels = memberOf.size === 0 ? grants.channels : new Set([...grants.channels, ...memberOf]);
+      return anyOf([channels.size === 0 ? NONE : { kind: "channels-in", channelIds: channels }, PUBLIC]);
+    }
     case "is-self":
       return selfPredicate(selfIds);
     case "acts-as-person":
@@ -107,9 +124,9 @@ function compileCondition(condition: Condition, grants: Grants, selfIds: readonl
   return NONE;
 }
 
-function compileRule(rule: Rule, grants: Grants, selfIds: readonly string[]): Predicate {
+function compileRule(rule: Rule, grants: Grants, selfIds: readonly string[], memberOf: ReadonlySet<string>): Predicate {
   if (rule.originVisibility) return NONE;
-  return allOf(rule.when.map((condition) => compileCondition(condition, grants, selfIds)));
+  return allOf(rule.when.map((condition) => compileCondition(condition, grants, selfIds, memberOf)));
 }
 
 /** `predicateFor` over an explicit (validated) table; production code calls `predicateFor`. */
@@ -128,11 +145,12 @@ export function predicateWith(
   if (!isKnownActorKind(actor.kind)) return NONE;
   const grants = effectiveGrants(actor);
   const selfIds = selfIdsOf(actor);
+  const memberOf = memberChannelsOf(actor);
   const alternatives: Predicate[] = [];
   for (const rule of rules) {
     if (rule.action !== action || ruleTarget(rule) !== target) continue;
     if (rule.actorKinds && !rule.actorKinds.includes(actor.kind)) continue;
-    alternatives.push(compileRule(rule, grants, selfIds));
+    alternatives.push(compileRule(rule, grants, selfIds, memberOf));
   }
   return anyOf(alternatives);
 }

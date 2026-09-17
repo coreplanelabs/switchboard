@@ -51,6 +51,17 @@ settings:
       - message.channels
       - message.groups
       - message.im
+      # Membership freshness (authorization.md item 7): a person joining or leaving a channel
+      # forgets their cached channel set; the bot leaving, or a channel archived or deleted,
+      # forgets everyone's. Covered by channels:read / groups:read — no new scope.
+      - member_joined_channel
+      - member_left_channel
+      - channel_left
+      - group_left
+      - channel_archive
+      - group_archive
+      - channel_deleted
+      - group_deleted
   # The bot dials out to Slack over a websocket; no request URL, no inbound port.
   socket_mode_enabled: true
   org_deploy_enabled: false
