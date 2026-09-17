@@ -7123,13 +7123,22 @@ export class ResidentDO extends Sandbox<Env> {
         fates.set(ref, { fate: looked.fate, detail });
       }),
     );
+    // The runs registered on this resident (item 44): a run holds its tree
+    // from its attach to its release, and its process lives in the container
+    // between the bot's calls — the op counters read 0 while its model thinks.
+    const registered = new Set(
+      [...(await this.ctx.storage.list<RunRegistration>({ prefix: RUN_REG_KEY_PREFIX })).values()].map(
+        (r) => r.threadKey,
+      ),
+    );
     for (const binding of live) {
       const isDefaultRef = binding.ref === defaultRef;
       // The default branch is never a finished ref (reclaimDecision keeps it
       // by name), so its fate is never looked up.
       const { fate, detail } = (!isDefaultRef && fates.get(binding.ref)) || { fate: "unknown" as RefFate, detail: "" };
       const busy = this.threadOpsInFlight.get(binding.threadKey) ?? 0;
-      const decision = reclaimDecision({ fate, isDefaultRef, busy });
+      const held = registered.has(binding.threadKey);
+      const decision = reclaimDecision({ fate, isDefaultRef, busy, held });
       if (!decision.reclaim) {
         kept.push({ threadKey: binding.threadKey, ref: binding.ref, why: decision.why });
         continue;
@@ -7144,6 +7153,11 @@ export class ResidentDO extends Sandbox<Env> {
       const current = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(binding.threadKey));
       if (busyNow > 0) {
         kept.push({ threadKey: binding.threadKey, ref: binding.ref, why: "busy" });
+        continue;
+      }
+      // A run attached while the tree was measured holds it now (item 44).
+      if ((await this.ctx.storage.get<RunRegistration>(runRegKey(binding.threadKey))) !== undefined) {
+        kept.push({ threadKey: binding.threadKey, ref: binding.ref, why: "run-held" });
         continue;
       }
       if (!current || current.evicted || current.lastAttachAt !== binding.lastAttachAt) {

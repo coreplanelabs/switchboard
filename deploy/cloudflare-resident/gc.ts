@@ -79,6 +79,10 @@ export interface ReclaimInput {
   isDefaultRef: boolean;
   /** Thread exec/read/write currently running on this binding. */
   busy: number;
+  /** A run registered on the thread — attached and not yet released (item
+   *  44): its process lives in the container between the bot's calls, so
+   *  `busy` reads 0 while its model thinks. Held is kept, whatever the fate. */
+  held: boolean;
 }
 
 /** The PR that decided the fate (for the audit trail): the open one, else the
@@ -93,11 +97,13 @@ export type ReclaimWhy =
   | "no-pr"
   | "fate-unknown"
   | "busy"
+  | "run-held"
   | "re-attached"
   | Extract<RefFate, "gone" | "merged" | "closed">;
 
 /** Evict this binding now? A finished ref (gone/merged/closed) is reclaimed
- *  when nothing runs on it — and nothing else is asked. What its tree holds
+ *  when nothing runs on it — no op in flight and no run registered from its
+ *  attach to its release — and nothing else is asked. What its tree holds
  *  is never a reason to keep it: a run starts from a clean tree, so dirt in a
  *  tree no run is using protects nothing (the next attach wipes it); the
  *  Worker measures and records what it removes instead. Keeps are named so
@@ -113,6 +119,7 @@ export function reclaimDecision(input: ReclaimInput): { reclaim: boolean; why: R
       return { reclaim: false, why: "fate-unknown" };
   }
   if (input.busy > 0) return { reclaim: false, why: "busy" };
+  if (input.held) return { reclaim: false, why: "run-held" };
   return { reclaim: true, why: input.fate };
 }
 

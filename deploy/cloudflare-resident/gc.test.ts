@@ -146,7 +146,7 @@ describe("parsePullsBody — defensive parse of the REST answer", () => {
 });
 
 describe("reclaimDecision — evict this binding now?", () => {
-  const base = { fate: "merged" as const, isDefaultRef: false, busy: 0 };
+  const base = { fate: "merged" as const, isDefaultRef: false, busy: 0, held: false };
   it("merged PR, idle → reclaim", () => {
     expect(reclaimDecision(base)).toEqual({ reclaim: true, why: "merged" });
   });
@@ -167,6 +167,13 @@ describe("reclaimDecision — evict this binding now?", () => {
   });
   it("an op in flight on the thread → keep (busy)", () => {
     expect(reclaimDecision({ ...base, busy: 2 })).toEqual({ reclaim: false, why: "busy" });
+  });
+  it("a run registered on the thread — attached, not yet released (item 44) — → keep (run-held) with no op in flight, whatever the ref's fate: a harness run's process lives in the container between the bot's calls, so the op counters read 0 while it thinks", () => {
+    expect(reclaimDecision({ ...base, held: true })).toEqual({ reclaim: false, why: "run-held" });
+    expect(reclaimDecision({ ...base, fate: "gone", held: true })).toEqual({ reclaim: false, why: "run-held" });
+    expect(reclaimDecision({ ...base, fate: "closed", held: true })).toEqual({ reclaim: false, why: "run-held" });
+    // an op in flight is the nearer fact and names itself first
+    expect(reclaimDecision({ ...base, busy: 1, held: true })).toEqual({ reclaim: false, why: "busy" });
   });
   it("the decision asks nothing about the tree: a finished ref goes whatever its tree holds (a run starts from a clean tree — item 17), and no keep is named for dirt", () => {
     // An input that still carried a clean verdict changes nothing: the field

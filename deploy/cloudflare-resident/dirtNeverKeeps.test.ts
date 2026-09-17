@@ -114,20 +114,20 @@ describe("the disk-full recycle goes by liveness, never by dirt", () => {
 describe("a finished ref's tree is reclaimed whatever it holds", () => {
   const reclaim = method("reclaimFinishedRefs");
 
-  it("the pure decision takes the fate, the default-branch rule and the op count — no clean input, no dirty keep", () => {
+  it("the pure decision takes the fate, the default-branch rule, the op count and the run registration — no clean input, no dirty keep", () => {
     const input = /export interface ReclaimInput \{[\s\S]*?\n\}/.exec(gc);
     expect(input, "gc.ts declares ReclaimInput").not.toBeNull();
     expect(input![0]).not.toMatch(/clean/);
     const why = /export type ReclaimWhy =[\s\S]*?;/.exec(gc);
     expect(why, "gc.ts declares ReclaimWhy").not.toBeNull();
     expect(why![0]).not.toMatch(/"dirty"/);
-    expect(reclaim).toMatch(/const decision = reclaimDecision\(\{ fate, isDefaultRef, busy \}\);/);
+    expect(reclaim).toMatch(/const decision = reclaimDecision\(\{ fate, isDefaultRef, busy, held \}\);/);
     expect(reclaim).not.toMatch(/why: "dirty"/);
     expect(reclaim).not.toMatch(/worktreeCleanliness/);
   });
 
   it("what the tree holds is measured once after the decision and before the re-read guards, and rides into the eviction for the record; the busy guard stands", () => {
-    const decision = reclaim.indexOf("const decision = reclaimDecision({ fate, isDefaultRef, busy });");
+    const decision = reclaim.indexOf("const decision = reclaimDecision({ fate, isDefaultRef, busy, held });");
     const measure = reclaim.indexOf("const tree = active ? await this.measureTreeBeforeEviction(binding) : undefined;");
     const busyNow = reclaim.indexOf("const busyNow = this.threadOpsInFlight.get(binding.threadKey) ?? 0;");
     const reread = reclaim.indexOf(
