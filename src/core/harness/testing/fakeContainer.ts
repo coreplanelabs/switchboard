@@ -5,8 +5,10 @@
 // to decide, line by line, so every path — a settled run, a stop, a death, a
 // dialog — is one recorded stream.
 
+import { ExecInfraError } from "../../../execution/executor.js";
 import {
   checkPortArg,
+  HarnessContainerDownError,
   HarnessContainerError,
   HarnessContainerRuntimeReplacedError,
   PORT_ARG,
@@ -17,6 +19,12 @@ import {
   type HarnessStart,
   type HarnessStarted,
 } from "../container.js";
+
+/** The resident client's failure as the incident recorded it: the exec transport failed with the WebSocket's 1006 close, no word. */
+export const TRANSPORT_LOST_TEXT =
+  "resident /exec: Peer closed WebSocket: 1006 WebSocket disconnected without sending Close frame.";
+/** What the one more command meets while the platform rebuilds the container: the binding's not-running refusal, no word. */
+export const CONTAINER_DOWN_TEXT = "resident /exec: The container is not running, consider calling start()";
 
 export class FakeHarnessContainer implements HarnessContainer {
   readonly files = new Map<string, string>();
@@ -82,6 +90,22 @@ export class FakeHarnessContainer implements HarnessContainer {
    *  `renamedWord`, or the container as it was. */
   dieWithoutWord(then: "word" | "renamed" | "same", renamedWord: string): void {
     this.die();
+    this.thenOnProbe(then, renamedWord);
+  }
+
+  /** The platform's replacement as the incident met it: the container is
+   *  killed under the process's command, so the next read fails on its
+   *  transport — the executor's infra failure carrying the WebSocket's 1006
+   *  close, no word — and, for `downForProbes` answers, the one more command
+   *  finds the container not running (the restore window) before it finds
+   *  `then`: the word, the renamed container, or the container as it was. */
+  loseTransport(then: "word" | "renamed" | "same", renamedWord: string, downForProbes = 0): void {
+    this.failOnceDrained = new ExecInfraError(TRANSPORT_LOST_TEXT);
+    this.downForProbes = downForProbes;
+    this.thenOnProbe(then, renamedWord);
+  }
+
+  private thenOnProbe(then: "word" | "renamed" | "same", renamedWord: string): void {
     if (then === "word")
       this.failNext = {
         operation: "identity",
@@ -92,6 +116,11 @@ export class FakeHarnessContainer implements HarnessContainer {
       };
     else if (then === "renamed") this.vm = renamedWord;
   }
+
+  /** How many `identity` probes still find the container down (not running) before it answers. */
+  downForProbes = 0;
+  /** How many times `identity` was asked. */
+  identityAsked = 0;
 
   private maybeFail(operation: string): void {
     const f = this.failNext;
@@ -161,6 +190,11 @@ export class FakeHarnessContainer implements HarnessContainer {
    *  failure the executor would report: the runtime-replaced word on the one
    *  more command a process found dead without it takes. */
   async identity(): Promise<string | undefined> {
+    this.identityAsked++;
+    if (this.downForProbes > 0) {
+      this.downForProbes--;
+      throw new HarnessContainerDownError("identity", CONTAINER_DOWN_TEXT);
+    }
     this.maybeFail("identity");
     return this.vm;
   }

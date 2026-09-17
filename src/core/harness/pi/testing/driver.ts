@@ -190,6 +190,18 @@ export function piDriver(): HarnessDriver {
             container.dieWithoutWord(script.deadWithoutWordThen ?? "word", REPLACED_WORD);
             return true;
           }
+          // The replacement as the incident met it (`transportLostBeforeModelCall`):
+          // the next read fails on its transport with no word, and the one more
+          // command finds the container down for as many probes as the script
+          // says before it finds what the script says.
+          if (script.transportLostBeforeModelCall === turn + 1) {
+            container.loseTransport(
+              script.transportLostThen ?? "word",
+              REPLACED_WORD,
+              script.containerDownForProbes ?? 0,
+            );
+            return true;
+          }
           return false;
         },
         ...(script.bypassGate ? { bypassGate: true } : {}),

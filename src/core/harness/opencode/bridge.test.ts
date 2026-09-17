@@ -6,9 +6,11 @@ import { planResume, type KnownTool } from "../../runLedger/resume.js";
 import { bearerHashOf } from "../../modelProxy/runBearers.js";
 import type { RunEvent } from "../../runEvents.js";
 import type { StepReport } from "../../runLedger/stepReport.js";
+import { ExecInfraError } from "../../../execution/executor.js";
 import { identityChangedCondition } from "../container.js";
 import { HarnessContainerReplacedError } from "../contract.js";
 import { piDriver } from "../pi/testing/driver.js";
+import { TRANSPORT_LOST_TEXT } from "../testing/fakeContainer.js";
 import type { DrivenRun, RunScript } from "../testing/scenarios.js";
 import type { OpenCodeFeedRecord } from "./client.js";
 import {
@@ -787,6 +789,97 @@ describe("an OpenCode found dead before any command returned the executor's word
     expect(notes(r.events).some((n) => n.kind === "sandbox_restarted")).toBe(false);
     expect(r.killed.length).toBeGreaterThan(0);
     expect(r.removed).toEqual([openCodeRunPaths("run-c").dir]);
+  });
+});
+
+describe("an OpenCode whose container command fails on its transport with no word — the one more command runs here too, and waits through a container that is down", () => {
+  const oneCallOpen: RunScript = {
+    turns: [
+      {
+        content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "echo one" } }],
+        stopReason: "tool_use",
+      },
+      { content: [{ type: "text", text: "never" }], stopReason: "end_turn" },
+    ],
+    transportLostBeforeModelCall: 2,
+  };
+  const verdictOf = (r: DrivenRun): HarnessContainerReplacedError => {
+    expect(r.outcome.kind).toBe("failed");
+    const err = r.outcome.kind === "failed" ? r.outcome.error : undefined;
+    expect(err).toBeInstanceOf(HarnessContainerReplacedError);
+    expect(err?.name).toBe("OpenCodeContainerReplacedError");
+    return err as HarnessContainerReplacedError;
+  };
+  const noteSummaries = (r: DrivenRun, kind: string) =>
+    notes(r.events)
+      .filter((n) => n.kind === kind)
+      .map((n) => n.summary);
+
+  it("the feed read failing with the WebSocket's 1006 close (the executor's infra failure, no word) is not judged a plain failure: one more command, and that command failing with the word is the executor's word — the replaced verdict by type with the open call settled, one sandbox_restarted note, the server and its tailer neither ended nor their root removed", async () => {
+    const r = await run(oneCallOpen);
+    const err = verdictOf(r);
+    expect(err.message).toMatch(
+      /^the container running OpenCode was replaced \(vm-conformance → vm-conformance; the executor said: harness container: identity failed — runtime-replaced: /,
+    );
+    expect(err).toMatchObject({ was: "vm-conformance", now: "vm-conformance", condition: "word" });
+    expect(err.record.settlements).toEqual([
+      expect.objectContaining({ action: "synthetic", text: openCodeReplacedCallNote("bash") }),
+    ]);
+    expect(noteSummaries(r, "sandbox_restarted")).toEqual([err.message]);
+    expect(toolResults(r).filter((t) => t.callId === "c1")).toEqual([
+      expect.objectContaining({ ok: false, summary: openCodeReplacedCallNote("bash") }),
+    ]);
+    expect(r.killed).toEqual([]);
+    expect(r.removed).toEqual([]);
+  });
+
+  it("the one more command answering another identity than the launch recorded is the verdict by the changed identity, as after a wordless death", async () => {
+    const r = await run({ ...oneCallOpen, transportLostThen: "renamed" });
+    const err = verdictOf(r);
+    expect(err.message).toBe(
+      `the container running OpenCode was replaced (vm-conformance → vm-conformance-2; ${identityChangedCondition()})`,
+    );
+    expect(err).toMatchObject({
+      was: "vm-conformance",
+      now: "vm-conformance-2",
+      said: undefined,
+      condition: "identity",
+    });
+    expect(err.record.settlements.map((s) => s.toolUse.id)).toEqual(["c1"]);
+    expect(r.killed).toEqual([]);
+    expect(r.removed).toEqual([]);
+  });
+
+  it("the same identity on the one more command leaves the failure standing, named as the transport error it was — never the verdict, never 'the OpenCode run ended before its execution settled' — with a harness_error note saying the one more command named no replacement, no sandbox_restarted note, the server and its tailer ended and the root removed", async () => {
+    const r = await run({ ...oneCallOpen, transportLostThen: "same" });
+    expect(r.outcome.kind).toBe("failed");
+    if (r.outcome.kind === "failed") {
+      expect(r.outcome.error).toBeInstanceOf(ExecInfraError);
+      expect(r.outcome.error.message).toBe(TRANSPORT_LOST_TEXT);
+    }
+    expect(noteSummaries(r, "sandbox_restarted")).toEqual([]);
+    expect(noteSummaries(r, "harness_error")).toEqual([
+      expect.stringMatching(
+        /^a container command failed on its transport \(resident \/exec: Peer closed WebSocket: 1006 .*\); the one more command named no replacement, so the failure stands$/,
+      ),
+    ]);
+    expect(r.killed.length).toBeGreaterThan(0);
+    expect(r.removed).toEqual([openCodeRunPaths("run-c").dir]);
+  });
+
+  it("the one more command waits through a container that is down — 'The container is not running' from the probe itself is re-sent after the executor's backoff, never judged — and the container that then answers the same identity leaves the failure standing with the wait on the record", async () => {
+    const r = await run({ ...oneCallOpen, transportLostThen: "same", containerDownForProbes: 2 });
+    expect(r.outcome.kind).toBe("failed");
+    if (r.outcome.kind === "failed") expect(r.outcome.error.message).toBe(TRANSPORT_LOST_TEXT);
+    expect(noteSummaries(r, "sandbox_restarted")).toEqual([]);
+    expect(noteSummaries(r, "harness_error")).toEqual([
+      expect.stringMatching(
+        /^the one more command finds the container down \(harness container: identity failed — resident \/exec: The container is not running, consider calling start\(\)\); waiting for it to answer, up to 300s$/,
+      ),
+      "the container answered after 15s of waiting",
+      expect.stringMatching(/the one more command named no replacement, so the failure stands$/),
+    ]);
+    expect(r.killed.length).toBeGreaterThan(0);
   });
 });
 

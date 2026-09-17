@@ -209,9 +209,34 @@ const INTERRUPTION_SIGNATURE = /\bexit 143\b|Session terminated|SIGTERM|^restore
  *  exec path and the refresh classifier agree on one wording list (a container
  *  stop mid-snapshot produces "Process supervisor is closed"; classified as the
  *  repo's own `snapshot-failed` it would end the instance `degraded` instead of
- *  being retried into the same step). */
-export const RUNTIME_REPLACEMENT_WORDING =
-  /previous runtime incarnation|interrupted because the runtime changed|runtime identity is no longer active|sandbox lifetime is no longer current|platform was updating the sandbox runtime|no longer identifies pid|process supervisor is closed|container is not running, consider calling start/i;
+ *  being retried into the same step).
+ *
+ *  The list is the union of two a reader tells apart, because the resident's
+ *  `/exec` answer treats them differently (resident-repos item 43): the SDK's
+ *  words that vouch the runtime MOVED — a new incarnation serves the thread,
+ *  so the container the command was aimed at is gone whatever else is known
+ *  — and the platform's words for a container that is merely DOWN, which say
+ *  nothing about a replacement: a stopped container answers "Process
+ *  supervisor is closed" to a spawn, and the workerd binding answers "The
+ *  container is not running" whether the container is asleep, starting, or
+ *  gone under a roll. For the refresh classifier and `isRuntimeReplacement`
+ *  the union is right: a step interrupted either way is retried onto the
+ *  container that comes back. */
+export const RUNTIME_MOVED_WORDING =
+  /previous runtime incarnation|interrupted because the runtime changed|runtime identity is no longer active|sandbox lifetime is no longer current|platform was updating the sandbox runtime|no longer identifies pid/i;
+/** The platform's words for a container that is down under a command (see
+ *  `RUNTIME_MOVED_WORDING`): the spawn refusal of a stopped container and the
+ *  binding's not-running refusal, anchored to the full phrase so a genuine
+ *  crash ("container exited with unexpected exit code") and the readiness
+ *  probe ("the container is not listening") never match. The harness's
+ *  container seam reads the same two as a container down under its one more
+ *  command — a wait, never a judgement (harness.md item 6). */
+export const STOPPED_CONTAINER_WORDING =
+  /process supervisor is closed|container is not running, consider calling start/i;
+export const RUNTIME_REPLACEMENT_WORDING = new RegExp(
+  `${RUNTIME_MOVED_WORDING.source}|${STOPPED_CONTAINER_WORDING.source}`,
+  "i",
+);
 
 /** `runtimeUnreachable` is the caller's word that the failure was the SDK's
  *  connect abort at the exec choke point (the Worker's typed check over the

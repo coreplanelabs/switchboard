@@ -40,7 +40,7 @@ import {
   identityChangedCondition,
   type HarnessContainer,
 } from "../container.js";
-import { FakeHarnessContainer } from "../testing/fakeContainer.js";
+import { FakeHarnessContainer, TRANSPORT_LOST_TEXT } from "../testing/fakeContainer.js";
 import {
   compactionSteer,
   isTransientProviderError,
@@ -2091,6 +2091,88 @@ describe("runPiHarness — the container replaced under a live run", () => {
     expect(w.container.killed).toEqual([]);
     expect(w.container.removed).toEqual([]);
     expect(w.registry.get("run-7")).toBeDefined();
+  });
+
+  it("a container command that fails on its transport with no word — the read's WebSocket closed with 1006 as the platform killed the container — takes the same one more command before judging: failing with the word, it is the executor's word — the replaced verdict with the record, the call in flight settled with the restart note, one sandbox_restarted note, nothing killed or removed, the run left on the relay — never the plain failure it was judged before", async () => {
+    const w = world({ withSpans: true });
+    piMidCall(w, (c) => c.loseTransport("word", "vm-new"));
+    const err = await w.start().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PiContainerReplacedError);
+    expect((err as Error).message).toMatch(
+      /^the container running pi was replaced \(vm-fake → vm-fake; the executor said: harness container: identity failed — runtime-replaced: the resident runtime was replaced/,
+    );
+    expect(err).toMatchObject({ was: "vm-fake", now: "vm-fake", condition: "word" });
+    expect(w.events.filter((e) => e.type === "tool_result")).toEqual([
+      expect.objectContaining({ tool: "bash", ok: false, callId: "c1", summary: replacedCallNote("bash") }),
+    ]);
+    expect(w.sink.ended("tool.bash")?.status).toBe("error");
+    expect(w.sink.ended("run.agent")?.status).toBe("error");
+    expect(noteKinds(w)).toEqual(["sandbox_restarted"]);
+    expect(noteSummaries(w)).toEqual([(err as Error).message]);
+    expect(w.container.killed).toEqual([]);
+    expect(w.container.removed).toEqual([]);
+    expect(w.registry.get("run-7")).toBeDefined();
+  });
+
+  it("a transport loss whose one more command answers another identity than the one recorded when pi started is the verdict by the changed identity, as after a wordless death", async () => {
+    const w = world();
+    piMidCall(w, (c) => c.loseTransport("renamed", "vm-new"));
+    const err = await w.start().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PiContainerReplacedError);
+    expect((err as Error).message).toBe(
+      `the container running pi was replaced (vm-fake → vm-new; ${identityChangedCondition()})`,
+    );
+    expect(err).toMatchObject({ was: "vm-fake", now: "vm-new", said: undefined, condition: "identity" });
+    expect((err as PiContainerReplacedError).record.settlements.map((s) => s.toolUse.id)).toEqual(["c1"]);
+    expect(noteKinds(w)).toEqual(["sandbox_restarted"]);
+    expect(w.container.killed).toEqual([]);
+    expect(w.container.removed).toEqual([]);
+  });
+
+  it("a transport loss whose one more command answers the identity recorded leaves the failure standing, NAMED as the transport error it was — never the verdict, never 'pi exited before the run settled' — with a harness_error note saying the one more command named no replacement, no sandbox_restarted note, pi ended and its root removed", async () => {
+    const w = world();
+    w.container.files.set(paths.errLog, "Error: cannot find module 'foo'\n");
+    piMidCall(w, (c) => c.loseTransport("same", "vm-new"));
+    const err = await w.start().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toBe(TRANSPORT_LOST_TEXT);
+    expect(noteKinds(w)).toEqual(["harness_error"]);
+    expect(noteSummaries(w)[0]).toMatch(
+      /^a container command failed on its transport \(resident \/exec: Peer closed WebSocket: 1006 .*\); the one more command named no replacement, so the failure stands$/,
+    );
+    // The launch's own name for the row, then exactly one more command.
+    expect(w.container.identityAsked).toBe(2);
+    expect(w.container.killed).toEqual([4242]);
+    expect(w.container.removed).toEqual([paths.dir]);
+  });
+
+  it("the one more command waits through a container that is down — 'The container is not running' from the probe itself is re-sent after the executor's backoff (5 s, 10 s), never judged — and the container that then answers decides: the same identity leaves the failure standing with the wait on the record; the word after the wait is the verdict", async () => {
+    const slept: number[] = [];
+    const same = world({ sleep: async (ms) => void slept.push(ms) });
+    piMidCall(same, (c) => c.loseTransport("same", "vm-new", 2));
+    const err = await same.start().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toBe(TRANSPORT_LOST_TEXT);
+    // The launch's own name, then the probe re-sent through two down answers.
+    expect(same.container.identityAsked).toBe(4);
+    expect(slept.filter((ms) => ms >= 5_000)).toEqual([5_000, 10_000]);
+    expect(noteKinds(same)).toEqual(["harness_error", "harness_error", "harness_error"]);
+    expect(noteSummaries(same)[0]).toMatch(
+      /^the one more command finds the container down \(harness container: identity failed — resident \/exec: The container is not running, consider calling start\(\)\); waiting for it to answer, up to 300s$/,
+    );
+    expect(noteSummaries(same)[1]).toBe("the container answered after 15s of waiting");
+    expect(noteSummaries(same)[2]).toMatch(/the one more command named no replacement, so the failure stands$/);
+    expect(same.container.killed).toEqual([4242]);
+
+    const word = world({ sleep: async (ms) => void slept.push(ms) });
+    piMidCall(word, (c) => c.loseTransport("word", "vm-new", 1));
+    const verdict = await word.start().catch((e: unknown) => e);
+    expect(verdict).toBeInstanceOf(PiContainerReplacedError);
+    expect(verdict).toMatchObject({ condition: "word" });
+    expect(word.container.identityAsked).toBeGreaterThanOrEqual(2);
+    expect(noteKinds(word)).toEqual(["harness_error", "harness_error", "sandbox_restarted"]);
+    expect(word.container.killed).toEqual([]);
+    expect(word.container.removed).toEqual([]);
   });
 
   it("saysContainerReplaced reads the executors' typed word first — the resident's ExecSandboxRestartedError, the seam's HarnessContainerRuntimeReplacedError — then the word `runtime-replaced` or `runtime-unreachable` anywhere in a failure's text, behind any prefix; a failure without the word is not one, and a bare string never is", () => {

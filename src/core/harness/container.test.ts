@@ -1,19 +1,30 @@
 import { describe, expect, it } from "vitest";
 import { shellQuote } from "../../execution/shellQuote.js";
-import { ExecSandboxRestartedError, type ExecOptions, type Executor } from "../../execution/executor.js";
 import {
+  ExecInfraError,
+  ExecSandboxRestartedError,
+  type ExecOptions,
+  type Executor,
+} from "../../execution/executor.js";
+import { SANDBOX_START_BACKOFF_MS, SANDBOX_START_WAIT_MAX_MS } from "../../execution/sandboxErrors.js";
+import {
+  CONTAINER_DOWN_WORDING,
   CURL_MAX_TIME_S,
   ExecHarnessContainer,
   HARNESS_PORT_ENV,
+  HarnessContainerDownError,
   HarnessContainerError,
   HarnessContainerRuntimeReplacedError,
   INLINE_LINE_CHARS,
   OP_TIMEOUT_MS,
+  PROBE_WAIT_BACKOFF_MS,
+  PROBE_WAIT_MAX_MS,
   identityChangedCondition,
   isContainerGone,
   HarnessControlFileLostError,
   replacedBecause,
   replacedVerdict,
+  saysTransportLost,
   PORT_ARG,
   WRITE_CHUNK_CHARS,
   aliveScript,
@@ -393,6 +404,146 @@ describe("replacedVerdict — one more container command before a dead process i
   });
 });
 
+describe("replacedVerdict — the one more command waits through a container that is down (the restore window), bounded like the start gate", () => {
+  /** An `identity` that answers `down` times with the platform's not-running text before it answers `then`. */
+  function downThen(down: number, then: () => Promise<string | undefined>) {
+    let asked = 0;
+    const identity = async () => {
+      asked++;
+      if (asked <= down)
+        throw new HarnessContainerDownError(
+          "identity",
+          "resident /exec: The container is not running, consider calling start()",
+        );
+      return then();
+    };
+    return { container: { identity }, asked: () => asked };
+  }
+  /** A probe whose sleeps are recorded and instant. */
+  function probe() {
+    const slept: number[] = [];
+    const noted: string[] = [];
+    return {
+      slept,
+      noted,
+      wait: { sleep: async (ms: number) => void slept.push(ms), note: (text: string) => void noted.push(text) },
+    };
+  }
+
+  it("the bound and the backoff are the executor's own start wait (execution.md item 23): 5 min in total, re-sent after 5 s, 10 s, then 15 s", () => {
+    expect(PROBE_WAIT_MAX_MS).toBe(SANDBOX_START_WAIT_MAX_MS);
+    expect(PROBE_WAIT_MAX_MS).toBe(5 * 60_000);
+    expect(PROBE_WAIT_BACKOFF_MS).toBe(SANDBOX_START_BACKOFF_MS);
+    expect(PROBE_WAIT_BACKOFF_MS).toEqual([5_000, 10_000, 15_000]);
+  });
+
+  it("a container down under the one more command is a wait, never the judgement: the probe is re-sent after the backoff until the container answers — the word, a changed identity or the same word decide as they always did — and the notes say the wait began and how long it took", async () => {
+    // Down twice, then the executor's word.
+    const seam = new HarnessContainerRuntimeReplacedError("identity", "runtime-replaced: the runtime was replaced");
+    const word = downThen(2, async () => {
+      throw seam;
+    });
+    const p1 = probe();
+    await expect(replacedVerdict(word.container, "vm-a", p1.wait)).resolves.toEqual({ condition: "word", said: seam });
+    expect(word.asked()).toBe(3);
+    expect(p1.slept).toEqual([5_000, 10_000]);
+    expect(p1.noted).toHaveLength(2);
+    expect(p1.noted[0]).toMatch(
+      /^the one more command finds the container down \(.*The container is not running.*\); waiting for it to answer, up to 300s$/,
+    );
+    expect(p1.noted[1]).toBe("the container answered after 15s of waiting");
+
+    // Down three times, then another identity.
+    const renamed = downThen(3, async () => "vm-b");
+    const p2 = probe();
+    await expect(replacedVerdict(renamed.container, "vm-a", p2.wait)).resolves.toEqual({
+      condition: "identity",
+      was: "vm-a",
+      now: "vm-b",
+    });
+    expect(p2.slept).toEqual([5_000, 10_000, 15_000]);
+    expect(p2.noted[1]).toBe("the container answered after 30s of waiting");
+
+    // Down twice, then the same word: no verdict, the failure stands.
+    const same = downThen(2, async () => "vm-a");
+    const p3 = probe();
+    await expect(replacedVerdict(same.container, "vm-a", p3.wait)).resolves.toBeUndefined();
+    expect(same.asked()).toBe(3);
+    expect(p3.slept).toEqual([5_000, 10_000]);
+  });
+
+  it("a wait that runs out decides: once the next pause would pass the bound the probe stops, the note says the container did not answer, and there is no verdict", async () => {
+    const never = downThen(Number.POSITIVE_INFINITY, async () => "unreachable");
+    const p = probe();
+    await expect(replacedVerdict(never.container, "vm-a", p.wait)).resolves.toBeUndefined();
+    const total = p.slept.reduce((a, b) => a + b, 0);
+    expect(total).toBeLessThanOrEqual(PROBE_WAIT_MAX_MS);
+    expect(total + 15_000).toBeGreaterThan(PROBE_WAIT_MAX_MS);
+    expect(p.slept.slice(0, 3)).toEqual([5_000, 10_000, 15_000]);
+    expect(new Set(p.slept.slice(3))).toEqual(new Set([15_000]));
+    expect(never.asked()).toBe(p.slept.length + 1);
+    expect(p.noted.at(-1)).toBe("the container did not answer within 300s; the wait ran out");
+  });
+
+  it("without a probe to wait with, a container down under the command judges nothing, as any other failed command", async () => {
+    const down = downThen(1, async () => "vm-b");
+    await expect(replacedVerdict(down.container, "vm-a")).resolves.toBeUndefined();
+    expect(down.asked()).toBe(1);
+  });
+});
+
+describe("saysTransportLost — the third failure shape: a container command failed on its transport with no word", () => {
+  it("the executors' typed infra failure (the exec transport failed, not a command exit) and the platform's or the transports' words for a container that is down — not running, starting, just exited, its supervisor closed, the WebSocket closed without a frame, the connection reset", () => {
+    expect(
+      saysTransportLost(
+        new ExecInfraError(
+          "resident /exec: Peer closed WebSocket: 1006 WebSocket disconnected without sending Close frame.",
+        ),
+      ),
+    ).toBe(true);
+    expect(saysTransportLost(new ExecInfraError("resident /exec HTTP 502"))).toBe(true);
+    expect(saysTransportLost(new Error("resident /exec: The container is not running, consider calling start()"))).toBe(
+      true,
+    );
+    expect(saysTransportLost(new Error("Container is starting. Please retry in a moment."))).toBe(true);
+    expect(saysTransportLost(new Error("not-serviceable: The container just exited"))).toBe(true);
+    expect(saysTransportLost(new Error("Process supervisor is closed"))).toBe(true);
+    expect(saysTransportLost(new Error("read ECONNRESET"))).toBe(true);
+    expect(saysTransportLost(new Error("socket hang up"))).toBe(true);
+    expect(saysTransportLost(new HarnessContainerDownError("identity", "The container is not running"))).toBe(true);
+    for (const text of [
+      "The container is not running, consider calling start()",
+      "Container is starting",
+      "the container just exited",
+      "Process supervisor is closed",
+      "Peer closed WebSocket: 1006 WebSocket disconnected without sending Close frame.",
+      "read ECONNRESET",
+      "connection reset by peer",
+      "socket hang up",
+    ])
+      expect(CONTAINER_DOWN_WORDING.test(text), text).toBe(true);
+  });
+
+  it("never the word (the typed gone errors, the word in a text), never a control file lost, never a command that failed as a command, never a bare string", () => {
+    expect(saysTransportLost(new ExecSandboxRestartedError("the sandbox restarted under the run", 1))).toBe(false);
+    expect(saysTransportLost(new HarnessContainerRuntimeReplacedError("read", "runtime-replaced: swapped"))).toBe(
+      false,
+    );
+    expect(
+      saysTransportLost(new ExecInfraError("runtime-unreachable: the sandbox container's runtime did not answer")),
+    ).toBe(false);
+    expect(
+      saysTransportLost(new Error("runtime-replaced: the resident runtime was replaced (Peer closed WebSocket)")),
+    ).toBe(false);
+    expect(saysTransportLost(new HarnessControlFileLostError("send", "/var/tmp/x/fifo", "/var/tmp/x"))).toBe(false);
+    expect(saysTransportLost(new HarnessContainerError("read", "exit 1:\ntail: cannot open"))).toBe(false);
+    expect(saysTransportLost(new Error("the model call failed"))).toBe(false);
+    expect(saysTransportLost("Peer closed WebSocket: 1006")).toBe(false);
+    expect(new HarnessContainerDownError("identity", "x")).toBeInstanceOf(HarnessContainerError);
+    expect(isContainerGone(new HarnessContainerDownError("identity", "x"))).toBe(false);
+  });
+});
+
 describe("ExecHarnessContainer — each operation is one command over the executor", () => {
   it("start runs the wrapper with the env on the exec and parses the pid from the last line", async () => {
     const { executor, calls } = recordingExecutor(["4242\n"]);
@@ -500,6 +651,23 @@ describe("ExecHarnessContainer — each operation is one command over the execut
     const c = new ExecHarnessContainer(executor);
     await expect(c.identity()).rejects.toBe(restarted);
     await expect(c.identity()).rejects.toBeInstanceOf(HarnessContainerRuntimeReplacedError);
+  });
+
+  it("identity throws the container down under the question — the platform's not-running or starting text, the transport lost — as the typed HarnessContainerDownError, for the one more command to wait on, never as a container with no name", async () => {
+    const { executor } = recordingExecutor([
+      new ExecInfraError("resident /exec: The container is not running, consider calling start()"),
+      new ExecInfraError(
+        "resident /exec: Peer closed WebSocket: 1006 WebSocket disconnected without sending Close frame.",
+      ),
+      "exit 1:\nno shell",
+      new ExecInfraError("resident /exec HTTP 502"),
+    ]);
+    const c = new ExecHarnessContainer(executor);
+    await expect(c.identity()).rejects.toBeInstanceOf(HarnessContainerDownError);
+    await expect(c.identity()).rejects.toMatchObject({ operation: "identity" });
+    // A command that failed as a command, or an infra failure without the container-down words, is no identity.
+    expect(await c.identity()).toBeUndefined();
+    expect(await c.identity()).toBeUndefined();
   });
 
   it("request runs curl over the executor with the body on stdin, parses a 2xx and a 5xx alike — a body carrying the executors' runtime word included — writes a long body to a file first, hands a secret header's value through the exec's environment, and rethrows the container-gone word like every other operation", async () => {

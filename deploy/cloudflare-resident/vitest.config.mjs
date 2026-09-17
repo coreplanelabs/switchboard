@@ -12,8 +12,10 @@ import { defineConfig } from "vitest/config";
 // (rebindAttach.test.ts), for the release at a run's end
 // (releaseAtRunEnd.test.ts), for the rule that dirt never keeps a tree
 // (dirtNeverKeeps.test.ts), for the rebuild on the down transition with
-// the watchdog as backstop (autoRebuild.test.ts) and for the held
-// /await-restore route and its waiter ledger wiring (awaitRestore.test.ts);
+// the watchdog as backstop (autoRebuild.test.ts), for the held
+// /await-restore route and its waiter ledger wiring (awaitRestore.test.ts)
+// and for the /exec answer's runtime-replaced word being given only when the
+// resident knows the container it held is gone (execReplacedWord.test.ts);
 // testing/sourceScan.ts is their helper. Every
 // test file of this directory is listed here — src/vitestWorkspace.test.ts
 // holds that.
@@ -40,6 +42,7 @@ export default defineConfig({
       "awaitRestore.test.ts",
       "infraStreak.test.ts",
       "staleTip.test.ts",
+      "execReplacedWord.test.ts",
     ],
   },
 });

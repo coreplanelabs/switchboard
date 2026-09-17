@@ -46,6 +46,7 @@ import type { ProxyRefusalCode } from "../../../channels/modelProxy.js";
 import {
   replacedBecause,
   replacedVerdict,
+  saysTransportLost,
   type HarnessContainer,
   type ReplacedCondition,
   type ReplacedVerdict,
@@ -1110,6 +1111,13 @@ export async function driveOpenCode(
    *  read having failed with the word — what the one more container command
    *  before the crash judgement said (`replacedVerdict`). */
   let replacedBy: ReplacedVerdict | undefined;
+  /** A feed read failed on its transport with no word (`saysTransportLost`;
+   *  the third failure shape, harness.md item 6): the one more command ran,
+   *  and the failure stands, named as it was, when that command named no
+   *  replacement. */
+  let transportLost: Error | undefined;
+  /** What the one more command waits with: the harness's sleep, the notes on the record. */
+  const probe = { sleep: deps.sleep, note: (text: string) => note("harness_error", text) };
   // The base of the record a relaunch rebuilds from: the seed with its request,
   // or the resumed transcript, which the mirror's rows follow.
   const recordBase = {
@@ -1235,14 +1243,23 @@ export async function driveOpenCode(
       pending ??= iterator.next();
       const tick = deps.sleep(deps.tickMs ?? 1000).then(() => "tick" as const);
       // A read that fails because the container was replaced under the run is
-      // the verdict below (the survival clause's ceiling); any other failure
-      // propagates to the finally, which closes the transport, as before.
+      // the verdict below (the survival clause's ceiling); a read that fails
+      // on its transport with no word (the platform's replacement closes the
+      // WebSocket under it before any word can come) takes the one more
+      // command, which waits through a container that is down, before it is
+      // judged; any other failure propagates to the finally, which closes the
+      // transport, as before.
       let next: IteratorResult<string> | "tick";
       try {
         next = await Promise.race([pending, tick]);
       } catch (err) {
-        if (!(err instanceof Error && saysContainerReplaced(err))) throw err;
-        replacedBy = { condition: "word", said: err };
+        if (err instanceof Error && saysContainerReplaced(err)) {
+          replacedBy = { condition: "word", said: err };
+          break;
+        }
+        if (!(err instanceof Error && saysTransportLost(err))) throw err;
+        transportLost = err;
+        replacedBy = await replacedVerdict(conn.container, conn.containerWord, probe);
         break;
       }
       if (next === "tick") {
@@ -1257,7 +1274,7 @@ export async function driveOpenCode(
         // while exec still answers, so one more container command is taken
         // before the crash judgement: the word on it, or the container's
         // changed identity, is the verdict below; nothing on it, the crash.
-        replacedBy = await replacedVerdict(conn.container, conn.containerWord);
+        replacedBy = await replacedVerdict(conn.container, conn.containerWord, probe);
         break;
       }
       // The byte after this record: the row's offset once a refill's steps
@@ -1312,7 +1329,7 @@ export async function driveOpenCode(
     }
   } finally {
     transport.close();
-    agentSpan?.end(hardStopped || bypass || replyFailed || replacedBy ? "error" : "ok");
+    agentSpan?.end(hardStopped || bypass || replyFailed || replacedBy || transportLost ? "error" : "ok");
   }
 
   // The container was replaced under the run (the survival clause's ceiling):
@@ -1337,6 +1354,17 @@ export async function driveOpenCode(
         : new OpenCodeContainerReplacedError(undefined, replacedBy.was, replacedBy.now, record, "identity");
     note("sandbox_restarted", replaced.message);
     throw replaced;
+  }
+  // The read failed on its transport and the one more command named no
+  // replacement: the failure stands, named as the transport error it was —
+  // never a crash judgement of the harness's own — and the caller ends the
+  // server, its tailer and the root as after any failed run.
+  if (transportLost !== undefined) {
+    note(
+      "harness_error",
+      `a container command failed on its transport (${redactAndCap(transportLost.message, 240)}); the one more command named no replacement, so the failure stands`,
+    );
+    throw transportLost;
   }
   if (bypass) throw bypass;
   if (replyFailed) throw replyFailed;

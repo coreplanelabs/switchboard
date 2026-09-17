@@ -10,7 +10,9 @@ import {
   planWakeDepsBudget,
   WAKE_DEPS_MIN_MS,
   SDK_BACKUP_ARCHIVE_DIR,
+  RUNTIME_MOVED_WORDING,
   RUNTIME_REPLACEMENT_WORDING,
+  STOPPED_CONTAINER_WORDING,
   checkoutUpdateCommand,
   classifyRefreshFailure,
   restoreFailureDisposition,
@@ -453,6 +455,37 @@ describe("RUNTIME_REPLACEMENT_WORDING (a deploy that ROLLS the container, not ju
     expect(
       classifyRefreshFailure({ step: "build", message: "container exited with unexpected exit code: 1" }).interrupted,
     ).toBe(false);
+  });
+
+  it("is the union of two lists a reader tells apart: the SDK's words that vouch the runtime MOVED (a new incarnation serves the thread) and the platform's words for a container that is merely DOWN (stopped, asleep or starting) — the resident's /exec says runtime-replaced on the first whatever it knows, and on the second only when it knows the container it held is gone", () => {
+    const moved = [
+      "Process handle refers to a previous runtime incarnation",
+      "interrupted because the runtime changed",
+      "Runtime identity is no longer active",
+      "sandbox lifetime is no longer current",
+      "the platform was updating the sandbox runtime",
+      "the runtime no longer identifies pid 4242",
+    ];
+    const down = ["Process supervisor is closed", CONTAINER_ROLLED];
+    for (const text of moved) {
+      expect(RUNTIME_MOVED_WORDING.test(text), text).toBe(true);
+      expect(STOPPED_CONTAINER_WORDING.test(text), text).toBe(false);
+      expect(RUNTIME_REPLACEMENT_WORDING.test(text), text).toBe(true);
+    }
+    for (const text of down) {
+      expect(STOPPED_CONTAINER_WORDING.test(text), text).toBe(true);
+      expect(RUNTIME_MOVED_WORDING.test(text), text).toBe(false);
+      expect(RUNTIME_REPLACEMENT_WORDING.test(text), text).toBe(true);
+    }
+    // The union is exactly the two lists, and case-insensitive like both.
+    expect(RUNTIME_REPLACEMENT_WORDING.source).toBe(
+      `${RUNTIME_MOVED_WORDING.source}|${STOPPED_CONTAINER_WORDING.source}`,
+    );
+    expect(RUNTIME_REPLACEMENT_WORDING.flags).toBe("i");
+    expect(STOPPED_CONTAINER_WORDING.test("the container is not running, consider calling start()")).toBe(true);
+    // Neither list broadens to the failures the block above keeps out.
+    expect(STOPPED_CONTAINER_WORDING.test("container exited with unexpected exit code: 1")).toBe(false);
+    expect(RUNTIME_MOVED_WORDING.test("the container is not listening")).toBe(false);
   });
 });
 

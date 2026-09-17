@@ -18,7 +18,9 @@
 // lines the harness names filtered at the source. A bearer reaches the process
 // through the exec's env channel and is never part of a command.
 
-import { ExecSandboxRestartedError, type Executor } from "../../execution/executor.js";
+import { ExecInfraError, ExecSandboxRestartedError, type Executor } from "../../execution/executor.js";
+import { STOPPED_CONTAINER_WORDING } from "../../execution/residentRefresh.js";
+import { SANDBOX_START_BACKOFF_MS, SANDBOX_START_WAIT_MAX_MS } from "../../execution/sandboxErrors.js";
 import { shellQuote } from "../../execution/shellQuote.js";
 import { parseExitPrefix, redactAndCap } from "../runEvents.js";
 
@@ -135,7 +137,9 @@ export interface HarnessContainer {
    *  when the container cannot name itself: then nothing is judged by it, and
    *  the pid decides as before. A container that is gone under the question —
    *  the executor's typed word for a replaced runtime — is thrown, never read
-   *  as a container with no name. */
+   *  as a container with no name; so is a container that is down under it
+   *  with no word (`HarnessContainerDownError`), which the one more command
+   *  waits on. */
   identity(): Promise<string | undefined>;
   /** Reach a server the run's process listens on over loopback: the answer
    *  whatever its status; a container gone under the request is the typed
@@ -353,6 +357,17 @@ export const OP_TIMEOUT_MS = 60_000;
  *  executor's — the caller can tell the two apart. */
 export const CURL_MAX_TIME_S = 55;
 
+/** How long the one more command (`replacedVerdict`) waits for a container
+ *  that is down under it to answer, and the pauses between its re-sends: the
+ *  executor's own bound on a container's start and its backoff (the start
+ *  gate, execution.md item 23 — a starting container is a wait the executor
+ *  re-sends through, whatever the command's budget), reused rather than a
+ *  bound of the seam's own. The platform rebuilt a replaced resident
+ *  container in about a minute; a wait that runs out decides nothing, and the
+ *  failure that opened the question stands. */
+export const PROBE_WAIT_MAX_MS = SANDBOX_START_WAIT_MAX_MS;
+export const PROBE_WAIT_BACKOFF_MS = SANDBOX_START_BACKOFF_MS;
+
 /** The environment variable a secret header's value rides to curl under: `SWITCHBOARD_REQUEST_H<n>`, in the header's order. */
 export const secretHeaderEnv = (n: number): string => `SWITCHBOARD_REQUEST_H${n}`;
 
@@ -470,6 +485,68 @@ export function isContainerGone(err: unknown): err is ExecSandboxRestartedError 
   return err instanceof ExecSandboxRestartedError || err instanceof HarnessContainerRuntimeReplacedError;
 }
 
+/** The platform's and the transports' words for a container that is down
+ *  under a command with no word for a replacement: the resident's two
+ *  (`STOPPED_CONTAINER_WORDING`: a stopped container's spawn refusal, the
+ *  binding's "The container is not running, consider calling start()"), the
+ *  platform's for a container gone for a moment ("Container is starting",
+ *  "The container just exited"), and the transport's for a socket the
+ *  container's death closed under a call — the WebSocket closed with 1006 and
+ *  no Close frame, a connection reset, a socket hung up. None says the
+ *  container was replaced: an asleep or starting container answers the same
+ *  words. The seam reads them twice: on a failing command, as the third
+ *  failure shape (`saysTransportLost`) that takes the one more command; on the
+ *  one more command itself, as a container down under the question
+ *  (`HarnessContainerDownError`), which is a wait and never the judgement. */
+export const CONTAINER_DOWN_WORDING = new RegExp(
+  `${STOPPED_CONTAINER_WORDING.source}|container is starting|container just exited|peer closed websocket|without sending close frame|\\bECONNRESET\\b|connection reset|socket hang up`,
+  "i",
+);
+
+/** The one more command found the container down under the question — not
+ *  running, starting, or the transport to it lost — with no word for a
+ *  replacement: what `identity` throws in place of "no name", so
+ *  `replacedVerdict` waits for the container to answer instead of judging by
+ *  a silence. `isContainerGone` does not match it. */
+export class HarnessContainerDownError extends HarnessContainerError {
+  constructor(operation: string, detail: string) {
+    super(operation, detail);
+    this.name = "HarnessContainerDownError";
+  }
+}
+
+/** Whether a container command's failure says the container is down under
+ *  it (`CONTAINER_DOWN_WORDING`), the word being absent. */
+export function saysContainerDown(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    !isContainerGone(err) &&
+    !RUNTIME_WORD.test(err.message) &&
+    CONTAINER_DOWN_WORDING.test(err.message)
+  );
+}
+
+/** The third failure shape of a container command, beside the word and the
+ *  wordless death (harness.md item 6): the command failed on its transport
+ *  with no word — the executor's typed infra failure (`ExecInfraError`: the
+ *  exec transport failed, not a command exit; the resident client's `resident
+ *  /exec: Peer closed WebSocket: 1006 …` is one) or a failure whose text says
+ *  the container is down. The platform's rollout closes the WebSocket under
+ *  the process's command before any word can come, so a harness that judged
+ *  this a plain failure lost the run where the container had in fact been
+ *  replaced; it takes the one more command instead (`replacedVerdict`). Never
+ *  the word (that is the verdict as it always was), never a control file lost
+ *  (the container answered), never a command that failed as a command. */
+export function saysTransportLost(err: unknown): boolean {
+  if (!(err instanceof Error) || isContainerGone(err) || RUNTIME_WORD.test(err.message)) return false;
+  if (err instanceof HarnessControlFileLostError) return false;
+  return (
+    err instanceof ExecInfraError ||
+    err instanceof HarnessContainerDownError ||
+    CONTAINER_DOWN_WORDING.test(err.message)
+  );
+}
+
 /** What a replaced verdict rests on, as a tag a reader of the error and of the
  *  record compares — never a sentence to parse: `word`, the executor's word on
  *  a failing container command (the condition as it always was, `said`
@@ -503,22 +580,67 @@ export type ReplacedVerdict =
  *  corroborates a verdict the word made and decides only here, where no word
  *  can come); anything else — the same word, no word on either side, a command
  *  that failed for another reason — leaves the crash judgement standing, and
- *  the caller makes it. `undefined` is that judgement's cue. */
+ *  the caller makes it. `undefined` is that judgement's cue.
+ *
+ *  The same command runs when a container command failed on its transport
+ *  with no word (`saysTransportLost`), and it has to survive the window the
+ *  platform's replacement opens: the resident rebuilt its container in about
+ *  a minute, and until then the command itself answers that the container is
+ *  not running (`HarnessContainerDownError`). That answer is a wait, never
+ *  the judgement: given a `probe`, the command is re-sent after
+ *  `PROBE_WAIT_BACKOFF_MS` until the container answers — the word, a changed
+ *  identity or the same word then decide as above — or the wait reaches
+ *  `PROBE_WAIT_MAX_MS` and runs out, deciding nothing (the start gate's rule,
+ *  execution.md item 23). `probe.note` is told once when the wait begins and
+ *  once when it ends, for the record. Without a `probe` a container down under
+ *  the command judges nothing, as any other failed command. */
 export async function replacedVerdict(
   container: Pick<HarnessContainer, "identity">,
   recorded: string | undefined,
+  probe?: ProbeWait,
 ): Promise<ReplacedVerdict | undefined> {
-  let now: string | undefined;
-  try {
-    now = await container.identity();
-  } catch (err) {
-    if (isContainerGone(err)) return { condition: "word", said: err };
+  let waited = 0;
+  for (let attempt = 0; ; attempt++) {
+    let now: string | undefined;
+    try {
+      now = await container.identity();
+    } catch (err) {
+      if (isContainerGone(err)) {
+        if (waited > 0) probe?.note?.(containerAnswered(waited));
+        return { condition: "word", said: err };
+      }
+      if (err instanceof HarnessContainerDownError && probe !== undefined) {
+        const pause = PROBE_WAIT_BACKOFF_MS[Math.min(attempt, PROBE_WAIT_BACKOFF_MS.length - 1)];
+        if (waited + pause > PROBE_WAIT_MAX_MS) {
+          probe.note?.(`the container did not answer within ${seconds(PROBE_WAIT_MAX_MS)}; the wait ran out`);
+          return undefined;
+        }
+        if (waited === 0)
+          probe.note?.(
+            `the one more command finds the container down (${redactAndCap(err.message.replace(/\s+/g, " ").trim(), 240)}); waiting for it to answer, up to ${seconds(PROBE_WAIT_MAX_MS)}`,
+          );
+        await probe.sleep(pause);
+        waited += pause;
+        continue;
+      }
+      return undefined;
+    }
+    if (waited > 0) probe?.note?.(containerAnswered(waited));
+    if (recorded !== undefined && now !== undefined && now !== recorded)
+      return { condition: "identity", was: recorded, now };
     return undefined;
   }
-  if (recorded !== undefined && now !== undefined && now !== recorded)
-    return { condition: "identity", was: recorded, now };
-  return undefined;
 }
+
+/** What the one more command waits with: the harness's sleep (never a clock
+ *  read of the seam's own), and a note sink for the record. */
+export interface ProbeWait {
+  sleep: (ms: number) => Promise<void>;
+  note?: (text: string) => void;
+}
+
+const seconds = (ms: number): string => `${Math.round(ms / 1000)}s`;
+const containerAnswered = (waitedMs: number): string => `the container answered after ${seconds(waitedMs)} of waiting`;
 
 /** The note's sentence for a verdict reached by the changed identity
  *  (`condition: "identity"`): what the `sandbox_restarted` note says in place
@@ -630,13 +752,17 @@ export class ExecHarnessContainer implements HarnessContainer {
   /** One word or nothing: an empty answer, a malformed one or a command the
    *  executor could not run is no identity — a judgement never rests on a
    *  guess — except the executor's typed word that the container is gone under
-   *  the question, which is thrown as it is from every other operation. */
+   *  the question, which is thrown as it is from every other operation, and a
+   *  container down under it (`saysContainerDown`: not running, starting, the
+   *  transport lost), thrown as `HarnessContainerDownError` for the one more
+   *  command to wait on rather than read as a container with no name. */
   async identity(): Promise<string | undefined> {
     try {
       const word = stdoutOf("identity", await this.exec(identityScript())).trim();
       return IDENTITY_WORD.test(word) ? word : undefined;
     } catch (err) {
       if (isContainerGone(err)) throw err;
+      if (saysContainerDown(err)) throw new HarnessContainerDownError("identity", (err as Error).message);
       return undefined;
     }
   }
