@@ -1,6 +1,6 @@
 ---
 title: A budget is a lease carved from its parent, and one module proves the leases fit
-status: proposed
+status: accepted
 date: 2026-09-17
 pattern: A single arithmetic module owns every wall clock as a lease carved from the parent's remainder minus the floors of every round that must follow; the lease covers everything a run does; one fit is asserted at verify, at config load and at the fork; a lease is sized by the infrastructure that must outlive it, a grant by the person; renewal opens a new segment from a recorded head
 ---
@@ -8,6 +8,8 @@ pattern: A single arithmetic module owns every wall clock as a lease carved from
 # A budget is a lease carved from its parent, and one module proves the leases fit
 
 **The ask.** Decide (the maintainer, before the plan is written): adopt the lease as Switchboard's one budget primitive, one module as the owner of every wall-clock number and its derivation, and one fit asserted at verify, at config load and at the fork; build the module (unit one) and the wind-down inside the lease (unit two) from this record; take the grant and renewal (unit three) as the direction, its open terms resolved in its own plan before its default turns on. Reader: an engineer who knows the run loop and the ship pipeline and has not read the budget audit of 2026-09-17 (recorded on #1477). Frame assumed from the maintainer's "pull all our time budgets in the whole system and make sure that they are cohesive" and "these decisions and designs must be principled" on 2026-09-17.
+
+**Accepted 2026-09-17** for units one and two, executed from [the plan](../plans/2026-09-17-003-feat-budgets-are-leases-units-one-two-plan.md); unit three is held as direction and is not accepted by this record. The wind-down fix and the checks-by-cost rule the record names as in flight merged before acceptance; unit two builds on them.
 
 Success criteria: (1) every wall-clock number in `src/` that bounds a run, a round, a wait or a leaf call is a row of one module or derived from it, and `verify` fails when a number cannot hold what is carved from it at any round of a pipeline; (2) a pipeline that cannot hold its own loop is refused wherever its minutes are set, config load or a clip at the fork, naming the sum; (3) a run's lease covers everything it does, so its total time never exceeds the lease plus its provisioning, its work is pushed and the head recorded, and no model call outlives the credential; (4) a unit that needs more than one lease continues under the same request without a person re-issuing, while its grant holds and each lease recorded progress; (5) an ask, a floor or an allowance changes in one place and the check says what else must move.
 
@@ -24,7 +26,7 @@ You would expect one clock per run. A coding run under ship has six, set in six 
 | The registry declares an ask per preset (coding 45, review 25, research 8, general 5, explore 120, conductor 120, ship 120) and derives one number from it, the turn cap `ask × 6` (#1020), with ship's structural 1 exempt. | `src/agents/registry.ts:50-63, 613-735`; `src/agents/registry.test.ts:132-138` |
 | Ship carves a child's minutes as `max(2, min(ask, floor(remainder − reserve)))`, reserves 11 / 8 / 0 for a coding, fix and review round, and dispatches any round while 3 minutes remain; the merge wait is 60 minutes of its own. The validator refuses `ship.maxMinutes` under 14, never against the coding ask; a boundary or `budget:` clips ship after load with no check. | `src/core/ship/coordinator.ts:52-75, 678, 727-745, 880`; `src/config/validate.ts:489-493`; `src/config/profile.ts:212-221` |
 | The lease starts after provisioning, 0.3 to 2.6 minutes after the row's `startedAt` in the 14 hits on record. Past the deadline: a write-up of 0.3 to 3.4 minutes, a description turn of up to 5, and a bearer minted before the lease for the budget plus 5, so a slow description turn has no credential. | `src/core/dispatcher.ts:581, 864, 957, 1151`; `src/core/harness/pi/harness.ts:99, 436-439, 994`; `src/core/dispatch/runLoop.ts:1115-1132`; `src/core/dispatch/provision.ts:856` |
-| Nothing clips pi's shell; the native clip left with the native tool table. The model proxy is the one point a run cannot talk past: it refuses past the turn guard with a typed note and already reads every request body. | `docs/reference/specs/execution.md:22`; `src/channels/modelProxy.ts:515-531` |
+| Nothing clips pi's shell; the native clip left with the native tool table. The model proxy is the one point a run cannot talk past: it refuses past the turn guard with a typed note and already reads every request body. | execution.md item 12; `src/channels/modelProxy.ts:515-531` |
 | The row records a typed handoff and, for pushes, only the branch of a `pr_opened` event; a first push with no description publishes nothing, and no sha of a coding run's push is recorded. Every run starts from a clean tree. | `src/core/runRecord.ts:147, 219-226, 243-246`; `src/core/codingPrPostStep.ts:672-690`; resident-repos items 16a, 17 |
 
 ## The shape
@@ -123,14 +125,16 @@ Three units, each its own pull request off this record's plan. One: the module w
 
 ## Validation criteria
 
-1. `verify` fails when an ask, a floor, an allowance or a default `maxRounds` changes so the fit no longer holds, naming the sum and the ask. `[gap]` unit one: `src/core/budgets.check.test.ts::the longest loop the config allows fits inside the pipeline's ask`.
-2. `deploy config` refuses a pipeline under the fit, and the fork refuses a clipped ship request under it, both naming the sum. `[gap]` unit one: `src/config/validate.test.ts::a ship pipeline that cannot hold its loop is refused with the sum`; `src/core/dispatch/ship.test.ts::a boundary that clips ship under its loop refuses at the fork`.
-3. No duration literal outside the module: the scanner gains the predicate and its allowlist only shrinks. `[gap]` unit one: `src/core/trace/clockAllowlist.test.ts::a minutes literal outside budgets.ts is a new read`.
-4. A round whose carve falls under its floor is not dispatched and the segment ends naming the round. `[gap]` unit one: `src/core/ship/coordinator.test.ts::a round under its floor ends the unit review pending`.
-5. The proxy refuses a call that carries tools after the loop's end and admits one that does not; a run's time from the lease's start never exceeds the lease plus the grace. `[gap]` unit two: `src/channels/modelProxy.test.ts::a call with tools past the loop's end is refused`; harness conformance row `the lease covers the write-up and the post-step`.
-6. A ship child pushes at the wind-down and its row records ref and sha. `[gap]` unit two: `src/core/ship/contract.test.ts::the wind-down instruction pushes before the final answer`; `src/core/runRecord.test.ts::a pushed head is recorded with its sha`; live receipt human-gated, on #1477.
-7. A unit whose segment recorded a new sha under a grant with renewals continues in the same thread with a card naming the segment and the sha; one without stops naming the failed test; a reclaimed runner does not renew twice. `[gap]` unit three: `src/core/ship/coordinator.test.ts::renewal follows progress and the grant`; `::a reclaimed runner finds the renewal row`.
-8. Twenty production renewals read from the ledger with the share of stops a person continued unchanged. Human-gated; recorded on unit three's tracker issue.
+Proof references use the repository's shape, `file::describe::it`; every row is `[gap]` until its unit lands and binds it in the covering spec.
+
+1. `verify` fails when an ask, a floor, an allowance or the default `maxRounds` changes so the fit no longer holds, naming the sum and the ask. `[gap]` plan unit one: `src/core/budgets.check.test.ts::the fit::the longest loop the config allows fits inside the pipeline's ask`.
+2. `deploy config` refuses a pipeline under the fit, and the fork refuses a clipped ship request under it, both naming the sum. `[gap]` plan unit two: `src/config.test.ts::ship caps block (agent:ship pipeline)::a pipeline that cannot hold its loop is refused with the sum`; `src/core/dispatch/ship.test.ts::runShipBranch…::a boundary that clips ship under its loop refuses at the fork with the sum`.
+3. No duration literal outside the module: a second ratchet lists them and only shrinks. `[gap]` plan unit three: `src/core/trace/durationAllowlist.test.ts::the duration ratchet::a minutes literal outside budgets.ts is listed or fails by name`.
+4. A round whose carve falls under its floor is not dispatched and the unit ends `review pending` naming the round. `[gap]` plan unit two: `src/core/ship/coordinator.test.ts::…::a round under its floor ends the unit review pending`.
+5. The proxy refuses a call that carries tools after the loop's end and admits one that does not; a run's time from the lease's start never exceeds the lease plus the grace. `[gap]` plan units five and six: `src/channels/modelProxy.test.ts::the loop's end::a call with tools past the loop's end is 403 time_budget_exhausted`; conformance row `conversation: the lease covers the write-up and the post-step`.
+6. A ship child pushes at the wind-down and its row records ref and sha. `[gap]` plan unit eight: `src/core/codingPrPostStep.test.ts::…::a push with no description publishes pushed_head with ref and sha`; live receipt human-gated, recorded on the tracker issue for the wind-down abort.
+7. A shell command in flight at the loop's end is ended and the harness process is not. `[gap]` plan unit seven: conformance row `survival: a command in flight at the loop's end is ended and the write-up stands`.
+8. The floors, the post-step allowance and the `review pending` baseline are read from the ledger before unit two ships. `[gap]` plan unit four: recorded on the tracker issue with sample sizes; human-gated.
 
 ## Appendix: the survey at `6fd2003e5431`
 
@@ -144,7 +148,7 @@ Three units, each its own pull request off this record's plan. One: the module w
 | Run order; lease start | attach, then bearer mint, then the loop; `startedAt = receivedAt`; deadline set from the resumed remaining or the ask; abort 3 min into the write-up | `src/core/dispatcher.ts:581, 864, 957, 1151`; `src/core/harness/pi/harness.ts:99, 436-439, 994` |
 | Bearer | budget + 5 min from the mint | `src/core/dispatch/provision.ts:856`; `src/core/modelProxy/runBearers.ts:31` |
 | Post-steps | description turn `min(ask, 5)`, verdict turn `min(ask, 3)`, after the loop | `src/core/dispatch/runLoop.ts:1115-1132`; `src/core/descriptionTurn.ts:41, 165`; `src/core/verdictTurn.ts:35, 113` |
-| Shell; proxy | pi's own tool, unclipped; `bashBudgetWithinRun` under `attach_file` only, its 60-second reserve reused by `await_runs`; the proxy refuses past the turn guard with a typed note and pins every request body | `docs/reference/specs/execution.md:22`; `src/tools/attach.ts:136`; `src/core/dispatch/awaitChildren.ts:140`; `src/channels/modelProxy.ts:515-531` |
+| Shell; proxy | pi's own tool, unclipped; `bashBudgetWithinRun` under `attach_file` only, its 60-second reserve reused by `await_runs`; the proxy refuses past the turn guard with a typed note and pins every request body | execution.md item 12; `src/tools/attach.ts:136`; `src/core/dispatch/awaitChildren.ts:140`; `src/channels/modelProxy.ts:515-531` |
 | Resident | step ceiling 30 min; token 60 min refreshed 25 before expiry, 45 as the backstop; worktree released at the run's end, clean tree per run | `src/execution/residentInstanceId.ts:182`; `src/execution/residentCredentials.ts:31, 40`; resident-repos items 16a, 17 |
 | Drain window | 15 min per bot generation | `src/core/drain.ts:20` |
 | Row facts | typed handoff; pushed branches only from `pr_opened`, published on a submitted description or an existing pull request; a coding run's head is a branch name, no sha; a review run records its reviewed head | `src/core/runRecord.ts:147, 152-154, 219-226, 243-246`; `src/core/codingPrPostStep.ts:672-690` |
