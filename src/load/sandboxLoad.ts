@@ -44,6 +44,14 @@ export interface SandboxLoadParams {
  *  seed's time went: the checkout restore, the deps restore, the fix-up. */
 export const SEED_STEP_OPS = { restore: "seed-restore", deps: "seed-deps", fixup: "seed-fixup" } as const;
 
+/** Each restore's two phases as their own ops, when the Worker reports them:
+ *  the download and the extraction of the checkout archive and of the deps
+ *  entry's — so a slow seed's owner is a row in the receipt, not a guess. */
+export const SEED_PHASE_OPS = {
+  checkout: { download: "seed-checkout-download", extract: "seed-checkout-extract" },
+  deps: { download: "seed-deps-download", extract: "seed-deps-extract" },
+} as const;
+
 /** The cold fleet's `max_instances` at the time of writing; past it every
  *  command waits for a seat, which is a measurement worth taking on purpose. */
 export const SANDBOX_LOAD_MAX_THREADS = 25;
@@ -101,6 +109,21 @@ export async function runSandboxLoad(
         for (const [step, op] of Object.entries(SEED_STEP_OPS) as Array<[keyof typeof SEED_STEP_OPS, string]>) {
           const ms = answer.steps[step];
           if (ms !== null) samples.push({ op, thread: i, startedAt: seedAt, ms, ok: true });
+        }
+        if (answer.phases) {
+          for (const which of ["checkout", "deps"] as const) {
+            const phases = answer.phases[which];
+            if (!phases) continue;
+            for (const phase of ["download", "extract"] as const) {
+              samples.push({
+                op: SEED_PHASE_OPS[which][phase],
+                thread: i,
+                startedAt: seedAt,
+                ms: phases[phase],
+                ok: true,
+              });
+            }
+          }
         }
       }
       // The first command is what creates the container (or, seeded, what

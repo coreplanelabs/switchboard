@@ -70,6 +70,19 @@ export interface SandboxSeed {
 
 export type SeedStep = "restore" | "deps" | "fixup";
 
+/** One restore's two phases, in milliseconds: the SDK's presigned download of
+ *  the archive (judged by bytes arriving), then the extraction onto the disk. */
+export interface RestorePhases {
+  download: number;
+  extract: number;
+}
+
+export interface SeedPhases {
+  checkout: RestorePhases;
+  /** Null when no deps entry rode along. */
+  deps: RestorePhases | null;
+}
+
 export type SeedAnswer =
   | {
       seeded: true;
@@ -82,6 +95,10 @@ export type SeedAnswer =
       from: { ref: string; sha: string; checkoutBackupId: string; depsBackupId?: string };
       /** Milliseconds per step; `deps` null when no entry rode along; all zero when cached. */
       steps: { restore: number; deps: number | null; fixup: number };
+      /** Each restore split into its two phases — the archive's download to the
+       *  container and its extraction onto the disk — so the gate's reading says
+       *  which one owns a slow seed. Absent when cached. */
+      phases?: SeedPhases;
       ms: number;
     }
   | { seeded: false; reason: SeedReason; detail: string; step?: SeedStep };

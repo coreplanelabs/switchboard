@@ -103,6 +103,10 @@ describe("runSandboxLoad — seeded", () => {
                 sha: seed.sha,
                 from: { ref: seed.ref, sha: seed.sha, checkoutBackupId: seed.checkoutBackupId },
                 steps: { restore: 18_000, deps: 9_000, fixup: 3_000 },
+                phases: {
+                  checkout: { download: 12_000, extract: 6_000 },
+                  deps: { download: 7_000, extract: 2_000 },
+                },
                 ms: 30_000,
               };
             }
@@ -117,7 +121,7 @@ describe("runSandboxLoad — seeded", () => {
     };
   }
 
-  it("seeds before the first command and records the seed plus the Worker's restore, deps and fix-up timings as their own ops", async () => {
+  it("seeds before the first command and records the seed plus the Worker's restore, deps and fix-up timings — and each restore's download and extraction — as their own ops", async () => {
     const fleet = seededFleet(() => ({ seeded: true }));
     const out = await runSandboxLoad(
       { runId: "s4", threads: 2, staggerMs: 0, holdMs: 1_000, cpuSeconds: 1, pauseMs: 0, seed },
@@ -129,12 +133,19 @@ describe("runSandboxLoad — seeded", () => {
       "seed-restore",
       "seed-deps",
       "seed-fixup",
+      "seed-checkout-download",
+      "seed-checkout-extract",
+      "seed-deps-download",
+      "seed-deps-extract",
       "first-exec",
       "exec",
       "exec-cpu",
     ]);
     expect(s.ops.find((o) => o.op === "seed")).toMatchObject({ count: 2, ok: 2, p50: 30_000 });
     expect(s.ops.find((o) => o.op === "seed-restore")).toMatchObject({ count: 2, p50: 18_000 });
+    // the two phases of each restore are rows of their own, so a slow seed's owner is read, not guessed
+    expect(s.ops.find((o) => o.op === "seed-checkout-download")).toMatchObject({ count: 2, p50: 12_000 });
+    expect(s.ops.find((o) => o.op === "seed-deps-extract")).toMatchObject({ count: 2, p50: 2_000 });
     expect(fleet.seeds).toEqual([seed, seed]);
   });
 
