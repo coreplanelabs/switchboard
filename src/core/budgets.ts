@@ -24,6 +24,12 @@ export const MINUTE_MS = 60_000;
  *  as a literal where it is used. */
 export const DAY_MS = 24 * 60 * MINUTE_MS;
 
+/** How long the confirmation a routed write is offered as stays pending
+ *  (docs/decisions/0044; docs/reference/specs/routing-and-config.md item 25):
+ *  the connect ticket's ten minutes. The bot passes it to the config object,
+ *  which stamps the expiry on its own clock. */
+export const CONFIRMATION_TTL_MS = 10 * MINUTE_MS;
+
 /** The presets that run the tool loop, and the one pipeline preset. */
 export const LOOP_PRESETS = ["general", "coding", "review", "research", "explore", "conductor"] as const;
 export type LoopPreset = (typeof LOOP_PRESETS)[number];

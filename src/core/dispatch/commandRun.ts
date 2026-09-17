@@ -38,10 +38,12 @@ import type { FastPathDeps } from "./fastPath.js";
 export type RouteEventFields = Omit<Extract<RunEvent, { type: "route" }>, "type" | "seq" | "at">;
 
 /** What a command run may carry beyond the command: the router's decision, when
- *  the command came through its door, and the door's mark for the audit line. */
+ *  the command came through its door, and the door's mark for the audit line —
+ *  `route` for a command the router bound and ran, `confirm` for a stored
+ *  input run at a confirmation's click (record 0044). */
 export interface CommandRunOptions {
   route?: RouteEventFields;
-  source?: "route";
+  source?: "route" | "confirm";
 }
 
 /** `runInlineCommandRun`'s options: the command's, plus whether the channel is

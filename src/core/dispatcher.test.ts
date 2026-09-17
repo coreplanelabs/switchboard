@@ -25,7 +25,23 @@ import { InMemoryArtifactStore } from "../artifacts/store.js";
 import { ExecSandboxRestartedError } from "../execution/executor.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
 import type { ChannelIO, HistoryItem, RunReceipt, StatusUpdate } from "./types.js";
-import { activeRunCount, dispatch, type CoreDeps, type DispatchOutcome } from "./dispatcher.js";
+import { activeRunCount, dispatch, dispatchClick, type CoreDeps, type DispatchOutcome } from "./dispatcher.js";
+import { CONFIRMATION_TTL_MS } from "./budgets.js";
+import type { AuditEntry } from "./commandRegistry.js";
+import {
+  InMemoryConfirmationStore,
+  renderOffer,
+  STORE_UNREACHABLE_NOTE,
+  UNSHOWABLE_LINE,
+  type ConfirmationStore,
+} from "./confirmations.js";
+import {
+  OFFER_CANCELLED_LINE,
+  OFFER_EXPIRED_LINE,
+  OFFER_FOREIGN_LINE,
+  OFFER_UNREADABLE_LINE,
+  OFFER_USED_LINE,
+} from "./dispatch/confirm.js";
 import { setShutdownNotice } from "./dispatch/run.js";
 import { durableInboxMessage, type DispatchFollowUp } from "./dispatch/admission.js";
 import { CUSTOM_INSTRUCTIONS_HEADER } from "./customInstructions.js";
@@ -15002,5 +15018,349 @@ describe("the confirm axis through dispatch(): the door hands back at or after t
       expect(deps.invoked, JSON.stringify(layers)).toEqual(["config.show"]);
       expect(replies[0]!.split("\n")[0], JSON.stringify(layers)).toBe("routed: config show");
     }
+  });
+});
+
+// Feature: docs/reference/specs/routing-and-config.md item 25 (record 0044, the
+// confirmation): on a channel that can show an offer, the door stores one row
+// in the confirmation store and offers the full line; `dispatchClick` consumes
+// it once for the requester and runs the stored input through the typed path
+// with `source: confirm`; every refusal is a named line; without `offer`, or
+// without the store, the hand-back is byte for byte what it was.
+describe("the confirmation through dispatch() and dispatchClick(): offered when the channel can show one, consumed once for the requester (record 0044)", () => {
+  const HAND_BACK_LINE = "To run this: config set channel --models.coding anthropic/claude-opus-5";
+  const LINE = "config set channel --models.coding anthropic/claude-opus-5";
+  const RISK = "changes the scope's settings for everyone in it until reset";
+  const BUILT_IN_FOOTER = "confirmation required by the built-in default";
+  const call = (tool: string, input: unknown) => vi.fn<RouteModel>(async () => ({ tool, input }));
+  const contentTypes = (events: readonly RunEvent[]) => events.filter((e) => !isSpanRecord(e)).map((e) => e.type);
+  const requester: Actor = { kind: "user", id: "slack:UADMIN", grants: NO_GRANTS };
+  const stranger: Actor = { kind: "user", id: "slack:UOTHER", grants: NO_GRANTS };
+  /** A browser session the identity record binds to the requester (record 0042): another surface's id, the requester in `self`. */
+  const requesterInBrowser: Actor = {
+    kind: "user",
+    id: "access:sub-1",
+    grants: NO_GRANTS,
+    self: ["access:sub-1", "slack:UADMIN"],
+  };
+  const codingModelIn = (deps: TestDeps) =>
+    deps.config.resolve({ channelId: "slack:CX", userId: "slack:UADMIN", request: { agent: "coding" } }).modelRef;
+  /** The routed deps with a counting registry, an in-memory confirmation store
+   *  on a clock the test advances, and the catalogue re-bound with an audit
+   *  spy, so a test can read `source` off the audit line. */
+  const wired = (yaml = ROUTING_ON_YAML) => {
+    let n = 0;
+    let now = 1_000_000;
+    const registry = new RunRegistry({ genId: () => `r${++n}`, genToken: () => "t" });
+    const provider = capturingProvider();
+    const deps = makeDeps(yaml, provider);
+    deps.runRegistry = registry;
+    deps.admission = new ThreadAdmission();
+    deps.clock = () => now;
+    const store = new InMemoryConfirmationStore({ clock: () => now });
+    deps.confirmations = store;
+    const audits: AuditEntry[] = [];
+    const bound = buildCoreCommands(deps.config, null, {
+      registry,
+      secrets: processSecrets,
+      dataDir: deps.dataDir!,
+      warn: () => {},
+      audit: (e) => void audits.push(e),
+    });
+    const invoked: string[] = [];
+    deps.invoked = invoked;
+    deps.commands = {
+      ...bound,
+      invoke: (id, raw, caller, trace) => {
+        invoked.push(id);
+        return bound.invoke(id, raw, caller, trace);
+      },
+    };
+    return { deps, registry, provider, store, audits, tick: (ms: number) => void (now += ms), now: () => now };
+  };
+  /** The channel with `offer` and the two run signals spied. */
+  const offeringIO = () => {
+    const f = fakeIO();
+    const offers: Array<Parameters<NonNullable<ChannelIO["offer"]>>[0]> = [];
+    const started = vi.fn();
+    const finished = vi.fn();
+    f.io.offer = vi.fn(async (o) => void offers.push(o));
+    f.io.runStarted = started;
+    f.io.runFinished = finished;
+    return { ...f, offers, started, finished };
+  };
+  const bindsConfigSet = () => call("config_set", { scope: "channel", models: { coding: "anthropic/claude-opus-5" } });
+  /** The sentence through the door on an offering channel: the offer it minted. */
+  const offered = async (deps: TestDeps) => {
+    deps.routeModel = bindsConfigSet();
+    const io = offeringIO();
+    await dispatch(deps, msg("use opus for coding in this channel", "slack:UADMIN"), io.io);
+    return io;
+  };
+  const click = (deps: TestDeps, kind: "confirm" | "cancel", id: string, actor: Actor) => {
+    const io = fakeIO();
+    return dispatchClick(deps, { kind, id, actor, io: io.io }).then((outcome) => ({ outcome, ...io }));
+  };
+
+  it("a routed write on a channel with `offer` mints one row and offers the full line, the risk line and the footer naming the built-in default; one record with outcome offered, nothing invoked, no run signal and no plain reply", async () => {
+    const { deps, registry, provider, store, now } = wired();
+    const { offers, replies, statuses, started, finished } = await offered(deps);
+    expect(deps.routeModel).toHaveBeenCalledTimes(1);
+    expect(offers).toEqual([
+      {
+        id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        line: LINE,
+        risk: RISK,
+        footer: BUILT_IN_FOOTER,
+        expiresAt: now() + CONFIRMATION_TTL_MS,
+      },
+    ]);
+    expect(replies).toEqual([]);
+    expect(deps.invoked).toEqual([]);
+    expect(statuses).toEqual([]);
+    expect(provider.requests).toEqual([]);
+    expect(started).not.toHaveBeenCalled();
+    expect(finished).not.toHaveBeenCalled();
+    expect(store.rows.size).toBe(1);
+    expect(store.rows.get(offers[0]!.id)).toMatchObject({
+      command: "config.set",
+      input: { args: ["channel"], options: { models: { coding: "anthropic/claude-opus-5" } } },
+      message: { channelId: "slack:CX", userId: "slack:UADMIN", threadKey: "slack:CX:1.0" },
+      model: "anthropic/general-model",
+    });
+    const snap = registry.snapshotById("r1");
+    expect(registry.getById("r1")).toMatchObject({ status: "completed", agent: "command", threadKey: "slack:CX:1.0" });
+    expect(contentTypes(snap?.events ?? [])).toEqual(["input", "run_meta", "route", "answer"]);
+    expect(snap?.events.find((e) => e.type === "route")).toMatchObject({
+      preset: "command",
+      reason: "command config.set",
+      command: "config.set",
+      receipt: LINE,
+      outcome: "offered",
+    });
+    expect(snap?.events.find((e) => e.type === "answer")).toMatchObject({ text: renderOffer(offers[0]!) });
+    expect(registry.snapshotById("r2")).toBeNull();
+    expect(codingModelIn(deps)).toBe("anthropic/coding-model");
+  });
+
+  it("the offer's line is the full chat form where the record's receipt is capped", async () => {
+    const { deps, registry } = wired();
+    const long = `anthropic/${"x".repeat(ROUTE_RECEIPT_CAP + 100)}`;
+    deps.routeModel = call("config_set", { scope: "channel", models: { coding: long } });
+    const { offers } = offeringIO();
+    const io = offeringIO();
+    await dispatch(deps, msg("use that long model name for coding here", "slack:UADMIN"), io.io);
+    expect(offers).toEqual([]);
+    expect(io.offers[0]!.line).toBe(`config set channel --models.coding ${long}`);
+    expect(registry.snapshotById("r1")?.events.find((e) => e.type === "route")).toMatchObject({
+      outcome: "offered",
+      receipt: expect.stringMatching(/^config set channel --models\.coding anthropic\/x+…$/),
+    });
+  });
+
+  it("the footer names the scope that asked: a channel that set `confirm` is `this channel's boundary`", async () => {
+    const yaml = ROUTING_ON_YAML + `channels:\n  "slack:CX":\n    boundary:\n      confirm: write\n`;
+    const { deps } = wired(yaml);
+    const { offers } = await offered(deps);
+    expect(offers[0]).toMatchObject({ footer: "confirmation required by this channel's boundary" });
+  });
+
+  it("without `offer` on the channel the hand-back is byte for byte today's and no row is minted", async () => {
+    const { deps, registry, store } = wired();
+    deps.routeModel = bindsConfigSet();
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("use opus for coding in this channel", "slack:UADMIN"), io);
+    expect(replies).toEqual([HAND_BACK_LINE]);
+    expect(store.rows.size).toBe(0);
+    expect(registry.snapshotById("r1")?.events.find((e) => e.type === "route")).toMatchObject({ outcome: "hand_back" });
+  });
+
+  it("with `offer` on the channel but no store in the process the hand-back is today's and nothing is offered", async () => {
+    const { deps } = wired();
+    deps.confirmations = undefined;
+    const { offers, replies } = await offered(deps);
+    expect(replies).toEqual([HAND_BACK_LINE]);
+    expect(offers).toEqual([]);
+  });
+
+  it("a token-shaped argument mints nothing: the reply says to type the line yourself, recorded as a hand-back; no offer", async () => {
+    const { deps, registry, store } = wired();
+    deps.routeModel = call("config_set", {
+      scope: "channel",
+      models: { coding: "sk-ant-abcdefghijklmnopqrstuvwxyz0123" },
+    });
+    const io = offeringIO();
+    await dispatch(deps, msg("use my key for coding here", "slack:UADMIN"), io.io);
+    expect(io.replies).toEqual([UNSHOWABLE_LINE]);
+    expect(io.offers).toEqual([]);
+    expect(store.rows.size).toBe(0);
+    expect(deps.invoked).toEqual([]);
+    const snap = registry.snapshotById("r1");
+    expect(snap?.events.find((e) => e.type === "route")).toMatchObject({ outcome: "hand_back" });
+    expect(snap?.events.find((e) => e.type === "answer")).toMatchObject({ text: UNSHOWABLE_LINE });
+  });
+
+  it("a store that throws at mint falls back to the hand-back with one sentence naming it, recorded as a hand-back; no offer", async () => {
+    const { deps, registry, store } = wired();
+    const throwing: ConfirmationStore = {
+      put: async () => {
+        throw new Error("object unreachable");
+      },
+      consume: (id, ids) => store.consume(id, ids),
+      cancel: (id, ids) => store.cancel(id, ids),
+      describe: () => "throwing",
+    };
+    deps.confirmations = throwing;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { offers, replies } = await offered(deps);
+      expect(replies).toEqual([`${HAND_BACK_LINE}\n${STORE_UNREACHABLE_NOTE}`]);
+      expect(offers).toEqual([]);
+      expect(registry.snapshotById("r1")?.events.find((e) => e.type === "route")).toMatchObject({
+        outcome: "hand_back",
+      });
+      expect(warn.mock.calls.some((c) => String(c[0]).includes("object unreachable"))).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("the confirm click runs the stored input as the requester with source confirm: exactly one record with outcome confirmed, the reply's first line the receipt, the setting changed; a second click reads already used", async () => {
+    const { deps, registry, audits, store } = wired();
+    const { offers } = await offered(deps);
+    const id = offers[0]!.id;
+    const first = await click(deps, "confirm", id, requester);
+    expect(first.outcome).toEqual({ status: "completed" });
+    expect(first.replies).toEqual([
+      `routed: ${LINE}\nUpdated channel scope. Now: {"models":{"coding":"anthropic/claude-opus-5"}}`,
+    ]);
+    expect(deps.invoked).toEqual(["config.set"]);
+    expect(audits).toEqual([
+      expect.objectContaining({ commandId: "config.set", callerId: "slack:UADMIN", outcome: "ok", source: "confirm" }),
+    ]);
+    expect(codingModelIn(deps)).toBe("anthropic/claude-opus-5");
+    expect(store.rows.size).toBe(0);
+    const snap = registry.snapshotById("r2");
+    expect(registry.getById("r2")).toMatchObject({ status: "completed", agent: "command", threadKey: "slack:CX:1.0" });
+    expect(contentTypes(snap?.events ?? [])).toEqual(["input", "run_meta", "route", "answer"]);
+    expect(snap?.events.find((e) => e.type === "route")).toMatchObject({
+      preset: "command",
+      reason: "confirmed after offer",
+      model: "anthropic/general-model",
+      command: "config.set",
+      input: { args: ["channel"], options: { models: { coding: "anthropic/claude-opus-5" } } },
+      receipt: LINE,
+      outcome: "confirmed",
+    });
+    expect(registry.snapshotById("r3")).toBeNull();
+    const second = await click(deps, "confirm", id, requester);
+    expect(second.outcome).toEqual({ status: "refused", refusal: "confirmation_used" });
+    expect(second.replies).toEqual([OFFER_USED_LINE]);
+    expect(deps.invoked).toEqual(["config.set"]);
+    expect(registry.snapshotById("r3")).toBeNull();
+  });
+
+  it("a click after the expiry reads expired, judged on the store's clock; nothing runs", async () => {
+    const { deps, tick } = wired();
+    const { offers } = await offered(deps);
+    tick(CONFIRMATION_TTL_MS);
+    const late = await click(deps, "confirm", offers[0]!.id, requester);
+    expect(late.outcome).toEqual({ status: "refused", refusal: "confirmation_expired" });
+    expect(late.replies).toEqual([OFFER_EXPIRED_LINE]);
+    expect(deps.invoked).toEqual([]);
+    expect(codingModelIn(deps)).toBe("anthropic/coding-model");
+  });
+
+  it("a clicker whose id and `self` miss the requester is refused and nothing runs; the requester still can", async () => {
+    const { deps, audits } = wired();
+    const { offers } = await offered(deps);
+    const foreign = await click(deps, "confirm", offers[0]!.id, stranger);
+    expect(foreign.outcome).toEqual({ status: "refused", refusal: "confirmation_foreign" });
+    expect(foreign.replies).toEqual([OFFER_FOREIGN_LINE]);
+    expect(deps.invoked).toEqual([]);
+    expect(audits).toEqual([]);
+    const own = await click(deps, "confirm", offers[0]!.id, requester);
+    expect(own.outcome).toEqual({ status: "completed" });
+    expect(deps.invoked).toEqual(["config.set"]);
+  });
+
+  it("a clicker whose `self` holds the requester confirms from another surface's id, and the command runs as the requester", async () => {
+    const { deps, audits } = wired();
+    const { offers } = await offered(deps);
+    const own = await click(deps, "confirm", offers[0]!.id, requesterInBrowser);
+    expect(own.outcome).toEqual({ status: "completed" });
+    expect(own.replies[0]!.split("\n")[0]).toBe(`routed: ${LINE}`);
+    expect(audits).toEqual([expect.objectContaining({ callerId: "slack:UADMIN", source: "confirm", outcome: "ok" })]);
+    expect(codingModelIn(deps)).toBe("anthropic/claude-opus-5");
+  });
+
+  it("a cancel and a confirm on one id cannot both succeed, in either order; a stranger cannot cancel", async () => {
+    const one = wired();
+    const first = await offered(one.deps);
+    const strangerCancel = await click(one.deps, "cancel", first.offers[0]!.id, stranger);
+    expect(strangerCancel.outcome).toEqual({ status: "refused", refusal: "confirmation_foreign" });
+    expect(strangerCancel.replies).toEqual([OFFER_FOREIGN_LINE]);
+    const cancelled = await click(one.deps, "cancel", first.offers[0]!.id, requester);
+    expect(cancelled.outcome).toEqual({ status: "completed" });
+    expect(cancelled.replies).toEqual([OFFER_CANCELLED_LINE]);
+    const afterCancel = await click(one.deps, "confirm", first.offers[0]!.id, requester);
+    expect(afterCancel.outcome).toEqual({ status: "refused", refusal: "confirmation_used" });
+    expect(one.deps.invoked).toEqual([]);
+    expect(codingModelIn(one.deps)).toBe("anthropic/coding-model");
+    const two = wired();
+    const second = await offered(two.deps);
+    expect((await click(two.deps, "confirm", second.offers[0]!.id, requester)).outcome).toEqual({
+      status: "completed",
+    });
+    const afterConfirm = await click(two.deps, "cancel", second.offers[0]!.id, requester);
+    expect(afterConfirm.outcome).toEqual({ status: "refused", refusal: "confirmation_used" });
+    expect(afterConfirm.replies).toEqual([OFFER_USED_LINE]);
+    expect(two.deps.invoked).toEqual(["config.set"]);
+  });
+
+  it("a store that cannot be read at the click answers its line and runs nothing", async () => {
+    const { deps, store } = wired();
+    const { offers } = await offered(deps);
+    deps.confirmations = {
+      put: (row, ttl) => store.put(row, ttl),
+      cancel: (id, ids) => store.cancel(id, ids),
+      describe: () => "throwing",
+      consume: async () => {
+        throw new Error("object unreachable");
+      },
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const res = await click(deps, "confirm", offers[0]!.id, requester);
+      expect(res.outcome).toEqual({ status: "refused", refusal: "confirmation_unreadable" });
+      expect(res.replies).toEqual([OFFER_UNREADABLE_LINE]);
+      expect(deps.invoked).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("a click is counted in flight for the shutdown drain while it runs and released when it ends, as a dispatch is", async () => {
+    const { deps, store } = wired();
+    const { offers } = await offered(deps);
+    expect(activeRunCount()).toBe(0);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    deps.confirmations = {
+      put: (row, ttl) => store.put(row, ttl),
+      cancel: (id, ids) => store.cancel(id, ids),
+      describe: () => "gated",
+      consume: async (id, ids) => {
+        await gate;
+        return store.consume(id, ids);
+      },
+    };
+    const pending = click(deps, "confirm", offers[0]!.id, requester);
+    await realSleep(5);
+    expect(activeRunCount()).toBe(1);
+    release();
+    const res = await pending;
+    expect(res.outcome).toEqual({ status: "completed" });
+    expect(activeRunCount()).toBe(0);
   });
 });

@@ -20,6 +20,7 @@ import { parseChatCommand, type ChatCommands, type ParsedChatCommand } from "../
 import type { RunRegistry } from "../runRegistry.js";
 import type { RunEnding } from "../runEnding.js";
 import type { RunsService } from "../runsService.js";
+import type { ConfirmationStore } from "../confirmations.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
 import type { RecordDeps } from "./record.js";
 import { replyCommandOutput } from "./reply.js";
@@ -66,6 +67,16 @@ export interface FastPathDeps extends RecordDeps, Pick<ResolveDeps, "resolveRepo
    * command is recorded under the inline-run rule alone.
    */
   runs?: Pick<RunsService, "listRuns" | "getRunEvents">;
+  /**
+   * Where the confirmation a routed write is offered as lives (record 0044;
+   * routing-and-config item 25): the config object's `confirmations` table in
+   * production, a file or memory otherwise. The door mints a row here when the
+   * channel can show an offer, and `dispatchClick` consumes it. Absent (most
+   * unit tests, a process before the store is wired) → the door hands back the
+   * pasteable line exactly as before, and a click answers that the
+   * confirmation could not be read.
+   */
+  confirmations?: ConfirmationStore;
 }
 
 /** What the fast path needs of the request: the message, its channel handle,

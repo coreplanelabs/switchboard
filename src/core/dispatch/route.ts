@@ -45,7 +45,7 @@ import { HAND_BACK_PREFIX } from "./handBack.js";
 import { chatActorOf } from "../authz/actor.js";
 import { TOOLSETS } from "../../tools/toolsets.js";
 import { routingOn, type ConfigStore, type ResolvedRequest } from "../../config.js";
-import { CONFIRM_ORDER, effectiveConfirm, type ConfirmClass } from "../../config/profile.js";
+import { CONFIRM_ORDER, effectiveConfirm, type ConfirmClass, type EffectiveConfirm } from "../../config/profile.js";
 import type { RouteAnswerMode } from "../../config/validate.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
 import { parseModelRef, type Provider, type ToolDef } from "../provider.js";
@@ -63,7 +63,7 @@ import type {
 } from "../runEvents.js";
 import { COMMAND_RUN_AGENT } from "../runOwner.js";
 import type { Span } from "../trace/types.js";
-import type { ChannelIO, HistoryItem, IncomingMessage } from "../types.js";
+import type { ChannelIO, ConfirmationOffer, HistoryItem, IncomingMessage } from "../types.js";
 import type { RunEnding } from "../runEnding.js";
 import type { RequestTrace } from "../requestTrace.js";
 import type { McpCatalogEntry, McpToolSource } from "../../mcp/source.js";
@@ -76,6 +76,16 @@ import {
 } from "../commandRegistry.js";
 import { chatInvocation, jsonSchemaFor, mcpToolName, namedToInput } from "../commandSurface.js";
 import { unwrapChatLinks, type ChatCommands } from "../commandChat.js";
+import { CONFIRMATION_TTL_MS } from "../budgets.js";
+import {
+  confirmationFooter,
+  confirmationMessageOf,
+  newConfirmationId,
+  renderOffer,
+  STORE_UNREACHABLE_NOTE,
+  UNSHOWABLE_LINE,
+  type Confirmation,
+} from "../confirmations.js";
 import { repoFromThread } from "../repoContext.js";
 import { postSettledOutcome, recordRoutedDecision, runChatCommand, type RouteEventFields } from "./commandRun.js";
 import type { FastPathDeps } from "./fastPath.js";
@@ -1112,7 +1122,7 @@ function resolveRouted(
 export type RouteStage =
   | { kind: "unrouted"; rejected?: RouteDecided }
   | { kind: "routed"; resolved: ResolvedRequest; route: RouteDecided }
-  | { kind: "command"; command: string; outcome: "hand_back" | "ok" | "error" };
+  | { kind: "command"; command: string; outcome: "hand_back" | "offered" | "ok" | "error" };
 
 /**
  * The stage. Turned off (`routing: { auto: false }`), or an agent any layer
@@ -1292,16 +1302,7 @@ async function answerCommand(
     console.log(
       `[route] ${msg.threadKey} handed back ${def.id} on ${modelRef} (${blastRadius(def)} at or after confirm ${confirm.value}, ${confirm.scope}): ${receipt}`,
     );
-    // The hand-back is a record (record 0044): the same decision a routed
-    // read's run carries, with `outcome: hand_back`, invoking nothing and
-    // telling no surface of the run — so the reply below is the line it was.
-    const line = `${HAND_BACK_PREFIX} ${receipt}`;
-    await recordRoutedDecision(deps, msg, io, def, { ...route, outcome: "hand_back" }, line, ending, trace);
-    await ending.sealAfterReply(
-      async () => {},
-      () => root.span("post.reply", () => io.reply(line)),
-    );
-    return { kind: "command", command: def.id, outcome: "hand_back" };
+    return answerHandBack(branch, msg, def, decided.input, route, receipt, confirm, root);
   }
   console.log(`[route] ${msg.threadKey} routed to command ${def.id} on ${modelRef}: ${receipt}`);
   const res = await runChatCommand(deps, msg, io, { kind: "invoke", id: def.id, input: decided.input }, ending, trace, {
@@ -1315,6 +1316,80 @@ async function answerCommand(
   );
   if (res.ok && res.followUp) postSettledOutcome(res.followUp, io, root);
   return { kind: "command", command: def.id, outcome: res.ok ? "ok" : "error" };
+}
+
+/**
+ * The door's answer for a command it does not run from prose (record 0044):
+ * a hand-back, or — on a channel that can show one — an offer. Both are
+ * records first (`recordRoutedDecision`: a command run that invokes nothing
+ * and tells no surface of the run, its `route` event's `outcome` saying which)
+ * and one reply second. A channel without `offer`, or a process without the
+ * confirmation store, is answered `To run this: <chat form>` exactly as before
+ * the store existed. Otherwise the offer shows the FULL chat form of the bound
+ * input — uncapped, because a line the person cannot read in full is not a
+ * confirmation; the record keeps the capped receipt as today — and when
+ * redaction would alter that line (an argument looks like a secret) nothing
+ * is minted and the reply says to type the line. The row is minted in the
+ * store with the connect ticket's ten-minute ttl, the object stamping the
+ * expiry; a store that cannot be reached costs the button and nothing else:
+ * the hand-back goes out with one sentence saying so, recorded as a hand-back.
+ */
+async function answerHandBack(
+  branch: CommandBranchContext,
+  msg: IncomingMessage,
+  def: CommandDef<unknown>,
+  input: CommandInput,
+  route: RouteEventFields,
+  receipt: string,
+  confirm: EffectiveConfirm,
+  root: Span,
+): Promise<RouteStage> {
+  const { deps, io, ending, trace } = branch;
+  const answer = async (
+    text: string,
+    outcome: "hand_back" | "offered",
+    post: () => Promise<void>,
+  ): Promise<RouteStage> => {
+    await recordRoutedDecision(deps, msg, io, def, { ...route, outcome }, text, ending, trace);
+    await ending.sealAfterReply(
+      async () => {},
+      () => root.span("post.reply", post),
+    );
+    return { kind: "command", command: def.id, outcome };
+  };
+  const handBack = `${HAND_BACK_PREFIX} ${receipt}`;
+  const offer = io.offer?.bind(io);
+  const store = deps.confirmations;
+  if (!offer || !store) return answer(handBack, "hand_back", () => io.reply(handBack));
+  const line = chatInvocation(def, input);
+  if (redactSecrets(line) !== line) return answer(UNSHOWABLE_LINE, "hand_back", () => io.reply(UNSHOWABLE_LINE));
+  const risk = def.annotations?.risk?.(input) ?? "";
+  const footer = confirmationFooter(confirm.scope);
+  let row: Confirmation;
+  try {
+    row = await store.put(
+      {
+        id: newConfirmationId(),
+        message: confirmationMessageOf(msg),
+        command: def.id,
+        input,
+        receipt,
+        risk,
+        footer,
+        model: route.model,
+      },
+      CONFIRMATION_TTL_MS,
+    );
+  } catch (err) {
+    console.warn(
+      `[route] ${msg.threadKey} confirmation store unreachable at mint, handing back: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    const text = `${handBack}\n${STORE_UNREACHABLE_NOTE}`;
+    return answer(text, "hand_back", () => io.reply(text));
+  }
+  const shown: ConfirmationOffer = { id: row.id, line, risk, footer, expiresAt: row.expiresAt };
+  console.log(`[route] ${msg.threadKey} offered ${def.id} as confirmation ${row.id} (${footer})`);
+  return answer(renderOffer(shown), "offered", () => offer(shown));
 }
 
 /** A bound input as the record may carry it: every string redacted and cut at

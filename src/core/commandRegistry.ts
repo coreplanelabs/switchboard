@@ -365,9 +365,10 @@ export interface AuditEntry {
   reason?: string;
   /** The door the call came through when it was not the surface's own grammar
    *  (`TraceOptions.source`): `route` for a command the request router bound
-   *  from prose. Absent for a typed command, so a reader of the audit log can
-   *  count the door's calls apart from the grammar's. */
-  source?: "route";
+   *  from prose, `confirm` for a stored input run at a confirmation's click
+   *  (record 0044). Absent for a typed command, so a reader of the audit log
+   *  can count the door's calls apart from the grammar's. */
+  source?: "route" | "confirm";
 }
 
 export interface CommandRegistryOptions {

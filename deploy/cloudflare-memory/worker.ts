@@ -627,6 +627,27 @@ export class ScheduleDO extends DurableObject<Env> {
 // for optimistic concurrency: a `put` whose `expectedVersion` is stale is a 409,
 // never a silent clobber (the bot and the CLI both write this document).
 
+/** What the bot posts to mint a confirmation: the facts this object judges on
+ *  and the bot's own row as an opaque body (routing-and-config item 25). */
+interface ConfirmationInput {
+  id: string;
+  threadKey: string;
+  requester: string;
+  body: Record<string, unknown>;
+}
+/** A stored confirmation as a consume returns it: the input plus the expiry this object stamped. */
+interface ConfirmationRow extends ConfirmationInput {
+  expiresAt: number;
+}
+/** Why a consume or a cancel refused: the row is gone (`used`), past its expiry (`expired`), or someone else's (`foreign`). */
+type ConfirmationRefusal = "used" | "expired" | "foreign";
+type ConfirmationOutcome = { row: ConfirmationRow } | { refused: ConfirmationRefusal };
+type ConfirmationCancelOutcome = { ok: true } | { refused: Exclude<ConfirmationRefusal, "expired"> };
+
+function isJsonObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
 export class ConfigDO extends DurableObject<Env> {
   private readonly sql: SqlStorage;
 
@@ -650,7 +671,89 @@ export class ConfigDO extends DurableObject<Env> {
         expires_at INTEGER NOT NULL,
         ticket TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS confirmations (
+        id TEXT PRIMARY KEY,
+        thread_key TEXT NOT NULL,
+        requester TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        body TEXT NOT NULL
+      );
     `);
+  }
+
+  // ---- Confirmations (docs/reference/specs/routing-and-config.md item 25): the
+  // row a routed write is offered as, minted by the bot and consumed once at
+  // the click. The body is the bot's row, opaque here; this object owns the
+  // three facts the consume decides on — the thread (one pending row per
+  // thread), the requester (the click must be theirs) and the expiry, stamped
+  // and judged on this object's clock so two bot processes alive during a roll
+  // read one answer. Nothing sweeps: expiry is checked on touch.
+
+  /** Insert the row and drop the thread's older one in one transaction; the
+   *  expiry is `now + ttlMs`, stamped here and answered to the caller. */
+  async putConfirmation(row: ConfirmationInput, ttlMs: number, now: number): Promise<number> {
+    const expiresAt = now + ttlMs;
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec(`DELETE FROM confirmations WHERE thread_key = ?`, row.threadKey);
+      this.sql.exec(
+        `INSERT OR REPLACE INTO confirmations (id, thread_key, requester, expires_at, body) VALUES (?, ?, ?, ?, ?)`,
+        row.id,
+        row.threadKey,
+        row.requester,
+        expiresAt,
+        JSON.stringify(row.body),
+      );
+    });
+    return expiresAt;
+  }
+
+  /** Read, judge and delete in one transaction on the single-threaded object,
+   *  so a confirmation runs at most once whatever the click timing: a missing
+   *  row is `used`, a row past its expiry is deleted and `expired`, a requester
+   *  none of `actorIds` names is `foreign` (the row stays for its requester),
+   *  and otherwise the row is deleted and returned. */
+  async consumeConfirmation(id: string, actorIds: readonly string[], now: number): Promise<ConfirmationOutcome> {
+    return this.ctx.storage.transactionSync(() => {
+      const stored = this.readConfirmation(id);
+      if (!stored) return { refused: "used" };
+      if (stored.expiresAt <= now) {
+        this.sql.exec(`DELETE FROM confirmations WHERE id = ?`, id);
+        return { refused: "expired" };
+      }
+      if (!actorIds.includes(stored.requester)) return { refused: "foreign" };
+      this.sql.exec(`DELETE FROM confirmations WHERE id = ?`, id);
+      return { row: stored };
+    });
+  }
+
+  /** Delete the row under the same requester check as a consume; a missing row
+   *  is `used`. Expiry plays no part: cancelling an expired offer still leaves
+   *  nothing pending, which is what the click asked for. */
+  async cancelConfirmation(id: string, actorIds: readonly string[]): Promise<ConfirmationCancelOutcome> {
+    return this.ctx.storage.transactionSync(() => {
+      const stored = this.readConfirmation(id);
+      if (!stored) return { refused: "used" };
+      if (!actorIds.includes(stored.requester)) return { refused: "foreign" };
+      this.sql.exec(`DELETE FROM confirmations WHERE id = ?`, id);
+      return { ok: true };
+    });
+  }
+
+  private readConfirmation(id: string): ConfirmationRow | undefined {
+    const row = this.sql
+      .exec<{ thread_key: string; requester: string; expires_at: number; body: string }>(
+        `SELECT thread_key, requester, expires_at, body FROM confirmations WHERE id = ?`,
+        id,
+      )
+      .toArray()[0];
+    if (!row) return undefined;
+    return {
+      id,
+      threadKey: row.thread_key,
+      requester: row.requester,
+      expiresAt: row.expires_at,
+      body: parseStored(row.body, isJsonObject) ?? {},
+    };
   }
 
   // ---- MCP sealed credentials + connect tickets (docs/reference/specs/mcp-tools.md items 15–16).
@@ -1052,8 +1155,21 @@ const CONFIG_ROUTES = new Set([
   "/config/tickets/put",
   "/config/tickets/get",
   "/config/tickets/transition",
+  "/config/confirmations/put",
+  "/config/confirmations/consume",
+  "/config/confirmations/cancel",
 ]);
 const TICKET_STATES: ReadonlySet<string> = new Set<McpTicketState>(MCP_TICKET_STATES);
+/** A confirmation id as the bot mints it (a UUID) — one token, no whitespace, bounded. */
+const CONFIRMATION_ID_RE = /^[A-Za-z0-9_-]{8,128}$/;
+
+/** The `{ id, actorIds }` a consume or a cancel carries, or the 400 that refuses it. */
+function confirmationClickOf(b: Record<string, unknown>): { id: string; actorIds: string[] } | Response {
+  if (typeof b.id !== "string" || !CONFIRMATION_ID_RE.test(b.id)) return json({ error: "id malformed" }, 400);
+  if (!Array.isArray(b.actorIds) || !b.actorIds.every((a): a is string => typeof a === "string"))
+    return json({ error: "actorIds must be a list of actor ids" }, 400);
+  return { id: b.id, actorIds: b.actorIds };
+}
 
 async function handleConfig(pathname: string, body: unknown, env: Env): Promise<Response> {
   const b = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
@@ -1094,6 +1210,38 @@ async function handleConfig(pathname: string, body: unknown, env: Env): Promise<
         `[config/tickets/transition] ${b.ticket.serverId} ${b.fromState}→${b.ticket.state} applied=${applied}`,
       );
       return json({ ok: true, applied });
+    }
+    // Confirmations (routing-and-config item 25): the body is the bot's row,
+    // stored verbatim; the expiry is this object's clock plus the ttl the bot
+    // passed, never a timestamp the bot chose.
+    case "/config/confirmations/put": {
+      if (typeof b.id !== "string" || !CONFIRMATION_ID_RE.test(b.id)) return json({ error: "id malformed" }, 400);
+      if (typeof b.threadKey !== "string" || !b.threadKey) return json({ error: "threadKey required" }, 400);
+      if (typeof b.requester !== "string" || !b.requester) return json({ error: "requester required" }, 400);
+      if (!isJsonObject(b.body)) return json({ error: "body must be a JSON object" }, 400);
+      if (typeof b.ttlMs !== "number" || !Number.isInteger(b.ttlMs) || b.ttlMs < 0)
+        return json({ error: "ttlMs must be a non-negative integer" }, 400);
+      const expiresAt = await dO.putConfirmation(
+        { id: b.id, threadKey: b.threadKey, requester: b.requester, body: b.body },
+        b.ttlMs,
+        systemClock(),
+      );
+      console.log(`[config/confirmations/put] ${b.threadKey} ${b.id} expires_at=${expiresAt}`);
+      return json({ ok: true, expiresAt });
+    }
+    case "/config/confirmations/consume": {
+      const click = confirmationClickOf(b);
+      if (click instanceof Response) return click;
+      const outcome = await dO.consumeConfirmation(click.id, click.actorIds, systemClock());
+      console.log(`[config/confirmations/consume] ${click.id} ${"row" in outcome ? "consumed" : outcome.refused}`);
+      return json(outcome);
+    }
+    case "/config/confirmations/cancel": {
+      const click = confirmationClickOf(b);
+      if (click instanceof Response) return click;
+      const outcome = await dO.cancelConfirmation(click.id, click.actorIds);
+      console.log(`[config/confirmations/cancel] ${click.id} ${"ok" in outcome ? "cancelled" : outcome.refused}`);
+      return json(outcome);
     }
     default:
       break;

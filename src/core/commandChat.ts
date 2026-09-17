@@ -154,9 +154,10 @@ export interface HandleChatCommandArgs {
    *  the registry hands it to the handler (docs/reference/specs/tracing.md item 24). */
   span?: Span;
   /** The door the command came through when it was not the chat grammar:
-   *  `route` for a command the request router bound from prose (record 0036).
+   *  `route` for a command the request router bound from prose (record 0036),
+   *  `confirm` for a stored input run at a confirmation's click (record 0044).
    *  Copied onto the registry's audit line (`TraceOptions.source`). */
-  source?: "route";
+  source?: "route" | "confirm";
 }
 
 /** The `Caller` a chat message resolves to: the message's user as the id and

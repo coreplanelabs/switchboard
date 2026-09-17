@@ -34,6 +34,7 @@ import { defaultRunRegistry } from "./core/runRegistry.js";
 import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 import { buildMcp } from "./mcp/index.js";
 import { NullMcpToolSource } from "./mcp/source.js";
+import { buildConfirmationStore } from "./core/confirmations.js";
 import { createMcpConnectViewHandler, isConnectPath } from "./channels/mcpConnectView.js";
 import { resolvePersonByEmail, resolveUserEmail, resolveUserName } from "./channels/slack/lookups.js";
 import { mdToMrkdwn } from "./channels/mrkdwn.js";
@@ -176,6 +177,15 @@ export async function runBot(): Promise<void> {
     commandGroups: coreCommandGroups(),
   });
   console.log(`[config] runtime overrides: ${config.overridesLocation()}`);
+  // The confirmation a routed write is offered as (record 0044; routing-and-config
+  // item 25) lives where the overrides live: the same ConfigDO in prod — a row
+  // that must outlive the bot process that minted it — or a JSON file beside
+  // the overrides file. A configured Worker without its bearer stopped the
+  // load above already; the same check holds here.
+  const confirmations = buildConfirmationStore(config, processSecrets, {
+    path: join(DATA_DIR, "confirmations.json"),
+  });
+  console.log(`[confirmations] ${confirmations.describe()}`);
   // What is on in this process (src/core/capabilities.ts): resolved ONCE, here,
   // from the config and the environment; every surface below reads this value
   // and none re-derives a capability from `config`.
@@ -437,6 +447,7 @@ export async function runBot(): Promise<void> {
     runStore,
     threadsElsewhere,
     runLedger,
+    confirmations,
   };
   // --- command registry (docs/decisions/0008-one-command-definition-every-surface.md):
   // the ONE core catalogue (`buildCoreCommands`,
