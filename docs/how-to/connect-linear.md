@@ -71,9 +71,10 @@ Every operation refreshes the person's team membership and public-team access.
 Even an administrator's Switchboard grant does not bypass Linear's private-team
 boundary. Subissue creation does not automatically delegate another run.
 
-Native Stop uses the same `runs:write` grant and run-visibility policy as
-`runs stop`. A Linear session does not establish team-wide membership; configure
-the actor's channel grants explicitly. Revocation and access removal are
+Native Stop lets a person cancel their own active work through the shared
+`runs:stop` policy. Stopping another person's work requires `runs:write` and
+visibility of that run. A Linear session does not establish team-wide membership;
+configure an operator's channel grants explicitly. Revocation and access removal are
 infrastructure cancellations and require no new grant from the former requester.
 
 Coding runs can return files through `attach_file`. With an artifact store,

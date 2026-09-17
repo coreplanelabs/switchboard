@@ -19,7 +19,7 @@ One decision, `authorize(actor, action, resource) → allow | deny(reason)`, ove
 
    | Actor id | Baseline (held listed or not) | A `grants` entry … |
    |---|---|---|
-   | `slack:U…` or `linear:<workspace>:<user>` | `{ actions: CHAT_OPEN_ACTIONS + agent:run:<name> for every agent not under restrict.agents }` — `help:read, status:read, config:read, repo:read, friction:read, memory:read, mcp:read, schedule:read, memory:write, mcp:write` | adds to it |
+   | `slack:U…` or `linear:<workspace>:<user>` | `{ actions: CHAT_OPEN_ACTIONS + agent:run:<name> for every agent not under restrict.agents }` — `help:read, status:read, config:read, repo:read, friction:read, memory:read, mcp:read, schedule:read, memory:write, mcp:write, work-items:read, runs:stop:self` | adds to it |
    | `access:<sub>` | `{ actions: every <group>:read + memory:write, mcp:write }` (the groups the store is handed at startup; the two personal chat writes since the web chat, [record 0043](../../decisions/0043-the-home-page-is-a-chat-the-browser-is-a-channel-and-a-turn-is-a-run.md) — the tier rows still decide the target) | adds to it |
    | `access:svc:<cn>`, `http:<subject>`, `mcp:<subject>` | nothing (`NO_GRANTS`) | is exactly what it holds — `dispatch` included |
    | `schedule:<name>` | the registry's declared grants (`self-improvement`: `{ actions: {friction:read, friction:write}, channels: all }`) | replaces them whole |
@@ -125,3 +125,13 @@ Reads join the chat baseline; writes require an explicit grant.
 
 Proof: `src/channels/linear/workItems.test.ts::*`, and each policy row’s allow
 and deny cases in `src/core/authz/policy.test.ts`.
+
+## Native cancellation
+
+`runs:stop` on a run permits its owner with `runs:stop:self` (the chat
+baseline), or an operator holding `runs:write` with visibility of the run.
+The self-stop grant does not admit run-management commands or permit stopping
+another person’s run. Linear additionally scopes the control to the signed
+session and to work started before the control event arrived.
+
+Proof: `src/channels/linear/control.test.ts::*` and the policy row coverage.

@@ -55,6 +55,11 @@ export const POLICY: readonly Rule[] = [
   // Stopping a run needs the write grant AND visibility of the run.
   { action: "runs:write", resource: "run", when: [grant("runs:write"), MEMBER_OF] },
   { action: "runs:write", resource: "run", when: [grant("runs:write"), ALL_CHANNELS] },
+  // Native session cancellation: a person may stop their own run without
+  // acquiring operator rights to other runs or run-management commands.
+  { action: "runs:stop", resource: "run", when: [grant("runs:stop:self"), IS_SELF] },
+  { action: "runs:stop", resource: "run", when: [grant("runs:write"), MEMBER_OF] },
+  { action: "runs:stop", resource: "run", when: [grant("runs:write"), ALL_CHANNELS] },
   // List-shaped `runs.*`: the grant admits the command; the store predicate narrows the rows.
   { action: "runs:read", resource: "command", when: [grant("runs:read")] },
   { action: "runs:write", resource: "command", when: [grant("runs:write")] },

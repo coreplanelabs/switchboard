@@ -69,8 +69,10 @@ the human assignee.
     a command whose effects may already have happened. Pre-dispatch transport
     failures retain their event for retry.
     Turns in one session wait for the prior turn's admission, not its full
-    execution. Stop resolves the human actor and uses the existing `runs:write`
-    policy; it never stops a later run created after the control event arrived.
+    execution. Stop resolves the human actor and uses the shared `runs:stop`
+    policy: people can cancel their own work, while another person's work
+    needs the operator's write grant and visibility. It never stops a later
+    run created after the control event arrived.
     A permanently invalid signed request closes with an honest native error.
 13. Signed revocation removes the matching installation before intake returns;
     a delayed revocation cannot remove a newer installation. It cancels pending

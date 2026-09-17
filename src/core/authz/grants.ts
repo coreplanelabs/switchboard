@@ -53,6 +53,7 @@ export const CHAT_OPEN_ACTIONS: readonly string[] = [
   "help:read",
   "status:read",
   "work-items:read",
+  "runs:stop:self",
   "config:read",
   "repo:read",
   "friction:read",
