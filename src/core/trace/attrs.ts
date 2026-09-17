@@ -34,6 +34,14 @@ export interface AttrDomain {
   /** The `<provider>/<model>` that took the turn — a ship run's children answer
    *  on different models, and the run page badges the switch per step. */
   model: string;
+  /** The tools a proxied call offered the model (model-proxy.md item 6): how
+   *  many, their names sorted and comma-joined, and the request's `tool_choice`
+   *  by its word — `auto` when tools came and nothing was said, `none` when no
+   *  tools came or the request said so, `any` for OpenAI's `required`, `tool`
+   *  for a named tool. */
+  tools: number;
+  toolNames: string;
+  toolChoice: "auto" | "none" | "any" | "tool";
   stopReason: "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | "other";
   inputTokens: number;
   outputTokens: number;
@@ -159,6 +167,9 @@ const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
   backend: "string",
   command: "string",
   model: "string",
+  tools: "number",
+  toolNames: "string",
+  toolChoice: "string",
   stopReason: "string",
   inputTokens: "number",
   outputTokens: "number",

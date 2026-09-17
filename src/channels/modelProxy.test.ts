@@ -534,6 +534,9 @@ describe("the meter — one model.turn span per proxied call, the runner's attrs
     expect(turn.status).toBe("ok");
     expect(turn.attrs).toEqual({
       model: "anthropic/claude-opus-5",
+      tools: 1, // the fixture offers `bash` and says nothing about tool_choice
+      toolNames: "bash",
+      toolChoice: "auto",
       stopReason: "tool_use",
       inputTokens: 1200,
       outputTokens: 42,
@@ -587,6 +590,8 @@ describe("the meter — one model.turn span per proxied call, the runner's attrs
     const turns = h.ends.filter((s) => s.name === "model.turn");
     expect(turns[0].attrs).toEqual({
       model: "local/llama-3",
+      tools: 0,
+      toolChoice: "none",
       stopReason: "tool_use",
       inputTokens: 900,
       outputTokens: 30,
@@ -594,7 +599,85 @@ describe("the meter — one model.turn span per proxied call, the runner's attrs
       ttftMs: 10,
     });
     expect(turns[1].status).toBe("ok");
-    expect(turns[1].attrs).toEqual({ model: "local/llama-3", stopReason: "tool_use", ttftMs: 10 });
+    expect(turns[1].attrs).toEqual({
+      model: "local/llama-3",
+      tools: 0,
+      toolChoice: "none",
+      stopReason: "tool_use",
+      ttftMs: 10,
+    });
+  });
+
+  it("the tools the request offered ride the span from its start: their count, their names sorted, and the tool_choice by its word — Anthropic's type, OpenAI's string or function object, `none` when no tools came — so a record says whether a write-up turn still carried the workspace tools", async () => {
+    const h = harness({
+      answer: () =>
+        new Response(JSON.stringify(anthropicMessage({ stop_reason: "end_turn" })), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    });
+    const token = h.bearers.mint(h.grant("run-1"));
+    const tools = [
+      { name: "write", input_schema: {} },
+      { name: "bash", input_schema: {} },
+    ];
+    await handleModelProxyRequest(
+      request({ headers: bearer(token), json: { ...anthropicRequest(), tools } }).req,
+      h.deps,
+    );
+    await handleModelProxyRequest(
+      request({ headers: bearer(token), json: { ...anthropicRequest(), tools, tool_choice: { type: "none" } } }).req,
+      h.deps,
+    );
+    await handleModelProxyRequest(
+      request({
+        headers: bearer(token),
+        json: { ...anthropicRequest(), tools, tool_choice: { type: "tool", name: "bash" } },
+      }).req,
+      h.deps,
+    );
+    const anthropic = h.ends.filter((s) => s.name === "model.turn");
+    expect(anthropic.map((t) => [t.attrs.tools, t.attrs.toolChoice, t.attrs.toolNames])).toEqual([
+      [2, "auto", "bash,write"],
+      [2, "none", "bash,write"],
+      [2, "tool", "bash,write"],
+    ]);
+    // the start record carries them too: a call that never answers still says what it offered
+    expect(h.starts.filter((s) => s.name === "model.turn")[0].attrs).toMatchObject({ tools: 2, toolChoice: "auto" });
+
+    const o = harness({
+      answer: () =>
+        new Response(
+          JSON.stringify({
+            id: "c1",
+            choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        ),
+    });
+    const local = o.bearers.mint(o.localGrant("run-1"));
+    const fn = (name: string) => ({ type: "function", function: { name, parameters: {} } });
+    for (const body of [
+      { model: "x", messages: [], tools: [fn("bash")] },
+      { model: "x", messages: [], tools: [fn("bash")], tool_choice: "required" },
+      { model: "x", messages: [], tools: [fn("bash")], tool_choice: { type: "function", function: { name: "bash" } } },
+      { model: "x", messages: [], tools: [fn("bash")], tool_choice: "none" },
+    ]) {
+      await handleModelProxyRequest(
+        request({ path: OPENAI_CHAT_COMPLETIONS_PATH, headers: bearer(local), json: body }).req,
+        o.deps,
+      );
+    }
+    const openai = o.ends.filter((s) => s.name === "model.turn");
+    expect(openai.map((t) => [t.attrs.tools, t.attrs.toolChoice, t.attrs.toolNames])).toEqual([
+      [1, "auto", "bash"],
+      [1, "any", "bash"],
+      [1, "tool", "bash"],
+      [1, "none", "bash"],
+    ]);
   });
 
   it("the SSE meter reads a data line split across chunks and CRLF framing, and ignores what is not JSON", () => {

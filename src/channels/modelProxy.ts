@@ -401,12 +401,63 @@ export class SseMeter {
   }
 }
 
-/** The `model.turn` attrs as the runner sets them: the model ref, the stop
- *  reason, the four token counts and the time to first token — each only when known. */
-export function turnAttrs(grant: Pick<RunBearerGrant, "modelRef">, meter: TurnMeter, ttftMs?: number): SpanAttrs {
+/** What a request offered the model: the tool definitions and the request's
+ *  `tool_choice`, read in each dialect's shape (docs/reference/specs/model-proxy.md
+ *  item 6). `toolChoice` is the provider's word normalised to four: `auto`
+ *  (tools came, nothing said), `none` (no tools, or the request said so),
+ *  `any` (Anthropic's `any`, OpenAI's `required`), `tool` (a named tool —
+ *  Anthropic's `{type: "tool"}`, OpenAI's function object). A malformed table
+ *  counts what it can name; the upstream refuses the rest. */
+export interface ToolsOffered {
+  tools: number;
+  /** Absent when no tool came, so a tool-less call carries no empty name list. */
+  toolNames?: string;
+  toolChoice: "auto" | "none" | "any" | "tool";
+}
+
+export function toolsOffered(shape: ProxyShape, body: Record<string, unknown>): ToolsOffered {
+  const table = Array.isArray(body.tools) ? body.tools : [];
+  const names: string[] = [];
+  for (const t of table) {
+    const r = record(t);
+    if (!r) continue;
+    const name = shape === "anthropic" ? r.name : record(r.function)?.name;
+    if (typeof name === "string") names.push(name);
+  }
+  names.sort();
+  return {
+    tools: table.length,
+    ...(names.length > 0 ? { toolNames: names.join(",") } : {}),
+    toolChoice: toolChoiceWord(shape, body.tool_choice, table.length),
+  };
+}
+
+function toolChoiceWord(shape: ProxyShape, choice: unknown, tools: number): ToolsOffered["toolChoice"] {
+  if (choice === undefined || choice === null) return tools > 0 ? "auto" : "none";
+  if (shape === "anthropic") {
+    const type = record(choice)?.type;
+    if (type === "none" || type === "any" || type === "tool" || type === "auto") return type;
+    return tools > 0 ? "auto" : "none";
+  }
+  if (choice === "none") return "none";
+  if (choice === "required") return "any";
+  if (choice === "auto") return tools > 0 ? "auto" : "none";
+  return record(choice) ? "tool" : tools > 0 ? "auto" : "none";
+}
+
+/** The `model.turn` attrs as the runner sets them: the model ref, what the
+ *  request offered, the stop reason, the four token counts and the time to
+ *  first token — each only when known. */
+export function turnAttrs(
+  grant: Pick<RunBearerGrant, "modelRef">,
+  meter: TurnMeter,
+  ttftMs?: number,
+  offered?: ToolsOffered,
+): SpanAttrs {
   const u = meter.usage;
   return {
     model: grant.modelRef,
+    ...(offered ?? {}),
     ...(meter.stopReason ? { stopReason: meter.stopReason } : {}),
     ...(u
       ? {
@@ -529,8 +580,9 @@ export async function handleAdmitted(
     );
   }
   const payload = JSON.stringify(pinRequest(shape, body, grant));
+  const offered = toolsOffered(shape, body);
   const startedAt = deps.clock();
-  const span = grant.span.start("model.turn", { attrs: { model: grant.modelRef }, startedAt });
+  const span = grant.span.start("model.turn", { attrs: { model: grant.modelRef, ...offered }, startedAt });
   const outcome = (status: number, outBytes: number) =>
     `[model-proxy] run=${grant.runId} turn=${turn.turn}/${grant.maxTurns} ${shape} → ${status} in=${Buffer.byteLength(payload)} out=${outBytes} ${Math.max(0, deps.clock() - startedAt)}ms`;
   let res: Response;
@@ -566,12 +618,16 @@ export async function handleAdmitted(
         meter.feed(chunk);
       },
       onDone: () => {
-        span.setAttrs(turnAttrs(grant, meter.result(), firstAt !== undefined ? firstAt - startedAt : undefined));
+        span.setAttrs(
+          turnAttrs(grant, meter.result(), firstAt !== undefined ? firstAt - startedAt : undefined, offered),
+        );
         span.end("ok");
         log(outcome(res.status, outBytes));
       },
       onError: (err) => {
-        span.setAttrs(turnAttrs(grant, meter.result(), firstAt !== undefined ? firstAt - startedAt : undefined));
+        span.setAttrs(
+          turnAttrs(grant, meter.result(), firstAt !== undefined ? firstAt - startedAt : undefined, offered),
+        );
         span.fail(err);
         span.end("error");
         log(
@@ -589,7 +645,7 @@ export async function handleAdmitted(
   } catch {
     // not JSON: forwarded as it came, metered as nothing
   }
-  span.setAttrs(turnAttrs(grant, meter));
+  span.setAttrs(turnAttrs(grant, meter, undefined, offered));
   span.end("ok");
   log(outcome(res.status, text.length));
   return { status: res.status, headers, body: text };
