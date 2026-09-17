@@ -62,6 +62,19 @@ export const windDownFailureNote = (error: string, closes: "run" | "turn" = "run
 /** The card's line when the finale bound ends a write-up that never came. */
 export const finaleTimedOutNote = (closes: "run" | "turn" = "run"): string =>
   `finale timed out — closing the ${closes} without a write-up`;
+/** The card's line when the loop ended with its wrap-up instruction still held
+ *  behind a prompt in doubt (harness-pi item 16): pi finished on its own and
+ *  never saw it, so the answer wears no wind-down label. */
+export const wrapUpUndeliveredNote = (kind: "time" | "turns" | "soft", closes: "run" | "turn" = "run"): string =>
+  `the ${wrapUpName(kind)} wrap-up instruction never reached pi — held behind a prompt in doubt when pi settled — so the ${closes} closes on pi's own answer, unlabelled`;
+/** The card's line when the wrap-up instruction's write failed with the
+ *  control plane's reset (harness-pi item 16): a steer is never resolved by a
+ *  re-send, so the finale's clock is not started on an instruction pi may
+ *  never have got; the loop asks again, and the clock starts when that lands. */
+export const wrapUpWriteFailedNote = (kind: "time" | "turns" | "soft", closes: "run" | "turn" = "run"): string =>
+  `the ${wrapUpName(kind)} wrap-up instruction's write failed with the control plane's reset; the ${closes} asks again once re-attached, and its finale clock starts when that instruction lands`;
+const wrapUpName = (kind: "time" | "turns" | "soft"): string =>
+  kind === "time" ? "time-budget" : kind === "turns" ? "turn-guard" : "soft-stop";
 /** The failed call's words when the finale bound itself is why no write-up
  *  came — the harness aborted the call in flight at the bound — for
  *  `windDownFailureNote` and the answer's `writeUpFailed` clause. */

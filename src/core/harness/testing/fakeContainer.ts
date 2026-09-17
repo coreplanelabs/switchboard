@@ -80,6 +80,14 @@ export class FakeHarnessContainer implements HarnessContainer {
    *  finds alive besides the one this container started — a row's OpenCode or
    *  pi still up in this container on a resume, for `alive`/`find`. */
   readonly alivePids = new Set<number>();
+  /** Set to make every `writeLine` span a macrotask between its beginning and
+   *  its landing, both recorded on `writeSpans` — the pipe's truth that a line
+   *  is a separate exec and, over PIPE_BUF, several `write(2)`s, so a test can
+   *  assert that no two writes to the FIFO are ever in flight at once
+   *  (harness-pi item 16). Off, a write lands whole and at once. */
+  slowWrites = false;
+  /** Every slow write's beginning and landing, in order. */
+  readonly writeSpans: Array<{ phase: "begin" | "end"; line: string }> = [];
   /** Runs after each stdin line the harness writes — a scripted process answering. */
   onStdin: ((line: string, container: FakeHarnessContainer) => void) | undefined;
   /** Answers a request into the container — a scripted server; unset, no server listens. */
@@ -196,7 +204,12 @@ export class FakeHarnessContainer implements HarnessContainer {
     }
     if (this.fifoPath !== undefined && paths.fifo !== this.fifoPath)
       throw new HarnessContainerError("send", `sh: 1: cannot create ${paths.fifo}: Directory nonexistent`);
+    if (this.slowWrites) {
+      this.writeSpans.push({ phase: "begin", line });
+      await new Promise<void>((r) => setImmediate(r));
+    }
     this.stdin.push(line);
+    if (this.slowWrites) this.writeSpans.push({ phase: "end", line });
     this.onStdin?.(line, this);
   }
 
