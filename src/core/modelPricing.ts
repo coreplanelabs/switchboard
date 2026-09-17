@@ -80,6 +80,79 @@ export function anthropicTokensCostUsd(modelId: string, t: AnthropicTokens): num
   );
 }
 
+// ---- the operator's table: `costs.prices` over the list (costs.md item 4b) --------------
+
+/** USD per million tokens of each kind a run's spans count, for one `<provider>/<model>` ref. */
+export interface ModelPrice {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
+/** `costs.prices`: the exact ref as the spans name it → its rates. */
+export type ModelPriceTable = Readonly<Record<string, ModelPrice>>;
+
+/** No table configured: the list alone prices. */
+export const NO_PRICES: ModelPriceTable = Object.freeze({});
+
+const PRICE_KINDS = ["input", "output", "cacheRead", "cacheWrite"] as const;
+
+const isRate = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0;
+
+/** `costs.prices` as config spells it. Absent → the empty table. A key is a
+ *  `<provider>/<model>` ref; a value names all four kinds as finite dollars per
+ *  million ≥ 0 (a kind left out would price at $0 in silence); anything else
+ *  is refused by name. */
+export function parseModelPrices(raw: unknown): ModelPriceTable {
+  if (raw === undefined || raw === null) return NO_PRICES;
+  if (typeof raw !== "object" || Array.isArray(raw))
+    throw new Error("costs.prices must be a mapping of <provider>/<model> → rates");
+  const out: Record<string, ModelPrice> = {};
+  for (const [ref, value] of Object.entries(raw as Record<string, unknown>)) {
+    const slash = ref.indexOf("/");
+    if (slash <= 0 || slash === ref.length - 1)
+      throw new Error(`costs.prices.${ref} must be keyed <provider>/<model>, the ref a run's spans name`);
+    if (typeof value !== "object" || value === null || Array.isArray(value))
+      throw new Error(
+        `costs.prices.${ref} must be a mapping of { input, output, cacheRead, cacheWrite } in USD per million tokens`,
+      );
+    const v = value as Record<string, unknown>;
+    const price: Partial<ModelPrice> = {};
+    for (const kind of PRICE_KINDS) {
+      if (!isRate(v[kind]))
+        throw new Error(`costs.prices.${ref}.${kind} must be a finite number of USD per million tokens, 0 or more`);
+      price[kind] = v[kind];
+    }
+    out[ref] = price as ModelPrice;
+  }
+  return out;
+}
+
+/** The price of a ref: the configured table first (the exact ref), else the
+ *  Anthropic list by family after the provider prefix is dropped — cache
+ *  writes at the 5-minute rate, the one cache-write count a span carries —
+ *  and undefined for a model neither knows (the caller reports the tokens,
+ *  never $0). */
+export function modelPriceOf(ref: string, prices: ModelPriceTable = NO_PRICES): ModelPrice | undefined {
+  const configured = prices[ref];
+  if (configured) return configured;
+  const list = anthropicPriceOf(modelIdOf(ref));
+  if (!list) return undefined;
+  return { input: list.input, output: list.output, cacheRead: list.cacheRead, cacheWrite: list.cacheWrite5m };
+}
+
+/** What a model's counted tokens cost at a price, USD. */
+export function modelUsageUsd(m: ModelUsage, p: ModelPrice): number {
+  return (
+    (m.inputTokens * p.input +
+      m.outputTokens * p.output +
+      m.cacheReadTokens * p.cacheRead +
+      m.cacheWriteTokens * p.cacheWrite) /
+    1_000_000
+  );
+}
+
 // ---- a run's tokens, priced -----------------------------------------------------------
 
 /** One model's tokens, priced; `usd` is null for a model the price table does not know. */
@@ -90,10 +163,12 @@ export interface PricedModelUsage extends ModelUsage {
 /** `anthropic/claude-fable-5` → `claude-fable-5`: the spans name the provider, the price table the model. */
 export const modelIdOf = (ref: string): string => (ref.includes("/") ? ref.slice(ref.indexOf("/") + 1) : ref);
 
-/** A usage priced at list: dollars for the models the table knows, and the
- *  tokens of the ones it does not (never $0 in silence). Cache writes at the
- *  5-minute rate: the spans carry one cache-write count. */
-export function llmUsdOfUsage(usage: RunUsage): {
+/** A usage priced through the table (`modelPriceOf`): dollars for the models a
+ *  price is known for, and the tokens of the ones it is not (never $0 in silence). */
+export function llmUsdOfUsage(
+  usage: RunUsage,
+  prices: ModelPriceTable = NO_PRICES,
+): {
   usd: number;
   unpricedTokens: number;
   byModel: Record<string, PricedModelUsage>;
@@ -102,13 +177,8 @@ export function llmUsdOfUsage(usage: RunUsage): {
   let unpricedTokens = 0;
   const byModel: Record<string, PricedModelUsage> = {};
   for (const [ref, m] of Object.entries(usage.byModel)) {
-    const priced = anthropicTokensCostUsd(modelIdOf(ref), {
-      uncachedInput: m.inputTokens,
-      output: m.outputTokens,
-      cacheRead: m.cacheReadTokens,
-      cacheWrite5m: m.cacheWriteTokens,
-      cacheWrite1h: 0,
-    });
+    const price = modelPriceOf(ref, prices);
+    const priced = price ? modelUsageUsd(m, price) : undefined;
     if (priced === undefined) unpricedTokens += m.inputTokens + m.outputTokens + m.cacheReadTokens + m.cacheWriteTokens;
     else usd += priced;
     byModel[ref] = { ...m, usd: priced ?? null };

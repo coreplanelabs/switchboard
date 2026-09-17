@@ -10,6 +10,7 @@ import {
 } from "./costs.js";
 import { buildCostsByReport, type CostsByReport } from "./costsBy.js";
 import type { CostsSnapshot, CostsSnapshotStore } from "./costsSnapshotStore.js";
+import { NO_PRICES, type ModelPriceTable } from "./modelPricing.js";
 import { NullRunStore, type RunStore } from "./runStore.js";
 import type { RunUsageReport } from "./runUsage.js";
 import { untilText } from "./snapshotAge.js";
@@ -184,6 +185,7 @@ export function byReportFromSnapshot(
   snapshot: CostsSnapshot,
   daily: CostReport,
   viewer: { viewerUserIds: string[]; matchedByEmail: boolean },
+  prices: ModelPriceTable = NO_PRICES,
 ): CostsByReport {
   return {
     ...buildCostsByReport({
@@ -195,6 +197,7 @@ export function byReportFromSnapshot(
       viewerUserIds: viewer.viewerUserIds,
       matchedByEmail: viewer.matchedByEmail,
       generatedAt: Date.parse(snapshot.takenAt),
+      prices,
     }),
     snapshot: stampOf(snapshot),
   };

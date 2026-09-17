@@ -219,6 +219,21 @@ describe("createCostsService", () => {
     expect(r.coverage.historyOn).toBe(false);
   });
 
+  // costs.md item 4b: the by-user report prices through the configured table.
+  it("prices the by-user report at `costs.prices` where the table names a ref, the list elsewhere", async () => {
+    const priced = parseCostsConfig({
+      cloudflareAccountId: "acct-example",
+      groups: { switchboard: { workers: ["switchboard"], containerApps: { "app-bot": "bot" } } },
+      prices: { "anthropic/claude-haiku-4-5": { input: 2, output: 5, cacheRead: 0.1, cacheWrite: 1.25 } },
+    })!;
+    const snapshots = snapshotterWith();
+    await snapshots.refresh("schedule");
+    const r = await createCostsService(priced, snapshots).byReport("switchboard", "3", undefined);
+    expect(r.users[0].llmUsd).toBeCloseTo(2, 9); // 1M haiku input at the configured $2/MTok, not the list's $1
+    const list = await createCostsService(cfg, snapshots).byReport("switchboard", "3", undefined);
+    expect(list.users[0].llmUsd).toBeCloseTo(1, 9);
+  });
+
   it("costsFromConfig: the production wiring from the block and the env — off without the Cloudflare token, the LLM line on with the admin key, the snapshot kept in memory (with a warning) when no `*.worker` block names the state Worker", () => {
     const secrets = (names: Record<string, string>) => ({
       named: (n: string) => (names[n] !== undefined ? { reveal: () => names[n] } : undefined),

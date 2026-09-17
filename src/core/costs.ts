@@ -1,4 +1,9 @@
-import { anthropicTokensCostUsd, type AnthropicTokens } from "./modelPricing.js";
+import {
+  anthropicTokensCostUsd,
+  parseModelPrices,
+  type AnthropicTokens,
+  type ModelPriceTable,
+} from "./modelPricing.js";
 import { systemClock } from "./trace/clock.js";
 // Spend report: what a group of deployed pieces ("switchboard" = the bot
 // Worker + its containers, the resident/sandbox/memory Workers) costs per day,
@@ -69,6 +74,8 @@ export interface CostsConfig {
   /** Env var holding an Anthropic Admin API key (sk-ant-admin…). Optional feature. */
   anthropicAdminKeyEnv: string;
   groups: Record<string, CostGroupConfig>;
+  /** `costs.prices`: the operator's per-million rates by `<provider>/<model>`, over the Anthropic list (item 4b). */
+  prices: ModelPriceTable;
   /** The snapshot the page and the twins serve (src/core/costsSnapshot.ts). */
   snapshot: {
     /** Hours between two reads of the billing sources. */
@@ -156,6 +163,7 @@ export function parseCostsConfig(raw: unknown): CostsConfig | undefined {
     anthropicAdminKeyEnv:
       typeof r.anthropicAdminKeyEnv === "string" ? r.anthropicAdminKeyEnv : DEFAULT_ANTHROPIC_ADMIN_ENV,
     groups,
+    prices: parseModelPrices(r.prices),
     snapshot: snapshotConfig(r.snapshot),
   };
 }

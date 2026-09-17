@@ -1,5 +1,5 @@
 import type { DailyCost, DateRange } from "./costs.js";
-import { llmUsdOfUsage, type PricedModelUsage } from "./modelPricing.js";
+import { llmUsdOfUsage, type ModelPriceTable, type PricedModelUsage } from "./modelPricing.js";
 import { addUsage, emptyUsage, type RunUsageReport, type UsageRow } from "./runUsage.js";
 
 // Cost by user (docs/reference/specs/costs.md item 10): who spent what, built from the
@@ -8,9 +8,9 @@ import { addUsage, emptyUsage, type RunUsageReport, type UsageRow } from "./runU
 // Pure — every dollar of arithmetic is here and unit-tested; the service only
 // fetches the two inputs and resolves the viewer.
 //
-// Dollars: a user's tokens priced at Anthropic list per model (the same table
-// the page prices the open day with), cache writes at the 5-minute rate — the
-// spans record one cache-write number. Cloud: each day's Cloudflare spend is
+// Dollars: a user's tokens priced per model through the price table (costs.md
+// item 4b: `costs.prices` over the Anthropic list, cache writes at the 5-minute
+// rate — the spans record one cache-write number). Cloud: each day's Cloudflare spend is
 // split by each user's share of run wall-clock that day and labelled allocated;
 // a day with spend but no runs is unallocated, never invented onto someone.
 // Range: bounded to what the history holds (its retention and its oldest
@@ -136,6 +136,8 @@ export function buildCostsByReport(input: {
   viewerUserIds: string[];
   matchedByEmail: boolean;
   generatedAt: number;
+  /** `costs.prices` over the Anthropic list (item 4b); absent → the list alone. */
+  prices?: ModelPriceTable;
 }): CostsByReport {
   const { range, usage } = input;
   const from = coverageFrom(range, usage, input.generatedAt);
@@ -149,7 +151,7 @@ export function buildCostsByReport(input: {
   for (const [day, cloud] of cloudByDay) if ((wallByDay.get(day) ?? 0) <= 0) cloudUnallocatedUsd += cloud;
 
   const days: CostsByDay[] = rowsIn.map((r) => {
-    const priced = llmUsdOfUsage(r.usage);
+    const priced = llmUsdOfUsage(r.usage, input.prices);
     const wall = wallByDay.get(r.day) ?? 0;
     const cloudUsd = wall > 0 ? (cloudByDay.get(r.day) ?? 0) * (r.wallMs / wall) : 0;
     cloudAllocatedUsd += cloudUsd;
@@ -178,7 +180,7 @@ export function buildCostsByReport(input: {
       byModel: {},
     };
     if (r.userName && !row.userName) row.userName = r.userName;
-    const priced = llmUsdOfUsage(r.usage);
+    const priced = llmUsdOfUsage(r.usage, input.prices);
     row.runs += r.runs;
     row.wallMs += r.wallMs;
     row.llmUsd += priced.usd;

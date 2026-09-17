@@ -5,8 +5,100 @@ import {
   anthropicTokensCostUsd,
   llmUsdOfUsage,
   modelIdOf,
+  modelPriceOf,
+  NO_PRICES,
+  parseModelPrices,
 } from "./modelPricing.js";
 import type { RunUsage } from "./runUsage.js";
+
+// Feature: docs/reference/specs/costs.md item 4b — one price table for a run's
+// tokens: the configured `costs.prices` entry for the exact ref wins, the list
+// by family is the fallback, a model neither knows is unpriced.
+describe("the price table — costs.prices over the list", () => {
+  const gpt = { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0 };
+
+  it("parseModelPrices: absent is the empty table; a table of per-million rates keyed by <provider>/<model> is carried; a non-mapping, a key without a provider, a missing kind, and a negative or non-numeric rate are refused by name", () => {
+    expect(parseModelPrices(undefined)).toEqual({});
+    expect(parseModelPrices(null)).toEqual({});
+    expect(parseModelPrices({ "openai/gpt-5": gpt, "anthropic/claude-haiku-4-5": { ...gpt, input: 2 } })).toEqual({
+      "openai/gpt-5": gpt,
+      "anthropic/claude-haiku-4-5": { ...gpt, input: 2 },
+    });
+    expect(() => parseModelPrices("cheap")).toThrow(/costs\.prices must be a mapping/);
+    expect(() => parseModelPrices([gpt])).toThrow(/costs\.prices must be a mapping/);
+    expect(() => parseModelPrices({ "gpt-5": gpt })).toThrow(/costs\.prices\.gpt-5 .*<provider>\/<model>/);
+    expect(() => parseModelPrices({ "openai/gpt-5": { input: 1, output: 2, cacheRead: 3 } })).toThrow(
+      /costs\.prices\.openai\/gpt-5\.cacheWrite must be/,
+    );
+    expect(() => parseModelPrices({ "openai/gpt-5": { ...gpt, output: -1 } })).toThrow(
+      /costs\.prices\.openai\/gpt-5\.output must be/,
+    );
+    expect(() => parseModelPrices({ "openai/gpt-5": { ...gpt, input: "1.25" } })).toThrow(
+      /costs\.prices\.openai\/gpt-5\.input must be/,
+    );
+    expect(() => parseModelPrices({ "openai/gpt-5": { ...gpt, cacheRead: Number.NaN } })).toThrow(
+      /costs\.prices\.openai\/gpt-5\.cacheRead must be/,
+    );
+    expect(() => parseModelPrices({ "openai/gpt-5": "cheap" })).toThrow(
+      /costs\.prices\.openai\/gpt-5 must be a mapping/,
+    );
+  });
+
+  it("modelPriceOf: the configured ref wins over the list; a ref the table lacks falls back to the list by family after the provider prefix is dropped, cache writes at the 5-minute rate; a model neither knows is undefined", () => {
+    const prices = parseModelPrices({ "openai/gpt-5": gpt, "anthropic/claude-haiku-4-5": { ...gpt, input: 2 } });
+    expect(modelPriceOf("openai/gpt-5", prices)).toEqual(gpt);
+    expect(modelPriceOf("anthropic/claude-haiku-4-5", prices)).toEqual({ ...gpt, input: 2 });
+    // The exact ref, as the spans name it: a dated release of the overridden model is the list's.
+    expect(modelPriceOf("anthropic/claude-haiku-4-5-20251001", prices)).toEqual({
+      input: 1,
+      output: 5,
+      cacheRead: 0.1,
+      cacheWrite: 1.25,
+    });
+    expect(modelPriceOf("anthropic/claude-fable-5-1", prices)).toEqual({
+      input: 10,
+      output: 50,
+      cacheRead: 0.25,
+      cacheWrite: 12.5,
+    });
+    expect(modelPriceOf("bedrock/claude-fable-5-1", NO_PRICES)).toEqual(modelPriceOf("anthropic/claude-fable-5-1"));
+    expect(modelPriceOf("openai/gpt-5", NO_PRICES)).toBeUndefined();
+    expect(modelPriceOf("openai/gpt-5")).toBeUndefined();
+    expect(modelPriceOf("anthropic/claude-future-9", prices)).toBeUndefined();
+    expect(modelPriceOf("unknown", prices)).toBeUndefined();
+  });
+
+  it("llmUsdOfUsage prices through the table: a configured provider's model at its rates, an overridden Anthropic model at the override, the rest at list", () => {
+    const million = 1_000_000;
+    const tokens = {
+      turns: 1,
+      inputTokens: million,
+      outputTokens: million,
+      cacheReadTokens: million,
+      cacheWriteTokens: million,
+    };
+    const usage: RunUsage = {
+      turns: 3,
+      byModel: {
+        "openai/gpt-5": tokens,
+        "anthropic/claude-haiku-4-5": tokens,
+        "anthropic/claude-fable-5": tokens,
+      },
+    };
+    const prices = parseModelPrices({ "openai/gpt-5": gpt, "anthropic/claude-haiku-4-5": { ...gpt, input: 2 } });
+    const priced = llmUsdOfUsage(usage, prices);
+    expect(priced.byModel["openai/gpt-5"].usd).toBeCloseTo(1.25 + 10 + 0.125 + 0, 9);
+    expect(priced.byModel["anthropic/claude-haiku-4-5"].usd).toBeCloseTo(2 + 10 + 0.125 + 0, 9);
+    expect(priced.byModel["anthropic/claude-fable-5"].usd).toBeCloseTo(10 + 50 + 1 + 12.5, 9);
+    expect(priced.unpricedTokens).toBe(0);
+    expect(priced.usd).toBeCloseTo(11.375 + 12.125 + 73.5, 9);
+    // Without the table the OpenAI model is unpriced and the Anthropic ones are the list's.
+    const listOnly = llmUsdOfUsage(usage);
+    expect(listOnly.byModel["openai/gpt-5"].usd).toBeNull();
+    expect(listOnly.unpricedTokens).toBe(4 * million);
+    expect(listOnly.byModel["anthropic/claude-haiku-4-5"].usd).toBeCloseTo(1 + 5 + 0.1 + 1.25, 9);
+  });
+});
 
 // Feature: docs/reference/specs/costs.md items 4a and 10a — the Anthropic list
 // prices: a model id resolves to its family, every token kind is priced per

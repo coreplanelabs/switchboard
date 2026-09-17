@@ -436,6 +436,12 @@ workspaceDir: ./workspaces
 #       r2Buckets:                                # optional: bucket name → label for buckets not named <worker>-cache
 #         some-other-bucket: uploads
 #       anthropicWorkspaceId: wrkspc_...          # this app's Anthropic workspace
+#   prices:                                    # optional: USD per million tokens by <provider>/<model>, the ref a run's
+#     openai/gpt-5:                            #   spans name — for a model the Anthropic list does not know, or to
+#       input: 1.25                            #   override the list; all four kinds named (a provider with no
+#       output: 10                             #   cache-write charge says 0). A model neither knows is "unpriced",
+#       cacheRead: 0.125                       #   never $0, on the costs page and on a run's own page
+#       cacheWrite: 0
 
 # Delivery indicators: GET /delivery and `delivery report` (docs/reference/specs/delivery.md).
 # Optional. Needs a GitHub credential (the App triple or GH_TOKEN); read-only on GitHub.

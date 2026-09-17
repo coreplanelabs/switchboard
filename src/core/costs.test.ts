@@ -511,6 +511,17 @@ describe("parseCostsConfig", () => {
         /costs\.snapshot\.alertChannel must be a platform-namespaced channel id/,
       );
   });
+  // costs.md item 4b: the operator's price table rides the block and is validated with it.
+  it("prices is the empty table when absent, a table of per-million rates keyed by provider/model when given, and a malformed one is refused by name", () => {
+    const base = { cloudflareAccountId: "x", groups: { g: { workers: ["w"] } } };
+    expect(parseCostsConfig(base)?.prices).toEqual({});
+    const gpt = { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0 };
+    expect(parseCostsConfig({ ...base, prices: { "openai/gpt-5": gpt } })?.prices).toEqual({ "openai/gpt-5": gpt });
+    expect(() => parseCostsConfig({ ...base, prices: { "openai/gpt-5": { input: 1 } } })).toThrow(
+      /costs\.prices\.openai\/gpt-5\.output must be/,
+    );
+    expect(() => parseCostsConfig({ ...base, prices: "cheap" })).toThrow(/costs\.prices must be a mapping/);
+  });
   it("returns undefined for absent config and throws on a malformed one (never a silent half-config)", () => {
     expect(parseCostsConfig(undefined)).toBeUndefined();
     expect(() => parseCostsConfig({ groups: {} })).toThrow(/cloudflareAccountId/);

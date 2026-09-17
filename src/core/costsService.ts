@@ -155,10 +155,12 @@ export function createCostsService(
         deps.emailOfSlackUser,
         emailCache,
       );
-      return byReportFromSnapshot(snapshot, daily, {
-        viewerUserIds: viewerIds.userIds,
-        matchedByEmail: viewerIds.matchedByEmail,
-      });
+      return byReportFromSnapshot(
+        snapshot,
+        daily,
+        { viewerUserIds: viewerIds.userIds, matchedByEmail: viewerIds.matchedByEmail },
+        cfg.prices,
+      );
     },
     status: () => snapshots.status(),
     async snapshot(by) {
