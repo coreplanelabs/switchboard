@@ -7,7 +7,12 @@
 // inline runs (`runInlineCommandRun`), the rest answer log-only. One path, one
 // record shape, whichever door the command came through: the router's door
 // adds the `route` event to the run and `source: route` to the audit line and
-// changes nothing else here.
+// changes nothing else here. A door decision about a state change (record
+// 0044) is a record too: a hand-back is written by `recordRoutedDecision`,
+// which invokes nothing and tells no surface of the run, and the paste that
+// follows it is recorded by `runChatCommand` because its route carries an
+// outcome — whatever the command, announced to no surface unless the command
+// was a run anyway.
 import { systemClock } from "../trace/index.js";
 import { COMMAND_RUN_AGENT } from "../runOwner.js";
 import type { Span } from "../trace/types.js";
@@ -19,6 +24,7 @@ import { redactSecrets, type RunEvent } from "../runEvents.js";
 import type { RunStatus } from "../runRecord.js";
 import { analyzeRunFriction } from "../runFriction.js";
 import { invokeChatCommand, type ChatCommandResult, type ParsedChatCommand } from "../commandChat.js";
+import type { CommandDef } from "../commandRegistry.js";
 import { cliWords } from "../commandSurface.js";
 import { defaultRunRegistry } from "../runRegistry.js";
 import type { RunEnding } from "../runEnding.js";
@@ -36,6 +42,16 @@ export type RouteEventFields = Omit<Extract<RunEvent, { type: "route" }>, "type"
 export interface CommandRunOptions {
   route?: RouteEventFields;
   source?: "route";
+}
+
+/** `runInlineCommandRun`'s options: the command's, plus whether the channel is
+ *  told of the run. Default true — `runStarted` as the run is created,
+ *  `runFinished` before the reply — the signals the HTTP ingress and the web
+ *  chat key their reply shape on (a run id, or the reply text). `false` writes
+ *  the record and says nothing: a hand-back, or the paste of a command that was
+ *  never a run, is answered exactly as it was before it was recorded. */
+export interface InlineRunOptions extends CommandRunOptions {
+  announce?: boolean;
 }
 
 /** Registry commands the dispatcher records as inline runs: the ones
@@ -59,7 +75,10 @@ export function isInlineRunCommand(id: string): boolean {
  * repo resolver (history + the production repo resolver) for the commands that
  * ask for the thread's bound repo (`memory list` with the repo scope) — paid
  * only when asked. Commands that do work (`isInlineRunCommand`) are recorded as
- * inline runs; help/usage replies and read-only answers are not.
+ * inline runs, and so is any command whose route carries an outcome — the
+ * paste of a hand-back (record 0044), recorded whatever its id and announced
+ * to the channel only when the command was a run anyway; help/usage replies
+ * and every other read-only answer are not.
  */
 export async function runChatCommand(
   deps: FastPathDeps,
@@ -84,11 +103,43 @@ export async function runChatCommand(
       span,
       ...(opts.source ? { source: opts.source } : {}),
     });
-  if (parsed.kind === "invoke" && isInlineRunCommand(parsed.id))
-    return runInlineCommandRun(deps, msg, cliWords(parsed.id)[0], io, invoke, ending, trace, opts);
+  if (parsed.kind === "invoke") {
+    const inline = isInlineRunCommand(parsed.id);
+    if (inline || opts.route?.outcome !== undefined)
+      return runInlineCommandRun(deps, msg, cliWords(parsed.id)[0], io, invoke, ending, trace, {
+        ...opts,
+        announce: inline,
+      });
+  }
   // A config reply, a listing, `help`: no run — the command's own work is the
   // request's one step, log-only.
   return trace.root.span("run.command", invoke, { attrs: { command: parsed.kind === "invoke" ? parsed.id : "help" } });
+}
+
+/**
+ * A door decision about a state change as a run record (record 0044): the
+ * router bound a command the door does not run from prose, and the reply is
+ * the line to paste. The record is an inline command run with nothing invoked
+ * — `execute` answers the line and never reaches the registry — so it carries
+ * the same `input`, `run_meta`, `route` and `answer` a routed read's does and
+ * seals `completed`; the `route` event's `outcome` says what the door did. No
+ * surface is told of the run (`announce: false`): the hand-back is answered by
+ * the web chat and the HTTP ingress exactly as before it was counted.
+ */
+export async function recordRoutedDecision(
+  deps: FastPathDeps,
+  msg: IncomingMessage,
+  io: ChannelIO,
+  def: Pick<CommandDef<unknown>, "id">,
+  route: RouteEventFields,
+  text: string,
+  ending: RunEnding,
+  trace: RequestTrace,
+): Promise<void> {
+  await runInlineCommandRun(deps, msg, cliWords(def.id)[0], io, async () => ({ ok: true, text }), ending, trace, {
+    route,
+    announce: false,
+  });
 }
 
 /**
@@ -123,7 +174,8 @@ export function postSettledOutcome(
  * (docs/decisions/0008-one-command-definition-every-surface.md); the channel reply is a projection of it.
  * A thrown command still finishes its run (as `failed`, with the `⚠️ <error>`
  * reply as its `answer`) and the error propagates to the dispatcher's outer
- * handler.
+ * handler. `announce: false` keeps `runStarted` and `runFinished` from the
+ * channel: the record is written, the surface answers as if no run existed.
  */
 export async function runInlineCommandRun<
   T extends { text: string; ok: boolean; trace?: unknown; residentMs?: number },
@@ -135,11 +187,12 @@ export async function runInlineCommandRun<
   execute: (span: Span) => Promise<T>,
   ending: RunEnding,
   trace: RequestTrace,
-  opts: CommandRunOptions = {},
+  opts: InlineRunOptions = {},
 ): Promise<T> {
   const registry = deps.runRegistry ?? defaultRunRegistry;
   const root = trace.root;
   const clock = deps.clock ?? systemClock;
+  const announce = opts.announce ?? true;
   const channelVisibility = await root.span("dispatch.channel_visibility", () =>
     channelVisibilityOf(deps, msg.channelId),
   );
@@ -167,7 +220,7 @@ export async function runInlineCommandRun<
   // spans so far backfill, then `run.command` and the reply follow live. A
   // natural-language fall-through rebinds the same root to the agent run next.
   trace.bindRun(run.id, (e) => registry.publish(run.id, e));
-  io.runStarted?.({ id: run.id });
+  if (announce) io.runStarted?.({ id: run.id });
   registry.publish(run.id, {
     type: "input",
     text: redactSecrets(msg.text),
@@ -213,7 +266,7 @@ export async function runInlineCommandRun<
   } finally {
     const status: RunStatus = result?.ok ? "completed" : "failed";
     registry.finish(run.id, status);
-    io.runFinished?.({ id: run.id, status });
+    if (announce) io.runFinished?.({ id: run.id, status });
     // Sealed by the caller's drain after its reply (or at once, with no reply,
     // when the command fell through to the agent); the record is written then.
     // A command's status is its own `ok` — a reply that throws never flips it.

@@ -388,6 +388,13 @@ export type RouteInputObject2 = { readonly [key: string]: RouteInputLeafOrList |
 export type RouteInputObject3 = { readonly [key: string]: RouteInputLeafOrList | RouteInputObject2 };
 export type RouteInputValue = RouteInputLeafOrList | RouteInputObject3;
 
+/** How a door decision about a state change ended (docs/decisions/0044-a-routed-write-is-confirmed-in-proportion-to-its-blast-radius.md):
+ *  `hand_back` — the router bound a state-changing command and the door answered
+ *  the line to paste, nothing invoked; `pasted` — the typed line that followed
+ *  a hand-back in its thread, with the same receipt, ran. A routed read
+ *  carries no outcome: it is not a decision about a state change. */
+export type RouteOutcome = "hand_back" | "pasted";
+
 export type RunEvent =
   /** `callId` is the provider's tool_use id — the explicit pair key between a
    *  call and its result (live-view item 13); the runner stamps it on both. */
@@ -734,7 +741,11 @@ export type RunEvent =
    *  (`command`), `command` the id the model called, `input` the bound input
    *  (redacted, each value capped) and `receipt` the chat form the reply led
    *  with (`routed: <chat form>`, redacted and capped at `ROUTE_RECEIPT_CAP`);
-   *  how the invoke ended is the run's own status and `answer`. */
+   *  how the invoke ended is the run's own status and `answer`. A door
+   *  decision about a state change (record 0044) is a command run too, with
+   *  `outcome` saying which: a hand-back invoked nothing and its `answer` is
+   *  the line to paste; a paste is the typed line that followed, whatever its
+   *  command, `handBackRunId` naming the hand-back's record. */
   | {
       type: "route";
       preset: string;
@@ -745,6 +756,8 @@ export type RunEvent =
       command?: string;
       input?: { readonly [key: string]: RouteInputValue };
       receipt?: string;
+      outcome?: RouteOutcome;
+      handBackRunId?: string;
       seq?: number;
       at?: number;
     }

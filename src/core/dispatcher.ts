@@ -86,7 +86,7 @@ import { readThread, stickyAgentOf, threadPrOf, threadRouteOf } from "./dispatch
 import { threadArtifactsFor } from "./dispatch/threadArtifacts.js";
 import { describeAsset, readThreadAssets, type ThreadAsset } from "./dispatch/threadAssets.js";
 import { runToolCapabilities, type ParentRun } from "./dispatch/spawn.js";
-import { createRunsService } from "./runsService.js";
+import { createRunsService, type RunsService } from "./runsService.js";
 import type { CoordinatorTag } from "./coordinator/contract.js";
 import type { DispatchOutcome } from "./dispatch/outcome.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
@@ -115,6 +115,9 @@ export interface CoreDeps
   /** The MCP tool source: required for provisioning (every run asks it for its tools), and the same instance the
    *  route stage reads the caller's catalog off (record 0040) — declared here so the two bases agree. */
   mcp: McpToolSource;
+  /** The one runs service (`RunDeps.runs`): the run tools, the thread read and stage A's paste check
+   *  (record 0044) all read it — declared here so the two bases that name it agree. */
+  runs?: RunsService;
   /** The tracer behind every root this process starts; the no-gaps test injects one with its `SpanContext`. */
   tracer?: Tracer;
   /** The root's leading sinks (a test's recording sink); default: the one log sink at `tracing.log`. */

@@ -9,9 +9,11 @@ import { channelOf, startRequestRoot } from "../requestTrace.js";
 import { createRunEnding } from "../runEnding.js";
 import { NullRunHistoryWriter } from "../runHistoryWriter.js";
 import { RunRegistry } from "../runRegistry.js";
+import { isSpanRecord, type RunEvent } from "../runEvents.js";
+import type { RunRecord } from "../runRecord.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
 import type { FastPathDeps } from "./fastPath.js";
-import { isInlineRunCommand, runChatCommand, type RouteEventFields } from "./commandRun.js";
+import { isInlineRunCommand, recordRoutedDecision, runChatCommand, type RouteEventFields } from "./commandRun.js";
 
 // Feature: docs/reference/specs/command-registry.md item 18 — the command-run
 // machinery the fast paths and the request router's command branch share
@@ -157,5 +159,158 @@ describe("runChatCommand — the machinery moved from the fast path", () => {
     );
     expect(res.ok).toBe(true);
     expect(d.runRegistry.snapshotById("run-cmd")).toBeNull();
+  });
+});
+
+// Feature: docs/reference/specs/run-history.md item 2 and
+// docs/reference/specs/routing-and-config.md item 21 (record 0044, the counts):
+// a door decision about a state change is a run record — a hand-back invokes
+// nothing and tells no surface, a paste is recorded whatever its command.
+
+/** The routed `config set` the door hands back, as its record carries it. */
+const HAND_BACK: RouteEventFields = {
+  preset: "command",
+  reason: "command config.set",
+  model: "anthropic/general-model",
+  command: "config.set",
+  input: { args: ["channel"], options: { models: { coding: "anthropic/other-model" } } },
+  receipt: "config set channel --models.coding anthropic/other-model",
+  outcome: "hand_back",
+};
+const HAND_BACK_LINE = `To run this: ${HAND_BACK.receipt}`;
+
+/** The registry's `invoke` behind a spy, so a test can say whether any handler ran. */
+function spiedInvoke(d: FastPathDeps) {
+  const commands = d.commands!;
+  const invoke = vi.fn(commands.invoke.bind(commands));
+  d.commands = { ...commands, invoke };
+  return invoke;
+}
+
+/** The null writer with its `write` spied, so the sealed record's shape is readable. */
+function keepingWriter() {
+  const writer = new NullRunHistoryWriter();
+  const write = vi.spyOn(writer, "write");
+  return { writer, records: (): RunRecord[] => write.mock.calls.map((c) => c[0]) };
+}
+
+const contentTypes = (events: readonly RunEvent[]) => events.filter((e) => !isSpanRecord(e)).map((e) => e.type);
+
+describe("recordRoutedDecision — a door decision as a run record no surface is told about (record 0044)", () => {
+  it("publishes input, run_meta, route and answer, seals completed, calls no handler and neither runStarted nor runFinished", async () => {
+    const d = deps();
+    const kept = keepingWriter();
+    d.runHistoryWriter = kept.writer;
+    const invoke = spiedInvoke(d);
+    const { message, io, ending, trace, replies } = request("use the other model for coding in this channel", d);
+    const started = vi.fn();
+    const finished = vi.fn();
+    io.runStarted = started;
+    io.runFinished = finished;
+    const def = d.commands!.get("config.set")!;
+    await recordRoutedDecision(d, message, io, def, HAND_BACK, HAND_BACK_LINE, ending, trace);
+    await ending.sealAfterReply(
+      async () => {},
+      async () => void (await io.reply(HAND_BACK_LINE)),
+    );
+    const snap = d.runRegistry.snapshotById("run-cmd");
+    expect(snap?.finished).toBe(true);
+    expect(d.runRegistry.getById("run-cmd")).toMatchObject({ status: "completed", agent: "command" });
+    expect(contentTypes(snap?.events ?? [])).toEqual(["input", "run_meta", "route", "answer"]);
+    expect(snap?.events.find((e) => e.type === "route")).toMatchObject({ ...HAND_BACK, at: NOW });
+    expect(snap?.events.find((e) => e.type === "answer")).toMatchObject({ text: HAND_BACK_LINE });
+    expect(invoke).not.toHaveBeenCalled();
+    expect(started).not.toHaveBeenCalled();
+    expect(finished).not.toHaveBeenCalled();
+    expect(replies).toEqual([HAND_BACK_LINE]);
+    // The sealed record is the run's: agent `command`, completed, the decision on it.
+    const records = kept.records();
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ id: "run-cmd", agent: "command", status: "completed" });
+    expect(records[0]!.events.find((e) => e.type === "route")).toMatchObject({ outcome: "hand_back" });
+    // Nothing was written: the channel's config is as the fixture left it.
+    expect(
+      d.config.resolve({ channelId: "slack:CX", userId: "slack:UADMIN", request: { agent: "coding" } }).modelRef,
+    ).not.toBe("anthropic/other-model");
+  });
+});
+
+describe("runChatCommand — the recording rule widens to a routed decision with an outcome (record 0044)", () => {
+  const SET = {
+    kind: "invoke",
+    id: "config.set",
+    input: { args: ["channel"], options: { models: { coding: "anthropic/other-model" } } },
+  } as const;
+
+  it("a `config.set` call carrying a route with `outcome: pasted` is recorded — the handler runs, the record carries the outcome and the hand-back's id — and the channel is told of no run", async () => {
+    const d = deps();
+    const invoke = spiedInvoke(d);
+    const { message, io, ending, trace } = request("config set channel --models.coding anthropic/other-model", d);
+    const started = vi.fn();
+    const finished = vi.fn();
+    io.runStarted = started;
+    io.runFinished = finished;
+    const res = await runChatCommand(d, message, io, SET, ending, trace, {
+      route: { ...HAND_BACK, reason: "pasted after hand-back", outcome: "pasted", handBackRunId: "run-hb" },
+    });
+    expect(res.ok).toBe(true);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke.mock.calls[0]![0]).toBe("config.set");
+    const snap = d.runRegistry.snapshotById("run-cmd");
+    expect(snap?.finished).toBe(true);
+    expect(d.runRegistry.getById("run-cmd")).toMatchObject({ status: "completed", agent: "command" });
+    expect(contentTypes(snap?.events ?? [])).toEqual(["input", "run_meta", "route", "answer"]);
+    expect(snap?.events.find((e) => e.type === "route")).toMatchObject({
+      command: "config.set",
+      outcome: "pasted",
+      handBackRunId: "run-hb",
+      reason: "pasted after hand-back",
+    });
+    // A typed no-work command is answered as it always was: no run announced.
+    expect(started).not.toHaveBeenCalled();
+    expect(finished).not.toHaveBeenCalled();
+  });
+
+  it("the same call with a route and no outcome — a routed read's shape — records nothing, as today", async () => {
+    const d = deps();
+    const invoke = spiedInvoke(d);
+    const { message, io, ending, trace } = request("set the coding model here", d);
+    const { outcome: _outcome, ...noOutcome } = HAND_BACK;
+    const res = await runChatCommand(d, message, io, SET, ending, trace, { route: noOutcome, source: "route" });
+    expect(res.ok).toBe(true);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(d.runRegistry.snapshotById("run-cmd")).toBeNull();
+  });
+
+  it("an inline-run command is still announced to the channel when it carries an outcome — the paste of `mcp add` is the run it always was", async () => {
+    expect(isInlineRunCommand("mcp.add")).toBe(true);
+    const d = deps();
+    const { message, io, ending, trace } = request("mcp add acme https://mcp.example.test/sse", d);
+    const started = vi.fn();
+    io.runStarted = started;
+    await runChatCommand(
+      d,
+      message,
+      io,
+      { kind: "invoke", id: "mcp.add", input: { args: ["acme", "https://mcp.example.test/sse"], options: {} } },
+      ending,
+      trace,
+      {
+        route: {
+          ...HAND_BACK,
+          command: "mcp.add",
+          input: { args: ["acme", "https://mcp.example.test/sse"], options: {} },
+          receipt: "mcp add acme https://mcp.example.test/sse",
+          reason: "pasted after hand-back",
+          outcome: "pasted",
+          handBackRunId: "run-hb",
+        },
+      },
+    );
+    expect(started).toHaveBeenCalledWith({ id: "run-cmd" });
+    expect(d.runRegistry.snapshotById("run-cmd")?.events.find((e) => e.type === "route")).toMatchObject({
+      outcome: "pasted",
+      handBackRunId: "run-hb",
+    });
   });
 });

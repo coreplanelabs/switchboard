@@ -69,7 +69,7 @@ import { CommandRegistry, type CommandDef, type CommandEffect, type CommandInput
 import { chatInvocation, jsonSchemaFor, mcpToolName, namedToInput } from "../commandSurface.js";
 import { unwrapChatLinks, type ChatCommands } from "../commandChat.js";
 import { repoFromThread } from "../repoContext.js";
-import { postSettledOutcome, runChatCommand, type RouteEventFields } from "./commandRun.js";
+import { postSettledOutcome, recordRoutedDecision, runChatCommand, type RouteEventFields } from "./commandRun.js";
 import type { FastPathDeps } from "./fastPath.js";
 import { maxChildrenOf } from "./spawn.js";
 
@@ -117,6 +117,15 @@ export { HAND_BACK_PREFIX };
  */
 export function routedRunsAtOnce(def: Pick<CommandDef<unknown>, "effect" | "action">): boolean {
   return def.effect === "read" || def.action.endsWith(":exec");
+}
+
+/** The receipt of a bound command as the reply leads with it and the record
+ *  keeps it: the chat form, redacted and cut at `ROUTE_RECEIPT_CAP`. One
+ *  function for both sides of the paste check (record 0044): the hand-back
+ *  records it, and stage A computes the typed line's the same way, so a line
+ *  over the cap still matches its hand-back. */
+export function routeReceipt(def: CommandDef<unknown>, input: CommandInput): string {
+  return redactAndCap(chatInvocation(def, input), ROUTE_RECEIPT_CAP);
 }
 /** The line that opens the parts block of a routed conductor's brief; the
  *  conductor's prompt (`CONDUCTOR_SYSTEM`) names the same words. */
@@ -482,11 +491,14 @@ export function buildRoutePrompt(input: Omit<RouteInput, "allowed">): RoutePromp
 /** The rule for the command tools (record 0036, unit 2), in the system half:
  *  a request that asks exactly what one command does is that command's call,
  *  its arguments bound from the request and the thread's repository; anything
- *  the model is unsure a command covers is a route, never a guessed call. The
- *  rule never names a command — the tools carry their own descriptions and
- *  schemas — so a command added to the catalogue is covered the day it lands. */
+ *  the model is unsure a command covers is a route, never a guessed call; and
+ *  a question about a subject a command reports on is not a call for it
+ *  (record 0044: on the replay, questions that merely named a subject bound
+ *  its read command 14 times in 33). The rule never names a command — the
+ *  tools carry their own descriptions and schemas — so a command added to the
+ *  catalogue is covered the day it lands. */
 function commandsRule(commands: readonly RoutableCommand[]): string {
-  return `Commands: beside \`${ROUTE_TOOL_NAME}\` you are offered one tool per command this deployment answers without a model — ${commands.length} of them, each described by its own tool. When the request asks exactly what one of those tools does — a listing, a setting, a repository operation, a lookup by id — call that tool with its arguments bound from the request (a repository the request leaves unnamed is the thread's repository when one is given). A command call is not a route: call exactly one tool, either \`${ROUTE_TOOL_NAME}\` or one command, never two. When the request asks for anything a command does not do exactly — a judgement, a change to code, an investigation, a question about the world — call \`${ROUTE_TOOL_NAME}\`. A command that changes state here is handed back to the person as the line to type, never run from a call, so a call to one costs nothing when the person did not mean it; a command that only reads, or that only runs a repository's own checks and changes nothing here, runs at once.`;
+  return `Commands: beside \`${ROUTE_TOOL_NAME}\` you are offered one tool per command this deployment answers without a model — ${commands.length} of them, each described by its own tool. When the request asks exactly what one of those tools does — a listing, a setting, a repository operation, a lookup by id — call that tool with its arguments bound from the request (a repository the request leaves unnamed is the thread's repository when one is given). Call a command only when the request asks for what the command does: a question about a subject a command reports on is not a call — "why did the last run fail?" asks for an explanation, not for the listing — so it is a route. A command call is not a route: call exactly one tool, either \`${ROUTE_TOOL_NAME}\` or one command, never two. When the request asks for anything a command does not do exactly — a judgement, a change to code, an investigation, a question about the world — call \`${ROUTE_TOOL_NAME}\`. A command that changes state here is handed back to the person as the line to type, never run from a call, so a call to one costs nothing when the person did not mean it; a command that only reads, or that only runs a repository's own checks and changes nothing here, runs at once.`;
 }
 
 /** The rule for connected data sources (record 0040), in the system half so it
@@ -1144,17 +1156,8 @@ async function answerCommand(
     console.log(`[route] ${msg.threadKey} not routed: command ${decided.id} is no longer in the catalogue`);
     return { kind: "unrouted" };
   }
-  const receipt = redactAndCap(chatInvocation(def, decided.input), ROUTE_RECEIPT_CAP);
+  const receipt = routeReceipt(def, decided.input);
   const receiptLine = `${ROUTED_RECEIPT_PREFIX} ${receipt}`;
-  if (!routedRunsAtOnce(def)) {
-    console.log(`[route] ${msg.threadKey} handed back ${def.id} on ${modelRef}: ${receipt}`);
-    await ending.sealAfterReply(
-      async () => {},
-      () => root.span("post.reply", () => io.reply(`${HAND_BACK_PREFIX} ${receipt}`)),
-    );
-    return { kind: "command", command: def.id, outcome: "hand_back" };
-  }
-  console.log(`[route] ${msg.threadKey} routed to command ${def.id} on ${modelRef}: ${receipt}`);
   const route: RouteEventFields = {
     preset: COMMAND_RUN_AGENT,
     reason: `command ${def.id}`,
@@ -1163,6 +1166,20 @@ async function answerCommand(
     input: redactedInput(decided.input),
     receipt,
   };
+  if (!routedRunsAtOnce(def)) {
+    console.log(`[route] ${msg.threadKey} handed back ${def.id} on ${modelRef}: ${receipt}`);
+    // The hand-back is a record (record 0044): the same decision a routed
+    // read's run carries, with `outcome: hand_back`, invoking nothing and
+    // telling no surface of the run — so the reply below is the line it was.
+    const line = `${HAND_BACK_PREFIX} ${receipt}`;
+    await recordRoutedDecision(deps, msg, io, def, { ...route, outcome: "hand_back" }, line, ending, trace);
+    await ending.sealAfterReply(
+      async () => {},
+      () => root.span("post.reply", () => io.reply(line)),
+    );
+    return { kind: "command", command: def.id, outcome: "hand_back" };
+  }
+  console.log(`[route] ${msg.threadKey} routed to command ${def.id} on ${modelRef}: ${receipt}`);
   const res = await runChatCommand(deps, msg, io, { kind: "invoke", id: def.id, input: decided.input }, ending, trace, {
     route,
     source: "route",
