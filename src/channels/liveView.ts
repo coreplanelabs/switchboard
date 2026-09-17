@@ -20,6 +20,7 @@ import { INLINE_IMAGE_TYPES } from "../artifacts/contentType.js";
 import { safeBasename } from "../artifacts/keys.js";
 import type { RunRegistry } from "../core/runRegistry.js";
 import type { RunSummary } from "../core/runRegistry/projections.js";
+import { pullRequestNumberOf } from "../core/runRecord.js";
 import { runResource, type RunListCursor, type RunsService, type RunView } from "../core/runsService.js";
 import type { ScheduleDef } from "../core/schedules.js";
 import type { ScheduleStore } from "../core/scheduleStore.js";
@@ -637,10 +638,20 @@ export function createLiveViewHandler(
           notFoundPage(res);
           return;
         }
+        // The pull request's findings ledger (agent-ship item 18), under the
+        // same predicate, when the unit row names one: the same read `runs
+        // findings` makes; a ledger no run the viewer may see names is no key.
+        const findings = found.value.pr
+          ? await service.listFindings({ repo: found.value.instance.repo, number: found.value.pr.number }, visibleTo)
+          : undefined;
         const tokens = liveTokens();
         const seed: UnitSeed = {
           page: "unit",
-          view: { ...found.value, runs: found.value.runs.map((r) => withLiveToken(r, tokens)) },
+          view: {
+            ...found.value,
+            runs: found.value.runs.map((r) => withLiveToken(r, tokens)),
+            ...(findings?.ok ? { findings: findings.value } : {}),
+          },
           now: now(),
           retentionDays: deps.retention ? deps.retention.retentionDays : null,
         };
@@ -856,10 +867,21 @@ export function createLiveViewHandler(
         const visibleTo = readableRuns(actor);
         const meta = events.find((e) => e.type === "run_meta");
         const instanceId = meta?.type === "run_meta" ? meta.instanceId : undefined;
-        const [children, units] = await Promise.all([
+        // The pull request this record names (`pullRequestNumberOf`, run-history
+        // item 58): its findings ledger's unit page is linked when the viewer
+        // may read the ledger and a unit row names the pull request (agent-ship item 18).
+        const prNumber = view.repo !== undefined ? pullRequestNumberOf(view) : undefined;
+        const [children, units, ledger] = await Promise.all([
           service.listChildren(route.id, visibleTo),
           instanceId !== undefined ? service.listInstanceUnits(instanceId, visibleTo) : Promise.resolve([]),
+          prNumber !== undefined && view.repo !== undefined
+            ? service.listFindings({ repo: view.repo, number: prNumber }, visibleTo)
+            : Promise.resolve(undefined),
         ]);
+        const findingsLedger =
+          ledger?.ok && ledger.value.unit !== undefined
+            ? { unit: ledger.value.unit, rows: ledger.value.findings.length }
+            : undefined;
         const tokens = liveTokens();
         res.writeHead(200, WEB_HTML_HEADERS);
         res.end(
@@ -869,6 +891,7 @@ export function createLiveViewHandler(
             id: route.id,
             ...(children.length > 0 ? { children: children.map((c) => withLiveToken(c, tokens)) } : {}),
             ...(units.length > 0 ? { units } : {}),
+            ...(findingsLedger !== undefined ? { findingsLedger } : {}),
             // The stored stream with the truncation made visible (AE11): the
             // seed IS the stream on a history page — normalized first on a
             // span-schema record, so a pair whose twin the budget dropped gets

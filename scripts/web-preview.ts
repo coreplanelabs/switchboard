@@ -40,10 +40,11 @@ import { READING_DIFF_GIT, READING_DIFF_MEAT, READING_DIFF_SUMMARY } from "./web
 //   /runs/live-1     a live run fed by a scripted SSE stream (loops forever)
 //   /runs/hist-1     a finished run in history mode        /runs/nope   the 404
 //   /runs/review-1   a finished PR review carrying both reading diffs (the panel)
-//   /runs/hist-4     a finished PR review with a request_changes verdict as the Reply
+//   /runs/hist-4     a finished PR review with a request_changes verdict as the Reply and a Findings link to its unit's ledger
 //   /runs/scheduled  the Scheduled tab                     /residents   /costs   /costs?view=users   /delivery
-//   /runs/unit/plan-acme-3:U13   a ship unit through two review rounds, both threads (`?open=<run id>` opens a
-//                               row's timeline; `?session=coding&q=lockfile` runs the search on first paint)
+//   /runs/unit/plan-acme-3:U13   a ship unit through two review rounds, both threads, with the pull request's findings
+//                               ledger (`?open=<run id>` opens a row's timeline; `?session=coding&q=lockfile` runs the
+//                               search on first paint)
 //   /runs/unit/plan-acme-3:U14   a unit whose review thread does not exist yet — the coding thread alone
 //   /runs/cond-1                a finished conductor listing the runs it spawned
 //   /runs/ship-1                the pipeline's own record listing its instance's units
@@ -1435,6 +1436,9 @@ const unitRun = (
     ...over,
   };
 };
+/** The heads the fixture unit's two reviews read: round 1's and, after the findings step repushed, round 2's. */
+const UNIT_HEAD_A = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+const UNIT_HEAD_B = "b2c3d4e5f60718293a4b5c6d7e8f90123456789a";
 /** The coding stream runs 27.6 minutes received to finish, the review's 6.9 — the rounds are laid out around them. */
 const CODING_MS = HIST_FINISHED_AT - RECEIVED_AT;
 const REVIEW_MS = REVIEW_FINISHED_AT - REVIEW_RECEIVED_AT;
@@ -1489,6 +1493,78 @@ const UNIT_U3: UnitSeed["view"] = {
   startedAt: UNIT_T0 - 2_000,
   instance: UNIT_INSTANCE,
   runs: UNIT_RUNS,
+  findings: {
+    repo: "acme/api",
+    pr: { number: 61, url: "https://github.com/acme/api/pull/61" },
+    unit: "plan-acme-3:U13",
+    runs: UNIT_RUNS.map((r) => ({
+      id: r.id,
+      agent: r.agent,
+      startedAt: r.startedAt,
+      finishedAt: r.finishedAt ?? r.startedAt,
+      round: r.round,
+      ...(r.thread === "review"
+        ? {
+            head: r.id === "unit-r1" ? UNIT_HEAD_A : UNIT_HEAD_B,
+            verdict: r.id === "unit-r1" ? ("request_changes" as const) : ("approve" as const),
+            findings: r.id === "unit-r1" ? 3 : 1,
+          }
+        : r.id === "unit-c1"
+          ? { dispositions: 3 }
+          : {}),
+    })),
+    findings: [
+      {
+        id: "F1",
+        severity: "major",
+        file: "web/src/pages/UnitPage.vue",
+        line: 118,
+        title: "a run that started at a round boundary is cut into the previous round",
+        raised: { runId: "unit-r1", head: UNIT_HEAD_A, round: 1 },
+        lastSeen: { runId: "unit-r1", head: UNIT_HEAD_A, round: 1 },
+        disposition: {
+          kind: "fixed",
+          note: "the boundary is inclusive: a run at the boundary belongs to the round that began there",
+          runId: "unit-c1",
+          round: 1,
+        },
+        status: "fixed",
+      },
+      {
+        id: "F2",
+        severity: "minor",
+        file: "src/core/unitRuns.ts",
+        line: 92,
+        title: "two runs in the same millisecond order by id, not thread — the review can precede its coding round",
+        raised: { runId: "unit-r1", head: UNIT_HEAD_A, round: 1 },
+        lastSeen: { runId: "unit-r2", head: UNIT_HEAD_B, round: 2 },
+        disposition: {
+          kind: "fixed",
+          note: "coding sorts before review on a tie, then id",
+          runId: "unit-c1",
+          round: 1,
+        },
+        status: "re-raised",
+        reRaisedAfter: "fixed",
+      },
+      {
+        id: "F3",
+        severity: "nit",
+        file: "web/src/pages/unitPage.test.ts",
+        line: 41,
+        title: "the fixture's review thread key repeats the coding thread's suffix",
+        raised: { runId: "unit-r1", head: UNIT_HEAD_A, round: 1 },
+        lastSeen: { runId: "unit-r1", head: UNIT_HEAD_A, round: 1 },
+        disposition: {
+          kind: "declined",
+          note: "the suffix is the Slack thread ts the fixture mirrors; a distinct one would not read as a thread",
+          runId: "unit-c1",
+          round: 1,
+        },
+        status: "conceded",
+      },
+    ],
+  },
 };
 // A unit the runner has just reached: round 0 in flight, no review thread yet.
 const UNIT_U4: UnitSeed["view"] = {
@@ -2232,6 +2308,8 @@ function page(
         sealedAt: VERDICT_FINISHED_AT + 2_000,
         replyOk: true,
         durationMs: VERDICT_FINISHED_AT - VERDICT_RECEIVED_AT,
+        // The pull request's findings ledger lives on the ship unit that opened it (agent-ship item 18).
+        findingsLedger: { unit: "plan-acme-3:U13", rows: 3 },
       },
     };
   if (pathname.startsWith("/runs/"))

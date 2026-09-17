@@ -24,6 +24,7 @@ declare module 'vue' {
     DocsLink: typeof import('./src/components/DocsLink.vue')['default']
     EmptyState: typeof import('./src/components/home/EmptyState.vue')['default']
     ExpandableText: typeof import('./src/components/ExpandableText.vue')['default']
+    FindingsBlock: typeof import('./src/components/unit/FindingsBlock.vue')['default']
     GithubMark: typeof import('./src/components/GithubMark.vue')['default']
     InstallationPanel: typeof import('./src/components/settings/InstallationPanel.vue')['default']
     MarkdownText: typeof import('./src/components/MarkdownText.vue')['default']

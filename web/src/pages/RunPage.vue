@@ -66,6 +66,12 @@ const artifactLinks = seed?.artifacts ?? null;
  *  pipeline's own record — the units of the instance it stands for. */
 const children = seed?.children ?? [];
 const units = (seed?.mode === "history" ? seed.units : undefined) ?? [];
+/** Where the findings ledger of the pull request this run names lives
+ *  (agent-ship item 18): the unit page's Findings block, when the seed names it. */
+const findingsLedger = seed?.mode === "history" ? seed.findingsLedger : undefined;
+const findingsHref = computed(() =>
+  findingsLedger ? `/runs/unit/${encodeURIComponent(findingsLedger.unit)}#findings` : undefined,
+);
 
 const openParam = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("open") : null;
 const model = createRunPageModel({
@@ -563,6 +569,15 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
         >
           <GithubMark class="mr-1 align-[-0.125em]" />#{{ state.meta.pr }}
         </a>
+        <!-- The pull request's findings ledger (agent-ship item 18): a link to the
+             unit page's block, present exactly when the seed names where it lives. -->
+        <a
+          v-if="findingsHref && findingsLedger"
+          class="findings whitespace-nowrap text-primary no-underline hover:underline"
+          :href="findingsHref"
+          title="the pull request's findings ledger on its unit's page"
+          >Findings · {{ findingsLedger.rows }}</a
+        >
         <!-- The review's reading diff (docs/reference/specs/reading-diff.md item 12):
              present exactly when the run published reading-diff artifacts —
              a link-weight control like the chips beside it. -->

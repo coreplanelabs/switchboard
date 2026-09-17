@@ -4,6 +4,7 @@ import UnitRoutePage from "./UnitRoutePage.vue";
 import { mountApp } from "../testing/mount";
 import { browser } from "../lib/browser";
 import type { UnitRunRowSeed, UnitSeed } from "@core/channels/webSeed.js";
+import type { FindingsLedgerView } from "@core/core/runsService.js";
 import { wrapUntrusted } from "@core/core/untrusted.js";
 
 // Feature: docs/reference/specs/live-view.md item 28; agent-ship.md item 17;
@@ -544,5 +545,137 @@ describe("UnitRoutePage (the /runs/unit/:key dispatch)", () => {
     const w = mountApp(UnitRoutePage, { seed: seed() });
     expect(w.find("h1 .title").text()).toBe("Unit U16");
     expect(w.text()).not.toContain("That run isn't here.");
+  });
+});
+
+describe("UnitPage — the Findings block: the pull request's ledger beside the runs (agent-ship item 18)", () => {
+  const HEAD_A = "a".repeat(40);
+  const HEAD_B = "b".repeat(40);
+  const LEDGER: FindingsLedgerView = {
+    repo: "acme/api",
+    pr: { number: 42, url: "https://github.com/acme/api/pull/42" },
+    unit: "plan-p-1:U16",
+    runs: [
+      { id: "c0", agent: "coding", startedAt: T0, finishedAt: T0 + 60_000, round: 0 },
+      {
+        id: "r1",
+        agent: "review",
+        startedAt: T0 + 70_000,
+        finishedAt: T0 + 130_000,
+        head: HEAD_A,
+        round: 1,
+        verdict: "request_changes",
+        findings: 3,
+      },
+      { id: "c1", agent: "coding", startedAt: T0 + 140_000, finishedAt: T0 + 200_000, round: 1, dispositions: 3 },
+      {
+        id: "r2",
+        agent: "review",
+        startedAt: T0 + 210_000,
+        finishedAt: T0 + 250_000,
+        head: HEAD_B,
+        round: 2,
+        verdict: "request_changes",
+        findings: 2,
+      },
+    ],
+    findings: [
+      {
+        id: "F1",
+        severity: "major",
+        file: "src/a.ts",
+        line: 12,
+        title: "the guard moved but the null path stays",
+        raised: { runId: "r1", head: HEAD_A, round: 1 },
+        lastSeen: { runId: "r2", head: HEAD_B, round: 2 },
+        disposition: { kind: "fixed", note: "guarded the null path", runId: "c1", round: 1 },
+        status: "re-raised",
+        reRaisedAfter: "fixed",
+      },
+      {
+        id: "F2",
+        severity: "nit",
+        file: "src/b.ts",
+        title: "typo in a comment",
+        raised: { runId: "r1", head: HEAD_A, round: 1 },
+        lastSeen: { runId: "r1", head: HEAD_A, round: 1 },
+        disposition: { kind: "declined", note: "the comment quotes the library", runId: "c1", round: 1 },
+        status: "conceded",
+      },
+      {
+        id: "F3",
+        severity: "minor",
+        file: "src/c.ts",
+        line: 3,
+        title: "new in the second round",
+        raised: { runId: "r2", head: HEAD_B, round: 2 },
+        lastSeen: { runId: "r2", head: HEAD_B, round: 2 },
+        status: "open",
+      },
+      {
+        id: "F4",
+        severity: "nit",
+        file: "src/d.ts",
+        title: "vanished with no disposition",
+        raised: { runId: "elsewhere", head: HEAD_A },
+        lastSeen: { runId: "elsewhere", head: HEAD_A },
+        status: "not re-raised",
+      },
+      { id: "F9", disposition: { kind: "fixed", note: "?", runId: "c1", round: 1 }, status: "unknown id" },
+    ],
+  };
+
+  it("draws one row per finding — id, severity, file:line, title, status (a re-raise naming the kind it answered) and the disposition's note — under a header tallying the statuses; the trail names each run by its round and thread, a click opens that run's fold on this page, and a run outside the page links to its own page; a finding no review issued reads unknown id without a place", async () => {
+    const w = mountApp(UnitPage, { seed: seed({ findings: LEDGER }) });
+    const block = w.find("#findings");
+    expect(block.exists()).toBe(true);
+    expect(block.find("h2").text()).toContain("Findings");
+    expect(block.find(".count").text()).toContain("5 findings");
+    expect(block.find(".tally").text()).toBe("1 open · 1 conceded · 1 re-raised · 1 not re-raised · 1 unknown id");
+    expect(block.find("a.prlink").attributes("href")).toBe("https://github.com/acme/api/pull/42");
+    const rows = block.findAll("li.finding");
+    expect(rows.map((li) => li.attributes("data-finding-id"))).toEqual(["F1", "F2", "F3", "F4", "F9"]);
+    expect(rows.map((li) => li.find(".status").text())).toEqual([
+      "re-raised after fixed",
+      "conceded",
+      "open",
+      "not re-raised",
+      "unknown id",
+    ]);
+    expect(rows[0].find(".fid").text()).toBe("F1");
+    expect(rows[0].find(".severity").text()).toBe("major");
+    expect(rows[0].find(".where").text()).toBe("src/a.ts:12");
+    expect(rows[0].find(".title").text()).toBe("the guard moved but the null path stays");
+    expect(rows[0].find(".note").text()).toBe("fixed — guarded the null path");
+    expect(rows[1].find(".where").text()).toBe("src/b.ts"); // no line
+    expect(rows[1].find(".note").text()).toBe("declined — the comment quotes the library");
+    expect(rows[2].find(".note").exists()).toBe(false); // open: nothing recorded against it yet
+    expect(rows[4].find(".where").exists()).toBe(false);
+    expect(rows[4].find(".title").exists()).toBe(false);
+    expect(rows[4].find(".note").text()).toBe("fixed — ?");
+    // The trail: where it was raised, what answered it, where it was last seen — each a run on this page.
+    const trail = rows[0].findAll("a.run");
+    expect(trail.map((a) => a.attributes("data-run-id"))).toEqual(["r1", "c1", "r2"]);
+    expect(trail.map((a) => a.text())).toEqual(["round 1 · review", "round 1 · coding", "round 2 · review"]);
+    expect(trail.map((a) => a.attributes("href"))).toEqual(["#run-r1", "#run-c1", "#run-r2"]);
+    // A finding first and last seen in one run shows that run once.
+    expect(rows[1].findAll("a.run").map((a) => a.attributes("data-run-id"))).toEqual(["r1", "c1"]);
+    // A run outside this page's rows links to its own page, named by its id.
+    const away = rows[3].findAll("a.run");
+    expect(away.map((a) => a.attributes("href"))).toEqual(["/runs/elsewhere"]);
+    expect(away[0].text()).toBe("elsewhere");
+    // Clicking a run on the page opens its fold, as a search hit does.
+    expect((w.find("#run-r1 details").element as HTMLDetailsElement).open).toBe(false);
+    await trail[0].trigger("click");
+    await w.vm.$nextTick();
+    expect((w.find("#run-r1 details").element as HTMLDetailsElement).open).toBe(true);
+  });
+
+  it("absent from the seed the block is not drawn; a ledger with no findings says the reviews listed none", () => {
+    expect(mountApp(UnitPage, { seed: seed() }).find("#findings").exists()).toBe(false);
+    const none = mountApp(UnitPage, { seed: seed({ findings: { ...LEDGER, findings: [] } }) });
+    expect(none.find("#findings .count").text()).toContain("0 findings");
+    expect(none.find("#findings .empty").text()).toBe("The reviews listed no findings.");
+    expect(none.findAll("#findings li.finding")).toHaveLength(0);
   });
 });
