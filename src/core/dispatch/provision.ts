@@ -240,12 +240,24 @@ export async function openAckCard(deps: ProvisionDeps, ctx: AckCardContext): Pro
  * visible where the run is watched. Undefined when the preset's own budget
  * stands and no directive was sent — the card is then exactly what it was.
  */
-export function budgetClipLabel(agent: AgentDef, profile: RunProfile, budgetDirective?: number): string | undefined {
+export function budgetClipLabel(
+  agent: AgentDef,
+  profile: RunProfile,
+  budgetDirective?: number,
+  source: { coordinator?: boolean } = {},
+): string | undefined {
   const idle = budgetDirective !== undefined && profile.boundedBy !== "directive";
   if (profile.boundedBy === undefined) {
     return idle ? `budget:${budgetDirective} narrowed nothing (preset asks ${agent.maxMinutes})` : undefined;
   }
-  const facts = [`${clipSourceLabel(profile.boundedBy)}; preset asks ${agent.maxMinutes}`];
+  // A plan runner's child took its minutes from the runner's carve (agent-ship
+  // item 8): the pipeline's remainder minus the reserve for the rounds after
+  // it — the directive on its request is the runner's, not a person's.
+  const clippedBy =
+    profile.boundedBy === "directive" && source.coordinator
+      ? "carved by the plan runner from the pipeline's remaining clock"
+      : clipSourceLabel(profile.boundedBy);
+  const facts = [`${clippedBy}; preset asks ${agent.maxMinutes}`];
   if (idle) facts.push(`budget:${budgetDirective} narrowed nothing`);
   return `budget ${profile.minutes} min (${facts.join("; ")})`;
 }

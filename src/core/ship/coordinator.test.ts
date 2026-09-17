@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { shipRoundHeader } from "../shipPipeline.js";
+import { ASKS } from "../budgets.js";
 import type { Finding, FindingDisposition } from "../reviewVerdict.js";
 import {
   applyReturn,
   cursorFinished,
   generatedPlanId,
   matchDispositions,
-  MERGE_WAIT_MAX_MS,
   MERGE_WAIT_CHUNK_MS,
   nextAction,
   openPlanCursor,
@@ -19,9 +19,6 @@ import {
   planInstanceId,
   readyUnits,
   renderUnitReport,
-  SHIP_FIX_RESERVE_MS,
-  SHIP_LOOP_RESERVE_MS,
-  SHIP_ROUND_RESERVE_MS,
   shipInterruptedNote,
   settleUnit,
   startUnit,
@@ -107,8 +104,6 @@ const HEAD_B = "b2c3d4e5f60718293a4b5c6d7e8f9012345678a1";
 const HEAD_C = "c3d4e5f60718293a4b5c6d7e8f9012345678a1b2";
 const T0 = 1_700_000_000_000;
 const MIN = 60_000;
-/** The child presets' own budgets as the bot supplies them (the registry's coding 45, review 25). */
-const CHILD_MINUTES = { coding: 45, review: 25 } as const;
 
 const FINDING: Finding = { id: "F1", severity: "minor", file: "src/a.ts", line: 3, title: "off by one" };
 const FIXED: FindingDisposition = { findingId: "F1", disposition: "fixed", note: "counted from zero" };
@@ -120,7 +115,6 @@ function input(over: Partial<UnitPipelineInput> = {}): UnitPipelineInput {
     repo: REPO,
     base: "main",
     caps: { maxRounds: 3, maxMinutes: 120 },
-    childMinutes: CHILD_MINUTES,
     merge: "runner",
     generated: false,
     ...over,
@@ -333,7 +327,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
       step: "U10/0/coding",
       preset: "coding",
       round: { index: 0, kind: "coding" },
-      budgetMinutes: CHILD_MINUTES.coding,
+      budgetMinutes: ASKS.coding,
       brief: { kind: "contract", unit: "U10", rebase: { branch: input().unit.branch, onto: "main" } },
     });
     d.answer({ type: "spawn", outcome: "spawned", runId: "run-c0", at: T0 });
@@ -358,7 +352,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
       step: "U10/1/review",
       preset: "review",
       round: { index: 1, kind: "review" },
-      budgetMinutes: CHILD_MINUTES.review,
+      budgetMinutes: ASKS.review,
       brief: { kind: "review", pr: 7, headSha: HEAD_A, round: 1, unit: "U10" },
     });
     runChild(
@@ -456,7 +450,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
       step: "U10/1/findings",
       preset: "coding",
       round: { index: 1, kind: "findings" },
-      budgetMinutes: CHILD_MINUTES.coding,
+      budgetMinutes: ASKS.coding,
       brief: { kind: "findings", pr: 7, reviewRunId: "run-r1", unit: "U10" },
     });
     expect(JSON.stringify(d.action)).not.toContain('"fix"');
@@ -532,8 +526,10 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect(d.action).toMatchObject({ type: "wait", step: "U10/1/findings/wait/1", runId: "run-f1" });
     expect(d.rounds().at(-1)).toBe("1 coding started");
 
-    // The person's run spends the unit's clock: a busy answer that reaches the reserve ends the unit at the cap.
-    const capped = fresh(input({ caps: { maxRounds: 3, maxMinutes: 60 }, merge: "person" }));
+    // The person's run spends the unit's clock: a busy answer that leaves the
+    // findings child under its floor (the remainder minus the 39 it holds for
+    // the rounds after it falls under 10) ends the unit at the cap.
+    const capped = fresh(input({ merge: "person" }));
     throughRoundZero(capped);
     runChild(
       capped,
@@ -551,9 +547,12 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
       type: "spawn",
       outcome: "busy",
       runId: "run-person",
-      at: T0 + 60 * MIN - SHIP_ROUND_RESERVE_MS + 1,
+      at: T0 + 72 * MIN,
     });
-    expect(capped.action).toMatchObject({ type: "end", ending: { kind: "wall_clock_cap", reviewRounds: 1 } });
+    expect(capped.action).toMatchObject({
+      type: "end",
+      ending: { kind: "wall_clock_cap", reviewRounds: 1, refused: { round: "findings", minutes: 9, floor: 10 } },
+    });
     expect(capped.state.findingsRunByRound).toEqual({});
     expect(capped.state.lastCodingRunId).toBe("run-c0");
     expect(capped.rounds()).not.toContain("1 coding started");
@@ -638,24 +637,23 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect(report).toContain("Unaddressed (no disposition):\n  - [minor] F1 src/a.ts:3 — off by one");
   });
 
-  it("the wall-clock cap: a round starts only when the reservation holds, and the child's budget is clipped to what remains", () => {
-    const d = fresh(input({ caps: { maxRounds: 3, maxMinutes: 30 }, merge: "person" }));
-    // Round 0 spawned with the coding preset's own budget clipped to the 30-minute
-    // pipeline minus the loop's reserve (two review rounds and the merge poll).
+  it("the wall-clock cap: every round is carved from what remains minus the reserve for the rounds after it, and a round under its floor is not dispatched — the unit ends at the cap naming the round, the minutes and the floor", () => {
+    const d = fresh(input({ merge: "person" }));
+    // Round 0: the coding child's whole ask, holding 60 for three reviews, two fixes and the merge.
     d.answer({ type: "branch", ok: true, at: T0 });
-    expect(d.action).toMatchObject({ type: "spawn", budgetMinutes: 30 - SHIP_LOOP_RESERVE_MS / MIN });
+    expect(d.action).toMatchObject({ type: "spawn", preset: "coding", budgetMinutes: 45 });
     d.answer({ type: "spawn", outcome: "spawned", runId: "run-c0", at: T0 });
     expect(d.action).toMatchObject({ type: "wait", timeoutMs: WAIT_CHUNK_MS });
     d.answer({ type: "wait", outcome: "event" });
-    // The coding child ended with 20 minutes left: the review round is clipped to 20 of its 25.
+    // The coding child ended with 80 minutes left: the first review holds 52 and gets its whole 25.
     d.answer({
       type: "read-record",
       run: finished({ status: "completed", pr: { number: 7, url: PR_URL, created: true } }),
-      at: T0 + 10 * MIN,
+      at: T0 + 40 * MIN,
     });
-    d.answer({ type: "pr-check", pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A }, at: T0 + 10 * MIN });
-    expect(d.action).toMatchObject({ type: "spawn", preset: "review", budgetMinutes: 20 });
-    // The review asked for changes with less than the reserve left: no findings step starts.
+    d.answer({ type: "pr-check", pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A }, at: T0 + 40 * MIN });
+    expect(d.action).toMatchObject({ type: "spawn", preset: "review", budgetMinutes: 25 });
+    // The review asked for changes with 45 minutes left: the fix would get 45 − 39 = 6, under its floor of 10.
     runChild(
       d,
       "run-r1",
@@ -665,27 +663,32 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
         reviewPosted: true,
         reviewHead: HEAD_A,
       }),
-      T0 + 30 * MIN - SHIP_ROUND_RESERVE_MS + 1,
+      T0 + 75 * MIN,
     );
-    expect(d.action).toMatchObject({ type: "end", ending: { kind: "wall_clock_cap" } });
-    expect(renderUnitReport(d.state)).toContain("cannot hold another round");
+    expect(d.action).toMatchObject({
+      type: "end",
+      ending: { kind: "wall_clock_cap", refused: { round: "findings", minutes: 6, floor: 10 } },
+    });
+    const report = renderUnitReport(d.state);
+    expect(report).toContain("cannot hold another round");
+    expect(report).toContain("the findings round would get 6 min, under its floor of 10");
   });
 
-  it("the coding child's budget leaves the loop's reserve: two review rounds and the merge poll always fit after round 0, whatever the preset asks", () => {
-    // A 40-minute pipeline: the coding preset's 45 is clipped to 40 minus the
-    // 11-minute loop reserve, never to 39 — the review loop always has a clock.
-    const d = fresh(input({ caps: { maxRounds: 3, maxMinutes: 40 }, merge: "person" }));
-    d.answer({ type: "branch", ok: true, at: T0 });
-    expect(SHIP_LOOP_RESERVE_MS).toBe(2 * SHIP_ROUND_RESERVE_MS + 5 * MIN);
-    expect(d.action).toMatchObject({ type: "spawn", preset: "coding", budgetMinutes: 40 - SHIP_LOOP_RESERVE_MS / MIN });
+  it("the coding child's carve leaves the reserve for the whole loop the config allows: a 100-minute pipeline at three rounds hands the child 40 (100 − 60), a 120-minute one its whole 45, a 60-minute one at one round 42", () => {
+    const short = fresh(input({ caps: { maxRounds: 3, maxMinutes: 100 }, merge: "person" }));
+    short.answer({ type: "branch", ok: true, at: T0 });
+    expect(short.action).toMatchObject({ type: "spawn", preset: "coding", budgetMinutes: 40 });
+    const full = fresh(input({ merge: "person" }));
+    full.answer({ type: "branch", ok: true, at: T0 });
+    expect(full.action).toMatchObject({ type: "spawn", preset: "coding", budgetMinutes: 45 });
+    // Fewer review rounds hold less back: at one round the reserve is a review, its provisioning and the merge floor.
+    const one = fresh(input({ caps: { maxRounds: 1, maxMinutes: 60 }, merge: "person" }));
+    one.answer({ type: "branch", ok: true, at: T0 });
+    expect(one.action).toMatchObject({ type: "spawn", preset: "coding", budgetMinutes: 42 });
   });
 
-  it("a findings child's budget leaves the re-review and the merge poll, not the whole loop's reserve: a late fix round keeps the minutes the first review already spent", () => {
-    // A 40-minute pipeline: round 0 ends at 10 minutes, the review asks for
-    // changes at 15. The fix child has 25 minutes of clock; it leaves one
-    // round's reserve and the merge poll (8 minutes), not the 11 a round-0
-    // child leaves — the first review has already happened.
-    const d = fresh(input({ caps: { maxRounds: 3, maxMinutes: 40 }, merge: "person" }));
+  it("a findings child's carve leaves the rounds after it — the re-review, a second fix, the last review and the merge — never the whole loop's reserve: with 105 minutes left it gets its whole 45, with 55 left it gets 16", () => {
+    const d = fresh(input({ merge: "person" }));
     throughRoundZero(d);
     expect(d.action).toMatchObject({ type: "spawn", preset: "review", round: { index: 1, kind: "review" } });
     runChild(
@@ -699,28 +702,47 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
       }),
       T0 + 15 * MIN,
     );
-    expect(SHIP_FIX_RESERVE_MS).toBe(SHIP_ROUND_RESERVE_MS + 5 * MIN);
     expect(d.action).toMatchObject({
       type: "spawn",
       preset: "coding",
       round: { index: 1, kind: "findings" },
-      budgetMinutes: Math.min(CHILD_MINUTES.coding, 25 - SHIP_FIX_RESERVE_MS / MIN),
+      budgetMinutes: 45,
     });
-    expect(d.action).not.toMatchObject({ budgetMinutes: 25 - SHIP_LOOP_RESERVE_MS / MIN });
+
+    const late = fresh(input({ caps: { maxRounds: 3, maxMinutes: 70 }, merge: "person" }));
+    throughRoundZero(late);
+    runChild(
+      late,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "request_changes", summary: "x", findings: [FINDING] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 15 * MIN,
+    );
+    expect(late.action).toMatchObject({
+      type: "spawn",
+      preset: "coding",
+      round: { index: 1, kind: "findings" },
+      budgetMinutes: 16,
+    });
   });
 
   it("a wall-clock cap after the child opened or updated the pull request ends the unit review_pending: the pull request and the child's head are named, the report says review pending and how the budget went (coding, review, waiting)", () => {
-    const d = fresh(input({ caps: { maxRounds: 3, maxMinutes: 40 }, merge: "person" }));
+    const d = fresh(input({ merge: "person" }));
     d.answer({ type: "branch", ok: true, at: T0 });
-    // The coding child ships its pull request with 2 minutes left on the pipeline.
+    // The coding child ships its pull request with 50 minutes left on the pipeline:
+    // the review holds 52 for the rounds after it, so it falls under its floor of 5.
     runChild(
       d,
       "run-c0",
       finished({ status: "completed", pr: { number: 7, url: PR_URL, created: true } }),
-      T0 + 38 * MIN,
+      T0 + 70 * MIN,
     );
     expect(d.action.type).toBe("pr-check");
-    d.answer({ type: "pr-check", pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A }, at: T0 + 38 * MIN });
+    d.answer({ type: "pr-check", pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A }, at: T0 + 70 * MIN });
     expect(d.action).toMatchObject({
       type: "end",
       ending: {
@@ -728,18 +750,18 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
         pr: { number: 7, url: PR_URL },
         headSha: HEAD_A,
         reviewRounds: 0,
-        spent: { coding: 38 * MIN, review: 0, waiting: 0 },
+        spent: { coding: 70 * MIN, review: 0, waiting: 0 },
       },
     });
     const report = renderUnitReport(d.state);
     expect(report).toContain(`⏳ Review pending: the coding child shipped ${PR_URL}`);
     expect(report).toContain("cannot hold the review round");
     expect(report).toContain("The next attempt starts at the review round");
-    expect(report).toContain("Budget split (40 min): coding 38 min, review 0 min, waiting 0 min.");
+    expect(report).toContain("Budget split (120 min): coding 70 min, review 0 min, waiting 0 min.");
   });
 
   it("the wall-clock cap's report carries the budget split too, so a person can see whether the cap or the child is the problem", () => {
-    const d = fresh(input({ caps: { maxRounds: 3, maxMinutes: 30 }, merge: "person" }));
+    const d = fresh(input({ merge: "person" }));
     d.answer({ type: "branch", ok: true, at: T0 });
     runChild(
       d,
@@ -757,14 +779,14 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
         reviewPosted: true,
         reviewHead: HEAD_A,
       }),
-      T0 + 28 * MIN,
+      T0 + 75 * MIN,
     );
-    // The findings step cannot start: not a review round, so the honest wall-clock cap — with the split.
+    // The findings step cannot start (45 left, 39 held, 6 under the floor of 10): not a review round, so the honest wall-clock cap — with the split.
     expect(d.action).toMatchObject({
       type: "end",
-      ending: { kind: "wall_clock_cap", spent: { coding: 10 * MIN, review: 18 * MIN, waiting: 0 } },
+      ending: { kind: "wall_clock_cap", spent: { coding: 10 * MIN, review: 65 * MIN, waiting: 0 } },
     });
-    expect(renderUnitReport(d.state)).toContain("Budget split (30 min): coding 10 min, review 18 min, waiting 0 min.");
+    expect(renderUnitReport(d.state)).toContain("Budget split (120 min): coding 10 min, review 65 min, waiting 0 min.");
   });
 
   it("a lastPush on the input starts the attempt at the review round when the open pull request still heads at the child's own last push — and at round 0 when the head moved or none is known", () => {
@@ -1105,8 +1127,8 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
   });
 
   it("the wait is sliced: every wait is a chunk, never the child's whole budget, and a live answer waits the next chunk; the slices before the budget plus the margin sum to exactly that, the last one the remainder; past it an overdue child is asked about every chunk, never in a zero-length wait; a finished record ends the wait exactly as the event would; a busy wait is a chunk too", () => {
-    const until = T0 + CHILD_MINUTES.coding * MIN + WAIT_MARGIN_MS;
-    expect(WAIT_CHUNK_MS).toBeLessThan(CHILD_MINUTES.coding * MIN);
+    const until = T0 + ASKS.coding * MIN + WAIT_MARGIN_MS;
+    expect(WAIT_CHUNK_MS).toBeLessThan(ASKS.coding * MIN);
     const d = atWait();
     expect(d.action).toMatchObject({ type: "wait", step: "U10/0/coding/wait/1", timeoutMs: WAIT_CHUNK_MS });
     // A chunk the engine never answered; the bot says live: the next slice is a chunk again.
@@ -1146,7 +1168,7 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
       sum.answer({ type: "wait", outcome: "timeout" });
       sum.answer({ type: "read-record", run: { finished: false }, at: clock });
     }
-    expect(total).toBe(CHILD_MINUTES.coding * MIN + WAIT_MARGIN_MS);
+    expect(total).toBe(ASKS.coding * MIN + WAIT_MARGIN_MS);
 
     // A busy wait — another run holding the thread — is a chunk too, then the spawn is asked again.
     const b = fresh(input());
@@ -1320,7 +1342,7 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
     // asked once more, and a pending past the cap ends the unit.
     d.answer({ type: "wait-checks", outcome: "timeout" });
     expect(d.action).toMatchObject({ type: "merge", step: "U10/merge/3" });
-    d.answer({ type: "merge", outcome: "pending", reason: "checks running", at: T0 + 20 * MIN + MERGE_WAIT_MAX_MS });
+    d.answer({ type: "merge", outcome: "pending", reason: "checks running", at: T0 + 20 * MIN + 60 * MIN });
     expect(d.action).toMatchObject({ type: "end", ending: { kind: "merge_refused" } });
     expect(renderUnitReport(d.state)).toContain("checks running");
 

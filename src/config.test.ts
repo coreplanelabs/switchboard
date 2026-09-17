@@ -1017,23 +1017,29 @@ describe("spawn block (spawn.maxChildren)", () => {
 
 describe("ship caps block (agent:ship pipeline)", () => {
   it("parses maxRounds/maxMinutes; absent block leaves the field unset", async () => {
-    const s = store(YAML_FIXTURE + "ship:\n  maxRounds: 2\n  maxMinutes: 30\n");
-    expect(s.config.ship).toEqual({ maxRounds: 2, maxMinutes: 30 });
+    const s = store(YAML_FIXTURE + "ship:\n  maxRounds: 2\n  maxMinutes: 90\n");
+    expect(s.config.ship).toEqual({ maxRounds: 2, maxMinutes: 90 });
     expect(store().config.ship).toBeUndefined();
   });
 
   it("rejects non-integers and values < 1 at load, naming the key", async () => {
     expect(() => store(YAML_FIXTURE + "ship:\n  maxRounds: 0\n")).toThrow(/ship\.maxRounds must be an integer >= 1/);
-    expect(() => store(YAML_FIXTURE + "ship:\n  maxMinutes: 1.5\n")).toThrow(
-      /ship\.maxMinutes must be an integer >= 14/,
-    );
-    // The pipeline budgets for the loop: a maxMinutes under the loop's reserve
-    // plus one round leaves the coding child no room at all, refused at load.
-    expect(() => store(YAML_FIXTURE + "ship:\n  maxMinutes: 13\n")).toThrow(
-      /ship\.maxMinutes must be an integer >= 14 — the pipeline reserves two review rounds and the merge poll/,
-    );
-    expect(store(YAML_FIXTURE + "ship:\n  maxMinutes: 14\n").config.ship).toEqual({ maxMinutes: 14 });
+    expect(() => store(YAML_FIXTURE + "ship:\n  maxMinutes: 1.5\n")).toThrow(/ship\.maxMinutes must be an integer/);
     expect(() => store(YAML_FIXTURE + 'ship: "nope"\n')).toThrow(/ship must be a mapping/);
+  });
+
+  // agent-ship.md item 8, decision 0046: the fit at config load — the pipeline
+  // holds its first child at its ask and every later round at its floor, or
+  // the config is refused naming the sum, never left to cap out on every unit.
+  it("a ship pipeline that cannot hold its loop is refused with the sum: 40 minutes against the 108 three review rounds need, 120 against the 129 four need; 108 at three rounds loads, and the default 120 at three rounds loads", async () => {
+    expect(() => store(YAML_FIXTURE + "ship:\n  maxMinutes: 40\n")).toThrow(
+      /ship\.maxMinutes 40 cannot hold the loop ship\.maxRounds 3 allows — 108 minutes are needed \(3 to provision, the coding child's 45, and the reserve for 3 review rounds at their floors\)/,
+    );
+    expect(() => store(YAML_FIXTURE + "ship:\n  maxRounds: 4\n")).toThrow(
+      /ship\.maxMinutes 120 cannot hold the loop ship\.maxRounds 4 allows — 129 minutes are needed/,
+    );
+    expect(store(YAML_FIXTURE + "ship:\n  maxMinutes: 108\n").config.ship).toEqual({ maxMinutes: 108 });
+    expect(store(YAML_FIXTURE + "ship:\n  maxRounds: 3\n").config.ship).toEqual({ maxRounds: 3 });
   });
 
   // docs/reference/specs/agent-ship.md item 16: the plan runner is the one ship

@@ -34,8 +34,9 @@ import type { RunStatus } from "../runRecord.js";
 import { normalizeHead, sameCommit } from "../reviewedHead.js";
 import { formatFinding, type Finding, type FindingDisposition, type ReviewVerdictKind } from "../reviewVerdict.js";
 import { parsePlanUnit, planUnitIds } from "./contract.js";
+import { carve, loopPosition, MINUTE_MS, SHIP_WAIT, type Carve, type Loop } from "../budgets.js";
 
-const MIN = 60_000;
+const MIN = MINUTE_MS;
 
 /** What a pipeline runs under: the rounds cap from the `ship` config block, and
  *  the wall clock from the parent's EFFECTIVE profile — the ship preset's
@@ -45,34 +46,10 @@ export interface ShipCaps {
   maxMinutes: number;
 }
 
-/** A round is dispatched only when at least this much of the pipeline budget
- *  remains (the reservation check, agent-ship item 8): a child clipped below
- *  this cannot do useful work, so the pipeline reports the cap instead of
- *  burning an attach and a model turn on a doomed round. */
-export const SHIP_ROUND_RESERVE_MS = 3 * MIN;
-
-/** What a round-0 coding child must leave on the pipeline's clock: two review
- *  rounds (a review and, after a fix, its re-review) and one merge poll — the
- *  loop the pipeline exists to run. The coding child's budget is clipped to
- *  the remaining wall clock MINUS this reserve (never under the two minutes a
- *  spawn accepts), so a child that uses its whole directive still hands the
- *  pipeline a clock that holds the review; without the clip a 40-minute
- *  pipeline hands 39 minutes to the child and caps out with the pull request
- *  shipped and unreviewed. */
-export const SHIP_LOOP_RESERVE_MS = 2 * SHIP_ROUND_RESERVE_MS + 5 * MIN;
-
-/** What a findings child (the fix after a review asked for changes) must leave
- *  on the clock: the re-review and one merge poll — one round's reserve and
- *  five minutes. Never the whole loop's: by the time a fix round runs, the
- *  first review has already happened, and holding two rounds back from a late
- *  fix would cap a pipeline that still has the time. */
-export const SHIP_FIX_RESERVE_MS = SHIP_ROUND_RESERVE_MS + 5 * MIN;
-
-/** The floor `validateShip` holds `ship.maxMinutes` to: the loop's reserve
- *  plus one round's — under it no coding child can both work and leave the
- *  review its time, so the config is refused at load rather than left to cap
- *  out on every unit. */
-export const SHIP_MIN_MAX_MINUTES = (SHIP_LOOP_RESERVE_MS + SHIP_ROUND_RESERVE_MS) / MIN;
+/** A round's minutes come from `carve` in `src/core/budgets.ts` (agent-ship
+ *  item 8, decision 0046): the remainder minus the reserve derived over the
+ *  rounds that must still follow, capped at the preset's ask, refused under the
+ *  round's floor. Nothing here holds a reserve of its own. */
 
 /** What a ship pipeline's thread and card say when the bot died under it (run-
  *  history item 36): the work it did stands on GitHub with nobody driving it,
@@ -525,7 +502,14 @@ export type UnitEnding =
   | { kind: "merge_ready"; pr: PrRef; reviewRounds: number }
   | { kind: "merge_refused"; pr: PrRef; reason: string; reviewRounds: number }
   | { kind: "round_cap"; maxRounds: number; reviewRounds: number }
-  | { kind: "wall_clock_cap"; remainingMs: number; reviewRounds: number; spent: ShipBudgetSpent }
+  | {
+      kind: "wall_clock_cap";
+      remainingMs: number;
+      reviewRounds: number;
+      spent: ShipBudgetSpent;
+      /** The round the remainder could not hold: what it would have got and the floor it fell under. */
+      refused?: { round: RoundKind; minutes: number; floor: number };
+    }
   /** The wall clock capped AFTER the coding child opened or updated the pull
    *  request: the work stands and only the review is missing, so the ending
    *  names the pull request and "review pending" instead of calling the unit a
@@ -584,9 +568,6 @@ export interface UnitPipelineInput {
   /** The pull request's base — the branch the unit is created from and rebased onto. */
   base: string;
   caps: ShipCaps;
-  /** Each child preset's own wall-clock budget (its `maxMinutes`), the number a
-   *  round's budget is clipped from — supplied by the bot, which holds the registry. */
-  childMinutes: Readonly<Record<ChildPreset, number>>;
   /** Who merges: the instance's `merge` field as the plan route answers it —
    *  `runner` (a seeded plan, under its grant) or `person` (a task, or a
    *  record without the field). */
@@ -614,7 +595,7 @@ type Phase =
   /** Before anything is created: what already heads the branch — a merged pull request ends the unit here. */
   | { at: "pre-check" }
   | { at: "branch" }
-  | { at: "spawn"; round: RoundRef; busy: number }
+  | { at: "spawn"; round: RoundRef; busy: number; minutes: number; holds: number }
   | { at: "busy-wait"; round: RoundRef; runId?: string; n: number }
   /** `until`: when the child's budget plus the margin runs out, counted from the spawn's answer — the wait's last slice ends there. */
   | { at: "wait"; round: RoundRef; runId: string; n: number; until: number }
@@ -630,8 +611,8 @@ type Phase =
        *  request; with nothing pushed the unit ends with the child's own reason. */
       dead?: "failed" | "interrupted";
     }
-  | { at: "merge"; pr: PrRef; headSha: string; n: number; since: number }
-  | { at: "merge-wait"; pr: PrRef; headSha: string; n: number; since: number }
+  | { at: "merge"; pr: PrRef; headSha: string; n: number; since: number; waitMs: number }
+  | { at: "merge-wait"; pr: PrRef; headSha: string; n: number; since: number; waitMs: number }
   | { at: "ended" };
 
 export interface UnitPipelineState {
@@ -662,7 +643,7 @@ export interface UnitPipelineState {
 }
 
 /** Past a child's budget, the parent asks the bot instead of waiting on. */
-export const WAIT_MARGIN_MS = 5 * MIN;
+export const WAIT_MARGIN_MS = SHIP_WAIT.marginMinutes * MIN;
 /** One slice of a wait on a child. The child's budget plus the margin is
  *  walked in chunks with a `read-record` between them, so an event the engine
  *  never delivered — refused, lost, sent to an instance that had ended — costs
@@ -670,19 +651,18 @@ export const WAIT_MARGIN_MS = 5 * MIN;
  *  is the machine's one cadence for asking the bot what it cannot be told (the
  *  margin and the merge poll are the same number), and it keeps a round to a
  *  few steps: a coding child's 45 minutes are ten waits and ten reads. */
-export const WAIT_CHUNK_MS = 5 * MIN;
-/** How long the merge step waits for the guards at most. While checks are
- *  pending the machine waits on the intake's `checks-settled-<head>` event
- *  (http-ingress.md item 12) — one bounded wait per ask, the remainder of this
- *  cap, as the fallback when the event never arrives. */
-export const MERGE_WAIT_MAX_MS = 60 * MIN;
+export const WAIT_CHUNK_MS = SHIP_WAIT.chunkMinutes * MIN;
+/** The merge wait is a round of its own: its minutes are carved from the
+ *  pipeline's remainder when the door is first asked (the merge wait's ask and
+ *  floor are rows of `src/core/budgets.ts`), and the wait below is sliced
+ *  from that carve. */
 /** One merge wait's fallback timeout: the old poll's cadence. The event wakes
  *  the machine at once when the intake delivers it; without one (the webhook
  *  not configured, a delivery lost) the door is still re-asked every chunk, so
  *  a merge is never slower than the poll it replaced. */
-export const MERGE_WAIT_CHUNK_MS = 5 * MIN;
+export const MERGE_WAIT_CHUNK_MS = SHIP_WAIT.mergeChunkMinutes * MIN;
 /** A `busy` without the live run's id: nothing to wait on, so a short sleep before the spawn is asked again. */
-export const BUSY_RETRY_MS = 2 * MIN;
+export const BUSY_RETRY_MS = SHIP_WAIT.busyRetryMinutes * MIN;
 
 // ---- the unit pipeline: opening and the next action -----------------------------------------------
 
@@ -721,28 +701,16 @@ function waitSliceMs(clock: number, until: number): number {
   return remaining > 0 ? Math.min(WAIT_CHUNK_MS, remaining) : WAIT_CHUNK_MS;
 }
 
-/** The child's budget: its preset's own, clipped to the pipeline's remaining
- *  wall clock (agent-ship item 8's clip), never under the two minutes a
- *  spawn accepts. */
-function budgetMinutesFor(s: UnitPipelineState, round: RoundRef): number {
-  const headroom = remainingMs(s) - reserveFor(round.kind);
-  return Math.max(2, Math.min(s.input.childMinutes[presetOf(round.kind)], Math.floor(headroom / MIN)));
-}
+/** The pipeline's loop as the config allows it. */
+const loopOf = (s: UnitPipelineState): Loop => ({ maxRounds: s.input.caps.maxRounds });
 
-/** What a child of each round kind leaves on the pipeline's clock: round 0's
- *  coding child the whole loop (two reviews and the merge poll,
- *  SHIP_LOOP_RESERVE_MS), a findings child the re-review and the merge poll
- *  (SHIP_FIX_RESERVE_MS), a review child nothing — the review is what the
- *  reserve was held for. */
-function reserveFor(kind: RoundKind): number {
-  switch (kind) {
-    case "coding":
-      return SHIP_LOOP_RESERVE_MS;
-    case "findings":
-      return SHIP_FIX_RESERVE_MS;
-    case "review":
-      return 0;
-  }
+/** A round's carve (agent-ship item 8): the remainder minus the reserve for
+ *  the rounds after it, capped at its preset's ask, refused under its floor.
+ *  A review round `n` and the findings step that follows it share `n`; the
+ *  module's positions are the loop's own. */
+function roundCarve(s: UnitPipelineState, round: RoundRef): Carve {
+  const kind = round.kind === "findings" ? "fix" : round.kind;
+  return carve(remainingMs(s), { kind, index: loopPosition(loopOf(s), kind, round.index) }, loopOf(s));
 }
 
 const roundStep = (s: UnitPipelineState, round: RoundRef) => `${s.input.unit.id}/${round.index}/${round.kind}`;
@@ -800,7 +768,7 @@ export function nextAction(s: UnitPipelineState): CoordinatorAction {
         step: roundStep(s, p.round),
         preset,
         round: p.round,
-        budgetMinutes: budgetMinutesFor(s, p.round),
+        budgetMinutes: p.minutes,
         brief: briefFor(s, p.round),
       };
     }
@@ -831,7 +799,7 @@ export function nextAction(s: UnitPipelineState): CoordinatorAction {
         type: "wait-checks",
         step: `${unit}/merge/wait/${p.n}`,
         headSha: p.headSha,
-        timeoutMs: Math.max(MIN, Math.min(MERGE_WAIT_CHUNK_MS, MERGE_WAIT_MAX_MS - (s.clock - p.since))),
+        timeoutMs: Math.max(MIN, Math.min(MERGE_WAIT_CHUNK_MS, p.waitMs - (s.clock - p.since))),
       };
     case "ended":
       return { type: "end", step: `${unit}/end`, ending: s.ending! };
@@ -861,7 +829,7 @@ const roundNote = (round: RoundRef, outcome: ShipRoundOutcome): CoordinatorNote 
 /** The cap's ending: `review_pending` when the clock ran out entering a
  *  review round with the child's pull request standing — the work shipped and
  *  only the review is missing — else the wall-clock cap. Both carry the split. */
-function capEnding(s: UnitPipelineState, round?: RoundRef): UnitEnding {
+function capEnding(s: UnitPipelineState, round?: RoundRef, refused?: Carve): UnitEnding {
   if (round?.kind === "review" && s.pr !== undefined)
     return {
       kind: "review_pending",
@@ -870,16 +838,28 @@ function capEnding(s: UnitPipelineState, round?: RoundRef): UnitEnding {
       reviewRounds: s.reviewRounds,
       spent: s.spentMs,
     };
-  return { kind: "wall_clock_cap", remainingMs: remainingMs(s), reviewRounds: s.reviewRounds, spent: s.spentMs };
+  return {
+    kind: "wall_clock_cap",
+    remainingMs: remainingMs(s),
+    reviewRounds: s.reviewRounds,
+    spent: s.spentMs,
+    ...(round !== undefined && refused?.kind === "refused"
+      ? { refused: { round: round.kind, minutes: refused.minutes, floor: refused.floor } }
+      : {}),
+  };
 }
 
-/** Start a round if the reservation holds (agent-ship item 8's check: a
- *  child clipped under the reserve cannot do useful work). */
+/** Start a round if its carve holds (agent-ship item 8): a round the
+ *  remainder cannot carve above its floor is not dispatched, and the unit ends
+ *  at the cap naming the round, what it would have got and the floor. */
 function enterRound(s: UnitPipelineState, round: RoundRef, notes: CoordinatorNote[] = []): Transition {
-  const remaining = remainingMs(s);
-  if (remaining < SHIP_ROUND_RESERVE_MS) return end(s, capEnding(s, round), notes);
+  const carved = roundCarve(s, round);
+  if (carved.kind === "refused") return end(s, capEnding(s, round, carved), notes);
   const reviewRounds = round.kind === "review" ? round.index : s.reviewRounds;
-  return { state: { ...s, reviewRounds, phase: { at: "spawn", round, busy: 0 } }, notes };
+  return {
+    state: { ...s, reviewRounds, phase: { at: "spawn", round, busy: 0, minutes: carved.minutes, holds: carved.holds } },
+    notes,
+  };
 }
 
 /** The next review round, or the round cap. */
@@ -1042,7 +1022,26 @@ function settleReview(
         { kind: "merge_refused", pr, reason: "no approved head is known to merge at", reviewRounds: next.reviewRounds },
         notes,
       );
-    return { state: { ...next, phase: { at: "merge", pr, headSha, n: 1, since: next.clock } }, notes };
+    const mergeWait = carve(
+      remainingMs(next),
+      { kind: "merge", index: loopPosition(loopOf(next), "merge") },
+      loopOf(next),
+    );
+    if (mergeWait.kind === "refused")
+      return end(
+        next,
+        {
+          kind: "merge_refused",
+          pr,
+          reason: `the remaining ${mergeWait.minutes} minutes of the pipeline are under the merge wait's floor of ${mergeWait.floor}`,
+          reviewRounds: next.reviewRounds,
+        },
+        notes,
+      );
+    return {
+      state: { ...next, phase: { at: "merge", pr, headSha, n: 1, since: next.clock, waitMs: mergeWait.minutes * MIN } },
+      notes,
+    };
   }
   // request_changes: the verdict settled (and posted) — now a stop
   // short-circuits the findings step, naming the review standing on the pull request.
@@ -1252,7 +1251,7 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
         case "spawned":
         case "alreadySpawned": {
           // The child's budget runs from the spawn's answer; the wait walks it, plus the margin, in chunks.
-          const until = clocked.clock + budgetMinutesFor(s, p.round) * MIN + WAIT_MARGIN_MS;
+          const until = clocked.clock + p.minutes * MIN + WAIT_MARGIN_MS;
           const runs =
             p.round.kind === "review"
               ? { reviewRunByRound: { ...s.reviewRunByRound, [p.round.index]: r.runId } }
@@ -1270,7 +1269,8 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
         case "busy": {
           // Another run holds the unit's thread: wait for its end, then ask
           // again — unless the pipeline's wall clock ran out meanwhile.
-          if (remainingMs(clocked) < SHIP_ROUND_RESERVE_MS) return end(clocked, capEnding(clocked, p.round));
+          const recarved = roundCarve(clocked, p.round);
+          if (recarved.kind === "refused") return end(clocked, capEnding(clocked, p.round, recarved));
           return {
             state: {
               ...clocked,
@@ -1302,8 +1302,19 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
       }
       break;
     }
-    case "busy-wait":
-      return { state: { ...s, phase: { at: "spawn", round: p.round, busy: p.n } }, notes: [] };
+    case "busy-wait": {
+      // The clock moved while the spawn was busy: the round is carved again
+      // from what remains, and a carve now under the floor ends at the cap.
+      const carved = roundCarve(s, p.round);
+      if (carved.kind === "refused") return end(s, capEnding(s, p.round, carved));
+      return {
+        state: {
+          ...s,
+          phase: { at: "spawn", round: p.round, busy: p.n, minutes: carved.minutes, holds: carved.holds },
+        },
+        notes: [],
+      };
+    }
     case "wait":
       return {
         state: { ...s, phase: { at: "read", round: p.round, runId: p.runId, n: p.n, until: p.until } },
@@ -1356,7 +1367,7 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
       if (r.outcome === "refused")
         return end(clocked, { kind: "merge_refused", pr: p.pr, reason: r.reason, reviewRounds: s.reviewRounds });
       const waited = r.at - p.since;
-      if (waited >= MERGE_WAIT_MAX_MS)
+      if (waited >= p.waitMs)
         return end(clocked, {
           kind: "merge_refused",
           pr: p.pr,
@@ -1364,13 +1375,19 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
           reviewRounds: s.reviewRounds,
         });
       return {
-        state: { ...clocked, phase: { at: "merge-wait", pr: p.pr, headSha: p.headSha, n: p.n, since: p.since } },
+        state: {
+          ...clocked,
+          phase: { at: "merge-wait", pr: p.pr, headSha: p.headSha, n: p.n, since: p.since, waitMs: p.waitMs },
+        },
         notes: [],
       };
     }
     case "merge-wait":
       return {
-        state: { ...s, phase: { at: "merge", pr: p.pr, headSha: p.headSha, n: p.n + 1, since: p.since } },
+        state: {
+          ...s,
+          phase: { at: "merge", pr: p.pr, headSha: p.headSha, n: p.n + 1, since: p.since, waitMs: p.waitMs },
+        },
         notes: [],
       };
     case "ended":
@@ -1505,7 +1522,7 @@ export function renderUnitReport(s: UnitPipelineState, facts?: MergeReadyFacts):
       ]);
     case "wall_clock_cap":
       return join([
-        `🧢 Ship stopped at a cap: the remaining pipeline time (~${Math.max(0, Math.round(e.remainingMs / MIN))} min of the ${s.input.caps.maxMinutes}-minute budget) cannot hold another round — no approval after ${rounds}.${prLine}`,
+        `🧢 Ship stopped at a cap: the remaining pipeline time (~${Math.max(0, Math.round(e.remainingMs / MIN))} min of the ${s.input.caps.maxMinutes}-minute budget) cannot hold another round${e.refused ? ` (the ${e.refused.round} round would get ${e.refused.minutes} min, under its floor of ${e.refused.floor})` : ""} — no approval after ${rounds}.${prLine}`,
         budgetSplitLine(e.spent, s.input.caps.maxMinutes),
         splitReport(s),
         reissue,

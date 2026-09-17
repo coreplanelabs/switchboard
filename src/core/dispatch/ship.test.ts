@@ -68,7 +68,10 @@ function configStore(extra = ""): ConfigStore {
 /** Everything `dispatch()` hands the ship branch for one request, with a
  *  recording channel, card and registry, a real writer over an in-memory store,
  *  and the runner's seams — its records, its shim — as doubles. */
-function setup(userId: string, over: { text?: string; repoCtx?: Record<string, unknown>; configExtra?: string } = {}) {
+function setup(
+  userId: string,
+  over: { text?: string; repoCtx?: Record<string, unknown>; configExtra?: string; minutes?: number } = {},
+) {
   const config = configStore(over.configExtra ?? "");
   const store = new InMemoryRunStore();
   const writer = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
@@ -108,8 +111,9 @@ function setup(userId: string, over: { text?: string; repoCtx?: Record<string, u
   const ctx = {
     agent: getAgent("ship"),
     // The parent's effective profile, as the gate admitted it: the preset's
-    // declared 120 clipped to 45 by a channel boundary.
-    profile: { ...declaredProfile(getAgent("ship")), minutes: 45, boundedBy: "channel" as const },
+    // declared 120 clipped to 110 by a channel boundary — above the fit the
+    // fork asserts (108 at three rounds), so the runner is asked.
+    profile: { ...declaredProfile(getAgent("ship")), minutes: over.minutes ?? 110, boundedBy: "channel" as const },
     modelRef: "anthropic/general-model",
     agentSource: "directive" as const,
     label: "*ship* · acme/api",
@@ -177,7 +181,7 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
       threadKey: THREAD,
       repo: "acme/api",
       base: "main",
-      caps: { maxRounds: 3, maxMinutes: 45 },
+      caps: { maxRounds: 3, maxMinutes: 110 },
       card: { channel: "CX", ts: "1.5" },
       runId: "run-s",
       label: "*ship* · acme/api",
@@ -201,19 +205,46 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
       status: "completed",
       agent: "ship",
       replyOk: true,
-      profile: { preset: "ship", machine: "repo-resident", identity: "write", minutes: 45, boundedBy: "channel" },
+      profile: { preset: "ship", machine: "repo-resident", identity: "write", minutes: 110, boundedBy: "channel" },
     });
   });
 
   // agent-ship.md item 8: the runner's wall clock is the parent's EFFECTIVE
   // profile's minutes — the preset's declared budget as the gate clipped it —
   // never the `ship` config block read again; the rounds cap is the block's.
-  it("the caps handed to the runner: `maxMinutes` is the profile's minutes (the channel's 45, not the block's 60), `maxRounds` the config block's", async () => {
-    const s = setup("slack:UADMIN", { configExtra: "ship:\n  maxRounds: 2\n  maxMinutes: 60\n" });
+  it("the caps handed to the runner: `maxMinutes` is the profile's minutes (the channel's 110, not the block's 120), `maxRounds` the config block's", async () => {
+    const s = setup("slack:UADMIN", { configExtra: "ship:\n  maxRounds: 2\n  maxMinutes: 120\n" });
     await runShipBranch(s.deps, s.msg, s.io, s.ctx);
     expect((await s.instances.get("plan-fix-the-login-redirect-6435ec"))?.caps).toEqual({
       maxRounds: 2,
-      maxMinutes: 45,
+      maxMinutes: 110,
+    });
+  });
+
+  // agent-ship.md item 8, decision 0046: the fit at the fork. A boundary or a
+  // `budget:` directive that clipped the pipeline under the loop it allows is
+  // refused with the sum on the card, and no instance opens.
+  it("a boundary that clips ship under its loop refuses at the fork with the sum: 40 minutes cannot hold three review rounds (108 needed), no instance is created, the card closes 🚫 and the reply names the numbers", async () => {
+    const s = setup("slack:UADMIN", { minutes: 40 });
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    expect(s.created).toEqual([]);
+    expect(s.refusals).toEqual(["ship_budget"]);
+    expect(JSON.stringify(s.closes[0])).toContain("🚫");
+    expect(JSON.stringify(s.closes[0])).toContain(
+      "budget 40 min cannot hold the ship loop (3 review rounds need 108 min)",
+    );
+    expect(s.replies[0]).toContain("Ship cannot start under a 40-minute budget");
+    expect(s.replies[0]).toContain("needs 108 minutes");
+    expect(s.replies[0]).toContain("`agent:coding`");
+  });
+
+  it("a boundary at the fit's sum starts the runner: 108 minutes hold three review rounds", async () => {
+    const s = setup("slack:UADMIN", { minutes: 108 });
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    expect(s.created).toEqual(["plan-fix-the-login-redirect-6435ec"]);
+    expect((await s.instances.get("plan-fix-the-login-redirect-6435ec"))?.caps).toEqual({
+      maxRounds: 3,
+      maxMinutes: 108,
     });
   });
 

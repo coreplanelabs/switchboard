@@ -8354,8 +8354,10 @@ workspaceDir: __WORKDIR__
     for (const text of surfaces) expect(text).not.toContain("ship/");
   });
 
-  it("a channel boundary clips the pipeline's wall clock: the preset's 120 becomes the channel's 10 in the caps handed to the runner, the card names the clip and the record carries the ship profile", async () => {
-    const { deps, instances } = shipDeps(SHIP_YAML + 'channels:\n  "slack:CX":\n    boundary:\n      maxMinutes: 10\n');
+  it("a channel boundary clips the pipeline's wall clock: the preset's 120 becomes the channel's 110 in the caps handed to the runner, the card names the clip and the record carries the ship profile; a boundary under the loop's fit (10 against 108) is refused before any instance opens, naming the sum", async () => {
+    const { deps, instances } = shipDeps(
+      SHIP_YAML + 'channels:\n  "slack:CX":\n    boundary:\n      maxMinutes: 110\n',
+    );
     const store = new InMemoryRunStore();
     const registry = new RunRegistry({ genId: () => "run-shipb", genToken: () => "tok" });
     deps.runRegistry = registry;
@@ -8369,28 +8371,38 @@ workspaceDir: __WORKDIR__
     await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
     await deps.runHistoryWriter.settled();
     expect(replies[0]).toContain("Handed to the plan runner");
-    expect((await handed(instances, "run-shipb")).instance?.caps).toEqual({ maxRounds: 3, maxMinutes: 10 });
+    expect((await handed(instances, "run-shipb")).instance?.caps).toEqual({ maxRounds: 3, maxMinutes: 110 });
     expect(
       statuses
         .map((s) => JSON.stringify(s))
-        .some((s) => s.includes("budget 10 min (channel boundary; preset asks 120)")),
+        .some((s) => s.includes("budget 110 min (channel boundary; preset asks 120)")),
     ).toBe(true);
-    const profile = { preset: "ship", machine: "repo-resident", identity: "write", minutes: 10, boundedBy: "channel" };
+    const profile = { preset: "ship", machine: "repo-resident", identity: "write", minutes: 110, boundedBy: "channel" };
     expect((await store.get("run-shipb"))!.profile).toEqual(profile);
     expect(AGENTS.ship.maxMinutes).toBe(120); // the shared def is never mutated
+
+    // The fit at the fork (agent-ship item 8): a boundary of 10 cannot hold the
+    // loop's 108, so the request is refused with the sum and no instance opens.
+    const tight = shipDeps(SHIP_YAML + 'channels:\n  "slack:CX":\n    boundary:\n      maxMinutes: 10\n');
+    tight.deps.runRegistry = new RunRegistry({ genId: () => "run-shipt", genToken: () => "tok" });
+    const tightIo = fakeIO();
+    await dispatch(tight.deps, msg(TASK_MSG, "slack:UADMIN"), tightIo.io);
+    expect(tightIo.replies[0]).toContain("Ship cannot start under a 10-minute budget");
+    expect(tightIo.replies[0]).toContain("needs 108 minutes");
+    expect(tight.created).toEqual([]);
   });
 
-  it("`agent:ship budget:10` clips the pipeline's wall clock as the caller's own boundary; `ship.maxMinutes` stays the preset's declared budget the card names; the block's rounds cap rides unclipped", async () => {
-    const { deps, instances } = shipDeps(SHIP_YAML + "ship:\n  maxMinutes: 60\n  maxRounds: 2\n");
+  it("`agent:ship budget:90` clips the pipeline's wall clock as the caller's own boundary; `ship.maxMinutes` stays the preset's declared budget the card names; the block's rounds cap rides unclipped", async () => {
+    const { deps, instances } = shipDeps(SHIP_YAML + "ship:\n  maxMinutes: 120\n  maxRounds: 2\n");
     const registry = new RunRegistry({ genId: () => "run-shipd", genToken: () => "tok" });
     deps.runRegistry = registry;
     const { io, statuses } = fakeIO();
-    await dispatch(deps, msg("agent:ship budget:10 in acme/api: fix the login redirect", "slack:UADMIN"), io);
-    expect((await handed(instances, "run-shipd")).instance?.caps).toEqual({ maxRounds: 2, maxMinutes: 10 });
+    await dispatch(deps, msg("agent:ship budget:90 in acme/api: fix the login redirect", "slack:UADMIN"), io);
+    expect((await handed(instances, "run-shipd")).instance?.caps).toEqual({ maxRounds: 2, maxMinutes: 90 });
     expect(
       statuses
         .map((s) => JSON.stringify(s))
-        .some((s) => s.includes("budget 10 min (budget directive; preset asks 60)")),
+        .some((s) => s.includes("budget 90 min (budget directive; preset asks 120)")),
     ).toBe(true);
   });
 

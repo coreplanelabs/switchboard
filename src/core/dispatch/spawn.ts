@@ -27,7 +27,7 @@
 // run tools reach — never pulls the dispatcher in behind it.
 import { AGENTS } from "../../agents/registry.js";
 import type { ConfigStore } from "../../config.js";
-import { MIN_BOUNDARY_MINUTES } from "../../config/validate.js";
+import { carveChildOfParent, LOOP_PRESETS, type LoopPreset } from "../budgets.js";
 import type { ChatMessage } from "../chatMessage.js";
 import type { RunsReadCapability, SteerCapability } from "../../tools/runs.js";
 import { resolveChatActor } from "../authz/actor.js";
@@ -251,11 +251,17 @@ export async function spawnChild<D extends SpawnCoreDeps>(
       `\`${request.preset}\` runs as a \`write\` identity — it pushes branches and opens pull requests — and a spawned child never writes: it reads this conversation and reports; the person who asked starts that work by hand with \`agent:${request.preset}\``,
     );
   }
-  const minutesLeft = Math.floor(parent.remainingMs / 60_000);
-  if (minutesLeft < MIN_BOUNDARY_MINUTES) {
+  // The child's minutes are the parent's remainder, refused under the child
+  // preset's floor (decision 0046; `src/core/budgets.ts`): a child under its
+  // floor costs a thread and a model turn and finishes nothing.
+  const childPreset: LoopPreset = (LOOP_PRESETS as readonly string[]).includes(request.preset)
+    ? (request.preset as LoopPreset)
+    : "general";
+  const carved = carveChildOfParent(parent.remainingMs, childPreset);
+  if (carved.kind === "refused") {
     return refused(
       "spawn_budget",
-      `this run has under ${MIN_BOUNDARY_MINUTES} minutes left — too little to hand a child, which could never run a command in it; wrap up instead`,
+      `this run has ${carved.minutes} minute${carved.minutes === 1 ? "" : "s"} left — under the ${carved.floor}-minute floor a \`${request.preset}\` child needs to do useful work; wrap up instead`,
     );
   }
   const live = deps.registry.listActive().filter((s) => !s.finished && s.parentRunId === parent.runId).length;

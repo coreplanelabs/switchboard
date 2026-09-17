@@ -913,7 +913,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     return h;
   }
 
-  it("plan answers the instance's units with where each stands, who merges from the instance's field, the caps as clipped, the base and the children's own budgets; an instance without the field is a person's merge; an unknown instance is 404", async () => {
+  it("plan answers the instance's units with where each stands, who merges from the instance's field, the caps as clipped and the base; an instance without the field is a person's merge; an unknown instance is 404", async () => {
     const h = await planHarness();
     expect(await call(h, "plan", { parentInstanceId: PLAN_INSTANCE.id })).toEqual({
       status: 200,
@@ -928,7 +928,6 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         repo: "acme/api",
         base: "main",
         caps: { maxRounds: 2, maxMinutes: 45 },
-        childMinutes: { coding: 45, review: 25 },
         units: [unitRow("U10"), unitRow("U11")],
         at: NOW,
       },

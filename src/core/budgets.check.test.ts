@@ -10,14 +10,18 @@ import {
   ASKS,
   BASH_COMMAND,
   carve,
+  carveChildOfParent,
   FLOORS,
   fit,
   LOOP_PRESETS,
+  loopPosition,
   loopRounds,
   MERGE_WAIT_ASK_MINUTES,
   MINUTE_MS,
   POST_STEP_MINUTES,
+  PRESET_FLOORS,
   reserveMinutes,
+  SHIP_WAIT,
   RUNAWAY_TURNS_PER_MINUTE,
   runawayTurnCap,
 } from "./budgets.js";
@@ -40,6 +44,22 @@ describe("the budgets module — one table every wall clock derives from (docs/d
   it("the loop at 3 review rounds is coding, review, fix, review, fix, review, merge", () => {
     expect(loopRounds({ maxRounds: 3 })).toEqual(["coding", "review", "fix", "review", "fix", "review", "merge"]);
     expect(loopRounds({ maxRounds: 1 })).toEqual(["coding", "review", "merge"]);
+  });
+
+  it("the coordinator's round numbers map onto the loop's positions: coding 0; review n and its fix at 2n − 1 and 2n; the merge last", () => {
+    const loop = { maxRounds: 3 };
+    expect(loopPosition(loop, "coding")).toBe(0);
+    expect(loopPosition(loop, "review", 1)).toBe(1);
+    expect(loopPosition(loop, "fix", 1)).toBe(2);
+    expect(loopPosition(loop, "review", 3)).toBe(5);
+    expect(loopPosition(loop, "merge")).toBe(6);
+    expect(loopRounds(loop)[loopPosition(loop, "merge")]).toBe("merge");
+  });
+
+  it("the floors are the presets': coding 10, review 5, research 3, general 2, explore and conductor 15 — the round floors derive from them, and the ship waits are rows", () => {
+    expect(PRESET_FLOORS).toEqual({ general: 2, coding: 10, review: 5, research: 3, explore: 15, conductor: 15 });
+    expect(FLOORS).toEqual({ coding: 10, fix: 10, review: 5, merge: 10 });
+    expect(SHIP_WAIT).toEqual({ marginMinutes: 5, chunkMinutes: 5, mergeChunkMinutes: 5, busyRetryMinutes: 2 });
   });
 });
 
@@ -129,6 +149,17 @@ describe("carve — a round's minutes from the parent's remainder, refused under
       boundedBy: "parent",
     });
     expect(carve(9 * MINUTE_MS, { kind: "merge", index: 6 }, SHIP_DEFAULT)).toMatchObject({ kind: "refused" });
+  });
+
+  it("a conductor's child takes the parent's whole remainder, refused under its preset's floor: a research child with 2.5 minutes left is refused (floor 3), a general child with 2 is carved 2", () => {
+    expect(carveChildOfParent(2.5 * MINUTE_MS, "research")).toEqual({
+      kind: "refused",
+      reason: "under floor",
+      minutes: 2,
+      floor: 3,
+    });
+    expect(carveChildOfParent(2 * MINUTE_MS, "general")).toEqual({ kind: "carved", minutes: 2 });
+    expect(carveChildOfParent(0, "explore")).toEqual({ kind: "refused", reason: "under floor", minutes: 0, floor: 15 });
   });
 
   it("a child with no loop (a conductor's) takes only the floor and the parent: 30 minutes carve 30, 7 are refused", () => {

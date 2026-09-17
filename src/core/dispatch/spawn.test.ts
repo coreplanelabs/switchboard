@@ -234,14 +234,24 @@ describe("spawnChild — the one path a child run is born through", () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
-  it("a parent with under two minutes left is refused `spawn_budget`: a child could never run a command", async () => {
+  // decision 0046: a child is refused under its preset's floor (research 3, general 2 minutes), never under one global number.
+  it("a parent with less left than the child preset's floor is refused `spawn_budget` naming the floor: research under 3 minutes, general under 2; the floor is the preset's, so 2 minutes spawn a general child and not a research one", async () => {
     const { dispatch } = fakeDispatch(registers("run-child"));
     const ch = channel();
-    const out = await spawnChild(deps(dispatch), parent(ch.io, { remainingMs: 119_000 }), {
+    const out = await spawnChild(deps(dispatch), parent(ch.io, { remainingMs: 2 * 60_000 + 30_000 }), {
       preset: "research",
       prompt: "q",
     });
     expect(out).toMatchObject({ kind: "refused", reason: "spawn_budget" });
+    expect(
+      (out as { message?: string; reason: string } & Record<string, unknown>).message ?? JSON.stringify(out),
+    ).toContain("3-minute floor");
+    expect(dispatch).not.toHaveBeenCalled();
+    const general = await spawnChild(deps(dispatch), parent(ch.io, { remainingMs: 119_000 }), {
+      preset: "general",
+      prompt: "q",
+    });
+    expect(general).toMatchObject({ kind: "refused", reason: "spawn_budget" });
     expect(dispatch).not.toHaveBeenCalled();
   });
 

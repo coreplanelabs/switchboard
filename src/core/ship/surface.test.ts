@@ -41,10 +41,6 @@ describe("the ship modules after the round loop's retirement — a source scan",
         "ShipConfig",
         "shipInterruptedNote",
         "ShipCaps",
-        // The loop's budget, not a loop: the reserve the coding child's
-        // directive leaves and the floor validateShip holds maxMinutes to.
-        "SHIP_LOOP_RESERVE_MS",
-        "SHIP_MIN_MAX_MINUTES",
         "SHIP_DEFAULT_MAX_ROUNDS",
         "SHIP_DEFAULT_MAX_MINUTES",
         "ADDRESS_SEVERITIES",

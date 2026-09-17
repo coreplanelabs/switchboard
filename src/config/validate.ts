@@ -6,7 +6,14 @@ import { TRACING_LOG_LEVELS } from "../core/trace/sinks.js";
 import { EFFORT_LEVELS_HINT, isEffort } from "../effort.js";
 import type { SelfImprovementConfig } from "../core/selfImprovement.js";
 import type { RunHistoryConfig } from "../core/runStore.js";
-import { ADDRESS_SEVERITIES, isAddressSeverity, SHIP_MIN_MAX_MINUTES, type ShipConfig } from "../core/shipPipeline.js";
+import {
+  ADDRESS_SEVERITIES,
+  isAddressSeverity,
+  SHIP_DEFAULT_MAX_ROUNDS,
+  SHIP_DEFAULT_MAX_MINUTES,
+  type ShipConfig,
+} from "../core/shipPipeline.js";
+import { ALLOWANCES, ASKS, fit } from "../core/budgets.js";
 import type { SpawnConfig } from "../core/dispatch/spawn.js";
 import { validateDashboardConfig } from "../core/dashboardAuthConfig.js";
 import { validateArtifacts } from "../artifacts/config.js";
@@ -519,14 +526,24 @@ function validateShip(ship: ShipConfig): void {
   const rounds = ship.maxRounds;
   if (rounds !== undefined && (!Number.isInteger(rounds) || rounds < 1))
     throw new Error("config.yaml: ship.maxRounds must be an integer >= 1");
-  // The pipeline budgets for the loop (agent-ship item 8): the coding child's
-  // directive is clipped to leave two review rounds and the merge poll, so a
-  // budget under the loop's reserve plus one round leaves no room for the child
-  // to work at all — refused at load rather than left to cap out on every unit.
+  // The pipeline holds the loop it allows (agent-ship item 8, decision 0046):
+  // the fit — provisioning, the coding child at its ask, and the reserve for
+  // every later round at its floor — is asserted here over the deployment's
+  // numbers, so a pipeline that cannot hold its own loop is refused at load
+  // naming the sum, never left to cap out on every unit.
   const minutes = ship.maxMinutes;
-  if (minutes !== undefined && (!Number.isInteger(minutes) || minutes < SHIP_MIN_MAX_MINUTES))
+  if (minutes !== undefined && !Number.isInteger(minutes))
+    throw new Error("config.yaml: ship.maxMinutes must be an integer (docs/reference/specs/agent-ship.md item 8)");
+  const pipeline = {
+    maxMinutes: minutes ?? SHIP_DEFAULT_MAX_MINUTES,
+    maxRounds: (ship.maxRounds as number | undefined) ?? SHIP_DEFAULT_MAX_ROUNDS,
+  };
+  const held = fit(pipeline);
+  if (!held.ok)
     throw new Error(
-      `config.yaml: ship.maxMinutes must be an integer >= ${SHIP_MIN_MAX_MINUTES} — the pipeline reserves two review rounds and the merge poll out of it, and the coding child's budget is clipped to the rest (docs/reference/specs/agent-ship.md item 8)`,
+      `config.yaml: ship.maxMinutes ${pipeline.maxMinutes} cannot hold the loop ship.maxRounds ${pipeline.maxRounds} allows — ` +
+        `${held.need} minutes are needed (${ALLOWANCES.provision} to provision, the coding child's ${ASKS.coding}, and the reserve for ` +
+        `${pipeline.maxRounds} review rounds at their floors); raise ship.maxMinutes or lower ship.maxRounds (docs/reference/specs/agent-ship.md item 8)`,
     );
   // The severity gate: the level an approve's findings are held to.
   if (ship.addressSeverity !== undefined && !isAddressSeverity(ship.addressSeverity))
