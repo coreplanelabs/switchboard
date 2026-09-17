@@ -1,5 +1,46 @@
 # Changelog
 
+## [1.242.0](https://github.com/coreplanelabs/switchboard/compare/v1.241.0...v1.242.0) (2026-09-17)
+
+
+### Features
+
+* **agents:** every coding prompt orders its checks by cost and pushes before the expensive ones, and the unit contract's first instruction says the same ([#1493](https://github.com/coreplanelabs/switchboard/issues/1493)) ([762cb11](https://github.com/coreplanelabs/switchboard/commit/762cb1183872a5bff4c64c070c162e9152e2d055))
+* **authz:** a linked dashboard session carries the private channels its person is in, from users.conversations kept fresh by Slack's membership events — so member-of admits a private channel's runs, config and MCP tier to the people in it ([cece6a7](https://github.com/coreplanelabs/switchboard/commit/cece6a73630e37e318b799cb56abfc8dade4ac65))
+* **authz:** a linked dashboard session carries the private channels its person is in, from users.conversations kept fresh by Slack's membership events — so member-of admits a private channel's runs, config and MCP tier to the people in it ([#1495](https://github.com/coreplanelabs/switchboard/issues/1495)) ([cece6a7](https://github.com/coreplanelabs/switchboard/commit/cece6a73630e37e318b799cb56abfc8dade4ac65))
+* **config:** the harness word is a scope setting — one person or one channel puts a preset on OpenCode without moving the deployment ([#1501](https://github.com/coreplanelabs/switchboard/issues/1501)) ([8be1090](https://github.com/coreplanelabs/switchboard/commit/8be10905a47942f50657865b4a5db10e1237090f))
+* **dispatcher:** the natural test and build forms reach repo test and repo build through the router — the two regexes and their fast path retire, and an exec-class command runs when routed ([#1461](https://github.com/coreplanelabs/switchboard/issues/1461)) ([35886ad](https://github.com/coreplanelabs/switchboard/commit/35886ad396b83e99ba7e6c052ae89bf05b0679f0))
+* **harness:** the OpenCode re-attach — a resume whose server still answers in this container continues its session instead of ending it, the store joined by message id, the pending asks decided through the gate ([#1481](https://github.com/coreplanelabs/switchboard/issues/1481)) ([abb9b05](https://github.com/coreplanelabs/switchboard/commit/abb9b05cb15ce05316632e14a7060c5142367288))
+* **sandbox:** a seed's answer and log split each restore into download and extraction, and load:seeded reports them as rows — so the gate reading names what owns a slow seed ([#1484](https://github.com/coreplanelabs/switchboard/issues/1484)) ([6fd2003](https://github.com/coreplanelabs/switchboard/commit/6fd2003e543172a2c5acd82d0ddbbe940e405fc3))
+* **web:** the / palette completes level by level — a settled word narrows the next, the best match is ghost text after the caret, Tab or → accepts it, and a command sends without its slash ([#1475](https://github.com/coreplanelabs/switchboard/issues/1475)) ([2d65a0b](https://github.com/coreplanelabs/switchboard/commit/2d65a0b72c9f24573d721645e333dc7ab2abbf6a))
+* **web:** the threads rail is wider and the person's to size and hide, and a row's tooltip carries the channel, the date and the request in full ([#1474](https://github.com/coreplanelabs/switchboard/issues/1474)) ([bef4025](https://github.com/coreplanelabs/switchboard/commit/bef40252f66c998b9db77e2c8dcf839366b54bdc))
+
+
+### Bug fixes
+
+* **authz:** a relayed request's dispatch gates decide on the app acting for the person, not on the person — the agent, repository and GitHub-write gates, the router and a steer take the resolved actor, and the relay rides every child, resume and restart ([#1489](https://github.com/coreplanelabs/switchboard/issues/1489)) ([ff07f0d](https://github.com/coreplanelabs/switchboard/commit/ff07f0d8046c34eabef90bea5cacd8a9b65b043a))
+* **costs:** a snapshot take from Slack is credited by name, a failing refresh loop backs off to an hour and can post to a channel ([#1473](https://github.com/coreplanelabs/switchboard/issues/1473)) ([0d43183](https://github.com/coreplanelabs/switchboard/commit/0d43183fa1e7f11e98fd101e78788211a9045ff5))
+* **dispatcher:** the run card names the branch its own attach bound, not the thread's first plan's ([#1485](https://github.com/coreplanelabs/switchboard/issues/1485)) ([25a51fb](https://github.com/coreplanelabs/switchboard/commit/25a51fb1981e424b565c62cf5e8833be0bf84830))
+* **docs:** screenshots gate hashes inputs per page so parallel web PRs stop colliding ([#1462](https://github.com/coreplanelabs/switchboard/issues/1462)) ([e33fead](https://github.com/coreplanelabs/switchboard/commit/e33fead7c9f01a3381617ebcd6f8c6c57eb32ca2))
+* **harness:** a budgeted run ends by the wind-down with its work pushed, never an aborted model call ([#1486](https://github.com/coreplanelabs/switchboard/issues/1486)) ([65fe74a](https://github.com/coreplanelabs/switchboard/commit/65fe74a0f4dae2a79f3075a85dcf06609e60e240))
+* **harness:** a pi found dead at a rollout is judged replaced, not crashed, after one more container command ([#1500](https://github.com/coreplanelabs/switchboard/issues/1500)) ([9dd245e](https://github.com/coreplanelabs/switchboard/commit/9dd245e5132fd805e06eaac5a5c47100de3119e2))
+* **harness:** the per-run roots live under /var/tmp, out of the shared temp directory a suite cleans, and a control file lost under a live run fails it by name ([#1498](https://github.com/coreplanelabs/switchboard/issues/1498)) ([c6c6082](https://github.com/coreplanelabs/switchboard/commit/c6c608263b50cd77e36d8432ad8ebd0c58b04a4b))
+* **resident:** a refresh cycle that keeps failing in the resident's own steps recreates the container and then rebuilds, while a failure in the repository's command keeps parking as before ([#1490](https://github.com/coreplanelabs/switchboard/issues/1490)) ([c17e933](https://github.com/coreplanelabs/switchboard/commit/c17e933869b76bf8432b9a321d297375aac4f6bc))
+* **resident:** an attach that names the commit it expects runs at that commit or is refused, never at whatever the branch tip happens to be ([#1492](https://github.com/coreplanelabs/switchboard/issues/1492)) ([2eb74ff](https://github.com/coreplanelabs/switchboard/commit/2eb74ff7e75a9a7480b72eb7c766247efc418bc3))
+* **resident:** the deploy preflight counts a harness run from its attach to its release, so a deploy never rolls the resident under a live run ([#1494](https://github.com/coreplanelabs/switchboard/issues/1494)) ([0abc365](https://github.com/coreplanelabs/switchboard/commit/0abc365d42a51d0b41030c885c064f652cad550e))
+* **runs:** failed runs record their reason and undelivered replies seal replyOk false ([#1479](https://github.com/coreplanelabs/switchboard/issues/1479)) ([4edf5ed](https://github.com/coreplanelabs/switchboard/commit/4edf5edb342a0077d27ca66f6f73eff338d21ecf))
+* **sandbox:** the platform's container start-rate limit is capacity, not a failure — "too many containers per second" joins the fleet-busy patterns so the executor waits and re-sends ([#1468](https://github.com/coreplanelabs/switchboard/issues/1468)) ([c36222a](https://github.com/coreplanelabs/switchboard/commit/c36222a6aab011f09171eb7c49ea2951bde789d0))
+* **web:** the empty state hangs from the top at a capped offset, the composer focus sweep is a line of colour that settles to ink, and a rail title skips a run that recorded no request ([#1472](https://github.com/coreplanelabs/switchboard/issues/1472)) ([b11a854](https://github.com/coreplanelabs/switchboard/commit/b11a854339762ef66412171640df2d52d75af051))
+
+
+### Documentation
+
+* **costs:** a design record for archiving the days each snapshot saw whole, so the costs page can offer more than Cloudflare's 32 days ([#1476](https://github.com/coreplanelabs/switchboard/issues/1476)) ([25c9ca6](https://github.com/coreplanelabs/switchboard/commit/25c9ca6fd3db2f83ee7db8a7a72f8f05c7eae756))
+* **docs:** a one-unit plan collects the check-run intake's operating note and its live wake row ([#1480](https://github.com/coreplanelabs/switchboard/issues/1480)) ([462670a](https://github.com/coreplanelabs/switchboard/commit/462670a47ba2bba3aae4b8b9fcfedf02358ff439))
+* **docs:** record 0046 proposes that a budget is a lease carved from its parent — one module owns every wall clock, one fit is asserted at verify, config load and the fork, and a grant bounds multi-day work ([#1496](https://github.com/coreplanelabs/switchboard/issues/1496)) ([5e00f6a](https://github.com/coreplanelabs/switchboard/commit/5e00f6a5de4f4461a421a33aa646c3370b9976f1))
+* **docs:** the checksIntake row explains secret rollout and route states, and http-ingress item 12 gains its live wake proof row ([#1488](https://github.com/coreplanelabs/switchboard/issues/1488)) ([dd9692f](https://github.com/coreplanelabs/switchboard/commit/dd9692f84f5dc4d9664e961c7fa18dedae9095e9))
+* **docs:** the graded-confirmation plan — six units build record 0044, counts first, behaviour-identical until Slack renders the button ([#1497](https://github.com/coreplanelabs/switchboard/issues/1497)) ([7ae1c08](https://github.com/coreplanelabs/switchboard/commit/7ae1c08c9fd88fbd1480ae08e6ce5710efda418e))
+
 ## [1.241.0](https://github.com/coreplanelabs/switchboard/compare/v1.240.0...v1.241.0) (2026-09-17)
 
 
