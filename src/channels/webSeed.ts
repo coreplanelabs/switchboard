@@ -1,5 +1,5 @@
 import type { RunStatus } from "../core/runRecord.js";
-import type { RunView } from "../core/runsService.js";
+import type { FindingsLedgerView, RunView } from "../core/runsService.js";
 import type { UnitFacts, UnitRun, UnitRunsView } from "../core/unitRuns.js";
 import type { CostReport } from "../core/costs.js";
 import type { UserCostReport } from "../core/costsByUser.js";
@@ -134,6 +134,12 @@ export interface RunHistorySeed {
    *  order. Present only on the pipeline's own record, and only when the
    *  viewer may see the instance. */
   units?: UnitFacts[];
+  /** Where the findings ledger of the pull request this run names lives
+   *  (agent-ship item 18): the unit page whose row names the pull request, and
+   *  how many rows the ledger has — the page draws a link, never the table.
+   *  Present only when the record names a pull request, the viewer may read
+   *  its ledger and a unit row names it. */
+  findingsLedger?: { unit: string; rows: number };
 }
 
 export interface RunNotFoundSeed {
@@ -153,7 +159,14 @@ export type UnitRunRowSeed = RunView & Partial<Pick<UnitRun, "round" | "thread">
  *  that does not exist, is served the run 404 (`RunNotFoundSeed`) instead. */
 export interface UnitSeed {
   page: "unit";
-  view: Omit<UnitRunsView, "runs"> & { runs: UnitRunRowSeed[] };
+  view: Omit<UnitRunsView, "runs"> & {
+    runs: UnitRunRowSeed[];
+    /** The pull request's findings ledger (agent-ship item 18) — what `runs
+     *  findings` answers under the viewer's predicate, rows as the service
+     *  answers them (a page binds text as text). Present only when the unit
+     *  row names a pull request and a run the viewer may see names it. */
+    findings?: FindingsLedgerView;
+  };
   now: number;
   retentionDays: number | null;
 }

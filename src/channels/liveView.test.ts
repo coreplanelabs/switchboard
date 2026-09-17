@@ -2671,6 +2671,88 @@ describe("the unit page and what a run is the parent of (item 28)", () => {
     expect(plain.units).toBeUndefined();
   });
 
+  it("the unit page's seed carries the pull request's findings ledger when the unit row names one — joined from the records the viewer may see, each run with its round — and no key for a unit naming no pull request; a review run's history page names the unit page its ledger lives on with the row count, a run naming no pull request names none", async () => {
+    const h = await harness();
+    const HEAD = "a".repeat(40);
+    const child = (step: string): Partial<RunRecord> => ({
+      parentInstanceId: "plan-p-1",
+      idempotencyKey: `plan-p-1:U16/${step}`,
+    });
+    const pr = { number: 42, url: "https://github.com/acme/api/pull/42" };
+    await h.store.put(
+      record("c0", {
+        threadKey: "slack:C1:u1",
+        agent: "coding",
+        startedAt: T0 + 1_000,
+        repo: "acme/api",
+        pr,
+        ...child("0/coding"),
+      }),
+    );
+    await h.store.put(
+      record("r1", {
+        threadKey: "slack:C1:u1r",
+        agent: "review",
+        startedAt: T0 + 12_000,
+        finishedAt: T0 + 17_000,
+        repo: "acme/api",
+        verdict: {
+          verdict: "request_changes",
+          summary: "one",
+          head: HEAD,
+          findings: [{ id: "F1", severity: "major", file: "src/a.ts", line: 12, title: "null path unguarded" }],
+        },
+        reviewHead: HEAD,
+        reviewPost: { posted: true, target: { repo: "acme/api", number: 42 }, head: HEAD, verdict: "request_changes" },
+        ...child("1/review"),
+      }),
+    );
+    await h.store.put(
+      record("c1", {
+        threadKey: "slack:C1:u1",
+        agent: "coding",
+        startedAt: T0 + 22_000,
+        finishedAt: T0 + 27_000,
+        repo: "acme/api",
+        pr,
+        dispositions: [{ findingId: "F1", disposition: "fixed", note: "guarded" }],
+        ...child("1/findings"),
+      }),
+    );
+    await h.store.put(record("solo", { threadKey: "slack:C1:solo", agent: "review", repo: "acme/api" }));
+    const seed = unitSeedOf((await h.get("/runs/unit/plan-p-1:U16")).body());
+    expect(seed.view.findings).toMatchObject({ repo: "acme/api", pr, unit: "plan-p-1:U16" });
+    expect(seed.view.findings?.runs.map((r) => [r.id, r.round])).toEqual([
+      ["c0", 0],
+      ["r1", 1],
+      ["c1", 0],
+    ]);
+    expect(seed.view.findings?.findings).toEqual([
+      {
+        id: "F1",
+        severity: "major",
+        file: "src/a.ts",
+        line: 12,
+        title: "null path unguarded",
+        raised: { runId: "r1", head: HEAD, round: 1 },
+        lastSeen: { runId: "r1", head: HEAD, round: 1 },
+        disposition: { kind: "fixed", note: "guarded", runId: "c1", round: 0 },
+        status: "awaiting re-review",
+      },
+    ]);
+    // The unit whose row names no pull request carries no ledger.
+    expect(unitSeedOf((await h.get("/runs/unit/plan-p-1:U17")).body()).view.findings).toBeUndefined();
+    // The review run's page: where the ledger lives and how many rows it has.
+    const review = runSeedOf((await h.get("/runs/r1")).body()) as RunHistorySeed;
+    expect(review.findingsLedger).toEqual({ unit: "plan-p-1:U16", rows: 1 });
+    // A coding run that opened the pull request names it too; a run naming none does not.
+    expect((runSeedOf((await h.get("/runs/c1")).body()) as RunHistorySeed).findingsLedger).toEqual({
+      unit: "plan-p-1:U16",
+      rows: 1,
+    });
+    expect((runSeedOf((await h.get("/runs/solo")).body()) as RunHistorySeed).findingsLedger).toBeUndefined();
+  });
+
   it("a live page seeds the children the registry holds for it, each live child with its own token — the parent's token opens no child", async () => {
     const h = await harness();
     const parent = h.registry.create("conductor · fan-out", {

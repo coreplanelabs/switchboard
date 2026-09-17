@@ -107,6 +107,12 @@ export const SURFACES = [
     what: "a finished conductor's page listing the runs it spawned",
   },
   {
+    name: "review-page",
+    path: "/runs/hist-4",
+    page: "web/src/pages/RunRoutePage.vue",
+    what: "a finished pull request review: the verdict as the Reply, the pull request and its Findings ledger link in the facts bar",
+  },
+  {
     name: "settings-mcps",
     path: "/settings/mcps",
     page: "web/src/pages/SettingsPage.vue",

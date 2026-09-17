@@ -7,9 +7,9 @@
   "now": 1788877800000,
   "inputs": {
     "scripts/screenshots.mts": "8d507868382af4fdd9ebbad5a93fbd47db331dd9d303aad0c6f1fc651f153b2f",
-    "scripts/web-preview.ts": "b038824db5beeab766990d0fe10c6325429cf3cb8e7ab05b844e2086ca20fe77",
+    "scripts/web-preview.ts": "46b425624fcb9a3789bbeeac0759803a8ecfdbce302e4d7940a3546354fc4644",
     "src/channels/webShell.ts": "5eab7aae4b16bad384c4863ddb8b3d644470cba2421e56d7649bd2fd95b26d92",
-    "src/docs/screenshotManifest.ts": "12ae2476806a42b394da7d8698464df43afd94270b13ebd521c9f022e998c06c",
+    "src/docs/screenshotManifest.ts": "fdab7f6f44e836c25b8bffd17cb51bbca057e519d1305ab14607c60e8ccc28eb",
     "web/src/App.vue": "e95e58c24d31cd6de4b5d701b4c44ce9752c5278b7d6afd9c9e7028104ae2122",
     "web/src/assets/main.css": "4395477163af0000521b98bbdc6ef4489fbc2dac63c75ba54001022e3475fd71",
     "web/src/components/AppNav.vue": "6d40882ef54bbf19f3efed3075010d9bf99e60aaa312fbb1930e7d11923d753c",

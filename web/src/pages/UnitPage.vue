@@ -4,6 +4,7 @@ import AppShell from "../components/AppShell.vue";
 import GithubMark from "../components/GithubMark.vue";
 import SlackMark from "../components/SlackMark.vue";
 import RunFoldRow from "../components/runs/RunFoldRow.vue";
+import FindingsBlock from "../components/unit/FindingsBlock.vue";
 import SessionSearch, { type SearchSession } from "../components/unit/SessionSearch.vue";
 import { useSeed } from "../lib/seed";
 import { useWallClock } from "../lib/wallClock";
@@ -22,7 +23,10 @@ import type { UnitThread } from "@core/core/unitRuns.js";
 // derives nothing from raw events. A unit whose review thread does not exist
 // yet lists the coding thread alone; a unit not started lists nothing and
 // says so. In-progress work draws where it will end up: a live run is a row
-// in its round with its clock moving, never a separate status.
+// in its round with its clock moving, never a separate status. The pull
+// request's findings ledger (agent-ship item 18) sits between the contract
+// and the runs when the seed carries it: one row per finding across every
+// round, each trail stop opening the run it names in place.
 
 const seed = useSeed("unit");
 const view = seed?.view;
@@ -243,6 +247,9 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
           {{ view.ending.report }}
         </p>
       </section>
+
+      <!-- The pull request's findings ledger (agent-ship item 18), when the unit names one. -->
+      <FindingsBlock v-if="view.findings" :ledger="view.findings" :runs="view.runs" @open="openRun" />
 
       <SessionSearch
         v-if="sessions.length > 0"

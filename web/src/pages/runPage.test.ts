@@ -1633,3 +1633,25 @@ describe("PR-review panel wiring", { timeout: PANEL_BUDGET_MS }, () => {
     expect(document.querySelector('[data-testid^="abridge"]')).toBeNull();
   });
 });
+
+describe("RunPage — history mode: the Findings link (agent-ship item 18)", () => {
+  it("a run whose seed names the unit page its pull request's ledger lives on links it beside the pull request, with the row count; a run without one shows no link", () => {
+    const events = [
+      input,
+      { type: "run_meta", agent: "review", model: "anthropic/m", repo: "acme/api", ref: "patch-1", pr: 42, at: 2 },
+      { type: "answer", text: "Changes requested: one thing", at: 3 },
+    ] as LiveFrame[];
+    const w = mountApp(RunPage, {
+      seed: historySeed(events, { status: "completed", findingsLedger: { unit: "plan-p-1:U16", rows: 3 } }),
+    });
+    const link = w.find("#runmeta a.findings");
+    expect(link.exists()).toBe(true);
+    expect(link.attributes("href")).toBe("/runs/unit/plan-p-1%3AU16#findings");
+    expect(link.text()).toBe("Findings · 3");
+    expect(link.attributes("title")).toBe("the pull request's findings ledger on its unit's page");
+    // It sits beside the pull request link, in the same facts bar.
+    expect(w.find("#runmeta a.prlink").exists()).toBe(true);
+    const without = mountApp(RunPage, { seed: historySeed(events, { status: "completed" }) });
+    expect(without.find("a.findings").exists()).toBe(false);
+  });
+});
