@@ -21,10 +21,10 @@
     "web/src/components/StatusDot.vue": "e31004d149370c7455a11e6aa63553327b2b219b3d224bc45cfd99c0843c58e7",
     "web/src/components/ThemeToggle.vue": "025a9a0c7ccc2983772c1888f7426ec161feb3ffaea87c914c65d15bdfd740d3",
     "web/src/components/ViewAsBanner.vue": "c31f753d698c3c9df6f7643fdff78eee122c2a5bacff2d71e2899dd841b9f474",
-    "web/src/components/runs/RunRow.vue": "25ce2f5304bdc5c0a9fd076b333ef50727c1fd74e418de550a447112196e1a46",
+    "web/src/components/runs/RunRow.vue": "2c9e4436bf6bb23f9e51470bdd8e30a5c65392dad7beb8c885166b5ceddfd998",
     "web/src/components/runs/RunsTabs.vue": "b20205f3e70f5c043f26d937cf90905e9411584b4289dd546621d58ece044d41",
     "web/src/components/runs/SourceMark.vue": "437844bb6d5ea4a3461afe465d2540deec87414a68efcaedd0eec5a7fbf3c757",
-    "web/src/components/runs/ViewAsPicker.vue": "df158e9a353f28e7d3a090cff9f71567109155f055288844d8151ea18b248d85",
+    "web/src/components/runs/ViewAsPicker.vue": "abafd9a327d3da3ffa324fb0d58f676844e2327f9ce5a72adbb56af8ac8a8428",
     "web/src/lib/browser.ts": "d1fd4f9f5935c3ca65a7d7e38f362601576ae575406bb2b5ac87ad118ff05dc7",
     "web/src/lib/capabilities.ts": "0e485825f48786605345f6a7298763790b7468595d9a828b615a245ab4a6aecd",
     "web/src/lib/durationTone.ts": "9e5bbcf765a307f3c05cf1fd807697bf1957e03acbf95f38883b5db4d4b8f3c1",
@@ -39,6 +39,6 @@
     "web/src/main.ts": "43c95547c4e4d9ecb88e9a0e7428417cda86764bdbfdab76c1c926b722f1deee",
     "web/src/pages/RunsIndexPage.vue": "97f6165208a167955b5a07498be5414d28d059a81b176c08dd21dd0bc1bdcabc",
     "web/src/routes.ts": "e30b01a01fef6eb8f3be948de3e9b925565c4570d01713a203aaaf6f40ab826d",
-    "web/vite.config.ts": "9383938ec67bd57d645a9361990b0cab36d6a1d33eab5c4431180abd886692d0"
+    "web/vite.config.ts": "eaec9946d776ac13e8a0c3715d909dbe94dc5d5c7c7093e8665ff4992b70297e"
   }
 }

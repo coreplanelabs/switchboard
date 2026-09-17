@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 import vue from "@vitejs/plugin-vue";
 import ui from "@nuxt/ui/vite";
+import { popupLayers } from "./src/lib/uiTheme";
 
 // The web app is served by the bot process (src/index.ts) as hashed static
 // assets under /assets/*, referenced from server-rendered shells. The build
@@ -17,6 +18,9 @@ export default defineConfig({
           primary: "neutral",
           neutral: "neutral",
         },
+        // Every menu, combobox list, tooltip and popover paints above the page
+        // (live-view.md item 20): the one layer, set once in web/src/lib/uiTheme.ts.
+        ...popupLayers(),
       },
       // Bundle every icon the source uses (plus the theme's defaults) at build
       // time: the CSP allows no runtime fetch from the Iconify API. The scan

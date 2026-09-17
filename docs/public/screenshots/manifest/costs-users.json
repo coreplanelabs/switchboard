@@ -35,6 +35,6 @@
     "web/src/main.ts": "43c95547c4e4d9ecb88e9a0e7428417cda86764bdbfdab76c1c926b722f1deee",
     "web/src/pages/CostsPage.vue": "6d15de32bd4267a975a3ea89477c9a192721fd47a8a117dc5db280556cef730a",
     "web/src/routes.ts": "e30b01a01fef6eb8f3be948de3e9b925565c4570d01713a203aaaf6f40ab826d",
-    "web/vite.config.ts": "9383938ec67bd57d645a9361990b0cab36d6a1d33eab5c4431180abd886692d0"
+    "web/vite.config.ts": "eaec9946d776ac13e8a0c3715d909dbe94dc5d5c7c7093e8665ff4992b70297e"
   }
 }

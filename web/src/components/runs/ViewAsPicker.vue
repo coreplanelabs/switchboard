@@ -48,12 +48,13 @@ async function pick(value: unknown): Promise<void> {
       aria-label="view the dashboard as a person"
       :disabled="busy"
       size="xs"
-      class="w-44 text-xs"
+      class="w-60 text-xs"
+      :ui="{ itemTrailing: 'min-w-0' }"
       @update:model-value="pick"
       @create="pick"
     >
       <template #item-trailing="{ item }">
-        <span v-if="item.suffix" class="ml-2 font-mono text-[0.6875rem] text-dimmed">{{ item.suffix }}</span>
+        <span v-if="item.suffix" class="ml-2 truncate font-mono text-[0.6875rem] text-dimmed">{{ item.suffix }}</span>
       </template>
       <template #create-item-label="{ item }">
         View as <span class="font-mono">{{ item }}</span>
