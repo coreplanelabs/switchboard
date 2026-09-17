@@ -309,10 +309,12 @@ const elsewhereLine = !elsewhere
       </USlideover>
 
       <section class="thread mx-auto flex min-h-[calc(100vh-8rem)] w-full max-w-3xl flex-col">
-        <!-- The empty state: the mark, the greeting, the composer in the middle, the chips. -->
+        <!-- The empty state: the mark, the greeting, the composer, the chips — hung from the top at a
+             capped offset (a share of the viewport, never more than a hand's height), so a tall
+             screen does not sink it to the middle of nowhere; a short one keeps it in reach. -->
         <EmptyState
           v-if="empty"
-          class="my-auto"
+          class="mb-auto mt-[clamp(1.5rem,14vh,9rem)]"
           :name="seed.viewer.name"
           :hour="hour"
           :suggestions="seed.suggestions"

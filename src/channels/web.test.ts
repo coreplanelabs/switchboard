@@ -528,12 +528,23 @@ describe("GET /threads and /threads/<id> — the seed from the runs service (ite
     expect(res.body).not.toMatch(/tok-/);
   });
 
-  it("/threads/<id> seeds exactly the thread's runs the viewer may read, oldest first, each with its request, reply and route; a live run carries its token; the rail lists the viewer's threads across channels, newest first, a foreign thread by its whole key", async () => {
+  it("/threads/<id> seeds exactly the thread's runs the viewer may read, oldest first, each with its request, reply and route; a live run carries its token; the rail lists the viewer's threads across channels, newest first, a foreign thread by its whole key, a thread whose oldest run recorded no request titled by the next one's", async () => {
     const { handler, store, registry } = setup();
     await store.put(record("r-1", NOW - 60_000));
     await store.put(record("r-2", NOW - 30_000));
     // Another conversation of alice's, and a Slack thread her linked person requested in.
     await store.put(record("o-1", NOW - 3_600_000, { threadKey: "web:a1:conv-2" }));
+    // A thread whose oldest run died before its request was published (no `input`; its
+    // label is the card's head): the title comes from the next run that recorded one.
+    await store.put(
+      record("d-0", NOW - 7_200_000, {
+        threadKey: "web:a1:conv-3",
+        label: "*ship* on `anthropic/m`",
+        status: "failed",
+        events: [{ type: "run_meta", agent: "ship", seq: 1 }],
+      }),
+    );
+    await store.put(record("d-1", NOW - 7_000_000, { threadKey: "web:a1:conv-3" }));
     await store.put(
       record("s-1", NOW - 120_000, {
         threadKey: "slack:C1:1712.34",
@@ -576,6 +587,7 @@ describe("GET /threads and /threads/<id> — the seed from the runs service (ite
         surface: "slack",
       },
       { id: "conv-2", title: "request of o-1", lastAt: NOW - 3_600_000, runs: 1, live: false, surface: "web" },
+      { id: "conv-3", title: "request of d-1", lastAt: NOW - 7_000_000, runs: 2, live: false, surface: "web" },
     ]);
     // The tab title carries the live count, as the runs index does.
     expect(res.body).toMatch(/<title>\(1\) Threads<\/title>/);
