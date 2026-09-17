@@ -53,8 +53,8 @@ The repo's whole interface: deterministic, non-interactive, no credential unless
 | `npm run check:pr-title` | Judges one PR title as the changelog line it becomes: grammar, type, scope, the migration note behind `!`. | `-- "feat(scope): …"` before opening a PR; CI's `title` check runs it. |
 | `npm run check:project-facts` | Every copy of the project's names, repository, docs URL and contact address equals `project.json`; its description, topics and npm package fit their rules. | After editing `project.json` or a community file; part of `check:consistency`. |
 | `npm run agents:gen` | Writes the Commands table in AGENTS.md from `package.json` and this file. | After adding or changing a script; part of `fix`. |
-| `npm run clock:gen` | Regenerates the clock-read allowlist (`src/core/trace/clockAllowlist.json`) from the tree — empty since the ratchet reached zero; a result that is not `{}` names a new direct read. | Part of `fix`. |
-| `npm run clock:check` | No production file reads the wall clock directly: the allowlist is empty and the tree agrees. | Part of `check:consistency`. |
+| `npm run clock:gen` | Regenerates both clock allowlists from the tree: wall-clock reads (empty) and duration literals outside `src/core/budgets.ts`. | Part of `fix`. |
+| `npm run clock:check` | No production file reads the wall clock directly or gained a duration literal outside `src/core/budgets.ts`; both allowlists match the tree. | Part of `check:consistency`. |
 | `npm run agents:check` | AGENTS.md is under its size budget, its Commands table is current, and every root script is described here. | Part of `check:consistency`. |
 | `npm run lint` | ESLint over the whole tree. | `npm run fix` repairs what it can. |
 | `npm run lint:fix` | ESLint with autofix. | Part of `fix`. |

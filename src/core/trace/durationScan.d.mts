@@ -1,8 +1,6 @@
 export declare const ALLOWLIST_PATH: string;
-export declare function filesUnder(root: string, include: readonly string[], exempt: readonly string[]): string[];
 export declare function productionFiles(root: string): string[];
-export declare function scriptBlocksOf(path: string, text: string): string;
-export declare function countClockReads(path: string, text: string): Record<string, number>;
+export declare function countDurationLiterals(path: string, text: string): Record<string, number>;
 export declare function scan(root: string): Record<string, number>;
 export declare const SCANNER_IDS: readonly string[];
 export declare const RULE_IDS: readonly string[];

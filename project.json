@@ -168,11 +168,11 @@
       "when": "Part of `check:consistency`."
     },
     "clock:gen": {
-      "does": "Regenerates the clock-read allowlist (`src/core/trace/clockAllowlist.json`) from the tree — empty since the ratchet reached zero; a result that is not `{}` names a new direct read.",
+      "does": "Regenerates both clock allowlists from the tree: wall-clock reads (empty) and duration literals outside `src/core/budgets.ts`.",
       "when": "Part of `fix`."
     },
     "clock:check": {
-      "does": "No production file reads the wall clock directly: the allowlist is empty and the tree agrees.",
+      "does": "No production file reads the wall clock directly or gained a duration literal outside `src/core/budgets.ts`; both allowlists match the tree.",
       "when": "Part of `check:consistency`."
     },
     "docs:changed": {
