@@ -75,10 +75,13 @@ const executor: Executor = {
 
 /** The model, replaying the row's turns in order and recording every request;
  *  the call numbered `failAt` (1-based) fails with the provider's words instead,
- *  which the scripted pi settles the turn on as pi does a failed call. */
+ *  which the scripted pi settles the turn on as pi does a failed call; the call
+ *  numbered `hangAt` never answers until the run's abort reaches it, as a
+ *  provider call the harness's finale bound cuts off. */
 function replaying(
   turns: RunScript["turns"],
   failAt: number | undefined,
+  hangAt: number | undefined,
 ): { provider: Provider; requests: CompletionRequest[] } {
   const requests: CompletionRequest[] = [];
   let calls = 0;
@@ -88,6 +91,12 @@ function replaying(
       requests.push(req);
       calls++;
       if (calls === failAt) throw new Error(FAILED_MODEL_CALL_ERROR);
+      if (calls === hangAt)
+        return new Promise<CompletionResult>((_, reject) => {
+          const abort = () => reject(new Error("This operation was aborted"));
+          if (req.signal?.aborted) abort();
+          else req.signal?.addEventListener("abort", abort, { once: true });
+        });
       const turn = turns[Math.min(calls - 1, turns.length - 1)];
       const result: CompletionResult = { content: turn.content, stopReason: turn.stopReason ?? "end_turn" };
       return result;
@@ -138,8 +147,15 @@ export function piDriver(): HarnessDriver {
       const facts: HarnessFacts[] = [];
       const progress: string[] = [];
       const statusReports: string[] = [];
-      const model = replaying(script.turns, script.failModelCall);
+      const model = replaying(script.turns, script.failModelCall, script.hangModelCall);
       let modelCalls = 0;
+      /** The run's lease clocks, for a script that moves the clock: past the loop's end, past the finale bound. */
+      const lease = loopClock(NOW, agent.maxMinutes * MINUTE_MS, agent.name);
+      /** Waits for the harness to steer pi once more than it has (a write-up, a wrap-up). */
+      const awaitSteer = async () => {
+        const steersBefore = pi.steers.length;
+        for (let i = 0; i < 200 && pi.steers.length === steersBefore; i++) await new Promise((r) => setTimeout(r, 5));
+      };
       const pi: ProviderPi = scriptPiFromProvider(container, {
         provider: model.provider,
         registry,
@@ -157,10 +173,29 @@ export function piDriver(): HarnessDriver {
             await new Promise((r) => setTimeout(r, 15));
             // The clock lands past the LOOP's end, inside the lease: the
             // write-up that follows runs within the lease, as the row asserts.
-            clock.now = loopClock(NOW, agent.maxMinutes * MINUTE_MS, agent.name).loopEnd + 1;
-            const steersBefore = pi.steers.length;
-            for (let i = 0; i < 200 && pi.steers.length === steersBefore; i++)
-              await new Promise((r) => setTimeout(r, 5));
+            clock.now = lease.loopEnd + 1;
+            await awaitSteer();
+          }
+          if (script.softStopBeforeModelCall === modelCalls) {
+            // An operator's soft stop with this call under way: the harness's
+            // tick notes the stop and steers the write-up — waited for — and
+            // this call is the one that answers it, or never does.
+            await new Promise((r) => setTimeout(r, 15));
+            control.requestStop("soft");
+            await awaitSteer();
+          }
+          if (script.hangModelCall === modelCalls) {
+            // This call never answers (the provider waits for the abort). The
+            // wind-down is the soft stop above when the script names one, else
+            // the budget: the clock passes the loop's end with the turn open and
+            // the write-up's steer is waited for; then the clock passes the
+            // finale bound, so the harness's next tick aborts the call.
+            if (script.softStopBeforeModelCall !== modelCalls) {
+              await new Promise((r) => setTimeout(r, 15));
+              clock.now = lease.loopEnd + 1;
+              await awaitSteer();
+            }
+            clock.now += lease.finaleMs + 1;
           }
           await new Promise((r) => setTimeout(r, 15));
         },

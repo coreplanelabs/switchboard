@@ -45,7 +45,13 @@ import {
 } from "../contract.js";
 import type { RunBearerStore } from "../../modelProxy/runBearers.js";
 import { OPENCODE_EVENT_DISPOSITION } from "./dispositions.js";
-import { driveOpenCode, openCodeToolNameWord, type OpenCodeConnection, type OpenCodeReattach } from "./bridge.js";
+import {
+  driveOpenCode,
+  OpenCodeRequestRefusedError,
+  openCodeToolNameWord,
+  type OpenCodeConnection,
+  type OpenCodeReattach,
+} from "./bridge.js";
 import {
   openCodeAuthHeader,
   OPENCODE_ROUTES,
@@ -72,6 +78,7 @@ import {
 } from "./process.js";
 import { openCodeImportBody, openCodeSeedAndRequest, openCodeSessionId, openCodeSettlementNote } from "./session.js";
 import { OPENCODE_TAILER_SOURCE } from "./tailerSource.js";
+import { PROXY_PROVIDER } from "../pi/process.js";
 import type { LiveHarness } from "../pi/relay.js";
 
 /** What a deployment sets for every run on OpenCode: the compaction thresholds
@@ -148,10 +155,16 @@ export class OpenCodeHarness implements Harness {
   }
 }
 
-/** The model ref a session carries: the run's provider and model, and the
- *  effort tier as its variant when the harness names one (none in stage A). */
+/** The model ref a session carries — on the create, the seed's import and a
+ *  rebuild's import alike. The provider is the configuration's one provider,
+ *  `PROXY_PROVIDER` (the key `openCodeConfig` writes the model under), never
+ *  the bot's provider name (`run.model.provider`, `anthropic` on a live
+ *  deployment): OpenCode resolves the ref against its configuration and a
+ *  provider it does not define is `Model unavailable: <provider>/<id>`. The id
+ *  is the run's, and the effort tier is its variant when the harness names
+ *  one (none in stage A). */
 function modelRef(run: HarnessRun, variant: string | undefined): { providerID: string; id: string; variant?: string } {
-  return { providerID: run.model.provider, id: run.model.id, ...(variant ? { variant } : {}) };
+  return { providerID: PROXY_PROVIDER, id: run.model.id, ...(variant ? { variant } : {}) };
 }
 
 /** The feed's current end byte, read forward from `from` to the last byte: a
@@ -385,15 +398,22 @@ export async function openOpenCodeRun(
       const cwd = deps.container.cwd(started.paths, run.rules.checkout);
 
       // The session: a resume imports the record; a fresh run with a seed imports
-      // the earlier turns; a fresh run of one turn is created with none.
+      // the earlier turns; a fresh run of one turn is created with none. An
+      // answer outside 2xx to either is the run's failure by name, said on the
+      // record first: the prime is the request that would carry a model
+      // reference OpenCode cannot resolve.
+      const refusedBy = (what: string, res: HarnessResponse): OpenCodeRequestRefusedError => {
+        const refused = new OpenCodeRequestRefusedError(what, res.status, res.body);
+        note("harness_error", `${refused.message} — the run is stopped`);
+        return refused;
+      };
       const importInto = async (
         messages: Parameters<typeof openCodeImportBody>[0],
         opts: Parameters<typeof openCodeImportBody>[1],
       ) => {
         const body = openCodeImportBody(messages, opts);
         const res = await request(deps.container, started, auth, OPENCODE_ROUTES["session.import"], body);
-        if (res.status < 200 || res.status >= 300)
-          throw new Error(`OpenCode refused the session import (${res.status}): ${redactAndCap(res.body, 200)}`);
+        if (res.status < 200 || res.status >= 300) throw refusedBy("session import", res);
       };
       if (run.resume !== undefined && run.resume.messages.length > 0) {
         const settlements = new Map(run.resume.settlements.map((s) => [s.toolUse.id, openCodeSettlementNote(s)]));
@@ -423,8 +443,7 @@ export async function openOpenCodeRun(
             location: { directory: cwd },
             model: modelRef(run, undefined),
           });
-          if (res.status < 200 || res.status >= 300)
-            throw new Error(`OpenCode refused the session create (${res.status}): ${redactAndCap(res.body, 200)}`);
+          if (res.status < 200 || res.status >= 300) throw refusedBy("session create", res);
           const created = parseSessionId(res.body);
           if (created !== undefined) server.sessionID = created;
         }

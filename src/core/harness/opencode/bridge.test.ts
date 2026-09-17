@@ -23,8 +23,23 @@ import {
 import { OPENCODE_EVENT_DISPOSITION, openCodeDispositionCounts, openCodeDispositionOf } from "./dispositions.js";
 import { openCodeReplacedCallNote } from "./session.js";
 import { openCodeRunPaths } from "./process.js";
-import { openCodeDriver } from "./testing/driver.js";
-import { MODEL_CALL_IN_FLIGHT } from "../windDown.js";
+import { feedByteLength, openCodeDriver, TAILER_READY_NOTES } from "./testing/driver.js";
+import { loopClock, MINUTE_MS } from "../../budgets.js";
+import { CONFORMANCE_MAX_MINUTES, FAILED_MODEL_CALL_ERROR } from "../testing/scenarios.js";
+import {
+  finaleAbortReason,
+  finaleTimedOutNote,
+  MODEL_CALL_IN_FLIGHT,
+  softStopAnswer,
+  softStopNote,
+  timeBudgetAnswer,
+  timeBudgetNote,
+  windDownFailureNote,
+} from "../windDown.js";
+import { FIRST_EVENT_BOUND_MS } from "./bridge.js";
+
+/** The finale bound the conformance run's lease carries (the drivers' preset runs no post-step). */
+const FINALE_MS = loopClock(0, CONFORMANCE_MAX_MINUTES * MINUTE_MS, "conformance").finaleMs;
 
 // Feature: docs/reference/specs/harness.md items 2 and 4 — OpenCode's gate and
 // record. Every tool call is decided in the bot over the HTTP ask; a reply the
@@ -592,6 +607,201 @@ describe("the loop — a reply that cannot be posted, and the narration's timing
       )
       .map((e) => (e.type === "assistant" ? `assistant:${e.text}` : `tool_call:${e.callId}`));
     expect(order).toEqual(["assistant:checking the tree", "tool_call:c1", "assistant:one more look", "tool_call:c2"]);
+  });
+});
+
+// Feature: docs/reference/specs/harness.md items 5 and 13 — the answer to every
+// request the harness makes is read and a refusal fails the run by name at
+// once; an admitted prompt owes the feed its first event within a bound, past
+// which the run fails by name with the diagnostics; and the wind-down's ending
+// seals on a turn that never answers: the finale bound interrupts it, the loop
+// leaves without waiting on a settle, the process is ended, and the run closes
+// by the wind-down's own answer — never a replaced verdict, never a wait to the
+// budget. The two live runs that met the model-reference defect hung for the
+// want of all three.
+describe("the loop — a refused request, a silent server, and a hung turn", () => {
+  const oneTurn: RunScript = { turns: [{ content: [{ type: "text", text: "done" }], stopReason: "end_turn" }] };
+  const hung: RunScript = {
+    turns: [
+      {
+        content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "echo hi" } }],
+        stopReason: "tool_use",
+      },
+      { content: [{ type: "text", text: "never" }], stopReason: "end_turn" },
+    ],
+    hangModelCall: 2,
+  };
+  const harnessErrors = (r: DrivenRun) =>
+    notes(r.events)
+      .filter((n) => n.kind === "harness_error")
+      .map((n) => n.summary);
+  const posts = (r: DrivenRun, suffix: string) =>
+    r.requests.filter((q) => q.method === "POST" && q.path.endsWith(suffix));
+  const steers = (r: DrivenRun) =>
+    posts(r, "/prompt").filter((q) => (JSON.parse(q.body ?? "{}") as { delivery?: string }).delivery === "steer");
+  const failedWith = (r: DrivenRun, name: string): Error => {
+    expect(r.outcome.kind).toBe("failed");
+    const err = r.outcome.kind === "failed" ? r.outcome.error : new Error("answered");
+    expect(err.name).toBe(name);
+    return err;
+  };
+
+  it("the prompt the server refuses fails the run by name at once — a harness_error naming the prompt and the server's answer, the outcome OpenCodeRequestRefusedError, one POST and no wait on the feed, the process ended", async () => {
+    const r = await openCodeDriver({ promptPostFails: 1 }).run(oneTurn);
+    const err = failedWith(r, "OpenCodeRequestRefusedError");
+    expect(err.message).toBe('OpenCode refused the prompt (500): {"error":"the store hiccuped"}');
+    expect(harnessErrors(r)).toEqual([`${err.message} — the run is stopped`]);
+    expect(posts(r, "/prompt")).toHaveLength(1);
+    expect(r.killed.length).toBeGreaterThan(0);
+    expect(r.removed).toEqual([openCodeRunPaths("run-c").dir]);
+    expect(notes(r.events).some((n) => n.kind === "sandbox_restarted")).toBe(false);
+  });
+
+  it("a resume's continue the server refuses is named as the continue", async () => {
+    const driver = openCodeDriver({ promptPostFails: 1 });
+    const r = await driver.run({
+      ...oneTurn,
+      resume: {
+        messages: [{ role: "user", content: [{ type: "text", text: "carry on" }] }],
+        settlements: [],
+        remainingMs: 300_000,
+        turn: 0,
+        inboxConsumedSeq: 0,
+        facts: driver.facts({ pid: 999, container: "vm-old" }),
+      },
+    });
+    const err = failedWith(r, "OpenCodeRequestRefusedError");
+    expect(err.message).toMatch(/^OpenCode refused the continue \(500\)/);
+    expect(harnessErrors(r)).toEqual([`${err.message} — the run is stopped`]);
+  });
+
+  it("the prime the server refuses — the seed's import, or the create of a seedless run — fails the run by name with a harness_error first, before any prompt", async () => {
+    const seeded = await openCodeDriver({ primePostFails: true }).run({
+      seed: [
+        { role: "user", content: [{ type: "text", text: "earlier" }] },
+        { role: "assistant", content: [{ type: "text", text: "answered" }] },
+      ],
+      turns: oneTurn.turns,
+    });
+    const imported = failedWith(seeded, "OpenCodeRequestRefusedError");
+    expect(imported.message).toBe('OpenCode refused the session import (500): {"error":"the store hiccuped"}');
+    expect(harnessErrors(seeded)).toEqual([`${imported.message} — the run is stopped`]);
+    expect(posts(seeded, "/prompt")).toHaveLength(0);
+    expect(seeded.killed.length).toBeGreaterThan(0);
+
+    const bare = await openCodeDriver({ primePostFails: true }).run(oneTurn);
+    const created = failedWith(bare, "OpenCodeRequestRefusedError");
+    expect(created.message).toBe('OpenCode refused the session create (500): {"error":"the store hiccuped"}');
+    expect(harnessErrors(bare)).toEqual([`${created.message} — the run is stopped`]);
+    expect(posts(bare, "/prompt")).toHaveLength(0);
+  });
+
+  it("an admitted prompt the feed then carries nothing for within the bound fails the run by name with the diagnostics — the phase, the session, the feed offset, the last feed record (the tailer's own note lifts nothing), both error logs' tails — the interrupt posted, the process ended, never a replaced verdict", async () => {
+    const r = await openCodeDriver({ silentAfterPrompt: 1 }).run(oneTurn);
+    const err = failedWith(r, "OpenCodeSilentError");
+    const reconnected = { feed: "tailer", at: NOW, note: "reconnected", connections: 2 };
+    const offset = feedByteLength([...TAILER_READY_NOTES, reconnected]);
+    expect(err.message).toBe(
+      `OpenCode produced no event for session ses_run-c within ${FIRST_EVENT_BOUND_MS / 1000} s of the prompt — the server admitted it and nothing followed; ` +
+        `feed offset ${offset}, last feed record: ${JSON.stringify(reconnected)}; ` +
+        "serve.err: provider: connect ETIMEDOUT 10.0.0.1:443 (the proxy did not answer); " +
+        "tailer.err: tailer: event stream idle; no records for the session",
+    );
+    expect(harnessErrors(r)).toEqual([`${err.message} — the run is stopped`]);
+    expect(posts(r, "/interrupt")).toHaveLength(1);
+    expect(r.killed.length).toBeGreaterThan(0);
+    expect(r.removed).toEqual([openCodeRunPaths("run-c").dir]);
+    expect(notes(r.events).some((n) => n.kind === "sandbox_restarted")).toBe(false);
+  });
+
+  it("a resume's continue answered by silence names the continue", async () => {
+    const driver = openCodeDriver({ silentAfterPrompt: 1 });
+    const r = await driver.run({
+      ...oneTurn,
+      resume: {
+        messages: [{ role: "user", content: [{ type: "text", text: "carry on" }] }],
+        settlements: [],
+        remainingMs: 300_000,
+        turn: 0,
+        inboxConsumedSeq: 0,
+        facts: driver.facts({ pid: 999, container: "vm-old" }),
+      },
+    });
+    const err = failedWith(r, "OpenCodeSilentError");
+    expect(err.message).toMatch(/ within \d+ s of the continue — /);
+  });
+
+  it("the budget on a hung turn: the wind-down's note names the finale bound, one write-up steer and one interrupt are posted, the server and its tailer are ended and the root removed, and the run answers the budget's reason-alone line with the clause — never a failed run, never a replaced verdict", async () => {
+    const r = await run(hung);
+    expect(answered(r)).toBe(timeBudgetAnswer("", CONFORMANCE_MAX_MINUTES, finaleAbortReason(FINALE_MS)));
+    expect(
+      notes(r.events)
+        .filter((n) => n.kind === "time_budget_exhausted")
+        .map((n) => n.summary),
+    ).toEqual([timeBudgetNote(MODEL_CALL_IN_FLIGHT)]);
+    expect(harnessErrors(r)).toEqual([windDownFailureNote(finaleAbortReason(FINALE_MS))]);
+    expect(r.progress).toContain(finaleTimedOutNote());
+    expect(steers(r)).toHaveLength(1);
+    expect(posts(r, "/interrupt")).toHaveLength(1);
+    expect(r.killed).toEqual([4242, 4242]);
+    expect(r.removed).toEqual([openCodeRunPaths("run-c").dir]);
+    expect(notes(r.events).some((n) => n.kind === "sandbox_restarted")).toBe(false);
+  });
+
+  it("a soft stop on a hung turn ends the same way: the stopped note in mode soft, the write-up steered, the finale's interrupt, the process ended, and the ⏹ reason-alone line with the clause", async () => {
+    const r = await run({ ...hung, softStopBeforeModelCall: 2 });
+    expect(answered(r)).toBe(softStopAnswer("", finaleAbortReason(FINALE_MS)));
+    const stopped = notes(r.events).filter((n) => n.kind === "stopped");
+    expect(stopped).toHaveLength(1);
+    expect(stopped[0]).toMatchObject({ mode: "soft", summary: softStopNote() });
+    expect(harnessErrors(r)).toEqual([windDownFailureNote(finaleAbortReason(FINALE_MS))]);
+    expect(steers(r)).toHaveLength(1);
+    expect(posts(r, "/interrupt")).toHaveLength(1);
+    expect(r.killed).toEqual([4242, 4242]);
+  });
+
+  it("a soft stop whose write-up comes answers under the ⏹ label with the write-up, and the relayed tools are refused meanwhile", async () => {
+    const r = await run({
+      turns: [
+        {
+          content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "echo hi" } }],
+          stopReason: "tool_use",
+        },
+        {
+          content: [{ type: "tool_use", id: "c2", name: "update_status", input: { checklist: "○ late" } }],
+          stopReason: "tool_use",
+        },
+        { content: [{ type: "text", text: "findings so far" }], stopReason: "end_turn" },
+      ],
+      softStopBeforeModelCall: 2,
+    });
+    expect(answered(r)).toBe(softStopAnswer("findings so far"));
+    expect(notes(r.events).filter((n) => n.kind === "stopped")).toHaveLength(1);
+    const refused = notes(r.events).find((n) => n.kind === "tool_refused" && /update_status/.test(n.summary));
+    expect(refused?.summary).toMatch(/an operator asked this run to stop/);
+    expect(r.statusReports).toEqual([]);
+    expect(harnessErrors(r)).toEqual([]);
+  });
+
+  it("a model call that fails outside the wind-down fails the run by the provider's words at once — the execution settled on the failure, nothing awaited past it, the process ended", async () => {
+    const r = await run({ ...oneTurn, failModelCall: 1 });
+    expect(r.outcome.kind).toBe("failed");
+    if (r.outcome.kind === "failed")
+      expect(r.outcome.error.message).toBe(`the model call failed: ${FAILED_MODEL_CALL_ERROR}`);
+    expect(harnessErrors(r)).toEqual([]);
+    expect(posts(r, "/interrupt")).toHaveLength(0);
+    expect(r.killed.length).toBeGreaterThan(0);
+    expect(r.removed).toEqual([openCodeRunPaths("run-c").dir]);
+  });
+
+  it("a write-up steer the server refuses is a harness_error at once, never swallowed, and the finale still ends the run by the wind-down", async () => {
+    const r = await openCodeDriver({ steerPostFails: true }).run(hung);
+    expect(answered(r)).toBe(timeBudgetAnswer("", CONFORMANCE_MAX_MINUTES, finaleAbortReason(FINALE_MS)));
+    expect(harnessErrors(r)).toEqual([
+      'the write-up steer did not reach the server: it answered 500 ({"error":"the store hiccuped"})',
+      windDownFailureNote(finaleAbortReason(FINALE_MS)),
+    ]);
+    expect(r.killed.length).toBeGreaterThan(0);
   });
 });
 

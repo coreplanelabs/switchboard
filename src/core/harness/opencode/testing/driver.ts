@@ -67,7 +67,7 @@ import {
   type ModelTurn,
   type RunScript,
 } from "../../testing/scenarios.js";
-import { openCodeToolNameWord } from "../bridge.js";
+import { FIRST_EVENT_BOUND_MS, openCodeToolNameWord } from "../bridge.js";
 import { OpenCodeHarness } from "../harness.js";
 import { openCodeAuthHeader, OPENCODE_VERSION } from "../client.js";
 import {
@@ -185,6 +185,17 @@ export interface FakeServeOptions {
   replyPostThrows?: boolean;
   /** Every steer POST (a follow-up) answers 500: the server never takes the follow-up. */
   steerPostFails?: boolean;
+  /** The session's prime — its import or its create — answers 500. */
+  primePostFails?: boolean;
+  /** The `queue` prompt POST of this 1-based number (1 the run's request or a
+   *  resume's continue, 2 the first post-turn's) answers 500: nothing starts. */
+  promptPostFails?: number;
+  /** The `queue` prompt of this 1-based number is admitted (200) and nothing
+   *  follows on the feed for the session — no step, no event — while the
+   *  server's and the tailer's error logs each hold a line and the tailer
+   *  writes one note of its own; the serve then moves the run's clock past
+   *  the first-event bound, so the harness's next tick finds the silence. */
+  silentAfterPrompt?: number;
   /** The relay registry the run is opened on; a test hands one that already
    *  holds the run's registration with a relayed call still running, so a
    *  relaunch is seen to take it over rather than register anew. Fresh unless given. */
@@ -266,6 +277,12 @@ interface ServeDeps {
   /** Moves the run's clock past its deadline (`budgetBeforeModelCall`): the
    *  serve has no clock of its own, the driver that built the run does. */
   spendBudget?: () => void;
+  /** Moves the run's clock forward by `ms`: past the finale bound once a
+   *  write-up's steer has landed on a hung turn, past the first-event bound
+   *  after a prompt the serve stays silent on. */
+  advanceClock?: (ms: number) => void;
+  /** The run's finale bound (`loopClock(...).finaleMs`), for a hung turn's clock. */
+  finaleMs?: number;
 }
 
 /** The serve as a test holds it: the model requests it recorded. */
@@ -293,6 +310,11 @@ class ScriptedServe {
   private replyFailuresLeft: number;
   private readonly replyPostThrows: boolean;
   private readonly steerPostFails: boolean;
+  private readonly primePostFails: boolean;
+  private readonly promptPostFails: number | undefined;
+  private readonly silentAfterPrompt: number | undefined;
+  /** How many `queue` prompts the serve has been posted. */
+  private queuePrompts = 0;
   private readonly mutate: MutatedClause | undefined;
   private readonly replacedWord: string;
   private readonly reattach: ReattachOptions;
@@ -330,6 +352,9 @@ class ScriptedServe {
     this.replyFailuresLeft = options.failReplyPosts ?? 0;
     this.replyPostThrows = options.replyPostThrows === true;
     this.steerPostFails = options.steerPostFails === true;
+    this.primePostFails = options.primePostFails === true;
+    this.promptPostFails = options.promptPostFails;
+    this.silentAfterPrompt = options.silentAfterPrompt;
     this.mutate = options.mutate;
     this.replacedWord = options.replacedWord ?? REPLACED_WORD;
     this.reattach = options.reattach ?? {};
@@ -619,7 +644,9 @@ class ScriptedServe {
     if (req.method === "POST" && req.path === "/api/plugin/await-activation")
       return { status: 204, headers: {}, body: "" };
     if (req.method === "POST" && req.path === "/api/session/import") {
+      if (this.primePostFails) return j(500, { error: "the store hiccuped" });
       const body = parseBody(req.body);
+      this.sessionModel = (body.info as { model?: unknown } | undefined)?.model;
       // The conversation clause switched off: the seed is never imported, so the
       // model's first call does not see the thread's earlier turns.
       if (this.mutate !== "conversation")
@@ -627,7 +654,11 @@ class ScriptedServe {
           this.store.push(m as Record<string, unknown>);
       return j(200, { data: { id: (body.info as { id?: string })?.id ?? this.sessionID } });
     }
-    if (req.method === "POST" && req.path === "/api/session") return j(200, { data: { id: this.sessionID } });
+    if (req.method === "POST" && req.path === "/api/session") {
+      if (this.primePostFails) return j(500, { error: "the store hiccuped" });
+      this.sessionModel = parseBody(req.body).model;
+      return j(200, { data: { id: this.sessionID } });
+    }
     if (req.method === "POST" && req.path.endsWith("/wait")) return { status: 204, headers: {}, body: "" };
     if (req.method === "POST" && req.path.endsWith("/prompt")) {
       const body = parseBody(req.body);
@@ -641,6 +672,27 @@ class ScriptedServe {
         // boundary: at once when nothing is in flight, else when the calls settle.
         this.stepBoundary();
       } else {
+        this.queuePrompts++;
+        // The prompt the server refuses (the harness must fail by name, not wait on the feed).
+        if (this.promptPostFails === this.queuePrompts) return j(500, { error: "the store hiccuped" });
+        // The prompt the server admits and never acts on: the feed stays silent
+        // for the session — the tailer's own note is not the server's word —
+        // the error logs say what a reader would find there, and the clock
+        // passes the first-event bound once the harness holds the answer.
+        if (this.silentAfterPrompt === this.queuePrompts) {
+          const paths = openCodeRunPathsAt(this.run.root);
+          this.container.files.set(
+            paths.errLog,
+            "provider: connect ETIMEDOUT 10.0.0.1:443 (the proxy did not answer)\n",
+          );
+          this.container.files.set(paths.tailer.errLog, "tailer: event stream idle; no records for the session\n");
+          this.container.emit({ feed: "tailer", at: NOW, note: "reconnected", connections: 2 });
+          void (async () => {
+            for (let i = 0; i < 8; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+            this.deps.advanceClock?.(FIRST_EVENT_BOUND_MS + 1);
+          })();
+          return j(200, { data: { id: `inb_${this.ordinal++}` } });
+        }
         // A rebuild's prompt is the continue that triggers the session; the
         // imported record already holds the conversation and the settlement, so
         // the continue's echo is elided (the mirror starts from the settlement
@@ -697,6 +749,47 @@ class ScriptedServe {
     return j(404, { error: "no such route" });
   }
 
+  /** The session's model reference, as the create or the import carried it:
+   *  resolved when an execution starts, never at the request — the real server
+   *  stores the reference as given and resolves it against its configuration
+   *  only when the prompt's execution asks for the model. */
+  private sessionModel: unknown;
+
+  /** Why the session's model reference does not resolve against the
+   *  configuration the launch wrote, in the real server's words, or nothing
+   *  when it does. Measured against `@opencode/cli` at the pin: a create with
+   *  `anthropic/real-model` is admitted, the prompt is admitted, the execution
+   *  starts and fails at once with `provider.no-route` — `Model unavailable:
+   *  anthropic/real-model` — and no `session.idle` follows. So a harness that
+   *  names the bot's provider where the configuration's key belongs meets the
+   *  same failure here it met live, and a loop that waits past the failure for
+   *  an idle hangs here as it hung there (record 0038's stage gate on the fake:
+   *  the fake answers as the real binary does, never more kindly). A session
+   *  created with no reference runs on the configuration's default model. */
+  private modelUnavailable(): string | undefined {
+    const ref = this.sessionModel;
+    if (typeof ref !== "object" || ref === null) return undefined;
+    const { providerID, id } = ref as { providerID?: unknown; id?: unknown };
+    const written = this.container.files.get(this.configPath());
+    const config = written
+      ? (JSON.parse(written) as { providers?: Record<string, { models?: Record<string, unknown> }> })
+      : {};
+    const provider = typeof providerID === "string" ? config.providers?.[providerID] : undefined;
+    if (provider !== undefined && typeof id === "string" && provider.models?.[id] !== undefined) return undefined;
+    return `Model unavailable: ${String(providerID)}/${String(id)}`;
+  }
+
+  /** The execution fails as the real server fails one: the failure event with
+   *  the provider's words, then the two refills its terminal transition causes
+   *  — the pending asks (none) and the store with the idle marker the failure
+   *  left — and NO `session.idle`. */
+  private failExecution(type: string, message: string): void {
+    this.emitEvent("session.execution.failed", { sessionID: this.sessionID, error: { type, message } });
+    this.store.push({ id: `msg_idle_${this.ordinal++}`, type: "idle", outcome: "failed", time: { created: NOW } });
+    this.emitPermissions([]);
+    this.emitMessages();
+  }
+
   private waitReply(requestID: string): Promise<Decision> {
     return new Promise((resolve) => this.replies.set(requestID, resolve));
   }
@@ -723,6 +816,15 @@ class ScriptedServe {
 
   private async play(): Promise<void> {
     this.playing = true;
+    this.emitEvent("session.execution.started", { sessionID: this.sessionID });
+    // The model reference is resolved when the execution asks for the model —
+    // the real server's moment — and a reference the configuration cannot
+    // resolve fails the execution there, in the server's words.
+    const unavailable = this.modelUnavailable();
+    if (unavailable !== undefined) {
+      this.failExecution("provider.no-route", unavailable);
+      return;
+    }
     if (this.script.unknownEventKind) this.emitEvent(this.script.unknownEventKind, { sessionID: this.sessionID });
     for (let t = 0; t < this.script.turns.length && !this.interrupted; t++) {
       // A hard stop before this model call (`hardStopBeforeModelCall`): request
@@ -756,17 +858,51 @@ class ScriptedServe {
         this.deps.spendBudget();
         for (let i = 0; i < 200 && this.pendingSteers.length === 0; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
       }
-      if (this.script.failModelCall === t + 1) {
-        // The model call fails: the execution fails with the provider's words
-        // and the session goes idle, as the server reports a call the proxy
-        // answered with an error. A steer queued meanwhile was for the turn
-        // after this one, which never comes.
+      if (this.script.softStopBeforeModelCall === t + 1) {
+        // An operator's soft stop before this model call: requested, then the
+        // loop's write-up steer waited for, so this call is the one that
+        // answers it — or never does, with `hangModelCall`.
+        if (this.run.control === undefined)
+          throw new Error(
+            "softStopBeforeModelCall needs the run's control: hand the serve a run, not a bare container",
+          );
+        this.run.control.requestStop("soft");
+        for (let i = 0; i < 200 && this.pendingSteers.length === 0; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+      }
+      if (this.script.hangModelCall === t + 1) {
+        // This model call never answers: the step opens and nothing follows —
+        // not the answer, not a reaction to the wind-down's steer, not a
+        // `session.execution.interrupted` for the interrupt (a deaf turn). The
+        // wind-down is the soft stop above when the script names one, else the
+        // budget: the clock passes the loop's end with the step open and the
+        // write-up's steer is waited for. Then the clock passes the finale
+        // bound, and the play waits for the harness's interrupt and stops.
+        if (this.deps.advanceClock === undefined || this.deps.finaleMs === undefined)
+          throw new Error("hangModelCall needs the driver's clock: hand the serve `advanceClock` and `finaleMs`");
         this.recordModelCall();
-        this.emitEvent("session.execution.failed", {
+        this.emitEvent("session.step.started", {
           sessionID: this.sessionID,
-          error: { message: FAILED_MODEL_CALL_ERROR },
+          assistantMessageID: `msg_a${t}`,
+          agent: "switchboard",
         });
-        this.emitEvent("session.idle", { sessionID: this.sessionID });
+        if (this.script.softStopBeforeModelCall !== t + 1) {
+          if (this.deps.spendBudget === undefined)
+            throw new Error("hangModelCall needs the driver's clock: hand the serve `spendBudget`");
+          for (let i = 0; i < 8; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+          this.deps.spendBudget();
+          for (let i = 0; i < 200 && this.pendingSteers.length === 0; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+        }
+        this.deps.advanceClock(this.deps.finaleMs + 1);
+        for (let i = 0; i < 2000 && !this.interrupted; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+        return;
+      }
+      if (this.script.failModelCall === t + 1) {
+        // The model call fails: the execution fails with the provider's words,
+        // as the server reports a call the proxy answered with an error, and
+        // the store's idle marker is the last of it. A steer queued meanwhile
+        // was for the turn after this one, which never comes.
+        this.recordModelCall();
+        this.failExecution("provider.error", FAILED_MODEL_CALL_ERROR);
         return;
       }
       this.flushSteers();
@@ -1258,12 +1394,16 @@ async function runOpenCode(script: RunScript, options: FakeServeOptions = {}): P
     maxTokens: run.agent.maxTokens,
     control: run.control,
   });
+  /** The run's lease clocks, for a script that moves the clock: past the loop's end, past the finale bound. */
+  const lease = loopClock(NOW, run.agent.maxMinutes * MINUTE_MS, run.agent.name);
   const serveDeps: ServeDeps = {
     registry,
     sleep: deps.sleep,
     ...(deps.tickMs !== undefined ? { tickMs: deps.tickMs } : {}),
     // The clock lands past the LOOP's end, inside the lease (pi's driver does the same).
-    spendBudget: () => void (clock.now = loopClock(NOW, run.agent.maxMinutes * MINUTE_MS, run.agent.name).loopEnd + 1),
+    spendBudget: () => void (clock.now = lease.loopEnd + 1),
+    advanceClock: (ms) => void (clock.now += ms),
+    finaleMs: lease.finaleMs,
   };
   const serve = new ScriptedServe(container, source, script, serveDeps, options);
   const recorded = script.processAliveOnResume
@@ -1310,6 +1450,8 @@ export interface ScriptOpenCodeServeOptions {
   registry: HarnessRegistry;
   bearers?: RunBearerStore;
   options?: FakeServeOptions;
+  /** The caller's hand on the run's clock, for a script that needs the clock moved (`silentAfterPrompt`). */
+  advanceClock?: (ms: number) => void;
 }
 
 /** The scripted serve bound to a bare container, for a run the RUN LOOP opens
@@ -1364,6 +1506,7 @@ export function scriptOpenCodeServe(
       sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 2))),
       tickMs: 5,
       ...(opts.bearers ? { bearers: opts.bearers } : {}),
+      ...(opts.advanceClock ? { advanceClock: opts.advanceClock } : {}),
     },
     opts.options,
   );

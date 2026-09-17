@@ -35,6 +35,7 @@ import {
   toolTextFailed,
   type RunEvent,
   type RunNoteKind,
+  type StopMode,
 } from "../../runEvents.js";
 import type { ChatMessage, ContentPart } from "../../chatMessage.js";
 import type { CompactionEntry } from "../../runLedger/types.js";
@@ -58,9 +59,14 @@ import { PiRpcTransport } from "../pi/transport.js";
 import { judgeToolCall, openCodeToolWord, type ToolRuleContext } from "../pi/toolRules.js";
 import {
   CONTINUE_PROMPT,
+  finaleAbortReason,
+  finaleTimedOutNote,
   HARD_STOP_MESSAGE,
   hardStopNote,
   MODEL_CALL_IN_FLIGHT,
+  SOFT_STOP_INSTRUCTION,
+  softStopAnswer,
+  softStopNote,
   timeBudgetAnswer,
   timeBudgetInstruction,
   timeBudgetNote,
@@ -85,7 +91,7 @@ import {
 } from "./client.js";
 import { openCodeDispositionOf } from "./dispositions.js";
 import { openCodeReplacedCallNote, openCodeSettlementNote } from "./session.js";
-import { openCodeBuiltinToolsFor, type OpenCodeRunPaths } from "./process.js";
+import { openCodeBuiltinToolsFor, OPENCODE_READY_MS, type OpenCodeRunPaths } from "./process.js";
 
 /** A tool call the model ran to its end with no ask the bot answered, or an
  *  approval the bot did not send: the gate was bypassed and the run fails
@@ -116,6 +122,72 @@ export class OpenCodeReplyFailedError extends Error {
       }): the ask stays unanswered, so the run stops rather than hang`,
     );
     this.name = "OpenCodeReplyFailedError";
+  }
+}
+
+/** OpenCode answered a request the harness makes for the run outside 2xx —
+ *  the session's prime (its import or create), the prompt, a resume's
+ *  continue, a follow-up turn's prompt. Said on the record as a
+ *  `harness_error` naming the request and the server's answer, at once, and
+ *  the run fails by that name: a refused prompt starts no execution, so a loop
+ *  that read the answer as admitted and waited on the feed for its first event
+ *  would wait to the budget, silently. */
+export class OpenCodeRequestRefusedError extends Error {
+  constructor(
+    readonly request: string,
+    readonly status: number,
+    body: string,
+  ) {
+    super(`OpenCode refused the ${request} (${status}): ${redactAndCap(body, 200)}`);
+    this.name = "OpenCodeRequestRefusedError";
+  }
+}
+
+/** How long the feed may carry nothing for the run's session after a request
+ *  that starts an execution — the prompt, a resume's continue, a follow-up
+ *  turn's prompt — before the run fails by name: the bound the launch already
+ *  gives the server to answer its health (`OPENCODE_READY_MS`), since a server
+ *  that admitted a prompt shows its first event (the inbox's, the step's start)
+ *  well inside the time it takes to come up. Not a bound on a model call or a
+ *  tool: the first live record for the session lifts it, and the wind-down's
+ *  finale bound covers the turn from there. */
+export const FIRST_EVENT_BOUND_MS = OPENCODE_READY_MS;
+/** How much of each error log the silence diagnostics quote. */
+const SILENCE_TAIL_BYTES = 2000;
+
+/** What the record carries when the feed stayed silent past the bound: enough
+ *  to say why nothing came, not merely that nothing did. */
+export interface OpenCodeSilenceDiagnostics {
+  sessionID: string;
+  /** The feed byte the loop had read to when the bound passed. */
+  feedOffset: number;
+  /** The last feed line read, whatever its kind; none when the loop read nothing since its offset. */
+  lastRecord?: string;
+  /** The tail of the server's stderr (`serve.err`). */
+  serveErr: string;
+  /** The tail of the tailer's stderr (`tailer.err`). */
+  tailerErr: string;
+  boundMs: number;
+}
+
+/** The server admitted the harness's request and the feed then carried no
+ *  record for the run's session within `FIRST_EVENT_BOUND_MS`: the run fails
+ *  by this name, the `harness_error` note carrying the phase and the
+ *  diagnostics, never a silent wait to the budget. */
+export class OpenCodeSilentError extends Error {
+  constructor(
+    readonly phase: string,
+    readonly diagnostics: OpenCodeSilenceDiagnostics,
+  ) {
+    const d = diagnostics;
+    const quote = (label: string, text: string) =>
+      `${label}: ${text.trim() ? redactAndCap(text.trim(), 400) : "(empty)"}`;
+    super(
+      `OpenCode produced no event for session ${d.sessionID} within ${Math.round(d.boundMs / 1000)} s of ${phase} — the server admitted it and nothing followed; ` +
+        `feed offset ${d.feedOffset}, last feed record: ${d.lastRecord === undefined ? "none" : redactAndCap(d.lastRecord, 300)}; ` +
+        `${quote("serve.err", d.serveErr)}; ${quote("tailer.err", d.tailerErr)}`,
+    );
+    this.name = "OpenCodeSilentError";
   }
 }
 
@@ -577,9 +649,22 @@ export class OpenCodeBridge {
         this.note("harness_error", `an OpenCode step failed: ${redactAndCap(errorMessage(data.error), 200)}`);
         break;
       case "session.execution.failed": {
+        // The execution ended on the failure: OpenCode's terminal transition,
+        // beside `succeeded` and `interrupted` (the store's idle marker carries
+        // `outcome: failed`), and no `session.idle` follows it — proven against
+        // the real binary, whose `provider.no-route` failure is the last event
+        // the session emits. So the run settles here, on the failure by name,
+        // or on the wind-down's answer when the run was already winding down;
+        // a loop that waited past it for an idle waited to its budget. The one
+        // exception is the proxy's turn-budget refusal, which is the wind-down's
+        // trigger: the write-up is steered and starts an execution of its own.
         const error = { status: statusOf(data.error), message: errorMessage(data.error) };
+        this.stepOpen = false;
         if (isBudgetRefusal(error)) out.budgetStop = true;
-        else out.providerError = redactAndCap(error.message, 400);
+        else {
+          out.providerError = redactAndCap(error.message, 400);
+          out.settled = true;
+        }
         break;
       }
       case "session.execution.succeeded":
@@ -1035,10 +1120,12 @@ export async function driveOpenCode(
     if (!run.resume)
       emit({ type: "lease", startedAt: lease.startedAt, endsAt: deadline, loopEndsAt: loopEnd, at: lease.startedAt });
   }
-  const note = (kind: RunNoteKind, summary: string) => {
+  const note = (kind: RunNoteKind, summary: string, mode?: StopMode) => {
     run.onProgress?.(summary);
-    emit({ type: "run_note", kind, summary });
+    emit({ type: "run_note", kind, summary, ...(mode ? { mode } : {}) });
   };
+  /** Which request this loop's prompt is, for the record: the fresh run's, a resume's continue, a post-turn's. */
+  const promptPhase = kind === "turn" ? "follow-up turn's prompt" : run.resume !== undefined ? "continue" : "prompt";
   const bridge = new OpenCodeBridge({
     emit,
     ...(run.onProgress ? { onProgress: run.onProgress } : {}),
@@ -1091,16 +1178,31 @@ export async function driveOpenCode(
     offset: conn.feedOffset,
   });
 
-  let writeUp: { kind: "time" } | { kind: "turns"; pace: string } | undefined;
+  let writeUp: WriteUp | undefined;
   /** When the write-up was steered: the finale bound counts from here. */
   let writeUpAt: number | undefined;
-  /** The finale bound interrupted the session during a write-up: the run ends
-   *  by the wind-down's answer, and the interrupted call's failure is not the run's. */
+  /** The finale bound ended the write-up: the run closes by the wind-down's
+   *  answer with nothing more awaited of the feed — the interrupt is sent and
+   *  the caller ends the process — and the aborted call's failure is the
+   *  wind-down's note, never the run's failure or a replaced verdict. */
   let finaleAborted = false;
   let hardStopped = false;
+  /** An operator's soft stop: the write-up steered, the answer under the ⏹ label. */
+  let stopMode: StopMode | undefined;
+  /** What ended the loop from a tick rather than from the feed: the hard stop,
+   *  the finale bound, or the silence bound; the loop leaves at once on any. */
+  let ended: "hard" | "finale" | "silent" | undefined;
+  /** The request whose first event the feed still owes (`FIRST_EVENT_BOUND_MS`):
+   *  set when a `queue` prompt is admitted, cleared by the first live record for
+   *  the session — a `steer` lands at the running execution's next step boundary,
+   *  which a long tool call may put minutes away, so it is never armed. */
+  let awaiting: { phase: string; since: number } | undefined;
+  /** The last feed line read, for the silence diagnostics. */
+  let lastRecord: string | undefined;
   let warned = false;
   let bypass: OpenCodeGateBypassedError | undefined;
   let replyFailed: OpenCodeReplyFailedError | undefined;
+  let refused: OpenCodeRequestRefusedError | undefined;
   let providerError: string | undefined;
   /** The model call the wind-down waited on failed: a note, never the ending —
    *  the write-up's answer names it where the findings would have been. */
@@ -1125,7 +1227,28 @@ export async function driveOpenCode(
     compactions: run.resume?.compactions ?? [],
   };
 
-  const startWriteUp = (w: NonNullable<typeof writeUp>, instruction: string) => {
+  /** A request whose answer the loop does not wait on — a steer, the
+   *  interrupt: its failure is never swallowed. An answer outside 2xx, or a
+   *  request that threw, is a `harness_error` naming the request and the
+   *  answer, at once; the ending it was part of is the wind-down's or the
+   *  stop's, bounded by the finale, so nothing waits on it. */
+  const post = (what: string, route: { method: string; path: string }, body?: unknown) => {
+    void request(route, body).then(
+      (res) => {
+        if (res.status < 200 || res.status >= 300)
+          note(
+            "harness_error",
+            `${what} did not reach the server: it answered ${res.status}${res.body.trim() ? ` (${redactAndCap(res.body, 200)})` : ""}`,
+          );
+      },
+      (err: unknown) =>
+        note(
+          "harness_error",
+          `${what} did not reach the server: ${redactAndCap(err instanceof Error ? err.message : String(err), 200)}`,
+        ),
+    );
+  };
+  const startWriteUp = (w: WriteUp, instruction: string) => {
     writeUp = w;
     writeUpAt = now();
     // The relay's door refuses new tool calls while the run writes up (the
@@ -1134,32 +1257,55 @@ export async function driveOpenCode(
       conn.writeUp.blocked =
         w.kind === "time"
           ? "the run has reached its time budget: no more tool calls — the run is writing its final answer"
-          : "the run has hit its turn guard: no more tool calls — the run is writing its final answer";
-    void request(sessionRoutes["session.prompt"], { text: instruction, delivery: "steer" }).catch(() => {});
+          : w.kind === "turns"
+            ? "the run has hit its turn guard: no more tool calls — the run is writing its final answer"
+            : "an operator asked this run to stop: no more tool calls — the run is writing its final answer";
+    post("the write-up steer", sessionRoutes["session.prompt"], { text: instruction, delivery: "steer" });
   };
   const turnCount = () => deps.bearers?.grantOf(run.runId)?.turns ?? bridge.turns;
+  /** The budgets, the stops, the finale and the silence bound — on every event and every tick. */
   const check = () => {
-    if (run.control?.requested === "hard") {
+    const requested = run.control?.requested;
+    if (requested === "hard") {
       if (!hardStopped) {
         hardStopped = true;
+        ended = "hard";
         // The hard stop on the record (the record clause): a `stopped` note in
         // mode `hard`, said once, then the interrupt that ends the session.
-        run.onProgress?.(hardStopNote());
-        emit({ type: "run_note", kind: "stopped", summary: hardStopNote(), mode: "hard" });
-        void request(sessionRoutes["session.interrupt"]).catch(() => {});
+        note("stopped", hardStopNote(), "hard");
+        post("the interrupt", sessionRoutes["session.interrupt"]);
       }
       return;
     }
     if (writeUp) {
-      // The write-up is bounded by its allowance, as pi's is: past it the run
-      // closes by the wind-down's own answer — the interrupt ends whatever
-      // call is in flight, and `finaleAborted` keeps that failure the run's own.
+      // The write-up is bounded by its allowance, as pi's is (harness.md item
+      // 5): past the bound the run closes by the wind-down's own answer with no
+      // write-up — the call in flight interrupted, its failure the wind-down's
+      // note — and the loop leaves now rather than wait for a settle a hung
+      // turn never sends: a turn that answered nothing for the bound answers
+      // nothing to the interrupt either, and the caller ends the process.
       if (writeUpAt !== undefined && now() - writeUpAt >= lease.finaleMs) {
         writeUpAt = undefined;
         finaleAborted = true;
-        run.onProgress?.("finale timed out — closing the run without a write-up");
-        void request(sessionRoutes["session.interrupt"]).catch(() => {});
+        ended = "finale";
+        const reason = finaleAbortReason(lease.finaleMs);
+        writeUpFailed ??= reason;
+        run.onProgress?.(finaleTimedOutNote());
+        note("harness_error", windDownFailureNote(reason));
+        post("the interrupt", sessionRoutes["session.interrupt"]);
       }
+      return;
+    }
+    if (awaiting !== undefined && now() - awaiting.since >= FIRST_EVENT_BOUND_MS) {
+      // The feed owed the first event of an execution and carried nothing for
+      // the bound: the run fails by name below, with the diagnostics.
+      ended = "silent";
+      return;
+    }
+    if (requested === "soft") {
+      stopMode = "soft";
+      note("stopped", softStopNote(), "soft");
+      startWriteUp({ kind: "soft" }, SOFT_STOP_INSTRUCTION);
       return;
     }
     if (now() >= loopEnd) {
@@ -1177,9 +1323,10 @@ export async function driveOpenCode(
       warned = true;
       const minutesLeft = Math.max(1, Math.round((loopEnd - now()) / MINUTE_MS));
       note("wrap_up", wrapUpNote(minutesLeft));
-      void request(sessionRoutes["session.prompt"], { text: wrapUpInstruction(minutesLeft), delivery: "steer" }).catch(
-        () => {},
-      );
+      post("the wrap-up steer", sessionRoutes["session.prompt"], {
+        text: wrapUpInstruction(minutesLeft),
+        delivery: "steer",
+      });
     }
   };
 
@@ -1203,7 +1350,7 @@ export async function driveOpenCode(
       if (failure !== undefined) {
         replyFailed = new OpenCodeReplyFailedError(reply.requestID, reply.callId, reply.reply, failure);
         note("harness_error", `${replyFailed.message} — the run is stopped`);
-        void request(sessionRoutes["session.interrupt"]).catch(() => {});
+        post("the interrupt", sessionRoutes["session.interrupt"]);
         return replyFailed;
       }
     }
@@ -1231,15 +1378,27 @@ export async function driveOpenCode(
     // A fresh run is prompted with its request; a resumed one — rebuilt or
     // re-attached — with the continue, in pi's words: its transcript already
     // holds the request, and the last user turn of a transcript may be a
-    // tool result with no text at all.
-    await request(sessionRoutes["session.prompt"], {
+    // tool result with no text at all. The server's answer is read: a prompt
+    // it refused started nothing, and the run fails by that name at once
+    // rather than wait on the feed for an execution that will never begin. A
+    // `queue` prompt it admitted owes the feed its first event within the
+    // bound; a `steer` (a re-attach into an execution under way) lands at
+    // that execution's next step boundary and is not bounded here.
+    const delivery = conn.reattach?.delivery ?? "queue";
+    const admitted = await request(sessionRoutes["session.prompt"], {
       text: run.resume !== undefined ? CONTINUE_PROMPT : openCodePromptText(run.messages),
-      delivery: conn.reattach?.delivery ?? "queue",
+      delivery,
     });
+    if (admitted.status < 200 || admitted.status >= 300) {
+      refused = new OpenCodeRequestRefusedError(promptPhase, admitted.status, admitted.body);
+      note("harness_error", `${refused.message} — the run is stopped`);
+      throw refused;
+    }
+    if (delivery === "queue") awaiting = { phase: `the ${promptPhase}`, since: now() };
     check();
     const iterator = transport.lines[Symbol.asyncIterator]();
     let pending: Promise<IteratorResult<string>> | undefined;
-    for (;;) {
+    for (; ended === undefined;) {
       pending ??= iterator.next();
       const tick = deps.sleep(deps.tickMs ?? 1000).then(() => "tick" as const);
       // A read that fails because the container was replaced under the run is
@@ -1264,7 +1423,6 @@ export async function driveOpenCode(
       }
       if (next === "tick") {
         check();
-        if (hardStopped) break;
         continue;
       }
       pending = undefined;
@@ -1282,8 +1440,13 @@ export async function driveOpenCode(
       // generation's on a re-attach.
       const after = transport.consumedOffset;
       bridge.catchingUp = conn.reattach !== undefined && after <= conn.reattach.catchUpTo;
+      lastRecord = next.value;
       const record = parseFeedRecord(next.value);
       if (!record) continue;
+      // The first live record for the session pays what the admitted prompt
+      // owed; a tailer's own note is not the server's word, and a record read
+      // catching up on a re-attach is the dead generation's.
+      if (record.feed !== "tailer" && !bridge.catchingUp) awaiting = undefined;
       const obs = bridge.observe(record);
       if (record.feed === "messages" && conn.saveOffset !== undefined) {
         const save = conn.saveOffset;
@@ -1292,7 +1455,7 @@ export async function driveOpenCode(
       if ((await postReplies(obs)) !== undefined) break;
       if (obs.bypass) {
         bypass = obs.bypass;
-        void request(sessionRoutes["session.interrupt"]).catch(() => {});
+        post("the interrupt", sessionRoutes["session.interrupt"]);
         break;
       }
       if (bridge.catchingUp) {
@@ -1302,7 +1465,6 @@ export async function driveOpenCode(
         if (obs.providerError !== undefined)
           note("harness_error", `a model call failed while the bot was away (${obs.providerError}); continuing`);
         check();
-        if (hardStopped) break;
         continue;
       }
       if (obs.budgetStop && !writeUp) {
@@ -1325,11 +1487,14 @@ export async function driveOpenCode(
         break;
       }
       check();
-      if (hardStopped) break;
     }
   } finally {
     transport.close();
-    agentSpan?.end(hardStopped || bypass || replyFailed || replacedBy || transportLost ? "error" : "ok");
+    agentSpan?.end(
+      hardStopped || bypass || replyFailed || replacedBy || transportLost || refused || ended === "silent"
+        ? "error"
+        : "ok",
+    );
   }
 
   // The container was replaced under the run (the survival clause's ceiling):
@@ -1368,6 +1533,28 @@ export async function driveOpenCode(
   }
   if (bypass) throw bypass;
   if (replyFailed) throw replyFailed;
+  if (awaiting !== undefined && ended === "silent") {
+    // The server admitted the request and the feed carried nothing for the
+    // session within the bound: the failure by name, with what the record
+    // could not otherwise show — the two error logs' tails, the last feed
+    // record and the offset, the session — said once, then the interrupt for
+    // whatever the server has under way, and the caller ends the process.
+    const [serveErr, tailerErr] = await Promise.all([
+      conn.container.tail(conn.paths.errLog, SILENCE_TAIL_BYTES).catch(() => ""),
+      conn.container.tail(conn.paths.tailer.errLog, SILENCE_TAIL_BYTES).catch(() => ""),
+    ]);
+    const silent = new OpenCodeSilentError(awaiting.phase, {
+      sessionID: conn.sessionID,
+      feedOffset: transport.consumedOffset,
+      ...(lastRecord !== undefined ? { lastRecord } : {}),
+      serveErr,
+      tailerErr,
+      boundMs: FIRST_EVENT_BOUND_MS,
+    });
+    note("harness_error", `${silent.message} — the run is stopped`);
+    post("the interrupt", sessionRoutes["session.interrupt"]);
+    throw silent;
+  }
   const remaining = () => deadline - now();
   if (hardStopped) return { answer: HARD_STOP_MESSAGE, remainingMs: remaining };
   if (providerError !== undefined) throw new Error(`the model call failed: ${providerError}`);
@@ -1376,17 +1563,22 @@ export async function driveOpenCode(
   // turn is the answer.
   await bridge.flush();
   const text = bridge.answer() ?? "";
-  const answer = writeUpAnswer(writeUp, text, run.agent.maxMinutes, writeUpFailed);
+  const answer = writeUpAnswer(writeUp, stopMode, text, run.agent.maxMinutes, writeUpFailed);
   return { answer, remainingMs: remaining };
 }
 
+/** The wind-downs that steer a write-up, and what each labels the answer with. */
+type WriteUp = { kind: "time" } | { kind: "turns"; pace: string } | { kind: "soft" };
+
 function writeUpAnswer(
-  writeUp: { kind: "time" } | { kind: "turns"; pace: string } | undefined,
+  writeUp: WriteUp | undefined,
+  stopMode: StopMode | undefined,
   text: string,
   maxMinutes: number,
   writeUpFailed: string | undefined,
 ): string {
   if (writeUp?.kind === "time") return timeBudgetAnswer(text, maxMinutes, writeUpFailed);
   if (writeUp?.kind === "turns") return turnGuardAnswer(text, writeUp.pace, writeUpFailed);
+  if (writeUp?.kind === "soft" || stopMode === "soft") return softStopAnswer(text, writeUpFailed);
   return text || "_(no response)_";
 }

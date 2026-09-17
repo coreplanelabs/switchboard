@@ -59,6 +59,14 @@ export const hardStopNote = (): string => "hard stop — run aborted, no summary
  *  ending: the write-up's answer stands, and this says what failed under it. */
 export const windDownFailureNote = (error: string, closes: "run" | "turn" = "run"): string =>
   `the model call failed during the wind-down (${error}); the ${closes} closes with its findings so far`;
+/** The card's line when the finale bound ends a write-up that never came. */
+export const finaleTimedOutNote = (closes: "run" | "turn" = "run"): string =>
+  `finale timed out — closing the ${closes} without a write-up`;
+/** The failed call's words when the finale bound itself is why no write-up
+ *  came — the harness aborted the call in flight at the bound — for
+ *  `windDownFailureNote` and the answer's `writeUpFailed` clause. */
+export const finaleAbortReason = (boundMs: number): string =>
+  `aborted at the finale bound (${elapsedMinutes(boundMs)})`;
 
 /** The clause a wind-down answer carries when no write-up came because the
  *  model call the wind-down waited on failed: the thread reads why there are no

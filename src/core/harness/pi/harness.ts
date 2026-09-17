@@ -34,6 +34,7 @@ import {
 } from "../contract.js";
 import {
   CONTINUE_PROMPT,
+  finaleTimedOutNote,
   HARD_STOP_MESSAGE,
   SOFT_STOP_INSTRUCTION,
   hardStopNote,
@@ -1034,7 +1035,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           // flight, and `finaleAborted` keeps that abort the run's own.
           writeUpAt = undefined;
           finaleAborted = true;
-          run.onProgress?.("finale timed out — closing the run without a write-up");
+          run.onProgress?.(finaleTimedOutNote());
           transport!.send({ type: "abort" });
         }
         return;
@@ -1379,7 +1380,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           if (writeUpAt !== undefined && now() - writeUpAt >= turnLease.finaleMs) {
             writeUpAt = undefined;
             finaleAborted = true;
-            run.onProgress?.("finale timed out — closing the turn without a write-up");
+            run.onProgress?.(finaleTimedOutNote("turn"));
             rpc.send({ type: "abort" });
           }
           return;
