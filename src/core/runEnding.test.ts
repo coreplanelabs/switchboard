@@ -8,12 +8,16 @@ import type { SealResult } from "./runRegistry/projections.js";
  *  the first `replyOk` stands, the result is re-readable. */
 function fakeRegistry() {
   const sealed = new Map<string, SealResult>();
-  const calls: Array<{ id: string; replyOk?: boolean }> = [];
+  const calls: Array<{ id: string; replyOk?: boolean; replyNote?: string }> = [];
   return {
     calls,
     sealed,
-    seal(id: string, opts: { replyOk?: boolean } = {}): SealResult {
-      calls.push({ id, ...(opts.replyOk !== undefined ? { replyOk: opts.replyOk } : {}) });
+    seal(id: string, opts: { replyOk?: boolean; replyNote?: string } = {}): SealResult {
+      calls.push({
+        id,
+        ...(opts.replyOk !== undefined ? { replyOk: opts.replyOk } : {}),
+        ...(opts.replyNote !== undefined ? { replyNote: opts.replyNote } : {}),
+      });
       const prior = sealed.get(id);
       if (prior) return prior;
       const result: SealResult = {
@@ -21,6 +25,7 @@ function fakeRegistry() {
         eventCount: 3,
         sealedAt: 1000,
         ...(opts.replyOk !== undefined ? { replyOk: opts.replyOk } : {}),
+        ...(opts.replyNote !== undefined ? { replyNote: opts.replyNote } : {}),
       };
       sealed.set(id, result);
       return result;
@@ -91,6 +96,27 @@ describe("createRunEnding — seal after the reply, records after the seal", () 
     await expect(ending.sealAfterReply(boom("card edit failed"), ok)).rejects.toThrow("card edit failed");
     expect(reg.calls[0]).toEqual({ id: "r1" });
     expect(seen).toEqual([{ failed: true, seal: { events: [], eventCount: 3, sealedAt: 1000 } }]);
+  });
+
+  // docs/reference/specs/run-history.md item 38: a reply nobody could receive is not delivered.
+  it("a reply with no channel to deliver to seals replyOk false with the reason, without flipping the record to failed", async () => {
+    const reg = fakeRegistry();
+    const ending = createRunEnding({ registry: reg });
+    const seals: SealResult[] = [];
+    let flipped = false;
+    ending.finished("r1");
+    ending.register({
+      runId: "r1",
+      flipOnPostFinishFailure: true,
+      write: (s, failedAfterFinish) => {
+        seals.push(s);
+        flipped = failedAfterFinish;
+      },
+    });
+    await ending.sealAfterReply(ok, ok, { undelivered: "no channel to deliver to" });
+    expect(reg.calls[0]).toEqual({ id: "r1", replyOk: false, replyNote: "no channel to deliver to" });
+    expect(seals[0]).toMatchObject({ replyOk: false, replyNote: "no channel to deliver to" });
+    expect(flipped).toBe(false); // the run completed; only its delivery is false
   });
 
   it("without a reply (a fall-through) the drain seals with no replyOk", async () => {

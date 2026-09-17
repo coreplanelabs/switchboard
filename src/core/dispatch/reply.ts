@@ -501,6 +501,9 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
           ),
         ),
       () => root.span("post.reply", () => io.reply(prNote ? `${channelAnswer}\n\n${prNote}` : channelAnswer)),
+      // A null channel's reply resolves but reaches nobody: the seal says
+      // `replyOk: false` with the reason (run-history.md item 38).
+      io.undeliverable !== undefined ? { undelivered: io.undeliverable } : undefined,
     );
   } finally {
     await root.span("post.workspace_release", (span) => releaseWorkspace(span));

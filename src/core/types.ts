@@ -228,6 +228,14 @@ export interface ChannelIO {
   /** Post a reply in the conversation. Adapter handles chunking/formatting. */
   reply(text: string): Promise<void>;
   /**
+   * Present when this channel has nowhere to deliver a reply (the resumed-run
+   * null channel, docs/reference/specs/run-history.md item 38): the reason, e.g.
+   * "no channel to deliver to". `reply` still resolves (it logs), but the run's
+   * seal must say `replyOk: false` with this reason — a reply nobody could
+   * receive was not delivered. Absent on every real channel.
+   */
+  undeliverable?: string;
+  /**
    * Post `lead` as the message and `text` as an attached file beside it — for
    * output too long to read as chat (a 100-tool `mcp show`): the channel's
    * collapsible container rather than a run of chunked messages. Optional;

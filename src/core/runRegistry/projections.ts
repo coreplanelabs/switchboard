@@ -86,6 +86,8 @@ export interface RunSummary {
   receivedAt?: number;
   sealedAt?: number;
   replyOk?: boolean;
+  /** Why a `replyOk: false` reply was not delivered (e.g. "no channel to deliver to"). */
+  replyNote?: string;
   stepCount?: number;
   schema?: number;
 }
@@ -119,6 +121,8 @@ export interface SealResult {
   eventCount?: number;
   sealedAt?: number;
   replyOk?: boolean;
+  /** Why a `replyOk: false` reply was not delivered. */
+  replyNote?: string;
 }
 
 /** Build the index summary for one run. The single source of the run→summary
@@ -148,6 +152,7 @@ export function summaryOf(run: RunState): RunSummary {
     ...(m?.receivedAt !== undefined ? { receivedAt: m.receivedAt } : {}),
     ...(run.sealedAt !== undefined ? { sealedAt: run.sealedAt } : {}),
     ...(run.replyOk !== undefined ? { replyOk: run.replyOk } : {}),
+    ...(run.replyNote !== undefined ? { replyNote: run.replyNote } : {}),
     ...(run.status !== undefined ? { status: run.status } : {}),
     eventCount: run.eventCount,
     stepCount: run.stepCount,
@@ -182,9 +187,14 @@ export function sealResultOf(run: RunState): SealResult {
     eventCount: run.eventCount,
     ...(run.sealedAt !== undefined ? { sealedAt: run.sealedAt } : {}),
     ...(run.replyOk !== undefined ? { replyOk: run.replyOk } : {}),
+    ...(run.replyNote !== undefined ? { replyNote: run.replyNote } : {}),
   };
 }
 
 export function sealedFrameOf(run: RunState): SealedFrame {
-  return { sealedAt: run.sealedAt ?? 0, ...(run.replyOk !== undefined ? { replyOk: run.replyOk } : {}) };
+  return {
+    sealedAt: run.sealedAt ?? 0,
+    ...(run.replyOk !== undefined ? { replyOk: run.replyOk } : {}),
+    ...(run.replyNote !== undefined ? { replyNote: run.replyNote } : {}),
+  };
 }

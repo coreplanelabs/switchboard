@@ -508,6 +508,20 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect((await s.store.get("run-l"))!.status).toBe("failed");
   });
 
+  // docs/reference/specs/run-history.md item 15: a failed run carries its reason
+  // on the record itself, even when the reply is never delivered.
+  it("a failed run leaves its reason on the record: the loop's throw is published as a `run_failed` run_note before the finish, so the run page says why", async () => {
+    const s = setup(new Error("harness container: read failed — runtime-replaced"));
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("runtime-replaced");
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const rec = (await s.store.get("run-l"))!;
+    expect(rec.status).toBe("failed");
+    expect(rec.events.filter((e) => e.type === "run_note" && e.kind === "run_failed")).toEqual([
+      expect.objectContaining({ summary: expect.stringContaining("runtime-replaced") }),
+    ]);
+  });
+
   // docs/reference/specs/run-history.md item 57: the failure by name. The
   // provider's refusal reaches the loop as the harness's typed error, and the
   // record says so, so the session's next seed can leave the request out.

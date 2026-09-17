@@ -40,14 +40,21 @@ export interface RunEnding {
   /** Seal every finished run with `replyOk`, then run every registered writer
    *  once with its run's `SealResult`. Idempotent: a second drain finds nothing.
    *  Never throws; a writer that throws is logged with its run id only. */
-  drain(replyOk: boolean | undefined): void;
+  drain(replyOk: boolean | undefined, replyNote?: string): void;
   /** The reply wrap: `prelude` (the card close) then `reply`, and a drain in
    *  `finally`. `replyOk` is scoped to the reply call alone — `undefined` when
    *  no reply was given or the prelude threw, `false` once the reply was
    *  invoked, `true` when it returned — so a thrown card close seals with no
    *  caption while still flipping the record; the throw is re-raised after the
-   *  flip and the drain. */
-  sealAfterReply(prelude: () => Promise<void>, reply?: () => Promise<void>): Promise<void>;
+   *  flip and the drain. `opts.undelivered` says the reply call has no channel
+   *  to deliver to (docs/reference/specs/run-history.md item 38): the reply is still
+   *  invoked (its log line), but the seal says `replyOk: false` with the reason,
+   *  because a reply nobody could receive was not delivered. */
+  sealAfterReply(
+    prelude: () => Promise<void>,
+    reply?: () => Promise<void>,
+    opts?: { undelivered?: string },
+  ): Promise<void>;
 }
 
 export interface RunEndingDeps {
@@ -65,10 +72,13 @@ export function createRunEnding(deps: RunEndingDeps): RunEnding {
   const finished: Array<{ id: string; afterSeal?: () => void }> = [];
   const pending: PendingRecord[] = [];
 
-  const drain = (replyOk: boolean | undefined): void => {
+  const drain = (replyOk: boolean | undefined, replyNote?: string): void => {
     for (const { id, afterSeal } of finished.splice(0)) {
       try {
-        deps.registry.seal(id, replyOk === undefined ? {} : { replyOk });
+        deps.registry.seal(
+          id,
+          replyOk === undefined ? {} : { replyOk, ...(replyNote !== undefined ? { replyNote } : {}) },
+        );
       } catch (err) {
         log(`[ending] seal ${id}: ${describe(err)}`);
       }
@@ -108,20 +118,22 @@ export function createRunEnding(deps: RunEndingDeps): RunEnding {
       for (let i = pending.length - 1; i >= 0; i--) if (pending[i]!.runId === runId) pending.splice(i, 1);
     },
     drain,
-    async sealAfterReply(prelude, reply) {
+    async sealAfterReply(prelude, reply, opts) {
       let ok: boolean | undefined;
       try {
         await prelude();
         if (reply) {
           ok = false;
           await reply();
-          ok = true;
+          // A reply with no channel to deliver to is not delivered: the seal
+          // keeps `replyOk: false` and carries the reason.
+          if (opts?.undelivered === undefined) ok = true;
         }
       } catch (err) {
         for (const entry of pending) if (entry.flipOnPostFinishFailure) entry.failedAfterFinish = true;
         throw err;
       } finally {
-        drain(ok);
+        drain(ok, ok === false ? opts?.undelivered : undefined);
       }
     },
   };

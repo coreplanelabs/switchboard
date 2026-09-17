@@ -97,6 +97,11 @@ export type RunNoteKind =
   /** The PR head moved while a review ran and the same run is re-reviewing at
    *  the new head (agent-review.md item 12). Published by the dispatcher. */
   | "head_moved"
+  /** The run loop threw and the run finishes `failed`: the summary is the
+   *  error's message, redacted and capped, so the run page says why a failed
+   *  run failed even when the reply is never delivered (run-history.md).
+   *  Published by the run loop's catch, before the finish. */
+  | "run_failed"
   /** An MCP server configured for this agent did not answer discovery
    *  (docs/reference/specs/mcp-tools.md item 8); the run proceeds without its tools. One
    *  note per server, published by the dispatcher before the first turn. */
@@ -205,6 +210,7 @@ export const RUN_NOTE_KINDS = [
   "stopped",
   "spans_dropped",
   "head_moved",
+  "run_failed",
   "mcp_unavailable",
   "follow_up",
   "resumed",

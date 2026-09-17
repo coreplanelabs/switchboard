@@ -13,6 +13,8 @@ import type { ChannelIO, StatusHandle } from "./types.js";
 export function nullChannelIO(logKey: string, log: (line: string) => void = console.log): ChannelIO {
   let children = 0;
   return {
+    // The seal reads this: a reply logged here was not delivered (run-history.md item 38).
+    undeliverable: "no channel to deliver to",
     reply: async (text) => {
       log(`[resume] ${logKey} reply (no channel to deliver to): ${text.length} chars`);
     },
