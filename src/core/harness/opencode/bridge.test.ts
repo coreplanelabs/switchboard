@@ -22,6 +22,7 @@ import { OPENCODE_EVENT_DISPOSITION, openCodeDispositionCounts, openCodeDisposit
 import { openCodeReplacedCallNote } from "./session.js";
 import { openCodeRunPaths } from "./process.js";
 import { openCodeDriver } from "./testing/driver.js";
+import { MODEL_CALL_IN_FLIGHT } from "../windDown.js";
 
 // Feature: docs/reference/specs/harness.md items 2 and 4 — OpenCode's gate and
 // record. Every tool call is decided in the bot over the HTTP ask; a reply the
@@ -593,6 +594,27 @@ describe("the loop — a reply that cannot be posted, and the narration's timing
 });
 
 describe("wind-down parity, an undelivered follow-up, and the alive-here reconciliation", () => {
+  // The budget note says what the run was at when the clock ran out, in pi's
+  // words: the open tool calls by name, the model call a started step has under
+  // way, or nothing between steps.
+  it("doingNow: nothing before a step, the model call while a step is open, the open tools by name while they run, nothing once the execution settles", () => {
+    const { bridge } = harness();
+    expect(bridge.doingNow()).toBeUndefined();
+    bridge.observe(ev("session.step.started", { sessionID: "ses_c", assistantMessageID: "msg_a0" }));
+    expect(bridge.doingNow()).toBe(MODEL_CALL_IN_FLIGHT);
+    bridge.observe(ev("session.tool.input.started", { sessionID: "ses_c", id: "c1", name: "shell" }));
+    bridge.observe(ev("session.tool.called", { sessionID: "ses_c", id: "c1", input: { command: "ls" } }));
+    expect(bridge.doingNow()).toBe("running bash");
+    bridge.observe(ev("session.tool.success", { sessionID: "ses_c", id: "c1", content: [], executed: true }));
+    expect(bridge.doingNow()).toBe(MODEL_CALL_IN_FLIGHT);
+    bridge.observe(ev("session.step.ended", { sessionID: "ses_c", assistantMessageID: "msg_a0" }));
+    expect(bridge.doingNow()).toBeUndefined();
+    bridge.observe(ev("session.step.started", { sessionID: "ses_c", assistantMessageID: "msg_a1" }));
+    bridge.observe(ev("session.execution.failed", { sessionID: "ses_c", error: { message: "the stream closed" } }));
+    bridge.observe(ev("session.idle", { sessionID: "ses_c" }));
+    expect(bridge.doingNow()).toBeUndefined();
+  });
+
   it("F1: a steer the server never took is recorded as undelivered and handed back to the inbox, never as folded in, and no input event carries it", async () => {
     const r = await openCodeDriver({ steerPostFails: true }).run({
       turns: [

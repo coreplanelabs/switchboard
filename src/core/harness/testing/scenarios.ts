@@ -29,7 +29,12 @@ import {
   type HarnessName,
   type HarnessResume,
 } from "../contract.js";
-import { HARD_STOP_MESSAGE } from "../windDown.js";
+import { HARD_STOP_MESSAGE, MODEL_CALL_IN_FLIGHT, timeBudgetAnswer, timeBudgetNote } from "../windDown.js";
+
+/** The wall clock every conformance run is given: the drivers' preset budget. */
+export const CONFORMANCE_MAX_MINUTES = 10;
+/** The provider's words when a scripted model call fails (`RunScript.failModelCall`), on every driver. */
+export const FAILED_MODEL_CALL_ERROR = "the provider closed the stream before the answer";
 
 /** One answer of the scripted model: the content parts and how it stopped. */
 export interface ModelTurn {
@@ -65,6 +70,14 @@ export interface RunScript {
   followUp?: string;
   /** A hard stop requested before the model call of this 1-based number. */
   hardStopBeforeModelCall?: number;
+  /** The run's wall clock runs out before the model call of this 1-based
+   *  number: the clock passes the deadline with that call under way, so the
+   *  harness winds the run down — the budget note, the write-up steered — and
+   *  that call is the one the wind-down waits on. */
+  budgetBeforeModelCall?: number;
+  /** The model call of this 1-based number fails with a provider error
+   *  (`FAILED_MODEL_CALL_ERROR`) instead of answering its turn. */
+  failModelCall?: number;
   /** The container the harness's process ran in is replaced under the run
    *  with the previous turn's tool call in flight, before the model call of
    *  this 1-based number would carry that call's result: the driver leaves the
@@ -515,6 +528,33 @@ export const SCENARIOS: readonly ScenarioRow[] = [
       assert.ok(stopped, "no stopped note");
       assert.equal(stopped.mode, "hard");
       assert.ok(run.killed.length > 0, "the process was not ended");
+    },
+  },
+  {
+    id: "conversation-write-up-call-fails",
+    clause: "conversation",
+    title: "a write-up whose last model call fails ends with the write-up's answer and a harness_error note",
+    script: {
+      turns: [call("c1", "bash", { command: "echo hi" }), text("never written")],
+      budgetBeforeModelCall: 2,
+      failModelCall: 2,
+    },
+    check: (run) => {
+      // The wind-down owns the ending: the budget note says the run was on a
+      // model call when the clock ran out, the call's failure is a note, and
+      // the run answered under the budget's label — naming the failed call
+      // where the write-up would have been — never as a failed model call.
+      assert.equal(answered(run), timeBudgetAnswer("", CONFORMANCE_MAX_MINUTES, FAILED_MODEL_CALL_ERROR));
+      const budget = notes(run).filter((n) => n.kind === "time_budget_exhausted");
+      assert.deepEqual(
+        budget.map((n) => n.summary),
+        [timeBudgetNote(MODEL_CALL_IN_FLIGHT)],
+        "the budget note does not say the run was on a model call",
+      );
+      const failed = notes(run).filter((n) => n.kind === "harness_error");
+      assert.equal(failed.length, 1, "the failed call is not exactly one harness_error note");
+      assert.match(failed[0].summary, /during the wind-down/);
+      assert.ok(failed[0].summary.includes(FAILED_MODEL_CALL_ERROR), "the note does not carry the provider's words");
     },
   },
   {

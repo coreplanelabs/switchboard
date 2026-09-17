@@ -25,6 +25,7 @@ import {
 import type { CompactionEntry } from "../../runLedger/types.js";
 import type { Clock, Span } from "../../trace/types.js";
 import type { Disposition } from "../contract.js";
+import { MODEL_CALL_IN_FLIGHT } from "../windDown.js";
 import { BLOCKED_AT_DOOR_PREFIX, BLOCKED_UNAVAILABLE_PREFIX } from "./extensionSource.js";
 import { piAnsweredWithoutRunning, type PiEvent } from "./protocol.js";
 
@@ -164,6 +165,10 @@ export class PiBridge {
   /** Text beside a bookkeeping-only call, held until the next message decides (harness-pi item 5). */
   private heldAnswer: string | undefined;
   private assistantStartedAt: number | undefined;
+  /** A model call is under way: pi opened a turn (`turn_start`) and has not
+   *  answered it yet (the assistant's `message_end`). What the budget note says
+   *  the run was at when no tool call is open (`doingNow`). */
+  private modelCallOpen = false;
   /** The calls under way: their span, their tool, and whether their end is
    *  judged against the gate (harness-pi item 7). */
   private readonly openTools = new Map<string, { span: Span | undefined; tool: string; judged: boolean }>();
@@ -198,6 +203,7 @@ export class PiBridge {
     this.answerText = undefined;
     this.heldAnswer = undefined;
     this.assistantStartedAt = undefined;
+    this.modelCallOpen = false;
   }
 
   /** The gate saw this call: the extension's `tool_call` hook asked the bot
@@ -229,6 +235,9 @@ export class PiBridge {
         break;
       case "agent_settled":
         out.settled = true;
+        break;
+      case "turn_start":
+        this.modelCallOpen = true;
         break;
       case "message_start":
         if (isRecord(event.message) && event.message.role === "assistant") this.assistantStartedAt = this.deps.clock();
@@ -291,6 +300,7 @@ export class PiBridge {
 
   private onAssistant(message: PiAssistantMessage, out: BridgeObservation): void {
     const at = this.deps.clock();
+    this.modelCallOpen = false;
     if (this.assistantStartedAt !== undefined) {
       this.deps.onProgress?.(`💭 thought for ${formatDuration(at - this.assistantStartedAt, "precise")}`);
       this.assistantStartedAt = undefined;
@@ -446,6 +456,15 @@ export class PiBridge {
    *  end: what a relayed request that arrived ahead of the poll waits for. */
   callOpen(callId: string): boolean {
     return this.openTools.has(callId);
+  }
+
+  /** What the run is at right now, for the budget note: the open tool calls by
+   *  name; else the model call pi has under way; else nothing — pi between
+   *  turns, or settled — and the note says the budget alone. */
+  doingNow(): string | undefined {
+    const open = [...this.openTools.values()].map((o) => o.tool);
+    if (open.length > 0) return `running ${open.join(", ")}`;
+    return this.modelCallOpen ? MODEL_CALL_IN_FLIGHT : undefined;
   }
 
   /** End whatever tool spans a stopped pi left open, so no span outlives the

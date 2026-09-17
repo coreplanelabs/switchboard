@@ -58,6 +58,7 @@ import {
   CONTINUE_PROMPT,
   HARD_STOP_MESSAGE,
   hardStopNote,
+  MODEL_CALL_IN_FLIGHT,
   timeBudgetAnswer,
   timeBudgetInstruction,
   timeBudgetNote,
@@ -65,6 +66,7 @@ import {
   turnGuardInstruction,
   turnGuardNote,
   turnGuardPace,
+  windDownFailureNote,
   wrapUpInstruction,
   wrapUpNote,
 } from "../windDown.js";
@@ -278,6 +280,10 @@ export class OpenCodeBridge {
   private answerText: string | undefined;
   /** Narration text seen since the last turn's start, emitted beside its call. */
   private pendingNarration: string | undefined;
+  /** A model call is under way: a step OpenCode started and has not ended.
+   *  What the budget note says the run was at when no tool call is open
+   *  (`doingNow`), as pi's bridge reads it off `turn_start`. */
+  private stepOpen = false;
   /** callId → the tool name the model gave it (from `session.tool.input.started`). */
   private readonly toolNames = new Map<string, string>();
   /** The open calls' spans, by callId. */
@@ -441,6 +447,16 @@ export class OpenCodeBridge {
     this.openTools.clear();
   }
 
+  /** What the run is at right now, for the budget note: the open tool calls by
+   *  name; else the model call OpenCode has under way (a step started and not
+   *  ended); else nothing — between steps, or settled — and the note says the
+   *  budget alone. The same reading as pi's bridge gives. */
+  doingNow(): string | undefined {
+    const open = [...this.openTools.values()].map((o) => o.tool);
+    if (open.length > 0) return `running ${open.join(", ")}`;
+    return this.stepOpen ? MODEL_CALL_IN_FLIGHT : undefined;
+  }
+
   /** The record as this generation holds it (`HarnessRecord`; harness.md item
    *  6): the base — the seed with its request, or the resumed transcript — and
    *  the mirror's rows, every call of the last turn settled with the replaced
@@ -527,8 +543,12 @@ export class OpenCodeBridge {
         if (typeof data.text === "string" && data.text.trim())
           this.pendingNarration = this.pendingNarration ? `${this.pendingNarration}\n${data.text}` : data.text;
         break;
+      case "session.step.started":
+        this.stepOpen = true;
+        break;
       case "session.step.ended":
         this.pendingNarration = undefined;
+        this.stepOpen = false;
         break;
       case "session.tool.success":
         this.onToolSettled(data, true, out);
@@ -563,6 +583,7 @@ export class OpenCodeBridge {
       case "session.execution.succeeded":
       case "session.execution.interrupted":
       case "session.idle":
+        this.stepOpen = false;
         out.settled = true;
         break;
       default:
@@ -1061,6 +1082,9 @@ export async function driveOpenCode(
   let bypass: OpenCodeGateBypassedError | undefined;
   let replyFailed: OpenCodeReplyFailedError | undefined;
   let providerError: string | undefined;
+  /** The model call the wind-down waited on failed: a note, never the ending —
+   *  the write-up's answer names it where the findings would have been. */
+  let writeUpFailed: string | undefined;
   let settled = false;
   /** The container was replaced under the run (the survival clause's ceiling):
    *  the executor's word on the feed read, or — OpenCode found dead with no
@@ -1100,7 +1124,7 @@ export async function driveOpenCode(
     }
     if (writeUp) return;
     if (now() >= deadline) {
-      note("time_budget_exhausted", timeBudgetNote());
+      note("time_budget_exhausted", timeBudgetNote(bridge.doingNow()));
       startWriteUp({ kind: "time" }, timeBudgetInstruction());
       return;
     }
@@ -1238,7 +1262,16 @@ export async function driveOpenCode(
         note("turn_budget_exhausted", turnGuardNote(pace));
         startWriteUp({ kind: "turns", pace }, turnGuardInstruction(pace));
       }
-      if (obs.providerError !== undefined) providerError = obs.providerError;
+      if (obs.providerError !== undefined) {
+        if (writeUp) {
+          // The run is already winding down (a budget, the turn guard): a
+          // model call that fails now does not take the ending over — the
+          // wind-down's answer stands, and the record says what failed under
+          // it (pi's rule, harness-pi.md item 15).
+          writeUpFailed = obs.providerError;
+          note("harness_error", windDownFailureNote(obs.providerError));
+        } else providerError = obs.providerError;
+      }
       if (obs.settled) {
         settled = true;
         break;
@@ -1283,7 +1316,7 @@ export async function driveOpenCode(
   // turn is the answer.
   await bridge.flush();
   const text = bridge.answer() ?? "";
-  const answer = writeUpAnswer(writeUp, text, run.agent.maxMinutes);
+  const answer = writeUpAnswer(writeUp, text, run.agent.maxMinutes, writeUpFailed);
   return { answer };
 }
 
@@ -1291,8 +1324,9 @@ function writeUpAnswer(
   writeUp: { kind: "time" } | { kind: "turns"; pace: string } | undefined,
   text: string,
   maxMinutes: number,
+  writeUpFailed: string | undefined,
 ): string {
-  if (writeUp?.kind === "time") return timeBudgetAnswer(text, maxMinutes);
-  if (writeUp?.kind === "turns") return turnGuardAnswer(text, writeUp.pace);
+  if (writeUp?.kind === "time") return timeBudgetAnswer(text, maxMinutes, writeUpFailed);
+  if (writeUp?.kind === "turns") return turnGuardAnswer(text, writeUp.pace, writeUpFailed);
   return text || "_(no response)_";
 }

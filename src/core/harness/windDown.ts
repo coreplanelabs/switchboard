@@ -39,28 +39,50 @@ export const SOFT_STOP_INSTRUCTION =
 /** The turn guard's pace, as its note and its answer say it: `<N> model turn(s) in <M>`. */
 export const turnGuardPace = (turns: number, elapsedMs: number): string =>
   `${turns} model turn${turns === 1 ? "" : "s"} in ${elapsedMinutes(elapsedMs)}`;
-export const timeBudgetNote = (): string => "time budget exhausted — writing up findings so far";
+/** What a bridge says the run was at when no tool call is open and the model
+ *  has a turn under way (`doingNow`): the same words on every harness. */
+export const MODEL_CALL_IN_FLIGHT = "a model call was in flight";
+/** The budget's note; `doing` is what the run was at when the clock ran out
+ *  (the open tool calls by name, or `MODEL_CALL_IN_FLIGHT`), when the bridge
+ *  can say. */
+export const timeBudgetNote = (doing?: string): string =>
+  doing
+    ? `time budget exhausted while ${doing} — writing up findings so far`
+    : "time budget exhausted — writing up findings so far";
 export const turnGuardNote = (pace: string): string =>
   `turn guard fired: ${pace}, a pace that looks like a loop — writing up findings so far`;
 export const softStopNote = (): string => "soft stop — no further steps, writing up findings so far";
 export const hardStopNote = (): string => "hard stop — run aborted, no summary written";
+/** A model call that failed once the run was winding down — the finale bound's
+ *  own abort of a call in flight included — is a note on the record, never the
+ *  ending: the write-up's answer stands, and this says what failed under it. */
+export const windDownFailureNote = (error: string, closes: "run" | "turn" = "run"): string =>
+  `the model call failed during the wind-down (${error}); the ${closes} closes with its findings so far`;
 
-/** The thread's answer when the wall clock ran out: the write-up under its label, or the reason alone. */
-export const timeBudgetAnswer = (text: string, maxMinutes: number): string =>
+/** The clause a wind-down answer carries when no write-up came because the
+ *  model call the wind-down waited on failed: the thread reads why there are no
+ *  findings while the run still ends by the wind-down's words. */
+const noWriteUp = (failed: string | undefined): string =>
+  failed ? `; the model call failed during the wind-down (${failed}), so no write-up came` : "";
+
+/** The thread's answer when the wall clock ran out: the write-up under its
+ *  label, or the reason alone — naming the failed model call when that is why
+ *  no write-up came (`writeUpFailed`). */
+export const timeBudgetAnswer = (text: string, maxMinutes: number, writeUpFailed?: string): string =>
   text
     ? `⚠️ _Hit the ${maxMinutes}-minute budget before finishing — findings so far:_\n\n${text}`
-    : `Stopped at the ${maxMinutes}-minute budget without finishing. Partial work may exist in the workspace — narrow the task and try again.`;
+    : `Stopped at the ${maxMinutes}-minute budget without finishing${noWriteUp(writeUpFailed)}. Partial work may exist in the workspace — narrow the task and try again.`;
 /** The thread's answer when the turn guard fired. */
-export const turnGuardAnswer = (text: string, pace: string): string =>
+export const turnGuardAnswer = (text: string, pace: string, writeUpFailed?: string): string =>
   text
     ? `⚠️ _Stopped after ${pace} — that pace looks like a loop; findings so far:_\n\n${text}`
-    : `Stopped after ${pace} — that pace looks like a loop — without finishing. Partial work may exist in the workspace — look for a retry loop in the run's events before trying again.`;
+    : `Stopped after ${pace} — that pace looks like a loop — without finishing${noWriteUp(writeUpFailed)}. Partial work may exist in the workspace — look for a retry loop in the run's events before trying again.`;
 
 /** The thread's answer after a soft stop. */
-export const softStopAnswer = (text: string): string =>
+export const softStopAnswer = (text: string, writeUpFailed?: string): string =>
   text
     ? `⏹ _Stopped early by an operator (soft stop) — findings so far:_\n\n${text}`
-    : "⏹ Stopped early by an operator (soft stop) before any findings were written. Partial work may exist in the workspace.";
+    : `⏹ Stopped early by an operator (soft stop) before any findings were written${noWriteUp(writeUpFailed)}. Partial work may exist in the workspace.`;
 
 function elapsedMinutes(ms: number): string {
   const minutes = Math.round(ms / 60_000);

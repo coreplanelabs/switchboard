@@ -215,6 +215,104 @@ export async function observeCodingWorkspace(
   return (await probesAt(`git -C ${shellQuote(dir)}`)).observation;
 }
 
+/** Where a ship coding child's budget-end salvage may push (push-before-abort,
+ *  docs/reference/specs/agent-ship.md item 8): the branch the run's own push
+ *  named, else the checkout — and only when the plan's base is known and is
+ *  another branch, since the base is the one branch a child never pushes to,
+ *  and a branch that cannot be told from it may be it. Otherwise the salvage
+ *  is skipped, and the word says why. */
+export function salvageTargetOf(opts: {
+  pushedBranch: string | undefined;
+  checkedOut: string | undefined;
+  base: string | undefined;
+}): { branch: string } | { skipped: string } {
+  const branch = opts.pushedBranch ?? opts.checkedOut;
+  if (branch === undefined)
+    return {
+      skipped:
+        "the budget-end salvage was skipped: the workspace's branch could not be read, so there is nowhere to push",
+    };
+  if (opts.base === undefined)
+    return {
+      skipped: `the budget-end salvage to \`${branch}\` was skipped: the plan's base is unknown, so the branch cannot be told from it`,
+    };
+  if (branch === opts.base)
+    return {
+      skipped: `the budget-end salvage was skipped: the checkout is the plan's base \`${branch}\`, which a child never pushes to`,
+    };
+  return { branch };
+}
+
+/** The salvage's word for a clean tree with nothing unpushed on `branch`. */
+export const nothingToSalvageNote = (branch: string): string =>
+  `the budget ended with nothing to salvage: the tree is clean and \`${branch}\` holds no unpushed commits`;
+
+/** Whether the observation found work for the budget-end salvage to push:
+ *  measured work — uncommitted changes or unpushed commits — wins whatever the
+ *  other measure says; a tree measured clean on both has nothing; a measure the
+ *  observation could not take (its probe failed, `undefined`) is never read as
+ *  clean — the salvage is not attempted and the word says which measure is
+ *  missing, so a note never claims a clean tree the run could not see. */
+export function salvageWorkOf(
+  observed: Pick<WorkspaceObservation, "uncommittedChanges" | "unpushedCommits">,
+  branch: string,
+): { work: true } | { work: false; summary: string } {
+  if ((observed.uncommittedChanges ?? 0) > 0 || (observed.unpushedCommits ?? 0) > 0) return { work: true };
+  if (observed.uncommittedChanges === undefined || observed.unpushedCommits === undefined) {
+    const measure = (n: number | undefined) => (n === undefined ? "could not be measured" : String(n));
+    return {
+      work: false,
+      summary: `the budget-end salvage to \`${branch}\` was not attempted: the workspace could not be measured (uncommitted changes: ${measure(observed.uncommittedChanges)}; unpushed commits: ${measure(observed.unpushedCommits)}) — work may sit unpushed there`,
+    };
+  }
+  return { work: false, summary: nothingToSalvageNote(branch) };
+}
+
+/** Push-before-abort (docs/reference/specs/agent-ship.md item 8): a ship coding
+ *  child whose loop ended at the time budget commits and pushes what its tree
+ *  still holds to the unit's branch (`salvageTargetOf` names it), so a re-issue
+ *  starts from the partial work instead of zero — or says plainly that it had
+ *  nothing. Mechanical, in the run loop after the model is done: the model can
+ *  make no more tool calls at the wind-down, so nothing else can push.
+ *  Best-effort: a failed step reports itself and never fails the run. */
+export async function salvageBudgetPush(
+  executor: { exec: (cmd: string, opts?: ExecTraceOptions) => Promise<string> },
+  opts: { branch: string },
+  span?: Span,
+): Promise<{ pushed: boolean; summary: string }> {
+  const trace = span ? { span } : undefined;
+  const run = (cmd: string) => executor.exec(cmd, trace);
+  const probe = (cmd: string) => run(cmd).catch(() => "");
+  try {
+    // Tracked changes only, the clean-tree rule's own measure (resident-repos
+    // item 17): untracked scratch is the run's own noise. The two measures are
+    // `run`, not `probe`: a measure that fails is the salvage failing (the
+    // catch below says so), never a tree read as clean.
+    const dirty = (await run("git status --porcelain -uno")).trim() !== "";
+    if (dirty) {
+      await run("git add -u");
+      await run(
+        `git commit -m ${shellQuote("wip: committed at the budget wind-down — work in progress, not reviewed")}`,
+      );
+    }
+    const unpushed = parseCountOutput(await run("git rev-list --count HEAD --not --remotes")) ?? 0;
+    if (!dirty && unpushed === 0) return { pushed: false, summary: nothingToSalvageNote(opts.branch) };
+    await run(`git push origin ${shellQuote(`HEAD:refs/heads/${opts.branch}`)}`);
+    const head = parseRevParseOutput(await probe("git rev-parse HEAD"));
+    return {
+      pushed: true,
+      summary: `the budget ended with work in the tree — ${
+        dirty ? "committed the uncommitted work and pushed" : "pushed the unpushed commits"
+      } to \`${opts.branch}\`${head !== undefined ? ` (${head.slice(0, 7)})` : ""}`,
+    };
+  } catch (err) {
+    return {
+      pushed: false,
+      summary: `the budget-end salvage push to \`${opts.branch}\` failed: ${err instanceof Error ? err.message : String(err)} — partial work may sit unpushed in the workspace`,
+    };
+  }
+}
+
 // git's per-ref push status line — `" %c %-*s %-*s -> %s"` in git's own format:
 // a flag (` ` fast-forward, `+` forced, `-` deleted, `*` new ref, `!`
 // rejected, `=` up to date), the summary (`[new branch]`, `[up to date]`,

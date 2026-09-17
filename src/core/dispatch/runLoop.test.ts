@@ -702,6 +702,92 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     ]);
   });
 
+  // agent-ship item 8, push-before-abort: a coordinator's coding child whose
+  // loop ended at the time budget salvages what its tree holds to the unit's
+  // branch — and nowhere when the plan's base cannot be named, since the
+  // branch might then be the base.
+  it("a coordinator's coding child at its time budget commits and pushes its tree to the unit's branch and says so; with the plan's base unknown the salvage is skipped, nothing is pushed, and the note says why", async () => {
+    const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+    const BRANCH = "plan/p/u1";
+    const budgeted = async (base: string | undefined) => {
+      const clock = { now: NOW };
+      const registry = new HarnessRegistry();
+      const container = new FakeHarnessContainer();
+      const commands: string[] = [];
+      const pi = scriptPiFromProvider(container, {
+        provider: {
+          name: "budgeted",
+          async complete() {
+            // The budget runs out with this call under way: the harness notes it
+            // and steers the write-up before the answer lands.
+            clock.now = NOW + 46 * 60_000;
+            for (let i = 0; i < 200 && pi.steers.length === 0; i++) await new Promise((r) => setTimeout(r, 5));
+            return { content: [{ type: "text", text: "half done" }], stopReason: "end_turn" };
+          },
+        },
+        registry,
+      });
+      const s = setup("", {
+        agent: "coding",
+        yaml: PI_YAML,
+        coding: true,
+        repoCtx: { repo: "o/r", ref: BRANCH } as RepoContext,
+        binding: { ref: BRANCH, sha: HEAD, workspace: "/srv/wt/u1" },
+        coordinator: {
+          parentInstanceId: "coord-b",
+          idempotencyKey: "coord-b:budgeted/0/coding",
+          ...(base ? { base } : {}),
+        },
+        harness: {
+          harnesses: roster(),
+          registry,
+          harnessUrl: "https://bot.example.com",
+          containerFor: () => container,
+          pollMs: 1,
+          tickMs: 5,
+        },
+        bearer: "sbr_run-l.s3cret",
+        executor: {
+          exec: async (cmd: string) => {
+            commands.push(cmd);
+            if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
+            if (/rev-parse HEAD/.test(cmd)) return `${HEAD}\n`;
+            if (/status --porcelain -uno/.test(cmd)) return " M src/a.ts\n";
+            if (/rev-list --count/.test(cmd)) return "0\n";
+            return "";
+          },
+        },
+      });
+      // No instance in the store either: with no base on the tag, the base is lost.
+      s.deps.coordinatorInstances = new InMemoryCoordinatorInstanceStore();
+      const out = answered(await runLoop(s.deps, { ...s.ctx, clock: () => clock.now }));
+      s.ending.drain(true);
+      await s.writer.settled();
+      const rec = (await s.store.get("run-l"))!;
+      const salvage = rec.events.filter(
+        (e) => e.type === "run_note" && (e as { kind: string }).kind === "budget_salvage",
+      );
+      return { out, commands, salvage };
+    };
+    const pushed = await budgeted("feat/trunk");
+    expect(pushed.out.answer).toMatch(/^⚠️ _Hit the 45-minute budget before finishing/);
+    expect(pushed.commands).toContain("git add -u");
+    expect(pushed.commands).toContain(`git push origin 'HEAD:refs/heads/${BRANCH}'`);
+    expect(pushed.salvage).toEqual([
+      expect.objectContaining({
+        summary: `the budget ended with work in the tree — committed the uncommitted work and pushed to \`${BRANCH}\` (${HEAD.slice(0, 7)})`,
+      }),
+    ]);
+    const lost = await budgeted(undefined);
+    expect(lost.out.answer).toMatch(/^⚠️ _Hit the 45-minute budget before finishing/);
+    expect(lost.commands.some((c) => c.startsWith("git push") || c.startsWith("git commit"))).toBe(false);
+    expect(lost.salvage).toEqual([
+      expect.objectContaining({
+        summary: `the budget-end salvage to \`${BRANCH}\` was skipped: the plan's base is unknown, so the branch cannot be told from it`,
+      }),
+    ]);
+  });
+
   it("without a store the pi steer is sent as before: no copy, no pull, no line", async () => {
     const container = new FakeHarnessContainer();
     const steers = piFinishingOnSteer(container, "done");

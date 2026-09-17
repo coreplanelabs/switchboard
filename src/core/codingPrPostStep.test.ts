@@ -7,6 +7,9 @@ import {
   observeCodingWorkspace,
   pushedBranchOf,
   runCodingPrPostStep,
+  salvageBudgetPush,
+  salvageTargetOf,
+  salvageWorkOf,
   trackPushedBranch,
   workLeftBehindLabel,
   workLeftBehindOf,
@@ -1541,5 +1544,139 @@ describe("workLeftBehindOf, workLeftBehindSummary and workLeftBehindLabel", () =
     expect(workLeftBehindLabel(left)).toBe(
       "2 uncommitted change(s) and 1 unpushed commit(s) left behind — discarded at the run's end",
     );
+  });
+});
+
+describe("salvageBudgetPush — a ship coding child pushes what it has at the budget (push-before-abort, agent-ship.md item 8)", () => {
+  const fakeExecutor = (answers: Record<string, string>, opts: { failOn?: string } = {}) => {
+    const commands: string[] = [];
+    return {
+      commands,
+      executor: {
+        exec: (cmd: string) => {
+          commands.push(cmd);
+          if (opts.failOn !== undefined && cmd.startsWith(opts.failOn))
+            return Promise.reject(new Error("remote hung up unexpectedly"));
+          for (const [prefix, out] of Object.entries(answers)) if (cmd.startsWith(prefix)) return Promise.resolve(out);
+          return Promise.resolve("");
+        },
+      },
+    };
+  };
+
+  it("commits the tracked changes and pushes them to the unit's branch, naming the head", async () => {
+    const w = fakeExecutor({
+      "git status": " M src/a.ts\n",
+      "git rev-list": "0\n",
+      "git rev-parse HEAD": "abc123def456abc123def456abc123def456ab12\n",
+    });
+    const out = await salvageBudgetPush(w.executor, { branch: "plan/p/u1" });
+    expect(out.pushed).toBe(true);
+    expect(out.summary).toContain("committed the uncommitted work and pushed");
+    expect(out.summary).toContain("`plan/p/u1`");
+    expect(out.summary).toContain("abc123d");
+    expect(w.commands).toContain("git add -u");
+    expect(w.commands.some((c) => c.startsWith("git commit -m") && c.includes("budget wind-down"))).toBe(true);
+    expect(w.commands).toContain("git push origin 'HEAD:refs/heads/plan/p/u1'");
+  });
+
+  it("pushes the unpushed commits without committing when the tree is clean", async () => {
+    const w = fakeExecutor({ "git status": "\n", "git rev-list": "2\n" });
+    const out = await salvageBudgetPush(w.executor, { branch: "plan/p/u1" });
+    expect(out.pushed).toBe(true);
+    expect(out.summary).toContain("pushed the unpushed commits");
+    expect(w.commands.some((c) => c.startsWith("git commit"))).toBe(false);
+    expect(w.commands.some((c) => c.startsWith("git push origin"))).toBe(true);
+  });
+
+  it("states plainly that it had nothing when the tree is clean and no commit is unpushed", async () => {
+    const w = fakeExecutor({ "git status": "\n", "git rev-list": "0\n" });
+    const out = await salvageBudgetPush(w.executor, { branch: "plan/p/u1" });
+    expect(out.pushed).toBe(false);
+    expect(out.summary).toBe(
+      "the budget ended with nothing to salvage: the tree is clean and `plan/p/u1` holds no unpushed commits",
+    );
+    expect(w.commands.some((c) => c.startsWith("git push"))).toBe(false);
+  });
+
+  it("a failed push reports itself and never throws", async () => {
+    const w = fakeExecutor({ "git status": " M src/a.ts\n" }, { failOn: "git push" });
+    const out = await salvageBudgetPush(w.executor, { branch: "plan/p/u1" });
+    expect(out.pushed).toBe(false);
+    expect(out.summary).toContain("salvage push to `plan/p/u1` failed: remote hung up unexpectedly");
+  });
+
+  it("a measure that fails is the salvage failing, never a tree read as clean: nothing is pushed and the note names the failure", async () => {
+    const w = fakeExecutor({ "git rev-list": "0\n" }, { failOn: "git status" });
+    const out = await salvageBudgetPush(w.executor, { branch: "plan/p/u1" });
+    expect(out.pushed).toBe(false);
+    expect(out.summary).toContain("salvage push to `plan/p/u1` failed: remote hung up unexpectedly");
+    expect(out.summary).not.toContain("clean");
+    expect(w.commands.some((c) => c.startsWith("git push") || c.startsWith("git commit"))).toBe(false);
+  });
+});
+
+describe("salvageWorkOf — whether the observation found work to salvage, and what it says when it could not see", () => {
+  it("measured work wins: uncommitted changes or unpushed commits mean a push, whatever the other measure says", () => {
+    expect(salvageWorkOf({ uncommittedChanges: 2, unpushedCommits: 0 }, "plan/p/u1")).toEqual({ work: true });
+    expect(salvageWorkOf({ uncommittedChanges: 0, unpushedCommits: 1 }, "plan/p/u1")).toEqual({ work: true });
+    expect(salvageWorkOf({ uncommittedChanges: undefined, unpushedCommits: 1 }, "plan/p/u1")).toEqual({ work: true });
+    expect(salvageWorkOf({ uncommittedChanges: 3, unpushedCommits: undefined }, "plan/p/u1")).toEqual({ work: true });
+  });
+
+  it("a tree measured clean on both counts has nothing to salvage, and says so", () => {
+    expect(salvageWorkOf({ uncommittedChanges: 0, unpushedCommits: 0 }, "plan/p/u1")).toEqual({
+      work: false,
+      summary: "the budget ended with nothing to salvage: the tree is clean and `plan/p/u1` holds no unpushed commits",
+    });
+  });
+
+  it("a measure the observation could not take is never read as clean: the salvage is not attempted and the note names the missing measure", () => {
+    expect(salvageWorkOf({ uncommittedChanges: undefined, unpushedCommits: 0 }, "plan/p/u1")).toEqual({
+      work: false,
+      summary:
+        "the budget-end salvage to `plan/p/u1` was not attempted: the workspace could not be measured (uncommitted changes: could not be measured; unpushed commits: 0) — work may sit unpushed there",
+    });
+    const both = salvageWorkOf({}, "plan/p/u1");
+    expect(both.work).toBe(false);
+    expect(both).toMatchObject({
+      summary: expect.stringContaining(
+        "uncommitted changes: could not be measured; unpushed commits: could not be measured",
+      ),
+    });
+    expect(JSON.stringify(both)).not.toContain("clean");
+  });
+});
+
+describe("salvageTargetOf — where the budget-end salvage may push, and when it may not", () => {
+  it("pushes to the branch the run's own push named, else to the checkout, when the plan's base is known and is another branch", () => {
+    expect(salvageTargetOf({ pushedBranch: "plan/p/u1", checkedOut: "plan/p/u1", base: "feat/trunk" })).toEqual({
+      branch: "plan/p/u1",
+    });
+    // The push wins over a checkout that moved after it.
+    expect(salvageTargetOf({ pushedBranch: "plan/p/u1", checkedOut: "scratch", base: "feat/trunk" })).toEqual({
+      branch: "plan/p/u1",
+    });
+    expect(salvageTargetOf({ pushedBranch: undefined, checkedOut: "plan/p/u1", base: "feat/trunk" })).toEqual({
+      branch: "plan/p/u1",
+    });
+  });
+
+  it("refuses to push when the base cannot be named: the branch might be the base, and the word says so", () => {
+    expect(salvageTargetOf({ pushedBranch: undefined, checkedOut: "plan/p/u1", base: undefined })).toEqual({
+      skipped:
+        "the budget-end salvage to `plan/p/u1` was skipped: the plan's base is unknown, so the branch cannot be told from it",
+    });
+  });
+
+  it("refuses to push to the plan's base itself, and when the workspace's branch could not be read", () => {
+    expect(salvageTargetOf({ pushedBranch: undefined, checkedOut: "feat/trunk", base: "feat/trunk" })).toEqual({
+      skipped:
+        "the budget-end salvage was skipped: the checkout is the plan's base `feat/trunk`, which a child never pushes to",
+    });
+    expect(salvageTargetOf({ pushedBranch: undefined, checkedOut: undefined, base: "feat/trunk" })).toEqual({
+      skipped:
+        "the budget-end salvage was skipped: the workspace's branch could not be read, so there is nowhere to push",
+    });
   });
 });

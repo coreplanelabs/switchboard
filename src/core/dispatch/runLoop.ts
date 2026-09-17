@@ -58,6 +58,9 @@ import { postReviewComment } from "../../execution/githubComments.js";
 import {
   observeCodingWorkspace,
   runCodingPrPostStep,
+  salvageBudgetPush,
+  salvageTargetOf,
+  salvageWorkOf,
   trackPushedBranch,
   workLeftBehindLabel,
   workLeftBehindOf,
@@ -346,6 +349,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // when no push was observed — the checkout can move between the push and
   // the post. The latest push wins.
   const pushes = trackPushedBranch(typeof restored.pushedBranch === "string" ? restored.pushedBranch : undefined);
+  // The loop ended at its time budget (the harness's wind-down note): a ship
+  // coding child then salvages what its tree still holds (push-before-abort,
+  // agent-ship.md item 8) after the workspace observation below.
+  let budgetEnded = false;
   // The registry backlog is the run's ONE event store: the live
   // page, the post-run friction diagnosis and the run record all read it back
   // via `registry.snapshot` — there is no second copy to drift from it.
@@ -354,6 +361,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     registry.publish(run.id, e); // feed the external live-view stream
     if (isSpanRecord(e)) return; // timing, not activity (docs/reference/specs/tracing.md): the card and its clock ignore it
     if (e.type === "tool_call") toolCalls++;
+    if (e.type === "run_note" && e.kind === "time_budget_exhausted") budgetEnded = true;
     if (isCodingPrRun) {
       pushes.observe(e);
       const pushedBranch = pushes.branch();
@@ -1096,6 +1104,39 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       ...(ownPr !== undefined ? { ownPr } : {}),
     };
     if (isCodingPrRun && run.control.requested !== "hard") await observeWorkspaceNow();
+    // Push-before-abort (agent-ship.md item 8): a ship coding child (a
+    // coordinator's spawn) whose loop ended at the time budget commits and
+    // pushes what the observation found still in the tree to the unit's own
+    // branch — never the plan's base, and nowhere when the base cannot be
+    // named, since the branch might then be it — or says plainly that it had
+    // nothing, that the tree could not be measured, or why the salvage was
+    // skipped, so a re-issue starts from the partial work instead of zero.
+    // The note is the record's; a push moves the observation, so it is read
+    // again.
+    if (isCodingPrRun && coordinator !== undefined && budgetEnded && run.control.requested !== "hard") {
+      const target = salvageTargetOf({
+        pushedBranch: pushes.branch(),
+        checkedOut: observedCheckedOut,
+        base: repoCtx.baseRef ?? planBase,
+      });
+      const work =
+        "skipped" in target
+          ? undefined
+          : salvageWorkOf(
+              { uncommittedChanges: observedUncommitted, unpushedCommits: observedUnpushed },
+              target.branch,
+            );
+      const salvaged =
+        "skipped" in target
+          ? { pushed: false, summary: target.skipped }
+          : work !== undefined && !work.work
+            ? { pushed: false, summary: work.summary }
+            : await root.span("run.budget_salvage", (span) =>
+                salvageBudgetPush(executor, { branch: target.branch }, span),
+              );
+      onEvent({ type: "run_note", kind: "budget_salvage", summary: salvaged.summary });
+      if (salvaged.pushed) await observeWorkspaceNow();
+    }
     // The description turn (docs/reference/specs/pr-description.md item 5,
     // descriptionTurn.ts): the coding prompt requires a resubmitted
     // description after EVERY push to a PR that already exists (agent-coding.md

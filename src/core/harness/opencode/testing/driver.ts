@@ -58,7 +58,14 @@ import {
 } from "../../container.js";
 import { authorizeToolCall, HarnessRegistry, relayToolCall, runRelayedTool } from "../../pi/relay.js";
 import { FakeHarnessContainer } from "../../testing/fakeContainer.js";
-import type { DrivenRun, HarnessDriver, ModelTurn, RunScript } from "../../testing/scenarios.js";
+import {
+  CONFORMANCE_MAX_MINUTES,
+  FAILED_MODEL_CALL_ERROR,
+  type DrivenRun,
+  type HarnessDriver,
+  type ModelTurn,
+  type RunScript,
+} from "../../testing/scenarios.js";
 import { openCodeToolNameWord } from "../bridge.js";
 import { OpenCodeHarness } from "../harness.js";
 import { openCodeAuthHeader, OPENCODE_VERSION } from "../client.js";
@@ -116,7 +123,7 @@ const agentFor = (identity: Identity): AgentDef => ({
   identity,
   maxTurns: 50,
   maxTokens: 4096,
-  maxMinutes: 10,
+  maxMinutes: CONFORMANCE_MAX_MINUTES,
 });
 
 /** The executor a relayed tool runs over in the bot; OpenCode's own tools run in the fake serve. */
@@ -247,13 +254,17 @@ interface ServeRun {
 }
 
 /** What the serve needs of the process: the relay registry the run is registered
- *  on, the pacing for a scripted hard stop, and the bearer store to meter each
- *  model call on (pi's scripted double does the same), when a test hands one. */
+ *  on, the pacing for a scripted hard stop, the bearer store to meter each
+ *  model call on (pi's scripted double does the same), when a test hands one,
+ *  and the driver's hand on the run's clock for a scripted budget end. */
 interface ServeDeps {
   registry: HarnessRegistry;
   sleep: (ms: number) => Promise<void>;
   tickMs?: number;
   bearers?: RunBearerStore;
+  /** Moves the run's clock past its deadline (`budgetBeforeModelCall`): the
+   *  serve has no clock of its own, the driver that built the run does. */
+  spendBudget?: () => void;
 }
 
 /** The serve as a test holds it: the model requests it recorded. */
@@ -724,6 +735,37 @@ class ScriptedServe {
         for (let i = 0; i < 200 && !this.interrupted; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
       }
       if (this.interrupted) break;
+      if (this.script.budgetBeforeModelCall === t + 1) {
+        // The wall clock runs out with this model call under way: the step has
+        // started, the clock passes the deadline, and the harness's tick notes
+        // the budget and steers the write-up before the call answers — waited
+        // for, as the hard stop above waits for its interrupt.
+        if (this.deps.spendBudget === undefined)
+          throw new Error("budgetBeforeModelCall needs the driver's clock: hand the serve `spendBudget`");
+        this.emitEvent("session.step.started", {
+          sessionID: this.sessionID,
+          assistantMessageID: `msg_a${t}`,
+          agent: "switchboard",
+        });
+        // The step's start is read off the feed before the clock moves, so the
+        // budget note finds the model call in flight and not the tool before it.
+        for (let i = 0; i < 8; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+        this.deps.spendBudget();
+        for (let i = 0; i < 200 && this.pendingSteers.length === 0; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+      }
+      if (this.script.failModelCall === t + 1) {
+        // The model call fails: the execution fails with the provider's words
+        // and the session goes idle, as the server reports a call the proxy
+        // answered with an error. A steer queued meanwhile was for the turn
+        // after this one, which never comes.
+        this.recordModelCall();
+        this.emitEvent("session.execution.failed", {
+          sessionID: this.sessionID,
+          error: { message: FAILED_MODEL_CALL_ERROR },
+        });
+        this.emitEvent("session.idle", { sessionID: this.sessionID });
+        return;
+      }
       this.flushSteers();
       this.recordModelCall();
       await this.playTurn(this.script.turns[t], t);
@@ -1166,13 +1208,15 @@ async function runOpenCode(script: RunScript, options: FakeServeOptions = {}): P
     };
   }
   const registry = options.registry ?? new HarnessRegistry();
+  /** The run's clock: fixed, until a script spends the budget under a model call. */
+  const clock = { now: NOW };
   const deps: HarnessDeps = {
     container,
     bearer: BEARER,
     harnessUrl: HARNESS_URL,
     registry,
     ...(options.bearers ? { bearers: options.bearers } : {}),
-    clock: () => NOW,
+    clock: () => clock.now,
     sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 2))),
     pollMs: 1,
     tickMs: 5,
@@ -1190,7 +1234,12 @@ async function runOpenCode(script: RunScript, options: FakeServeOptions = {}): P
     maxTokens: run.agent.maxTokens,
     control: run.control,
   });
-  const serveDeps = { registry, sleep: deps.sleep, ...(deps.tickMs !== undefined ? { tickMs: deps.tickMs } : {}) };
+  const serveDeps: ServeDeps = {
+    registry,
+    sleep: deps.sleep,
+    ...(deps.tickMs !== undefined ? { tickMs: deps.tickMs } : {}),
+    spendBudget: () => void (clock.now = NOW + run.agent.maxMinutes * 60_000 + 1),
+  };
   const serve = new ScriptedServe(container, source, script, serveDeps, options);
   const recorded = script.processAliveOnResume
     ? new ScriptedServe(container, source, script, serveDeps, options, "recorded")

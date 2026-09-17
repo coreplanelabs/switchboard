@@ -16,11 +16,17 @@ import { FollowUpInbox } from "../../../threadAdmission.js";
 import { openThroughSeam, type HarnessDeps, type HarnessFacts, type HarnessRun } from "../../contract.js";
 import { HarnessContainerRuntimeReplacedError } from "../../container.js";
 import { FakeHarnessContainer } from "../../testing/fakeContainer.js";
-import type { DrivenRun, HarnessDriver, RunScript } from "../../testing/scenarios.js";
+import {
+  CONFORMANCE_MAX_MINUTES,
+  FAILED_MODEL_CALL_ERROR,
+  type DrivenRun,
+  type HarnessDriver,
+  type RunScript,
+} from "../../testing/scenarios.js";
 import { PiHarness } from "../piHarness.js";
 import { piRunPaths } from "../process.js";
 import { HarnessRegistry } from "../relay.js";
-import { scriptPiFromProvider } from "./providerPi.js";
+import { scriptPiFromProvider, type ProviderPi } from "./providerPi.js";
 
 const RUN_ID = "run-c";
 /** The bearer every conformance run is started with: the proxy's shape, a secret a row can look for. */
@@ -56,7 +62,7 @@ const agentFor = (identity: Identity): AgentDef => ({
   identity,
   maxTurns: 50,
   maxTokens: 4096,
-  maxMinutes: 10,
+  maxMinutes: CONFORMANCE_MAX_MINUTES,
 });
 
 /** The run's executor, as pi's own tools run over it in the scripted double: every command answers, every file is empty. */
@@ -66,15 +72,22 @@ const executor: Executor = {
   writeFile: async () => "",
 };
 
-/** The model, replaying the row's turns in order and recording every request. */
-function replaying(turns: RunScript["turns"]): { provider: Provider; requests: CompletionRequest[] } {
+/** The model, replaying the row's turns in order and recording every request;
+ *  the call numbered `failAt` (1-based) fails with the provider's words instead,
+ *  which the scripted pi settles the turn on as pi does a failed call. */
+function replaying(
+  turns: RunScript["turns"],
+  failAt: number | undefined,
+): { provider: Provider; requests: CompletionRequest[] } {
   const requests: CompletionRequest[] = [];
-  let i = 0;
+  let calls = 0;
   const provider: Provider = {
     name: "conformance",
     async complete(req) {
       requests.push(req);
-      const turn = turns[Math.min(i++, turns.length - 1)];
+      calls++;
+      if (calls === failAt) throw new Error(FAILED_MODEL_CALL_ERROR);
+      const turn = turns[Math.min(calls - 1, turns.length - 1)];
       const result: CompletionResult = { content: turn.content, stopReason: turn.stopReason ?? "end_turn" };
       return result;
     },
@@ -106,6 +119,9 @@ export function piDriver(): HarnessDriver {
     },
     async run(script) {
       const identity = script.identity ?? "write";
+      const agent = agentFor(identity);
+      /** The run's clock: fixed, until a script spends the budget under a model call. */
+      const clock = { now: NOW };
       const container = new FakeHarnessContainer();
       container.vm = script.containerWord === null ? undefined : (script.containerWord ?? CONTAINER_WORD);
       // The row's pi is still alive in this container on the resume (the
@@ -121,9 +137,9 @@ export function piDriver(): HarnessDriver {
       const facts: HarnessFacts[] = [];
       const progress: string[] = [];
       const statusReports: string[] = [];
-      const model = replaying(script.turns);
+      const model = replaying(script.turns, script.failModelCall);
       let modelCalls = 0;
-      scriptPiFromProvider(container, {
+      const pi: ProviderPi = scriptPiFromProvider(container, {
         provider: model.provider,
         registry,
         // A real pi's model call takes time, during which the harness ticks:
@@ -131,6 +147,18 @@ export function piDriver(): HarnessDriver {
         beforeModelCall: async () => {
           modelCalls++;
           if (script.hardStopBeforeModelCall === modelCalls) control.requestStop("hard");
+          if (script.budgetBeforeModelCall === modelCalls) {
+            // The wall clock runs out with this call under way: pi has opened
+            // the turn (read off the log first, so the budget note finds the
+            // call in flight and not the tool before it), then the harness's
+            // tick notes the budget and steers the write-up before the call
+            // answers — waited for, as the hard stop waits for its abort.
+            await new Promise((r) => setTimeout(r, 15));
+            clock.now = NOW + agent.maxMinutes * 60_000 + 1;
+            const steersBefore = pi.steers.length;
+            for (let i = 0; i < 200 && pi.steers.length === steersBefore; i++)
+              await new Promise((r) => setTimeout(r, 5));
+          }
           await new Promise((r) => setTimeout(r, 15));
         },
         // The container is replaced under the run with this call in flight (the
@@ -166,7 +194,7 @@ export function piDriver(): HarnessDriver {
       });
       const run: HarnessRun = {
         runId: RUN_ID,
-        agent: agentFor(identity),
+        agent,
         model: { id: "claude-fable-5", provider: "anthropic", providerType: "anthropic" },
         system: "You are the conformance run.",
         messages: [
@@ -189,7 +217,7 @@ export function piDriver(): HarnessDriver {
         bearer: BEARER,
         harnessUrl: "https://bot.example.com",
         registry,
-        clock: () => NOW,
+        clock: () => clock.now,
         sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 5))),
         pollMs: 1,
         tickMs: 5,
