@@ -212,6 +212,11 @@ export interface HomeConversationRowSeed {
   /** The channel's platform (`web`, `slack`, `http`, …): the rail marks a thread
    *  from another surface with its glyph; absent on the fixtures' plain rows. */
   surface?: string;
+  /** The thread's channel on another surface (`slack:C…`), for the tooltip; absent on the
+   *  viewer's own web lane. */
+  channelId?: string;
+  /** That channel's name without its hash, when the name directory knew it. */
+  channelName?: string;
 }
 
 /** The home page (`/threads`, `/threads/<conversation>`): the open thread's turns,

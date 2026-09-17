@@ -39,7 +39,7 @@
     "web/src/lib/filePreview.ts": "5c88224bfdd06300f492a1ef07f5fbbed7d2cb39f51a027b5b12c3319627dc15",
     "web/src/lib/format.ts": "c606fee13ee47cd493bc70bc5c8d70fe697bc1903afa8434261b48c29e682759",
     "web/src/lib/githubLinks.ts": "9b382f6de5837da30e9ec8895fae5f301907c50d63baca116f3b9eba0bbbbff9",
-    "web/src/lib/homeModel.ts": "64efc0702274c3d0446b198f563c7b76a40b5742441b35a188dedc1f296c8f1b",
+    "web/src/lib/homeModel.ts": "60a6f25b398c714bc77a5b85cb6ee2dce49a9d59eb8af3ca8db32972310b81af",
     "web/src/lib/indexRow.ts": "14bfe15c9a4a18e2fb64e7310c633084bcfee21fd975e77b66a04804135f7c47",
     "web/src/lib/markPulse.ts": "df29e8abee12f0827e8e1295f8fcb1184530240139790da7bffb5929fad8f647",
     "web/src/lib/navSections.ts": "dd842db8c9b0fc1d7cc592f145803622047d03131d876e7681710c28f4f348db",

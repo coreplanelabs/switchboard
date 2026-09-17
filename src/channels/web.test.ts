@@ -102,7 +102,7 @@ const COMMANDS = [
   { id: "deploy.all", action: "deploy:write", describe: "Deploy", effect: "write" },
 ] as unknown as CommandDef<unknown>[];
 
-function setup(opts: { dispatch?: DispatchFn; now?: number } = {}) {
+function setup(opts: { dispatch?: DispatchFn; now?: number; channelNames?: Record<string, string> } = {}) {
   let n = 0;
   const registry = new RunRegistry({ genId: () => `id-${++n}`, genToken: () => `tok-${n}`, now: () => NOW });
   const store = new InMemoryRunStore({ now: () => NOW });
@@ -124,6 +124,18 @@ function setup(opts: { dispatch?: DispatchFn; now?: number } = {}) {
     capabilities: ALL_CAPABILITIES,
     retention: { retentionDays: 30 },
     publicBaseUrl: "https://bot.example.test",
+    ...(opts.channelNames
+      ? {
+          names: {
+            person: async () => undefined,
+            channel: async (id: string) => {
+              const name = opts.channelNames![id];
+              if (name === "!") throw new Error("slack down");
+              return name;
+            },
+          },
+        }
+      : {}),
     dispatch: (deps, msg, io, o) => {
       calls.push({ msg, io });
       return dispatch(deps, msg, io, o);
@@ -644,6 +656,7 @@ describe("GET /threads and /threads/<id> — the seed from the runs service (ite
         runs: 1,
         live: false,
         surface: "slack",
+        channelId: "slack:C1",
       },
       {
         id: "conv-2",
@@ -666,6 +679,32 @@ describe("GET /threads and /threads/<id> — the seed from the runs service (ite
     ]);
     // The tab title carries the live count, as the runs index does.
     expect(res.body).toMatch(/<title>\(1\) Threads<\/title>/);
+  });
+
+  it("the rail names a thread's channel when the name directory knows it (record 0042, the dashboard reads names): channelName beside channelId on the Slack row, nothing on the viewer's own lane, the id alone when unknown or failing", async () => {
+    const { store, handler } = setup({ channelNames: { "slack:C1": "backend", "slack:C9": "!" } });
+    await store.put(
+      record("r-1", NOW - 5_000, { threadKey: "web:a1:conv-1", channelId: "web:a1", userId: "access:a1" }),
+    );
+    await store.put(
+      record("s-1", NOW - 3_000, { threadKey: "slack:C1:1712.34", channelId: "slack:C1", userId: "slack:UALICE" }),
+    );
+    await store.put(
+      record("s-2", NOW - 2_000, { threadKey: "slack:C9:1712.99", channelId: "slack:C9", userId: "slack:UALICE" }),
+    );
+    await store.put(
+      record("s-3", NOW - 1_000, { threadKey: "slack:C2:1712.55", channelId: "slack:C2", userId: "slack:UALICE" }),
+    );
+    const res = await request(handler, { url: "/threads/conv-1", actor: linked });
+    const seed = seedOf<HomeSeed>(res.body);
+    const byId = Object.fromEntries(seed.conversations.map((c) => [c.id, c]));
+    expect(byId["slack:C1:1712.34"]).toMatchObject({ channelId: "slack:C1", channelName: "backend" });
+    expect(byId["slack:C9:1712.99"]).toMatchObject({ channelId: "slack:C9" });
+    expect(byId["slack:C9:1712.99"]).not.toHaveProperty("channelName");
+    expect(byId["slack:C2:1712.55"]).toMatchObject({ channelId: "slack:C2" });
+    expect(byId["slack:C2:1712.55"]).not.toHaveProperty("channelName");
+    expect(byId["conv-1"]).not.toHaveProperty("channelId");
+    expect(byId["conv-1"]).not.toHaveProperty("channelName");
   });
 
   it("a stranger's thread — or one the viewer may see nothing of — is the same 404 an unknown run gives; the viewer's own empty conversation opens empty", async () => {

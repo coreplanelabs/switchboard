@@ -790,7 +790,7 @@ export async function runBot(): Promise<void> {
     // Costs dash: GET /costs (first group) + /costs/<group> (+ .json twins),
     // served from the snapshot built above. Access-gated below alongside /runs
     // and /residents.
-    const costsView = createCostsViewHandler(costsService, shell);
+    const costsView = createCostsViewHandler(costsService, shell, { names });
     const costsState = costs
       ? `GET /costs (${costsService.groups().join(",")}; LLM ${costs.llmOn ? "on" : "off"}; snapshot every ${costsCfg?.snapshot.everyHours ?? "?"} h)`
       : costsCfg
@@ -833,6 +833,7 @@ export async function runBot(): Promise<void> {
       commands,
       shell,
       capabilities,
+      names,
       retention:
         capabilities.runHistory && runHistoryCfg
           ? { retentionDays: retentionPolicyOf(runHistoryCfg).retentionDays }

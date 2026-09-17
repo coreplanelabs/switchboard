@@ -19,7 +19,7 @@
     "web/src/components/SettingsLink.vue": "467f56fd73f816d58bffbfd5dd7039a183b118cba05d0c7249c097798b3a8018",
     "web/src/components/ThemeToggle.vue": "025a9a0c7ccc2983772c1888f7426ec161feb3ffaea87c914c65d15bdfd740d3",
     "web/src/components/costs/CostChart.vue": "d48000d00266ad30e01826f51d00c4c21e5527676733b66b46842eca223f4686",
-    "web/src/components/costs/CostsByDimension.vue": "b4ee52557c3437489e3aceb55f2fe553a54c67c8a543bec65bb609df79018a8f",
+    "web/src/components/costs/CostsByDimension.vue": "acf5d3a1b1207504165e41f62201b46818c59f451c64d7d8500a5b818fc520a6",
     "web/src/lib/browser.ts": "d1fd4f9f5935c3ca65a7d7e38f362601576ae575406bb2b5ac87ad118ff05dc7",
     "web/src/lib/capabilities.ts": "0e485825f48786605345f6a7298763790b7468595d9a828b615a245ab4a6aecd",
     "web/src/lib/costs.ts": "cacac88f2afbdae2338ec2f139957f6cec6c40db20a94f250986e4d0432b4e3d",
