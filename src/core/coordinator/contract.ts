@@ -203,6 +203,13 @@ export interface CoordinatorInstance {
   attempt?: number;
 }
 
+export interface UnitSegment {
+  index: number;
+  from?: string;
+  runId?: string;
+  at: number;
+}
+
 /** One unit of the plan an instance runs (a task string is a generated plan of
  *  one unit, `U1`): its branch, the units it waits on, and — as the runner
  *  reaches it — its thread, its pull request, the round boundaries the card
@@ -237,6 +244,13 @@ export interface CoordinatorUnit {
    *  opened or updated): the next attempt's pre-check starts at the review
    *  round when the open pull request still heads exactly here. */
   lastPush?: string;
+  /** The renewals the unit spent (decision 0046, Renewal): one row per segment
+   *  the grant opened after the first, keyed by the segment's index — written
+   *  by `unit-end` on a `continued` ending before the segment runs, so a runner
+   *  reclaimed between a segment's end and its renewal finds the row and never
+   *  renews the same segment twice. `from` is the sha the segment continues
+   *  from, `runId` the coding run whose write-up briefs it. */
+  segments?: UnitSegment[];
   /** The round boundaries the coordinator reported, oldest first (the `ship_round` vocabulary). */
   rounds: Array<{ index: number; agent: string; outcome: string; at: number }>;
   /** How the unit ended: the ending's kind and the thread's report, when it has. */
@@ -289,6 +303,15 @@ export function isCoordinatorInstance(v: unknown): v is CoordinatorInstance {
 }
 
 /** Structural check on a unit row from outside the process. */
+const isSegment = (v: unknown): boolean =>
+  isObject(v) &&
+  typeof v.index === "number" &&
+  Number.isInteger(v.index) &&
+  v.index >= 2 &&
+  (v.from === undefined || isText(v.from)) &&
+  (v.runId === undefined || isText(v.runId)) &&
+  typeof v.at === "number";
+
 export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   if (!isObject(v)) return false;
   const r = v;
@@ -301,6 +324,7 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   if (r.pr !== undefined && !isPr(r.pr)) return false;
   if (r.resume !== undefined && !isResume(r.resume)) return false;
   if (r.lastPush !== undefined && !isText(r.lastPush)) return false;
+  if (r.segments !== undefined && (!Array.isArray(r.segments) || !r.segments.every(isSegment))) return false;
   if (
     !Array.isArray(r.rounds) ||
     r.rounds.length > MAX_ROUNDS ||

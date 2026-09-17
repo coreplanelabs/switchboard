@@ -844,6 +844,14 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
       ...(posted?.reviewPostReason !== undefined ? { reviewPostReason: posted.reviewPostReason } : {}),
       ...(record.dispositions !== undefined ? { dispositions: record.dispositions } : {}),
       ...(record.handoff !== undefined ? { handoff: true } : {}),
+      // The renewal's facts (decision 0046): progress is read off these.
+      ...(record.pushed !== undefined ? { pushed: record.pushed } : {}),
+      ...(record.lease !== undefined ? { leaseStartedAt: record.lease.startedAt } : {}),
+      // What the child cost, as the runs service prices it (costs.md item 4c):
+      // null when unknown — no usage on the record, or a model without a price
+      // — so a capped grant never renews on an understated total.
+      costUsd: record.cost?.usd ?? null,
+      ...(record.handoff !== undefined ? { handoffLists: record.handoff } : {}),
     },
     at,
   });
@@ -1163,7 +1171,12 @@ function unitLines(
         : u.threadKey
           ? "starting"
           : "waiting";
-    return generated ? state : `${u.unit} · ${state}`;
+    // A renewed unit names its segment (decision 0046): `segment 2 · …`.
+    const seg =
+      u.ending === undefined && u.segments !== undefined && u.segments.length > 0
+        ? `segment ${u.segments[u.segments.length - 1]!.index} · `
+        : "";
+    return generated ? `${seg}${state}` : `${u.unit} · ${seg}${state}`;
   });
 }
 
@@ -1227,6 +1240,19 @@ async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   return json(200, { ok: true, at });
 }
 
+/** The segment a continued ending opens, as the driver names it: its index (two up), the sha it continues from, the run whose write-up briefs it. */
+function parseSegment(raw: unknown): { index: number; from?: string; runId?: string } | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const s = raw as Record<string, unknown>;
+  if (typeof s.index !== "number" || !Number.isInteger(s.index) || s.index < 2) return undefined;
+  const from = normalizeHead(s.from);
+  return {
+    index: s.index,
+    ...(from !== undefined ? { from } : {}),
+    ...(typeof s.runId === "string" && RUN_ID_PATTERN.test(s.runId) ? { runId: s.runId } : {}),
+  };
+}
+
 /** A unit ended: the row says how, the unit's thread gets the report, the card is redrawn. */
 async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps): Promise<IngressResponse> {
   const id = parseInstanceId(body.parentInstanceId);
@@ -1252,13 +1278,23 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   // driver's `headSha`): persisted on the row as `lastPush`, so the next
   // attempt's rows carry it and its pre-check starts at the review round.
   const lastPush = normalizeHead(body.headSha);
+  // A continued ending is a segment's end, not the unit's (decision 0046):
+  // the renewal is written as a row keyed by the segment it opens — once; a
+  // runner reclaimed between the segment's end and its renewal finds the row
+  // and does not renew twice — and the unit keeps no ending.
+  const segment = ending.kind === "continued" ? parseSegment(body.segment) : undefined;
+  if (ending.kind === "continued" && segment === undefined)
+    return json(400, { ok: false, error: "a continued ending must carry the segment it opens" });
+  const segments = row.segments ?? [];
   const updated: CoordinatorUnit = {
     ...row,
     ...(pr && typeof pr.number === "number" && typeof pr.url === "string"
       ? { pr: { number: pr.number, url: pr.url } }
       : {}),
     ...(lastPush !== undefined ? { lastPush } : {}),
-    ending: { kind: ending.kind, report: ending.report, at },
+    ...(segment !== undefined
+      ? { segments: segments.some((s) => s.index === segment.index) ? segments : [...segments, { ...segment, at }] }
+      : { ending: { kind: ending.kind, report: ending.report, at } }),
   };
   await deps.instances.putUnits([updated]);
   const thread = unitThread(instance, updated);
@@ -1601,6 +1637,7 @@ function briefReaders(deps: AdminCoordinatorDeps, instance: CoordinatorInstance)
         ...(r.verdict?.findings !== undefined ? { findings: r.verdict.findings } : {}),
         ...(r.dispositions !== undefined ? { dispositions: r.dispositions } : {}),
         ...(finalReplyOf(r.events) !== undefined ? { finalReply: finalReplyOf(r.events) } : {}),
+        ...(r.handoff !== undefined ? { handoff: r.handoff } : {}),
       };
     },
     // The generated plan's request text: the ship run's own record

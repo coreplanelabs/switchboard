@@ -293,7 +293,17 @@ export function sanitizeActor(actor: RunActor): RunActor {
  *  settles a round: caps end the pipeline BETWEEN rounds, visible as the
  *  absence of a next `started` boundary plus the answer's cap report. */
 export type ShipRoundOutcome =
-  "started" | "pr_opened" | "completed" | "approve" | "request_changes" | "no_verdict" | "aborted" | "stopped";
+  | "started"
+  | "pr_opened"
+  | "completed"
+  | "approve"
+  | "request_changes"
+  | "no_verdict"
+  | "aborted"
+  | "stopped"
+  /** The coding round ended at its lease with the unit unfinished and the row
+   *  showing progress, and the grant renewed: the next segment opens (decision 0046). */
+  | "continued";
 
 /**
  * One event in a run's stream. `seq` is stamped by `RunRegistry.publish` — a

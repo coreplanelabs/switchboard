@@ -215,6 +215,56 @@ describe("composeChild — the child a brief names", () => {
     expect(task.contract?.unit.id).toBe("U1");
   });
 
+  it("a contract brief with a continuation prefaces the unit's request with the segment, the branch and sha to continue from, and the previous run's write-up and handoff — the contract itself unchanged (decision 0046)", async () => {
+    const { r } = readers({
+      runs: {
+        "run-c0": {
+          finalReply: "Budget reached: the parser is pushed, the tests are next.",
+          handoff: {
+            deviations: [{ from: "one parser", to: "two", why: "the grammar forked" }],
+            followUps: [{ what: "tests", where: "src/parser.test.ts" }],
+            unproven: [{ criterion: "round-trip", why: "no fixture yet" }],
+          },
+        },
+      },
+    });
+    const child = await composeChild(
+      {
+        kind: "contract",
+        unit: "U10",
+        rebase: { branch: unit.branch, onto: "main" },
+        continue: { segment: 2, from: "a".repeat(40), previousRunId: "run-c0" },
+      },
+      instance,
+      unit,
+      r,
+    );
+    expect(child.prompt).toContain(
+      `Segment 2 of this unit: the previous segment ended at its lease with the unit unfinished. Continue from \`${unit.branch}\` at \`aaaaaaa\` as it stands`,
+    );
+    expect(child.prompt).toContain(
+      "The previous segment's write-up:\nBudget reached: the parser is pushed, the tests are next.",
+    );
+    expect(child.prompt).toContain("follow-ups still open:\n- tests (src/parser.test.ts)");
+    expect(child.prompt).toContain("Deviations it recorded:\n- one parser → two: the grammar forked");
+    expect(child.prompt).toContain("Unproven:\n- round-trip: no fixture yet");
+    expect(child.prompt).toContain("Implement unit U10 — Warm the cache on wake — of docs/plans/fixture.md");
+    expect(child.prompt.indexOf("Segment 2")).toBeLessThan(child.prompt.indexOf("Implement unit U10"));
+    expect(child.contract?.unit.id).toBe("U10");
+
+    // No previous run in the history: the preface still names the segment and the branch, and nothing is invented.
+    const bare = await composeChild(
+      { kind: "contract", unit: "U10", rebase: { branch: unit.branch, onto: "main" }, continue: { segment: 3 } },
+      instance,
+      unit,
+      r,
+    );
+    expect(bare.prompt).toContain(
+      `Segment 3 of this unit: the previous segment ended at its lease with the unit unfinished. Continue from \`${unit.branch}\` as it stands`,
+    );
+    expect(bare.prompt).not.toContain("write-up");
+  });
+
   it("a review brief is a review child on the pull request: round one's turn names the head; a re-review carries the prior review run's findings and the coding run's dispositions from their records, matched to the review's ids with an id it never issued dropped and noted, and the same contract", async () => {
     const { r } = readers({
       runs: {

@@ -280,6 +280,98 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "completed" }]);
   });
 
+  it("a segment that ends `continued` opens the next: the unit runs again under `U10/s2/…` step names with the session — the sha to continue from, the previous run, the renewals spent and the spend — the unit-end carries the segment row, and the plan settles on the last segment's ending", async () => {
+    const budgetEnded = (runId: string, at: number) =>
+      record(
+        {
+          id: runId,
+          finished: true,
+          status: "completed",
+          finalReply: "Budget reached: the parser is pushed, tests are next.",
+          pushed: [{ ref: "plan/fixture/u10", sha: HEAD, at: at - MIN }],
+          leaseStartedAt: T0,
+          costUsd: 12.5,
+          handoffLists: { deviations: [], followUps: [{ what: "tests", where: "src" }], unproven: [] },
+        },
+        at,
+      );
+    const s = steps({
+      "U10/0/coding/wait/1": "event",
+      "U10/s2/0/coding/wait/1": "event",
+      "U10/s2/1/review/wait/1": "event",
+    });
+    const b = bot({
+      plan: [
+        planAnswer([row("U10")], T0, "person", { grant: { renewals: 6, costCapUsd: 50 }, grantSource: "channel" }),
+      ],
+      "unit-start": [started("U10"), started("U10", T0 + 46 * MIN)],
+      branch: [branched("U10"), branched("U10", T0 + 46 * MIN)],
+      spawn: [spawned("run-c0"), spawned("run-c1", T0 + 47 * MIN), spawned("run-r1", T0 + 60 * MIN)],
+      "read-record": [
+        budgetEnded("run-c0", T0 + 45 * MIN),
+        codingDone("run-c1", T0 + 60 * MIN),
+        reviewApproved("run-r1", T0 + 70 * MIN),
+      ],
+      // Segment one: nothing heads the branch before or after its child. Segment two: the pull request.
+      "pr-check": [prNone(), prNone(T0 + 45 * MIN), prNone(T0 + 46 * MIN), prOpen(T0 + 60 * MIN)],
+      round: [acked(), acked(), acked(), acked(), acked(), acked()],
+      "unit-end": [ok({ ok: true, told: true }, T0 + 45 * MIN), ok({ ok: true, told: true }, T0 + 71 * MIN)],
+      finish: [ok({ ok: true, runId: "run-parent" }, T0 + 71 * MIN)],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary).toEqual({
+      instance: INSTANCE,
+      planId: "fixture",
+      units: { U10: "merge_ready" },
+      outcome: "completed",
+    });
+    expect(s.names()).toEqual([
+      "plan",
+      "U10/start",
+      "U10/pr-check",
+      "U10/branch",
+      "U10/0/coding",
+      "U10/note/1",
+      "U10/0/coding/wait/1",
+      "U10/0/coding/read/1",
+      "U10/0/coding/pr-check",
+      "U10/note/2",
+      "U10/end",
+      "U10/s2/start",
+      "U10/s2/pr-check",
+      "U10/s2/branch",
+      "U10/s2/0/coding",
+      "U10/s2/note/1",
+      "U10/s2/0/coding/wait/1",
+      "U10/s2/0/coding/read/1",
+      "U10/s2/0/coding/pr-check",
+      "U10/s2/note/2",
+      "U10/s2/1/review",
+      "U10/s2/note/3",
+      "U10/s2/1/review/wait/1",
+      "U10/s2/1/review/read/1",
+      "U10/s2/note/4",
+      "U10/s2/end/pr-facts",
+      "U10/s2/end",
+      "finish",
+    ]);
+    // Segment two's coding child is briefed as a continuation from the recorded sha and the previous run.
+    expect(b.of("spawn")[1]).toMatchObject({
+      step: "U10/s2/0/coding",
+      brief: { kind: "contract", unit: "U10", continue: { segment: 2, from: HEAD, previousRunId: "run-c0" } },
+    });
+    expect(b.of("round").map((r) => `${(r as { index: number }).index} ${(r as { outcome: string }).outcome}`)).toEqual(
+      ["0 started", "0 continued", "0 started", "0 pr_opened", "1 started", "1 approve"],
+    );
+    const ends = b.of("unit-end") as Array<{ ending: { kind: string; report: string }; segment?: unknown }>;
+    expect(ends[0].ending.kind).toBe("continued");
+    expect(ends[0].segment).toEqual({ index: 2, from: HEAD, runId: "run-c0" });
+    expect(ends[0].ending.report).toContain(`renewal 1 of 6, continues ${HEAD.slice(0, 7)}`);
+    expect(ends[1].ending.kind).toBe("merge_ready");
+    expect(ends[1].segment).toBeUndefined();
+    expect(ends[1].ending.report).toContain("Renewals: 0 of 6 spent, cost cap $50 (granted by channel).");
+  });
+
   it("the grant rides the plan answer into the unit's report — spent of granted, the cap and the granter — and a count the route answers above the module's ceiling reads as the default, so nothing renews on a guess (decision 0046)", async () => {
     const run = async (extra: Record<string, unknown>) => {
       const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
