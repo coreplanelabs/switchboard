@@ -27,6 +27,7 @@ import {
   finaleTimedOutNote,
   HARD_STOP_MESSAGE,
   timeBudgetAnswer,
+  toolCutNote,
   windDownFailureNote,
 } from "../windDown.js";
 import { bearerHashOf, RunBearerStore, type RunBearerGrant } from "../../modelProxy/runBearers.js";
@@ -978,7 +979,7 @@ describe("the post-turn on the run's session — refused, answered by silence, o
     await session.end();
   });
 
-  it("after a hung tool call: the tool the loop allowed never settled, the finale interrupted it, and its late success lands only after the post-turn's own execution has started — the post-turn sets it aside as the earlier execution's (no bypass, no result on its record, the loop before's call handed over) and answers its own text", async () => {
+  it("a tool call cut at the loop's end: the budget note names it, the interrupt ends the hung step and the write-up is a queued prompt whose execution the loop owns — the cut tool's own late outcome lands in it marked cut, the run answers the write-up under the budget's label with no finale and no harness_error — and a post-turn after it has no earlier tail to set aside", async () => {
     const hungTool: RunScript = {
       turns: [
         {
@@ -990,35 +991,120 @@ describe("the post-turn on the run's session — refused, answered by silence, o
     };
     const o = openRun({ interruptSettlesLate: "interrupted", hangToolCall: 1 }, hungTool);
     const session = await o.opened;
-    const reason = finaleAbortReason(o.lease.finaleMs);
-    expect(o.progress).toContain(finaleTimedOutNote());
+    // The write-up's execution answered inside the lease: no finale, no wind-down failure.
+    expect(session.answer).toBe(timeBudgetAnswer("never", 10));
+    expect(o.progress).not.toContain(finaleTimedOutNote());
+    expect(
+      notes(o.events)
+        .filter((n) => n.kind === "tool_cut")
+        .map((n) => n.summary),
+    ).toEqual([toolCutNote("running bash")]);
+    expect(notes(o.events).filter((n) => n.kind === "harness_error")).toEqual([]);
+    const toolEvents = () =>
+      o.events
+        .filter((e) => e.type === "tool_call" || e.type === "tool_result")
+        .map((e) => `${e.type}:${e.callId}${e.type === "tool_result" ? `:${e.ok}:${e.cut === true}` : ""}`);
+    // The loop's own record: the call, then its late outcome — the fake's late success, landing after the
+    // write-up's execution started — marked `cut` by the interrupt that ended its step (harness.md item 13).
+    expect(toolEvents()).toEqual(["tool_call:c1", "tool_result:c1:true:true"]);
+    // The post-turn replays the script under the same call id, under a step of its own: judged as its own, and
+    // no earlier tail is left to set aside — the loop read it.
     expect(await session.followUp(postTurn)).toBe("never");
-    expect(
-      notes(o.events)
-        .filter((n) => n.kind === "harness_error")
-        .map((n) => n.summary),
-    ).toEqual([windDownFailureNote(reason)]);
-    expect(
-      notes(o.events)
-        .filter((n) => n.kind === "settle_set_aside")
-        .map((n) => n.summary),
-    ).toEqual([
-      // The post-turn's bridge never saw the hung call named: `tool` is the word it has.
-      "OpenCode settled tool (call c1) of a step this loop never saw start (msg_a0); set aside — an earlier execution's late settle, or a step lost with the stream",
+    expect(notes(o.events).filter((n) => n.kind === "settle_set_aside")).toEqual([]);
+    expect(toolEvents()).toEqual([
+      "tool_call:c1",
+      "tool_result:c1:true:true",
+      "tool_call:c1",
+      "tool_result:c1:true:false",
     ]);
-    // The hung call is on the record once, as the loop's call, with the result the loop wrote when it left at the finale — a failure marked `cut`, the call interrupted and not settled (harness.md item 13) — and its late success is nobody's; the post-turn's own call (the fake replays the script under the same call id, under a step of its own) is judged as its own.
-    expect(
-      o.events.filter((e) => e.type === "tool_call" || e.type === "tool_result").map((e) => `${e.type}:${e.callId}`),
-    ).toEqual(["tool_call:c1", "tool_result:c1", "tool_call:c1", "tool_result:c1"]);
-    const cut = o.events.find((e) => e.type === "tool_result");
-    expect(cut?.type === "tool_result" ? { ok: cut.ok, cut: cut.cut } : undefined).toEqual({ ok: false, cut: true });
-    // What the workspace's release reads off this record: the hung call stays cut — the post-turn's result for
+    // What the workspace's release reads off this record: the cut call stays cut — the post-turn's result for
     // the same call id is no settle — so the run's tree is torn down, not paired behind the command.
     expect(callsInFlight(o.events, "completed").map((c) => c.callId)).toEqual(["c1"]);
     await session.end();
   });
 
-  it("after a hung tool call whose late success lands only during the SECOND post-turn: set aside there too — the settle names a step no loop of this session saw start, so nothing is handed turn to turn — and both post-turns answer their own text", async () => {
+  it("a tool that completes on its own while the loop-end interrupt is in flight: the interrupt answers `interrupted: false`, so no write-up prompt is posted; the tool's own success is read as the loop's own and lands unmarked — nothing cut, nothing in flight — and the run closes under the budget's no-write-up label", async () => {
+    const hungTool: RunScript = {
+      turns: [
+        {
+          content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "sleep 30" } }],
+          stopReason: "tool_use",
+        },
+        { content: [{ type: "text", text: "never" }], stopReason: "end_turn" },
+      ],
+    };
+    const o = openRun(
+      { interruptSettlesLate: "interrupted", hangToolCall: 1, hungToolSettlesDuringInterrupt: true },
+      hungTool,
+    );
+    const session = await o.opened;
+    expect(session.answer).toBe(timeBudgetAnswer("", 10));
+    expect(
+      notes(o.events)
+        .filter((n) => n.kind === "tool_cut")
+        .map((n) => n.summary),
+    ).toEqual([toolCutNote("running bash")]);
+    // The tool settled before the interrupt landed: its own success, unmarked — nothing was cut, nothing is in flight.
+    expect(
+      o.events
+        .filter((e) => e.type === "tool_call" || e.type === "tool_result")
+        .map((e) => `${e.type}:${e.callId}${e.type === "tool_result" ? `:${e.ok}:${e.cut === true}` : ""}`),
+    ).toEqual(["tool_call:c1", "tool_result:c1:true:false"]);
+    expect(callsInFlight(o.events, "completed")).toEqual([]);
+    // One prompt on the session: the request's. The write-up was never posted — the loop had left on the answer.
+    expect(o.container.requests.filter((q) => q.method === "POST" && /\/prompt$/.test(q.path))).toHaveLength(1);
+    expect(o.container.requests.filter((q) => q.method === "POST" && /\/interrupt$/.test(q.path))).toHaveLength(1);
+    await session.end();
+  });
+
+  it("an operator's hard stop landing while the loop-end interrupt is in flight: the run ends as the stop, the write-up prompt is never posted after the loop leaves — no billed execution nobody reads", async () => {
+    const r = await openCodeDriver({
+      interruptSettlesLate: "interrupted",
+      hangToolCall: 1,
+      hardStopOnCutInterrupt: true,
+    }).run({
+      turns: [
+        {
+          content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "sleep 30" } }],
+          stopReason: "tool_use",
+        },
+        { content: [{ type: "text", text: "never" }], stopReason: "end_turn" },
+      ],
+    });
+    expect(r.outcome).toEqual({ kind: "answered", answer: HARD_STOP_MESSAGE });
+    expect(r.stopRequested).toBe("hard");
+    expect(notes(r.events).filter((n) => n.kind === "stopped")).toHaveLength(1);
+    // The write-up's queued prompt is never posted: the loop had ended on the stop when the interrupt landed. One
+    // prompt (the request's); two interrupts (the loop-end cut's and the hard stop's own).
+    expect(r.requests.filter((q) => q.method === "POST" && /\/prompt$/.test(q.path))).toHaveLength(1);
+    expect(r.requests.filter((q) => q.method === "POST" && /\/interrupt$/.test(q.path))).toHaveLength(2);
+  });
+
+  it("a tool call cut at the loop's end whose write-up prompt the server refuses: the run fails by name at once — OpenCodeRequestRefusedError naming the write-up prompt and the answer, the post's harness_error on the record — never a finale run out for an execution the server never started", async () => {
+    const hungTool: RunScript = {
+      turns: [
+        {
+          content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "sleep 30" } }],
+          stopReason: "tool_use",
+        },
+        { content: [{ type: "text", text: "never" }], stopReason: "end_turn" },
+      ],
+    };
+    // The write-up's queued prompt is the session's second queue prompt.
+    const o = openRun({ interruptSettlesLate: "interrupted", hangToolCall: 1, promptPostFails: 2 }, hungTool);
+    await expect(o.opened).rejects.toMatchObject({
+      name: "OpenCodeRequestRefusedError",
+      message: 'OpenCode refused the write-up prompt (500): {"error":"the store hiccuped"}',
+    });
+    expect(o.progress).not.toContain(finaleTimedOutNote());
+    expect(
+      notes(o.events)
+        .filter((n) => n.kind === "harness_error")
+        .map((n) => n.summary),
+    ).toEqual(['the write-up prompt did not reach the server: it answered 500 ({"error":"the store hiccuped"})']);
+  });
+
+  it("a tool call cut at the loop's end whose late outcome lands only during the first post-turn: the loop closed the call marked cut when it left, the post-turn sets the late settle aside (a step no loop of its own saw start), and both post-turns answer their own text", async () => {
     const hungTool: RunScript = {
       turns: [
         {
@@ -1030,19 +1116,34 @@ describe("the post-turn on the run's session — refused, answered by silence, o
     };
     const o = openRun({ interruptSettlesLate: "interrupted", hungToolSettlesOnPlay: 3, hangToolCall: 1 }, hungTool);
     const session = await o.opened;
-    const reason = finaleAbortReason(o.lease.finaleMs);
+    expect(session.answer).toBe(timeBudgetAnswer("never", 10));
+    const toolEvents = () =>
+      o.events
+        .filter((e) => e.type === "tool_call" || e.type === "tool_result")
+        .map((e) => `${e.type}:${e.callId}${e.type === "tool_result" ? `:${e.ok}:${e.cut === true}` : ""}`);
+    // The late outcome had not landed when the write-up's execution settled: the loop left on its interrupt with
+    // the call open and closed it marked `cut`.
+    expect(toolEvents()).toEqual(["tool_call:c1", "tool_result:c1:false:true"]);
     expect(await session.followUp(postTurn)).toBe("never");
     expect(await session.followUp(postTurn)).toBe("never");
+    expect(notes(o.events).filter((n) => n.kind === "harness_error")).toEqual([]);
+    // The first post-turn read the late outcome: a step no loop of its own saw start, set aside.
     expect(
       notes(o.events)
-        .filter((n) => n.kind === "harness_error")
+        .filter((n) => n.kind === "settle_set_aside")
         .map((n) => n.summary),
-    ).toEqual([windDownFailureNote(reason)]);
-    expect(notes(o.events).filter((n) => n.kind === "settle_set_aside")).toHaveLength(1);
-    // The loop's own hung call carries the cut result it wrote when it left; each post-turn's call settles as its own.
-    expect(
-      o.events.filter((e) => e.type === "tool_call" || e.type === "tool_result").map((e) => `${e.type}:${e.callId}`),
-    ).toEqual(["tool_call:c1", "tool_result:c1", "tool_call:c1", "tool_result:c1", "tool_call:c1", "tool_result:c1"]);
+    ).toEqual([
+      "OpenCode settled tool (call c1) of a step this loop never saw start (msg_a0); set aside — an earlier execution's late settle, or a step lost with the stream",
+    ]);
+    // The loop's own cut result, then each post-turn's replayed call settling as its own.
+    expect(toolEvents()).toEqual([
+      "tool_call:c1",
+      "tool_result:c1:false:true",
+      "tool_call:c1",
+      "tool_result:c1:true:false",
+      "tool_call:c1",
+      "tool_result:c1:true:false",
+    ]);
     expect(callsInFlight(o.events, "completed").map((c) => c.callId)).toEqual(["c1"]);
     await session.end();
   });
@@ -1220,17 +1321,6 @@ describe("OpenCodeHarness — the resident's control plane resets under a write"
       { content: [{ type: "text", text: "done" }], stopReason: "end_turn" },
     ],
   };
-  /** A tool call the fake hangs (`hangToolCall: 1`) until the finale interrupts it: the execution reaches no step boundary while the loop runs. */
-  const hungTurn: RunScript = {
-    turns: [
-      {
-        content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "sleep 30" } }],
-        stopReason: "tool_use",
-      },
-      { content: [{ type: "text", text: "never" }], stopReason: "end_turn" },
-    ],
-  };
-
   /** Whether any model call of the run carried `text` in a user turn. */
   const modelSaw = (r: DrivenRun, text: string) =>
     r.modelCalls.some((c) =>
@@ -1357,13 +1447,45 @@ describe("OpenCodeHarness — the resident's control plane resets under a write"
     ).toBe(true);
   });
 
-  it("a follow-up's steer into a RUNNING execution whose answer the reset cut, when the execution never reaches a step boundary before the loop leaves (a hung tool the finale interrupts): unresolved — no row, the store still showing the execution under way — and the run fails by name rather than hand a steer the server may have taken back for a second delivery", async () => {
+  /** A run whose only model call hangs: a follow-up's steer posted into the running execution at the prompt sits
+   *  in it, and the step boundary it would land at never comes — the finale interrupts the hung call and the loop
+   *  leaves. (A hung tool no longer makes this shape: it is cut at the loop's end and the write-up's own execution
+   *  brings the boundary.) */
+  const hungCall: RunScript = {
+    turns: [{ content: [{ type: "text", text: "never" }], stopReason: "end_turn" }],
+    hangModelCall: 1,
+  };
+
+  it("a follow-up's steer into a hung tool's execution the reset cut, then the loop-end cut: the write-up's queued prompt is the loop's own write (`ownPrompts`, so its row is set aside by the steer's resolution as the opening prompt's is) — the steer is unresolvable from the store and fails the run by name, handed back to the inbox and never folded in, not read as a landed row of the write-up", async () => {
+    const r = await openCodeDriver({
+      controlResetOnSteer: "lost",
+      followUpAtFirstAsk: "also check the docs",
+      interruptSettlesLate: "interrupted",
+      hangToolCall: 1,
+    }).run({
+      turns: [
+        {
+          content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "sleep 30" } }],
+          stopReason: "tool_use",
+        },
+        { content: [{ type: "text", text: "never" }], stopReason: "end_turn" },
+      ],
+    });
+    // The steer is never mistaken for a landed row of the write-up's own prompt: it is handed back to the inbox
+    // and never folded in, whether the store leaves it unresolvable (the run failing by name) or lost.
+    expect(r.outcome.kind).toBe("failed");
+    const err = r.outcome.kind === "failed" ? r.outcome.error : undefined;
+    expect(err?.name).toBe("OpenCodeWriteUnresolvedError");
+    expect(r.inboxLeft.map((i) => i.text)).toEqual(["also check the docs"]);
+    expect(notes(r).some((n) => n.kind === "follow_up" && /folded in/.test(n.summary))).toBe(false);
+  });
+
+  it("a follow-up's steer into a RUNNING execution whose answer the reset cut, when the execution never reaches a step boundary before the loop leaves (a hung model call the finale interrupts): unresolved — no row, the store still showing the execution under way — and the run fails by name rather than hand a steer the server may have taken back for a second delivery", async () => {
     const r = await openCodeDriver({
       controlResetOnSteer: "landed",
-      followUpAtFirstAsk: "also check the docs",
-      hangToolCall: 1,
+      followUpAtPrompt: "also check the docs",
       interruptSettlesLate: "interrupted",
-    }).run(hungTurn);
+    }).run(hungCall);
     expect(r.outcome.kind).toBe("failed");
     const err = r.outcome.kind === "failed" ? r.outcome.error : undefined;
     expect(err?.name).toBe("OpenCodeWriteUnresolvedError");
@@ -1375,10 +1497,9 @@ describe("OpenCodeHarness — the resident's control plane resets under a write"
   it("a steer the server answered without a message id into a RUNNING execution that never reaches a step boundary before the loop leaves: unresolved by the same name — never noted as not delivered, never folded in; handed back for the fresh turn with the run's failure, since the session it may have reached is over", async () => {
     const r = await openCodeDriver({
       steerAnswersNoId: "landed",
-      followUpAtFirstAsk: "also check the docs",
-      hangToolCall: 1,
+      followUpAtPrompt: "also check the docs",
       interruptSettlesLate: "interrupted",
-    }).run(hungTurn);
+    }).run(hungCall);
     expect(r.outcome.kind).toBe("failed");
     const err = r.outcome.kind === "failed" ? r.outcome.error : undefined;
     expect(err?.name).toBe("OpenCodeWriteUnresolvedError");

@@ -37,7 +37,7 @@ import {
   timeBudgetNote,
   windDownFailureNote,
 } from "../windDown.js";
-import { FIRST_EVENT_BOUND_MS } from "./bridge.js";
+import { doingWords, FIRST_EVENT_BOUND_MS } from "./bridge.js";
 
 /** The finale bound the conformance run's lease carries (the drivers' preset runs no post-step). */
 const FINALE_MS = loopClock(0, CONFORMANCE_MAX_MINUTES * MINUTE_MS, "conformance").finaleMs;
@@ -1156,7 +1156,7 @@ describe("the bridge's observing mode — an earlier execution's tail is not thi
         .filter((e) => e.type === "tool_call" || e.type === "tool_result")
         .map((e) => `${e.type}:${e.callId}:${e.tool}${e.type === "tool_result" ? `:${e.ok}` : ""}`),
     ).toEqual(["tool_call:c-todo:todowrite", "tool_result:c-todo:todowrite:false"]);
-    expect(bridge.doingNow()).toBeUndefined();
+    expect(doingWords(bridge.doingNow())).toBeUndefined();
   });
 
   it("a refilled ask naming no call opens nothing; a permission over something other than a tool (external_directory, doom_loop) with a tool source opens the call under the tool the store names for it — the ask's source read against the mirror's assistant message and its tool part — and the settle lands there, never an orphan result", () => {
@@ -1263,7 +1263,7 @@ describe("the bridge's observing mode — an earlier execution's tail is not thi
         .filter((n) => n.kind === "tool_refused")
         .map((n) => n.summary),
     ).toEqual([expect.stringMatching(/^doom_loop refused: OpenCode's repeat guard/)]);
-    expect(bridge.doingNow()).toBeUndefined();
+    expect(doingWords(bridge.doingNow())).toBeUndefined();
   });
 
   it("a permission over something other than a tool whose call the store does not name yet — no part of the ask's source in the store — is answered and its call held unopened; a messages refill that names the part then opens it under the tool's word with the part's input, and the settle lands there", () => {
@@ -1389,7 +1389,7 @@ describe("the bridge's observing mode — an earlier execution's tail is not thi
     expect(events.filter((e) => e.type === "tool_call").map((e) => e.callId)).toEqual(["c-race"]);
     expect(events.filter((e) => e.type === "tool_result").map((e) => e.callId)).toEqual(["c-race"]);
     expect(bridge.toolCalls).toBe(1);
-    expect(bridge.doingNow()).toBeUndefined();
+    expect(doingWords(bridge.doingNow())).toBeUndefined();
   });
 
   it("two resource permissions held for one call — external_directory, then doom_loop — are both kept: the refill that names the part opens the call once with every held ask's input folded in, the directory among them", () => {
@@ -1583,20 +1583,20 @@ describe("the bridge's observing mode — an earlier execution's tail is not thi
     expect(notes(events).filter((n) => n.kind === "tool_unnamed")).toHaveLength(1);
     expect(notes(events)[0]?.summary).toMatch(/c-dir2/);
     expect(notes(events)[0]?.summary).toMatch(/msg_y/);
-    expect(bridge.doingNow()).toBeUndefined();
+    expect(doingWords(bridge.doingNow())).toBeUndefined();
   });
 
   it("catching up on a dead generation's feed, its execution failing is history the bridge says — a model call failed while the bot was away, or the proxy's turn budget reached while the bot was away — never this generation's settle, and its step is closed", () => {
     const { bridge, events } = harness();
     bridge.observing = "catching-up";
     bridge.observe(ev("session.step.started", { sessionID: "ses_c", assistantMessageID: "msg_dead", agent: "x" }));
-    expect(bridge.doingNow()).toBe(MODEL_CALL_IN_FLIGHT);
+    expect(doingWords(bridge.doingNow())).toBe(MODEL_CALL_IN_FLIGHT);
     const failed = bridge.observe(
       ev("session.execution.failed", { sessionID: "ses_c", error: { message: "the proxy answered 400" } }),
     );
     expect(failed.settled).toBe(false);
     expect(failed.providerError).toBeUndefined();
-    expect(bridge.doingNow()).toBeUndefined();
+    expect(doingWords(bridge.doingNow())).toBeUndefined();
     const budget = bridge.observe(
       ev("session.execution.failed", {
         sessionID: "ses_c",
@@ -1667,20 +1667,20 @@ describe("wind-down parity, an undelivered follow-up, and the alive-here reconci
   // way, or nothing between steps.
   it("doingNow: nothing before a step, the model call while a step is open, the open tools by name while they run, nothing once the execution settles", () => {
     const { bridge } = harness();
-    expect(bridge.doingNow()).toBeUndefined();
+    expect(doingWords(bridge.doingNow())).toBeUndefined();
     bridge.observe(ev("session.step.started", { sessionID: "ses_c", assistantMessageID: "msg_a0" }));
-    expect(bridge.doingNow()).toBe(MODEL_CALL_IN_FLIGHT);
+    expect(doingWords(bridge.doingNow())).toBe(MODEL_CALL_IN_FLIGHT);
     bridge.observe(ev("session.tool.input.started", { sessionID: "ses_c", id: "c1", name: "shell" }));
     bridge.observe(ev("session.tool.called", { sessionID: "ses_c", id: "c1", input: { command: "ls" } }));
-    expect(bridge.doingNow()).toBe("running bash");
+    expect(doingWords(bridge.doingNow())).toBe("running bash");
     bridge.observe(ev("session.tool.success", { sessionID: "ses_c", id: "c1", content: [], executed: true }));
-    expect(bridge.doingNow()).toBe(MODEL_CALL_IN_FLIGHT);
+    expect(doingWords(bridge.doingNow())).toBe(MODEL_CALL_IN_FLIGHT);
     bridge.observe(ev("session.step.ended", { sessionID: "ses_c", assistantMessageID: "msg_a0" }));
-    expect(bridge.doingNow()).toBeUndefined();
+    expect(doingWords(bridge.doingNow())).toBeUndefined();
     bridge.observe(ev("session.step.started", { sessionID: "ses_c", assistantMessageID: "msg_a1" }));
     bridge.observe(ev("session.execution.failed", { sessionID: "ses_c", error: { message: "the stream closed" } }));
     bridge.observe(ev("session.idle", { sessionID: "ses_c" }));
-    expect(bridge.doingNow()).toBeUndefined();
+    expect(doingWords(bridge.doingNow())).toBeUndefined();
   });
 
   it("F1: a steer the server never took is recorded as undelivered and handed back to the inbox, never as folded in, and no input event carries it", async () => {
