@@ -12125,6 +12125,31 @@ workspaceDir: __WORKDIR__
     vi.mocked(runPiHarnessOpen).mockClear();
   });
 
+  it("a lease under the preset's minimum: `agent:explore budget:3` is refused by name before any card, thread claim, ledger row or executor — the loop would have had no time; `budget:4` is admitted", async () => {
+    const ledger = new InMemoryRunLedger();
+    const provider = capturingProvider();
+    const deps = makeDeps(BOUNDED_YAML, provider);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
+    const admission = new ThreadAdmission<DispatchFollowUp>();
+    const claim = vi.spyOn(admission, "claim");
+    deps.admission = admission;
+    deps.runLedger = createLedgerWriteThrough({
+      ledger,
+      gen: "gen-B",
+      fallback: { put: async () => {} },
+      warn: () => {},
+    });
+    const { io, replies, statuses } = fakeIO();
+    await dispatch(deps, inChannel("COPEN", "agent:explore budget:3 time the suite"), io);
+    expect(replies).toEqual([
+      "🚫 `explore` needs at least 4 minutes — a turn, then its write-up and post-step — and this message's own budget gives it 3. Send the message again with `budget:4` or more.",
+    ]);
+    expect(statuses).toEqual([]);
+    expect(claim).not.toHaveBeenCalled();
+    expect(ledger.live.size).toBe(0);
+    expect(vi.mocked(makeExecutor)).not.toHaveBeenCalled();
+  });
+
   it("identity above the cap: `agent:coding` in a channel bounded to `read` is refused by name before any card, thread claim, ledger row or executor; `agent:review` in the same channel is admitted with its declared profile", async () => {
     const ledger = new InMemoryRunLedger();
     const provider = capturingProvider();

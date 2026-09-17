@@ -127,6 +127,18 @@ export function postStepLease(preset: string, remainingMs: number | undefined): 
   return Math.min(allowance, Math.max(1, remainingMs / MINUTE_MS));
 }
 
+/** The least lease under which a loop-running preset does anything: the
+ *  write-up and the preset's post-step are held back from every lease
+ *  (`loopClock`), so a lease of that sum leaves the loop nothing — the run
+ *  goes straight to its write-up and reports a budget it never had. One minute
+ *  above the sum is the least that runs a turn. A profile clipped under this by
+ *  a directive, a boundary or a parent's remainder is refused at the gate
+ *  naming it, the way a ship round is refused under its floor; the floors are
+ *  the larger numbers a round needs to be worth dispatching. */
+export function leaseMinimum(preset: string): number {
+  return ALLOWANCES.writeUp + postStepMinutes(preset) + 1;
+}
+
 /** A follow-up turn's lease, in ms: the lesser of what it asks and what the
  *  run's lease still holds, never under a minute — the grace covers that floor
  *  when the turn starts by the lease's end; later, the bearer may expire under

@@ -115,9 +115,14 @@ export async function authorizeProfile(
 
 /** `identity write > read (channel)` — the one-line log form of a refusal. */
 function refusalSummary(refusal: ProfileRefusal): string {
-  return refusal.axis === "identity"
-    ? `identity ${refusal.needs} > ${refusal.cap} (${refusal.scope})`
-    : `machine ${refusal.needs} not in ${refusal.allowed.join(",")} (${refusal.scopes.join(",")})`;
+  switch (refusal.axis) {
+    case "identity":
+      return `identity ${refusal.needs} > ${refusal.cap} (${refusal.scope})`;
+    case "machine":
+      return `machine ${refusal.needs} not in ${refusal.allowed.join(",")} (${refusal.scopes.join(",")})`;
+    case "minutes":
+      return `minutes ${refusal.have} < ${refusal.needs} (${refusal.scope})`;
+  }
 }
 
 /** The scope a boundary came from, as the thread reads it. */
@@ -148,10 +153,26 @@ function wayForward(scope: BoundaryScope, axis: string, needs: string, adminsHin
     case "directive":
       return "send the message again without the budget directive";
     case "parent":
-      // Unreachable today: a parent bounds the minutes alone (`boundedByParent`),
-      // and the minutes axis clips instead of refusing. Named so the switch
-      // stays exhaustive when a scope is added.
-      return "spawn it from a run with more time left";
+      // A parent bounds the minutes alone (`boundedByParent`): the one axis it
+      // reaches is the lease minimum's.
+      return `spawn it from a run with at least ${needs} left`;
+  }
+}
+
+/** The minutes axis: the minimum, the lease and whose clip, then the way
+ *  forward — the same scopes as the other axes, worded for minutes. */
+function minutesWayForward(scope: BoundaryScope, needs: number, adminsHint: string): string {
+  switch (scope) {
+    case "directive":
+      return `send the message again with \`budget:${needs}\` or more`;
+    case "user":
+      return `raise your own boundary with \`config set me --boundary.maxMinutes ${needs}\`, or drop your overrides with \`config clear me\``;
+    case "channel":
+      return `run it in a channel whose boundary allows ${needs} minutes, or ask ${adminsHint} to raise this channel's boundary`;
+    case "defaults":
+      return `ask ${adminsHint} to raise \`defaults.boundary\` in the configuration`;
+    case "parent":
+      return `spawn it from a run with at least ${needs} minutes left`;
   }
 }
 
@@ -162,6 +183,10 @@ export function profileRefusalReply(agentName: string, refusal: ProfileRefusal, 
   if (refusal.axis === "identity") {
     const how = wayForward(refusal.scope, "maxIdentity", refusal.needs, adminsHint);
     return `🚫 \`${agentName}\` needs a \`${refusal.needs}\` credential; ${boundaryOf(refusal.scope)} caps runs at \`${refusal.cap}\`. ${capitalize(how)}.`;
+  }
+  if (refusal.axis === "minutes") {
+    const how = minutesWayForward(refusal.scope, refusal.needs, adminsHint);
+    return `🚫 \`${agentName}\` needs at least ${refusal.needs} minutes — a turn, then its write-up and post-step — and ${boundaryOf(refusal.scope)} gives it ${refusal.have}. ${capitalize(how)}.`;
   }
   const scopes = refusal.scopes.map(boundaryOf);
   const who = scopes.length > 1 ? `${scopes.join(" and ")} allow` : `${scopes[0] ?? "the boundary"} allows`;

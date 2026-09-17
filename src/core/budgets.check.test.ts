@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { AGENTS } from "../agents/registry.js";
 import {
   DEFAULT_GRANT,
+  leaseMinimum,
   GRANT_RENEWALS_MAX,
   ALLOWANCES,
   ASKS,
@@ -220,6 +221,28 @@ describe("the stack — the write-up, the post-step and the exec margin fit insi
   it("a command is refused before the write-up begins: commandWriteUp ≤ writeUp; and the bash caps are module rows", () => {
     expect(ALLOWANCES.commandWriteUp).toBeLessThanOrEqual(ALLOWANCES.writeUp);
     expect(BASH_COMMAND).toEqual({ defaultMinutes: 5, maxMinutes: 20, minMs: 1_000 });
+  });
+});
+
+describe("the lease minimum — the least lease whose loop has a minute after the write-up and the post-step", () => {
+  it("is the write-up, the preset's post-step and one minute: 4 for a preset without a post-step, 9 for coding, 7 for review; an unknown preset reads as one without a post-step", () => {
+    expect(leaseMinimum("general")).toBe(4);
+    expect(leaseMinimum("research")).toBe(4);
+    expect(leaseMinimum("explore")).toBe(4);
+    expect(leaseMinimum("conductor")).toBe(4);
+    expect(leaseMinimum("coding")).toBe(9);
+    expect(leaseMinimum("review")).toBe(7);
+    expect(leaseMinimum("not-a-preset")).toBe(4);
+  });
+
+  it("every loop-running preset's ask holds its minimum, so a declared profile is never refused on its own", () => {
+    for (const preset of LOOP_PRESETS) expect(ASKS[preset], preset).toBeGreaterThanOrEqual(leaseMinimum(preset));
+  });
+
+  it("a lease at the minimum leaves its loop exactly one minute; one under it leaves none", () => {
+    const T0 = 1_700_000_000_000;
+    expect(loopClock(T0, leaseMinimum("explore") * MINUTE_MS, "explore").loopEnd - T0).toBe(MINUTE_MS);
+    expect(loopClock(T0, 3 * MINUTE_MS, "explore").loopEnd - T0).toBe(0);
   });
 });
 
