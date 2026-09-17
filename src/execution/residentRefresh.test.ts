@@ -290,6 +290,20 @@ describe("classifyRefreshFailure (a build SIGTERM'd by a deploy is an interrupti
     expect(classifyRefreshFailure({ step: "checkout-update", message: "exit 143: " }).interrupted).toBe(true);
   });
 
+  // Seen live: a container stopped under the wake path's short ready-stamp
+  // probe answered the platform's own words — not a shell's `exit 143` —
+  // and the cycle recorded `degraded(refresh-failed: …)` until the next cycle.
+  it("the platform's exit-code wording for a SIGTERMed container (Container exited with unexpected exit code: 143) is an interruption too, while any other exit code stays a genuine crash", () => {
+    const stopped = "Container exited with unexpected exit code: 143";
+    const f = classifyRefreshFailure({ step: "refresh", message: stopped });
+    expect(f.interrupted).toBe(true);
+    expect(f.reason).toBe(`refresh-interrupted: refresh ${stopped}`);
+    for (const code of [1, 2, 137, 139, 1430]) {
+      const crash = `Container exited with unexpected exit code: ${code}`;
+      expect(classifyRefreshFailure({ step: "refresh", message: crash }).interrupted, crash).toBe(false);
+    }
+  });
+
   it("SIGTERM / 'Session terminated' wording without the exit code still counts", () => {
     expect(
       classifyRefreshFailure({ step: "build", message: "exit 1: Session terminated, killing shell" }).interrupted,
@@ -438,6 +452,15 @@ describe("restoreFailureDisposition (a restore the runtime replacement interrupt
   // back a normal result — `exit 143: no output`, SIGTERM — and only the
   // cleanup execs 10 ms later carried the SDK's `container is not running`
   // wording, swallowed. The wake path read a snapshot failure and went `down`.
+  it("a container that exited with code 143 under the restore's own execs is interrupted too: SIGTERM's status in the platform's exit-code wording, never a crash", () => {
+    const stopped = "Container exited with unexpected exit code: 143";
+    expect(restoreFailureDisposition(stopped)).toEqual({
+      action: "interrupted",
+      reason: `restore-interrupted: ${stopped}`,
+    });
+    expect(restoreFailureDisposition("Container exited with unexpected exit code: 137").action).toBe("down");
+  });
+
   it("an extract killed by SIGTERM (exit 143, no output) is `interrupted` — the same kill signature the instance step's classifier already reads", () => {
     for (const msg of ["exit 143: no output", "exit 143: stderr: Terminated", "unsquashfs: SIGTERM received"]) {
       expect(restoreFailureDisposition(msg), msg).toEqual({
