@@ -303,6 +303,8 @@ Phase A (record unit one): U1 → U2 → U3, each a pull request; U3 may land af
 
 ### U11. The continuation card and the reply that spends a renewal by hand
 
+> **Amended 2026-09-17.** Retired before it was built: a keyword or a command that spends a renewal is a verb one preset knows, and the maintainer's rule is that any text in a thread is a nudge the system reads by context. Record 0051 (a thread has one owner for its life) replaces this unit: the unit idles instead of ending, the requester's plain reply wakes it and spends the renewal, and the stop card's sentence changes to "reply in this thread to continue". The card lines above stay as the idle card's words; the two review nits of unit ten fold into 0051's first unit.
+
 - **Goal**: a person sees one card per segment naming the segment and the sha it continued from, and one stop card when the grant or the progress test ends the session, with the reply that spends a renewal by hand as record 0044's confirmation surface; renewals are turned on for one channel and the first twenty segments are read before the default moves.
 - **Requirements**: record 0046's Renewal section and its amendment, point 5 (agent-ship item 8; record 0044).
 - **Dependencies**: U10.
