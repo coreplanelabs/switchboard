@@ -25,7 +25,7 @@ import {
   type ChildContract,
   type ContractUnit,
 } from "../ship/contract.js";
-import { shipTaskText } from "../ship/preflight.js";
+import { shipTaskText, shipUnitText } from "../ship/preflight.js";
 import { buildShipReviewTurn } from "../ship/reviewChild.js";
 import type { CoordinatorInstance, CoordinatorUnit } from "./contract.js";
 import type { Handoff } from "../ship/handoff.js";
@@ -81,7 +81,10 @@ async function generatedUnitOf(
     return generatedUnit(unit.unit, `Resume the review loop of ${url}`);
   }
   const request = await readers.readShipRequest();
-  const task = request !== undefined ? shipTaskText(parseDirectives(request).text, instance.repo) : "";
+  // The child's text is the request as written (urls kept, item 16); the
+  // probe decides only whether the request carried a task at all.
+  const written = request !== undefined ? parseDirectives(request).text : "";
+  const task = shipTaskText(written, instance.repo) ? shipUnitText(written, instance.repo) : "";
   return generatedUnit(unit.unit, task || "Implement the task this thread's ship request describes.");
 }
 

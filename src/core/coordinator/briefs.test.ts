@@ -155,7 +155,7 @@ describe("contractFor — the unit's contract from the repository at the base re
     expect(contract.rebase).toEqual({ branch: genUnit.branch, onto: "main" });
     const blind = await contractFor(genInstance, genUnit, { ...r, readShipRequest: async () => undefined });
     expect(blind.unit.section).toContain("Implement the task this thread's ship request describes.");
-    // A request that reads as a markdown heading (shipTaskText leaves the text
+    // A request that reads as a markdown heading (shipUnitText leaves the text
     // on one line, so a leading `##` is the case) is the request's own text:
     // the unit is built, never parsed back, so the section keeps it whole where
     // the plan parser would end the section at that line.
@@ -169,6 +169,17 @@ describe("contractFor — the unit's contract from the repository at the base re
     );
     expect(parsePlanUnit(headed.unit.section, genUnit.unit)!.section).not.toContain("\n\n## Acceptance");
     expect(headed.specRows).toEqual([]);
+    // The request's urls reach the child: a Slack `<url|label>` link is the bare
+    // url in the section, never the label Slack elides, never stripped — the
+    // entry probe's text (shipTaskText) is not the unit's.
+    const linked = await contractFor(genInstance, genUnit, {
+      ...r,
+      readShipRequest: async () =>
+        "agent:ship in acme/api: point the redirect at <https://calendar.acme.test/TrrMBAg7|calendar.acme.test/…> (the booking page)",
+    });
+    expect(linked.unit.section).toBe(
+      `### ${genUnit.unit}. point the redirect at https://calendar.acme.test/TrrMBAg7 (the booking page)\n\npoint the redirect at https://calendar.acme.test/TrrMBAg7 (the booking page)`,
+    );
   });
 
   it("a resume's section names the pull request, not the request text", async () => {
@@ -213,6 +224,18 @@ describe("composeChild — the child a brief names", () => {
     );
     expect(task.prompt).toBe("fix the login redirect");
     expect(task.contract?.unit.id).toBe("U1");
+    // The prompt keeps the request's urls, a Slack-labelled link as its bare url.
+    const linked = await composeChild(
+      { kind: "contract", unit: genUnit.unit, rebase: { branch: genUnit.branch, onto: "main" } },
+      { ...instance, plan: { id: "fix-abc123" } },
+      genUnit,
+      {
+        ...r,
+        readShipRequest: async () =>
+          "agent:ship in acme/api: point the redirect at <https://calendar.acme.test/TrrMBAg7|calendar.acme.test/…>",
+      },
+    );
+    expect(linked.prompt).toBe("point the redirect at https://calendar.acme.test/TrrMBAg7");
   });
 
   it("a contract brief with a continuation prefaces the unit's request with the segment, the branch and sha to continue from, and the previous run's write-up and handoff — the contract itself unchanged (decision 0046)", async () => {

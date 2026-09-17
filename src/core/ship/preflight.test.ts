@@ -4,7 +4,7 @@
 // fact is the pull request's own, named, never refused).
 import { describe, expect, it, vi } from "vitest";
 import type { PullRequestFacts, RepoShipInfo } from "../../execution/githubPulls.js";
-import { shipPreflight, type ShipPreflightInput } from "./preflight.js";
+import { shipPreflight, shipTaskText, shipUnitText, type ShipPreflightInput } from "./preflight.js";
 
 const HEAD = "a".repeat(40);
 const PR_URL = "https://github.com/acme/api/pull/7";
@@ -208,5 +208,29 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
       }),
     );
     expect(throwing).toEqual({ ok: true, entry: { repo: "acme/api", base: undefined } });
+  });
+});
+
+describe("shipUnitText — the generated unit's text is the request as written (agent-ship item 16)", () => {
+  it("keeps every url: a Slack `<url|label>` link unwraps to its bare url, a pasted url stays, an issue reference stays; only the mention and the `in <repo>:` prefix go (directives are the caller's)", () => {
+    const text =
+      "<@U0BOT> in acme/infra: change the <http://meet.example.com/onboarding|meet.example.com/onboarding> redirect to <https://calendar.example/TrrMBAg7|calendar.example/…> (the new booking page), see acme/infra#12 and https://example.com/why";
+    expect(shipUnitText(text, "acme/infra")).toBe(
+      "change the http://meet.example.com/onboarding redirect to https://calendar.example/TrrMBAg7 (the new booking page), see acme/infra#12 and https://example.com/why",
+    );
+    // The same request stripped for the entry probe loses every url — the two
+    // helpers answer different questions and must never be swapped.
+    expect(shipTaskText(text, "acme/infra")).not.toContain("calendar.example");
+  });
+
+  it("the repository prefix goes in either case with or without its colon, only at the front — `in <repo>` mid-sentence and the slug in prose stay; an uppercase scheme unwraps too; an empty remainder is empty", () => {
+    expect(shipUnitText("in ACME/INFRA fix the thing in the acme/infra repo", "acme/infra")).toBe(
+      "fix the thing in the acme/infra repo",
+    );
+    expect(shipUnitText("the redirect in acme/infra is stale", "acme/infra")).toBe(
+      "the redirect in acme/infra is stale",
+    );
+    expect(shipUnitText("<HTTPS://Example.com/A|label>", "acme/infra")).toBe("HTTPS://Example.com/A");
+    expect(shipUnitText("   in acme/infra:  ", "acme/infra")).toBe("");
   });
 });
