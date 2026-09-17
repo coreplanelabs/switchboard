@@ -363,6 +363,8 @@ describe("renderContract — one block under `## Contract`, fixed sub-headings i
     expect([...order].sort((a, b) => a - b)).toEqual(order);
     // the first instruction names the branch and the parent
     expect(text).toContain("Rebase `plan/fixture/u10-warm-the-cache` onto `main`");
+    // and the wind-down step (decision 0046): push what compiles at the wind-down note, then answer
+    expect(text).toContain("At the wind-down note, commit and push what compiles, say what does not, then answer.");
     // the first instruction orders the push before the full verification (agent-coding item 13:
     // an unpushed tree does not survive the run's end) and carries the pre-push re-fetch, so the
     // pull request is not born conflicting when main moved while the child worked

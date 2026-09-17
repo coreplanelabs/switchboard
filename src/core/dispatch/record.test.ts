@@ -355,6 +355,22 @@ describe("assembleRunRecord — the handoff on the record", () => {
     expect("lease" in assembleRunRecord(base())).toBe(false);
   });
 
+  // docs/reference/specs/run-history.md item 2: the pushed heads ride the record off their events (decision 0046).
+  it("carries the run's pushed heads off its pushed_head events, and the record still validates; none → no key", () => {
+    const events = [
+      { type: "input" as const, text: "go", seq: 1 },
+      { type: "pushed_head" as const, ref: "fix/a", sha: "a".repeat(40), by: "push" as const, seq: 2, at: 5 },
+    ];
+    const record = assembleRunRecord({
+      ...base(),
+      snap: { events, startedAt: 1, eventCount: 2, stepCount: 0 } as never,
+    });
+    expect(record.pushed).toEqual([{ ref: "fix/a", sha: "a".repeat(40) }]);
+    expect(isRunRecord(record)).toBe(true);
+    expect(isRunRecord(JSON.parse(JSON.stringify(record)))).toBe(true);
+    expect("pushed" in assembleRunRecord(base())).toBe(false);
+  });
+
   it("carries parentRunId for a spawned child, and the record still validates; no parent → no key", () => {
     const child = assembleRunRecord({ ...base(), parentRunId: "run-parent" });
     expect(child.parentRunId).toBe("run-parent");

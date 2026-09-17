@@ -119,6 +119,11 @@ describe("createRunTimeline — grouping", () => {
       { kind: "pr_opened", url: "https://github.com/acme/web/pull/7", number: 7, created: false, at: undefined },
     ]);
     expect(t.push({ type: "pr_opened", url: "", number: 7 })).toEqual([]);
+    // The pushed head (decision 0046): a branch and a sha, or nothing.
+    expect(t.push({ type: "pushed_head", ref: "fix/a", sha: "a".repeat(40), by: "push", at: 8 })).toEqual([
+      { kind: "pushed_head", ref: "fix/a", sha: "a".repeat(40), at: 8 },
+    ]);
+    expect(t.push({ type: "pushed_head", ref: "fix/a", by: "push" })).toEqual([]);
     expect(t.push({ type: "pr_opened", url: "https://github.com/acme/web/pull/0", number: 0 })).toEqual([]);
     expect(
       t.push({ type: "run_note", kind: "stop_requested", summary: "stop requested", mode: "soft", at: 3 }),

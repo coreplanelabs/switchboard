@@ -277,6 +277,8 @@ export function activityLine(e: RunEvent): string {
       return "PR description recorded"; // published straight to the registry — never arrives here
     case "pr_opened":
       return "PR opened"; // published straight to the registry — never arrives here
+    case "pushed_head":
+      return `⬆ pushed ${e.ref} @ ${e.sha.slice(0, 7)}`;
     case "coordinator_tag":
       return "coordinator tag recorded"; // published straight to the registry — never arrives here
     case "review_posted":

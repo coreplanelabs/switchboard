@@ -238,6 +238,15 @@ describe("parseRunEventLines", () => {
     expect(skipped).toBe(1);
   });
 
+  it("accepts `pushed_head` when it carries a ref, a sha and who pushed it, skips it otherwise", () => {
+    const ok = { type: "pushed_head", ref: "fix/a", sha: "a".repeat(40), by: "push", at: 2 };
+    const noSha = { type: "pushed_head", ref: "fix/a", by: "push" };
+    const badSource = { type: "pushed_head", ref: "fix/a", sha: "a".repeat(40), by: "hand" };
+    const { events, skipped } = parseRunEventLines([ok, noSha, badSource].map((e) => JSON.stringify(e)).join("\n"));
+    expect(events).toEqual([ok]);
+    expect(skipped).toBe(2);
+  });
+
   it("accepts `ship_round` when it carries a numeric index + agent and outcome strings, skips it otherwise", () => {
     const ok = { type: "ship_round", index: 1, agent: "review", outcome: "approve", at: 3 };
     const badIndex = { type: "ship_round", index: "1", agent: "review", outcome: "approve" };

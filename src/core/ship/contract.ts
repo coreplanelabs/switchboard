@@ -431,7 +431,8 @@ function renderFirstInstruction(rebase: ChildContract["rebase"]): string {
     `Push the branch as soon as the change exists and its cheapest proving checks pass — before the project's ` +
     `full verification, which runs after that push with any fix as a further commit; an unpushed tree does not ` +
     `survive the run's end. Right before each push, fetch ${onto} again and rebase once more if it moved while ` +
-    `you worked, so the pull request is not born conflicting.`
+    `you worked, so the pull request is not born conflicting. At the wind-down note, commit and push what compiles, ` +
+    `say what does not, then answer.`
   );
 }
 

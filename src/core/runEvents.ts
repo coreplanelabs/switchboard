@@ -695,6 +695,12 @@ export type RunEvent =
    *  start of the loop; a resumed run carries the original. Head material,
    *  like `run_meta`. Additive: unknown → ignored. */
   | { type: "lease"; startedAt: number; endsAt: number; loopEndsAt: number; seq?: number; at?: number }
+  /** A head the run pushed (docs/reference/specs/run-history.md item 2; decision
+   *  0046): the branch and the sha the coding post-step observed on the remote
+   *  (`by: "push"`), or the budget-end salvage pushed (`by: "salvage"`),
+   *  whether or not a pull request follows — the fact renewal reads. Published
+   *  straight to the registry like `pr_opened`. Additive: unknown → ignored. */
+  | { type: "pushed_head"; ref: string; sha: string; by: "push" | "salvage"; seq?: number; at?: number }
   /** The coordinator tag as a fact of the run (docs/reference/specs/run-history.md
    *  item 48a): the instance the run is a child of, the unit its idempotency
    *  key named, and the base branch its pull request targets — published by

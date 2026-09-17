@@ -122,6 +122,8 @@ function isRunEvent(v: unknown): v is RunEvent {
       return typeof o.description === "object" && o.description !== null;
     case "pr_opened":
       return typeof o.url === "string" && typeof o.number === "number" && typeof o.created === "boolean";
+    case "pushed_head":
+      return typeof o.ref === "string" && typeof o.sha === "string" && (o.by === "push" || o.by === "salvage");
     case "review_posted":
       return typeof o.repo === "string" && typeof o.number === "number" && typeof o.head === "string";
     case "ship_round":

@@ -114,6 +114,8 @@ export type TimelineChange =
   /** The coding post-step's PR (a `pr_opened` event): what the reply is about,
    *  for the Reply head — opened new, or an existing open PR edited. */
   | { kind: "pr_opened"; url: string; number: number; created: boolean; at?: number }
+  /** A head the run pushed (a `pushed_head` event; decision 0046): the branch and the sha. */
+  | { kind: "pushed_head"; ref: string; sha: string; at?: number }
   /** A skill loaded into context (a `skill_use` event): rendered inside the
    *  step whose `use_skill` call it belongs to, as its own row — not a call
    *  card (the call card is the tool's; this is what the tool loaded). */
@@ -355,6 +357,10 @@ export function createRunTimeline(): RunTimeline {
         const number = num(e.number);
         if (!str(e.url) || number === undefined || !Number.isInteger(number) || number <= 0) return [];
         return [{ kind: "pr_opened", url: str(e.url), number, created: e.created === true, at: num(e.at) }];
+      }
+      case "pushed_head": {
+        if (!str(e.ref) || !str(e.sha)) return [];
+        return [{ kind: "pushed_head", ref: str(e.ref), sha: str(e.sha), at: num(e.at) }];
       }
       case "run_meta": {
         // Optional fields ride only when present (and well-typed) — the page

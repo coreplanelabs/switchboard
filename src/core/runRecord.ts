@@ -213,6 +213,10 @@ export interface RunRecord {
    *  `lease` event, folded at the assembly. Present only on a run whose
    *  harness started a loop; a record written before the event lacks it. */
   lease?: RunLease;
+  /** The heads the run pushed (item 2; decision 0046): one per branch, the
+   *  last `pushed_head` event's sha winning — the fact a renewal reads to know
+   *  the run made progress. Present only on a run that pushed. */
+  pushed?: PushedHead[];
   /** What the run cost in tokens, per model, summed from its `model.turn`
    *  spans at finish (`usageOfEvents`; docs/reference/specs/costs.md, cost by user).
    *  Every record written since carries it (zero turns included); one written
@@ -236,6 +240,21 @@ export interface RunLease {
   startedAt: number;
   endsAt: number;
   loopEndsAt: number;
+}
+
+/** A head a run pushed, as the record names it (item 2): the branch and the sha. */
+export interface PushedHead {
+  ref: string;
+  sha: string;
+}
+
+/** The heads a run's events say it pushed — one per branch, the last event's
+ *  sha winning, in first-seen order — or nothing when it pushed none. */
+export function pushedHeadsOf(events: readonly RunEvent[]): PushedHead[] | undefined {
+  const byRef = new Map<string, string>();
+  for (const e of events) if (e.type === "pushed_head") byRef.set(e.ref, e.sha);
+  if (byRef.size === 0) return undefined;
+  return [...byRef].map(([ref, sha]) => ({ ref, sha }));
 }
 
 /** The lease a run's events say its harness started — the first `lease`
@@ -798,6 +817,18 @@ export function isRunRecord(v: unknown): v is RunRecord {
   if (r.profile !== undefined && !isRunProfileRecord(r.profile)) return false;
   // The pull request the run reached (item 2): a positive integer and a URL, or absent.
   if (r.pr !== undefined && !isRunPullRequestShape(r.pr)) return false;
+  if (
+    r.pushed !== undefined &&
+    !(
+      Array.isArray(r.pushed) &&
+      r.pushed.every((h) => {
+        if (typeof h !== "object" || h === null) return false;
+        const { ref, sha } = h as Record<string, unknown>;
+        return typeof ref === "string" && ref.length > 0 && typeof sha === "string" && /^[0-9a-f]{7,40}$/.test(sha);
+      })
+    )
+  )
+    return false;
   // A parent is named by a run id (item 46): the same shape as the record's own.
   if (r.parentRunId !== undefined && (typeof r.parentRunId !== "string" || !RUN_ID_PATTERN.test(r.parentRunId)))
     return false;
