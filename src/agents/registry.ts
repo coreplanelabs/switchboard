@@ -1,6 +1,7 @@
 // Agent definitions. An agent is a system prompt + toolset + machine class + wall-clock budget.
 import type { Effort } from "../effort.js";
 import { BASH_TIMEOUT_MAX_MS } from "../execution/bashTimeout.js";
+import { ASKS, RUNAWAY_TURNS_PER_MINUTE, runawayTurnCap, type LoopPreset } from "../core/budgets.js";
 import { CONTRACT_HEADING, CONTRACT_SECTION_HEADINGS, PR_TITLE_GUARD } from "../core/ship/contract.js";
 // Which model runs it is resolved separately by the config layers, so any
 // agent can run on any configured provider/model.
@@ -41,24 +42,16 @@ export function machineNeedsRepo(machine: MachineClass): boolean {
 export const IDENTITIES = ["none", "read", "write"] as const;
 export type Identity = (typeof IDENTITIES)[number];
 
-/** The pace that marks a run as looping rather than working: a model turn
- *  every ten seconds, sustained for the whole wall clock. A busy run takes
- *  20–40 s a turn (a model think plus a tool call), so a run that averages six
- *  a minute from start to end is re-issuing calls, not making progress — and
- *  its turn cap ends it before the wall clock would, with a write-up that
- *  says so (docs/reference/specs/harness-pi.md item 15). */
-export const RUNAWAY_TURNS_PER_MINUTE = 6;
+/** The wall clocks live in `src/core/budgets.ts` (docs/decisions/0046): a
+ *  preset's ask, the turn cap derived from it and every allowance are rows
+ *  there, and this registry reads them. Re-exported for the readers that
+ *  learned them here. */
+export { RUNAWAY_TURNS_PER_MINUTE, runawayTurnCap };
 
-/** The turn cap a wall clock implies: `maxMinutes × RUNAWAY_TURNS_PER_MINUTE`.
- *  Every preset that runs the loop derives its `maxTurns` from this, so the
- *  cap is never a number a good run reaches — the minutes are the budget. */
-export function runawayTurnCap(maxMinutes: number): number {
-  return maxMinutes * RUNAWAY_TURNS_PER_MINUTE;
-}
-
-/** A loop-running preset's budget as one fact: the wall clock, and the runaway
- *  guard derived from it. */
-function loopBudget(maxMinutes: number): Pick<AgentDef, "maxMinutes" | "maxTurns"> {
+/** A loop-running preset's budget as one fact read from the module: the wall
+ *  clock it asks for, and the runaway guard derived from it. */
+function loopBudget(preset: LoopPreset): Pick<AgentDef, "maxMinutes" | "maxTurns"> {
+  const maxMinutes = ASKS[preset];
   return { maxMinutes, maxTurns: runawayTurnCap(maxMinutes) };
 }
 
@@ -638,7 +631,7 @@ const WORK_PRESETS = {
     machine: "none",
     identity: "none",
     maxTokens: 16000,
-    ...loopBudget(5),
+    ...loopBudget("general"),
   },
   coding: {
     name: "coding",
@@ -648,7 +641,7 @@ const WORK_PRESETS = {
     seededSystem: CODING_SYSTEM_SEEDED,
     toolset: "full",
     maxTokens: 64000,
-    ...loopBudget(45),
+    ...loopBudget("coding"),
     // No built-in effort: the deployment decides (`defaults.efforts.coding`,
     // `config set channel efforts.coding=…`, or `effort:` per request).
     machine: "repo-resident",
@@ -669,7 +662,7 @@ const WORK_PRESETS = {
     machine: "repo-resident",
     identity: "read", // a read-scoped token and a read-only worktree: it cannot post or push from inside
     maxTokens: 64000,
-    ...loopBudget(25), // a safety net — typical reviews land in ~5 minutes
+    ...loopBudget("review"), // a safety net — typical reviews land in ~5 minutes
     effort: "medium", // fast turns; one big-context pass does the deep work
   },
   ship: {
@@ -698,7 +691,7 @@ const WORK_PRESETS = {
     // reviewed pull request, never code landing on main.
     maxTurns: 1,
     maxTokens: 16000,
-    maxMinutes: 120,
+    maxMinutes: ASKS.ship,
   },
   research: {
     name: "research",
@@ -709,7 +702,7 @@ const WORK_PRESETS = {
     machine: "none", // web I/O only; no workspace is provisioned
     identity: "none",
     maxTokens: 24000,
-    ...loopBudget(8),
+    ...loopBudget("research"),
     effort: "medium",
   },
   explore: {
@@ -723,7 +716,7 @@ const WORK_PRESETS = {
     machine: "repo-cold",
     identity: "read", // a read-scoped token: it can clone and read, never push — whatever the caller holds
     maxTokens: 64000,
-    ...loopBudget(120),
+    ...loopBudget("explore"),
     // No built-in effort: the deployment decides, as for coding.
   },
 } satisfies Record<string, AgentDef>;
@@ -748,7 +741,7 @@ export const AGENTS: Record<string, AgentDef> = {
     // spawn exactly those — so no child runs that the record did not name.
     routable: false,
     maxTokens: 32000,
-    ...loopBudget(120), // long enough to outlast a coding child; every child is capped by what remains of it
+    ...loopBudget("conductor"), // long enough to outlast a coding child; every child is capped by what remains of it
     // No built-in effort: the deployment decides, as for coding.
   },
 };
