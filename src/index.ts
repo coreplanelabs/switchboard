@@ -160,9 +160,15 @@ const INTERRUPTED_WRITE_BUDGET_MS = 10_000;
  * CLI's `start` (src/cli.ts) — the same process from the same directory.
  */
 export async function runBot(): Promise<void> {
-  const channels = channelsToStart(
-    new Set(["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "LINEAR_BRIDGE_TOKEN"].filter((key) => processSecrets.get(key))),
-  );
+  let channels: ReturnType<typeof channelsToStart>;
+  try {
+    channels = channelsToStart(
+      new Set(["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "LINEAR_BRIDGE_TOKEN"].filter((key) => processSecrets.get(key))),
+    );
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : "Invalid channel configuration");
+    process.exit(1);
+  }
 
   // Build identity for /healthz (docs/reference/specs/slack-channel.md item 8): written by
   // `deploy/cloudflare/write-build.mjs` into the image; "unknown" when built by hand.
