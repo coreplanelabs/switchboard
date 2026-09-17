@@ -486,6 +486,36 @@ describe("resolveProfile — the effective profile once the preset is known", ()
     });
   });
 
+  it("a lease under the preset's minimum is refused on the minutes axis — a `budget:3` explore (minimum 4) as the directive's, a channel of 3 as the channel's — and one at the minimum runs", () => {
+    const explore = getAgent("explore");
+    expect(
+      resolveProfile({ agent: explore, resolved: resolvedIn(YAML, "explore"), resume: undefined, budget: 3 }),
+    ).toEqual({ kind: "refused", refusal: { axis: "minutes", needs: 4, have: 3, scope: "directive" } });
+    expect(
+      resolveProfile({ agent: explore, resolved: resolvedIn(YAML, "explore"), resume: undefined, budget: 4 }),
+    ).toEqual({
+      kind: "profile",
+      profile: { machine: "repo-cold", identity: "read", minutes: 4, boundedBy: "directive" },
+    });
+    // Coding's minimum is 9 (write-up 3, post-step 5, one turn): a budget of 8 is refused, 9 runs.
+    const coding = getAgent("coding");
+    expect(
+      resolveProfile({ agent: coding, resolved: resolvedIn(YAML, "coding"), resume: undefined, budget: 8 }),
+    ).toEqual({ kind: "refused", refusal: { axis: "minutes", needs: 9, have: 8, scope: "directive" } });
+    expect(
+      resolveProfile({ agent: coding, resolved: resolvedIn(YAML, "coding"), resume: undefined, budget: 9 }),
+    ).toMatchObject({ kind: "profile", profile: { minutes: 9 } });
+    // A spawned child whose parent has less left than the minimum is refused as the parent's.
+    expect(
+      resolveProfile({
+        agent: explore,
+        resolved: resolvedIn(YAML, "explore"),
+        resume: undefined,
+        parentRemainingMs: 2.5 * 60_000,
+      }),
+    ).toEqual({ kind: "refused", refusal: { axis: "minutes", needs: 4, have: 2, scope: "parent" } });
+  });
+
   it("a resume keeps the profile its row was admitted with — the clipped budget and what clipped it — rather than re-reading the preset; the current boundaries still refuse an identity or class above their cap", () => {
     const coding = getAgent("coding");
     const carried = {

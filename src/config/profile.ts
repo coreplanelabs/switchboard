@@ -231,7 +231,11 @@ export function boundedByParent(
  *  reply names. */
 export type ProfileRefusal =
   | { axis: "identity"; needs: Identity; cap: Identity; scope: BoundaryScope }
-  | { axis: "machine"; needs: MachineClass; allowed: MachineClass[]; scopes: BoundaryScope[] };
+  | { axis: "machine"; needs: MachineClass; allowed: MachineClass[]; scopes: BoundaryScope[] }
+  /** The minutes axis refuses only under a minimum the caller names (the
+   *  preset's lease minimum, `leaseMinimum` in `src/core/budgets.ts`): a lease
+   *  clipped below it would leave the loop no time at all. */
+  | { axis: "minutes"; needs: number; have: number; scope: BoundaryScope };
 
 /** The effective profile, or the refusal the authorize stage turns into a
  *  named reply. Resolution is pure; the gate judges. */
@@ -252,6 +256,8 @@ export function effectiveProfile(
   preset: Pick<AgentDef, "machine" | "identity" | "maxMinutes">,
   directives: { budget?: number },
   boundary: EffectiveBoundary | undefined,
+  /** The least lease the preset does anything under; absent, the minutes only clip. */
+  minimum?: number,
 ): ProfileResolution {
   if (boundary?.maxIdentity && !identityWithin(preset.identity, boundary.maxIdentity.value)) {
     return {
@@ -284,6 +290,16 @@ export function effectiveProfile(
   if (boundary?.maxMinutes && boundary.maxMinutes.value < minutes) {
     minutes = boundary.maxMinutes.value;
     boundedBy = boundary.maxMinutes.scope;
+  }
+  // Under the minimum the clip is a refusal, not a run: the write-up and the
+  // post-step take the whole lease and the loop never turns. Attributed to
+  // whatever clipped; a declared ask under its own minimum is the module's
+  // invariant to catch, named as the defaults' here so the switch is total.
+  if (minimum !== undefined && minutes < minimum) {
+    return {
+      kind: "refused",
+      refusal: { axis: "minutes", needs: minimum, have: minutes, scope: boundedBy ?? "defaults" },
+    };
   }
   return {
     kind: "profile",

@@ -113,6 +113,35 @@ describe("effectiveProfile — preset ∩ directives ∩ boundary, clip or refus
     expect(looser).toEqual({ kind: "profile", profile: declaredProfile(AGENTS.coding) });
   });
 
+  it("the minutes axis refuses under a minimum the caller names: a lease clipped below it is refused naming the minimum, the lease and the scope that clipped; at the minimum it runs; without a minimum nothing changes", () => {
+    const channel3 = intersectBoundaries([layer("channel", { maxMinutes: 3 })]);
+    expect(effectiveProfile(AGENTS.explore, {}, channel3, 4)).toEqual({
+      kind: "refused",
+      refusal: { axis: "minutes", needs: 4, have: 3, scope: "channel" },
+    });
+    expect(effectiveProfile(AGENTS.explore, { budget: 3 }, undefined, 4)).toEqual({
+      kind: "refused",
+      refusal: { axis: "minutes", needs: 4, have: 3, scope: "directive" },
+    });
+    expect(effectiveProfile(AGENTS.explore, { budget: 4 }, undefined, 4)).toEqual({
+      kind: "profile",
+      profile: { machine: "repo-cold", identity: "read", minutes: 4, boundedBy: "directive" },
+    });
+    // The identity axis is judged first: a read-capped channel refuses coding on identity, whatever the minutes.
+    expect(
+      effectiveProfile(
+        AGENTS.coding,
+        { budget: 3 },
+        intersectBoundaries([layer("channel", { maxIdentity: "read" })]),
+        9,
+      ),
+    ).toMatchObject({ kind: "refused", refusal: { axis: "identity" } });
+    expect(effectiveProfile(AGENTS.explore, { budget: 3 }, undefined)).toEqual({
+      kind: "profile",
+      profile: { machine: "repo-cold", identity: "read", minutes: 3, boundedBy: "directive" },
+    });
+  });
+
   it("a directive narrows the budget as the caller's own boundary and never widens it; a boundary under the directive wins the attribution", () => {
     expect(effectiveProfile(AGENTS.coding, { budget: 30 }, undefined)).toEqual({
       kind: "profile",

@@ -5,6 +5,7 @@
 // and the target repository, ref and pull request, started as a promise so the
 // GitHub round trip overlaps the memory read and lands after the ack card.
 // Pure resolution — the gates that judge the result are authorize.ts.
+import { leaseMinimum } from "../budgets.js";
 import type { ConfigStore, ResolvedRequest } from "../../config.js";
 import { machineNeedsRepo, type AgentDef } from "../../agents/registry.js";
 import { boundedByParent, effectiveProfile, type ProfileResolution, type RunProfile } from "../../config/profile.js";
@@ -165,7 +166,15 @@ export function resolveProfile(ctx: {
     ctx.parentRemainingMs !== undefined
       ? boundedByParent(ctx.resolved.boundary, ctx.parentRemainingMs)
       : ctx.resolved.boundary;
-  const resolution = effectiveProfile(declared, ctx.budget !== undefined ? { budget: ctx.budget } : {}, boundary);
+  // The lease minimum (decision 0046; `leaseMinimum`): a lease clipped under
+  // the write-up, the post-step and one turn is refused here by name, never
+  // started to report a budget it never had.
+  const resolution = effectiveProfile(
+    declared,
+    ctx.budget !== undefined ? { budget: ctx.budget } : {},
+    boundary,
+    leaseMinimum(ctx.agent.name),
+  );
   if (resolution.kind === "profile" && carried?.boundedBy && !resolution.profile.boundedBy) {
     return { kind: "profile", profile: { ...resolution.profile, boundedBy: carried.boundedBy } };
   }
