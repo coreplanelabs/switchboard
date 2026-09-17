@@ -469,6 +469,22 @@ describe("RUNTIME_REPLACEMENT_WORDING (a deploy that ROLLS the container, not ju
     expect(RUNTIME_REPLACEMENT_WORDING.test(CONTAINER_ROLLED)).toBe(true);
   });
 
+  // The other wording a roll leaves in a resident step: `The container just
+  // exited`, the SDK's answer when the container dies under a live exec (the
+  // bot side already reads it as a roll — CONTAINER_GONE_WORDING, item 65).
+  // Five stop-container faults during a wake on a throwaway resident each recorded
+  // `refresh-failed: The container just exited`: a container roll counted as
+  // the resident's own step failing, one strike each toward item 67's ladder.
+  it("classifies `The container just exited` as a runtime replacement too, so a roll mid-cycle is an interruption the engine retries, never a counted step failure", () => {
+    const EXITED = "The container just exited";
+    expect(RUNTIME_REPLACEMENT_WORDING.test(EXITED)).toBe(true);
+    expect(RUNTIME_REPLACEMENT_WORDING.test(`sandbox.exec failed: ${EXITED}`)).toBe(true);
+    const f = classifyRefreshFailure({ step: "refresh", message: EXITED });
+    expect(f.interrupted).toBe(true);
+    expect(f.reason).toBe(`refresh-interrupted: refresh ${EXITED}`);
+    expect(restoreFailureDisposition(EXITED).action).toBe("interrupted");
+  });
+
   it("matches on the cause chain too (the resident walks selfAndCauses), and is case-insensitive", () => {
     expect(RUNTIME_REPLACEMENT_WORDING.test("the container is not running, consider calling start()")).toBe(true);
     // wrapped one link down, the shape the SDK produces when it re-throws the
@@ -504,7 +520,7 @@ describe("RUNTIME_REPLACEMENT_WORDING (a deploy that ROLLS the container, not ju
       "the platform was updating the sandbox runtime",
       "the runtime no longer identifies pid 4242",
     ];
-    const down = ["Process supervisor is closed", CONTAINER_ROLLED];
+    const down = ["Process supervisor is closed", CONTAINER_ROLLED, "The container just exited"];
     for (const text of moved) {
       expect(RUNTIME_MOVED_WORDING.test(text), text).toBe(true);
       expect(STOPPED_CONTAINER_WORDING.test(text), text).toBe(false);
