@@ -215,6 +215,10 @@ export type RunNoteKind =
    *  there was nothing to push), so a re-issue starts from the partial work
    *  (docs/reference/specs/agent-ship.md item 8). */
   | "budget_salvage"
+  /** The loop's end found a tool call in flight and ended it, so the write-up
+   *  keeps its allowance (decision 0046, unit seven; harness-pi item 6). The
+   *  summary names the tools. Published by the harness beside the budget note. */
+  | "tool_cut"
   /** The native loop's stuck-loop guard: the same tool call failed identically
    *  six times in a row and the run was forced into its write-up. Written by
    *  no loop since that loop's deletion; a record from before it may carry it. */
@@ -225,6 +229,7 @@ export type RunNoteKind =
 export const RUN_NOTE_KINDS = [
   "wrap_up",
   "time_budget_exhausted",
+  "tool_cut",
   "turn_budget_exhausted",
   "sandbox_dead",
   "fleet_busy",

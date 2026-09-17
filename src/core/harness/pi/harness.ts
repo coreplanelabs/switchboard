@@ -51,6 +51,7 @@ import {
   windDownFailureNote,
   wrapUpInstruction,
   wrapUpNote,
+  toolCutNote,
 } from "../windDown.js";
 import { bearerHashOf } from "../../modelProxy/runBearers.js";
 import { redactAndCap, redactSecrets, type RunEvent, type RunNoteKind, type StopMode } from "../../runEvents.js";
@@ -1180,8 +1181,19 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         return;
       }
       if (now() >= loopEnd) {
-        note("time_budget_exhausted", timeBudgetNote(bridge.doingNow()));
+        const doing = bridge.doingNow();
+        note("time_budget_exhausted", timeBudgetNote(doing));
         startWriteUp({ kind: "time" }, timeBudgetInstruction());
+        // A tool call in flight is ended at the loop's end (decision 0046,
+        // unit seven): the abort follows the write-up's steer on the transport's
+        // chain, so pi has the instruction before the cut and reads it as its
+        // next turn, with the write-up's whole allowance ahead of it — instead
+        // of the finale spent waiting the command out. A model call in flight
+        // is left to answer: the steer lands at its turn boundary as today.
+        if (doing !== undefined && doing.startsWith("running ")) {
+          note("tool_cut", toolCutNote(doing));
+          abortPi();
+        }
         return;
       }
       if (bridge.turns >= run.agent.maxTurns) {

@@ -39,6 +39,7 @@ import {
   softStopNote,
   timeBudgetAnswer,
   timeBudgetNote,
+  toolCutNote,
 } from "../windDown.js";
 import { TRANSPORT_LOST_TEXT } from "./fakeContainer.js";
 
@@ -97,6 +98,12 @@ export interface RunScript {
    *  write-up's steer has landed, so the harness's wind-down, its finale bound
    *  and the process's end are exercised without a real wait. */
   hangModelCall?: number;
+  /** The tool call of this 1-based turn never returns: the driver holds it
+   *  open and lands the clock past the loop's end with it in flight, so the
+   *  harness's next tick notes the budget with the tool named, steers the
+   *  write-up and cuts the call (decision 0046, unit seven) — its result lands
+   *  `aborted` — and the write-up runs with its whole allowance. */
+  hangToolCall?: number;
   /** The run's wall clock runs out before the model call of this 1-based
    *  number: the clock passes the deadline with that call under way, so the
    *  harness winds the run down — the budget note, the write-up steered — and
@@ -764,6 +771,42 @@ export const SCENARIOS: readonly ScenarioRow[] = [
       const last = Math.max(...run.events.map((e) => e.at ?? 0));
       assert.ok(last <= lease.endsAt, `the run outlived its lease: ${last} > ${lease.endsAt}`);
       assert.ok(last > lease.loopEndsAt, "the clock never passed the loop's cut");
+    },
+  },
+  {
+    id: "budget-cuts-the-tool-in-flight",
+    clause: "conversation",
+    title:
+      "a tool call in flight at the loop's end is cut: the budget note names it, a tool_cut note says why, its result lands aborted, and the write-up runs with its allowance and answers before the lease ends",
+    script: {
+      turns: [call("c1", "bash", { command: "sleep 900" }), text("findings so far: the sleep was cut")],
+      hangToolCall: 1,
+    },
+    check: (run) => {
+      assert.equal(answered(run), timeBudgetAnswer("findings so far: the sleep was cut", CONFORMANCE_MAX_MINUTES));
+      assert.deepEqual(
+        notes(run)
+          .filter((n) => n.kind === "time_budget_exhausted")
+          .map((n) => n.summary),
+        [timeBudgetNote("running bash")],
+        "the budget note does not name the tool in flight",
+      );
+      assert.deepEqual(
+        notes(run)
+          .filter((n) => n.kind === "tool_cut")
+          .map((n) => n.summary),
+        [toolCutNote("running bash")],
+        "the cut is not exactly one tool_cut note",
+      );
+      assert.equal(notes(run).filter((n) => n.kind === "harness_error").length, 0, "the cut was recorded as a failure");
+      const cut = toolResults(run).find((r) => r.callId === "c1");
+      assert.ok(cut !== undefined && cut.ok === false, "the cut call's result is not on the record as a failure");
+      const lease = run.events.find((e) => e.type === "lease");
+      assert.ok(lease && lease.type === "lease", "no lease event");
+      const last = Math.max(...run.events.map((e) => e.at ?? 0));
+      assert.ok(last <= lease.endsAt, `the run outlived its lease: ${last} > ${lease.endsAt}`);
+      // The write-up is a second model call after the cut: the answer came from the model, not the loop's reason alone.
+      assert.equal(run.modelCalls.length, 2, "the write-up did not call the model after the cut");
     },
   },
   {
