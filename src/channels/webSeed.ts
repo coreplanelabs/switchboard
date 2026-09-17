@@ -359,6 +359,8 @@ export interface SettingsSeed {
   mcps?: {
     /** The channel whose tier is listed beside org and own (`?channel=`); absent → org + own only. */
     channel?: string;
+    /** That channel's name without the hash, when the directory knew it (the id shows otherwise). */
+    channelName?: string;
     /** `mcp list --all` answered: every tier there is (an admin). Otherwise the rows are the
      *  org's, the open channel's, the viewer's own, and the tiers of the channels whose config
      *  the viewer may read (record 0042). */
@@ -373,11 +375,18 @@ export interface SettingsSeed {
     viewer?: ViewerSettingsView;
     /** `config show` without a channel could not be read: the reason. */
     viewerUnavailable?: string;
-    index: ChannelScopeIndexRow[];
+    /** Each configured channel, with its name without the hash when the directory knew it. */
+    index: (ChannelScopeIndexRow & { channelName?: string })[];
     /** `config overrides` could not be read: the reason. */
     unavailable?: string;
     /** `/settings/channels/<id>`: that channel's scope, or why it could not be read. */
-    selected?: { channelId: string; scope?: ChannelScopeView; refused?: string; canWrite: boolean };
+    selected?: {
+      channelId: string;
+      channelName?: string;
+      scope?: ChannelScopeView;
+      refused?: string;
+      canWrite: boolean;
+    };
   };
   installation?: InstallationView;
 }

@@ -37,6 +37,8 @@ import { NullMcpToolSource } from "./mcp/source.js";
 import { buildConfirmationStore } from "./core/confirmations.js";
 import { createMcpConnectViewHandler, isConnectPath } from "./channels/mcpConnectView.js";
 import { resolvePersonByEmail, resolveUserEmail, resolveUserName } from "./channels/slack/lookups.js";
+import { slackNames } from "./channels/slackNames.js";
+import { NO_NAMES, type NameDirectory } from "./core/names.js";
 import { mdToMrkdwn } from "./channels/mrkdwn.js";
 import { buildMemoryStore, NullMemoryStore, pendingReflectionCount } from "./core/memory/index.js";
 import { healthPayload, readBuildInfo } from "./channels/health.js";
@@ -217,6 +219,12 @@ export async function runBot(): Promise<void> {
   let slackPersonByEmail: PersonLookup | undefined;
   const personByEmail: PersonLookup = (email) =>
     slackPersonByEmail ? slackPersonByEmail(email) : Promise.resolve(undefined);
+  /** Display names for the ids the dashboard shows (src/core/names.ts), the Slack directory once the app exists. */
+  let slackNameDirectory: NameDirectory | undefined;
+  const names: NameDirectory = {
+    person: (id) => (slackNameDirectory ?? NO_NAMES).person(id),
+    channel: (id) => (slackNameDirectory ?? NO_NAMES).channel(id),
+  };
   /** A linked person's channels, bound to the Slack directory once the app exists; `unknown` before. */
   let slackChannelsOf: ((actorId: string) => Promise<ReadonlySet<string> | "unknown">) | undefined;
   const channelsOf = (actorId: string) =>
@@ -226,6 +234,8 @@ export async function runBot(): Promise<void> {
     resolveEmail: (userId) => (slackEmailLookup ? slackEmailLookup(userId) : Promise.resolve(undefined)),
     // `addedBy` as a name on the MCP lists (record 0042): the cached lookup the runs index uses.
     resolveName: (userId) => (slackNameLookup ? slackNameLookup(userId) : Promise.resolve(undefined)),
+    // A channel tier's rows name their channel the same way (settings-page.md item 8).
+    resolveChannelName: (channelId) => names.channel(channelId),
     warn: (m) => console.warn(`[mcp] ${m}`),
   });
   // Every optional subsystem below is wired as a real implementation or its
@@ -632,6 +642,7 @@ export async function runBot(): Promise<void> {
     userId.startsWith("slack:")
       ? resolveUserName(app.client, userId.slice("slack:".length))
       : Promise.resolve(undefined);
+  slackNameDirectory = slackNames(app.client);
   slackPost = async (channel, text) => {
     await app.client.chat.postMessage({ channel, text: mdToMrkdwn(text) });
   };
@@ -795,6 +806,7 @@ export async function runBot(): Promise<void> {
     const settingsView = createSettingsViewHandler(
       {
         commands,
+        names,
         callerFor: (identity) =>
           callerFor(identity, { grantsFor: (id) => config.grantsFor(id), personByEmail, channelsOf }),
         installation: () => installationSettings(config.config, capabilities),

@@ -1847,6 +1847,7 @@ const SETTINGS_SERVERS: NonNullable<SettingsSeed["mcps"]>["servers"] = [
   {
     name: "notion",
     scope: "channel",
+    channelName: "payments",
     scopeKey: `channel:${SETTINGS_CHANNEL}`,
     url: "https://mcp.notion.example/mcp",
     agents: ["general", "research"],
@@ -1902,8 +1903,13 @@ const SETTINGS_SERVERS: NonNullable<SettingsSeed["mcps"]>["servers"] = [
 ];
 
 const SETTINGS_INDEX: NonNullable<SettingsSeed["channels"]>["index"] = [
-  { channelId: SETTINGS_CHANNEL, settings: ["agent", "boundary", "instructions", "mcpServers"], source: "both" },
-  { channelId: "slack:CACME0002", settings: ["models"], source: "config" },
+  {
+    channelId: SETTINGS_CHANNEL,
+    channelName: "payments",
+    settings: ["agent", "boundary", "instructions", "mcpServers"],
+    source: "both",
+  },
+  { channelId: "slack:CACME0002", channelName: "acme-ops", settings: ["models"], source: "config" },
 ];
 
 const SETTINGS_SCOPE: NonNullable<NonNullable<SettingsSeed["channels"]>["selected"]>["scope"] = {
@@ -1952,7 +1958,13 @@ function settingsSeed(pathname: string, search: string): SettingsSeed | null {
     return {
       ...base,
       tab,
-      mcps: { channel, allTiers: true, servers: SETTINGS_SERVERS, canWrite: { org: true, channel: true } },
+      mcps: {
+        channel,
+        ...(channel === SETTINGS_CHANNEL ? { channelName: "payments" } : {}),
+        allTiers: true,
+        servers: SETTINGS_SERVERS,
+        canWrite: { org: true, channel: true },
+      },
     };
   }
   const selected = m[2] ? decodeURIComponent(m[2]) : undefined;
@@ -1974,7 +1986,16 @@ function settingsSeed(pathname: string, search: string): SettingsSeed | null {
         user: { effort: "medium", boundary: { maxMinutes: 30 } },
       },
       index: SETTINGS_INDEX,
-      ...(selected ? { selected: { channelId: selected, scope: SETTINGS_SCOPE, canWrite: true } } : {}),
+      ...(selected
+        ? {
+            selected: {
+              channelId: selected,
+              ...(selected === SETTINGS_CHANNEL ? { channelName: "payments" } : {}),
+              scope: SETTINGS_SCOPE,
+              canWrite: true,
+            },
+          }
+        : {}),
     },
   };
 }
