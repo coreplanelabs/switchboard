@@ -22,6 +22,7 @@ import {
   ExecControlResetError,
   ExecInfraError,
   ExecSandboxRestartedError,
+  infraMayClear,
   type Executor,
 } from "../../execution/executor.js";
 import { STOPPED_CONTAINER_WORDING } from "../../execution/residentRefresh.js";
@@ -512,15 +513,6 @@ export const CONTAINER_DOWN_WORDING = new RegExp(
   "i",
 );
 
-/** The executors' words for a Worker that could not be reached or would not
- *  serve yet — an infra failure a wait can clear: an HTTP 5xx from the Worker
- *  (the isolate rolling under a deploy), the resident's `not-serviceable`
- *  refusal (its hydration failing while it restores), no answer within the
- *  send's deadline. Not the refusals that wait cannot clear — an evicted
- *  worktree (`POST /attach` must run), the deploy-storm streak guard (refuses
- *  by design) — which stay "no name" under the one more command. */
-export const WORKER_UNREACHABLE_WORDING = /\bHTTP 5\d\d\b|not-serviceable|gave no answer within/i;
-
 /** The one more command found the container down under the question — not
  *  running, starting, or the transport to it lost — with no word for a
  *  replacement: what `identity` throws in place of "no name", so
@@ -914,15 +906,19 @@ export class ExecHarnessContainer implements HarnessContainer {
    *  container ran and failed is no identity — a judgement never rests on a
    *  guess — except the executor's typed word that the container is gone under
    *  the question, which is thrown as it is from every other operation, and a
-   *  command that reached no container and may yet (`saysContainerDown`: not
-   *  running, starting, the transport lost; `WORKER_UNREACHABLE_WORDING`: the
-   *  Worker's 5xx, no answer in time, its `not-serviceable` refusal while the
-   *  isolate rolls — the very window the one more command must survive),
+   *  command that reached no container and may yet: the container down in the
+   *  Worker's own words (`saysContainerDown`: not running, starting, the
+   *  transport lost), or an infra failure whose typed reason a wait can clear
+   *  (`infraMayClear`: the transport lost, the deadline passed, the empty
+   *  failure shape, the Worker unavailable — the executors type the reason
+   *  where they build the failure, so no wording is matched here). Either is
    *  thrown as `HarnessContainerDownError` for that command to wait on rather
-   *  than read as a container with no name. An infra failure no wait clears —
-   *  an evicted worktree that needs an attach, the deploy-storm streak guard —
-   *  is no name, so the one more command judges at once. A caller that only
-   *  wants a name for the record reads it through `identityOrNothing`. */
+   *  than read as a container with no name. A refusal no wait clears — typed
+   *  `refused` by the executor: an evicted worktree that needs an attach, the
+   *  deploy-storm streak guard, a 4xx — or a Worker answer whose words are not
+   *  the container's is no name, so the one more command judges at once. A
+   *  caller that only wants a name for the record reads it through
+   *  `identityOrNothing`. */
   async identity(): Promise<string | undefined> {
     try {
       const word = stdoutOf("identity", await this.execIdempotent("identity", identityScript())).trim();
@@ -935,7 +931,7 @@ export class ExecHarnessContainer implements HarnessContainer {
       // to re-send, never returned as `undefined` (which reads as a judgement)
       // and never read as a container merely down.
       if (isControlReset(err)) throw err;
-      if (saysContainerDown(err) || (err instanceof ExecInfraError && WORKER_UNREACHABLE_WORDING.test(err.message)))
+      if (saysContainerDown(err) || (err instanceof ExecInfraError && infraMayClear(err)))
         throw new HarnessContainerDownError("identity", (err as Error).message);
       return undefined;
     }

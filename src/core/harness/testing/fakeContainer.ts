@@ -121,7 +121,8 @@ export class FakeHarnessContainer implements HarnessContainer {
    *  finds the container not running (the restore window) before it finds
    *  `then`: the word, the renamed container, or the container as it was. */
   loseTransport(then: "word" | "renamed" | "same", renamedWord: string, downForProbes = 0): void {
-    this.failOnceDrained = new ExecInfraError(TRANSPORT_LOST_TEXT);
+    // The resident's answer as its client throws it: the SDK's words forwarded, typed `answered`.
+    this.failOnceDrained = new ExecInfraError(TRANSPORT_LOST_TEXT, "answered");
     this.downForProbes = downForProbes;
     this.thenOnProbe(then, renamedWord);
   }

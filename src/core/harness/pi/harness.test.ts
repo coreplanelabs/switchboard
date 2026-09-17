@@ -1953,6 +1953,7 @@ describe("runPiHarness — the container replaced under a live run", () => {
         c,
         new ExecInfraError(
           "runtime-unreachable: the sandbox container's runtime did not answer (container abc, sandbox SDK 1.0.0; the platform reports the container stopped) — nothing ran",
+          "answered",
         ),
       );
       // The container was replaced (the word), so the row's pid is gone: the
@@ -2339,6 +2340,33 @@ describe("runPiHarness — the container replaced under a live run", () => {
     expect(noteKinds(w)).not.toContain("sandbox_restarted");
   });
 
+  it("after a follow-up turn's wait only the hard stop is read: a soft stop or the turn's deadline landing during the wait neither notes a stop nor steers a write-up into the dead transport — the turn fails with the transport error, named, and nothing is sent to pi", async () => {
+    const w = world();
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0) {
+        bashTurn(w, "call_0", "npm test", "ok");
+        finalTurn(c, "All green.");
+        return;
+      }
+      c.emit({ type: "turn_start" });
+      c.loseTransport("same", "vm-new", 1);
+      // The operator asks for a soft stop while the container is down.
+      c.onDownProbe = () => w.control.requestStop("soft");
+    });
+    const session = await w.open();
+    const sentBefore = w.container.stdin.length;
+    const err = await session
+      .followUp({ text: "one more", maxTurns: 4, maxMinutes: 5, toolContext: { executor } })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toBe(TRANSPORT_LOST_TEXT);
+    expect(noteKinds(w)).not.toContain("stopped");
+    expect(noteKinds(w)).not.toContain("time_budget_exhausted");
+    // Nothing was steered or aborted into a transport already known lost.
+    expect(w.container.stdin.slice(sentBefore).filter((l) => /"type":"(steer|abort)"/.test(l))).toEqual([]);
+    expect(noteSummaries(w)).toContainEqual(expect.stringMatching(/so the failure stands$/));
+  });
+
   it("a control file that vanished under a follow-up turn is noted exactly once, then the turn fails by name", async () => {
     const w = world();
     scriptedPi(w.container, (n, c) => {
@@ -2362,7 +2390,9 @@ describe("runPiHarness — the container replaced under a live run", () => {
     expect(saysContainerReplaced(new ExecSandboxRestartedError("the sandbox restarted under the run", 1))).toBe(true);
     expect(saysContainerReplaced(new HarnessContainerRuntimeReplacedError("alive", "dead"))).toBe(true);
     expect(
-      saysContainerReplaced(new ExecInfraError("runtime-unreachable: the sandbox container's runtime did not answer")),
+      saysContainerReplaced(
+        new ExecInfraError("runtime-unreachable: the sandbox container's runtime did not answer", "answered"),
+      ),
     ).toBe(true);
     expect(
       saysContainerReplaced(
@@ -2386,6 +2416,7 @@ describe("runPiHarness — the container replaced under a live run", () => {
       saysContainerReplaced(
         new ExecInfraError(
           "resident /exec: runtime replaced 2 times in a row with no successful operation between (runtime-replaced: the resident runtime was replaced (a deploy) while this command was running) — a deploy storm or a flapping resident, not a one-off deploy.",
+          "refused",
         ),
       ),
     ).toBe(true);
@@ -2395,7 +2426,9 @@ describe("runPiHarness — the container replaced under a live run", () => {
       false,
     );
     expect(
-      saysContainerReplaced(new ExecInfraError("resident /exec: worktree still unavailable after a re-attach")),
+      saysContainerReplaced(
+        new ExecInfraError("resident /exec: worktree still unavailable after a re-attach", "refused"),
+      ),
     ).toBe(false);
     expect(
       saysContainerReplaced(

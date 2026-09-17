@@ -130,10 +130,67 @@ export interface ReleaseResult {
  *  `Error`, so `err.message`/`instanceof Error` callers are unaffected. */
 export class ExecInfraError extends Error {
   readonly infra = true as const;
-  constructor(message: string) {
+  constructor(
+    message: string,
+    /** Why, as a type the harness's one more command waits on (`EXEC_INFRA_WAITABLE`), never the prose. */
+    readonly reason: ExecInfraReason,
+  ) {
     super(message);
     this.name = "ExecInfraError";
   }
+}
+
+/** Why an executor's infra failure happened, typed at the one place that knows
+ *  — the executor building the error — so the harness's one more command
+ *  (docs/reference/specs/harness.md item 6) decides by the type, never by the
+ *  prose: a wording no test copied from the executor cannot match a regex it
+ *  was written to fit. `transport-lost`: the request to the Worker failed on
+ *  its transport (a network failure, the connection dropped). `deadline-passed`:
+ *  the call's or the send's deadline passed with no answer. `empty-failure`:
+ *  the Worker's failure shape with its text missing (the rollout's
+ *  previous-image answer, execution.md item 3). `worker-unavailable`: an HTTP
+ *  5xx from the Worker (the isolate rolling under a deploy). Those four a wait
+ *  can clear (`EXEC_INFRA_WAITABLE`). `answered`: the Worker answered a
+ *  failure by name in its body — the resident forwarding the SDK's words
+ *  ("The container is not running", "Peer closed WebSocket"), its
+ *  `not-serviceable` refusals, the sandbox's "Command execution failed" — whose
+ *  meaning is in the words, so the seam reads the container-down ones and
+ *  waits on nothing else. `refused`: a refusal no wait clears — an HTTP 4xx,
+ *  a worktree still gone after the one re-attach, the deploy-storm streak
+ *  guard, a strike after the wake wait — judged at once. */
+export const EXEC_INFRA_REASONS = [
+  "transport-lost",
+  "deadline-passed",
+  "empty-failure",
+  "worker-unavailable",
+  "answered",
+  "refused",
+] as const;
+export type ExecInfraReason = (typeof EXEC_INFRA_REASONS)[number];
+
+/** The reasons a wait can clear: the failure reached no Worker, or reached one that could not serve yet. */
+export const EXEC_INFRA_WAITABLE: ReadonlySet<ExecInfraReason> = new Set<ExecInfraReason>([
+  "transport-lost",
+  "deadline-passed",
+  "empty-failure",
+  "worker-unavailable",
+]);
+
+/** Whether a wait may clear this infra failure (`EXEC_INFRA_WAITABLE`). */
+export function infraMayClear(err: ExecInfraError): boolean {
+  return EXEC_INFRA_WAITABLE.has(err.reason);
+}
+
+/** The reason for an HTTP status the Worker answered: a 5xx is the Worker
+ *  unavailable (a wait may clear it), anything else a refusal. */
+export function infraReasonOfStatus(status: number): ExecInfraReason {
+  return status >= 500 && status <= 599 ? "worker-unavailable" : "refused";
+}
+
+/** The reason for a request that failed before or while the Worker answered:
+ *  the deadline's own abort (`execDeadline`'s `TimeoutError`) or the transport. */
+export function infraReasonOfRequestFailure(err: unknown): ExecInfraReason {
+  return err instanceof Error && err.name === "TimeoutError" ? "deadline-passed" : "transport-lost";
 }
 
 /** An exec-CAPACITY failure: the sandbox fleet had no free instance for this

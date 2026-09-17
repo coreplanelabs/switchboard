@@ -61,7 +61,7 @@ describe("TracingExecutor", () => {
   it("wraps release and moveTo only when the inner executor has them; a throw ends the span `error` and propagates", async () => {
     const inner: Executor = {
       exec: async () => {
-        throw new ExecInfraError("resident /exec HTTP 503");
+        throw new ExecInfraError("resident /exec HTTP 503", "worker-unavailable");
       },
       readFile: async () => "x",
       writeFile: async () => "x",

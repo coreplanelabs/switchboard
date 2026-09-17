@@ -4,6 +4,8 @@ import {
   ExecInfraError,
   decodeBase64Read,
   execDeadline,
+  infraReasonOfRequestFailure,
+  infraReasonOfStatus,
   truncate,
   type ExecOptions,
   type Executor,
@@ -89,8 +91,11 @@ function sendDeadlineMs(budgetMs: number): number {
 
 /** The infra error for a send the Worker never answered inside its deadline:
  *  names both numbers, so the reader sees which budget the wait was sized
- *  from, and says what may still be true inside the sandbox. */
-function noAnswerMessage(route: string, budgetMs: number): string {
+ *  from, and says what may still be true inside the sandbox. Exported, with
+ *  the two builders below, so the tests that assert the harness waits on
+ *  these failures build their fixtures from the words the executor throws —
+ *  never a retyped copy. */
+export function sandboxNoAnswerMessage(route: string, budgetMs: number): string {
   const secs = (ms: number) => Math.round(ms / 1000);
   const exec = route === "/exec";
   return (
@@ -98,6 +103,20 @@ function noAnswerMessage(route: string, budgetMs: number): string {
     `(${exec ? "command budget" : "budget"} ${secs(budgetMs)}s + ${secs(EXEC_CALL_MARGIN_MS)}s margin) — ` +
     `the sandbox may be gone; ${exec ? "the command may still be running in it" : "the operation may still have run in it"}`
   );
+}
+
+/** The infra error for a request that failed on its transport ("fetch failed"): the command may still be running in the sandbox. */
+export function sandboxRequestFailedMessage(route: string, err: unknown): string {
+  return (
+    `sandbox worker ${route} request failed (${err instanceof Error ? err.message : String(err)}). ` +
+    "The command may still be running or have been killed mid-flight in the sandbox; " +
+    "re-check its effects before re-running it."
+  );
+}
+
+/** The infra error for the Worker's failure shape with its text missing (execution.md item 3): the rollout's previous-image answer. */
+export function sandboxEmptyFailureMessage(route: string): string {
+  return `sandbox worker ${route}: failure with an empty message (the Worker's failure shape with its text missing)`;
 }
 
 /** Resolve after `ms`, or reject with `ExecCapacityError` the moment `signal`
@@ -195,6 +214,7 @@ export class CloudflareSandboxExecutor implements Executor {
     // Sandbox cold starts can 5xx on a thread's first command — retry briefly.
     const delays = [0, 3000, 6000, 12000];
     let lastErr = "";
+    let lastStatus = 0;
     for (const delay of delays) {
       if (delay > 0) await new Promise((r) => setTimeout(r, delay));
       let res: Response;
@@ -228,18 +248,15 @@ export class CloudflareSandboxExecutor implements Executor {
         // either way an infra failure that fail-fast counts, never an
         // indefinite wait. A hard stop takes the generic path below: the
         // runner has already moved on and does not read the message.
-        if (deadline.aborted && !signal?.aborted) throw new ExecInfraError(noAnswerMessage(route, budgetMs));
+        if (deadline.aborted && !signal?.aborted)
+          throw new ExecInfraError(sandboxNoAnswerMessage(route, budgetMs), "deadline-passed");
         // Network-level failure ("fetch failed"): undici drops the connection
         // after ~300s without response headers, so a command that outlives the
         // sandbox's COMMAND_TIMEOUT_MS margin surfaces here, not as exit 124.
         // Don't retry — the command may have side effects and may still be
         // running in the sandbox; give the agent a legible error instead. Infra
         // (not a command exit): the runner counts these toward fail-fast.
-        throw new ExecInfraError(
-          `sandbox worker ${route} request failed (${err instanceof Error ? err.message : String(err)}). ` +
-            "The command may still be running or have been killed mid-flight in the sandbox; " +
-            "re-check its effects before re-running it.",
-        );
+        throw new ExecInfraError(sandboxRequestFailedMessage(route, err), infraReasonOfRequestFailure(err));
       }
       // Heartbeat whitespace around one JSON document parses unchanged; a
       // non-JSON body (an edge error page) is {} and the status speaks below.
@@ -263,9 +280,7 @@ export class CloudflareSandboxExecutor implements Executor {
       // exit 127 with no output and NO error key is not
       // this: `foo 2>/dev/null` is a legitimate silent 127.
       if (res.ok && "error" in data && data.error === "") {
-        throw new ExecInfraError(
-          `sandbox worker ${route}: failure with an empty message (the Worker's failure shape with its text missing)`,
-        );
+        throw new ExecInfraError(sandboxEmptyFailureMessage(route), "empty-failure");
       }
       // /exec streams its response (heartbeat whitespace + one JSON document,
       // always HTTP 200 since headers are sent before the outcome is known),
@@ -276,14 +291,18 @@ export class CloudflareSandboxExecutor implements Executor {
         // In-body worker failure — the sandbox's "Command execution failed" /
         // exitCode-127 signal (a wedged sandbox reports this for every command,
         // even a bare echo). Infra, not a command exit — counts toward fail-fast.
-        throw new ExecInfraError(`sandbox worker ${route}: ${data.error}`);
+        // The Worker's own words: their meaning is in the words (the harness's
+        // seam reads the container-down ones), so no wait on the type alone.
+        throw new ExecInfraError(`sandbox worker ${route}: ${data.error}`, "answered");
       }
       if (res.ok) return { kind: "ok", data };
       lastErr = `sandbox worker ${route} HTTP ${res.status}: ${String(data.error ?? "")}`;
+      lastStatus = res.status;
       if (res.status < 500) break; // 4xx is not retryable
     }
-    // Exhausted retries against an unreachable worker — infra, not a command exit.
-    throw new ExecInfraError(lastErr);
+    // Exhausted retries against an unreachable worker — infra, not a command
+    // exit; a 5xx the Worker may yet clear, a 4xx a refusal.
+    throw new ExecInfraError(lastErr, infraReasonOfStatus(lastStatus));
   }
 
   async exec(command: string, opts?: ExecOptions): Promise<string> {
@@ -318,7 +337,10 @@ export class CloudflareSandboxExecutor implements Executor {
   async seed(seed: SandboxSeed, opts?: { signal?: AbortSignal; span?: Span }): Promise<SeedAnswer> {
     const r = await this.call("/seed", { seed }, opts?.signal, SEED_BUDGET_MS, opts?.span);
     if (typeof r.seeded !== "boolean") {
-      throw new ExecInfraError(`sandbox worker /seed answered without a verdict: ${JSON.stringify(r).slice(0, 200)}`);
+      throw new ExecInfraError(
+        `sandbox worker /seed answered without a verdict: ${JSON.stringify(r).slice(0, 200)}`,
+        "refused",
+      );
     }
     return r as unknown as SeedAnswer;
   }
