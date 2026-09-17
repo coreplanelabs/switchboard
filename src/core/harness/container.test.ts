@@ -457,6 +457,31 @@ describe("replacedVerdict — the one more command waits through a container tha
     expect(PROBE_WAIT_BACKOFF_MS).toEqual([5_000, 10_000, 15_000]);
   });
 
+  it("one restore, one wait, whatever route the resident answered it by: the hydrate path's `restore in progress` 503 and the wake path's strike after the client's own 60 s budget ran out on a still-restoring resident are both the down answer from identity — typed by the one decision on the resident's state — so the one more command re-sends both through the same pauses and both decide by the changed identity once the container answers; never a give-up at 60 s on one route and five minutes on the other", async () => {
+    const restoring = { error: "not-serviceable: restore in progress", state: "restoring", reason: "rehydrating" };
+    const byHydratePath = () =>
+      new ExecInfraError(`resident /exec: ${restoring.error}`, residentAnswerReason(503, restoring));
+    const byWakePath = () =>
+      residentWakeStrike(
+        "/exec",
+        "not-serviceable: The container just exited",
+        "waited 60s for the resident to wake (last seen restoring (rehydrating)) and gave up",
+        "worker-unavailable",
+      );
+    for (const down of [byHydratePath, byWakePath]) {
+      const { executor, calls } = recordingExecutor([down(), down(), "vm-b\n"]);
+      const p = probe();
+      await expect(replacedVerdict(new ExecHarnessContainer(executor), "vm-a", p.wait)).resolves.toMatchObject({
+        condition: "identity",
+        was: "vm-a",
+        now: "vm-b",
+      });
+      expect(calls).toHaveLength(3);
+      expect(p.slept).toEqual([5_000, 10_000]);
+      expect(p.noted[1]).toBe("the container answered after 15s of waiting");
+    }
+  });
+
   it("a container down under the one more command is a wait, never the judgement: the probe is re-sent after the backoff until the container answers — the word, a changed identity or the same word decide as they always did — and the notes say the wait began and how long it took", async () => {
     // Down twice, then the executor's word.
     const seam = new HarnessContainerRuntimeReplacedError("identity", "runtime-replaced: the runtime was replaced");
@@ -818,7 +843,7 @@ describe("ExecHarnessContainer — each operation is one command over the execut
     await expect(c.identity()).rejects.toBeInstanceOf(HarnessContainerRuntimeReplacedError);
   });
 
-  it("identity throws the container down under the question — the platform's not-running or starting text the resident answers with, and the executors' typed infra reasons a wait can clear (the transport lost, the deadline passed, the empty failure shape, the Worker unavailable — the resident's 5xx in the restore window among them), each built by the executor's own helper — as the typed HarnessContainerDownError, for the one more command to wait on; the type decides first: a typed refusal no wait clears is no name even when its words are the container's (the resident client's strike after its own wake wait), as are the run's own stop, a Worker answer whose words are not the container's, a command the container itself failed, or an empty answer", async () => {
+  it("identity throws the container down under the question — the platform's not-running or starting text the resident answers with, and the executors' typed infra reasons a wait can clear (the transport lost, the deadline passed, the empty failure shape, the Worker unavailable — the resident's 5xx in the restore window among them), each built by the executor's own helper — as the typed HarnessContainerDownError, for the one more command to wait on; the type decides first: a typed refusal no wait clears is no name even when its words are the container's (the resident client's strike on a definite engine view), as are the run's own stop, a Worker answer whose words are not the container's, a command the container itself failed, or an empty answer; the strike after the client's budget ran out on a resident still restoring waits like the restore's own 503", async () => {
     const deadline = new DOMException("the 90s call deadline passed", "TimeoutError");
     const network = new TypeError("fetch failed");
     const stopped = new AbortController();
@@ -836,15 +861,23 @@ describe("ExecHarnessContainer — each operation is one command over the execut
       new ExecInfraError(sandboxNoAnswerMessage("/exec", 60_000), "deadline-passed"),
       new ExecInfraError(requestFailedMessage("sandbox", "/exec", network), infraReasonOfRequestFailure(network)),
       new ExecInfraError(sandboxEmptyFailureMessage("/exec"), "empty-failure"),
-      // The resident unavailable for a moment — the restore window's answers, typed by their 5xx before their words.
+      // The resident unavailable for a moment — the restore window's answers, typed by the state the resident puts on them.
       answer(503, { error: "not-serviceable: restore in progress", state: "restoring", reason: "rehydrating" }),
-      answer(503, { error: "mirror-busy: mutex not acquired within 30000ms", state: "ready", reason: "mirror-busy" }),
+      answer(503, { error: "mirror-busy: mutex not acquired within 30000ms", state: "warm", reason: "mirror-busy" }),
       new ExecInfraError("resident /exec HTTP 502", residentAnswerReason(502, {})),
+      // The wake path's strike after the client's own budget ran out on a resident still restoring: the same restore, the same wait here.
+      residentWakeStrike(
+        "/exec",
+        "not-serviceable: The container just exited",
+        "waited 60s for the resident to wake (last seen restoring (rehydrating)) and gave up",
+        "worker-unavailable",
+      ),
       // Typed refusals no wait clears — no name BY THE TYPE, the strike's words the container's own.
       residentWakeStrike(
         "/exec",
         "not-serviceable: The container just exited",
-        "waited 30s for the resident to wake (last seen restoring) and gave up",
+        "the resident is down (no-snapshot: nothing to rehydrate from), which no wake recovers from; not waiting",
+        "refused",
       ),
       answer(503, {
         error: "not-serviceable: no-snapshot: nothing to rehydrate from",
@@ -866,15 +899,16 @@ describe("ExecHarnessContainer — each operation is one command over the execut
         requestFailedMessage("resident", "/exec", new DOMException("This operation was aborted", "AbortError")),
         infraReasonOfRequestFailure(new DOMException("This operation was aborted", "AbortError"), stopped.signal),
       ),
-      // An answer whose words are not the container's.
+      // Answers whose words are not the container's: the SDK's, and a deterministic 500 the resident answered (no state on it).
       answer(200, { error: "Command execution failed" }),
+      answer(500, { error: "TypeError: Cannot read properties of undefined" }),
       "exit 1:\nno shell",
       "(no output)",
     ]);
     const c = new ExecHarnessContainer(executor);
-    for (let i = 0; i < 10; i++) await expect(c.identity()).rejects.toBeInstanceOf(HarnessContainerDownError);
-    // No name, so the one more command judges at once — the strike first: its words say the container just exited, its type says the wait was spent.
-    for (let i = 0; i < 8; i++) expect(await c.identity()).toBeUndefined();
+    for (let i = 0; i < 11; i++) await expect(c.identity()).rejects.toBeInstanceOf(HarnessContainerDownError);
+    // No name, so the one more command judges at once — the down strike first: its words say the container just exited, its type says nothing is coming back.
+    for (let i = 0; i < 9; i++) expect(await c.identity()).toBeUndefined();
     // A command the container ran and failed, or an empty answer, is no identity — the container answered.
     expect(await c.identity()).toBeUndefined();
     expect(await c.identity()).toBeUndefined();

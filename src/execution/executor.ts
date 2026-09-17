@@ -203,17 +203,25 @@ export function infraReasonOfRequestFailure(err: unknown, signal?: AbortSignal):
   return err instanceof Error && err.name === "TimeoutError" ? "deadline-passed" : "transport-lost";
 }
 
-/** The infra failure's words for a request to a remote executor's Worker that
- *  failed on its transport, hit its deadline or was aborted, before or while
- *  the Worker answered: one sentence for both Workers, the Worker's name the
- *  only difference, so the tests that assert the harness waits on this failure
- *  build their fixtures from the words the executors throw — never a retyped
- *  copy, never two wordings drifting apart. The operation may have run, or
- *  still be running, in the Worker: the caller never re-runs it blind. */
-export function requestFailedMessage(worker: "resident" | "sandbox", route: string, err: unknown): string {
+/** The words for a request to a remote executor's Worker — or to the resident
+ *  admin API — that failed on its transport, hit its deadline or was aborted,
+ *  before or while the Worker answered: one sentence for every client, the
+ *  subject and the re-check the only differences, so the tests that assert the
+ *  harness waits on this failure build their fixtures from the words the
+ *  clients throw — never a retyped copy, never three wordings drifting apart.
+ *  The operation may have run, or still be running, in the Worker: the caller
+ *  never re-runs it blind; `recheck` says how it looks first. */
+export function requestFailedMessage(
+  worker: "resident" | "sandbox" | "resident admin",
+  route: string,
+  err: unknown,
+  recheck = "re-check its effects",
+): string {
+  const subject = worker === "resident admin" ? "resident admin" : `${worker} worker`;
+  const host = worker === "sandbox" ? "sandbox" : "resident";
   return (
-    `${worker} worker ${route} request failed (${err instanceof Error ? err.message : String(err)}). ` +
-    `The operation may still have run, or still be running, in the ${worker}; re-check its effects before re-running it.`
+    `${subject} ${route} request failed (${err instanceof Error ? err.message : String(err)}). ` +
+    `The operation may still have run, or still be running, in the ${host}; ${recheck} before re-running it.`
   );
 }
 

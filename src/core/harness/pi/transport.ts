@@ -92,6 +92,23 @@ export class PiRpcTransport implements PiTransport {
       });
   }
 
+  /** The hard stop's abort: through the chain while it is live — in its place
+   *  behind the writes in flight — and written directly once a failed write
+   *  spent the chain (`sendError`), since a write queued behind a failure never
+   *  lands here (it waits for a re-attach that a stop is not making) and the
+   *  stop's abort must reach a pi the one more command may have found alive
+   *  and mid-turn. Never queued for `takeUnsent`: a re-attach must not replay
+   *  an abort. A failure of the direct write is nobody's — the transport is
+   *  being left. */
+  sendAbort(): void {
+    if (this.closed) return;
+    if (this.sendError === undefined) {
+      this.send({ type: "abort" });
+      return;
+    }
+    void this.deps.container.writeLine(this.deps.paths, JSON.stringify({ type: "abort" })).catch(() => undefined);
+  }
+
   /** The writes whose turn never came — queued behind a failed one, or still
    *  queued when the transport was abandoned — in the order they were sent,
    *  taken once. They never reached pi, so the re-attach re-sends them as they

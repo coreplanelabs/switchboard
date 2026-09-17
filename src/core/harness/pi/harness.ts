@@ -938,6 +938,24 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
      *  loop sent. The gate writes to `transport` as it is at that moment, so a
      *  re-attach's fresh transport is what a held write reaches. */
     const sends = new HeldSends((command) => transport!.send(command));
+    /** The hard stop, once, on every tick and at every end of a wait — the
+     *  loop's `check`, a turn's `turnCheck`, the read after `judgeUnsettled`'s
+     *  wait and after a follow-up turn's: the flag, and one abort to pi, since
+     *  the one more command may have found pi alive and mid-turn, and left alone
+     *  it would go on generating and calling tools until `end()`. On a tick the
+     *  abort takes the gate like every write, so a prompt in doubt keeps its
+     *  order and the ticks still running release it. At the end of a wait
+     *  nothing ticks any more — a write held behind a prompt in doubt, or queued
+     *  behind a failed write, would never be made — so the abort is delivered
+     *  now (`sendAbort`): in its place on a live chain, written directly over
+     *  one the turn's own failed write spent. The `stopped` note and the abort
+     *  line as the answer stay with the path that ends. */
+    const hardStop = (when: "tick" | "after-wait"): void => {
+      if (hardStopped) return;
+      hardStopped = true;
+      if (when === "tick") sends.send({ type: "abort" });
+      else transport?.sendAbort();
+    };
     const startWriteUp = (kind: WriteUp, instruction: string) => {
       writeUp = kind;
       writeUpAt = now();
@@ -1032,10 +1050,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     const check = () => {
       const requested = run.control?.requested;
       if (requested === "hard") {
-        if (!hardStopped) {
-          hardStopped = true;
-          sends.send({ type: "abort" });
-        }
+        hardStop("tick");
         return;
       }
       if (writeUp) {
@@ -1431,7 +1446,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       // The judgement below waits on the container; the wait ends with the
       // run's own stop, read here once it has.
       await judgeUnsettled();
-      if (run.control?.requested === "hard") hardStopped = true;
+      if (run.control?.requested === "hard") hardStop("after-wait");
     }
     if (hardStopped) {
       note("stopped", hardStopNote(), "hard");
@@ -1506,10 +1521,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       /** The turn's budget and the stops — on every event and every tick. */
       const turnCheck = () => {
         if (run.control?.requested === "hard") {
-          if (!hardStopped) {
-            hardStopped = true;
-            sends.send({ type: "abort" });
-          }
+          hardStop("tick");
           return;
         }
         if (writeUp) {
@@ -1642,15 +1654,15 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           // the stop, not as the transport failure the wait was judging. Only
           // the hard stop: the full `turnCheck()` would note a soft stop or the
           // turn's deadline and steer a write-up into a transport already known
-          // lost, then the turn would fail anyway. The abort still goes to pi,
-          // as `turnCheck`'s hard branch sends it: the one more command may
-          // have found the container alive with pi mid-turn (the same identity,
-          // no word), and left alone pi would go on generating and calling
-          // tools until `end()`; a write into a transport that IS lost costs
-          // nothing — a failed write surfaces only on a read nobody makes.
+          // lost, then the turn would fail anyway. The abort still goes to pi
+          // (`hardStop`, the one sequence every end of a wait runs): the one
+          // more command may have found the container alive with pi mid-turn
+          // (the same identity, no word), and left alone pi would go on
+          // generating and calling tools until `end()` — delivered now, since
+          // nothing ticks the gate any more, and written directly when the
+          // turn's own failed write spent the transport's chain.
           if (run.control?.requested === "hard") {
-            hardStopped = true;
-            sends.send({ type: "abort" });
+            hardStop("after-wait");
             note("stopped", hardStopNote(), "hard");
             return HARD_STOP_MESSAGE;
           }

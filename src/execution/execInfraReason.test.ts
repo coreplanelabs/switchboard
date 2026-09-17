@@ -13,6 +13,7 @@ import {
 } from "./executor.js";
 import { sandboxEmptyFailureMessage, sandboxNoAnswerMessage } from "./cloudflareSandbox.js";
 import { residentAnswerReason, residentWakeStrike } from "./resident.js";
+import { isWakeable } from "./residentWake.js";
 
 // Feature: docs/reference/specs/execution.md item 9 and harness.md item 6 — an
 // executor's infra failure carries a typed reason, so the harness's one more
@@ -56,21 +57,34 @@ function isReasonHelperCall(node: ts.Node | undefined): boolean {
 }
 
 /** Whether the reason argument is a literal from the closed list, a call to one
- *  of the reason-of helpers, or a `const` the enclosing block bound to such a
- *  call (the one decision reused for the tracker's kind). */
+ *  of the reason-of helpers, a `const` the enclosing block bound to such a call
+ *  (the one decision reused for the tracker's kind), or a parameter of the
+ *  enclosing function declared `ExecInfraReason` (the type carries it: the
+ *  caller had to name one). */
 function namesAReason(arg: ts.Expression | undefined): boolean {
   if (arg === undefined) return false;
   if (ts.isStringLiteral(arg)) return (EXEC_INFRA_REASONS as readonly string[]).includes(arg.text);
   if (isReasonHelperCall(arg)) return true;
   if (!ts.isIdentifier(arg)) return false;
   for (let scope: ts.Node | undefined = arg.parent; scope !== undefined; scope = scope.parent) {
-    if (!ts.isBlock(scope)) continue;
-    for (const statement of scope.statements) {
-      if (!ts.isVariableStatement(statement)) continue;
-      if (!(statement.declarationList.flags & ts.NodeFlags.Const)) continue;
-      for (const declaration of statement.declarationList.declarations)
-        if (ts.isIdentifier(declaration.name) && declaration.name.text === arg.text)
-          return isReasonHelperCall(declaration.initializer);
+    if (ts.isBlock(scope)) {
+      for (const statement of scope.statements) {
+        if (!ts.isVariableStatement(statement)) continue;
+        if (!(statement.declarationList.flags & ts.NodeFlags.Const)) continue;
+        for (const declaration of statement.declarationList.declarations)
+          if (ts.isIdentifier(declaration.name) && declaration.name.text === arg.text)
+            return isReasonHelperCall(declaration.initializer);
+      }
+    }
+    if (ts.isFunctionLike(scope)) {
+      const param = scope.parameters.find((p) => ts.isIdentifier(p.name) && p.name.text === arg.text);
+      if (param !== undefined)
+        return (
+          param.type !== undefined &&
+          ts.isTypeReferenceNode(param.type) &&
+          ts.isIdentifier(param.type.typeName) &&
+          param.type.typeName.text === "ExecInfraReason"
+        );
     }
   }
   return false;
@@ -125,10 +139,21 @@ describe("ExecInfraError carries a typed reason, and the two remote executors na
       '  const reason = "refused" as const;\n' +
       '  const other = new ExecInfraError("b", reason);\n' +
       '  const loose = new ExecInfraError("c", unbound);\n' +
-      "}\n";
+      "}\n" +
+      'function m(reason: ExecInfraReason) { return new ExecInfraError("d", reason); }\n' +
+      'function n(reason: string) { return new ExecInfraError("e", reason); }\n';
     const calls = constructions("probe.ts", source);
-    expect(calls).toHaveLength(6);
-    expect(calls.map((call) => namesAReason(call.arguments?.[1]))).toEqual([true, true, true, false, false, false]);
+    expect(calls).toHaveLength(8);
+    expect(calls.map((call) => namesAReason(call.arguments?.[1]))).toEqual([
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+    ]);
   });
 
   it("the executors' REAL failure wordings — built by the same helpers the executors throw with, never retyped — carry the waitable reasons: the one request-failed sentence for both Workers (a deadline abort, a network failure) and the sandbox executor's no-answer and empty-failure shapes", () => {
@@ -179,8 +204,8 @@ describe("ExecInfraError carries a typed reason, and the two remote executors na
     expect(infraMayClear(new ExecInfraError("x", "aborted"))).toBe(false);
   });
 
-  it("a resident answer is typed by its status first, then by what the body names: a 5xx is the resident unavailable — a restore under way, the mirror mutex held by a refresh, a hydration failing mid-restore, the isolate's own 500 — unless the body names a refusal no wait clears (the resident `down`, the resource not registered); a body on any other status is the words; a bare 4xx is refused", () => {
-    // Waits: the answers the restore window and a busy mirror produce.
+  it("a resident answer is typed by the fields the resident puts on it: a 5xx carrying a state is unavailable when that state says the resident is coming back (restoring, serviceable, a degraded reason the engine retries — the wake path's own decision) and refused when it does not (down, onboarding, a repo failure) or when the resource is unregistered; a 5xx with a body and no state is deterministic and answered; a bare 5xx is unavailable; a body on any other status is the words; a bare 4xx is refused", () => {
+    // Waits: the restore window and a busy mirror, typed by the state the resident puts on the answer.
     expect(
       residentAnswerReason(503, {
         error: "not-serviceable: restore in progress",
@@ -191,15 +216,40 @@ describe("ExecInfraError carries a typed reason, and the two remote executors na
     expect(
       residentAnswerReason(503, {
         error: "mirror-busy: mutex not acquired within 30000ms",
-        state: "ready",
+        state: "warm",
         reason: "mirror-busy",
       }),
     ).toBe("worker-unavailable");
     expect(residentAnswerReason(503, { error: "not-serviceable: refreshing", state: "refreshing", reason: "" })).toBe(
       "worker-unavailable",
     );
-    expect(residentAnswerReason(500, { error: "op-failed at fetch: exit 128" })).toBe("worker-unavailable");
+    expect(
+      residentAnswerReason(503, {
+        error: "image-stale: the container predates the current pool and is restarting; retry shortly",
+        state: "restoring",
+        reason: "image-stale",
+      }),
+    ).toBe("worker-unavailable");
+    expect(
+      residentAnswerReason(503, {
+        error: "not-serviceable: degraded",
+        state: "degraded",
+        reason: "restore-interrupted: the runtime was replaced under the restore",
+      }),
+    ).toBe("worker-unavailable");
     expect(residentAnswerReason(502, {})).toBe("worker-unavailable");
+    // The same decision as the wake path's, on the same words: one fact, one verdict.
+    for (const [state, reason] of [
+      ["restoring", "rehydrating"],
+      ["warm", "mirror-busy"],
+      ["down", "no-snapshot"],
+      ["onboarding", ""],
+      ["degraded", "install-failed: exit 1"],
+    ] as const) {
+      expect(residentAnswerReason(503, { error: "x", state, reason }), `${state} (${reason})`).toBe(
+        isWakeable(state, reason) ? "worker-unavailable" : "refused",
+      );
+    }
     // Judged at once: nothing a wait changes.
     expect(
       residentAnswerReason(503, {
@@ -208,6 +258,10 @@ describe("ExecInfraError carries a typed reason, and the two remote executors na
         reason: "no-snapshot",
       }),
     ).toBe("refused");
+    // The rebuild after a down transition: longer than any wait, and the wake path strikes on it too.
+    expect(residentAnswerReason(503, { error: "not-serviceable: onboarding", state: "onboarding", reason: "" })).toBe(
+      "refused",
+    );
     expect(
       residentAnswerReason(503, {
         error: "not-serviceable: registry record or repo facts missing",
@@ -216,6 +270,11 @@ describe("ExecInfraError carries a typed reason, and the two remote executors na
     ).toBe("refused");
     expect(residentAnswerReason(404, {})).toBe("refused");
     expect(residentAnswerReason(400, { error: "bad request" })).toBe("answered");
+    // Deterministic 500s — the resident answered, every time: the words decide at the seam, the failure stands at once.
+    expect(residentAnswerReason(500, { error: "op-failed at fetch: exit 128" })).toBe("answered");
+    expect(residentAnswerReason(500, { error: "attach-failed at clone: exit 128" })).toBe("answered");
+    expect(residentAnswerReason(500, { error: 'read-failed: stat answered ""' })).toBe("answered");
+    expect(residentAnswerReason(500, { error: "TypeError: Cannot read properties of undefined" })).toBe("answered");
     // The words: the SDK's text the resident forwards (a 409 with no word for a known replacement), read at the seam.
     expect(residentAnswerReason(409, { error: "The container is not running, consider calling start()" })).toBe(
       "answered",
@@ -223,17 +282,26 @@ describe("ExecInfraError carries a typed reason, and the two remote executors na
     expect(residentAnswerReason(200, { error: "Command execution failed" })).toBe("answered");
   });
 
-  it("the resident client's strike after its own wake wait is a typed refusal whose words are still the container's: the wait it names was already spent, so the one more command judges it at once by the type and never re-waits on the words", () => {
-    const strike = residentWakeStrike(
+  it("the resident client's strike after its own wake wait carries what the last engine view said: a budget that ran out on a resident still coming back is unavailable — the harness's one more command keeps waiting on it, its bound being the longer clock — while a definite view (down, onboarding, no answer) is refused; the words are the container's either way", () => {
+    const restoring = residentWakeStrike(
       "/exec",
       "not-serviceable: The container just exited",
-      "waited 30s for the resident to wake (last seen restoring) and gave up",
+      "waited 60s for the resident to wake (last seen restoring (rehydrating)) and gave up",
+      "worker-unavailable",
     );
-    expect(strike).toBeInstanceOf(ExecInfraError);
-    expect(strike.reason).toBe("refused");
-    expect(infraMayClear(strike)).toBe(false);
-    expect(strike.message).toBe(
-      "resident /exec: not-serviceable: The container just exited; waited 30s for the resident to wake (last seen restoring) and gave up",
+    expect(restoring).toBeInstanceOf(ExecInfraError);
+    expect(restoring.reason).toBe("worker-unavailable");
+    expect(infraMayClear(restoring)).toBe(true);
+    expect(restoring.message).toBe(
+      "resident /exec: not-serviceable: The container just exited; waited 60s for the resident to wake (last seen restoring (rehydrating)) and gave up",
     );
+    const down = residentWakeStrike(
+      "/exec",
+      "not-serviceable: The container just exited",
+      "the resident is down (no-snapshot: nothing to rehydrate from), which no wake recovers from; not waiting",
+      "refused",
+    );
+    expect(down.reason).toBe("refused");
+    expect(infraMayClear(down)).toBe(false);
   });
 });

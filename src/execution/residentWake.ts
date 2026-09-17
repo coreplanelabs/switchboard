@@ -63,14 +63,27 @@ const TRANSIENT_DEGRADED_REASON = /^(?:stale-mid-flight|restore-interrupted|runt
 
 export type WakeDecision = { wait: true; why: string } | { wait: false; why: string };
 
-/** Whether the engine view says the container is coming back. Wait while the
- *  engine holds a snapshot the container wakes from: `restoring` (the wake is
- *  running), any serviceable state (`warm`, `refreshing`, `degraded` with an
- *  intact checkout: `isServiceable`), or a `degraded` reason the engine
- *  retries by itself. Strike on a definite answer no wake recovers from
- *  (`down`, `onboarding`, a repo failure, not onboarded, an off-table state)
- *  and on a resident Worker that did not answer at all: nothing then says
- *  the container is coming back, and the two-strikes rule stands. */
+/** Whether a resident in `{state, reason}` is coming back on its own — the ONE
+ *  answer both of the client's waits read, so one fact never gets two
+ *  verdicts by route: the wake path (`wakeDecision`, on the engine view after
+ *  a refusal naming a container gone for a moment) and the answer typing
+ *  (`residentAnswerReason`, on a 5xx that carries the state). Coming back:
+ *  `restoring` (the wake is running), any serviceable state (`warm`,
+ *  `refreshing`, `degraded` with an intact checkout: the engine holds the
+ *  snapshot the container wakes from), or a `degraded` reason the engine
+ *  retries by itself. Not coming back within any wait: `down`, `onboarding`
+ *  (the rebuild after a down transition, longer than any wait), a repo
+ *  failure, not onboarded, an off-table state. */
+export function isWakeable(state: string, reason: string): boolean {
+  if (state === "restoring") return true;
+  if (isServiceable(state, reason)) return true;
+  return state === "degraded" && TRANSIENT_DEGRADED_REASON.test(reason);
+}
+
+/** Whether the engine view says the container is coming back (`isWakeable`),
+ *  and why in words. Strike on a definite answer no wake recovers from and on
+ *  a resident Worker that did not answer at all: nothing then says the
+ *  container is coming back, and the two-strikes rule stands. */
 export function wakeDecision(probe: ResidentStatusProbe): WakeDecision {
   if (probe.kind === "unreachable") {
     return {
@@ -79,14 +92,12 @@ export function wakeDecision(probe: ResidentStatusProbe): WakeDecision {
     };
   }
   const seen = describeState(probe.state, probe.reason);
+  if (!isWakeable(probe.state, probe.reason))
+    return { wait: false, why: `the resident is ${seen}, which no wake recovers from; not waiting` };
   if (probe.state === "restoring") return { wait: true, why: `the resident is ${seen}: the wake is already running` };
-  if (isServiceable(probe.state, probe.reason)) {
+  if (isServiceable(probe.state, probe.reason))
     return { wait: true, why: `the resident is ${seen}: the engine holds the snapshot the container wakes from` };
-  }
-  if (probe.state === "degraded" && TRANSIENT_DEGRADED_REASON.test(probe.reason)) {
-    return { wait: true, why: `the resident is ${seen}: the engine retries that on its own` };
-  }
-  return { wait: false, why: `the resident is ${seen}, which no wake recovers from; not waiting` };
+  return { wait: true, why: `the resident is ${seen}: the engine retries that on its own` };
 }
 
 export function describeState(state: string, reason: string): string {

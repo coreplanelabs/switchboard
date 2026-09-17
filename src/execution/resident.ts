@@ -12,6 +12,7 @@ import {
   containerGoneMessage,
   describeProbe,
   isContainerRolling,
+  isWakeable,
   sandboxRestartedMessage,
   saysContainerGone,
   saysControlReset,
@@ -92,33 +93,56 @@ import type { LeftBehind } from "./residentCleanliness.js";
 const DETACH_TIMEOUT_MS = 10_000;
 
 /** The typed reason for a resident answer the client got no result from,
- *  decided by the status first and the body after (execution.md item 9). A 5xx
- *  is the resident unavailable — a restore under way, the mirror mutex held by
- *  a refresh, a hydration failing mid-restore, the isolate's own 500 — which a
- *  wait may clear, unless the body names a refusal no wait clears: the resident
- *  `down` (only a watchdog rebuild ends it; `state`) or the resource
- *  unregistered (`reason: "unregistered"`: no record or facts to serve from).
- *  A body on any other status is the resident's words — the SDK's text
- *  forwarded, a named refusal — whose meaning is in the words, read at the
- *  harness's seam; a bare 4xx is refused. The two refusals are read from the
- *  fields the resident types on its answer, never from its prose. */
+ *  decided by the fields the resident types on it, never by its prose
+ *  (execution.md item 9). A 5xx that carries the resident's `state` — the
+ *  hydrate path's `not-serviceable` answers, the mirror mutex held by a refresh
+ *  (`mirror-busy`), attach's `image-stale` — is the resident unavailable
+ *  (`worker-unavailable`, a wait may clear it) when that state says the
+ *  resident is coming back (`isWakeable`: restoring, serviceable, a degraded
+ *  reason the engine retries — the same decision the wake path makes), and a
+ *  refusal no wait clears otherwise (`down`, `onboarding`, a repo failure) —
+ *  as is `reason: "unregistered"` (no record or facts to serve from). A 5xx
+ *  with a body but no state — the fetch handler's catch-all 500 for an
+ *  unnamed throw, `read-failed`, `attach-failed at <step>`, `op-failed` — is
+ *  deterministic: the resident answered, so its words decide at the harness's
+ *  seam (`answered`) and the failure stands at once instead of being re-run for
+ *  five minutes. A bare 5xx with nothing (an edge error page) is the Worker
+ *  unavailable. A body on any other status is the resident's words — the
+ *  SDK's text forwarded, a named refusal — read at the seam; a bare 4xx is
+ *  refused. */
 export function residentAnswerReason(status: number, data: Record<string, unknown>): ExecInfraReason {
   if (status >= 500 && status <= 599) {
-    if (data.state === "down" || data.reason === "unregistered") return "refused";
-    return "worker-unavailable";
+    if (data.reason === "unregistered") return "refused";
+    if (typeof data.state === "string")
+      return isWakeable(data.state, typeof data.reason === "string" ? data.reason : "")
+        ? "worker-unavailable"
+        : "refused";
+    if (typeof data.error === "string" && data.error) return "answered";
+    return infraReasonOfStatus(status);
   }
   if (typeof data.error === "string" && data.error) return "answered";
   return infraReasonOfStatus(status);
 }
 
 /** The strike after the wake wait (item 65): the refusal that named a
- *  container gone for a moment, and why the wait ended without it back. Typed
- *  `refused` — the wait this client owed was spent here, so the harness's one
- *  more command judges it at once by the type although the words are still the
- *  container's — and counted by the tracker (`container-exited`). Exported so
- *  the seam's tests build the strike as this client throws it. */
-export function residentWakeStrike(route: string, refusal: string, why: string): ExecInfraError {
-  return classifyError(new ExecInfraError(`resident ${route}: ${refusal}; ${why}`, "refused"), {
+ *  container gone for a moment, why the wait ended without it back, and what
+ *  that says to the harness's one more command. A wait that ran out while the
+ *  resident was still coming back (`isWakeable` on the last engine view: a
+ *  restore under way, a starting container) is the resident unavailable
+ *  (`worker-unavailable`): this client's budget is the command's own, and the
+ *  harness's restore-window bound (`PROBE_WAIT_MAX_MS`) is a different, longer
+ *  clock — one restore must get one wait whatever route the resident answered
+ *  by (harness.md item 6). A definite engine view (`down`, `onboarding`, a
+ *  Worker that did not answer `/status`) is `refused`: nothing says the
+ *  container is coming back. Counted by the tracker (`container-exited`).
+ *  Exported so the seam's tests build the strike as this client throws it. */
+export function residentWakeStrike(
+  route: string,
+  refusal: string,
+  why: string,
+  reason: ExecInfraReason,
+): ExecInfraError {
+  return classifyError(new ExecInfraError(`resident ${route}: ${refusal}; ${why}`, reason), {
     kind: "infra",
     code: "container-exited",
   });
@@ -897,7 +921,16 @@ export class ResidentExecutor implements Executor {
   ): Promise<{ waitedMs: number; ref: string; sha: string }> {
     const t0 = systemClock();
     const waited = () => systemClock() - t0;
-    const strike = (why: string): ExecInfraError => residentWakeStrike(route, refusal, why);
+    /** A definite engine view — no wake recovers from it — or a Worker that did not answer: refused. */
+    const definite = (why: string): ExecInfraError => residentWakeStrike(route, refusal, why, "refused");
+    /** The budget ran out while the last engine view still said the resident is coming back: unavailable, not refused. */
+    const stillComing = (why: string, last: ResidentStatusProbe): ExecInfraError =>
+      residentWakeStrike(
+        route,
+        refusal,
+        why,
+        last.kind === "status" && isWakeable(last.state, last.reason) ? "worker-unavailable" : "refused",
+      );
     const probe = () =>
       ResidentExecutor.probeStatus(
         this.opts.baseUrl,
@@ -908,26 +941,33 @@ export class ResidentExecutor implements Executor {
       );
     let seen = await probe();
     const decision = wakeDecision(seen);
-    if (!decision.wait) throw strike(decision.why);
+    if (!decision.wait) throw definite(decision.why);
     const budget = wakeWaitBudget(opts.budgetMs);
     for (;;) {
       const spent = waited();
       if (spent >= budget) {
-        throw strike(
+        throw stillComing(
           `waited ${Math.round(spent / 1000)}s for the resident to wake (last seen ${describeProbe(seen)}) and gave up`,
+          seen,
         );
       }
       await wakePause(Math.min(WAKE_POLL_MS, budget - spent), opts.signal);
       seen = await probe();
       const again = wakeDecision(seen);
-      if (!again.wait) throw strike(again.why);
+      if (!again.wait) throw definite(again.why);
       if (seen.kind !== "status" || !isServiceable(seen.state, seen.reason)) continue;
       let answer: AttachAnswer;
       try {
         answer = await this.attachOnce(opts.span, Math.max(budget - waited(), 1_000));
       } catch (err) {
         if (!(err instanceof ExecInfraError)) throw err;
-        throw strike(`the re-attach after ${Math.round(waited() / 1000)}s did not answer (${err.message})`);
+        // The re-attach's own failure says why: its reason rides on the strike.
+        throw residentWakeStrike(
+          route,
+          refusal,
+          `the re-attach after ${Math.round(waited() / 1000)}s did not answer (${err.message})`,
+          err.reason,
+        );
       }
       if (answer.ok) return { waitedMs: waited(), ref: answer.binding.ref, sha: answer.binding.sha };
       if (!isContainerRolling(answer.data.error)) throw this.attachRefusal(answer);
