@@ -42,7 +42,7 @@ Every registered command has an HTTP twin behind the same dashboard gate, plus a
 | `/api/help.show` | `GET`, `POST` | `help:read` | How to ask in plain words: describe what you want, force an agent, change a route in the thread. |
 | `/api/help.commands` | `GET`, `POST` | `help:read` | Every chat command by group, the grammar, and the per-request directives. |
 | `/api/status.show` | `GET`, `POST` | `status:read` | Which build this process runs: version, commit, when it was built and started, runs in flight, draining. |
-| `/api/config.show` | `GET`, `POST` | `config:read` | The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted. |
+| `/api/config.show` | `GET`, `POST` | `config:read` | The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel. |
 | `/api/config.overrides` | `GET`, `POST` | `config:read` | Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; `config show --channel <id>` reads one. |
 | `/api/config.set` | `POST` | `config:write` | Set the agent, model, effort or boundary for a channel (gated) or for yourself; per-agent forms take --models.&lt;agent&gt; / --efforts.&lt;agent&gt;, the boundary's axes --boundary.&lt;axis&gt; (a boundary caps every run in the scope and never grants). |
 | `/api/config.clear` | `POST` | `config:write` | Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again. |

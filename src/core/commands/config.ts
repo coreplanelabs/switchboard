@@ -206,14 +206,27 @@ export const configShow = defineCommand({
   action: "config:read",
   effect: "read",
   describe:
-    "The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted.",
+    "The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.",
   render: (output) => formatConfigDescription(output as unknown as ConfigDescription),
   handler: async ({ options, caller, deps }) => {
-    const channel = targetChannel(caller, options.channel);
+    const me = meIdOf(caller) ?? caller.id;
+    const channel = options.channel ?? caller.origin?.channelId;
+    if (!channel) {
+      // No channel to speak of (a browser, a token, the CLI without --channel): the caller's
+      // settings outside any channel — the installation defaults under their own scope. The
+      // synthetic channel has no scope and nobody's config to read, so no read gate applies and
+      // nothing is editable as a channel (record 0041: a settings page never has "no data").
+      const description: ConfigDescription = {
+        ...(await deps.config.describeConfig(`none:${me}`, me)),
+        channel: {},
+        channelConfigRestricted: true,
+      };
+      return description as unknown as JsonValue;
+    }
     await assertMayReadChannel(caller, channel, deps);
     // The same question `config set channel` asks, answered for THIS caller's actor — the CLI's `all`, a token's grants, a Slack user's — never for an id the store looks up on its own.
     const description: ConfigDescription = {
-      ...(await deps.config.describeConfig(channel, meIdOf(caller) ?? caller.id)),
+      ...(await deps.config.describeConfig(channel, me)),
       channelConfigRestricted: !mayEditChannel(caller, channel),
     };
     return description as unknown as JsonValue;

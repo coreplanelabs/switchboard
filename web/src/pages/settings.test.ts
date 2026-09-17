@@ -100,9 +100,12 @@ describe("SettingsPage", () => {
     expect(wrapper.find('.settings-link[aria-current="page"]').attributes("href")).toBe("/settings");
   });
 
-  it("without a seed renders the empty state, never a crash", () => {
+  it("without a seed renders an application error with a reload, never a crash and never a 'no data' state", () => {
     const wrapper = mountApp(SettingsPage, { seed: null });
-    expect(wrapper.find("p.empty").text()).toContain("unavailable");
+    expect(wrapper.find(".error").attributes("role")).toBe("alert");
+    expect(wrapper.find(".error").text()).toContain("could not be loaded");
+    expect(wrapper.find(".error button").text()).toBe("Reload");
+    expect(wrapper.find("p.empty").exists()).toBe(false);
   });
 
   it("Installation: one row per knob with its value and the default mark; capabilities with their state", () => {
@@ -448,6 +451,32 @@ describe("ChannelsPanel", () => {
   ): NonNullable<SettingsSeed["channels"]> => ({
     index: INDEX,
     ...over,
+  });
+
+  it("shows the viewer's own settings first — what a run gets, the defaults, their own scope or the sentence that nothing is theirs yet; a refusal is shown as is (record 0041: never a 'no data' state)", () => {
+    const VIEWER = {
+      effective: { agent: "general", model: "anthropic/general-model", effort: "low" as const },
+      defaults: { agent: "general", models: { general: "anthropic/general-model", review: "anthropic/review-model" } },
+      restrictedAgents: ["coding"],
+      user: { model: "anthropic/mine", effort: "low" as const },
+    };
+    const wrapper = mountApp(ChannelsPanel, {
+      props: { channels: channels({ viewer: VIEWER }), vocabulary: VOCABULARY },
+    });
+    expect(wrapper.find("section.mine .effective").text()).toBe("agent general · anthropic/general-model · effort low");
+    expect(wrapper.find("section.mine .defaults").text()).toContain("review → anthropic/review-model");
+    expect(wrapper.find("section.mine .yours").text()).toBe("model anthropic/mineeffort low");
+    const bare = mountApp(ChannelsPanel, {
+      props: { channels: channels({ viewer: { ...VIEWER, user: {} }, index: [] }), vocabulary: VOCABULARY },
+    });
+    expect(bare.find("section.mine .yours").text()).toBe("Nothing of your own yet — the defaults apply.");
+    expect(bare.find("ul.index").exists()).toBe(false);
+    expect(bare.find("p.empty").text()).toContain("Every channel runs on the defaults");
+    const refused = mountApp(ChannelsPanel, {
+      props: { channels: channels({ viewerUnavailable: "config:read is missing" }), vocabulary: VOCABULARY },
+    });
+    expect(refused.find("section.mine").exists()).toBe(false);
+    expect(refused.find("p.unavailable").text()).toBe("config:read is missing");
   });
 
   it("lists the configured channels as links with their setting names and source, and a placeholder until one is picked", () => {

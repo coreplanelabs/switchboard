@@ -1867,6 +1867,19 @@ function settingsSeed(pathname: string, search: string): SettingsSeed | null {
     ...base,
     tab: "channels",
     channels: {
+      viewer: {
+        effective: { agent: "general", model: "anthropic/claude-haiku-4-5", effort: "medium" },
+        defaults: {
+          agent: "general",
+          models: {
+            general: "anthropic/claude-haiku-4-5",
+            coding: "anthropic/claude-opus-5",
+            review: "anthropic/claude-opus-5",
+          },
+        },
+        restrictedAgents: ["coding", "conductor"],
+        user: { effort: "medium", boundary: { maxMinutes: 30 } },
+      },
       index: SETTINGS_INDEX,
       ...(selected ? { selected: { channelId: selected, scope: SETTINGS_SCOPE, canWrite: true } } : {}),
     },

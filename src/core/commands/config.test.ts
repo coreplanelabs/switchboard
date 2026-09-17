@@ -125,18 +125,19 @@ describe("config show", () => {
     expect(await show(chat(gated, "slack:UX"))).toMatchObject({ ok: true, value: { channelConfigRestricted: true } });
   });
 
-  it("--channel names another (public) channel; a machine caller must name one (no origin) and needs config:read", async () => {
+  it("--channel names another (public) channel; a machine caller without one (no origin) gets its settings outside any channel — the defaults under its own scope, no channel scope, nothing channel-editable — and needs config:read", async () => {
     const config = store();
     await config.setChannelOverride("slack:COTHER", { agent: "review" });
     const commands = bind(config, async () => "public" as const);
     expect((await say(commands, "config show --channel slack:COTHER", chat(config, "slack:UX"))).text).toContain(
       "agent `review`",
     );
-    expect(await commands.invoke("config.show", {}, mcp("config:read"))).toMatchObject({
-      ok: false,
-      error: "invalid_input",
-      message: "channel: required on this surface — pass --channel <id>",
+    const outside = await commands.invoke("config.show", {}, mcp("config:read"));
+    expect(outside).toMatchObject({
+      ok: true,
+      value: { channel: {}, channelConfigRestricted: true, effective: { agent: "general" } },
     });
+    expect((outside as unknown as { value: { channel: unknown } }).value.channel).toEqual({}); // never another channel's scope
     expect(
       (await commands.invoke("config.show", { options: { channel: "slack:COTHER" } }, mcp("config:read"))).ok,
     ).toBe(true);
