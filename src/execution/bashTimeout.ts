@@ -69,6 +69,37 @@ export function bashBudgetWithinRun(wantedMs: number, remainingMs: number): RunB
   };
 }
 
+/** The bound on an attach request an executor opens while its run has
+ *  `remainingMs` of wall clock left (`ResidentExecutorOptions.remainingMs`):
+ *  `bounded` by the attach's own default, `BASH_TIMEOUT_MS` — an attach may
+ *  clone and install deps — clipped to what the run has left less the same
+ *  write-up reserve a command keeps back, so an attach never holds a run past
+ *  its lease and the model keeps its write-up; never raised above the default.
+ *  Inside the reserve, or with less than the one-second floor past it,
+ *  `exhausted`: the request is not opened at all — the
+ *  resident would run the attach to its end server-side for a run that is
+ *  ending, and the caller would get a deadline it could read as waitable — and
+ *  the note names the run's clock. The command's own budget never bounds an
+ *  attach: the attach is not the command. */
+export type AttachBound = { kind: "bounded"; timeoutMs: number } | { kind: "exhausted"; note: string };
+
+export function attachBoundWithinRun(remainingMs: number): AttachBound {
+  const secs = (ms: number) => Math.max(0, Math.round(ms / 1000));
+  const left = Math.trunc(remainingMs - RUN_DEADLINE_RESERVE_MS);
+  // The same floor `bashBudgetWithinRun` keeps: a remainder under the one-second
+  // minimum is not a bound anyone meant, and a request opened under it is the
+  // hazard the reserve exists to prevent, one second wide.
+  if (left < BASH_TIMEOUT_MIN_MS) {
+    return {
+      kind: "exhausted",
+      note:
+        `the run has ${secs(remainingMs)}s of wall clock left, inside the ${secs(RUN_DEADLINE_RESERVE_MS)}s ` +
+        "write-up reserve, so no attach was opened",
+    };
+  }
+  return { kind: "bounded", timeoutMs: Math.min(BASH_TIMEOUT_MS, left) };
+}
+
 /** The line a timed-out command shows the model: names the limit that fired
  *  and the knob that raises it, so the model can self-correct (re-run with a
  *  larger timeoutMs, split the command, or background it) instead of guessing

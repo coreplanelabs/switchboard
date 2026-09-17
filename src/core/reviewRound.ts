@@ -134,6 +134,10 @@ export async function attachRoundWorkspace(input: {
     /** The run's hard stop, where the caller holds a run control: the first
      *  attach's wake wait ends on it at once (execution.md item 9). */
     stopSignal?: AbortSignal;
+    /** The run's remaining wall clock, where the caller holds a run control
+     *  (`RunControl.remainingMs`; undefined until the lease starts): every
+     *  attach the resident executor opens is clipped to it (execution.md item 9). */
+    remainingMs?: () => number | undefined;
   };
   logKey: string;
   /** The caller's `dispatch.workspace.attach` span: the probe and the attach
@@ -153,6 +157,7 @@ export async function attachRoundWorkspace(input: {
       ...(input.round.ownPr !== undefined ? { ownPr: input.round.ownPr } : {}),
       ...(input.round.reattach !== undefined ? { reattach: input.round.reattach } : {}),
       ...(input.round.stopSignal !== undefined ? { stopSignal: input.round.stopSignal } : {}),
+      ...(input.round.remainingMs !== undefined ? { remainingMs: input.round.remainingMs } : {}),
     },
     input.span,
   );

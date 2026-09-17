@@ -63,6 +63,10 @@ export interface RelaunchContext {
    *  wake wait, so a stop while the replacement is being re-attached ends it at
    *  once and the run ends stopped, never relaunched (execution.md item 9). */
   stopSignal?: AbortSignal;
+  /** The run's remaining wall clock (`run.control.remainingMs`, the lease the
+   *  relaunch continues): every attach the re-attached executor opens is
+   *  clipped to it (execution.md item 9). */
+  remainingMs?: () => number | undefined;
   /** The row's write for the harness facts — issued inside the rotation, as its contract requires. */
   saveFacts: (facts: HarnessFacts) => void;
 }
@@ -79,7 +83,11 @@ export type RelaunchDecision =
     }
   | { kind: "refused"; interruption: HarnessInterruptedError }
   /** The run's own stop ended the re-attach: nothing is written or rotated, and the run ends stopped. */
-  | { kind: "stopped" };
+  | { kind: "stopped" }
+  /** The run is inside its write-up reserve (execution.md item 9): its workspace
+   *  was never asked for, nothing is written or rotated, and the run ends on
+   *  its budget — never `workspace_lost`, never a new run from the request. */
+  | { kind: "lease_spent"; why: string };
 
 /**
  * The relaunch, decided and prepared: refused by name, or the resume the
@@ -130,10 +138,19 @@ export async function prepareRelaunch(
       clock: ctx.clock,
       reattach: ctx.binding,
       ...(ctx.stopSignal !== undefined ? { stopSignal: ctx.stopSignal } : {}),
+      ...(ctx.remainingMs !== undefined ? { remainingMs: ctx.remainingMs } : {}),
     });
     // The stop that ended the re-attach's wait is the run's end, decided before
     // the rotation: nothing is written, the bearers stand, nothing relaunches.
     if (reattached.kind === "stopped") return { kind: "stopped" };
+    // The lease inside its write-up reserve is the run's end, decided before
+    // any request and before the rotation: a re-dispatch with a fresh lease
+    // would be the run restarted from scratch seconds from its deadline.
+    if (reattached.kind === "lease_spent")
+      return {
+        kind: "lease_spent",
+        why: `the container was replaced under the run with its lease inside the write-up reserve (${reattached.why}); its workspace was not re-attached and pi was not relaunched — the run ends on its budget`,
+      };
     if (reattached.kind === "reattach_refused")
       return refuse(
         `the run's workspace could not be re-attached in the replacement container (${reattached.why}); the run restarts from its request as a new run in this thread`,

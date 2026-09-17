@@ -244,6 +244,27 @@ describe("prepareRelaunch — the relaunch decided and prepared", () => {
     expect(d.runBearers.grantOf("run-1")?.bearers).toBe(1);
   });
 
+  it("a run inside its write-up reserve is the decision `lease_spent`, before any request and before the rotation: the workspace is never asked for, nothing is written, the run's bearers stand, and the why names the clock — never `workspace_lost`, never a restart from the request (execution.md item 9)", async () => {
+    const d = deps();
+    const old = grant(d.runBearers);
+    const { ctx, saves } = context({
+      binding: { backend: "resident", workspace: "/workspace/threads/t/main", user: "worker2" },
+      remainingMs: () => 30_000,
+    });
+    const decision = await prepareRelaunch(d, ctx);
+    expect(decision).toEqual({
+      kind: "lease_spent",
+      why: "the container was replaced under the run with its lease inside the write-up reserve (the run has 30s of wall clock left, inside the 60s write-up reserve, so no attach was opened); its workspace was not re-attached and pi was not relaunched — the run ends on its budget",
+    });
+    expect(saves).toEqual([]);
+    expect(d.runBearers.verify(old).ok).toBe(true);
+    // With the lease still running (or not started) the same context is the refusal it was.
+    const running = await prepareRelaunch(d, context({ ...ctx, remainingMs: () => 10 * 60_000 }).ctx);
+    expect(running.kind).toBe("refused");
+    const unstarted = await prepareRelaunch(d, context({ ...ctx, remainingMs: () => undefined }).ctx);
+    expect(unstarted.kind).toBe("refused");
+  });
+
   it("the run's hard stop rides into the re-attach, and a stop that ended its wait is the decision `stopped`, before the rotation: nothing is written, the bearers stand, nothing relaunches and nothing restarts", async () => {
     const d = deps();
     const old = grant(d.runBearers);

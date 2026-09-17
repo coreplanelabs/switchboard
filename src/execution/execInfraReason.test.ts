@@ -458,12 +458,24 @@ describe("ExecInfraError carries a typed reason, and the two remote executors na
       transport: false,
       status: 502,
     };
+    // ...and the view is typed by the field the Worker put on it, never by its
+    // status class: a 5xx it typed `transient` is the blip, an untyped 5xx (a
+    // throw in the status route) is as definite as the 4xx.
+    const typed: ResidentStatusProbe = {
+      kind: "unreachable",
+      error: "probe HTTP 500: internal error",
+      transport: false,
+      status: 500,
+      transient: true,
+    };
     expect(wakeStrikeReason(unreachable, true)).toBe("worker-unavailable");
-    expect(wakeStrikeReason(gateway, true)).toBe("worker-unavailable");
+    expect(wakeStrikeReason(typed, true)).toBe("worker-unavailable");
+    expect(wakeStrikeReason(gateway, true)).toBe("refused");
     expect(wakeStrikeReason(denied, true)).toBe("refused");
     expect(wakeStrikeReason(denied, false)).toBe("refused");
     expect(isUnansweredProbe(unreachable)).toBe(true);
-    expect(isUnansweredProbe(gateway)).toBe(true);
+    expect(isUnansweredProbe(typed)).toBe(true);
+    expect(isUnansweredProbe(gateway)).toBe(false);
     expect(isUnansweredProbe(denied)).toBe(false);
     expect(isUnansweredProbe(restoring)).toBe(false);
     expect(classificationOf(unansweredAfterTransient)).toEqual({ kind: "infra", code: "transient-refusal" });

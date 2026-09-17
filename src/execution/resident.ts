@@ -9,7 +9,6 @@ import { residentState, sanitizeResidentBody } from "./residentText.js";
 import {
   WAKE_POLL_MS,
   WAKE_PROBE_TIMEOUT_MS,
-  WAKE_WAIT_MAX_MS,
   containerGoneMessage,
   describeProbe,
   isContainerRolling,
@@ -24,7 +23,7 @@ import {
 import type { ResidentStep } from "./residentStepTrace.js";
 import { sanitizeGraftedSteps, withResidentTrace } from "./residentTrace.js";
 import { repoResourceId } from "../core/residentAdmin.js";
-import { EXEC_CALL_MARGIN_MS, clampBashTimeout } from "./bashTimeout.js";
+import { EXEC_CALL_MARGIN_MS, attachBoundWithinRun, clampBashTimeout } from "./bashTimeout.js";
 import { DISK_PRESSURE_REASON } from "./residentDiskBudget.js";
 import {
   BASH_TIMEOUT_MS,
@@ -139,27 +138,62 @@ export function residentAnswerReason(status: number, data: Record<string, unknow
   return infraReasonOfStatus(status);
 }
 
-/** The status a resident answer says. The streamed routes — `/exec`, `/attach`
- *  and `/await-restore` write heartbeat whitespace then ONE JSON document, so
- *  a long command, a deps install or a restore cannot lose the connection —
- *  put a refusal's own status IN the body over HTTP 200, and that is the
- *  status the answer is typed by (`residentAnswerReason`). Any other answer's
- *  status is the HTTP status: a body's `status` on a real 4xx/5xx, or on a
- *  success document (which carries no `error`), is never read. One rule for
- *  the three routes. */
+/** The status a resident answer says. The streamed routes — `/exec`, `/attach`,
+ *  `/await-restore` and `/op` write heartbeat whitespace then ONE JSON
+ *  document, so a long command, a deps install, a restore or a suite cannot
+ *  lose the connection — put a refusal's own status IN the body over HTTP 200,
+ *  and that is the status the answer is typed by (`residentAnswerReason`,
+ *  `isTransientRefusal`). Any other answer's status is the HTTP status: a
+ *  body's `status` on a real 4xx/5xx, or on a success document (which carries
+ *  no `error`), is never read. One rule for the four routes. */
 export function answeredStatus(httpStatus: number, data: Record<string, unknown>): number {
   return httpStatus === 200 && typeof data.error === "string" && typeof data.status === "number"
     ? data.status
     : httpStatus;
 }
 
-/** Whether an attach refusal is the 500 for a throw the Worker typed as the
- *  platform's transient: a 5xx carrying `transient: true`. The one rule at
- *  every site that judges a refusal (`attach`, `attachRefusal`, the wake
- *  wait's re-attach), so a `transient` flag on any other status is never a
- *  reason to wait. */
+/** Whether an attach refusal is the platform's transient, by its provenance —
+ *  the rule `probeStatus` types a `/status` answer by, so both routes judge one
+ *  provenance (execution.md item 9): a 5xx the Worker typed `transient: true`
+ *  (the Durable Object reset or lost under the attach), or a 5xx carrying no
+ *  Worker document at all — no string `error`, which every route's catch puts
+ *  on its answer: the edge's own page, where the Worker never ran. The one
+ *  rule at every site that judges a refusal (`attach`, `attachRefusal`, the
+ *  wake wait's re-attach, `/op`'s reader), so a `transient` flag on any other
+ *  status is never a reason to wait, and the Worker's own untyped 5xx never is. */
 export function isTransientRefusal(answer: { status: number; data: Record<string, unknown> }): boolean {
-  return answer.status >= 500 && answer.status <= 599 && answer.data.transient === true;
+  if (answer.status < 500 || answer.status > 599) return false;
+  return answer.data.transient === true || typeof answer.data.error !== "string";
+}
+
+/** An attach this executor did not open: the run's lease is inside its
+ *  write-up reserve (`attachBoundWithinRun` said `exhausted`; execution.md item
+ *  9). Typed `refused` — no wait clears it, so the harness's one more command
+ *  never holds a run inside its reserve on it — and read apart by class where
+ *  the run's end is decided: a relaunch's re-attach ends the run on its budget
+ *  (`WorkspaceReattachLeaseSpentError` in the factory); inside a harness's
+ *  loop it cannot arise, since the loop ends before the reserve, and on the
+ *  wind-down's and the post-steps' commands it is that command's own failure,
+ *  never the container's verdict (`identity` answers no name on a `refused`). */
+export class ResidentLeaseSpentError extends ExecInfraError {
+  constructor(
+    route: string,
+    note: string,
+    /** The run's wall clock left when the attach was not opened. */
+    readonly leftMs: number,
+  ) {
+    super(`resident ${route}: ${note}`, "refused");
+    this.name = "ResidentLeaseSpentError";
+    classifyError(this, { kind: "infra", code: "attach" });
+  }
+}
+
+/** A refusal's words for the card and the strike: the Worker's `error`, or
+ *  the status alone when no Worker document answered. */
+function refusalWords(answer: { status: number; data: Record<string, unknown> }): string {
+  return typeof answer.data.error === "string"
+    ? answer.data.error
+    : `HTTP ${answer.status} with no Worker document in the answer`;
 }
 
 /** The words a resident answer uses for ITSELF in `reason` on a 5xx that
@@ -201,15 +235,25 @@ export function wakeStrikeReason(last: ResidentStatusProbe, transient = false): 
   return last.kind === "status" && isWakeable(last.state, last.reason) ? "worker-unavailable" : "refused";
 }
 
-/** A `/status` probe nothing answered: the transport failed, or the Worker
- *  answered with a 5xx — the Durable Object reset or lost under an attach
- *  loses the probe too. A 4xx is an answer (an operator token no longer
- *  accepted) and never this. The one rule the wake wait's transient mode and
- *  its strike read the same view by. */
+/** A `/status` probe nothing answered: the transport failed, or the answer
+ *  was the platform's transient — a 5xx the Worker typed so (the Durable
+ *  Object reset or lost under an attach loses the probe too), or a 5xx with no
+ *  Worker document at all, the edge's own error page where the Worker never
+ *  ran. A 4xx is an answer (an operator token no longer accepted), and so is a
+ *  5xx the Worker answered without typing it transient — a throw in the status
+ *  route; neither is this. The one rule the wake wait's transient mode, its
+ *  strike and the selection probe's wait read a view by. */
 export function isUnansweredProbe(
   view: ResidentStatusProbe,
 ): view is Extract<ResidentStatusProbe, { kind: "unreachable" }> {
-  return view.kind === "unreachable" && (view.transport || (view.status !== undefined && view.status >= 500));
+  // Typed by its provenance (`probeStatus`; execution.md item 9), never by the
+  // status class alone: `transient` says the answer was the platform's — the
+  // Worker's word, or no Worker document to carry one. No skew clause here, on
+  // purpose: a resident Worker from before the typing (1.245.0 carries it)
+  // answers a platform throw as an untyped 5xx, which this rule strikes at
+  // once — one cold run, where a clause admitting it would re-admit a route's
+  // own throw as the blip for as long as it stayed.
+  return view.kind === "unreachable" && (view.transport || view.transient === true);
 }
 
 /** What began a wake wait, and so what its strike says happened: a refusal
@@ -283,7 +327,7 @@ export function residentWakeStrike(
  *  (the re-attach's own case) — so a caller that counts infra failures sees
  *  the same thing from every stop point, and nothing waits on a run that was
  *  stopped. */
-const wakeStopped = (route: string): ExecInfraError =>
+export const wakeStopped = (route: string): ExecInfraError =>
   classifyError(
     new ExecInfraError(`resident ${route}: stopped waiting for the resident to wake: the run was stopped`, "aborted"),
     { kind: "transport" },
@@ -308,20 +352,22 @@ function wakePause(ms: number, signal: AbortSignal | undefined, route: string): 
 
 /** The wake path's ONE loop over `/status` views (item 65; execution.md item
  *  9) — the wake wait's (`awaitWake`, which re-attaches inside it) and the
- *  selection probe's wait through a typed blip (the factory's) both run here,
- *  so one pause (`WAKE_POLL_MS`, clipped to the budget), one stop check and
- *  one budget rule serve both; each caller's `probe` keeps its own deadline
- *  and is handed the run's stop. `judge` reads the view in hand — `{ end }`
- *  finishes with that value, `"wait"` pauses then probes again, `"again"`
- *  probes again at once (a view worth re-reading without a pause) — and is
- *  handed the wait's one clock, `spent()`, for every message it words. The
- *  budget bounds the PROBING, on a clock that starts where the caller says
- *  (`since`; now when absent): when it is spent before the next probe, `spent`
- *  answers (or throws) from the last view. The run's stop, riding into the
- *  pause and every probe, ends the loop with `wakeStopped`'s typed error. */
+ *  selection probe's wait through a blip (the factory's) both run here, so one
+ *  pause (`WAKE_POLL_MS`, clipped to the budget), one stop check and one
+ *  budget rule serve both; each caller's `probe` keeps its own deadline (the
+ *  wake's `WAKE_PROBE_TIMEOUT_MS`, the selection's configured one) and is
+ *  handed the run's stop. `judge` reads the view in hand — `{ end }` finishes
+ *  with that value, `"wait"` pauses then probes again, `"again"` probes again
+ *  at once (a view worth re-reading without a pause). The budget bounds the
+ *  PROBING, on a clock that starts where the caller's wait did (`since`:
+ *  before the probe that produced `first`, so the strike's `spentMs` is the
+ *  whole wait, never short by one probe): when it is spent before the next
+ *  probe, `spent` answers (or throws) from the last view. The run's stop,
+ *  riding into the pause and every probe, ends the loop with `wakeStopped`'s
+ *  typed error. */
 export async function waitOnStatus<T>(input: {
   first: ResidentStatusProbe;
-  /** When the wait began, on the caller's clock; now when absent. */
+  /** When the wait began — the caller's clock before the probe that produced `first`; now when absent. */
   since?: number;
   probe: (signal: AbortSignal | undefined) => Promise<ResidentStatusProbe>;
   budgetMs: number;
@@ -391,6 +437,15 @@ export interface ResidentExecutorOptions {
    *  Sent only when true, so a fresh attach, and an older resident, see the
    *  body they always did. */
   reuse?: boolean;
+  /** The run's remaining wall clock (`RunControl.remainingMs`, the dispatch's
+   *  hand-off; undefined until the harness starts the lease), read at the
+   *  moment each attach this executor opens: every attach request — the first
+   *  of an `attach()`, each re-attach inside a wake wait, a recovery attach —
+   *  is bounded by the attach's own default clipped to it, and inside the
+   *  write-up reserve none is opened (`attachBoundWithinRun`; execution.md item
+   *  9). Never sent to the Worker. Absent for an executor built with no run
+   *  (staging, the CLI): the default alone bounds. */
+  remainingMs?: () => number | undefined;
 }
 
 /** What a successful /attach reports about the thread's worktree. */
@@ -598,10 +653,33 @@ export class ResidentOperations implements Operations {
       return {
         kind: "error",
         message: `resident /op: ${err}`,
-        ...(data.transient === true ? { transient: true } : {}),
+        // The one rule every reader of the field applies (`isTransientRefusal`):
+        // a 5xx carrying it — the streamed document's own status, read by the
+        // one rule (`answeredStatus`) as /exec's is; the flag on a named refusal
+        // is never one. The second clause is deploy-skew code with a removal
+        // trigger: a document with NO status at all is a resident Worker from
+        // before `streamOp` carried it, whose typed 500 arrived with its status
+        // shed, and the field alone is read there. Drop the clause once the
+        // Worker release carrying `streamOp`'s status (the first after 1.245.0)
+        // is live on every resident; from then a status-less document is a
+        // named refusal on a 200, whose flag is never the signal.
+        ...(isTransientRefusal({ status: answeredStatus(res.status, data), data }) ||
+        (data.status === undefined && data.transient === true)
+          ? { transient: true }
+          : {}),
       };
     }
-    if (!res.ok) return { kind: "error", message: `resident /op HTTP ${res.status}` };
+    // A non-2xx with no Worker document — the edge's own page over a real HTTP
+    // 5xx — is the platform's blip by the same provenance rule (`isTransientRefusal`
+    // over the HTTP status), so the reader words it as the resident unavailable
+    // for a moment; a 4xx there is the plain failure it is.
+    if (!res.ok) {
+      return {
+        kind: "error",
+        message: `resident /op HTTP ${res.status}`,
+        ...(isTransientRefusal({ status: res.status, data }) ? { transient: true } : {}),
+      };
+    }
     const ok = data.ok === true;
     const summary =
       typeof data.summary === "string" && data.summary ? data.summary : `${op} ${ok ? "succeeded" : "failed"}`;
@@ -633,12 +711,21 @@ export type ResidentStatusProbe =
   | {
       kind: "unreachable";
       error: string;
-      /** The request itself failed (nothing answered). `false` when the Worker answered with a non-2xx, carried as `status`. */
+      /** The request itself failed (nothing answered). `false` when something answered with a non-2xx, carried as `status`. */
       transport: boolean;
       status?: number;
-      /** The Worker typed its non-2xx as the platform's transient (`catchAllErr` at the
-       *  fetch handler: the Durable Object reset or lost under the probe) — a re-probe clears it. */
+      /** The non-2xx was the platform's transient, by its provenance: the Worker
+       *  typed its own answer so (`catchAllErr` at the fetch handler: the Durable
+       *  Object reset or lost under the probe), or a 5xx carried no Worker
+       *  document at all — the edge's own error page, where the Worker never
+       *  ran to type it. A re-probe clears either. */
       transient?: boolean;
+      /** Set with `transient` when the 5xx carried no Worker document — the
+       *  edge's own page. The selection's wait tells the two apart at its end
+       *  (resident-repos.md item 25): a whole wait on the edge's page is the
+       *  platform not answering and arms the outage window; a whole wait on
+       *  the Worker's typed blip is the Durable Object's and does not. */
+      edge?: true;
     };
 
 /** The seed handle a resident's `/status` publishes (docs/reference/specs/execution.md
@@ -755,12 +842,22 @@ export class ResidentExecutor implements Executor {
     // and `state` is validated against the closed table (never echoed).
     const data = sanitizeResidentBody((await res.json().catch(() => ({}))) as Record<string, unknown>);
     if (!res.ok) {
+      // Typed by provenance (execution.md item 9). The Worker's document — a
+      // string `error`, which every route's catch puts on its answer — is the
+      // Worker's answer: definite unless it typed the throw `transient`. A 5xx
+      // with no Worker document (a non-JSON body, the edge's own error page:
+      // the platform between us and the Worker, which never ran) is unanswered,
+      // the same blip a re-probe clears. A 4xx is an answer either way.
+      const answered = typeof data.error === "string";
+      const edge = res.status >= 500 && !answered;
+      const transient = edge || (res.status >= 500 && data.transient === true);
       return {
         kind: "unreachable",
-        error: `probe HTTP ${res.status}: ${String(data.error ?? "")}`,
+        error: `probe HTTP ${res.status}: ${answered ? data.error : "no Worker document in the answer"}`,
         transport: false,
         status: res.status,
-        ...(res.status >= 500 && data.transient === true ? { transient: true } : {}),
+        ...(transient ? { transient: true } : {}),
+        ...(edge ? { edge: true } : {}),
       };
     }
     const seed = seedHandleOf(data.snapshot);
@@ -880,22 +977,24 @@ export class ResidentExecutor implements Executor {
    *  budget it throws the wake's strike (`worker-unavailable`), so a caller
    *  with a longer clock may still wait and the factory falls back cold naming
    *  the wait. A deterministic refusal is judged at once, with no probe.
-   *  `attachTimeoutMs` is how long one attach request may take — the exec
-   *  default when absent (a first attach or a head move may clone and install
-   *  deps); an operation passes its own call bound, so its recovery never
-   *  waits past the operation's wall clock. */
-  async attach(
-    span?: Span,
-    opts: { signal?: AbortSignal; budgetMs?: number; attachTimeoutMs?: number } = {},
-  ): Promise<ResidentBinding> {
-    const answer = await this.attachOnce(span, opts.attachTimeoutMs, opts.signal);
+   *  ONE bound for every attach request this call opens — the first request
+   *  and each re-attach inside the wake wait alike, whoever opened the call:
+   *  the attach's own default (`attachOnce`'s, the exec default
+   *  `BASH_TIMEOUT_MS`), since an attach may clone and install deps and a
+   *  request cut short strikes a resident still attaching; clipped to the
+   *  run's remaining wall clock where this executor carries the run's
+   *  (`attachBoundMs`), so no attach holds a run past its lease. `opts.budgetMs`
+   *  bounds the wait's PROBING alone (item 65's ceiling too), never a request:
+   *  an operation's wall clock is the command's, and a recovery attach is not
+   *  the command. */
+  async attach(span?: Span, opts: { signal?: AbortSignal; budgetMs?: number } = {}): Promise<ResidentBinding> {
+    const answer = await this.attachOnce(span, this.attachBoundMs("/attach"), opts.signal);
     if (answer.ok) return answer.binding;
     if (isTransientRefusal(answer)) {
-      const woke = await this.awaitWake("/attach", String(answer.data.error), {
+      const woke = await this.awaitWake("/attach", refusalWords(answer), {
         origin: "transient-refusal",
         signal: opts.signal,
         budgetMs: opts.budgetMs,
-        attachTimeoutMs: opts.attachTimeoutMs,
         span,
       });
       return { ...woke.binding, wokeAfterMs: woke.waitedMs };
@@ -906,8 +1005,9 @@ export class ResidentExecutor implements Executor {
   /** One `/attach`, answered rather than thrown: the binding on a 200, else
    *  the refusal's status and body, so the wake wait (item 65) can read the
    *  refusal's own words and keep waiting through a container still rolling.
-   *  `timeoutMs` bounds the call; the default is the exec ceiling, since an
-   *  attach may wait on a restore or a deps install. `signal` is the run's
+   *  `timeoutMs` bounds the call; the default is the exec default
+   *  (`BASH_TIMEOUT_MS`, `call`'s own), since an attach may wait on a restore
+   *  or a deps install; `attach` clips it to the run's clock. `signal` is the run's
    *  stop where the caller has one (the wake wait's re-attach): it drops the
    *  request at once, and the failure is `aborted`, never the transport lost. */
   private async attachOnce(span?: Span, timeoutMs?: number, signal?: AbortSignal): Promise<AttachAnswer> {
@@ -954,9 +1054,25 @@ export class ResidentExecutor implements Executor {
    *  else with its own words. The steps the resident ran before refusing ride
    *  the error (docs/reference/specs/tracing.md item 19): the dispatcher grafts
    *  them under its attach span. */
+  /** The bound on one attach request this executor opens (`attachOnce`), by
+   *  whether it carries the run's clock (execution.md item 9): the attach's own
+   *  default clipped to the run's remaining wall clock (`attachBoundWithinRun`),
+   *  or the default alone — `attachOnce`'s — with no run clock, or before the
+   *  lease has started. Inside the write-up reserve no request is opened: the
+   *  typed `refused`, which no wait clears, naming the run's clock — the
+   *  resident would run the attach to its end for a run that is ending, and a
+   *  deadline on an opened request reads as waitable. */
+  private attachBoundMs(route: string): number | undefined {
+    const left = this.opts.remainingMs?.();
+    if (left === undefined) return undefined;
+    const bound = attachBoundWithinRun(left);
+    if (bound.kind === "bounded") return bound.timeoutMs;
+    throw new ResidentLeaseSpentError(route, bound.note, left);
+  }
+
   private attachRefusal(answer: { status: number; data: Record<string, unknown> }): Error {
     const { status, data } = answer;
-    const err = String(data.error ?? `HTTP ${status}`);
+    const err = refusalWords(answer);
     const failedTrace = sanitizeGraftedSteps(data.trace);
     const traced = (e: Error): Error => (failedTrace.length > 0 ? withResidentTrace(e, { steps: failedTrace }) : e);
     if (status === 409 && data.needs === "ref") {
@@ -966,21 +1082,11 @@ export class ResidentExecutor implements Executor {
     if (status === 409 && data.needs === "recreate")
       return traced(new ResidentReuseRefusedError(this.opts.resource, err));
     if (status === 404) return traced(new Error(`resident attach: ${this.opts.resource} is not onboarded (${err})`));
-    // A 500 for a throw no route named, typed by the Worker: the platform's
-    // transient (the Durable Object reset or lost under the attach) is the
-    // resident unavailable for a moment — infra a wait clears: `attach` waits
-    // on it itself first, and past its budget the harness's one more command
-    // may still (execution.md item 9); a deterministic 500 (`attach-failed at
-    // <step>`, a throw in the route) stays the attach's own legible error,
-    // judged at once.
-    if (isTransientRefusal(answer)) {
-      return traced(
-        classifyError(
-          new ExecInfraError(`resident attach failed for ${this.opts.resource}: ${err}`, "worker-unavailable"),
-          { kind: "infra", code: "attach" },
-        ),
-      );
-    }
+    // A deterministic refusal — `attach-failed at <step>`, a throw in the route,
+    // a 4xx — is the attach's own legible error, judged at once. A refusal the
+    // platform's transient (`isTransientRefusal`) never reaches here: every
+    // caller waits on it first (`attach`, the wake wait's re-attach), and a
+    // wait spent is the wake's strike.
     return traced(new Error(`resident attach failed for ${this.opts.resource}: ${err}`));
   }
 
@@ -1094,9 +1200,10 @@ export class ResidentExecutor implements Executor {
       if (!CONTROL_RESET_REISSUE_ROUTES.has(route) && saysControlReset(data))
         throw new ExecControlResetError(String(data.error).trim());
     };
-    // One wake budget per operation: the wait for a rolling container and any
-    // recovery attach's wait for a transient refusal draw on the same clock,
-    // so an op never waits twice the budget before its command starts. The
+    // One wake budget per operation, bounding the PROBING (never an attach
+    // request, which runs under the attach's own timeout): the wait for a
+    // rolling container and any recovery attach's wait for a transient refusal
+    // draw on the same clock, so an op never probes twice the budget. The
     // clock starts at the first wait, never at the call that met the refusal:
     // that call's latency is the command's, not the wake's. Once running it
     // counts everything after — a call re-issued after the wake included — so
@@ -1107,17 +1214,18 @@ export class ResidentExecutor implements Executor {
       waitStarted ??= systemClock();
       return Math.max(0, waitBudget - (systemClock() - waitStarted));
     };
-    // A recovery attach (the worktree gone, the DO reset, the runtime replaced)
-    // may clone and install deps like a first attach: the attach default is
-    // its floor, the op's own call bound raising it where that is longer.
-    const recoveryAttachTimeoutMs = Math.max(callTimeoutMs, BASH_TIMEOUT_MS);
+    // Every attach an operation opens from here — the rolling wake's re-attach,
+    // which recreates the worktree from the mirror, and the three recovery
+    // attaches — runs under the attach's own default clipped to the run's
+    // remaining clock where this executor carries it (`attachBoundMs`): the
+    // op's call bound is the command's, and the wake budget bounds the
+    // probing alone.
     let r = await this.call(route, body, callTimeoutMs, signal, span);
     if (isContainerRolling(r.data.error)) {
       const woke = await this.awaitWake(route, String(r.data.error), {
         origin: "container-exited",
         signal,
         budgetMs: waitLeft(),
-        attachTimeoutMs: callTimeoutMs,
         span,
       });
       if (route === "/exec")
@@ -1139,7 +1247,7 @@ export class ResidentExecutor implements Executor {
     goneUnderThread(r.data);
     controlResetUnderThread(r.data);
     if (r.data.needs === "attach") {
-      await this.attach(span, { signal, budgetMs: waitLeft(), attachTimeoutMs: recoveryAttachTimeoutMs }); // the recovery rides the same trace as the op it rescues
+      await this.attach(span, { signal, budgetMs: waitLeft() }); // the recovery rides the same trace as the op it rescues
       r = await this.call(route, body, callTimeoutMs, signal, span);
       goneUnderThread(r.data);
       controlResetUnderThread(r.data);
@@ -1150,7 +1258,7 @@ export class ResidentExecutor implements Executor {
       // the DO is fresh after its reset, so re-attach once and re-issue — a
       // second landing is harmless here (`/read`, idempotent by shape; `/write`,
       // a full-content put). Still reset after the re-issue → the unknown outcome.
-      await this.attach(span, { signal, budgetMs: waitLeft(), attachTimeoutMs: recoveryAttachTimeoutMs }); // the recovery rides the same trace as the op it rescues
+      await this.attach(span, { signal, budgetMs: waitLeft() }); // the recovery rides the same trace as the op it rescues
       r = await this.call(route, body, callTimeoutMs, signal, span);
       if (saysControlReset(r.data)) throw new ExecControlResetError(String(r.data.error).trim());
       // Compound fault: the reset also left the worktree evicted. The re-attach
@@ -1162,7 +1270,7 @@ export class ResidentExecutor implements Executor {
     if (r.data.reason === "runtime-replaced") {
       // An idempotent route (/exec threw above): re-attach once and re-issue.
       this.noteRuntimeReplaced(route, r.data);
-      await this.attach(span, { signal, budgetMs: waitLeft(), attachTimeoutMs: recoveryAttachTimeoutMs }); // the recovery rides the same trace as the op it rescues
+      await this.attach(span, { signal, budgetMs: waitLeft() }); // the recovery rides the same trace as the op it rescues
       r = await this.call(route, body, callTimeoutMs, signal, span);
       if (r.data.reason === "runtime-replaced") this.noteRuntimeReplaced(route, r.data);
       // Compound fault: the deploy also left the worktree evicted. The
@@ -1217,10 +1325,13 @@ export class ResidentExecutor implements Executor {
       origin: WakeOrigin;
       signal?: AbortSignal;
       budgetMs?: number;
-      attachTimeoutMs?: number;
       span?: Span;
     },
   ): Promise<{ waitedMs: number; binding: ResidentBinding }> {
+    // The wait's one clock, before the first probe: the loop reads it for its
+    // budget check and hands it to `judge` as `spent()`, so every `waited Ns` —
+    // the strikes', the binding's — is the whole wait, never short by one
+    // probe, and a message after a re-attach counts the re-attach.
     const t0 = systemClock();
     let transient = opts.origin === "transient-refusal";
     /** A definite engine view — no wake recovers from it — or a Worker that did not answer: refused. */
@@ -1251,7 +1362,6 @@ export class ResidentExecutor implements Executor {
     // strike on an "unreachable" view the stop itself produced. (The loop
     // makes this check after each of its own probes.)
     if (opts.signal?.aborted) throw wakeStopped(route);
-    const budget = wakeWaitBudget(opts.budgetMs);
     // Each turn of the wake path's one loop (`waitOnStatus`), the first view
     // included: judge the view — a definite one is the strike at once, before
     // any pause — then re-attach when it says the resident serves, else (or
@@ -1267,29 +1377,25 @@ export class ResidentExecutor implements Executor {
       first,
       since: t0,
       probe,
-      budgetMs: budget,
+      budgetMs: wakeWaitBudget(opts.budgetMs),
       signal: opts.signal,
       route,
       judge: async (view, spent) => {
         const verdict = decide(view);
         if (!verdict.wait) throw definite(verdict.why);
         if (view.kind === "status" && isServiceable(view.state, view.reason) && (transient || !firstView)) {
+          // The one bound every attach request has, whoever opened the call
+          // (`attach`): the attach's own default, clipped to the run's remaining
+          // clock where this executor carries it — a re-attach may clone and
+          // install deps, and clipped to the budget's remainder or the wake
+          // ceiling it would strike a resident still attaching and provision
+          // the run cold beside it. The budget bounds the probing this loop
+          // does, never the request. Inside the write-up reserve the bound
+          // refuses before any request opens — the typed `refused`, outside the
+          // strike below, which reads a request's own failure.
+          const bound = this.attachBoundMs(route);
           let answer: AttachAnswer;
           try {
-            // The wake budget bounds the PROBING; the re-attach's own bound is the
-            // caller's. A caller with none — a first attach, a resume, a head move
-            // — gets the attach's own timeout, the exec default, uncapped: a cold
-            // clone and deps install may run past the wake ceiling, and clipped to
-            // the budget's remainder or the ceiling the re-attach would strike a
-            // resident still attaching and provision the run cold beside it. An
-            // operation's wait gets the longer of the budget's remainder and its
-            // own call bound, and never past the wake ceiling: an operation never
-            // waits past its wall clock, nor past three minutes whatever its
-            // command's budget (item 65).
-            const bound =
-              opts.attachTimeoutMs === undefined
-                ? Math.max(budget - spent(), BASH_TIMEOUT_MS)
-                : Math.min(WAKE_WAIT_MAX_MS, Math.max(budget - spent(), opts.attachTimeoutMs));
             answer = await this.attachOnce(opts.span, bound, opts.signal);
           } catch (err) {
             if (!(err instanceof ExecInfraError)) throw err;
@@ -1351,8 +1457,8 @@ export class ResidentExecutor implements Executor {
     const { status, data } = await this.opWithReattach("/exec", body, {
       signal: opts?.signal,
       callTimeoutMs: timeoutMs + EXEC_CALL_MARGIN_MS,
-      // The wake wait (item 65) may take what the command itself could: the
-      // tool layer already clipped this to the run's remaining wall clock.
+      // The wake wait (item 65) may probe for what the command itself could:
+      // the tool layer already clipped this to the run's remaining wall clock.
       waitBudgetMs: timeoutMs,
       span: opts?.span,
     });

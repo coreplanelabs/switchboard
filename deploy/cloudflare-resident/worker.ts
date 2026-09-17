@@ -8906,19 +8906,18 @@ async function handleOp(env: Env, body: Record<string, unknown>, traceparent?: s
   return streamOp(stub.runOp(op as "test" | "build", ref, traceparent));
 }
 
-/** /op's payload mapping: results pass through; a named error sheds its
- *  transport-only `status` field (the body is the contract, never the code); a
- *  pending op that rejected is the typed 500 (`catchAllErr`, so `transient`
- *  rides beside the words), its status shed the same way. */
+/** /op's payload mapping: results pass through; a failure streams as the typed
+ *  document it is — the named error with its `status` IN the body, a pending
+ *  op that rejected as the typed 500 (`catchAllErr`, so `transient` rides
+ *  beside the words) — exactly as `/exec`, `/attach` and `/await-restore`
+ *  stream theirs, so the client reads the status off the document by the one
+ *  rule (`answeredStatus`) and judges `transient` by the one rule too
+ *  (`isTransientRefusal`: a 5xx carrying it), never by the field on a 200. */
 function streamOp(pending: Promise<Awaited<ReturnType<ResidentDO["runOp"]>>>): Response {
-  const shedStatus = (failure: ThreadErr): object => {
-    const { status: _status, ...rest } = failure;
-    return rest;
-  };
   return streamHeartbeatJson(
     pending,
-    (result) => ("error" in result ? shedStatus(result) : result),
-    (err) => shedStatus(catchAllErr(err, "op-failed")),
+    (result) => result,
+    (err) => catchAllErr(err, "op-failed"),
   );
 }
 

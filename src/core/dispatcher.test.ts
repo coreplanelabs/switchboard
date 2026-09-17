@@ -11144,9 +11144,18 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       kind: string;
       summary: string;
     }>;
+    // One `sandbox_restarted` note — the harness's verdict — and the stop's own kind for the stop: a
+    // reader counting replaced containers by note kind sees one, not two.
     expect(notes.filter((n) => n.kind === "sandbox_restarted").map((n) => n.summary)).toEqual([
       "the container running pi was replaced (vm-fake → vm-new; the executor said: the sandbox restarted under the run (waited 42 s))",
-      "the container was replaced under the run, and the run was stopped while its workspace was being re-attached in the replacement",
+    ]);
+    expect(notes.filter((n) => n.kind === "stopped")).toEqual([
+      expect.objectContaining({
+        kind: "stopped",
+        mode: "hard",
+        summary:
+          "the run was stopped while its workspace was being re-attached in the replacement container; pi was not relaunched",
+      }),
     ]);
     expect(notes.some((n) => n.kind === "resumed")).toBe(false);
     expect(replies.some((r) => r.startsWith("❌"))).toBe(false);
