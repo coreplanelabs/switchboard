@@ -1501,7 +1501,10 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
 function recordingLedgerRun() {
   const states: Record<string, unknown>[] = [];
   const records: RunRecord[] = [];
-  const ledgerRun = new NullLedgerRun("run-l", { put: async (record) => void records.push(record) });
+  const ledgerRun = new NullLedgerRun("run-l", {
+    put: async (record) => void records.push(record),
+    abandoned: () => {},
+  });
   ledgerRun.setState = (patch) => void states.push(patch as Record<string, unknown>);
   return { ledgerRun, states, record: () => records[0]! };
 }
@@ -1815,7 +1818,7 @@ describe("the pi harness — the container replaced under a living bot: the rela
     const ledger = createLedgerWriteThrough({
       ledger: inner,
       gen: "gen-T",
-      fallback: { put: async () => {} },
+      fallback: { put: async () => {}, abandoned: () => {} },
       warn: () => {},
     });
     const seed: ChatMessage[] = [{ role: "user", content: [{ type: "text", text: "fix the failing test" }] }];
@@ -3852,7 +3855,7 @@ describe("the relaunch ceiling — the mid-run re-attach spike (the record's fir
     const ledger = createLedgerWriteThrough({
       ledger: inner,
       gen: "gen-T",
-      fallback: { put: async () => {} },
+      fallback: { put: async () => {}, abandoned: () => {} },
       warn: () => {},
     });
     const seed: ChatMessage[] = [{ role: "user", content: [{ type: "text", text: "fix the failing test" }] }];

@@ -4,9 +4,14 @@
 // never on a 4xx, never on a missing route; every permanent loss is counted and
 // every in-flight write (backoff included) is visible to the shutdown drain.
 import { describe, expect, it } from "vitest";
-import { createRunHistoryWriter, NullRunHistoryWriter, RUN_HISTORY_RETRY_DELAYS_MS } from "./runHistoryWriter.js";
+import {
+  createRunHistoryWriter,
+  NullRunHistoryWriter,
+  RUN_HISTORY_RETRY_DELAYS_MS,
+  type RecordSink,
+} from "./runHistoryWriter.js";
 import type { RunRecord } from "./runRecord.js";
-import type { PutResult, RunStore } from "./runStore.js";
+import { InMemoryRunStore, type PutResult, type RunStore } from "./runStore.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./runStoreWorker.js";
 import { analyzeRunFriction } from "./runFriction.js";
 import { createTracer } from "./trace/tracer.js";
@@ -37,6 +42,7 @@ function scriptedStore(outcomes: Array<Error | PutResult>) {
   const puts: RunRecord[] = [];
   const traces: Array<TraceOptions | undefined> = [];
   const store = {
+    abandoned: () => {}, // a store keeps nothing in flight: the writer's final word is a no-op here
     put: async (r: RunRecord, trace?: TraceOptions) => {
       puts.push(r);
       traces.push(trace);
@@ -64,15 +70,97 @@ function harness(outcomes: Array<Error | PutResult>, over: { random?: () => numb
 }
 
 describe("createRunHistoryWriter", () => {
-  it("write hands its span to the store's put — the request's root, so a Worker store's request is an http.client child of it (docs/reference/specs/tracing.md item 24); a write without one hands no span — only the retry word every attempt carries (run-history item 54)", async () => {
+  it("write hands its span to the store's put — the request's root, so a Worker store's request is an http.client child of it (docs/reference/specs/tracing.md item 24); a write without one hands none", async () => {
     const h = harness([OK, OK]);
     const root = createTracer({ clock: () => 1 }).start("request", { sinks: [] });
     h.writer.write(record("run-a"), { span: root });
     h.writer.write(record("run-b"));
     await h.writer.settled();
-    // `retryFollows` is true on a first attempt that would be retried: two more attempts follow it.
-    expect(h.traces).toEqual([{ span: root, retryFollows: true }, { retryFollows: true }]);
+    expect(h.traces).toEqual([{ span: root }, undefined]);
     expect(h.puts.map((r) => r.id)).toEqual(["run-a", "run-b"]);
+  });
+
+  // The writer's final word to a sink that keeps something in flight per
+  // record (docs/reference/specs/run-history.md item 54): `abandoned` at every
+  // give-up — a missing route, a permanent failure, the attempts spent — and
+  // never after a put that landed, whatever the attempt count.
+  it("tells a sink `abandoned` once at each give-up — route missing, permanent, attempts spent — with why, and never after a put that landed", async () => {
+    const abandoned: Array<{ id: string; why: string }> = [];
+    const outcomes = new Map<string, Array<Error | undefined>>([
+      ["route", [new RouteMissingError("run store /runs/put: route missing (older state Worker)")]],
+      ["perm", [new PermanentStoreError("run store /runs/put: HTTP 400 bad record")]],
+      [
+        "spent",
+        [new TransientStoreError("HTTP 503"), new TransientStoreError("HTTP 503"), new TransientStoreError("HTTP 503")],
+      ],
+      ["late", [new TransientStoreError("HTTP 503"), new TransientStoreError("HTTP 503"), undefined]],
+    ]);
+    const puts: string[] = [];
+    const sink = {
+      put: async (r: RunRecord) => {
+        puts.push(r.id);
+        const next = outcomes.get(r.id)?.shift();
+        if (next instanceof Error) throw next;
+        return OK;
+      },
+      abandoned: (r: RunRecord, why: string) => void abandoned.push({ id: r.id, why }),
+    };
+    const h = harness([]);
+    for (const id of ["route", "perm", "spent", "late"]) h.writer.write(record(id), { via: sink });
+    await h.writer.settled();
+    expect(puts.filter((p) => p === "spent")).toHaveLength(3);
+    expect(puts.filter((p) => p === "late")).toHaveLength(3); // the third attempt landed: no word
+    expect(abandoned).toEqual([
+      { id: "route", why: "run store /runs/put: route missing (older state Worker)" },
+      { id: "perm", why: "run store /runs/put: HTTP 400 bad record" },
+      { id: "spent", why: "not persisted after 3 attempts: HTTP 503" },
+    ]);
+    expect(h.writer.failures()).toBe(3);
+  });
+
+  // The one path where the writer's give-up is not its own: something outside
+  // `attemptAll`'s stop rules rejected — the injected sleep here, a hook — and
+  // the defensive catch is what remains. It says the final word too, so a
+  // finish the sink named on the first put never stays pending for a writer
+  // that is done with it.
+  it("a rejection that escapes the give-up rules — the injected sleep throwing — still says `abandoned` from write()'s defensive catch, with why", async () => {
+    const abandoned: Array<{ id: string; why: string }> = [];
+    let puts = 0;
+    const sink = {
+      put: async () => {
+        puts++;
+        throw new TransientStoreError("HTTP 503");
+      },
+      abandoned: (r: RunRecord, why: string) => void abandoned.push({ id: r.id, why }),
+    };
+    const warnings: string[] = [];
+    const writer = createRunHistoryWriter({
+      store: { put: async () => OK, abandoned: () => {} },
+      warn: (m) => warnings.push(m),
+      sleep: async () => {
+        throw new Error("timer broke");
+      },
+    });
+    writer.write(record("run-x"), { via: sink });
+    await writer.settled();
+    expect(puts).toBe(1); // the retry never came: the backoff itself threw
+    expect(abandoned).toEqual([{ id: "run-x", why: "writer failed unexpectedly: timer broke" }]);
+    expect(writer.failures()).toBe(1);
+    expect(warnings.some((w) => w.includes("writer failed unexpectedly: timer broke"))).toBe(true);
+  });
+
+  // The final word is required on the type, not optional: a sink that kept
+  // something in flight and forgot it would park its waiters silently. The
+  // proof is the compiler's — a wordless sink does not build (`@ts-expect-error`
+  // fails the typecheck if the error ever goes away) — and a store, which keeps
+  // nothing in flight, answers no-op.
+  it("a sink without the final word does not compile: `abandoned` is required on RecordSink, and a store answers it no-op", () => {
+    // @ts-expect-error — `abandoned` is required (docs/reference/specs/run-history.md item 54)
+    const wordless: RecordSink = { put: async () => OK };
+    void wordless;
+    const store: RecordSink = new InMemoryRunStore();
+    expect(typeof store.abandoned).toBe("function");
+    expect(() => store.abandoned(record("any"), "why")).not.toThrow();
   });
 
   it("a successful put is one write, pending back to 0, onPersisted called with the id", async () => {
@@ -165,6 +253,7 @@ describe("createRunHistoryWriter", () => {
         viaPuts.push(r);
         if (fails-- > 0) throw new TransientStoreError("HTTP 503");
       },
+      abandoned: () => {},
     };
     h.writer.write(record("run-l"), { via });
     expect(h.writer.pending()).toBe(1);
@@ -305,7 +394,7 @@ describe("createRunHistoryWriter", () => {
 describe("NullRunHistoryWriter — the writer of a process without run history", () => {
   it("drops every write (final, provisional, via a sink), never counts pending or failures, is never degraded, and settles at once", async () => {
     const writer = new NullRunHistoryWriter();
-    const sink = { put: async () => ({}) };
+    const sink = { put: async () => ({}), abandoned: () => {} };
     writer.write(record("a"));
     writer.write(record("b"), { provisional: true });
     writer.write(record("c"), { via: sink });

@@ -314,6 +314,7 @@ function ledgerBackedStore(ledger: InMemoryRunLedger, store: RunStore): RunStore
   };
   return {
     put: (record, trace) => store.put(record, trace),
+    abandoned: () => {},
     get: async (id) => {
       await drained();
       return store.get(id);
@@ -2667,6 +2668,7 @@ describe("review post-step", () => {
           order.push(`record:${r.status}`);
           return inner.put(r);
         },
+        abandoned: () => {},
         get: (id) => inner.get(id),
         getSummary: (id) => inner.getSummary(id),
         list: (o) => inner.list(o),
@@ -7808,6 +7810,7 @@ describe("run history write path", () => {
     let putsAtReply = -1;
     const puts: RunRecord[] = [];
     const store = {
+      abandoned: () => {}, // a store keeps nothing in flight: the writer's final word is a no-op
       put: async (r: RunRecord) => {
         puts.push(r);
         return { ok: true as const, retained: 1, stored: true, rewritten: false };
@@ -7831,6 +7834,7 @@ describe("run history write path", () => {
     const inner = new InMemoryRunStore();
     let fails = 2;
     const store = {
+      abandoned: () => {}, // a store keeps nothing in flight: the writer's final word is a no-op
       put: async (r: RunRecord) => {
         if (fails-- > 0) throw new TransientStoreError("run store /runs/put HTTP 503");
         return inner.put(r);
@@ -7848,6 +7852,7 @@ describe("run history write path", () => {
   it("a 413 (PermanentStoreError) is not retried: one attempt, one warn, failures +1; the reply is unaffected", async () => {
     let attempts = 0;
     const store = {
+      abandoned: () => {}, // a store keeps nothing in flight: the writer's final word is a no-op
       put: async () => {
         attempts++;
         throw new PermanentStoreError("run store /runs/put HTTP 413");
@@ -7867,6 +7872,7 @@ describe("run history write path", () => {
   it("a 404 (RouteMissingError) logs once, is not retried, sets degraded; the runs are still counted", async () => {
     let attempts = 0;
     const store = {
+      abandoned: () => {}, // a store keeps nothing in flight: the writer's final word is a no-op
       put: async () => {
         attempts++;
         throw new RouteMissingError("run store /runs/put HTTP 404");
@@ -7897,6 +7903,7 @@ describe("run history write path", () => {
       const inner = new InMemoryRunStore();
       const puts: RunRecord[] = [];
       const store = {
+        abandoned: () => {}, // a store keeps nothing in flight: the writer's final word is a no-op
         put: async (r: RunRecord) => {
           puts.push(r);
           return inner.put(r);
@@ -7942,6 +7949,7 @@ describe("run history write path", () => {
       const registry = new RunRegistry({ genId: () => "run-h", genToken: () => "tok" });
       let n = 0;
       const store = {
+        abandoned: () => {}, // a store keeps nothing in flight: the writer's final word is a no-op
         put: async () => {
           // The tombstone put succeeds; the finish put is permanently lost.
           if (++n === 2) throw new PermanentStoreError("run store /runs/put HTTP 413");
@@ -8967,7 +8975,7 @@ workspaceDir: __WORKDIR__
     deps.runLedger = createLedgerWriteThrough({
       ledger,
       gen: "gen-ship",
-      fallback: { put: async (r) => void fallbackPuts.push(r.id) },
+      fallback: { put: async (r) => void fallbackPuts.push(r.id), abandoned: () => {} },
       warn: () => {},
     });
     let phaseAtReply: string | undefined;
@@ -9521,7 +9529,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     deps.runLedger = createLedgerWriteThrough({
       ledger,
       gen: over.gen ?? "gen-T",
-      fallback: { put: async (r) => void fallbackPuts.push(r.id) },
+      fallback: { put: async (r) => void fallbackPuts.push(r.id), abandoned: () => {} },
       warn: (m) => warnings.push(m),
     });
     return { deps, registry, store, ledger, writer, warnings, fallbackPuts };
@@ -10975,7 +10983,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     deps.runLedger = createLedgerWriteThrough({
       ledger,
       gen: "gen-T",
-      fallback: { put: async () => {} },
+      fallback: { put: async () => {}, abandoned: () => {} },
       warn: () => {},
     });
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
@@ -11405,7 +11413,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     deps.runLedger = createLedgerWriteThrough({
       ledger,
       gen: "gen-T",
-      fallback: { put: async () => {} },
+      fallback: { put: async () => {}, abandoned: () => {} },
       warn: () => {},
     });
     deps.admission = new ThreadAdmission();
@@ -11442,6 +11450,202 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       "finish run-2",
     ]);
     expect(inner.finished.get("run-1")?.status).toBe("failed");
+    expect(inner.finished.get("run-2")).toMatchObject({ status: "completed", threadKey: "slack:CX:1.0" });
+    expect(
+      inner.finished.get("run-2")!.events.filter((e) => e.type === "run_note" && e.kind === "ledger_untracked"),
+    ).toEqual([]);
+    expect(inner.live.size).toBe(0);
+  });
+
+  // The other exit before `open`: the reservation is made, then the setup
+  // fails — here the MCP discovery throws — while follow-ups were queued
+  // during it. Nobody is finishing that row, so nothing could be waited for;
+  // it is abandoned before the thread is settled, and the fresh turn for those
+  // follow-ups claims a free thread.
+  it("a never-promoted reservation is abandoned before the thread is settled: the fresh turn for follow-ups queued during a setup that failed before open claims a free thread and is tracked, with no untracked note", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const order: string[] = [];
+    const ledger = new Proxy(inner, {
+      get(target, prop) {
+        if (prop === "abandon")
+          return async (runId: string, gen: string) => {
+            order.push(`abandon ${runId}`);
+            return target.abandon(runId, gen);
+          };
+        if (prop === "claim")
+          return async (req: ClaimRequest) => {
+            const result = await target.claim(req);
+            order.push(`claim ${req.runId} ${result.ok ? "ok" : result.reason}`);
+            return result;
+          };
+        if (prop === "finish")
+          return async (runId: string, gen: string, record: RunRecord) => {
+            order.push(`finish ${runId}`);
+            return target.finish(runId, gen, record);
+          };
+        const v = Reflect.get(target, prop) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    }) as InMemoryRunLedger;
+    // MCP discovery: the first run's waits for the test and then fails; the fresh turn's answers at once.
+    let discoveries = 0;
+    let onFirst!: () => void;
+    let failFirst!: () => void;
+    const firstStarted = new Promise<void>((r) => (onFirst = r));
+    const failed = new Promise<never>((_, reject) => (failFirst = () => reject(new Error("mcp discovery exploded"))));
+    class GatedMcp extends NullMcpToolSource {
+      override async toolsFor(agentName: string, caller: { userId: string; channelId?: string }) {
+        if (discoveries++ === 0) {
+          onFirst();
+          return failed;
+        }
+        return super.toolsFor(agentName, caller);
+      }
+    }
+    const provider = capturingProvider("answer 2");
+    let n = 0;
+    const registry = new RunRegistry({ genId: () => `run-${++n}`, genToken: () => `tok-${n}` });
+    const writer = createRunHistoryWriter({
+      store: new InMemoryRunStore(),
+      warn: () => {},
+      onPersisted: (id) => registry.markPersisted(id),
+      sleep: async () => {},
+    });
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.runHistoryWriter = writer;
+    deps.mcp = new GatedMcp();
+    deps.runLedger = createLedgerWriteThrough({
+      ledger,
+      gen: "gen-T",
+      fallback: { put: async () => {}, abandoned: () => {} },
+      warn: () => {},
+    });
+    deps.admission = new ThreadAdmission();
+    const a = fakeIO();
+    const run = dispatch(
+      deps,
+      { ...msg("write the report"), sourceUrl: "https://slack.example/p2", userName: "ux" },
+      a.io,
+    );
+    await firstStarted; // reserved — run-1's row is live — and the setup still in flight
+    expect(inner.live.has("run-1")).toBe(true);
+    const b = fakeIO();
+    await dispatch(
+      deps,
+      { ...msg("and also the numbers", "slack:UY"), sourceUrl: "https://slack.example/p2", userName: "uy" },
+      b.io,
+    );
+    expect(b.replies[0]).toMatch(/^↪/); // steered into the run being set up
+    failFirst();
+    const outcome = await run;
+    await writer.settled();
+    expect(outcome.status).toBe("failed");
+    expect(a.replies.some((r) => r.includes("mcp discovery exploded"))).toBe(true);
+    // The follow-up was not lost: it ran as its own turn, on its own sender's handle…
+    expect(b.replies.at(-1)).toBe("answer 2");
+    // …and its reservation found the thread free: run-1's row was abandoned BEFORE the settle handed the follow-up on.
+    expect(order.indexOf("abandon run-1")).toBeLessThan(order.indexOf("claim run-2 ok"));
+    expect(order.filter((o) => o.startsWith("claim run-2"))).toEqual(["claim run-2 ok", "claim run-2 ok"]);
+    expect(inner.live.has("run-1")).toBe(false);
+    expect(inner.finished.has("run-1")).toBe(false); // never started: no record of it
+    expect(inner.finished.get("run-2")).toMatchObject({ status: "completed", threadKey: "slack:CX:1.0" });
+    expect(
+      inner.finished.get("run-2")!.events.filter((e) => e.type === "run_note" && e.kind === "ledger_untracked"),
+    ).toEqual([]);
+    expect(inner.live.size).toBe(0);
+  });
+
+  // The ordering above holds only when the ledger answers the abandon. When it
+  // does not — one transient — the row stands as this generation's own dead
+  // reservation, and the fresh turn's claim meets it: the write-through knows
+  // the row is its own (reserved here, promoted never, driven by nobody),
+  // abandons it again from the claim and claims once more.
+  it("a never-promoted reservation whose abandon failed transiently is abandoned again by the next claim on the thread: the fresh turn is still tracked, with no untracked note", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const order: string[] = [];
+    let abandonFailures = 1;
+    const ledger = new Proxy(inner, {
+      get(target, prop) {
+        if (prop === "abandon")
+          return async (runId: string, gen: string) => {
+            if (abandonFailures-- > 0) {
+              order.push(`abandon ${runId} threw`);
+              throw new TransientStoreError("run ledger /runs/abandon: HTTP 503");
+            }
+            order.push(`abandon ${runId}`);
+            return target.abandon(runId, gen);
+          };
+        if (prop === "claim")
+          return async (req: ClaimRequest) => {
+            const result = await target.claim(req);
+            if (req.runId !== "run-1") order.push(`claim ${req.runId} ${result.ok ? "ok" : result.reason}`);
+            return result;
+          };
+        const v = Reflect.get(target, prop) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    }) as InMemoryRunLedger;
+    let discoveries = 0;
+    let onFirst!: () => void;
+    let failFirst!: () => void;
+    const firstStarted = new Promise<void>((r) => (onFirst = r));
+    const failed = new Promise<never>((_, reject) => (failFirst = () => reject(new Error("mcp discovery exploded"))));
+    class GatedMcp extends NullMcpToolSource {
+      override async toolsFor(agentName: string, caller: { userId: string; channelId?: string }) {
+        if (discoveries++ === 0) {
+          onFirst();
+          return failed;
+        }
+        return super.toolsFor(agentName, caller);
+      }
+    }
+    const provider = capturingProvider("answer 2");
+    let n = 0;
+    const registry = new RunRegistry({ genId: () => `run-${++n}`, genToken: () => `tok-${n}` });
+    const writer = createRunHistoryWriter({
+      store: new InMemoryRunStore(),
+      warn: () => {},
+      onPersisted: (id) => registry.markPersisted(id),
+      sleep: async () => {},
+    });
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.runHistoryWriter = writer;
+    deps.mcp = new GatedMcp();
+    deps.runLedger = createLedgerWriteThrough({
+      ledger,
+      gen: "gen-T",
+      fallback: { put: async () => {}, abandoned: () => {} },
+      warn: () => {},
+    });
+    deps.admission = new ThreadAdmission();
+    const a = fakeIO();
+    const run = dispatch(
+      deps,
+      { ...msg("write the report"), sourceUrl: "https://slack.example/p2", userName: "ux" },
+      a.io,
+    );
+    await firstStarted;
+    const b = fakeIO();
+    await dispatch(
+      deps,
+      { ...msg("and also the numbers", "slack:UY"), sourceUrl: "https://slack.example/p2", userName: "uy" },
+      b.io,
+    );
+    expect(b.replies[0]).toMatch(/^↪/);
+    failFirst();
+    await run;
+    await writer.settled();
+    expect(b.replies.at(-1)).toBe("answer 2");
+    // The finally's abandon threw; the fresh turn's claim met the dead row, abandoned it again, and claimed once more.
+    expect(order.slice(0, 4)).toEqual([
+      "abandon run-1 threw",
+      "claim run-2 thread-live",
+      "abandon run-1",
+      "claim run-2 ok",
+    ]);
+    expect(inner.live.has("run-1")).toBe(false);
     expect(inner.finished.get("run-2")).toMatchObject({ status: "completed", threadKey: "slack:CX:1.0" });
     expect(
       inner.finished.get("run-2")!.events.filter((e) => e.type === "run_note" && e.kind === "ledger_untracked"),
@@ -11523,7 +11727,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     const notes = (stored?.events ?? []).filter((e) => e.type === "run_note" && e.kind === "ledger_untracked");
     expect(notes).toHaveLength(1);
     expect((notes[0] as { summary: string }).summary).toBe(
-      "not tracked by the run ledger: run run-1, whose finish was in flight in this process, still holds the thread's row: its finish did not land (run ledger /runs/finish: The operation was aborted due to timeout) — no handoff, resume or reclaim reaches this run; its record still reaches the store",
+      "not tracked by the run ledger: run run-1, whose finish was in flight in this process, still holds the thread's row: its finish did not land (not persisted after 3 attempts: run ledger /runs/finish: The operation was aborted due to timeout) — no handoff, resume or reclaim reaches this run; its record still reaches the store",
     );
   });
 
@@ -11699,7 +11903,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     deps.runLedger = createLedgerWriteThrough({
       ledger,
       gen: "gen-B",
-      fallback: { put: async () => {} },
+      fallback: { put: async () => {}, abandoned: () => {} },
       warn: () => {},
     });
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
@@ -12685,7 +12889,7 @@ workspaceDir: __WORKDIR__
     deps.runLedger = createLedgerWriteThrough({
       ledger,
       gen: "gen-B",
-      fallback: { put: async () => {} },
+      fallback: { put: async () => {}, abandoned: () => {} },
       warn: () => {},
     });
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
@@ -12712,7 +12916,7 @@ workspaceDir: __WORKDIR__
     deps.runLedger = createLedgerWriteThrough({
       ledger,
       gen: "gen-B",
-      fallback: { put: async () => {} },
+      fallback: { put: async () => {}, abandoned: () => {} },
       warn: () => {},
     });
     const { io, replies, statuses } = fakeIO();
@@ -12737,7 +12941,7 @@ workspaceDir: __WORKDIR__
     deps.runLedger = createLedgerWriteThrough({
       ledger,
       gen: "gen-B",
-      fallback: { put: async () => {} },
+      fallback: { put: async () => {}, abandoned: () => {} },
       warn: () => {},
     });
     const { io, replies, statuses } = fakeIO();
@@ -13163,7 +13367,7 @@ workspaceDir: __WORKDIR__
     deps.runLedger = createLedgerWriteThrough({
       ledger,
       gen: "gen-C",
-      fallback: { put: async () => {} },
+      fallback: { put: async () => {}, abandoned: () => {} },
       warn: () => {},
     });
     deps.runs = createRunsService({ registry, store: ledgerBackedStore(ledger, store), ledger });
@@ -13369,7 +13573,7 @@ workspaceDir: __WORKDIR__
     t.deps.runLedger = createLedgerWriteThrough({
       ledger,
       gen: "gen-P",
-      fallback: { put: async () => {} },
+      fallback: { put: async () => {}, abandoned: () => {} },
       warn: () => {},
     });
     t.deps.runs = createRunsService({ registry: t.registry, store: t.store, ledger });
@@ -14275,7 +14479,7 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
       deps.runLedger = createLedgerWriteThrough({
         ledger,
         gen: "gen-C",
-        fallback: { put: async () => {} },
+        fallback: { put: async () => {}, abandoned: () => {} },
         warn: () => {},
       });
       deps.runs = createRunsService({ registry, store: ledgerBackedStore(ledger, store), ledger });
@@ -14719,7 +14923,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     deps.runLedger = createLedgerWriteThrough({
       ledger,
       gen: "gen-S",
-      fallback: { put: async () => {} },
+      fallback: { put: async () => {}, abandoned: () => {} },
       warn: (m) => warnings.push(m),
     });
     deps.harness = {

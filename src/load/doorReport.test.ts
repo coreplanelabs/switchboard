@@ -147,6 +147,7 @@ describe("doorReport — hand-backs, the pastes that followed and the rate, per 
     const store = new InMemoryRunStore({ now: () => NOW });
     const broken: RunStore = {
       put: (record) => store.put(record),
+      abandoned: () => {},
       get: (id) => store.get(id),
       getSummary: (id) => store.getSummary(id),
       list: async () => {

@@ -18,7 +18,7 @@ import type { ChatMessage } from "../chatMessage.js";
 import type { ToolDef } from "../provider.js";
 import type { RunEvent } from "../runEvents.js";
 import type { RunRecord, RunSession } from "../runRecord.js";
-import type { TraceOptions } from "../trace/types.js";
+import type { RecordSink } from "../runHistoryWriter.js";
 import type { AssembledTranscript } from "./transcript.js";
 import type { FenceResult, Notepad, SessionHit } from "./types.js";
 import { PermanentStoreError, RouteMissingError } from "../runStoreWorker.js";
@@ -54,19 +54,10 @@ export function mintGeneration(now: () => number = Date.now, random: () => strin
   return gen;
 }
 
-/** What a caller of `RecordSink.put` says beside the trace (item 54): with
- *  `retryFollows`, a transient failure of this put will be tried again by the
- *  caller (the history writer's ladder), so the run's finish stays named as in
- *  flight through the backoff; without it, the failure is the attempt
- *  sequence's end and the name goes. */
-export interface PutOptions extends TraceOptions {
-  retryFollows?: boolean;
-}
-
-/** Where a finished record goes: the ledger's `finish`, or the plain store. */
-export interface RecordSink {
-  put(record: RunRecord, opts?: PutOptions): Promise<unknown>;
-}
+/** Where a finished record goes: the ledger's `finish`, or the plain store —
+ *  the history writer's own sink contract, `put` and the caller's final
+ *  `abandoned` word (item 54). */
+export type { RecordSink };
 
 export interface LedgerWriteThroughOptions {
   ledger: RunLedger;
@@ -140,15 +131,19 @@ export interface ReserveRunRequest {
   /** With `request` set: the message in the durable inbox row's shape. */
   meta: LiveRunMeta;
   card?: CardHandle | null;
-  /** The reservation waited for a finish in flight in this process — the
-   *  thread's live row was a run this process was closing — and the row still
-   *  stood afterwards, so the run goes on untracked (item 54). `why` names
-   *  that run and how its finish ended, for the run's own record: the warning
-   *  in the bot log is not the only witness. */
-  onUntracked?: (why: string) => void;
   onStop?: (mode: StopMode) => void;
   onFenced?: () => void;
 }
+
+/** How a reservation ended (item 42; item 54 for `untracked`): the tracked run
+ *  with its heartbeat running; `untracked` with why — the thread's row is a run
+ *  this process was closing and still stood after its finish settled, or is
+ *  another run's for real, or the state Worker has no run-ledger routes, or the
+ *  claim kept failing — for the run's own record, the warning in the bot log
+ *  not being the only witness; `fenced` — this run's row is another
+ *  generation's; `off` — the process has no ledger, nothing to say. */
+export type ReserveOutcome =
+  { kind: "tracked"; run: LedgerRun } | { kind: "untracked"; why: string } | { kind: "fenced" } | { kind: "off" };
 
 /** `finishing()`'s answer: `ok` — reply; `fenced` — another generation owns
  *  the run, do NOT reply (it will); `unavailable` — the ledger could not be
@@ -220,10 +215,10 @@ export interface AdoptRunRequest {
 export interface LedgerWriteThrough {
   readonly gen: string;
   /** Reserve the thread at admission (item 42): an `attaching` row with the
-   *  request and no prompt, its heartbeat running. `undefined` when the run is
-   *  not tracked (as `open`). The run is not resumable until `open` promotes
-   *  it; a reclaim of the row restarts the run from its request. */
-  reserve(req: ReserveRunRequest): Promise<LedgerRun | undefined>;
+   *  request and no prompt, its heartbeat running — or why not (`ReserveOutcome`).
+   *  The run is not resumable until `open` promotes it; a reclaim of the row
+   *  restarts the run from its request. */
+  reserve(req: ReserveRunRequest): Promise<ReserveOutcome>;
   /** Claim and seed. `undefined` when the run is not tracked: the thread has a
    *  live row already (another generation's — reclaim is the resume phase's),
    *  the routes are missing, or the claim kept failing — or, with a
@@ -277,8 +272,8 @@ export class NullLedgerWriteThrough implements LedgerWriteThrough {
     readonly gen: string,
     private readonly fallback: RecordSink,
   ) {}
-  async reserve(_req: ReserveRunRequest): Promise<LedgerRun | undefined> {
-    return undefined;
+  async reserve(_req: ReserveRunRequest): Promise<ReserveOutcome> {
+    return { kind: "off" };
   }
   async open(_req: OpenRunRequest): Promise<LedgerRun | undefined> {
     return undefined;
@@ -352,6 +347,11 @@ export class NullLedgerRun implements LedgerRun {
 /** Backoff before a retry: the claim gets both, a step or state write the first. */
 const RETRY_MS: readonly number[] = [200, 800];
 
+/** How many finishes landed in this process the write-through remembers
+ *  (item 54; the `landed` set): the newest ones, oldest out. A row naming an
+ *  older finish is a stale row and is untracked in one claim. */
+export const LANDED_MAX = 256;
+
 /** How a run's finish ended (item 54): the row went (`landed`), the ledger
  *  refused it and the record went to the plain store (`refused`), or the
  *  attempt sequence failed for good (`failed`, with the last error's words). */
@@ -369,15 +369,15 @@ interface Landing {
  *  54): the run's row still stood — or another run's row does now. */
 function untrackedWhy(awaited: string, live: { runId: string }, outcome: LandingOutcome): string {
   if (live.runId !== awaited)
-    return `the thread's live row belongs to run ${live.runId} now, not to run ${awaited}, whose finish this reservation waited for`;
-  const held = `run ${awaited}, whose finish was in flight in this process, still holds the thread's row`;
+    return `the thread's live row belongs to run ${live.runId} now, not to run ${awaited}, whose finish this process landed or was landing`;
+  const inFlight = `run ${awaited}, whose finish was in flight in this process, still holds the thread's row`;
   switch (outcome.kind) {
     case "failed":
-      return `${held}: its finish did not land (${outcome.why})`;
+      return `${inFlight}: its finish did not land (${outcome.why})`;
     case "refused":
-      return `${held}: the ledger refused its finish`;
+      return `${inFlight}: the ledger refused its finish`;
     case "landed":
-      return `${held}: its finish landed, yet the row still stands`;
+      return `run ${awaited}, whose finish landed in this process, still holds the thread's row: the row stands past its finish`;
   }
 }
 
@@ -401,20 +401,34 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
   const live = new Set<TrackedRun>();
   /** The finishes this process is landing right now, by run id (item 54): from
    *  the sink's first `put` to the outcome — landed, refused, or failed for
-   *  good. A claim answered `thread-live` claims once more: after awaiting the
-   *  named run's `settled` when it is here — an event, no timer of the
-   *  write-through's own — and at once when it is not, since the finish may
-   *  have landed in the moment between the answer and this read (a row that
-   *  is another run's for real costs that one more claim, then is untracked
-   *  as it always was). What bounds the wait is the
-   *  finish's own attempt sequence: every ledger call in an attempt (the state
-   *  flush, the append flush, the finish, the store fallback) aborts at the
-   *  client's `AbortSignal.timeout` (`RUN_STORE_TIMEOUT_MS`), and between the
-   *  history writer's attempts its fixed backoff — the entry stays through
-   *  that backoff because the writer says a retry follows (`PutOptions`); a
-   *  single `put` that fails without that word, or a permanent failure,
-   *  settles the entry as failed at once, so no waiter outlives its caller. */
+   *  good. A claim answered `thread-live` for a run named here awaits its
+   *  `settled` — an event, no timer of the write-through's own — then claims
+   *  once more. What bounds the wait is the finish's own attempt sequence:
+   *  every ledger call in an attempt (the state flush, the append flush, the
+   *  finish, the store fallback) aborts at the client's `AbortSignal.timeout`
+   *  (`RUN_STORE_TIMEOUT_MS`), and between the history writer's attempts its
+   *  fixed backoff; the entry lives until the caller's final word — the record
+   *  landed or was refused, or the caller said `abandoned` (the writer at its
+   *  give-up, a one-shot closer after its failed put) — so the sink never
+   *  re-derives a retry policy, and no waiter outlives its caller. */
   const landing = new Map<string, Landing>();
+  /** The runs whose finish landed in this process most recently (item 54): a
+   *  `thread-live` naming one of them is the moment between the answer and the
+   *  row's release, and is claimed once more at once; a row named neither here
+   *  nor in `landing` is another run's for real and is untracked in one claim,
+   *  as before. Capped at `LANDED_MAX`, oldest out (a `Set` keeps insertion
+   *  order): an entry covers only the moment after its finish, and a resident
+   *  roll finishes every live run within seconds, so the newest few hundred
+   *  hold far more than that window ever needs — where an uncapped set, like
+   *  the history writer's `finals`, would grow one id per finished run for the
+   *  process's life. */
+  const landed = new Set<string>();
+  /** This generation's reservations not yet promoted, finished or abandoned for
+   *  sure (item 42): a `thread-live` naming one of them, with no tracked run
+   *  driving it, is this process's own dead reservation whose abandon did not
+   *  reach the ledger — the claim abandons it again and claims once more
+   *  (item 54), so no dispatch ordering in the finally has to be right. */
+  const unpromoted = new Set<string>();
   const landingFor = (runId: string): Landing => {
     let entry = landing.get(runId);
     if (entry === undefined) {
@@ -428,6 +442,11 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
   const settleLanding = (runId: string, entry: Landing, outcome: LandingOutcome): void => {
     entry.resolve(outcome);
     if (landing.get(runId) === entry) landing.delete(runId);
+    if (outcome.kind === "landed") {
+      landed.delete(runId); // re-inserted as the newest
+      landed.add(runId);
+      while (landed.size > LANDED_MAX) landed.delete(landed.values().next().value!);
+    }
   };
 
   const routeMissing = (): void => {
@@ -438,7 +457,9 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     );
   };
 
-  type Claimed = { outcome: "ok"; session?: RunSession } | { outcome: "untracked" | "fenced" };
+  /** `untracked` carries why, in the words the run's own record gets (item 54). */
+  type Claimed =
+    { outcome: "ok"; session?: RunSession } | { outcome: "fenced" } | { outcome: "untracked"; why: string };
 
   /** `fenced`: the thread's row is THIS run under another generation — the
    *  reservation's lease lapsed and a reclaim took it (item 42); this process
@@ -449,19 +470,15 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
    *  run's log. The three requests are one claim: any failure retries them all. */
   async function claim(
     req: Omit<OpenRunRequest, "seed" | "reservation">,
-    opts: {
-      phase?: "attaching";
-      seed?: readonly ChatMessage[];
-      log?: { from: number; turns: number };
-      /** Told why when the claim waited for a finish in flight here and ended untracked all the same (item 54). */
-      onUntracked?: (why: string) => void;
-    } = {},
+    opts: { phase?: "attaching"; seed?: readonly ChatMessage[]; log?: { from: number; turns: number } } = {},
   ): Promise<Claimed> {
-    // The one re-claim made after a `thread-live` answer, and — when the named
-    // run's finish was in flight here — which run and how its finish ended,
-    // what the untracked note says.
+    // The one re-claim made after a `thread-live` naming a run this process
+    // finished or is finishing, and — when its finish was waited for — how
+    // that finish ended: what the untracked note says.
     let claimedAgain = false;
     let awaited: { runId: string; outcome: LandingOutcome } | undefined;
+    // This generation's own dead reservation met on the thread, abandoned again from here.
+    let reabandoned: { runId: string; failed?: string } | undefined;
     for (let attempt = 1; ; attempt++) {
       try {
         let session: RunSession | undefined;
@@ -499,40 +516,68 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           return session ? { outcome: "ok", session } : { outcome: "ok" };
         }
         if (result.live.runId === req.runId) return { outcome: "fenced" };
-        // The thread's live row is a run this process is closing (item 54): a
-        // restart from its request, or the fresh turn for its unconsumed
-        // follow-ups, is dispatched from that run's finally right after its
-        // finish was handed to the history writer, so this claim can reach the
-        // ledger ahead of that write. Claim once more: after the finish when it
-        // is in flight here — its `settled` in `landing`, an awaited event,
-        // bounded by the finish's own calls and the writer's backoff, never a
-        // timer of ours — and at once when it is not, since it may have landed
-        // in the moment between the answer and this read. The second answer is
-        // the last: a finish that failed or was refused leaves the row
-        // standing, and the run goes on untracked, as any other thread-live
-        // answer leaves it — said on the run's own record through
-        // `onUntracked` when a finish was waited for; a row that was another
-        // run's all along is untracked silently, as before.
+        // The thread's live row is a run this process is closing or has just
+        // closed (item 54): a restart from its request, or the fresh turn for
+        // its unconsumed follow-ups, is dispatched from that run's finally right
+        // after its finish was handed to the history writer, so this claim can
+        // reach the ledger ahead of that write — or in the moment after it
+        // landed. Claim once more, once: after the finish when it is in flight
+        // here (its `settled` in `landing`, an awaited event, bounded by the
+        // finish's own calls, the writer's backoff and the caller's final word,
+        // never a timer of ours), at once when it landed here already
+        // (`landed`). A row named by neither is another run's for real, and
+        // the claim is untracked in one round trip, as it always was. The
+        // second answer is the last: a finish that failed or was refused
+        // leaves the row standing, and the run goes on untracked, as any other
+        // thread-live answer leaves it — every exit saying why, for the run's
+        // own record.
         if (!claimedAgain) {
-          claimedAgain = true;
           const inFlight = landing.get(result.live.runId);
-          if (inFlight !== undefined) awaited = { runId: result.live.runId, outcome: await inFlight.settled };
-          attempt--; // the re-claim is not a failed attempt
-          continue;
+          if (inFlight !== undefined) {
+            claimedAgain = true;
+            awaited = { runId: result.live.runId, outcome: await inFlight.settled };
+            attempt--; // the re-claim is not a failed attempt
+            continue;
+          }
+          if (landed.has(result.live.runId)) {
+            claimedAgain = true;
+            awaited = { runId: result.live.runId, outcome: { kind: "landed" } };
+            attempt--;
+            continue;
+          }
+          // This generation's own reservation that never started, whose abandon
+          // did not reach the ledger (item 42): nobody drives it here, nothing is
+          // landing for it — abandon it again from here, then claim once more.
+          if (unpromoted.has(result.live.runId) && ![...live].some((r) => r.runId === result.live.runId)) {
+            claimedAgain = true;
+            reabandoned = { runId: result.live.runId };
+            try {
+              await ledger.abandon(result.live.runId, gen);
+              unpromoted.delete(result.live.runId); // gone, or another generation's: nothing of ours stands
+            } catch (err) {
+              reabandoned.failed = describe(err);
+            }
+            attempt--;
+            continue;
+          }
         }
-        if (awaited !== undefined) opts.onUntracked?.(untrackedWhy(awaited.runId, result.live, awaited.outcome));
-        warn(
-          `[ledger] ${req.threadKey} not tracked: the thread's live row belongs to run ${result.live.runId} (started ${new Date(result.live.startedAt).toISOString()}) — reclaim is the resume phase's`,
-        );
-        return { outcome: "untracked" };
+        const why =
+          awaited !== undefined
+            ? untrackedWhy(awaited.runId, result.live, awaited.outcome)
+            : reabandoned !== undefined && reabandoned.runId === result.live.runId
+              ? `run ${reabandoned.runId} is this generation's own reservation that never started and still holds the thread's row: its abandon did not reach the ledger${reabandoned.failed !== undefined ? ` (${reabandoned.failed})` : ""}`
+              : `the thread's live row belongs to run ${result.live.runId} (started ${new Date(result.live.startedAt).toISOString()}), whose finish is not in flight in this process — reclaim is the resume phase's`;
+        warn(`[ledger] ${req.threadKey} not tracked: ${why}`);
+        return { outcome: "untracked", why };
       } catch (err) {
         if (err instanceof RouteMissingError) {
           routeMissing();
-          return { outcome: "untracked" };
+          return { outcome: "untracked", why: "the state Worker has no run-ledger routes" };
         }
         if (err instanceof PermanentStoreError || attempt >= claimAttempts) {
-          warn(`[ledger] ${req.threadKey} not tracked: claim failed after ${attempt} attempt(s): ${describe(err)}`);
-          return { outcome: "untracked" };
+          const why = `the claim failed after ${attempt} attempt(s): ${describe(err)}`;
+          warn(`[ledger] ${req.threadKey} not tracked: ${why}`);
+          return { outcome: "untracked", why };
         }
         await sleep(RETRY_MS[Math.min(attempt, RETRY_MS.length) - 1]);
       }
@@ -650,24 +695,23 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     }
 
     readonly sink: RecordSink = {
-      put: async (plain, opts) => {
+      put: async (plain) => {
         this.finished = true; // no event or state write after this point
         live.delete(this);
         // Named in `landing` from the first attempt to the outcome, so a claim
         // meeting this run's row can await it and say why the row stood (item
-        // 54). A transient failure the caller will retry keeps the name through
-        // the backoff; a permanent one, or a caller who will not try again,
-        // settles it as failed now — a waiter never outlives its caller.
+        // 54). A failure here settles nothing: the caller decides whether it
+        // tries again (the history writer's ladder) or is done — and says so
+        // with `abandoned`, which is the one word that settles a failed finish.
         const entry = landingFor(this.runId);
-        try {
-          const { value, outcome } = await this.land(plain);
-          settleLanding(this.runId, entry, outcome);
-          return value;
-        } catch (err) {
-          if (opts?.retryFollows !== true || err instanceof PermanentStoreError)
-            settleLanding(this.runId, entry, { kind: "failed", why: describe(err) });
-          throw err;
-        }
+        const { value, outcome } = await this.land(plain);
+        settleLanding(this.runId, entry, outcome);
+        return value;
+      },
+      abandoned: (record, why) => {
+        if (record.id !== this.runId) return;
+        const entry = landing.get(this.runId);
+        if (entry !== undefined) settleLanding(this.runId, entry, { kind: "failed", why });
       },
     };
 
@@ -866,12 +910,16 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         const result = await ledger.abandon(this.runId, gen);
         // `unknown-run` is silence: the row is already gone (a stale
         // reservation never had one of its own); `fenced` names a row another
-        // generation drives now.
+        // generation drives now. Either way nothing of ours stands to abandon.
+        unpromoted.delete(this.runId);
         if (!result.ok && result.reason === "fenced")
           warn(`[ledger] ${this.threadKey} abandon refused (fenced) — the row is another generation's`);
       } catch (err) {
+        // The row may still stand as this generation's dead reservation: it stays
+        // in `unpromoted`, and the next claim that meets it abandons it again
+        // (item 54) — no dispatch ordering has to be right for that.
         warn(
-          `[ledger] ${this.threadKey} abandon failed: ${describe(err)} — the sweep will take the row once its lease lapses`,
+          `[ledger] ${this.threadKey} abandon failed: ${describe(err)} — the next claim on the thread abandons the row again, or the sweep takes it once its lease lapses`,
         );
       }
     }
@@ -914,15 +962,17 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
   return {
     gen,
     async reserve(req) {
-      const claimed = await claim(
-        { ...req, system: "", tools: [], state: {} },
-        { phase: "attaching", ...(req.onUntracked !== undefined ? { onUntracked: req.onUntracked } : {}) },
-      );
-      if (claimed.outcome !== "ok") return undefined;
+      const claimed = await claim({ ...req, system: "", tools: [], state: {} }, { phase: "attaching" });
+      // Every untracked exit says why (item 54): the row a run this process
+      // closed still stood, another run's row, no routes, a claim that kept
+      // failing — for the run's own record, not the bot log alone.
+      if (claimed.outcome === "untracked") return { kind: "untracked", why: claimed.why };
+      if (claimed.outcome === "fenced") return { kind: "fenced" };
       const run = new TrackedRun(req);
       run.startHeartbeat();
       live.add(run);
-      return run;
+      unpromoted.add(req.runId);
+      return { kind: "tracked", run };
     },
     async open(req) {
       const reserved = req.reservation;
@@ -936,6 +986,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         // goes on untracked, as an open without a reservation would.
         if (!reserved.tracked()) return undefined;
         const claimed = await claim(req, seed ? { seed, ...(req.seed?.log ? { log: req.seed.log } : {}) } : {});
+        unpromoted.delete(reserved.runId); // promoted, fenced or stale: no longer a reservation to abandon
         if (claimed.outcome === "fenced") {
           reserved.detach("promotion refused (fenced)");
           return undefined;

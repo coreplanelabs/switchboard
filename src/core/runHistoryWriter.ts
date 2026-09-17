@@ -1,5 +1,4 @@
 import type { RunRecord } from "./runRecord.js";
-import type { RunStore } from "./runStore.js";
 import type { Span, TraceOptions } from "./trace/types.js";
 import { PermanentStoreError, RouteMissingError } from "./runStoreWorker.js";
 
@@ -89,16 +88,34 @@ export class NullRunHistoryWriter implements RunHistoryWriter {
   }
 }
 
-/** What the writer tells a sink beside the trace: whether it will try this put
- *  again on a transient failure (docs/reference/specs/run-history.md item 54 —
- *  the ledger's write-through keeps a finish named as in flight through the
- *  backoff on that word). */
-export interface SinkPutOptions extends TraceOptions {
-  retryFollows?: boolean;
+/** Where a record can be written: the store, or a sink a caller routes one
+ *  write through (the ledger's write-through, for a tracked run's finish). A
+ *  `RunStore` is one. `abandoned` is the caller's final word to a sink that
+ *  keeps something in flight per record (docs/reference/specs/run-history.md
+ *  item 54): this record will not be put again — the writer says it at its
+ *  final give-up (a missing route, a permanent failure, the attempts spent),
+ *  a one-shot caller right after its own failed put — so whatever the sink
+ *  named as in flight for it settles, and no waiter outlives its caller.
+ *  Required, not optional: a sink that kept something in flight and forgot
+ *  the word would park its waiters silently, so the compiler asks every sink
+ *  for it — a store keeps nothing in flight per record and answers no-op. */
+export interface RecordSink {
+  put(record: RunRecord, trace?: TraceOptions): Promise<unknown>;
+  abandoned(record: RunRecord, why: string): void;
 }
 
-/** Where a record can be written: the store, or a sink a caller routes one write through. */
-export type RecordSink = Pick<RunStore, "put"> | { put(record: RunRecord, opts?: SinkPutOptions): Promise<unknown> };
+/** One put with no retry, the caller's final word said for it (docs/reference/specs/
+ *  run-history.md item 54): on a failure the sink hears `abandoned` before the
+ *  error is rethrown, so a caller that puts a record once — the reclaim's
+ *  closers — cannot forget the word. */
+export async function putOnce(sink: RecordSink, record: RunRecord): Promise<unknown> {
+  try {
+    return await sink.put(record);
+  } catch (err) {
+    sink.abandoned(record, describe(err));
+    throw err;
+  }
+}
 
 export interface RunHistoryWriterOptions {
   store: RecordSink;
@@ -148,35 +165,43 @@ export function createRunHistoryWriter(opts: RunHistoryWriterOptions): RunHistor
     span: Span | undefined,
   ): Promise<void> => {
     const attempts = RUN_HISTORY_RETRY_DELAYS_MS.length + 1;
+    // The writer's final word to the sink (run-history item 54): this record is
+    // not put again, so a finish the sink kept named as in flight settles now.
+    const giveUp = (why: string): void => {
+      failures++;
+      try {
+        sink.abandoned(record, why);
+      } catch (err) {
+        opts.warn(`[run-history] abandoned hook failed for ${record.id}: ${describe(err)}`);
+      }
+    };
     for (let attempt = 1; ; attempt++) {
       // A provisional write stands down (silently — not a loss) the moment the
       // run's final record is enqueued; checked before every attempt so a
       // retry waking from backoff can never clobber the final record.
       if (flag?.superseded) return;
       try {
-        // The sink learns whether a transient failure here is the end of the
-        // sequence or a retry's beginning (item 54): the last attempt is final.
-        await sink.put(record, { ...(span ? { span } : {}), retryFollows: attempt < attempts });
+        await sink.put(record, span ? { span } : undefined);
         if (!flag) persisted(record.id);
         return;
       } catch (err) {
         if (err instanceof RouteMissingError) {
-          failures++;
           degraded = true;
           if (!routeMissingLogged) {
             routeMissingLogged = true;
             opts.warn(ROUTE_MISSING_MESSAGE);
           }
+          giveUp(describe(err));
           return;
         }
         if (err instanceof PermanentStoreError) {
-          failures++;
           opts.warn(`[run-history] ${record.id} not persisted (permanent, not retried): ${describe(err)}`);
+          giveUp(describe(err));
           return;
         }
         if (attempt >= attempts) {
-          failures++;
           opts.warn(`[run-history] ${record.id} not persisted after ${attempts} attempts: ${describe(err)}`);
+          giveUp(`not persisted after ${attempts} attempts: ${describe(err)}`);
           return;
         }
         await sleep(jittered(RUN_HISTORY_RETRY_DELAYS_MS[attempt - 1]));
@@ -196,11 +221,20 @@ export function createRunHistoryWriter(opts: RunHistoryWriterOptions): RunHistor
         for (const f of provisionalFlags) if (f.id === record.id) f.superseded = true;
       }
       // attemptAll never rejects (every path returns), but a defensive catch
-      // keeps a bug here from surfacing as an unhandled rejection in a run.
-      const p: Promise<void> = attemptAll(record, flag, writeOpts?.via ?? opts.store, writeOpts?.span)
+      // keeps a bug here from surfacing as an unhandled rejection in a run —
+      // and says the final word (item 54): whatever escaped `giveUp` (the
+      // injected sleep, a hook), the sink must not keep this record's finish
+      // named as in flight for a caller that is done.
+      const sink = writeOpts?.via ?? opts.store;
+      const p: Promise<void> = attemptAll(record, flag, sink, writeOpts?.span)
         .catch((err: unknown) => {
           failures++;
           opts.warn(`[run-history] ${record.id} writer failed unexpectedly: ${describe(err)}`);
+          try {
+            sink.abandoned(record, `writer failed unexpectedly: ${describe(err)}`);
+          } catch (hookErr) {
+            opts.warn(`[run-history] abandoned hook failed for ${record.id}: ${describe(hookErr)}`);
+          }
         })
         .finally(() => {
           if (flag) provisionalFlags.delete(flag);

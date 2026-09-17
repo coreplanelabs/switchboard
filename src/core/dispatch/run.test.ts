@@ -81,7 +81,7 @@ class RecordingLedger extends NullLedgerWriteThrough {
   }
   override async open(req: OpenRunRequest): Promise<LedgerRun | undefined> {
     this.opened.push(req);
-    this.handle = new RecordingRun(req.runId, { put: async () => {} });
+    this.handle = new RecordingRun(req.runId, { put: async () => {}, abandoned: () => {} });
     return this.handle;
   }
 }
@@ -146,7 +146,7 @@ function setup() {
 describe("claimRun — the ledger claim once the prompt exists", () => {
   it("a reserved fresh run promotes its reservation: the row carries the identity, the prompt and tools verbatim, the seed, the card, and the hooks; every event from here on is mirrored", async () => {
     const { deps, ledger, registry, run, base } = setup();
-    const reserved = new NullLedgerRun("run-c", { put: async () => {} });
+    const reserved = new NullLedgerRun("run-c", { put: async () => {}, abandoned: () => {} });
     const out = await claimRun(deps, { ...base, reserved, resume: undefined, ledgerRun: undefined });
     expect(out).toBe(ledger.handle);
     expect(ledger.opened).toHaveLength(1);
@@ -180,7 +180,7 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
   // after a bot roll reads the plan's base back off the run's own events.
   it("a coordinator's child publishes its tag as a `coordinator_tag` event at the claim — instance, unit and base — mirrored onto the row; a resume republishes nothing", async () => {
     const { deps, ledger, base } = setup();
-    const reserved = new NullLedgerRun("run-c", { put: async () => {} });
+    const reserved = new NullLedgerRun("run-c", { put: async () => {}, abandoned: () => {} });
     const coordinator = { parentInstanceId: "plan-p-2", idempotencyKey: "plan-p-2:U16/1/coding", base: "feat/trunk" };
     await claimRun(deps, { ...base, reserved, resume: undefined, ledgerRun: undefined, coordinator });
     expect(ledger.handle!.events.map((e) => e.event)).toEqual([
@@ -188,7 +188,7 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
     ]);
 
     const resumed = setup();
-    const adopted = new RecordingRun("run-c", { put: async () => {} });
+    const adopted = new RecordingRun("run-c", { put: async () => {}, abandoned: () => {} });
     const resume = { lastSeq: 3 } as unknown as ResumeContext;
     await claimRun(resumed.deps, { ...resumed.base, reserved: undefined, resume, ledgerRun: adopted, coordinator });
     expect(adopted.events).toEqual([]);
@@ -204,7 +204,7 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
 
   it("a resume keeps the row it adopted at admission and mirrors only what this generation publishes", async () => {
     const { deps, ledger, registry, run, base } = setup();
-    const adopted = new RecordingRun("run-c", { put: async () => {} });
+    const adopted = new RecordingRun("run-c", { put: async () => {}, abandoned: () => {} });
     const resume = { lastSeq: 3 } as unknown as ResumeContext;
     const out = await claimRun(deps, { ...base, reserved: undefined, resume, ledgerRun: adopted });
     expect(out).toBe(adopted);
