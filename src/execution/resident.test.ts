@@ -1384,6 +1384,9 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     expect(first).toBeInstanceOf(ExecInfraError);
     expect((first as Error).message).toContain("The container just exited");
     expect((first as Error).message).toContain("down");
+    // A definite engine view: no wait clears it, so the strike is refused — the
+    // one more command judges at once although the words are the container's.
+    expect((first as ExecInfraError).reason).toBe("refused");
     const second = await executor.exec("git status").catch((e: unknown) => e);
     expect(second).toBeInstanceOf(ExecInfraError);
     expect(calls.map(route)).toEqual(["/exec", "/status", "/exec", "/status"]);
@@ -1394,6 +1397,7 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     const err = await new ResidentExecutor(OPTS).exec("true").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ExecInfraError);
     expect((err as Error).message).toContain("fetch failed");
+    expect((err as ExecInfraError).reason).toBe("refused");
   });
 
   it("a refusal that does not name a rolling container keeps the old rule: one strike, no probe", async () => {
@@ -1417,6 +1421,10 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     expect(settled).toBeInstanceOf(ExecInfraError);
     expect((settled as Error).message).toContain("waited 20s");
     expect((settled as Error).message).toContain("restoring");
+    // The resident was still coming back when this client's budget ran out: the
+    // harness's one more command keeps waiting on it (its own five-minute
+    // bound), so the strike is the resident unavailable, never a refusal.
+    expect((settled as ExecInfraError).reason).toBe("worker-unavailable");
     expect(calls.map(route)).toEqual(["/exec", "/status", "/status", "/status", "/status", "/status"]);
   });
 

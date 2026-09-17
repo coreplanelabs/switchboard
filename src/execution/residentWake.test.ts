@@ -4,6 +4,7 @@ import {
   WAKE_WAIT_MAX_MS,
   containerGoneMessage,
   isContainerRolling,
+  isWakeable,
   sandboxRestartedMessage,
   saysContainerGone,
   saysControlReset,
@@ -102,6 +103,28 @@ describe("wakeDecision: the engine view says whether the container is coming bac
     const decision = wakeDecision({ kind: "unreachable", error: "fetch failed", transport: true });
     expect(decision.wait).toBe(false);
     expect(decision.why).toContain("fetch failed");
+  });
+
+  it("isWakeable is the one decision on a state: wakeDecision's wait is exactly it for every engine view, so the client's answer typing (a 5xx carrying the state) and the wake path cannot diverge on the same fact — onboarding, the rebuild after a down transition, is not coming back within any wait on either", () => {
+    for (const probe of [
+      status("restoring", "rehydrating"),
+      status("warm"),
+      status("warm", "mirror-busy"),
+      status("refreshing", "fetching"),
+      status("degraded", "github-unreachable: fetch failed"),
+      status("degraded", "restore-interrupted: the runtime was replaced under the restore"),
+      status("degraded", "install-failed: exit 1"),
+      status("degraded", "disk-full: 0 KiB free"),
+      status("down", "no-snapshot: nothing to rehydrate from"),
+      status("onboarding"),
+      status("not-onboarded"),
+      status("unknown"),
+    ]) {
+      expect(isWakeable(probe.state, probe.reason), `${probe.state} (${probe.reason})`).toBe(wakeDecision(probe).wait);
+    }
+    expect(isWakeable("restoring", "")).toBe(true);
+    expect(isWakeable("onboarding", "")).toBe(false);
+    expect(isWakeable("down", "")).toBe(false);
   });
 });
 

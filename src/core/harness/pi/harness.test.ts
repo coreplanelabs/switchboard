@@ -2209,6 +2209,18 @@ describe("runPiHarness — the container replaced under a live run", () => {
     expect(word.container.removed).toEqual([]);
   });
 
+  it("the loop's wait ended by a hard stop aborts pi too — the one hardStop every end of a wait runs: exactly one abort line to pi, one stopped note in mode hard, the abort line as the answer", async () => {
+    const w = world({ sleep: async () => {} });
+    piMidCall(w, (c) => {
+      c.loseTransport("same", "vm-new", 50);
+      c.onDownProbe = () => w.control.requestStop("hard");
+    });
+    const answer = await w.start();
+    expect(answer).toBe(HARD_STOP_MESSAGE);
+    expect(w.container.stdin.filter((l) => /"type":"abort"/.test(l))).toHaveLength(1);
+    expect(noteKinds(w).filter((k) => k === "stopped")).toEqual(["stopped"]);
+  });
+
   it("the wait observes the run: a hard stop requested while the container is down ends the wait at once — no further probe, no pause waited out — and the run ends as the hard stop it was: the abort line as the answer, one stopped note in mode hard, the wait's note saying why it ended, pi ended", async () => {
     const slept: number[] = [];
     const w = world({ sleep: async (ms) => void slept.push(ms) });
@@ -2364,6 +2376,31 @@ describe("runPiHarness — the container replaced under a live run", () => {
     expect(w.container.stdin.slice(sentBefore).filter((l) => /"type":"abort"/.test(l))).toHaveLength(1);
     expect(noteKinds(w).filter((k) => k === "stopped")).toEqual(["stopped"]);
     expect(w.events.find((e) => e.type === "run_note" && e.kind === "stopped")).toMatchObject({ mode: "hard" });
+  });
+
+  it("the abort reaches pi even when the turn's own failed write spent the transport's chain: a follow-up turn whose prompt write failed on the FIFO with the container's transport words (the failure surfacing on the read), whose one more command found the container down once, and whose wait a hard stop ended — the abort is written directly, since a write queued behind the failure would never land", async () => {
+    const w = world();
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0) {
+        bashTurn(w, "call_0", "npm test", "ok");
+        finalTurn(c, "All green.");
+      }
+    });
+    const session = await w.open();
+    w.container.failSendType = {
+      type: "prompt",
+      error: new ExecInfraError(
+        "resident /exec: Peer closed WebSocket: 1006 WebSocket disconnected without sending Close frame.",
+        "answered",
+      ),
+    };
+    w.container.downForProbes = 1;
+    w.container.onDownProbe = () => w.control.requestStop("hard");
+    const sentBefore = w.container.stdin.length;
+    const answer = await session.followUp({ text: "one more", maxTurns: 4, maxMinutes: 5, toolContext: { executor } });
+    expect(answer).toBe(HARD_STOP_MESSAGE);
+    expect(w.container.stdin.slice(sentBefore).filter((l) => /"type":"abort"/.test(l))).toHaveLength(1);
+    expect(noteKinds(w).filter((k) => k === "stopped")).toEqual(["stopped"]);
   });
 
   it("after a follow-up turn's wait only the hard stop is read: a soft stop or the turn's deadline landing during the wait neither notes a stop nor steers a write-up into the dead transport — the turn fails with the transport error, named, and nothing is sent to pi", async () => {

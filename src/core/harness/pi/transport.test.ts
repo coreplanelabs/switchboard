@@ -230,6 +230,40 @@ describe("PiRpcTransport", () => {
     expect(t.takeUnsent()).toEqual([{ type: "abort" }]);
   });
 
+  it("sendAbort reaches pi whatever the chain's state: through the chain, in its place, while the chain is live; written directly once a failed write spent it — and never queued for a re-attach to replay", async () => {
+    const live = new FakeHarnessContainer();
+    await live.start({ paths, command: "pi", args: [], env: {} });
+    const { t: onLive } = transport(live);
+    onLive.send({ type: "steer", message: "first" });
+    onLive.sendAbort();
+    await onLive.flushed();
+    expect(live.stdin.map((l) => JSON.parse(l) as unknown)).toEqual([
+      { type: "steer", message: "first" },
+      { type: "abort" },
+    ]);
+    expect(onLive.takeUnsent()).toEqual([]);
+
+    const spent = new FakeHarnessContainer();
+    await spent.start({ paths, command: "pi", args: [], env: {} });
+    const { t: onSpent } = transport(spent);
+    spent.failNext = { operation: "send", error: new Error("resident /exec: Peer closed WebSocket: 1006") };
+    onSpent.send({ id: "p", type: "prompt", message: "go" });
+    await onSpent.flushed();
+    expect(spent.stdin).toEqual([]);
+    // A plain send after the failure is held (the chain is spent); the abort is written directly.
+    onSpent.send({ type: "steer", message: "held" });
+    onSpent.sendAbort();
+    await onSpent.flushed();
+    expect(spent.stdin.map((l) => JSON.parse(l) as unknown)).toEqual([{ type: "abort" }]);
+    // The re-attach takes the held steer and never an abort.
+    expect(onSpent.takeUnsent()).toEqual([{ type: "steer", message: "held" }]);
+    // A closed transport sends nothing: pi is being ended.
+    onSpent.close();
+    onSpent.sendAbort();
+    await onSpent.flushed();
+    expect(spent.stdin).toHaveLength(1);
+  });
+
   it("a re-attach starts reading at the offset it was handed", async () => {
     const c = new FakeHarnessContainer();
     await c.start({ paths, command: "pi", args: [], env: {} });

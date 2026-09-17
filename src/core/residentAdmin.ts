@@ -1,5 +1,6 @@
 import type { ConfigStore } from "../config.js";
 import { sanitizeResidentBody } from "../execution/residentText.js";
+import { requestFailedMessage } from "../execution/executor.js";
 import { tracedFetch } from "./trace/tracedFetch.js";
 import type { Span } from "./trace/types.js";
 import { processSecrets, type Secrets } from "../secrets.js";
@@ -106,11 +107,8 @@ export function makeResidentAdminClient(baseUrl: string, token: string): Residen
           { route },
         );
       } catch (err) {
-        throw new Error(
-          `resident admin ${route} request failed (${err instanceof Error ? err.message : String(err)}). ` +
-            "The operation may still have run in the resident; check `repo list` before re-running it.",
-          { cause: err },
-        );
+        // The one request-failed sentence every resident client uses (execution.md item 9), the re-check the admin's own.
+        throw new Error(requestFailedMessage("resident admin", route, err, "check `repo list`"), { cause: err });
       }
       // Item 62: these bodies reach Slack replies (`repo list`, `repo rebuild`).
       const data = sanitizeResidentBody((await res.json().catch(() => ({}))) as Record<string, unknown>);
