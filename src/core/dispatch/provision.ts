@@ -562,6 +562,10 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
 export interface Reservation {
   reserved: LedgerRun | undefined;
   requestRow: Record<string, unknown>;
+  /** Set when the reservation waited for a finish this process was landing and
+   *  the row still stood (run-history item 54): why the ledger would not take
+   *  the run, for its own record and card. */
+  untracked?: string;
 }
 
 /** What `reserveRun` reads off the dispatch. */
@@ -624,6 +628,7 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
   } = ctx;
   if (!resume && !restart) {
     const requestRow = durableInboxMessage(msg, msg.text, receivedAt);
+    let untracked: string | undefined;
     const reserved = await root.span("dispatch.ledger_reserve", () =>
       deps.runLedger.reserve({
         runId,
@@ -654,6 +659,9 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
           request: requestRow,
         },
         card: card.handle ?? null,
+        onUntracked: (why: string) => {
+          untracked = why;
+        },
         ...hooks,
       }),
     );
@@ -664,7 +672,7 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
     // durable window "from the reserve on"), where naming the run earlier
     // would push to a row that may not exist yet and warn for nothing.
     admitted.runId = runId;
-    return { reserved, requestRow };
+    return { reserved, requestRow, ...(untracked !== undefined ? { untracked } : {}) };
   }
   return undefined;
 }

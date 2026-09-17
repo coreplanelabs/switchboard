@@ -64,13 +64,14 @@ function harness(outcomes: Array<Error | PutResult>, over: { random?: () => numb
 }
 
 describe("createRunHistoryWriter", () => {
-  it("write hands its span to the store's put — the request's root, so a Worker store's request is an http.client child of it (docs/reference/specs/tracing.md item 24); a write without one hands none", async () => {
+  it("write hands its span to the store's put — the request's root, so a Worker store's request is an http.client child of it (docs/reference/specs/tracing.md item 24); a write without one hands no span — only the retry word every attempt carries (run-history item 54)", async () => {
     const h = harness([OK, OK]);
     const root = createTracer({ clock: () => 1 }).start("request", { sinks: [] });
     h.writer.write(record("run-a"), { span: root });
     h.writer.write(record("run-b"));
     await h.writer.settled();
-    expect(h.traces).toEqual([{ span: root }, undefined]);
+    // `retryFollows` is true on a first attempt that would be retried: two more attempts follow it.
+    expect(h.traces).toEqual([{ span: root, retryFollows: true }, { retryFollows: true }]);
     expect(h.puts.map((r) => r.id)).toEqual(["run-a", "run-b"]);
   });
 
