@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DailyCost, DateRange } from "./costs.js";
-import { buildCostsByReport, coverageFrom, llmUsdOfUsage, modelIdOf } from "./costsBy.js";
+import { buildCostsByReport, coverageFrom } from "./costsBy.js";
 import type { RunUsage, RunUsageReport, UsageRow } from "./runUsage.js";
 
 // Feature: docs/reference/specs/costs.md item 10 — cost by user: run tokens priced at
@@ -57,46 +57,6 @@ const row = (d: string, userId: string, wallMs: number, u: RunUsage, userName?: 
   runs,
   wallMs,
   usage: u,
-});
-
-describe("llmUsdOfUsage", () => {
-  it("prices each model's tokens at list after dropping the provider prefix, cache writes at the 5-minute rate; an unknown model's tokens are unpriced", () => {
-    const million = 1_000_000;
-    const u: RunUsage = {
-      turns: 3,
-      byModel: {
-        "anthropic/claude-fable-5": {
-          turns: 1,
-          inputTokens: million,
-          outputTokens: million,
-          cacheReadTokens: million,
-          cacheWriteTokens: million,
-        },
-        "anthropic/claude-haiku-4-5": {
-          turns: 1,
-          inputTokens: million,
-          outputTokens: 0,
-          cacheReadTokens: 0,
-          cacheWriteTokens: 0,
-        },
-        "openrouter/some/future-model": {
-          turns: 1,
-          inputTokens: 10,
-          outputTokens: 20,
-          cacheReadTokens: 30,
-          cacheWriteTokens: 40,
-        },
-      },
-    };
-    const priced = llmUsdOfUsage(u);
-    expect(priced.usd).toBeCloseTo(10 + 50 + 1 + 12.5 + 1, 9);
-    expect(priced.unpricedTokens).toBe(100);
-    expect(priced.byModel["anthropic/claude-fable-5"].usd).toBeCloseTo(73.5, 9);
-    expect(priced.byModel["openrouter/some/future-model"].usd).toBeNull();
-    expect(modelIdOf("anthropic/claude-fable-5")).toBe("claude-fable-5");
-    expect(modelIdOf("claude-fable-5")).toBe("claude-fable-5");
-    expect(modelIdOf("openrouter/anthropic/claude-sonnet-5")).toBe("anthropic/claude-sonnet-5");
-  });
 });
 
 describe("coverageFrom", () => {

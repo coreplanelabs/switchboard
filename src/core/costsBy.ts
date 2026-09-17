@@ -1,13 +1,6 @@
 import type { DailyCost, DateRange } from "./costs.js";
-import { anthropicTokensCostUsd } from "./modelPricing.js";
-import {
-  addUsage,
-  emptyUsage,
-  type ModelUsage,
-  type RunUsage,
-  type RunUsageReport,
-  type UsageRow,
-} from "./runUsage.js";
+import { llmUsdOfUsage, type PricedModelUsage } from "./modelPricing.js";
+import { addUsage, emptyUsage, type RunUsageReport, type UsageRow } from "./runUsage.js";
 
 // Cost by user (docs/reference/specs/costs.md item 10): who spent what, built from the
 // run history's usage cells (run-history.md item 56 — one per requester,
@@ -22,11 +15,6 @@ import {
 // a day with spend but no runs is unallocated, never invented onto someone.
 // Range: bounded to what the history holds (its retention and its oldest
 // finish), so an empty day reads as "no data" rather than "$0".
-
-/** One model's tokens for one user over the range, priced; `usd` is null for a model the price table does not know. */
-export interface PricedModelUsage extends ModelUsage {
-  usd: number | null;
-}
 
 export interface CostsByDay {
   day: string;
@@ -101,35 +89,6 @@ export interface CostsByReport {
 }
 
 const DAY_MS = 86_400_000;
-
-/** `anthropic/claude-fable-5` → `claude-fable-5`: the spans name the provider, the price table the model. */
-export const modelIdOf = (ref: string): string => (ref.includes("/") ? ref.slice(ref.indexOf("/") + 1) : ref);
-
-/** A usage priced at list: dollars for the models the table knows, and the
- *  tokens of the ones it does not (never $0 in silence). Cache writes at the
- *  5-minute rate: the spans carry one cache-write count. */
-export function llmUsdOfUsage(usage: RunUsage): {
-  usd: number;
-  unpricedTokens: number;
-  byModel: Record<string, PricedModelUsage>;
-} {
-  let usd = 0;
-  let unpricedTokens = 0;
-  const byModel: Record<string, PricedModelUsage> = {};
-  for (const [ref, m] of Object.entries(usage.byModel)) {
-    const priced = anthropicTokensCostUsd(modelIdOf(ref), {
-      uncachedInput: m.inputTokens,
-      output: m.outputTokens,
-      cacheRead: m.cacheReadTokens,
-      cacheWrite5m: m.cacheWriteTokens,
-      cacheWrite1h: 0,
-    });
-    if (priced === undefined) unpricedTokens += m.inputTokens + m.outputTokens + m.cacheReadTokens + m.cacheWriteTokens;
-    else usd += priced;
-    byModel[ref] = { ...m, usd: priced ?? null };
-  }
-  return { usd, unpricedTokens, byModel };
-}
 
 /** Where the data begins: the range's start, the history's oldest finish and
  *  its retention cutoff, whichever is latest. */

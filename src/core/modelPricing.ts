@@ -1,3 +1,5 @@
+import type { ModelUsage, RunUsage } from "./runUsage.js";
+
 // The price of a model's tokens (docs/reference/specs/costs.md): one table
 // serves every dollar of token arithmetic — the open day's estimate from
 // Anthropic's hourly usage report and the by-user report's run tokens. The
@@ -76,4 +78,40 @@ export function anthropicTokensCostUsd(modelId: string, t: AnthropicTokens): num
       t.cacheWrite1h * p.cacheWrite1h) /
     1_000_000
   );
+}
+
+// ---- a run's tokens, priced -----------------------------------------------------------
+
+/** One model's tokens, priced; `usd` is null for a model the price table does not know. */
+export interface PricedModelUsage extends ModelUsage {
+  usd: number | null;
+}
+
+/** `anthropic/claude-fable-5` → `claude-fable-5`: the spans name the provider, the price table the model. */
+export const modelIdOf = (ref: string): string => (ref.includes("/") ? ref.slice(ref.indexOf("/") + 1) : ref);
+
+/** A usage priced at list: dollars for the models the table knows, and the
+ *  tokens of the ones it does not (never $0 in silence). Cache writes at the
+ *  5-minute rate: the spans carry one cache-write count. */
+export function llmUsdOfUsage(usage: RunUsage): {
+  usd: number;
+  unpricedTokens: number;
+  byModel: Record<string, PricedModelUsage>;
+} {
+  let usd = 0;
+  let unpricedTokens = 0;
+  const byModel: Record<string, PricedModelUsage> = {};
+  for (const [ref, m] of Object.entries(usage.byModel)) {
+    const priced = anthropicTokensCostUsd(modelIdOf(ref), {
+      uncachedInput: m.inputTokens,
+      output: m.outputTokens,
+      cacheRead: m.cacheReadTokens,
+      cacheWrite5m: m.cacheWriteTokens,
+      cacheWrite1h: 0,
+    });
+    if (priced === undefined) unpricedTokens += m.inputTokens + m.outputTokens + m.cacheReadTokens + m.cacheWriteTokens;
+    else usd += priced;
+    byModel[ref] = { ...m, usd: priced ?? null };
+  }
+  return { usd, unpricedTokens, byModel };
 }
