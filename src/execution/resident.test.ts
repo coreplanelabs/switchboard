@@ -1,6 +1,12 @@
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ExecControlResetError, ExecInfraError, ExecSandboxRestartedError, infraMayClear } from "./executor.js";
+import {
+  BASH_TIMEOUT_MAX_MS,
+  ExecControlResetError,
+  ExecInfraError,
+  ExecSandboxRestartedError,
+  infraMayClear,
+} from "./executor.js";
 import { ResidentExecutor, ResidentNeedsRefError, ResidentOperations, ResidentReuseRefusedError } from "./resident.js";
 import { classificationOf } from "../core/trace/classify.js";
 import { residentTraceOf } from "./residentTrace.js";
@@ -1040,10 +1046,13 @@ describe("ResidentOperations.run", () => {
     if (res.kind === "error") expect(res.message).toMatch(/\/op request failed/);
   });
 
-  it("bounds the /op request with an AbortSignal.timeout (a hung resident can't stall the dispatch)", async () => {
+  it("bounds the /op request with an AbortSignal.timeout at the exec ceiling (a long suite outlives the per-command default; a hung resident is still bounded)", async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
     const { calls } = stubFetch({ body: { ok: true, summary: "s", exitCode: 0 } });
     await new ResidentOperations(OPS).run("test", { repo: "jshttp/vary" });
     expect(calls[0].init.signal).toBeInstanceOf(AbortSignal);
+    expect(timeoutSpy).toHaveBeenCalledWith(BASH_TIMEOUT_MAX_MS);
+    timeoutSpy.mockRestore();
   });
 });
 
