@@ -1400,6 +1400,20 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     expect((err as ExecInfraError).reason).toBe("refused");
   });
 
+  it("a re-attach that fails as infra inside the wait is a strike typed by the last engine view, not by the re-attach's own verdict: the attach ran under this client's clipped timeout, so its transport failure says nothing about a resident the engine still says is serving — unavailable, for the harness's longer wait", async () => {
+    // The engine says restoring, then warm: the re-attach goes out and fails on its transport.
+    const { calls } = stubFetch({ body: JUST_EXITED }, restoring(), status("warm"), { reject: "fetch failed" });
+    const executor = new ResidentExecutor(OPTS);
+    const p = executor.exec("git status").catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(5_000);
+    const err = await p;
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toContain("the re-attach after 5s did not answer");
+    expect((err as Error).message).toContain("fetch failed");
+    expect((err as ExecInfraError).reason).toBe("worker-unavailable");
+    expect(calls.map(route)).toEqual(["/exec", "/status", "/status", "/attach"]);
+  });
+
   it("a refusal that does not name a rolling container keeps the old rule: one strike, no probe", async () => {
     const { calls } = stubFetch({
       body: { ...JUST_EXITED, error: "not-serviceable: registry record or repo facts missing" },

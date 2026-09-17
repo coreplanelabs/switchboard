@@ -203,26 +203,31 @@ export function infraReasonOfRequestFailure(err: unknown, signal?: AbortSignal):
   return err instanceof Error && err.name === "TimeoutError" ? "deadline-passed" : "transport-lost";
 }
 
-/** The words for a request to a remote executor's Worker — or to the resident
- *  admin API — that failed on its transport, hit its deadline or was aborted,
- *  before or while the Worker answered: one sentence for every client, the
- *  subject and the re-check the only differences, so the tests that assert the
- *  harness waits on this failure build their fixtures from the words the
- *  clients throw — never a retyped copy, never three wordings drifting apart.
- *  The operation may have run, or still be running, in the Worker: the caller
- *  never re-runs it blind; `recheck` says how it looks first. */
-export function requestFailedMessage(
-  worker: "resident" | "sandbox" | "resident admin",
+/** The one sentence every resident or sandbox client says for a request that
+ *  failed on its transport, hit its deadline or was aborted, before or while
+ *  the other side answered: `subject` is who asked (`resident worker`,
+ *  `sandbox worker`, `resident admin`), `host` is where the operation may have
+ *  run (`resident`, `sandbox`), `recheck` how the caller looks before it
+ *  re-runs anything. The tests that assert the harness waits on this failure
+ *  build their fixtures from it — never a retyped copy, never wordings
+ *  drifting apart. */
+export function requestFailedSentence(
+  subject: string,
+  host: "resident" | "sandbox",
   route: string,
   err: unknown,
-  recheck = "re-check its effects",
+  recheck: string,
 ): string {
-  const subject = worker === "resident admin" ? "resident admin" : `${worker} worker`;
-  const host = worker === "sandbox" ? "sandbox" : "resident";
   return (
     `${subject} ${route} request failed (${err instanceof Error ? err.message : String(err)}). ` +
     `The operation may still have run, or still be running, in the ${host}; ${recheck} before re-running it.`
   );
+}
+
+/** The two remote executors' request-failed words: the Worker's name as the
+ *  subject, the Worker as the host, the effects to re-check. */
+export function requestFailedMessage(worker: "resident" | "sandbox", route: string, err: unknown): string {
+  return requestFailedSentence(`${worker} worker`, worker, route, err, "re-check its effects");
 }
 
 /** An exec-CAPACITY failure: the sandbox fleet had no free instance for this
