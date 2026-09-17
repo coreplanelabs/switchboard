@@ -12,6 +12,7 @@ import {
   usersReportFromSnapshot,
   type CostsSnapshotStamp,
   type CostsSnapshotStatus,
+  type SnapshotterOptions,
 } from "./costsSnapshot.js";
 import { buildCostsSnapshotStore, type CostsSnapshot } from "./costsSnapshotStore.js";
 import type { RunStore } from "./runStore.js";
@@ -174,6 +175,9 @@ export interface CostsFromConfigDeps {
   /** The run history the by-user half reads; absent or the Null Object = history off. */
   runStore?: RunStore;
   emailOfSlackUser?: CostsServiceDeps["emailOfSlackUser"];
+  /** Post a line to a platform-namespaced channel (`slack:C…`) — what `costs.snapshot.alertChannel`
+   *  is told through; absent, or a namespace the process cannot post to (rejects), and the alert is a warning. */
+  notify?: (channelId: string, text: string) => Promise<void>;
   warn: (message: string) => void;
   now?: () => Date;
 }
@@ -184,6 +188,23 @@ export interface CostsWiring {
   service: CostsService;
   snapshots: CostsSnapshotter;
   llmOn: boolean;
+}
+
+/** The snapshotter's alert: the configured channel through the process's poster. A channel with
+ *  no poster in this process is a warning at wiring time and no alert — the status still says. */
+function alertOf(
+  channel: string | undefined,
+  deps: Pick<CostsFromConfigDeps, "notify" | "warn">,
+): Pick<SnapshotterOptions, "alert"> | undefined {
+  if (channel === undefined) return undefined;
+  if (!deps.notify) {
+    deps.warn(
+      `costs.snapshot.alertChannel ${channel} is set but this process cannot post to a channel; the status alone says when takes fail`,
+    );
+    return undefined;
+  }
+  const notify = deps.notify;
+  return { alert: (text) => notify(channel, text) };
 }
 
 /** The production wiring from the `costs:` block and the env, shared by the bot (src/index.ts)
@@ -208,7 +229,12 @@ export function costsFromConfig(
       ...(deps.runStore ? { runStore: deps.runStore } : {}),
     },
     buildCostsSnapshotStore(blocks, deps.secrets, deps.warn),
-    { everyHours: cfg.snapshot.everyHours, warn: deps.warn, ...(deps.now ? { now: deps.now } : {}) },
+    {
+      everyHours: cfg.snapshot.everyHours,
+      warn: deps.warn,
+      ...(deps.now ? { now: deps.now } : {}),
+      ...(alertOf(cfg.snapshot.alertChannel, deps) ?? {}),
+    },
   );
   return {
     service: createCostsService(cfg, snapshots, {

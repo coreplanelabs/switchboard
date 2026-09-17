@@ -35,8 +35,10 @@ const service = (over: Partial<CostsService>): CostsService => {
 };
 
 describe("costs.snapshot", () => {
-  it("credits the take to the linked person's name, else the caller's id", () => {
+  it("credits the take to the linked person's name, else the name the caller's adapter resolved, else the caller's id", () => {
     expect(takerLabel(caller({ asUser: { id: "slack:UCASEY", name: "casey" } }))).toBe("casey");
+    expect(takerLabel({ ...caller(), name: "Casey Q" })).toBe("Casey Q");
+    expect(takerLabel({ ...caller({ asUser: { id: "slack:UCASEY", name: "casey" } }), name: "Casey Q" })).toBe("casey");
     expect(takerLabel(caller())).toBe("slack:UCASEY");
   });
 

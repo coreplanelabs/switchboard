@@ -496,11 +496,23 @@ describe("parseCostsConfig", () => {
     expect(COSTS_SNAPSHOT_EVERY_HOURS).toEqual({ default: 24, min: 1, max: 168 });
     expect(parseCostsConfig({ ...base, snapshot: {} })?.snapshot).toEqual({ everyHours: 24 });
     expect(parseCostsConfig({ ...base, snapshot: { everyHours: 6 } })?.snapshot).toEqual({ everyHours: 6 });
-    for (const everyHours of [0, 169, 1.5, "24"])
+    for (const everyHours of [0, 169, 1.5, "24", null])
       expect(() => parseCostsConfig({ ...base, snapshot: { everyHours } })).toThrow(
         /costs\.snapshot\.everyHours must be a whole number of hours between 1 and 168/,
       );
     expect(() => parseCostsConfig({ ...base, snapshot: [] })).toThrow(/costs\.snapshot must be a mapping/);
+  });
+  it("snapshot.alertChannel is optional, a platform-namespaced channel id when given, anything else refused by name", () => {
+    const base = { cloudflareAccountId: "3c7b", groups: { g: { workers: ["w"] } } };
+    expect(parseCostsConfig({ ...base, snapshot: { alertChannel: "slack:COPS" } })?.snapshot).toEqual({
+      everyHours: 24,
+      alertChannel: "slack:COPS",
+    });
+    expect(parseCostsConfig({ ...base, snapshot: { everyHours: 6 } })?.snapshot).not.toHaveProperty("alertChannel");
+    for (const alertChannel of ["COPS", "", 7, null])
+      expect(() => parseCostsConfig({ ...base, snapshot: { alertChannel } })).toThrow(
+        /costs\.snapshot\.alertChannel must be a platform-namespaced channel id/,
+      );
   });
   it("returns undefined for absent config and throws on a malformed one (never a silent half-config)", () => {
     expect(parseCostsConfig(undefined)).toBeUndefined();

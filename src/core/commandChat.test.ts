@@ -342,6 +342,13 @@ describe("chatCallerFor", () => {
     expect(chatCallerFor(msg("x"), config, resolve).origin?.repo).toBe(resolve);
   });
 
+  it("carries the adapter's resolved display name as `name` (identity for a stamp, never authority) and omits it when none was resolved", async () => {
+    const { chatCallerFor } = await import("./commandChat.js");
+    const config = configStore(ADMIN_YAML);
+    expect(chatCallerFor({ ...msg("x", "slack:UX"), userName: "Casey Q" }, config).name).toBe("Casey Q");
+    expect(chatCallerFor(msg("x", "slack:UX"), config)).not.toHaveProperty("name");
+  });
+
   it("carries the message's user as the Actor the table decides on: admin → everything, a plain user → the open chat commands + the unrestricted agents, a machine channel's user → a service actor", async () => {
     const { chatCallerFor } = await import("./commandChat.js");
     const { ALL_GRANTS, CHAT_OPEN_ACTIONS } = await import("./authz/grants.js");
