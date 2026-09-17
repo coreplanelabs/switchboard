@@ -14,8 +14,12 @@ import { defineConfig } from "vitest/config";
 // the workspaces.
 // CI runs this same entry as N shards, one job each: `npm test -- --shard=i/N`
 // splits the projects' files across the shards (.github/workflows/ci.yml).
+// The one global setup gives the run a temp root of its own and removes it at
+// the end (src/core/testing/tempRoot.ts): every project's `tmpdir()` is under
+// it, so no suite leaves anything in the shared temp dir.
 export default defineConfig({
   test: {
+    globalSetup: ["src/core/testing/tempRoot.ts"],
     projects: [
       { test: { name: "bot", include: ["src/**/*.test.ts"] } },
       "./web/vite.config.ts",
