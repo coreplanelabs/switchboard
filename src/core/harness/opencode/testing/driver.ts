@@ -1627,7 +1627,12 @@ class ScriptedServe {
     // The tailer's stream is down for this step (`dropStreamAtStep`): none of the
     // call's events reach the feed until the reply; the permissions refill does.
     const dropped = this.dropStreamAtStep === turnIndex + 1 && this.plays === 1;
-    if (!dropped) {
+    // The record clause switched off: none of the call's events — its naming,
+    // the call, its settle — reaches the stream, so the record loses the call's
+    // vocabulary whatever the gate's ask lets the bridge rebuild (a named call's
+    // own ask opens its line; no ask carries a settle).
+    const unrecorded = this.mutate === "record";
+    if (!dropped && !unrecorded) {
       this.emitEvent("session.tool.input.started", {
         sessionID: this.sessionID,
         assistantMessageID,
@@ -1641,9 +1646,7 @@ class ScriptedServe {
         text: JSON.stringify(input),
       });
     }
-    // The record clause switched off: the tool call never reaches the stream, so
-    // the record loses its `tool_call` vocabulary.
-    if (this.mutate !== "record" && !dropped)
+    if (!unrecorded && !dropped)
       this.emitEvent("session.tool.called", {
         sessionID: this.sessionID,
         assistantMessageID,
@@ -1845,13 +1848,14 @@ class ScriptedServe {
         this.relayNames.has(part.name) && this.mutate !== "relay"
           ? await this.runRelay(callId, part.name, input)
           : [{ type: "text", text: ownToolResultText(part.name, input) }];
-      this.emitEvent("session.tool.success", {
-        sessionID: this.sessionID,
-        assistantMessageID,
-        id: callId,
-        content,
-        executed: true,
-      });
+      if (!unrecorded)
+        this.emitEvent("session.tool.success", {
+          sessionID: this.sessionID,
+          assistantMessageID,
+          id: callId,
+          content,
+          executed: true,
+        });
       return this.toolContent(callId, ask.name, input, "completed", content);
     }
     const message = decision.message ?? "The user rejected permission to use this specific tool call.";

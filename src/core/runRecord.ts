@@ -291,6 +291,16 @@ export function pushedBranchesOf(events: readonly RunEvent[]): PushedBranch[] {
   return [...byRef].map(([ref, pr]) => ({ ref, pr }));
 }
 
+/** A call a run's ending may have left running in its workspace (harness.md
+ *  item 13): the id the record pairs by, the tool, and the line the
+ *  `workspace_torn_down` note names it by — the `tool_call`'s own summary
+ *  while the record holds it, else the tool and the id. */
+export interface CallInFlight {
+  callId: string;
+  tool: string;
+  summary: string;
+}
+
 /** The tool calls a run's ending may have left running in its workspace, in
  *  the record's order — what the workspace's release reads to tear the
  *  workspace down rather than wait for an idle the command would refuse, and
@@ -299,26 +309,38 @@ export function pushedBranchesOf(events: readonly RunEvent[]): PushedBranch[] {
  *  settled, whatever the run's status, and stays cut whatever lands for it
  *  later — an unmarked result (a post-turn's bridge reads the earlier
  *  execution's aborted settle as its own), or the call announced again under
- *  the same id; a call with no result at
- *  all was left open by a run that failed, was interrupted or hard-stopped,
- *  while on a run that completed or stopped softly it is a relayed tool that
- *  ran in the bot or a result lost to a transport gap, nothing running. Calls
- *  and results pair by id; a result for a call the record never opened counts
- *  for nothing. */
-export function callsInFlight(
-  events: readonly RunEvent[],
-  status: RunStatus,
-): Extract<RunEvent, { type: "tool_call" }>[] {
-  const calls = new Map<
-    string,
-    { call: Extract<RunEvent, { type: "tool_call" }>; state: "open" | "cut" | "settled" }
-  >();
+ *  the same id; a call with no result at all was left open by a run that
+ *  failed, was interrupted or hard-stopped, while on a run that completed or
+ *  stopped softly it is a relayed tool that ran in the bot or a result lost to
+ *  a transport gap, nothing running. Calls and results pair by id. The events
+ *  are the registry's bounded backlog (`runRegistry/backlog.ts` drops the
+ *  oldest past its count or byte bound), so on a long run the line of a
+ *  command that hung early may be gone while its cut result — the ending's,
+ *  landing last — survives: a cut result for a call the record no longer
+ *  holds is the harness's own word that the call was ended and not settled,
+ *  and counts by itself, named by its tool and id; an unmarked result for a
+ *  call never opened counts for nothing. */
+export function callsInFlight(events: readonly RunEvent[], status: RunStatus): CallInFlight[] {
+  const calls = new Map<string, { call: CallInFlight; state: "open" | "cut" | "settled" }>();
   for (const e of events) {
     if (e.type === "tool_call" && e.callId !== undefined) {
-      if (calls.get(e.callId)?.state !== "cut") calls.set(e.callId, { call: e, state: "open" });
+      const seen = calls.get(e.callId);
+      if (seen?.state === "cut") {
+        // Announced again after its cut — or after an orphan cut, the line the
+        // backlog evicted now written again: the line is the record's, the
+        // state stays the cut's.
+        seen.call.tool = e.tool;
+        seen.call.summary = e.summary;
+      } else calls.set(e.callId, { call: { callId: e.callId, tool: e.tool, summary: e.summary }, state: "open" });
     } else if (e.type === "tool_result" && e.callId !== undefined) {
       const seen = calls.get(e.callId);
-      if (seen !== undefined && seen.state !== "cut") seen.state = e.cut === true ? "cut" : "settled";
+      if (seen === undefined) {
+        if (e.cut === true)
+          calls.set(e.callId, {
+            call: { callId: e.callId, tool: e.tool, summary: `${e.tool} (call ${e.callId})` },
+            state: "cut",
+          });
+      } else if (seen.state !== "cut") seen.state = e.cut === true ? "cut" : "settled";
     }
   }
   const orderly = status === "completed" || status === "stopped_soft";

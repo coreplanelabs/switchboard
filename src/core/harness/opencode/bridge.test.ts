@@ -1503,6 +1503,85 @@ describe("the bridge's observing mode — an earlier execution's tail is not thi
     ]);
   });
 
+  it("an external_directory ask held for a call the store had not named — the tool's own ask then opens the call: the directory rides the call's line, no note is needed, and the settle lands paired", () => {
+    const { bridge, events } = harness();
+    const vendor = "/workspace/threads/t/main/vendor";
+    expect(bridge.observe(asked_("per_d", "c-held", "external_directory", vendor)).replies.map((r) => r.reply)).toEqual(
+      ["once"],
+    );
+    expect(
+      bridge
+        .observe(asked_("per_r", "c-held", "read", "/workspace/threads/t/main/src/a.ts"))
+        .replies.map((r) => r.reply),
+    ).toEqual(["once"]);
+    bridge.observe(settled("session.tool.success", "c-held"));
+    expect(events.filter((e) => e.type === "tool_call").map((e) => `${e.callId}:${e.summary}`)).toEqual([
+      `c-held:read /workspace/threads/t/main/src/a.ts (reaching ${vendor})`,
+    ]);
+    expect(events.filter((e) => e.type === "tool_result").map((e) => `${e.callId}:${e.ok}`)).toEqual(["c-held:true"]);
+    expect(notes(events).filter((n) => n.kind === "directory_reached")).toEqual([]);
+  });
+
+  it("an external_directory ask held before the stream's session.tool.called opens the call: the directory rides the line the call opens with, beside the tool's own input, and no note is written", () => {
+    const { bridge, events } = harness();
+    const vendor = "/workspace/threads/t/main/vendor";
+    bridge.observe(inputStarted("c-call", "read"));
+    expect(bridge.observe(asked_("per_d", "c-call", "external_directory", vendor)).replies.map((r) => r.reply)).toEqual(
+      ["once"],
+    );
+    bridge.observe(
+      ev("session.tool.called", {
+        sessionID: "ses_c",
+        assistantMessageID: "msg_a0",
+        id: "c-call",
+        input: { filePath: "/workspace/threads/t/main/src/b.ts" },
+        executed: false,
+      }),
+    );
+    expect(events.filter((e) => e.type === "tool_call").map((e) => `${e.callId}:${e.summary}`)).toEqual([
+      `c-call:read /workspace/threads/t/main/src/b.ts (reaching ${vendor})`,
+    ]);
+    expect(notes(events).filter((n) => n.kind === "directory_reached")).toEqual([]);
+  });
+
+  // harness.md item 13: a call the stream named (`session.tool.input.started`)
+  // whose `session.tool.called` was lost is still the model's call — its own
+  // ask names the tool and its target — and a call the record never opens is
+  // one no interrupt or end can cut, its command invisible to the release.
+  it("a call the stream named whose own ask arrives with its session.tool.called lost opens at the ask under the stream's name, so the loop's end can cut it: the cut lands on its line", () => {
+    const { bridge, events } = harness();
+    bridge.observe(inputStarted("c-own", "read"));
+    expect(
+      bridge
+        .observe(asked_("per_o", "c-own", "read", "/workspace/threads/t/main/src/a.ts"))
+        .replies.map((r) => r.reply),
+    ).toEqual(["once"]);
+    expect(events.filter((e) => e.type === "tool_call").map((e) => `${e.callId}:${e.tool}:${e.summary}`)).toEqual([
+      "c-own:read:read /workspace/threads/t/main/src/a.ts",
+    ]);
+    bridge.closeOpenSpans(() => "cut at the loop's end", { cut: true });
+    expect(events.filter((e) => e.type === "tool_result").map((e) => `${e.callId}:${e.ok}:${e.cut}`)).toEqual([
+      "c-own:false:true",
+    ]);
+  });
+
+  it("an external_directory ask held for a call the stream named but never opened — `session.tool.input.started` gave the name, `session.tool.called` was lost — opens the call at its settle under the stream's name with the held directory on its line, no tool_unnamed and no directory_reached note, so the settle lands on an announced call", () => {
+    const { bridge, events } = harness();
+    const vendor = "/workspace/threads/t/main/vendor";
+    bridge.observe(inputStarted("c-named", "read"));
+    expect(
+      bridge.observe(asked_("per_d", "c-named", "external_directory", vendor)).replies.map((r) => r.reply),
+    ).toEqual(["once"]);
+    expect(events.filter((e) => e.type === "tool_call")).toEqual([]);
+    bridge.observe(settled("session.tool.success", "c-named"));
+    expect(
+      events
+        .filter((e) => e.type === "tool_call" || e.type === "tool_result")
+        .map((e) => `${e.type}:${e.callId}:${e.tool}:${e.type === "tool_result" ? e.ok : e.summary}`),
+    ).toEqual([`tool_call:c-named:read:read ${vendor}`, "tool_result:c-named:read:true"]);
+    expect(notes(events).filter((n) => n.kind === "tool_unnamed" || n.kind === "directory_reached")).toEqual([]);
+  });
+
   it("the tool's own ask and a resource permission's ask for the same call are both answered, in either order — the second is never mistaken for a refill of the first", () => {
     for (const order of [
       ["shell", "doom_loop"],

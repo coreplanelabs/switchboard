@@ -450,6 +450,10 @@ export class OpenCodeBridge {
   private readonly toolNames = new Map<string, string>();
   /** The open calls' spans, by callId. */
   private readonly openTools = new Map<string, { span: Span | undefined; tool: string }>();
+  /** The calls whose `tool_call` line is on the record (`openCall`), open or
+   *  settled since: what a later ask cannot amend. A call the stream only named
+   *  (`toolNames`, from `session.tool.input.started`) has no line yet. */
+  private readonly announced = new Set<string>();
   /** callId → the bot's decision for its ask, `once` or `reject`. A settled
    *  call not among these ran with no decision; a success for a call the bot
    *  rejected ran against the reject. Both are bypasses. */
@@ -890,7 +894,13 @@ export class OpenCodeBridge {
     // an ask the refill carried ahead of this event — is not opened twice: one
     // `tool_call`, one span, one count, the settle landing once.
     if (this.openTools.has(callId)) return;
-    this.openCall(callId, this.toolNames.get(callId) ?? "tool", isRecord(data.input) ? data.input : undefined);
+    // The asks held for the call before this — a directory it reaches, asked
+    // ahead of its part — ride the line it opens with, beside its own input.
+    this.openCall(
+      callId,
+      this.toolNames.get(callId) ?? "tool",
+      foldInputs(this.takeHeldAsks(callId), isRecord(data.input) ? data.input : undefined),
+    );
   }
 
   /** The call opened on the record — its span, its `tool_call` with the
@@ -902,6 +912,7 @@ export class OpenCodeBridge {
     const tool = openCodeToolNameWord(name);
     const span = this.deps.agentSpan?.start(`tool.${tool}`);
     this.openTools.set(callId, { span, tool });
+    this.announced.add(callId);
     this.toolCalls++;
     if (this.pendingNarration) {
       this.emit({ type: "assistant", text: redactSecrets(this.pendingNarration) });
@@ -946,18 +957,24 @@ export class OpenCodeBridge {
       );
       return;
     }
-    // A resource permission's call the store never named before its settle:
-    // opened now under the first held ask's own name, said so, with every held
-    // ask's resources folded in, so the settle lands on an announced call.
+    // Asks still held at the settle mean nothing opened the call — every open
+    // site folds the held asks into the line it writes — so the settle opens it
+    // now, with every held ask's resources folded in, and lands on an announced
+    // call: under the name the stream gave it (`session.tool.input.started`,
+    // its `session.tool.called` lost), or, the stream having named nothing
+    // either, under the first held ask's own name, said so.
     const held = this.takeHeldAsks(callId);
     const first = held[0];
-    if (first !== undefined && !this.openTools.has(callId) && !this.toolNames.has(callId)) {
-      this.note(
-        "tool_unnamed",
-        `OpenCode asked ${redactAndCap(held.map((h) => h.action).join(", "), 60)} for call ${callId} of step ${redactAndCap(first.source?.messageID ?? "", 80)}, and the store showed no part naming the call's tool before it settled; the record opens the call under the permission's name`,
-      );
-      this.toolNames.set(callId, first.action);
-      this.openCall(callId, first.action, foldInputs(held, undefined));
+    if (first !== undefined) {
+      const named = this.toolNames.get(callId);
+      if (named === undefined) {
+        this.note(
+          "tool_unnamed",
+          `OpenCode asked ${redactAndCap(held.map((h) => h.action).join(", "), 60)} for call ${callId} of step ${redactAndCap(first.source?.messageID ?? "", 80)}, and the store showed no part naming the call's tool before it settled; the record opens the call under the permission's name`,
+        );
+        this.toolNames.set(callId, first.action);
+      }
+      this.openCall(callId, named ?? first.action, foldInputs(held, undefined));
     }
     const open = this.openTools.get(callId);
     this.openTools.delete(callId);
@@ -1076,7 +1093,7 @@ export class OpenCodeBridge {
   private openNamedCall(callId: string, part: ToolPart, ask?: OpenCodePermissionRequest): void {
     const held = this.takeHeldAsks(callId);
     if (ask !== undefined) held.push(ask);
-    if (this.openTools.has(callId) || this.toolNames.has(callId)) {
+    if (this.announced.has(callId)) {
       this.noteDirectoryReached(callId, held);
       return;
     }
@@ -1121,16 +1138,14 @@ export class OpenCodeBridge {
     // call is opened under the tool the store names for the part the ask's
     // `source` points at (the mirror's assistant message, its tool part) —
     // or, the store holding no such part yet, under the permission's own name
-    // with a `tool_unnamed` note, the record unable to name the tool. A call
-    // the stream named and never called is the stream's own record hole (the
-    // record clause's mutation switch) and stays one.
+    // with a `tool_unnamed` note, the record unable to name the tool. A name
+    // alone (`toolNames`, from `session.tool.input.started`) is no line: an
+    // ask for a call the stream named and never called is treated as for one
+    // never named — held, or opening the call under the stream's name — and
+    // only a call no ask of its own ever reaches stays the stream's record
+    // hole (the record clause's mutation switch).
     const source = request.source;
-    if (
-      source?.type === "tool" &&
-      this.observing === "own" &&
-      !this.openTools.has(callId) &&
-      !this.toolNames.has(callId)
-    ) {
+    if (source?.type === "tool" && this.observing === "own" && !this.announced.has(callId)) {
       if (RESOURCE_PERMISSIONS.has(request.action)) {
         // A permission over a directory or a repeating session: the call is
         // the tool's that tripped it, named by the store's part. The ask is
@@ -1149,14 +1164,20 @@ export class OpenCodeBridge {
           else held.push(request);
         }
       } else {
-        // The raw tool name: a built-in's is its action, an MCP tool's the tool
-        // half of `<server>_<tool>`; `openCall` says it in the record's word.
+        // The tool's own ask opens the call: under the name the stream gave it
+        // (`session.tool.input.started`, its `session.tool.called` lost — a
+        // call the record never opens is one no interrupt or end can cut, its
+        // command invisible to the workspace's release), else under the raw
+        // tool name — a built-in's is its action, an MCP tool's the tool half
+        // of `<server>_<tool>` — which `openCall` says in the record's word;
+        // the asks held for the call ride its line beside the ask's own target.
         const raw =
           OPENCODE_ACTION_TO_TOOL_WORD[request.action] !== undefined
             ? request.action
             : openCodeToolWord(request.action);
-        this.toolNames.set(callId, raw);
-        this.openCall(callId, raw, openInput(request, undefined));
+        const name = this.toolNames.get(callId) ?? raw;
+        this.toolNames.set(callId, name);
+        this.openCall(callId, name, foldInputs(this.takeHeldAsks(callId), openInput(request, undefined)));
       }
     } else if (source?.type === "tool" && this.observing === "own" && request.action === "external_directory") {
       // The call is already on the record — its own ask or the stream's call

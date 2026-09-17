@@ -172,9 +172,10 @@ export class PiBridge {
   /** The calls under way: their span, their tool, and whether their end is
    *  judged against the gate (harness-pi item 7). */
   private readonly openTools = new Map<string, { span: Span | undefined; tool: string; judged: boolean }>();
-  /** The open calls an abort was sent for (`markOpenCallsCut`): their end, when
-   *  pi answers it, is the abort's cut and not a settle — the result is marked
-   *  `cut`, and the workspace's release reads the command as one that may run on. */
+  /** The open calls an abort was sent for (`markOpenCallsCut`): their failed
+   *  end, when pi answers it, is the abort's cut and not a settle — the result
+   *  is marked `cut`, and the workspace's release reads the command as one that
+   *  may run on; a clean end in the abort's window is the command's own exit. */
   private readonly cutCalls = new Set<string>();
   /** The calls the gate saw — the extension asked `/harness/authorize` for
    *  them (`gateSaw`) — not yet ended. */
@@ -363,7 +364,7 @@ export class PiBridge {
     const callId = str(event.toolCallId);
     const open = this.openTools.get(callId);
     this.openTools.delete(callId);
-    const cut = this.cutCalls.delete(callId);
+    const marked = this.cutCalls.delete(callId);
     const tool = open?.tool ?? str(event.toolName);
     const isError = event.isError === true;
     const text = piResultText(event.result);
@@ -375,6 +376,12 @@ export class PiBridge {
         ? piBashExit(text, isError)
         : { failed: isError || (this.deps.textFailing?.has(tool) === true && toolTextFailed(text)) };
     const ok = !exit.failed;
+    // The mark is set when the abort is SENT (`markOpenCallsCut`); pi handles
+    // it a moment later, and a tool that finished in that window ends clean —
+    // the command exited, and its result is a settle, not a cut (harness.md
+    // item 13: a `cut` result is a command that may run on). Only a marked
+    // call's failed end is the abort's.
+    const cut = marked && !ok;
     this.emit({
       type: "tool_result",
       tool,
@@ -474,8 +481,9 @@ export class PiBridge {
   }
 
   /** An abort is being sent to pi: every call open now is cut by it, not
-   *  settled — its end, when pi answers, lands marked `cut` (harness.md item 13:
-   *  the command behind it may run on, and the workspace's release reads it so). */
+   *  settled — its failed end, when pi answers, lands marked `cut` (harness.md
+   *  item 13: the command behind it may run on, and the workspace's release
+   *  reads it so); a tool that exits clean before pi handles the abort settles. */
   markOpenCallsCut(): void {
     for (const callId of this.openTools.keys()) this.cutCalls.add(callId);
   }
