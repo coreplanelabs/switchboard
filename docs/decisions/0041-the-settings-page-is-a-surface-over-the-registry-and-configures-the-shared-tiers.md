@@ -1,6 +1,6 @@
 ---
 title: The settings page is a surface over the command registry and configures the shared tiers; personal settings stay where the identity is
-status: proposed
+status: accepted
 date: 2026-09-16
 pattern: Adapter over the registry (no second write path); the null tier for an identity the store cannot map; an allow-list projection instead of a filtered secret
 ---
@@ -127,14 +127,26 @@ If customers set personal settings far more than shared ones, the missing `me` t
 
 | Criterion | Proof |
 |---|---|
-| `/settings`, `/settings/mcps`, `/settings/channels`, `/settings/channels/<id>`, `/settings/installation` render the shell with a `settings` seed for a gated identity; anything else under `/settings` is a 404 | `[gap]` `src/channels/settingsView.test.ts` |
-| The seed's `canWrite` equals `authorize(actor, …)` for org and channel, for a granted and an ungranted actor | `[gap]` `src/channels/settingsView.test.ts` |
-| No request the page composes carries `scope: "me"`; the user scope is never rendered | `[gap]` `web/src/pages/settings.test.ts` |
-| A `me` write from an `access` caller is refused with the pointer to chat, on the config and the MCP commands; a chat caller's `me` write is unchanged | `[gap]` `src/core/commands/config.test.ts`, `src/core/commands/mcp.test.ts` |
-| `config overrides` lists only channels the caller may read and names settings, never values | `[gap]` `src/core/commands/config.test.ts` |
-| The installation projection contains no `*Env` name, no URL and no bot secret name for the full example config | `[gap]` `src/core/installationSettings.test.ts` |
+| `/settings`, `/settings/mcps`, `/settings/channels`, `/settings/channels/<id>`, `/settings/installation` render the shell with a `settings` seed for a gated identity; anything else under `/settings` is a 404 | `[unit]` `src/channels/settingsView.test.ts::parseSettingsRoute::the page, its three tabs, a channel under Channels, and a channel query on MCPs`, `src/channels/settingsView.test.ts::parseSettingsRoute::anything else under /settings is not a route: an unknown tab, a channel under the wrong tab, a malformed id` |
+| The seed's `canWrite` equals `authorize(actor, …)` for org and channel, for a granted and an ungranted actor | `[unit]` `src/channels/settingsView.test.ts::the settings view::MCPs: the seed is `mcp list` invoked as the viewer, with canWrite from the org and channel questions`, `src/channels/settingsView.test.ts::the settings view::MCPs: a viewer without the grants sees the same rows read-only; without a channel the channel right is false` |
+| No request the page composes carries `scope: "me"` for an unlinked session; the user scope is never rendered for it (amended by [record 0042](0042-a-dashboard-session-is-the-person-its-email-names-identity-not-authority.md): a session linked to its Slack person composes `me` and sees its person's tier) | `[unit]` `web/src/pages/settings.test.ts::McpServersPanel::Add posts mcp.add with the org tier, the agents joined, and never a `me` scope`, `web/src/pages/settings.test.ts::McpServersPanel for a linked session (record 0042)::an unlinked session sees the person's row read-only and cannot pick me` |
+| A `me` write from an unlinked `access` caller is refused with the pointer to chat, on the config and the MCP commands; a chat caller's `me` write is unchanged | `[unit]` `src/core/commands/config.test.ts::config set::a credential needs config:write for any scope; a chat person always has their own scope; an Access browser session writes neither `me` (no run is its) nor `channel` (no grant)`, `src/core/commands/mcp.test.ts::mcp.* commands::a `me` write from the Access surface is refused with the pointer to chat (record 0041); org and channel writes and every read are unchanged for it` |
+| `config overrides` lists only channels the caller may read and names settings, never values | `[unit]` `src/core/commands/config.test.ts::config overrides — the index of configured channels::*` |
+| The installation projection contains no `*Env` name, no URL and no bot secret name for the full example config | `[unit]` `src/core/installationSettings.test.ts::installationSettings::never renders an env var name, a URL, a bearer, or a manifest secret name, whatever the config holds` |
 | The header carries the settings cog for every installation (amended: a cog, not a nav section) and the MCPs tab only with the `mcp` capability | `web/src/components/AppNav.test.ts`, `web/src/pages/settings.test.ts` (bound in settings-page.md item 6) |
-| Human-gated: an admin adds, connects and removes an org server from the deployed page; an ungranted viewer sees the page read-only | receipt on the PR |
+| Human-gated: an admin adds, connects and removes an org server from the deployed page; an ungranted viewer sees the page read-only | read half posted on #1375 (release 1.238.0, the tab and its rights as the maintainer); the write half and the ungranted viewer are the maintainer's, owed on the same thread |
+
+## Accepted 2026-09-16
+
+*Re-evaluation.* The bet was that the settings page is an adapter over the command registry and nothing more: it renders `config show` and `mcp list`, every write is a `POST /api/config.*` or `/api/mcp.*`, and the page carries no rule of its own about who may do what. Six PRs later it held without a page-only rule: #1375 built the three tabs, #1387 moved the way in to the header's cog, and [record 0042](0042-a-dashboard-session-is-the-person-its-email-names-identity-not-authority.md)'s three PRs (#1395, #1399, #1409) and its polish (#1428) added the `me` tier, every tier for an admin and promotion by adding commands and options to the registry, which the page then rendered; the conformance suite grew rows, the page grew no logic. The maintainer accepted the shape on that evidence ("agree with 41, settings is a projection / adapter over command registry"), live on release 1.238.0.
+
+What changed since the proposal, checked against the reasoning above:
+
+- **The tier the page did not offer is offered.** Record 0042 answered this record's first open question: the Access email links a session to its Slack person in the actor resolver, as identity and never authority, so the page's `me` is the person's and the refusal stands only for an unlinked session. The "what would change our mind" count of personal versus shared settings is moot; the validation row about `scope: "me"` is amended above, not removed.
+- **A settings page never has "no data".** The maintainer's acceptance condition: every installation has defaults and every viewer has a scope, so a page that says "no channel carries a scope yet" or "settings are unavailable" is showing the reader an internal state, not their settings. The Channels tab is to show the viewer's effective settings and the installation's defaults before any channel is picked; an empty MCP list is a legitimate state (a fresh installation) and reads as product copy; a page served without its seed is an application error and renders as one. This is the next settings PR, not a change to the shape.
+- **Channel names, not ids**, the second open question, stays open with the maintainer; it needs a channel-name lookup the directory does not expose today.
+
+The record's validation rows carry their proofs now (the gap markers were the state before #1375); the human-gated row names what is still owed.
 
 ## Sources
 
