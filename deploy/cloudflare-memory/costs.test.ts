@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest";
 const BASE = "https://memory.test";
 /** A calendar day as the billing datasets spell it (YYYY-MM-DD, UTC). */
 const iso = (y: number, m: number, d: number) => new Date(Date.UTC(y, m - 1, d)).toISOString().slice(0, 10);
-const JUN_19 = iso(2026, 6, 19);
+const AUG_17 = iso(2026, 8, 17);
 const SEP_16 = iso(2026, 9, 16);
 const SEP_17 = iso(2026, 9, 17);
 const AUTH = { authorization: "Bearer test-token", "content-type": "application/json" };
@@ -31,7 +31,7 @@ const snapshot = (over: Record<string, unknown> = {}) => ({
   takenAt: `${SEP_16}T06:15:00.000Z`,
   takenBy: "schedule",
   durationMs: 31_000,
-  range: { from: JUN_19, to: SEP_16, days: 90, partialLastDay: true },
+  range: { from: AUG_17, to: SEP_16, days: 31, partialLastDay: true },
   usage: {
     containers: [
       {

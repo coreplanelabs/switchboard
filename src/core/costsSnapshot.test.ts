@@ -178,7 +178,7 @@ describe("takeCostsSnapshot", () => {
     });
     const snapshot = await takeCostsSnapshot(sources, { now: c.now, by: "schedule" });
     const window = resolveRange(String(SNAPSHOT_DAYS), new Date(T0));
-    expect(window.days).toBe(90);
+    expect(window.days).toBe(31);
     expect(ranges).toEqual([window, window]);
     expect(queries).toEqual([
       { sinceMs: Date.parse(`${window.from}T00:00:00Z`), untilMs: Date.parse(`${window.to}T00:00:00Z`) + 86_400_000 },

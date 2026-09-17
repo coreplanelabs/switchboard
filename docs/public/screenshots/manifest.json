@@ -87,7 +87,7 @@
     "web/src/modules/pr-review/fileIcons.ts": "20249273d50a4903660f3ee587aa9c3fa47917246926498454fc5c8474c932b4",
     "web/src/modules/pr-review/files.ts": "4d20c305e836df6ecb55ac4434b9ef944b5dcee1003d9df90820d5c0ac900b4f",
     "web/src/modules/pr-review/types.ts": "c2f796770a1005788bd8274489026d93ff658326bbb8352f084c699c04c68e96",
-    "web/src/pages/CostsPage.vue": "886869e71c740820596d123d5518175cd6b1569e5fc0739710e2a95015f597b2",
+    "web/src/pages/CostsPage.vue": "22267a8eb27ccfc1a3d373458eb5e56b0ccfa18ae95e90d9146202baff1acfc8",
     "web/src/pages/DeliveryPage.vue": "21ea80a98b6725f3426717a55c8a82c53772bb52d592a8e15d65d1265fa4eb9b",
     "web/src/pages/HomePage.vue": "3d91b5825599530206f8d6cf2d446997e070703ef32e717a085b1f4a4cea5441",
     "web/src/pages/NotFoundPage.vue": "00e0cc2cdb3a07a1a5f90b5cdbde67327924ace2f6e7cd4780f3916ea2afc6d9",
