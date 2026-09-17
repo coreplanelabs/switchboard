@@ -82,6 +82,48 @@ export const wrapUpWriteFailedNote = (kind: "time" | "turns" | "soft", closes: "
  *  never told to stop (harness-pi item 16). No path reaches it today; the note
  *  is what makes a swallowed stop seen rather than assumed. */
 export const ABORT_DROPPED_NOTE = "the abort was dropped: no transport kept it, so pi was never told to stop";
+/** The record's line when an abort's write failed with the control plane's
+ *  reset (harness-pi item 16): the run's loop or a follow-up turn (`closes`)
+ *  owes pi the stop and asks again on every tick until it lands. Written once,
+ *  at the FIRST failure of a stop; the re-asks that fail after it write
+ *  nothing, and `abortReaskedNote` closes the series with the count — two
+ *  lines, never one per tick. */
+export const abortWriteFailedNote = (closes: "run" | "turn" = "run"): string =>
+  `the abort's write failed with the control plane's reset; the ${closes} asks pi to stop again on every tick until the stop lands`;
+/** The record's closing line of a stop the loop or turn (`closes`) had to ask
+ *  again for (harness-pi item 16), written once: when a stop `landed` — any
+ *  sender's, the re-ask's or another's — a `stop_landed` note, since it says
+ *  the series closed well; or when the loop or turn ended with the stop still
+ *  `unheard` — owed with no tick yet run to ask, or no stop in flight to hear
+ *  — a `harness_error`; each saying how many times the tick asked. With
+ *  `abortWriteFailedNote` at the first failure these are the series' two
+ *  lines; a re-ask is never a line. */
+export const abortReaskedNote = (
+  times: number,
+  outcome: "landed" | "unheard",
+  closes: "run" | "turn" = "run",
+): string => {
+  const asked = timesWord(times);
+  if (outcome === "landed")
+    return times === 0
+      ? `the stop landed before the ${closes} could ask again`
+      : `the stop landed after the ${closes} asked pi to stop again ${asked}`;
+  return times === 0
+    ? `the ${closes} ended with the stop still unheard, before it could ask again`
+    : `the ${closes} ended with the stop still unheard, after asking pi to stop again ${asked}`;
+};
+/** The record's line when a stop sent while the loop or turn (`closes`) was
+ *  live failed its write only after the loop or turn had ended — the hard
+ *  stop's or a gate bypass's abort, which the same tick sends and breaks on;
+ *  the recovery's deadline abort on a run its throw ends; the last re-ask of a
+ *  series still in flight when pi settled by itself (harness-pi item 16): the
+ *  ended loop asks nothing again, so this one line is what makes the swallowed
+ *  stop seen — the series' closing line, with its count of re-asks (`times`) —
+ *  and the run's end kills pi. */
+export const abortFailedAfterEndNote = (closes: "run" | "turn" = "run", times = 0): string =>
+  `the stop's write failed with the control plane's reset after the ${closes} ended${times === 0 ? "" : `, after asking pi to stop again ${timesWord(times)}`}; nothing asks again, and the run's end kills pi`;
+/** How many times, as the abort series' lines say it — one word for both lines, so they cannot drift. */
+const timesWord = (n: number): string => (n === 1 ? "once" : `${n} times`);
 const wrapUpName = (kind: "time" | "turns" | "soft"): string =>
   kind === "time" ? "time-budget" : kind === "turns" ? "turn-guard" : "soft-stop";
 /** The failed call's words when the finale bound itself is why no write-up

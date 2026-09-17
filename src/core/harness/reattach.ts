@@ -110,9 +110,10 @@ export function reattachTransport(
 /** The commands re-sent AS THEY WERE after a reset left them unknown: pi
  *  ignores a duplicate response for an id it has already settled. A `prompt`
  *  is not here (it awaits its echo), neither is a `steer` (its echo and the
- *  loop's requeue resolve it), and neither is an `abort` — never in doubt,
- *  since the transport writes it as its own step, past any spent chain, and
- *  never records its failure. */
+ *  loop's requeue resolve it), and neither is an `abort` — never in doubt: the
+ *  transport writes it as its own step past any spent chain, and a failed one
+ *  its sender asks again on the loop's next tick (the pi harness's `abortPi`),
+ *  so the re-attach neither resolves nor re-sends a stop. */
 const RESEND_AS_IS = new Set(["set_auto_retry", "get_state", "extension_ui_response"]);
 
 /** How to resolve the write a reset left unknown, by pi's echo — one rule for
@@ -124,8 +125,8 @@ const RESEND_AS_IS = new Set(["set_auto_retry", "get_state", "extension_ui_respo
  *    the very chunk read before the transport surfaced its send error.
  *  - `resend`: an id-carrying control command or the gate reply — safe to
  *    re-send as it was (its id dedups). An abort is never in doubt: the
- *    transport writes it as its own step past any spent chain and never
- *    records its failure, so one here needs nothing.
+ *    transport writes it as its own step past any spent chain, and a failed
+ *    one its sender asks again on the next tick, so it needs nothing here.
  *  - `await-echo`: a `prompt` with an id, re-sent only if pi does not echo that
  *    id within the bound — a blind re-send would deliver the whole request
  *    twice into one turn (`streamingBehavior: "steer"` on the re-send, which pi
@@ -236,8 +237,9 @@ export class HeldSends {
    *  order. A gate reply and an abort never hold (`PASSES_HOLD`): the rule
    *  lives here, by the command's type, so no caller can get it wrong.
    *  `onLanded` runs when the write has settled at the transport — told
-   *  `landed`, or `failed` with the reset — never at the hand-off to a chain
-   *  that only holds it, and never for a write nothing kept. */
+   *  `landed`, `failed` with the reset, or `dropped` — never at the hand-off to
+   *  a chain that only holds it, and never once the loop or turn that sent it
+   *  has ended (`dropHeld` forgets it). */
   send(command: Record<string, unknown>, onLanded?: (landing: Settled) => void): void {
     if (onLanded) this.onLanded.set(command, onLanded);
     if (this.holding && !PASSES_HOLD.has(String(command.type))) {
@@ -291,9 +293,17 @@ export class HeldSends {
     if (this.queue[0]?.state === "await") this.headSince = now;
   }
 
-  /** The loop or turn that sent what is still held has ended: drop it all,
-   *  delivering nothing, and answer what was dropped so the caller can say so.
-   *  A held follow-up steer went back to the inbox with the other unechoed
+  /** The loop or turn that sent what is still pending has ended: drop the held
+   *  writes, delivering nothing, answer what was dropped so the caller can say
+   *  so, and forget EVERY callback but an abort's — a write in flight included,
+   *  whose landing, however late, is nobody's now (a dispatched wrap-up steer
+   *  settling inside a follow-up turn would otherwise start the turn's clock or
+   *  re-ask the loop's instruction into it — forgotten here, by construction,
+   *  not checked by each sender). An abort's callback alone survives: a stop in
+   *  flight when its loop ended is the one landing the ended loop still wants
+   *  on the record (harness-pi item 16: a swallowed stop is seen, never
+   *  assumed), and its sender notes what became of it and never asks again
+   *  after the drop. A held follow-up steer went back to the inbox with the other unechoed
    *  steers (the loop's `requeueUnechoed`), a held wind-down steer belongs to
    *  the loop that ended (its answer then wears no label for a wrap-up pi never
    *  saw), and a prompt still in doubt when the loop settled is nothing a later
@@ -304,7 +314,7 @@ export class HeldSends {
     const dropped = this.queue.map((held) => held.command);
     this.queue.length = 0;
     this.headSince = undefined;
-    for (const command of dropped) this.onLanded.delete(command);
+    for (const command of this.onLanded.keys()) if (command.type !== "abort") this.onLanded.delete(command);
     return dropped;
   }
 

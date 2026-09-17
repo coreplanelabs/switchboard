@@ -94,6 +94,10 @@ export type RunNoteKind =
   | "sandbox_restarted"
   | "stop_requested"
   | "stopped"
+  /** A stop the loop or turn had to ask pi for again reached it: the series a
+   *  failed abort's write opened (its `harness_error` line) closes here with
+   *  the count of re-asks (harness-pi item 16). Written by the pi harness. */
+  | "stop_landed"
   /** Setup spans the request's stream sink had to drop before this run was
    *  bound (docs/reference/specs/tracing.md): `summary` says how many, `from`/`to` the
    *  interval, which the partition reports as not recorded. */
@@ -248,6 +252,7 @@ export const RUN_NOTE_KINDS = [
   "sandbox_restarted",
   "stop_requested",
   "stopped",
+  "stop_landed",
   "spans_dropped",
   "head_moved",
   "run_failed",
