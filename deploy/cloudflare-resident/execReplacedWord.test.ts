@@ -13,16 +13,13 @@ import { methodOf, readSource } from "./testing/sourceScan";
 // the container it held is gone, and its one reliable knowledge is its own: a
 // restore under way for this resident; otherwise the answer says what the SDK
 // said, with no word and no `reason`, and the harness's one more command
-// decides. Not the Container base's exit state (read from the pinned
-// @cloudflare/containers 0.3.7: a roll's rejection writes `stopped` or nothing
-// once the wake replaced the monitor, while an idle stop's graceful exit writes
-// `stopped_with_code(0)` — it separates nothing), not the platform's `running`
-// flag (an asleep or starting container answers false too), not the base's
-// `onStop` (replayed at the next start for an idle sleep as much as for a
-// roll). The incarnation swap is unconditional at the choke point — every
-// classified replacement clears the memos and leases — and only the word is
-// gated. This scan over the entry holds the line: plain Node, the file read as
-// text, never loaded — like lifecycle.test.ts.
+// decides. Not the Container base's exit state, not the platform's `running`
+// flag, not the base's replayed `onStop`: why each separates nothing is the
+// record's, in resident-repos.md item 43 with the pinned library's lines. At
+// the choke point a classified replacement clears the per-incarnation memos
+// unconditionally and mints the incarnation (every lease) only when known,
+// and only the word is gated. This scan over the entry holds the line: plain
+// Node, the file read as text, never loaded — like lifecycle.test.ts.
 
 const source = readSource("worker.ts");
 
@@ -83,21 +80,24 @@ describe("the /exec answer says runtime-replaced only when the resident knows th
     expect(source).not.toMatch(/containerStop\b/); // the teardown's `containerStopped` is another thing
   });
 
-  it("the incarnation swap is unconditional at the choke point again — every RuntimeReplacedError clears the memos and the leases, as the per-incarnation memo block promises — while the word stays gated: the error still carries `known` for the exec gate", () => {
+  it("the two consequences of a classified replacement are split at the choke point: the per-incarnation memos clear unconditionally (the fact that was stale), the incarnation — and with it every lease — is minted only when the replacement is known, so a transport blip on one request cannot hand a live holder's mutex to a concurrent attach; the word stays gated on the same `known`", () => {
     const run = methodOf(source, "run");
     expect(run, "run is declared").not.toBeNull();
-    // Both sites: the swap first, unconditionally; then the decision the word reads.
-    expect(run.match(/this\.swapIncarnation\(\);/g)).toHaveLength(2);
-    expect(run).not.toMatch(/if \(known\) this\.swapIncarnation\(\)/);
+    // Both sites: the memos first, unconditionally; the decision; the incarnation only on it.
+    expect(run.match(/this\.clearIncarnationMemos\(\);/g)).toHaveLength(2);
     expect(run.match(/const known = await this\.replacementKnown\(err\);/g)).toHaveLength(2);
+    expect(run.match(/if \(known\) this\.swapIncarnation\(\);/g)).toHaveLength(2);
+    expect(run).not.toMatch(/^\s*this\.swapIncarnation\(\);\s*$/m);
     expect(run).toMatch(/new RuntimeReplacedError\("spawn", err, known\)/);
     expect(run).toMatch(/new RuntimeReplacedError\("collect", err, known\)/);
     for (const site of run.matchAll(
-      /this\.swapIncarnation\(\);[\s\S]{0,400}?const known = await this\.replacementKnown\(err\);/g,
+      /this\.clearIncarnationMemos\(\);[\s\S]{0,600}?const known = await this\.replacementKnown\(err\);/g,
     ))
-      expect(site[0]).not.toMatch(/if \(/);
-    // The memo block's invariant reads true again: a runtime replacement at the
-    // one exec choke point clears the memos, whatever the word will say.
+      expect(site[0], "the memo clear is not under a condition").not.toMatch(
+        /if \([^)]*\)\s*this\.clearIncarnationMemos/,
+      );
+    // The memo block's invariant reads true: a runtime replacement at the one
+    // exec choke point clears the memos, whatever the word will say.
     expect(source).toMatch(
       /a runtime replacement surfaces as RuntimeReplacedError at the\s*\/\/ ONE exec choke point \(`run\(\)`\)/,
     );

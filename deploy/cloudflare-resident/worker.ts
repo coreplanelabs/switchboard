@@ -1699,23 +1699,14 @@ export class ResidentDO extends Sandbox<Env> {
    *  this resident (`restoring`, persisted before any restore work) — its own
    *  knowledge, reliable — and nothing else.
    *
-   *  Not the Container base's exit state (`getState()`), which was tried and
-   *  separates nothing, read from `@cloudflare/containers` 0.3.7
-   *  `container.js`: the rollout's "Runtime signalled the container to exit
-   *  due to a new version rollout: 0" does not match `RUNTIME_SIGNALLED_ERROR`
-   *  (`'runtime signalled the container to exit:'`, line 10, matched by a
-   *  lowercase `includes`, 53-56), so its monitor rejection writes `stopped`
-   *  (1445-1462) — or nothing at all, since the harness's next command wakes
-   *  the container and the wake replaces `this.monitor` before the old
-   *  callback runs (`startAndWaitForPorts`, 1377-1380; the callback's guard,
-   *  1442-1444) — while an idle stop's graceful exit resolves the monitor and
-   *  writes `stopped_with_code(0)` (1434-1440; `stop()` writes no state,
-   *  712-717). Not a replayed `onStop` either: the base calls it only from
-   *  `syncPendingStoppedEvents` at the next start (1594-1603), for an idle
-   *  sleep as much as for a roll. Not the platform's `running` flag — an
-   *  asleep or starting container answers false to it too. The harness's own
-   *  probe (`identity`, `alive`) stays the arbiter, so under-saying the word
-   *  here is safe and over-saying it is what orphans a process.
+   *  Not the Container base's exit state, not a replayed `onStop`, not the
+   *  platform's `running` flag: each was tried or weighed and separates
+   *  nothing — a roll and an idle sleep leave the same traces, in both
+   *  directions — and the why, with the pinned library's lines, is the
+   *  record's alone (docs/reference/specs/resident-repos.md item 43), so a
+   *  dependency bump rots one place, not three. The harness's own probe
+   *  (`identity`, `alive`) stays the arbiter, so under-saying the word here is
+   *  safe and over-saying it is what orphans a process.
    *
    *  A read that fails (the storage under a reset or a restore) is no
    *  knowledge: the answer falls back to the SDK's words and the harness
@@ -2131,17 +2122,24 @@ export class ResidentDO extends Sandbox<Env> {
       // takes the throw below. It exists so that if a future SDK vouches "never
       // started" we retry then — and only then — without a change here.
       if (!(err instanceof OperationInterruptedError && err.retryable === true)) {
-        // The memos and leases go on EVERY replacement the SDK classified,
-        // whatever the word below will say: they are cheap to re-derive, and
-        // the per-incarnation memo block's invariant is that this one choke
-        // point clears them. Gating the swap on `known` was tried and does not
-        // hold on a real roll — the harness's next command wakes the container
-        // and the wake rewrites the base's state and replaces its monitor
-        // before the exit is ever recorded, so `known` stays false and stale
-        // memos (`hydratedVerdictAt`, `gitSetupDone`, `stageDirsReady`, …) and
-        // dead leases survive into the replacement. Only the word is gated.
-        this.swapIncarnation();
+        // Two consequences with different safety, split here. The memos
+        // (`hydratedVerdictAt`, `gitSetupDone`, `stageDirsReady`, the deps
+        // flags — the fact that was stale) clear on EVERY replacement the SDK
+        // classified: cheap to re-derive, and the per-incarnation memo block's
+        // invariant is that this one choke point clears them, whatever the
+        // word will say. The incarnation — the lease fencing token, one
+        // isolate paired with one container runtime — is minted only when the
+        // replacement is KNOWN: `isRuntimeReplacement` is the union, and a
+        // transport blip on one request that minted an id would make
+        // `takeMutex` read the live holder's row as `holder-incarnation-gone`
+        // and hand the mirror mutex to a concurrent `/attach` over a running
+        // fetch. (A swap gated whole on `known` was tried and left the memos
+        // stale on a real roll, where `known` is false while the wake rewrites
+        // the base's state — resident-repos item 43.) Only the word is gated,
+        // on the same `known`.
+        this.clearIncarnationMemos();
         const known = await this.replacementKnown(err);
+        if (known) this.swapIncarnation();
         throw new RuntimeReplacedError("spawn", err, known);
       }
       console.log(
@@ -2170,10 +2168,11 @@ export class ResidentDO extends Sandbox<Env> {
       // Checked before the replacement branch below.
       if (isControlReset(err)) throw new ControlResetError("collect", err);
       if (isRuntimeReplacement(err)) {
-        // Unconditional, as at the spawn site above: the memos and leases go
-        // with every classified replacement; only the word is gated.
-        this.swapIncarnation();
+        // The same split as the spawn site above: the memos unconditionally,
+        // the incarnation only when the replacement is known, the word gated.
+        this.clearIncarnationMemos();
         const known = await this.replacementKnown(err);
+        if (known) this.swapIncarnation();
         throw new RuntimeReplacedError("collect", err, known);
       }
       if (err instanceof ProcessWaitTimeoutError) {
