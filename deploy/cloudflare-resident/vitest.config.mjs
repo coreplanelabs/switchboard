@@ -33,6 +33,7 @@ export default defineConfig({
       "instanceStep.test.ts",
       "lifecycle.test.ts",
       "runtimeUnreachable.test.ts",
+      "controlReset.test.ts",
       "reuseAttach.test.ts",
       "rebindAttach.test.ts",
       "releaseAtRunEnd.test.ts",

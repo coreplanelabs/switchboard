@@ -705,6 +705,32 @@ class RuntimeReplacedError extends Error {
   }
 }
 
+/** The resident's own Durable Object was reset while a command was in flight —
+ *  a `wrangler deploy` of the Worker code (not the container image) supersedes
+ *  this DO's isolate, so the SDK's control session to the container is lost
+ *  mid-command (`isDurableObjectCodeUpdateReset`). This is NOT a runtime
+ *  replacement: the container and every process the run holds in it are exactly
+ *  as they were — only the DO that was driving them reset. The command's
+ *  outcome is unknown (the reset may have raced its start or its finish), so
+ *  the resident never re-issues it here; the thread routes answer the NAMED
+ *  `control-reset` error and the client re-sends an idempotent op or resolves a
+ *  write by pi's echo (docs/reference/specs/harness-pi.md item 16). Distinct
+ *  from `RuntimeReplacedError` precisely so the harness never mistakes a DO
+ *  reset over a live pi for a replaced container and orphans that pi. */
+class ControlResetError extends Error {
+  constructor(
+    readonly phase: "spawn" | "collect",
+    readonly cause: unknown,
+  ) {
+    super(
+      `control-reset: the resident's Durable Object was reset (a deploy) while this command was ${
+        phase === "spawn" ? "starting" : "running"
+      }; the container and its processes are as they were; the command's outcome is unknown (${errMsg(cause)})`,
+    );
+    this.name = "ControlResetError";
+  }
+}
+
 /** Every wording the pinned SDK (@cloudflare/sandbox@0.13.0-next.751.1) uses
  *  when the runtime incarnation changed under a call, for the message-based
  *  fallback below. Two of these come from classes the SDK does NOT export
@@ -763,16 +789,25 @@ const RPC_TRANSPORT_LOSS_KINDS = new Set(["peer_closed", "connection_failed", "u
 /** Does this SDK error mean the runtime incarnation changed under us? Typed
  *  checks first (`StaleProcessHandleError`, `RuntimeIdentityInactiveError`, an
  *  `OperationInterruptedError` with one of `RUNTIME_REPLACED_REASONS`, an
- *  `RPCTransportError` with one of `RPC_TRANSPORT_LOSS_KINDS`, the platform's
- *  superseded-isolate reset), then the SDK's message wording — on the error AND
- *  its cause chain — as a belt-and-braces fallback. Anything else (a real spawn
- *  failure, a timeout, a wire-format error) is NOT a runtime replacement. */
+ *  `RPCTransportError` with one of `RPC_TRANSPORT_LOSS_KINDS`), then the SDK's
+ *  message wording — on the error AND its cause chain — as a belt-and-braces
+ *  fallback. Anything else (a real spawn failure, a timeout, a wire-format
+ *  error) is NOT a runtime replacement.
+ *
+ *  Deliberately IMMUNE to the platform's superseded-isolate reset (a DO
+ *  code-update reset): that is this Durable Object resetting over a container it
+ *  did not touch, the container unchanged, so it is never a runtime replacement
+ *  and never swaps the incarnation on the `/exec` path. `run()` answers it as a
+ *  `control-reset` (`isControlReset`), and the restore path folds it in
+ *  explicitly at its own site (`isRuntimeReplacement(err) || isControlReset(err)`)
+ *  — the ONE place a DO reset shares the replacement disposition, since a reset
+ *  under a live restore leaves nothing to land and re-restores onto the container
+ *  that comes back. Keeping it out of this predicate makes that use the only one. */
 function isRuntimeReplacement(err: unknown): boolean {
   if (err instanceof StaleProcessHandleError) return true;
   if (err instanceof RuntimeIdentityInactiveError) return true;
   if (err instanceof OperationInterruptedError && RUNTIME_REPLACED_REASONS.has(err.reason)) return true;
   if (err instanceof RPCTransportError && RPC_TRANSPORT_LOSS_KINDS.has(err.kind)) return true;
-  if (isDurableObjectCodeUpdateReset(err)) return true;
   for (const link of selfAndCauses(err)) if (RUNTIME_REPLACEMENT_WORDING.test(errMsg(link))) return true;
   return false;
 }
@@ -781,23 +816,38 @@ function isRuntimeReplacement(err: unknown): boolean {
  *  — a new incarnation serves the thread, so the container the command was
  *  aimed at is gone whatever else the resident knows: the typed classes for
  *  a stale process handle and an inactive runtime identity, an interruption
- *  whose reason is a replaced runtime, the platform's superseded-isolate
- *  reset, and the SDK's wordings for the same (`RUNTIME_MOVED_WORDING`, on the
- *  error and its cause chain). NOT the words for a container that is merely
- *  down (`STOPPED_CONTAINER_WORDING`: "The container is not running", "Process
- *  supervisor is closed") and NOT a transport lost under the call
- *  (`RPCTransportError`): an asleep or starting container and a network blip
- *  answer those too, so on `/exec` they are the word only when the resident
- *  itself knows the container it held is gone (`replacedExecAnswer`). The
- *  resident's own steps keep the union (`isRuntimeReplacement`): a step
- *  interrupted either way is retried onto the container that comes back. */
+ *  whose reason is a replaced runtime, and the SDK's wordings for the same
+ *  (`RUNTIME_MOVED_WORDING`, on the error and its cause chain). NOT the words
+ *  for a container that is merely down (`STOPPED_CONTAINER_WORDING`: "The
+ *  container is not running", "Process supervisor is closed") and NOT a
+ *  transport lost under the call (`RPCTransportError`): an asleep or starting
+ *  container and a network blip answer those too, so on `/exec` they are the
+ *  word only when the resident itself knows the container it held is gone
+ *  (`replacedExecAnswer`). NOT the platform's superseded-isolate reset either:
+ *  that is this Durable Object resetting over a container it did not touch —
+ *  `run()` intercepts it first, in both phases, as a `control-reset`
+ *  (`isControlReset`), so a DO-reset cause never reaches this predicate, and a
+ *  vouch for it here would say the opposite of that word. The restore path
+ *  keeps the union by naming both explicitly at its site
+ *  (`isRuntimeReplacement(err) || isControlReset(err)`), so a step interrupted
+ *  either way is retried onto the container that comes back — while this
+ *  predicate and `isRuntimeReplacement` stay immune to the reset. */
 function sdkVouchesRuntimeMoved(err: unknown): boolean {
   if (err instanceof StaleProcessHandleError) return true;
   if (err instanceof RuntimeIdentityInactiveError) return true;
   if (err instanceof OperationInterruptedError && RUNTIME_REPLACED_REASONS.has(err.reason)) return true;
-  if (isDurableObjectCodeUpdateReset(err)) return true;
   for (const link of selfAndCauses(err)) if (RUNTIME_MOVED_WORDING.test(errMsg(link))) return true;
   return false;
+}
+
+/** Whether a command's failure is the resident's own Durable Object resetting
+ *  under it (a Worker-code deploy) rather than the container runtime being
+ *  replaced. Checked BEFORE `isRuntimeReplacement` on the thread `run()` path,
+ *  so a DO reset over a still-running container answers `control-reset`, never
+ *  the replaced word. The SDK's predicate already walks the cause
+ *  chain (`selfAndCauses`), so it is called directly on the caught error. */
+function isControlReset(err: unknown): boolean {
+  return isDurableObjectCodeUpdateReset(err);
 }
 
 /** The named ThreadErr every thread route (exec/read/write) answers for a
@@ -814,6 +864,15 @@ function sdkVouchesRuntimeMoved(err: unknown): boolean {
  *  re-attach for a read that fails outright while the container starts. */
 function runtimeReplacedErr(err: RuntimeReplacedError): ThreadErr {
   return { error: err.message, status: 409, reason: "runtime-replaced" };
+}
+
+/** The named ThreadErr a DO code-update reset answers with — its own `reason`
+ *  the client keys on, distinct from `runtime-replaced`: the container is
+ *  unchanged and the command's outcome is unknown, so the client re-sends an
+ *  idempotent op or resolves a write by echo (harness-pi item 16), never the
+ *  replaced verdict. */
+function controlResetErr(err: ControlResetError): ThreadErr {
+  return { error: err.message, status: 409, reason: "control-reset" };
 }
 
 /** The container's control port never answered: `exec` rejected with the
@@ -2049,6 +2108,12 @@ export class ResidentDO extends Sandbox<Env> {
     try {
       proc = await createExtensionProcessSandbox(this).exec(argv as unknown as SandboxCommand, launch);
     } catch (err) {
+      // A DO code-update reset (our own Worker deploy) BEFORE a runtime
+      // replacement: the container is unchanged, so this is `control-reset`, not
+      // the replaced word — never `swapIncarnation`, and the command's outcome
+      // is unknown. Checked first so a DO reset over a live pi is never
+      // read as a replaced container.
+      if (isControlReset(err)) throw new ControlResetError("spawn", err);
       if (!isRuntimeReplacement(err)) {
         // The control port never answered the SDK's connect (its 30 s abort,
         // raised inside the wake path): no process started and nothing about
@@ -2099,6 +2164,11 @@ export class ResidentDO extends Sandbox<Env> {
         truncated: out.truncated,
       };
     } catch (err) {
+      // A DO code-update reset during collect: the container and the process are
+      // unchanged (only this DO's isolate reset), so the outcome is unknown but
+      // never a replacement — `control-reset`, no `swapIncarnation`.
+      // Checked before the replacement branch below.
+      if (isControlReset(err)) throw new ControlResetError("collect", err);
       if (isRuntimeReplacement(err)) {
         // Unconditional, as at the spawn site above: the memos and leases go
         // with every classified replacement; only the word is gated.
@@ -2684,7 +2754,13 @@ export class ResidentDO extends Sandbox<Env> {
       // asks the runtime whether the container the extract wrote to is still
       // there (the incident that named this: a resident went `down` on exactly
       // this, 10 ms before every exec answered "container is not running").
-      const runtimeReplaced = isRuntimeReplacement(err);
+      // A DO code-update reset under a live restore leaves nothing to land (the
+      // restore's SDK call is gone with this isolate), so it shares the
+      // replacement disposition — interrupted, retried onto the container that
+      // comes back. This is the ONLY site that folds the DO reset in;
+      // `isRuntimeReplacement` itself stays immune to it, so `/exec` never
+      // answers the replaced word for a reset over a live container.
+      const runtimeReplaced = isRuntimeReplacement(err) || isControlReset(err);
       const runtimeActive = runtimeReplaced ? false : await this.isRuntimeActive().catch(() => null);
       const disposition = restoreFailureDisposition(errMsg(err), {
         runtimeReplaced,
@@ -6365,6 +6441,9 @@ export class ResidentDO extends Sandbox<Env> {
     try {
       return await this.execThreadBody(threadKey, command, timeoutMs, env);
     } catch (err) {
+      // A DO reset over a live container answers its own word at once — the
+      // container is unchanged, so no `replacedExecAnswer` gate applies.
+      if (err instanceof ControlResetError) return controlResetErr(err);
       if (err instanceof RuntimeReplacedError) return this.replacedExecAnswer(err);
       throw err;
     }
@@ -6390,7 +6469,8 @@ export class ResidentDO extends Sandbox<Env> {
         : {}),
     } satisfies ThreadBinding);
 
-    // A runtime replacement under the command propagates to `execThreadImpl`'s gate.
+    // A runtime replacement or a control reset under the command propagates to
+    // `execThread`'s gate (`replacedExecAnswer` / `controlResetErr`).
     const r = await this.threadRunCapped(binding.user, binding.worktreePath, command, timeoutMs, EXEC_OUTPUT_CAP, env);
     const truncated = r.stdout.length > EXEC_OUTPUT_CAP || r.stderr.length > EXEC_OUTPUT_CAP || r.truncated === true;
     const notes: string[] = [];
@@ -6443,6 +6523,7 @@ export class ResidentDO extends Sandbox<Env> {
         capBytesFor(READ_CONTENT_CAP),
       );
     } catch (err) {
+      if (err instanceof ControlResetError) return controlResetErr(err);
       if (err instanceof RuntimeReplacedError) return runtimeReplacedErr(err);
       throw err;
     }
@@ -6491,6 +6572,7 @@ export class ResidentDO extends Sandbox<Env> {
       }
       return { encoding: "base64", content: parts.join(""), size };
     } catch (err) {
+      if (err instanceof ControlResetError) return controlResetErr(err);
       if (err instanceof RuntimeReplacedError) return runtimeReplacedErr(err);
       throw err;
     }
@@ -6537,6 +6619,7 @@ export class ResidentDO extends Sandbox<Env> {
         DEFAULT_EXEC_TIMEOUT_MS,
       );
     } catch (err) {
+      if (err instanceof ControlResetError) return controlResetErr(err);
       if (err instanceof RuntimeReplacedError) return runtimeReplacedErr(err);
       const step = err instanceof StepError ? ` at ${err.step}` : "";
       return { error: `write-failed${step}: ${errMsg(err)}`, status: 400 };
