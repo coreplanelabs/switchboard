@@ -18,6 +18,12 @@
 
 export const MINUTE_MS = 60_000;
 
+/** One calendar day in milliseconds: the unit the daily cost and delivery ranges
+ *  step by (`dayOf`, the day count of a range). A day is not a lease, but it is
+ *  a duration, and every duration is read from this table rather than written
+ *  as a literal where it is used. */
+export const DAY_MS = 24 * 60 * MINUTE_MS;
+
 /** The presets that run the tool loop, and the one pipeline preset. */
 export const LOOP_PRESETS = ["general", "coding", "review", "research", "explore", "conductor"] as const;
 export type LoopPreset = (typeof LOOP_PRESETS)[number];
