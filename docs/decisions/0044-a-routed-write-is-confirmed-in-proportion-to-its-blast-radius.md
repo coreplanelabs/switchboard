@@ -1,6 +1,6 @@
 ---
 title: A routed write is confirmed in proportion to its blast radius; the definition declares it, the org floors it, the channel asks with one click, and a test run never asks
-status: proposed
+status: accepted
 date: 2026-09-17
 pattern: A decision derived from a field the definition carries and fenced by the conformance suite; a boundary axis that intersects toward caution; one core object every channel adapter renders
 ---
@@ -143,21 +143,21 @@ Not here: the locked-keys list for org-only settings; any adapter beyond Slack, 
 
 | Question | Owner | Resolved by | Needed before |
 |---|---|---|---|
-| Does a button get read where a paste did not? | the maintainer | the first plan unit's paste-through rate for today's hand-back, then one week of minted, run, cancelled and expired counts after the button lands | the default relaxes |
-| Labels on `repo onboard`, `mcp promote`, `friction propose` | the owners of the repo, mcp and friction groups | their review of the table in the plan's first unit | the fence lands |
+| Does a button get read where a paste did not? | the maintainer | decided at acceptance (2026-09-17): yes — the maintainer's judgement after pressing the live buttons; the counts stay a measurement (`npm run load -- door`), not a gate | the default relaxes |
+| Labels on `repo onboard`, `mcp promote`, `friction propose` | the owners of the repo, mcp and friction groups | decided at acceptance: the three labels stand as written (confirmed in the review of the plan's labels unit) | the fence lands |
 | When `never` validates and the default relaxes to `destructive` | the maintainer | two consecutive weekly replays with the decoy row at 0 and fewer than 1 in 50 write binds wrong in command or arguments | the axis's second release |
-| Does the verifier earn its call? | the maintainer | the replay with `--verify`: at least half the write misbinds removed, under one rejected correct bind in twenty | the verifier ships |
+| Does the verifier earn its call? | the maintainer | the replay with `--verify` (built as a flag by the plan's verifier unit; nothing in production calls it): at least half the write misbinds removed, under one rejected correct bind in twenty | the verifier ships to production |
 
 ## Validation criteria
 
-Every row is `[gap]` today and names its unit; the rows for the axis's arithmetic, the adapter contract and the replay flags live in the plan.
+Bound at acceptance (2026-09-17) to the tests the plan's units added (`docs/plans/2026-09-17-002-feat-graded-confirmation-plan.md`: the labels unit, the axis unit, the confirmation unit, the Slack unit); the rows for the axis's arithmetic, the adapter contract and the replay flags live in the plan and its specs.
 
 | Criterion | Proof |
 |---|---|
-| Every chat-exposed write declares `destructive`; a write without it fails the conformance suite naming the command; `tools/list` carries the hints; `blastRadius` is `read`, `exec`, `destructive` or `write` as the shape says | `[gap]` unit 1: `src/core/commandConformance.test.ts`, `src/channels/mcp.test.ts`, `src/core/dispatch/route.test.ts` |
-| A routed command at or after the effective class stores one confirmation and replies the offer with the full chat form; before it, it runs with the receipt; a secret-looking argument mints nothing and names the reason | `[gap]` unit 3: `src/core/dispatcher.test.ts` |
-| A confirmation runs once, for an actor whose `self` holds the requester, before expiry, with the stored input, through the typed path with `source: confirm`; expired, used and foreign clicks are refused with the named line; a store outage at mint falls back to the pasteable line | `[gap]` unit 3: `src/core/dispatch/confirm.test.ts` |
-| Live, human-gated: "use opus for coding here" replies the offer with buttons; Run changes the setting and the message shows the result; a second person's click is refused; "run the tests on main" in an onboarded repo runs with no button | `[gap]` unit 4, posted on the receipts tracker |
+| Every chat-exposed write of class `write` or `destructive` declares `destructive` and a risk line; a write without them fails the conformance suite naming the command and the field; `tools/list` carries the four hints; `blastRadius` is `read`, `exec`, `destructive` or `write` as the shape says and the door's rule agrees with it on every offered command | `src/core/commandConformance.test.ts::…::blast radius: every chat-exposed write of class write or destructive declares … and a risk line…`, `::…::blast radius: a write missing … is named with the field…`; `src/channels/mcp.test.ts::…::tools/list carries each command's blast radius in MCP's own hint names…`; `src/core/dispatch/route.test.ts::routedRunsAtOnce — a read or an exec-class write runs when routed; a state-changing write is handed back::*` |
+| A routed command at or after the effective class stores one confirmation and replies the offer with the full chat form, the risk line and the deciding scope; before it, it runs with the receipt; a secret-looking argument mints nothing and names the reason; a store that cannot be reached at mint falls back to the pasteable line | `src/core/dispatcher.test.ts::the confirm axis through dispatch(): the door hands back at or after the effective confirm class (record 0044)::*`, `::the confirmation through dispatch() and dispatchClick(): offered when the channel can show one, consumed once for the requester (record 0044)::*` |
+| A confirmation runs once, for an actor whose id or `self` holds the requester, before expiry on the object's clock, with the stored input, through the typed path with `source: confirm` and `outcome: confirmed`; expired, used and foreign clicks are refused with the named line; cancel and confirm on one id cannot both succeed | `src/core/dispatch/confirm.test.ts::consumeAndRun — the stored input runs once, as the requester, through the typed path (record 0044)::*`, `::cancelPending — the other button::*`; `src/core/confirmations.test.ts::WorkerConfirmationStore (the ConfigDO confirmations client)::*`; the object's own consume in `deploy/cloudflare-memory/config.test.ts` |
+| Live, human-gated: "use anthropic/claude-opus-5 for coding in this channel" replies the exact line, the risk line, `confirmation required by the built-in default`, Run and Cancel; Cancel leaves the line and runs nothing; Run runs the command as the requester and the message becomes the receipt and the result, the buttons gone the instant one is pressed; an expired click reads its line; "run the tests on main in an onboarded repo" runs with no button | the receipts tracker (#234), 2026-09-17, on releases 1.244.0 and 1.245.0; the one row still open is a second person's click, expected `only the requester can confirm this` |
 
 ## Sources
 
