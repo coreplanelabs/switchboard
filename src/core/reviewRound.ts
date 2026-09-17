@@ -780,9 +780,8 @@ export async function runReviewPostStep(input: {
     const target: ReviewCommentTarget = { ...postTarget, commitId: pinned };
     // The verdict line is built here, by code — the model's prose never
     // decides whether the body starts with "LGTM:" (auto-approve contract).
-    const body = carried
-      ? `${buildReviewPostBody(input.answer, verdict)}\n\n${carriedFooter(carried)}`
-      : buildReviewPostBody(input.answer, verdict);
+    const rendered = buildReviewPostBody(input.answer, verdict, { repo: postTarget.repo, head: pinned });
+    const body = carried ? `${rendered}\n\n${carriedFooter(carried)}` : rendered;
     const where = `${postTarget.repo}#${postTarget.number}`;
     try {
       await input.post(target, body);

@@ -1327,6 +1327,8 @@ export async function dispatch(
       agent,
       run,
       answer,
+      verdict: ran.verdict,
+      reviewPost: ran.reviewPost,
       liveUrl,
       prNote,
       stopped,

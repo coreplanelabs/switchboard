@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ADDRESS_SEVERITIES,
+  buildReviewChannelReply,
   buildReviewPostBody,
   CHANGES_TOKEN,
   FINDING_SEVERITIES,
@@ -84,30 +85,132 @@ describe("the stored shapes — isReviewVerdictShape, isFindingDispositionsShape
 // Feature: docs/reference/specs/agent-review.md — deterministic verdict token. The
 // auto-approve workflow keys on `startsWith(body, "LGTM:")`, so the first line
 // is produced by code from the structured verdict, never by the model's prose.
+// Feature: docs/reference/specs/agent-review.md item 5b — both surfaces are
+// rendered from the typed verdict. The GitHub comment: the token line first
+// (the auto-approve contract), a GitHub alert callout with the verdict word,
+// the pinned head and the finding counts, a findings table linked at the head,
+// the model's text folded under `Full review`, a machine-readable marker last.
 describe("review verdict → post body", () => {
-  it("approve → body starts with the exact `LGTM:` token and the summary", () => {
-    const body = buildReviewPostBody("Looks fine.\n- nit: rename x", {
-      verdict: "approve",
-      summary: "no blocking issues",
-    });
-    expect(body.startsWith(`${LGTM_TOKEN} no blocking issues\n\n`)).toBe(true);
-    expect(body).toContain("Looks fine.");
+  const NIT = {
+    id: "F2",
+    severity: "nit",
+    file: "src/pages/prompts/[slug].astro",
+    line: 48,
+    title: "Comment says 34 recipes; there are 32",
+  };
+  const MINOR = {
+    id: "F1",
+    severity: "minor",
+    file: "src/data/removed-pages.mjs",
+    title: "Removed use-case URLs 404 with no redirect",
+  };
+  const HEAD = "ca726ad9d4f3b1c2e5a6b7c8d9e0f1a2b3c4d5e6";
+  const TARGET = { repo: "acme/site", head: HEAD };
+
+  it("approve → the exact `LGTM:` token line first, a NOTE callout with the verdict word, the pinned head and the counts, the prose folded under `Full review`", () => {
+    const v = parseVerdictInput({ verdict: "approve", summary: "no blocking issues", findings: [NIT] })!;
+    const body = buildReviewPostBody("F2: the comment predates the two recipes that were cut.", v, TARGET);
+    expect(
+      body.startsWith(
+        `${LGTM_TOKEN} no blocking issues\n\n> [!NOTE]\n> **Approved** · head \`ca726ad\` · 1 finding: 1 nit\n`,
+      ),
+    ).toBe(true);
+    expect(body).toContain(
+      "<details>\n<summary>Full review</summary>\n\nF2: the comment predates the two recipes that were cut.\n\n</details>",
+    );
   });
 
-  it("request_changes → never starts with LGTM, even if the prose does", () => {
-    const body = buildReviewPostBody("LGTM overall but one blocker...", {
+  it("request_changes → WARNING callout, never starts with LGTM even if the prose does", () => {
+    const v = parseVerdictInput({
       verdict: "request_changes",
       summary: "null deref in handler",
-    });
-    expect(body.startsWith(`${CHANGES_TOKEN} null deref in handler\n\n`)).toBe(true);
+      findings: [MINOR, NIT],
+    })!;
+    const body = buildReviewPostBody("LGTM overall but one blocker...", v, TARGET);
+    expect(
+      body.startsWith(
+        `${CHANGES_TOKEN} null deref in handler\n\n> [!WARNING]\n> **Changes requested** · head \`ca726ad\` · 2 findings: 1 minor, 1 nit\n`,
+      ),
+    ).toBe(true);
     expect(body.startsWith("LGTM")).toBe(false);
   });
 
-  it("no verdict → fail-closed: explicit non-approving line, prose preserved", () => {
-    const body = buildReviewPostBody("LGTM: ship it", undefined);
-    expect(body.startsWith(`${NO_VERDICT_LINE}\n\n`)).toBe(true);
+  it("no verdict → fail-closed: the non-approving line, a CAUTION callout, no table, the prose preserved", () => {
+    const body = buildReviewPostBody("LGTM: ship it", undefined, TARGET);
+    expect(
+      body.startsWith(
+        `${NO_VERDICT_LINE}\n\n> [!CAUTION]\n> **No verdict** · head \`ca726ad\` · the run ended without a submit_verdict call\n`,
+      ),
+    ).toBe(true);
     expect(body.startsWith("LGTM")).toBe(false);
+    expect(body).not.toContain("| Severity |");
     expect(body).toContain("LGTM: ship it"); // the prose is kept, just not first
+  });
+
+  it("findings render as a table — severity, id + title, the file linked at the pinned head, `#L<line>` when the finding has one", () => {
+    const v = parseVerdictInput({ verdict: "request_changes", summary: "two", findings: [MINOR, NIT] })!;
+    const body = buildReviewPostBody("prose", v, TARGET);
+    expect(body).toContain(
+      "| Severity | Finding | Where |\n| --- | --- | --- |\n" +
+        `| minor | **F1** Removed use-case URLs 404 with no redirect | [\`src/data/removed-pages.mjs\`](https://github.com/acme/site/blob/${HEAD}/src/data/removed-pages.mjs) |\n` +
+        `| nit | **F2** Comment says 34 recipes; there are 32 | [\`src/pages/prompts/[slug].astro:48\`](https://github.com/acme/site/blob/${HEAD}/src/pages/prompts/%5Bslug%5D.astro#L48) |\n`,
+    );
+  });
+
+  it("without a target the Where cell is plain code and the callout names no head; a pipe in a title is escaped so the row holds", () => {
+    const v = parseVerdictInput({
+      verdict: "request_changes",
+      summary: "s",
+      findings: [{ ...MINOR, title: "a | b" }],
+    })!;
+    const body = buildReviewPostBody("prose", v);
+    expect(body).toContain("> **Changes requested** · 1 finding: 1 minor\n");
+    expect(body).toContain("| minor | **F1** a \\| b | `src/data/removed-pages.mjs` |");
+  });
+
+  it("a file that is not a path (spaces, a URL) is never linked", () => {
+    const v = parseVerdictInput({
+      verdict: "request_changes",
+      summary: "s",
+      findings: [
+        { ...MINOR, file: "PR description" },
+        { ...NIT, file: "https://x.test/a" },
+      ],
+    })!;
+    const body = buildReviewPostBody("prose", v, TARGET);
+    expect(body).toContain("| minor | **F1** Removed use-case URLs 404 with no redirect | `PR description` |");
+    expect(body).toContain("| nit | **F2** Comment says 34 recipes; there are 32 | `https://x.test/a:48` |");
+    expect(body).not.toContain("blob/");
+  });
+
+  it("the counts: an empty findings array says `no findings`, no array says `findings not itemized`; neither renders a table", () => {
+    const empty = buildReviewPostBody(
+      "Fine.",
+      parseVerdictInput({ verdict: "approve", summary: "ok", findings: [] })!,
+      TARGET,
+    );
+    expect(empty).toContain("> **Approved** · head `ca726ad` · no findings\n");
+    expect(empty).not.toContain("| Severity |");
+    const none = buildReviewPostBody("Fine.", parseVerdictInput({ verdict: "approve", summary: "ok" })!, TARGET);
+    expect(none).toContain("> **Approved** · head `ca726ad` · findings not itemized\n");
+    expect(none).not.toContain("| Severity |");
+  });
+
+  it("an empty answer renders no `Full review` block; the body ends with the machine-readable verdict marker", () => {
+    const v = parseVerdictInput({ verdict: "approve", summary: "ok", findings: [NIT] })!;
+    const body = buildReviewPostBody("  \n", v, TARGET);
+    expect(body).not.toContain("<details>");
+    const marker = body.split("\n").at(-1)!;
+    const m = /^<!-- switchboard:verdict (.*) -->$/.exec(marker);
+    expect(m).not.toBeNull();
+    expect(JSON.parse(m![1])).toEqual({
+      verdict: "approve",
+      head: HEAD,
+      findings: [{ id: "F2", severity: "nit", file: "src/pages/prompts/[slug].astro", line: 48 }],
+    });
+    expect(buildReviewPostBody("x", undefined).split("\n").at(-1)).toBe(
+      '<!-- switchboard:verdict {"verdict":"none"} -->',
+    );
   });
 
   it("summary is collapsed to one line so the token line cannot be split", () => {
@@ -135,17 +238,6 @@ describe("review verdict → post body", () => {
     it("parses valid findings in order", () => {
       const v = parseVerdictInput({ verdict: "request_changes", summary: "two issues", findings: [F1, F2] });
       expect(v).toEqual({ verdict: "request_changes", summary: "two issues", findings: [F1, F2] });
-    });
-
-    it("renders findings as a compact list under the verdict line, before the prose", () => {
-      const v = parseVerdictInput({ verdict: "request_changes", summary: "two issues", findings: [F1, F2] })!;
-      const body = buildReviewPostBody("Prose explanation here.", v);
-      expect(body).toBe(
-        `${CHANGES_TOKEN} two issues\n` +
-          "- [blocking] F1 src/a.ts:12 — Null deref in handler\n" +
-          "- [nit] F2 src/b.ts — Rename x\n" +
-          "\nProse explanation here.",
-      );
     });
 
     it("a malformed single finding drops with a note naming it; the verdict and the other findings stand", () => {
@@ -205,7 +297,7 @@ describe("review verdict → post body", () => {
       expect(v.verdict).toBe("approve");
       const body = buildReviewPostBody("prose", v);
       expect(body.startsWith(`${LGTM_TOKEN} minor nits only\n`)).toBe(true);
-      expect(body).toContain("- [nit] F2 src/b.ts — Rename x");
+      expect(body).toContain("| nit | **F2** Rename x | `src/b.ts` |");
     });
 
     // Feature: docs/reference/specs/agent-review.md item 5a — the severity gate
@@ -357,10 +449,12 @@ describe("review verdict → post body", () => {
       expect(v.findings).toEqual([{ id: "F1", severity: "minor", file: "src/a.ts", title: "broken across lines" }]);
     });
 
-    it("an empty findings array is valid and renders nothing extra", () => {
+    it("an empty findings array is valid and renders no table", () => {
       const v = parseVerdictInput({ verdict: "approve", summary: "ok", findings: [] })!;
       expect(v.findings).toEqual([]);
-      expect(buildReviewPostBody("prose", v)).toBe(`${LGTM_TOKEN} ok\n\nprose`);
+      const body = buildReviewPostBody("prose", v);
+      expect(body.startsWith(`${LGTM_TOKEN} ok\n\n> [!NOTE]\n> **Approved** · no findings\n`)).toBe(true);
+      expect(body).not.toContain("| Severity |");
     });
   });
 
@@ -483,5 +577,70 @@ describe("the stored review post — isReviewPostShape and its redaction", () =>
       reason: "HTTP 401 for «redacted-github-token»",
     });
     expect(redactReviewPost(posted)).toEqual(posted);
+  });
+});
+
+// Feature: docs/reference/specs/agent-review.md item 5b — the thread reply is
+// rendered from the typed verdict too: the token line, one bullet per finding,
+// where it was posted and the run link. The model's write-up rides along only
+// when it landed nowhere else (no GitHub post, or findings not itemized), so
+// the review's text is always somewhere a person reads it.
+describe("review verdict → channel reply (item 5b: Slack gets the verdict and the findings, the prose only when it lands nowhere else)", () => {
+  const v = parseVerdictInput({
+    verdict: "request_changes",
+    summary: "two issues",
+    findings: [
+      {
+        id: "F1",
+        severity: "minor",
+        file: "src/data/removed-pages.mjs",
+        title: "Removed use-case URLs 404 with no redirect",
+      },
+      {
+        id: "F2",
+        severity: "nit",
+        file: "src/pages/prompts/[slug].astro",
+        line: 48,
+        title: "Comment says 34 recipes; there are 32",
+      },
+    ],
+  })!;
+  const head =
+    `${CHANGES_TOKEN} two issues\n` +
+    "- [minor] F1 src/data/removed-pages.mjs — Removed use-case URLs 404 with no redirect\n" +
+    "- [nit] F2 src/pages/prompts/[slug].astro:48 — Comment says 34 recipes; there are 32";
+  const posted = { repo: "acme/site", number: 359 };
+  const liveUrl = "https://bot.example/runs/run-x?t=tok";
+  const answer = "F1: the redirect table lost two rows.\n\nF2: the count predates the cut.";
+
+  it("posted with itemized findings → the token line, one bullet per finding, the post and the run link — none of the prose", () => {
+    expect(buildReviewChannelReply({ answer, verdict: v, posted, liveUrl })).toBe(
+      `${head}\n\nPosted to acme/site#359 · [Live run](${liveUrl})`,
+    );
+  });
+
+  it("not posted (Slack-only, an opt-out, a guard refusal) → the same head, then the prose", () => {
+    expect(buildReviewChannelReply({ answer, verdict: v, posted: undefined, liveUrl })).toBe(
+      `${head}\n\n${answer}\n\n[Live run](${liveUrl})`,
+    );
+  });
+
+  it("posted but findings not itemized → the prose rides along: a list that says nothing is no substitute", () => {
+    const bare = parseVerdictInput({ verdict: "approve", summary: "fine" })!;
+    expect(buildReviewChannelReply({ answer, verdict: bare, posted, liveUrl })).toBe(
+      `${LGTM_TOKEN} fine\n\n${answer}\n\nPosted to acme/site#359 · [Live run](${liveUrl})`,
+    );
+  });
+
+  it("no verdict → the bare answer with the run link, as before; nothing is appended without a URL or a post", () => {
+    expect(buildReviewChannelReply({ answer: "answer", verdict: undefined, posted, liveUrl })).toBe(
+      `answer\n\n[Live run](${liveUrl})`,
+    );
+    expect(
+      buildReviewChannelReply({ answer: "answer", verdict: undefined, posted: undefined, liveUrl: undefined }),
+    ).toBe("answer");
+    expect(buildReviewChannelReply({ answer, verdict: v, posted, liveUrl: undefined })).toBe(
+      `${head}\n\nPosted to acme/site#359`,
+    );
   });
 });

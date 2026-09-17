@@ -91,7 +91,9 @@ describe("reviewOutcome — one task judged as the post-step would judge it", ()
     expect(o.verdict?.verdict).toBe("approve");
     expect(o.houseShape).toBe(true);
     expect(o.headMatches).toBe(true);
-    expect(o.body).toBe("LGTM: looks correct\n- [nit] F1 src/x.ts:3 — a name\n\nThe review.");
+    expect(o.body?.startsWith("LGTM: looks correct\n\n> [!NOTE]\n> **Approved** · ")).toBe(true);
+    expect(o.body).toContain("| nit | **F1** a name | `src/x.ts:3` |");
+    expect(o.body).toContain("<summary>Full review</summary>\n\nThe review.\n\n</details>");
     expect(o.problems).toEqual([]);
     expect(o.writeCalls).toEqual([]);
   });
@@ -102,7 +104,8 @@ describe("reviewOutcome — one task judged as the post-step would judge it", ()
     expect(none.verdict).toBeUndefined();
     expect(none.houseShape).toBe(false);
     expect(none.headMatches).toBe(false);
-    expect(none.body).toBe("No verdict submitted — not approving.\n\nThe review.");
+    expect(none.body?.startsWith("No verdict submitted — not approving.\n\n> [!CAUTION]\n")).toBe(true);
+    expect(none.body).toContain("<summary>Full review</summary>\n\nThe review.\n\n</details>");
     expect(none.problems).toEqual(["no verdict submitted"]);
   });
   it("a verdict naming another head, or none, fails the head check the reviewed-head guard would fail — the shape may still hold", () => {
