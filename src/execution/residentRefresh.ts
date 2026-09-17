@@ -132,6 +132,10 @@ export interface RefreshFailure {
    *  with the attempt count (the ladder below decides what the resident does
    *  about it); real failures keep `<step>-failed:`. */
   reason: string;
+  /** The step that failed, as the caller named it (`refresh` for a failure
+   *  between steps): item 67 reads whether it ran the repository's own command
+   *  or the resident's machinery. */
+  step: string;
   interrupted: boolean;
   diskFull: boolean;
   runtimeUnreachable: boolean;
@@ -234,6 +238,7 @@ export function classifyRefreshFailure(input: {
   const { step, message } = input;
   if (input.runtimeUnreachable) {
     return {
+      step,
       interrupted: false,
       diskFull: false,
       runtimeUnreachable: true,
@@ -242,6 +247,7 @@ export function classifyRefreshFailure(input: {
   }
   if (isDiskFullMessage(message)) {
     return {
+      step,
       interrupted: false,
       diskFull: true,
       runtimeUnreachable: false,
@@ -251,6 +257,7 @@ export function classifyRefreshFailure(input: {
   const timedOut = /\(timed out\)/.test(message);
   if (!timedOut && (INTERRUPTION_SIGNATURE.test(message) || RUNTIME_REPLACEMENT_WORDING.test(message))) {
     return {
+      step,
       interrupted: true,
       diskFull: false,
       runtimeUnreachable: false,
@@ -259,13 +266,20 @@ export function classifyRefreshFailure(input: {
   }
   if (input.freeKiB !== undefined && input.freeKiB !== null && input.freeKiB < DISK_FULL_FREE_KIB) {
     return {
+      step,
       interrupted: false,
       diskFull: true,
       runtimeUnreachable: false,
       reason: diskFullReason({ step, message, freeKiB: input.freeKiB }),
     };
   }
-  return { interrupted: false, diskFull: false, runtimeUnreachable: false, reason: `${step}-failed: ${message}` };
+  return {
+    step,
+    interrupted: false,
+    diskFull: false,
+    runtimeUnreachable: false,
+    reason: `${step}-failed: ${message}`,
+  };
 }
 
 // -- the runtime that never answers --------------------------------------------

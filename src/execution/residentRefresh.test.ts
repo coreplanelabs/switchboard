@@ -274,6 +274,7 @@ describe("classifyRefreshFailure (a build SIGTERM'd by a deploy is an interrupti
   it("an ordinary build failure stays <step>-failed with the message verbatim", () => {
     const f = classifyRefreshFailure({ step: "build", message: "exit 1: src/x.ts(3,1): error TS2304" });
     expect(f).toEqual({
+      step: "build",
       interrupted: false,
       diskFull: false,
       runtimeUnreachable: false,
@@ -482,6 +483,7 @@ describe("classifyRefreshFailure (a full container disk is `disk-full`, not GitH
   it("the same message with room on the disk, or with no probe answer, stays the step's own failure", () => {
     const msg = "exit 4: stderr: error: failed to write new configuration file /etc/gitconfig.lock";
     expect(classifyRefreshFailure({ step: "git-setup", message: msg, freeKiB: DISK_FULL_FREE_KIB })).toEqual({
+      step: "git-setup",
       interrupted: false,
       diskFull: false,
       runtimeUnreachable: false,
@@ -778,6 +780,7 @@ describe("runtime-unreachable (a container whose control port never answers is n
       runtimeUnreachable: { count: 2 },
     });
     expect(f).toEqual({
+      step: "refresh",
       interrupted: false,
       diskFull: false,
       runtimeUnreachable: true,
@@ -802,6 +805,7 @@ describe("runtime-unreachable (a container whose control port never answers is n
   it("without the caller's word the classifier does not guess from the wording — the message stays the step's own failure, as it did in production", () => {
     const f = classifyRefreshFailure({ step: "refresh", message: production.message });
     expect(f).toEqual({
+      step: "refresh",
       interrupted: false,
       diskFull: false,
       runtimeUnreachable: false,

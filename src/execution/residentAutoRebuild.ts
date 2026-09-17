@@ -9,8 +9,10 @@
  *  cycle, and these say the snapshot (or the container that would restore it)
  *  cannot be used — never a provision failure, which would loop against the
  *  same broken build. `runtime-unreachable` is item 64's last rung: a recreated
- *  container that did not answer either. */
-export const REHYDRATION_FAILURE_RE = /^(r2-restore-failed|snapshot-stamp-mismatch|no-snapshot|runtime-unreachable)/;
+ *  container that did not answer either; `infra-streak` is item 67's: a
+ *  recreated container whose cycles kept failing in the resident's own steps. */
+export const REHYDRATION_FAILURE_RE =
+  /^(r2-restore-failed|snapshot-stamp-mismatch|no-snapshot|runtime-unreachable|infra-streak)/;
 
 /** How many auto-rebuilds one resident gets inside one window. A rebuild is a
  *  clone, an install and a build (minutes to half an hour) that holds the cap
