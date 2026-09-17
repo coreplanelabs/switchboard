@@ -135,7 +135,7 @@ describe("PiRpcTransport", () => {
     await c.start({ paths, command: "pi", args: [], env: {} });
     const { t } = transport(c);
     c.failNext = { operation: "send", error: new Error("resident /exec: worktree evicted") };
-    t.send({ type: "abort" });
+    t.send({ type: "steer", message: "go" }); // any write but an abort, whose direct write's failure is nobody's
     await t.flushed();
     await expect(collect(t, 1)).rejects.toThrow("worktree evicted");
   });
@@ -175,8 +175,8 @@ describe("PiRpcTransport", () => {
     const { t } = transport(c);
     t.send({ type: "prompt", message: "in flight" });
     t.send({ type: "steer", message: "queued behind it" });
-    await new Promise((r) => setImmediate(r)); // let the first write reach the gate, past the drop check
-    t.abandon(); // the re-attach's close: drop what is still queued
+    await new Promise((r) => setImmediate(r)); // let the first write reach the gate, past the hold check
+    t.abandon(); // the re-attach's close: hold what is still queued for the fresh transport
     release();
     await t.flushed();
     // The in-flight write landed (already committed); the queued one never did —
@@ -208,40 +208,90 @@ describe("PiRpcTransport", () => {
     expect(t.pendingSend).toEqual({ id: "p", type: "prompt", message: "go" });
     expect(c.stdin).toEqual([]);
     // A send after the failure is held back too: this transport is spent.
-    t.send({ type: "abort" });
+    t.send({ type: "steer", message: "sent after the failure" });
     await t.flushed();
     expect(c.stdin).toEqual([]);
     // Neither is lost: the re-attach takes them, in order, for the fresh transport — once.
-    expect(t.takeUnsent()).toEqual([{ type: "steer", message: "queued behind the failure" }, { type: "abort" }]);
+    expect(t.takeUnsent()).toEqual([
+      { type: "steer", message: "queued behind the failure" },
+      { type: "steer", message: "sent after the failure" },
+    ]);
+    expect(t.takeUnsent()).toEqual([]);
+    // The one exception is an abort: written directly, it lands even here, and is never the re-attach's.
+    t.send({ type: "abort" });
+    await t.flushed();
+    expect(c.stdin).toEqual(['{"type":"abort"}']);
     expect(t.takeUnsent()).toEqual([]);
   });
 
-  it("the contracts after a failed send: flushed() resolves once every later write is held (not landed), and a plain close() delivers nothing more — the held writes are the re-attach's to take, never a teardown's to flush", async () => {
+  it("the contracts after a failed send: flushed() resolves once every later write is held (not landed), and a plain close() delivers nothing more of the chain — the held writes are the re-attach's to take — while a teardown's abort still reaches pi, written directly", async () => {
     const c = new FakeHarnessContainer();
     await c.start({ paths, command: "pi", args: [], env: {} });
     const { t } = transport(c);
     c.failNext = { operation: "send", error: new Error("control-reset: the resident's Durable Object was reset") };
     t.send({ id: "p", type: "prompt", message: "go" });
-    t.send({ type: "abort" }); // a teardown abort behind the failure
+    await t.flushed(); // the failure recorded: the chain is spent
+    t.send({ type: "steer", message: "behind the failure" }); // held
+    t.sendAbort(); // a teardown's abort: direct, so it lands even now
     t.close();
-    await t.flushed(); // settles: the failure recorded, the abort held — never a hang
+    await t.flushed(); // settles: the steer held — never a hang
     expect(t.pendingSend).toEqual({ id: "p", type: "prompt", message: "go" });
-    expect(c.stdin).toEqual([]);
-    expect(t.takeUnsent()).toEqual([{ type: "abort" }]);
+    expect(c.stdin).toEqual(['{"type":"abort"}']);
+    expect(t.takeUnsent()).toEqual([{ type: "steer", message: "behind the failure" }]);
   });
 
-  it("sendAbort reaches pi whatever the chain's state: through the chain, in its place, while the chain is live; written directly once a failed write spent it — and never queued for a re-attach to replay", async () => {
+  it("sendAbort writes the abort directly whatever the chain's state — never queued for a re-attach to replay, so a write that fails after the abort was asked for cannot swallow it — AND once more behind a write pending on a live chain, so the direct write overtaking a prompt still in flight never leaves pi running the prompt unwatched; an idle chain gets the one abort", async () => {
+    // A live chain with a prompt pending: the abort is written at once, ahead
+    // of the prompt whose turn on the chain has not come — and once more behind
+    // it, in the prompt's wake, so whichever order the FIFO takes an abort
+    // follows the prompt. An abort is idempotent and the duplicate harmless;
+    // nothing of it is queued.
     const live = new FakeHarnessContainer();
     await live.start({ paths, command: "pi", args: [], env: {} });
     const { t: onLive } = transport(live);
-    onLive.send({ type: "steer", message: "first" });
+    onLive.send({ id: "p", type: "prompt", message: "first" });
     onLive.sendAbort();
     await onLive.flushed();
     expect(live.stdin.map((l) => JSON.parse(l) as unknown)).toEqual([
-      { type: "steer", message: "first" },
+      { type: "abort" },
+      { id: "p", type: "prompt", message: "first" },
       { type: "abort" },
     ]);
     expect(onLive.takeUnsent()).toEqual([]);
+    // The chain now idle: nothing to overtake, so the direct write is the one abort — never a blind duplicate.
+    onLive.sendAbort();
+    await onLive.flushed();
+    expect(live.stdin).toHaveLength(4);
+    expect(live.stdin.slice(3).map((l) => JSON.parse(l) as unknown)).toEqual([{ type: "abort" }]);
+
+    // A write in flight that fails only AFTER the abort was asked for: an abort
+    // queued behind it would never be written (the chain is then spent) and a
+    // re-attach would replay it. Written directly, it reaches pi while the
+    // write is still in flight; the chained copy finds the chain spent and is
+    // dropped, and nothing of it is left for `takeUnsent`.
+    const late = new FakeHarnessContainer();
+    await late.start({ paths, command: "pi", args: [], env: {} });
+    let fail!: (err: Error) => void;
+    const realWrite = late.writeLine.bind(late);
+    late.writeLine = async (p, line) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "prompt") await new Promise<void>((_, reject) => (fail = reject));
+      return realWrite(p, line);
+    };
+    const { t: onLate } = transport(late);
+    onLate.send({ id: "p", type: "prompt", message: "go" });
+    await new Promise((r) => setImmediate(r)); // the prompt is in flight
+    onLate.sendAbort();
+    expect(late.stdin.map((l) => JSON.parse(l) as unknown)).toEqual([{ type: "abort" }]);
+    fail(new Error("control-reset: the resident's Durable Object was reset"));
+    await onLate.flushed();
+    expect(onLate.pendingSend).toEqual({ id: "p", type: "prompt", message: "go" });
+    expect(onLate.takeUnsent()).toEqual([]);
+    // Even an abort handed to `send` never queues: it goes the direct way.
+    onLate.send({ type: "abort" });
+    await onLate.flushed();
+    expect(late.stdin.map((l) => JSON.parse(l) as unknown)).toEqual([{ type: "abort" }, { type: "abort" }]);
+    expect(onLate.takeUnsent()).toEqual([]);
 
     const spent = new FakeHarnessContainer();
     await spent.start({ paths, command: "pi", args: [], env: {} });
@@ -262,6 +312,51 @@ describe("PiRpcTransport", () => {
     onSpent.sendAbort();
     await onSpent.flushed();
     expect(spent.stdin).toHaveLength(1);
+  });
+
+  it("a gate reply rides the chain like every other write (only the abort is direct): on a spent chain it is held for the re-attach in its turn, and its own failed write is recorded for the re-attach to re-send as it was — where an abort's failed write is nobody's", async () => {
+    const reply = { id: "d1", type: "extension_ui_response", response: { confirmed: true } };
+    // A spent chain: the reply is held behind the steer, in order, for the
+    // fresh transport — never written on a chain whose next write is a
+    // re-send, never lost.
+    const spent = new FakeHarnessContainer();
+    await spent.start({ paths, command: "pi", args: [], env: {} });
+    const { t: onSpent } = transport(spent);
+    spent.failNext = { operation: "send", error: new Error("control-reset: the resident's Durable Object was reset") };
+    onSpent.send({ id: "p", type: "prompt", message: "go" });
+    await onSpent.flushed();
+    onSpent.send({ type: "steer", message: "held" });
+    onSpent.send(reply);
+    await onSpent.flushed();
+    expect(spent.stdin).toEqual([]);
+    expect(onSpent.takeUnsent()).toEqual([{ type: "steer", message: "held" }, reply]);
+
+    // A reply whose write fails: the failure is the stream's (the tool is
+    // waiting on that answer) and the reply is `pendingSend`, for the re-attach
+    // to re-send as it was (RESEND_AS_IS).
+    const failing = new FakeHarnessContainer();
+    await failing.start({ paths, command: "pi", args: [], env: {} });
+    const { t: onFailing } = transport(failing);
+    failing.failNext = {
+      operation: "send",
+      error: new Error("control-reset: the resident's Durable Object was reset"),
+    };
+    onFailing.send(reply);
+    await onFailing.flushed();
+    expect(onFailing.pendingSend).toEqual(reply);
+    await expect(collect(onFailing, 1)).rejects.toThrow("control-reset");
+
+    // An abort's failed direct write is nobody's: nothing recorded, the chain still live.
+    const quiet = new FakeHarnessContainer();
+    await quiet.start({ paths, command: "pi", args: [], env: {} });
+    const { t: onQuiet } = transport(quiet);
+    quiet.failNext = { operation: "send", error: new Error("resident /exec: Peer closed WebSocket: 1006") };
+    onQuiet.sendAbort();
+    await new Promise((r) => setImmediate(r));
+    expect(onQuiet.pendingSend).toBeUndefined();
+    onQuiet.send({ type: "steer", message: "after" });
+    await onQuiet.flushed();
+    expect(quiet.stdin).toEqual(['{"type":"steer","message":"after"}']);
   });
 
   it("a re-attach starts reading at the offset it was handed", async () => {

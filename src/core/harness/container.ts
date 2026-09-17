@@ -771,8 +771,10 @@ function waitEnds(probe: ProbeWait, waitedMs: number, pause: number): string | u
  *  ran out, `false` the moment the stop fired. A sleep that rejects (an
  *  abortable sleep torn down, a double that throws) rejects the wait with its
  *  failure — never a wait that hangs with the rejection unhandled — and the
- *  stop listener goes with it either way. */
-function sleepUnlessStopped(probe: ProbeWait, pause: number): Promise<boolean> {
+ *  stop listener goes with it either way. The one more command's pause, and
+ *  the pi harness's wait for a write in flight to settle (harness-pi item 16):
+ *  every wait the harness makes under the run reads the stop the same way. */
+export function sleepUnlessStopped(probe: ProbeWait, pause: number): Promise<boolean> {
   const { signal } = probe;
   if (signal === undefined) return probe.sleep(pause).then(() => true);
   return new Promise<boolean>((resolve, reject) => {
