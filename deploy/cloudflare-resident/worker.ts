@@ -846,6 +846,37 @@ function sdkVouchesRuntimeMoved(err: unknown): boolean {
  *  so a DO reset over a still-running container answers `control-reset`, never
  *  the replaced word. The SDK's predicate already walks the cause
  *  chain (`selfAndCauses`), so it is called directly on the caught error. */
+/** The platform's own transient wording, seen on an unnamed throw in a route: a
+ *  lost network connection to a Durable Object, a storage operation that did
+ *  not complete, the platform's internal error. Kept short and read only where
+ *  no typed class names the throw. */
+const TRANSIENT_PLATFORM_WORDING =
+  /network connection lost|durable object reset|storage operation|internal error|overloaded/i;
+
+/** Whether an unnamed throw the fetch handler caught is the platform's own
+ *  transient — the Durable Object reset by a deploy (`isControlReset`), the
+ *  runtime replaced under the call (`isRuntimeReplacement`), the container's
+ *  runtime unreachable (`isRuntimeUnreachableSignal`), or the platform's
+ *  transient wording anywhere in the cause chain — against a deterministic
+ *  throw in the route itself (a bug, a bad argument). The client reads the
+ *  answer's `transient` field to re-probe the first and judge the second at
+ *  once (execution.md item 9), never the words. */
+function isTransientPlatformThrow(err: unknown): boolean {
+  if (isControlReset(err) || isRuntimeReplacement(err)) return true;
+  for (const link of selfAndCauses(err)) {
+    if (isRuntimeUnreachableSignal(link)) return true;
+    if (link instanceof Error && TRANSIENT_PLATFORM_WORDING.test(link.message)) return true;
+  }
+  return false;
+}
+
+/** The fetch handler's catch-all answer for a throw no route named: the words,
+ *  and whether the throw was the platform's transient (`transient`), typed here
+ *  so the client decides by a field. */
+function catchAllErr(err: unknown): ThreadErr {
+  return { error: errMsg(err), status: 500, transient: isTransientPlatformThrow(err) };
+}
+
 function isControlReset(err: unknown): boolean {
   return isDurableObjectCodeUpdateReset(err);
 }
@@ -1204,6 +1235,17 @@ interface ThreadBinding {
 interface ThreadErr {
   error: string;
   status: number;
+  /** Beside `state` on a 503 that carries the lifecycle state: the lifecycle
+   *  REASON (`getStatus().reason`), kept apart from `reason`, which is the
+   *  answer's own word (`mirror-busy`, `disk-pressure`, `image-stale`). The
+   *  client reads the pair to decide whether the resident is coming back
+   *  (execution.md item 9); reading `reason` there would take a busy mirror on
+   *  a degraded-but-serviceable resident for a repo failure. */
+  stateReason?: string;
+  /** On the fetch handler's catch-all 500: whether the throw it wrapped was the
+   *  platform's own transient (`isTransientPlatformThrow`) — a re-probe clears
+   *  it — or a deterministic throw in the route, judged at once. */
+  transient?: boolean;
   /** The steps the request ran before it failed (docs/reference/specs/tracing.md item 19):
    *  a failed attach's trace is the one that says which step blew the budget. */
   trace?: ResidentStep[];
@@ -4547,7 +4589,7 @@ export class ResidentDO extends Sandbox<Env> {
       const reason = diskPressureReason({ verdict: final, evicted, kept, spares });
       console.log(`attach ${input.threadKey}: ${reason}`);
       const s = await this.getStatus();
-      return { error: reason, status: 503, state: s.state, reason: DISK_PRESSURE_REASON };
+      return { error: reason, status: 503, state: s.state, stateReason: s.reason, reason: DISK_PRESSURE_REASON };
     }
     const m = final.math;
     console.log(
@@ -4947,6 +4989,7 @@ export class ResidentDO extends Sandbox<Env> {
           error: "image-stale: the container predates the current pool and is restarting; retry shortly",
           status: 503,
           state: "restoring",
+          stateReason: "",
           reason: "image-stale",
         };
       }
@@ -5010,7 +5053,13 @@ export class ResidentDO extends Sandbox<Env> {
       await this.refreshIfStale(resourceId);
     } catch (err) {
       const s = await this.getStatus();
-      return { error: `not-serviceable: ${errMsg(err)}`, status: 503, state: s.state, reason: s.reason };
+      return {
+        error: `not-serviceable: ${errMsg(err)}`,
+        status: 503,
+        state: s.state,
+        stateReason: s.reason,
+        reason: s.reason,
+      };
     }
     // `resourceId` was read by the caller a moment ago (item 15 of the audit:
     // this used to re-read the same key), the registry record rides in from
@@ -5175,7 +5224,7 @@ export class ResidentDO extends Sandbox<Env> {
     } catch (err) {
       if (err instanceof MirrorBusyError) {
         const s = await this.getStatus();
-        return { error: errMsg(err), status: 503, state: s.state, reason: "mirror-busy" };
+        return { error: errMsg(err), status: 503, state: s.state, stateReason: s.reason, reason: "mirror-busy" };
       }
       return { error: `attach-failed: ${errMsg(err)}`, status: 500 };
     }
@@ -5477,7 +5526,7 @@ export class ResidentDO extends Sandbox<Env> {
         return { error: `reuse-refused: ${err.why}`, status: 409, needs: "recreate" };
       if (err instanceof MirrorBusyError) {
         const s = await this.getStatus();
-        return { error: errMsg(err), status: 503, state: s.state, reason: "mirror-busy" };
+        return { error: errMsg(err), status: 503, state: s.state, stateReason: s.reason, reason: "mirror-busy" };
       }
       if (err instanceof StepError && err.step === "unknown-ref") {
         return { error: `unknown-ref: ${err.message}`, status: 400 };
@@ -5522,7 +5571,7 @@ export class ResidentDO extends Sandbox<Env> {
       // worktree lock above, so the bot-side fallback can retry.
       if (err instanceof MirrorBusyError) {
         const s = await this.getStatus();
-        return { error: errMsg(err), status: 503, state: s.state, reason: "mirror-busy" };
+        return { error: errMsg(err), status: 503, state: s.state, stateReason: s.reason, reason: "mirror-busy" };
       }
       return this.attachFailed(err);
     }
@@ -6360,7 +6409,13 @@ export class ResidentDO extends Sandbox<Env> {
       await this.ensureHydrated();
     } catch (err) {
       const s = await this.getStatus();
-      return { error: `not-serviceable: ${errMsg(err)}`, status: 503, state: s.state, reason: s.reason };
+      return {
+        error: `not-serviceable: ${errMsg(err)}`,
+        status: 503,
+        state: s.state,
+        stateReason: s.reason,
+        reason: s.reason,
+      };
     }
     const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
     if (!binding) {
@@ -6989,7 +7044,13 @@ export class ResidentDO extends Sandbox<Env> {
       await this.ensureHydrated();
     } catch (err) {
       const s = await this.getStatus();
-      return { error: `not-serviceable: ${errMsg(err)}`, status: 503, state: s.state, reason: s.reason };
+      return {
+        error: `not-serviceable: ${errMsg(err)}`,
+        status: 503,
+        state: s.state,
+        stateReason: s.reason,
+        reason: s.reason,
+      };
     }
     // One storage round trip for the two facts; the registry lookup stays (an
     // op resolves ONLY through the onboard-time command table).
@@ -7096,7 +7157,7 @@ export class ResidentDO extends Sandbox<Env> {
     } catch (err) {
       if (err instanceof MirrorBusyError) {
         const s = await this.getStatus();
-        return { error: errMsg(err), status: 503, state: s.state, reason: "mirror-busy" };
+        return { error: errMsg(err), status: 503, state: s.state, stateReason: s.reason, reason: "mirror-busy" };
       }
       if (err instanceof StepError && err.step === "unknown-ref") {
         return { error: `unknown-ref: ${err.message}`, status: 400 };
@@ -8199,7 +8260,7 @@ export default {
             return json({ error: "unknown route" }, 404);
         }
       } catch (err) {
-        return json({ error: errMsg(err) }, 500);
+        return json(catchAllErr(err), 500);
       }
     })();
     root?.end(res.status >= 500 ? "error" : "ok", { httpStatus: res.status });
@@ -8749,7 +8810,7 @@ async function handleAttach(env: Env, body: Record<string, unknown>, traceparent
       reason,
     ),
     (result) => result,
-    (err) => ({ error: errMsg(err), status: 500 }),
+    (err) => catchAllErr(err),
   );
 }
 
@@ -8767,7 +8828,7 @@ async function handleAwaitRestore(env: Env, body: Record<string, unknown>): Prom
   return streamHeartbeatJson(
     residentStub(env, resource.resource).awaitRestore(),
     (result) => result,
-    (err) => ({ error: errMsg(err), status: 500 }),
+    (err) => catchAllErr(err),
   );
 }
 

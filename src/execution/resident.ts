@@ -113,15 +113,55 @@ const DETACH_TIMEOUT_MS = 10_000;
 export function residentAnswerReason(status: number, data: Record<string, unknown>): ExecInfraReason {
   if (status >= 500 && status <= 599) {
     if (data.reason === "unregistered") return "refused";
-    if (typeof data.state === "string")
-      return isWakeable(data.state, typeof data.reason === "string" ? data.reason : "")
-        ? "worker-unavailable"
-        : "refused";
+    // The lifecycle pair the resident puts on the answer: `state` and
+    // `stateReason` — never `reason`, which is the answer's OWN word
+    // (`mirror-busy`, `disk-pressure`, `image-stale`, `not-serviceable`'s
+    // detail) and would read a busy mirror on a degraded-but-serviceable
+    // resident as a repo failure. A Worker predating `stateReason` gives the
+    // state alone, read as a state with no reason.
+    if (typeof data.state === "string") {
+      const stateReason = typeof data.stateReason === "string" ? data.stateReason : "";
+      return isWakeable(data.state, stateReason) ? "worker-unavailable" : "refused";
+    }
+    // The fetch handler's catch-all 500 says whether the throw it wrapped was
+    // the platform's own transient (a Durable Object reset by a deploy, a lost
+    // connection, a storage operation that did not complete): a re-probe
+    // clears those; every other stateless 5xx with a body is deterministic.
+    if (data.transient === true) return "worker-unavailable";
     if (typeof data.error === "string" && data.error) return "answered";
     return infraReasonOfStatus(status);
   }
   if (typeof data.error === "string" && data.error) return "answered";
   return infraReasonOfStatus(status);
+}
+
+/** What the wake path's strike says to the harness's one more command, from
+ *  the last engine view (`isWakeable`): the resident still coming back is
+ *  `worker-unavailable` — the harness's bound is the longer clock — and a
+ *  definite view, or a Worker that did not answer `/status`, is `refused`. The
+ *  one decision for the budget strike and for a re-attach that failed as infra
+ *  inside the wait (whose own verdict was made under this client's clipped
+ *  timeout, not by the resident); a stop stays `aborted`. */
+export function wakeStrikeReason(last: ResidentStatusProbe): ExecInfraReason {
+  return last.kind === "status" && isWakeable(last.state, last.reason) ? "worker-unavailable" : "refused";
+}
+
+/** The strike after the wake budget ran out, as `awaitWake` throws it: how long
+ *  was waited, what the engine last said, and the reason `wakeStrikeReason`
+ *  draws from that view. Exported so the seam's parity test builds the strike
+ *  through the same decision this client makes. */
+export function residentWakeBudgetStrike(
+  route: string,
+  refusal: string,
+  spentMs: number,
+  last: ResidentStatusProbe,
+): ExecInfraError {
+  return residentWakeStrike(
+    route,
+    refusal,
+    `waited ${Math.round(spentMs / 1000)}s for the resident to wake (last seen ${describeProbe(last)}) and gave up`,
+    wakeStrikeReason(last),
+  );
 }
 
 /** The strike after the wake wait (item 65): the refusal that named a
@@ -923,14 +963,6 @@ export class ResidentExecutor implements Executor {
     const waited = () => systemClock() - t0;
     /** A definite engine view — no wake recovers from it — or a Worker that did not answer: refused. */
     const definite = (why: string): ExecInfraError => residentWakeStrike(route, refusal, why, "refused");
-    /** The budget ran out while the last engine view still said the resident is coming back: unavailable, not refused. */
-    const stillComing = (why: string, last: ResidentStatusProbe): ExecInfraError =>
-      residentWakeStrike(
-        route,
-        refusal,
-        why,
-        last.kind === "status" && isWakeable(last.state, last.reason) ? "worker-unavailable" : "refused",
-      );
     const probe = () =>
       ResidentExecutor.probeStatus(
         this.opts.baseUrl,
@@ -945,12 +977,7 @@ export class ResidentExecutor implements Executor {
     const budget = wakeWaitBudget(opts.budgetMs);
     for (;;) {
       const spent = waited();
-      if (spent >= budget) {
-        throw stillComing(
-          `waited ${Math.round(spent / 1000)}s for the resident to wake (last seen ${describeProbe(seen)}) and gave up`,
-          seen,
-        );
-      }
+      if (spent >= budget) throw residentWakeBudgetStrike(route, refusal, spent, seen);
       await wakePause(Math.min(WAKE_POLL_MS, budget - spent), opts.signal);
       seen = await probe();
       const again = wakeDecision(seen);
@@ -961,12 +988,16 @@ export class ResidentExecutor implements Executor {
         answer = await this.attachOnce(opts.span, Math.max(budget - waited(), 1_000));
       } catch (err) {
         if (!(err instanceof ExecInfraError)) throw err;
-        // The re-attach's own failure says why: its reason rides on the strike.
+        // The re-attach ran under this client's clipped timeout (the budget's
+        // remainder, a second at least), so its own verdict — a deadline
+        // passed, the transport lost — says nothing about the resident: the
+        // strike reads the last engine view, as the budget strike does; only
+        // the run's own stop keeps its word.
         throw residentWakeStrike(
           route,
           refusal,
           `the re-attach after ${Math.round(waited() / 1000)}s did not answer (${err.message})`,
-          err.reason,
+          err.reason === "aborted" ? "aborted" : wakeStrikeReason(seen),
         );
       }
       if (answer.ok) return { waitedMs: waited(), ref: answer.binding.ref, sha: answer.binding.sha };

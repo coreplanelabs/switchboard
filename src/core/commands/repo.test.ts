@@ -5,6 +5,7 @@ import { parseInvocation } from "../commandSurface.js";
 import type { OperationResult, Operations } from "../operations.js";
 import type { ResidentAdminClient, ResidentAdminResponse } from "../residentAdmin.js";
 import { sanitizeResidentBody } from "../../execution/residentText.js";
+import { requestFailedSentence } from "../../execution/executor.js";
 import {
   NO_OPS_BACKEND_MESSAGE,
   SETTLE_MAX_MS,
@@ -252,8 +253,15 @@ describe("repo.list", () => {
     const down = bind({
       admin: mockClient({
         residents: async () => {
+          // The admin client's own sentence, built as it builds it — never a retyped copy.
           throw new Error(
-            "resident admin /residents request failed (fetch failed). The operation may still have run in the resident; check `repo list` before re-running it.",
+            requestFailedSentence(
+              "resident admin",
+              "resident",
+              "/residents",
+              new Error("fetch failed"),
+              "check `repo list`",
+            ),
           );
         },
       }),

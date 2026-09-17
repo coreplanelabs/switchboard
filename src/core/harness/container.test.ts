@@ -11,7 +11,7 @@ import {
 } from "../../execution/executor.js";
 import { CONTAINER_GONE_WORDING } from "../../execution/residentWake.js";
 import { STOPPED_CONTAINER_WORDING } from "../../execution/residentRefresh.js";
-import { residentAnswerReason, residentWakeStrike } from "../../execution/resident.js";
+import { residentAnswerReason, residentWakeBudgetStrike, residentWakeStrike } from "../../execution/resident.js";
 import { sandboxEmptyFailureMessage, sandboxNoAnswerMessage } from "../../execution/cloudflareSandbox.js";
 import { SANDBOX_START_BACKOFF_MS, SANDBOX_START_WAIT_MAX_MS } from "../../execution/sandboxErrors.js";
 import {
@@ -461,13 +461,15 @@ describe("replacedVerdict — the one more command waits through a container tha
     const restoring = { error: "not-serviceable: restore in progress", state: "restoring", reason: "rehydrating" };
     const byHydratePath = () =>
       new ExecInfraError(`resident /exec: ${restoring.error}`, residentAnswerReason(503, restoring));
+    // The strike as the client's wake path throws it, its reason drawn from the
+    // last engine view by the client's own decision — so a reverted decision
+    // fails this test.
     const byWakePath = () =>
-      residentWakeStrike(
-        "/exec",
-        "not-serviceable: The container just exited",
-        "waited 60s for the resident to wake (last seen restoring (rehydrating)) and gave up",
-        "worker-unavailable",
-      );
+      residentWakeBudgetStrike("/exec", "not-serviceable: The container just exited", 60_000, {
+        kind: "status",
+        state: "restoring",
+        reason: "rehydrating",
+      });
     for (const down of [byHydratePath, byWakePath]) {
       const { executor, calls } = recordingExecutor([down(), down(), "vm-b\n"]);
       const p = probe();
@@ -866,12 +868,11 @@ describe("ExecHarnessContainer — each operation is one command over the execut
       answer(503, { error: "mirror-busy: mutex not acquired within 30000ms", state: "warm", reason: "mirror-busy" }),
       new ExecInfraError("resident /exec HTTP 502", residentAnswerReason(502, {})),
       // The wake path's strike after the client's own budget ran out on a resident still restoring: the same restore, the same wait here.
-      residentWakeStrike(
-        "/exec",
-        "not-serviceable: The container just exited",
-        "waited 60s for the resident to wake (last seen restoring (rehydrating)) and gave up",
-        "worker-unavailable",
-      ),
+      residentWakeBudgetStrike("/exec", "not-serviceable: The container just exited", 60_000, {
+        kind: "status",
+        state: "restoring",
+        reason: "rehydrating",
+      }),
       // Typed refusals no wait clears — no name BY THE TYPE, the strike's words the container's own.
       residentWakeStrike(
         "/exec",
