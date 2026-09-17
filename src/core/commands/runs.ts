@@ -275,6 +275,8 @@ export const runsStop = defineCommand({
   options: z.object({ mode: z.enum(["soft", "hard"]).describe("soft = finish the current step; hard = abort now") }),
   action: "runs:write",
   effect: "write",
+  // Ends someone's live run; nothing restarts it.
+  annotations: { destructive: true, risk: () => "stops a live run; hard aborts it now" },
   describe:
     "Request a live run to stop (`--mode soft` = finish the current step; `hard` = abort now). Records the caller as the actor.",
   handler: async ({ args, options, caller, deps }) => {

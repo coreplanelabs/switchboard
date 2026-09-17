@@ -2,7 +2,9 @@ import { z } from "zod";
 import {
   CommandError,
   commandDefiner,
+  dryRunRequested,
   flag,
+  PLAN_ONLY_RISK,
   type Caller,
   type CommandDef,
   type CommandRegistry,
@@ -217,6 +219,9 @@ export const repoOnboard = defineCommand({
   }),
   action: "repo:write",
   effect: "write",
+  // Reversible by `repo offboard`, but it reaches outside the bot's own state:
+  // compute is billed from the moment it runs, so the risk line says so.
+  annotations: { destructive: false, openWorld: true, risk: () => "provisions a resident (billable)" },
   describe: "Onboard a repo as an always-warm resident environment (provisions billable compute; admin-gated).",
   render: (output) => {
     const o = output as JsonObject;
@@ -393,6 +398,11 @@ export const repoOffboard = defineCommand({
   options: dryRunOptions,
   action: "repo:write",
   effect: "write",
+  // Nothing here undoes a teardown; a `--dry-run` keeps the class and says it changes nothing.
+  annotations: {
+    destructive: true,
+    risk: (input) => (dryRunRequested(input) ? PLAN_ONLY_RISK : "tears down the resident and its snapshots"),
+  },
   describe:
     "Tear down a resident repo: registry record, schedules, container, R2 snapshots (admin-gated; --dry-run plans only).",
   render: (output) => {
@@ -437,6 +447,10 @@ export const repoRebuild = defineCommand({
   options: dryRunOptions,
   action: "repo:write",
   effect: "write",
+  annotations: {
+    destructive: true,
+    risk: (input) => (dryRunRequested(input) ? PLAN_ONLY_RISK : "discards the snapshot and reprovisions"),
+  },
   describe: "Discard a resident's snapshot and reprovision it from scratch (admin-gated; --dry-run plans only).",
   render: (output) => {
     const o = output as JsonObject;
@@ -490,6 +504,8 @@ export const repoReconfigure = defineCommand({
   }),
   action: "repo:write",
   effect: "write",
+  // Reversible by a second `repo reconfigure`.
+  annotations: { destructive: false, risk: () => "changes the resident's branch or commands" },
   describe:
     "Change a resident's default branch and/or command table (admin-gated; takes effect on the next refresh/attach).",
   render: (output) => {

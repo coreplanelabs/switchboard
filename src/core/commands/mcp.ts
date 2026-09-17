@@ -267,6 +267,8 @@ export const mcpPromote = defineCommand({
   // table's, at the door: the same `mcp:write` on `config-scope { org }` that `mcp add --scope org` asks.
   resource: () => ({ type: "config-scope", kind: "org" }),
   effect: "write",
+  // Reversible by `mcp remove`; it changes what every run in the org can reach.
+  annotations: { destructive: false, risk: () => "adds or moves a server every run in the scope can use" },
   describe:
     "Re-issue a person's MCP server in the org tier (admins): the same name, URL and auth, added by you; a bearer/oauth server gets a fresh org connect link for you to complete — the person's credential is never copied.",
   render: renderAdd,
@@ -315,6 +317,8 @@ export const mcpAdd = defineCommand({
   }),
   action: "mcp:write",
   effect: "write",
+  // Reversible by `mcp remove`; a token entered through the link is never in chat.
+  annotations: { destructive: false, risk: () => "adds or moves a server every run in the scope can use" },
   describe:
     "Register an external MCP server for yourself, this channel, or the org — auth is detected from the server; sign-in or a token happens on a one-time link, never in chat.",
   render: renderAdd,
@@ -342,6 +346,7 @@ export const mcpConnect = defineCommand({
   options: z.object({ scope: scopeOption, channel: channelOption }),
   action: "mcp:write",
   effect: "write",
+  annotations: { destructive: false, risk: () => "adds or moves a server every run in the scope can use" },
   describe:
     "A fresh one-time link to sign in to an OAuth server or enter (or replace) a bearer server's token — only you can complete it; it expires in 10 minutes.",
   render: renderAdd,
@@ -391,6 +396,8 @@ export const mcpRemove = defineCommand({
   options: z.object({ scope: scopeOption, channel: channelOption }),
   action: "mcp:write",
   effect: "write",
+  // The server and its stored credential are gone; nothing here restores the credential.
+  annotations: { destructive: true, risk: () => "deletes the server and its credential" },
   describe:
     "Remove an MCP server you added and its stored credential (yours freely; channel ones need channel-config rights, org-wide ones admin rights).",
   handler: async ({ args, options, caller, deps }) => {

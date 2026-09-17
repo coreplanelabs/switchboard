@@ -54,6 +54,8 @@ export const costsSnapshot = defineCommand({
   id: "costs.snapshot",
   action: "costs:write",
   effect: "write",
+  // The next snapshot rewrites this one, so it is reversible but not idempotent.
+  annotations: { destructive: false, risk: () => "rewrites the snapshot" },
   enabledWhen: (caps) => caps.costs,
   describe:
     "Take the costs snapshot now: read both billing sources and the run history once over the page's widest range, store the result, and serve it to every reader of the costs page from then on.",

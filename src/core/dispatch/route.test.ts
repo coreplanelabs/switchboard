@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { AGENTS, COMPOUND_PRESET, presetDoor } from "../../agents/registry.js";
-import { commandDefiner, type CommandDef } from "../commandRegistry.js";
+import { blastRadius, commandDefiner, CommandRegistry, type CommandDef } from "../commandRegistry.js";
+import { registerCoreCommands, type CoreCommandDeps } from "../commands/all.js";
 import { jsonSchemaFor } from "../commandSurface.js";
 import { TOOLSETS } from "../../tools/toolsets.js";
 import { ROUTE_ATTACH_FIXTURES } from "../../load/routeAttachFixtures.js";
@@ -1738,5 +1739,23 @@ describe("routedRunsAtOnce — a read or an exec-class write runs when routed; a
     expect(routedRunsAtOnce({ effect: "write", action: "deploy:exec" })).toBe(true);
     expect(routedRunsAtOnce({ effect: "write", action: "runs:write" })).toBe(false);
     expect(routedRunsAtOnce({ effect: "write", action: "friction:write" })).toBe(false);
+  });
+
+  it("restated on blastRadius, the rule agrees with the two-field reading on every command the router is offered: a read or an exec runs, a write or a destructive write is handed back", () => {
+    const registry = new CommandRegistry<CoreCommandDeps>({ audit: () => {} });
+    registerCoreCommands(registry);
+    const offered = routableCommands({ list: () => registry.list() as CommandDef<unknown>[] });
+    expect(offered.length).toBeGreaterThan(20);
+    for (const { def } of offered) {
+      const radius = blastRadius(def);
+      expect(routedRunsAtOnce(def), `${def.id} is ${radius}`).toBe(radius === "read" || radius === "exec");
+      expect(routedRunsAtOnce(def), `${def.id} under the two-field reading`).toBe(
+        def.effect === "read" || def.action.endsWith(":exec"),
+      );
+    }
+    const runsAtOnce = offered.filter((c) => routedRunsAtOnce(c.def));
+    expect(runsAtOnce.filter((c) => c.def.effect === "write").map((c) => c.id)).toEqual(["repo.test", "repo.build"]);
+    expect(offered.filter((c) => !routedRunsAtOnce(c.def)).map((c) => blastRadius(c.def))).not.toContain("read");
+    expect(offered.filter((c) => !routedRunsAtOnce(c.def)).map((c) => blastRadius(c.def))).not.toContain("exec");
   });
 });

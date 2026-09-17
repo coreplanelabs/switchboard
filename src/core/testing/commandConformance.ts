@@ -7,7 +7,14 @@ import { POLICY, ruleTarget } from "../authz/policy.js";
 import { targetOfResource } from "../authz/resource.js";
 import type { Actor } from "../authz/types.js";
 import { dependsOn, type CapabilityKey } from "../capabilityGating.js";
-import { acceptsUndefined, resourceOf, type Caller, type CommandDef, type SurfaceName } from "../commandRegistry.js";
+import {
+  acceptsUndefined,
+  blastRadius,
+  resourceOf,
+  type Caller,
+  type CommandDef,
+  type SurfaceName,
+} from "../commandRegistry.js";
 import {
   asText,
   camelToKebab,
@@ -1068,4 +1075,36 @@ export function fixturesFor(cmd: Pick<CommandDef<unknown>, "id">): {
     paraphrase: ROUTE_COMMAND_FIXTURES.find((f) => f.command === cmd.id && f.kind === "paraphrase"),
     decoy: ROUTE_COMMAND_DECOYS.find((d) => d.command === cmd.id),
   };
+}
+
+/** One line per chat-exposed write of class `write` or `destructive` that
+ *  declares no blast radius — the loud failure a new write hits until its
+ *  definition says `destructive` true or false and names its risk line
+ *  (docs/reference/specs/command-registry.md item 29). A read and an
+ *  exec-class write are exempt, and so is a write chat never offers. The fence
+ *  is presence, not truth: the risk line is checked against the required-only
+ *  input for being non-empty, never for being right. */
+export function blastRadiusGaps(catalogue: readonly CommandDef<unknown>[]): string[] {
+  const where = "docs/reference/specs/command-registry.md item 29";
+  const gaps: string[] = [];
+  for (const cmd of catalogue) {
+    if (cmd.surfaces?.chat === false) continue;
+    const radius = blastRadius(cmd);
+    if (radius === "read" || radius === "exec") continue;
+    if (typeof cmd.annotations?.destructive !== "boolean") {
+      gaps.push(
+        `${cmd.id}: annotations.destructive is not declared — a chat-exposed write says true or false (${where})`,
+      );
+      continue;
+    }
+    if (typeof cmd.annotations.risk !== "function") {
+      gaps.push(`${cmd.id}: annotations.risk is missing — a chat-exposed write names what a run changes (${where})`);
+      continue;
+    }
+    const named = variantsOf(cmd).variants.find((v) => v.name === "required-only")?.named ?? {};
+    const input = namedToInput(cmd, named, "camel");
+    if (cmd.annotations.risk("error" in input ? {} : input).trim() === "")
+      gaps.push(`${cmd.id}: annotations.risk answered an empty line for the required-only input (${where})`);
+  }
+  return gaps;
 }

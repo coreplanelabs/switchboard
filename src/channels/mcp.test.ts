@@ -7,6 +7,7 @@ import type { DispatchFn, IngressConfig, IngressIdentity } from "./http.js";
 import type { CoreDeps } from "../core/dispatcher.js";
 import type { ChannelIO, IncomingMessage } from "../core/types.js";
 import { CommandRegistry, bindCommands } from "../core/commandRegistry.js";
+import { registerCoreCommands, type CoreCommandDeps } from "../core/commands/all.js";
 import { registerRunsCommands, type RunsCommandDeps } from "../core/commands/runs.js";
 import type { RunEvent } from "../core/runEvents.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
@@ -569,6 +570,65 @@ describe("handleMcpRequest — registry commands as tools", () => {
       commands: bindCommands(registry, undefined),
     });
     expect(((res.body as RpcResult).result.tools as { name: string }[]).map((t) => t.name)).toEqual(["dispatch"]);
+  });
+
+  it("tools/list carries each command's blast radius in MCP's own hint names: a read is readOnlyHint, an exec-class write and a read are destructiveHint false, a reversible write is destructiveHint false, a destructive write is destructiveHint true; idempotent and open-world ride the definition", async () => {
+    const registry = new CommandRegistry<CoreCommandDeps>({ audit: () => {} });
+    registerCoreCommands(registry);
+    const res = await handleMcpRequest(rpc("tools/list", {}), deps, {
+      auth: good,
+      commands: bindCommands(registry, undefined as unknown as CoreCommandDeps),
+    });
+    const tools = (res.body as RpcResult).result.tools as Array<{
+      name: string;
+      annotations?: Record<string, boolean>;
+    }>;
+    const hints = (name: string) => tools.find((t) => t.name === name)?.annotations;
+    // A read.
+    expect(hints("runs_list")).toEqual({
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    });
+    // An exec-class write: a run of the repository's own checks, never destructive.
+    expect(hints("repo_test")).toEqual({
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    });
+    // A reversible write that is also idempotent (a stored abridgement is answered, not recomputed).
+    expect(hints("review_abridge")).toEqual({
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    });
+    // A destructive write.
+    expect(hints("repo_offboard")).toEqual({
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: false,
+    });
+    // A destructive write that reaches outside (it files issues on the tracker).
+    expect(hints("friction_propose")).toEqual({
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    });
+    // Every registry tool carries the four hints; the hand-written dispatch tool is unchanged.
+    for (const t of tools.slice(1))
+      expect(Object.keys(t.annotations ?? {}).sort(), t.name).toEqual([
+        "destructiveHint",
+        "idempotentHint",
+        "openWorldHint",
+        "readOnlyHint",
+      ]);
+    expect(tools[0].name).toBe("dispatch");
+    expect(tools[0]).not.toHaveProperty("annotations");
   });
 
   it("tools/call runs_list returns a header line plus the invoke JSON, with no token", async () => {

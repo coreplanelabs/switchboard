@@ -236,6 +236,8 @@ export const memoryForget = defineCommand({
   args: [{ name: "id", schema: memoryId, describe: "the record id (`mem:<scope>:<n>`, from `memory list`)" }],
   action: "memory:write",
   effect: "write",
+  // Soft-deletes a record that influences every run; no command here restores it.
+  annotations: { destructive: true, risk: () => "removes the record from every future run" },
   describe:
     "Soft-delete one memory record so it no longer influences any run (yours freely; shared org/repo/channel records need repo-management rights).",
   render: (output) => {

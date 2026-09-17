@@ -15,8 +15,8 @@ import { authorize } from "../core/authz/authorize.js";
 import { CHAT_OPEN_ACTIONS } from "../core/authz/grants.js";
 import type { Actor } from "../core/authz/types.js";
 import { CAPABILITY_KEYS, dependsOn, type CapabilityKey } from "../core/capabilityGating.js";
-import type { CommandAction, CommandDef, SurfaceName } from "../core/commandRegistry.js";
-import { acceptsUndefined, resourceOf } from "../core/commandRegistry.js";
+import type { BlastRadius, CommandAction, CommandDef, SurfaceName } from "../core/commandRegistry.js";
+import { acceptsUndefined, blastRadius, resourceOf } from "../core/commandRegistry.js";
 import { chatForm, cliFlag, httpPath, isBooleanSchema, mcpToolName, typeHint } from "../core/commandSurface.js";
 
 /** Everything the docs need about one command, flattened out of its definition. */
@@ -30,7 +30,11 @@ export interface DocCommand {
   action: CommandAction;
   /** Who may run it in Slack, in the vocabulary of docs/reference/authorization.md (`whoMayRun`). */
   who: string;
+  /** The policy target the table decides on for an empty input — `` `command` ``, `` `agent` ``, `` `config-scope` (org) ``. */
+  resource: string;
   effect: "read" | "write";
+  /** `blastRadius(def)`: what a run changes, as the door and the MCP hints read it. */
+  blastRadius: BlastRadius;
   surfaces: readonly SurfaceName[];
   httpPath: string;
   mcpTool: string;
@@ -81,6 +85,15 @@ export function whoMayRun(cmd: Pick<CommandDef<unknown>, "id" | "action" | "reso
   return SLACK_READERS.find((r) => authorize(r.actor, cmd.action, resource).allow)?.label ?? "nobody in Slack";
 }
 
+/** The policy target a command's `resource` resolver names for an empty input
+ *  (`command` when it has none), as the catalogue prints it: the type in a code
+ *  span, a kinded resource's kind in brackets — `` `config-scope` (org) ``. */
+export function resourceLabel(cmd: Pick<CommandDef<unknown>, "id" | "resource">): string {
+  const caller = { kind: "chat" as const, id: "slack:UDOC", actor: SLACK_READERS[0]!.actor };
+  const resource = resourceOf(cmd, {}, caller);
+  return "kind" in resource ? `\`${resource.type}\` (${resource.kind})` : `\`${resource.type}\``;
+}
+
 /** `<me|channel>` for an enum, `<slug>` otherwise; `[…]` when optional, `…` for rest. */
 function argForm(arg: { name: string; schema: z.ZodType; rest?: true }): string {
   const hint = typeHint(arg.schema);
@@ -119,7 +132,9 @@ export function docCommands(cmds: readonly CommandDef<unknown>[]): DocCommand[] 
       describe: cmd.describe,
       action: cmd.action,
       who: whoMayRun(cmd),
+      resource: resourceLabel(cmd),
       effect: cmd.effect,
+      blastRadius: blastRadius(cmd),
       surfaces: ALL_SURFACES.filter((s) => cmd.surfaces?.[s] !== false),
       httpPath: httpPath(cmd.id),
       mcpTool: mcpToolName(cmd.id),
@@ -227,6 +242,31 @@ export function renderCapabilityCommands(cmds: readonly DocCommand[]): string {
   return `${table(["Capability", "Commands that depend on it"], rows)}\n\nThe other ${alwaysOn} ${noun} on in every installation.`;
 }
 
+/** docs/reference/specs/command-registry.md `## Catalogue` — every registered
+ *  command, whatever surface it serves, as the spec's own table: the id, the
+ *  derived form, the action and the resource the policy table decides on, the
+ *  effect, the blast radius (`blastRadius(def)` — the class the door decides
+ *  on and the MCP hints render), the surfaces and the description. The
+ *  conformance suite checks the ids against the registry; the generator keeps
+ *  the rest from drifting. Surfaces print by name, every row, so a reader can
+ *  scan one column for where a command is reachable. */
+export function renderCatalogue(cmds: readonly DocCommand[]): string {
+  const rows = cmds.map((c) => [
+    code(c.id),
+    code(c.usage),
+    code(c.action),
+    c.resource,
+    c.effect,
+    c.blastRadius,
+    c.surfaces.length === 0 ? "—" : c.surfaces.join(", "),
+    cell(c.describe),
+  ]);
+  return table(
+    ["Command", "Derived form", "Action", "Resource", "Effect", "Blast radius", "Surfaces", "Description"],
+    rows,
+  );
+}
+
 /** Every generated region in docs/, keyed by the file that carries it. The
  *  generator walks exactly this table — a region added here without a marker in
  *  the file (or the reverse) is a `docs:check` failure. */
@@ -237,4 +277,5 @@ export const GENERATED_REGIONS: Readonly<
   "reference/slack-commands.md": { "chat-commands": renderChatCommands },
   "reference/dashboard-routes.md": { "api-routes": renderApiRoutes },
   "how-to/turn-features-on-and-off.md": { "capability-commands": renderCapabilityCommands },
+  "reference/specs/command-registry.md": { catalogue: renderCatalogue },
 };

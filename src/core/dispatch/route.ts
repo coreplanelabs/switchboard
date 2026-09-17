@@ -65,7 +65,13 @@ import type { ChannelIO, HistoryItem, IncomingMessage } from "../types.js";
 import type { RunEnding } from "../runEnding.js";
 import type { RequestTrace } from "../requestTrace.js";
 import type { McpCatalogEntry, McpToolSource } from "../../mcp/source.js";
-import { CommandRegistry, type CommandDef, type CommandEffect, type CommandInput } from "../commandRegistry.js";
+import {
+  blastRadius,
+  CommandRegistry,
+  type CommandDef,
+  type CommandEffect,
+  type CommandInput,
+} from "../commandRegistry.js";
 import { chatInvocation, jsonSchemaFor, mcpToolName, namedToInput } from "../commandSurface.js";
 import { unwrapChatLinks, type ChatCommands } from "../commandChat.js";
 import { repoFromThread } from "../repoContext.js";
@@ -107,16 +113,17 @@ export { HAND_BACK_PREFIX };
 
 /**
  * Whether a command the router bound runs at once or is handed back as the
- * line to type (record 0039 as amended). Two fields every definition already
- * carries decide it — never a list in code: a `read` runs; a `write` runs only
- * when its action class is `exec` (`repo:exec` — `repo test`, `repo build`: a
- * run of the repository's own checks that changes nothing of Switchboard's
- * own, so a misread sentence costs one wasted run and nothing to undo); a
- * `write` whose class is `write` (`config:write`, `mcp:write`, `repo:write`…)
- * is handed back, because a write bound from prose is a write nobody typed.
+ * line to type (record 0039 as amended; record 0044). The command's blast
+ * radius decides — `blastRadius(def)`, derived from the definition, never a
+ * list in code: a `read` runs; an `exec` runs (`repo:exec` — `repo test`,
+ * `repo build`: a run of the repository's own checks that changes nothing of
+ * Switchboard's own, so a misread sentence costs one wasted run and nothing
+ * to undo); a `write` or a `destructive` command is handed back, because a
+ * write bound from prose is a write nobody typed.
  */
-export function routedRunsAtOnce(def: Pick<CommandDef<unknown>, "effect" | "action">): boolean {
-  return def.effect === "read" || def.action.endsWith(":exec");
+export function routedRunsAtOnce(def: Pick<CommandDef<unknown>, "effect" | "action" | "annotations">): boolean {
+  const radius = blastRadius(def);
+  return radius === "read" || radius === "exec";
 }
 
 /** The receipt of a bound command as the reply leads with it and the record
