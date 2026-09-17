@@ -60,6 +60,12 @@ export class PiRpcTransport implements PiTransport {
    *  held for the fresh transport (`takeUnsent`) instead of landing here. A
    *  plain `close()` leaves it false. */
   private heldForReattach = false;
+  /** The queued writes a re-attach took to re-send (`takeUnsent("reattach")`)
+   *  whose step has not yet run: that step answers `held`, since the fresh
+   *  transport re-sends the very object — where a write the loop's end took to
+   *  discard answers `dropped`. Who took an entry decides its landing, not the
+   *  transport's state since. */
+  private readonly handedOver = new Set<Record<string, unknown>>();
   /** The writes handed to `send` whose turn on the chain has not come, in
    *  order — one-to-one with the chain's undecided steps, each step taking its
    *  OWN entry by identity, never the head by position, since the queue may be
@@ -146,15 +152,20 @@ export class PiRpcTransport implements PiTransport {
         // queued write stays queued. A plain `close()` (teardown) does
         // neither, so a write sent just before it still flushes — unless an
         // earlier write failed, when it is held like the rest (see `close`).
-        // Otherwise it is in flight — if its entry is still in the queue: its
-        // own, by identity, never the head by position, since the loop that
-        // sent it may have ended and emptied the queue (`takeUnsent`) and a
-        // later loop refilled it with a write whose entry is that write's own.
-        // Gone, this write was dropped before its turn came: `dropped` whatever
-        // the chain's state, never `held` (nothing keeps it for `takeUnsent`);
-        // nothing writes it, and nothing of anyone else's is taken.
+        // The entry decides — its own, by identity, never the head by
+        // position, since the loop that sent it may have ended and emptied
+        // the queue and a later loop refilled it with a write whose entry is
+        // that write's own. Gone, WHO took it decides, not the transport's
+        // state since: taken by a re-attach (`takeUnsent("reattach")`, then
+        // `abandon()`), the fresh transport re-sends the same object and the
+        // gate keeps its callback, so this step answers `held` whatever order
+        // the microtasks landed in; taken by a loop's end to be discarded, it
+        // is `dropped` — nobody holds it, no re-send will come — even on a
+        // transport a later recovery has since abandoned. Present on an
+        // abandoned or spent chain, it stays queued for the re-attach (`held`);
+        // present on a live one, it lands.
         const at = this.queued.indexOf(command);
-        if (at < 0) return "dropped";
+        if (at < 0) return this.handedOver.delete(command) ? "held" : "dropped";
         if (this.heldForReattach || this.sendError !== undefined) return "held";
         this.queued.splice(at, 1);
         return this.land(line);
@@ -193,21 +204,24 @@ export class PiRpcTransport implements PiTransport {
 
   /** The writes whose turn never came — queued behind a failed one, or still
    *  queued when the transport was abandoned — in the order they were sent,
-   *  taken once; the caller says what becomes of them. The re-attach takes
-   *  them to re-send as they were on the fresh transport, behind the write the
-   *  failure left unknown: they never reached pi. The loop or turn that ends
-   *  takes them to discard (`HeldSends.dropHeld` empties the gate at the same
-   *  moment), so none is a later turn's — a dead loop's wrap-up steer held on
-   *  a spent chain must not ride into the next turn, and one queued on a live
-   *  chain behind a write in flight must not land into it: its step finds its
-   *  own entry gone and answers `dropped`, and the queue stays one-to-one with
-   *  the chain, so a later turn's write is landed by its own step and never by
-   *  a dead loop's; the list is for the sender's label — a wrap-up steer among
-   *  them clears it (harness-pi item 16). Never a stop: an abort is not
-   *  queued, and a failed one is its sender's to ask again. */
-  takeUnsent(): Record<string, unknown>[] {
+   *  taken once, by the `taker` named: the write's landing follows who took
+   *  it, not the transport's state since. A `reattach` takes them to re-send
+   *  as they were on the fresh transport, behind the write the failure left
+   *  unknown (they never reached pi), and a step of theirs that runs later
+   *  answers `held`. A `loop-end` takes them to discard (`HeldSends.dropHeld`
+   *  empties the gate at the same moment), so none is a later turn's — a dead
+   *  loop's wrap-up steer held on a spent chain must not ride into the next
+   *  turn, and one queued on a live chain behind a write in flight must not
+   *  land into it: its step finds its own entry gone and answers `dropped`,
+   *  and the queue stays one-to-one with the chain, so a later turn's write is
+   *  landed by its own step and never by a dead loop's; the list is for the
+   *  sender's label — a wrap-up steer among them clears it (harness-pi item
+   *  16). Never a stop: an abort is not queued, and a failed one is its
+   *  sender's to ask again. */
+  takeUnsent(taker: "reattach" | "loop-end"): Record<string, unknown>[] {
     const unsent = this.queued;
     this.queued = [];
+    if (taker === "reattach") for (const command of unsent) this.handedOver.add(command);
     return unsent;
   }
 
