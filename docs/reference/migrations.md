@@ -4,7 +4,7 @@ What an operator changes when a release breaks something: one section per such r
 
 A section says, in this order: what no longer works as it did, what replaces it, and the smallest edit that gets an installation from one to the other — a config key to rename, a command to re-run, a secret to add. Nothing else: history and reasons live in the changelog and the [decision records](../explanation/design-decisions.md).
 
-## 2.0.0
+## 1.241.0
 
 - The dashboard has a new gated section, the chat at `/threads` ([web-chat.md](specs/web-chat.md), [dashboard-routes.md](dashboard-routes.md)), and `/` now answers `302 /threads` instead of `302 /runs`. Under `dashboard.auth: access` the Cloudflare Access application lists path prefixes, and a prefix it does not list is served a bare `403` by the bot's own gate: add `threads` to the application's paths (beside `runs`, `residents`, `costs`, `delivery`, `settings`, `api`, `mcp/connect`) before or with this deploy, or every visit to the home page ends in that `403`. Bookmarks to `/runs` are unchanged; the runs page keeps every operator control.
 - A browser session (`access:<sub>`) now holds `memory:write` and `mcp:write` in its baseline beside every group's read ([authorization.md](specs/authorization.md) item 9): what you type at `/threads` is a chat message, and `memory remember` and `mcp add` for your own tier work there as they do in Slack. The shared tiers are unchanged — an org or channel write still needs the grant it always needed. Nothing to edit; an installation that wants browser sessions without those two writes has no knob for it, as Slack users have none.
