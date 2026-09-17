@@ -1,0 +1,157 @@
+---
+title: A budget is a lease carved from its parent, and one module proves the leases fit
+status: proposed
+date: 2026-09-17
+pattern: A single arithmetic module owns every wall clock as a lease carved from the parent's remainder minus the floors of every round that must follow; the lease covers everything a run does; one fit is asserted at verify, at config load and at the fork; a lease is sized by the infrastructure that must outlive it, a grant by the person; renewal opens a new segment from a recorded head
+---
+
+# A budget is a lease carved from its parent, and one module proves the leases fit
+
+**The ask.** Decide (the maintainer, before the plan is written): adopt the lease as Switchboard's one budget primitive, one module as the owner of every wall-clock number and its derivation, and one fit asserted at verify, at config load and at the fork; build the module (unit one) and the wind-down inside the lease (unit two) from this record; take the grant and renewal (unit three) as the direction, its open terms resolved in its own plan before its default turns on. Reader: an engineer who knows the run loop and the ship pipeline and has not read the budget audit of 2026-09-17 (recorded on #1477). Frame assumed from the maintainer's "pull all our time budgets in the whole system and make sure that they are cohesive" and "these decisions and designs must be principled" on 2026-09-17.
+
+Success criteria: (1) every wall-clock number in `src/` that bounds a run, a round, a wait or a leaf call is a row of one module or derived from it, and `verify` fails when a number cannot hold what is carved from it at any round of a pipeline; (2) a pipeline that cannot hold its own loop is refused wherever its minutes are set, config load or a clip at the fork, naming the sum; (3) a run's lease covers everything it does, so its total time never exceeds the lease plus its provisioning, its work is pushed and the head recorded, and no model call outlives the credential; (4) a unit that needs more than one lease continues under the same request without a person re-issuing, while its grant holds and each lease recorded progress; (5) an ask, a floor or an allowance changes in one place and the check says what else must move.
+
+## TL;DR
+
+Twelve of the 59 ship coding children since 2026-09-16 ended at a 28- or 39-minute budget with their work finished and unpushed, because production set the ship pipeline to 40 minutes while the coding preset asks 45 and nothing compared the two; one of 282 standalone coding runs hit its 45 in the same window. The bet is that a budget is never an absolute number but a **lease**, a slice of the parent's remaining time minus the **floors** of every round that must still follow, carved by one module and covering everything the run does, with one fit asserted at verify, at config load and at the fork. It costs one module, the relocation of about twenty constants and three rewritten carve sites in unit one, then in unit two a wind-down the model proxy enforces and a recorded pushed head; unit three, renewal under a **grant** of cost and approvals, is a direction with three open terms. Decided: the lease, the floors, the module, the three-site fit, the lease covering the write-up and post-steps, and that a multi-day problem is bounded by the grant while each lease is sized by the infrastructure that must outlive it. If we do nothing, every new pipeline or preset adds a number that agrees with the others by luck, and the next disagreement is found in the ledger after a week of lost work.
+
+## Today at `6fd2003e5431`
+
+You would expect one clock per run. A coding run under ship has six, set in six files; the appendix lists them with proofs, and the design depends on these five facts.
+
+| Fact | Proof |
+|---|---|
+| The registry declares an ask per preset (coding 45, review 25, research 8, general 5, explore 120, conductor 120, ship 120) and derives one number from it, the turn cap `ask × 6` (#1020), with ship's structural 1 exempt. | `src/agents/registry.ts:50-63, 613-735`; `src/agents/registry.test.ts:132-138` |
+| Ship carves a child's minutes as `max(2, min(ask, floor(remainder − reserve)))`, reserves 11 / 8 / 0 for a coding, fix and review round, and dispatches any round while 3 minutes remain; the merge wait is 60 minutes of its own. The validator refuses `ship.maxMinutes` under 14, never against the coding ask; a boundary or `budget:` clips ship after load with no check. | `src/core/ship/coordinator.ts:52-75, 678, 727-745, 880`; `src/config/validate.ts:489-493`; `src/config/profile.ts:212-221` |
+| The lease starts after provisioning, 0.3 to 2.6 minutes after the row's `startedAt` in the 14 hits on record. Past the deadline: a write-up of 0.3 to 3.4 minutes, a description turn of up to 5, and a bearer minted before the lease for the budget plus 5, so a slow description turn has no credential. | `src/core/dispatcher.ts:581, 864, 957, 1151`; `src/core/harness/pi/harness.ts:99, 436-439, 994`; `src/core/dispatch/runLoop.ts:1115-1132`; `src/core/dispatch/provision.ts:856` |
+| Nothing clips pi's shell; the native clip left with the native tool table. The model proxy is the one point a run cannot talk past: it refuses past the turn guard with a typed note and already reads every request body. | `docs/reference/specs/execution.md:22`; `src/channels/modelProxy.ts:515-531` |
+| The row records a typed handoff and, for pushes, only the branch of a `pr_opened` event; a first push with no description publishes nothing, and no sha of a coding run's push is recorded. Every run starts from a clean tree. | `src/core/runRecord.ts:147, 219-226, 243-246`; `src/core/codingPrPostStep.ts:672-690`; resident-repos items 16a, 17 |
+
+## The shape
+
+A budget is a **lease**: a deadline a run holds, carved by its parent from the parent's own remaining time. A preset keeps an **ask**, the lease it wants when nothing above is tighter, and a **floor**, the least lease in which it does useful work. A parent that runs a loop of rounds holds back, before each round, the **reserve** for that round: the floor plus provisioning of every round that must still follow in the longest loop the config allows, plus the merge wait's floor. A round's lease is the remainder minus its reserve, capped at the ask, refused under the floor. A lease covers everything the run does: the loop, the write-up and the post-steps all end inside it, each with a named **allowance**. One module, `src/core/budgets.ts`, owns the asks, floors and allowances and the one **carve** function; every other file imports a lease and asks what is left. One **fit**, that a pipeline's minutes hold its first child at its ask and every later round at its floor, is asserted three times over one table: at verify over the registry, at config load over the deployment, at the fork over a clipped request. A pipeline's lease bounds one **segment**, one pass through its loop; above it sits the **grant**, what the person authorized for the whole problem as cost and approvals, which decides whether the runner opens another segment when one ends with progress.
+
+The known shape is a scheduler's time slice under a process's quota, and the one difference is that our slice ends only after the run has recorded a pushed head, because the container, the credential and the worktree do not survive to the next slice.
+
+## One trace: a three-hour unit under a two-hour pipeline
+
+The case most likely to be wrong is renewal, so the trace runs a unit that cannot fit one segment, in a channel whose grant allows six renewals. Minutes are whole; the carve is `min(ask, remainder − reserve)`, refused under the floor. Asks and floors: coding 45 and 10, review 25 and 5, merge wait 60 and 10; allowances: provision 3, write-up 3, post-step 5; the pipeline allows 3 review rounds. The reserves this gives: before the coding round `3 × (5 + 3) + 2 × (10 + 3) + 10` = 60; before the first review 52; before the first fix 39; before the second review 31.
+
+1. A person posts `fix issue #N`. The router picks ship; the request carries the channel's grant: the org's cost cap for a ship, six renewals, `merge: person`.
+2. The runner opens segment one with a 120-minute lease. Provisioning takes 2; it carves the coding round `min(45, 118 − 60)` = 45, and the card reads `budget 45 min (carved from ship's 120; holds 60 for three reviews, two fixes and the merge)`.
+3. Inside its 45 the child's loop ends at 37: the proxy refuses any model call after `deadline − (3 + 5)` that still carries tools, and the harness kills the shell command in flight. At the wind-down note, three minutes before that, the child had committed and pushed `a1b2c3d`, and its row records the ref and sha; the write-up and the description turn run in the held-back 8. The unit is not done: two follow-ups remain in the handoff.
+4. The runner reads the row: a recorded sha newer than the lease's start is progress. The loop has no second coding round, so the segment ends `continued`, and the runner asks the grant: five renewals remain and spend is under the cap. It opens segment two with a fresh 120-minute lease, card `renewal 1 of 6, continues a1b2c3d`.
+5. Segment two provisions in 2 and carves its coding round, 45 again; the continuation's request is the previous handoff, it starts from `a1b2c3d` in a clean tree, pushes `d4e5f6a` at 30 and opens the pull request; the loop ends at 37 and the description turn submits. Remainder 73.
+6. The first review is `min(25, 73 − 52)` = 21; it provisions in 2 and finds one minor in 4. Remainder 67.
+7. The fix child is `min(45, 67 − 39)` = 28, above coding's floor; it provisions in 2 and pushes at 9. Remainder 56.
+8. The second review is `min(25, 56 − 31)` = 25; it provisions in 2 and approves in 3. Remainder 51. The merge is the person's, so the unit ends `merge_ready`.
+9. Variant at step 4: the child recorded no sha newer than its lease start and its handoff is unchanged. The runner does not renew; its card says `no progress in the last lease; grant holds 5 renewals; reply continue to spend one`.
+10. Variant at step 7: the remainder is 46, so the fix child's carve is `46 − 39` = 7, under its floor. The runner ends `review pending` naming the finding, and the re-issue starts at the fix round; today it dispatches a 2-minute child.
+11. Variant at step 2: a channel boundary clips ship to 40. The fork applies the fit, `40 < 3 + 45 + 60` = 108, and refuses with that sum on the card instead of carving a child.
+
+The property the trace proves: no run holds a deadline it did not derive from the parent's remainder, no round is admitted under its floor, a lease ends with its head recorded, and the problem ends only by the grant.
+
+## The difficulty map
+
+1. **Progress, and who decides renewal** ([Renewal](#renewal-the-grant-decides-the-lease-continues)). Most likely to be wrong: a wrong progress test loops on a stuck unit or stops a slow one, and the grant's transport and cost cap are open.
+2. **The wind-down inside the lease** ([The wind-down](#the-wind-down-the-lease-covers-everything-the-run-does)). The proxy must refuse the right calls and the harness must kill the shell; a mistake here loses a run's answer silently. Most work.
+3. **The floors and allowances** ([Fit](#fit-the-module-and-the-check)). Too low re-admits the 3-minute review; too high ends segments `review pending` with time left. Review's floor and two allowances are measured; the rest are guesses.
+4. **Three fit sites, one table** ([Fit](#fit-the-module-and-the-check)). The fork is the site the incident's shape can still reach.
+
+## Fit: the module and the check
+
+The constraint is that the registry's numbers were right and production's were not, and nothing compared them: ship 120 holds coding 45 plus 11 with 64 to spare, the deployment knob made it 40, the validator's floor of 14 accepted it, and every layer below treated the resulting 28 as the truth. A number is wrong only relative to another number, so the check must hold both, and the incident's rule alone, `ship.maxMinutes ≥ ask(coding) + reserve`, needs the coding ask from the registry and the reserve from the coordinator, which is the module in embryo, and says nothing about the rounds after the first.
+
+`src/core/budgets.ts` declares three tables and one function. **Asks** per preset, moved from the registry entries; the registry keeps `maxMinutes` for its 31 readers, filled from the module. **Floors** per round kind: review 5 (the ledger's 90th percentile of 181 completed reviews is 5.1 minutes, the median 1.8, the longest 8.3), coding 10 and merge wait 10 (guesses, read against the ledger before unit two). **Allowances**, in minutes: `provision 3` (the 0.3 to 2.6 measured), `writeUp 3` (13 of 14 write-ups fit), `postStep 5` for a coding run's description turn and `3` for a review's verdict turn (today's caps, unmeasured, measured before unit two from the `run.description_turn` spans), `execCall 0.5`, `bearerGrace 1`. The reserve is not a table but a derivation, `reserve(round) = Σ (floor + provision) over the rounds that must follow it in the longest loop the config allows + floor(merge)`, so every reserve moves with `maxRounds` and the floors and can never describe a different loop than the fit does. The merge wait becomes a round with an ask of 60 and a floor of 10, carved like any other; the 3-minute dispatch gate, the wait margin and the wait chunks become module rows. `carve(remainingMs, round, loop)` returns `{ minutes, boundedBy: "ask" | "parent", holds }` or `refused: under floor` and is the only place a round's minutes are computed: the ship coordinator, the conductor's spawn and the fork call it.
+
+The **fit** is `maxMinutes ≥ provision + ask(coding) + reserve(coding)`, the first child at its ask and every later round at its floor. At the shipped default of 3 rounds: `3 + 45 + 60` = 108 ≤ 120 holds; 4 rounds is 129 and fails naming the sum. The fit proves a pipeline can finish its loop, not that its rounds are generous; how often a segment ends `review pending` is read from the ledger and tunes the floors, not the rule, and today's rate is measured before unit one as the baseline the floors must not raise. It is asserted at three sites over the one table: `src/core/budgets.check.test.ts` at verify, over the registry's ship and conductor; `validateShip` at config load, over the deployment's knob, replacing the floor of 14; and the fork, over a request whose minutes a boundary or a `budget:` clipped, refusing with the sum on the card. The check also asserts that every floor is at most its ask, that `writeUp + postStep + execCall ≤` every ask, and that `maxTurns = runawayTurnCap(ask)` for every loop-running preset, ship exempt as today. That no minutes literal lives outside the module is a new predicate for the scanner behind `clock:check`, which today counts wall-clock reads, not durations; it ratchets the same way, over an allowlist that starts at today's files and only shrinks.
+
+Invariants: a round's minutes are a literal nowhere but the module; every lease on a card names what it was carved from and what the parent held back; the three fit sites read one table. Failure modes: a floor or allowance changes and the fit breaks, `verify` names the sum and the ask; a deployment or a clipped request cannot hold its loop, it is refused with the sum; a new round kind has no floor row, the check fails on the missing declaration.
+
+Why not one validator rule for the incident and stop? It would have caught the 40 and nothing else: not the 3-minute review, not a description turn outliving the bearer, not the clip at the fork, not the next pipeline. Its inputs are the module's tables; writing the rule is writing the module.
+
+## The wind-down: the lease covers everything the run does
+
+The constraint is the 14 budget hits on record and what the code says about them. The lease starts after provisioning; the write-up took up to 3.4 minutes past the deadline; a description turn of up to 5 follows it; the bearer, minted before the lease began, dies about 5 past the deadline. One run ended `the model call failed: This operation was aborted` with nothing pushed (#1477). And nothing bounds pi's shell: a `npm run verify` issued at minute 43 runs to its own end. Each constant is defensible alone; together, the promise a child makes its parent, "done by 45", is off by the provisioning before it and by up to 8 minutes after it, and a slow description turn has no credential.
+
+The design makes the lease the whole promise. The harness holds back `writeUp + postStep` from the deadline, so a coding run's loop ends at `deadline − 8`. The enforcement is the model proxy, the one point a run cannot talk past and the one that already reads every request body: after the loop's end it admits only a request that carries no tools, the write-up turn and the post-step turns, and refuses the rest with a `time_budget_exhausted` note the way it refuses past the turn guard today. At the loop's end the harness aborts pi and kills the shell command in flight; whether pi's abort ends its own tool's process group is the guess unit two verifies first, and the killed command's leftovers are discarded by the clean-tree rule, since the push happened at the wind-down note three minutes earlier. The bearer's grace past the deadline is one minute, for the last call's tail. The ship child's contract gains one step at the wind-down note: commit and push what compiles, say what does not, then answer; and the harness records the pushed head on the row as a typed event with ref and sha, the fact the row lacks today and renewal reads.
+
+Invariants: a run's total time from the lease's start never exceeds the lease plus the grace, and the row records the lease's start; no call the proxy admits after the loop's end carries tools; the bearer is valid at every call the harness issues. Failure modes: the write-up call is slower than its allowance, the run ends with the wind-down's sentence and the recorded head, and the card says the write-up was cut; the push fails, the answer says so and the row records no head, which renewal reads as no progress.
+
+Why not a longer margin? A margin is the amount by which the promise is false; a 10-minute margin makes every reserve wrong by 10.
+
+## Renewal: the grant decides, the lease continues
+
+The constraint is that the problems we want to run last longer than anything a container, a credential or a bot generation is promised to survive: the resident's step ceiling is 30 minutes, its token lives 60 and is refreshed 25 before expiry, the drain window is 15, and a release replaces containers on its own schedule. A lease sized by the problem is a lease the infrastructure will break, so the lease is sized by the infrastructure and the problem is bounded by something else.
+
+**A lease is sized by the infrastructure that must outlive it; a grant is sized by the person.** The grant is what the request authorizes for the whole problem: a cost cap in dollars (the orchestration plan's cost-budget row, metered per call at the proxy, summed at finish, enforcement not built), a count of renewals, and the approval points that exist (`merge: person`, record 0044's confirmation). When a segment ends with its unit unfinished, the runner decides whether to open another. It renews when three things hold: the row shows **progress**, the grant has a renewal left and the session's summed spend is under its cap, and the pipeline's ask still passes the fit. Otherwise it stops and says which failed, and a person's reply spends a renewal by hand.
+
+Progress is a fact the row records after unit two and the runner reads without a model: a pushed sha that differs from the head the lease started at, or a handoff whose follow-ups shrank or whose deviations grew. The guess is that this is too strict for investigation-shaped units, which push nothing for an hour while making progress; the first twenty renewals in production decide it: if more than a quarter of the stops were units a person then continued unchanged, a third clause is added, a handoff naming new evidence.
+
+A continuation is a run, not a resume: it starts in the same thread from the recorded sha in a clean tree, as every run does, and its request is the previous run's handoff, not the person's message. The ledger links the segments as one session, the key that already ties a thread's runs on one agent, and the renewal decision is written as a row keyed by session and segment index, so a runner reclaimed by the ledger between a segment's end and its renewal finds the row and does not renew twice. Renewal never revokes: a child's lease outlives its parent's end, as #1371 made the pipeline behave, and a re-issue while that child lives is refused by the session row that names it. A person sees one thread, one card per lease naming its segment and the sha it continued from, and one stop card when the grant or the progress test ends it.
+
+Invariants: segments under one request never exceed the grant's renewals; spend under one request never exceeds the cap plus one segment, since spend is summed at each run's end; a renewal names the sha it continues from; two segments of one session never run at once. Failure modes: an empty commit fools the progress test, the renewals and the cap bound the damage; the handoff is malformed, the runner reads no progress and stops with the reason.
+
+Why not let the model ask for more time? A run cannot verify its own progress, and asking is what a stuck loop does best. Renewal is the parent's decision from a recorded sha the run cannot fake cheaply.
+
+## Why not X
+
+**Why not just raise the numbers and move on?** The registry's numbers were already right; production overrode one and the system had no way to say the override broke another. Raising is the stopgap (infrastructure #109); the module is what makes the next override visible.
+
+**Why not have the child commit and push continuously, so a budget hit is never lossy?** It should, and the contract says so; it does not remove the wind-down. Between two pushes there is always unpushed state, the description turn still needs a credential, and continuous pushing tells the parent nothing about when to stop; the recorded head at the wind-down is what renewal reads.
+
+**Why not one long clock and let the run manage itself?** One clock cannot hold a review after a coding child that used all of it, which is the whole reason the reserves exist; and the clock and the turn guard are what stop a stuck loop's spend today.
+
+**Why not put every timeout in config?** Config is where the 40 came from. Numbers a person tunes belong in config behind a validator that knows the fit; relations between numbers belong in code, derived.
+
+## Boundaries
+
+The cost meter's enforcement and the `budget:$N` directive stay the orchestration plan's row; this record makes the grant what that row implements. Approval points are record 0044's. The ledger's resume, the ship re-issue at the review round, the clean-tree rule and the session key are used as they are. Not in scope: a lease for a person's reply, and rate limits. Compatibility: `maxMinutes` stays on `AgentDef`, filled from the module; `budget:` keeps its meaning and gains the fork's fit; the one deployment under the fit moved to 120 on 2026-09-17. Reversibility: unit one is a relocation and reverts alone; unit two sits behind the harness's wind-down path; unit three is behind the renewal count, and zero renewals is today's behavior.
+
+## Rollout
+
+Three units, each its own pull request off this record's plan. One: the module with its tables, `carve` and the derived reserve, the fit at its three sites, the registry filled from the module, the merge wait carved, the cards naming the carve, the duration-literal ratchet; no behavior change except a refused config or a refused clip; the `review pending` baseline read first. Two: the proxy's tool-less admission after the loop's end, the shell kill, the post-steps inside the lease, the pushed-head event on the row, the ship contract's push at the wind-down (absorbing #1477's fix, in flight); floors and the post-step allowance read from the ledger first. Three: the grant on the request with zero renewals by default, the renewal row and decision, the continuation card; renewals on for one channel, twenty segments read, then the default raised.
+
+## Open questions
+
+| Question | Owner | Resolves it | Needed before |
+|---|---|---|---|
+| Whether pi's abort ends its tool's process group, or the harness must kill it | the record owner | one live run with a `sleep` in flight at the loop's end, in unit two's first pull request | unit two |
+| Coding's and the merge wait's floors, and the post-step allowance | the record owner | the ledger's duration distributions of fix children, runner merge waits and description turns | unit two |
+| What counts as progress beyond a new sha or a moved handoff | the maintainer | the first twenty renewals, read from the ledger | unit three's default above zero |
+| How a request expresses a grant, and the default cost cap | the maintainer | record 0044's confirmation surface and the orchestration plan's cost row | unit three |
+
+## Validation criteria
+
+1. `verify` fails when an ask, a floor, an allowance or a default `maxRounds` changes so the fit no longer holds, naming the sum and the ask. `[gap]` unit one: `src/core/budgets.check.test.ts::the longest loop the config allows fits inside the pipeline's ask`.
+2. `deploy config` refuses a pipeline under the fit, and the fork refuses a clipped ship request under it, both naming the sum. `[gap]` unit one: `src/config/validate.test.ts::a ship pipeline that cannot hold its loop is refused with the sum`; `src/core/dispatch/ship.test.ts::a boundary that clips ship under its loop refuses at the fork`.
+3. No duration literal outside the module: the scanner gains the predicate and its allowlist only shrinks. `[gap]` unit one: `src/core/trace/clockAllowlist.test.ts::a minutes literal outside budgets.ts is a new read`.
+4. A round whose carve falls under its floor is not dispatched and the segment ends naming the round. `[gap]` unit one: `src/core/ship/coordinator.test.ts::a round under its floor ends the unit review pending`.
+5. The proxy refuses a call that carries tools after the loop's end and admits one that does not; a run's time from the lease's start never exceeds the lease plus the grace. `[gap]` unit two: `src/channels/modelProxy.test.ts::a call with tools past the loop's end is refused`; harness conformance row `the lease covers the write-up and the post-step`.
+6. A ship child pushes at the wind-down and its row records ref and sha. `[gap]` unit two: `src/core/ship/contract.test.ts::the wind-down instruction pushes before the final answer`; `src/core/runRecord.test.ts::a pushed head is recorded with its sha`; live receipt human-gated, on #1477.
+7. A unit whose segment recorded a new sha under a grant with renewals continues in the same thread with a card naming the segment and the sha; one without stops naming the failed test; a reclaimed runner does not renew twice. `[gap]` unit three: `src/core/ship/coordinator.test.ts::renewal follows progress and the grant`; `::a reclaimed runner finds the renewal row`.
+8. Twenty production renewals read from the ledger with the share of stops a person continued unchanged. Human-gated; recorded on unit three's tracker issue.
+
+## Appendix: the survey at `6fd2003e5431`
+
+| Clock | Value | Proof |
+|---|---|---|
+| Preset asks; turn guard | coding 45, review 25, research 8, general 5, explore 120, conductor 120, ship 120; `ask × 6`, ship exempt | `src/agents/registry.ts:50-63, 613-735`; `src/agents/registry.test.ts:132-138` |
+| Ship reserves; carve; gate; defaults | round 3, loop 11, fix 8; `max(2, min(ask, floor(headroom / min)))`; dispatched while 3 min remain; 3 rounds, 120 min | `src/core/ship/coordinator.ts:52-75, 727-745, 880`; `src/core/shipPipeline.ts:74-76` |
+| Ship waits | child wait bounded by the carved budget plus a 5-minute margin; merge wait 60 its own, chunk 5 | `src/core/ship/coordinator.ts:665-685, 1255` |
+| Child transport; conductor child; resolution | `budget:` directive; parent's remaining ms as a boundary; a directive narrows, never widens | `src/core/dispatch/spawn.ts:163`; `src/core/dispatch/resolve.ts:164-167`; `src/config/profile.ts:212-221` |
+| Validator floor | `ship.maxMinutes ≥ 14` | `src/config/validate.ts:489-493` |
+| Run order; lease start | attach, then bearer mint, then the loop; `startedAt = receivedAt`; deadline set from the resumed remaining or the ask; abort 3 min into the write-up | `src/core/dispatcher.ts:581, 864, 957, 1151`; `src/core/harness/pi/harness.ts:99, 436-439, 994` |
+| Bearer | budget + 5 min from the mint | `src/core/dispatch/provision.ts:856`; `src/core/modelProxy/runBearers.ts:31` |
+| Post-steps | description turn `min(ask, 5)`, verdict turn `min(ask, 3)`, after the loop | `src/core/dispatch/runLoop.ts:1115-1132`; `src/core/descriptionTurn.ts:41, 165`; `src/core/verdictTurn.ts:35, 113` |
+| Shell; proxy | pi's own tool, unclipped; `bashBudgetWithinRun` under `attach_file` only, its 60-second reserve reused by `await_runs`; the proxy refuses past the turn guard with a typed note and pins every request body | `docs/reference/specs/execution.md:22`; `src/tools/attach.ts:136`; `src/core/dispatch/awaitChildren.ts:140`; `src/channels/modelProxy.ts:515-531` |
+| Resident | step ceiling 30 min; token 60 min refreshed 25 before expiry, 45 as the backstop; worktree released at the run's end, clean tree per run | `src/execution/residentInstanceId.ts:182`; `src/execution/residentCredentials.ts:31, 40`; resident-repos items 16a, 17 |
+| Drain window | 15 min per bot generation | `src/core/drain.ts:20` |
+| Row facts | typed handoff; pushed branches only from `pr_opened`, published on a submitted description or an existing pull request; a coding run's head is a branch name, no sha; a review run records its reviewed head | `src/core/runRecord.ts:147, 152-154, 219-226, 243-246`; `src/core/codingPrPostStep.ts:672-690` |
+| Wall-clock ratchet | `clock:check` counts wall-clock reads over an allowlist | `package.json:53`; `src/core/trace/clockScan.mjs:1-3`; `src/core/trace/clockAllowlist.json` |
+| Production pipeline | `ship.maxMinutes` 40 until 2026-09-17, then 120 | the deployment's config document; infrastructure #109 |
+| Ledger audit | 341 finished coding runs 2026-08-30 to 2026-09-17; 282 standalone, p50 3.4, p95 29.7, 1 hit at 45; 59 children, 12 hits at 39 or 28, work unpushed; 14 hits by 04:10Z, provisioning 0.3 to 2.6, write-up 0.3 to 3.4; 181 completed reviews p10 1.1, p50 1.8, p90 5.1, max 8.3 | recorded on #1477 |
+
+## Sources
+
+#1020, #1365, #1371, #1477, infrastructure #109; records 0026, 0029, 0032, 0044; the orchestration plan's cost-budget row; the ledger audit recorded on #1477.
