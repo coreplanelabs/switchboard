@@ -155,6 +155,20 @@ export const FIRST_EVENT_BOUND_MS = OPENCODE_READY_MS;
 /** How much of each error log the silence diagnostics quote. */
 const SILENCE_TAIL_BYTES = 2000;
 
+/** Whether a feed record is the server's word that the run's session began an
+ *  execution — `session.execution.started` naming `sessionID` — the one record
+ *  that lifts the first-event bound and marks the execution as the loop's own.
+ *  Nothing else does: the tailer's reconnect sweep writes a permissions and a
+ *  messages refill for every session it knows whether or not anything changed,
+ *  and the server emits catalogue and configuration events that name no
+ *  session, so a wedged server's feed is not silent — it is silent of the
+ *  execution, which is what the bound is for. */
+export function executionStartedFor(record: OpenCodeFeedRecord, sessionID: string): boolean {
+  if (record.feed !== "event" || record.event.type !== "session.execution.started") return false;
+  const data = record.event.data as { sessionID?: unknown } | undefined;
+  return data?.sessionID === sessionID;
+}
+
 /** What the record carries when the feed stayed silent past the bound: enough
  *  to say why nothing came, not merely that nothing did. */
 export interface OpenCodeSilenceDiagnostics {
@@ -1181,21 +1195,34 @@ export async function driveOpenCode(
   let writeUp: WriteUp | undefined;
   /** When the write-up was steered: the finale bound counts from here. */
   let writeUpAt: number | undefined;
-  /** The finale bound ended the write-up: the run closes by the wind-down's
-   *  answer with nothing more awaited of the feed — the interrupt is sent and
-   *  the caller ends the process — and the aborted call's failure is the
-   *  wind-down's note, never the run's failure or a replaced verdict. */
-  let finaleAborted = false;
-  let hardStopped = false;
-  /** An operator's soft stop: the write-up steered, the answer under the ⏹ label. */
-  let stopMode: StopMode | undefined;
-  /** What ended the loop from a tick rather than from the feed: the hard stop,
-   *  the finale bound, or the silence bound; the loop leaves at once on any. */
+  /** What ended the loop from a tick rather than from the feed, and the one
+   *  fact the ending reads: `hard` — the operator's stop, the interrupt sent,
+   *  the abort line the answer; `finale` — the finale bound ended the write-up,
+   *  so the run closes by the wind-down's answer with nothing more awaited of
+   *  the feed (the interrupt is sent, the caller ends the process, and the
+   *  aborted call's failure is the wind-down's note, never the run's failure or
+   *  a replaced verdict); `silent` — the first-event bound passed. The loop
+   *  leaves at once on any. */
   let ended: "hard" | "finale" | "silent" | undefined;
+  /** The `stopped` note is written once for the run, whichever stop came first. */
+  let stopNoted = false;
+  /** The loop has left: a request whose answer arrives now was cut by the
+   *  caller's end of the process, and its failure is that end's own effect,
+   *  not the record's. */
+  let left = false;
+  /** The execution the loop drives has begun: set by the server's own
+   *  `session.execution.started` for the session after the prompt (the record
+   *  that also lifts the first-event bound), or from the start on a re-attach
+   *  steered into an execution under way. A settle, a failure or a budget stop
+   *  read before it belongs to an earlier execution — the aborted write-up of
+   *  the loop before this post-turn, whose end the server sends late — and is
+   *  not this loop's. */
+  let executionOwned = conn.reattach?.delivery === "steer";
   /** The request whose first event the feed still owes (`FIRST_EVENT_BOUND_MS`):
-   *  set when a `queue` prompt is admitted, cleared by the first live record for
-   *  the session — a `steer` lands at the running execution's next step boundary,
-   *  which a long tool call may put minutes away, so it is never armed. */
+   *  set when a `queue` prompt is admitted, cleared by the session's
+   *  `session.execution.started` (`executionStartedFor`) — a `steer` lands at
+   *  the running execution's next step boundary, which a long tool call may
+   *  put minutes away, so it is never armed. */
   let awaiting: { phase: string; since: number } | undefined;
   /** The last feed line read, for the silence diagnostics. */
   let lastRecord: string | undefined;
@@ -1228,24 +1255,30 @@ export async function driveOpenCode(
   };
 
   /** A request whose answer the loop does not wait on — a steer, the
-   *  interrupt: its failure is never swallowed. An answer outside 2xx, or a
-   *  request that threw, is a `harness_error` naming the request and the
-   *  answer, at once; the ending it was part of is the wind-down's or the
-   *  stop's, bounded by the finale, so nothing waits on it. */
+   *  interrupt: its failure is never swallowed while the loop runs. An answer
+   *  outside 2xx, or a request that threw, is a `harness_error` naming the
+   *  request and the answer, at once; the ending it was part of is the
+   *  wind-down's or the stop's, bounded by the finale, so nothing waits on it.
+   *  An answer that arrives once the loop has left is the caller's end of the
+   *  process cutting the request — the interrupt an ending posted, reset by
+   *  the kill that follows — and says nothing the record does not already
+   *  hold, so it is not a note. */
   const post = (what: string, route: { method: string; path: string }, body?: unknown) => {
     void request(route, body).then(
       (res) => {
-        if (res.status < 200 || res.status >= 300)
-          note(
-            "harness_error",
-            `${what} did not reach the server: it answered ${res.status}${res.body.trim() ? ` (${redactAndCap(res.body, 200)})` : ""}`,
-          );
+        if (left || (res.status >= 200 && res.status < 300)) return;
+        note(
+          "harness_error",
+          `${what} did not reach the server: it answered ${res.status}${res.body.trim() ? ` (${redactAndCap(res.body, 200)})` : ""}`,
+        );
       },
-      (err: unknown) =>
+      (err: unknown) => {
+        if (left) return;
         note(
           "harness_error",
           `${what} did not reach the server: ${redactAndCap(err instanceof Error ? err.message : String(err), 200)}`,
-        ),
+        );
+      },
     );
   };
   const startWriteUp = (w: WriteUp, instruction: string) => {
@@ -1267,17 +1300,26 @@ export async function driveOpenCode(
   const check = () => {
     const requested = run.control?.requested;
     if (requested === "hard") {
-      if (!hardStopped) {
-        hardStopped = true;
+      if (ended === undefined) {
         ended = "hard";
         // The hard stop on the record (the record clause): a `stopped` note in
         // mode `hard`, said once, then the interrupt that ends the session.
+        stopNoted = true;
         note("stopped", hardStopNote(), "hard");
         post("the interrupt", sessionRoutes["session.interrupt"]);
       }
       return;
     }
     if (writeUp) {
+      // An operator's soft stop once a write-up is already under way (the
+      // budget's, the turn guard's) changes nothing the run does — every tool
+      // is refused and the model is writing its final answer — but the request
+      // is on the record: one `stopped` note in mode soft, no second steer, the
+      // answer's label the ending's that was already under way.
+      if (requested === "soft" && !stopNoted) {
+        stopNoted = true;
+        note("stopped", softStopNote(), "soft");
+      }
       // The write-up is bounded by its allowance, as pi's is (harness.md item
       // 5): past the bound the run closes by the wind-down's own answer with no
       // write-up — the call in flight interrupted, its failure the wind-down's
@@ -1286,7 +1328,6 @@ export async function driveOpenCode(
       // nothing to the interrupt either, and the caller ends the process.
       if (writeUpAt !== undefined && now() - writeUpAt >= lease.finaleMs) {
         writeUpAt = undefined;
-        finaleAborted = true;
         ended = "finale";
         const reason = finaleAbortReason(lease.finaleMs);
         writeUpFailed ??= reason;
@@ -1303,7 +1344,7 @@ export async function driveOpenCode(
       return;
     }
     if (requested === "soft") {
-      stopMode = "soft";
+      stopNoted = true;
       note("stopped", softStopNote(), "soft");
       startWriteUp({ kind: "soft" }, SOFT_STOP_INSTRUCTION);
       return;
@@ -1443,10 +1484,13 @@ export async function driveOpenCode(
       lastRecord = next.value;
       const record = parseFeedRecord(next.value);
       if (!record) continue;
-      // The first live record for the session pays what the admitted prompt
-      // owed; a tailer's own note is not the server's word, and a record read
-      // catching up on a re-attach is the dead generation's.
-      if (record.feed !== "tailer" && !bridge.catchingUp) awaiting = undefined;
+      // The session's own execution start pays what the admitted prompt owed
+      // and makes the execution this loop's; a record read catching up on a
+      // re-attach is the dead generation's.
+      if (!bridge.catchingUp && executionStartedFor(record, conn.sessionID)) {
+        executionOwned = true;
+        awaiting = undefined;
+      }
       const obs = bridge.observe(record);
       if (record.feed === "messages" && conn.saveOffset !== undefined) {
         const save = conn.saveOffset;
@@ -1464,6 +1508,14 @@ export async function driveOpenCode(
         // settle: said where it failed, and the run goes on to its own end.
         if (obs.providerError !== undefined)
           note("harness_error", `a model call failed while the bot was away (${obs.providerError}); continuing`);
+        check();
+        continue;
+      }
+      if (!executionOwned && (obs.settled || obs.providerError !== undefined || obs.budgetStop)) {
+        // The end of an execution this loop did not start — the write-up the
+        // loop before this post-turn interrupted at its finale, settling late —
+        // is not this loop's settle: the execution the prompt starts is still
+        // owed, and its own start is what the bound waits for.
         check();
         continue;
       }
@@ -1489,9 +1541,21 @@ export async function driveOpenCode(
       check();
     }
   } finally {
+    left = true;
     transport.close();
+    // The span says what the outcome says: an operator's abort, a bypass, a
+    // reply or a request the server refused, a replaced or lost container, a
+    // failed model call, a silent server. The finale's abort ends `ok` as pi's
+    // does — the run closes by the wind-down's answer.
     agentSpan?.end(
-      hardStopped || bypass || replyFailed || replacedBy || transportLost || refused || ended === "silent"
+      ended === "hard" ||
+        ended === "silent" ||
+        bypass ||
+        replyFailed ||
+        replacedBy ||
+        transportLost ||
+        refused ||
+        providerError !== undefined
         ? "error"
         : "ok",
     );
@@ -1556,14 +1620,14 @@ export async function driveOpenCode(
     throw silent;
   }
   const remaining = () => deadline - now();
-  if (hardStopped) return { answer: HARD_STOP_MESSAGE, remainingMs: remaining };
+  if (ended === "hard") return { answer: HARD_STOP_MESSAGE, remainingMs: remaining };
   if (providerError !== undefined) throw new Error(`the model call failed: ${providerError}`);
-  if (!settled && !finaleAborted) throw new Error("the OpenCode run ended before its execution settled");
+  if (!settled && ended !== "finale") throw new Error("the OpenCode run ended before its execution settled");
   // Every refill the loop saw has landed as its steps, and the last text-only
   // turn is the answer.
   await bridge.flush();
   const text = bridge.answer() ?? "";
-  const answer = writeUpAnswer(writeUp, stopMode, text, run.agent.maxMinutes, writeUpFailed);
+  const answer = writeUpAnswer(writeUp, text, run.agent.maxMinutes, writeUpFailed);
   return { answer, remainingMs: remaining };
 }
 
@@ -1572,13 +1636,12 @@ type WriteUp = { kind: "time" } | { kind: "turns"; pace: string } | { kind: "sof
 
 function writeUpAnswer(
   writeUp: WriteUp | undefined,
-  stopMode: StopMode | undefined,
   text: string,
   maxMinutes: number,
   writeUpFailed: string | undefined,
 ): string {
   if (writeUp?.kind === "time") return timeBudgetAnswer(text, maxMinutes, writeUpFailed);
   if (writeUp?.kind === "turns") return turnGuardAnswer(text, writeUp.pace, writeUpFailed);
-  if (writeUp?.kind === "soft" || stopMode === "soft") return softStopAnswer(text, writeUpFailed);
+  if (writeUp?.kind === "soft") return softStopAnswer(text, writeUpFailed);
   return text || "_(no response)_";
 }
