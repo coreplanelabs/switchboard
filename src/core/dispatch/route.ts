@@ -32,11 +32,13 @@
 // derived from the registry (`routableCommands`: the MCP name, the description,
 // the JSON schema — the same derivation the MCP adapter lists), and may call one
 // of them instead of routing. A command call binds the request to a typed
-// input; the stage then hands an `effect: write` command back as the line to
-// paste and never runs it from prose, runs an `effect: read` command through
-// the registry as the message's user with the receipt line first, and on any
-// failure replies the command's own error line and the override footer and
-// stops — one model call, never a second route.
+// input; the stage then decides by `routedRunsAtOnce` — a read, or a write
+// whose action class is `exec` (a repository's own test or build, which
+// changes nothing of Switchboard's own), runs through the registry as the
+// message's user with the receipt line first; every other write is handed back
+// as the line to paste and never run from prose — and on any failure replies
+// the command's own error line and the override footer and stops — one model
+// call, never a second route.
 import { AGENTS, COMPOUND_PRESET, type Identity, type MachineClass } from "../../agents/registry.js";
 import { HAND_BACK_PREFIX } from "./handBack.js";
 import { grantsSubject } from "../authz/actor.js";
@@ -97,10 +99,25 @@ export const ROUTE_RECEIPT_CAP = 300;
 /** The receipt line's prefix: `routed: <chat form>` — the same word the card's
  *  route line uses for a preset. */
 export const ROUTED_RECEIPT_PREFIX = "routed:";
-/** The hand-back's prefix for an `effect: write` command (record 0039): the line
- *  to paste follows it, and nothing runs. Defined in its own pure module so the
- *  web bundle can read it (the home page fills its composer with the command). */
+/** The hand-back's prefix for a state-changing write command (record 0039; the
+ *  rule is `routedRunsAtOnce`): the line to paste follows it, and nothing runs.
+ *  Defined in its own pure module so the web bundle can read it (the home page
+ *  fills its composer with the command). */
 export { HAND_BACK_PREFIX };
+
+/**
+ * Whether a command the router bound runs at once or is handed back as the
+ * line to type (record 0039 as amended). Two fields every definition already
+ * carries decide it — never a list in code: a `read` runs; a `write` runs only
+ * when its action class is `exec` (`repo:exec` — `repo test`, `repo build`: a
+ * run of the repository's own checks that changes nothing of Switchboard's
+ * own, so a misread sentence costs one wasted run and nothing to undo); a
+ * `write` whose class is `write` (`config:write`, `mcp:write`, `repo:write`…)
+ * is handed back, because a write bound from prose is a write nobody typed.
+ */
+export function routedRunsAtOnce(def: Pick<CommandDef<unknown>, "effect" | "action">): boolean {
+  return def.effect === "read" || def.action.endsWith(":exec");
+}
 /** The line that opens the parts block of a routed conductor's brief; the
  *  conductor's prompt (`CONDUCTOR_SYSTEM`) names the same words. */
 export const COMPOUND_BRIEF_HEADING = "Routed as a compound request";
@@ -141,9 +158,10 @@ export function routablePresets(): RoutablePreset[] {
 }
 
 /** One command the router may call instead of routing (record 0036, unit 2):
- *  the registry's def, its effect — the one fact the stage decides on — and
- *  the tool the model is shown, derived from the def exactly as the MCP
- *  adapter derives its listing (`mcpToolName`, `describe`, `jsonSchemaFor`). */
+ *  the registry's def (the stage decides on its `effect` and `action` through
+ *  `routedRunsAtOnce`), its effect, and the tool the model is shown, derived
+ *  from the def exactly as the MCP adapter derives its listing (`mcpToolName`,
+ *  `describe`, `jsonSchemaFor`). */
 export interface RoutableCommand {
   id: string;
   effect: CommandEffect;
@@ -468,7 +486,7 @@ export function buildRoutePrompt(input: Omit<RouteInput, "allowed">): RoutePromp
  *  rule never names a command — the tools carry their own descriptions and
  *  schemas — so a command added to the catalogue is covered the day it lands. */
 function commandsRule(commands: readonly RoutableCommand[]): string {
-  return `Commands: beside \`${ROUTE_TOOL_NAME}\` you are offered one tool per command this deployment answers without a model — ${commands.length} of them, each described by its own tool. When the request asks exactly what one of those tools does — a listing, a setting, a repository operation, a lookup by id — call that tool with its arguments bound from the request (a repository the request leaves unnamed is the thread's repository when one is given). A command call is not a route: call exactly one tool, either \`${ROUTE_TOOL_NAME}\` or one command, never two. When the request asks for anything a command does not do exactly — a judgement, a change to code, an investigation, a question about the world — call \`${ROUTE_TOOL_NAME}\`. A command that changes state is handed back to the person as the line to type, never run from a call, so a call to one costs nothing when the person did not mean it; a command that only reads runs at once.`;
+  return `Commands: beside \`${ROUTE_TOOL_NAME}\` you are offered one tool per command this deployment answers without a model — ${commands.length} of them, each described by its own tool. When the request asks exactly what one of those tools does — a listing, a setting, a repository operation, a lookup by id — call that tool with its arguments bound from the request (a repository the request leaves unnamed is the thread's repository when one is given). A command call is not a route: call exactly one tool, either \`${ROUTE_TOOL_NAME}\` or one command, never two. When the request asks for anything a command does not do exactly — a judgement, a change to code, an investigation, a question about the world — call \`${ROUTE_TOOL_NAME}\`. A command that changes state here is handed back to the person as the line to type, never run from a call, so a call to one costs nothing when the person did not mean it; a command that only reads, or that only runs a repository's own checks and changes nothing here, runs at once.`;
 }
 
 /** The rule for connected data sources (record 0040), in the system half so it
@@ -1090,20 +1108,23 @@ export async function routeRequest(deps: RouteDeps, ctx: RouteStageContext): Pro
 }
 
 /**
- * The command branch (record 0036, unit 2; record 0039): what happens once the
- * router called a command instead of routing. The command's `effect` decides —
- * no field on the def, no list in code. `write`: the request is handed back as
- * the line to paste (`To run this: <chat form>`) and nothing runs, because a
- * write bound from prose is a write nobody typed. `read`: the command runs
- * through the same machinery a typed command does (`runChatCommand`), as the
- * message's user, with `source: route` on the audit line and the decision on
- * the run's record as its `route` event; the reply leads with the receipt
- * (`routed: <chat form>`, the same words the card uses for a preset) so the
- * person sees what was bound and can paste it to run it again. On any failure
- * — a refusal, a bad value, a repository with no resident, a handler error —
+ * The command branch (record 0036, unit 2; record 0039 as amended): what
+ * happens once the router called a command instead of routing. The command's
+ * own definition decides, through `routedRunsAtOnce` — no new field, no list
+ * in code. Handed back: the request is answered as the line to paste (`To run
+ * this: <chat form>`) and nothing runs, because a write bound from prose is a
+ * write nobody typed. Runs at once (a read, or an exec-class write such as
+ * `repo test`): the command runs through the same machinery a typed command
+ * does (`runChatCommand`), as the message's user — authorized before it is
+ * parsed, the per-repository allowlist inside the handler — with `source:
+ * route` on the audit line and the decision on the run's record as its `route`
+ * event; the reply leads with the receipt (`routed: <chat form>`, the same
+ * words the card uses for a preset) so the person sees what was bound and can
+ * paste it to run it again. On any failure — a refusal, a bad value, a
+ * repository with no resident, a backend that cannot serve, a handler error —
  * the reply is the receipt, the command's own error line and the override
- * footer, and the dispatch ends: one model call, never a second route. Every
- * field the record gains is redacted and capped.
+ * footer, and the dispatch ends: one model call, never a second route, nothing
+ * handed to an agent. Every field the record gains is redacted and capped.
  */
 async function answerCommand(
   commands: ChatCommands,
@@ -1123,7 +1144,7 @@ async function answerCommand(
   }
   const receipt = redactAndCap(chatInvocation(def, decided.input), ROUTE_RECEIPT_CAP);
   const receiptLine = `${ROUTED_RECEIPT_PREFIX} ${receipt}`;
-  if (def.effect === "write") {
+  if (!routedRunsAtOnce(def)) {
     console.log(`[route] ${msg.threadKey} handed back ${def.id} on ${modelRef}: ${receipt}`);
     await ending.sealAfterReply(
       async () => {},

@@ -4,22 +4,23 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { processSecrets } from "../../secrets.js";
 import { ConfigStore } from "../../config.js";
-import { parseDirectives } from "../../directives.js";
 import { buildCoreCommands } from "../commandCatalogue.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import { createRunEnding } from "../runEnding.js";
 import { NullRunHistoryWriter } from "../runHistoryWriter.js";
 import { RunRegistry } from "../runRegistry.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
-import { answerChatCommand, answerOperation, isInlineRunCommand, type FastPathDeps } from "./fastPath.js";
+import * as fastPath from "./fastPath.js";
+import { answerChatCommand, isInlineRunCommand, type FastPathDeps } from "./fastPath.js";
 
 // Feature: docs/reference/specs/command-registry.md (the chat adapter as stage A),
-// docs/reference/specs/routing-and-config.md item 10 — the fast paths' own
-// contract: what they answer, what they hand on. The inline command runs, the
-// receipts and the natural-language translation into `repo.test|build` are
-// proven end to end through `dispatch()` in `src/core/dispatcher.test.ts`
-// (`registry chat commands in the fast-path chain`, `inline command runs + run
-// receipts`, `deterministic ops fast-path`).
+// docs/reference/specs/routing-and-config.md item 10 — the fast path's own
+// contract: what it answers, what it hands on. Stage A is the ONE fast path:
+// the typed grammar, and nothing that reads prose. The inline command runs and
+// the receipts are proven end to end through `dispatch()` in
+// `src/core/dispatcher.test.ts` (`registry chat commands in the fast-path
+// chain`, `inline command runs + run receipts`); the natural op forms reach
+// `repo.test|build` through the router's door there too (`deterministic ops`).
 
 const NOW = 10_000;
 
@@ -107,28 +108,20 @@ describe("answerChatCommand — stage A", () => {
   });
 });
 
-describe("answerOperation — the natural-language op fast path", () => {
-  it("prose that names no op is handed on", async () => {
+describe("stage A is the only fast path — no natural form is recognized without the model", () => {
+  it("the natural op forms are prose here: handed on untouched, nothing replied, no history fetched, no run — the router's door is their way to repo.test|build", async () => {
     const d = deps(true);
-    const { ctx, replies } = request("hello there, how are you", d);
-    const directives = parseDirectives(ctx.msg.text);
-    expect(await answerOperation(d, { ...ctx, directives, history: [] })).toBe(false);
-    expect(replies).toEqual([]);
+    for (const text of ["run the tests on main in acme/api", "build main in acme/api", "Run tests on master."]) {
+      const { ctx, replies, history } = request(text, d);
+      expect(await answerChatCommand(d, ctx), text).toBe(false);
+      expect(replies, text).toEqual([]);
+      expect(history, text).not.toHaveBeenCalled();
+    }
+    expect(d.runRegistry!.listActive()).toEqual([]);
   });
 
-  it("an explicit agent: or model: directive disables recognition — the user picked a model path", async () => {
-    const d = deps(true);
-    const { ctx, replies } = request("agent:coding run the tests on main in acme/api", d);
-    const directives = parseDirectives(ctx.msg.text);
-    expect(directives.agent).toBe("coding");
-    expect(await answerOperation(d, { ...ctx, directives, history: [] })).toBe(false);
-    expect(replies).toEqual([]);
-  });
-
-  it("without a command registry nothing is recognized", async () => {
-    const d = deps(false);
-    const { ctx } = request("run the tests on main in acme/api", d);
-    expect(await answerOperation(d, { ...ctx, directives: parseDirectives(ctx.msg.text), history: [] })).toBe(false);
+  it("the module exports the typed grammar's stage and the inline-run predicate, and nothing that reads prose", () => {
+    expect(Object.keys(fastPath).sort()).toEqual(["COMMAND_RUN_AGENT", "answerChatCommand", "isInlineRunCommand"]);
   });
 });
 

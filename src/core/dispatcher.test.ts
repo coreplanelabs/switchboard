@@ -247,6 +247,10 @@ routing: { auto: false }
 workspaceDir: __WORKDIR__
 `;
 
+/** The same fixture with the router on: the door's suites script `deps.routeModel`
+ *  and prove what a plain message reaches through it. */
+const ROUTING_ON_YAML = YAML_FIXTURE.replace("routing: { auto: false }\n", "routing: { auto: true }\n");
+
 /** The thread's newest run, finished with a session log: what a follow-up
  *  continues (routing-and-config item 3, by transcript — never an `agent:`
  *  token in the thread's history). */
@@ -1247,17 +1251,25 @@ describe("repo management commands", () => {
   });
 });
 
-// Feature: docs/reference/specs/resident-repos.md, docs/reference/specs/routing-and-config.md — the
-// deterministic ops fast-path: recognized ops answer with a real op
-// execution and ZERO model turns, mirroring the config-command inline-reply
-// shape. Only the model call is skipped — the implicit target agent (coding)
-// passes canRunAgent and the repo passes canUseRepo BEFORE anything
-// executes. Anything ambiguous or non-matching falls through to the agent
-// (never guess).
-describe("deterministic ops fast-path", () => {
+// Feature: docs/reference/specs/routing-and-config.md items 7 and 10,
+// docs/reference/specs/command-registry.md item 24, record 0039 as amended (an
+// exec-class command runs when routed) — deterministic ops through both doors.
+// The typed form (`repo test acme/api main`) is stage A: answered inline with
+// zero model turns. The natural forms ("run the tests on main in acme/api")
+// are prose, so they reach `repo.test` through the router's command menu: one
+// model call binds the command, the reply leads with the receipt line, and the
+// op runs at once because `repo:exec` changes nothing of Switchboard's own. An
+// op that cannot serve (no resident, no backend) replies the command's own line
+// and the override footer — never a fall-through to the agent, never a second
+// model call. Only the model call differs between the doors; the gates (the
+// `agentRun` registry gate, `canUseRepo` inside) apply on both.
+describe("deterministic ops: the typed form is stage A, the natural forms reach repo.test through the door", () => {
   afterEach(() => {
     vi.mocked(makeExecutor).mockClear();
   });
+
+  const FOOTER = "wrong preset? reply agent:<preset> to run it another way";
+  const RECEIPT = "routed: repo test acme/api main";
 
   function fakeOps(result: import("./operations.js").OperationResult) {
     return {
@@ -1276,46 +1288,210 @@ describe("deterministic ops fast-path", () => {
     output: "1 passing",
   } as const;
 
-  it('F3: "run the tests on main" for an onboarded repo → op result posted, provider NEVER called', async () => {
+  /** A scripted router that binds `repo_test` to the slug and ref as a person said them. */
+  const bindsRepoTest = (slug: string, ref: string) =>
+    vi.fn<RouteModel>(async () => ({ tool: "repo_test", input: { slug, ref } }));
+
+  /** The dispatcher with the router on, an ops backend scripted with one
+   *  result, and a run registry whose ids count up so a second run would show. */
+  function routed(result: import("./operations.js").OperationResult) {
     const provider = capturingProvider();
-    const deps = makeDeps(YAML_FIXTURE, provider);
-    const ops = fakeOps(OK_RESULT);
+    const deps = makeDeps(ROUTING_ON_YAML, provider);
+    let n = 0;
+    const registry = new RunRegistry({ genId: () => `r${++n}`, genToken: () => "t" });
+    deps.runRegistry = registry;
+    deps.admission = new ThreadAdmission();
+    const ops = fakeOps(result);
     deps.operations = ops;
-    const { io, replies } = fakeIO();
+    return { deps, provider, registry, ops };
+  }
+
+  it('"run the tests on main in acme/api" reaches repo.test through the door: one model call, the receipt line first, then the op\'s result — the op an inline run carrying the decision, no card, no agent run', async () => {
+    const { deps, provider, registry, ops } = routed(OK_RESULT);
+    deps.routeModel = bindsRepoTest("acme/api", "main");
+    const { io, replies, statuses } = fakeIO();
     await dispatch(deps, msg("run the tests on main in acme/api", "slack:UADMIN"), io);
+    expect(deps.routeModel).toHaveBeenCalledTimes(1);
+    expect(deps.invoked).toEqual(["repo.test"]);
     expect(ops.calls).toEqual([{ op: "test", req: { repo: "acme/api", ref: "main" } }]);
-    expect(replies[0]).toContain("✅");
-    expect(replies[0]).toContain("test passed");
+    expect(replies).toHaveLength(1);
+    const lines = replies[0]!.split("\n");
+    expect(lines[0]).toBe(RECEIPT);
+    expect(lines[1]).toContain("✅");
+    expect(lines[1]).toContain("test passed");
     expect(replies[0]).toContain("1 passing");
+    expect(replies[0]).not.toContain(FOOTER);
+    expect(statuses).toEqual([]);
     expect(provider.requests).toHaveLength(0);
     expect(makeExecutor).not.toHaveBeenCalled();
+    const snap = registry.snapshotById("r1");
+    expect(snap?.finished).toBe(true);
+    expect(snap?.events.find((e) => e.type === "route")).toMatchObject({
+      command: "repo.test",
+      receipt: "repo test acme/api main",
+    });
+    expect(registry.snapshotById("r2")).toBeNull();
   });
 
-  it("explicit `repo test <owner/name> <ref>` executes for an authorized user regardless of phrasing", async () => {
-    const provider = capturingProvider();
-    const deps = makeDeps(YAML_FIXTURE, provider);
-    const ops = fakeOps(OK_RESULT);
-    deps.operations = ops;
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg("repo test acme/api main", "slack:UADMIN"), io);
+  it('"run the tests on main" as a reply in a thread whose earlier turns name acme/api: the router is shown the thread\'s repository and the bound repo_test runs against it', async () => {
+    const { deps, provider, ops } = routed(OK_RESULT);
+    // The scripted router binds the repository from the line the stage adds to
+    // its user turn — nothing in the request itself names one.
+    const router = vi.fn<RouteModel>(async (prompt) => {
+      const repo = /The thread's repository: (\S+)/.exec(prompt.user)?.[1];
+      return { tool: "repo_test", input: { slug: repo, ref: "main" } };
+    });
+    deps.routeModel = router;
+    const { io, replies } = fakeIO([
+      { role: "user", text: "agent:coding fix the login bug in acme/api" },
+      { role: "assistant", text: "done" },
+    ]);
+    await dispatch(deps, msg("run the tests on main", "slack:UADMIN"), io);
+    expect(router).toHaveBeenCalledTimes(1);
+    expect(router.mock.calls[0]![0].user).toContain("The thread's repository: acme/api");
     expect(ops.calls).toEqual([{ op: "test", req: { repo: "acme/api", ref: "main" } }]);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]!.split("\n")[0]).toBe(RECEIPT);
     expect(replies[0]).toContain("✅");
     expect(provider.requests).toHaveLength(0);
   });
 
-  it("a user without coding-agent access is refused by the `agentRun` gate (the registry's shared restricted line); the op never executes", async () => {
-    const provider = capturingProvider();
-    const deps = makeDeps(YAML_FIXTURE, provider); // coding restricted to UADMIN
-    const ops = fakeOps(OK_RESULT);
-    deps.operations = ops;
+  it('a repository with no resident: the bound repo_test answers not_found, and the reply is the receipt, the command\'s own "not onboarded" line and the override footer — one sealed failed command run, no sandbox, no second model call, no agent run', async () => {
+    const { deps, provider, registry, ops } = routed({ kind: "not-onboarded" });
+    deps.routeModel = bindsRepoTest("acme/api", "main");
+    const { io, replies, statuses } = fakeIO();
+    await dispatch(deps, msg("run the tests on main in acme/api", "slack:UADMIN"), io);
+    expect(deps.routeModel).toHaveBeenCalledTimes(1);
+    expect(ops.calls).toHaveLength(1); // the backend was asked once and said there is no resident
+    expect(replies).toHaveLength(1);
+    const lines = replies[0]!.split("\n");
+    expect(lines[0]).toBe(RECEIPT);
+    expect(lines[1]).toBe(
+      "⚠️ `repo test`: `acme/api` is not onboarded as a resident, so `repo test` has nothing to run against — `repo onboard acme/api` first, or ask the coding agent directly.",
+    );
+    expect(lines.at(-1)).toBe(FOOTER);
+    expect(statuses).toEqual([]);
+    expect(provider.requests).toHaveLength(0);
+    expect(makeExecutor).not.toHaveBeenCalled();
+    const snap = registry.snapshotById("r1");
+    expect(snap?.finished).toBe(true);
+    expect(snap?.events.find((e) => e.type === "route")).toMatchObject({ command: "repo.test" });
+    expect(registry.snapshotById("r2")).toBeNull(); // no agent run followed the failed command
+  });
+
+  it("an op backend failure (unavailable) through the door has the same shape: the receipt, the ⚠️ line with the backend's message and the footer — never a fall-through to the agent", async () => {
+    const { deps, provider, ops } = routed({ kind: "error", message: "resident /op HTTP 500" });
+    deps.routeModel = bindsRepoTest("acme/api", "main");
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("run the tests on main in acme/api", "slack:UADMIN"), io);
+    expect(ops.calls).toHaveLength(1);
+    expect(replies).toHaveLength(1);
+    const lines = replies[0]!.split("\n");
+    expect(lines[0]).toBe(RECEIPT);
+    expect(lines[1]).toBe("⚠️ `repo test`: resident /op HTTP 500");
+    expect(lines.at(-1)).toBe(FOOTER);
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it("a failing suite through the door is a result, not an error: ❌ with the named summary under the receipt, no footer", async () => {
+    const { deps, provider } = routed({
+      kind: "result",
+      ok: false,
+      summary: "test failed (exit 1) on repo:acme/api @ main (abc12345)",
+      output: "1 failing",
+    });
+    deps.routeModel = bindsRepoTest("acme/api", "main");
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("run the tests on main in acme/api", "slack:UADMIN"), io);
+    const lines = replies[0]!.split("\n");
+    expect(lines[0]).toBe(RECEIPT);
+    expect(lines[1]).toContain("❌");
+    expect(lines[1]).toContain("test failed (exit 1)");
+    expect(replies[0]).not.toContain(FOOTER);
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it("a mutating command-table entry is refused through the door with the named reason under the receipt, and the footer", async () => {
+    const { deps, provider } = routed({
+      kind: "refused",
+      reason:
+        'op-refused: the "test" command-table entry is marked effects: mutating — the modelless op path executes readonly entries only',
+    });
+    deps.routeModel = bindsRepoTest("acme/api", "main");
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("run the tests on main in acme/api", "slack:UADMIN"), io);
+    const lines = replies[0]!.split("\n");
+    expect(lines[0]).toBe(RECEIPT);
+    expect(lines[1]).toMatch(/^⚠️ `repo test`: op-refused/);
+    expect(lines[1]).toContain("mutating");
+    expect(lines.at(-1)).toBe(FOOTER);
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it("a user without coding-agent access: the router binds repo_test, the registry's `agentRun` gate refuses with the shared restricted line under the receipt, and the op never executes", async () => {
+    const { deps, provider, ops } = routed(OK_RESULT);
+    deps.routeModel = bindsRepoTest("acme/api", "main");
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("run the tests on main in acme/api", "slack:UX"), io);
-    expect(replies).toEqual(["🚫 `repo test` is restricted. Ask <@slack:UADMIN>."]);
+    expect(replies).toEqual([`${RECEIPT}\n🚫 \`repo test\` is restricted. Ask <@slack:UADMIN>.\n${FOOTER}`]);
     expect(ops.calls).toHaveLength(0);
     expect(provider.requests).toHaveLength(0);
   });
 
-  it("a canUseRepo refusal names the repo; the op never executes", async () => {
+  it("a hostile ref the router binds fails the schema at invoke: the receipt, the named refusal and the footer; no backend is reached", async () => {
+    const { deps, provider, ops } = routed(OK_RESULT);
+    deps.routeModel = bindsRepoTest("acme/api", "main;rm");
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("run the tests on main;rm in acme/api", "slack:UADMIN"), io);
+    expect(replies).toHaveLength(1);
+    const lines = replies[0]!.split("\n");
+    expect(lines[0]).toMatch(/^routed: repo test acme\/api /);
+    expect(lines[1]).toMatch(/^⚠️ `repo test`: ref/);
+    expect(lines.at(-1)).toBe(FOOTER);
+    expect(ops.calls).toHaveLength(0);
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it('prose that names no op ("can you check the tests seem fine?") is routed to a preset like any plain message: no command binds, no op runs, the agent serves it', async () => {
+    const { deps, provider, ops } = routed(OK_RESULT);
+    deps.routeModel = vi.fn(async () => JSON.stringify({ preset: "general", reason: "a question about the tests" }));
+    const { io, replies } = fakeIO([{ role: "user", text: "we are looking at acme/api" }]);
+    await dispatch(deps, msg("can you check the tests seem fine?", "slack:UADMIN"), io);
+    expect(deps.routeModel).toHaveBeenCalledTimes(1);
+    expect(deps.invoked).toEqual([]);
+    expect(ops.calls).toHaveLength(0);
+    expect(provider.requests).toHaveLength(1);
+    expect(replies).toContain("answer");
+  });
+
+  it("an agent: directive skips the door: the router is never asked, no command binds, no op runs, the named agent serves the request", async () => {
+    const { deps, provider, ops } = routed(OK_RESULT);
+    deps.routeModel = bindsRepoTest("acme/api", "main");
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:coding run the tests on main in acme/api", "slack:UADMIN"), io);
+    expect(deps.routeModel).not.toHaveBeenCalled();
+    expect(deps.invoked).toEqual([]);
+    expect(ops.calls).toHaveLength(0);
+    expect(provider.requests).toHaveLength(1);
+  });
+
+  it("the typed `repo test acme/api main` still answers inline in stage A: no model call, the router never asked, no history fetch, no receipt line", async () => {
+    const { deps, provider, ops } = routed(OK_RESULT);
+    deps.routeModel = bindsRepoTest("acme/api", "main");
+    const { io, replies } = fakeIO();
+    const history = vi.fn(io.history);
+    io.history = history;
+    await dispatch(deps, msg("repo test acme/api main", "slack:UADMIN"), io);
+    expect(deps.routeModel).not.toHaveBeenCalled();
+    expect(history).not.toHaveBeenCalled();
+    expect(ops.calls).toEqual([{ op: "test", req: { repo: "acme/api", ref: "main" } }]);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("✅");
+    expect(replies[0]).not.toMatch(/^routed:/);
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it("a canUseRepo refusal on the typed form names the repo; the op never executes", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(REPO_PERMS_YAML, provider); // acme/api restricted to UADMIN; UDEV may run coding
     const ops = fakeOps(OK_RESULT);
@@ -1328,30 +1504,7 @@ describe("deterministic ops fast-path", () => {
     expect(provider.requests).toHaveLength(0);
   });
 
-  it('ambiguous phrasing ("can you check the tests seem fine?") falls through to the agent path', async () => {
-    const provider = capturingProvider();
-    const deps = makeDeps(YAML_FIXTURE, provider);
-    const ops = fakeOps(OK_RESULT);
-    deps.operations = ops;
-    const { io, replies } = fakeIO([{ role: "user", text: "we are looking at acme/api" }]);
-    await dispatch(deps, msg("can you check the tests seem fine?"), io);
-    expect(ops.calls).toHaveLength(0);
-    expect(provider.requests).toHaveLength(1); // the agent path served it
-    expect(replies).toContain("answer");
-  });
-
-  it("a natural-language ref with shell metacharacters falls through silently (never reaches any backend)", async () => {
-    const provider = capturingProvider();
-    const deps = makeDeps(YAML_FIXTURE, provider);
-    const ops = fakeOps(OK_RESULT);
-    deps.operations = ops;
-    const { io } = fakeIO();
-    await dispatch(deps, msg("run the tests on main;rm in acme/api"), io);
-    expect(ops.calls).toHaveLength(0);
-    expect(provider.requests).toHaveLength(1);
-  });
-
-  it("an explicit `repo test` with a hostile ref is a NAMED refusal before any backend", async () => {
+  it("a typed `repo test` with a hostile ref is a NAMED refusal before any backend", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);
     const ops = fakeOps(OK_RESULT);
@@ -1363,61 +1516,7 @@ describe("deterministic ops fast-path", () => {
     expect(provider.requests).toHaveLength(0);
   });
 
-  it("an op failure (tests fail) is posted as ❌ with the named summary — a result, not an error path", async () => {
-    const provider = capturingProvider();
-    const deps = makeDeps(YAML_FIXTURE, provider);
-    const ops = fakeOps({
-      kind: "result",
-      ok: false,
-      summary: "test failed (exit 1) on repo:acme/api @ main (abc12345)",
-      output: "1 failing",
-    });
-    deps.operations = ops;
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg("run the tests on main in acme/api", "slack:UADMIN"), io);
-    expect(replies[0]).toContain("❌");
-    expect(replies[0]).toContain("test failed (exit 1)");
-    expect(provider.requests).toHaveLength(0);
-  });
-
-  it("a mutating command-table entry is refused on the modelless path with the named reason", async () => {
-    const provider = capturingProvider();
-    const deps = makeDeps(YAML_FIXTURE, provider);
-    const ops = fakeOps({
-      kind: "refused",
-      reason:
-        'op-refused: the "test" command-table entry is marked effects: mutating — the modelless op path executes readonly entries only',
-    });
-    deps.operations = ops;
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg("run the tests on main in acme/api", "slack:UADMIN"), io);
-    expect(replies[0]).toMatch(/^⚠️ `repo test`: op-refused/);
-    expect(replies[0]).toContain("mutating");
-    expect(provider.requests).toHaveLength(0);
-  });
-
-  it("a non-onboarded repo natural-language ask falls through to the agent path; the command run is sealed with no reply attempted, the agent run after its reply", async () => {
-    const provider = capturingProvider();
-    const deps = makeDeps(YAML_FIXTURE, provider);
-    let n = 0;
-    const registry = new RunRegistry({ genId: () => `run-${++n}`, genToken: () => `tok-${n}` });
-    deps.runRegistry = registry;
-    const ops = fakeOps({ kind: "not-onboarded" });
-    deps.operations = ops;
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg("run the tests on main in acme/api", "slack:UADMIN"), io);
-    expect(ops.calls).toHaveLength(1); // the op was attempted…
-    expect(provider.requests).toHaveLength(1); // …and the agent path served the ask
-    expect(replies).toContain("answer");
-    const rows = registry.listActive().sort((a, b) => a.id.localeCompare(b.id));
-    expect(rows.map((r) => r.id)).toEqual(["run-1", "run-2"]);
-    expect(rows[0]).toMatchObject({ finished: true }); // the command run: sealed, no reply was attempted for it
-    expect(rows[0].sealedAt).toBeDefined();
-    expect(rows[0].replyOk).toBeUndefined();
-    expect(rows[1]).toMatchObject({ finished: true, replyOk: true }); // the agent run: sealed after its reply
-  });
-
-  it("an explicit `repo test` on a non-onboarded repo gets a named reply (config-family commands never silently become a model turn)", async () => {
+  it("a typed `repo test` on a non-onboarded repo gets a named reply (config-family commands never silently become a model turn)", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);
     const ops = fakeOps({ kind: "not-onboarded" });
@@ -1428,12 +1527,7 @@ describe("deterministic ops fast-path", () => {
     expect(provider.requests).toHaveLength(0);
   });
 
-  // Coverage gap (testing P2): the fast-path `case "error"` (a failing OR
-  // throwing backend) — untested for BOTH forms, though its not-onboarded
-  // sibling covers both. Explicit `repo test/build` is config-family → always
-  // a named ⚠️ reply; natural language is an accelerator → falls through so the
-  // agent can still serve the ask.
-  it("an explicit `repo test` whose op returns kind:error gets a named ⚠️ reply (never silently a model turn)", async () => {
+  it("a typed `repo test` whose op returns kind:error gets a named ⚠️ reply (never silently a model turn)", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);
     deps.operations = fakeOps({ kind: "error", message: "resident /op request failed (timeout)" });
@@ -1444,19 +1538,7 @@ describe("deterministic ops fast-path", () => {
     expect(provider.requests).toHaveLength(0);
   });
 
-  it("a natural-language ask whose op returns kind:error falls through to the agent path", async () => {
-    const provider = capturingProvider();
-    const deps = makeDeps(YAML_FIXTURE, provider);
-    const ops = fakeOps({ kind: "error", message: "resident /op HTTP 500" });
-    deps.operations = ops;
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg("run the tests on main in acme/api", "slack:UADMIN"), io);
-    expect(ops.calls).toHaveLength(1); // the op was attempted…
-    expect(provider.requests).toHaveLength(1); // …and the agent path served the ask
-    expect(replies).toContain("answer");
-  });
-
-  it("a THROWING op on the explicit path is caught (.catch → kind:error) and reported as ⚠️, never an unhandled crash", async () => {
+  it("a THROWING op on the typed form is caught (.catch → kind:error) and reported as ⚠️, never an unhandled crash", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);
     const ops = {
@@ -1473,17 +1555,6 @@ describe("deterministic ops fast-path", () => {
     expect(replies[0]).toContain("⚠️");
     expect(replies[0]).toContain("backend exploded");
     expect(provider.requests).toHaveLength(0);
-  });
-
-  it("an explicit agent directive skips the natural-language fast-path (the user picked a model path)", async () => {
-    const provider = capturingProvider();
-    const deps = makeDeps(YAML_FIXTURE, provider);
-    const ops = fakeOps(OK_RESULT);
-    deps.operations = ops;
-    const { io } = fakeIO();
-    await dispatch(deps, msg("agent:coding run the tests on main in acme/api", "slack:UADMIN"), io);
-    expect(ops.calls).toHaveLength(0);
-    expect(provider.requests).toHaveLength(1);
   });
 });
 
@@ -7534,9 +7605,9 @@ describe("run history write path", () => {
 });
 
 // Feature: docs/reference/specs/command-registry.md (chat adapter) / docs/reference/specs/routing-and-config.md
-// item 10 — the registry chat parse is the LAST text-only fast path:
-// as the whole of stage A, before io.history()/recognizeOperation. EVERY
-// chat command is registry-owned; the adapter is the only chat parser.
+// item 10 — the registry chat parse is the ONE text-only fast path: the whole
+// of stage A, before io.history() and before the router is asked. EVERY chat
+// command is registry-owned; the adapter is the only chat parser.
 describe("registry chat commands in the fast-path chain", () => {
   function withCommands(deps: TestDeps) {
     const reg = new RunRegistry({ genId: () => "live0001", genToken: () => "tok-secret" });
@@ -7710,10 +7781,12 @@ describe("registry chat commands in the fast-path chain", () => {
     expect(provider.requests).toHaveLength(1);
   });
 
-  it("the explicit `repo test` form and the natural-language form reach the SAME registry command (`repo.test`), once each; the ops backend runs once per ask", async () => {
+  it("the typed `repo test` form (stage A: no history fetch, no router) and the natural form (through the door: one router call, the thread read once) reach the SAME registry command (`repo.test`), once each; the ops backend runs once per ask", async () => {
     const provider = capturingProvider();
-    const deps = makeDeps(YAML_FIXTURE, provider);
+    const deps = makeDeps(ROUTING_ON_YAML, provider);
     const { invoked } = withCommands(deps);
+    deps.admission = new ThreadAdmission();
+    deps.routeModel = vi.fn<RouteModel>(async () => ({ tool: "repo_test", input: { slug: "acme/api", ref: "main" } }));
     const ops = {
       calls: [] as string[],
       async run(op: string) {
@@ -7728,19 +7801,21 @@ describe("registry chat commands in the fast-path chain", () => {
     await dispatch(deps, msg("repo test acme/api main", "slack:UADMIN"), io);
     expect(ops.calls).toEqual(["test"]);
     expect(invoked).toEqual(["repo.test"]);
-    expect(history).not.toHaveBeenCalled(); // the explicit form is stage A: no history fetch
+    expect(history).not.toHaveBeenCalled(); // the typed form is stage A: no history fetch
+    expect(deps.routeModel).not.toHaveBeenCalled(); // and no router
     await dispatch(deps, msg("run the tests on main in acme/api", "slack:UADMIN"), io);
     expect(ops.calls).toEqual(["test", "test"]);
     expect(invoked).toEqual(["repo.test", "repo.test"]);
-    expect(history).toHaveBeenCalledTimes(1); // natural language needs the thread (stage B)
+    expect(history).toHaveBeenCalledTimes(1); // prose needs the thread: the router reads it once
+    expect(deps.routeModel).toHaveBeenCalledTimes(1);
     await dispatch(deps, msg("runs list --status all", "slack:UADMIN"), io);
     expect(invoked).toEqual(["repo.test", "repo.test", "runs.list"]);
     expect(replies).toHaveLength(3);
-    expect(replies[0]).toBe(replies[1]);
+    expect(replies[1]).toBe(`routed: repo test acme/api main\n${replies[0]}`); // the same text, under the receipt
     expect(provider.requests).toHaveLength(0);
   });
 
-  it("without a bound command set, every text is ordinary prose: `runs list`, `help`, `config show`, and the natural-language op all go to the model", async () => {
+  it("without a bound command set, every text is ordinary prose: `runs list`, `help`, `config show`, and the natural op form all go to the model", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);
     deps.commands = undefined;
@@ -14159,11 +14234,10 @@ describe("the references step in dispatch (record 0037)", () => {
 // answered with the receipt first, and ended on any failure with the command's
 // own line and the override footer; one model call, never a second route.
 describe("the command menu through dispatch() (record 0036 unit 2; record 0039)", () => {
-  const ROUTED = YAML_FIXTURE.replace("routing: { auto: false }\n", "routing: { auto: true }\n");
   const FOOTER = "wrong preset? reply agent:<preset> to run it another way";
   /** A scripted router that calls one command tool with one input. */
   const call = (tool: string, input: unknown) => vi.fn<RouteModel>(async () => ({ tool, input }));
-  const wired = (yaml = ROUTED) => {
+  const wired = (yaml = ROUTING_ON_YAML) => {
     const registry = new RunRegistry({ genId: () => "r1", genToken: () => "t" });
     const provider = capturingProvider();
     const deps = makeDeps(yaml, provider);
@@ -14222,14 +14296,21 @@ describe("the command menu through dispatch() (record 0036 unit 2; record 0039)"
     expect(prompt.user).not.toContain("<https://");
   });
 
-  it("every effect: write command in the catalogue is handed back and nothing is invoked; every effect: read command is invoked", async () => {
+  it("every write command whose action class is not exec is handed back and nothing is invoked; the exec-class writes (repo test, repo build) and every read run through the registry", async () => {
     const { deps } = wired();
     const chatExposed = deps.commands!.list().filter((c) => c.surfaces?.chat !== false);
-    const writes = chatExposed.filter((c) => c.effect === "write");
-    const reads = chatExposed.filter((c) => c.effect === "read");
-    expect(writes.length).toBeGreaterThan(5);
-    expect(reads.length).toBeGreaterThan(5);
-    for (const cmd of writes) {
+    const handedBack = chatExposed.filter((c) => c.effect === "write" && !c.action.endsWith(":exec"));
+    const runs = chatExposed.filter((c) => c.effect === "read" || c.action.endsWith(":exec"));
+    expect(handedBack.length).toBeGreaterThan(5);
+    expect(runs.filter((c) => c.effect === "read").length).toBeGreaterThan(5);
+    // The carve-out is exactly the two deterministic ops: a test or build run changes nothing of Switchboard's own.
+    expect(
+      runs
+        .filter((c) => c.effect === "write")
+        .map((c) => c.id)
+        .sort(),
+    ).toEqual(["repo.build", "repo.test"]);
+    for (const cmd of handedBack) {
       deps.routeModel = call(mcpToolName(cmd.id), {});
       const { io, replies } = fakeIO();
       await dispatch(deps, msg(`please ${cmd.id}`, "slack:UADMIN"), io);
@@ -14238,14 +14319,15 @@ describe("the command menu through dispatch() (record 0036 unit 2; record 0039)"
       expect(replies[0], cmd.id).toContain(cliWords(cmd.id).join(" "));
     }
     expect(deps.invoked).toEqual([]);
-    for (const cmd of reads) {
+    for (const cmd of runs) {
       deps.routeModel = call(mcpToolName(cmd.id), {});
       const { io, replies } = fakeIO();
       await dispatch(deps, msg(`please ${cmd.id}`, "slack:UADMIN"), io);
       expect(replies, cmd.id).toHaveLength(1);
       expect(replies[0]!.split("\n")[0], cmd.id).toBe(`routed: ${cliWords(cmd.id).join(" ")}`);
+      expect(replies[0], cmd.id).not.toMatch(/^To run this: /);
     }
-    expect([...new Set(deps.invoked)].sort()).toEqual(reads.map((c) => c.id).sort());
+    expect([...new Set(deps.invoked)].sort()).toEqual(runs.map((c) => c.id).sort());
   });
 
   it("a routed read that does work (friction_report) runs as an inline command run carrying the route event right after run_meta, and the reply is the receipt then the command's own text — no footer, no card, no agent turn", async () => {

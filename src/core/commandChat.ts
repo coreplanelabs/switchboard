@@ -30,10 +30,11 @@ import type { Span } from "./trace/types.js";
 // exposed to chat (plus the one word `help`, the chat spelling of `help show`).
 // Everything else — prose, an unknown verb, a mid-sentence mention — is null,
 // and the dispatcher carries on. This is the ONLY thing that turns chat text
-// into a command. Natural
-// language is never recognized here (never guess); the dispatcher's
-// `recognizeOperation` translates its few conservative forms INTO a registry
-// invocation (`repo.test` / `repo.build`) instead of executing anything itself.
+// into a command by its grammar. Natural language is never recognized here
+// (never guess): a plain sentence that means a command reaches the same
+// registry through the router's door (src/core/dispatch/route.ts, the command
+// menu), which binds the arguments under the command's schema with one model
+// call and replies with the receipt line first.
 //
 // The rest of the message is bound by the SAME grammar the CLI uses
 // (`parseInvocation`): positionals, `--kebab-case` flags, quoted values. A

@@ -24,7 +24,7 @@ import {
   type RestartContext,
   type ResumeContext,
 } from "./dispatch/admission.js";
-import { answerChatCommand, answerOperation, type FastPathDeps } from "./dispatch/fastPath.js";
+import { answerChatCommand, type FastPathDeps } from "./dispatch/fastPath.js";
 import { NO_REFERENCES, readReferences, REFERENCE_REFUSAL, type ReferenceDeps } from "./dispatch/references.js";
 import { resolveChatActor } from "./authz/actor.js";
 import { referencesOn } from "../config.js";
@@ -345,11 +345,6 @@ export async function dispatch(
     if (await answerChatCommand(deps, { msg, io, ending, trace })) return ended;
 
     const { directives, history } = await readRequest({ msg, io, root });
-
-    // The natural-language op fast path (dispatch/fastPath.ts): a conservative
-    // op form is the registry command it names; an op that cannot serve falls
-    // through to the agent.
-    if (await answerOperation(deps, { msg, io, ending, trace, directives, history })) return ended;
 
     // The thread's runs, read once (dispatch/thread.ts) for a reply in an
     // existing thread — a message that starts a thread has none, and a spawn,
