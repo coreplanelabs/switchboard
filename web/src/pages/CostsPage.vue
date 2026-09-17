@@ -185,7 +185,7 @@ const projectionLine = computed(() => {
 const daysNewestFirst = computed(() => (report.value ? [...report.value.days].reverse() : []));
 /** The range presets. Both billing sources bucket by UTC day (the cost report
  *  offers nothing finer), so the short one is today, not a rolling 24 hours. */
-const ranges = [1, 7, 30, 90];
+const ranges = [1, 7, 30];
 const rangeLabel = (n: number): string => (n === 1 ? "today" : `${n}d`);
 
 /** The LLM tile's second line: yesterday's and the open day's figures, the

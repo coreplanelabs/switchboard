@@ -394,7 +394,8 @@ describe("CostsPage", () => {
     const hrefs = w.findAll("a").map((a) => a.attributes("href"));
     expect(hrefs).toContain("/costs/switchboard?days=1");
     expect(hrefs).toContain("/costs/switchboard?days=7");
-    expect(hrefs).toContain("/costs/switchboard?days=90");
+    expect(hrefs).toContain("/costs/switchboard?days=30");
+    expect(hrefs).not.toContain("/costs/switchboard?days=90"); // Cloudflare answers no range wider than 32 days
     expect(hrefs).not.toContain("/costs/switchboard?days=3");
     // A visible switcher beside the group pills, not header small print; the
     // short preset is today (UTC), never a rolling window the sources lack.

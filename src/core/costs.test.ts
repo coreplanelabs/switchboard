@@ -435,10 +435,11 @@ describe("resolveRange", () => {
     const r = resolveRange(null, now);
     expect(r).toEqual({ from: JUL_31, to: AUG_29, days: 30, partialLastDay: true });
   });
-  it("clamps ?days to 1..90 and rejects garbage", () => {
+  it("clamps ?days to 1..31 — the widest range Cloudflare answers — and rejects garbage", () => {
     expect(resolveRange("7", now).from).toBe(AUG_23);
     expect(resolveRange("0", now).days).toBe(1);
-    expect(resolveRange("9999", now).days).toBe(90);
+    expect(resolveRange("9999", now).days).toBe(31);
+    expect(resolveRange("90", now).days).toBe(31);
     expect(resolveRange("abc", now).days).toBe(30);
   });
 });
@@ -1015,7 +1016,7 @@ describe("AnthropicCostReportSource", () => {
 
   it("refuses a report that still has more pages past the page cap rather than returning a truncated total", async () => {
     // Every page claims another one follows: an endless report. Unreachable for a
-    // ≤90-day range at limit=31, so this is the guard that makes it loud if it ever isn't.
+    // ≤31-day range at limit=31, so this is the guard that makes it loud if it ever isn't.
     const f = fakeFetch(() => ({ status: 200, body: { data: [], has_more: true, next_page: "again" } }));
     await expect(
       new AnthropicCostReportSource({ adminKey: "k", fetchImpl: f.fetchImpl }).fetchDailyCost(RANGE),

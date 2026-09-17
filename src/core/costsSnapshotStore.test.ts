@@ -17,7 +17,7 @@ import {
 
 /** A calendar day as the billing datasets spell it (YYYY-MM-DD, UTC). */
 const iso = (y: number, m: number, d: number) => new Date(Date.UTC(y, m - 1, d)).toISOString().slice(0, 10);
-const JUN_19 = iso(2026, 6, 19);
+const AUG_17 = iso(2026, 8, 17);
 const SEP_16 = iso(2026, 9, 16);
 const SEP_17 = iso(2026, 9, 17);
 
@@ -26,7 +26,7 @@ export function snapshot(over: Partial<CostsSnapshot> = {}): CostsSnapshot {
     takenAt: `${SEP_16}T06:15:00.000Z`,
     takenBy: "schedule",
     durationMs: 31_000,
-    range: { from: JUN_19, to: SEP_16, days: 90, partialLastDay: true },
+    range: { from: AUG_17, to: SEP_16, days: 31, partialLastDay: true },
     usage: {
       ...EMPTY_USAGE,
       workers: [{ date: SEP_16, scriptName: "switchboard", requests: 10, cpuTimeUs: 1_000 }],
@@ -80,7 +80,7 @@ describe("isCostsSnapshot", () => {
     expect(isCostsSnapshot({ ...snapshot(), takenAt: "yesterday" })).toBe(false);
     expect(isCostsSnapshot({ ...snapshot(), takenBy: 7 })).toBe(false);
     expect(isCostsSnapshot({ ...snapshot(), durationMs: -1 })).toBe(false);
-    expect(isCostsSnapshot({ ...snapshot(), range: { from: JUN_19, to: "today", days: 90 } })).toBe(false);
+    expect(isCostsSnapshot({ ...snapshot(), range: { from: AUG_17, to: "today", days: 31 } })).toBe(false);
     // Every dataset Cloudflare bills on must be present as rows carrying a day.
     const { workflows: _dropped, ...short } = snapshot().usage;
     expect(isCostsSnapshot({ ...snapshot(), usage: short })).toBe(false);

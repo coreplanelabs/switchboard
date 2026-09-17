@@ -762,10 +762,15 @@ export function anthropicTokensCostUsd(modelId: string, t: AnthropicTokens): num
 // ---- range ----------------------------------------------------------------------------
 
 const DEFAULT_DAYS = 30;
-/** The widest range the page offers — and the window a costs snapshot is read for. */
-export const MAX_DAYS = 90;
+/** The widest range the page offers — and the window a costs snapshot is read for.
+ *  Cloudflare's analytics on a Workers account answer no range wider than 4w4d
+ *  (32 days) and hold no data older than that (`cannot request a time range
+ *  wider than 4w4d`, `cannot request data older than 4w4d` — measured live), so
+ *  a wider window is a refused read, not more history: 31 UTC days is the most
+ *  a take can ask for. */
+export const MAX_DAYS = 31;
 
-/** `?days=N` → a UTC date range ending today. Garbage → default; clamped 1..90. */
+/** `?days=N` → a UTC date range ending today. Garbage → default; clamped 1..31. */
 export function resolveRange(daysParam: string | null, now: Date = new Date(systemClock())): DateRange {
   const parsed = daysParam === null ? NaN : Number(daysParam);
   const days = Number.isInteger(parsed) ? Math.min(MAX_DAYS, Math.max(1, parsed)) : DEFAULT_DAYS;
@@ -1070,7 +1075,7 @@ export class AnthropicCostReportSource implements LlmCostSource {
     if (range.from >= endExclusive) return { rows, closedThrough };
     let page: string | null = null;
     for (let i = 0; ; i++) {
-      // Like the non-USD check: refuse rather than mis-sum. A ≤90-day range at
+      // Like the non-USD check: refuse rather than mis-sum. A ≤31-day range at
       // limit=31 is at most 3 pages, so hitting the cap means the API changed.
       if (i >= MAX_COST_PAGES)
         throw new Error(
