@@ -626,6 +626,13 @@ describe("budgetClipLabel — the card's budget line", () => {
     );
   });
 
+  it("names the source when the plan runner hands a coding child a budget directive under the preset's own — the ship child's card line", () => {
+    const coding = getAgent("coding");
+    expect(budgetClipLabel(coding, { ...declaredProfile(coding), minutes: 28, boundedBy: "directive" }, 28)).toBe(
+      "budget 28 min (budget directive; preset asks 45)",
+    );
+  });
+
   // routing-and-config item 20: a spawned child clipped to what its parent had left.
   it("names the parent run's budget when a child was clipped to what its parent had left", () => {
     expect(budgetClipLabel(explore, { ...declared, minutes: 7, boundedBy: "parent" })).toBe(

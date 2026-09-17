@@ -46,6 +46,7 @@ import {
   turnGuardInstruction,
   turnGuardNote,
   turnGuardPace,
+  windDownFailureNote,
   wrapUpInstruction,
   wrapUpNote,
 } from "../windDown.js";
@@ -911,6 +912,12 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     let warned = false;
     let settled = false;
     let stopMode: StopMode | undefined;
+    /** The finale bound aborted pi during a write-up: the run ends by the
+     *  wind-down's answer, and the aborted call's failure is not the run's. */
+    let finaleAborted = false;
+    /** The model call the wind-down waited on failed (the finale's abort
+     *  included): the answer names it where the write-up would have been. */
+    let writeUpFailed: string | undefined;
     const startWriteUp = (kind: WriteUp, instruction: string) => {
       writeUp = kind;
       writeUpAt = now();
@@ -1009,8 +1016,12 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       }
       if (writeUp) {
         if (writeUpAt !== undefined && now() - writeUpAt >= (deps.finaleTimeoutMs ?? FINALE_TIMEOUT_MS)) {
-          // The write-up itself is bounded, like the native finale: past it the run closes without one.
+          // The write-up itself is bounded, like the native finale: past it the
+          // run closes without one — by the wind-down's own answer, never as a
+          // failed model call: the abort below kills whatever call is in
+          // flight, and `finaleAborted` keeps that abort the run's own.
           writeUpAt = undefined;
+          finaleAborted = true;
           run.onProgress?.("finale timed out — closing the run without a write-up");
           transport!.send({ type: "abort" });
         }
@@ -1023,7 +1034,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         return;
       }
       if (now() >= deadline) {
-        note("time_budget_exhausted", timeBudgetNote());
+        note("time_budget_exhausted", timeBudgetNote(bridge.doingNow()));
         startWriteUp({ kind: "time" }, timeBudgetInstruction());
         return;
       }
@@ -1176,6 +1187,13 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             "harness_error",
             `the model call failed (${obs.providerError}) — that looks transient; retrying once after ${PROVIDER_RETRY_BACKOFF_MS / 1000}s`,
           );
+        } else if (writeUp || finaleAborted) {
+          // The run is already winding down (a budget, the turn guard, a soft
+          // stop) — a model call that fails now, the finale bound's own abort
+          // included, does not take the ending over: the wind-down's answer
+          // stands, and the record says what failed under it.
+          writeUpFailed = obs.providerError;
+          note("harness_error", windDownFailureNote(obs.providerError));
         } else {
           providerError = obs.providerError;
           providerRefusal = obs.policyRefusal === true;
@@ -1209,7 +1227,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       answer = HARD_STOP_MESSAGE;
     } else {
       if (bypass) throw bypass;
-      if (!settled) {
+      if (!settled && !finaleAborted) {
         // pi is gone before the run settled, or its container stopped
         // answering. A container replaced under the run (item 16) — the
         // executor's word on a container command — ends the run by the
@@ -1251,11 +1269,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       const text = bridge.answer() ?? "";
       answer =
         writeUp?.kind === "time"
-          ? timeBudgetAnswer(text, run.agent.maxMinutes)
+          ? timeBudgetAnswer(text, run.agent.maxMinutes, writeUpFailed)
           : writeUp?.kind === "turns"
-            ? turnGuardAnswer(text, writeUp.pace)
+            ? turnGuardAnswer(text, writeUp.pace, writeUpFailed)
             : writeUp?.kind === "soft" || stopMode === "soft"
-              ? softStopAnswer(text)
+              ? softStopAnswer(text, writeUpFailed)
               : text || "_(no response)_";
     }
     // The loop is over: its `run.agent` ends here, as the native loop's does,
@@ -1285,6 +1303,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       const turnsBefore = bridge.turns;
       // The loop's write-up, when it took one, is spent: the turn has its own budget.
       clearWriteUp();
+      finaleAborted = false;
+      writeUpFailed = undefined;
       const id = `${ids.prompt}:follow-up:${++followUps}`;
       let turnSettled = false;
       let turnError: string | undefined;
@@ -1304,6 +1324,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         if (writeUp) {
           if (writeUpAt !== undefined && now() - writeUpAt >= (deps.finaleTimeoutMs ?? FINALE_TIMEOUT_MS)) {
             writeUpAt = undefined;
+            finaleAborted = true;
             run.onProgress?.("finale timed out — closing the turn without a write-up");
             rpc.send({ type: "abort" });
           }
@@ -1315,7 +1336,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           return;
         }
         if (now() >= turnDeadline) {
-          note("time_budget_exhausted", timeBudgetNote());
+          note("time_budget_exhausted", timeBudgetNote(bridge.doingNow()));
           startWriteUp({ kind: "time" }, timeBudgetInstruction());
           return;
         }
@@ -1353,8 +1374,15 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           if (obs.response?.id === id && obs.response.success === false)
             throw new PromptRefused(String(obs.response.error ?? "no reason"));
           if (obs.providerError !== undefined) {
-            turnError = obs.providerError;
-            turnRefusal = obs.policyRefusal === true;
+            if (writeUp || finaleAborted) {
+              // The turn is winding down: the aborted call's failure is not
+              // the turn's ending — the write-up's label is (the loop's rule).
+              writeUpFailed = obs.providerError;
+              note("harness_error", windDownFailureNote(obs.providerError, "turn"));
+            } else {
+              turnError = obs.providerError;
+              turnRefusal = obs.policyRefusal === true;
+            }
           }
           if (obs.settled) {
             turnSettled = true;
@@ -1368,7 +1396,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           return HARD_STOP_MESSAGE;
         }
         if (bypass) throw bypass;
-        if (!turnSettled) {
+        if (!turnSettled && !finaleAborted) {
           const tail = await container.tail(root.errLog, 2000);
           throw new Error(
             `pi exited before the turn settled${tail.trim() ? `: ${redactAndCap(tail.trim(), 400)}` : ""}`,
@@ -1379,9 +1407,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           throw new Error(`the model call failed: ${turnError}`);
         }
         const text = bridge.answer() ?? "";
-        if (writeUp?.kind === "time") return timeBudgetAnswer(text, input.maxMinutes);
-        if (writeUp?.kind === "turns") return turnGuardAnswer(text, writeUp.pace);
-        if (writeUp?.kind === "soft") return softStopAnswer(text);
+        if (writeUp?.kind === "time") return timeBudgetAnswer(text, input.maxMinutes, writeUpFailed);
+        if (writeUp?.kind === "turns") return turnGuardAnswer(text, writeUp.pace, writeUpFailed);
+        if (writeUp?.kind === "soft") return softStopAnswer(text, writeUpFailed);
         return text || "_(no response)_";
       } catch (err) {
         turnFailed = true;

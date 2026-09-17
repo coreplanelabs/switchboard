@@ -805,6 +805,53 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(w.notes).toContain("finale timed out — closing the run without a write-up");
   });
 
+  it("a model call in flight at the budget ends by the wind-down, not an aborted call: the budget answer stands, the failure is a note, and the budget note says what the run was doing", async () => {
+    const clock = { now: NOW };
+    const w = world({ clock, agent: { maxMinutes: 10 } });
+    scriptedPi(w.container, (n, c) => {
+      bashTurn(w, "c1", "ls", "a");
+      c.emit({ type: "turn_start" }); // pi opens the next turn: its model call is under way…
+      // …when the deadline passes — once the harness has read the turn's start
+      // off the log (the call's result lands on the stream in the same read).
+      void vi
+        .waitFor(() => expect(w.events.some((e) => e.type === "tool_result" && e.callId === "c1")).toBe(true))
+        .then(() => {
+          clock.now += 11 * 60_000;
+          setImmediate(() => {
+            // pi's in-flight model call dies as an abort while the run winds down.
+            c.emit(
+              {
+                type: "message_end",
+                message: {
+                  role: "assistant",
+                  content: [],
+                  stopReason: "error",
+                  errorMessage: "This operation was aborted",
+                },
+              },
+              { type: "agent_settled" },
+            );
+          });
+        });
+    });
+    const answer = await w.start();
+    // The wind-down's own words, naming the failed call where the write-up would have been.
+    expect(answer).toBe(
+      "Stopped at the 10-minute budget without finishing; the model call failed during the wind-down (This operation was aborted), so no write-up came. Partial work may exist in the workspace — narrow the task and try again.",
+    );
+    expect(w.notes.some((note) => note.includes("time budget exhausted while a model call was in flight"))).toBe(true);
+    expect(
+      w.notes.some((note) => note.includes("the model call failed during the wind-down (This operation was aborted)")),
+    ).toBe(true);
+    // The wind-down instruction was steered; the run never became a failure.
+    expect(
+      w.container
+        .commands()
+        .filter((c) => c.type === "steer")
+        .map((s) => String(s.message)),
+    ).toContain(timeBudgetInstruction());
+  });
+
   it("a pi that dies before settling fails the run naming its last stderr; a refused prompt fails it by reason; a model error fails it with pi's message", async () => {
     const dead = world();
     dead.container.files.set(paths.errLog, "Error: cannot find module 'foo'\n");

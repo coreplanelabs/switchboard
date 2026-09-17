@@ -3,6 +3,7 @@ import { PI_EVENT_HOME } from "../../../load/piRpc.js";
 import type { RunEvent } from "../../runEvents.js";
 import { recordingSink } from "../../testing/recordingSink.js";
 import { createTracer } from "../../trace/tracer.js";
+import { MODEL_CALL_IN_FLIGHT } from "../windDown.js";
 import { PI_EVENT_DISPOSITION, PiBridge, describePiToolCall, piBashExit } from "./bridge.js";
 import type { PiEvent } from "./protocol.js";
 
@@ -319,6 +320,40 @@ describe("turns, narration and the answer — the loop's rules", () => {
       ...(text ? [{ type: "text", text }] : []),
       { type: "toolCall", id: "s", name: "update_status", arguments: { checklist: "○ plan" } },
     ]);
+
+  // The budget note says what the run was at when the clock ran out
+  // (harness-pi item 15): the open tool calls by name, the model call pi has
+  // under way, or nothing — never a model call that is not there.
+  it("doingNow: nothing before a turn, the model call once pi opens a turn, the open tools by name while they run, nothing again between turns", () => {
+    const { bridge } = harness();
+    expect(bridge.doingNow()).toBeUndefined();
+    bridge.observe({ type: "agent_start" });
+    bridge.observe({ type: "turn_start" });
+    expect(bridge.doingNow()).toBe(MODEL_CALL_IN_FLIGHT);
+    bridge.observe(assistant([{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "ls" } }]));
+    // The model answered: no call is in flight until pi starts the tool.
+    expect(bridge.doingNow()).toBeUndefined();
+    bridge.observe({ type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: { command: "ls" } });
+    bridge.observe({ type: "tool_execution_start", toolCallId: "c2", toolName: "read", args: { path: "a" } });
+    expect(bridge.doingNow()).toBe("running bash, read");
+    bridge.observe({ type: "tool_execution_end", toolCallId: "c1", toolName: "bash", result: {}, isError: false });
+    expect(bridge.doingNow()).toBe("running read");
+    bridge.observe({ type: "tool_execution_end", toolCallId: "c2", toolName: "read", result: {}, isError: false });
+    bridge.observe({ type: "turn_end" });
+    expect(bridge.doingNow()).toBeUndefined();
+    // The next turn's call, dying as a failure, was in flight until pi settled it.
+    bridge.observe({ type: "turn_start" });
+    expect(bridge.doingNow()).toBe(MODEL_CALL_IN_FLIGHT);
+    bridge.observe({
+      type: "message_end",
+      message: { role: "assistant", content: [], stopReason: "error", errorMessage: "This operation was aborted" },
+    });
+    expect(bridge.doingNow()).toBeUndefined();
+    // A new prompt on the session starts the reading over.
+    bridge.observe({ type: "turn_start" });
+    bridge.newPrompt();
+    expect(bridge.doingNow()).toBeUndefined();
+  });
 
   // The message pi settles a failed model call with is the failure, not a turn
   // (session-log item 2): the mirror never sees it, so no step spends an index

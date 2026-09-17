@@ -192,6 +192,11 @@ export type RunNoteKind =
    *  item 7): the summary names the tool and the rule; the model read the same
    *  reason as the tool's result. Published by the bot's authorize route. */
   | "tool_refused"
+  /** A ship coding child's budget ended with work still in the tree: the run
+   *  loop committed and pushed it to the unit's branch (or says plainly that
+   *  there was nothing to push), so a re-issue starts from the partial work
+   *  (docs/reference/specs/agent-ship.md item 8). */
+  | "budget_salvage"
   /** The native loop's stuck-loop guard: the same tool call failed identically
    *  six times in a row and the run was forced into its write-up. Written by
    *  no loop since that loop's deletion; a record from before it may carry it. */
@@ -226,6 +231,7 @@ export const RUN_NOTE_KINDS = [
   "harness_error",
   "policy_refusal",
   "tool_refused",
+  "budget_salvage",
   "stuck_loop",
 ] as const satisfies readonly RunNoteKind[];
 type _EveryKindListed = [RunNoteKind] extends [(typeof RUN_NOTE_KINDS)[number]] ? true : never;
