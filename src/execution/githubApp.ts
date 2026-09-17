@@ -12,6 +12,10 @@ import { processSecrets, type Secret } from "../secrets.js";
 // injected into sandboxes as GH_TOKEN, where gh and git (via the credential
 // helper) accept it exactly like a PAT. PRs are authored as <app-name>[bot].
 //
+// On the cold sandbox and E2B planes that token is what a run holds for its
+// whole run, scoped by permission and never by repository. The git door that
+// replaces it with the run bearer is docs/decisions/0048-the-git-door-a-cold-runs-only-github-credential-is-its-run-bearer.md.
+//
 // Freshness contract: a token is handed out only while it has at least
 // TOKEN_REUSE_MARGIN_MS to live, and the sandbox executors ask for it per
 // COMMAND (resolveEnvs), never once per run — so a command that starts on a

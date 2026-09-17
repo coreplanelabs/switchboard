@@ -7,6 +7,9 @@ import { parseIngressTokenMap, tokenForSubject } from "./ingressTokens.js";
 // worker), and each Worker's `scheduled()` looks its firing up HERE — so a
 // schedule can never exist in one place and not the other.
 //
+// Schedules a person adds at runtime, and the hand-over of a firing to the
+// `schedule:<name>` actor declared below, are docs/decisions/0049-a-stored-schedule-is-a-turn-the-minute-tick-fires.md.
+//
 // A schedule has three independent facets:
 //   worker   — whose wrangler.jsonc carries the cron and whose `scheduled()` fires it
 //   action   — what a firing does: `run` (the bot shim POSTs the generic /ingress as
