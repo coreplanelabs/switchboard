@@ -519,6 +519,8 @@ export async function openOpenCodeRun(
         // The turn's lease is carved from the run's: the lesser of its ask and
         // what the lease still holds, never under a minute (decision 0046).
         const turnMinutes = turnLeaseMs(input.maxMinutes, remainingMs()) / MINUTE_MS;
+        // The turn's tools, marked for the proxy for the turn's duration (model-proxy item 6).
+        deps.bearers?.markTurn(run.runId, input.tools);
         try {
           const { answer: turnAnswer } = await driveOpenCode(
             deps,
@@ -540,6 +542,7 @@ export async function openOpenCodeRun(
           );
           return turnAnswer;
         } finally {
+          deps.bearers?.clearTurn(run.runId);
           live.toolContext = previous;
         }
       },

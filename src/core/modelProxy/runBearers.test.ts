@@ -83,6 +83,36 @@ describe("RunBearerStore — mint and verify", () => {
   });
 });
 
+describe("RunBearerStore — the loop's end and a turn's tools, marked by the harness for the proxy (model-proxy item 6)", () => {
+  it("marks the loop's end once and reads it back; a turn marked with tools narrows the next requests to them, a turn marked without tools leaves them open, and clearing the turn returns to the loop-ended state", () => {
+    const h = harness();
+    h.store.mint(h.grant("run-1"));
+    expect(h.store.marksOf("run-1")).toEqual({ loopEnded: false });
+    expect(h.store.markLoopEnded("run-1")).toBe(true);
+    expect(h.store.marksOf("run-1")).toEqual({ loopEnded: true });
+    expect(h.store.markTurn("run-1", ["submit_pr_description", "bash"])).toBe(true);
+    expect(h.store.marksOf("run-1")).toEqual({ loopEnded: true, turn: { tools: ["submit_pr_description", "bash"] } });
+    expect(h.store.clearTurn("run-1")).toBe(true);
+    expect(h.store.marksOf("run-1")).toEqual({ loopEnded: true });
+    expect(h.store.markTurn("run-1")).toBe(true);
+    expect(h.store.marksOf("run-1")).toEqual({ loopEnded: true, turn: { tools: null } });
+  });
+  it("the marks survive a rotation and an adopt (the same entry), and a run this store never minted or one that ended takes none", () => {
+    const h = harness();
+    h.store.mint(h.grant("run-1"));
+    h.store.markLoopEnded("run-1");
+    const rotated = h.store.rotate("run-1", () => {});
+    expect(rotated.ok).toBe(true);
+    expect(h.store.adopt("run-1", "ab".repeat(32))).toBe(true);
+    expect(h.store.marksOf("run-1")).toEqual({ loopEnded: true });
+    expect(h.store.markLoopEnded("run-9")).toBe(false);
+    expect(h.store.marksOf("run-9")).toBeUndefined();
+    h.store.revoke("run-1");
+    expect(h.store.markLoopEnded("run-1")).toBe(false);
+    expect(h.store.markTurn("run-1", [])).toBe(false);
+  });
+});
+
 describe("RunBearerStore — expiry and revocation", () => {
   it("the lease's start resets the expiry to the lease's end plus the grace: the mint's provisional expiry is replaced, `issue` and `rotate` hand out the new one, and a run this store never minted or one that ended takes no lease", () => {
     const h = harness();

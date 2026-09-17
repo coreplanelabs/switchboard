@@ -938,6 +938,10 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     const startWriteUp = (kind: WriteUp, instruction: string) => {
       writeUp = kind;
       writeUpAt = now();
+      // The requests that follow are the checkpoint turn: the proxy sends them
+      // upstream with `tool_choice: none` (model-proxy item 6; decision 0046's
+      // amendment) — the model is shown its tools and may call none.
+      deps.bearers?.markLoopEnded(run.runId);
       transport!.send({ type: "steer", message: instruction });
     };
     // Steers go out in the order their follow-ups were drained: the staging of one
@@ -1436,6 +1440,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       /** The turn's read failed saying the container was replaced (the word), or on its transport with no word: judged after the loop as the loop's own are. */
       let turnContainerSaid: Error | undefined;
       let turnTransportLost: Error | undefined;
+      // The turn's tools, marked for the proxy for the turn's duration
+      // (model-proxy item 6): the list trimmed to them, or the whole table.
+      deps.bearers?.markTurn(run.runId, input.tools);
       try {
         rpc.send({ id, type: "prompt", message: input.text });
         turnCheck();
@@ -1548,6 +1555,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         if (err instanceof HarnessControlFileLostError) note("harness_error", err.message);
         throw err;
       } finally {
+        deps.bearers?.clearTurn(run.runId);
         live.toolContext = runContext;
         bridge.under(undefined);
         turnSpan?.end(hardStopped || bypass || turnFailed ? "error" : "ok");

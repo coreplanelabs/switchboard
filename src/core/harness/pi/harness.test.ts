@@ -726,6 +726,8 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       at: NOW,
     });
     expect(w.bearers.grantOf("run-7")?.expiresAt).toBe(bearerExpiresAt(NOW + 20 * MINUTE_MS));
+    // the write-up steer marked the loop's end for the proxy: the checkpoint turn goes upstream tool-less (model-proxy item 6)
+    expect(w.bearers.marksOf("run-7")).toEqual({ loopEnded: true });
     expect(
       w.container
         .commands()
@@ -2853,6 +2855,31 @@ describe("runPiHarness — the deployment's compaction thresholds in pi's settin
 // budget; then the caller ends pi. The closed form (`runPiHarness`) is the
 // same loop with the end at once, as every test above drives it.
 describe("runPiHarnessOpen — the session stays open for one more turn", () => {
+  it("a follow-up turn marks the tools it may call on the run's bearer entry for its duration and clears them after, so the proxy trims the turn's requests and the checkpoint's none is lifted (model-proxy item 6)", async () => {
+    const w = world();
+    let during: unknown;
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0) {
+        finalTurn(c, "loop done");
+        return;
+      }
+      during = w.bearers.marksOf("run-7"); // read while the turn's prompt is under way
+      finalTurn(c, "turn done");
+    });
+    const session = await w.open();
+    expect(session.answer).toBe("loop done");
+    const answer = await session.followUp({
+      text: "one more",
+      maxTurns: 1,
+      maxMinutes: 5,
+      tools: ["submit_verdict", "bash"],
+      toolContext: { executor },
+    });
+    expect(answer).toBe("turn done");
+    expect(during).toEqual({ loopEnded: false, turn: { tools: ["submit_verdict", "bash"] } });
+    expect(w.bearers.marksOf("run-7")).toEqual({ loopEnded: false });
+    await session.end();
+  });
   const sent = (c: FakeHarnessContainer) => c.stdin.map((l) => JSON.parse(l) as Record<string, unknown>);
 
   it("hands back the loop's answer with pi alive; a follow-up prompts the same session with its text, its tool call is on the stream under a run.agent of the caller's span, the relayed tools read the turn's context, no step is mirrored for it, and end() kills pi and removes the root once", async () => {

@@ -35,6 +35,9 @@ import type { Span } from "./trace/types.js";
  *  post-step's allowance carved from the lease's remainder (`postStepLease`,
  *  decision 0046). */
 export const VERDICT_TURN_MAX_TURNS = 4;
+/** The tools the turn may call (model-proxy item 6): read the head, submit
+ *  the verdict, report on the card — nothing that writes. */
+export const VERDICT_TURN_TOOLS: readonly string[] = ["bash", "read", "submit_verdict", "update_status"];
 
 /** The pull request the review was of — what the turn names. */
 export interface VerdictTurnTarget {
@@ -116,6 +119,7 @@ export async function runVerdictTurn(input: {
       text: verdictFollowUp(t),
       maxTurns: Math.min(turn.agent.maxTurns, VERDICT_TURN_MAX_TURNS),
       maxMinutes: Math.min(turn.agent.maxMinutes, postStepLease("review", turn.remainingMs?.())),
+      tools: VERDICT_TURN_TOOLS,
       toolContext,
       ...(input.span ? { span: input.span } : {}),
     });

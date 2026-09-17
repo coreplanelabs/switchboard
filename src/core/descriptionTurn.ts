@@ -41,6 +41,18 @@ import type { Span } from "./trace/types.js";
  *  coding post-step's allowance carved from the lease's remainder
  *  (`postStepLease`, decision 0046). */
 export const DESCRIPTION_TURN_MAX_TURNS = 8;
+/** The tools the turn may call (model-proxy item 6): read the pull request
+ *  and the change, submit the description, report on the card — never edit
+ *  or push. The proxy trims each request's tool list to these. */
+export const DESCRIPTION_TURN_TOOLS: readonly string[] = [
+  "github_issue_get",
+  "diff_digest",
+  "bash",
+  "read",
+  "grep",
+  "submit_pr_description",
+  "update_status",
+];
 
 /** What the turn is about: the pushed branch, its proven head, and the open
  *  PR that branch heads. */
@@ -168,6 +180,7 @@ export async function runDescriptionTurn(input: {
       text: followUpText,
       maxTurns: Math.min(turn.agent.maxTurns, DESCRIPTION_TURN_MAX_TURNS),
       maxMinutes: Math.min(turn.agent.maxMinutes, postStepLease("coding", turn.remainingMs?.())),
+      tools: DESCRIPTION_TURN_TOOLS,
       toolContext,
       ...(input.span ? { span: input.span } : {}),
     });

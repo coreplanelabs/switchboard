@@ -1298,6 +1298,8 @@ export async function driveOpenCode(
   const startWriteUp = (w: WriteUp, instruction: string) => {
     writeUp = w;
     writeUpAt = now();
+    // The checkpoint turn: the proxy sends what follows with `tool_choice: none` (model-proxy item 6).
+    deps.bearers?.markLoopEnded(run.runId);
     // The relay's door refuses new tool calls while the run writes up (the
     // minor the review named), as pi's `toolsBlocked` does.
     if (conn.writeUp)

@@ -688,6 +688,93 @@ describe("the meter — one model.turn span per proxied call, the runner's attrs
     ]);
   });
 
+  it("after the harness marks the loop's end the checkpoint request goes upstream with tool_choice none on both dialects, its tools untouched and the span saying so; a turn marked with tools trims the upstream list to them, loop ended or not, and lifts the none; a turn marked without tools leaves the request as it came; an unmarked run is untouched", async () => {
+    const h = harness({
+      answer: () =>
+        new Response(JSON.stringify(anthropicMessage({ stop_reason: "end_turn" })), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    });
+    const token = h.bearers.mint(h.grant("run-1"));
+    const tools = [
+      { name: "bash", input_schema: {} },
+      { name: "submit_pr_description", input_schema: {} },
+    ];
+    const send = (extra: Record<string, unknown> = {}) =>
+      handleModelProxyRequest(
+        request({ headers: bearer(token), json: { ...anthropicRequest(), tools, ...extra } }).req,
+        h.deps,
+      );
+    await send(); // no mark: as it came
+    // a post-step turn after a loop that answered naturally: trimmed without any loop-end mark
+    h.bearers.markTurn("run-1", ["submit_pr_description"]);
+    await send();
+    h.bearers.clearTurn("run-1");
+    h.bearers.markLoopEnded("run-1");
+    await send(); // the checkpoint turn
+    h.bearers.markTurn("run-1", ["submit_pr_description"]);
+    await send(); // a post-step turn narrowed to its tool
+    h.bearers.clearTurn("run-1");
+    h.bearers.markTurn("run-1");
+    await send({ tool_choice: { type: "auto" } }); // a turn with the session's whole table
+    const up = h.calls.map((c) => [
+      (c.body.tools as { name: string }[]).map((t) => t.name).join(","),
+      JSON.stringify(c.body.tool_choice ?? null),
+    ]);
+    // the fixture says `auto` itself; the checkpoint turn overrides it, the trimmed turn drops it, the open turn keeps it
+    expect(up).toEqual([
+      ["bash,submit_pr_description", '{"type":"auto"}'],
+      ["submit_pr_description", "null"],
+      ["bash,submit_pr_description", '{"type":"none"}'],
+      ["submit_pr_description", "null"],
+      ["bash,submit_pr_description", '{"type":"auto"}'],
+    ]);
+    // the span records what the run OFFERED and the word that WENT UPSTREAM
+    const turns = h.ends.filter((s) => s.name === "model.turn");
+    expect(turns.map((t) => [t.attrs.tools, t.attrs.toolChoice])).toEqual([
+      [2, "auto"],
+      [2, "auto"],
+      [2, "none"],
+      [2, "auto"],
+      [2, "auto"],
+    ]);
+
+    const o = harness({
+      answer: () =>
+        new Response(
+          JSON.stringify({
+            id: "c1",
+            choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    });
+    const local = o.bearers.mint(o.localGrant("run-1"));
+    const fn = (name: string) => ({ type: "function", function: { name, parameters: {} } });
+    const sendO = (extra: Record<string, unknown> = {}) =>
+      handleModelProxyRequest(
+        request({
+          path: OPENAI_CHAT_COMPLETIONS_PATH,
+          headers: bearer(local),
+          json: { model: "x", messages: [], tools: [fn("bash"), fn("submit_verdict")], ...extra },
+        }).req,
+        o.deps,
+      );
+    o.bearers.markLoopEnded("run-1");
+    await sendO({ tool_choice: "auto" }); // the checkpoint turn overrides the request's word
+    o.bearers.markTurn("run-1", ["submit_verdict"]);
+    await sendO();
+    const upO = o.calls.map((c) => [
+      (c.body.tools as { function: { name: string } }[]).map((t) => t.function.name).join(","),
+      JSON.stringify(c.body.tool_choice ?? null),
+    ]);
+    expect(upO).toEqual([
+      ["bash,submit_verdict", '"none"'],
+      ["submit_verdict", "null"],
+    ]);
+  });
+
   it("the SSE meter reads a data line split across chunks and CRLF framing, and ignores what is not JSON", () => {
     const meter = new SseMeter("anthropic");
     const encoder = new TextEncoder();

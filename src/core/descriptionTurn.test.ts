@@ -6,6 +6,7 @@ import type { CodingPrTarget, WorkspaceObservation } from "./codingPrPostStep.js
 import { MINUTE_MS, POST_STEP_MINUTES } from "./budgets.js";
 import {
   DESCRIPTION_TURN_MAX_TURNS,
+  DESCRIPTION_TURN_TOOLS,
   descriptionFollowUp,
   descriptionTurnTarget,
   runDescriptionTurn,
@@ -241,6 +242,7 @@ describe("runDescriptionTurn — one clipped prompt on the run's own pi session 
     expect(input.text).toBe(descriptionFollowUp(t));
     expect(JSON.stringify(input.text)).toContain("submit_pr_description");
     expect(input.maxTurns).toBe(DESCRIPTION_TURN_MAX_TURNS);
+    expect(input.tools).toEqual(DESCRIPTION_TURN_TOOLS); // read, submit, report — never edit or push (model-proxy item 6)
     expect(input.maxMinutes).toBe(POST_STEP_MINUTES.coding); // no lease remainder was handed: the allowance stands
     expect(AGENTS.coding.maxTurns).toBeGreaterThan(DESCRIPTION_TURN_MAX_TURNS); // the clip is a clip
     expect(AGENTS.coding.maxMinutes).toBeGreaterThan(POST_STEP_MINUTES.coding);

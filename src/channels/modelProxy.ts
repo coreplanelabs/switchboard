@@ -16,7 +16,7 @@
 
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { once } from "node:events";
-import type { RunBearerGrant, RunBearerStore } from "../core/modelProxy/runBearers.js";
+import type { RunBearerGrant, RunBearerStore, RunMarks } from "../core/modelProxy/runBearers.js";
 import type { SpanAttrs } from "../core/trace/attrs.js";
 import type { Clock } from "../core/trace/types.js";
 import { usageFromAnthropic, usageFromOpenAI } from "../core/modelProxy/usage.js";
@@ -415,6 +415,42 @@ export interface ToolsOffered {
   toolChoice: "auto" | "none" | "any" | "tool";
 }
 
+/** What the harness marked on the run, applied to the request's tools before
+ *  the pin (docs/reference/specs/model-proxy.md item 6; decision 0046's
+ *  amendment). After the loop's end a request goes upstream with `tool_choice:
+ *  none`, its tool list untouched — the model is shown its tools and may call
+ *  none, so the checkpoint is a text turn and the cached tool and system prefix
+ *  stand. A follow-up turn marked with tools goes upstream with the list
+ *  trimmed to them and the choice left to the model, whether or not the loop
+ *  ended — a run that answered naturally still runs its post-step turns; one
+ *  marked without tools goes as it came. Nothing is refused for the tools it carries. */
+export function shapeTools(
+  shape: ProxyShape,
+  body: Record<string, unknown>,
+  marks: RunMarks | undefined,
+): { body: Record<string, unknown>; toolChoice: ToolsOffered["toolChoice"] } {
+  const offered = toolsOffered(shape, body);
+  if (!marks) return { body, toolChoice: offered.toolChoice };
+  // A follow-up turn is shaped by its own mark whether or not the loop ended:
+  // a run that answered naturally still runs its description or verdict turn.
+  if (marks.turn !== undefined && marks.turn.tools === null) return { body, toolChoice: offered.toolChoice };
+  if (marks.turn === undefined) {
+    if (!marks.loopEnded) return { body, toolChoice: offered.toolChoice };
+    const none = shape === "anthropic" ? { type: "none" } : "none";
+    return { body: { ...body, tool_choice: none }, toolChoice: "none" };
+  }
+  const allowed = new Set(marks.turn.tools);
+  const table = Array.isArray(body.tools) ? body.tools : [];
+  const kept = table.filter((t) => {
+    const r = record(t);
+    const name = r === undefined ? undefined : shape === "anthropic" ? r.name : record(r.function)?.name;
+    return typeof name === "string" && allowed.has(name);
+  });
+  const { tool_choice: _choice, ...rest } = body;
+  const shaped = { ...rest, tools: kept };
+  return { body: shaped, toolChoice: toolChoiceWord(shape, undefined, kept.length) };
+}
+
 export function toolsOffered(shape: ProxyShape, body: Record<string, unknown>): ToolsOffered {
   const table = Array.isArray(body.tools) ? body.tools : [];
   const names: string[] = [];
@@ -581,8 +617,11 @@ export async function handleAdmitted(
       `the run is past its ${turn.maxTurns}-turn guard (${used})`,
     );
   }
-  const payload = JSON.stringify(pinRequest(shape, body, grant));
-  const offered = toolsOffered(shape, body);
+  // What the run offered rides the span; what went upstream is shaped by the
+  // harness's marks (the checkpoint turn's none, a post-step's trimmed list).
+  const shaped = shapeTools(shape, body, deps.bearers.marksOf(grant.runId));
+  const payload = JSON.stringify(pinRequest(shape, shaped.body, grant));
+  const offered = { ...toolsOffered(shape, body), toolChoice: shaped.toolChoice };
   const startedAt = deps.clock();
   const span = grant.span.start("model.turn", { attrs: { model: grant.modelRef, ...offered }, startedAt });
   const outcome = (status: number, outBytes: number) =>
