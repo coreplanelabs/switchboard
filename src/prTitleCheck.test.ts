@@ -4,10 +4,13 @@ import { describe, expect, it } from "vitest";
 import {
   allowedScopes,
   allowedTypes,
+  BOT_SCOPES,
   checkPrTitle,
   migrationNoteProblems,
   nextMajor,
+  TITLE_MAX_VISIBLE,
 } from "../scripts/check-pr-title.mjs";
+import { PR_DESCRIPTION_CAPS } from "./core/prDescription.js";
 
 // The title gate's decision. A PR title is the squash commit's subject and the
 // changelog line a reader gets, so the grammar is Conventional Commits, the
@@ -66,6 +69,9 @@ describe("allowedScopes", () => {
     // … and the two titles no person writes: Dependabot's `chore(deps)` /
     // `ci(deps)` and release-please's `chore(main): release …`.
     expect(SCOPES).toEqual(expect.arrayContaining(["deps", "main"]));
+    // The bots' scopes — the ones the length cap leaves alone — are exactly those two, and the map names them.
+    expect([...BOT_SCOPES].sort()).toEqual(["deps", "main"]);
+    for (const s of BOT_SCOPES) expect(SCOPES).toContain(s);
     expect(new Set(SCOPES).size, "a scope is listed once").toBe(SCOPES.length);
     for (const s of SCOPES) expect(s).toMatch(/^[a-z][a-z0-9-]*$/);
   });
@@ -193,6 +199,80 @@ describe("checkPrTitle rejects, naming the fix", () => {
     expect(checkPrTitle("hotfix: x", { ...vocab, types: [...vocab.types, "hotfix"] }).ok).toBe(true);
     expect(checkPrTitle("fix(web): x", vocab).ok).toBe(false);
     expect(checkPrTitle("fix(web): x", { ...vocab, scopes: [...vocab.scopes, "web"] }).ok).toBe(true);
+  });
+});
+
+describe("the title is capped at 72 characters", () => {
+  // The whole title — type, scope and description — is one changelog line and
+  // one squash subject; git's subject convention and GitHub's commit list both
+  // stop at 72, so past it the line is cut. The cap is a refusal naming the
+  // count, never a truncation: the author cuts to one change, one clause.
+  const fill = (prefix: string, n: number) => prefix + "x".repeat(n - prefix.length);
+
+  it("is 72, and the submit tool's schema holds the title to the same number", () => {
+    expect(TITLE_MAX_VISIBLE).toBe(72);
+    expect(PR_DESCRIPTION_CAPS.title).toBe(TITLE_MAX_VISIBLE);
+  });
+
+  it("a title at the cap passes; one character over is refused naming the count and the cap", () => {
+    expect(checkPrTitle(fill("fix(resident): ", 72), VOCAB).ok).toBe(true);
+    const v = checkPrTitle(fill("fix(resident): ", 73), VOCAB);
+    expect(v.ok).toBe(false);
+    if (!v.ok) {
+      expect(v.problems).toHaveLength(1);
+      expect(v.problems[0]).toMatch(/73 characters/);
+      expect(v.problems[0]).toMatch(/at most 72/);
+      expect(v.problems[0]).toMatch(/one change/);
+    }
+  });
+
+  it("counts the whole line — the type and the scope spend the same budget as the description", () => {
+    const description = "x".repeat(60);
+    expect(checkPrTitle(`fix: ${description}`, VOCAB).ok).toBe(true);
+    expect(checkPrTitle(`refactor(dispatcher): ${description}`, VOCAB).ok).toBe(false);
+  });
+
+  it("the titles this repository merges today are refused: a 175-character median is the shape the cap ends", () => {
+    const merged =
+      "fix(harness): the gate holds neither exit by type — an abort handed to it passes the hold as a reply does — the transport's landing tells a dropped write from a held one";
+    const v = checkPrTitle(merged, VOCAB);
+    expect(v.ok).toBe(false);
+    if (!v.ok) expect(v.problems[0]).toMatch(new RegExp(`${merged.length} characters`));
+  });
+
+  it("a length problem is reported beside a scope problem, not instead of it", () => {
+    const v = checkPrTitle(fill("fix(oss): ", 90), VOCAB);
+    expect(v.ok).toBe(false);
+    if (!v.ok) {
+      expect(v.problems.some((p) => /unknown scope "oss"/.test(p))).toBe(true);
+      expect(v.problems.some((p) => /at most 72/.test(p))).toBe(true);
+    }
+  });
+
+  it("the bots' titles are not held to it: Dependabot's and release-please's lines are theirs to write", () => {
+    expect(
+      checkPrTitle(
+        "chore(deps): bump wrangler from 4.124.0 to 4.129.0 in the minor-and-patch group across 1 directory",
+        VOCAB,
+      ).ok,
+    ).toBe(true);
+    expect(checkPrTitle(fill("ci(deps): ", 100), VOCAB).ok).toBe(true);
+    expect(checkPrTitle(fill("chore(main): release ", 100), VOCAB).ok).toBe(true);
+    // The exemption is the scope's, not the type's: a person's chore is capped.
+    expect(checkPrTitle(fill("chore(process): ", 73), VOCAB).ok).toBe(false);
+  });
+
+  it("a revert carries the original title and is judged by that title's own gate, not measured again", () => {
+    expect(checkPrTitle(`revert: ${fill("fix(resident): ", 72)}`, VOCAB).ok).toBe(true);
+  });
+
+  it("the grammar's other problems keep their own words: an over-long title with a trailing period names both", () => {
+    const v = checkPrTitle(`${fill("fix: ", 80)}.`, VOCAB);
+    expect(v.ok).toBe(false);
+    if (!v.ok) {
+      expect(v.problems.some((p) => /ends with a period/.test(p))).toBe(true);
+      expect(v.problems.some((p) => /at most 72/.test(p))).toBe(true);
+    }
   });
 });
 

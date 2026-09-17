@@ -10,7 +10,14 @@
 // every pull request as a required status.
 //
 // The grammar is Conventional Commits: `type(scope)!: description`, where the
-// scope and the `!` are optional. Each list has one source:
+// scope and the `!` are optional, and the whole line is at most 72 characters:
+// git's subject convention and the point past which GitHub's commit list cuts
+// a subject, so a longer title is a line the reader never sees whole. The cap
+// is a refusal naming the count, never a truncation — the author cuts to one
+// change, one clause, and the PR body carries the rest. It holds what people
+// and agents write; the bots' scopes (`deps`, `main`) write their own lines
+// and are left alone, and a `revert:` carries a title already judged. Each
+// list has one source:
 //   - types: release-please-config.json — the one place that says which types
 //     exist and where each lands in the changelog;
 //   - scopes: the Scope column of the Areas table in docs/reference/code-map.md
@@ -37,6 +44,18 @@ export const TITLE_GRAMMAR =
 
 export const CODE_MAP_PATH = "docs/reference/code-map.md";
 export const MIGRATIONS_PATH = "docs/reference/migrations.md";
+
+/** The most characters a title may run to, the whole line counted — git's
+ *  subject convention and where GitHub's commit list cuts a subject. The
+ *  submit tool's schema (`PR_DESCRIPTION_CAPS.title`) holds the same number;
+ *  a test keeps the two equal. */
+export const TITLE_MAX_VISIBLE = 72;
+
+/** The scopes only bots write — Dependabot's `chore(deps)` / `ci(deps)` and
+ *  release-please's `chore(main): release …` — as the code map's Areas table
+ *  names them. Their titles are theirs to write, so the cap leaves them alone;
+ *  every other rule still applies. */
+export const BOT_SCOPES = ["deps", "main"];
 
 /** The commit types release-please knows, in the order its config lists them. */
 export function allowedTypes(releasePleaseConfig) {
@@ -110,6 +129,12 @@ export function checkPrTitle(rawTitle, { types, scopes }) {
     );
   }
   if (/\.$/.test(description)) problems.push("the description ends with a period; drop it (it is a commit subject)");
+  const exemptFromCap = type === "revert" || (scope !== undefined && BOT_SCOPES.includes(scope));
+  if (!exemptFromCap && title.length > TITLE_MAX_VISIBLE) {
+    problems.push(
+      `the title is ${title.length} characters; at most ${TITLE_MAX_VISIBLE} — one change, one clause, present tense; the PR body carries the rest`,
+    );
+  }
   if (problems.length > 0) return { ok: false, problems };
   return { ok: true, type, scope: scope ?? null, breaking: breaking === "!", description };
 }

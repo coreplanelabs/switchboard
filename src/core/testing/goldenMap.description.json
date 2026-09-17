@@ -1,5 +1,5 @@
 {
-  "title": "feat(coding): the PR body is a fixed-size map for the reader, with decisions, proofs and agent notes collapsed under it",
+  "title": "feat(coding): the PR body is a fixed-size map with agent notes collapsed",
   "tldr": "Coding-agent PR bodies grew with the diff: a median of 6,800 characters with seven embedded code blocks, and an 80-file PR at 26,600. The body is now a capped map (TL;DR, why, at most seven linked pointers, feedback wanted, risk, verified) with decisions, proofs and agent notes collapsed under it.",
   "why": "Reviewers spend their time understanding a change, and long descriptions predict fewer participants; a body that restates the diff spends that attention before the reader chooses where to look. Record [0050](https://github.com/acme/api/blob/main/docs/decisions/0050-the-pr-body-is-a-fixed-size-map-for-the-reader-and-everything-for-agents-sits-below-a-fold.md) argues the shape; this PR is its one unit.",
   "pointers": [

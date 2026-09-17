@@ -92,7 +92,11 @@ const SUBMIT_PR_DESCRIPTION: PiToolDeclaration = {
   parameters: {
     type: "object",
     properties: {
-      title: { type: "string", description: "The PR title — one line naming the change" },
+      title: {
+        type: "string",
+        description:
+          "The PR title — one line naming the change, `type(scope): what a reader can now do or expect`, at most 72 characters in all",
+      },
       tldr: {
         type: "string",
         description:

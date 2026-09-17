@@ -192,6 +192,13 @@ type(scope): what a reader can now do or expect
   phase, "PR 3 of 6"), no issue numbers (release-please appends the PR link),
   no trailing period. One change per title: a title that needs "and" twice is
   two PRs.
+- **The whole line is at most 72 characters** — type, scope and description
+  together: git's subject convention, and the point past which GitHub's commit
+  list cuts a subject, so a longer title is a line the reader never sees whole.
+  The check refuses a longer title naming the count; it never truncates. Cut to
+  one change and one clause — the body carries the rest. The bots' lines
+  (`chore(deps)`, `ci(deps)`, `chore(main): release …`) and a `revert:` are
+  not measured.
 - **A breaking change** is `!` after the type — the only way to declare one,
   since a squash commit with no body has no `BREAKING CHANGE:` footer — plus
   its note in [Migration notes](docs/reference/migrations.md), under the
@@ -212,23 +219,25 @@ type(scope): what a reader can now do or expect
   names is cut, the pin is moved to the next minor or removed.
 
 The `title` check enforces all of it on every PR — grammar, type list, scope
-list, the migration section behind a `!` — and gives the same verdict locally:
+list, the 72-character cap, the migration section behind a `!` — and gives the
+same verdict locally:
 `npm run check:pr-title -- "feat(slack): …"`. A revert is
 `revert: <the original title>` (retitle what GitHub's Revert button opens).
 
 From the changelog, three lines that do the job:
 
 - `feat(cli): switchboard init — the one-command installer`
-- `feat(review): the review agent reads the touched specs and files a contradiction as a finding`
-- `fix(deploy): fly.toml is an inert path for the deploy selection — its deletion no longer rolls the whole fleet`
+- `feat(review): a touched spec the diff contradicts is a finding`
+- `fix(deploy): deleting fly.toml no longer rolls the whole fleet`
 
 And three that made the reader work, with the line they should have been:
 
 | As merged | The problem | As it should read |
 |---|---|---|
-| `refactor(core): the dispatcher's run stage leaves as named functions (pipeline split, PR 5 of 6)` | "PR 5 of 6" is sequencing nobody outside the series can follow, and the area has a name of its own | `refactor(dispatcher): the run stage is named functions under src/core/dispatch/` |
-| `fix(resident): the attach's ref-exists shortcut names its invariant, and a cat-file failure is its own step error — the #NNN review fixes` | two changes, and an issue number standing in for the reason | `fix(resident): a cat-file failure during attach is reported as that step's error, not as a checkout failure` |
+| `refactor(core): the dispatcher's run stage leaves as named functions (pipeline split, PR 5 of 6)` | "PR 5 of 6" is sequencing nobody outside the series can follow, and the area has a name of its own | `refactor(dispatcher): the run stage is named functions` |
+| `fix(resident): the attach's ref-exists shortcut names its invariant, and a cat-file failure is its own step error — the #NNN review fixes` | two changes, and an issue number standing in for the reason | `fix(resident): a cat-file failure during attach is that step's error` |
 | `fix: the review follow-ups from the Phase 7–9 PRs — effort levels from the ladder, a mermaid draw epoch, an escaped licence, a real workflow warning` | no scope, a phase name, four unrelated fixes under one line | four PRs, each its own line — e.g. `fix(docs): a mermaid diagram redraws when the site's theme changes` |
+| `fix(resident): repo test on a long suite finishes — the /op bound is the exec ceiling, not the per-command default` | 114 characters: the change and its mechanism in one subject, which GitHub cuts at 72 — the mechanism is the body's | `fix(resident): repo test on a long suite finishes within the /op bound` |
 
 ## Releases
 

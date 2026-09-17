@@ -22,6 +22,10 @@ import { redactSecrets } from "./redact.js";
  *  a markdown link's target excluded, and the counts. One table, read by the
  *  schema, the prompt and the tool descriptions. */
 export const PR_DESCRIPTION_CAPS = {
+  /** The squash subject and the changelog line, the whole line counted: the
+   *  number the title gate (`scripts/check-pr-title.mjs`, `TITLE_MAX_VISIBLE`)
+   *  holds it to; a test keeps the two equal. */
+  title: 72,
   tldr: 300,
   why: 400,
   pointers: 7,
@@ -111,8 +115,9 @@ function boundedArray<T extends z.ZodTypeAny>(item: T, min: number, max: number,
 
 export const PrDescriptionSchema = z.object({
   /** The PR title's single source. Metadata for the PR's own title field —
-   *  never rendered into the body (GitHub shows the title itself). */
-  title: line,
+   *  never rendered into the body (GitHub shows the title itself) — and the
+   *  squash subject, so it is capped like every other field. */
+  title: capped(line, PR_DESCRIPTION_CAPS.title),
   tldr: capped(prose, PR_DESCRIPTION_CAPS.tldr),
   why: capped(prose, PR_DESCRIPTION_CAPS.why),
   pointers: boundedArray(PointerSchema, 1, PR_DESCRIPTION_CAPS.pointers, "pointers"),
