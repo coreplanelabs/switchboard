@@ -13,6 +13,7 @@ import { MAX_INSTRUCTIONS_LENGTH } from "../config/validate.js";
 import type { ChatMessage } from "./chatMessage.js";
 import type { CompletionRequest, CompletionResult, Provider } from "./provider.js";
 import { AGENTS, getAgent } from "../agents/registry.js";
+import { CONFIG_AWARENESS_HEADER } from "./configAwareness.js";
 import { planResume } from "./runLedger/resume.js";
 import { knownToolsFor, launchResumes, resumeMessage } from "./resumeLaunch.js";
 import { reclaimRuns } from "./boot.js";
@@ -14071,6 +14072,140 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     const log = await t.ledger.readSession(KEY, 0);
     expect(log.messages).toEqual([...tail, user("also check the lockfile"), user("and bump the version")]);
     expect(t.warnings).toEqual([]);
+  });
+
+  // docs/reference/specs/session-log.md item 9 (record 0034 "The session", as
+  // amended): the seed is also handed the thread's artifacts since the agent's
+  // previous run — here a review the runner spawned into the thread after the
+  // coding run, whose verdict names two findings — as data in the prompt.
+  it("a coding follow-up is handed the verdict a review run recorded in the thread since its previous run: the findings by id in the prompt right after its notes, never in the conversation, and the record's seed note names the run (agent-coding: a coding follow-up in a thread with a review verdict sees its findings by id)", async () => {
+    const t = await threadWithSession(PI_YAML);
+    const reviewHead = "b".repeat(40);
+    await t.store.put({
+      id: "run-rev",
+      label: "review · acme/api#7",
+      agent: "review",
+      model: "anthropic/review-model",
+      channelId: "slack:CX",
+      userId: "slack:UADMIN",
+      threadKey: THREAD,
+      channelVisibility: "public",
+      startedAt: NOW - 9_000,
+      finishedAt: NOW - 8_000,
+      status: "completed",
+      eventCount: 0,
+      storedEventCount: 0,
+      truncated: false,
+      events: [],
+      diagnosis: analyzeRunFriction([]),
+      repo: "acme/api",
+      seed: "channel",
+      session: { key: `${THREAD}:review`, seedFrom: 0, request: 0, range: { from: 0, to: 2 } },
+      // The runner's review child (run-history item 48): skipped for stickiness, a run of the thread for its artifacts.
+      parentInstanceId: "inst-1",
+      idempotencyKey: "inst-1:review-1",
+      verdict: {
+        verdict: "request_changes",
+        summary: "two findings",
+        head: reviewHead,
+        findings: [
+          { id: "F1", severity: "major", file: "src/login.ts", line: 10, title: "drops the session cookie" },
+          { id: "F2", severity: "nit", file: "src/login.ts", title: "rename shadowed variable" },
+        ],
+      },
+      reviewPost: {
+        posted: true,
+        target: { repo: "acme/api", number: 7 },
+        head: reviewHead,
+        verdict: "request_changes",
+      },
+    });
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
+    let handed: ChatMessage[] | undefined;
+    let systemOnPi: string | undefined;
+    let agentOnPi: string | undefined;
+    vi.mocked(runPiHarnessOpen).mockImplementationOnce(async (_deps, run) => {
+      handed = run.messages;
+      systemOnPi = run.system;
+      agentOnPi = run.agent.name;
+      return piAnswered("addressed");
+    });
+    const { io } = fakeIO(history);
+    await dispatch(t.deps, followUp, io);
+    await t.writer.settled();
+    // The runner's child is not the thread's sticky agent (record 0034 as amended); the follow-up continues coding.
+    expect(agentOnPi).toBe("coding");
+    const system = systemOnPi!;
+    const notesAt = system.indexOf("YOUR NOTES FOR THIS THREAD");
+    const artifactsAt = system.indexOf("ARTIFACTS OF THIS THREAD'S RUNS SINCE YOUR PREVIOUS RUN HERE");
+    expect(notesAt).toBeGreaterThanOrEqual(0);
+    expect(artifactsAt).toBeGreaterThan(notesAt);
+    expect(artifactsAt).toBeLessThan(system.indexOf(CONFIG_AWARENESS_HEADER));
+    expect(system).toContain("### run run-rev (review)");
+    expect(system).toContain("- verdict: request_changes — two findings");
+    expect(system).toContain("[major] F1 src/login.ts:10 — drops the session cookie");
+    expect(system).toContain("[nit] F2 src/login.ts — rename shadowed variable");
+    expect(system).toContain(`- review post: posted to acme/api#7 at ${reviewHead} (request_changes)`);
+    // The block rides the prompt, never the conversation: the seed is the tail, the line since and the request.
+    expect(handed).toEqual([...tail, user("also check the lockfile"), user("and bump the version")]);
+    expect(JSON.stringify(handed)).not.toContain("drops the session cookie");
+    // The record: the seed's source is unchanged and its seed note says what rode the prompt.
+    const record = t.ledger.finished.get("run-next")!;
+    expect(record.seed).toBe("session");
+    const seedNotes = record.events
+      .filter((e) => e.type === "run_note" && (e as { kind: string }).kind === "seed")
+      .map((e) => (e as { summary: string }).summary);
+    expect(seedNotes).toContain("thread artifacts: 1 run since the previous run rides the prompt (run-rev)");
+  });
+
+  it("a review follow-up in a thread whose coding run recorded dispositions is handed them by finding id, with the pull request that run edited, in the prompt before its REVIEW TARGET (agent-review: a re-review in a thread whose coding run recorded dispositions sees them by id)", async () => {
+    const t = await threadWithSession(PI_YAML + "  review: pi\n");
+    const prev = (await t.store.get("run-prev"))!;
+    await t.store.put({
+      ...prev,
+      dispositions: [
+        { findingId: "F1", disposition: "fixed", note: "cookie set on the redirect" },
+        { findingId: "F2", disposition: "declined", note: "the shadowing is deliberate" },
+      ],
+    });
+    t.deps.resolveRepoContext = () => ({
+      repo: "acme/api",
+      ref: "fix/x",
+      refFromPr: true,
+      pr: 7,
+      headSha: "a".repeat(40),
+      baseRef: "main",
+    });
+    t.deps.postReviewComment = vi.fn(async () => {});
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
+    let systemOnPi: string | undefined;
+    let agentOnPi: string | undefined;
+    vi.mocked(runPiHarnessOpen).mockImplementationOnce(async (_deps, run) => {
+      systemOnPi = run.system;
+      agentOnPi = run.agent.name;
+      return piAnswered("re-reviewed");
+    });
+    const { io } = fakeIO(history);
+    await dispatch(t.deps, { ...followUp, text: "agent:review re-review https://github.com/acme/api/pull/7" }, io);
+    await t.writer.settled();
+    expect(agentOnPi).toBe("review");
+    const system = systemOnPi!;
+    // The review has no previous run in this thread: every run of the thread, the coding run among them.
+    const artifactsAt = system.indexOf("ARTIFACTS OF THIS THREAD'S RUNS (");
+    expect(artifactsAt).toBeGreaterThanOrEqual(0);
+    expect(system).not.toContain("SINCE YOUR PREVIOUS RUN");
+    expect(artifactsAt).toBeLessThan(system.indexOf("REVIEW TARGET"));
+    expect(system).toContain("### run run-prev (coding)");
+    expect(system).toContain("- pull request opened or edited: acme/api#7 (https://github.com/acme/api/pull/7)");
+    expect(system).toContain(
+      "- dispositions:\n  - F1: fixed — cookie set on the redirect\n  - F2: declined — the shadowing is deliberate",
+    );
+    const record = t.ledger.finished.get("run-next")!;
+    expect(record).toMatchObject({ agent: "review", seed: "channel" });
+    const seedNotes = record.events
+      .filter((e) => e.type === "run_note" && (e as { kind: string }).kind === "seed")
+      .map((e) => (e as { summary: string }).summary);
+    expect(seedNotes).toContain("thread artifacts: 1 run of the thread rides the prompt (run-prev)");
   });
 
   // docs/reference/specs/routing-and-config.md item 21: a sticky-by-transcript

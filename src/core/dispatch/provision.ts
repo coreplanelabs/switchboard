@@ -930,6 +930,13 @@ export interface PromptContext {
    *  thread's files one line each. Rendered as one block right after memory;
    *  absent when there is none of the three. */
   session?: { notepad?: string; summary?: string; files?: readonly string[] };
+  /** The thread's artifacts since the agent's previous run (docs/reference/specs/session-log.md
+   *  item 9), rendered by `threadArtifactsBlock` (dispatch/threadArtifacts.ts):
+   *  what other runs of the thread recorded — a pull request, a verdict with
+   *  its findings, dispositions, a handoff, a description's TL;DR, a review
+   *  post — as data, right after the notes block and before the agent's
+   *  prompt and its REVIEW TARGET. Absent when no run since carried one. */
+  threadArtifacts?: string;
   /** A plan unit's rendered contract for a review child (agent-ship item 13):
    *  placed right after the REVIEW TARGET block, as the ship pipeline's review
    *  round places it. Absent on every other request. */
@@ -1075,6 +1082,7 @@ export async function composePrompt(deps: ProvisionDeps, ctx: PromptContext): Pr
     blocks: {
       memory: memoryBlock,
       notes: notesBlock,
+      artifacts: ctx.threadArtifacts,
       config: configBlock,
       about: aboutBlock,
       instructions: instructionsBlock,

@@ -322,6 +322,31 @@ describe("makeSystemComposer (head-pinned composition with an explicit AgentDef)
     expect(without({ sha: undefined, verified: false })).toBe(`MEMORY\n\nCONFIG\n\n${AGENTS.general.system}`);
   });
 
+  it("the thread's artifacts block follows the notes block and precedes the config block; without notes it follows memory (session-log item 9)", () => {
+    const compose = makeSystemComposer({
+      agent: AGENTS.general,
+      resident: false,
+      repo: undefined,
+      workspace: undefined,
+      prTarget: undefined,
+      blocks: { ...blocks, memory: "MEMORY", notes: "NOTES", artifacts: "ARTIFACTS", config: "CONFIG" },
+    });
+    expect(compose({ sha: undefined, verified: false })).toBe(
+      `MEMORY\n\nNOTES\n\nARTIFACTS\n\nCONFIG\n\n${AGENTS.general.system}`,
+    );
+    const withoutNotes = makeSystemComposer({
+      agent: AGENTS.general,
+      resident: false,
+      repo: undefined,
+      workspace: undefined,
+      prTarget: undefined,
+      blocks: { ...blocks, memory: "MEMORY", artifacts: "ARTIFACTS", config: "CONFIG" },
+    });
+    expect(withoutNotes({ sha: undefined, verified: false })).toBe(
+      `MEMORY\n\nARTIFACTS\n\nCONFIG\n\n${AGENTS.general.system}`,
+    );
+  });
+
   it("a PR review target pins the REVIEW TARGET block to the given head and recomposes at a new one", () => {
     const compose = makeSystemComposer({
       agent: AGENTS.review,

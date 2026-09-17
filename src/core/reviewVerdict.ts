@@ -163,6 +163,13 @@ export function formatFinding(f: Finding): string {
   return `[${f.severity}] ${f.id} ${location} — ${f.title}`;
 }
 
+/** One compact disposition line — `id: fixed|declined[ — note]` — the coding
+ *  side's answer to a finding, as ship's re-review turn and the thread's
+ *  artifacts block both render it. */
+export function formatDisposition(d: FindingDisposition): string {
+  return `${d.findingId}: ${d.disposition}${d.note ? ` — ${d.note}` : ""}`;
+}
+
 /**
  * Build the body posted to GitHub: the deterministic verdict line, the
  * compact findings list (when present), a blank line, then the model's

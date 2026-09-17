@@ -98,6 +98,18 @@ export function previousRunOf(runs: readonly RunView[], agent: string): Previous
   };
 }
 
+/** The thread's finished runs newer than the agent's previous run — every
+ *  finished run when the agent has none to continue there — oldest first: the
+ *  runs whose typed artifacts a seed is handed (session-log item 9). The page
+ *  is newest first, so "newer" is "before it on the page"; a live run has no
+ *  record yet and is left out; another agent's run and a coordinator's child
+ *  count alike, since both are runs of the thread. The previous run itself is
+ *  the session the seed continues, not an artifact of it. */
+export function runsSince(runs: readonly RunView[], agent: string): RunView[] {
+  const previous = runs.findIndex((r) => r.agent === agent && continuable(r));
+  return (previous < 0 ? runs : runs.slice(0, previous)).filter((r) => r.finished).reverse();
+}
+
 /** The log rows of the requests the provider refused under its usage policy
  *  (session-log item 9): the request row of every finished run of `agent`
  *  in the page whose record names its session and says

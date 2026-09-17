@@ -6,7 +6,7 @@
 // carries the previous round's findings and the dispositions the coding run
 // recorded against them.
 
-import { formatFinding, type Finding, type FindingDisposition } from "../reviewVerdict.js";
+import { formatDisposition, formatFinding, type Finding, type FindingDisposition } from "../reviewVerdict.js";
 
 /** The review child's one user turn. Re-review rounds carry the prior findings
  *  and the coding run's dispositions as the runner matched them (`dropped`: the
@@ -24,9 +24,7 @@ export function buildShipReviewTurn(input: {
     return `Review pull request ${input.where}${at}. Submit your verdict with findings via submit_verdict before your final message.`;
   }
   const findings = input.prior.findings.map(formatFinding).join("\n") || "(none recorded)";
-  const dispositions =
-    input.prior.dispositions.map((d) => `${d.findingId}: ${d.disposition}${d.note ? ` — ${d.note}` : ""}`).join("\n") ||
-    "(none recorded)";
+  const dispositions = input.prior.dispositions.map(formatDisposition).join("\n") || "(none recorded)";
   const dropped =
     input.prior.dropped !== undefined && input.prior.dropped.length > 0
       ? `\nDispositions naming no finding of the previous round (dropped): ${input.prior.dropped.join(", ")}`

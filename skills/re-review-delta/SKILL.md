@@ -1,12 +1,12 @@
 ---
 name: re-review-delta
-description: How a ship re-review round reads the delta since the last reviewed head without narrowing what the verdict covers.
+description: How a re-review — a ship re-review round, or a re-review asked for in a thread whose coding run repushed — reads the delta since the last reviewed head without narrowing what the verdict covers.
 agents: [review]
 ---
 
-# Re-reviewing after a fix round (ship re-review rounds)
+# Re-reviewing after a repush (ship re-review rounds and thread re-reviews)
 
-You already reviewed this PR at an earlier head and returned findings; a fix round has since repushed. This skill narrows what you READ, never what your verdict COVERS.
+You already reviewed this PR at an earlier head and returned findings; the branch has since been repushed — by a fix round of the ship pipeline, or by a coding run in this thread that addressed your findings. This skill narrows what you READ, never what your verdict COVERS.
 
 ## Scope: exploration vs verdict
 
@@ -15,7 +15,7 @@ You already reviewed this PR at an earlier head and returned findings; a fix rou
 
 ## Verify every prior finding's disposition
 
-The fix round recorded a disposition per finding (`fixed` / `declined` + note). For each:
+The coding run that addressed your findings recorded a disposition per finding (`fixed` / `declined` + note): a ship round hands them to you in its turn, a thread re-review in the artifacts block of your prompt. For each:
 
 - **`fixed`** — verify the fix actually landed and actually resolves the finding at the new head. A fix that moved the problem or half-landed gets the finding re-raised (same id, so the trail stays legible).
 - **`declined`** — read the argument. Concede when it holds (do not re-raise a finding you now agree was wrong — say so). Re-raise with a counter-argument when it does not: escalate the reasoning, not the volume.
