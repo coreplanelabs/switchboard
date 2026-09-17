@@ -140,11 +140,12 @@ const ids = (res: { ok: true; value: unknown } | { ok: false }) =>
   value<{ runs: { id: string }[] }>(res).runs.map((r) => r.id);
 
 describe("runs.* registrations", () => {
-  it("registers the eight commands with the declared actions and chat opt-outs", () => {
+  it("registers the nine commands with the declared actions and chat opt-outs", () => {
     const byId = Object.fromEntries(runsCommands.map((c) => [c.id, c]));
     expect(Object.keys(byId).sort()).toEqual([
       "runs.children",
       "runs.events",
+      "runs.findings",
       "runs.friction",
       "runs.get",
       "runs.list",
@@ -159,14 +160,20 @@ describe("runs.* registrations", () => {
       "runs.friction",
       "runs.unit",
       "runs.children",
+      "runs.findings",
       "runs.search",
     ]) {
       expect(byId[id].action).toBe("runs:read");
       expect(byId[id].effect).toBe("read");
     }
     expect(byId["runs.stop"]).toMatchObject({ action: "runs:write", effect: "write" });
+    // The findings ledger reads finished records: it needs run history and says so; every other read is always on.
+    expect(byId["runs.findings"].enabledWhen).toBeDefined();
+    for (const id of Object.keys(byId).filter((id) => id !== "runs.findings"))
+      expect(byId[id].enabledWhen, id).toBeUndefined();
     // The listings of run metadata are chat-shaped; what carries stored free text is not.
-    for (const id of ["runs.list", "runs.unit", "runs.children"]) expect(byId[id].surfaces?.chat).toBeUndefined();
+    for (const id of ["runs.list", "runs.unit", "runs.children", "runs.findings"])
+      expect(byId[id].surfaces?.chat).toBeUndefined();
     for (const id of ["runs.get", "runs.events", "runs.friction", "runs.search"])
       expect(byId[id].surfaces?.chat).toBe(false);
   });
@@ -868,6 +875,141 @@ describe("runs unit / runs children / runs search — the unit is the reading un
     expect(
       await registry.invoke("runs.search", { args: [KEY, "flaky"], options: {} }, chatOperator, deps),
     ).toMatchObject({ ok: false, error: "not_found" });
+  });
+});
+
+describe("runs findings — a pull request's findings ledger on every surface (agent-ship item 18)", () => {
+  const T0 = NOW - 100_000;
+  const HEAD = "a".repeat(40);
+  const URL = "https://github.com/acme/api/pull/42";
+
+  async function world() {
+    let n = 0;
+    const reg = new RunRegistry({ genId: () => `id-${++n}`, genToken: () => `tok-${n}`, now: () => NOW });
+    const store = new InMemoryRunStore({ now: () => NOW });
+    const at = (id: string, agent: string, startedAt: number, over: Partial<RunRecord> = {}) =>
+      record(id, startedAt + 5_000, { agent, startedAt, repo: "acme/api", channelVisibility: "public", ...over });
+    await store.put(at("c0", "coding", T0, { pr: { number: 42, url: URL } }));
+    await store.put(
+      at("r1", "review", T0 + 10_000, {
+        channelId: "slack:G_PRIV",
+        channelVisibility: "private",
+        verdict: {
+          verdict: "request_changes",
+          summary: "two",
+          head: HEAD,
+          findings: [
+            { id: "F1", severity: "major", file: "src/a.ts", line: 12, title: "null path unguarded" },
+            { id: "F2", severity: "nit", file: "src/b.ts", title: "typo" },
+          ],
+        },
+        reviewHead: HEAD,
+        reviewPost: { posted: true, target: { repo: "acme/api", number: 42 }, head: HEAD, verdict: "request_changes" },
+      }),
+    );
+    await store.put(
+      at("c1", "coding", T0 + 20_000, {
+        pr: { number: 42, url: URL },
+        dispositions: [
+          { findingId: "F1", disposition: "fixed", note: "guarded it" },
+          { findingId: "F2", disposition: "declined", note: "the library's spelling" },
+        ],
+      }),
+    );
+    const runs = createRunsService({ registry: reg, store });
+    const registry = new CommandRegistry<RunsCommandDeps>({ audit: () => {} });
+    registerRunsCommands(registry);
+    const denied: RunReadDenied[] = [];
+    const deps: RunsCommandDeps = { runs: async () => runs, denied: (e) => denied.push(e) };
+    return { registry, deps };
+  }
+
+  it("answers the ledger for `owner/repo#N` and for the pull request URL alike — titles and notes wrapped as untrusted on the JSON surface — and renders one line per finding under a header: aligned columns for the terminal, a chat shape without padded columns, both unwrapped", async () => {
+    const { registry, deps } = await world();
+    const res = await registry.invoke("runs.findings", { args: ["acme/api#42"], options: {} }, cli, deps);
+    const v = value<{
+      repo: string;
+      pr: { number: number; url?: string };
+      runs: Array<{ id: string }>;
+      findings: Array<{ id: string; status: string; title?: string; disposition?: { note: string } }>;
+    }>(res);
+    expect(v.repo).toBe("acme/api");
+    expect(v.pr).toEqual({ number: 42, url: URL });
+    expect(v.runs.map((r) => r.id)).toEqual(["c0", "r1", "c1"]);
+    expect(v.findings.map((f) => [f.id, f.status])).toEqual([
+      ["F1", "awaiting re-review"],
+      ["F2", "awaiting re-review"],
+    ]);
+    expect(v.findings[0].title).toContain(UNTRUSTED_OPEN);
+    expect(v.findings[0].title).toContain("null path unguarded");
+    expect(v.findings[1].disposition!.note).toContain(UNTRUSTED_OPEN);
+    expect(v.findings[1].disposition!.note).toContain("the library's spelling");
+    expect(JSON.stringify(v)).not.toMatch(/tok-/);
+    const byUrl = await registry.invoke("runs.findings", { args: [URL], options: {} }, cli, deps);
+    expect(byUrl).toEqual(res);
+    const cmd = registry.get("runs.findings")!;
+    const text = renderText(cmd, value(res));
+    const lines = text.split("\n");
+    expect(lines[0]).toBe("findings for acme/api#42 — 2 findings: 2 awaiting re-review");
+    expect(lines).toHaveLength(3);
+    expect(lines[1]).toMatch(
+      /^F1\s{2,}major\s{2,}src\/a\.ts:12\s{2,}null path unguarded\s{2,}awaiting re-review\s{2,}guarded it$/,
+    );
+    expect(lines[2]).toMatch(
+      /^F2\s{2,}nit\s{2,}src\/b\.ts\s{2,}typo\s{2,}awaiting re-review\s{2,}the library's spelling$/,
+    );
+    expect(text).not.toContain("UNTRUSTED");
+    const chat = renderText(cmd, value(res), { surface: "chat" });
+    expect(chat.split("\n")[1]).toBe(
+      "• `F1` · major · src/a.ts:12 · null path unguarded · awaiting re-review — guarded it",
+    );
+    expect(chat.split("\n").filter((l) => /\S {2,}\S/.test(l))).toEqual([]);
+    expect(chat).not.toContain("UNTRUSTED");
+    expect(
+      renderText(cmd, {
+        repo: "acme/api",
+        pr: { number: 7 },
+        unit: "plan-p-1:U16",
+        runs: [],
+        findings: [{ id: "F1", severity: "major", file: "f", title: "t", status: "re-raised", reRaisedAfter: "fixed" }],
+      }),
+    ).toBe(
+      "findings for acme/api#7 (unit plan-p-1:U16) — 1 finding: 1 re-raised\nF1  major  f  t  re-raised after fixed",
+    );
+    expect(renderText(cmd, { repo: "acme/api", pr: { number: 7 }, runs: [{ id: "c" }], findings: [] })).toBe(
+      "findings for acme/api#7 — 0 findings\n(none)",
+    );
+  });
+
+  it("a pull request no run names is not_found (`no runs name this pull request`); a malformed reference is invalid_input naming `pr`; a reader outside the private review reads the ledger from the public runs alone; chat is a surface for it", async () => {
+    const { registry, deps } = await world();
+    expect(await registry.invoke("runs.findings", { args: ["acme/api#99"], options: {} }, cli, deps)).toMatchObject({
+      ok: false,
+      error: "not_found",
+      message: "no runs name this pull request",
+      decidedBy: "handler",
+    });
+    const malformed = await registry.invoke("runs.findings", { args: ["acme/api"], options: {} }, cli, deps);
+    expect(malformed).toMatchObject({ ok: false, error: "invalid_input" });
+    if (malformed.ok) throw new Error("unreachable");
+    expect(malformed.message).toContain("pr");
+    expect(malformed.message).not.toContain("acme/api");
+    // The reviewer's run is private: a reader admitted to public runs sees the
+    // coding runs' story — the dispositions answer ids no review it saw issued.
+    const reader = callerWith("access", "access:ro", { actions: set("runs:read") });
+    const partial = value<{ runs: Array<{ id: string }>; findings: Array<{ id: string; status: string }> }>(
+      await registry.invoke("runs.findings", { args: ["acme/api#42"], options: {} }, reader, deps),
+    );
+    expect(partial.runs.map((r) => r.id)).toEqual(["c0", "c1"]);
+    expect(partial.findings.map((f) => [f.id, f.status])).toEqual([
+      ["F1", "unknown id"],
+      ["F2", "unknown id"],
+    ]);
+    const slack = callerWith("chat", "slack:UPOWER", "all", {
+      origin: { channelId: "slack:C1", threadKey: "slack:C1:t" },
+    });
+    const chat = await registry.invoke("runs.findings", { args: ["acme/api#42"], options: {} }, slack, deps);
+    expect(chat.ok).toBe(true);
   });
 });
 

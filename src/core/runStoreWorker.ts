@@ -28,7 +28,7 @@ import { isRunUsageReport, type RunUsageQuery, type RunUsageReport } from "./run
 //   POST /runs/put    {storeKey, record, policy?, policyUpdatedAt?} → {ok, retained, stored, rewritten}
 //   POST /runs/get    {storeKey, id}                                → {record: RunRecord | null}
 //   POST /runs/summary {storeKey, id}                               → {summary: RunListItem | null}
-//   POST /runs/list   {storeKey, limit?, before?, beforeId?, sinceMs?, agent?, channel?, threadKey?, parentRunId?}
+//   POST /runs/list   {storeKey, limit?, before?, beforeId?, sinceMs?, agent?, channel?, threadKey?, parentRunId?, pr?}
 //                                                                   → {items: RunListItem[], nextBefore?: {finishedAt, id}}
 //   POST /runs/events {storeKey, id, afterSeq?, limit?}             → {events: StoredRunEvent[] | null, nextAfterSeq?}
 //                                                                     (`events: null` = unknown or hidden run)

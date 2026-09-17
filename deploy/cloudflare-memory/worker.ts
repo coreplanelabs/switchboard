@@ -25,6 +25,7 @@ import {
   isRunSession,
   isRunVisibilityFilter,
   normalizeStored,
+  pullRequestNumberOf,
   RETENTION_BOUNDS,
   RUN_EVENTS_DEFAULT_PAGE,
   RUN_EVENTS_MAX_PAGE,
@@ -1265,13 +1266,15 @@ export class RunHistoryDO extends DurableObject<Env> {
     this.migrateRunsTable();
     // The indexes the visibility predicate's leaves walk (`channel_id IN`,
     // `channel_visibility IN`, `user_id =`), each ordered like the page; the
-    // session the sweep asks about; the parent a children listing filters on.
+    // session the sweep asks about; the parent a children listing filters on;
+    // the pull request a findings listing filters on.
     this.sql.exec(`
       CREATE INDEX IF NOT EXISTS runs_channel_finished ON runs(channel_id, finished_at DESC, run_id DESC);
       CREATE INDEX IF NOT EXISTS runs_visibility_finished ON runs(channel_visibility, finished_at DESC, run_id DESC);
       CREATE INDEX IF NOT EXISTS runs_user_finished ON runs(user_id, finished_at DESC, run_id DESC);
       CREATE INDEX IF NOT EXISTS runs_session ON runs(session_key);
       CREATE INDEX IF NOT EXISTS runs_parent ON runs(parent_run_id, finished_at DESC, run_id DESC);
+      CREATE INDEX IF NOT EXISTS runs_pr ON runs(repo, pr_number, finished_at DESC, run_id DESC);
     `);
     // The sessions registry (session-log item 7): every session log a run of
     // this store claimed, with its thread — the sweep cannot enumerate the
@@ -1438,7 +1441,11 @@ export class RunHistoryDO extends DurableObject<Env> {
    *  aggregate fills it from the run's stored events. The parent a child names
    *  (run-history item 46), the column a children listing filters on: the
    *  record already carries it in `summary_json`, so existing rows are filled
-   *  from there once, and every later `put` writes it beside the row. */
+   *  from there once, and every later `put` writes it beside the row. The pull
+   *  request a run names (run-history item 58; `pullRequestNumberOf`), the
+   *  column a findings listing filters on: the same one-time fill from
+   *  `summary_json` — the coding post-step's `pr`, else a posted review's
+   *  target — and every later `put` writes it beside the row. */
   migrateRunsTable(): void {
     const columns = new Set(
       this.sql
@@ -1455,6 +1462,19 @@ export class RunHistoryDO extends DurableObject<Env> {
       this.sql.exec(
         `UPDATE runs SET parent_run_id = json_extract(summary_json, '$.parentRunId')
          WHERE json_type(summary_json, '$.parentRunId') = 'text'`,
+      );
+    }
+    if (!columns.has("pr_number")) {
+      this.sql.exec(`ALTER TABLE runs ADD COLUMN pr_number INTEGER`);
+      // `pullRequestNumberOf` in SQL: the coding post-step's pull request, else
+      // the one a posted review targeted (a skipped post has no target).
+      this.sql.exec(
+        `UPDATE runs SET pr_number = COALESCE(
+           CASE WHEN json_type(summary_json, '$.pr.number') = 'integer' THEN json_extract(summary_json, '$.pr.number') END,
+           CASE WHEN json_extract(summary_json, '$.reviewPost.posted') = 1
+                 AND json_type(summary_json, '$.reviewPost.target.number') = 'integer'
+                THEN json_extract(summary_json, '$.reviewPost.target.number') END
+         )`,
       );
     }
   }
@@ -1970,8 +1990,8 @@ export class RunHistoryDO extends DurableObject<Env> {
         );
       this.sql.exec(
         `INSERT INTO runs (run_id, label, agent, model, channel_id, user_id, thread_key, channel_visibility, repo, started_at, finished_at, stored_at, status,
-                           event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json, session_key, usage_json, parent_run_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json, session_key, usage_json, parent_run_id, pr_number)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(run_id) DO UPDATE SET
            label = excluded.label, agent = excluded.agent, model = excluded.model, channel_id = excluded.channel_id,
            user_id = excluded.user_id, thread_key = excluded.thread_key, channel_visibility = excluded.channel_visibility,
@@ -1981,7 +2001,8 @@ export class RunHistoryDO extends DurableObject<Env> {
            bytes = excluded.bytes, diagnosis_json = excluded.diagnosis_json, summary_json = excluded.summary_json,
            session_key = excluded.session_key,
            usage_json = COALESCE(excluded.usage_json, runs.usage_json),
-           parent_run_id = excluded.parent_run_id`,
+           parent_run_id = excluded.parent_run_id,
+           pr_number = excluded.pr_number`,
         stored.id,
         stored.label ?? null,
         stored.agent ?? null,
@@ -2004,6 +2025,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         stored.session?.key ?? null,
         stored.usage ? JSON.stringify(stored.usage) : null,
         stored.parentRunId ?? null,
+        pullRequestNumberOf(stored) ?? null,
       );
       // The session's registry row learns its newest finish (session-log item
       // 7); a record that reaches the store without a claim (the plain put
@@ -2343,6 +2365,11 @@ export class RunHistoryDO extends DurableObject<Env> {
       where.push(`parent_run_id = ?`);
       params.push(q.parentRunId);
     }
+    if (q.pr !== undefined) {
+      // `namesPullRequest` in SQL: the row's repository and the number it names.
+      where.push(`repo = ?`, `pr_number = ?`);
+      params.push(q.pr.repo, q.pr.number);
+    }
     if (q.visibleTo !== undefined && q.visibleTo.kind !== "all") where.push(visibilitySql(q.visibleTo, params));
     const select = `SELECT run_id, agent, channel_id, finished_at, bytes, event_count, summary_json FROM runs WHERE ${where.join(" AND ")} ORDER BY finished_at DESC, run_id DESC`;
     // `LIMIT` holds on the over-bound path too: the kept set is the newest
@@ -2590,12 +2617,26 @@ function parseRunList(body: unknown): Validated<{ storeKey: string; query: RunLi
     if (!id.ok) return invalid("parentRunId must match ^[A-Za-z0-9_-]{1,64}$");
     query.parentRunId = id.value;
   }
+  if (b.pr !== undefined) {
+    const pr = b.pr as Record<string, unknown> | null;
+    if (
+      typeof pr !== "object" ||
+      pr === null ||
+      typeof pr.repo !== "string" ||
+      !REPO_SLUG.test(pr.repo) ||
+      typeof pr.number !== "number" ||
+      !Number.isInteger(pr.number) ||
+      pr.number < 1
+    )
+      return invalid("pr must be { repo: owner/name, number: a positive integer }");
+    query.pr = { repo: pr.repo, number: pr.number };
+  }
   if (b.visibleTo !== undefined) {
     // A malformed filter is a 400, never "all": the bot degrades to live rows
     // rather than the DO widening what an actor may see.
     if (!isRunVisibilityFilter(b.visibleTo)) return invalid("visibleTo must be a run visibility filter");
-    if (boundParameters(b.visibleTo) > DO_MAX_BOUND_PARAMETERS - RUN_LIST_BASE_PARAMETERS)
-      return invalid(`visibleTo names more than ${DO_MAX_BOUND_PARAMETERS - RUN_LIST_BASE_PARAMETERS} ids`);
+    const headroom = DO_MAX_BOUND_PARAMETERS - RUN_LIST_BASE_PARAMETERS - (query.pr ? RUN_LIST_PR_PARAMETERS : 0);
+    if (boundParameters(b.visibleTo) > headroom) return invalid(`visibleTo names more than ${headroom} ids`);
     query.visibleTo = b.visibleTo;
   }
   return { ok: true, value: { storeKey: key.value, query } };
@@ -2604,6 +2645,8 @@ function parseRunList(body: unknown): Validated<{ storeKey: string; query: RunLi
 /** Parameters the page query binds before any filter: the cursor pair (3) and the age floor (1),
  *  plus `agent`, `channel`, `threadKey`, `parentRunId`, and the LIMIT at most — the headroom `visibleTo` must fit under. */
 const RUN_LIST_BASE_PARAMETERS = 9;
+/** The two more a `pr` filter binds (`repo`, `pr_number`), taken from the same headroom only when asked. */
+const RUN_LIST_PR_PARAMETERS = 2;
 
 /** How many `?` a filter binds (one per id, one per user). */
 function boundParameters(f: RunVisibilityFilter): number {

@@ -67,6 +67,7 @@ const GATES: Record<string, (c: Capabilities) => boolean> = {
   "memory.forget": (c) => c.memory,
   "friction.report": (c) => c.runHistory,
   "friction.propose": (c) => c.runHistory,
+  "runs.findings": (c) => c.runHistory,
   "review.abridge": (c) => c.runHistory && c.readingDiffAbridge,
   "repo.list": (c) => c.residents,
   "repo.onboard": (c) => c.residents,
@@ -138,9 +139,10 @@ describe("enabledWhen on the core catalogue — which capability each command ne
     }
   });
 
-  it("no runs.* command is gated: every one answers for live runs without a history store", () => {
+  it("no runs.* command is gated but `runs findings`: every other one answers for live runs without a history store; the ledger reads finished records, so it needs one", () => {
     for (const cmd of everyCommand().filter((c) => c.id.startsWith("runs."))) {
-      expect(cmd.enabledWhen, cmd.id).toBeUndefined();
+      if (cmd.id === "runs.findings") expect(cmd.enabledWhen, cmd.id).toBeDefined();
+      else expect(cmd.enabledWhen, cmd.id).toBeUndefined();
     }
   });
 });

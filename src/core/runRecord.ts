@@ -465,6 +465,10 @@ export interface RunListOptions {
   /** The runs one run spawned or that continue a thread it opened
    *  (`RunRecord.parentRunId`, item 46) — a conductor's children as one listing. */
   parentRunId?: string;
+  /** The runs that name one pull request (`namesPullRequest`, item 58): the
+   *  coding runs whose post-step opened or edited it and the review runs that
+   *  posted to it — the findings ledger's runs as one listing. */
+  pr?: { repo: string; number: number };
   /** What the ACTOR may see (authorization): the store predicate compiled
    *  from the policy, pushed down so no surface loads rows and filters after.
    *  Absent = no visibility constraint — only a caller that has already decided
@@ -575,6 +579,27 @@ export function matchesVisibility(
     case "and":
       return filter.of.length > 0 && filter.of.every((p) => matchesVisibility(p, row));
   }
+}
+
+/** The pull request number a stored row names (item 58): the one its coding
+ *  post-step opened or edited (`pr`), else the one its review posted to
+ *  (`reviewPost.target`). Undefined for a run that named none — a review whose
+ *  post was skipped included. The Worker's `pr_number` column is this value,
+ *  written at `put` and backfilled from `summary_json` with the same rule. */
+export function pullRequestNumberOf(row: Pick<RunListItem, "pr" | "reviewPost">): number | undefined {
+  if (row.pr !== undefined) return row.pr.number;
+  if (row.reviewPost?.posted) return row.reviewPost.target.number;
+  return undefined;
+}
+
+/** The one truth table for `RunListOptions.pr`: the row's repository is the
+ *  pull request's and the number it names is the pull request's. The Worker
+ *  applies the same test in SQL (`repo = ? AND pr_number = ?`). */
+export function namesPullRequest(
+  row: Pick<RunListItem, "repo" | "pr" | "reviewPost">,
+  pr: { repo: string; number: number },
+): boolean {
+  return row.repo === pr.repo && pullRequestNumberOf(row) === pr.number;
 }
 
 /** The list order (`finishedAt` desc, `id` desc) as a cursor predicate: true

@@ -20,6 +20,7 @@ import {
   isRunListItem,
   isRunRecord,
   matchesVisibility,
+  namesPullRequest,
   newestFirst,
   normalizeStored,
   RUN_EVENTS_DEFAULT_PAGE,
@@ -177,6 +178,7 @@ export function selectListItems<T extends RunListItem>(items: readonly T[], opts
   if (opts.channel !== undefined) out = out.filter((r) => r.channelId === opts.channel);
   if (opts.threadKey !== undefined) out = out.filter((r) => r.threadKey === opts.threadKey);
   if (opts.parentRunId !== undefined) out = out.filter((r) => r.parentRunId === opts.parentRunId);
+  if (opts.pr !== undefined) out = out.filter((r) => namesPullRequest(r, opts.pr!));
   if (opts.visibleTo !== undefined) out = out.filter((r) => matchesVisibility(opts.visibleTo!, r));
   return out.slice(0, clampListLimit(opts.limit));
 }

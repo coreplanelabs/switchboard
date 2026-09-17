@@ -876,7 +876,11 @@ export async function fixture(
   // The unit is the reading unit: one ship instance whose task unit ran a
   // coding round in its thread and a review round in its review thread
   // (`runs unit`), the coding run's session log with the words a search finds
-  // (`runs search`), and one child of the persisted run (`runs children`).
+  // (`runs search`), one child of the persisted run (`runs children`), and the
+  // pull request the unit opened, its review's findings and the coding run's
+  // dispositions against them (`runs findings`; the fence on a title and a
+  // note is the command's own test — the same strings ride `runs unit`'s
+  // views as the record carries them).
   const units = new InMemoryCoordinatorInstanceStore();
   await units.put({
     id: "ship-fin-1",
@@ -897,21 +901,56 @@ export async function fixture(
       dependsOn: [],
       threadKey: "slack:C1:unit",
       reviewThread: { threadKey: "slack:C1:unit-review" },
+      pr: { number: 42, url: `https://github.com/${FIXTURE.repo}/pull/42` },
       rounds: [
         { index: 0, agent: "coding", outcome: "started", at: NOW - 25_000 },
         { index: 0, agent: "coding", outcome: "pr_opened", at: NOW - 16_000 },
         { index: 1, agent: "review", outcome: "started", at: NOW - 15_000 },
-        { index: 1, agent: "review", outcome: "approve", at: NOW - 6_000 },
+        { index: 1, agent: "review", outcome: "request_changes", at: NOW - 6_000 },
+        { index: 1, agent: "coding", outcome: "started", at: NOW - 5_000 },
       ],
     },
   ]);
   await store.put({
     ...record("unit-coding", NOW - 16_000),
     threadKey: "slack:C1:unit",
+    repo: FIXTURE.repo,
     startedAt: NOW - 24_000,
+    pr: { number: 42, url: `https://github.com/${FIXTURE.repo}/pull/42` },
+    parentInstanceId: "ship-fin-1",
+    idempotencyKey: "ship-fin-1:task/0/coding",
     session: { key: FIXTURE.sessionKey, seedFrom: 0, request: 0, range: { from: 0, to: 3 } },
   });
-  await store.put({ ...reviewRecord("unit-review", NOW - 6_000), startedAt: NOW - 14_000 });
+  await store.put({
+    ...reviewRecord("unit-review", NOW - 6_000),
+    startedAt: NOW - 14_000,
+    threadKey: "slack:C1:unit-review",
+    verdict: {
+      verdict: "request_changes",
+      summary: "one thing",
+      head: REVIEW_HEAD,
+      findings: [{ id: "F1", severity: "minor", file: "src/f.ts", line: 1, title: "old is gone" }],
+    },
+    reviewHead: REVIEW_HEAD,
+    reviewPost: {
+      posted: true,
+      target: { repo: FIXTURE.repo, number: 42 },
+      head: REVIEW_HEAD,
+      verdict: "request_changes",
+    },
+    parentInstanceId: "ship-fin-1",
+    idempotencyKey: "ship-fin-1:task/1/review",
+  });
+  await store.put({
+    ...record("unit-findings", NOW - 2_000),
+    threadKey: "slack:C1:unit",
+    repo: FIXTURE.repo,
+    startedAt: NOW - 4_000,
+    pr: { number: 42, url: `https://github.com/${FIXTURE.repo}/pull/42` },
+    dispositions: [{ findingId: "F1", disposition: "fixed", note: "restored it" }],
+    parentInstanceId: "ship-fin-1",
+    idempotencyKey: "ship-fin-1:task/1/findings",
+  });
   await store.put({ ...record("child-1", NOW - 4_000), startedAt: NOW - 9_000, parentRunId: FIXTURE.persistedRun });
   const ledger = new InMemoryRunLedger(() => NOW);
   await ledger.claimSession(FIXTURE.sessionKey, "unit-coding", "g1");

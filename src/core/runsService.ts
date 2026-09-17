@@ -6,6 +6,7 @@ import { SPAN_SCHEMA } from "./normalizeSpans.js";
 import { analyzeRunFriction, type FrictionOptions, type FrictionDiagnosis } from "./runFriction.js";
 import {
   clampListLimit,
+  namesPullRequest,
   RUN_ID_PATTERN,
   RUN_LIST_MAX_LIMIT,
   toVisibilityFilter,
@@ -14,6 +15,8 @@ import {
   type RunRecord,
   type RunSession,
 } from "./runRecord.js";
+import { ledgerOf, type FindingRow, type LedgerRun } from "./findingsLedger.js";
+import type { ReviewVerdictKind } from "./reviewVerdict.js";
 import type { RunRegistry, StopRequestResult, SubscribeOptions, Subscribed } from "./runRegistry.js";
 import type { RunSnapshot, RunStopStatus, RunSummary } from "./runRegistry/projections.js";
 import type { RunStore } from "./runStore.js";
@@ -21,7 +24,7 @@ import type { RunLedger } from "./runLedger/ledger.js";
 import type { LiveRunRow } from "./runLedger/types.js";
 import { snippetOf } from "./runLedger/sessionLog.js";
 import { activityOfEvents } from "./runRegistry/activity.js";
-import { parseUnitKey } from "./coordinator/contract.js";
+import { parseUnitKey, unitKeyOf } from "./coordinator/contract.js";
 import type { CoordinatorInstanceStore } from "./coordinator/instanceStore.js";
 import type { CoordinatorInstance } from "./coordinator/contract.js";
 import { instanceFactsOf, unitFactsOf, unitRunsOf, type UnitFacts, type UnitRunsView } from "./unitRuns.js";
@@ -205,6 +208,10 @@ export interface ListRunsOptions {
    *  (`RunView.parentRunId`) — a conductor's children, live and finished,
    *  ANDed with `visibleTo`. */
   parentRunId?: string;
+  /** The runs whose record names one pull request (`namesPullRequest`): the
+   *  coding runs that opened or edited it and the reviews that posted to it —
+   *  finished runs only, a live row has no record yet — ANDed with `visibleTo`. */
+  pr?: { repo: string; number: number };
   /** Only runs finished (or, while live, started) at or after this epoch ms. */
   sinceMs?: number;
   /** Rows after the merge: default `RUN_LIST_DEFAULT_LIMIT`, capped at `RUN_LIST_MAX_LIMIT`. */
@@ -268,6 +275,33 @@ export interface SessionSearchView {
   gaps: number[];
 }
 
+/** One run the findings ledger was read from (agent-ship item 18): its
+ *  identity, when it finished, the head a review read, its round when a unit
+ *  row supplied it, and what it contributed — a verdict with so many findings,
+ *  or so many dispositions. */
+export interface FindingsLedgerRun {
+  id: string;
+  agent?: string;
+  startedAt: number;
+  finishedAt: number;
+  head?: string;
+  round?: number;
+  verdict?: ReviewVerdictKind;
+  findings?: number;
+  dispositions?: number;
+}
+
+/** What `runs findings` answers: the pull request, the unit whose row names
+ *  it when one does, the runs the ledger was read from oldest finished first,
+ *  and one row per finding id (`ledgerOf`). */
+export interface FindingsLedgerView {
+  repo: string;
+  pr: { number: number; url?: string };
+  unit?: string;
+  runs: FindingsLedgerRun[];
+  findings: FindingRow[];
+}
+
 /** The registry capabilities handed to the live HTML/SSE path once the token
  *  checked out: the subscription, the backlog, and the token-gated stop (the
  *  page's Stop/Kill buttons stay capability-gated, not operator-gated). */
@@ -304,6 +338,14 @@ export interface RunsService {
    *  rule `listUnitRuns` applies to a unit not started): existence is never
    *  revealed across a channel. */
   listInstanceUnits(instanceId: string, visibleTo: Predicate): Promise<UnitFacts[]>;
+  /** A pull request's findings ledger (agent-ship item 18): the runs whose
+   *  records name it (`ListRunsOptions.pr`) plus, when one of them belongs to a
+   *  coordinator instance whose unit row names the pull request, that unit's
+   *  runs with their rounds — each under `visibleTo`, so only runs the reader
+   *  may see enter the join — handed to `ledgerOf`. `not_found` when no run the
+   *  reader may see names the pull request: an unknown pull request, one no run
+   *  worked on, and one whose runs are all outside the predicate are one answer. */
+  listFindings(pr: { repo: string; number: number }, visibleTo: Predicate): Promise<Result<FindingsLedgerView>>;
   /** The runs that name `parentRunId` as their parent — a conductor's
    *  children, live and finished — in start order, under `visibleTo`. Who may
    *  see the parent is the caller's point read to make first. */
@@ -435,6 +477,28 @@ function newestFinished(a: RunView, b: RunView): number {
 
 const notFound = { ok: false, error: "not_found" } as const;
 const conflict = { ok: false, error: "conflict" } as const;
+
+/** The ledger's order: oldest finished first, then started, then id — `ledgerOf`'s own. */
+function oldestFinished(a: RunView, b: RunView): number {
+  return (
+    (a.finishedAt ?? 0) - (b.finishedAt ?? 0) || a.startedAt - b.startedAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+  );
+}
+
+/** A finished run as the ledger view lists it (`FindingsLedgerRun`). */
+function ledgerRunView(r: RunView & { round?: number }): FindingsLedgerRun {
+  const head = r.reviewHead ?? r.verdict?.head;
+  return {
+    id: r.id,
+    ...(r.agent !== undefined ? { agent: r.agent } : {}),
+    startedAt: r.startedAt,
+    finishedAt: r.finishedAt ?? r.startedAt,
+    ...(head !== undefined ? { head } : {}),
+    ...(r.round !== undefined ? { round: r.round } : {}),
+    ...(r.verdict !== undefined ? { verdict: r.verdict.verdict, findings: r.verdict.findings?.length ?? 0 } : {}),
+    ...(r.dispositions !== undefined ? { dispositions: r.dispositions.length } : {}),
+  };
+}
 
 /** Take events in order while under the count cap and the byte budget (always
  *  at least one), stamping `nextAfterSeq` when anything was left behind. */
@@ -583,6 +647,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
         (opts.channel === undefined || r.channelId === opts.channel) &&
         (opts.threadKey === undefined || r.threadKey === opts.threadKey) &&
         (opts.parentRunId === undefined || r.parentRunId === opts.parentRunId) &&
+        (opts.pr === undefined || namesPullRequest(r, opts.pr)) &&
         (opts.sinceMs === undefined || (r.finishedAt ?? r.startedAt) >= opts.sinceMs);
       const paging = opts.before !== undefined;
       const live = paging
@@ -628,6 +693,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
             ...(opts.channel !== undefined ? { channel: opts.channel } : {}),
             ...(opts.threadKey !== undefined ? { threadKey: opts.threadKey } : {}),
             ...(opts.parentRunId !== undefined ? { parentRunId: opts.parentRunId } : {}),
+            ...(opts.pr !== undefined ? { pr: opts.pr } : {}),
             ...(opts.sinceMs !== undefined ? { sinceMs: opts.sinceMs } : {}),
             ...(opts.before !== undefined ? { before: opts.before } : {}),
             ...(opts.beforeId !== undefined ? { beforeId: opts.beforeId } : {}),
@@ -829,6 +895,49 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       const instance = await units.get(instanceId);
       if (!instance || !instanceAdmits(instance, visibleTo)) return [];
       return (await units.listUnits(instanceId)).map(unitFactsOf);
+    },
+
+    async listFindings(pr, visibleTo) {
+      if (visibleTo.kind === "none") return notFound;
+      // The first source: every record that names the pull request, under the predicate.
+      const named = (await service.listRuns({ status: "all", visibleTo, pr, limit: RUN_LIST_MAX_LIMIT })).runs;
+      const byId = new Map<string, LedgerRun & RunView>(named.map((r) => [r.id, r]));
+      let unit: string | undefined;
+      let url = named.find((r) => r.pr?.number === pr.number)?.pr?.url;
+      // The second source: the unit rows that name it, reached through the
+      // instance a named run is a child of — its two threads' runs, cut at the
+      // rounds the runner reported (`unitRunsOf`), so each run carries its
+      // round and a review that posted nothing still enters through its thread.
+      if (units) {
+        const instanceIds = [...new Set(named.map((r) => r.parentInstanceId).filter((id) => id !== undefined))];
+        for (const instanceId of instanceIds) {
+          const [instance, rows] = await Promise.all([units.get(instanceId), units.listUnits(instanceId)]);
+          if (!instance || instance.repo !== pr.repo) continue;
+          for (const row of rows) {
+            if (row.pr?.number !== pr.number) continue;
+            const [coding, review] = await Promise.all([
+              threadRuns(row.threadKey, visibleTo),
+              threadRuns(row.reviewThread?.threadKey, visibleTo),
+            ]);
+            for (const run of unitRunsOf(row, { coding, review }))
+              byId.set(run.id, { ...(byId.get(run.id) ?? run), round: run.round });
+            unit ??= unitKeyOf(row);
+            url ??= row.pr.url;
+          }
+        }
+      }
+      const runs = [...byId.values()].filter((r) => r.finishedAt !== undefined).sort(oldestFinished);
+      if (runs.length === 0) return notFound;
+      return {
+        ok: true,
+        value: {
+          repo: pr.repo,
+          pr: { number: pr.number, ...(url !== undefined ? { url } : {}) },
+          ...(unit !== undefined ? { unit } : {}),
+          runs: runs.map(ledgerRunView),
+          findings: ledgerOf(runs),
+        },
+      };
     },
 
     async listChildren(parentRunId, visibleTo) {

@@ -455,6 +455,8 @@ export const FIXTURE = {
   unitKey: "ship-fin-1:task",
   /** The coding thread's session log of that unit (`runs search`): the session its coding run was a range of. */
   sessionKey: "slack:C1:unit:coding",
+  /** The pull request that unit opened, reviewed and answered (`runs findings`), as a person spells it. */
+  pullRequest: "acme/api#42",
 } as const;
 
 /** Hints by FIELD NAME: a value the fixture honors (an id that exists, a slug
@@ -488,6 +490,8 @@ export const FIELD_HINTS: SampleHints = {
   since: "2026-09-01T00:00:00Z".slice(0, 10),
   // runs.search: the session log the fixture seeded (a key the pattern accepts is not enough — the search must find a session's runs).
   session: FIXTURE.sessionKey,
+  // runs.findings: the pull request the fixture's ship unit opened, reviewed and answered (a reference the pattern accepts is not enough — runs must name it).
+  pr: FIXTURE.pullRequest,
 };
 
 /** A refusal the DATA decides on one surface only (command-registry.md item
