@@ -20,6 +20,7 @@ import type { PiCompactionConfig } from "../../../config.js";
 import type { ChatMessage } from "../../chatMessage.js";
 import {
   HarnessContainerReplacedError,
+  HarnessGateBypassedError,
   HarnessMismatchError,
   isPiFacts,
   type Finding,
@@ -169,8 +170,9 @@ class PromptRefused extends Error {
 }
 
 /** A tool call pi ran to its end without the extension ever asking the gate
- *  for it (harness-pi item 7): the run fails closed on the first one. */
-class GateBypassed extends Error {
+ *  for it (harness-pi item 7): the run fails closed on the first one — the
+ *  contract's kind, read at the workspace's release. */
+class GateBypassed extends HarnessGateBypassedError {
   constructor(tool: string, callId: string) {
     super(`the gate was bypassed: pi ran ${tool} (call ${callId}) without asking the bot`);
     this.name = "GateBypassed";
@@ -520,6 +522,10 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
   let windingDown: "run" | "turn" = "run";
   let hardStopped = false;
   let bypass: GateBypassed | undefined;
+  /** An abort was sent to pi this session (`abortPi`): the calls it left open were cut, not settled. */
+  let abortSent = false;
+  /** pi settled its turn (`agent_settled`): what is still open at the session's end is a straggler, nothing running. */
+  let settled = false;
   /** The container was replaced under the run (item 16): the loop's verdict once pi was found gone before the run settled. */
   let replaced: PiContainerReplacedError | undefined;
   const toolsBlocked = (): string | undefined => {
@@ -648,12 +654,19 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     if (sessionEnded) return;
     sessionEnded = true;
     transport?.close();
+    // The session's end (item 14): a call still open after an abort, or on a
+    // turn pi never settled, is cut, not settled — pi is gone but its tree
+    // persists and a relayed command may run on, so the workspace's release
+    // reads it as in flight (harness.md item 13); a call still open after a
+    // settled turn is a straggler whose settle never reached the record,
+    // nothing running, and stays unmarked.
     bridge.closeOpenSpans(
       hardStopped
         ? "the run was hard-stopped"
         : bypass
           ? "the run was stopped: a tool call bypassed the gate"
           : "the run ended",
+      { cut: abortSent || !settled },
     );
     save();
     // pi's container was replaced (item 16): the executor reaches the
@@ -959,7 +972,6 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     else sends.send({ id: ids.prompt, type: "prompt", ...promptOf(run.messages) });
 
     let warned = false;
-    let settled = false;
     let stopMode: StopMode | undefined;
     /** The finale bound aborted pi during a write-up: the run ends by the
      *  wind-down's answer, and the aborted call's failure is not the run's. */
@@ -974,6 +986,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
      *  recovery that abandons a transport, and after `end()` nothing sends
      *  one — the note is what makes that seen rather than assumed. */
     const abortPi = (): void => {
+      // The calls open now are the abort's to cut: their ends land marked `cut`
+      // (harness.md item 13), so the workspace's release reads the command
+      // behind each as one that may run on rather than a settle.
+      abortSent = true;
+      bridge.markOpenCallsCut();
       sends.send({ type: "abort" }, (landing) => {
         if (landing === "dropped")
           note("harness_error", "the abort was dropped: no transport kept it, so pi was never told to stop");

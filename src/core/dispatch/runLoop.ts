@@ -19,6 +19,7 @@ import { parseModelRef } from "../provider.js";
 import { mergeTools, TOOLSETS } from "../../tools/toolsets.js";
 import {
   HarnessContainerReplacedError,
+  HarnessGateBypassedError,
   HarnessInterruptedError,
   harnessFactsOf,
   openThroughSeam,
@@ -77,7 +78,7 @@ import { isSpanRecord, redactAndCap, type RunEvent } from "../runEvents.js";
 import { oneLine } from "../redact.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "../runFriction.js";
 import { markdownOutput } from "../llmOutput/index.js";
-import { pushedBranchesOf, type RunFailure, type RunSeed, type RunStatus } from "../runRecord.js";
+import { callsInFlight, pushedBranchesOf, type RunFailure, type RunSeed, type RunStatus } from "../runRecord.js";
 import type { RunHandle, RunRegistry } from "../runRegistry.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
 import type { RunsReadCapability, SteerCapability } from "../../tools/runs.js";
@@ -99,8 +100,8 @@ import { artifactLink, cardActivity } from "./reply.js";
 import { stageIntoWorkspace, stagingIndex, type WorkspaceFiles } from "./staging.js";
 import { githubCapabilityFor, shutdownNotice, webCapability, type RunDeps } from "./run.js";
 
-/** Longest `run_failed` note summary kept on the stream: a reason, not a stack dump. */
-const RUN_FAILED_NOTE_MAX = 500;
+/** Longest note summary the loop writes for an ending (`run_failed`, `workspace_torn_down`): a reason, not a stack dump. */
+const ENDING_NOTE_MAX = 500;
 
 /** What the loop hands back once the run has answered: the answer as
  *  canonicalized for every projection, the head the review settled on, the
@@ -547,6 +548,18 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // is told the review was carried forward.
   let carried: { reviewed: string; current: string; commits: number } | undefined;
   let runFailed = false; // the runner threw → terminal status `failed`
+  /** The runner threw the gate's bypass: what ran in the workspace was never vetted, so its release tears it down whatever the record shows in flight. */
+  let gateBypassed = false;
+  /** Whether the run's ending may have left a command running in its workspace
+   *  — a call the ending's abort or interrupt cut (its result marked `cut`), or
+   *  open when the run failed, was interrupted or hard-stopped (`callsInFlight`
+   *  under the run's status) — read off the record once the harness session has
+   *  ended (its end settles what it cut, marked) and before the record is
+   *  sealed, said on the record as a `workspace_torn_down` note naming the
+   *  calls, and handed to the release, which tears the workspace down for it
+   *  rather than pair it (harness.md item 13). */
+  let commandInFlight = false;
+  const recordEvents = () => registry.snapshot(run.id, run.token)?.events ?? [];
   // The failure by name (run-history item 57), when the harness's throw has
   // one: the record says it, so the session's next seed can act on it.
   let failure: RunFailure | undefined;
@@ -558,6 +571,34 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // runs the request again once the thread is free, the path a refused
   // re-attach takes (run-history item 54).
   let interrupted: HarnessInterruptedError | undefined;
+  /** The run's terminal status as of now: what the finish hands the registry,
+   *  and what the record read deciding the workspace's release goes by. */
+  const statusNow = (): RunStatus => {
+    const stopped = run.control.requested;
+    return interrupted
+      ? "interrupted"
+      : runFailed
+        ? "failed"
+        : stopped === "hard"
+          ? "stopped_hard"
+          : stopped === "soft"
+            ? "stopped_soft"
+            : "completed";
+  };
+  const readCallsInFlight = (): void => {
+    const calls = callsInFlight(recordEvents(), statusNow());
+    commandInFlight = calls.length > 0;
+    if (commandInFlight)
+      registry.publish(run.id, {
+        type: "run_note",
+        kind: "workspace_torn_down",
+        summary: redactAndCap(
+          `a command may still be running in the workspace, so it is torn down rather than paired: ${calls.map((c) => c.summary).join("; ")}`,
+          ENDING_NOTE_MAX,
+        ),
+        at: clock(),
+      });
+  };
   let runDiagnosis: FrictionDiagnosis | undefined; // the finish-site diagnosis: the done card's shape line
   // The run keeps its harness process alive past the loop (harness-pi item
   // 14): the reviewed-head settle's re-review and the description turn below
@@ -575,8 +616,15 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // a read-only agent's, or one an operator HARD-stopped ("tear it down
   // now": the abandoned command may still be running in there, and the
   // whole point of a hard stop is to free the resources), is released
-  // unconditionally. Best-effort — a failed release is a log line, never a
-  // failed run. Called AFTER the
+  // unconditionally — and so is one whose ending may have left a command
+  // running in it (`callsInFlight`, read once the harness session had ended and
+  // before the record was sealed, said on it as a `workspace_torn_down` note:
+  // the tool the ending's abort or interrupt cut, a call open when the run
+  // failed or was interrupted — a run that completed with a call unpaired left
+  // nothing running), since a release that waits for idle would be refused by
+  // that command and hold the workspace past the run; and one the gate's
+  // bypass failed, whatever the record shows in flight (harness.md item 13).
+  // Best-effort — a failed release is a log line, never a failed run. Called AFTER the
   // answer has been sent (or the failure card closed): the `/detach` round
   // trip is bounded at 10 s on a sick resident, and nothing about the reply
   // depends on it, so it must never sit between "answer ready" and the
@@ -588,9 +636,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // in — so a resident thread remembers its own branches once the clean tree
   // is gone and a follow-up can rebind onto them.
   const releaseWorkspace = (span?: Span) => {
-    const pushed = pushedBranchesOf(registry.snapshot(run.id, run.token)?.events ?? []);
+    const events = recordEvents();
+    const pushed = pushedBranchesOf(events);
     return round.release({
       hardStopped: run.control.requested === "hard",
+      commandInFlight,
+      gateBypassed,
       ...(span ? { span } : {}),
       ...(pushed.length > 0 ? { pushed } : {}),
     });
@@ -1222,8 +1273,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       }
     }
     // The last prompt on the run's pi has been sent: pi ends here, before the
-    // post-step and before the workspace it runs in can be released.
+    // post-step and before the workspace it runs in can be released; what its
+    // ending left running is read off the record once it has.
     await harnessSession?.end();
+    readCallsInFlight();
     // What the run leaves uncommitted or unpushed does not outlive it: a run
     // starts from a clean tree (resident-repos item 17), and the release that
     // follows the reply discards the tree. Said HERE — on the record, before
@@ -1355,6 +1408,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     if (err instanceof HarnessInterruptedError) interrupted = err;
     else {
       runFailed = true;
+      gateBypassed = err instanceof HarnessGateBypassedError;
       if (err instanceof ModelPolicyRefusedError) failure = { kind: "policy_refusal" };
       // The record must say why a failed run failed even when the reply is
       // never delivered (run-history.md): the error's message, redacted and
@@ -1362,11 +1416,13 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       registry.publish(run.id, {
         type: "run_note",
         kind: "run_failed",
-        summary: redactAndCap(err instanceof Error ? err.message : String(err), RUN_FAILED_NOTE_MAX),
+        summary: redactAndCap(err instanceof Error ? err.message : String(err), ENDING_NOTE_MAX),
       });
     }
-    // pi first: it runs in the workspace released next (a no-op once ended).
+    // pi first: it runs in the workspace released next (a no-op once ended);
+    // what the ending left running is read off the record once it has.
     await harnessSession?.end();
+    readCallsInFlight();
     await root.span("post.workspace_release", (span) => releaseWorkspace(span));
     if (!interrupted) throw err;
     // The interruption is the loop's own outcome: answered from here, the
@@ -1380,16 +1436,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     };
   } finally {
     clearInterval(heartbeat);
-    const stopped = run.control.requested;
-    const status: RunStatus = interrupted
-      ? "interrupted"
-      : runFailed
-        ? "failed"
-        : stopped === "hard"
-          ? "stopped_hard"
-          : stopped === "soft"
-            ? "stopped_soft"
-            : "completed";
+    const status = statusNow();
     // Close the live-view stream and start the TTL, handing the registry the
     // terminal status so every summary projects it (the index, `runs list`)
     // instead of re-deriving it. The one status the registry cannot know is

@@ -20,11 +20,13 @@ import { reattachWorkspace } from "./provision.js";
 import { bearerHashOf, RunBearerStore } from "../modelProxy/runBearers.js";
 import { RUN_BEARER_ENV } from "../harness/pi/process.js";
 import {
+  HarnessGateBypassedError,
   openThroughSeam,
   type Finding,
   type Harness,
   type HarnessFacts,
   type HarnessRun,
+  type HarnessSession,
 } from "../harness/contract.js";
 import type { HarnessRoster } from "../harness/roster.js";
 import { InMemoryRunStore, NullRunStore } from "../runStore.js";
@@ -302,7 +304,14 @@ function setup(
         backend: "local" as const,
         ...(opts.binding ? { binding: opts.binding } : {}),
       },
-      release: async (opts: { hardStopped: boolean }) => void releases.push(opts.hardStopped ? "hard" : "paired"),
+      release: async (opts: { hardStopped: boolean; commandInFlight?: boolean; gateBypassed?: boolean }) =>
+        void releases.push(
+          opts.hardStopped
+            ? "hard"
+            : opts.commandInFlight === true || opts.gateBypassed === true
+              ? "torn-down"
+              : "paired",
+        ),
     },
     admitted: new ThreadAdmission<DispatchFollowUp>().claim(THREAD, { agent: agentName }).live,
     ledgerRun: undefined,
@@ -519,6 +528,140 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     s.ending.drain(undefined);
     await s.writer.settled();
     expect((await s.store.get("run-l"))!.status).toBe("failed");
+  });
+
+  // docs/reference/specs/harness.md item 13: the workspace's release reads the
+  // record. A command the run's ending may have left running in the workspace —
+  // a call the ending cut (its result marked `cut`: pi's abort, OpenCode's
+  // interrupt, the session's end), or a call open when the run failed or was
+  // interrupted — tears the workspace down as after a hard stop rather than hold
+  // it behind the command, and the record says so; a run that completed with a
+  // call unpaired (a relayed tool that ran in the bot) left nothing running and
+  // pairs the workspace as any orderly end does; a failure with nothing in
+  // flight pairs it too; a gate bypass tears it down whatever the record shows.
+  // The harness is a stub over the seam: what it puts on the record and how its
+  // `open` ends are the ending's two facts, and the loop reads nothing else.
+  const openToolCall = (run: HarnessRun): void =>
+    run.onEvent?.({ type: "tool_call", tool: "bash", summary: "$ sleep 600", command: "sleep 600", callId: "c-open" });
+  const settleToolCall = (run: HarnessRun): void =>
+    run.onEvent?.({ type: "tool_result", tool: "bash", ok: true, summary: "exit 0", callId: "c-open" });
+  // pi's aborted settle: the tool's own end after the loop's abort, which the
+  // bridge marks `cut` — on the record before the session ends.
+  const abortOpenCall = (run: HarnessRun): void =>
+    run.onEvent?.({ type: "tool_result", tool: "bash", ok: false, summary: "aborted", callId: "c-open", cut: true });
+  // What pi's `end()` does to every call still open (`closeOpenSpans`): a
+  // failed result marked `cut`.
+  const cutOpenCallAtEnd = (run: HarnessRun): void =>
+    run.onEvent?.({
+      type: "tool_result",
+      tool: "bash",
+      ok: false,
+      summary: "the run ended",
+      callId: "c-open",
+      cut: true,
+    });
+  // A relayed tool's call the record never paired: it ran in the bot, nothing in the workspace.
+  const openRelayedCall = (run: HarnessRun): void =>
+    run.onEvent?.({ type: "tool_call", tool: "update_status", summary: "update_status", callId: "c-relayed" });
+  const tornDownNotes = async (s: ReturnType<typeof setup>, ended: boolean | undefined) => {
+    s.ending.drain(ended);
+    await s.writer.settled();
+    return (await s.store.get("run-l"))!.events
+      .filter((e) => e.type === "run_note" && e.kind === "workspace_torn_down")
+      .map((e) => (e.type === "run_note" ? e.summary : ""));
+  };
+  const endingIn = (open: Harness["open"]) =>
+    setup("", {
+      agent: "coding",
+      yaml: YAML + "harness:\n  coding: pi\n",
+      harness: {
+        harnesses: roster({ ...watched(piHarness).harness, open }),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+      bearer: "sbr_run-l.s3cret",
+    });
+  const sessionAnswering = (answer: string, end: () => Promise<void> = async () => {}): HarnessSession => ({
+    answer,
+    followUp: async () => "",
+    remainingMs: () => 0,
+    end,
+  });
+
+  it("the tool the finale interrupted — the run ends with its wind-down's answer, the call open on the record until the session's end cuts it as pi's does: the workspace is released `always`, torn down, not paired behind the command still running, and the record says why", async () => {
+    const s = endingIn(async (_deps, run) => {
+      openToolCall(run);
+      return sessionAnswering("the run ran out of time while a command was running", async () => cutOpenCallAtEnd(run));
+    });
+    const out = answered(await runLoop(s.deps, s.ctx));
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+    await out.releaseWorkspace();
+    expect(s.releases).toEqual(["torn-down"]);
+    expect(await tornDownNotes(s, true)).toEqual([expect.stringContaining("$ sleep 600")]);
+  });
+
+  it("the tool pi's abort settled — its own end, aborted, on the record before the session ends: the workspace is torn down all the same, the aborted settle a cut and not a settle", async () => {
+    const s = endingIn(async (_deps, run) => {
+      openToolCall(run);
+      abortOpenCall(run);
+      return sessionAnswering("the run ran out of time while a command was running");
+    });
+    const out = answered(await runLoop(s.deps, s.ctx));
+    await out.releaseWorkspace();
+    expect(s.releases).toEqual(["torn-down"]);
+  });
+
+  it("a clean completion with a relayed tool's call unpaired on the record — it ran in the bot, nothing in the workspace: the workspace is paired, released if idle, and nothing is said", async () => {
+    const s = endingIn(async (_deps, run) => {
+      openRelayedCall(run);
+      return sessionAnswering("done");
+    });
+    const out = answered(await runLoop(s.deps, s.ctx));
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+    await out.releaseWorkspace();
+    expect(s.releases).toEqual(["paired"]);
+    expect(await tornDownNotes(s, true)).toEqual([]);
+  });
+
+  it("a follow-up's steer unresolved with a command in flight: the failure propagates, the run is finished `failed`, the workspace is torn down and the record says why", async () => {
+    const s = endingIn(async (_deps, run) => {
+      openToolCall(run);
+      throw new Error("the follow-up's steer was in flight when the resident's control plane reset under the run");
+    });
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("the follow-up's steer");
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "failed" });
+    expect(s.releases).toEqual(["torn-down"]);
+    expect(await tornDownNotes(s, undefined)).toEqual([expect.stringContaining("$ sleep 600")]);
+  });
+
+  it("a server gone silent with a call open: the failure propagates and the workspace is torn down", async () => {
+    const s = endingIn(async (_deps, run) => {
+      openToolCall(run);
+      throw new Error("the feed carried nothing for the session past the bound");
+    });
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("carried nothing");
+    expect(s.releases).toEqual(["torn-down"]);
+  });
+
+  it("the opening prompt unresolved — nothing in flight: the run fails by name and the workspace is paired, released if idle", async () => {
+    const s = endingIn(async () => {
+      throw new Error("the prompt was in flight when the resident's control plane reset under the run");
+    });
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("the prompt was in flight");
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "failed" });
+    expect(s.releases).toEqual(["paired"]);
+  });
+
+  it("a gate bypass — the call already settled on the record, nothing in flight: the workspace is torn down all the same, what ran in it never vetted", async () => {
+    const s = endingIn(async (_deps, run) => {
+      openToolCall(run);
+      settleToolCall(run);
+      throw new HarnessGateBypassedError("the gate was bypassed: bash (call c-open) ran without asking the bot");
+    });
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("the gate was bypassed");
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "failed" });
+    expect(s.releases).toEqual(["torn-down"]);
   });
 
   // docs/reference/specs/run-history.md item 15: a failed run carries its reason

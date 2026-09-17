@@ -66,9 +66,22 @@ export type FetchPrCommits = (q: { repo: string; base: string; sha: string }) =>
  *  the run left uncommitted or unpushed is named — a run starts from a clean
  *  tree, so nothing in it survives the run (resident-repos item 16a). A hard
  *  stop means "tear it down now" (the abandoned command may still be running
- *  in there) → "always" regardless of the identity. */
-export function releaseModeFor(identity: Identity, opts: { hardStopped: boolean }): ReleaseMode {
-  return identity === "read" || opts.hardStopped ? "always" : "if-idle";
+ *  in there) → "always" regardless of the identity; so does a command the
+ *  run's ending may have left running (`callsInFlight` on the record: a call
+ *  the ending's abort or interrupt cut, a call open when the run failed, was
+ *  interrupted or hard-stopped — never a call a completed or softly stopped
+ *  run left unpaired, which ran in the bot or lost its result to a gap) — a
+ *  release that waits for idle would be
+ *  refused by the command and hold the workspace past the run — and so does
+ *  the gate's bypass, whatever is in flight: what ran in the workspace was
+ *  never vetted (harness.md item 13). */
+export function releaseModeFor(
+  identity: Identity,
+  opts: { hardStopped: boolean; commandInFlight?: boolean; gateBypassed?: boolean },
+): ReleaseMode {
+  return identity === "read" || opts.hardStopped || opts.commandInFlight === true || opts.gateBypassed === true
+    ? "always"
+    : "if-idle";
 }
 
 /** One round's workspace: the executor selection made for the round's agent,
@@ -82,6 +95,10 @@ export interface RoundWorkspace {
    */
   release(opts: {
     hardStopped: boolean;
+    /** The run's ending may have left a command running in the workspace (`callsInFlight` on the record). */
+    commandInFlight?: boolean;
+    /** The run failed on the gate's bypass (`HarnessGateBypassedError`): what ran in the workspace was never vetted. */
+    gateBypassed?: boolean;
     /** The `post.workspace_release` span: the executor's release becomes its child. */
     span?: Span;
     /** The branches the run pushed and the pull requests they head (resident-repos
@@ -141,6 +158,8 @@ export async function attachRoundWorkspace(input: {
   );
   const release = async (opts: {
     hardStopped: boolean;
+    commandInFlight?: boolean;
+    gateBypassed?: boolean;
     span?: Span;
     pushed?: ReleaseOptions["pushed"];
   }): Promise<void> => {

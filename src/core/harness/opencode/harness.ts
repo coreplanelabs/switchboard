@@ -535,7 +535,9 @@ export async function openOpenCodeRun(
     let draining = true;
     // The drainer's own failure — a follow-up's steer the store could not
     // resolve — is held for the loop's end (a rejection with no one waiting on
-    // it would be unhandled), then thrown once the loop has left.
+    // it would be unhandled), then thrown once the loop has left — unless the
+    // loop ended on the operator's hard stop, which wins: the run ends as the
+    // stop, the failure staying on the record as the drainer's `harness_error`.
     const drainer = drainFollowUps(deps, run, conn, () => draining, emit, note).then(
       () => undefined,
       (err: unknown) => err,
@@ -543,16 +545,17 @@ export async function openOpenCodeRun(
 
     let answer: string;
     let remainingMs: () => number;
+    let hardStopped: boolean;
     let drained: unknown;
     try {
       let storeIds: string[];
-      ({ answer, remainingMs, storeIds } = await driveOpenCode(deps, run, conn));
+      ({ answer, remainingMs, storeIds, hardStopped } = await driveOpenCode(deps, run, conn));
       for (const id of storeIds) known.add(id);
     } finally {
       draining = false;
       drained = await drainer;
     }
-    if (drained instanceof OpenCodeWriteUnresolvedError) throw drained;
+    if (drained instanceof OpenCodeWriteUnresolvedError && !hardStopped) throw drained;
 
     return {
       answer,
@@ -762,7 +765,8 @@ function drainFollowUps(
   const auth = { Authorization: openCodeAuthHeader(conn.password) };
   const routes = openCodeSessionRoutes(conn.sessionID);
   return (async () => {
-    /** The follow-ups the store told lost, each with the batch behind it in
+    /** The follow-ups the store told lost, and behind each the same person's
+     *  later ones as they come — the rest of its batch, later drains' — in
      *  order: never steered again by this loop, requeued to the front of the
      *  inbox once the loop has left, for the run stage's fresh-turn path. */
     const deferred: FollowUpInput[] = [];
@@ -862,11 +866,11 @@ function drainFollowUps(
         // The loop leaving the feed with no row and the store still showing the
         // execution under way (a hung tool the finale interrupts) is the steer
         // unresolved. Unresolved — that, or a store that cannot be read —
-        // fails the run by name as the loop's own writes do, one rule, the
-        // loop stopped hard here and the harness throwing once it has left,
-        // the batch's follow-ups not yet posted handed back with it: never a
-        // landed steer handed back for a second delivery, never a follow-up
-        // dropped.
+        // fails the run by name as the loop's own writes do, one rule: the
+        // loop ended through the connection (`conn.failure`, no stop asked of
+        // the run's control) and the harness throwing once it has left, the
+        // follow-up and the batch's not yet posted handed back with it — never
+        // a landed steer steered again by this loop, never a follow-up dropped.
         const learnRow = async (
           steerSeq: number,
           knownAtSteer: ReadonlySet<string>,
