@@ -20,12 +20,22 @@ describe("progressOf — progress is read off the row, never asked of the model"
     expect(
       progressOf({ branch: BRANCH, pushed: [{ ref: BRANCH, sha: B, at: T0 + 1 }], startHead: A, leaseStartedAt: T0 }),
     ).toEqual({ progressed: true, by: "push", sha: B });
-    // A fresh branch has no start head: any push is progress.
+    // A fresh branch has no start head: a push of a new head is progress.
     expect(progressOf({ branch: BRANCH, pushed: [{ ref: BRANCH, sha: A }] })).toEqual({
       progressed: true,
       by: "push",
       sha: A,
     });
+    // On a fresh branch the base head stands in for the start head: a later
+    // push of a genuinely new head after the lease began is progress.
+    expect(
+      progressOf({
+        branch: BRANCH,
+        pushed: [{ ref: BRANCH, sha: B, at: T0 + 1 }],
+        baseHead: A,
+        leaseStartedAt: T0,
+      }),
+    ).toEqual({ progressed: true, by: "push", sha: B });
     // The last push to the branch is the one that counts.
     expect(
       progressOf({
@@ -56,6 +66,17 @@ describe("progressOf — progress is read off the row, never asked of the model"
     expect(
       progressOf({ branch: BRANCH, pushed: [{ ref: BRANCH, sha: B, at: T0 - 1 }], startHead: A, leaseStartedAt: T0 }),
     ).toMatchObject({ progressed: false });
+    // A fresh branch is created at the base head, so its push of that head is
+    // the branch's creation, not the unit's progress.
+    expect(progressOf({ branch: BRANCH, pushed: [{ ref: BRANCH, sha: A }], baseHead: A })).toMatchObject({
+      progressed: false,
+    });
+    // A recorded start head outranks the base head: continuing past the base is progress.
+    expect(progressOf({ branch: BRANCH, pushed: [{ ref: BRANCH, sha: B }], startHead: A, baseHead: B })).toEqual({
+      progressed: true,
+      by: "push",
+      sha: B,
+    });
     const none = progressOf({ branch: BRANCH, pushed: [], startHead: A });
     expect(none).toEqual({
       progressed: false,
@@ -138,6 +159,16 @@ describe("renewalDecision — renew only when progress, a renewal and the cap al
         pipeline: PIPELINE,
       }),
     ).toEqual({ renew: false, why: "grant_exhausted", detail: "the grant's 2 renewals are spent", renewalsLeft: 0 });
+    // A grant of one reads singular: "1 renewal is spent", never "are".
+    expect(
+      renewalDecision({
+        grant: { renewals: 1 },
+        renewalsSpent: 1,
+        spendUsd: 0,
+        progress: progressed,
+        pipeline: PIPELINE,
+      }),
+    ).toEqual({ renew: false, why: "grant_exhausted", detail: "the grant's 1 renewal is spent", renewalsLeft: 0 });
   });
 
   it("spend at or over the cap stops, and an unknown spend under a cap stops too — a cap never trusts a total that left a model's tokens out", () => {
