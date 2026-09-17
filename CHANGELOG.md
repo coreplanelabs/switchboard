@@ -1,5 +1,41 @@
 # Changelog
 
+## [1.245.0](https://github.com/coreplanelabs/switchboard/compare/v1.244.0...v1.245.0) (2026-09-17)
+
+
+### Features
+
+* **authz:** an admin views the dashboard as a person, read-only ([#1622](https://github.com/coreplanelabs/switchboard/issues/1622)) ([7bccaa8](https://github.com/coreplanelabs/switchboard/commit/7bccaa87d7187b55041f25d42c7c132962bdd0df))
+* **process:** the title check caps a title at 72 characters ([#1605](https://github.com/coreplanelabs/switchboard/issues/1605)) ([474ae31](https://github.com/coreplanelabs/switchboard/commit/474ae3132606dcee6eeb25e7a6d4815a6dec4341))
+* **web:** a searchable channel picker and styled selects everywhere ([2bae117](https://github.com/coreplanelabs/switchboard/commit/2bae117fdc3a35aab53ecf2b3bcd52d741a9d403))
+* **web:** a searchable channel picker and styled selects everywhere ([#1606](https://github.com/coreplanelabs/switchboard/issues/1606)) ([2bae117](https://github.com/coreplanelabs/switchboard/commit/2bae117fdc3a35aab53ecf2b3bcd52d741a9d403))
+
+
+### Bug fixes
+
+* **deploy:** forward OPENROUTER_API_KEY into the bot container ([#1337](https://github.com/coreplanelabs/switchboard/issues/1337)) ([#1614](https://github.com/coreplanelabs/switchboard/issues/1614)) ([d34ae42](https://github.com/coreplanelabs/switchboard/commit/d34ae425c4ae768612a48e656a32eb8ba3360e7d))
+* **dispatcher:** a lease too short for a turn and write-up is refused ([#1616](https://github.com/coreplanelabs/switchboard/issues/1616)) ([41bee15](https://github.com/coreplanelabs/switchboard/commit/41bee1558ac91285002dd65454523242b6c02df9))
+* **harness:** a tool in flight at the loop's end is cut on pi ([#1618](https://github.com/coreplanelabs/switchboard/issues/1618)) ([aab3185](https://github.com/coreplanelabs/switchboard/commit/aab3185031fbed8e922baee3d254c9ea083c87f0))
+* **harness:** both gate exits by type; a landing tells its own sender ([#1596](https://github.com/coreplanelabs/switchboard/issues/1596)) ([d63814a](https://github.com/coreplanelabs/switchboard/commit/d63814ac6a96c8928b5d63c591b318fc23922be0))
+* **harness:** OpenCode refill order, repeat guard, follow-up hand-back ([#1597](https://github.com/coreplanelabs/switchboard/issues/1597)) ([4551d28](https://github.com/coreplanelabs/switchboard/commit/4551d28f9c8ea2cb06c590d32d6811bbf10da19e))
+* **harness:** the executor's type decides the third failure shape ([#1607](https://github.com/coreplanelabs/switchboard/issues/1607)) ([ce28b8f](https://github.com/coreplanelabs/switchboard/commit/ce28b8f527dbff81909f0b870b0f30b8e7143408))
+* **harness:** the tailer never rejects, an unsafe failure tears down ([#1615](https://github.com/coreplanelabs/switchboard/issues/1615)) ([3bf5581](https://github.com/coreplanelabs/switchboard/commit/3bf5581141f0d63d9b8822d93b68a0e18c343a75))
+* **process:** the title cap counts raw characters under one true name ([#1608](https://github.com/coreplanelabs/switchboard/issues/1608)) ([f1101c2](https://github.com/coreplanelabs/switchboard/commit/f1101c27f3dd79c225a88e9ab22b585dd0c9bb39))
+* **resident:** a container exit mid-cycle is a roll, not a step failure ([#1617](https://github.com/coreplanelabs/switchboard/issues/1617)) ([38a9b9f](https://github.com/coreplanelabs/switchboard/commit/38a9b9fe3c08fcf979a44acd3236145c254ec3a4))
+* **resident:** a repo op on a long suite finishes — the server-side /op budget is the exec ceiling, matching the client's /op wait ([#1599](https://github.com/coreplanelabs/switchboard/issues/1599)) ([9b601e2](https://github.com/coreplanelabs/switchboard/commit/9b601e2dbffbd5333942eb4b4d0d8b934fcf9185))
+* **resident:** one typed 500, one stop shape, and the first attach waits ([#1595](https://github.com/coreplanelabs/switchboard/issues/1595)) ([54493b2](https://github.com/coreplanelabs/switchboard/commit/54493b2620d590d4f5191c51f5ef6d1be5a7d08f))
+* **review:** no LGTM over a finding at or above the severity to address ([#1612](https://github.com/coreplanelabs/switchboard/issues/1612)) ([5e3dfe1](https://github.com/coreplanelabs/switchboard/commit/5e3dfe1f63a72d50a8926a15b0712ea8f7362edf))
+* **slack:** a confirmation's buttons go the moment one is pressed ([#1620](https://github.com/coreplanelabs/switchboard/issues/1620)) ([597c207](https://github.com/coreplanelabs/switchboard/commit/597c2078fa3ef780f45f5b77b6224b2aaa833681))
+
+
+### Documentation
+
+* **dispatcher:** record 0051 — a thread has one owner for its life, a message is one event in a mode the sender chooses, and a pipeline idles instead of ending; 0046's unit eleven retired ([#1602](https://github.com/coreplanelabs/switchboard/issues/1602)) ([7df91b0](https://github.com/coreplanelabs/switchboard/commit/7df91b06c1ad2f53c80b2e0c0f7798be02aaaf2e))
+* **docs:** plan amended for record 0052: U36 status, six units ([#1532](https://github.com/coreplanelabs/switchboard/issues/1532)) ([#1611](https://github.com/coreplanelabs/switchboard/issues/1611)) ([457409a](https://github.com/coreplanelabs/switchboard/commit/457409a0fcb86f3ed0036d7df0da755c7d6597b6))
+* **docs:** record 0050 is accepted, the PR-body map is live-receipted ([#1613](https://github.com/coreplanelabs/switchboard/issues/1613)) ([03b5ea9](https://github.com/coreplanelabs/switchboard/commit/03b5ea9fb7451f72c68eeee641fe6bf43b620c71))
+* **docs:** record 0052 — a run resolves one model card ([#1532](https://github.com/coreplanelabs/switchboard/issues/1532)) ([#1600](https://github.com/coreplanelabs/switchboard/issues/1600)) ([152a529](https://github.com/coreplanelabs/switchboard/commit/152a529f62fa4bac0a15fe6a8383b471d9aa077f))
+* **resident:** item 67 repository-side row fails build, not install ([#1623](https://github.com/coreplanelabs/switchboard/issues/1623)) ([97e57ef](https://github.com/coreplanelabs/switchboard/commit/97e57ef172e752e62ebbe6e46b7c9f6b2e01e1f7))
+
 ## [1.244.0](https://github.com/coreplanelabs/switchboard/compare/v1.243.0...v1.244.0) (2026-09-17)
 
 
