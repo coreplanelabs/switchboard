@@ -18,7 +18,7 @@ Right after a fresh installation starts there is no snapshot yet: the page says 
 
 ## Take a snapshot now
 
-Ask the bot for `costs snapshot` in Slack, or run `switchboard costs snapshot` on the CLI. The take reads both billing sources and the run history once (a few seconds, half a minute in a bad one), stores the result, and the page shows it on the next load with your name on the status line. The command needs the `costs:write` grant — an admin's `all` or a `grants` entry that names it — because a take reads two providers and replaces what every viewer sees.
+Click **Snapshot now** beside the status line (it is there when your session holds `costs:write`), ask the bot for `costs snapshot` in Slack, or run `switchboard costs snapshot` on the CLI. Every open costs page shows the take as it happens — the line reads `Taking a snapshot now…` and the figures repaint when it lands, no reload needed. The take reads both billing sources and the run history once (a few seconds, half a minute in a bad one), stores the result, and the page shows it on the next load with your name on the status line. The command needs the `costs:write` grant — an admin's `all` or a `grants` entry that names it — because a take reads two providers and replaces what every viewer sees.
 
 ## Narrow to one group
 

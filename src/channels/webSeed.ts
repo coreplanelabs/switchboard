@@ -259,6 +259,8 @@ export interface CostsSeed {
   users?: UserCostReport;
   /** The snapshot every figure on the page comes from: its stamp, the take in flight, when the next is due. */
   snapshot: CostsSnapshotStatus;
+  /** Whether the viewer holds `costs:write` — the **Snapshot now** button is offered only then. */
+  canSnapshot: boolean;
 }
 
 export interface DeliverySeed {
