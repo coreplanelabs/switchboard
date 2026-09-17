@@ -1,4 +1,4 @@
-import { spawn, execFileSync } from "node:child_process";
+import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -97,21 +97,83 @@ function fakeRuntime(dir: string, plan: string[]): string {
 }
 
 const dirs: string[] = [];
-afterEach(() => {
+/** Every supervisor a test started, so the teardown can end the ones a test
+ *  left running — and their runtimes with them. */
+const started: Array<{ child: ChildProcess; dir: string }> = [];
+
+/** The fake runtimes of `dir` still alive: `pgrep -f` over the script's path,
+ *  which only this test's processes carry. `pgrep` exits 1 for no match; a
+ *  host without it (exit code ENOENT) answers nothing, the assertion waived. */
+function survivingRuntimes(dir: string): number[] {
+  try {
+    return execFileSync("pgrep", ["-f", join(dir, "runtime.sh")], { encoding: "utf8" })
+      .split("\n")
+      .filter(Boolean)
+      .map(Number);
+  } catch (err) {
+    const e = err as { status?: number; code?: string };
+    if (e.status === 1 || e.code === "ENOENT") return [];
+    throw err;
+  }
+}
+
+/** End the supervisor's whole process group — the runtime it started shares
+ *  it — and wait for the supervisor itself to be gone. A SIGKILL on the
+ *  supervisor alone orphans the runtime: nothing forwards a KILL. */
+async function killGroup(s: { child: ChildProcess; exited: Promise<number | null> }): Promise<void> {
+  // The group outlives the supervisor: a runtime orphaned by a KILL keeps the
+  // group id, so the group is signalled whether or not the supervisor is gone.
+  if (s.child.pid !== undefined) {
+    try {
+      process.kill(-s.child.pid, "SIGKILL");
+    } catch {
+      // the group is gone already
+    }
+  }
+  await s.exited;
+}
+
+afterEach(async () => {
+  for (const s of started.splice(0)) {
+    const exited = new Promise<number | null>((r) => {
+      if (s.child.exitCode !== null || s.child.signalCode !== null) r(s.child.exitCode);
+      else s.child.on("exit", (c) => r(c));
+    });
+    await killGroup({ child: s.child, exited });
+  }
+  // The point of the group kill: a test run leaves no fake runtime
+  // behind, whatever signal ended its supervisor.
+  for (const d of dirs) {
+    const alive = survivingRuntimes(d);
+    for (const pid of alive) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // gone between the listing and the kill
+      }
+    }
+    expect(alive, `runtime shells of ${d} still alive after the test`).toEqual([]);
+  }
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
 function startSupervisor(dir: string, runtime: string, args: string[] = []) {
+  // Its own process group: the fake runtime the supervisor starts with `&`
+  // joins it, so ending the group ends both — the supervisor forwards TERM
+  // and INT itself, but nothing forwards a KILL.
   const child = spawn("sh", [SUPERVISOR, ...args], {
     env: { ...process.env, SANDBOX_RUNTIME: runtime },
     stdio: ["ignore", "pipe", "pipe"],
+    detached: true,
   });
+  started.push({ child, dir });
   let stderr = "";
   child.stderr.on("data", (c: Buffer) => (stderr += c.toString()));
   const exited = new Promise<number | null>((r) => child.on("exit", (c) => r(c)));
   const starts = () => Number(readFileSync(join(dir, "count"), "utf8").trim() || 0);
   const log = () => readFileSync(join(dir, "log"), "utf8");
-  return { child, exited, stderr: () => stderr, starts, log };
+  const s = { child, exited, stderr: () => stderr, starts, log, stop: () => killGroup({ child, exited }) };
+  return s;
 }
 
 async function until(cond: () => boolean, ms: number): Promise<void> {
@@ -141,9 +203,24 @@ describe("the runtime supervisor, driven", () => {
       expect(s.log()).toContain("start 2 args=--flag value");
       expect(s.stderr()).toContain("sandbox-runtime-supervisor: the runtime exited with status 1; starting it again");
     } finally {
-      s.child.kill("SIGKILL");
-      await s.exited;
+      await s.stop();
     }
+  });
+
+  it("a supervisor ended by SIGKILL takes its runtime with it when the group is ended, and leaves none behind", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sbx-supervisor-"));
+    dirs.push(dir);
+    const s = startSupervisor(dir, fakeRuntime(dir, ["live"]), ["--flag", "value"]);
+    await until(() => safeRead(s.starts) >= 1, 5_000);
+    expect(survivingRuntimes(dir)).toHaveLength(1);
+    // The supervisor alone: a KILL is not forwarded, so the runtime would live on…
+    s.child.kill("SIGKILL");
+    await s.exited;
+    expect(survivingRuntimes(dir)).toHaveLength(1);
+    // …until the group is ended, which is what every teardown here does.
+    await s.stop();
+    await until(() => survivingRuntimes(dir).length === 0, 5_000);
+    expect(survivingRuntimes(dir)).toEqual([]);
   });
 
   it("forwards SIGTERM to the live runtime and exits with the runtime's own status", async () => {
