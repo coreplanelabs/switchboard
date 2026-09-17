@@ -53,7 +53,7 @@ const tabs = computed<Array<{ label: string; value: Tab }>>(() => {
   const items: Array<{ label: string; value: Tab }> = [];
   if (gitDiff.value) items.push({ label: "Files changed", value: "files" });
   if (meatDiff.value) items.push({ label: "Reading diff", value: "reading" });
-  if (description.value?.tldr || description.value?.whatWhy) items.push({ label: "Description", value: "description" });
+  if (description.value?.tldr || description.value?.why) items.push({ label: "Description", value: "description" });
   return items;
 });
 /** The abridged diff is the reader's first stop when a producer made one. */
@@ -262,9 +262,9 @@ const ABRIDGE_EXPLANATION =
       >
         <div class="mb-2 text-xs font-medium text-(--ui-text-dimmed)">What the pull request says about itself</div>
         <MarkdownText v-if="description.tldr" :text="description.tldr" class="text-sm" data-testid="description-tldr" />
-        <template v-if="description.whatWhy">
-          <div class="mt-4 mb-2 text-xs font-medium text-(--ui-text-dimmed)">What &amp; why</div>
-          <MarkdownText :text="description.whatWhy" class="text-sm" data-testid="description-what-why" />
+        <template v-if="description.why">
+          <div class="mt-4 mb-2 text-xs font-medium text-(--ui-text-dimmed)">Why</div>
+          <MarkdownText :text="description.why" class="text-sm" data-testid="description-why" />
         </template>
         <p v-if="note" class="mt-4 text-xs text-(--ui-text-dimmed) italic" data-testid="description-origin">
           {{ note }}

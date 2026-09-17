@@ -707,7 +707,7 @@ export async function runCodingPrPostStep(input: {
       });
       // The description as data, persisted at its source (reading-diff.md item
       // 7): the same object the body was rendered from, with the head it was
-      // rendered at, so a review of this head can carry the exact Tour instead
+      // rendered at, so a review of this head can carry the exact pointers instead
       // of parsing the body back.
       input.publish({
         type: "review_artifact",

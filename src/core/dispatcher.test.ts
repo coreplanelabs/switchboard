@@ -3258,17 +3258,18 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
   const DESCRIPTION = {
     title: "Fix the login redirect",
     tldr: "Restores the session cookie on login. Users can sign in again.",
-    whatWhy: "The handler dropped the cookie after the redirect change; this restores it.",
-    tour: [
+    why: "The handler dropped the cookie after the redirect change; this restores it.",
+    pointers: [
       {
-        title: "The fix",
-        description: "The cookie is set on the redirect response again.",
+        label: "The fix",
+        text: "The cookie is set on the redirect response again.",
         anchor: { path: "src/login.ts", from: 10, to: 20 },
       },
     ],
-    remaining: [],
+    feedbackWanted: "Nothing in particular.",
+    verified: "See validation.",
     decisions: [{ title: "Keep the cookie name", rationale: "renaming would log everyone out" }],
-    risks: "none — covered by the auth suite",
+    risk: "none — covered by the auth suite",
     validation: { criteria: [{ criterion: "auth suite green", proof: "npm test — 24 passing" }] },
   };
 
@@ -3428,9 +3429,9 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     expect(target.headBranch).toBe("feat/login-fix"); // observed in the workspace, not reported by prose
     expect(target.base).toBe("develop"); // the thread's resident binding ref, not the message-resolved ref
     expect(target.title).toBe("Fix the login redirect"); // the typed PrDescription.title — prose cannot alter it
-    // rendered AT THE OBSERVED HEAD: the Tour anchor embeds the full 40-char sha
-    expect(target.body).toContain(`https://github.com/acme/api/blob/${HEAD}/src/login.ts#L10-L20`);
-    expect(target.body).toContain("## TL;DR");
+    // rendered AT THE OBSERVED HEAD: the pointer's link carries the full 40-char sha, inside link syntax
+    expect(target.body).toContain(`](https://github.com/acme/api/blob/${HEAD}/src/login.ts#L10-L20)`);
+    expect(target.body).toContain("**Why:**");
     // the reply carries the returned URL with the created wording
     expect(replies.some((r) => r.includes("https://github.com/acme/api/pull/7") && /PR opened/.test(r))).toBe(true);
   });
@@ -4136,7 +4137,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
   });
 
   it("the accepted description is published on the run stream as a typed pr_description event, redacted", async () => {
-    const leaky = { ...DESCRIPTION, risks: `uses ghp_${"a".repeat(24)} for auth — rotated after` };
+    const leaky = { ...DESCRIPTION, risk: `uses ghp_${"a".repeat(24)} for auth — rotated after` };
     const deps = codingDeps(describeThenAnswer(leaky));
     codingExecutor({ head: HEAD, branch: "feat/x", bindingRef: "main" });
     deps.openPullRequest = openSpy().fn;
@@ -4148,15 +4149,15 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     const ev = snap?.events.find((e) => e.type === "pr_description");
     if (ev?.type !== "pr_description") throw new Error("pr_description event missing");
     expect(ev.description.title).toBe("Fix the login redirect");
-    expect(ev.description.tour[0].anchor).toEqual({ path: "src/login.ts", from: 10, to: 20 });
-    expect(ev.description.risks).toContain("«redacted-github-token»");
-    expect(ev.description.risks).not.toContain("ghp_");
+    expect(ev.description.pointers[0].anchor).toEqual({ path: "src/login.ts", from: 10, to: 20 });
+    expect(ev.description.risk).toContain("«redacted-github-token»");
+    expect(ev.description.risk).not.toContain("ghp_");
   });
 
-  it("redaction walks every string leaf: a secret-shaped token in a tour anchor PATH is redacted on the published event too", async () => {
+  it("redaction walks every string leaf: a secret-shaped token in a pointer anchor PATH is redacted on the published event too", async () => {
     const leaky = {
       ...DESCRIPTION,
-      tour: [{ title: "The fix", description: "d.", anchor: { path: `src/ghp_${"a".repeat(24)}.ts`, from: 1, to: 2 } }],
+      pointers: [{ label: "The fix", text: "d.", anchor: { path: `src/ghp_${"a".repeat(24)}.ts`, from: 1, to: 2 } }],
     };
     const deps = codingDeps(describeThenAnswer(leaky));
     codingExecutor({ head: HEAD, branch: "feat/x", bindingRef: "main" });
@@ -4168,9 +4169,9 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     const snap = registry.snapshot("r10", "t10");
     const ev = snap?.events.find((e) => e.type === "pr_description");
     if (ev?.type !== "pr_description") throw new Error("pr_description event missing");
-    expect(ev.description.tour[0].anchor.path).toContain("«redacted-github-token»");
-    expect(ev.description.tour[0].anchor.path).not.toContain("ghp_");
-    expect(ev.description.tour[0].anchor.from).toBe(1); // numbers ride unchanged
+    expect(ev.description.pointers[0].anchor.path).toContain("«redacted-github-token»");
+    expect(ev.description.pointers[0].anchor.path).not.toContain("ghp_");
+    expect(ev.description.pointers[0].anchor.from).toBe(1); // numbers ride unchanged
   });
 
   // docs/reference/specs/agent-coding.md item 9, run-history.md item 2 — a plain
@@ -8034,10 +8035,7 @@ describe("reading-diff artifact on review runs", () => {
         title: "Fix the gate (submitted)",
         body: "## TL;DR\n\nsubmitted",
         tldr: "submitted",
-        tour: [
-          { title: "The gate", description: "d", anchor: { path: "src/gate.ts", from: 10, to: 20, sha: headSha } },
-        ],
-        remaining: [],
+        pointers: [{ label: "The gate", text: "d", anchor: { path: "src/gate.ts", from: 10, to: 20, sha: headSha } }],
         decisions: [{ title: "Fail closed", rationale: "safer" }],
         complete: true,
         problems: [],
@@ -8083,15 +8081,14 @@ describe("reading-diff artifact on review runs", () => {
       headSha: REVIEWED,
       title: "Fix the gate",
       tldr: "Two sentences, one of them holding «redacted-github-token».",
-      tour: [
+      pointers: [
         {
-          title: "The gate",
-          description: "Closes on a bad token.",
+          label: "The gate",
+          text: "Closes on a bad token.",
           anchor: { path: "src/gate.ts", from: 10, to: 20, sha: REVIEWED },
         },
       ],
-      remaining: [],
-      complete: false, // the body has no What & why / Decisions / Risks / Validation
+      complete: false, // the body has no Why / Feedback wanted / Risk / Verified / Validation
       truncated: false,
     });
     expect(artifact.body).not.toContain("ghp_");

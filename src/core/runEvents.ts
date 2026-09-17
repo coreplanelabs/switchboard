@@ -1,7 +1,7 @@
 // Types only, and from the zod-free module deliberately: this file is part of
 // the node-free contract the memory Worker and web app compile with their own
 // tsconfigs — importing prDescription.ts would drag zod into those graphs.
-import type { PrDescription, RenderedTourStep } from "./prDescriptionTypes.js";
+import type { PrDescription, RenderedPointer } from "./prDescriptionTypes.js";
 import type { HarnessScope } from "./harness/scope.js";
 
 /** The `pr_description` review artifact minus the event envelope
@@ -26,8 +26,11 @@ export interface PrDescriptionArtifact {
   /** The body as rendered (submitted) or as GitHub holds it (parsed), capped. */
   body: string;
   tldr?: string;
-  tour: RenderedTourStep[];
-  remaining: { path: string; note: string }[];
+  why?: string;
+  /** The map's "Where to look", each anchor stamped with the sha its permalink
+   *  was rendered at. (A record written under the previous contract carries
+   *  this array as `tour`; the line parser accepts either name.) */
+  pointers: RenderedPointer[];
   decisions: { title: string; rationale: string }[];
   /** Nothing missing or malformed — always true for `submitted`. */
   complete: boolean;

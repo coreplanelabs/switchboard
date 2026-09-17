@@ -88,7 +88,7 @@ const data = (over: Partial<PrReviewData> = {}): PrReviewData => ({
 const desc = (over: Partial<PrDescriptionData> = {}): PrDescriptionData => ({
   title: "Retry webhook deliveries",
   tldr: "The TL;DR.",
-  whatWhy: "Because a flaky receiver loses the event.",
+  why: "Because a flaky receiver loses the event.",
   origin: "parsed",
   complete: false,
   truncated: false,
@@ -310,7 +310,7 @@ describe("PrReviewPanel", () => {
     lone.unmount();
 
     const mute = await mountPanel({
-      data: data({ readingDiffs: [gitDiff], description: desc({ tldr: undefined, whatWhy: undefined }) }),
+      data: data({ readingDiffs: [gitDiff], description: desc({ tldr: undefined, why: undefined }) }),
     });
     expect(tabLabels(mute, "panel-tabs")).toEqual(["Files changed"]); // a description with no prose has no tab
     mute.unmount();
@@ -378,12 +378,12 @@ describe("PrReviewPanel", () => {
     again.unmount();
   });
 
-  it("the Description tab: the TL;DR and the What & why as prose, the note for a copy read back from the PR body; a complete description carries no note", async () => {
+  it("the Description tab: the TL;DR and the Why as prose, the note for a copy read back from the PR body; a complete description carries no note", async () => {
     const w = await mountPanel({ data: data({ description: desc() }) });
     await pickTab(w, "panel-tabs", "Description");
     const block = w.find('[data-testid="pr-description"]');
     expect(block.find('[data-testid="description-tldr"]').text()).toBe("The TL;DR.");
-    expect(block.find('[data-testid="description-what-why"]').text()).toBe("Because a flaky receiver loses the event.");
+    expect(block.find('[data-testid="description-why"]').text()).toBe("Because a flaky receiver loses the event.");
     expect(block.find('[data-testid="description-origin"]').text()).toBe("read back from the PR body");
     expect(w.find('[data-testid="file-diffs"]').exists()).toBe(false);
     w.unmount();

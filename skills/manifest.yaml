@@ -18,7 +18,7 @@ skills:
   # First-party (local: true): authored in this repo, never synced — git is
   # the integrity; the check verifies presence + agents and refuses an
   # upstream block.
-  - name: pr-tour
+  - name: pr-description
     local: true
     agents: [ coding ]
   - name: address-review-findings

@@ -1,34 +1,48 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 import {
+  FOLD_SUMMARIES,
   GENERATED_FOOTER,
+  MAP_LABELS,
+  PR_DESCRIPTION_CAPS,
   anchorUrl,
   parsePrDescription,
   parsePrDescriptionMarkdown,
   renderPrDescriptionMarkdown,
+  visibleLength,
   type PrDescription,
 } from "./prDescription.js";
 
-// Feature: docs/reference/specs/pr-description.md — the PR description is data; the GitHub
-// body is one rendering of it. The fixture is a real PR's description — the
-// PR that introduced the Tour, rewritten onto the fixture repo `acme/api` — and
-// the golden file is its rendered body, so the pipeline is exercised end to end
-// on a full-sized description, not a toy.
+// Feature: docs/reference/specs/pr-description.md (shape: docs/decisions/0050) — the PR
+// description is data; the GitHub body is one rendering of it: a fixed-size
+// MAP above the fold and the collapsed blocks below. The fixture is a real
+// PR's description — the PR that introduced the map, rewritten onto the
+// fixture repo `acme/api` — and the golden file is its rendered body, so the
+// pipeline is exercised end to end on a full-sized description, not a toy.
 
 const CTX = { repo: "acme/api", headSha: "685c471f31feaadd725fb917b68a2eea31c0f81a" };
+const URL_A = `https://github.com/acme/api/blob/${CTX.headSha}/src/a.ts#L3-L9`;
 
 function desc(over: Partial<PrDescription> = {}): PrDescription {
   return {
     title: "A test PR title",
     tldr: "Two sentences.",
-    whatWhy: "Because.",
-    tour: [{ title: "The thing", description: "What it does.", anchor: { path: "src/a.ts", from: 3, to: 9 } }],
-    remaining: [],
+    why: "Because [#1](https://github.com/acme/api/issues/1).",
+    pointers: [{ label: "The thing", text: "What it does.", anchor: { path: "src/a.ts", from: 3, to: 9 } }],
+    feedbackWanted: "Whether the cap is right.",
+    risk: "None — prompt only.",
+    verified: "`npm test` green.",
     decisions: [{ title: "Chose X", rationale: "Y was worse." }],
-    risks: "None — prompt only.",
     validation: { criteria: [{ criterion: "It renders", proof: "`[unit]` this test" }] },
     ...over,
   };
+}
+
+function goldenFixture(): PrDescription {
+  return parsePrDescription(
+    JSON.parse(readFileSync(new URL("./testing/goldenMap.description.json", import.meta.url), "utf8")),
+  );
 }
 
 describe("parsePrDescription (the schema)", () => {
@@ -44,55 +58,197 @@ describe("parsePrDescription (the schema)", () => {
     expect(parsePrDescription({ ...desc(), title: "  Fix the gate  " }).title).toBe("Fix the gate");
   });
 
-  it("rejects an embedded newline on a `line` field — a multi-line PR title would split the `### N.` headings and go verbatim into the PR's own title", () => {
+  it("rejects an embedded newline on a `line` field — a multi-line title goes verbatim into the PR's own title, a multi-line pointer would split its row", () => {
     const badTitle = () => parsePrDescription({ ...desc(), title: "Fix the gate\nand also the fence" });
     expect(badTitle).toThrow(/single line/);
-    expect(badTitle).toThrow(/title/); // the zod error names the offending path
+    expect(badTitle).toThrow(/title/);
     expect(() => parsePrDescription({ ...desc(), title: "Fix\r\nthe gate" })).toThrow(/single line/);
-    const badStep = () =>
+    const badPointer = () =>
       parsePrDescription({
         ...desc(),
-        tour: [{ title: "The\nthing", description: "d", anchor: { path: "src/a.ts", from: 1, to: 2 } }],
+        pointers: [{ label: "The\nthing", text: "d", anchor: { path: "src/a.ts", from: 1, to: 2 } }],
       });
-    expect(badStep).toThrow(/single line/);
-    expect(badStep).toThrow(/tour/); // …for tour-step titles too
+    expect(badPointer).toThrow(/single line/);
+    expect(badPointer).toThrow(/pointers/);
   });
 
-  it("rejects an empty tour, missing sections, and empty strings", () => {
-    expect(() => parsePrDescription({ ...desc(), tour: [] })).toThrow(/tour/);
-    const { risks: _r, ...noRisks } = desc();
-    expect(() => parsePrDescription(noRisks)).toThrow(/risks/);
+  it("rejects no pointers, missing fields and empty strings; decisions may be empty, criteria may not", () => {
+    expect(() => parsePrDescription({ ...desc(), pointers: [] })).toThrow(/at least 1 pointers \(got 0\)/);
+    const { risk: _r, ...noRisk } = desc();
+    expect(() => parsePrDescription(noRisk)).toThrow(/risk/);
+    const { feedbackWanted: _f, ...noFeedback } = desc();
+    expect(() => parsePrDescription(noFeedback)).toThrow(/feedbackWanted/);
+    const { verified: _v, ...noVerified } = desc();
+    expect(() => parsePrDescription(noVerified)).toThrow(/verified/);
     expect(() => parsePrDescription({ ...desc(), tldr: "   " })).toThrow(/tldr/);
-    expect(() => parsePrDescription({ ...desc(), decisions: [] })).toThrow(/decisions/);
-    expect(() => parsePrDescription({ ...desc(), validation: { criteria: [] } })).toThrow(/criteria/);
+    expect(parsePrDescription({ ...desc(), decisions: [] }).decisions).toEqual([]);
+    expect(() => parsePrDescription({ ...desc(), validation: { criteria: [] } })).toThrow(/at least 1 criteria/);
+  });
+
+  // docs/decisions/0050 "The cap": the map's size is the schema's, not the
+  // author's restraint — every field capped, the message naming cap and count.
+  /** The zod issue at `path`, so a test can assert the field AND the message. */
+  function issueAt(fn: () => unknown, path: string): string {
+    try {
+      fn();
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        const issue = err.issues.find((i) => i.path.join(".") === path);
+        if (!issue)
+          throw new Error(`no issue at ${path}; got ${err.issues.map((i) => i.path.join(".")).join(", ")}`, {
+            cause: err,
+          });
+        return issue.message;
+      }
+      throw err;
+    }
+    throw new Error("did not throw");
+  }
+
+  it("caps every map field in visible characters and names the cap and the count; a link's target is not counted", () => {
+    const long = (n: number) => "x".repeat(n);
+    expect(issueAt(() => parsePrDescription({ ...desc(), tldr: long(301) }), "tldr")).toBe(
+      "at most 300 visible characters (got 301)",
+    );
+    expect(issueAt(() => parsePrDescription({ ...desc(), why: long(401) }), "why")).toMatch(/at most 400/);
+    expect(issueAt(() => parsePrDescription({ ...desc(), feedbackWanted: long(201) }), "feedbackWanted")).toMatch(
+      /at most 200/,
+    );
+    expect(issueAt(() => parsePrDescription({ ...desc(), risk: long(301) }), "risk")).toMatch(/at most 300/);
+    expect(issueAt(() => parsePrDescription({ ...desc(), verified: long(201) }), "verified")).toMatch(/at most 200/);
+    const p = (over: Record<string, string>) => ({
+      ...desc(),
+      pointers: [{ label: "l", text: "t", anchor: { path: "a.ts", from: 1, to: 1 }, ...over }],
+    });
+    expect(issueAt(() => parsePrDescription(p({ label: long(61) })), "pointers.0.label")).toMatch(/at most 60/);
+    expect(issueAt(() => parsePrDescription(p({ text: long(161) })), "pointers.0.text")).toMatch(/at most 160/);
+    expect(issueAt(() => parsePrDescription(p({ risk: long(101) })), "pointers.0.risk")).toMatch(/at most 100/);
+    // A why of three links: 300 characters of URL count for nothing.
+    const linked = Array.from(
+      { length: 3 },
+      (_, i) => `[#${i}](https://github.com/acme/api/pull/${i}${long(90)})`,
+    ).join(" ");
+    expect(visibleLength(linked)).toBeLessThan(30);
+    expect(parsePrDescription({ ...desc(), why: `Stacked on ${linked}.` }).why).toContain("Stacked on");
+    // …and the collapsed half is bounded too, so the coverage instinct cannot move there.
+    expect(
+      issueAt(
+        () =>
+          parsePrDescription({
+            ...desc(),
+            decisions: Array.from({ length: 11 }, () => ({ title: "t", rationale: "r" })),
+          }),
+        "decisions",
+      ),
+    ).toBe("at most 10 decisions (got 11)");
+    expect(
+      issueAt(
+        () => parsePrDescription({ ...desc(), decisions: [{ title: "t", rationale: long(401) }] }),
+        "decisions.0.rationale",
+      ),
+    ).toMatch(/at most 400/);
+    expect(
+      issueAt(
+        () =>
+          parsePrDescription({
+            ...desc(),
+            validation: { criteria: Array.from({ length: 31 }, () => ({ criterion: "c", proof: "p" })) },
+          }),
+        "validation.criteria",
+      ),
+    ).toBe("at most 30 criteria (got 31)");
+    expect(
+      issueAt(
+        () => parsePrDescription({ ...desc(), validation: { criteria: [{ criterion: long(201), proof: "p" }] } }),
+        "validation.criteria.0.criterion",
+      ),
+    ).toMatch(/at most 200/);
+    expect(
+      issueAt(
+        () => parsePrDescription({ ...desc(), validation: { criteria: [{ criterion: "c", proof: long(301) }] } }),
+        "validation.criteria.0.proof",
+      ),
+    ).toMatch(/at most 300/);
+    expect(issueAt(() => parsePrDescription({ ...desc(), agentNotes: long(2001) }), "agentNotes")).toMatch(
+      /at most 2000/,
+    );
+  });
+
+  it("caps the pointers at seven, naming the count — an 80-file PR gets the same rows as a 3-file PR", () => {
+    const pointer = (i: number) => ({ label: `p${i}`, text: "t", anchor: { path: `src/${i}.ts`, from: 1, to: 1 } });
+    expect(
+      parsePrDescription({ ...desc(), pointers: Array.from({ length: 7 }, (_, i) => pointer(i)) }).pointers,
+    ).toHaveLength(7);
+    expect(
+      issueAt(
+        () => parsePrDescription({ ...desc(), pointers: Array.from({ length: 12 }, (_, i) => pointer(i)) }),
+        "pointers",
+      ),
+    ).toBe("at most 7 pointers (got 12)");
+    expect(PR_DESCRIPTION_CAPS.pointers).toBe(7);
+  });
+
+  it("rejects a pointer text carrying the ` ⚠ ` risk separator — it would parse back with its tail as the risk", () => {
+    const p = (text: string) => ({
+      ...desc(),
+      pointers: [{ label: "l", text, anchor: { path: "a.ts", from: 1, to: 1 } }],
+    });
+    expect(issueAt(() => parsePrDescription(p("one ⚠ two")), "pointers.0.text")).toMatch(/risk separator/);
+    expect(parsePrDescription(p("one⚠two")).pointers[0].text).toBe("one⚠two"); // no spaces: not the separator
   });
 
   it("rejects a bad anchor: absolute or traversing path, non-positive lines, to < from", () => {
-    const step = (anchor: Record<string, unknown>) => ({ ...desc(), tour: [{ title: "t", description: "d", anchor }] });
-    expect(() => parsePrDescription(step({ path: "/etc/passwd", from: 1, to: 2 }))).toThrow(/repo-relative/);
-    expect(() => parsePrDescription(step({ path: "../x.ts", from: 1, to: 2 }))).toThrow(/repo-relative/);
-    expect(() => parsePrDescription(step({ path: "a.ts", from: 0, to: 2 }))).toThrow(/from/);
-    expect(() => parsePrDescription(step({ path: "a.ts", from: 5, to: 2 }))).toThrow(/to must be >= from/);
-    // `..` is rejected as a SEGMENT only — a filename containing dots is legitimate (review nit).
-    expect(parsePrDescription(step({ path: "src/a..b.ts", from: 1, to: 2 })).tour[0].anchor.path).toBe("src/a..b.ts");
-    expect(() => parsePrDescription(step({ path: "src/../x.ts", from: 1, to: 2 }))).toThrow(/repo-relative/);
+    const p = (anchor: Record<string, unknown>) => ({ ...desc(), pointers: [{ label: "l", text: "t", anchor }] });
+    expect(() => parsePrDescription(p({ path: "/etc/passwd", from: 1, to: 2 }))).toThrow(/repo-relative/);
+    expect(() => parsePrDescription(p({ path: "../x.ts", from: 1, to: 2 }))).toThrow(/repo-relative/);
+    expect(() => parsePrDescription(p({ path: "a.ts", from: 0, to: 2 }))).toThrow(/from/);
+    expect(() => parsePrDescription(p({ path: "a.ts", from: 5, to: 2 }))).toThrow(/to must be >= from/);
+    // `..` is rejected as a SEGMENT only — a filename containing dots is legitimate.
+    expect(parsePrDescription(p({ path: "src/a..b.ts", from: 1, to: 2 })).pointers[0].anchor.path).toBe("src/a..b.ts");
+    expect(() => parsePrDescription(p({ path: "src/../x.ts", from: 1, to: 2 }))).toThrow(/repo-relative/);
   });
 });
 
 describe("renderPrDescriptionMarkdown", () => {
-  it("renders every section as a ## heading in the contract order, TL;DR first", () => {
+  it("renders the map in the contract order — tldr first with no heading, the bold labels, the numbered pointers — then the folds, then the footer", () => {
     const md = renderPrDescriptionMarkdown(desc(), CTX);
-    const headings = md.split("\n").filter((l) => l.startsWith("## "));
-    expect(headings).toEqual([
-      "## TL;DR",
-      "## What & why",
-      "## Tour",
-      "## Decisions",
-      "## Risks & implications",
-      "## Validation",
-    ]);
-    expect(md.startsWith("## TL;DR\n\nTwo sentences.\n")).toBe(true);
-    expect(md.trimEnd().endsWith(GENERATED_FOOTER)).toBe(true);
+    expect(md).toBe(
+      [
+        "Two sentences.",
+        "",
+        "**Why:** Because [#1](https://github.com/acme/api/issues/1).",
+        "",
+        "**Where to look**",
+        "",
+        `1. [The thing](${URL_A}) What it does.`,
+        "",
+        "**Feedback wanted:** Whether the cap is right.",
+        "",
+        "**Risk:** None — prompt only.",
+        "",
+        "**Verified:** `npm test` green.",
+        "",
+        "<details>",
+        "<summary>Decisions (1)</summary>",
+        "",
+        "- **Chose X.** Y was worse.",
+        "",
+        "</details>",
+        "",
+        "<details>",
+        "<summary>Validation (1 criterion)</summary>",
+        "",
+        "| Criterion | Proof |",
+        "|---|---|",
+        "| It renders | `[unit]` this test |",
+        "",
+        "</details>",
+        "",
+        GENERATED_FOOTER,
+        "",
+      ].join("\n"),
+    );
+    expect(md.split("\n").filter((l) => /^#{1,6}\s/.test(l))).toEqual([]); // no headings anywhere
   });
 
   it("the title is metadata for the PR's own title field — never rendered into the body", () => {
@@ -100,104 +256,130 @@ describe("renderPrDescriptionMarkdown", () => {
     expect(md).not.toContain("UNIQUE-TITLE-NEVER-IN-BODY");
   });
 
-  it("a Tour step is `### N. title` → description → optional Look for → permalink LAST, numbered from 1", () => {
+  it("a pointer is `N. [label](permalink) text ⚠ risk`, numbered from 1, the ⚠ only when a risk is set; a `]` in a label is escaped", () => {
     const md = renderPrDescriptionMarkdown(
       desc({
-        tour: [
-          { title: "First", description: "One.", lookFor: "the guard", anchor: { path: "src/a.ts", from: 3, to: 9 } },
-          { title: "Second", description: "Two.", anchor: { path: "src/b.ts", from: 10, to: 10 } },
+        pointers: [
+          { label: "First", text: "One.", risk: "the guard", anchor: { path: "src/a.ts", from: 3, to: 9 } },
+          { label: "Second [x]", text: "Two.", anchor: { path: "src/b.ts", from: 10, to: 10 } },
         ],
       }),
       CTX,
     );
     expect(md).toContain(
-      "### 1. First\n\nOne.\n\n**Look for:** the guard\n\nhttps://github.com/acme/api/blob/685c471f31feaadd725fb917b68a2eea31c0f81a/src/a.ts#L3-L9\n\n### 2. Second\n\nTwo.\n\nhttps://github.com/acme/api/blob/685c471f31feaadd725fb917b68a2eea31c0f81a/src/b.ts#L10-L10\n\n### 3. Remaining changes",
+      `1. [First](${URL_A}) One. ⚠ the guard\n2. [Second [x\\]](https://github.com/acme/api/blob/${CTX.headSha}/src/b.ts#L10-L10) Two.\n\n${MAP_LABELS.feedbackWanted}`,
     );
+  });
+
+  // docs/decisions/0050 "Links, not embeds": a bare permalink on its own line
+  // is what GitHub embeds as a code block; the map is links.
+  it("never writes a bare permalink line — every anchor sits inside link syntax", () => {
+    const md = renderPrDescriptionMarkdown(goldenFixture(), CTX);
+    const bare = md.split("\n").filter((l) => /^https:\/\/github\.com\/\S+\/blob\//.test(l.trim()));
+    expect(bare).toEqual([]);
+    expect(md).toMatch(/\]\(https:\/\/github\.com\/acme\/api\/blob\/[0-9a-f]{40}\/[^)]+#L\d+-L\d+\)/);
   });
 
   it("anchors take the sha from the render context — a repush is a re-render, never an edit of the data", () => {
     const d = desc();
     const a = renderPrDescriptionMarkdown(d, CTX);
-    const b = renderPrDescriptionMarkdown(d, { ...CTX, headSha: "a".repeat(40) });
-    expect(a).not.toBe(b);
-    expect(b).toContain(`/blob/${"a".repeat(40)}/src/a.ts#L3-L9`);
-    expect(anchorUrl(CTX, { path: "x/y.ts", from: 1, to: 2 })).toBe(
-      `https://github.com/acme/api/blob/${CTX.headSha}/x/y.ts#L1-L2`,
-    );
+    const b = renderPrDescriptionMarkdown(d, { ...CTX, headSha: "1234567890abcdef1234567890abcdef12345678" });
+    expect(a).toContain(`blob/${CTX.headSha}/src/a.ts#L3-L9`);
+    expect(b).toContain("blob/1234567890abcdef1234567890abcdef12345678/src/a.ts#L3-L9");
+    expect(anchorUrl(CTX, { path: "src/a.ts", from: 3, to: 9 })).toBe(URL_A);
   });
 
   it("percent-encodes path segments (a space or `#` in a filename would break the link), keeping `/` as the separator", () => {
-    expect(anchorUrl(CTX, { path: "docs/my file#1.md", from: 1, to: 2 })).toBe(
-      `https://github.com/acme/api/blob/${CTX.headSha}/docs/my%20file%231.md#L1-L2`,
+    expect(anchorUrl(CTX, { path: "docs/a b#c.md", from: 1, to: 2 })).toBe(
+      `https://github.com/acme/api/blob/${CTX.headSha}/docs/a%20b%23c.md#L1-L2`,
     );
   });
 
-  it("refuses a short sha or a non owner/name repo (a branch or short ref would not embed as code)", () => {
-    expect(() => renderPrDescriptionMarkdown(desc(), { ...CTX, headSha: "5bf806a" })).toThrow(/full 40-char/);
-    expect(() => renderPrDescriptionMarkdown(desc(), { ...CTX, headSha: "coding/pr-tour-template" })).toThrow(
-      /full 40-char/,
+  it("refuses a short sha or a non owner/name repo", () => {
+    expect(() => renderPrDescriptionMarkdown(desc(), { ...CTX, headSha: "685c471" })).toThrow(/40-char/);
+    expect(() => renderPrDescriptionMarkdown(desc(), { ...CTX, headSha: "coding/pr-description-map" })).toThrow(
+      /40-char/,
     );
-    expect(() => renderPrDescriptionMarkdown(desc(), { ...CTX, repo: "https://github.com/a/b" })).toThrow(
-      /owner\/name/,
-    );
+    expect(() => renderPrDescriptionMarkdown(desc(), { ...CTX, repo: "acme" })).toThrow(/owner\/name/);
   });
 
-  it("Remaining changes lists each file with its note, or says none is left", () => {
-    expect(renderPrDescriptionMarkdown(desc(), CTX)).toContain(
-      "### 2. Remaining changes\n\n- none — every touched file is covered by a step above\n",
-    );
-    const md = renderPrDescriptionMarkdown(desc({ remaining: [{ path: "package.json", note: "new script" }] }), CTX);
-    expect(md).toContain("### 2. Remaining changes\n\n- `package.json` — new script\n");
-  });
-
-  it("decisions read `- **Title.** rationale` (one trailing period, never two); validation is an optional summary + a criterion/proof table with pipes escaped", () => {
+  it("the folds: no decisions → no Decisions block; agentNotes → a For agents block; the validation fold names its count", () => {
     const md = renderPrDescriptionMarkdown(
       desc({
-        decisions: [
-          { title: "No period", rationale: "One." },
-          { title: "Has period.", rationale: "Two." },
-        ],
+        decisions: [],
+        agentNotes: "Skip the lockfile churn.",
         validation: {
-          summary: "All green.",
           criteria: [
-            { criterion: "a | b", proof: "multi\nline" },
-            { criterion: "literal \\| stays literal", proof: "C:\\path" },
+            { criterion: "a", proof: "b" },
+            { criterion: "c", proof: "d" },
           ],
         },
       }),
       CTX,
     );
-    expect(md).toContain("- **No period.** One.\n- **Has period.** Two.\n");
-    expect(md).toContain("## Validation\n\nAll green.\n\n| Criterion | Proof |\n|---|---|\n| a \\| b | multi line |\n");
-    // A backslash in the input is escaped before the pipe is, so `\|` in a cell
-    // renders as the two literal characters, not as an escaped-escape + row split.
-    expect(md).toContain("| literal \\\\\\| stays literal | C:\\\\path |\n");
+    expect(md).not.toContain("<summary>Decisions");
+    expect(md).toContain(`<summary>${FOLD_SUMMARIES.validation(2)}</summary>`);
+    expect(md).toContain("<details>\n<summary>For agents</summary>\n\nSkip the lockfile churn.\n\n</details>");
+    // Every fold is `<details>`, `<summary>`, a blank line (GitHub renders the markdown inside only after one), the body, `</details>`.
+    expect(md.match(/<details>\n<summary>[^\n]+<\/summary>\n\n/g)?.length).toBe(2);
+  });
+
+  it("decisions read `- **Title.** rationale` (one trailing period, never two); table cells escape `|` and flatten newlines", () => {
+    const md = renderPrDescriptionMarkdown(
+      desc({
+        decisions: [
+          { title: "Ends with period.", rationale: "r1" },
+          { title: "No period", rationale: "r2" },
+        ],
+        validation: { criteria: [{ criterion: "a | b", proof: "c\nd" }] },
+      }),
+      CTX,
+    );
+    expect(md).toContain("- **Ends with period.** r1\n- **No period.** r2");
+    expect(md).toContain("| a \\| b | c d |");
+  });
+
+  // docs/decisions/0050 invariants: the map never exceeds 3,800 visible
+  // characters, and the whole body never exceeds 26,000.
+  it("a maximal object renders a map under 3,800 visible characters and a body under 26,000", () => {
+    const fill = (n: number) => "x".repeat(n);
+    const maximal = desc({
+      tldr: fill(300),
+      why: fill(400),
+      pointers: Array.from({ length: 7 }, (_, i) => ({
+        label: fill(60),
+        text: fill(160),
+        risk: fill(100),
+        anchor: { path: `src/${i}.ts`, from: 1, to: 25 },
+      })),
+      feedbackWanted: fill(200),
+      risk: fill(300),
+      verified: fill(200),
+      decisions: Array.from({ length: 10 }, () => ({ title: fill(60), rationale: fill(400) })),
+      validation: { criteria: Array.from({ length: 30 }, () => ({ criterion: fill(200), proof: fill(300) })) },
+      agentNotes: fill(2000),
+    });
+    const md = renderPrDescriptionMarkdown(parsePrDescription(maximal), CTX);
+    const map = md.slice(0, md.indexOf("<details>"));
+    expect(visibleLength(map)).toBeLessThan(3800);
+    expect(visibleLength(md)).toBeLessThan(26000);
   });
 });
 
-// The golden: a real PR's description as data renders to the exact body that
-// PR carried. `scripts/render-pr-description.ts` produced the golden file from
-// the same fixture, and `gh pr edit --body-file` put it on the PR — so the PR
-// body, the golden file, and this assertion are one artifact by construction.
-const goldenFixture = () =>
-  parsePrDescription(
-    JSON.parse(readFileSync(new URL("./testing/goldenTour.description.json", import.meta.url), "utf8")),
-  );
-
 describe("golden: a full PR description rendered through the pipeline", () => {
   it("fixture → markdown equals the checked-in body byte for byte", () => {
-    const golden = readFileSync(new URL("./testing/goldenTour.body.md", import.meta.url), "utf8");
+    const golden = readFileSync(new URL("./testing/goldenMap.body.md", import.meta.url), "utf8");
     expect(renderPrDescriptionMarkdown(goldenFixture(), CTX)).toBe(golden);
   });
 });
 
 // Feature: docs/reference/specs/pr-description.md item 6 — the inverse of the renderer: a
 // body GitHub holds, read back into the object (what a review run's panel
-// gets when the PR was described by a human or an older pipeline). Strict
-// where the renderer is strict (a step needs a well-formed permalink), never
-// a throw on a body without the shape.
+// gets when the PR was described by a person or an older pipeline). Strict
+// where the renderer is strict (a pointer needs a well-formed permalink),
+// never a throw on a body without the shape.
 describe("parsePrDescriptionMarkdown — the inverse of the renderer", () => {
-  it("golden round trip: tldr, whatWhy, tour (anchors + the render sha), remaining, decisions, risks and validation come back equal; the title is not in the body", () => {
+  it("golden round trip: tldr, why, pointers (anchors + the render sha), feedbackWanted, risk, verified, decisions, validation and agentNotes come back equal; the title is not in the body", () => {
     const fixture = goldenFixture();
     const parsed = parsePrDescriptionMarkdown(renderPrDescriptionMarkdown(fixture, CTX));
     expect(parsed.problems).toEqual([]);
@@ -205,213 +387,267 @@ describe("parsePrDescriptionMarkdown — the inverse of the renderer", () => {
     const d = parsed.description;
     expect(d.title).toBeUndefined();
     expect(d.tldr).toBe(fixture.tldr);
-    expect(d.whatWhy).toBe(fixture.whatWhy);
-    expect(d.risks).toBe(fixture.risks);
-    expect(d.tour).toEqual(fixture.tour.map((s) => ({ ...s, anchor: { ...s.anchor, sha: CTX.headSha } })));
-    expect(d.remaining).toEqual(fixture.remaining);
+    expect(d.why).toBe(fixture.why);
+    expect(d.feedbackWanted).toBe(fixture.feedbackWanted);
+    expect(d.risk).toBe(fixture.risk);
+    expect(d.verified).toBe(fixture.verified);
+    expect(d.pointers).toEqual(fixture.pointers.map((p) => ({ ...p, anchor: { ...p.anchor, sha: CTX.headSha } })));
     expect(d.decisions).toEqual(fixture.decisions);
     expect(d.validation).toEqual(fixture.validation);
+    expect(d.agentNotes).toEqual(fixture.agentNotes);
   });
 
-  it("a small description round-trips too: an empty Remaining list, a multi-paragraph description, a single-line anchor, a decision title already ending in a period (lossy: the period is the renderer's)", () => {
+  it("a small description round-trips too: no decisions, a risk on a pointer, an escaped label, a single-line anchor, a decision title already ending in a period (lossy: the period is the renderer's)", () => {
     const small = desc({
-      tour: [
-        {
-          title: "The thing",
-          description: "First paragraph.\n\nSecond paragraph, with a `##` in code.",
-          lookFor: "the guard",
-          anchor: { path: "src/a b.ts", from: 3, to: 3 },
-        },
+      tldr: "First paragraph.\n\nSecond paragraph, with a `##` in code.",
+      pointers: [
+        { label: "The [thing]", text: "One.", risk: "the guard", anchor: { path: "src/a b.ts", from: 3, to: 3 } },
       ],
       decisions: [{ title: "Chose X.", rationale: "Y was worse." }],
-      validation: { summary: "All green.", criteria: [{ criterion: "a | b", proof: "c\\d\nnext line" }] },
+      validation: { criteria: [{ criterion: "a | b", proof: "c\\d\nnext line" }] },
     });
     const parsed = parsePrDescriptionMarkdown(renderPrDescriptionMarkdown(small, CTX));
-    expect(parsed.complete).toBe(true);
-    expect(parsed.description.tour).toEqual([
-      { ...small.tour[0], anchor: { ...small.tour[0].anchor, sha: CTX.headSha } },
+    expect(parsed.problems).toEqual([]);
+    expect(parsed.description.tldr).toBe(small.tldr);
+    expect(parsed.description.pointers).toEqual([
+      { ...small.pointers[0], anchor: { ...small.pointers[0].anchor, sha: CTX.headSha } },
     ]);
-    expect(parsed.description.remaining).toEqual([]);
     expect(parsed.description.decisions).toEqual([{ title: "Chose X", rationale: "Y was worse." }]);
     // table cells: `|` and `\` unescaped, a newline inside a cell was flattened by the renderer
-    expect(parsed.description.validation).toEqual({
-      summary: "All green.",
-      criteria: [{ criterion: "a | b", proof: "c\\d next line" }],
-    });
+    expect(parsed.description.validation).toEqual({ criteria: [{ criterion: "a | b", proof: "c\\d next line" }] });
+    const none = parsePrDescriptionMarkdown(renderPrDescriptionMarkdown(desc({ decisions: [] }), CTX));
+    expect(none.problems).toEqual([]);
+    expect(none.description.decisions).toEqual([]);
   });
 
-  it("a body without the shape never throws: the tldr is the first paragraph that is not a heading, the tour is empty, complete is false and the problems name the missing sections", () => {
+  it("a body without either shape never throws: the tldr is the first text that is not a heading, no pointers, complete is false and the problems name the missing labels", () => {
     const plain = parsePrDescriptionMarkdown("# Summary\n\nJust a plain body.\nSecond line.\n\nMore.");
-    expect(plain.description).toEqual({ tldr: "Just a plain body.\nSecond line.", tour: [] });
+    expect(plain.description.tldr).toBe("Just a plain body.\nSecond line.\n\nMore.");
+    expect(plain.description.pointers).toEqual([]);
     expect(plain.complete).toBe(false);
-    expect(plain.problems.join("\n")).toMatch(/## Tour/);
-    expect(parsePrDescriptionMarkdown("")).toEqual({
-      description: { tour: [] },
+    expect(plain.problems.join("\n")).toMatch(/\*\*Why:\*\*/);
+    expect(plain.problems.join("\n")).toMatch(/Where to look/);
+    expect(parsePrDescriptionMarkdown("")).toMatchObject({
+      description: { pointers: [], decisions: [] },
       complete: false,
-      problems: expect.any(Array),
     });
-    expect(parsePrDescriptionMarkdown("   \n\n")).toEqual({
-      description: { tour: [] },
-      complete: false,
-      problems: expect.any(Array),
-    });
+    expect(parsePrDescriptionMarkdown("   \n\n")).toMatchObject({ description: { pointers: [] }, complete: false });
   });
 
-  it("a hand-written body in the house shape (TL;DR without a heading, no Risks section, CRLF line ends) gets its Tour parsed, the leading paragraph as tldr, and complete: false naming the missing sections", () => {
+  it("a hand-written body in the map shape (CRLF, a bold note inside the tldr, no folds, a short sha) parses: the note stays in the tldr, the pointer's sha is the body's, complete is false naming the missing folds", () => {
     const body = [
-      "Two sentences a stranger can act on. That is the TL;DR.",
+      "Deliveries are tried once today.",
+      "**Note:** this is inside the tldr.",
       "",
-      "## What & why",
+      "**Why:** A flaky receiver loses the event.",
       "",
-      "Because the panel needs it.",
+      "**Where to look**",
       "",
+      "1. [The retry](https://github.com/acme/api/blob/685c471/src/retry.ts#L4-L12) Bounded to three attempts. ⚠ the backoff table",
+      "2. [Its test](https://github.com/acme/api/blob/685c471/src/retry.test.ts#L1) Pins the bound.",
+      "",
+      "**Feedback wanted:** the bound.",
+      "**Risk:** none.",
+      "**Verified:** ran the suite.",
+    ].join("\r\n");
+    const parsed = parsePrDescriptionMarkdown(body);
+    expect(parsed.description.tldr).toBe("Deliveries are tried once today.\n**Note:** this is inside the tldr.");
+    expect(parsed.description.why).toBe("A flaky receiver loses the event.");
+    expect(parsed.description.pointers).toEqual([
+      {
+        label: "The retry",
+        text: "Bounded to three attempts.",
+        risk: "the backoff table",
+        anchor: { path: "src/retry.ts", from: 4, to: 12, sha: "685c471" },
+      },
+      {
+        label: "Its test",
+        text: "Pins the bound.",
+        anchor: { path: "src/retry.test.ts", from: 1, to: 1, sha: "685c471" },
+      },
+    ]);
+    expect(parsed.description.feedbackWanted).toBe("the bound.");
+    expect(parsed.description.risk).toBe("none.");
+    expect(parsed.description.verified).toBe("ran the suite.");
+    expect(parsed.complete).toBe(false);
+    expect(parsed.problems).toEqual(["no `Validation` fold"]);
+  });
+
+  it("pointer strictness: a row without a github permalink, a non-github link, a traversing path or to < from is a problem and dropped; a `##` inside a fence is not structure; a duplicate label keeps the first", () => {
+    const body = [
+      "Tldr.",
+      "",
+      "**Why:** w.",
+      "",
+      "**Where to look**",
+      "",
+      "1. [No link] just text",
+      "2. [Elsewhere](https://gitlab.com/acme/api/blob/685c471f31feaadd725fb917b68a2eea31c0f81a/src/a.ts#L1-L2) text",
+      `3. [Traversing](https://github.com/acme/api/blob/${CTX.headSha}/src/../x.ts#L1-L2) text`,
+      `4. [Backwards](https://github.com/acme/api/blob/${CTX.headSha}/src/a.ts#L9-L3) text`,
+      `5. [Good](https://github.com/acme/api/blob/${CTX.headSha}/src/a.ts#L3-L9) text`,
+      "",
+      "**Feedback wanted:** f.",
+      "",
+      "```",
       "## Tour",
+      "**Risk:** inside a fence",
+      "```",
       "",
-      "### 1. The parser",
+      "**Risk:** r.",
       "",
-      "Reads the body back.",
+      "**Risk:** second.",
       "",
-      "**Look for:** the strictness on permalinks.",
+      "**Verified:** v.",
       "",
-      `https://github.com/acme/api/blob/${CTX.headSha}/src/core/prDescription.ts#L200-L260`,
-      "",
-      "### 2. Remaining changes",
-      "",
-      "- `docs/reference/specs/pr-description.md` — item 6 and its rows",
-      "",
-      "## Decisions",
-      "",
-      "- **Strict permalinks.** A step without one is dropped.",
-      "",
-      "## Validation",
+      "<details>",
+      "<summary>Validation (1 criterion)</summary>",
       "",
       "| Criterion | Proof |",
       "|---|---|",
-      "| It parses | `[unit]` this test |",
+      "| a | b |",
       "",
-    ].join("\r\n");
-    const parsed = parsePrDescriptionMarkdown(body);
-    expect(parsed.description.tldr).toBe("Two sentences a stranger can act on. That is the TL;DR.");
-    expect(parsed.description.whatWhy).toBe("Because the panel needs it.");
-    expect(parsed.description.tour).toEqual([
-      {
-        title: "The parser",
-        description: "Reads the body back.",
-        lookFor: "the strictness on permalinks.",
-        anchor: { path: "src/core/prDescription.ts", from: 200, to: 260, sha: CTX.headSha },
-      },
-    ]);
-    expect(parsed.description.remaining).toEqual([
-      { path: "docs/reference/specs/pr-description.md", note: "item 6 and its rows" },
-    ]);
-    expect(parsed.description.decisions).toEqual([
-      { title: "Strict permalinks", rationale: "A step without one is dropped." },
-    ]);
-    expect(parsed.description.risks).toBeUndefined();
-    expect(parsed.complete).toBe(false);
-    expect(parsed.problems).toEqual([
-      "no `## TL;DR` section — the tldr is the body's first paragraph",
-      "no `## Risks & implications` section",
-    ]);
-  });
-
-  it("step strictness: a step without a bare github permalink, a non-github link, an absolute or traversing path, or to < from is a problem and is dropped; a short sha and a single-line anchor are accepted; a `## ` inside a fence is not a section", () => {
-    const sha7 = CTX.headSha.slice(0, 7);
-    const body = [
-      "## TL;DR",
-      "",
-      "t",
-      "",
-      "## Tour",
-      "",
-      "### 1. No link",
-      "",
-      "prose only",
-      "",
-      "### 2. Not github",
-      "",
-      "https://gitlab.com/acme/api/blob/abc/src/a.ts#L1-L2",
-      "",
-      "### 3. Traversing path",
-      "",
-      `https://github.com/acme/api/blob/${CTX.headSha}/../etc/passwd#L1-L2`,
-      "",
-      "### 4. Backwards range",
-      "",
-      `https://github.com/acme/api/blob/${CTX.headSha}/src/a.ts#L9-L3`,
-      "",
-      "### 5. Fine, short sha, one line",
-      "",
-      "```",
-      "## not a section",
-      "```",
-      "",
-      `https://github.com/acme/api/blob/${sha7}/src/a.ts#L4`,
-      "",
-      "### 6. Remaining changes",
-      "",
-      "- none — every touched file is covered by a step above",
-      "",
+      "</details>",
     ].join("\n");
     const parsed = parsePrDescriptionMarkdown(body);
-    expect(parsed.description.tour).toEqual([
-      {
-        title: "Fine, short sha, one line",
-        description: "```\n## not a section\n```",
-        anchor: { path: "src/a.ts", from: 4, to: 4, sha: sha7 },
-      },
-    ]);
-    expect(parsed.description.remaining).toEqual([]);
-    expect(parsed.complete).toBe(false);
+    expect(parsed.description.pointers.map((p) => p.label)).toEqual(["Good"]);
+    expect(parsed.description.risk).toBe("r.");
+    expect(parsed.description.feedbackWanted).toBe("f.\n\n```\n## Tour\n**Risk:** inside a fence\n```");
     expect(parsed.problems).toEqual([
-      "step 1 (No link): no permalink line — dropped",
-      "step 2 (Not github): no permalink line — dropped",
-      expect.stringMatching(/^step 3 \(Traversing path\): anchor\.path/),
-      expect.stringMatching(/^step 4 \(Backwards range\): anchor/),
-      "no `## What & why` section",
-      "no `## Decisions` section",
-      "no `## Risks & implications` section",
-      "no `## Validation` section",
+      "duplicate `**Risk:**` — the first one stands",
+      "pointer row without a github permalink — dropped: `1. [No link] just text`",
+      "pointer row without a github permalink — dropped: `2. [Elsewhere](https://gitlab.com/acme/api/blob/685c471f31fe`",
+      "pointer 3: anchor.path path must be repo-relative — dropped",
+      "pointer 4: anchor to must be >= from — dropped",
     ]);
+    expect(parsed.complete).toBe(false);
   });
 
-  it("a percent-encoded path is decoded; a malformed escape is a problem; a duplicate section keeps the first; an unrecognized Remaining line is a problem", () => {
+  // docs/decisions/0050 "The parser": every PR already on GitHub carries the
+  // previous contract; it still reaches the artifact, as pointers.
+  it("a legacy Tour body parses by the old grammar: What & why → why, each step → a pointer (title → label, description → text, Look for appended), Risks → risk, decisions and the table kept, Remaining changes and the summary dropped, `legacy Tour shape` as a problem", () => {
     const body = [
       "## TL;DR",
       "",
-      "first",
+      "Old tldr.",
       "",
-      "## TL;DR",
+      "## What & why",
       "",
-      "second",
+      "Old why.",
       "",
       "## Tour",
       "",
-      "### 1. Encoded",
+      "### 1. The template",
       "",
-      `https://github.com/acme/api/blob/${CTX.headSha}/src/a%20b%23c.ts#L1-L2`,
+      "Every section is a heading.",
       "",
-      "### 2. Bad escape",
+      "**Look for:** the ordering.",
       "",
-      `https://github.com/acme/api/blob/${CTX.headSha}/src/%E0%A4%A.ts#L1-L2`,
+      `https://github.com/acme/api/blob/${CTX.headSha}/src/agents/registry.ts#L46-L60`,
+      "",
+      "### 2. No link",
+      "",
+      "Dropped.",
       "",
       "### 3. Remaining changes",
       "",
-      "- `ok.ts` — fine",
-      "  continued note",
-      "- not a path line",
+      "- `a.ts` — note",
       "",
+      "## Decisions",
+      "",
+      "- **Author-written.** More context.",
+      "",
+      "## Risks & implications",
+      "",
+      "Prompt-only.",
+      "",
+      "## Validation",
+      "",
+      "All green.",
+      "",
+      "| Criterion | Proof |",
+      "|---|---|",
+      "| a | b |",
+      "",
+      GENERATED_FOOTER,
     ].join("\n");
     const parsed = parsePrDescriptionMarkdown(body);
-    expect(parsed.description.tldr).toBe("first");
-    expect(parsed.description.tour.map((s) => s.anchor.path)).toEqual(["src/a b#c.ts"]);
-    expect(parsed.description.remaining).toEqual([{ path: "ok.ts", note: "fine\ncontinued note" }]);
-    expect(parsed.problems).toEqual(
-      expect.arrayContaining([
-        "duplicate `## TL;DR` section — the first one stands",
-        "step 2 (Bad escape): permalink path is not valid percent-encoding — dropped",
-        "Remaining changes: unrecognized line `- not a path line`",
-      ]),
+    expect(parsed.description).toEqual({
+      tldr: "Old tldr.",
+      why: "Old why.",
+      risk: "Prompt-only.",
+      pointers: [
+        {
+          label: "The template",
+          text: "Every section is a heading. Look for: the ordering.",
+          anchor: { path: "src/agents/registry.ts", from: 46, to: 60, sha: CTX.headSha },
+        },
+      ],
+      decisions: [{ title: "Author-written", rationale: "More context." }],
+      validation: { criteria: [{ criterion: "a", proof: "b" }] },
+    });
+    expect(parsed.complete).toBe(false);
+    expect(parsed.problems).toEqual(["step 2 (No link): no permalink line — dropped", "legacy Tour shape"]);
+    // A legacy body whose TL;DR has no heading: the leading paragraph is the tldr.
+    const headless = parsePrDescriptionMarkdown(
+      `Lead.\n\n## Tour\n\n### 1. S\n\nd\n\nhttps://github.com/acme/api/blob/685c471/a.ts#L1\n`,
     );
+    expect(headless.description.tldr).toBe("Lead.");
+    expect(headless.description.pointers).toEqual([
+      { label: "S", text: "d", anchor: { path: "a.ts", from: 1, to: 1, sha: "685c471" } },
+    ]);
+  });
+
+  it("a percent-encoded path is decoded; a malformed escape is a problem; an unknown fold is skipped; an unrecognized decision line is a problem", () => {
+    const body = [
+      "Tldr.",
+      "",
+      "**Why:** w.",
+      "",
+      "**Where to look**",
+      "",
+      `1. [Spaces](https://github.com/acme/api/blob/${CTX.headSha}/docs/a%20b%23c.md#L1-L2) text`,
+      `2. [Bad escape](https://github.com/acme/api/blob/${CTX.headSha}/docs/%E0%A4%A.md#L1-L2) text`,
+      "",
+      "**Feedback wanted:** f.",
+      "",
+      "**Risk:** r.",
+      "",
+      "**Verified:** v.",
+      "",
+      "<details>",
+      "<summary>Something else</summary>",
+      "",
+      "ignored",
+      "",
+      "</details>",
+      "",
+      "<details>",
+      "<summary>Decisions (1)</summary>",
+      "",
+      "- **Chose X.** Because.",
+      "not a decision",
+      "- plain bullet",
+      "",
+      "</details>",
+      "",
+      "<details>",
+      "<summary>Validation (1 criterion)</summary>",
+      "",
+      "| Criterion | Proof |",
+      "|---|---|",
+      "| a | b |",
+      "",
+      "</details>",
+    ].join("\n");
+    const parsed = parsePrDescriptionMarkdown(body);
+    expect(parsed.description.pointers).toEqual([
+      { label: "Spaces", text: "text", anchor: { path: "docs/a b#c.md", from: 1, to: 2, sha: CTX.headSha } },
+    ]);
+    expect(parsed.description.decisions).toEqual([{ title: "Chose X", rationale: "Because.\nnot a decision" }]);
+    expect(parsed.problems).toEqual([
+      "pointer 2: permalink path is not valid percent-encoding — dropped",
+      "Decisions: unrecognized line `- plain bullet`",
+    ]);
   });
 });

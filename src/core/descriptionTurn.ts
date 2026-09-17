@@ -97,7 +97,7 @@ export function descriptionFollowUp(t: DescriptionTurnTarget): string {
     `You pushed \`${t.branch}\` at \`${short}\` — that branch is the head of the open pull request ${t.pr.htmlUrl} (${t.repo}#${t.pr.number}) — but you did not call submit_pr_description, so the PR's title and body were not re-evaluated against what you pushed. A PR describing an earlier state of its branch is a bug, whoever opened it. Do this now, in this turn:`,
     `1. Read the PR's current title and body: call github_issue_get with repo \`${t.repo}\` and number ${t.pr.number} (it takes a pull request number).`,
     `2. Compare them with the change as it now stands at \`${short}\` (diff_digest where available; otherwise git diff against the base).`,
-    `3. Call submit_pr_description with the object that describes the PR as it is NOW: carry forward what the existing body says that is still true (a dependency bump's release notes belong in whatWhy), add what you pushed, and anchor the Tour at \`${t.headSha}\`.`,
+    `3. Call submit_pr_description with the object that describes the PR as it is NOW: carry forward what the existing body says that is still true (a dependency bump's release notes belong in why), add what you pushed, and anchor the pointers at \`${t.headSha}\`.`,
     `Do not push again and do not open a PR — Switchboard re-renders the PR's title and body from your object at ${short}. Then reply in one line.`,
   ].join("\n");
 }

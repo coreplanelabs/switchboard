@@ -41,17 +41,18 @@ const target: CodingPrTarget = { repo: "acme/api", baseRef: "main", bindingRef: 
 const DESCRIPTION: PrDescription = {
   title: "ci(deps): bump the action, refresh its hygiene allowlist",
   tldr: "Bumps the action and refreshes the allowlist lines its pin moved. CI is green again.",
-  whatWhy: "Dependabot moved the pin; the allowlist matches lines by content.",
-  tour: [
+  why: "Dependabot moved the pin; the allowlist matches lines by content.",
+  pointers: [
     {
-      title: "The allowlist",
-      description: "Three entries at the new pin.",
+      label: "The allowlist",
+      text: "Three entries at the new pin.",
       anchor: { path: "scripts/a", from: 1, to: 3 },
     },
   ],
-  remaining: [],
-  decisions: [{ title: "Keep dependabot's notes", rationale: "They are still true; they moved into whatWhy." }],
-  risks: "none",
+  feedbackWanted: "Nothing in particular.",
+  verified: "See validation.",
+  decisions: [{ title: "Keep dependabot's notes", rationale: "They are still true; they moved into why." }],
+  risk: "none",
   validation: { criteria: [{ criterion: "hygiene:check", proof: "ok — 201 files" }] },
 };
 
@@ -165,7 +166,7 @@ describe("descriptionFollowUp — the user turn the model is given", () => {
     expect(text).toContain("https://github.com/acme/api/pull/700");
     expect(text).toContain("acme/api#700");
     expect(text).toContain(`\`${HEAD.slice(0, 7)}\``);
-    expect(text).toContain(HEAD); // the full sha for the Tour anchors
+    expect(text).toContain(HEAD); // the full sha for the pointer anchors
     expect(text).toContain("github_issue_get with repo `acme/api` and number 700");
     expect(text).toContain("submit_pr_description");
     expect(text).toMatch(/Do not push again/);

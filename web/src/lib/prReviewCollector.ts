@@ -5,8 +5,8 @@ import { SHA_RE, type PrDescriptionData, type PrReviewData, type ReadingDiff } f
 // (docs/reference/specs/reading-diff.md item 12). This is the runs-specific half the module
 // deliberately does not know about: `run_meta` carries which PR the review is
 // of, `review_artifact` events carry the reading diffs and the PR's
-// description (item 7: its title names the panel, its prose fills the
-// Description tab). Runs stay unique to Switchboard; another host of the
+// description (item 7: its title names the panel, its prose — the TL;DR and
+// the why — fills the Description tab). Runs stay unique to Switchboard; another host of the
 // module writes its own adapter.
 
 export interface PrReviewState extends PrReviewData {
@@ -27,7 +27,8 @@ const nonEmpty = (v: unknown): v is string => typeof v === "string" && v !== "";
 const positiveInt = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v > 0;
 
 /** The body's first paragraph that is not a heading — the TL;DR of a
- *  description whose body has no `## TL;DR` section. */
+ *  description whose artifact carries none (the map renders it first, with no
+ *  heading; a body under the previous contract put it under `## TL;DR`). */
 export function firstParagraph(body: string): string | undefined {
   for (const paragraph of body.split(/\n\s*\n/)) {
     const lines = paragraph
@@ -40,9 +41,10 @@ export function firstParagraph(body: string): string | undefined {
   return undefined;
 }
 
-/** One `## <heading>` section's text (the renderer's fixed headings,
- *  case-insensitive) up to the next `## ` heading, fences respected — a `##`
- *  inside a code block is code. An absent or empty section is none. */
+/** One `## <heading>` section's text (case-insensitive) up to the next `## `
+ *  heading, fences respected — a `##` inside a code block is code. An absent
+ *  or empty section is none. The previous body contract's grammar: a body
+ *  written under it carries its why as `## What & why`. */
 export function markdownSection(body: string, heading: string): string | undefined {
   const wanted = heading.trim().toLowerCase();
   const out: string[] = [];
@@ -62,19 +64,50 @@ export function markdownSection(body: string, heading: string): string | undefin
   return text === "" ? undefined : text;
 }
 
+/** The map's `**<Label>:** …` field: the label's own line and every line up
+ *  to the next bold label, the `**Where to look**` list or the first
+ *  `<details>` fold, fences respected. An absent or empty field is none. */
+export function mapField(body: string, label: string): string | undefined {
+  const wanted = label.trim().toLowerCase();
+  const out: string[] = [];
+  let inFence = false;
+  let inside = false;
+  for (const line of body.split("\n")) {
+    if (/^\s*```/.test(line)) inFence = !inFence;
+    const l = line.trim();
+    if (!inFence && inside && l === "<details>") break;
+    const m = !inFence ? /^\*\*([^*]+?):?\*\*\s*(.*)$/.exec(l) : null;
+    if (m) {
+      const name = m[1].trim().toLowerCase();
+      const known = ["why", "where to look", "feedback wanted", "risk", "verified"].includes(name);
+      if (inside && known) break;
+      if (name === wanted) {
+        inside = true;
+        if (m[2]) out.push(m[2]);
+        continue;
+      }
+    }
+    if (inside) out.push(line);
+  }
+  const text = out.join("\n").trim();
+  return text === "" ? undefined : text;
+}
+
 /** The `pr_description` artifact projected onto the module's shape — the
  *  title, the prose and what kind of copy it is — or undefined when its title
- *  or origin is malformed (the frame then changes nothing). The artifact's
- *  Tour rides along in the record for the PR body; the panel does not render it. */
+ *  or origin is malformed (the frame then changes nothing). The why is the
+ *  artifact's, else the body's `**Why:**` field, else (a body under the
+ *  previous contract) its `## What & why` section. The artifact's pointers
+ *  ride along in the record for the PR body; the panel does not render them. */
 export function descriptionFrom(o: Record<string, unknown>): PrDescriptionData | undefined {
   if (!nonEmpty(o.title) || (o.origin !== "submitted" && o.origin !== "parsed")) return undefined;
   const body = typeof o.body === "string" ? o.body : "";
   const tldr = nonEmpty(o.tldr) ? o.tldr : firstParagraph(body);
-  const whatWhy = markdownSection(body, "What & why");
+  const why = nonEmpty(o.why) ? o.why : (mapField(body, "Why") ?? markdownSection(body, "What & why"));
   return {
     title: o.title,
     ...(tldr !== undefined ? { tldr } : {}),
-    ...(whatWhy !== undefined ? { whatWhy } : {}),
+    ...(why !== undefined ? { why } : {}),
     origin: o.origin,
     complete: o.complete === true,
     truncated: o.truncated === true,

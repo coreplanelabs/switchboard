@@ -98,7 +98,7 @@ describe("scope", () => {
       "web/package-lock.json",
       "docs/public/logo.svg",
       "docs/images/run.png",
-      "skills/pr-tour/SKILL.md",
+      "skills/pr-description/SKILL.md",
       ALLOWLIST_PATH,
       ALLOW_LINES_PATH,
       "scripts/public-hygiene.mjs",

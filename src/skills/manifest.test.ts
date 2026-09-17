@@ -42,13 +42,13 @@ Body line two.
 
 // A first-party skill: authored in this repo, listed in the manifest as
 // `local: true` — no source, no upstream block, no sync; git is its integrity.
-const LOCAL_MANIFEST = `${MANIFEST}  - name: pr-tour
+const LOCAL_MANIFEST = `${MANIFEST}  - name: pr-description
     local: true
     agents: [coding]
 `;
 
 const LOCAL_SKILL = `---
-name: pr-tour
+name: pr-description
 description: How to write the PR body Tour.
 agents: [coding]
 ---
@@ -94,8 +94,8 @@ describe("parseManifest", () => {
   // source/path — the file is authored here, never synced.
   it("parses a local entry (no source/path); rejects a local entry that also names a source or path, and a non-local entry missing them", () => {
     const m = parseManifest(LOCAL_MANIFEST);
-    expect(m.skills.find((s) => s.name === "pr-tour")).toEqual({ name: "pr-tour", local: true, agents: ["coding"] });
-    expect(() => parseManifest(LOCAL_MANIFEST.replace("local: true", "local: true\n    source: addyosmani/agent-skills"))).toThrow(/pr-tour.*local.*source/);
+    expect(m.skills.find((s) => s.name === "pr-description")).toEqual({ name: "pr-description", local: true, agents: ["coding"] });
+    expect(() => parseManifest(LOCAL_MANIFEST.replace("local: true", "local: true\n    source: addyosmani/agent-skills"))).toThrow(/pr-description.*local.*source/);
     expect(() => parseManifest(MANIFEST.replace("    source: addyosmani/agent-skills\n    path: skills/test-driven-development/SKILL.md\n", ""))).toThrow(/test-driven-development.*source/);
   });
 
@@ -206,19 +206,19 @@ describe("checkVendoredSkills (the offline drift check)", () => {
   });
 
   it("a local skill passes with no upstream block; is reported when missing, agents-drifted, or carrying an upstream block it must not have", () => {
-    const clean = fixture(LOCAL_MANIFEST, { "code-review-and-quality": crq, "test-driven-development": tdd, "pr-tour": LOCAL_SKILL });
+    const clean = fixture(LOCAL_MANIFEST, { "code-review-and-quality": crq, "test-driven-development": tdd, "pr-description": LOCAL_SKILL });
     expect(checkVendoredSkills(clean)).toEqual([]);
     const missing = fixture(LOCAL_MANIFEST, { "code-review-and-quality": crq, "test-driven-development": tdd });
-    expect(checkVendoredSkills(missing)).toEqual([expect.stringMatching(/pr-tour.*missing/)]);
-    const rescoped = fixture(LOCAL_MANIFEST, { "code-review-and-quality": crq, "test-driven-development": tdd, "pr-tour": LOCAL_SKILL.replace("agents: [coding]", "agents: [review]") });
-    expect(checkVendoredSkills(rescoped)).toEqual([expect.stringMatching(/pr-tour.*agents \[review\].*manifest says \[coding\]/)]);
+    expect(checkVendoredSkills(missing)).toEqual([expect.stringMatching(/pr-description.*missing/)]);
+    const rescoped = fixture(LOCAL_MANIFEST, { "code-review-and-quality": crq, "test-driven-development": tdd, "pr-description": LOCAL_SKILL.replace("agents: [coding]", "agents: [review]") });
+    expect(checkVendoredSkills(rescoped)).toEqual([expect.stringMatching(/pr-description.*agents \[review\].*manifest says \[coding\]/)]);
     const vendoredish = LOCAL_SKILL.replace(
       "agents: [coding]\n",
       // hex-looking values with letters: an all-digit scalar parses as a YAML number, not a string
       "agents: [coding]\nupstream:\n  repo: https://github.com/x/y\n  commit: " + "a".repeat(40) + "\n  path: p\n  bodySha256: " + "a".repeat(64) + "\n",
     );
-    const confused = fixture(LOCAL_MANIFEST, { "code-review-and-quality": crq, "test-driven-development": tdd, "pr-tour": vendoredish });
-    expect(checkVendoredSkills(confused)).toEqual([expect.stringMatching(/pr-tour.*local skill.*upstream/)]);
+    const confused = fixture(LOCAL_MANIFEST, { "code-review-and-quality": crq, "test-driven-development": tdd, "pr-description": vendoredish });
+    expect(checkVendoredSkills(confused)).toEqual([expect.stringMatching(/pr-description.*local skill.*upstream/)]);
   });
 
   it("reports a vendored file whose directory name differs from its skill name (and the manifest entry it leaves unvendored)", () => {

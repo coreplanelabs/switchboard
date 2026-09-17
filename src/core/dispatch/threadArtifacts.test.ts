@@ -26,11 +26,12 @@ const description = (tldr: string): RunEvent =>
     description: {
       title: "t",
       tldr,
-      whatWhy: "w",
-      tour: [],
-      remaining: [],
+      why: "w",
+      pointers: [],
+      feedbackWanted: "none",
+      risk: "none",
+      verified: "none",
       decisions: [],
-      risks: "none",
       validation: { criteria: [] },
     },
   }) as RunEvent;

@@ -1564,16 +1564,15 @@ describe("PR-review panel wiring", { timeout: PANEL_BUDGET_MS }, () => {
       pr: 42,
       headSha: "e".repeat(40),
       title: "Retry webhook deliveries",
-      body: "## TL;DR\n\nThe TL;DR.\n",
+      body: "The TL;DR.\n\n**Why:** w.\n",
       tldr: "The TL;DR.",
-      tour: [
+      pointers: [
         {
-          title: "The marker",
-          description: "Renamed.",
+          label: "The marker",
+          text: "Renamed.",
           anchor: { path: "src/a.ts", from: 1, to: 1, sha: "e".repeat(40) },
         },
       ],
-      remaining: [],
       decisions: [],
       complete: true,
       problems: [],

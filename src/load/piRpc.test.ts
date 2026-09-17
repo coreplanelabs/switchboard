@@ -31,17 +31,18 @@ const notice = (payload: unknown) => ({
 const description = {
   title: "Load harness note",
   tldr: "Adds a note under the harness directory.",
-  whatWhy: "A synthetic change so the driver can prove the PR-shaped path.",
-  tour: [
+  why: "A synthetic change so the driver can prove the PR-shaped path.",
+  pointers: [
     {
-      title: "The note",
-      description: "One line written by the model.",
+      label: "The note",
+      text: "One line written by the model.",
       anchor: { path: ".load-harness/note.txt", from: 1, to: 1 },
     },
   ],
-  remaining: [],
+  feedbackWanted: "Nothing in particular.",
+  verified: "See validation.",
   decisions: [{ title: "Synthetic content", rationale: "The harness measures plumbing." }],
-  risks: "None.",
+  risk: "None.",
   validation: { criteria: [{ criterion: "The note exists", proof: "cat .load-harness/note.txt" }] },
 };
 
@@ -258,9 +259,9 @@ describe("PiTaskAccumulator — one task's stream becomes the measured record", 
     for (const e of recordedStream()) acc.observe(e);
     expect(acc.result("settled", 1).prShaped).toEqual({ reached: true, problems: [] });
 
-    const strict = new PiTaskAccumulator({ task: "t", preview: allowAll, describe: () => ["tour: too small"] });
+    const strict = new PiTaskAccumulator({ task: "t", preview: allowAll, describe: () => ["pointers: too small"] });
     for (const e of recordedStream()) strict.observe(e);
-    expect(strict.result("settled", 1).prShaped).toEqual({ reached: false, problems: ["tour: too small"] });
+    expect(strict.result("settled", 1).prShaped).toEqual({ reached: false, problems: ["pointers: too small"] });
 
     const none = new PiTaskAccumulator({ task: "t", preview: allowAll, describe: noProblems });
     none.observe({ type: "agent_settled" });

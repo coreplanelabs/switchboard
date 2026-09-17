@@ -147,7 +147,7 @@ describe("the bridge speaks the loop's vocabulary — the same turn, the same ev
     expect(events[0]).not.toHaveProperty("command");
     expect(events[1]).toMatchObject({ type: "tool_result", tool: "read", ok: false, callId: "r", summary: "ENOENT" });
     expect(events[1]).not.toHaveProperty("exitCode");
-    expect(describePiToolCall("use_skill", { name: "pr-tour" })).toBe("use_skill pr-tour");
+    expect(describePiToolCall("use_skill", { name: "pr-description" })).toBe("use_skill pr-description");
     expect(describePiToolCall("web_fetch", { url: "https://x" })).toBe("web_fetch https://x");
     expect(describePiToolCall("ls", {})).toBe("ls");
   });

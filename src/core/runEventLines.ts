@@ -111,7 +111,8 @@ function isRunEvent(v: unknown): v is RunEvent {
           typeof o.pr === "number" &&
           typeof o.title === "string" &&
           typeof o.body === "string" &&
-          Array.isArray(o.tour)
+          // `pointers` today; `tour` on a record written under the previous contract.
+          (Array.isArray(o.pointers) || Array.isArray(o.tour))
         );
       }
       return (

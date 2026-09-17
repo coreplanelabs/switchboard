@@ -88,76 +88,91 @@ interface PiToolDeclaration {
  *  object with Switchboard's own parser; this declaration only shapes the call. */
 const SUBMIT_PR_DESCRIPTION: PiToolDeclaration = {
   description:
-    "Submit the PR description as a typed object. REQUIRED after pushing your branch: Switchboard renders the GitHub PR body from this object at the pushed head and opens (or updates) the pull request itself — never open a PR yourself. Fields map 1:1 to the rendered sections; `title` becomes the PR's title; tour anchors are (path, from, to) line ranges at your pushed head. Call it after your last push; if you push again afterwards, call it again — the last valid call wins. An invalid object returns an error naming the field to fix; correct it and resubmit.",
+    "Submit the PR description as a typed object. REQUIRED after pushing your branch: Switchboard renders the GitHub PR body from this object at the pushed head and opens (or updates) the pull request itself — never open a PR yourself. The body is a fixed-size MAP for the reader (tldr, why, at most 7 pointers, feedbackWanted, risk, verified) with decisions, validation and agentNotes collapsed under it; every field is capped in visible characters (a link's URL is not counted) and the tool refuses an object over a cap naming the field and the count, so cut and resubmit. `title` becomes the PR's title; pointer anchors are (path, from, to) line ranges at your pushed head, rendered as links. Call it after your last push; if you push again afterwards, call it again — the last valid call wins.",
   parameters: {
     type: "object",
     properties: {
       title: { type: "string", description: "The PR title — one line naming the change" },
       tldr: {
         type: "string",
-        description: "Two sentences for a naive reader with zero context: what and why it matters",
+        description:
+          "Two sentences for a reader with zero context: what this PR does and why it matters (≤300 visible chars)",
       },
-      whatWhy: {
+      why: {
         type: "string",
-        description: "The change and its motivation, with the triggering issue/request hyperlinked",
+        description:
+          "The problem and the motivation, with the triggering issue/request, record and stack hyperlinked; why, never what (≤400)",
       },
-      tour: {
+      pointers: {
         type: "array",
-        description: "Reader-first walkthrough steps in reading order (load the pr-tour skill first)",
+        description:
+          "Where to look: 1–7 rows in reading order, the files a reviewer would open first (load the pr-description skill first). Rendered as `N. [label](permalink) text ⚠ risk`",
         items: {
           type: "object",
           properties: {
-            title: { type: "string", description: "What this change is" },
-            description: { type: "string", description: "The explanation the reader needs before seeing the code" },
-            lookFor: { type: "string", description: "Optional pointer at the detail worth checking" },
+            label: { type: "string", description: "Names the thing the row links to (≤60)" },
+            text: { type: "string", description: "One sentence: what it does or why it is shaped so (≤160)" },
+            risk: { type: "string", description: "Optional; only where a mistake would matter — renders as ⚠ (≤100)" },
             anchor: {
               type: "object",
-              description: "The hunk: repo-relative path + inclusive 1-based line range at the pushed head",
+              description:
+                "The lines the label links to: repo-relative path + inclusive 1-based line range at the pushed head",
               properties: { path: { type: "string" }, from: { type: "integer" }, to: { type: "integer" } },
               required: ["path", "from", "to"],
             },
           },
-          required: ["title", "description", "anchor"],
+          required: ["label", "text", "anchor"],
         },
       },
-      remaining: {
-        type: "array",
+      feedbackWanted: {
+        type: "string",
+        description: "The one or two things you want the reviewer's judgement on (≤200)",
+      },
+      risk: {
+        type: "string",
         description:
-          "Every touched file the Tour steps did not cover, one note each ([] when the Tour covers everything)",
-        items: {
-          type: "object",
-          properties: { path: { type: "string" }, note: { type: "string" } },
-          required: ["path", "note"],
-        },
+          "What breaks if this is wrong, the blast radius, the rollback; over 400 changed lines, say so and name the split considered (≤300)",
+      },
+      verified: {
+        type: "string",
+        description: "One line for a person: which suites ran and passed, what is still human-gated (≤200)",
       },
       decisions: {
         type: "array",
-        description: "Non-obvious choices: alternatives considered and rejected, trade-offs",
+        description:
+          "Non-obvious choices (0–10): the alternative rejected and the fact that decided it; collapsed below the map",
         items: {
           type: "object",
-          properties: { title: { type: "string" }, rationale: { type: "string" } },
+          properties: { title: { type: "string" }, rationale: { type: "string", description: "≤400" } },
           required: ["title", "rationale"],
         },
       },
-      risks: { type: "string", description: 'What could break and the blast radius (or "none" — and why)' },
       validation: {
         type: "object",
-        description: "What you actually ran and the real results — never fabricated",
+        description: "What you actually ran and the real results — never fabricated; collapsed below the map",
         properties: {
-          summary: { type: "string", description: "Optional one-line overall result" },
           criteria: {
             type: "array",
+            description: "1–30 rows",
             items: {
               type: "object",
-              properties: { criterion: { type: "string" }, proof: { type: "string" } },
+              properties: {
+                criterion: { type: "string", description: "≤200" },
+                proof: { type: "string", description: "A test id or a command with its outcome (≤300)" },
+              },
               required: ["criterion", "proof"],
             },
           },
         },
         required: ["criteria"],
       },
+      agentNotes: {
+        type: "string",
+        description:
+          "Optional: what a reviewing agent needs that a person does not — the rebase done, generated files to skip, the repro command (≤2000)",
+      },
     },
-    required: ["title", "tldr", "whatWhy", "tour", "remaining", "decisions", "risks", "validation"],
+    required: ["title", "tldr", "why", "pointers", "feedbackWanted", "risk", "verified", "decisions", "validation"],
   },
 };
 

@@ -23,11 +23,11 @@ import { InMemoryRunStore, NullRunStore, type RunStore } from "./runStore.js";
 const HEAD = "685c471f31feaadd725fb917b68a2eea31c0f81a";
 const golden = () =>
   parsePrDescription(
-    JSON.parse(readFileSync(new URL("./testing/goldenTour.description.json", import.meta.url), "utf8")),
+    JSON.parse(readFileSync(new URL("./testing/goldenMap.description.json", import.meta.url), "utf8")),
   );
 
 describe("submittedPrDescriptionArtifact", () => {
-  it("carries the golden's title, tldr, tour (anchors stamped with the render sha), remaining and decisions plus the rendered body; complete, no problems, not truncated", () => {
+  it("carries the golden's title, tldr, why, pointers (anchors stamped with the render sha) and decisions plus the rendered body; complete, no problems, not truncated", () => {
     const desc = golden();
     const body = renderPrDescriptionMarkdown(desc, { repo: "acme/api", headSha: HEAD });
     const a = submittedPrDescriptionArtifact(desc, { repo: "acme/api", pr: 329, headSha: HEAD, body });
@@ -40,8 +40,8 @@ describe("submittedPrDescriptionArtifact", () => {
       title: desc.title,
       body,
       tldr: desc.tldr,
-      tour: desc.tour.map((s) => ({ ...s, anchor: { ...s.anchor, sha: HEAD } })),
-      remaining: desc.remaining,
+      why: desc.why,
+      pointers: desc.pointers.map((p) => ({ ...p, anchor: { ...p.anchor, sha: HEAD } })),
       decisions: desc.decisions,
       complete: true,
       problems: [],
@@ -54,10 +54,10 @@ describe("submittedPrDescriptionArtifact", () => {
     const desc = {
       ...golden(),
       title: `Rotate ${token}`,
-      tour: [
+      pointers: [
         {
-          title: "The fix",
-          description: `\u001b[32mgreen\u001b[0m uses ${token}`,
+          label: "The fix",
+          text: `\u001b[32mgreen\u001b[0m uses ${token}`,
           anchor: { path: `src/${token}.ts`, from: 1, to: 2 },
         },
       ],
@@ -69,15 +69,15 @@ describe("submittedPrDescriptionArtifact", () => {
     expect(json).not.toContain(token);
     expect(json).not.toContain("\u001b");
     expect(a.title).toBe("Rotate «redacted-github-token»");
-    expect(a.tour[0].description).toBe("green uses «redacted-github-token»");
-    expect(a.tour[0].anchor).toEqual({ path: "src/«redacted-github-token».ts", from: 1, to: 2, sha: HEAD });
+    expect(a.pointers[0].text).toBe("green uses «redacted-github-token»");
+    expect(a.pointers[0].anchor).toEqual({ path: "src/«redacted-github-token».ts", from: 1, to: 2, sha: HEAD });
     expect(a.decisions[0].rationale).toContain("«redacted»");
     expect(a.body).toContain("«redacted-github-token»");
   });
 });
 
 describe("parsedPrDescriptionArtifact", () => {
-  it("the golden body parses back complete: title from the facts, tldr and tour from the body, the reviewed head beside the anchors' render sha", () => {
+  it("the golden body parses back complete: title from the facts, tldr, why and pointers from the body, the reviewed head beside the anchors' render sha", () => {
     const desc = golden();
     const body = renderPrDescriptionMarkdown(desc, { repo: "acme/api", headSha: HEAD });
     const reviewed = "f".repeat(40); // reviewing a later head than the anchors were rendered at
@@ -94,14 +94,13 @@ describe("parsedPrDescriptionArtifact", () => {
       title: "The PR title",
       body,
       tldr: desc.tldr,
-      remaining: desc.remaining,
       decisions: desc.decisions,
       complete: true,
       problems: [],
       truncated: false,
     });
-    expect(a.tour).toEqual(desc.tour.map((s) => ({ ...s, anchor: { ...s.anchor, sha: HEAD } })));
-    expect(a.tour.every((s) => s.anchor.sha !== a.headSha)).toBe(true); // the panel can tell they differ
+    expect(a.pointers).toEqual(desc.pointers.map((p) => ({ ...p, anchor: { ...p.anchor, sha: HEAD } })));
+    expect(a.pointers.every((p) => p.anchor.sha !== a.headSha)).toBe(true); // the panel can tell they differ
   });
 
   it("sanitizes BEFORE parsing — a token in the body never reaches tldr, a step or the body; ANSI is stripped", () => {
@@ -127,17 +126,17 @@ describe("parsedPrDescriptionArtifact", () => {
     expect(JSON.stringify(a)).not.toContain(token);
     expect(JSON.stringify(a)).not.toContain("\u001b");
     expect(a.tldr).toBe("Rotate «redacted-github-token» now.");
-    expect(a.tour[0].description).toBe("It was «redacted-github-token».");
+    expect(a.pointers[0].text).toBe("It was «redacted-github-token».");
     expect(a.title).toBe("t «redacted-github-token»");
     expect(a.headSha).toBeUndefined();
   });
 
-  it("a body without the shape: tldr from the first paragraph, empty tour, complete false; a truncated body names the cut as the first problem", () => {
+  it("a body without the shape: tldr from the first paragraph, no pointers, complete false; a truncated body names the cut as the first problem", () => {
     const plain = parsedPrDescriptionArtifact(
       { title: "t", body: "Just prose.", truncated: false },
       { repo: "acme/api", pr: 1 },
     );
-    expect(plain).toMatchObject({ tldr: "Just prose.", tour: [], remaining: [], decisions: [], complete: false });
+    expect(plain).toMatchObject({ tldr: "Just prose.", pointers: [], decisions: [], complete: false });
     const cut = parsedPrDescriptionArtifact(
       { title: "t", body: "Just prose.", truncated: true },
       { repo: "acme/api", pr: 1 },
@@ -187,8 +186,7 @@ function submitted(over: Partial<PrDescriptionArtifact> = {}): RunEvent {
     title: "Fix the gate",
     body: "## TL;DR\n\nx",
     tldr: "x",
-    tour: [{ title: "s", description: "d", anchor: { path: "src/a.ts", from: 1, to: 2, sha: SHA_A } }],
-    remaining: [],
+    pointers: [{ label: "s", text: "d", anchor: { path: "src/a.ts", from: 1, to: 2, sha: SHA_A } }],
     decisions: [],
     complete: true,
     problems: [],

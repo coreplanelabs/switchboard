@@ -246,17 +246,18 @@ export function reviewProfileScript(opts: ProfileOptions): Script {
 export const SCRIPTED_PR_DESCRIPTION = {
   title: "Load harness note",
   tldr: "Adds a note file under the harness directory.",
-  whatWhy: "A synthetic change so the harness can prove the PR-shaped path end to end without a model.",
-  tour: [
+  why: "A synthetic change so the harness can prove the PR-shaped path end to end without a model.",
+  pointers: [
     {
-      title: "The note",
-      description: "One line written by the scripted model.",
+      label: "The note",
+      text: "One line written by the scripted model.",
       anchor: { path: `${HARNESS_DIR}/note.txt`, from: 1, to: 1 },
     },
   ],
-  remaining: [],
+  feedbackWanted: "Nothing: the content is synthetic.",
+  risk: "None: the file lives under the harness directory.",
+  verified: "The scripted model reads the note back.",
   decisions: [{ title: "Synthetic content", rationale: "The harness measures plumbing, not prose." }],
-  risks: "None: the file lives under the harness directory.",
   validation: { criteria: [{ criterion: "The note exists", proof: `cat ${HARNESS_DIR}/note.txt` }] },
 };
 

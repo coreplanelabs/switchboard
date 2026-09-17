@@ -326,11 +326,12 @@ describe("submit_pr_description tool", () => {
     return {
       title: "Fix the widget gate",
       tldr: "Two sentences.",
-      whatWhy: "Because.",
-      tour: [{ title: "The thing", description: "What it does.", anchor: { path: "src/a.ts", from: 3, to: 9 } }],
-      remaining: [],
+      why: "Because.",
+      pointers: [{ label: "The thing", text: "What it does.", anchor: { path: "src/a.ts", from: 3, to: 9 } }],
+      feedbackWanted: "Nothing in particular.",
+      verified: "See validation.",
       decisions: [{ title: "Chose X", rationale: "Y was worse." }],
-      risks: "None.",
+      risk: "None.",
       validation: { criteria: [{ criterion: "It renders", proof: "`[unit]` this test" }] },
     };
   }
@@ -356,20 +357,20 @@ describe("submit_pr_description tool", () => {
     );
     expect(got).toHaveLength(1);
     expect(got[0].title).toBe("Fix the widget gate"); // trimmed by the schema, not passed through raw
-    expect(got[0].tour[0].anchor).toEqual({ path: "src/a.ts", from: 3, to: 9 });
+    expect(got[0].pointers[0].anchor).toEqual({ path: "src/a.ts", from: 3, to: 9 });
     expect(String(out)).toMatch(/PR description recorded/);
   });
 
   it("a missing section is a string error naming the zod path — no throw, context untouched", async () => {
     const got: PrDescription[] = [];
-    const { risks: _r, ...noRisks } = validInput();
+    const { risk: _r, ...noRisk } = validInput();
     const out = await submitPrDescriptionTool.run(
-      noRisks,
+      noRisk,
       ctxWith((d) => got.push(d)),
     );
     expect(got).toEqual([]);
     expect(String(out)).toMatch(/^error:/);
-    expect(String(out)).toContain("risks");
+    expect(String(out)).toContain("risk");
   });
 
   it("a blank title is a string error naming `title`", async () => {
@@ -383,15 +384,15 @@ describe("submit_pr_description tool", () => {
     expect(String(out)).toContain("title");
   });
 
-  it("a bad anchor is a string error naming the full path into the tour", async () => {
+  it("a bad anchor is a string error naming the full path into the pointers", async () => {
     const input = validInput();
-    input.tour = [{ title: "t", description: "d", anchor: { path: "/etc/passwd", from: 1, to: 2 } }];
+    input.pointers = [{ label: "t", text: "d", anchor: { path: "/etc/passwd", from: 1, to: 2 } }];
     const out = await submitPrDescriptionTool.run(
       input,
       ctxWith(() => {}),
     );
     expect(String(out)).toMatch(/^error:/);
-    expect(String(out)).toContain("tour.0.anchor.path");
+    expect(String(out)).toContain("pointers.0.anchor.path");
   });
 
   it("last valid call wins: a second submission replaces the first at the sink", async () => {
@@ -416,11 +417,24 @@ describe("submit_pr_description tool", () => {
     );
   });
 
-  it("declares every schema section in the tool input schema (the model's contract)", () => {
+  it("declares every field of the map and the folds in the tool input schema (the model's contract); agentNotes is the one optional field", () => {
     const required = submitPrDescriptionTool.inputSchema.required as string[];
-    for (const field of ["title", "tldr", "whatWhy", "tour", "remaining", "decisions", "risks", "validation"]) {
+    const properties = Object.keys(submitPrDescriptionTool.inputSchema.properties as Record<string, unknown>);
+    for (const field of [
+      "title",
+      "tldr",
+      "why",
+      "pointers",
+      "feedbackWanted",
+      "risk",
+      "verified",
+      "decisions",
+      "validation",
+    ]) {
       expect(required).toContain(field);
     }
+    expect(properties).toContain("agentNotes");
+    expect(required).not.toContain("agentNotes");
   });
 });
 
