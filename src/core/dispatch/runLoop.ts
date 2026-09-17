@@ -137,9 +137,12 @@ export interface RunInterrupted {
   refusal: string;
   /** The interruption's words, as the record's note carries them. */
   note: string;
-  /** The request to run again as a new run, and the run it restarts — the
-   *  one just closed, which admission must never steer the request into. */
-  restart: { request: IncomingMessage; restartOf: string };
+  /** The request to run again as a new run, the run it restarts — the one
+   *  just closed, which admission must never steer the request into — and
+   *  the coordinator tag the run carried, so a coordinator's child restarts as
+   *  the same instance's child: its unit branch its own push target, the
+   *  plan's base the branch its pull request targets (run-history item 48a). */
+  restart: { request: IncomingMessage; restartOf: string; coordinator?: CoordinatorTag };
 }
 
 export type RunLoopOutcome = RunOutcome | RunInterrupted;
@@ -1343,7 +1346,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       reason: interrupted.reason,
       refusal: interrupted.refusal,
       note: interrupted.message,
-      restart: { request: msg, restartOf: run.id },
+      restart: { request: msg, restartOf: run.id, ...(coordinator !== undefined ? { coordinator } : {}) },
     };
   } finally {
     clearInterval(heartbeat);

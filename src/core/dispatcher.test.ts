@@ -10514,6 +10514,9 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         repo: "acme/api",
         ref: "main",
         request: durableInboxMessage(request, request.text, 4_000),
+        // a coordinator's child (run-history item 48a): the tag rides the row's meta and its event
+        parentInstanceId: "plan-p",
+        idempotencyKey: "plan-p:u1/0/coding",
       },
       system: "sys",
       tools: [],
@@ -10528,7 +10531,10 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       { step: 0, seq: 0, turnIndex: 1, inFlight: [], inboxConsumedSeq: 0, remainingMs: 300_000, turn: 0, iteration: 0 },
       [],
     );
-    await ledger.append("run-old", "gen-OLD", [{ type: "input", messageId: "m1", text: "fix it", at: 1, seq: 1 }]);
+    await ledger.append("run-old", "gen-OLD", [
+      { type: "input", messageId: "m1", text: "fix it", at: 1, seq: 1 },
+      { type: "coordinator_tag", parentInstanceId: "plan-p", base: "main", at: 1, seq: 2 },
+    ]);
     ledger.live.get("run-old")!.leaseUntil = 0;
     const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
     const provider = capturingProvider("started over and done");
@@ -10581,6 +10587,12 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(registry.listActive().map((r) => r.id)).toEqual(["run-l"]);
     expect(ledger.finished.get("run-l")?.status).toBe("completed");
     expect(ledger.live.has("run-old")).toBe(false);
+    // The restarted run is the same instance's child: its own coordinator_tag names the plan's base,
+    // so its unit branch is its push target and the base is what the gate protects.
+    expect(ledger.finished.get("run-l")?.events.find((e) => e.type === "coordinator_tag")).toMatchObject({
+      parentInstanceId: "plan-p",
+      base: "main",
+    });
   });
 
   /**

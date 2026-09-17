@@ -211,6 +211,20 @@ describe("abandonLostWorkspace: the resumed run closes saying why, and hands its
 });
 
 describe("prepareRestartTurn: the request runs again as its own dispatch", () => {
+  it("carries the coordinator tag the interrupted run had, so a ship child restarted from its request keeps its unit branch as its own push target and the plan's base as its pull request's base (run-history item 48a)", () => {
+    const coordinator = { parentInstanceId: "plan-p", idempotencyKey: "plan-p:u1/0/coding", base: "main" };
+    const turn = prepareRestartTurn(
+      { clock: () => NOW },
+      { request: REQUEST, pending: [], clock: () => NOW, restartOf: "run-old", coordinator },
+    );
+    expect(turn.opts.coordinator).toEqual(coordinator);
+    expect(turn.opts.restartOf).toBe("run-old");
+    // a run no coordinator spawned restarts without one
+    expect(
+      "coordinator" in
+        prepareRestartTurn({ clock: () => NOW }, { request: REQUEST, pending: [], clock: () => NOW }).opts,
+    ).toBe(false);
+  });
   it("keeps the request as the row carried it, stamps a fresh receipt, and opens a root of its own", () => {
     const turn = prepareRestartTurn({ clock: () => NOW }, { request: REQUEST, pending: [], clock: () => NOW });
     expect(turn.msg).toMatchObject({ ...REQUEST, receivedAt: NOW });
