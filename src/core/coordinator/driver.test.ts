@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { WAIT_CHUNK_MS } from "../ship/coordinator.js";
-import { RUN_FINISHED_EVENT_PREFIX, type CoordinatorUnit } from "./contract.js";
+import { MERGE_WAIT_CHUNK_MS, WAIT_CHUNK_MS } from "../ship/coordinator.js";
+import { checksSettledEventType, RUN_FINISHED_EVENT_PREFIX, type CoordinatorUnit } from "./contract.js";
 import {
   SPAWN_STEP_CONFIG,
   STEP_CONFIG,
@@ -371,7 +371,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(end.ending.report).toContain("names no base branch");
   });
 
-  it("the merge's pending poll: checks still running answer pending, the runner sleeps the poll and asks again under the next step name, and a merge GitHub refuses ends the unit merge_refused with the refusal in its report; a task string's ship branch is a person's merge — the machine ends merge-ready and never asks", async () => {
+  it("the merge's pending wait: checks still running answer pending, the runner waits on the checks-settled event at the approved head under a bounded timeout and asks again under the next step name, and a merge GitHub refuses ends the unit merge_refused with the refusal in its report; a task string's ship branch is a person's merge — the machine ends merge-ready and never asks", async () => {
     const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
     const b = bot({
       plan: [planAnswer([row("U10")])],
@@ -394,11 +394,15 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     const summary = await runPlan(s.runner, b.client, INSTANCE);
     expect(summary.units).toEqual({ U10: "merge_refused" });
     expect(summary.outcome).toBe("failed");
-    expect(s.names().slice(-5)).toEqual(["U10/merge/1", "U10/merge/sleep/1", "U10/merge/2", "U10/end", "finish"]);
-    expect(s.taken.find((t) => t.name === "U10/merge/sleep/1")).toEqual({
-      kind: "sleep",
-      name: "U10/merge/sleep/1",
-      ms: 5 * MIN,
+    expect(s.names().slice(-5)).toEqual(["U10/merge/1", "U10/merge/wait/1", "U10/merge/2", "U10/end", "finish"]);
+    // The wait is `waitForEvent` typed with the approved head — the intake's
+    // event, not a poll — with one chunk (the old poll cadence) as the fallback
+    // timeout, so an undelivered event never slows the door's re-ask.
+    expect(s.taken.find((t) => t.name === "U10/merge/wait/1")).toEqual({
+      kind: "wait",
+      name: "U10/merge/wait/1",
+      type: checksSettledEventType(HEAD),
+      timeout: MERGE_WAIT_CHUNK_MS,
     });
     const [end] = b.of("unit-end") as Array<{ ending: { kind: string; report: string } }>;
     expect(end.ending.kind).toBe("merge_refused");

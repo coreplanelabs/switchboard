@@ -448,6 +448,8 @@ export type CoordinatorAction =
       recover?: { runId: string };
     }
   | { type: "merge"; step: string; prNumber: number; headSha: string }
+  /** Wait for the intake's checks-settled event at the approved head, bounded as the fallback. */
+  | { type: "wait-checks"; step: string; headSha: string; timeoutMs: number }
   | { type: "sleep"; step: string; ms: number }
   | { type: "end"; step: string; ending: UnitEnding };
 
@@ -508,6 +510,7 @@ export type StepReturn =
   // fired, or a person merged — so the runner merged nothing (`by: other`).
   | { type: "merge"; step: string; outcome: "merged"; by: "other"; sha: string; mergedAt: string; at: number }
   | { type: "merge"; step: string; outcome: "pending" | "refused"; reason: string; at: number }
+  | { type: "wait-checks"; step: string; outcome: "event" | "timeout" }
   | { type: "sleep"; step: string };
 
 /** How one unit's pipeline ended — the truthful vocabulary the ship pipeline
@@ -628,7 +631,7 @@ type Phase =
       dead?: "failed" | "interrupted";
     }
   | { at: "merge"; pr: PrRef; headSha: string; n: number; since: number }
-  | { at: "merge-sleep"; pr: PrRef; headSha: string; n: number; since: number }
+  | { at: "merge-wait"; pr: PrRef; headSha: string; n: number; since: number }
   | { at: "ended" };
 
 export interface UnitPipelineState {
@@ -668,9 +671,16 @@ export const WAIT_MARGIN_MS = 5 * MIN;
  *  margin and the merge poll are the same number), and it keeps a round to a
  *  few steps: a coding child's 45 minutes are ten waits and ten reads. */
 export const WAIT_CHUNK_MS = 5 * MIN;
-/** How often the runner asks for the merge while the guards are still pending, and for how long at most. */
-export const MERGE_POLL_MS = 5 * MIN;
+/** How long the merge step waits for the guards at most. While checks are
+ *  pending the machine waits on the intake's `checks-settled-<head>` event
+ *  (http-ingress.md item 12) — one bounded wait per ask, the remainder of this
+ *  cap, as the fallback when the event never arrives. */
 export const MERGE_WAIT_MAX_MS = 60 * MIN;
+/** One merge wait's fallback timeout: the old poll's cadence. The event wakes
+ *  the machine at once when the intake delivers it; without one (the webhook
+ *  not configured, a delivery lost) the door is still re-asked every chunk, so
+ *  a merge is never slower than the poll it replaced. */
+export const MERGE_WAIT_CHUNK_MS = 5 * MIN;
 /** A `busy` without the live run's id: nothing to wait on, so a short sleep before the spawn is asked again. */
 export const BUSY_RETRY_MS = 2 * MIN;
 
@@ -816,8 +826,13 @@ export function nextAction(s: UnitPipelineState): CoordinatorAction {
       };
     case "merge":
       return { type: "merge", step: `${unit}/merge/${p.n}`, prNumber: p.pr.number, headSha: p.headSha };
-    case "merge-sleep":
-      return { type: "sleep", step: `${unit}/merge/sleep/${p.n}`, ms: MERGE_POLL_MS };
+    case "merge-wait":
+      return {
+        type: "wait-checks",
+        step: `${unit}/merge/wait/${p.n}`,
+        headSha: p.headSha,
+        timeoutMs: Math.max(MIN, Math.min(MERGE_WAIT_CHUNK_MS, MERGE_WAIT_MAX_MS - (s.clock - p.since))),
+      };
     case "ended":
       return { type: "end", step: `${unit}/end`, ending: s.ending! };
   }
@@ -1349,11 +1364,11 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
           reviewRounds: s.reviewRounds,
         });
       return {
-        state: { ...clocked, phase: { at: "merge-sleep", pr: p.pr, headSha: p.headSha, n: p.n, since: p.since } },
+        state: { ...clocked, phase: { at: "merge-wait", pr: p.pr, headSha: p.headSha, n: p.n, since: p.since } },
         notes: [],
       };
     }
-    case "merge-sleep":
+    case "merge-wait":
       return {
         state: { ...s, phase: { at: "merge", pr: p.pr, headSha: p.headSha, n: p.n + 1, since: p.since } },
         notes: [],

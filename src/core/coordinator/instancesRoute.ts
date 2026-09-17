@@ -131,6 +131,78 @@ export function parseInstanceStatusPath(pathname: string): string | undefined {
   return INSTANCE_ID_PATTERN.test(id) ? id : undefined;
 }
 
+/** `POST /admin/coordinator/instances/<id>/events` — the shim's event relay
+ *  (docs/reference/specs/http-ingress.md item 12): the bot holds no Workflow
+ *  binding, so the check-run intake sends `checks-settled-<head>` through this
+ *  route and the shim's own `SHIP_COORDINATOR.get(id).sendEvent` delivers it. */
+export const COORDINATOR_INSTANCE_EVENTS_SUFFIX = "/events";
+
+/** The instance id an event path names, or undefined for any other path. */
+export function parseInstanceEventPath(pathname: string): string | undefined {
+  if (!pathname.startsWith(COORDINATOR_INSTANCE_STATUS_PREFIX)) return undefined;
+  if (!pathname.endsWith(COORDINATOR_INSTANCE_EVENTS_SUFFIX)) return undefined;
+  const id = pathname.slice(
+    COORDINATOR_INSTANCE_STATUS_PREFIX.length,
+    pathname.length - COORDINATOR_INSTANCE_EVENTS_SUFFIX.length,
+  );
+  return INSTANCE_ID_PATTERN.test(id) ? id : undefined;
+}
+
+export type ParsedSendEvent = { ok: true; type: string; payload: unknown } | { ok: false; reason: string };
+
+/** The Workflow event alphabet — what the engine's `sendEvent` accepts as a type. */
+const EVENT_TYPE_PATTERN = /^[A-Za-z0-9_-]{1,100}$/;
+
+/** The body: `{ type, payload? }` — the typed event the instance's `waitForEvent` waits on. */
+export function parseSendEventRequest(text: string): ParsedSendEvent {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { ok: false, reason: "body is not valid JSON" };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+    return { ok: false, reason: "body must be a JSON object" };
+  const b = parsed as Record<string, unknown>;
+  if (typeof b.type !== "string" || !EVENT_TYPE_PATTERN.test(b.type))
+    return { ok: false, reason: "`type` must be a Workflow event type: letters, digits, `_` and `-`, at most 100" };
+  return { ok: true, type: b.type, payload: b.payload };
+}
+
+/** How the send ended on the shim: delivered, no such instance (the engine's
+ *  own `instance.not_found`), or the engine refusing by reason (an instance
+ *  that already ended is a refusal, not an absence). */
+export type SendEventOutcome =
+  { kind: "sent"; id: string } | { kind: "absent"; id: string } | { kind: "failed"; id: string; reason: string };
+
+export function sendEventResponse(outcome: SendEventOutcome): { status: number; body: Record<string, unknown> } {
+  switch (outcome.kind) {
+    case "sent":
+      return { status: 200, body: { ok: true, id: outcome.id, sent: true } };
+    case "absent":
+      return { status: 404, body: { ok: false, error: "no_instance", id: outcome.id } };
+    case "failed":
+      return { status: 502, body: { ok: false, error: "send_failed", id: outcome.id, message: outcome.reason } };
+  }
+}
+
+/** The send answer as the bot reads it back: sent, absent, or unanswered by reason. */
+export type SendEventAnswer = { kind: "sent" } | { kind: "absent" } | { kind: "unanswered"; reason: string };
+
+export function readSendEventAnswer(status: number, text: string): SendEventAnswer {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    parsed = undefined;
+  }
+  const body = typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : undefined;
+  if (status === 200 && body?.ok === true && body.sent === true) return { kind: "sent" };
+  if (status === 404 && body?.error === "no_instance") return { kind: "absent" };
+  const detail = typeof body?.error === "string" ? body.error : text.slice(0, 200);
+  return { kind: "unanswered", reason: `HTTP ${status} — ${detail}` };
+}
+
 /** How the status read ended on the shim: the platform's status word, no such
  *  instance, or the engine failing by reason. */
 export type InstanceStatusOutcome =

@@ -6,8 +6,8 @@ import {
   cursorFinished,
   generatedPlanId,
   matchDispositions,
-  MERGE_POLL_MS,
   MERGE_WAIT_MAX_MS,
+  MERGE_WAIT_CHUNK_MS,
   nextAction,
   openPlanCursor,
   openUnitPipeline,
@@ -1281,7 +1281,7 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
     expect(renderUnitReport(failed.state)).toContain("HTTP 503");
   });
 
-  it("the merge: `pending` polls under a bounded wait, `refused` ends the unit naming the reason, and the poll's budget is its own — never the pipeline's", () => {
+  it("the merge: `pending` waits on the checks-settled event at the approved head under a bounded fallback, `refused` ends the unit naming the reason, and the wait's budget is its own — never the pipeline's", () => {
     const d = fresh(input());
     throughRoundZero(d);
     runChild(
@@ -1297,22 +1297,31 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
     );
     expect(d.action).toMatchObject({ type: "merge", step: "U10/merge/1" });
     d.answer({ type: "merge", outcome: "pending", reason: "checks running", at: T0 + 20 * MIN });
-    expect(d.action).toMatchObject({ type: "sleep", step: "U10/merge/sleep/1", ms: MERGE_POLL_MS });
-    d.answer({ type: "sleep" });
+    // The wait is on the intake's typed event at the approved head, with the
+    // old poll cadence as the fallback timeout: without the event the door is
+    // still re-asked every chunk, never slower than the poll it replaced.
+    expect(d.action).toMatchObject({
+      type: "wait-checks",
+      step: "U10/merge/wait/1",
+      headSha: HEAD_A,
+      timeoutMs: MERGE_WAIT_CHUNK_MS,
+    });
+    d.answer({ type: "wait-checks", outcome: "event" });
     expect(d.action).toMatchObject({ type: "merge", step: "U10/merge/2" });
-    // Every poll answers pending: the wait is bounded by MERGE_WAIT_MAX_MS from the first ask.
-    let polls = 2;
-    for (;;) {
-      const at = T0 + 20 * MIN + (polls - 1) * MERGE_POLL_MS;
-      const next = d.answer({ type: "merge", outcome: "pending", reason: "checks running", at });
-      if (next.type === "end") break;
-      expect(next).toMatchObject({ type: "sleep" });
-      d.answer({ type: "sleep" });
-      polls += 1;
-      expect(polls).toBeLessThan(100);
-    }
+    // Still pending 58 minutes in: the fallback timeout shrinks to the remainder
+    // once it is under a chunk (never below the one-minute floor).
+    d.answer({ type: "merge", outcome: "pending", reason: "checks running", at: T0 + 20 * MIN + 58 * MIN });
+    expect(d.action).toMatchObject({
+      type: "wait-checks",
+      step: "U10/merge/wait/2",
+      timeoutMs: 2 * MIN,
+    });
+    // The event never arrives: the bounded fallback times out, the door is
+    // asked once more, and a pending past the cap ends the unit.
+    d.answer({ type: "wait-checks", outcome: "timeout" });
+    expect(d.action).toMatchObject({ type: "merge", step: "U10/merge/3" });
+    d.answer({ type: "merge", outcome: "pending", reason: "checks running", at: T0 + 20 * MIN + MERGE_WAIT_MAX_MS });
     expect(d.action).toMatchObject({ type: "end", ending: { kind: "merge_refused" } });
-    expect((polls - 1) * MERGE_POLL_MS).toBeGreaterThanOrEqual(MERGE_WAIT_MAX_MS);
     expect(renderUnitReport(d.state)).toContain("checks running");
 
     const refused = fresh(input());

@@ -57,7 +57,7 @@ import {
   type UnitPipelineInput,
   type UnitPipelineState,
 } from "../ship/coordinator.js";
-import { isCoordinatorUnit, runFinishedEventType, type CoordinatorUnit } from "./contract.js";
+import { checksSettledEventType, isCoordinatorUnit, runFinishedEventType, type CoordinatorUnit } from "./contract.js";
 
 const MIN = 60_000;
 
@@ -429,6 +429,22 @@ async function perform(
     case "sleep":
       await step.sleep(action.step, action.ms);
       return { type: "sleep", step: action.step };
+    case "wait-checks": {
+      // The intake's checks-settled event at the approved head (http-ingress.md
+      // item 12), with the machine's bounded timeout as the fallback: either
+      // way the machine re-asks the merge door, which is the guard.
+      let outcome: "event" | "timeout";
+      try {
+        await step.waitForEvent(action.step, {
+          type: checksSettledEventType(action.headSha),
+          timeout: action.timeoutMs,
+        });
+        outcome = "event";
+      } catch {
+        outcome = "timeout";
+      }
+      return { type: "wait-checks", step: action.step, outcome };
+    }
     case "merge":
       return mergeReturn(
         action.step,

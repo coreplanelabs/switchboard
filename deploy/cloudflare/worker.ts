@@ -17,8 +17,11 @@ import {
   createInstanceResponse,
   instanceStatusResponse,
   isInstanceNotFound,
+  parseInstanceEventPath,
   parseInstanceStatusPath,
   parseCreateInstanceRequest,
+  parseSendEventRequest,
+  sendEventResponse,
   parseSubjectAuthorization,
   type CreateInstanceOutcome,
 } from "../../src/core/coordinator/instancesRoute.ts";
@@ -87,6 +90,7 @@ export interface Env {
   DASHBOARD_TOKEN?: string; // dashboard auth `token` strategy: the bearer (the default env name; config may name another)
   SWITCHBOARD_INGRESS_TOKENS?: string; // enables HTTP /ingress + MCP /mcp (JSON token→identity map); the `cron` entry is what scheduled runs present; an entry whose `http:<subject>` actor holds `deploy:write` in the bot's config may POST /admin/restart
   BRAVE_SEARCH_API_KEY?: string; // web_search backend (Brave); web_fetch works without it
+  GITHUB_WEBHOOK_SECRET?: string; // check-run intake: signs POST /webhooks/github; absent, the intake answers 503 disabled
   CF_ANALYTICS_TOKEN?: string; // costs dash: Cloudflare API token, Account Analytics:Read only
   ANTHROPIC_ADMIN_KEY?: string; // costs dash (optional): Anthropic Admin API key for the LLM cost report
   MEMORY_TOKEN?: string; // durable memory + friction ledger + schedule firings + MCP registry: bearer for the state Worker
@@ -125,6 +129,7 @@ const FORWARDED_OPTIONAL = [
   "ANTHROPIC_ADMIN_KEY",
   "SWITCHBOARD_INGRESS_TOKENS",
   "BRAVE_SEARCH_API_KEY",
+  "GITHUB_WEBHOOK_SECRET",
   "MEMORY_TOKEN",
   "MCP_CREDENTIAL_KEY",
   "MCP_ACCESS_CLIENT_ID",
@@ -407,6 +412,57 @@ async function handleCoordinatorInstanceStatus(request: Request, env: Env, id: s
   return json(res.status, res.body);
 }
 
+/** `POST /admin/coordinator/instances/<id>/events` — the shim's event relay
+ *  (docs/reference/specs/http-ingress.md item 12): the bot's check-run intake
+ *  holds no Workflow binding, so its `checks-settled-<head>` send crosses here
+ *  and this Worker's own `SHIP_COORDINATOR` binding delivers it. The same door
+ *  as the create and the status: the bearer in the map, the bot's `authorize`
+ *  answer. The engine's `instance.not_found` is 404; any other refusal (an
+ *  instance that already ended) is 502 by reason — the sender treats both as a
+ *  failed send and the driver's bounded wait is the fallback. */
+async function handleCoordinatorInstanceEvent(request: Request, env: Env, id: string): Promise<Response> {
+  const json = (status: number, body: Record<string, unknown>) =>
+    new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  if (request.method !== "POST")
+    return json(405, {
+      ok: false,
+      error: `method not allowed: ${request.method} — ${COORDINATOR_INSTANCES_PATH}/<id>/events answers POST only`,
+    });
+  const authorization = request.headers.get("authorization") ?? undefined;
+  const authn = authenticateIngressBearer(authorization, env.SWITCHBOARD_INGRESS_TOKENS, "coordinator");
+  if (!authn.ok) {
+    console.warn(`[coordinator] instance event ${authn.status} — ${authn.reason}`);
+    return json(authn.status, { ok: false, error: authn.reason });
+  }
+  let answer: Response;
+  try {
+    answer = await getContainer(env.SWITCHBOARD, INSTANCE).fetch(
+      new Request(`${INTERNAL}${COORDINATOR_AUTHORIZE_PATH}`, {
+        method: "POST",
+        headers: { authorization: authorization ?? "" },
+      }),
+    );
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return json(503, { ok: false, error: `coordinator disabled: the bot could not be asked (${reason})` });
+  }
+  const auth = parseSubjectAuthorization(answer.status, await answer.text().catch(() => ""));
+  if (!auth.ok) return json(auth.status, { ok: false, error: auth.reason });
+  const parsed = parseSendEventRequest(await request.text().catch(() => ""));
+  if (!parsed.ok) return json(400, { ok: false, error: parsed.reason });
+  let outcome: Parameters<typeof sendEventResponse>[0];
+  try {
+    await (await env.SHIP_COORDINATOR.get(id)).sendEvent({ type: parsed.type, payload: parsed.payload });
+    outcome = { kind: "sent", id };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    outcome = isInstanceNotFound(reason) ? { kind: "absent", id } : { kind: "failed", id, reason };
+  }
+  const res = sendEventResponse(outcome);
+  console.log(`[coordinator] ${auth.subject} → instance ${id} event ${parsed.type}: ${outcome.kind}`);
+  return json(res.status, res.body);
+}
+
 /** Record a firing on the state Worker's ScheduleDO (the /runs Scheduled panel
  *  reads it). Best-effort: a failure here is a log line — the run itself (if
  *  any) already happened and is its own record. */
@@ -440,29 +496,32 @@ export default {
       // The routes the Worker answers itself — the restart, the coordinator's
       // instance creation and an instance's status, all over bindings only this
       // Worker holds; everything else is the container's.
-      const statusId = parseInstanceStatusPath(pathname);
+      const eventsId = parseInstanceEventPath(pathname);
+      const statusId = eventsId === undefined ? parseInstanceStatusPath(pathname) : undefined;
       const res =
         pathname === "/admin/restart"
           ? await handleAdminRestart(forwarded, env)
           : pathname === COORDINATOR_INSTANCES_PATH
             ? await handleCoordinatorInstances(forwarded, env)
-            : statusId !== undefined
-              ? await handleCoordinatorInstanceStatus(forwarded, env, statusId)
-              : pathname === COPY_PATH
-                ? // The artifact copy (artifactsCopy.ts): the R2 binding and the Slack
-                  // token are this Worker's; the bot only asks, with its copy bearer.
-                  // `forwarded`, never `inbound`: `withTraceContext` rebuilt the request
-                  // with `new Request(inbound, …)`, which takes the body stream with it —
-                  // `inbound.text()` is empty afterwards and the route read "not JSON" live.
-                  await handleArtifactsCopy(forwarded, {
-                    bucket: env.ARTIFACTS,
-                    bucketName: env.ARTIFACTS_BUCKET_NAME,
-                    copyToken: env.ARTIFACTS_COPY_TOKEN,
-                    slackToken: env.SLACK_BOT_TOKEN,
-                    fetch: (input, init) => fetch(input, init),
-                    lengthPipe: (size) => new FixedLengthStream(size),
-                  })
-                : withLength(await getContainer(env.SWITCHBOARD, INSTANCE).fetch(forwarded));
+            : eventsId !== undefined
+              ? await handleCoordinatorInstanceEvent(forwarded, env, eventsId)
+              : statusId !== undefined
+                ? await handleCoordinatorInstanceStatus(forwarded, env, statusId)
+                : pathname === COPY_PATH
+                  ? // The artifact copy (artifactsCopy.ts): the R2 binding and the Slack
+                    // token are this Worker's; the bot only asks, with its copy bearer.
+                    // `forwarded`, never `inbound`: `withTraceContext` rebuilt the request
+                    // with `new Request(inbound, …)`, which takes the body stream with it —
+                    // `inbound.text()` is empty afterwards and the route read "not JSON" live.
+                    await handleArtifactsCopy(forwarded, {
+                      bucket: env.ARTIFACTS,
+                      bucketName: env.ARTIFACTS_BUCKET_NAME,
+                      copyToken: env.ARTIFACTS_COPY_TOKEN,
+                      slackToken: env.SLACK_BOT_TOKEN,
+                      fetch: (input, init) => fetch(input, init),
+                      lengthPipe: (size) => new FixedLengthStream(size),
+                    })
+                  : withLength(await getContainer(env.SWITCHBOARD, INSTANCE).fetch(forwarded));
       root.end(res.status >= 500 ? "error" : "ok", { httpStatus: res.status });
       return res;
     } catch (err) {

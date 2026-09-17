@@ -164,6 +164,10 @@ export interface AdminCoordinatorDeps {
     pr: { repo: string; number: number },
     opts: { sha: string; title: string },
   ) => Promise<MergeResult>;
+  /** Records "this instance's merge step waits at this head" on every `pending`
+   *  answer — the check-run intake's address book (checksIntake.ts,
+   *  http-ingress.md item 12). Optional: without it the bounded wait stands alone. */
+  noteMergeWait?: (headSha: string, instanceId: string, at: number) => void;
   /** Where the parent's record goes when the instance ends. */
   runHistoryWriter: RunHistoryWriter;
   /** The channel's visibility stamp for that record (dispatch/record.ts `channelVisibilityOf`). */
@@ -1423,20 +1427,27 @@ async function merge(
       at,
     });
   if (checks.failed.length > 0) return refused(`CI is red at \`${headSha.slice(0, 7)}\`: ${checks.failed.join(", ")}`);
-  if (checks.total === 0)
+  // A `pending` answer is what the machine's merge wait rides: the intake
+  // (checksIntake.ts) reads this registry to know whom the checks-settled
+  // event at this head wakes (http-ingress.md item 12).
+  if (checks.total === 0) {
+    deps.noteMergeWait?.(headSha, id.value, at);
     return json(200, {
       ok: true,
       outcome: "pending",
       reason: `no check has reported at \`${headSha.slice(0, 7)}\` yet`,
       at,
     });
-  if (checks.pending.length > 0)
+  }
+  if (checks.pending.length > 0) {
+    deps.noteMergeWait?.(headSha, id.value, at);
     return json(200, {
       ok: true,
       outcome: "pending",
       reason: `${checks.pending.length} check(s) still running at \`${headSha.slice(0, 7)}\`: ${checks.pending.join(", ")}`,
       at,
     });
+  }
   let merged: MergeResult;
   try {
     merged = await deps.mergePullRequest(pr, {
