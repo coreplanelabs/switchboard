@@ -2,7 +2,7 @@
 
 The Linear integration is being built in stages. OAuth, durable webhook intake,
 native conversations, edge acknowledgements, dispatcher consumption, outbound
-files and lifecycle cancellation are wired. Issue tools, inbound files and live
+files, issue tools and lifecycle cancellation are wired. Inbound files and live
 deployment verification remain in progress. Do not install the app for end users until the completed channel
 is deployed. See the [delivery plan](../plans/2026-09-17-001-linear-channel.md).
 
@@ -62,6 +62,14 @@ through those ids or `linear:*`; do not copy a Slack administrator's privileges
 based on a matching display name. Linear team channel ids are
 `linear:<workspace-id>:<team-id>`, and session thread ids are
 `linear:<workspace-id>:<session-id>`.
+
+The `work_item_get` and `work_items_delegated` tools read issues visible to the
+requesting person. The queue uses Linear's delegate field, preserving the
+human assignee. Issue edits, subissues and comments require `work-items:write`;
+grant it to selected people or `linear:*` through the normal `grants` block.
+Every operation refreshes the person's team membership and public-team access.
+Even an administrator's Switchboard grant does not bypass Linear's private-team
+boundary. Subissue creation does not automatically delegate another run.
 
 Native Stop uses the same `runs:write` grant and run-visibility policy as
 `runs stop`. A Linear session does not establish team-wide membership; configure

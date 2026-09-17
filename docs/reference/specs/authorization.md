@@ -113,3 +113,15 @@ One decision, `authorize(actor, action, resource) → allow | deny(reason)`, ove
 | Agent actors gate tool-level actions: a coding agent's `repo:use` / push target decided by `authorize(agent actor, "repo:use", repo)` instead of the resident's compound gate | `[gap]` the `agent` kind and `onBehalfOf` exist (item 1); the resident gating has not moved |
 | 12: a root that ended 401/403 is never written; an internal Worker's root exists only after auth | `[unit]` `src/core/trace/workerTrace.test.ts::refusalFilter / workerLogSink::*`; the Workers' wiring is receipted live (tracing.md item 22) |
 | 12: the span log route opens only to an ingress bearer holding `trace:read`: 401 without a bearer, 403 with another grant, 503 without the token map ([tracing.md](tracing.md) item 26) | `[unit]` `src/channels/adminTraceLog.test.ts::GET /admin/trace/log::no bearer → 401, a bearer without trace:read → 403…` |
+
+## Work tracking
+
+`work-items:read` and `work-items:write` require the corresponding action grant
+and membership in the issue’s channel. Linear resolves current team membership
+and public-team access per request; the adapter supplies those facts to the
+same policy table, with no configured channel override across Linear privacy
+boundaries. The dispatcher binds the resolved actor outside model input.
+Reads join the chat baseline; writes require an explicit grant.
+
+Proof: `src/channels/linear/workItems.test.ts::*`, and each policy row’s allow
+and deny cases in `src/core/authz/policy.test.ts`.

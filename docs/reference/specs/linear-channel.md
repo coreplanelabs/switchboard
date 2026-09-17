@@ -5,8 +5,8 @@ Its OAuth app is the API identity; the dispatch actor is the authenticated perso
 the session. Native delegation names the app in `Issue.delegate` and preserves
 the human assignee.
 
-- **Code**: `src/channels/linear/oauth.ts`, `src/channels/linear/store.ts`, `src/channels/linear/webhook.ts`, `src/channels/linear/inbox.ts`, `src/channels/linear/api.ts`, `src/channels/linear/session.ts`, `src/channels/linear/io.ts`, `src/channels/linear/bridge.ts`, `src/channels/linear/consumer.ts`, `src/channels/linear/acknowledgement.ts`, `src/channels/linear/control.ts`, `src/channels/linear/recovery.ts`, `src/channels/linear/lifecycle.ts`, `src/index.ts`, `src/core/authz/actor.ts`, `src/core/authz/grants.ts`, `src/core/budgets.ts`, `deploy/cloudflare/linear.ts`, `deploy/cloudflare/worker.ts`, `deploy/cloudflare/wrangler.template.jsonc`.
-- **Tests**: `src/channels/linear/oauth.test.ts`, `src/channels/linear/store.test.ts`, `src/channels/linear/webhook.test.ts`, `src/channels/linear/inbox.test.ts`, `src/channels/linear/api.test.ts`, `src/channels/linear/session.test.ts`, `src/channels/linear/io.test.ts`, `src/channels/linear/bridge.test.ts`, `src/channels/linear/consumer.test.ts`, `src/channels/linear/acknowledgement.test.ts`, `src/channels/linear/control.test.ts`, `src/channels/linear/recovery.test.ts`, `src/channels/linear/lifecycle.test.ts`, `src/core/authz/actor.test.ts`.
+- **Code**: `src/channels/linear/oauth.ts`, `src/channels/linear/store.ts`, `src/channels/linear/webhook.ts`, `src/channels/linear/inbox.ts`, `src/channels/linear/api.ts`, `src/channels/linear/session.ts`, `src/channels/linear/io.ts`, `src/channels/linear/bridge.ts`, `src/channels/linear/consumer.ts`, `src/channels/linear/acknowledgement.ts`, `src/channels/linear/control.ts`, `src/channels/linear/recovery.ts`, `src/channels/linear/lifecycle.ts`, `src/channels/linear/workItems.ts`, `src/core/workItems.ts`, `src/tools/workItems.ts`, `src/tools/toolsets.ts`, `src/tools/runnableTool.ts`, `src/core/dispatch/runLoop.ts`, `src/core/authz/policy.ts`, `src/index.ts`, `src/core/authz/actor.ts`, `src/core/authz/grants.ts`, `src/core/budgets.ts`, `deploy/cloudflare/linear.ts`, `deploy/cloudflare/worker.ts`, `deploy/cloudflare/wrangler.template.jsonc`.
+- **Tests**: `src/channels/linear/oauth.test.ts`, `src/channels/linear/store.test.ts`, `src/channels/linear/webhook.test.ts`, `src/channels/linear/inbox.test.ts`, `src/channels/linear/api.test.ts`, `src/channels/linear/session.test.ts`, `src/channels/linear/io.test.ts`, `src/channels/linear/bridge.test.ts`, `src/channels/linear/consumer.test.ts`, `src/channels/linear/acknowledgement.test.ts`, `src/channels/linear/control.test.ts`, `src/channels/linear/recovery.test.ts`, `src/channels/linear/lifecycle.test.ts`, `src/channels/linear/workItems.test.ts`, `src/tools/workItems.test.ts`, `src/core/dispatch/runLoop.test.ts`, `src/core/authz/actor.test.ts`.
 - **Docs**: [Delivery plan](../../plans/2026-09-17-001-linear-channel.md).
 
 ## Behavior
@@ -92,6 +92,16 @@ the human assignee.
     the executor; the installation token stays at the edge. Upload completion
     posts a native activity with an inline image or file link. A failed upload
     never posts a success link or closes the active run.
+16. Issue tools bind the resolved requesting person, never a model-selected
+    actor. Each operation resolves their current workspace membership and
+    public-team access, then asks the shared policy table. A guest cannot
+    borrow the app's public-team access; an operator grant cannot bypass
+    Linear's private-team boundary. Reads and writes use separate actions.
+    Restricted child teams inherit their enclosing private team's membership;
+    a private child still needs its own membership.
+    The paginated queue filters `delegate`, not human `assignee`. Updates name
+    only requested fields; subissues inherit their parent's team without
+    silently assigning a person or starting a second delegated run.
 
 ## Proof
 
@@ -110,4 +120,6 @@ the human assignee.
 | 13: revocation and lifecycle cancellation | `[unit]` `src/channels/linear/lifecycle.test.ts::*` |
 | 14: durable acknowledgement and activity reconciliation | `[unit]` `src/channels/linear/acknowledgement.test.ts::*`, `src/channels/linear/inbox.test.ts::*`, `src/channels/linear/api.test.ts::*` |
 | 15: private file tickets, session checks and native sharing | `[unit]` `src/channels/linear/api.test.ts::*`, `src/channels/linear/bridge.test.ts::*`, `src/channels/linear/io.test.ts::*` |
-| Issue actions, inbound files and deployed installation | `[gap]` Delivery plan acceptance ledger; not implemented by OAuth alone |
+| 16: issue actions and delegated queue privacy | `[unit]` `src/channels/linear/workItems.test.ts::*` |
+| Work-item tool exposure and dispatcher binding | `[unit]` `src/tools/workItems.test.ts::*`, `src/core/dispatch/runLoop.test.ts::runLoop — the model turn and everything that rides on it::binds work tracking to the resolved requester before a model can call an issue tool` |
+| Inbound files and deployed installation | `[gap]` Delivery plan acceptance ledger; not implemented by OAuth alone |

@@ -11,8 +11,18 @@ import {
 } from "./api.js";
 import type { LinearDelivery, LinearInbox } from "./inbox.js";
 import { boundedBody } from "./webhook.js";
+import type { WorkItemRequest, WorkItemResult } from "../../core/workItems.js";
+import type { LinearWorkItemActor } from "./workItems.js";
 
 export const LINEAR_BRIDGE_PATH = "/internal/linear";
+
+const WORK_ITEM_ERRORS: Readonly<Record<string, number>> = {
+  linear_work_item_denied: 403,
+  linear_human_required: 403,
+  linear_invalid_work_item_input: 400,
+  linear_empty_work_item_update: 400,
+  linear_unknown_or_ambiguous_state: 400,
+};
 
 export interface LinearTransport {
   baseUrl: string;
@@ -39,7 +49,11 @@ async function call<T>(transport: LinearTransport, body: Record<string, unknown>
   } catch {
     throw new Error("linear_bridge_unavailable");
   }
-  if (!response.ok) throw new Error("linear_bridge_unavailable");
+  if (!response.ok) {
+    const error = object(await response.json().catch(() => null)).error;
+    if (typeof error === "string" && Object.hasOwn(WORK_ITEM_ERRORS, error)) throw new Error(error);
+    throw new Error("linear_bridge_unavailable");
+  }
   return ((await response.json()) as { result: T }).result;
 }
 
@@ -63,6 +77,9 @@ export class RemoteLinearApi implements LinearApi {
   }
   upload(sessionId: string, file: { name: string; size: number }): Promise<LinearUpload> {
     return call(this.transport, { op: "upload", organizationId: this.organizationId, sessionId, file });
+  }
+  workItems(sessionId: string, actor: LinearWorkItemActor, input: WorkItemRequest): Promise<WorkItemResult> {
+    return call(this.transport, { op: "workItems", organizationId: this.organizationId, sessionId, actor, input });
   }
 }
 
@@ -162,6 +179,7 @@ export async function handleLinearBridge(
       "activity",
       "link",
       "upload",
+      "workItems",
     ].includes(String(op))
   )
     return answer(400, { error: "unknown_operation" });
@@ -192,6 +210,12 @@ export async function handleLinearBridge(
           ...(typeof options.ephemeral === "boolean" ? { ephemeral: options.ephemeral } : {}),
           ...(typeof options.id === "string" ? { id: options.id } : {}),
         });
+      } else if (op === "workItems") {
+        result = await api.workItems(
+          id,
+          object(body.actor) as unknown as LinearWorkItemActor,
+          object(body.input) as unknown as WorkItemRequest,
+        );
       } else if (op === "upload") {
         const file = object(body.file);
         if (typeof file.size !== "number") return answer(400, { error: "invalid_file" });
@@ -204,7 +228,9 @@ export async function handleLinearBridge(
       }
     }
     return answer(200, { result: result ?? null });
-  } catch {
+  } catch (error) {
+    if (op === "workItems" && error instanceof Error && Object.hasOwn(WORK_ITEM_ERRORS, error.message))
+      return answer(WORK_ITEM_ERRORS[error.message]!, { error: error.message });
     return answer(503, { error: "linear_bridge_unavailable" });
   }
 }

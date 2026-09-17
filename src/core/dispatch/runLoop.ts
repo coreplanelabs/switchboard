@@ -641,6 +641,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     : undefined;
   const toolContext = {
     executor,
+    workItems: io.workItems?.(chatActorOf(deps.config, msg)),
     reportProgress,
     ...(attachFile ? { attach: attachFile } : {}),
     ...(artifacts ? { artifacts } : {}),

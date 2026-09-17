@@ -4,6 +4,9 @@
 // talk back through. Everything else — config resolution, permissions, agent
 // selection, execution — is channel-agnostic and lives in the dispatcher.
 
+import type { Actor } from "./authz/types.js";
+import type { WorkItems } from "./workItems.js";
+
 /** An image the user attached, already downloaded and base64-encoded. */
 export interface ImageAttachment {
   /** e.g. "image/png" — adapters only pass types every provider accepts */
@@ -242,6 +245,8 @@ export interface ConfirmationOffer {
 }
 
 export interface ChannelIO {
+  /** Bind work-tracking tools to the resolved actor, outside model arguments. */
+  workItems?(actor: Actor): WorkItems;
   /** Post a reply in the conversation. Adapter handles chunking/formatting. */
   reply(text: string): Promise<void>;
   /**

@@ -448,6 +448,8 @@ describe("the research preset on pi: the web toolset relayed, run in the bot as 
       "web_fetch",
       "web_search",
       "update_status",
+      "work_item_get",
+      "work_items_delegated",
       "github_repos",
       "github_file",
       "github_tree",

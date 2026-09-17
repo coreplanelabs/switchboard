@@ -52,6 +52,7 @@ export function agentRunAction(agent: string): string {
 export const CHAT_OPEN_ACTIONS: readonly string[] = [
   "help:read",
   "status:read",
+  "work-items:read",
   "config:read",
   "repo:read",
   "friction:read",

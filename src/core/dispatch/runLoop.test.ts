@@ -335,6 +335,26 @@ function setup(
 }
 
 describe("runLoop — the model turn and everything that rides on it", () => {
+  it("binds work tracking to the resolved requester before a model can call an issue tool", async () => {
+    const request = vi.fn(async () => ({ items: [] }));
+    const workItems = vi.fn(() => ({ request }));
+    let turn = 0;
+    const provider: Provider = {
+      name: "fake",
+      async complete() {
+        return turn++ === 0
+          ? {
+              content: [{ type: "tool_use", id: "t1", name: "work_items_delegated", input: {} }],
+              stopReason: "tool_use",
+            }
+          : { content: [{ type: "text", text: "No delegated issues." }], stopReason: "end_turn" };
+      },
+    };
+    const h = setup("", { agent: "coding", provider, io: { workItems } });
+    await runLoop(h.deps, h.ctx);
+    expect(workItems).toHaveBeenCalledWith(expect.objectContaining({ id: h.ctx.msg.userId }));
+    expect(request).toHaveBeenCalledWith({ op: "delegated", after: undefined, limit: undefined });
+  });
   // docs/reference/specs/agent-coding.md item 10: the thread's file upload
   // rides the tool context only when the channel has one — a coding run's
   // `attach_file` posts through the requesting thread's `attachFile`.
@@ -2206,12 +2226,17 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
     expect(tools).toEqual([
       "web_fetch",
       "update_status",
+      "work_item_get",
+      "work_items_delegated",
       "github_repos",
       "github_file",
       "github_tree",
       "github_search_code",
       "github_issue_list",
       "github_issue_get",
+      "work_item_update",
+      "work_item_create_child",
+      "work_item_comment",
       "github_issue_create",
       "github_issue_update",
       "github_issue_comment",
@@ -2386,7 +2411,14 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
     expect(start.env.SWITCHBOARD_HARNESS_URL).toBe("http://127.0.0.1:8080");
     expect(start.env.SWITCHBOARD_RUN_BEARER).toBe("sbr_run-l.s3cret");
     const tools = start.args[start.args.indexOf("--tools") + 1].split(",");
-    expect(tools).toEqual(["web_fetch", "web_search", "update_status", ...GITHUB_READS]);
+    expect(tools).toEqual([
+      "web_fetch",
+      "web_search",
+      "update_status",
+      "work_item_get",
+      "work_items_delegated",
+      ...GITHUB_READS,
+    ]);
     for (const own of ["read", "bash", "edit", "write", "grep", "find", "ls"]) expect(tools).not.toContain(own);
     expect(refusals).toEqual([
       {
@@ -2527,6 +2559,8 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
       "get_run_status",
       "web_fetch",
       "update_status",
+      "work_item_get",
+      "work_items_delegated",
       ...GITHUB_READS,
     ]);
     for (const own of ["read", "bash", "edit", "write", "grep", "find", "ls"]) expect(tools).not.toContain(own);

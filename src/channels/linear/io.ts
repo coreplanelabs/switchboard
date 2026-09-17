@@ -11,6 +11,9 @@ import type { Clock } from "../../core/trace/types.js";
 import { LINEAR_TIMING } from "../../core/budgets.js";
 import type { LinearApi, LinearContent } from "./api.js";
 import { contentTypeFor, INLINE_IMAGE_TYPES } from "../../artifacts/contentType.js";
+import { effectiveGrants } from "../../core/authz/authorize.js";
+import type { Actor } from "../../core/authz/types.js";
+import type { WorkItems } from "../../core/workItems.js";
 
 /** One native session is one Switchboard conversation. No Slack formatting,
  *  comment scraping or installation credential crosses this boundary. */
@@ -35,6 +38,12 @@ export class LinearChannelIO implements ChannelIO {
       uploadFetch?: typeof fetch;
     },
   ) {}
+
+  workItems(actor: Actor): WorkItems {
+    const actions = effectiveGrants(actor).actions;
+    const identity = { id: actor.id, actions: actions === "all" ? ("all" as const) : [...actions] };
+    return { request: (input) => this.deps.api.workItems(this.deps.sessionId, identity, input) };
+  }
 
   private enqueue(work: () => Promise<void>): Promise<void> {
     const result = this.writes.then(work);

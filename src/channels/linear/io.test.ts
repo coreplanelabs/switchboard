@@ -5,6 +5,7 @@ import type { LinearApi } from "./api.js";
 function fixture() {
   let now = 100;
   const api: LinearApi = {
+    workItems: vi.fn(),
     upload: vi.fn(),
     session: vi.fn(),
     activities: vi.fn(async () => []),
@@ -22,6 +23,30 @@ function fixture() {
 }
 
 describe("Linear channel output", () => {
+  it("binds work-item identity and intersected grants outside the tool's input", async () => {
+    const { api, io } = fixture();
+    const grants = {
+      actions: new Set(["work-items:read", "work-items:write"]),
+      channels: "all" as const,
+      repos: "all" as const,
+    };
+    const capability = io.workItems({
+      kind: "user",
+      id: "linear:org:person",
+      grants,
+      onBehalfOf: {
+        kind: "user",
+        id: "linear:org:other",
+        grants: { ...grants, actions: new Set(["work-items:read"]) },
+      },
+    });
+    await capability.request({ op: "get", id: "ENG-1" });
+    expect(api.workItems).toHaveBeenCalledWith(
+      "s",
+      { id: "linear:org:person", actions: ["work-items:read"] },
+      { op: "get", id: "ENG-1" },
+    );
+  });
   it("shares an uploaded image as native progress without closing the session", async () => {
     const { api, io } = fixture();
     vi.mocked(api.upload).mockResolvedValue({

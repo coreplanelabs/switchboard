@@ -1,5 +1,7 @@
 import { LINEAR_TIMING } from "../../core/budgets.js";
 import { contentTypeFor } from "../../artifacts/contentType.js";
+import type { WorkItemRequest, WorkItemResult } from "../../core/workItems.js";
+import { linearWorkItems, type LinearWorkItemActor } from "./workItems.js";
 
 export interface LinearUpload {
   uploadUrl: string;
@@ -42,6 +44,7 @@ export interface LinearApi {
   activity(sessionId: string, content: LinearContent, options?: { ephemeral?: boolean; id?: string }): Promise<void>;
   link(sessionId: string, link: { url: string; label: string }): Promise<void>;
   upload(sessionId: string, file: { name: string; size: number }): Promise<LinearUpload>;
+  workItems(sessionId: string, actor: LinearWorkItemActor, input: WorkItemRequest): Promise<WorkItemResult>;
 }
 
 export const object = (value: unknown): Record<string, unknown> =>
@@ -81,6 +84,14 @@ export class DirectLinearApi implements LinearApi {
       fetch: typeof fetch;
     },
   ) {}
+
+  workItems(_sessionId: string, actor: LinearWorkItemActor, input: WorkItemRequest): Promise<WorkItemResult> {
+    return linearWorkItems(
+      { organizationId: this.deps.organizationId, appUserId: this.deps.appUserId, query: this.query.bind(this) },
+      actor,
+      input,
+    );
+  }
 
   private async query(query: string, variables: Record<string, unknown>): Promise<Record<string, unknown>> {
     const token = await this.deps.token();

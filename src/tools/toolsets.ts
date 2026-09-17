@@ -13,6 +13,7 @@
 // out. There is one loop now and no filter: the table is exactly what is
 // relayed.
 
+import { WORK_ITEM_READ_TOOLS, WORK_ITEM_WRITE_TOOLS } from "./workItems.js";
 import { attachFileTool } from "./attach.js";
 import { diffDigestTool } from "./diffDigest.js";
 import { GITHUB_ISSUE_WRITE_TOOLS, GITHUB_READ_TOOLS } from "./github.js";
@@ -57,7 +58,9 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
     diffDigestTool,
     listSkillsTool,
     useSkillTool,
+    ...WORK_ITEM_READ_TOOLS,
     ...GITHUB_READ_TOOLS,
+    ...WORK_ITEM_WRITE_TOOLS,
     ...GITHUB_ISSUE_WRITE_TOOLS,
     ...SESSION_TOOLS,
   ],
@@ -68,14 +71,22 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
     diffDigestTool,
     listSkillsTool,
     useSkillTool,
+    ...WORK_ITEM_READ_TOOLS,
     ...GITHUB_READ_TOOLS,
     ...SESSION_TOOLS,
   ],
-  web: [webFetchTool, webSearchTool, updateStatusTool, ...GITHUB_READ_TOOLS],
+  web: [webFetchTool, webSearchTool, updateStatusTool, ...WORK_ITEM_READ_TOOLS, ...GITHUB_READ_TOOLS],
   /** The general agent: no workspace, no shell — GitHub reads + issue writes
    *  and URL reading, so a plain mention can answer from the repos and act on
    *  issues without being re-sent to another agent. */
-  assistant: [webFetchTool, updateStatusTool, ...GITHUB_READ_TOOLS, ...GITHUB_ISSUE_WRITE_TOOLS],
+  assistant: [
+    webFetchTool,
+    updateStatusTool,
+    ...WORK_ITEM_READ_TOOLS,
+    ...GITHUB_READ_TOOLS,
+    ...WORK_ITEM_WRITE_TOOLS,
+    ...GITHUB_ISSUE_WRITE_TOOLS,
+  ],
   /** The explore agent (docs/reference/specs/agent-explore.md): the web with
    *  search, the skills, the GitHub reads and the status card — and nothing
    *  that writes: no `submit_*`, no issue writes. Its shell and file reads are
@@ -87,6 +98,7 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
     webSearchTool,
     listSkillsTool,
     useSkillTool,
+    ...WORK_ITEM_READ_TOOLS,
     ...GITHUB_READ_TOOLS,
     ...SESSION_TOOLS,
   ],
@@ -95,7 +107,7 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
    *  steer or await a run — beside the GitHub reads, URL reading and the status
    *  card. No shell, no files, no writes: a conductor coordinates and never
    *  does a child's job. */
-  conductor: [...RUN_TOOLS, webFetchTool, updateStatusTool, ...GITHUB_READ_TOOLS],
+  conductor: [...RUN_TOOLS, webFetchTool, updateStatusTool, ...WORK_ITEM_READ_TOOLS, ...GITHUB_READ_TOOLS],
   none: [],
 };
 

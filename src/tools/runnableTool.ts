@@ -30,8 +30,11 @@ import type { GithubCapability } from "./github.js";
 import type { RunsReadCapability, SteerCapability } from "./runs.js";
 import type { SessionCapability } from "./session.js";
 import type { WebCapability } from "./web.js";
+import type { WorkItems } from "../core/workItems.js";
 
 export interface ToolContext {
+  /** Work tracking bound to this run's resolved actor by its channel. */
+  workItems?: WorkItems;
   executor: Executor;
   /** The tool call's id (the provider's `tool_use` id; pi's `toolCallId`),
    *  the same id the call's `tool_call`/`tool_result` events carry: what a tool

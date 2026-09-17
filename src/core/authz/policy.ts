@@ -67,6 +67,11 @@ export const POLICY: readonly Rule[] = [
   // no caller until the references dispatch step lands behind its flag.
   { action: "conversation:read", resource: "channel", when: [MEMBER_OF] },
 
+  // Work tracking requires both the action grant and current platform access.
+  // Its adapter supplies fresh memberOf facts and caps public access for guests.
+  { action: "work-items:read", resource: "channel", when: [grant("work-items:read"), MEMBER_OF] },
+  { action: "work-items:write", resource: "channel", when: [grant("work-items:write"), MEMBER_OF] },
+
   // ── review ───────────────────────────────────────────────────────────────
   // `review abridge` spends one Opus-class call and rewrites a stored record:
   // the grant admits the command (admins through `all`, operators by name;

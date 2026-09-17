@@ -6,6 +6,7 @@ import type { LinearApi } from "./api.js";
 function fixture() {
   const inbox = new InMemoryLinearInbox();
   const api: LinearApi = {
+    workItems: vi.fn(),
     upload: vi.fn(),
     session: vi.fn(async (id) => ({ id, appUserId: "bot" })),
     activities: vi.fn(async () => []),
@@ -18,6 +19,19 @@ function fixture() {
 }
 
 describe("Linear edge bridge", () => {
+  it("binds work-item operations to an accessible session over the fixed bridge", async () => {
+    const { api, transport } = fixture();
+    const remote = new RemoteLinearApi(transport, "org");
+    const actor = { id: "linear:org:person", actions: ["work-items:read"] };
+    vi.mocked(api.workItems).mockResolvedValue({ items: [] });
+    expect(await remote.workItems("s", actor, { op: "delegated" })).toEqual({ items: [] });
+    expect(api.workItems).toHaveBeenCalledWith("s", actor, { op: "delegated" });
+    vi.mocked(api.session).mockRejectedValueOnce(new Error("access removed"));
+    await expect(remote.workItems("s", actor, { op: "delegated" })).rejects.toThrow("linear_bridge_unavailable");
+    expect(api.workItems).toHaveBeenCalledTimes(1);
+    vi.mocked(api.workItems).mockRejectedValueOnce(new Error("linear_work_item_denied"));
+    await expect(remote.workItems("s", actor, { op: "delegated" })).rejects.toThrow("linear_work_item_denied");
+  });
   it("mints upload tickets only after checking session ownership and current access", async () => {
     const { api, transport } = fixture();
     const remote = new RemoteLinearApi(transport, "org");
