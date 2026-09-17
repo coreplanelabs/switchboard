@@ -183,3 +183,113 @@ describe("ConfigDO secrets + tickets (docs/reference/specs/mcp-tools.md items 15
     ).toBe(400);
   });
 });
+
+// Feature: docs/reference/specs/routing-and-config.md item 25 — the confirmation a
+// routed write is offered as: one row per thread in this object, consumed once
+// for its requester, expiry stamped and judged on the object's clock.
+describe("ConfigDO confirmations (docs/reference/specs/routing-and-config.md item 25)", () => {
+  const TTL = 600_000;
+  const requester = "slack:UREQ";
+  const row = (id: string, threadKey: string, body: Record<string, unknown> = { command: "config.set" }) => ({
+    id,
+    threadKey,
+    requester,
+    body,
+    ttlMs: TTL,
+  });
+
+  it("put stamps expiresAt on the object's clock from the ttl; consume returns the row once for the requester and deletes it; a second consume is `used`", async () => {
+    const id = `c-${key()}`;
+    const thread = `slack:CX:${key()}`;
+    const before = Date.now();
+    const put = await post("/config/confirmations/put", row(id, thread, { command: "config.set", n: 1 }));
+    const after = Date.now();
+    expect(put.status).toBe(200);
+    const expiresAt = put.data.expiresAt as number;
+    expect(expiresAt).toBeGreaterThanOrEqual(before + TTL);
+    expect(expiresAt).toBeLessThanOrEqual(after + TTL);
+    const consumed = await post("/config/confirmations/consume", { id, actorIds: [requester] });
+    expect(consumed.data).toEqual({
+      row: { id, threadKey: thread, requester, expiresAt, body: { command: "config.set", n: 1 } },
+    });
+    expect((await post("/config/confirmations/consume", { id, actorIds: [requester] })).data).toEqual({
+      refused: "used",
+    });
+  });
+
+  it("a row past its expiry is refused `expired` on touch and deleted — the object's clock decides, never the caller's", async () => {
+    const id = `c-${key()}`;
+    await post("/config/confirmations/put", { ...row(id, `slack:CX:${key()}`), ttlMs: 0 });
+    expect((await post("/config/confirmations/consume", { id, actorIds: [requester] })).data).toEqual({
+      refused: "expired",
+    });
+    expect((await post("/config/confirmations/consume", { id, actorIds: [requester] })).data).toEqual({
+      refused: "used",
+    });
+  });
+
+  it("an actor whose ids miss the requester is refused `foreign` and the row is kept; the requester's own id, or a list holding it, consumes", async () => {
+    const id = `c-${key()}`;
+    await post("/config/confirmations/put", row(id, `slack:CX:${key()}`));
+    expect((await post("/config/confirmations/consume", { id, actorIds: ["slack:UOTHER"] })).data).toEqual({
+      refused: "foreign",
+    });
+    expect(
+      (await post("/config/confirmations/consume", { id, actorIds: ["access:sub-1", "slack:UOTHER"] })).data,
+    ).toEqual({ refused: "foreign" });
+    const consumed = await post("/config/confirmations/consume", { id, actorIds: ["access:sub-1", requester] });
+    expect((consumed.data.row as { id: string }).id).toBe(id);
+  });
+
+  it("put replaces the thread's older row: after a second put the first id reads `used`, and another thread's row is untouched", async () => {
+    const thread = `slack:CX:${key()}`;
+    const first = `c-${key()}`;
+    const second = `c-${key()}`;
+    const elsewhere = `c-${key()}`;
+    await post("/config/confirmations/put", row(elsewhere, `slack:CY:${key()}`));
+    await post("/config/confirmations/put", row(first, thread));
+    await post("/config/confirmations/put", row(second, thread));
+    expect((await post("/config/confirmations/consume", { id: first, actorIds: [requester] })).data).toEqual({
+      refused: "used",
+    });
+    expect(
+      ((await post("/config/confirmations/consume", { id: second, actorIds: [requester] })).data.row as { id: string })
+        .id,
+    ).toBe(second);
+    expect(
+      (
+        (await post("/config/confirmations/consume", { id: elsewhere, actorIds: [requester] })).data.row as {
+          id: string;
+        }
+      ).id,
+    ).toBe(elsewhere);
+  });
+
+  it("cancel deletes the row for the requester and refuses a stranger; a cancelled or unknown id reads `used`", async () => {
+    const id = `c-${key()}`;
+    await post("/config/confirmations/put", row(id, `slack:CX:${key()}`));
+    expect((await post("/config/confirmations/cancel", { id, actorIds: ["slack:UOTHER"] })).data).toEqual({
+      refused: "foreign",
+    });
+    expect((await post("/config/confirmations/cancel", { id, actorIds: [requester] })).data).toEqual({ ok: true });
+    expect((await post("/config/confirmations/consume", { id, actorIds: [requester] })).data).toEqual({
+      refused: "used",
+    });
+    expect((await post("/config/confirmations/cancel", { id, actorIds: [requester] })).data).toEqual({
+      refused: "used",
+    });
+  });
+
+  it("validates: a malformed id, an empty threadKey or requester, a non-object body, a bad ttl and a non-list actorIds are 400", async () => {
+    const good = row(`c-${key()}`, `slack:CX:${key()}`);
+    expect((await post("/config/confirmations/put", { ...good, id: "no spaces allowed" })).status).toBe(400);
+    expect((await post("/config/confirmations/put", { ...good, threadKey: "" })).status).toBe(400);
+    expect((await post("/config/confirmations/put", { ...good, requester: 7 })).status).toBe(400);
+    expect((await post("/config/confirmations/put", { ...good, body: [1] })).status).toBe(400);
+    expect((await post("/config/confirmations/put", { ...good, ttlMs: -1 })).status).toBe(400);
+    expect((await post("/config/confirmations/put", { ...good, ttlMs: 1.5 })).status).toBe(400);
+    expect((await post("/config/confirmations/consume", { id: "no spaces", actorIds: [requester] })).status).toBe(400);
+    expect((await post("/config/confirmations/consume", { id: good.id, actorIds: requester })).status).toBe(400);
+    expect((await post("/config/confirmations/cancel", { id: good.id, actorIds: [1] })).status).toBe(400);
+  });
+});

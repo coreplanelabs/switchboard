@@ -70,9 +70,10 @@ export interface TraceOptions {
   span?: Span;
   /** Which door the call came through when it was not the surface's own
    *  grammar: `route` for a command the request router bound from prose
-   *  (record 0036). Copied onto the registry's audit line, never read by a
-   *  handler. Absent for a typed command. */
-  source?: "route";
+   *  (record 0036), `confirm` for a stored input run at a confirmation's
+   *  click (record 0044). Copied onto the registry's audit line, never read
+   *  by a handler. Absent for a typed command. */
+  source?: "route" | "confirm";
 }
 
 export interface Span {

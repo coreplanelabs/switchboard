@@ -25,6 +25,9 @@ import {
   type ResumeContext,
 } from "./dispatch/admission.js";
 import { answerChatCommand, type FastPathDeps } from "./dispatch/fastPath.js";
+import { actorIdsOf, cancelPending, consumeAndRun } from "./dispatch/confirm.js";
+import { postSettledOutcome } from "./dispatch/commandRun.js";
+import type { Actor } from "./authz/types.js";
 import { NO_REFERENCES, readReferences, REFERENCE_REFUSAL, type ReferenceDeps } from "./dispatch/references.js";
 import { resolveChatActor } from "./authz/actor.js";
 import { referencesOn } from "../config.js";
@@ -1401,4 +1404,104 @@ export async function dispatch(
   // Reached from the catch alone (every path in the try returns): the failed
   // request's outcome, its status stamped by the finally above.
   return ended;
+}
+
+/** A click on a confirmation's affordance, as an adapter hands it over
+ *  (record 0044; routing-and-config item 25): which button, the offer's id its
+ *  value carried, the actor the adapter proved (identity, never authority —
+ *  the store checks the requester against its id and `self`), and the channel
+ *  handle bound to the offer's conversation, where the answer goes. */
+export interface ClickRequest {
+  kind: "confirm" | "cancel";
+  id: string;
+  actor: Actor;
+  io: ChannelIO;
+}
+
+/**
+ * The second entry into the core, beside `dispatch()`: a click on a
+ * confirmation (record 0044). Channels are transports, so an adapter's action
+ * intake resolves the actor, constructs the channel handle and calls this;
+ * it builds no ending and no trace. This entry counts itself in the shutdown
+ * drain as `dispatch()` does, builds the run ending and the request trace the
+ * same way — neither needs a message — and runs the pure pieces in
+ * dispatch/confirm.ts: a confirm consumes the row for the clicker's ids and
+ * runs the stored input through the typed line's own path, replying the
+ * receipt first and the command's own text under it (a deferred outcome's
+ * settle follow-up posted as a typed one is); a cancel deletes it. Every
+ * refusal — used, expired, foreign, a store that could not be read — is a
+ * named line and a `refused` outcome, nothing run. A throw is answered the way
+ * `dispatch()` answers one: the redacted error line, the request `failed`.
+ */
+export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promise<DispatchOutcome> {
+  const ended: DispatchOutcome = { status: "completed" };
+  const clock = deps.clock ?? systemClock;
+  const trace = startRequestRoot(deps, {
+    channel: click.actor.origin ? channelOf(click.actor.origin.channelId) : undefined,
+    receivedAt: clock(),
+  });
+  const root = trace.root;
+  const io = click.io;
+  const actorIds = actorIdsOf(click.actor);
+  let caught = false;
+  let refused = false;
+  // Counted in flight from the first line to the reply, like a dispatch: a
+  // SIGTERM between the click and the command's run must not abandon it.
+  activeRuns++;
+  const ending = createRunEnding({
+    registry: deps.runRegistry ?? defaultRunRegistry,
+    onFinished: (id) => void deps.runBearers?.revoke(id),
+  });
+  const refuse = (outcome: string, text: string) => {
+    refused = true;
+    ended.refusal = outcome;
+    return root.span("dispatch.refuse", () => io.reply(text), { attrs: { outcome } });
+  };
+  try {
+    if (click.kind === "cancel") {
+      const res = await cancelPending(deps, { id: click.id, actorIds });
+      if (res.kind === "refused")
+        await ending.sealAfterReply(
+          async () => {},
+          () => refuse(res.refusal, res.text),
+        );
+      else
+        await ending.sealAfterReply(
+          async () => {},
+          () => root.span("post.reply", () => io.reply(res.text)),
+        );
+      return ended;
+    }
+    const res = await consumeAndRun(deps, { id: click.id, actorIds }, io, ending, trace);
+    if (res.kind === "refused") {
+      await ending.sealAfterReply(
+        async () => {},
+        () => refuse(res.refusal, res.text),
+      );
+      return ended;
+    }
+    // The command run (if the command made one) seals after its reply, as a
+    // typed line's does; the receipt leads, the command's text follows.
+    await ending.sealAfterReply(
+      async () => {},
+      () => root.span("post.reply", () => io.reply(res.text)),
+    );
+    if (res.result.ok && res.result.followUp) postSettledOutcome(res.result.followUp, io, root);
+    return ended;
+  } catch (err) {
+    caught = true;
+    await ending
+      .sealAfterReply(
+        async () => {},
+        () => root.span("post.reply", () => io.reply(redactSecrets(stripAnsi(errorReply(err))))),
+      )
+      .catch(() => {});
+    return ended;
+  } finally {
+    // The backstop, as in dispatch(): a finished run no reply reached is sealed and written.
+    ending.drain(undefined);
+    ended.status = caught ? "failed" : refused ? "refused" : "completed";
+    root.end(caught ? "error" : "ok", { status: ended.status });
+    activeRuns--;
+  }
 }

@@ -225,6 +225,18 @@ export interface UploadTicket {
 }
 
 /** What the core needs from a channel to serve one request. */
+/** What a channel shows for a confirmation (`ChannelIO.offer`): the id its
+ *  affordance carries back, the full command line to run, the one risk line
+ *  (empty when the command declares none), the footer naming the scope that
+ *  asked, and when the offer expires (ms epoch, the config object's clock). */
+export interface ConfirmationOffer {
+  id: string;
+  line: string;
+  risk: string;
+  footer: string;
+  expiresAt: number;
+}
+
 export interface ChannelIO {
   /** Post a reply in the conversation. Adapter handles chunking/formatting. */
   reply(text: string): Promise<void>;
@@ -263,6 +275,18 @@ export interface ChannelIO {
    * out and the tool posts the run-page link through `reply` instead.
    */
   uploadTicket?(file: { name: string; size: number }): Promise<UploadTicket>;
+  /**
+   * Show the confirmation a routed write is offered as
+   * (docs/reference/specs/routing-and-config.md item 25, record 0044): the full
+   * command line the router bound, its one risk line, the footer naming the
+   * scope that asked, and the id the channel's affordance carries back to
+   * `dispatchClick` — a button whose value is the id, on a channel with
+   * components. Optional; a channel without it (the CLI, an HTTP reply, the
+   * browser) is answered the pasteable line instead, and nothing below the
+   * seam names a channel. The channel shows the offer and holds nothing else:
+   * the row lives in the config object until the click or the expiry.
+   */
+  offer?(offer: ConfirmationOffer): Promise<void>;
   /** Create a progress indicator. Adapters may return a no-op handle. */
   status(initial: StatusUpdate): Promise<StatusHandle>;
   /**
