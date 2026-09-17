@@ -272,6 +272,9 @@ describe("classifyDocument (secret-file denylist overrides text classification)"
     expect(classifyDocument("text/plain", "notes.txt")).toBe("text");
     expect(classifyDocument("text/csv", "data.csv")).toBe("text");
     expect(classifyDocument("application/octet-stream", "main.ts")).toBe("text");
+    expect(classifyDocument("application/octet-stream", "src.v1/main.TS")).toBe("text");
+    expect(classifyDocument("application/octet-stream", "folder.txt/no-extension")).toBeNull();
+    expect(classifyDocument("application/octet-stream", ".ts")).toBeNull();
     expect(classifyDocument("text/plain", "app.log")).toBe("text");
   });
 });

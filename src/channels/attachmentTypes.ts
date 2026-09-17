@@ -1,5 +1,4 @@
 // Shared inbound file classification for channel adapters.
-import { extname } from "node:path";
 
 const PDF_TYPE = "application/pdf";
 // Text-ish mimetypes beyond the `text/*` family that Slack may report.
@@ -122,7 +121,13 @@ export function classifyDocument(mimetype: string | undefined, name: string | un
   if (isSecretFile(name)) return null;
   const mt = mimetype ?? "";
   if (mt.startsWith("text/") || TEXT_MIME_TYPES.has(mt)) return "text";
-  if (GENERIC_MIME_TYPES.has(mt) && TEXT_EXTENSIONS.has(extname(name ?? "").toLowerCase())) {
+  // Filenames also arrive as paths. Inspect only the last segment, and do
+  // not treat a dotfile's entire name as an extension. No host path API is
+  // needed, so this classifier also runs in the channel's edge Worker.
+  const leaf = (name ?? "").split("/").at(-1)!;
+  const dot = leaf.lastIndexOf(".");
+  const extension = dot > 0 ? leaf.slice(dot).toLowerCase() : "";
+  if (GENERIC_MIME_TYPES.has(mt) && TEXT_EXTENSIONS.has(extension)) {
     return "text";
   }
   return null;
