@@ -20,7 +20,7 @@
     "web/src/components/ThemeToggle.vue": "025a9a0c7ccc2983772c1888f7426ec161feb3ffaea87c914c65d15bdfd740d3",
     "web/src/components/settings/ChannelsPanel.vue": "562dd3124b8359f817641860e20b008cd14fc84a16bd7dd58d35e2e7ea7fdef5",
     "web/src/components/settings/InstallationPanel.vue": "2cf8d9d7fb30f3e1c060de2e67adc8abbafca8237e8a87610c1793c0c9a42a19",
-    "web/src/components/settings/McpServersPanel.vue": "249a6a71d581d419127920f6adb710fe417d6ff6518b12ef4f3117ba36e55a4c",
+    "web/src/components/settings/McpServersPanel.vue": "b73cd641695fc93bae565f8b76234ad01fd32b3805ba9780ca78c74203534894",
     "web/src/components/settings/SettingsTabs.vue": "531831c0221c81496f316cb438836d6d8fc635b69a707160cc15191e874c6dcd",
     "web/src/lib/browser.ts": "d1fd4f9f5935c3ca65a7d7e38f362601576ae575406bb2b5ac87ad118ff05dc7",
     "web/src/lib/capabilities.ts": "0e485825f48786605345f6a7298763790b7468595d9a828b615a245ab4a6aecd",

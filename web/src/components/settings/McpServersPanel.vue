@@ -7,11 +7,11 @@ import { AGENT_HUE, agentHue } from "../../lib/indexRow";
 import { getCommand, INPUT_CLASS, postCommand, SELECT_CLASS, type FetchLike } from "../../lib/settingsApi";
 
 // The MCPs tab: `mcp list` as a table, an add form, a connect link and a
-// remove button — every action one `POST /api/mcp.*` (record 0041). Org and
-// channel are always offered; `me` only when the session is linked to its
-// person (record 0042: the seed's `asUser`), because an unlinked browser
-// session is not the identity a run is requested as, and the handler refuses
-// it anyway. A credential never passes through this page: `add` and `connect`
+// remove button — every action one `POST /api/mcp.*` (record 0041). Every
+// tier is offered: `me` is the viewer's own — the linked person's when the
+// session is linked (record 0042: the seed's `asUser`), else this session's
+// own scope, the identity the dashboard's chat requests its runs as (record
+// 0043). A credential never passes through this page: `add` and `connect`
 // hand back a one-time link to the Access-gated connect form.
 
 type Tier = "org" | "channel" | "me";
@@ -20,7 +20,7 @@ const props = defineProps<{
   mcps: NonNullable<SettingsSeed["mcps"]>;
   vocabulary: SettingsVocabulary;
   viewer: string;
-  /** The person the session is linked to; present → the `me` tier is theirs and offered here. */
+  /** The person the session is linked to; present → the `me` tier is theirs, else the session's own. */
   asUser?: { id: string; name?: string };
   fetch?: FetchLike;
 }>();
@@ -33,7 +33,7 @@ const linked = computed(() => props.asUser !== undefined);
 const form = reactive({
   name: "",
   url: "",
-  scope: (props.mcps.channel ? "channel" : props.asUser ? "me" : "org") as Tier,
+  scope: (props.mcps.channel ? "channel" : "me") as Tier,
   agents: new Set<string>(SELF_SERVE_AGENTS),
   auth: "" as "" | "oauth" | "bearer" | "none",
 });
@@ -81,20 +81,18 @@ function watchRow(name: string, scopeKey: string, was: McpServerView["state"] | 
   watchTimer = setTimeout(() => void tick(), WATCH_EVERY_MS);
 }
 
+/** `me` is every session's own to write (the browser baseline carries `mcp:write`). */
 const canAdd = computed(() =>
-  form.scope === "org"
-    ? props.mcps.canWrite.org
-    : form.scope === "channel"
-      ? props.mcps.canWrite.channel
-      : linked.value,
+  form.scope === "org" ? props.mcps.canWrite.org : form.scope === "channel" ? props.mcps.canWrite.channel : true,
 );
-/** A user-tier row is the viewer's own when it is the linked person's. */
+/** A user-tier row is the viewer's own when it is the session's, or the linked person's. */
 const canWriteRow = (s: McpServerView) =>
   s.scope === "org"
     ? props.mcps.canWrite.org
     : s.scope === "channel"
       ? props.mcps.canWrite.channel
-      : props.asUser !== undefined && s.scopeKey === `user:${props.asUser.id}`;
+      : s.scopeKey === `user:${props.viewer}` ||
+        (props.asUser !== undefined && s.scopeKey === `user:${props.asUser.id}`);
 const isMine = (s: McpServerView) =>
   s.addedBy === props.viewer || (props.asUser !== undefined && s.addedBy === props.asUser.id);
 /** Whose a user-tier row is: the id after `user:` in its scope key. */
@@ -122,7 +120,7 @@ function toggleAgent(agent: string, on: boolean): void {
   else form.agents.delete(agent);
 }
 
-/** The target tier's options, by name as the command takes them; `me` only for a linked session (the handler refuses it otherwise). */
+/** The target tier's options, by name as the command takes them; `me` is the caller's own, whoever the handler resolves it to. */
 function tier(scope: Tier): Record<string, unknown> {
   if (scope === "channel") return { scope: "channel", channel: props.mcps.channel };
   return { scope };
@@ -450,18 +448,9 @@ async function probe(s: McpServerView): Promise<void> {
           <span class="text-xs text-dimmed">The server's Streamable-HTTP endpoint.</span>
         </div>
         <label class="text-sm text-muted sm:pt-1" for="mcp-scope">Tier</label>
-        <select
-          id="mcp-scope"
-          v-model="form.scope"
-          :class="SELECT_CLASS"
-          class="sm:max-w-md"
-          :disabled="!canAdd && !mcps.canWrite.org && !mcps.canWrite.channel && !linked"
-        >
-          <option value="me" :disabled="!linked">
-            me —
-            {{
-              asUser ? `your own runs, as ${asUser.name ?? asUser.id}` : "your session is not linked to a Slack user"
-            }}
+        <select id="mcp-scope" v-model="form.scope" :class="SELECT_CLASS" class="sm:max-w-md">
+          <option value="me">
+            me — {{ linked ? `your own runs, as ${asUser!.name ?? asUser!.id}` : "your own runs from this dashboard" }}
           </option>
           <option value="org">org — every run; may name coding, review, ship</option>
           <option value="channel" :disabled="!mcps.channel">
@@ -495,9 +484,7 @@ async function probe(s: McpServerView): Promise<void> {
             {{
               form.scope === "org"
                 ? "Org-wide servers are managed by admins (repo-management rights)."
-                : form.scope === "channel"
-                  ? "This channel's servers need channel-config rights."
-                  : "Personal servers need a session linked to your Slack user; add yours in chat with `mcp add`."
+                : "This channel's servers need channel-config rights."
             }}
           </span>
         </div>

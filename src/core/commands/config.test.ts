@@ -13,7 +13,7 @@ import { helpRows, parseInvocation, tokenize } from "../commandSurface.js";
 import {
   configCommands,
   configSet,
-  ME_ON_ACCESS_MESSAGE,
+  ME_ON_SERVICE_TOKEN_MESSAGE,
   registerConfigCommands,
   type ConfigCommandDeps,
 } from "./config.js";
@@ -440,7 +440,7 @@ describe("config set", () => {
     });
   });
 
-  it("a credential needs config:write for any scope; a chat person always has their own scope; an Access browser session writes neither `me` (no run is its) nor `channel` (no grant)", async () => {
+  it("a credential needs config:write for any scope; a chat person always has their own scope; a browser session writes its own `me` (the scope its chat runs read) and not `channel` (no grant); a service token has no `me`", async () => {
     const config = store();
     const commands = bind(config);
     expect(
@@ -453,31 +453,40 @@ describe("config set", () => {
     expect(
       await commands.invoke("config.set", { args: ["me"], options: { agent: "review" } }, mcp("dispatch")),
     ).toMatchObject({ ok: false, error: "unauthorized", decidedBy: "registry" });
-    // A browser session's `me` is a scope no run reads (nothing dispatches as an
-    // Access identity), so the handler refuses it with the pointer to chat
-    // (record 0041); the channel scope stays the channel-config right it never held.
+    // An unlinked browser session's `me` is its own `access:<sub>` scope — the identity
+    // the dashboard's chat requests its runs as (record 0043), so what it sets here is
+    // what those runs read; the channel scope stays the channel-config right it never held.
     const browser = callerWith("access", "access:u", ["config:read"]);
     expect(await commands.invoke("config.set", { args: ["me"], options: { agent: "review" } }, browser)).toMatchObject({
-      ok: false,
-      error: "unauthorized",
-      decidedBy: "handler",
-      message: ME_ON_ACCESS_MESSAGE,
-    });
-    expect(await commands.invoke("config.clear", { args: ["me"] }, browser)).toMatchObject({
-      ok: false,
-      error: "unauthorized",
-      message: ME_ON_ACCESS_MESSAGE,
+      ok: true,
+      value: { scope: "me", effective: { agent: "review" } },
     });
     expect(await commands.invoke("config.instructions", { args: ["me", "Be brief."] }, browser)).toMatchObject({
-      ok: false,
-      error: "unauthorized",
-      message: ME_ON_ACCESS_MESSAGE,
+      ok: true,
     });
-    // The peek is a read of an empty scope, not a write: still answered.
+    expect(config.scopes("web:u", "access:u").user).toEqual({ agent: "review", instructions: "Be brief." });
+    expect(config.resolve({ channelId: "web:u", userId: "access:u", request: {} }).agentName).toBe("review");
     expect(await commands.invoke("config.instructions", { args: ["me"] }, browser)).toMatchObject({
       ok: true,
-      value: { scope: "me", action: "show" },
+      value: { scope: "me", action: "show", instructions: "Be brief." },
     });
+    expect(await commands.invoke("config.clear", { args: ["me"] }, browser)).toMatchObject({ ok: true });
+    expect(config.scopes("web:u", "access:u").user).toEqual({});
+    // A service token requests no run: its `me` is refused by the data, before any store is touched.
+    const token = callerWith("access", "access:svc:ci", ["config:read", "config:write"]);
+    for (const [id, input] of [
+      ["config.set", { args: ["me"], options: { agent: "review" } }],
+      ["config.clear", { args: ["me"] }],
+      ["config.instructions", { args: ["me", "Be brief."] }],
+    ] as const) {
+      expect(await commands.invoke(id, input, token)).toMatchObject({
+        ok: false,
+        error: "unauthorized",
+        decidedBy: "handler",
+        message: ME_ON_SERVICE_TOKEN_MESSAGE,
+      });
+    }
+    expect(config.scopes("", "access:svc:ci").user).toEqual({});
     expect(config.scopes("slack:CX", "access:u").user).toEqual({});
     expect(
       await commands.invoke(

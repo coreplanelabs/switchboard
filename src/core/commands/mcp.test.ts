@@ -17,13 +17,8 @@ import {
   type JsonValue,
 } from "../commandRegistry.js";
 import { callerWith } from "../testing/callers.js";
-import {
-  MCP_COMMANDS,
-  MCP_ME_ON_ACCESS_MESSAGE,
-  MCP_OFF_MESSAGE,
-  registerMcpCommands,
-  type McpCommandDeps,
-} from "./mcp.js";
+import { ME_ON_SERVICE_TOKEN_MESSAGE } from "./config.js";
+import { MCP_COMMANDS, MCP_OFF_MESSAGE, registerMcpCommands, type McpCommandDeps } from "./mcp.js";
 
 // docs/reference/specs/mcp-tools.md items 13–15: the `mcp.*` commands are thin writes into
 // the config layers through the service; these tests pin the surface contract
@@ -145,24 +140,42 @@ describe("mcp.* commands", () => {
     }
   });
 
-  it("a `me` write from the Access surface is refused with the pointer to chat (record 0041); org and channel writes and every read are unchanged for it", async () => {
+  it("a browser session's `me` write lands in its own tier (record 0043); a service token's is refused by the data; org and channel writes and every read are unchanged for both", async () => {
     const { svc } = service();
     const inv = bind(svc);
     const browser = callerWith("access", "access:sub-1", "all");
+    // An unlinked session's own tier: `user:access:<sub>`, what the dashboard's chat runs read.
+    expect(
+      await inv.invoke(
+        "mcp.add",
+        { args: ["own"], options: { url: "https://mcp.own.example/mcp", auth: "none" } },
+        browser,
+      ),
+    ).toMatchObject({
+      ok: true,
+      value: { server: { name: "own", scope: "user", scopeKey: "user:access:sub-1", addedBy: "access:sub-1" } },
+    });
+    expect(await text(inv, "mcp.list", {}, browser)).toContain("`own` (user)");
+    expect(await inv.invoke("mcp.remove", { args: ["own"], options: { scope: "me" } }, browser)).toMatchObject({
+      ok: true,
+    });
+    expect(await text(inv, "mcp.list", {}, browser)).toContain("No MCP servers");
+    // A service token requests no run: its `me` (the default) is refused before any store is touched.
+    const token = callerWith("access", "access:svc:ci", "all");
     for (const [id, input] of [
       ["mcp.add", { args: ["vanta"], options: { url: "https://mcp.vanta.com/mcp" } }],
       ["mcp.add", { args: ["vanta"], options: { url: "https://mcp.vanta.com/mcp", scope: "me" } }],
       ["mcp.connect", { args: ["vanta"] }],
       ["mcp.remove", { args: ["vanta"], options: { scope: "me" } }],
     ] as const) {
-      expect(await inv.invoke(id, input, browser)).toMatchObject({
+      expect(await inv.invoke(id, input, token)).toMatchObject({
         ok: false,
         error: "unauthorized",
         decidedBy: "handler",
-        message: MCP_ME_ON_ACCESS_MESSAGE,
+        message: ME_ON_SERVICE_TOKEN_MESSAGE,
       });
     }
-    expect(await text(inv, "mcp.list", {}, browser)).toContain("No MCP servers");
+    expect(await text(inv, "mcp.list", {}, token)).toContain("No MCP servers");
     const added = await inv.invoke(
       "mcp.add",
       { args: ["vanta"], options: { url: "https://mcp.vanta.com/mcp", scope: "org" } },
@@ -381,10 +394,10 @@ describe("mcp.* commands — the connect follow-up (settle, item 19)", () => {
 // Feature: docs/decisions/0042 — a dashboard session linked to its person manages the
 // PERSON's MCP tier as `me`: the self-serve row admits it, `addedBy` names the person.
 describe("mcp `me` for a linked dashboard session (record 0042)", () => {
-  it("add without --scope lands in the person's tier with addedBy the person; list shows it; the unlinked session stays refused", async () => {
+  it("add without --scope lands in the person's tier with addedBy the person; list shows it; the same session unlinked lands in its own", async () => {
     const { svc } = service();
     const inv = bind(svc);
-    const base = callerWith("access", "access:sub-1", ["mcp:read"]);
+    const base = callerWith("access", "access:sub-1", ["mcp:read", "mcp:write"]);
     const linked: Caller = {
       ...base,
       actor: { ...base.actor, self: ["access:sub-1", "slack:ULINK"], asUser: { id: "slack:ULINK", name: "link" } },
@@ -403,8 +416,8 @@ describe("mcp `me` for a linked dashboard session (record 0042)", () => {
     expect(
       await inv.invoke("mcp.add", { args: ["vanta"], options: { url: "https://mcp.vanta.com/mcp" } }, base),
     ).toMatchObject({
-      ok: false,
-      error: "unauthorized",
+      ok: true,
+      value: { server: { name: "vanta", scope: "user", scopeKey: "user:access:sub-1", addedBy: "access:sub-1" } },
     });
   });
 });
