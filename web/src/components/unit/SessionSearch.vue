@@ -4,6 +4,7 @@ import { unwrapUntrusted } from "@core/core/untrusted.js";
 import type { SessionSearchHit } from "@core/core/runsService.js";
 import type { UnitRunRowSeed } from "@core/channels/webSeed.js";
 import type { UnitThread } from "@core/core/unitRuns.js";
+import SettingSelect from "../SettingSelect.vue";
 
 // The unit page's search (session-log item 11; record 0035): one session's
 // log at a time — the coding thread's or the review thread's, since the index
@@ -33,6 +34,8 @@ const emit = defineEmits<{ open: [runId: string, turn: number] }>();
 /** Hits the page asks for — a person reads a short list; the route caps at its own maximum. */
 const PAGE_HITS = 20;
 
+/** The threads as the select's data: `coding thread`, `review thread`. */
+const sessionItems = computed(() => props.sessions.map((s) => ({ label: `${s.thread} thread`, value: s.thread })));
 const thread = ref<UnitThread>(
   props.sessions.find((s) => s.thread === props.initial?.thread)?.thread ?? props.sessions[0]?.thread ?? "coding",
 );
@@ -87,14 +90,13 @@ onMounted(() => {
       <span class="font-normal normal-case tracking-normal text-dimmed">· one thread's log at a time</span>
     </h2>
     <form class="flex flex-wrap items-center gap-2" @submit.prevent="search">
-      <select
+      <SettingSelect
         id="search-session"
         v-model="thread"
-        class="session rounded border border-accented bg-default px-2 py-1 font-mono text-xs text-toned"
+        :items="sessionItems"
+        class="session"
         aria-label="which thread's log to search"
-      >
-        <option v-for="s in sessions" :key="s.key" :value="s.thread">{{ s.thread }} thread</option>
-      </select>
+      />
       <input
         id="search-words"
         v-model="q"

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import UnitPage from "./UnitPage.vue";
 import UnitRoutePage from "./UnitRoutePage.vue";
-import { mountApp } from "../testing/mount";
+import { mountApp, pickSelect, selectLabels, selectValue } from "../testing/mount";
 import { browser } from "../lib/browser";
 import type { UnitRunRowSeed, UnitSeed } from "@core/channels/webSeed.js";
 import type { FindingsLedgerView } from "@core/core/runsService.js";
@@ -286,7 +286,7 @@ describe("UnitPage — the unit is the reading unit (item 28)", () => {
     expect(codingOnly.find('#unitmeta [data-thread="review"]').text()).toBe("review thread not opened yet");
     expect(codingOnly.find('#unitmeta [data-thread="coding"] a').exists()).toBe(true);
     expect(codingOnly.find("#unitmeta .rounds").text()).toBe("1 round");
-    expect(codingOnly.findAll("#search-session option").map((o) => o.text())).toEqual(["coding thread"]);
+    expect(selectLabels(codingOnly, "#search-session")).toEqual(["coding thread"]);
     expect(codingOnly.find("#standing .chip").text()).toBe("round 0 · coding ended");
     expect(codingOnly.find("#unitmeta a.prlink").exists()).toBe(false);
 
@@ -342,7 +342,7 @@ describe("UnitPage — the unit is the reading unit (item 28)", () => {
     const w = mountApp(UnitPage, { seed: seed() });
     const box = w.find("#search");
     expect(box.find("h2").text()).toContain("Search the conversation");
-    expect(box.findAll("#search-session option").map((o) => o.text())).toEqual(["coding thread", "review thread"]);
+    expect(selectLabels(w, "#search-session")).toEqual(["coding thread", "review thread"]);
     await box.find("#search-words").setValue("lockfile");
     await box.find("form").trigger("submit");
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -373,7 +373,7 @@ describe("UnitPage — the unit is the reading unit (item 28)", () => {
     expect((w.find("#run-c1 details").element as HTMLDetailsElement).open).toBe(true);
     expect(fetchMock.mock.calls.map((c) => c[0])).toContain("/runs/c1/events");
     // The review thread's session is the other index: the key changes, nothing else does.
-    await box.find("#search-session").setValue("review");
+    await pickSelect(w, "#search-session", "review");
     await box.find("form").trigger("submit");
     expect(fetchMock.mock.calls.at(-1)?.[0]).toBe(
       "/api/runs.search?session=slack%3AC1%3Au1r%3Areview&query=lockfile&limit=20",
@@ -527,7 +527,7 @@ describe("UnitPage — the unit is the reading unit (item 28)", () => {
     expect(fetchMock.mock.calls[0][0]).toBe(
       "/api/runs.search?session=slack%3AC1%3Au1r%3Areview&query=lockfile&limit=20",
     );
-    expect((shared.find("#search-session").element as HTMLSelectElement).value).toBe("review");
+    expect(selectValue(shared, "#search-session")).toBe("review");
     expect((shared.find("#search-words").element as HTMLInputElement).value).toBe("lockfile");
   });
 });

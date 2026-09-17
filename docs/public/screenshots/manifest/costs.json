@@ -28,7 +28,7 @@
     "web/src/lib/markPulse.ts": "df29e8abee12f0827e8e1295f8fcb1184530240139790da7bffb5929fad8f647",
     "web/src/lib/navSections.ts": "dd842db8c9b0fc1d7cc592f145803622047d03131d876e7681710c28f4f348db",
     "web/src/lib/seed.ts": "b2fff894798801b6e062ec734b510b717ba879495fdc6fa1ebb69418c74cb75e",
-    "web/src/lib/settingsApi.ts": "4ae19745f39040f6380707bd4760299dea64612dc1c0e69f3dfc457fad4ec166",
+    "web/src/lib/settingsApi.ts": "b6cffaba534c477c8687f3a6d8c267cb80053adb037fa78ebca9ee200a123f1d",
     "web/src/lib/wallClock.ts": "d81d36cd618a94540500e6ae2b6e867156dcad0e910b644cb6d7bf619a501c6f",
     "web/src/main.ts": "43c95547c4e4d9ecb88e9a0e7428417cda86764bdbfdab76c1c926b722f1deee",
     "web/src/pages/CostsPage.vue": "6d15de32bd4267a975a3ea89477c9a192721fd47a8a117dc5db280556cef730a",

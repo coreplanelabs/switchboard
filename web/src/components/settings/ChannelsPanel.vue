@@ -2,7 +2,9 @@
 import { computed, reactive, ref } from "vue";
 import type { SettingsSeed, SettingsVocabulary } from "@core/channels/webSeed.js";
 import { browser } from "../../lib/browser";
-import { INPUT_CLASS, postCommand, SELECT_CLASS, type FetchLike } from "../../lib/settingsApi";
+import ChannelPicker from "../ChannelPicker.vue";
+import SettingSelect from "../SettingSelect.vue";
+import { INPUT_CLASS, postCommand, type FetchLike } from "../../lib/settingsApi";
 
 // The Channels tab: the index of configured channels (`config overrides`),
 // then one channel's scope (`config show --channel`) as a form whose Save is
@@ -40,6 +42,22 @@ const viewerScopeLines = computed((): string[] => {
   return lines;
 });
 const scope = computed(() => selected.value?.scope?.channel ?? null);
+/** The selects' options as data (Nuxt UI `USelect`): the empty value is the "leave it" choice, spelled out. */
+const agentItems = computed(() => [
+  { label: `— the default (${selected.value?.scope?.defaults.agent ?? "general"}), or the router —`, value: "" },
+  ...props.vocabulary.agents.map((a) => {
+    const restricted = selected.value?.scope?.restrictedAgents.includes(a) ?? false;
+    return { label: restricted ? `${a} (restricted)` : a, value: a, disabled: restricted };
+  }),
+]);
+const effortItems = computed(() => [
+  { label: "— unset —", value: "" },
+  ...props.vocabulary.efforts.map((e) => ({ label: e, value: e })),
+]);
+const identityItems = computed(() => [
+  { label: "— uncapped —", value: "" },
+  ...props.vocabulary.identities.map((i) => ({ label: i, value: i })),
+]);
 /** A channel as a person reads it: `#name` when the directory knew it, the id otherwise (the id
  *  stays in the tooltip and the data attribute either way). */
 const channelLabel = (c: { channelId: string; channelName?: string }): string =>
@@ -47,14 +65,14 @@ const channelLabel = (c: { channelId: string; channelName?: string }): string =>
 
 /** The channels the viewer may open, by name (`config channels`); the picker's options. */
 const pickable = computed(() => props.channels.pickable?.channels ?? []);
-const pickerLabel = (c: { channelId: string; channelName?: string; visibility: string }): string =>
-  `${c.channelName ? `#${c.channelName}` : c.channelId}${c.visibility === "private" ? " · private" : ""}`;
-/** Picked from the list, or typed as an id when the list cannot carry it (a machine channel, an unlisted one). */
-const picked = ref("");
+/** Picking a channel opens it: the combobox's value is the channel id. */
+function openPicked(id: string): void {
+  if (id) browser.navigate(`/settings/channels/${encodeURIComponent(id)}`);
+}
+/** Typed as an id when nothing could be listed (no bot channel list, no scoped channel). */
 const openField = ref("");
 function open(): void {
-  const id = (picked.value || openField.value).trim();
-  if (id) browser.navigate(`/settings/channels/${encodeURIComponent(id)}`);
+  openPicked(openField.value.trim());
 }
 
 const form = reactive({
@@ -211,23 +229,19 @@ const SOURCE_LABEL = { config: "config.yaml", runtime: "runtime", both: "config.
             </li>
           </ul>
         </div>
-        <form class="picker grid gap-2" @submit.prevent="open">
-          <div class="flex items-center gap-2">
-            <select
-              v-if="pickable.length > 0"
-              id="channel-pick"
-              v-model="picked"
-              :class="SELECT_CLASS"
-              class="flex-1 text-xs"
-              aria-label="channel to open"
-            >
-              <option value="">Pick a channel…</option>
-              <option v-for="c in pickable" :key="c.channelId" :value="c.channelId" :title="c.channelId">
-                {{ pickerLabel(c) }}
-              </option>
-            </select>
+        <div class="picker grid gap-2">
+          <ChannelPicker
+            v-if="pickable.length > 0"
+            id="channel-pick"
+            :channels="pickable"
+            :model-value="selected?.channelId ?? ''"
+            :extra="selected?.channelId"
+            placeholder="Search channels…"
+            aria-label="channel to open"
+            @update:model-value="openPicked"
+          />
+          <form v-else class="flex items-center gap-2" @submit.prevent="open">
             <input
-              v-else
               id="channel-open"
               v-model="openField"
               :class="INPUT_CLASS"
@@ -236,22 +250,11 @@ const SOURCE_LABEL = { config: "config.yaml", runtime: "runtime", both: "config.
               aria-label="channel id to open"
             />
             <UButton type="submit" size="xs" color="neutral" variant="outline">Open</UButton>
-          </div>
+          </form>
           <p v-if="pickable.length > 0 && channels.pickable?.listed === false" class="text-xs text-dimmed">
             The bot could not list its channels; only the channels that already carry settings are offered.
           </p>
-          <details v-if="pickable.length > 0" class="text-xs text-dimmed">
-            <summary class="cursor-pointer">Not listed? Open a channel by its id</summary>
-            <input
-              id="channel-open"
-              v-model="openField"
-              :class="INPUT_CLASS"
-              class="mt-1 w-full font-mono text-xs"
-              placeholder="slack:C0123… or http:ops"
-              aria-label="channel id to open"
-            />
-          </details>
-        </form>
+        </div>
       </aside>
 
       <div
@@ -293,17 +296,13 @@ const SOURCE_LABEL = { config: "config.yaml", runtime: "runtime", both: "config.
           <h3 class="font-mono text-xs font-medium uppercase tracking-wider text-muted">Agent, model, effort</h3>
           <div class="grid gap-3 sm:grid-cols-[9rem_1fr]">
             <label class="text-sm text-muted" for="ch-agent">Agent</label>
-            <select id="ch-agent" v-model="form.agent" :class="SELECT_CLASS" :disabled="!canWrite">
-              <option value="">— the default ({{ selected.scope.defaults.agent }}), or the router —</option>
-              <option
-                v-for="a in vocabulary.agents"
-                :key="a"
-                :value="a"
-                :disabled="selected.scope.restrictedAgents.includes(a)"
-              >
-                {{ a }}{{ selected.scope.restrictedAgents.includes(a) ? " (restricted)" : "" }}
-              </option>
-            </select>
+            <SettingSelect
+              id="ch-agent"
+              v-model="form.agent"
+              :items="agentItems"
+              class="w-full"
+              :disabled="!canWrite"
+            />
             <label class="text-sm text-muted" for="ch-model">Model, any agent</label>
             <input
               id="ch-model"
@@ -332,10 +331,13 @@ const SOURCE_LABEL = { config: "config.yaml", runtime: "runtime", both: "config.
               </label>
             </div>
             <label class="text-sm text-muted" for="ch-effort">Effort, any agent</label>
-            <select id="ch-effort" v-model="form.effort" :class="SELECT_CLASS" :disabled="!canWrite">
-              <option value="">— unset —</option>
-              <option v-for="e in vocabulary.efforts" :key="e" :value="e">{{ e }}</option>
-            </select>
+            <SettingSelect
+              id="ch-effort"
+              v-model="form.effort"
+              :items="effortItems"
+              class="w-full"
+              :disabled="!canWrite"
+            />
             <span class="text-sm text-muted">Effort per agent</span>
             <div class="grid gap-1.5">
               <label
@@ -344,10 +346,13 @@ const SOURCE_LABEL = { config: "config.yaml", runtime: "runtime", both: "config.
                 class="grid grid-cols-[6rem_1fr] items-center gap-2 font-mono text-xs"
               >
                 <span class="text-muted">{{ a }}</span>
-                <select v-model="form.efforts[a]" :name="`efforts.${a}`" :class="SELECT_CLASS" :disabled="!canWrite">
-                  <option value="">— unset —</option>
-                  <option v-for="e in vocabulary.efforts" :key="e" :value="e">{{ e }}</option>
-                </select>
+                <SettingSelect
+                  v-model="form.efforts[a]"
+                  :name="`efforts.${a}`"
+                  :items="effortItems"
+                  class="w-full"
+                  :disabled="!canWrite"
+                />
               </label>
             </div>
           </div>
@@ -368,10 +373,13 @@ const SOURCE_LABEL = { config: "config.yaml", runtime: "runtime", both: "config.
               :disabled="!canWrite"
             />
             <label class="text-sm text-muted" for="ch-identity">Max identity</label>
-            <select id="ch-identity" v-model="form.maxIdentity" :class="SELECT_CLASS" :disabled="!canWrite">
-              <option value="">— uncapped —</option>
-              <option v-for="i in vocabulary.identities" :key="i" :value="i">{{ i }}</option>
-            </select>
+            <SettingSelect
+              id="ch-identity"
+              v-model="form.maxIdentity"
+              :items="identityItems"
+              class="w-full"
+              :disabled="!canWrite"
+            />
             <span class="text-sm text-muted">Machines</span>
             <div class="flex flex-wrap gap-x-4 gap-y-1">
               <label
