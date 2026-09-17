@@ -79,6 +79,8 @@ export interface RunScript {
   unknownEventKind?: string;
   /** A thread follow-up queued before the run starts, for the harness to steer. */
   followUp?: string;
+  /** A second follow-up queued beside `followUp`: the drainer's batch of two. */
+  followUpToo?: string;
   /** A hard stop requested before the model call of this 1-based number. */
   hardStopBeforeModelCall?: number;
   /** A soft stop requested before the model call of this 1-based number: the
@@ -169,6 +171,8 @@ export interface RunScript {
 export interface DrivenRun {
   harness: HarnessName;
   outcome: { kind: "answered"; answer: string } | { kind: "failed"; error: Error };
+  /** What the run's follow-up inbox still holds once the run has ended: the follow-ups handed back. */
+  inboxLeft: { text: string }[];
   /** The run events the harness put on the stream, in order. */
   events: RunEvent[];
   /** The ledger's step records, in order. */

@@ -286,12 +286,28 @@ export interface FakeServeOptions {
    *  running execution, delivered at its step boundary — while its answer names
    *  the message as ever. */
   steerLandsAfterNextPrompt?: boolean;
+  /** The run's first steer POST answers 200 with a body that names no message
+   *  id: `landed`, the server took the steer as ever (its row where the timing
+   *  puts it); `dropped`, it recorded nothing — a server that answered and did
+   *  not act, the shape the drainer must still tell from the store. */
+  steerAnswersNoId?: "landed" | "dropped";
   /** Every `GET …/message` meets the control plane's reset: the store cannot be listed. */
   storeListingResets?: boolean;
   /** A thread follow-up arrives in the run's inbox as the first ask of the
    *  first play is raised — an execution under way — so the drainer steers it
    *  into a running execution (the row landing at the next step boundary). */
   followUpAtFirstAsk?: string;
+  /** A thread follow-up arrives in the run's inbox as the loop's first `queue`
+   *  prompt is admitted, and the prompt's answer is held until the drainer's
+   *  steer has been posted: the steer meets the execution the prompt started
+   *  while the loop's own write is still unanswered — the two writes around one
+   *  reset (`controlResetOnPrompt` + `controlResetOnSteer`). */
+  followUpAtPrompt?: string;
+  /** The first play's first ask is held (its tool not settling) until this
+   *  many steer POSTs have reached the serve: the execution stays under way
+   *  for a steer the drainer posts on a later tick — a later follow-up's — a
+   *  shape a play shorter than the drainer's tick would never exercise. */
+  firstAskWaitsForSteers?: number;
   /** The resident's control plane resets under the run's first `queue` prompt
    *  POST (a control reset, the container unchanged): `landed`, the server took
    *  the prompt before the reset cut the answer; `lost`, the prompt never
@@ -452,9 +468,16 @@ class ScriptedServe {
   private readonly dropStreamAtStep: number | undefined;
   private readonly controlResetOnSteer: "landed" | "lost" | undefined;
   private readonly steerLandsAfterNextPrompt: boolean;
+  private readonly steerAnswersNoId: "landed" | "dropped" | undefined;
+  private steerAnsweredNoId = false;
   private readonly storeListingResets: boolean;
   private readonly followUpAtFirstAsk: string | undefined;
+  private readonly followUpAtPrompt: string | undefined;
+  private readonly firstAskWaitsForSteers: number | undefined;
+  private firstAskHeld = false;
   private followUpPushed = false;
+  /** Steer POSTs that have reached the serve (`firstAskWaitsForSteers`). */
+  private steers = 0;
   /** A steer POST has reached the serve (`followUpAtFirstAsk` waits on it). */
   private steerSeen = false;
   /** Steer rows held back until the next queue prompt lands (`steerLandsAfterNextPrompt`). */
@@ -524,8 +547,11 @@ class ScriptedServe {
     this.dropStreamAtStep = options.dropStreamAtStep;
     this.controlResetOnSteer = options.controlResetOnSteer;
     this.steerLandsAfterNextPrompt = options.steerLandsAfterNextPrompt === true;
+    this.steerAnswersNoId = options.steerAnswersNoId;
     this.storeListingResets = options.storeListingResets === true;
     this.followUpAtFirstAsk = options.followUpAtFirstAsk;
+    this.followUpAtPrompt = options.followUpAtPrompt;
+    this.firstAskWaitsForSteers = options.firstAskWaitsForSteers;
     this.interruptAnswersAfterKill = options.interruptAnswersAfterKill ?? false;
     this.interruptPostFails = options.interruptPostFails === true;
     this.mutate = options.mutate;
@@ -878,10 +904,16 @@ class ScriptedServe {
         // lost, it never reached the server; landed, the row is in the store and
         // the answer alone is cut — the harness learns the row from the store.
         this.steerSeen = true;
+        this.steers++;
         const steerReset =
           this.controlResetOnSteer !== undefined && !this.steerReset ? this.controlResetOnSteer : undefined;
         if (steerReset !== undefined) this.steerReset = true;
         if (steerReset === "lost") throw controlReset("request");
+        // The answer names no message id (`steerAnswersNoId`): the server took
+        // the steer, or recorded nothing at all — the store tells which.
+        const noId = this.steerAnswersNoId !== undefined && !this.steerAnsweredNoId ? this.steerAnswersNoId : undefined;
+        if (noId !== undefined) this.steerAnsweredNoId = true;
+        if (noId === "dropped") return j(200, { data: { sessionID: this.sessionID, type: "user", payload: { text } } });
         const id = `msg_s${this.ordinal++}`;
         const inStore = !this.executing;
         if (inStore && this.steerLandsAfterNextPrompt) this.deferredSteerRows.push({ id, text });
@@ -891,6 +923,7 @@ class ScriptedServe {
         // boundary: at once when nothing is in flight, else when the calls settle.
         this.stepBoundary();
         if (steerReset === "landed") throw controlReset("request");
+        if (noId === "landed") return j(200, { data: { sessionID: this.sessionID, type: "user", payload: { text } } });
         return j(200, { data: { id, sessionID: this.sessionID, type: "user", payload: { text }, delivery: "steer" } });
       }
       {
@@ -952,21 +985,35 @@ class ScriptedServe {
         // after it starts a fresh one, as the real server does.
         this.interrupted = false;
         void this.play();
-        if (reset === "landed") {
-          this.promptResets++;
-          throw controlReset("request");
+        const admitted = () => {
+          if (reset === "landed") {
+            this.promptResets++;
+            throw controlReset("request");
+          }
+          // Measured: the answer names the user message the prompt became.
+          return j(200, {
+            data: {
+              id: promptId ?? `inb_${this.ordinal++}`,
+              sessionID: this.sessionID,
+              type: "user",
+              payload: { text },
+              delivery: "queue",
+            },
+          });
+        };
+        // The follow-up timed to this prompt (`followUpAtPrompt`): into the
+        // inbox now, the answer held until the drainer's steer has been posted
+        // into the execution just started.
+        if (this.followUpAtPrompt !== undefined && !this.followUpPushed) {
+          this.followUpPushed = true;
+          this.deps.inbox?.push({ text: this.followUpAtPrompt, userId: "user:conformance", at: NOW });
+          return (async () => {
+            for (let i = 0; i < 400 && !this.steerSeen; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+            return admitted();
+          })();
         }
+        return admitted();
       }
-      // Measured: the answer names the user message the prompt became.
-      return j(200, {
-        data: {
-          id: promptId ?? `inb_${this.ordinal++}`,
-          sessionID: this.sessionID,
-          type: "user",
-          payload: { text },
-          delivery: "queue",
-        },
-      });
     }
     const reply = /\/permission\/([^/]+)\/reply$/.exec(req.path);
     if (req.method === "POST" && reply) {
@@ -1184,9 +1231,10 @@ class ScriptedServe {
     return this.plays === 1 ? `msg_a${index}` : `msg_p${this.plays}_a${index}`;
   }
 
-  /** Any steers posted since the last turn whose rows are not in the store yet
-   *  (a steer into a running execution: delivered at the next step boundary),
-   *  injected as user turns so the model's next call sees them. */
+  /** Any steers posted during the step just ended whose rows are not in the
+   *  store yet (a steer into a running execution: delivered at the step
+   *  boundary, measured), injected as user turns there — before the store's
+   *  refill for the step — so the model's next call sees them. */
   private flushSteers(): void {
     for (const steer of this.pendingSteers.splice(0))
       if (!steer.inStore) this.store.push({ id: steer.id, type: "user", text: steer.text, time: { created: NOW } });
@@ -1332,7 +1380,6 @@ class ScriptedServe {
         this.failExecution("provider.error", FAILED_MODEL_CALL_ERROR);
         return;
       }
-      this.flushSteers();
       this.recordModelCall();
       await this.playTurn(this.script.turns[t], t);
       if (this.hungTool !== undefined) return;
@@ -1383,6 +1430,14 @@ class ScriptedServe {
       sessionID: this.sessionID,
       ...(this.interrupted ? { reason: "user" } : {}),
     });
+    // The idle marker the terminal transition leaves in the store, as the real
+    // server's listing carries it (its last row `idle` with the outcome).
+    this.store.push({
+      id: `msg_idle_${this.ordinal++}`,
+      type: "idle",
+      outcome: this.interrupted ? "interrupted" : "succeeded",
+      time: { created: NOW },
+    });
     // An interrupted execution's terminal transition causes its refills, in the
     // measured order: the pending asks (none now) and the store, after the end.
     if (this.interrupted) {
@@ -1427,6 +1482,14 @@ class ScriptedServe {
       content,
       time: { created: NOW, completed: NOW },
     });
+    // The step boundary: a steer posted into this step lands here, its row in
+    // the store as the boundary's event goes on the feed — the measured order
+    // (the real binary announces `session.inbox.delivered` right after the
+    // step's `session.step.ended`, the row in the store at that refill and the
+    // execution running a step for it before its terminal event), with no
+    // margin modelled: a server committing the row later than the boundary is
+    // not what was measured, so the fake does not pretend one.
+    this.flushSteers();
     this.emitMessages();
   }
 
@@ -1554,10 +1617,16 @@ class ScriptedServe {
       this.followUpPushed = true;
       this.deps.inbox?.push({ text: this.followUpAtFirstAsk!, userId: "user:conformance", at: NOW });
     }
+    const holdForSteers = this.firstAskWaitsForSteers !== undefined && !this.firstAskHeld;
+    if (holdForSteers) this.firstAskHeld = true;
     const decision = await this.waitReply(requestID);
     // The execution stays under way until the drainer's steer for that follow-up
     // has been posted, so the steer meets a running execution, as the option says.
     if (timedFollowUp) for (let i = 0; i < 400 && !this.steerSeen; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+    // …or until the steers the option counts have reached the serve (`firstAskWaitsForSteers`).
+    if (holdForSteers)
+      for (let i = 0; i < 400 && this.steers < (this.firstAskWaitsForSteers ?? 0); i++)
+        await this.deps.sleep(this.deps.tickMs ?? 1);
     this.liveAsks.delete(requestID);
     if (this.interruptedAsks.has(requestID)) {
       // The interrupt dropped the ask while it was pending: the binary emits no
@@ -1591,8 +1660,12 @@ class ScriptedServe {
           "hangToolCall needs the driver's clock: hand the serve `advanceClock`, `spendBudget` and `finaleMs`",
         );
       for (let i = 0; i < 8; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+      // The write-up's steer: the one posted after the budget is spent (a
+      // follow-up's steer may already be pending into this hung step).
+      const steersBefore = this.pendingSteers.length;
       this.deps.spendBudget();
-      for (let i = 0; i < 200 && this.pendingSteers.length === 0; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+      for (let i = 0; i < 200 && this.pendingSteers.length === steersBefore; i++)
+        await this.deps.sleep(this.deps.tickMs ?? 1);
       this.deps.advanceClock(this.deps.finaleMs + 1);
       // Owed before the wait: the interrupt's late tail may be read at the next
       // prompt before this play has ticked on.
@@ -1848,6 +1921,7 @@ async function runOpenCode(script: RunScript, options: FakeServeOptions = {}): P
   const control = new RunControl();
   const inbox = new FollowUpInbox();
   if (script.followUp !== undefined) inbox.push({ text: script.followUp, userId: "user:conformance", at: NOW });
+  if (script.followUpToo !== undefined) inbox.push({ text: script.followUpToo, userId: "user:conformance", at: NOW });
   const events: RunEvent[] = [];
   const steps: StepReport[] = [];
   const facts: HarnessFacts[] = [];
@@ -1954,6 +2028,7 @@ async function runOpenCode(script: RunScript, options: FakeServeOptions = {}): P
   return {
     harness: "opencode",
     outcome,
+    inboxLeft: inbox.drain().map((i) => ({ text: i.text })),
     events,
     steps,
     facts,

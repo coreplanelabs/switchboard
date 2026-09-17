@@ -142,6 +142,8 @@ export function piDriver(): HarnessDriver {
       const control = new RunControl();
       const inbox = new FollowUpInbox();
       if (script.followUp !== undefined) inbox.push({ text: script.followUp, userId: "user:conformance", at: NOW });
+      if (script.followUpToo !== undefined)
+        inbox.push({ text: script.followUpToo, userId: "user:conformance", at: NOW });
       const events: RunEvent[] = [];
       const steps: StepReport[] = [];
       const facts: HarnessFacts[] = [];
@@ -306,6 +308,7 @@ export function piDriver(): HarnessDriver {
       return {
         harness: "pi",
         outcome,
+        inboxLeft: inbox.drain().map((i) => ({ text: i.text })),
         events,
         steps,
         facts,
