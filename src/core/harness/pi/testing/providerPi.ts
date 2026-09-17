@@ -56,6 +56,13 @@ export interface ProviderPiOptions {
    *  which the harness ticks — drains the inbox, steers, checks the budgets.
    *  A test gives the harness that room here (a few real milliseconds). */
   beforeModelCall?: () => Promise<void>;
+  /** Asked once the harness has seen a tool call's start and the gate has let
+   *  it run: `true` leaves the call in flight — nothing runs, no result ever
+   *  lands, the double waits for the run's abort instead — as a tool in a
+   *  container replaced under the run dies with that container's disk (the
+   *  survival clause's ceiling). `turn` is the 1-based model call whose answer
+   *  made the call. Absent, every call runs. */
+  holdCallOpen?: (call: { toolCallId: string; tool: string; turn: number }) => boolean;
   /** A broken harness: pi's own tools run without asking the gate (the
    *  conformance suite's bypass row, which expects the run to fail closed). */
   bypassGate?: boolean;
@@ -423,6 +430,16 @@ export function scriptPiFromProvider(container: FakeHarnessContainer, opts: Prov
     if (opts.bypassGate && s.builtins.includes(ask.tool)) return runBuiltin(entry.toolContext.executor, ask, signal);
     const verdict = authorizeToolCall(entry, ask);
     if (!verdict.allow) return { content: text(verdict.reason), isError: true };
+    // The test holds this call open: the gate decided, the tool started, and
+    // its result never comes back — as pi and its tool die with a container
+    // replaced under the run. The call stays in flight until the run is aborted.
+    if (opts.holdCallOpen?.({ toolCallId: ask.toolCallId, tool: ask.tool, turn: requests.length })) {
+      await new Promise<void>((resolve) => {
+        if (signal.aborted) resolve();
+        else signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      return { content: text("aborted"), isError: true };
+    }
     if (s.builtins.includes(ask.tool)) {
       // pi's own tool runs in the container. This double runs it over the run's
       // executor under the bridge's `tool.<name>` span, as the relay runs a
