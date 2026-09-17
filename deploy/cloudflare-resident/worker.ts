@@ -198,6 +198,14 @@ import {
 } from "../../src/execution/residentRefresh.js";
 import { autoRebuildDecision, isAutoRebuildEligible } from "../../src/execution/residentAutoRebuild.js";
 import {
+  INFRA_STREAK_DOWN_AT,
+  infraStreakReason,
+  infraStreakRung,
+  type InfraStreakRow,
+  isRepoCommandStep,
+  parksOnRepeat,
+} from "../../src/execution/residentInfraStreak.js";
+import {
   lifecycleOf,
   parseLifecycle,
   type RefreshRow,
@@ -544,6 +552,8 @@ const GITHUB_API_TIMEOUT_MS = 10_000;
  *  idle-park like a warm one; the next attach still refreshes first. */
 const DEGRADED_PARK_AFTER_CYCLES = 3;
 const DEGRADED_STREAK_KEY = "resident:degradedStreak";
+/** Consecutive cycles failed in the resident's OWN steps (item 67): the ladder's count, `InfraStreakRow`. */
+const INFRA_STREAK_KEY = "resident:infraStreak";
 /** Degraded reasons that are not evidence about the repository — both always
  *  carry a `: detail` suffix: the watchdog's `stale-mid-flight: …` (a marker
  *  a dead cycle left behind; a cycle must run) and the wake path's
@@ -561,7 +571,7 @@ const DEGRADED_STREAK_KEY = "resident:degradedStreak";
  *  re-enters the step. A control port that did not answer
  *  (`runtime-unreachable: …`, item 64) is the third: no command ran, the
  *  ladder over its own persisted count owns the recovery. */
-const NON_EVIDENCE_REASON = /^(?:stale-mid-flight|restore-interrupted|runtime-unreachable):/;
+const NON_EVIDENCE_REASON = /^(?:stale-mid-flight|restore-interrupted|runtime-unreachable|infra-streak):/;
 /** When the disk-full recovery last stopped the container (docs/reference/specs/resident-repos.md item 54):
  *  feeds `planDiskFullRecovery`'s cooldown so a working set that refills the
  *  disk is named, not recycled in a loop. */
@@ -3099,10 +3109,12 @@ export class ResidentDO extends Sandbox<Env> {
       }
     }
     let settled = entry.state === "warm";
-    if (entry.state === "degraded" && !isNonEvidenceReason(entry.reason)) {
+    if (entry.state === "degraded" && !isNonEvidenceReason(entry.reason) && parksOnRepeat(entry.reason)) {
       // Count consecutive cycles that found the same REFRESH-PRODUCED degraded
-      // reason (github-unreachable, <step>-failed); a stable streak means
-      // retrying is not going to help and parking is the right cost behavior.
+      // reason that is evidence about the repo or GitHub (github-unreachable,
+      // a repo-command step's <step>-failed); a stable streak means retrying
+      // is not going to help and parking is the right cost behavior. A
+      // resident-step failure never parks: item 67's ladder is its escalation.
       // Any other state resets the streak (below).
       const prev = await this.ctx.storage.get<{ reason: string; count: number }>(DEGRADED_STREAK_KEY);
       const streak =
@@ -3317,6 +3329,8 @@ export class ResidentDO extends Sandbox<Env> {
     // "idle since" and every attach would take the wake-fetch path).
     delete updatedFacts.idleSince;
     await this.ctx.storage.put(FACTS_KEY, updatedFacts);
+    // A completed cycle ends any resident-step streak (item 67).
+    await this.ctx.storage.delete(INFRA_STREAK_KEY);
     await this.setResidentState("warm");
     // Event-triggered reclamation: the prune above already told the
     // mirror which branches died; finished refs give their worktree and
@@ -3370,8 +3384,57 @@ export class ResidentDO extends Sandbox<Env> {
   private async refreshFailed(failure: RefreshFailure, selfInFlight: number): Promise<void> {
     console.log(`refresh: cycle failed — ${failure.reason.slice(0, 400)}`);
     await this.recordRefreshError(failure.reason);
-    await this.setResidentState("degraded", failure.reason); // last snapshot keeps serving
-    if (failure.diskFull) await this.recoverFromDiskFull(failure.reason, selfInFlight);
+    if (failure.diskFull) {
+      await this.setResidentState("degraded", failure.reason);
+      await this.recoverFromDiskFull(failure.reason, selfInFlight);
+      return;
+    }
+    // Item 67: a failure in the repository's own command is evidence about the
+    // repo — degraded, and the gate's park streak decides; it also ends any
+    // resident-step streak, since our machinery got that far. A failure in
+    // the resident's own steps climbs the ladder over the persisted count.
+    if (isRepoCommandStep(failure.step)) {
+      await this.ctx.storage.delete(INFRA_STREAK_KEY);
+      await this.setResidentState("degraded", failure.reason);
+      return;
+    }
+    const row = await this.noteInfraStreak(failure.step);
+    switch (infraStreakRung(row.count)) {
+      case "count":
+        await this.setResidentState("degraded", failure.reason);
+        return;
+      case "recreate":
+        // The disk, not the repo: destroy the container, snapshots kept; the
+        // next cycle's wake restores mirror, checkout and deps from R2.
+        await this.recreateContainer(infraStreakReason(row, "recreate"));
+        return;
+      case "down": {
+        // A recreated container failed the same way: the snapshot or the
+        // resident is what is wrong, and a rebuild from GitHub is the exit —
+        // item 36's transition, the VM destroyed first so provisioning starts
+        // on a fresh one.
+        const reason = infraStreakReason(row, "down");
+        this.swapIncarnation(); // deliberate incarnation swap
+        await this.forgetRuntimeIdentity();
+        await this.destroy().catch((err) => console.log(`infra-streak: destroy failed: ${errMsg(err)}`));
+        await this.ctx.storage.delete(INFRA_STREAK_KEY);
+        await this.goDown(reason);
+        return;
+      }
+    }
+  }
+
+  /** One more cycle failed in the resident's own steps: the count up by one,
+   *  `firstAt` kept, the step and `lastAt` now. */
+  private async noteInfraStreak(step: string): Promise<InfraStreakRow> {
+    const prev = await this.ctx.storage.get<InfraStreakRow>(INFRA_STREAK_KEY);
+    const now = new Date(systemClock()).toISOString();
+    const row: InfraStreakRow = { step, count: (prev?.count ?? 0) + 1, firstAt: prev?.firstAt ?? now, lastAt: now };
+    await this.ctx.storage.put(INFRA_STREAK_KEY, row);
+    console.log(
+      `infra-streak: cycle ${row.count} of ${INFRA_STREAK_DOWN_AT} failed in the resident's own step ${step} (first at ${row.firstAt})`,
+    );
+    return row;
   }
 
   // -- the runtime that never answers (docs/reference/specs/resident-repos.md item 64) ------
@@ -3494,7 +3557,7 @@ export class ResidentDO extends Sandbox<Env> {
    *  restore, for the reason `escalateRuntimeUnreachable` gives. */
   private async recreateContainer(reason: string): Promise<void> {
     console.log(
-      `runtime-unreachable: destroying the container — snapshots kept; the next exec restores from R2 (${reason.slice(0, 200)})`,
+      `recreate: destroying the container — snapshots kept; the next exec restores from R2 (${reason.slice(0, 200)})`,
     );
     this.swapIncarnation(); // deliberate incarnation swap
     await this.forgetRuntimeIdentity();
@@ -7068,6 +7131,7 @@ export class ResidentDO extends Sandbox<Env> {
       REFRESH_INSTANCE_KEY,
       RUNTIME_UNREACHABLE_KEY,
       AUTO_REBUILDS_KEY,
+      INFRA_STREAK_KEY,
     ]);
     const facts = map.get(FACTS_KEY) as RepoFacts | undefined;
     const snap = map.get(SNAPSHOT_KEY) as SnapshotRecord | undefined;
@@ -7173,6 +7237,12 @@ export class ResidentDO extends Sandbox<Env> {
       // Item 36: the auto-rebuilds this resident has had (ISO instants; the
       // budget's window is judged over them). Empty after a person's rebuild.
       autoRebuilds: (map.get(AUTO_REBUILDS_KEY) as string[] | undefined) ?? [],
+      // Item 67: consecutive cycles failed in the resident's own steps, with
+      // the rung that count is on; null while cycles complete.
+      infraStreak: (() => {
+        const row = map.get(INFRA_STREAK_KEY) as InfraStreakRow | undefined;
+        return row ? { ...row, rung: infraStreakRung(row.count) } : null;
+      })(),
     };
   }
 
@@ -7253,6 +7323,33 @@ export class ResidentDO extends Sandbox<Env> {
       }),
     );
     return { recreated: true, restoreStartedAt };
+  }
+
+  /** Fault injection for item 67: write the resident-step streak row at `count`
+   *  (0 deletes it), so the next real failure lands on the rung under test.
+   *  Test-only semantics; admin scope. */
+  async debugSetInfraStreak(count: number): Promise<{ infraStreak: (InfraStreakRow & { rung: string }) | null }> {
+    if (count === 0) {
+      await this.ctx.storage.delete(INFRA_STREAK_KEY);
+      return { infraStreak: null };
+    }
+    const now = new Date(systemClock()).toISOString();
+    const row: InfraStreakRow = { step: "injected", count, firstAt: now, lastAt: now };
+    await this.ctx.storage.put(INFRA_STREAK_KEY, row);
+    return { infraStreak: { ...row, rung: infraStreakRung(count) } };
+  }
+
+  /** Fault injection for item 67: corrupt the mirror on disk (its objects
+   *  removed), so the next cycle's `fetch` fails in a resident step. The
+   *  snapshots in R2 are untouched — the ladder's recreate restores them.
+   *  Test-only semantics; admin scope. */
+  async debugBreakMirror(): Promise<{ broken: boolean; error?: string }> {
+    try {
+      await this.runOk(["rm", "-rf", `${MIRROR_DIR}/objects`], "break-mirror");
+      return { broken: true };
+    } catch (err) {
+      return { broken: false, error: errMsg(err) };
+    }
   }
 
   /** Fault injection for item 36 without corrupting real R2 objects. Bare: persist
@@ -8644,6 +8741,19 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
     }
     case "force-onboarding":
       return json(await stub.debugForceOnboarding());
+    case "infra-streak": {
+      // Fault injection for item 67: set the resident-step streak's count, so
+      // one real failure lands on the rung under test (recreate at 3, down at 5).
+      const count =
+        typeof body.count === "number" && Number.isInteger(body.count) && body.count >= 0 ? body.count : null;
+      if (count === null) return json({ error: "count must be a non-negative integer" }, 400);
+      return json(await stub.debugSetInfraStreak(count));
+    }
+    case "break-mirror":
+      // Fault injection for item 67: remove the mirror's objects, so the next
+      // cycle's fetch fails in a resident step — a corrupt disk, which the
+      // ladder's recreate restores from the snapshot. Test residents only.
+      return json(await stub.debugBreakMirror());
     case "force-down": {
       // Fault injection for item 36; a rehydration-flavored default reason
       // makes it eligible. `transition: true` fires the down through goDown

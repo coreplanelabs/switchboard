@@ -37,6 +37,7 @@ export default defineConfig({
       "dirtNeverKeeps.test.ts",
       "autoRebuild.test.ts",
       "awaitRestore.test.ts",
+      "infraStreak.test.ts",
     ],
   },
 });

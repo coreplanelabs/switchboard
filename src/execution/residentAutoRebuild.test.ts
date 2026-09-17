@@ -37,6 +37,7 @@ describe("autoRebuildDecision (the down transition decides; the watchdog is the 
       "snapshot-stamp-mismatch: restored disk {sha:abc} != stamp {sha:def}",
       "r2-restore-failed: checkout restore stalled: 0 bytes written in 120000 ms",
       "runtime-unreachable: the container's control port did not answer within 30 s (attempt 6 of 6)",
+      "infra-streak: 5 consecutive cycles failed in the resident's own steps (last: fetch, since …) — a recreated container failed the same way; rebuilding",
     ]) {
       expect(REHYDRATION_FAILURE_RE.test(reason), reason).toBe(true);
       expect(isAutoRebuildEligible(reason), reason).toBe(true);
