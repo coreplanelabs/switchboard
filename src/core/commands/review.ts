@@ -161,6 +161,8 @@ export const reviewAbridge = defineCommand({
   }),
   action: "review:write",
   effect: "write",
+  // A stored abridgement is answered, not recomputed, so a repeat changes nothing more.
+  annotations: { destructive: false, idempotent: true, risk: () => "spends one model call" },
   describe:
     "Abridge a finished PR review's reading diff with meat.dev on the bot host (one Opus-class call) and store it on the run; idempotent — a stored one is answered, not recomputed.",
   render: renderAbridge,

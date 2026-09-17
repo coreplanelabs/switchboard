@@ -296,6 +296,8 @@ export const configSet = defineCommand({
   }),
   action: "config:write",
   effect: "write",
+  // Reversible: one `config set` or `config clear` undoes it; the receipt names the scope.
+  annotations: { destructive: false, risk: () => "changes the scope's settings for everyone in it until reset" },
   describe:
     "Set the agent, model, effort, harness or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).",
   render: (output) => {
@@ -375,6 +377,7 @@ export const configClear = defineCommand({
   options: z.object({ channel: channelOption }),
   action: "config:write",
   effect: "write",
+  annotations: { destructive: false, risk: () => "changes the scope's settings for everyone in it until reset" },
   describe:
     "Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.",
   render: (output) => `Cleared ${who((output as JsonObject).scope as "channel" | "me")} overrides.`,
@@ -408,6 +411,7 @@ export const configInstructions = defineCommand({
   options: z.object({ channel: channelOption }),
   action: "config:write",
   effect: "write",
+  annotations: { destructive: false, risk: () => "changes the scope's settings for everyone in it until reset" },
   describe:
     "Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.",
   render: (output) => {

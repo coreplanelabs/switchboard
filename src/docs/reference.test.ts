@@ -9,6 +9,7 @@ import {
   GENERATED_REGIONS,
   renderApiRoutes,
   renderCapabilityCommands,
+  renderCatalogue,
   renderChatCommands,
   renderCliCommands,
   usageFor,
@@ -177,6 +178,70 @@ describe("renderCapabilityCommands", () => {
   });
 });
 
+describe("renderCatalogue", () => {
+  /** One command per blast-radius class, plus a kinded resource and a terminal-only surface. */
+  const cmds = docCommands([
+    {
+      id: "thing.show",
+      action: "repo:read",
+      effect: "read",
+      describe: "Show a thing.",
+      handler: async () => null,
+    },
+    {
+      id: "thing.run",
+      args: [{ name: "slug", schema: z.string(), describe: "which" }],
+      action: "repo:exec",
+      resource: () => ({ type: "agent", name: "coding" }),
+      effect: "write",
+      describe: "Run its checks.",
+      handler: async () => null,
+    },
+    {
+      id: "thing.set",
+      action: "repo:write",
+      effect: "write",
+      annotations: { destructive: false, risk: () => "changes it" },
+      describe: "Set a thing.",
+      handler: async () => null,
+    },
+    {
+      id: "thing.drop",
+      action: "mcp:write",
+      resource: () => ({ type: "config-scope", kind: "org" }),
+      effect: "write",
+      annotations: { destructive: true, risk: () => "drops it" },
+      surfaces: { http: false },
+      describe: "Drop it; a `|` in prose is escaped.",
+      handler: async () => null,
+    },
+  ] as unknown as CommandDef<unknown>[]);
+  const out = renderCatalogue(cmds);
+
+  it("one row per registered command, whatever surface it serves: id, derived form, action, the resource the table decides on, effect, blast radius, surfaces, description", () => {
+    expect(out.split("\n")[0]).toBe(
+      "| Command | Derived form | Action | Resource | Effect | Blast radius | Surfaces | Description |",
+    );
+    expect(out).toContain(
+      "| `thing.show` | `thing show` | `repo:read` | `command` | read | read | chat, cli, http, mcp | Show a thing. |",
+    );
+    expect(out).toContain(
+      "| `thing.run` | `thing run <slug>` | `repo:exec` | `agent` | write | exec | chat, cli, http, mcp | Run its checks. |",
+    );
+    expect(out).toContain(
+      "| `thing.set` | `thing set` | `repo:write` | `command` | write | write | chat, cli, http, mcp | Set a thing. |",
+    );
+    expect(out).toContain(
+      "| `thing.drop` | `thing drop` | `mcp:write` | `config-scope` (org) | write | destructive | chat, cli, mcp | Drop it; a `\\|` in prose is escaped. |",
+    );
+  });
+
+  it("the blast radius column is blastRadius(def) — read, exec, write, destructive — never a label the row asserts", () => {
+    expect(cmds.map((c) => c.blastRadius)).toEqual(["read", "exec", "write", "destructive"]);
+    expect(out.split("\n").filter((l) => l.startsWith("| `"))).toHaveLength(4);
+  });
+});
+
 describe("the real catalogue", () => {
   const registry = new CommandRegistry<CoreCommandDeps>({ audit: () => {} });
   registerCoreCommands(registry);
@@ -187,6 +252,19 @@ describe("the real catalogue", () => {
     for (const cmd of real) expect(out).toContain(`\`${cmd.usage.replace(/\|/g, "\\|")}\``);
     expect(out).toContain("### `mcp`");
     expect(out).toContain("deploy restart");
+  });
+
+  it("renders every registered command into the catalogue table with its blast radius, the exec-class writes being exactly repo test and repo build", () => {
+    const out = renderCatalogue(real);
+    for (const cmd of real) expect(out).toContain(`| \`${cmd.id}\` | `);
+    expect(real.filter((c) => c.blastRadius === "exec").map((c) => c.id)).toEqual(["repo.test", "repo.build"]);
+    expect(
+      real
+        .filter((c) => c.blastRadius === "destructive")
+        .map((c) => c.id)
+        .sort(),
+    ).toEqual(["friction.propose", "mcp.remove", "memory.forget", "repo.offboard", "repo.rebuild", "runs.stop"]);
+    expect(real.filter((c) => c.effect === "read").every((c) => c.blastRadius === "read")).toBe(true);
   });
 
   it("the capability column lists, per axis, exactly the commands dependsOn derives from the registry — a list nobody typed", () => {
@@ -203,7 +281,13 @@ describe("the real catalogue", () => {
   it("emits no unescaped pipe inside a table row (each row must have the column count its header declares)", () => {
     // One width per renderer: every row of a table — header included — splits into the same number
     // of cells once the escaped pipes are removed. A stray `|` in a cell would make its row wider.
-    const renderers = { renderCliCommands, renderChatCommands, renderApiRoutes, renderCapabilityCommands };
+    const renderers = {
+      renderCliCommands,
+      renderChatCommands,
+      renderApiRoutes,
+      renderCapabilityCommands,
+      renderCatalogue,
+    };
     for (const [name, render] of Object.entries(renderers)) {
       const rows = render(real)
         .split("\n")

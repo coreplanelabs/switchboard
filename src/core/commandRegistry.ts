@@ -55,6 +55,30 @@ export type SurfaceName = "chat" | "mcp" | "http" | "cli";
 /** Per-surface opt-outs; a surface absent here is exposed. */
 export type CommandSurfaces = Partial<Record<SurfaceName, false>>;
 
+/** What a run of this command changes, declared where the command is defined
+ *  (docs/decisions/0044-a-routed-write-is-confirmed-in-proportion-to-its-blast-radius.md).
+ *  `destructive` is the one required word for a state-changing write: true
+ *  when no command here undoes a run (a resident torn down, a live run
+ *  stopped, a record forgotten, issues filed), false when one command reverses
+ *  it. `idempotent`: a repeat with the same input changes nothing more.
+ *  `openWorld`: the run reaches outside Switchboard's own state (provisions
+ *  billable compute, files issues on a tracker). `risk(input)` is the one line
+ *  a channel shows beside an offer to run the command — what THIS parsed input
+ *  changes; a `--dry-run` input answers `PLAN_ONLY_RISK`. The MCP listing
+ *  renders these in MCP's own hint names (`src/channels/mcp.ts`), and the
+ *  conformance suite refuses a chat-exposed write that declares none, so the
+ *  fence is presence: the label itself is a judgement made in the record. */
+export interface CommandAnnotations {
+  destructive: boolean;
+  idempotent?: boolean;
+  openWorld?: boolean;
+  risk?: (input: CommandInput) => string;
+}
+
+/** The class a routed command is decided on — derived by `blastRadius` from
+ *  three fields of the definition on every read, stored nowhere. */
+export type BlastRadius = "read" | "exec" | "write" | "destructive";
+
 /**
  * Who is calling, as the adapter resolved it — never as the request claims.
  * `kind` is the SURFACE (what a command may opt out of); `id` is platform-
@@ -143,6 +167,10 @@ export interface CommandDef<
    *  coding }`: the op runs as the coding agent, so the right to run it decides. */
   resource?(input: RawInput, caller: Caller): Resource;
   effect: CommandEffect;
+  /** The blast radius a state-changing write declares (`CommandAnnotations`);
+   *  a read and an exec-class write carry none — `blastRadius` never reads it
+   *  for them. */
+  annotations?: CommandAnnotations;
   surfaces?: CommandSurfaces;
   /** The capability this command needs (src/core/capabilities.ts). Absent →
    *  always on. When the predicate is false for the process's capabilities the
@@ -202,6 +230,28 @@ const CAMEL_KEY = /^[a-z][A-Za-z0-9]*$/;
  *  `--dry-run` / `--no-dry-run`, MCP JSON) or the strings `"true"`/`"false"`
  *  (HTTP query strings). `z.coerce.boolean()` would read `"false"` as true. */
 export const flag = z.union([z.boolean(), z.enum(["true", "false"]).transform((v) => v === "true")]);
+
+/** `effect: "read"` → `read`; an `action` ending in `:exec` → `exec` (a run of
+ *  the repository's own checks, nothing of the bot's own changes); a write
+ *  declaring `destructive: true` → `destructive`; every other write → `write`
+ *  — one declaring nothing included, which the conformance suite refuses for a
+ *  chat-exposed command so the silence never reaches production. Pure over the
+ *  definition: the catalogue column, the MCP hints and the door's decision all
+ *  call it, so one definition change moves every surface. */
+export function blastRadius(def: Pick<CommandDef<unknown>, "effect" | "action" | "annotations">): BlastRadius {
+  if (def.effect === "read") return "read";
+  if (def.action.endsWith(":exec")) return "exec";
+  return def.annotations?.destructive === true ? "destructive" : "write";
+}
+
+/** The risk line of a `--dry-run` invocation: the class stays, the line says nothing changes. */
+export const PLAN_ONLY_RISK = "plan only; changes nothing";
+
+/** Whether a PARSED input asked for `--dry-run` — the boolean the `flag`
+ *  schema produced, so a text surface's `"true"` counts only once parsed. */
+export function dryRunRequested(input: CommandInput): boolean {
+  return input.options?.dryRun === true;
+}
 
 /**
  * Pins the argument and option types so `handler` sees the parsed shape, and

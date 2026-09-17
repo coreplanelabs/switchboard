@@ -1,6 +1,7 @@
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { resolveActor, type GrantsLookup } from "../core/authz/actor.js";
 import {
+  blastRadius,
   CommandRegistry,
   type Caller,
   type CommandDef,
@@ -8,6 +9,7 @@ import {
   type InvokeErrorCode,
 } from "../core/commandRegistry.js";
 import { jsonSchemaFor, mcpToolName, namedToInput } from "../core/commandSurface.js";
+import type { McpToolInfo } from "../mcp/types.js";
 import { dispatch as realDispatch, type CoreDeps } from "../core/dispatcher.js";
 import { startRequestRoot } from "../core/requestTrace.js";
 import { systemClock } from "../core/trace/clock.js";
@@ -102,13 +104,33 @@ export interface McpOptions {
 }
 
 /** `runs.list` → tool `runs_list`; `inputSchema` = the command's
- *  arguments (by name) + options (camelCase keys), derived from the definition. */
+ *  arguments (by name) + options (camelCase keys), derived from the definition;
+ *  `annotations` = the definition's blast radius in MCP's own `ToolAnnotations`
+ *  names (the shape the bot's own MCP client reads, `McpToolInfo.annotations`):
+ *  `readOnlyHint` from the effect, `destructiveHint` from
+ *  `annotations.destructive` (false for a read and for an exec-class write,
+ *  whatever they declare — `blastRadius` never reads it for them),
+ *  `idempotentHint` and `openWorldHint` from the definition, false unless it
+ *  says otherwise, because MCP presumes a non-read-only tool destructive when
+ *  the hint is absent and the registry never leaves a client presuming. */
 function toMcpTool(cmd: CommandDef<unknown>): {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  annotations: NonNullable<McpToolInfo["annotations"]>;
 } {
-  return { name: mcpToolName(cmd.id), description: cmd.describe, inputSchema: jsonSchemaFor(cmd) };
+  const radius = blastRadius(cmd);
+  return {
+    name: mcpToolName(cmd.id),
+    description: cmd.describe,
+    inputSchema: jsonSchemaFor(cmd),
+    annotations: {
+      readOnlyHint: radius === "read",
+      destructiveHint: radius === "destructive",
+      idempotentHint: cmd.annotations?.idempotent === true,
+      openWorldHint: cmd.annotations?.openWorld === true,
+    },
+  };
 }
 
 function mcpExposed(commands: CommandInvoker | undefined): CommandDef<unknown>[] {

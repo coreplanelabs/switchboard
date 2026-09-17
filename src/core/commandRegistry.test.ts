@@ -7,9 +7,12 @@ import {
   UNTRUSTED_CLOSE,
   UNTRUSTED_OPEN,
   UNTRUSTED_PREAMBLE,
+  PLAN_ONLY_RISK,
   bindCommands,
+  blastRadius,
   commandDefiner,
   defineCommand,
+  dryRunRequested,
   flag,
   parseInput,
   renderCompact,
@@ -944,5 +947,65 @@ describe("CommandRegistry audit line — the linked person", () => {
       outcome: "ok",
     });
     expect(audit.mock.calls[1]?.[0]).not.toHaveProperty("asUser");
+  });
+});
+
+describe("blastRadius — the class a definition's own fields decide, derived on every read and stored nowhere", () => {
+  const define = commandDefiner<Record<string, never>>();
+  const base = { describe: "d", handler: async () => ({}) };
+
+  it("a read is `read`, whatever its annotations say", () => {
+    expect(blastRadius(define({ ...base, id: "a.show", action: "a:read", effect: "read" }))).toBe("read");
+    expect(
+      blastRadius(
+        define({
+          ...base,
+          id: "a.peek",
+          action: "a:read",
+          effect: "read",
+          annotations: { destructive: true, risk: () => "never shown" },
+        }),
+      ),
+    ).toBe("read");
+  });
+
+  it("a write on an :exec action is `exec` — a run of the repository's own checks, nothing of the bot's own changes", () => {
+    expect(
+      blastRadius(
+        define({
+          ...base,
+          id: "repo.test",
+          action: "repo:exec",
+          resource: () => ({ type: "agent", name: "coding" }),
+          effect: "write",
+        }),
+      ),
+    ).toBe("exec");
+  });
+
+  it("a write declaring `destructive: false` is `write`, and so is one declaring nothing (the conformance fence, not this function, refuses the silence)", () => {
+    expect(
+      blastRadius(
+        define({ ...base, id: "a.set", action: "a:write", effect: "write", annotations: { destructive: false } }),
+      ),
+    ).toBe("write");
+    expect(blastRadius(define({ ...base, id: "a.put", action: "a:write", effect: "write" }))).toBe("write");
+  });
+
+  it("a write declaring `destructive: true` is `destructive`", () => {
+    expect(
+      blastRadius(
+        define({ ...base, id: "a.drop", action: "a:write", effect: "write", annotations: { destructive: true } }),
+      ),
+    ).toBe("destructive");
+  });
+
+  it("dryRunRequested reads the parsed input's --dry-run and nothing else; the plan-only risk line is one constant", () => {
+    expect(dryRunRequested({ options: { dryRun: true } })).toBe(true);
+    expect(dryRunRequested({ options: { dryRun: false } })).toBe(false);
+    expect(dryRunRequested({ options: {} })).toBe(false);
+    expect(dryRunRequested({})).toBe(false);
+    expect(dryRunRequested({ args: ["acme/api"], options: { dryRun: "true" } })).toBe(false);
+    expect(PLAN_ONLY_RISK).toBe("plan only; changes nothing");
   });
 });

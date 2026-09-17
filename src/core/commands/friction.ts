@@ -4,7 +4,9 @@ import { predicateFor } from "../authz/predicate.js";
 import {
   CommandError,
   commandDefiner,
+  dryRunRequested,
   flag,
+  PLAN_ONLY_RISK,
   type Caller,
   type CommandDef,
   type CommandRegistry,
@@ -157,6 +159,12 @@ export const frictionPropose = defineCommand({
   }),
   action: "friction:write",
   effect: "write",
+  // Files issues others see on a tracker outside the bot; no command here undoes it.
+  annotations: {
+    destructive: true,
+    openWorld: true,
+    risk: (input) => (dryRunRequested(input) ? PLAN_ONLY_RISK : "files issues on the tracker"),
+  },
   describe:
     "Run the self-improvement step: cluster recent friction, dedupe against open issues, file the top proposals as labeled issues.",
   render,

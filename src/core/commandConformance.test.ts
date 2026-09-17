@@ -30,7 +30,7 @@ import { RunStoreFrictionLedger } from "./frictionLedger.js";
 import { NO_CAPABILITIES, type Capabilities } from "./capabilities.js";
 import { routableCommands } from "./dispatch/route.js";
 import { ROUTE_COMMAND_DECOYS, ROUTE_COMMAND_FIXTURES } from "../load/routeCommandFixtures.js";
-import { fixturesFor } from "./testing/commandConformance.js";
+import { blastRadiusGaps, fixturesFor } from "./testing/commandConformance.js";
 import { parseInput } from "./commandRegistry.js";
 import { dependsOn, isEnabled, withOff, withOn } from "./capabilityGating.js";
 import { RunRegistry } from "./runRegistry.js";
@@ -257,6 +257,67 @@ describe("command conformance — catalogue fences", () => {
   it("the fence names a command with two fixtures and the missing kind", () => {
     const orphan = { id: "demo.unfixtured" };
     expect(fixturesFor(orphan)).toEqual({ happy: undefined, paraphrase: undefined, decoy: undefined });
+  });
+
+  // The blast-radius fence (record 0044; command-registry.md item 29): every
+  // chat-exposed write of class `write` or `destructive` declares `destructive`
+  // and a risk line, so a new write is labelled the day it lands. The fence is
+  // presence, not truth — the label is a judgement the record's table makes.
+  it("blast radius: every chat-exposed write of class write or destructive declares `destructive` and a risk line; reads and exec-class writes are exempt", () => {
+    expect(blastRadiusGaps(CATALOGUE)).toEqual([]);
+    const fenced = CATALOGUE.filter((c) => c.surfaces?.chat !== false && c.effect === "write");
+    expect(fenced.filter((c) => c.action.endsWith(":exec")).map((c) => c.id)).toEqual(["repo.test", "repo.build"]);
+    expect(fenced.filter((c) => !c.action.endsWith(":exec"))).toHaveLength(16);
+  });
+
+  it("blast radius: a write missing `destructive` or `risk`, or whose risk line is empty, is named with the field; an exec-class write, a read and a chat-hidden write are exempt", () => {
+    const define = commandDefiner<CoreCommandDeps>();
+    const handler = async () => ({});
+    const silent = define({
+      id: "demo.silent",
+      action: "config:write",
+      effect: "write",
+      describe: "says nothing",
+      handler,
+    });
+    const noRisk = define({
+      id: "demo.norisk",
+      action: "config:write",
+      effect: "write",
+      annotations: { destructive: true },
+      describe: "no risk line",
+      handler,
+    });
+    const mute = define({
+      id: "demo.mute",
+      action: "config:write",
+      effect: "write",
+      annotations: { destructive: false, risk: () => "" },
+      describe: "an empty risk line",
+      handler,
+    });
+    const op = define({
+      id: "demo.exec",
+      action: "repo:exec",
+      resource: () => ({ type: "agent", name: "coding" }),
+      effect: "write",
+      describe: "an op",
+      handler,
+    });
+    const read = define({ id: "demo.read", action: "config:read", effect: "read", describe: "a read", handler });
+    const hidden = define({
+      id: "demo.hidden",
+      action: "config:write",
+      effect: "write",
+      surfaces: { chat: false },
+      describe: "not offered in chat",
+      handler,
+    });
+    expect(blastRadiusGaps([silent, noRisk, mute, op, read, hidden] as CommandDef<unknown>[])).toEqual([
+      expect.stringMatching(/^demo\.silent: annotations\.destructive is not declared/),
+      expect.stringMatching(/^demo\.norisk: annotations\.risk is missing/),
+      expect.stringMatching(/^demo\.mute: annotations\.risk answered an empty line/),
+    ]);
   });
 
   it("authorization: every command's action has a policy row on the resource it authorizes (docs/reference/specs/authorization.md item 4)", () => {
