@@ -145,3 +145,12 @@ describe("stripDirectiveTokens (lenient: text as data)", () => {
     expect(stripDirectiveTokens(text)).toBe(parseDirectives(text).text);
   });
 });
+
+describe("severity:<level>", () => {
+  it("parses one of the ladder, strips the token, and refuses anything else by name", () => {
+    const d = parseDirectives("severity:major fix the flake");
+    expect(d.severity).toBe("major");
+    expect(d.text).toBe("fix the flake");
+    expect(() => parseDirectives("severity:huge fix it")).toThrow(/blocking, major, minor, nit/);
+  });
+});

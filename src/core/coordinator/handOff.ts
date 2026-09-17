@@ -26,6 +26,8 @@ import {
   planIdOf,
   planInstanceId,
   unitBranch,
+  type AddressSeverity,
+  type AddressSeveritySource,
   type PlanGraph,
   type ShipCaps,
 } from "../ship/coordinator.js";
@@ -56,6 +58,10 @@ export interface HandOffInput {
   label: string;
   /** The pipeline's caps as the profile gate clipped them. */
   caps: ShipCaps;
+  /** The severity to address, resolved by the ship branch
+   *  (directive > user > channel > org) — written on the instance beside `merge`;
+   *  absent (a caller without the config layers) is the default: `minor`, the org's. */
+  addressSeverity?: { level: AddressSeverity; source: AddressSeveritySource };
   /** The status card in the requesting thread, when the channel has one. */
   card?: { channel: string; ts: string };
   now: number;
@@ -136,6 +142,8 @@ async function plan(
     base,
     createdAt: input.now,
     caps: input.caps,
+    addressSeverity: (input.addressSeverity ?? { level: "minor" as const }).level,
+    addressSeveritySource: (input.addressSeverity ?? { source: "org" as const }).source ?? "org",
     ...(input.card !== undefined ? { card: input.card } : {}),
     runId: input.runId,
     label: input.label,

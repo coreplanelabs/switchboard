@@ -152,6 +152,11 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "object",
       },
       {
+        "name": "ship",
+        "required": false,
+        "type": "object",
+      },
+      {
         "name": "channel",
         "required": false,
         "type": "string",

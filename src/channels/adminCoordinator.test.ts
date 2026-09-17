@@ -921,6 +921,9 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         ok: true,
         planId: "fixture",
         merge: "runner",
+        // Absent on the record: the machine reads the default, named as the org's.
+        addressSeverity: "minor",
+        addressSeveritySource: "org",
         generated: false,
         repo: "acme/api",
         base: "main",
@@ -1846,7 +1849,9 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(frames).toHaveLength(1);
     expect((frames[0] as { cardTs?: string }).cardTs).toBe("1.5");
     const text = JSON.stringify(frames[0]);
-    expect(text).toContain("U10 · Round 0 — coding · started");
+    // The round header names the severity in force and its source (agent-ship
+    // item 6): this instance carries none, so the org default shows.
+    expect(text).toContain("U10 · Round 0 — coding · addressing minor+ (org) · started");
     expect(text).toContain("U11 · waiting");
     expect(
       (

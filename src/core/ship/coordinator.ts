@@ -554,6 +554,28 @@ export type CoordinatorNote =
  *  person can see whether the cap or the child is the problem. */
 export type ShipBudgetSpent = Readonly<Record<"coding" | "review" | "waiting", number>>;
 
+/** The severity ship must address before an approve stands ('s
+ *  gate): an approve carrying a finding at or above this level continues into
+ *  the findings step exactly as a request_changes does. Ordered most to least
+ *  severe; an unlabeled finding counts as `minor`. */
+export const ADDRESS_SEVERITIES = ["blocking", "major", "minor", "nit"] as const;
+export type AddressSeverity = (typeof ADDRESS_SEVERITIES)[number];
+/** Where the level in force came from, most specific wins: a `severity:` directive on the request (`run`), the user's or the channel's config scope, the org's `ship.addressSeverity` (or its default). */
+export type AddressSeveritySource = "org" | "channel" | "user" | "run";
+export const DEFAULT_ADDRESS_SEVERITY: AddressSeverity = "minor";
+export const isAddressSeverity = (v: unknown): v is AddressSeverity =>
+  (ADDRESS_SEVERITIES as readonly unknown[]).includes(v);
+
+const severityRank = (s: AddressSeverity): number => ADDRESS_SEVERITIES.indexOf(s);
+/** A finding's effective severity for the gate: an unlabeled one counts as minor. */
+const findingRank = (f: Finding): number =>
+  isAddressSeverity(f.severity) ? severityRank(f.severity) : severityRank("minor");
+/** The findings the gate acts on at `level`: at or above it (fyi and anything
+ *  outside the ladder is never actionable — it counts as minor only when unlabeled). */
+export function findingsAtOrAbove(findings: readonly Finding[], level: AddressSeverity): Finding[] {
+  return findings.filter((f) => findingRank(f) <= severityRank(level));
+}
+
 export interface UnitPipelineInput {
   unit: { id: string; branch: string };
   repo: string;
@@ -567,6 +589,12 @@ export interface UnitPipelineInput {
    *  `runner` (a seeded plan, under its grant) or `person` (a task, or a
    *  record without the field). */
   merge: "runner" | "person";
+  /** The severity to address: resolved once by the hand-off —
+   *  directive > user > channel > org — and written on the instance beside
+   *  `merge`, so the machine reads one value. Absent reads as the default. */
+  addressSeverity?: AddressSeverity;
+  /** Which layer set the level in force; named in the round header and the ending. */
+  addressSeveritySource?: AddressSeveritySource;
   /** The instance's mark (agent-ship item 16): a generated one-unit plan — a
    *  `plan` with an id and no `path` — whose unit runs in the requesting
    *  thread and is re-issued with the request's own text, never a plan path. */
@@ -960,6 +988,34 @@ function settleReview(
         },
         notes,
       );
+    // The severity gate: an approve carrying a finding at or
+    // above the level in force does not end the unit — the round continues
+    // into the findings step exactly as a request_changes does, and only an
+    // approve whose findings all sit below the level stands as merge-ready.
+    const level = next.input.addressSeverity ?? DEFAULT_ADDRESS_SEVERITY;
+    const gated = findingsAtOrAbove(verdict.findings, level);
+    if (gated.length > 0) {
+      if (mode !== undefined)
+        return end(
+          next,
+          {
+            kind: "stopped",
+            mode,
+            round,
+            reviewRounds: next.reviewRounds,
+            ...(facts.finalReply !== undefined ? { finalReply: facts.finalReply } : {}),
+            ...(facts.reviewPosted === true ? { postedReview: true } : {}),
+          },
+          notes,
+        );
+      if (next.reviewRounds >= next.input.caps.maxRounds)
+        return end(
+          next,
+          { kind: "round_cap", maxRounds: next.input.caps.maxRounds, reviewRounds: next.reviewRounds },
+          notes,
+        );
+      return enterRound(next, { index: round.index, kind: "findings" }, notes);
+    }
     const pr = next.pr!;
     if (next.input.merge !== "runner")
       return end(next, { kind: "merge_ready", pr, reviewRounds: next.reviewRounds }, notes);
@@ -1383,6 +1439,17 @@ export function renderUnitReport(s: UnitPipelineState, facts?: MergeReadyFacts):
   const declined = [...(s.dispositionsByRound[e.reviewRounds - 1] ?? [])].filter((d) => d.disposition === "declined");
   const declinedLine = `Declined findings: ${declined.length > 0 ? declined.map((d) => `${d.findingId}${d.note ? ` — ${d.note}` : ""}`).join("; ") : "none"}`;
   const verdictLine = `Verdict: LGTM${s.lastVerdictSummary ? ` — ${s.lastVerdictSummary}` : ""}`;
+  // The level in force and its source, plus the findings it left
+  // below the gate on the approved round — named so a skipped finding is a
+  // stated decision, never a silent one.
+  const level = s.input.addressSeverity ?? DEFAULT_ADDRESS_SEVERITY;
+  const levelLine = `Severity addressed: ${level} and above (set by ${s.input.addressSeveritySource ?? "org"}).`;
+  const lastFindings = s.findingsByRound[e.reviewRounds] ?? [];
+  const skipped = lastFindings.filter((f) => !findingsAtOrAbove([f], level).length);
+  const skippedLine =
+    skipped.length > 0
+      ? `Findings below ${level}, left as-is: ${skipped.map((f) => `${f.id} (${f.severity}) — ${f.title}`).join("; ")}`
+      : undefined;
   const join = (parts: Array<string | undefined>) => parts.filter(Boolean).join("\n\n");
   switch (e.kind) {
     case "merged":
@@ -1391,12 +1458,16 @@ export function renderUnitReport(s: UnitPipelineState, facts?: MergeReadyFacts):
       return [
         `✅ Merged after ${rounds}: ${e.pr.url} (squash \`${e.sha.slice(0, 7)}\`) — merged by the plan runner under \`plan:merge\`: the review approved at this head and the guards were green.`,
         verdictLine,
+        levelLine,
+        ...(skippedLine ? [skippedLine] : []),
         declinedLine,
       ].join("\n");
     case "merge_ready":
       return [
         `✅ Merge-ready after ${rounds}: ${e.pr.url}`,
         verdictLine,
+        levelLine,
+        ...(skippedLine ? [skippedLine] : []),
         declinedLine,
         // What the driver read at the approved head when it composed this
         // ending (agent-ship item 9): a merge that already happened is named

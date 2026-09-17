@@ -9,7 +9,7 @@ import type { ArtifactsConfig } from "./artifacts/config.js";
 import type { SelfImprovementConfig } from "./core/selfImprovement.js";
 import type { SchedulesConfig } from "./core/scheduleStore.js";
 import type { RunHistoryConfig } from "./core/runStore.js";
-import type { ShipConfig } from "./core/shipPipeline.js";
+import type { AddressSeverity, ShipConfig } from "./core/shipPipeline.js";
 import type { SpawnConfig } from "./core/dispatch/spawn.js";
 import type { DashboardConfig } from "./core/dashboardAuthConfig.js";
 import { hasAction } from "./core/authz/authorize.js";
@@ -74,6 +74,13 @@ export interface Scope {
    * Validated at load (`validateBoundaries`) and on write (`config set`).
    */
   boundary?: Boundary;
+  /**
+   * The severity agent:ship must address before an approve stands in this
+   * scope: overrides the org's `ship.addressSeverity` — user over
+   * channel over org; a `severity:<level>` directive on the request wins.
+   * Set with `config set channel|me --ship.addressSeverity <level>`.
+   */
+  ship?: { addressSeverity?: AddressSeverity };
   /**
    * Free-text custom instructions folded into the system prompt as ADVISORY
    * content only. Channel text applies to every run in the

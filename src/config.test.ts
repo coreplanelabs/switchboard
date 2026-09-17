@@ -26,7 +26,12 @@ import { AGENTS } from "./agents/registry.js";
 import { hasAction } from "./core/authz/authorize.js";
 import { ALL_GRANTS } from "./core/authz/grants.js";
 import { NO_GRANTS } from "./core/authz/types.js";
-import { resolveShipCaps, SHIP_DEFAULT_MAX_MINUTES, shipPresetFor } from "./core/shipPipeline.js";
+import {
+  resolveAddressSeverity,
+  resolveShipCaps,
+  SHIP_DEFAULT_MAX_MINUTES,
+  shipPresetFor,
+} from "./core/shipPipeline.js";
 import { DEFAULT_MAX_CHILDREN, maxChildrenOf } from "./core/dispatch/spawn.js";
 import { PiAiProviders } from "./core/harness/piAi.js";
 import { parseModelRef, type CompletionRequest } from "./core/provider.js";
@@ -850,6 +855,21 @@ describe("ship caps block (agent:ship pipeline)", () => {
       /ship\.coordinator is no longer a key/,
     );
     expect(() => store(YAML_FIXTURE + "ship:\n  maxRunds: 2\n")).toThrow(/ship\.maxRunds is not a known key/);
+  });
+
+  it("ship.addressSeverity: parsed at load, refused by name outside the ladder; resolveAddressSeverity layers directive > user > channel > org with the default minor as the org's", async () => {
+    expect(store(YAML_FIXTURE + "ship:\n  addressSeverity: major\n").config.ship).toEqual({ addressSeverity: "major" });
+    expect(() => store(YAML_FIXTURE + "ship:\n  addressSeverity: huge\n")).toThrow(
+      /ship\.addressSeverity must be one of blocking, major, minor, nit/,
+    );
+    expect(resolveAddressSeverity({})).toEqual({ level: "minor", source: "org" });
+    expect(resolveAddressSeverity({ org: "nit" })).toEqual({ level: "nit", source: "org" });
+    expect(resolveAddressSeverity({ org: "nit", channel: "major" })).toEqual({ level: "major", source: "channel" });
+    expect(resolveAddressSeverity({ channel: "major", user: "blocking" })).toEqual({
+      level: "blocking",
+      source: "user",
+    });
+    expect(resolveAddressSeverity({ user: "blocking", run: "nit" })).toEqual({ level: "nit", source: "run" });
   });
 
   it("shipPresetFor: the ship preset as this deployment declares it — the registry's def with `ship.maxMinutes` as its budget, the default being the def's own; always a copy", () => {

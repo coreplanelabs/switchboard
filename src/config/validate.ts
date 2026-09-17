@@ -6,7 +6,7 @@ import { TRACING_LOG_LEVELS } from "../core/trace/sinks.js";
 import { EFFORT_LEVELS_HINT, isEffort } from "../effort.js";
 import type { SelfImprovementConfig } from "../core/selfImprovement.js";
 import type { RunHistoryConfig } from "../core/runStore.js";
-import { SHIP_MIN_MAX_MINUTES, type ShipConfig } from "../core/shipPipeline.js";
+import { ADDRESS_SEVERITIES, isAddressSeverity, SHIP_MIN_MAX_MINUTES, type ShipConfig } from "../core/shipPipeline.js";
 import type { SpawnConfig } from "../core/dispatch/spawn.js";
 import { validateDashboardConfig } from "../core/dashboardAuthConfig.js";
 import { validateArtifacts } from "../artifacts/config.js";
@@ -426,7 +426,7 @@ export function validateRestrict(raw: unknown): Restriction {
 }
 
 /** The `ship` block's keys, held equal to `ShipConfig` the way the top-level keys are. */
-const SHIP_KEYS: Record<keyof ShipConfig, true> = { maxRounds: true, maxMinutes: true };
+const SHIP_KEYS: Record<keyof ShipConfig, true> = { maxRounds: true, maxMinutes: true, addressSeverity: true };
 
 /** `ship` caps (docs/reference/specs/agent-ship.md item 8): both bounds enforced at load
  *  so a typo cannot silently become "no cap" (mirrors validateRunHistory). Any
@@ -454,6 +454,11 @@ function validateShip(ship: ShipConfig): void {
   if (minutes !== undefined && (!Number.isInteger(minutes) || minutes < SHIP_MIN_MAX_MINUTES))
     throw new Error(
       `config.yaml: ship.maxMinutes must be an integer >= ${SHIP_MIN_MAX_MINUTES} — the pipeline reserves two review rounds and the merge poll out of it, and the coding child's budget is clipped to the rest (docs/reference/specs/agent-ship.md item 8)`,
+    );
+  // The severity gate: the level an approve's findings are held to.
+  if (ship.addressSeverity !== undefined && !isAddressSeverity(ship.addressSeverity))
+    throw new Error(
+      `config.yaml: ship.addressSeverity must be one of ${ADDRESS_SEVERITIES.join(", ")} (docs/reference/specs/agent-ship.md item 9)`,
     );
 }
 

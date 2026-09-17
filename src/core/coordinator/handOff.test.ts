@@ -117,6 +117,8 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
       createdAt: NOW,
       plan: { id: "fixture", path: "docs/plans/fixture.md" },
       merge: "runner",
+      addressSeverity: "minor",
+      addressSeveritySource: "org",
       caps: { maxRounds: 3, maxMinutes: 45 },
       card: { channel: "C1", ts: "1.5" },
       runId: "run-s",
@@ -564,5 +566,23 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     );
     const threw = harness({ create: new Error("boom") });
     expect((await handOffToCoordinator(threw.deps, input())).reply).toContain("could not be started: boom");
+  });
+});
+
+describe("the severity to address — resolved once, written on the instance beside `merge`", () => {
+  it("the hand-off writes the resolved level and its source on the instance; absent, the default (`minor`, org) is written so the machine always reads one value", async () => {
+    const h = harness();
+    await handOffToCoordinator(h.deps, input({ addressSeverity: { level: "blocking", source: "run" } }));
+    expect(await h.instances.get("plan-fixture")).toMatchObject({
+      merge: "runner",
+      addressSeverity: "blocking",
+      addressSeveritySource: "run",
+    });
+    const d = harness();
+    await handOffToCoordinator(d.deps, input());
+    expect(await d.instances.get("plan-fixture")).toMatchObject({
+      addressSeverity: "minor",
+      addressSeveritySource: "org",
+    });
   });
 });

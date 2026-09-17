@@ -746,3 +746,19 @@ describe("config `me` for a linked dashboard session (record 0042)", () => {
     expect(config.scopes("slack:CX", "slack:UX").user).toEqual({});
   });
 });
+
+// The severity agent:ship addresses before an approve stands:
+// `--ship.addressSeverity` on `config set`, per channel (gated) and per user,
+// resolved by the ship hand-off under a `severity:<level>` directive.
+describe("config set --ship.addressSeverity", () => {
+  it("`me` is self-service: the level lands on the user scope beside the other settings, and a value outside the ladder is refused by name", async () => {
+    const config = store();
+    const commands = bind(config);
+    const { text } = await say(commands, "config set me --ship.addressSeverity major", chat(config, "slack:UX"));
+    expect(text).toContain('"ship":{"addressSeverity":"major"}');
+    expect(config.scopes("slack:CX", "slack:UX").user.ship).toEqual({ addressSeverity: "major" });
+    const bad = await say(commands, "config set me --ship.addressSeverity huge", chat(config, "slack:UX"));
+    expect(bad.text).toMatch(/addressSeverity/);
+    expect(config.scopes("slack:CX", "slack:UX").user.ship).toEqual({ addressSeverity: "major" });
+  });
+});

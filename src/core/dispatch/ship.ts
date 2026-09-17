@@ -24,7 +24,7 @@ import { handOffToCoordinator, type HandOffOutcome } from "../coordinator/handOf
 import { createInstanceViaShim, fetchInstanceStatusViaShim } from "../coordinator/instancesClient.js";
 import { NullCoordinatorInstanceStore, type CoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "../coordinator/instancesRoute.js";
-import { resolveShipCaps } from "../shipPipeline.js";
+import { resolveAddressSeverity, resolveShipCaps } from "../shipPipeline.js";
 import { shipPreflight } from "../ship/preflight.js";
 import { redactSecrets, type AgentSource } from "../runEvents.js";
 import type { LiveThread } from "../threadAdmission.js";
@@ -321,6 +321,16 @@ export async function runShipBranch(
   // declared `ship.maxMinutes` as a boundary or a `budget:` directive clipped
   // it — so every child round the runner spawns is clipped to what remains of THAT.
   const caps = { ...resolveShipCaps(deps.config.config.ship), maxMinutes: profile.minutes };
+  // The severity to address, resolved once here — the request's
+  // `severity:` directive over the user's scope over the channel's over the
+  // org's — and handed to the runner on the instance beside `merge`.
+  const scopes = deps.config.scopes(msg.channelId, msg.userId);
+  const addressSeverity = resolveAddressSeverity({
+    org: deps.config.config.ship?.addressSeverity,
+    channel: scopes.channel.ship?.addressSeverity,
+    user: scopes.user.ship?.addressSeverity,
+    run: directives.severity,
+  });
   const shim = () => ({
     baseUrl: process.env.PUBLIC_BASE_URL,
     tokens: processSecrets.get("SWITCHBOARD_INGRESS_TOKENS"),
@@ -348,6 +358,7 @@ export async function runShipBranch(
           runId: run.id,
           label,
           caps,
+          addressSeverity,
           ...(card.handle !== undefined ? { card: card.handle } : {}),
           now: clock(),
         },
