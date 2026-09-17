@@ -81,7 +81,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { DirectoryBackup, SandboxCommand } from "@cloudflare/sandbox";
 import { createExtensionProcessSandbox } from "@cloudflare/sandbox/extensions";
 import { DurableObject } from "cloudflare:workers";
-import { BASH_TIMEOUT_MAX_MS, BASH_TIMEOUT_MS, clampBashTimeout } from "../../src/execution/bashTimeout.js";
+import { BASH_TIMEOUT_MAX_MS, clampBashTimeout } from "../../src/execution/bashTimeout.js";
 import { selectBindingsToPurge } from "../../src/execution/bindingPurge.js";
 import { busyAfterKillReason, planForceDetach } from "../../src/execution/residentDetach.js";
 import { parseReadonly, planReadonlyAttach } from "../../src/execution/residentReadonly.js";
@@ -621,9 +621,11 @@ const ATTACH_MUTEX_WAIT_MS = 60_000;
  *  stays far inside the bot's 45-min run budget. Work beyond 20 minutes
  *  belongs in background jobs.
  *
- *  /op runs (test/build) keep the flat 5-minute budget — the deterministic op
- *  path has no caller-supplied knob, so nothing may stretch it. */
-const OP_EXEC_TIMEOUT_MS = BASH_TIMEOUT_MS;
+ *  /op runs (test/build) get the flat 20-minute ceiling — the deterministic op
+ *  path has no caller-supplied knob, and a repo's full suite routinely outlives
+ *  the 5-minute per-command default; the client bounds its /op wait at the same
+ *  ceiling, so the two ends agree. */
+const OP_EXEC_TIMEOUT_MS = BASH_TIMEOUT_MAX_MS;
 /** Sanity bound on /exec's command body — a guard against a runaway caller,
  *  not a working limit: legitimate agent one-liners (heredocs writing test
  *  files, `node -e` scripts, long pipelines) run well past the old 8 000 and

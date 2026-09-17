@@ -47,6 +47,7 @@ export default defineConfig({
       "infraStreak.test.ts",
       "staleTip.test.ts",
       "execReplacedWord.test.ts",
+      "opExecTimeout.test.ts",
     ],
   },
 });
