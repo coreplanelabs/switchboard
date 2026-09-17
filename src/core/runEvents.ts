@@ -158,6 +158,13 @@ export type RunNoteKind =
    *  after the model's last turn — the release itself runs after the record
    *  is sealed — and set on the card's label too, so the loss is never silent. */
   | "work_left_behind"
+  /** The run's ending may have left a command running in its workspace — a
+   *  call cut by the ending's abort or interrupt, or open when the run failed —
+   *  so the release tears the workspace down rather than pair it for the
+   *  thread's next run (harness.md item 13). The summary names the calls.
+   *  Written by the run loop once the harness session has ended and before the
+   *  record is sealed; the release itself runs after. */
+  | "workspace_torn_down"
   /** A coding run submitted a PR description but the post-step opened no
    *  pull request because the branch it observed IS the base the pull
    *  request would target (docs/reference/specs/pr-description.md item 5) —
@@ -210,6 +217,11 @@ export type RunNoteKind =
    *  names the call and the step. Information, not a failure: the tool ran
    *  under the gate's decision either way. Published by the OpenCode bridge. */
   | "tool_unnamed"
+  /** An `external_directory` ask answered once its call's line was already on
+   *  the record (harness.md item 13): the line cannot be amended, so the
+   *  directory the call reached is said here, naming the call. Published by
+   *  the OpenCode bridge. */
+  | "directory_reached"
   /** A ship coding child's budget ended with work still in the tree: the run
    *  loop committed and pushed it to the unit's branch (or says plainly that
    *  there was nothing to push), so a re-issue starts from the partial work
@@ -248,6 +260,7 @@ export const RUN_NOTE_KINDS = [
   "cold_sandbox",
   "rebind_refused",
   "work_left_behind",
+  "workspace_torn_down",
   "pr_not_opened",
   "review_not_posted",
   "compacted",
@@ -256,6 +269,7 @@ export const RUN_NOTE_KINDS = [
   "tool_refused",
   "settle_set_aside",
   "tool_unnamed",
+  "directory_reached",
   "budget_salvage",
   "stuck_loop",
 ] as const satisfies readonly RunNoteKind[];
@@ -465,7 +479,12 @@ export type RunEvent =
    *  executors' shared `exit N:` prefix, 0 for a clean run; absent when the code
    *  was not numeric). `output` is the tool's text — control-stripped, redacted,
    *  capped at TOOL_OUTPUT_CAP — for the run page's expandable card; the status
-   *  card and the friction analyzer keep reading `summary`. */
+   *  card and the friction analyzer keep reading `summary`. `cut` marks the
+   *  result of a call the run's ending cut rather than settled — pi's abort (the
+   *  tool's own end after it), OpenCode's interrupt (a call still open when its
+   *  loop left), a session's end (`closeOpenSpans`): the command behind it may
+   *  still be running, and the workspace's release reads it so (`callsInFlight`,
+   *  harness.md item 13). */
   | {
       type: "tool_result";
       tool: string;
@@ -475,6 +494,7 @@ export type RunEvent =
       exitCode?: number;
       output?: string;
       infra?: true;
+      cut?: true;
       spanId?: string;
       logIndex?: number;
       seq?: number;

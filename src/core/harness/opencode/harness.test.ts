@@ -3,6 +3,7 @@ import type { RunnableTool } from "../../../tools/runnableTool.js";
 import { updateStatusTool } from "../../../tools/status.js";
 import type { ChatMessage } from "../../chatMessage.js";
 import type { RunEvent } from "../../runEvents.js";
+import { callsInFlight } from "../../runRecord.js";
 import { HarnessContainerError, OP_TIMEOUT_MS } from "../container.js";
 import {
   openThroughSeam,
@@ -21,7 +22,13 @@ import { FakeHarnessContainer } from "../testing/fakeContainer.js";
 import type { DrivenRun, RunScript } from "../testing/scenarios.js";
 import { loopClock, MINUTE_MS } from "../../budgets.js";
 import { recordingSink } from "../../testing/recordingSink.js";
-import { finaleAbortReason, finaleTimedOutNote, timeBudgetAnswer, windDownFailureNote } from "../windDown.js";
+import {
+  finaleAbortReason,
+  finaleTimedOutNote,
+  HARD_STOP_MESSAGE,
+  timeBudgetAnswer,
+  windDownFailureNote,
+} from "../windDown.js";
 import { bearerHashOf, RunBearerStore, type RunBearerGrant } from "../../modelProxy/runBearers.js";
 import { createTracer } from "../../trace/tracer.js";
 import type { HarnessStart } from "../container.js";
@@ -999,10 +1006,15 @@ describe("the post-turn on the run's session — refused, answered by silence, o
       // The post-turn's bridge never saw the hung call named: `tool` is the word it has.
       "OpenCode settled tool (call c1) of a step this loop never saw start (msg_a0); set aside — an earlier execution's late settle, or a step lost with the stream",
     ]);
-    // The hung call is on the record once, as the loop's call, with no result: its late success is nobody's; the post-turn's own call (the fake replays the script under the same call id, under a step of its own) is judged as its own.
+    // The hung call is on the record once, as the loop's call, with the result the loop wrote when it left at the finale — a failure marked `cut`, the call interrupted and not settled (harness.md item 13) — and its late success is nobody's; the post-turn's own call (the fake replays the script under the same call id, under a step of its own) is judged as its own.
     expect(
       o.events.filter((e) => e.type === "tool_call" || e.type === "tool_result").map((e) => `${e.type}:${e.callId}`),
-    ).toEqual(["tool_call:c1", "tool_call:c1", "tool_result:c1"]);
+    ).toEqual(["tool_call:c1", "tool_result:c1", "tool_call:c1", "tool_result:c1"]);
+    const cut = o.events.find((e) => e.type === "tool_result");
+    expect(cut?.type === "tool_result" ? { ok: cut.ok, cut: cut.cut } : undefined).toEqual({ ok: false, cut: true });
+    // What the workspace's release reads off this record: the hung call stays cut — the post-turn's result for
+    // the same call id is no settle — so the run's tree is torn down, not paired behind the command.
+    expect(callsInFlight(o.events, "completed").map((c) => c.callId)).toEqual(["c1"]);
     await session.end();
   });
 
@@ -1027,9 +1039,11 @@ describe("the post-turn on the run's session — refused, answered by silence, o
         .map((n) => n.summary),
     ).toEqual([windDownFailureNote(reason)]);
     expect(notes(o.events).filter((n) => n.kind === "settle_set_aside")).toHaveLength(1);
+    // The loop's own hung call carries the cut result it wrote when it left; each post-turn's call settles as its own.
     expect(
       o.events.filter((e) => e.type === "tool_call" || e.type === "tool_result").map((e) => `${e.type}:${e.callId}`),
-    ).toEqual(["tool_call:c1", "tool_call:c1", "tool_result:c1", "tool_call:c1", "tool_result:c1"]);
+    ).toEqual(["tool_call:c1", "tool_result:c1", "tool_call:c1", "tool_result:c1", "tool_call:c1", "tool_result:c1"]);
+    expect(callsInFlight(o.events, "completed").map((c) => c.callId)).toEqual(["c1"]);
     await session.end();
   });
 
@@ -1556,7 +1570,7 @@ describe("OpenCodeHarness — the resident's control plane resets under a write"
     expect(notes(r).some((n) => n.kind === "harness_error" && /the follow-up's steer/.test(n.summary))).toBe(true);
   });
 
-  it("a harness failure by name and an operator's hard stop landing in one tick — both while the loop waits on its prompt's answer, so its next check reads them together: the stop's `stopped` note is written all the same (the stop wins the settlement's reading), the failure stays on the record and names the run's end, the interrupt posted once", async () => {
+  it("a harness failure by name and an operator's hard stop landing in one tick — both while the loop waits on its prompt's answer, so its next check reads them together: the stop wins — the run ends as the stop, its `stopped` note written and the hard stop's answer given, the failure a `harness_error` on the record and not the run's end, the interrupt posted once", async () => {
     // The prompt's answer is held until the follow-up's steer has been posted (`followUpAtPrompt`); the steer's
     // resolution meets the store's reset, which fails it by name and requests the stop in one go, before the loop
     // reads anything again.
@@ -1566,9 +1580,7 @@ describe("OpenCodeHarness — the resident's control plane resets under a write"
       hardStopOnStoreReset: true,
       followUpAtPrompt: "also check the docs",
     }).run(toolTurn);
-    expect(r.outcome.kind).toBe("failed");
-    const err = r.outcome.kind === "failed" ? r.outcome.error : undefined;
-    expect(err?.name).toBe("OpenCodeWriteUnresolvedError");
+    expect(r.outcome).toEqual({ kind: "answered", answer: HARD_STOP_MESSAGE });
     expect(r.stopRequested).toBe("hard");
     expect(notes(r).filter((n) => n.kind === "stopped")).toHaveLength(1);
     expect(notes(r).some((n) => n.kind === "harness_error" && /the follow-up's steer/.test(n.summary))).toBe(true);

@@ -249,6 +249,19 @@ export class HarnessMismatchError extends HarnessInterruptedError {
   }
 }
 
+/** A tool ran that the gate never allowed — to its end with no ask the bot
+ *  answered, or after the bot's refusal (harness.md item 2): every harness
+ *  fails the run closed on the first one with a failure of this kind, under its
+ *  own name and words. The run loop reads the kind at the workspace's release:
+ *  what ran in the workspace was never vetted, so the workspace is torn down
+ *  whatever the record shows in flight, never paired for the thread's next run. */
+export class HarnessGateBypassedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "HarnessGateBypassedError";
+  }
+}
+
 /** How many times the run loop relaunches a run's process after its container
  *  was replaced under a living bot (the survival clause's ceiling; harness.md
  *  item 6): counted on the row's facts (`HarnessFacts.relaunches`) so the

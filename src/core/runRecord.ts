@@ -291,6 +291,40 @@ export function pushedBranchesOf(events: readonly RunEvent[]): PushedBranch[] {
   return [...byRef].map(([ref, pr]) => ({ ref, pr }));
 }
 
+/** The tool calls a run's ending may have left running in its workspace, in
+ *  the record's order — what the workspace's release reads to tear the
+ *  workspace down rather than wait for an idle the command would refuse, and
+ *  what its note names (harness.md item 13). A call whose result is marked
+ *  `cut` — pi's abort, OpenCode's interrupt, a session's end — was ended, not
+ *  settled, whatever the run's status, and stays cut whatever lands for it
+ *  later — an unmarked result (a post-turn's bridge reads the earlier
+ *  execution's aborted settle as its own), or the call announced again under
+ *  the same id; a call with no result at
+ *  all was left open by a run that failed, was interrupted or hard-stopped,
+ *  while on a run that completed or stopped softly it is a relayed tool that
+ *  ran in the bot or a result lost to a transport gap, nothing running. Calls
+ *  and results pair by id; a result for a call the record never opened counts
+ *  for nothing. */
+export function callsInFlight(
+  events: readonly RunEvent[],
+  status: RunStatus,
+): Extract<RunEvent, { type: "tool_call" }>[] {
+  const calls = new Map<
+    string,
+    { call: Extract<RunEvent, { type: "tool_call" }>; state: "open" | "cut" | "settled" }
+  >();
+  for (const e of events) {
+    if (e.type === "tool_call" && e.callId !== undefined) {
+      if (calls.get(e.callId)?.state !== "cut") calls.set(e.callId, { call: e, state: "open" });
+    } else if (e.type === "tool_result" && e.callId !== undefined) {
+      const seen = calls.get(e.callId);
+      if (seen !== undefined && seen.state !== "cut") seen.state = e.cut === true ? "cut" : "settled";
+    }
+  }
+  const orderly = status === "completed" || status === "stopped_soft";
+  return [...calls.values()].filter((c) => c.state === "cut" || (c.state === "open" && !orderly)).map((c) => c.call);
+}
+
 /** The router's decision as a record carries it — the same fields the
  *  `route` event and the ledger row's `meta.route` carry (routing-and-config
  *  item 21). */

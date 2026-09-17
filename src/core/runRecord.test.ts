@@ -10,6 +10,7 @@ import {
   RUN_ID_PATTERN,
   applyRetention,
   clampRetentionPolicy,
+  callsInFlight,
   fitRecordToBudget,
   isRunListItem,
   isRunRecord,
@@ -899,6 +900,53 @@ describe("the pull request on the record (docs/reference/specs/run-history.md it
     ]);
     expect(pushedBranchesOf(events.slice(1, 2))).toEqual([]);
     expect(pushedBranchesOf([])).toEqual([]);
+  });
+
+  // harness.md item 13: the workspace's release reads the record for the commands
+  // a run's ending may have left running in it — a call the ending cut (its result
+  // marked `cut`: pi's abort, OpenCode's interrupt, the session's end), or a call
+  // left open when the run failed or was interrupted; a run that completed with a
+  // call unpaired (a relayed tool that ran in the bot, a result lost to a gap)
+  // left nothing running.
+  it("callsInFlight reads the record for the commands a run's ending may have left running: a call whose result is marked `cut` is one whatever the status, and stays one whatever lands for it later; a call with no result is one when the run failed, was interrupted or hard-stopped and none when it completed or stopped softly; settled calls, infra settles and results for calls never opened are none — in the record's order", () => {
+    const call = (callId: string): RunEvent => ({
+      type: "tool_call",
+      tool: "bash",
+      summary: `$ sleep ${callId}`,
+      callId,
+    });
+    const result = (callId: string, mark: { infra?: true; cut?: true } = {}): RunEvent => ({
+      type: "tool_result",
+      tool: "bash",
+      ok: false,
+      summary: "exit 1",
+      callId,
+      ...mark,
+    });
+    expect(callsInFlight([], "failed")).toEqual([]);
+    expect(callsInFlight([call("c1")], "completed")).toEqual([]);
+    expect(callsInFlight([call("c1")], "failed")).toEqual([call("c1")]);
+    expect(callsInFlight([call("c1")], "interrupted")).toEqual([call("c1")]);
+    expect(callsInFlight([call("c1"), result("c1")], "failed")).toEqual([]);
+    expect(callsInFlight([call("c1"), result("c1"), call("c2")], "failed")).toEqual([call("c2")]);
+    expect(callsInFlight([call("c1"), result("c1", { infra: true })], "failed")).toEqual([]);
+    expect(callsInFlight([call("c1"), result("c1", { cut: true })], "completed")).toEqual([call("c1")]);
+    expect(callsInFlight([call("c1"), call("c2"), result("c1", { cut: true })], "completed")).toEqual([call("c1")]);
+    expect(callsInFlight([call("c1"), call("c2"), result("c2", { cut: true })], "failed")).toEqual([
+      call("c1"),
+      call("c2"),
+    ]);
+    expect(callsInFlight([result("c9", { cut: true })], "completed")).toEqual([]);
+    expect(callsInFlight([result("c9")], "failed")).toEqual([]);
+    // A call once cut stays cut: a later result for it — the post-turn's bridge
+    // reading the earlier execution's aborted settle as its own — is no settle.
+    expect(callsInFlight([call("c1"), result("c1", { cut: true }), result("c1")], "completed")).toEqual([call("c1")]);
+    expect(callsInFlight([call("c1"), result("c1", { cut: true }), call("c1"), result("c1")], "completed")).toEqual([
+      call("c1"),
+    ]);
+    // A soft stop ends in its write-up as a completion does; a hard stop leaves what it abandoned.
+    expect(callsInFlight([call("c1")], "stopped_soft")).toEqual([]);
+    expect(callsInFlight([call("c1")], "stopped_hard")).toEqual([call("c1")]);
   });
 });
 

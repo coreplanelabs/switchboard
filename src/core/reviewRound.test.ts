@@ -46,6 +46,15 @@ describe("releaseModeFor (per-agent attach/release pairing)", () => {
     expect(releaseModeFor("write", { hardStopped: true })).toBe("always");
     expect(releaseModeFor("read", { hardStopped: true })).toBe("always");
   });
+
+  it("a command still in flight at the run's end forces always too — the workspace is torn down as after a hard stop, never held behind the hung command — and so does a gate bypass, whatever is in flight: what ran in the workspace was never vetted", () => {
+    expect(releaseModeFor("write", { hardStopped: false, commandInFlight: true })).toBe("always");
+    expect(releaseModeFor("none", { hardStopped: false, commandInFlight: true })).toBe("always");
+    expect(releaseModeFor("write", { hardStopped: false, gateBypassed: true })).toBe("always");
+    expect(releaseModeFor("write", { hardStopped: false, commandInFlight: false, gateBypassed: false })).toBe(
+      "if-idle",
+    );
+  });
 });
 
 describe("attachRoundWorkspace (explicit AgentDef → attach + paired release)", () => {

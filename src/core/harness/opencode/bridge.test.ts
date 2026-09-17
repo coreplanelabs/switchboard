@@ -1249,9 +1249,11 @@ describe("the bridge's observing mode — an earlier execution's tail is not thi
       "tool_result:c-dir:read:true",
       "tool_result:c-loop:bash:false",
     ]);
-    // The tool's own path leads the call's summary; the directory the call reached outside the project rides beside it under its own key.
+    // The tool's own path leads the call's line; the directory the call reached follows it on the record.
     const dirCall = events.find((e) => e.type === "tool_call" && e.callId === "c-dir");
-    expect(dirCall?.type === "tool_call" ? dirCall.summary : "").toBe("read /w/src/a.ts");
+    expect(dirCall?.type === "tool_call" ? dirCall.summary : "").toBe(
+      "read /w/src/a.ts (reaching /workspace/threads/t/main/src)",
+    );
     // The repeat guard's call carries the tool's own input from the store's part: the command the record shows.
     const loopCall = events.find((e) => e.type === "tool_call" && e.callId === "c-loop");
     expect(loopCall?.type === "tool_call" ? loopCall.command : undefined).toBe("echo hi");
@@ -1388,6 +1390,117 @@ describe("the bridge's observing mode — an earlier execution's tail is not thi
     expect(events.filter((e) => e.type === "tool_result").map((e) => e.callId)).toEqual(["c-race"]);
     expect(bridge.toolCalls).toBe(1);
     expect(bridge.doingNow()).toBeUndefined();
+  });
+
+  it("two resource permissions held for one call — external_directory, then doom_loop — are both kept: the refill that names the part opens the call once with every held ask's input folded in, the directory among them", () => {
+    const { bridge, events } = harness();
+    const ask = (id: string, action: string, resources: string[]) =>
+      bridge.observe(
+        ev("permission.asked", {
+          id,
+          sessionID: "ses_c",
+          action,
+          resources,
+          source: { type: "tool", messageID: "msg_two", id: "c-two" },
+        }),
+      );
+    expect(
+      ask("per_dir", "external_directory", ["/workspace/threads/t/main/vendor"]).replies.map((r) => r.reply),
+    ).toEqual(["once"]);
+    expect(ask("per_loop", "doom_loop", ["*"]).replies.map((r) => r.reply)).toEqual(["reject"]);
+    expect(events.filter((e) => e.type === "tool_call")).toEqual([]);
+    // The part names the tool but carries no input of its own: the directory the
+    // external_directory ask named is the path the record has.
+    bridge.observe({
+      feed: "messages",
+      at: NOW,
+      sessionID: "ses_c",
+      reason: "session.step.ended",
+      data: [
+        {
+          id: "msg_two",
+          type: "assistant",
+          agent: "switchboard",
+          model: { providerID: "switchboard", id: "m" },
+          content: [{ type: "tool", id: "c-two", name: "read", state: { status: "running" } }],
+          time: { created: NOW },
+        },
+      ],
+    });
+    const calls = events.filter((e) => e.type === "tool_call");
+    expect(calls.map((e) => `${e.callId}:${e.tool}:${e.summary}`)).toEqual([
+      "c-two:read:read /workspace/threads/t/main/vendor",
+    ]);
+    expect(bridge.toolCalls).toBe(1);
+  });
+
+  it("two external_directory asks held for one call — a tool reaching two roots — keep every directory on the record: the tool's own path leads the call's line and each directory it reached follows once, none overwritten by the ask that came after", () => {
+    const { bridge, events } = harness();
+    const ask = (id: string, resources: string[]) =>
+      bridge.observe(
+        ev("permission.asked", {
+          id,
+          sessionID: "ses_c",
+          action: "external_directory",
+          resources,
+          source: { type: "tool", messageID: "msg_two", id: "c-two" },
+        }),
+      );
+    const vendor = "/workspace/threads/t/main/vendor";
+    const tools = "/workspace/threads/t/main/tools";
+    expect(ask("per_a", [vendor]).replies.map((r) => r.reply)).toEqual(["once"]);
+    expect(ask("per_b", [tools, vendor]).replies.map((r) => r.reply)).toEqual(["once"]);
+    bridge.observe({
+      feed: "messages",
+      at: NOW,
+      sessionID: "ses_c",
+      reason: "session.step.ended",
+      data: [
+        {
+          id: "msg_two",
+          type: "assistant",
+          agent: "switchboard",
+          model: { providerID: "switchboard", id: "m" },
+          content: [
+            {
+              type: "tool",
+              id: "c-two",
+              name: "read",
+              state: { status: "running", input: { filePath: `${vendor}/x.txt` } },
+            },
+          ],
+          time: { created: NOW },
+        },
+      ],
+    });
+    const calls = events.filter((e) => e.type === "tool_call");
+    expect(calls.map((e) => `${e.callId}:${e.tool}:${e.summary}`)).toEqual([
+      `c-two:read:read ${vendor}/x.txt (reaching ${vendor}, ${tools})`,
+    ]);
+  });
+
+  it("an external_directory ask that arrives once its call is already open — the tool's own ask opened it first — is answered, and since the call's line is on the record and cannot be amended, a directory_reached note names the call and the directory it reached", () => {
+    const { bridge, events } = harness();
+    expect(
+      bridge
+        .observe(asked_("per_r", "c-late", "read", "/workspace/threads/t/main/src/a.ts"))
+        .replies.map((r) => r.reply),
+    ).toEqual(["once"]);
+    expect(
+      bridge
+        .observe(asked_("per_d", "c-late", "external_directory", "/workspace/threads/t/main/vendor"))
+        .replies.map((r) => r.reply),
+    ).toEqual(["once"]);
+    expect(events.filter((e) => e.type === "tool_call").map((e) => `${e.callId}:${e.summary}`)).toEqual([
+      "c-late:read /workspace/threads/t/main/src/a.ts",
+    ]);
+    expect(
+      notes(events)
+        .filter((n) => n.kind === "directory_reached")
+        .map((n) => n.summary),
+    ).toEqual([
+      "read (call c-late) reached /workspace/threads/t/main/vendor after its line was written; the line does not name it",
+    ]);
   });
 
   it("the tool's own ask and a resource permission's ask for the same call are both answered, in either order — the second is never mistaken for a refill of the first", () => {

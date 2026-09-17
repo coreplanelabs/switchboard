@@ -777,7 +777,7 @@ export const SCENARIOS: readonly ScenarioRow[] = [
     id: "budget-cuts-the-tool-in-flight",
     clause: "conversation",
     title:
-      "a tool call in flight at the loop's end is cut: the budget note names it, a tool_cut note says why, its result lands aborted, and the write-up runs with its allowance and answers before the lease ends",
+      "a tool call in flight at the loop's end is cut: the budget note names it, a tool_cut note says why, its result lands aborted and marked cut, and the write-up runs with its allowance and answers before the lease ends",
     script: {
       turns: [call("c1", "bash", { command: "sleep 900" }), text("findings so far: the sleep was cut")],
       hangToolCall: 1,
@@ -801,6 +801,7 @@ export const SCENARIOS: readonly ScenarioRow[] = [
       assert.equal(notes(run).filter((n) => n.kind === "harness_error").length, 0, "the cut was recorded as a failure");
       const cut = toolResults(run).find((r) => r.callId === "c1");
       assert.ok(cut !== undefined && cut.ok === false, "the cut call's result is not on the record as a failure");
+      assert.equal(cut.cut, true, "the aborted settle is not marked cut: the release would read it as settled");
       const lease = run.events.find((e) => e.type === "lease");
       assert.ok(lease && lease.type === "lease", "no lease event");
       const last = Math.max(...run.events.map((e) => e.at ?? 0));
