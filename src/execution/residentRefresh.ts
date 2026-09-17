@@ -186,6 +186,22 @@ export function killStaleBuildProcessesCommand(user: string, dir: string): strin
  *  failure however it died. */
 const INTERRUPTION_SIGNATURE = /\bexit 143\b|Session terminated|SIGTERM|^restore-interrupted:/;
 
+/** The wordings git gives when the MIRROR itself is broken: its `origin`
+ *  remote gone from `config`, the repository not a repository, an object store
+ *  with bad, corrupt or unreadable objects, a local file it cannot open. None
+ *  of these is GitHub's doing, and none is cured by waiting for GitHub. */
+const MIRROR_FAILURE_WORDING =
+  /'origin' does not appear to be a git repository|not a git repository|\bbad object\b|\bcorrupt\b|unable to read (?:tree|object|commit|blob)|object file .* is empty|cannot open \.git\/|unable to open object|missing object/i;
+
+/** Whether a failed mirror fetch failed on the mirror (the resident's own
+ *  disk — item 67 counts it) rather than on GitHub (`github-unreachable`, a
+ *  serviceable reason that parks on repeat, item 16b). GitHub is the default:
+ *  a message names the mirror only through the wordings above, so an unknown
+ *  failure keeps the reading it always had. */
+export function fetchFailureIsMirrors(message: string): boolean {
+  return MIRROR_FAILURE_WORDING.test(message);
+}
+
 /** Message wording of the Sandbox SDK's runtime-replacement error family — the
  *  container went away UNDER a live SDK call, so the failure never reaches the
  *  shell-kill signature above: a step that dies this way surfaces as

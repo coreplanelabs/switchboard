@@ -15,6 +15,7 @@ import {
   STOPPED_CONTAINER_WORDING,
   checkoutUpdateCommand,
   classifyRefreshFailure,
+  fetchFailureIsMirrors,
   restoreFailureDisposition,
   killStaleBuildProcessesCommand,
   judgeRestoreProgress,
@@ -232,6 +233,43 @@ describe("killStaleBuildProcessesCommand (a build-user step never starts beside 
     });
     expect(r.status).toBe(0);
     expect(r.stdout).toBe("");
+  });
+});
+
+// Item 67: the cycle's fetch step used to name every failure `github-unreachable`
+// — GitHub's, a serviceable reason that parks on repeat. A fetch that fails on
+// the MIRROR itself (its remote gone from `config`, its object store broken)
+// is the resident's own failure: `fetch-failed`, a resident step the ladder
+// counts. The first live row of item 67 found this: the injected broken
+// mirror read `degraded(github-unreachable: 'origin' does not appear to be a
+// git repository …)`, parked, and the streak never moved.
+describe("fetchFailureIsMirrors (a fetch that fails on the mirror is the resident's, not GitHub's)", () => {
+  it("names the mirror for a missing remote, a broken object store or an unreadable local repository", () => {
+    for (const msg of [
+      "exit 128: stderr: fatal: 'origin' does not appear to be a git repository\nfatal: Could not read from remote repository.",
+      "exit 128: stderr: fatal: not a git repository (or any of the parent directories): .git",
+      "exit 128: stderr: fatal: bad object HEAD",
+      "exit 128: stderr: error: object file /workspace/mirror/objects/ab/cd is empty\nfatal: loose object abcd is corrupt",
+      "exit 128: stderr: fatal: unable to read tree 1234",
+      "exit 128: stderr: error: cannot open .git/FETCH_HEAD: No such file or directory",
+    ]) {
+      expect(fetchFailureIsMirrors(msg), msg).toBe(true);
+    }
+  });
+
+  it("leaves GitHub's failures to GitHub: DNS, timeouts, HTTP errors, refused credentials, a repository GitHub says is not there", () => {
+    for (const msg of [
+      "exit 128: stderr: fatal: unable to access 'https://github.com/o/r.git/': Could not resolve host: github.com",
+      "exit 128: stderr: fatal: unable to access 'https://github.com/o/r.git/': The requested URL returned error: 503",
+      "exit 128: stderr: fatal: unable to access 'https://github.com/o/r.git/': Operation timed out after 300000 milliseconds",
+      "exit 128: stderr: remote: Repository not found.\nfatal: repository 'https://github.com/o/r.git/' not found",
+      "exit 128: stderr: remote: Invalid username or token. Password authentication is not supported\nfatal: Authentication failed",
+      "token-mint-failed (command-level, fetching anonymously): 422; then exit 128: stderr: remote: Repository not found.",
+      "fetch timed out after 300000ms",
+      "",
+    ]) {
+      expect(fetchFailureIsMirrors(msg), msg).toBe(false);
+    }
   });
 });
 
