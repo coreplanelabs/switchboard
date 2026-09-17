@@ -29,6 +29,7 @@ import { CONFORMANCE_MAX_MINUTES, FAILED_MODEL_CALL_ERROR } from "../testing/sce
 import {
   finaleAbortReason,
   finaleTimedOutNote,
+  HARD_STOP_MESSAGE,
   MODEL_CALL_IN_FLIGHT,
   softStopAnswer,
   softStopNote,
@@ -821,6 +822,38 @@ describe("the loop — a refused request, a silent server, and a hung turn", () 
     expect(stopped).toHaveLength(1);
     expect(stopped[0]).toMatchObject({ mode: "soft", summary: softStopNote() });
     expect(steers(r)).toHaveLength(1);
+    expect(harnessErrors(r)).toEqual([]);
+  });
+
+  it("the interrupt an ending posts that the server refuses is a harness_error whenever the answer comes — after the loop has left included — beside the wind-down's note", async () => {
+    const r = await openCodeDriver({ interruptPostFails: true }).run(hung);
+    expect(answered(r)).toBe(timeBudgetAnswer("", CONFORMANCE_MAX_MINUTES, finaleAbortReason(FINALE_MS)));
+    expect(harnessErrors(r)).toEqual([
+      windDownFailureNote(finaleAbortReason(FINALE_MS)),
+      'the interrupt did not reach the server: it answered 500 ({"error":"interrupt refused"})',
+    ]);
+    expect(posts(r, "/interrupt")).toHaveLength(1);
+  });
+
+  it("a soft stop then a hard stop write two stopped notes, soft then hard, and the hard stop's abort line is the answer", async () => {
+    const r = await run({
+      turns: [
+        {
+          content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "echo hi" } }],
+          stopReason: "tool_use",
+        },
+        { content: [{ type: "text", text: "never" }], stopReason: "end_turn" },
+      ],
+      softStopBeforeModelCall: 2,
+      hardStopBeforeModelCall: 2,
+    });
+    expect(answered(r)).toBe(HARD_STOP_MESSAGE);
+    expect(
+      notes(r.events)
+        .filter((n) => n.kind === "stopped")
+        .map((n) => n.mode),
+    ).toEqual(["soft", "hard"]);
+    expect(posts(r, "/interrupt")).toHaveLength(1);
     expect(harnessErrors(r)).toEqual([]);
   });
 

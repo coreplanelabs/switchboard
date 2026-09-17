@@ -1204,19 +1204,24 @@ export async function driveOpenCode(
    *  a replaced verdict); `silent` — the first-event bound passed. The loop
    *  leaves at once on any. */
   let ended: "hard" | "finale" | "silent" | undefined;
-  /** The `stopped` note is written once for the run, whichever stop came first. */
-  let stopNoted = false;
-  /** The loop has left: a request whose answer arrives now was cut by the
-   *  caller's end of the process, and its failure is that end's own effect,
-   *  not the record's. */
+  /** The soft stop's `stopped` note is written once for the run — at the stop
+   *  that starts the write-up, or once when the request lands during another
+   *  wind-down's write-up; a hard stop that follows writes its own note, so the
+   *  record shows both operator actions. */
+  let softNoted = false;
+  /** The loop has left: a request that fails on its transport now was cut by
+   *  the caller's end of the process — that end's own effect, not the record's.
+   *  An answer the server gives is its word whenever it comes. */
   let left = false;
   /** The execution the loop drives has begun: set by the server's own
    *  `session.execution.started` for the session after the prompt (the record
    *  that also lifts the first-event bound), or from the start on a re-attach
-   *  steered into an execution under way. A settle, a failure or a budget stop
-   *  read before it belongs to an earlier execution — the aborted write-up of
-   *  the loop before this post-turn, whose end the server sends late — and is
-   *  not this loop's. */
+   *  steered into an execution under way. Every record before it belongs to
+   *  an earlier execution — the tail of the write-up the loop before this
+   *  post-turn interrupted at its finale, which the server sends late — and
+   *  is not this loop's to decide: nothing of it is judged, posted or read as
+   *  a bypass; the store's refills feed the mirror and a failure is noted as
+   *  the earlier execution's. */
   let executionOwned = conn.reattach?.delivery === "steer";
   /** The request whose first event the feed still owes (`FIRST_EVENT_BOUND_MS`):
    *  set when a `queue` prompt is admitted, cleared by the session's
@@ -1255,18 +1260,18 @@ export async function driveOpenCode(
   };
 
   /** A request whose answer the loop does not wait on — a steer, the
-   *  interrupt: its failure is never swallowed while the loop runs. An answer
-   *  outside 2xx, or a request that threw, is a `harness_error` naming the
-   *  request and the answer, at once; the ending it was part of is the
-   *  wind-down's or the stop's, bounded by the finale, so nothing waits on it.
-   *  An answer that arrives once the loop has left is the caller's end of the
-   *  process cutting the request — the interrupt an ending posted, reset by
-   *  the kill that follows — and says nothing the record does not already
-   *  hold, so it is not a note. */
+   *  interrupt: its failure is never swallowed. An answer outside 2xx is the
+   *  server's own word and is a `harness_error` naming the request and the
+   *  answer whenever it comes, the loop left or not — an interrupt the server
+   *  refused was not sent as far as the record says. A request that failed on
+   *  its transport after the loop left is the caller's end of the process
+   *  cutting it — the interrupt an ending posted, reset by the kill that
+   *  follows — and says nothing the record does not already hold; the same
+   *  failure while the loop runs is noted. */
   const post = (what: string, route: { method: string; path: string }, body?: unknown) => {
     void request(route, body).then(
       (res) => {
-        if (left || (res.status >= 200 && res.status < 300)) return;
+        if (res.status >= 200 && res.status < 300) return;
         note(
           "harness_error",
           `${what} did not reach the server: it answered ${res.status}${res.body.trim() ? ` (${redactAndCap(res.body, 200)})` : ""}`,
@@ -1303,8 +1308,8 @@ export async function driveOpenCode(
       if (ended === undefined) {
         ended = "hard";
         // The hard stop on the record (the record clause): a `stopped` note in
-        // mode `hard`, said once, then the interrupt that ends the session.
-        stopNoted = true;
+        // mode `hard`, said once — after a soft stop's own, when one came
+        // first — then the interrupt that ends the session.
         note("stopped", hardStopNote(), "hard");
         post("the interrupt", sessionRoutes["session.interrupt"]);
       }
@@ -1316,8 +1321,8 @@ export async function driveOpenCode(
       // is refused and the model is writing its final answer — but the request
       // is on the record: one `stopped` note in mode soft, no second steer, the
       // answer's label the ending's that was already under way.
-      if (requested === "soft" && !stopNoted) {
-        stopNoted = true;
+      if (requested === "soft" && !softNoted) {
+        softNoted = true;
         note("stopped", softStopNote(), "soft");
       }
       // The write-up is bounded by its allowance, as pi's is (harness.md item
@@ -1344,7 +1349,7 @@ export async function driveOpenCode(
       return;
     }
     if (requested === "soft") {
-      stopNoted = true;
+      softNoted = true;
       note("stopped", softStopNote(), "soft");
       startWriteUp({ kind: "soft" }, SOFT_STOP_INSTRUCTION);
       return;
@@ -1480,17 +1485,46 @@ export async function driveOpenCode(
       // land, and the line between the dead generation's records and this
       // generation's on a re-attach.
       const after = transport.consumedOffset;
-      bridge.catchingUp = conn.reattach !== undefined && after <= conn.reattach.catchUpTo;
+      const reattachCatchUp = conn.reattach !== undefined && after <= conn.reattach.catchUpTo;
       lastRecord = next.value;
       const record = parseFeedRecord(next.value);
       if (!record) continue;
       // The session's own execution start pays what the admitted prompt owed
       // and makes the execution this loop's; a record read catching up on a
       // re-attach is the dead generation's.
-      if (!bridge.catchingUp && executionStartedFor(record, conn.sessionID)) {
+      if (!reattachCatchUp && executionStartedFor(record, conn.sessionID)) {
         executionOwned = true;
         awaiting = undefined;
       }
+      if (!executionOwned && !reattachCatchUp) {
+        // Before the loop's own execution has started, the feed is an earlier
+        // execution's tail — the write-up the loop before this post-turn
+        // interrupted at its finale: a slow tool of that execution settling,
+        // an ask the interrupt rejected and its echo, its settle or failure.
+        // That exchange was this bot's own loop's, decided then; a fresh
+        // bridge holding none of its decisions would read the settle as a
+        // bypass and post a reply the interrupt already rejected, so none of
+        // it is observed. The store's refills still feed the mirror — the
+        // store is one whole the answer is read from — and a failure is said
+        // for what it is, an earlier execution's, as the catch-up branch says
+        // the dead generation's.
+        if (record.feed === "messages") {
+          bridge.observe(record);
+          if (conn.saveOffset !== undefined) {
+            const save = conn.saveOffset;
+            void bridge.flush().then(() => save(after));
+          }
+        } else if (record.feed === "event" && record.event.type === "session.execution.failed") {
+          const data = isRecord(record.event.data) ? record.event.data : {};
+          note(
+            "harness_error",
+            `a model call of an earlier execution failed (${redactAndCap(errorMessage(data.error), 400)}); continuing`,
+          );
+        }
+        check();
+        continue;
+      }
+      bridge.catchingUp = reattachCatchUp;
       const obs = bridge.observe(record);
       if (record.feed === "messages" && conn.saveOffset !== undefined) {
         const save = conn.saveOffset;
@@ -1508,14 +1542,6 @@ export async function driveOpenCode(
         // settle: said where it failed, and the run goes on to its own end.
         if (obs.providerError !== undefined)
           note("harness_error", `a model call failed while the bot was away (${obs.providerError}); continuing`);
-        check();
-        continue;
-      }
-      if (!executionOwned && (obs.settled || obs.providerError !== undefined || obs.budgetStop)) {
-        // The end of an execution this loop did not start — the write-up the
-        // loop before this post-turn interrupted at its finale, settling late —
-        // is not this loop's settle: the execution the prompt starts is still
-        // owed, and its own start is what the bound waits for.
         check();
         continue;
       }

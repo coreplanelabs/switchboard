@@ -130,6 +130,9 @@ export function silentPromptRecords(sessionID: string, store: readonly unknown[]
   return [...tailerReconnectRecords(sessionID, store, at), globalFeedEvent(at)];
 }
 
+/** The proxy's words when a hung turn's late end is a failure rather than an interrupt (`interruptSettlesLate: "failed"`). */
+export const LATE_FAILURE_ERROR = "the proxy answered 400 after the interrupt";
+
 /** How many feed bytes these records take as the fake writes them (one JSON line each): what a row's `logOffset` is computed from. */
 export function feedByteLength(records: readonly unknown[]): number {
   return records.reduce<number>((n, r) => n + Buffer.byteLength(JSON.stringify(r), "utf8") + 1, 0);
@@ -228,12 +231,17 @@ export interface FakeServeOptions {
    *  moves the run's clock past the first-event bound, so the harness's next
    *  tick finds the silence. */
   silentAfterPrompt?: number;
-  /** A hung turn's interrupt is honoured late: the aborted execution's
-   *  `session.execution.interrupted` and its refills land only when the NEXT
+  /** A hung turn's interrupt is honoured late: what the aborted execution
+   *  still writes after the interrupt — a slow own tool settling with its
+   *  result, an ask the interrupt rejected with its echo and the tool's
+   *  failure — then its end (`interrupted`, or `failed` with the proxy's
+   *  words, `LATE_FAILURE_ERROR`) and the refills, all land only when the NEXT
    *  `queue` prompt is posted (a post-turn's), before that prompt's execution
-   *  starts — as a slow turn's settle lands after the run loop has moved on
-   *  to the post-turn. Without it the hung turn is deaf: nothing ever comes. */
-  interruptSettlesLate?: boolean;
+   *  starts — as a slow turn's tail lands after the run loop has moved on to
+   *  the post-turn. Without it the hung turn is deaf: nothing ever comes. */
+  interruptSettlesLate?: "interrupted" | "failed";
+  /** The interrupt POST answers 500: the server refused it — its word, whenever it comes. */
+  interruptPostFails?: boolean;
   /** The interrupt POST answers only when the container kills the server —
    *  and then as the connection reset the kill causes — so a note about it
    *  after the loop left would be the kill's own effect on the record. */
@@ -355,8 +363,11 @@ class ScriptedServe {
   private readonly primePostFails: boolean;
   private readonly promptPostFails: number | undefined;
   private readonly silentAfterPrompt: number | undefined;
-  private readonly interruptSettlesLate: boolean;
+  private readonly interruptSettlesLate: "interrupted" | "failed" | undefined;
   private readonly interruptAnswersAfterKill: boolean;
+  private readonly interruptPostFails: boolean;
+  /** The run's first play is in its scripted hang: an interrupt now is one it owes a late settle for. */
+  private hanging = false;
   /** How many `queue` prompts the serve has been posted. */
   private queuePrompts = 0;
   /** How many plays have started: a scripted hang is the run's first play's, never a post-turn's replay. */
@@ -403,8 +414,9 @@ class ScriptedServe {
     this.primePostFails = options.primePostFails === true;
     this.promptPostFails = options.promptPostFails;
     this.silentAfterPrompt = options.silentAfterPrompt;
-    this.interruptSettlesLate = options.interruptSettlesLate === true;
+    this.interruptSettlesLate = options.interruptSettlesLate;
     this.interruptAnswersAfterKill = options.interruptAnswersAfterKill === true;
+    this.interruptPostFails = options.interruptPostFails === true;
     this.mutate = options.mutate;
     this.replacedWord = options.replacedWord ?? REPLACED_WORD;
     this.reattach = options.reattach ?? {};
@@ -749,14 +761,13 @@ class ScriptedServe {
         // turn it primed). A fresh run's prompt is the request, a store turn.
         if (!this.script.resume)
           this.store.push({ id: `msg_u${this.store.length}`, type: "user", text, time: { created: NOW } });
-        // A hung turn's late settle (`interruptSettlesLate`): the aborted
-        // execution ends on the feed now — after the harness moved on, before
-        // this prompt's execution starts — as the real server serializes them.
+        // A hung turn's late tail (`interruptSettlesLate`): the aborted
+        // execution's last records land on the feed now — after the harness
+        // moved on, before this prompt's execution starts — as the real server
+        // serializes them.
         if (this.lateSettle) {
           this.lateSettle = false;
-          this.emitEvent("session.execution.interrupted", { sessionID: this.sessionID, reason: "user" });
-          this.emitPermissions([]);
-          this.emitMessages();
+          this.emitLateTail();
         }
         // An interrupt ends the execution it was sent to; a prompt admitted
         // after it starts a fresh one, as the real server does.
@@ -799,13 +810,22 @@ class ScriptedServe {
       if (resolve) {
         this.replies.delete(reply[1]);
         resolve(decision);
+        return { status: 204, headers: {}, body: "" };
       }
-      return { status: 204, headers: {}, body: "" };
+      // A reply for an ask the server no longer holds — one an interrupt already
+      // rejected, or one it never issued — is refused, as the real server refuses it.
+      return j(404, { error: "permission not found" });
     }
     if (req.method === "POST" && req.path.endsWith("/interrupt")) {
       this.interrupted = true;
+      // The interrupt owes the hung play its late tail (`interruptSettlesLate`),
+      // decided here on the request itself, not on the play's next tick: the
+      // post-turn's prompt may land before that tick and reads the debt first.
+      if (this.hanging && this.interruptSettlesLate !== undefined) this.lateSettle = true;
       for (const resolve of this.replies.values()) resolve({ reply: "reject" });
       this.replies.clear();
+      // The interrupt the server refuses: its own word, a 500.
+      if (this.interruptPostFails) return j(500, { error: "interrupt refused" });
       // The interrupt the kill cuts: its request answers only once the server
       // is killed, and then with the reset the kill caused.
       if (this.interruptAnswersAfterKill)
@@ -846,6 +866,64 @@ class ScriptedServe {
     const provider = typeof providerID === "string" ? config.providers?.[providerID] : undefined;
     if (provider !== undefined && typeof id === "string" && provider.models?.[id] !== undefined) return undefined;
     return `Model unavailable: ${String(providerID)}/${String(id)}`;
+  }
+
+  /** The aborted execution's tail, landing once the next prompt is posted
+   *  (`interruptSettlesLate`): what a slow execution still writes after the
+   *  interrupt — an own tool the previous loop had allowed settling with its
+   *  result (`c-slow`, `executed: true`), an ask the interrupt rejected with
+   *  its echo and the tool's failure (`per_c-ask`) — then the execution's end
+   *  by the option's kind and the two refills its terminal transition causes.
+   *  Every record names the session; none is the next prompt's execution. */
+  private emitLateTail(): void {
+    const sessionID = this.sessionID;
+    const assistantMessageID = "msg_a_late";
+    this.emitEvent("session.tool.input.started", { sessionID, assistantMessageID, id: "c-slow", name: "shell" });
+    this.emitEvent("session.tool.called", {
+      sessionID,
+      assistantMessageID,
+      id: "c-slow",
+      input: { command: "sleep 30" },
+      executed: false,
+    });
+    this.emitEvent("session.tool.success", {
+      sessionID,
+      assistantMessageID,
+      id: "c-slow",
+      content: [{ type: "text", text: "slept" }],
+      executed: true,
+    });
+    this.emitEvent("session.tool.input.started", { sessionID, assistantMessageID, id: "c-ask", name: "shell" });
+    this.emitEvent("session.tool.called", {
+      sessionID,
+      assistantMessageID,
+      id: "c-ask",
+      input: { command: "echo late" },
+      executed: false,
+    });
+    this.emitEvent("permission.asked", {
+      id: "per_c-ask",
+      sessionID,
+      action: "shell",
+      resources: ["echo late"],
+      source: { type: "tool", messageID: assistantMessageID, id: "c-ask" },
+    });
+    this.emitEvent("permission.replied", { sessionID, requestID: "per_c-ask", reply: "reject" });
+    this.emitEvent("session.tool.failed", {
+      sessionID,
+      assistantMessageID,
+      id: "c-ask",
+      executed: false,
+      error: { type: "permission.rejected", message: "interrupted" },
+      content: [{ type: "text", text: "interrupted" }],
+    });
+    if (this.interruptSettlesLate === "failed") {
+      this.failExecution("provider.error", LATE_FAILURE_ERROR);
+      return;
+    }
+    this.emitEvent("session.execution.interrupted", { sessionID, reason: "user" });
+    this.emitPermissions([]);
+    this.emitMessages();
   }
 
   /** The execution fails as the real server fails one: the failure event with
@@ -901,7 +979,7 @@ class ScriptedServe {
       // it, then wait for the loop to see it and interrupt the session (the
       // interrupt route sets `interrupted`) before this turn plays — so the run
       // ends hard-stopped, never on this turn's answer.
-      if (this.script.hardStopBeforeModelCall === t + 1) {
+      if (this.script.hardStopBeforeModelCall === t + 1 && this.script.softStopBeforeModelCall !== t + 1) {
         if (this.run.control === undefined)
           throw new Error(
             "hardStopBeforeModelCall needs the run's control: hand the serve a run, not a bare container",
@@ -938,6 +1016,13 @@ class ScriptedServe {
           );
         this.run.control.requestStop("soft");
         for (let i = 0; i < 200 && this.pendingSteers.length === 0; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+        // A hard stop on the same call follows the soft one: the operator's
+        // second action, once the write-up is under way.
+        if (this.script.hardStopBeforeModelCall === t + 1) {
+          this.run.control.requestStop("hard");
+          for (let i = 0; i < 200 && !this.interrupted; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+          break;
+        }
       }
       if (this.script.hangModelCall === t + 1 && this.plays === 1) {
         // This model call never answers: the step opens and nothing follows —
@@ -965,8 +1050,9 @@ class ScriptedServe {
           for (let i = 0; i < 200 && this.pendingSteers.length === 0; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
         }
         this.deps.advanceClock(this.deps.finaleMs + 1);
+        this.hanging = true;
         for (let i = 0; i < 2000 && !this.interrupted; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
-        if (this.interruptSettlesLate) this.lateSettle = true;
+        this.hanging = false;
         return;
       }
       if (this.script.failModelCall === t + 1) {

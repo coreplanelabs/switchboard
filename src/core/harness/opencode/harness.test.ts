@@ -29,6 +29,7 @@ import { openCodeReplacedCallNote } from "./session.js";
 import { OPENCODE_SERVE_PID_ENV } from "./tailerSource.js";
 import {
   feedByteLength,
+  LATE_FAILURE_ERROR,
   openCodeDriver,
   scriptOpenCodeServe,
   TAILER_READY_NOTES,
@@ -937,8 +938,8 @@ describe("the post-turn on the run's session — refused, answered by silence, o
     await session.end();
   });
 
-  it("after a hung turn: the loop ended at the finale and the aborted execution's settle lands only once the post-turn's prompt is posted — the post-turn sets it aside as an execution it did not start, waits for its own execution's start, and answers the turn's own text; no second harness_error", async () => {
-    const o = openRun({ interruptSettlesLate: true }, hung);
+  it("after a hung turn: the loop ended at the finale and the aborted execution's tail lands only once the post-turn's prompt is posted — a slow own tool settling, an ask the interrupt rejected with its echo, then the settle — and the post-turn decides nothing of it: no reply posted, no bypass, the settle set aside; it waits for its own execution's start and answers the turn's own text; no second harness_error", async () => {
+    const o = openRun({ interruptSettlesLate: "interrupted" }, hung);
     const session = await o.opened;
     const reason = finaleAbortReason(o.lease.finaleMs);
     expect(session.answer).toBe(timeBudgetAnswer("", 10, reason));
@@ -949,8 +950,29 @@ describe("the post-turn on the run's session — refused, answered by silence, o
         .filter((n) => n.kind === "harness_error")
         .map((n) => n.summary),
     ).toEqual([windDownFailureNote(reason)]);
+    // Nothing of the earlier execution's tail was decided or recorded as this turn's.
+    expect(o.container.requests.some((q) => q.path.includes("per_c-ask"))).toBe(false);
+    expect(
+      o.events.some((e) => (e.type === "tool_call" || e.type === "tool_result") && /c-(slow|ask)/.test(e.callId ?? "")),
+    ).toBe(false);
     // The loop's span ended ok: the finale is the wind-down's ending, as on pi.
     expect(o.sink.ended("run.agent")?.status).toBe("ok");
+    await session.end();
+  });
+
+  it("after a hung turn whose aborted execution then fails on the proxy: the earlier execution's failure is noted as such and set aside, and the post-turn answers its own text", async () => {
+    const o = openRun({ interruptSettlesLate: "failed" }, hung);
+    const session = await o.opened;
+    const reason = finaleAbortReason(o.lease.finaleMs);
+    expect(await session.followUp(postTurn)).toBe("never");
+    expect(
+      notes(o.events)
+        .filter((n) => n.kind === "harness_error")
+        .map((n) => n.summary),
+    ).toEqual([
+      windDownFailureNote(reason),
+      `a model call of an earlier execution failed (${LATE_FAILURE_ERROR}); continuing`,
+    ]);
     await session.end();
   });
 
