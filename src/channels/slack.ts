@@ -1,5 +1,15 @@
-import { App, SocketModeReceiver, webApi } from "@slack/bolt";
-import { dispatch, type CoreDeps } from "../core/dispatcher.js";
+import {
+  App,
+  SocketModeReceiver,
+  webApi,
+  type BlockAction,
+  type ButtonAction,
+  type SlackActionMiddlewareArgs,
+  type types as slackTypes,
+} from "@slack/bolt";
+import { dispatch, dispatchClick, type CoreDeps } from "../core/dispatcher.js";
+import { chatActorOf } from "../core/authz/actor.js";
+import { renderOffer } from "../core/confirmations.js";
 import { type SlackThreadMessage, stripAppFooter, threadTurns } from "./slack/threadTurns.js";
 import {
   createStatusBudget,
@@ -12,6 +22,7 @@ import { systemClock } from "../core/trace/clock.js";
 import type { Span } from "../core/trace/types.js";
 import { catchUpWindowWarning } from "../core/drain.js";
 import { mdToMrkdwn } from "./mrkdwn.js";
+import { escapeMrkdwn } from "./slackEscape.js";
 import { classifyMessage, threadIncludesBot } from "./slackTriggers.js";
 import {
   fetchDocuments,
@@ -37,6 +48,7 @@ import { recordSocketConnected, recordSocketDisconnected } from "./slackSocketSt
 export { classifyMessage, threadIncludesBot, type MessageDecision } from "./slackTriggers.js";
 import type {
   ChannelIO,
+  ConfirmationOffer,
   DocumentAttachment,
   HistoryItem,
   ImageAttachment,
@@ -52,6 +64,8 @@ import type {
 // No routing, config, or agent logic lives here.
 
 type SlackClient = webApi.WebClient;
+/** A Block Kit block as the Web API takes it: one of the known shapes, or any block by `type`. */
+type SlackBlockKit = slackTypes.KnownBlock | slackTypes.Block;
 
 /** The two Web API clients the adapter runs on. Replies, card posts and reads
  *  go through `client` (Bolt's, with its 30-minute rate-limit retry). Card
@@ -96,6 +110,14 @@ function describeError(err: unknown): string {
 
 const PLATFORM = "slack";
 const SLACK_MSG_LIMIT = 3500;
+/** Block Kit's cap on one section's text — the offer message's completion is one section. */
+const SLACK_SECTION_LIMIT = 3000;
+
+/** What the offer message reads when the adapter itself could not carry the
+ *  click into the core or its answer back — the core's own refusals are its
+ *  named lines (dispatch/confirm.ts); this one is the adapter's. The line stays
+ *  on the message above it, so the person can still type it. */
+export const CLICK_FAILED_LINE = "this click could not be handled; type the line to run it";
 
 // Rotating inline-status phrases (assistant.threads.setStatus loading_messages).
 // Switchboard-flavored; Slack cycles through them while a turn runs.
@@ -300,6 +322,14 @@ export function createSlackApp(deps: CoreDeps) {
       },
     );
   });
+
+  // A click on a confirmation's Run or Cancel (docs/reference/specs/slack-channel.md
+  // item 14). Over Socket Mode a `block_actions` payload arrives on the same
+  // connection as the events, once the Slack app's interactivity is on; the
+  // handler acks first and hands the core the id, the actor and the handle.
+  app.action<BlockAction<ButtonAction>>(/^confirm\./, ({ ack, body, action, client }) =>
+    handleConfirmClick(deps, { client, statusClient }, { ack, body, action }, botUserId),
+  );
 
   // The receiver rides along for the Bolt-level wiring test: emitting
   // `connected` on `receiver.client` is exactly what a real reconnect does, so
@@ -514,7 +544,131 @@ export function resumeSlackIO(
   );
 }
 
+/** The offer message a click landed on, as the `block_actions` payload carries
+ *  it back: its `ts`, its plain-text fallback and its blocks — what the click's
+ *  answer completes in place (`SlackIO.reply`, the first time). */
+export interface OfferMessage {
+  ts: string;
+  text: string;
+  blocks: readonly SlackBlockKit[];
+}
+
+/** The channel IO for a click on a confirmation (docs/reference/specs/slack-channel.md
+ *  item 14): the offer's thread from the payload, the clicker as the user, no
+ *  triggering event — `resumeSlackIO`'s shape — plus the offer message, which
+ *  the first reply completes instead of posting under it. */
+export function clickSlackIO(
+  client: SlackClient,
+  click: { channel: string; threadTs: string; user: string; botUserId?: string; offer: OfferMessage },
+  opts: { statusClient?: SlackClient; statusBudget?: StatusBudget } = {},
+): SlackIO {
+  return new SlackIO(
+    client,
+    {
+      channel: click.channel,
+      user: click.user,
+      text: "",
+      ts: click.threadTs,
+      threadTs: click.threadTs,
+      botUserId: click.botUserId,
+    },
+    { ...opts, offerMessage: click.offer },
+  );
+}
+
+/** The listener's arguments the click intake reads: Bolt's ack, the
+ *  `block_actions` body and the button pressed. */
+export type ConfirmClick = Pick<SlackActionMiddlewareArgs<BlockAction<ButtonAction>>, "ack" | "body" | "action">;
+
+/**
+ * A click on a confirmation's Run or Cancel (record 0044; slack-channel.md
+ * item 14), in this order and no other: ack — Slack gives a listener three
+ * seconds, and nothing below may cost them — then the clicker resolved as a
+ * message's requester is (`resolveSlackRequester`, `chatActorOf`: identity,
+ * never authority — the core checks the requester against the actor), then the
+ * handle for the offer's channel and thread with the offer message to complete,
+ * then `dispatchClick` with the id the button carried. The core answers
+ * through the handle: its first reply completes the offer message — the line
+ * and the context kept, the buttons gone, the answer under them — and a later
+ * one (a deferred command's settle follow-up) posts in the thread. Nothing
+ * thrown leaves this function: a failure is logged and the offer message
+ * completed with `CLICK_FAILED_LINE`, best-effort. A payload the adapter did
+ * not post — no value, an unknown `confirm.*` id, no message — is acked,
+ * logged and ignored.
+ */
+export async function handleConfirmClick(
+  deps: CoreDeps,
+  { client, statusClient }: SlackClients,
+  { ack, body, action }: ConfirmClick,
+  botUserId?: string,
+): Promise<void> {
+  await ack();
+  const kind =
+    action.action_id === "confirm.run" ? "confirm" : action.action_id === "confirm.cancel" ? "cancel" : undefined;
+  const id = action.value;
+  const message = body.message as (OfferMessage & { thread_ts?: string }) | undefined;
+  const container = body.container as { channel_id?: string; thread_ts?: string } | undefined;
+  const channel = body.channel?.id ?? container?.channel_id;
+  if (!kind || !id || !message || !channel) {
+    console.error(
+      `[confirm] a ${action.action_id} click from ${body.user.id} carried no ${!kind ? "known kind" : !id ? "value" : !message ? "message" : "channel"}; ignored`,
+    );
+    return;
+  }
+  const threadTs = message.thread_ts ?? container?.thread_ts ?? message.ts;
+  let io: SlackIO | undefined;
+  try {
+    const requester = await resolveSlackRequester(client, {
+      channel,
+      ts: message.ts,
+      threadTs,
+      user: body.user.id,
+      text: "",
+    });
+    const actor = chatActorOf(deps.config, {
+      userId: requester.userId,
+      channelId: `${PLATFORM}:${channel}`,
+      threadKey: `${PLATFORM}:${channel}:${threadTs}`,
+    });
+    io = clickSlackIO(
+      client,
+      {
+        channel,
+        threadTs,
+        user: body.user.id,
+        botUserId,
+        offer: { ts: message.ts, text: message.text ?? "", blocks: message.blocks ?? [] },
+      },
+      { statusClient },
+    );
+    await dispatchClick(deps, { kind, id, actor, io });
+  } catch (err) {
+    console.error(
+      `[confirm] ${kind} click on ${id} in ${channel}:${message.ts} failed — ${err instanceof Error ? err.message : String(err)}`,
+    );
+    try {
+      await (
+        io ??
+        clickSlackIO(client, {
+          channel,
+          threadTs,
+          user: body.user.id,
+          botUserId,
+          offer: { ts: message.ts, text: message.text ?? "", blocks: message.blocks ?? [] },
+        })
+      ).reply(CLICK_FAILED_LINE);
+    } catch (again) {
+      console.error(
+        `[confirm] ${kind} click on ${id} in ${channel}:${message.ts}: the offer message could not be completed either — ${again instanceof Error ? again.message : String(again)}`,
+      );
+    }
+  }
+}
+
 export class SlackIO implements ChannelIO {
+  /** Set once the offer message this IO completes has been completed (`reply`). */
+  private offerCompleted = false;
+
   constructor(
     private client: SlackClient,
     private ev: SlackEvent,
@@ -522,12 +676,55 @@ export class SlackIO implements ChannelIO {
      *  thread (docs/reference/specs/run-history.md item 38) — `status()` edits it instead
      *  of posting a second card. `statusClient`: where card edits go (default
      *  `client`; production passes `createStatusClient`'s). `statusBudget`: the
-     *  edit budget drawn from (default the process's one). */
-    private opts: { existingCard?: { ts: string }; statusClient?: SlackClient; statusBudget?: StatusBudget } = {},
+     *  edit budget drawn from (default the process's one). `offerMessage`: the
+     *  confirmation a click landed on (slack-channel.md item 14) — the first
+     *  `reply` completes it in place; later replies post in the thread. */
+    private opts: {
+      existingCard?: { ts: string };
+      statusClient?: SlackClient;
+      statusBudget?: StatusBudget;
+      offerMessage?: OfferMessage;
+    } = {},
   ) {}
 
   async reply(text: string): Promise<void> {
-    await this.post(mdToMrkdwn(text));
+    const mrkdwn = mdToMrkdwn(text);
+    const offer = this.opts.offerMessage;
+    if (!offer || this.offerCompleted) {
+      await this.post(mrkdwn);
+      return;
+    }
+    // The click's answer: the offer message becomes its outcome. Its own
+    // blocks stay minus the buttons — the line above the answer, because the
+    // core's refusals say "type the line to run it" — and the answer is one
+    // section under them; an answer longer than a section carries continues
+    // in the thread. Completed once: a later reply is a follow-up, posted.
+    this.offerCompleted = true;
+    const [first, ...rest] = chunkText(mrkdwn, SLACK_SECTION_LIMIT);
+    await this.client.chat.update({
+      channel: this.ev.channel,
+      ts: offer.ts,
+      text: `${offer.text}\n${first}`,
+      blocks: [
+        ...offer.blocks.filter((b) => b.type !== "actions"),
+        { type: "section", text: { type: "mrkdwn", text: first } },
+      ],
+    });
+    for (const chunk of rest) await this.post(chunk);
+  }
+
+  /** The confirmation a routed write is offered as (docs/reference/specs/slack-channel.md
+   *  item 14, record 0044): one message in the thread — the exact line to run
+   *  as a code span, the risk line and the footer as context, and Run and
+   *  Cancel whose value is the offer's id — with the offer's text as the
+   *  fallback, so a client without blocks still shows the line to type. */
+  async offer(offer: ConfirmationOffer): Promise<void> {
+    await this.client.chat.postMessage({
+      channel: this.ev.channel,
+      thread_ts: this.ev.threadTs,
+      text: escapeMrkdwn(renderOffer(offer)),
+      blocks: offerBlocks(offer),
+    });
   }
 
   /** Long command output as a file in the thread: Slack renders an uploaded
@@ -821,6 +1018,37 @@ function chunkText(text: string, limit: number): string[] {
   }
   chunks.push(rest);
   return chunks;
+}
+
+/** The offer's Block Kit (item 14): the line as code — a span, or a fenced
+ *  block when the line itself carries a backtick, which a span cannot hold —
+ *  the risk (when the command declares one) and the footer as context, and the
+ *  two buttons, each carrying the id the core consumes. Every text is escaped
+ *  for mrkdwn: `&`, `<`, `>` are structural even inside code. */
+function offerBlocks(offer: ConfirmationOffer): slackTypes.KnownBlock[] {
+  const line = escapeMrkdwn(offer.line);
+  const code = line.includes("`") ? `\`\`\`\n${line}\n\`\`\`` : `\`${line}\``;
+  const context: slackTypes.ContextBlockElement[] = [
+    ...(offer.risk ? [{ type: "mrkdwn" as const, text: escapeMrkdwn(offer.risk) }] : []),
+    { type: "mrkdwn", text: escapeMrkdwn(offer.footer) },
+  ];
+  return [
+    { type: "section", text: { type: "mrkdwn", text: code } },
+    { type: "context", elements: context },
+    {
+      type: "actions",
+      elements: [
+        {
+          type: "button",
+          action_id: "confirm.run",
+          text: { type: "plain_text", text: "Run" },
+          style: "primary",
+          value: offer.id,
+        },
+        { type: "button", action_id: "confirm.cancel", text: { type: "plain_text", text: "Cancel" }, value: offer.id },
+      ],
+    },
+  ];
 }
 
 /**

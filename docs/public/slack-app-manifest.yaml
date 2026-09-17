@@ -70,5 +70,9 @@ settings:
       - group_deleted
   # The bot dials out to Slack over a websocket; no request URL, no inbound port.
   socket_mode_enabled: true
+  # The Run and Cancel buttons a routed state change is offered with reach the bot only with
+  # this on; over Socket Mode the clicks ride the same websocket, so still no request URL.
+  interactivity:
+    is_enabled: true
   org_deploy_enabled: false
   token_rotation_enabled: false
