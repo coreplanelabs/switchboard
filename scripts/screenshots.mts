@@ -1,11 +1,14 @@
 // The dashboard screenshots (docs/reference/specs/docs-site.md item 20).
 //
 //   npm run screenshots:gen     build the dashboard, serve the fixture preview,
-//                               render every surface in both themes to
-//                               docs/public/screenshots/<surface>-<theme>.png,
-//                               and record the inputs' hashes in manifest.json
+//                               render each surface whose inputs changed (both
+//                               themes) to docs/public/screenshots/<surface>-<theme>.png,
+//                               and record that surface's inputs' hashes in
+//                               manifest/<surface>.json — untouched surfaces'
+//                               pictures and manifests never move (--force
+//                               re-renders everything)
 //   npm run screenshots:check   what CI runs — no browser: exit 1 naming each
-//                               input that changed since the pictures were
+//                               surface whose inputs changed since it was
 //                               rendered, and each picture missing
 //
 // Deterministic by construction: the preview and the browser are held at one
@@ -16,18 +19,21 @@
 //
 // `gen` needs the browser `playwright-core` pins: `npx playwright-core install chromium`.
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   expectedFiles,
   FIXED_NOW,
   hashInputs,
   listInputs,
-  MANIFEST_PATH,
+  MANIFEST_DIR,
+  manifestPath,
   manifestProblems,
   renderManifest,
   SCREENSHOTS_DIR,
+  strayFiles,
   SURFACES,
+  surfaceInputs,
   THEMES,
   VIEWPORT,
   type Manifest,
@@ -42,29 +48,46 @@ const dir = join(root, SCREENSHOTS_DIR);
 const check = process.argv.includes("--check");
 const tag = check ? "screenshots:check" : "screenshots:gen";
 
-function currentInputs(): Record<string, string> {
-  return hashInputs(listInputs(root).map((path) => ({ path, text: readFileSync(join(root, path)) })));
+/** Every input's source text, read once; surfaceInputs slices it per page. */
+function inputSources(): { path: string; text: string }[] {
+  return listInputs(root).map((path) => ({ path, text: readFileSync(join(root, path), "utf8") }));
+}
+
+/** One surface's inputs in this tree, hashed. */
+function currentSurfaceInputs(page: string, sources: { path: string; text: string }[]): Record<string, string> {
+  const paths = new Set(surfaceInputs(page, sources));
+  return hashInputs(sources.filter((f) => paths.has(f.path)));
+}
+
+function recordedManifest(surface: string): Manifest | undefined {
+  const path = join(root, manifestPath(surface));
+  return existsSync(path) ? (JSON.parse(readFileSync(path, "utf8")) as Manifest) : undefined;
 }
 
 function presentPictures(): string[] {
   return existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".png")) : [];
 }
 
+function presentManifests(): string[] {
+  const mdir = join(root, MANIFEST_DIR);
+  return existsSync(mdir) ? readdirSync(mdir).filter((f) => f.endsWith(".json")) : [];
+}
+
 function runCheck(): number {
-  if (!existsSync(join(root, MANIFEST_PATH))) {
-    console.error(`${tag} ${MANIFEST_PATH} is missing — run \`npm run screenshots:gen\``);
-    return 1;
-  }
-  const recorded = JSON.parse(readFileSync(join(root, MANIFEST_PATH), "utf8")) as Manifest;
-  const problems = manifestProblems(currentInputs(), recorded, presentPictures());
+  const sources = inputSources();
+  const present = presentPictures();
+  const problems = [
+    ...SURFACES.flatMap((s) =>
+      manifestProblems(s.name, currentSurfaceInputs(s.page, sources), recordedManifest(s.name), present),
+    ),
+    ...strayFiles(present, presentManifests()),
+  ];
   if (problems.length > 0) {
     for (const p of problems) console.error(`${tag} ${p}`);
     console.error(`${tag} the dashboard changed since its pictures were rendered — run \`npm run screenshots:gen\``);
     return 1;
   }
-  console.log(
-    `${tag} ok — ${expectedFiles().length} picture(s) current against ${Object.keys(recorded.inputs).length} input(s)`,
-  );
+  console.log(`${tag} ok — ${expectedFiles().length} picture(s) current across ${SURFACES.length} surface(s)`);
   return 0;
 }
 
@@ -90,6 +113,35 @@ async function startPreview(): Promise<() => void> {
 }
 
 async function runGen(): Promise<number> {
+  // A surface whose recorded inputs equal this tree's and whose pictures are
+  // present was rendered from exactly this code — re-rendering it could only
+  // introduce environment noise, so it is skipped (the issue this fixes:
+  // unrelated PNGs moving on every gen). `--force` re-renders everything.
+  const sources = inputSources();
+  // A removed or renamed surface leaves its old picture and manifest behind;
+  // check reports them as stray, so gen sweeps them here.
+  const expectedPngs = new Set(expectedFiles());
+  const expectedManifests = new Set(SURFACES.map((s) => `${s.name}.json`));
+  for (const png of presentPictures().filter((f) => !expectedPngs.has(f))) {
+    unlinkSync(join(dir, png));
+    console.log(`${tag} removed stray ${png}`);
+  }
+  for (const m of presentManifests().filter((f) => !expectedManifests.has(f))) {
+    unlinkSync(join(root, MANIFEST_DIR, m));
+    console.log(`${tag} removed stray manifest/${m}`);
+  }
+  const present = presentPictures();
+  const force = process.argv.includes("--force");
+  const stale = SURFACES.filter(
+    (s) =>
+      force ||
+      manifestProblems(s.name, currentSurfaceInputs(s.page, sources), recordedManifest(s.name), present).length > 0,
+  );
+  if (stale.length === 0) {
+    console.log(`${tag} nothing to render — every surface is current (use --force to re-render)`);
+    return 0;
+  }
+  console.log(`${tag} rendering ${stale.length}/${SURFACES.length} surface(s): ${stale.map((s) => s.name).join(", ")}`);
   if (!process.argv.includes("--no-build")) {
     const build = spawnSync("npm", ["run", "--silent", "build", "-w", "web"], { cwd: root, stdio: "inherit" });
     if (build.status !== 0) return build.status ?? 1;
@@ -114,7 +166,7 @@ async function runGen(): Promise<number> {
       // The header's theme switch (web/src/components/ThemeToggle.vue) reads
       // this key on mount and stamps the class the token set keys on.
       await context.addInitScript((t: string) => localStorage.setItem("vueuse-color-scheme", t), theme);
-      for (const surface of SURFACES) {
+      for (const surface of stale) {
         const page = await context.newPage();
         await page.clock.setFixedTime(FIXED_NOW);
         await page.goto(`http://127.0.0.1:${PORT}${surface.path}`, { waitUntil: "load" });
@@ -136,9 +188,12 @@ async function runGen(): Promise<number> {
     await browser.close();
     stopPreview();
   }
-  const manifest = renderManifest(currentInputs());
-  writeFileSync(join(root, MANIFEST_PATH), `${JSON.stringify(manifest, null, 2)}\n`);
-  console.log(`${tag} wrote ${MANIFEST_PATH} — ${Object.keys(manifest.inputs).length} input(s) hashed`);
+  mkdirSync(join(root, MANIFEST_DIR), { recursive: true });
+  for (const surface of stale) {
+    const manifest = renderManifest(currentSurfaceInputs(surface.page, sources));
+    writeFileSync(join(root, manifestPath(surface.name)), `${JSON.stringify(manifest, null, 2)}\n`);
+    console.log(`${tag} wrote ${manifestPath(surface.name)} — ${Object.keys(manifest.inputs).length} input(s) hashed`);
+  }
   return 0;
 }
 
