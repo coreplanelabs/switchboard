@@ -1181,16 +1181,14 @@ export async function driveOpenCode(
   let writeUp: WriteUp | undefined;
   /** When the write-up was steered: the finale bound counts from here. */
   let writeUpAt: number | undefined;
-  /** The finale bound ended the write-up: the run closes by the wind-down's
-   *  answer with nothing more awaited of the feed — the interrupt is sent and
-   *  the caller ends the process — and the aborted call's failure is the
-   *  wind-down's note, never the run's failure or a replaced verdict. */
-  let finaleAborted = false;
-  let hardStopped = false;
-  /** An operator's soft stop: the write-up steered, the answer under the ⏹ label. */
-  let stopMode: StopMode | undefined;
-  /** What ended the loop from a tick rather than from the feed: the hard stop,
-   *  the finale bound, or the silence bound; the loop leaves at once on any. */
+  /** What ended the loop from a tick rather than from the feed, and the one
+   *  fact the ending reads: `hard` — the operator's stop, the interrupt sent,
+   *  the abort line the answer; `finale` — the finale bound ended the write-up,
+   *  so the run closes by the wind-down's answer with nothing more awaited of
+   *  the feed (the interrupt is sent, the caller ends the process, and the
+   *  aborted call's failure is the wind-down's note, never the run's failure or
+   *  a replaced verdict); `silent` — the first-event bound passed. The loop
+   *  leaves at once on any. */
   let ended: "hard" | "finale" | "silent" | undefined;
   /** The request whose first event the feed still owes (`FIRST_EVENT_BOUND_MS`):
    *  set when a `queue` prompt is admitted, cleared by the first live record for
@@ -1267,8 +1265,7 @@ export async function driveOpenCode(
   const check = () => {
     const requested = run.control?.requested;
     if (requested === "hard") {
-      if (!hardStopped) {
-        hardStopped = true;
+      if (ended === undefined) {
         ended = "hard";
         // The hard stop on the record (the record clause): a `stopped` note in
         // mode `hard`, said once, then the interrupt that ends the session.
@@ -1286,7 +1283,6 @@ export async function driveOpenCode(
       // nothing to the interrupt either, and the caller ends the process.
       if (writeUpAt !== undefined && now() - writeUpAt >= lease.finaleMs) {
         writeUpAt = undefined;
-        finaleAborted = true;
         ended = "finale";
         const reason = finaleAbortReason(lease.finaleMs);
         writeUpFailed ??= reason;
@@ -1303,7 +1299,6 @@ export async function driveOpenCode(
       return;
     }
     if (requested === "soft") {
-      stopMode = "soft";
       note("stopped", softStopNote(), "soft");
       startWriteUp({ kind: "soft" }, SOFT_STOP_INSTRUCTION);
       return;
@@ -1491,7 +1486,7 @@ export async function driveOpenCode(
   } finally {
     transport.close();
     agentSpan?.end(
-      hardStopped || bypass || replyFailed || replacedBy || transportLost || refused || ended === "silent"
+      ended === "hard" || ended === "silent" || bypass || replyFailed || replacedBy || transportLost || refused
         ? "error"
         : "ok",
     );
@@ -1556,14 +1551,14 @@ export async function driveOpenCode(
     throw silent;
   }
   const remaining = () => deadline - now();
-  if (hardStopped) return { answer: HARD_STOP_MESSAGE, remainingMs: remaining };
+  if (ended === "hard") return { answer: HARD_STOP_MESSAGE, remainingMs: remaining };
   if (providerError !== undefined) throw new Error(`the model call failed: ${providerError}`);
-  if (!settled && !finaleAborted) throw new Error("the OpenCode run ended before its execution settled");
+  if (!settled && ended !== "finale") throw new Error("the OpenCode run ended before its execution settled");
   // Every refill the loop saw has landed as its steps, and the last text-only
   // turn is the answer.
   await bridge.flush();
   const text = bridge.answer() ?? "";
-  const answer = writeUpAnswer(writeUp, stopMode, text, run.agent.maxMinutes, writeUpFailed);
+  const answer = writeUpAnswer(writeUp, text, run.agent.maxMinutes, writeUpFailed);
   return { answer, remainingMs: remaining };
 }
 
@@ -1572,13 +1567,12 @@ type WriteUp = { kind: "time" } | { kind: "turns"; pace: string } | { kind: "sof
 
 function writeUpAnswer(
   writeUp: WriteUp | undefined,
-  stopMode: StopMode | undefined,
   text: string,
   maxMinutes: number,
   writeUpFailed: string | undefined,
 ): string {
   if (writeUp?.kind === "time") return timeBudgetAnswer(text, maxMinutes, writeUpFailed);
   if (writeUp?.kind === "turns") return turnGuardAnswer(text, writeUp.pace, writeUpFailed);
-  if (writeUp?.kind === "soft" || stopMode === "soft") return softStopAnswer(text, writeUpFailed);
+  if (writeUp?.kind === "soft") return softStopAnswer(text, writeUpFailed);
   return text || "_(no response)_";
 }
