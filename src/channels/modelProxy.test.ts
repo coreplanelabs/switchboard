@@ -636,11 +636,17 @@ describe("the meter — one model.turn span per proxied call, the runner's attrs
       }).req,
       h.deps,
     );
+    await handleModelProxyRequest(
+      request({ headers: bearer(token), json: { ...anthropicRequest(), tools: [], tool_choice: { type: "auto" } } })
+        .req,
+      h.deps,
+    );
     const anthropic = h.ends.filter((s) => s.name === "model.turn");
     expect(anthropic.map((t) => [t.attrs.tools, t.attrs.toolChoice, t.attrs.toolNames])).toEqual([
       [2, "auto", "bash,write"],
       [2, "none", "bash,write"],
       [2, "tool", "bash,write"],
+      [0, "none", undefined],
     ]);
     // the start record carries them too: a call that never answers still says what it offered
     expect(h.starts.filter((s) => s.name === "model.turn")[0].attrs).toMatchObject({ tools: 2, toolChoice: "auto" });
@@ -665,6 +671,7 @@ describe("the meter — one model.turn span per proxied call, the runner's attrs
       { model: "x", messages: [], tools: [fn("bash")], tool_choice: "required" },
       { model: "x", messages: [], tools: [fn("bash")], tool_choice: { type: "function", function: { name: "bash" } } },
       { model: "x", messages: [], tools: [fn("bash")], tool_choice: "none" },
+      { model: "x", messages: [], tool_choice: "auto" },
     ]) {
       await handleModelProxyRequest(
         request({ path: OPENAI_CHAT_COMPLETIONS_PATH, headers: bearer(local), json: body }).req,
@@ -677,6 +684,7 @@ describe("the meter — one model.turn span per proxied call, the runner's attrs
       [1, "any", "bash"],
       [1, "tool", "bash"],
       [1, "none", "bash"],
+      [0, "none", undefined],
     ]);
   });
 

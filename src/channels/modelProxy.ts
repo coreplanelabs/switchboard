@@ -436,7 +436,9 @@ function toolChoiceWord(shape: ProxyShape, choice: unknown, tools: number): Tool
   if (choice === undefined || choice === null) return tools > 0 ? "auto" : "none";
   if (shape === "anthropic") {
     const type = record(choice)?.type;
-    if (type === "none" || type === "any" || type === "tool" || type === "auto") return type;
+    if (type === "none" || type === "any" || type === "tool") return type;
+    // an explicit `auto` with no tools reads as none, like an absent choice
+    if (type === "auto") return tools > 0 ? "auto" : "none";
     return tools > 0 ? "auto" : "none";
   }
   if (choice === "none") return "none";
