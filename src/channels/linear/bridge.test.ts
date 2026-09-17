@@ -21,6 +21,29 @@ function fixture() {
 }
 
 describe("Linear edge bridge", () => {
+  it("accepts local run-page links while rejecting remote plaintext and credential-bearing links", async () => {
+    const { api, transport } = fixture();
+    const remote = new RemoteLinearApi(transport, "org");
+    for (const url of [
+      "http://localhost:8082/runs/run",
+      "http://127.0.0.1:8082/runs/run",
+      "http://[::1]:8082/runs/run",
+      "https://bot.example/runs/run",
+    ]) {
+      await remote.link("s", { url, label: "Run" });
+      expect(api.link).toHaveBeenLastCalledWith("s", { url, label: "Run" });
+    }
+    vi.mocked(api.link).mockClear();
+    for (const url of [
+      "http://remote.example/run",
+      "http://localhost.evil.example/run",
+      "https://user:secret@bot.example/run",
+      "javascript:alert(1)",
+    ]) {
+      await expect(remote.link("s", { url, label: "Run" })).rejects.toThrow("linear_bridge_unavailable");
+    }
+    expect(api.link).not.toHaveBeenCalled();
+  });
   it("allows an authenticated file batch to finish beyond a single API call deadline", async () => {
     vi.useFakeTimers();
     const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation((ms) => {

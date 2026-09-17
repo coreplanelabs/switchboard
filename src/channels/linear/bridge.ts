@@ -243,7 +243,13 @@ export async function handleLinearBridge(
       } else if (op === "link") {
         const link = object(body.link),
           url = new URL(required(link.url));
-        if (url.protocol !== "https:" || url.username || url.password) return answer(400, { error: "invalid_link" });
+        if (
+          (url.protocol !== "https:" &&
+            !(url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))) ||
+          url.username ||
+          url.password
+        )
+          return answer(400, { error: "invalid_link" });
         result = await api.link(id, { url: url.href, label: required(link.label) });
       }
     }

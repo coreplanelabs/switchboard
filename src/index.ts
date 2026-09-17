@@ -6,7 +6,7 @@ import { installationPath } from "./deploy/operatorRoot.js";
 import { openConfigStore } from "./config.js";
 import { capabilitiesFrom } from "./core/capabilities.js";
 import { PiAiProviders } from "./core/harness/piAi.js";
-import { channelsToStart } from "./channels/startup.js";
+import { channelsToStart, linearBridgeBaseUrl } from "./channels/startup.js";
 import { createSlackApp } from "./channels/slack.js";
 import { RemoteLinearApi, RemoteLinearInbox, type LinearTransport } from "./channels/linear/bridge.js";
 import { LinearConsumer } from "./channels/linear/consumer.js";
@@ -585,8 +585,10 @@ export async function runBot(): Promise<void> {
   let linearTransport: LinearTransport | undefined;
   let linearConsumer: LinearConsumer | undefined;
   if (linearBearer) {
-    const baseUrl = process.env.PUBLIC_BASE_URL;
-    if (!baseUrl) throw new Error("LINEAR_BRIDGE_TOKEN requires PUBLIC_BASE_URL");
+    const baseUrl = linearBridgeBaseUrl({
+      LINEAR_BRIDGE_URL: process.env.LINEAR_BRIDGE_URL,
+      PUBLIC_BASE_URL: process.env.PUBLIC_BASE_URL,
+    });
     if (!ledgerClient) throw new Error("LINEAR_BRIDGE_TOKEN requires durable run history and its run ledger");
     linearTransport = { baseUrl, token: linearBearer.reveal(), fetch };
     const transport = linearTransport;

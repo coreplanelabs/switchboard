@@ -46,6 +46,11 @@ Only the bridge bearer reaches the bot container; it permits fixed delivery
 and session operations, with current app ownership checked on every request.
 The bridge is disabled without that bearer.
 
+In the bot process, `LINEAR_BRIDGE_URL` optionally selects a separate edge origin;
+it defaults to `PUBLIC_BASE_URL`. Run-page links continue to use the bot's
+`PUBLIC_BASE_URL`. The bridge accepts HTTPS origins and HTTP loopback origins,
+without embedded credentials, a path, query or fragment.
+
 The bot starts its consumer when `LINEAR_BRIDGE_TOKEN` is configured. Slack
 credentials are optional for a Linear-only process; if either Slack token is
 present, both are required and the Slack channel starts too. It requires
@@ -117,8 +122,7 @@ the executor streams the file to a private Linear upload using a short-lived
 signed ticket; the bot never holds its bytes or gives the executor a Linear
 token. Without an artifact store, the existing bounded byte-upload path is
 available. Images render inline in native progress and other files appear as
-links; the run's final answer still determines completion. Inbound private file
-retrieval remains in progress.
+links; the run's final answer still determines completion.
 
 The edge's `LINEAR_STATE` binding is independent of the bot container. Deploy
 the Worker migration before using the OAuth endpoints. Once the full channel
@@ -142,3 +146,16 @@ durable local storage. It needs neither a Docker build nor a Cloudflare
 account. Open `http://localhost:8080/oauth/linear/authorize` to test the local
 callback. Live webhook testing also requires a reachable development endpoint;
 the production app's webhook URL still points at production.
+
+For a separate local bot on port 8082, configure its environment with
+`PORT=8082`, `PUBLIC_BASE_URL=http://localhost:8082` and
+`LINEAR_BRIDGE_URL=http://localhost:8080`. Keep the edge's `PUBLIC_BASE_URL`
+on port 8080 so the registered OAuth callback stays correct. Both processes
+need the same `LINEAR_BRIDGE_TOKEN`; the bot also needs its model provider and
+durable history/ledger configuration. Start the bot with `npm run dev`.
+
+Use a development tunnel for `/webhooks/linear` and set the app's webhook URL
+to that public HTTPS endpoint. Do not expose the Workers development inspector.
+Local run-page links open on the machine running the bot; other workspace
+members need a reachable HTTPS run-page origin. Verify the links in a real
+Linear session along with a mention, delegation, follow-up, clarification and Stop.
