@@ -83,6 +83,18 @@ describe("settleThread — the thread when the request is over", () => {
     expect(b).toEqual([FOLLOW_UP_DROPPED_BY_STOP]);
   });
 
+  it("handed on: a run the harness failed by name requests no stop of the control — it ends the loop through the connection — so its unconsumed follow-ups run fresh, pinned to the slot's agent, and no sender is told they were dropped", async () => {
+    const s = setup();
+    const a: string[] = [];
+    s.admitted.inbox.push(followUp("and this", NOW + 1, a));
+    const control = new RunControl();
+    const out = settleThread({ admission: s.admission }, { msg, admitted: s.admitted, runLoopStarted: true, control });
+    expect(out).toMatchObject({ kind: "handed-on", agent: s.admitted.agent });
+    expect((out as { pending: DispatchFollowUp[] }).pending.map((p) => p.text)).toEqual(["and this"]);
+    expect(s.admission.get(THREAD)).toBeUndefined();
+    expect(a).toEqual([]);
+  });
+
   // docs/reference/specs/thread-admission.md item 7: a steer a run sent is a
   // program's message — unconsumed at the child's end it is neither run fresh
   // nor answered; the parent reads the child's end through its own tools.

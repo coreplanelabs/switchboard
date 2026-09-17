@@ -16,7 +16,7 @@ import type { Identity } from "../../../agents/registry.js";
 import type { RunnableTool } from "../../../tools/runnableTool.js";
 import type { ChatMessage, ContentPart } from "../../chatMessage.js";
 import type { CompletionRequest, CompletionResult } from "../../provider.js";
-import type { RunEvent } from "../../runEvents.js";
+import type { RunEvent, StopMode } from "../../runEvents.js";
 import type { StepReport } from "../../runLedger/stepReport.js";
 import { identityChangedCondition, type HarnessRequest, type HarnessStart } from "../container.js";
 import { WORD_ALIVE_REATTACH_NOTE } from "../reattach.js";
@@ -81,6 +81,8 @@ export interface RunScript {
   followUp?: string;
   /** A second follow-up queued beside `followUp`: the drainer's batch of two. */
   followUpToo?: string;
+  /** `followUp` is a parent run's steer (thread-admission item 7) from this run id, not a person's. */
+  followUpFrom?: string;
   /** A hard stop requested before the model call of this 1-based number. */
   hardStopBeforeModelCall?: number;
   /** A soft stop requested before the model call of this 1-based number: the
@@ -173,6 +175,8 @@ export interface DrivenRun {
   outcome: { kind: "answered"; answer: string } | { kind: "failed"; error: Error };
   /** What the run's follow-up inbox still holds once the run has ended: the follow-ups handed back. */
   inboxLeft: { text: string }[];
+  /** The stop the run's control was asked for, if any — what the dispatcher's settlement reads to drop the run's follow-ups; a run failing by name asks for none. */
+  stopRequested: StopMode | undefined;
   /** The run events the harness put on the stream, in order. */
   events: RunEvent[];
   /** The ledger's step records, in order. */

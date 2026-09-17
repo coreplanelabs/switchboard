@@ -209,6 +209,17 @@ describe("openCodeToolNameWord and judgeOpenCodeAsk — the gate in pi's words",
     expect(push.message).toMatch(/main/);
     // A relayed tool is allowed by name (it runs in the bot under the bot's gates).
     expect(judgeOpenCodeAsk("update_status", ["*"], rules, new Set(["update_status"])).reply).toBe("once");
+    // OpenCode's repeat guard — the same call made over and over — is refused
+    // under the guard's own name, so the model changes course. What the pinned
+    // binary does with the refusal is unmeasured: fourteen identical shell calls,
+    // successful and failing alike, raised no doom_loop ask under the launch's
+    // rules, so this verdict is an assumption about an ask that may never come.
+    const loop = judgeOpenCodeAsk("doom_loop", ["*"], rules, relayed);
+    expect(loop.reply).toBe("reject");
+    expect(loop.tool).toBe("doom_loop");
+    expect(loop.message).toMatch(/repeat guard/);
+    // A relayed tool that happens to be named `loop` does not turn the guard's ask into its allowance.
+    expect(judgeOpenCodeAsk("doom_loop", ["*"], rules, new Set(["loop"])).reply).toBe("reject");
   });
 
   it("under identity none the model's shell is refused as outside its reach", () => {
@@ -1238,11 +1249,190 @@ describe("the bridge's observing mode — an earlier execution's tail is not thi
       "tool_result:c-dir:read:true",
       "tool_result:c-loop:bash:false",
     ]);
+    // The tool's own path leads the call's summary; the directory the call reached outside the project rides beside it under its own key.
+    const dirCall = events.find((e) => e.type === "tool_call" && e.callId === "c-dir");
+    expect(dirCall?.type === "tool_call" ? dirCall.summary : "").toBe("read /w/src/a.ts");
+    // The repeat guard's call carries the tool's own input from the store's part: the command the record shows.
+    const loopCall = events.find((e) => e.type === "tool_call" && e.callId === "c-loop");
+    expect(loopCall?.type === "tool_call" ? loopCall.command : undefined).toBe("echo hi");
     expect(notes(events).filter((n) => n.kind === "tool_unnamed")).toEqual([]);
+    expect(
+      notes(events)
+        .filter((n) => n.kind === "tool_refused")
+        .map((n) => n.summary),
+    ).toEqual([expect.stringMatching(/^doom_loop refused: OpenCode's repeat guard/)]);
     expect(bridge.doingNow()).toBeUndefined();
   });
 
-  it("a permission over something other than a tool whose call the store does not name yet — no part of the ask's source in the mirror — opens the call under the permission's own name, with a tool_unnamed note naming the call and the step, so its settle still lands on an announced call", () => {
+  it("a permission over something other than a tool whose call the store does not name yet — no part of the ask's source in the store — is answered and its call held unopened; a messages refill that names the part then opens it under the tool's word with the part's input, and the settle lands there", () => {
+    const { bridge, events } = harness();
+    const directory = bridge.observe({
+      feed: "permissions",
+      at: NOW,
+      sessionID: "ses_c",
+      reason: "reconnect",
+      data: [
+        {
+          id: "per_dir3",
+          sessionID: "ses_c",
+          action: "external_directory",
+          resources: ["/workspace/threads/t/main/vendor"],
+          source: { type: "tool", messageID: "msg_z", id: "c-dir3" },
+        },
+      ],
+    });
+    expect(directory.replies.map((r) => r.reply)).toEqual(["once"]);
+    expect(events.filter((e) => e.type === "tool_call")).toEqual([]);
+    bridge.observe({
+      feed: "messages",
+      at: NOW,
+      sessionID: "ses_c",
+      reason: "session.step.ended",
+      data: [
+        {
+          id: "msg_z",
+          type: "assistant",
+          agent: "switchboard",
+          model: { providerID: "switchboard", id: "m" },
+          content: [
+            {
+              type: "tool",
+              id: "c-dir3",
+              name: "shell",
+              state: { status: "running", input: { command: "ls /workspace/threads/t/main/vendor" } },
+            },
+          ],
+          time: { created: NOW },
+        },
+      ],
+    });
+    bridge.observe(ev("permission.replied", { sessionID: "ses_c", requestID: "per_dir3", reply: "once" }));
+    const settled = bridge.observe(
+      ev("session.tool.success", {
+        sessionID: "ses_c",
+        assistantMessageID: "msg_z",
+        id: "c-dir3",
+        content: [{ type: "text", text: "listed" }],
+        executed: true,
+      }),
+    );
+    expect(settled.bypass).toBeUndefined();
+    expect(
+      events
+        .filter((e) => e.type === "tool_call" || e.type === "tool_result")
+        .map((e) => `${e.type}:${e.callId}:${e.tool}${e.type === "tool_call" ? `:${e.command ?? ""}` : `:${e.ok}`}`),
+    ).toEqual(["tool_call:c-dir3:bash:ls /workspace/threads/t/main/vendor", "tool_result:c-dir3:bash:true"]);
+    expect(notes(events).filter((n) => n.kind === "tool_unnamed")).toEqual([]);
+  });
+
+  it("a call opened from a held ask by the refill that named it is not opened again by the stream's session.tool.called that follows: one tool_call, one span, one count, and the settle lands once", () => {
+    const { bridge, events } = harness();
+    bridge.observe({
+      feed: "permissions",
+      at: NOW,
+      sessionID: "ses_c",
+      reason: "reconnect",
+      data: [
+        {
+          id: "per_race",
+          sessionID: "ses_c",
+          action: "external_directory",
+          resources: ["/workspace/threads/t/main/vendor"],
+          source: { type: "tool", messageID: "msg_r", id: "c-race" },
+        },
+      ],
+    });
+    bridge.observe({
+      feed: "messages",
+      at: NOW,
+      sessionID: "ses_c",
+      reason: "session.step.ended",
+      data: [
+        {
+          id: "msg_r",
+          type: "assistant",
+          agent: "switchboard",
+          model: { providerID: "switchboard", id: "m" },
+          content: [
+            {
+              type: "tool",
+              id: "c-race",
+              name: "shell",
+              state: { status: "running", input: { command: "ls /workspace/threads/t/main/vendor" } },
+            },
+          ],
+          time: { created: NOW },
+        },
+      ],
+    });
+    bridge.observe(
+      ev("session.tool.called", {
+        sessionID: "ses_c",
+        assistantMessageID: "msg_r",
+        id: "c-race",
+        tool: "shell",
+        input: { command: "ls /workspace/threads/t/main/vendor" },
+      }),
+    );
+    bridge.observe(ev("permission.replied", { sessionID: "ses_c", requestID: "per_race", reply: "once" }));
+    bridge.observe(
+      ev("session.tool.success", {
+        sessionID: "ses_c",
+        assistantMessageID: "msg_r",
+        id: "c-race",
+        content: [{ type: "text", text: "listed" }],
+        executed: true,
+      }),
+    );
+    expect(events.filter((e) => e.type === "tool_call").map((e) => e.callId)).toEqual(["c-race"]);
+    expect(events.filter((e) => e.type === "tool_result").map((e) => e.callId)).toEqual(["c-race"]);
+    expect(bridge.toolCalls).toBe(1);
+    expect(bridge.doingNow()).toBeUndefined();
+  });
+
+  it("the tool's own ask and a resource permission's ask for the same call are both answered, in either order — the second is never mistaken for a refill of the first", () => {
+    for (const order of [
+      ["shell", "doom_loop"],
+      ["doom_loop", "shell"],
+    ] as const) {
+      const { bridge } = harness();
+      const replies: string[] = [];
+      for (const [i, action] of order.entries()) {
+        const out = bridge.observe(
+          ev("permission.asked", {
+            id: `per_${i}`,
+            sessionID: "ses_c",
+            action,
+            resources: [action === "shell" ? "echo hi" : "*"],
+            source: { type: "tool", messageID: "msg_a0", id: "c-same" },
+          }),
+        );
+        replies.push(...out.replies.map((r) => `${r.requestID}:${r.reply}`));
+      }
+      expect(replies).toEqual(order[0] === "shell" ? ["per_0:once", "per_1:reject"] : ["per_0:reject", "per_1:once"]);
+    }
+  });
+
+  it("a refusal on a call is sticky: the tool's own ask allowed after the repeat guard refused the call does not lift the refusal, so a success executed anyway is the gate bypassed", () => {
+    const { bridge } = harness();
+    bridge.observe(asked_("per_g", "c-stick", "doom_loop", "*"));
+    bridge.observe(asked_("per_t", "c-stick", "shell", "echo hi"));
+    bridge.observe(ev("permission.replied", { sessionID: "ses_c", requestID: "per_g", reply: "reject" }));
+    bridge.observe(ev("permission.replied", { sessionID: "ses_c", requestID: "per_t", reply: "once" }));
+    const ran = bridge.observe(
+      ev("session.tool.success", {
+        sessionID: "ses_c",
+        assistantMessageID: "msg_a0",
+        id: "c-stick",
+        content: [{ type: "text", text: "hi" }],
+        executed: true,
+      }),
+    );
+    expect(ran.bypass).toBeDefined();
+    expect(ran.bypass?.message).toMatch(/a success after the bot's refusal/);
+  });
+
+  it("a permission over something other than a tool whose call the store never names before the settle opens the call at the settle under the permission's own name, with a tool_unnamed note naming the call and the step, so the settle still lands on an announced call", () => {
     const { bridge, events } = harness();
     const directory = bridge.observe({
       feed: "permissions",
@@ -1260,6 +1450,7 @@ describe("the bridge's observing mode — an earlier execution's tail is not thi
       ],
     });
     expect(directory.replies.map((r) => r.reply)).toEqual(["once"]);
+    expect(events.filter((e) => e.type === "tool_call")).toEqual([]);
     bridge.observe(ev("permission.replied", { sessionID: "ses_c", requestID: "per_dir2", reply: "once" }));
     const settled = bridge.observe(
       ev("session.tool.success", {

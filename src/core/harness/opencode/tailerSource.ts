@@ -90,15 +90,17 @@ async function getJson(path) {
   return JSON.parse(res.body);
 }
 
-/** The session's pending asks, whole; then its messages, the changed ones only. */
+/** The session's pending asks, whole, emitted the moment their read answers;
+ *  its messages, the changed ones only, after the store's pages. Both reads go
+ *  out at once: an unanswered ask holds the server's turn, so it waits on
+ *  nothing — least of all a long store's pagination. An ask read ahead of the
+ *  rows that name its call is the bridge's to hold until they come. */
 async function refill(sessionID, reason) {
   const at = Date.now();
-  try {
-    const answer = await getJson("/api/session/" + sessionID + "/permission");
-    emit({ feed: "permissions", at, sessionID, reason, data: Array.isArray(answer.data) ? answer.data : [] });
-  } catch (err) {
-    note("permission refill failed", { sessionID, reason, detail: detailOf(err) });
-  }
+  const asks = getJson("/api/session/" + sessionID + "/permission").then(
+    (answer) => emit({ feed: "permissions", at, sessionID, reason, data: Array.isArray(answer.data) ? answer.data : [] }),
+    (err) => note("permission refill failed", { sessionID, reason, detail: detailOf(err) }),
+  );
   try {
     const all = [];
     let cursor;
@@ -127,6 +129,7 @@ async function refill(sessionID, reason) {
     if (!known.has(sessionID)) known.set(sessionID, new Map());
     note("message refill failed", { sessionID, reason, detail: detailOf(err) });
   }
+  await asks;
 }
 
 function queueRefill(sessionID, reason) {

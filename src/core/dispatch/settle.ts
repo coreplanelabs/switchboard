@@ -69,7 +69,10 @@ export function settleThread(deps: Pick<AdmissionDeps, "admission">, ctx: Settle
   if (fromRuns > 0)
     console.log(`[dispatch] ${msg.threadKey} ${fromRuns} steer(s) from a parent run never read — not run fresh`);
   // A stop counts once the run loop had the run: a stop relayed during an
-  // attach that then refused stopped nothing, and the follow-ups run fresh.
+  // attach that then refused stopped nothing, and the follow-ups run fresh. A
+  // run a harness failed by name asked for no stop — it ended its loop through
+  // its own connection — so its follow-ups, handed back to the inbox, run fresh
+  // like those of a run that ended by itself.
   const stopMode: StopMode | undefined = runLoopStarted ? control?.requested : undefined;
   if (pending.length > 0 && stopMode) {
     console.log(`[dispatch] ${msg.threadKey} ${pending.length} follow-up(s) dropped: run stopped (${stopMode})`);

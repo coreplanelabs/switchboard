@@ -141,7 +141,13 @@ export function piDriver(): HarnessDriver {
       const registry = new HarnessRegistry();
       const control = new RunControl();
       const inbox = new FollowUpInbox();
-      if (script.followUp !== undefined) inbox.push({ text: script.followUp, userId: "user:conformance", at: NOW });
+      if (script.followUp !== undefined)
+        inbox.push({
+          text: script.followUp,
+          userId: script.followUpFrom !== undefined ? `run:${script.followUpFrom}` : "user:conformance",
+          at: NOW,
+          ...(script.followUpFrom !== undefined ? { from: { runId: script.followUpFrom } } : {}),
+        });
       if (script.followUpToo !== undefined)
         inbox.push({ text: script.followUpToo, userId: "user:conformance", at: NOW });
       const events: RunEvent[] = [];
@@ -309,6 +315,7 @@ export function piDriver(): HarnessDriver {
         harness: "pi",
         outcome,
         inboxLeft: inbox.drain().map((i) => ({ text: i.text })),
+        stopRequested: control.requested,
         events,
         steps,
         facts,
