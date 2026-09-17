@@ -18,7 +18,7 @@ import type { ChatMessage, ContentPart } from "../../chatMessage.js";
 import type { CompletionRequest, CompletionResult } from "../../provider.js";
 import type { RunEvent } from "../../runEvents.js";
 import type { StepReport } from "../../runLedger/stepReport.js";
-import type { HarnessRequest, HarnessStart } from "../container.js";
+import { identityChangedCondition, type HarnessRequest, type HarnessStart } from "../container.js";
 import {
   HarnessContainerReplacedError,
   HarnessMismatchError,
@@ -73,6 +73,20 @@ export interface RunScript {
    *  executor's runtime-replaced word, so the harness reads the survival
    *  clause's ceiling with the words to corroborate it and settles the call. */
   containerReplacedBeforeModelCall?: number;
+  /** The platform's rollout as the survival clause meets it: the harness's
+   *  process is found dead with the previous turn's tool call in flight, before
+   *  the model call of this 1-based number would carry that call's result, and
+   *  NO command has failed with the executor's runtime-replaced word — the
+   *  container's processes were killed first while exec still answered. The
+   *  driver leaves the call open and lets the process die; what the one more
+   *  container command the harness then takes finds is `deadWithoutWordThen`. */
+  deadWithoutWordBeforeModelCall?: number;
+  /** What the one more container command after the wordless death finds:
+   *  `word` — it fails with the executor's runtime-replaced word; `renamed` —
+   *  the container names itself another word than the one recorded when the
+   *  process started; `same` — the container as it was, so the crash judgement
+   *  stands. `word` unless said. */
+  deadWithoutWordThen?: "word" | "renamed" | "same";
   /** The row's process (named by the resume's facts) is still alive in this same
    *  container on the resume — the survival clause's alive-here: `open` finds it
    *  before anything is started and re-attaches to it when the row carries what
@@ -202,6 +216,78 @@ export function foreignFactsFor(name: HarnessName): HarnessFacts {
 
 /** The root a dead process's row records — another than the one a fresh start is filed under, so its removal is seen. */
 const DEAD_ROW_ROOT = "/tmp/switchboard-run-c-before";
+
+/** The wordless death's two rows read the record the same way: the seam's
+ *  verdict by type, how it was reached (`then`: the executor's word on the one
+ *  more command, or the changed identity as the condition with `said`
+ *  nothing), the note the verdict's message, the in-flight call the last
+ *  assistant turn's — settled on the record and failed on the stream with the
+ *  replaced note — and nothing ended or removed in the container that answers
+ *  now. What differs from `survival-container-replaced` is only how the
+ *  verdict came: no read failed with the word. */
+function checkDeadWithoutWord(run: DrivenRun, driver: HarnessDriver, then: "word" | "renamed"): void {
+  const error = failed(run);
+  if (!(error instanceof HarnessContainerReplacedError))
+    return assert.fail(`not the seam's container-replaced verdict: ${error.constructor.name} — ${error.message}`);
+  const condition = then === "word" ? "word" : "identity";
+  assert.equal(error.condition, condition, `the verdict's condition is tagged ${error.condition}, not ${condition}`);
+  if (then === "word") {
+    assert.ok(error.said !== undefined && error.said.length > 0, "the verdict carries no executor word");
+  } else {
+    assert.equal(error.said, undefined, "the verdict carries an executor word no command returned");
+    assert.equal(error.was, driver.containerWord, "the verdict's `was` is not the word recorded at the start");
+    assert.ok(error.now !== undefined && error.now !== error.was, "the verdict does not name the container's new word");
+  }
+  const restarted = notes(run).filter((n) => n.kind === "sandbox_restarted");
+  assert.equal(restarted.length, 1, `${restarted.length} sandbox_restarted notes, not one`);
+  assert.equal(restarted[0].summary, error.message, "the note is not the verdict's message");
+  if (then === "renamed")
+    assert.ok(
+      restarted[0].summary.includes(identityChangedCondition()),
+      "the note does not say the changed identity was the condition",
+    );
+  const rec = error.record;
+  const lastAssistant = [...rec.messages].reverse().find((m) => m.role === "assistant");
+  assert.ok(lastAssistant, "the record's last turn is not an assistant turn");
+  const inFlight = lastAssistant.content
+    .filter((p): p is Extract<ContentPart, { type: "tool_use" }> => p.type === "tool_use")
+    .map((p) => p.id);
+  assert.deepEqual(inFlight, ["c1"], "the in-flight call is not the last assistant turn's call");
+  assert.deepEqual(
+    rec.settlements.map((s) => s.toolUse.id),
+    inFlight,
+    "the settlements do not name exactly the last assistant turn's calls",
+  );
+  const settlement = rec.settlements[0];
+  assert.ok(settlement.action === "synthetic", "the settlement is not the synthetic replaced note");
+  assert.match(settlement.text, /replaced|in flight|lost/, "the settlement does not carry the replaced note");
+  const results = toolResults(run).filter((r) => r.callId === "c1");
+  assert.equal(results.length, 1, `the in-flight call has ${results.length} results on the stream, not one`);
+  assert.equal(results[0].ok, false, "the in-flight call's result on the stream is not a failure");
+  assert.match(results[0].summary, /replaced|in flight|lost/, "the result does not carry the replaced note");
+  assert.deepEqual(run.killed, [], "a pid was ended in the replacement");
+  assert.deepEqual(run.removed, [], "a root was removed in the replacement");
+}
+
+/** The wordless death's negative half: the one more command found the container
+ *  as it was, so the crash judgement stands — the run fails, and not with the
+ *  seam's verdict; no `sandbox_restarted` note; the process ended and its root
+ *  removed, as a process that died where it ran always is. The fix is not "every
+ *  wordless death is a replacement". */
+function checkDeadWithoutWordSame(run: DrivenRun): void {
+  const error = failed(run);
+  assert.ok(
+    !(error instanceof HarnessContainerReplacedError),
+    `the same container's dead process was judged replaced: ${error.message}`,
+  );
+  assert.equal(
+    notes(run).filter((n) => n.kind === "sandbox_restarted").length,
+    0,
+    "a sandbox_restarted note was written for a process that died where it ran",
+  );
+  assert.ok(run.killed.length > 0, "the dead process was not ended");
+  assert.ok(run.removed.length > 0, "the dead process's root was not removed");
+}
 
 const resumeOf = (facts: HarnessFacts): HarnessResume => ({
   messages: [{ role: "user", content: [{ type: "text", text: "carry on" }] }],
@@ -603,7 +689,7 @@ export const SCENARIOS: readonly ScenarioRow[] = [
       if (!(error instanceof HarnessContainerReplacedError))
         return assert.fail(`not the seam's container-replaced verdict: ${error.constructor.name} — ${error.message}`);
       // The verdict's words: the executor's condition, the two distinct container words.
-      assert.ok(error.said.length > 0, "the verdict carries no executor word");
+      assert.ok(error.said !== undefined && error.said.length > 0, "the verdict carries no executor word");
       assert.ok(error.was !== undefined && error.now !== undefined, "the verdict names neither container");
       assert.notEqual(error.was, error.now, "the container did not rename itself");
       const restarted = notes(run).find((n) => n.kind === "sandbox_restarted");
@@ -664,6 +750,41 @@ export const SCENARIOS: readonly ScenarioRow[] = [
       assert.deepEqual(run.killed, [], "a pid was ended in the replacement");
       assert.deepEqual(run.removed, [], "a root was removed in the replacement");
     },
+  },
+  {
+    id: "survival-dead-without-word-then-word",
+    clause: "survival",
+    title:
+      "the process is found dead with a tool call in flight and no command has returned the executor's word (the platform's rollout kills the container's processes first, while exec still answers): the harness takes one more container command before judging, and that command failing with the word is the executor's word — the seam's container-replaced verdict carrying the record with the in-flight call settled by the replaced note, one sandbox_restarted note, the call's failed tool_result on the stream, nothing killed or removed — never a crash",
+    script: {
+      turns: [call("c1", "bash", { command: "echo one" }), text("never")],
+      deadWithoutWordBeforeModelCall: 2,
+    },
+    check: (run, driver) => checkDeadWithoutWord(run, driver, "word"),
+  },
+  {
+    id: "survival-dead-without-word-then-renamed",
+    clause: "survival",
+    title:
+      "the process is found dead with a tool call in flight, no command has returned the executor's word, and the one more container command answers another identity than the one recorded when the process started: replaced by the changed identity — the verdict's condition says so and the sandbox_restarted note carries it in the executor's words' place, with the record and the settlement as with the word, nothing killed or removed",
+    script: {
+      turns: [call("c1", "bash", { command: "echo one" }), text("never")],
+      deadWithoutWordBeforeModelCall: 2,
+      deadWithoutWordThen: "renamed",
+    },
+    check: (run, driver) => checkDeadWithoutWord(run, driver, "renamed"),
+  },
+  {
+    id: "survival-dead-without-word-then-same",
+    clause: "survival",
+    title:
+      "the process is found dead with a tool call in flight, no command has returned the executor's word, and the one more container command answers the identity recorded when the process started: the crash judgement stands — the run fails without the container-replaced verdict, no sandbox_restarted note, the process ended and its root removed",
+    script: {
+      turns: [call("c1", "bash", { command: "echo one" }), text("never")],
+      deadWithoutWordBeforeModelCall: 2,
+      deadWithoutWordThen: "same",
+    },
+    check: checkDeadWithoutWordSame,
   },
   {
     id: "survival-foreign-row-refused",

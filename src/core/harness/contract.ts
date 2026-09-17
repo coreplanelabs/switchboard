@@ -24,7 +24,7 @@ import type { RunControl } from "../runRegistry/runControl.js";
 import type { FollowUpInbox, FollowUpInput } from "../threadAdmission.js";
 import type { Backend } from "../trace/attrs.js";
 import type { Clock, Span } from "../trace/types.js";
-import type { HarnessContainer } from "./container.js";
+import type { HarnessContainer, ReplacedCondition } from "./container.js";
 import type { HarnessRegistry } from "./pi/relay.js";
 import type { ToolRuleContext } from "./pi/toolRules.js";
 
@@ -287,20 +287,36 @@ export interface HarnessRecord {
  *  in that container — the workspace re-attached or refused by name, the
  *  bearer rotated, at most `RELAUNCH_CEILING` times — or closes the run
  *  `interrupted` as the floor does, saying why. `was` and `now` are the
- *  container's words, corroboration for the record and never the condition:
- *  the word is the kernel's boot id, which a container replaced on the same
- *  kernel keeps. */
+ *  container's words, corroboration for the record and never the condition
+ *  while the executor's word is there to be had: the word is the kernel's boot
+ *  id, which a container replaced on the same kernel keeps. A process found
+ *  dead before any command returned the word takes one more command before
+ *  the crash judgement (`replacedVerdict`, the container seam): the word on
+ *  that command is the condition as ever; a changed identity on it is the
+ *  condition too, and `condition` tags which fired. `said` is present exactly
+ *  when the condition is the word: a verdict by the identity has no executor's
+ *  words to carry, and one by the word always has them. */
 export class HarnessContainerReplacedError extends HarnessInterruptedError {
   constructor(
     message: string,
-    /** The executor's words, the condition. */
-    readonly said: string,
+    /** The executor's words: present exactly when `condition` is `word`. */
+    readonly said: string | undefined,
     readonly was: string | undefined,
     readonly now: string | undefined,
     readonly record: HarnessRecord,
+    /** What the verdict rests on, as a tag: the executor's word (the usual
+     *  case, and the default), or the container's changed identity on the one
+     *  more command a wordless death takes. */
+    readonly condition: ReplacedCondition = "word",
   ) {
     super(message, "container replaced under the run", "container_replaced");
     this.name = "HarnessContainerReplacedError";
+    if ((condition === "word") !== (said !== undefined))
+      throw new Error(
+        condition === "word"
+          ? "a replaced verdict by the executor's word carries no words"
+          : "a replaced verdict by the changed identity carries words no command returned",
+      );
   }
 }
 

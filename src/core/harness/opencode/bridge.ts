@@ -42,7 +42,13 @@ import type { StepReport } from "../../runLedger/stepReport.js";
 import type { Clock, Span } from "../../trace/types.js";
 import { HarnessContainerReplacedError, type HarnessDeps, type HarnessRecord, type HarnessRun } from "../contract.js";
 import type { ProxyRefusalCode } from "../../../channels/modelProxy.js";
-import type { HarnessContainer } from "../container.js";
+import {
+  replacedBecause,
+  replacedVerdict,
+  type HarnessContainer,
+  type ReplacedCondition,
+  type ReplacedVerdict,
+} from "../container.js";
 import { saysContainerReplaced } from "../pi/harness.js";
 import { describePiToolCall, piBashExit } from "../pi/bridge.js";
 import { PiMirror } from "../pi/mirror.js";
@@ -118,16 +124,27 @@ export class OpenCodeReplyFailedError extends Error {
  *  run holds now — the ceiling — or closes the run `interrupted` for a restart
  *  from its request, the floor, when the relaunch is refused. `said` is the
  *  executor's word, the condition; `was`/`now` are the two containers' words,
- *  corroboration for the record and never the condition. */
+ *  corroboration for the record and never the condition while the word is
+ *  there to be had. An OpenCode found dead before any command returned the
+ *  word took one more command (`replacedVerdict`): the word on it is `said`
+ *  as ever; a changed identity on it is the condition instead, `said` is
+ *  nothing and `condition` tags it `identity`, the note saying the identity's
+ *  sentence in the words' place. */
 export class OpenCodeContainerReplacedError extends HarnessContainerReplacedError {
-  constructor(said: string, was: string | undefined, now: string | undefined, record: HarnessRecord) {
+  constructor(
+    said: string | undefined,
+    was: string | undefined,
+    now: string | undefined,
+    record: HarnessRecord,
+    condition: ReplacedCondition = "word",
+  ) {
     super(
-      `the container running OpenCode was replaced (${was ?? "unknown"} → ${now ?? "unknown"}; the executor said: ` +
-        `${redactAndCap(said.replace(/\s+/g, " ").trim(), 240)})`,
+      `the container running OpenCode was replaced (${was ?? "unknown"} → ${now ?? "unknown"}; ${replacedBecause(condition, said)})`,
       said,
       was,
       now,
       record,
+      condition,
     );
     this.name = "OpenCodeContainerReplacedError";
   }
@@ -1045,8 +1062,11 @@ export async function driveOpenCode(
   let replyFailed: OpenCodeReplyFailedError | undefined;
   let providerError: string | undefined;
   let settled = false;
-  /** The container was replaced under the run: the executor's word on the feed read (the survival clause's ceiling). */
-  let containerSaid: Error | undefined;
+  /** The container was replaced under the run (the survival clause's ceiling):
+   *  the executor's word on the feed read, or — OpenCode found dead with no
+   *  read having failed with the word — what the one more container command
+   *  before the crash judgement said (`replacedVerdict`). */
+  let replacedBy: ReplacedVerdict | undefined;
   // The base of the record a relaunch rebuilds from: the seed with its request,
   // or the resumed transcript, which the mirror's rows follow.
   const recordBase = {
@@ -1167,7 +1187,7 @@ export async function driveOpenCode(
         next = await Promise.race([pending, tick]);
       } catch (err) {
         if (!(err instanceof Error && saysContainerReplaced(err))) throw err;
-        containerSaid = err;
+        replacedBy = { condition: "word", said: err };
         break;
       }
       if (next === "tick") {
@@ -1176,7 +1196,15 @@ export async function driveOpenCode(
         continue;
       }
       pending = undefined;
-      if (next.done) break;
+      if (next.done) {
+        // The feed ended: OpenCode's tailer is dead and no read failed with the
+        // word. The platform's rollout kills the container's processes first
+        // while exec still answers, so one more container command is taken
+        // before the crash judgement: the word on it, or the container's
+        // changed identity, is the verdict below; nothing on it, the crash.
+        replacedBy = await replacedVerdict(conn.container, conn.containerWord);
+        break;
+      }
       // The byte after this record: the row's offset once a refill's steps
       // land, and the line between the dead generation's records and this
       // generation's on a re-attach.
@@ -1220,7 +1248,7 @@ export async function driveOpenCode(
     }
   } finally {
     transport.close();
-    agentSpan?.end(hardStopped || bypass || replyFailed || containerSaid ? "error" : "ok");
+    agentSpan?.end(hardStopped || bypass || replyFailed || replacedBy ? "error" : "ok");
   }
 
   // The container was replaced under the run (the survival clause's ceiling):
@@ -1228,12 +1256,21 @@ export async function driveOpenCode(
   // everything the run had, and the run loop relaunches OpenCode from it in the
   // container the run holds now — or closes the run `interrupted` for a restart
   // when the relaunch is refused. Nothing of the old process is in the container
-  // that answers now, so the caller ends and removes nothing there.
-  if (containerSaid !== undefined) {
+  // that answers now, so the caller ends and removes nothing there. The verdict
+  // by the word names the container that answers now beside the launch's, for
+  // the record; the verdict by the changed identity already holds both words.
+  if (replacedBy !== undefined) {
     const record = bridge.record(recordBase, deadline);
     bridge.closeOpenSpans((open) => openCodeReplacedCallNote(open.tool));
-    const now2 = await conn.container.identity().catch(() => undefined);
-    const replaced = new OpenCodeContainerReplacedError(containerSaid.message, conn.containerWord, now2, record);
+    const replaced =
+      replacedBy.condition === "word"
+        ? new OpenCodeContainerReplacedError(
+            replacedBy.said.message,
+            conn.containerWord,
+            await conn.container.identity().catch(() => undefined),
+            record,
+          )
+        : new OpenCodeContainerReplacedError(undefined, replacedBy.was, replacedBy.now, record, "identity");
     note("sandbox_restarted", replaced.message);
     throw replaced;
   }
