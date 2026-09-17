@@ -978,6 +978,16 @@ export async function dispatch(
     // The run's meta went out at the reservation with the head as resolved
     // then; the record and the page must name the head actually reviewed.
     if (headGate.headAdopted) publishMeta(repoCtx);
+    // The card's branch/head line is the run's OWN binding (resident-repos
+    // item 16): a thread whose binding moved between two plans still resolves
+    // the ref and head from the thread's records — the FIRST plan's pull
+    // request — while the attach bound this run's own branch. Republish the
+    // meta from the binding (readers take the latest), before the loop, so
+    // every redraw — the second card's first frame included — names where the
+    // run actually is, never the value cached when the first plan bound it.
+    const bound = round.selection.binding;
+    if (bound !== undefined && (bound.ref !== repoCtx.ref || bound.sha !== repoCtx.headSha))
+      publishMeta({ ...repoCtx, ref: bound.ref, headSha: bound.sha });
 
     // Whether this run reviews a resolved PR (its system prompt carries the
     // REVIEW TARGET block, item 9) — the same predicate the post-step and the
@@ -1045,7 +1055,6 @@ export async function dispatch(
     // its stream too (resident-repos item 16): the run page explains a run on
     // the default where the thread's pull request was expected, with the
     // resident's own reason. Head material, like the cold-sandbox note.
-    const bound = round.selection.binding;
     const kept = bound?.rebindRefused;
     if (bound && kept) {
       const summary =

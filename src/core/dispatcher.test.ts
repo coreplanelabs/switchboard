@@ -1864,6 +1864,56 @@ describe("repo/ref resolution + resident prompt selection", () => {
     expect(events.slice(0, loopAt).every(isHeadMaterial)).toBe(true);
   });
 
+  // Feature: docs/reference/specs/resident-repos.md item 16 — a thread whose
+  // binding moves between two ship plans: the resolver still answers the FIRST
+  // plan's branch and head (the thread's records name that plan's PR), but the
+  // attach binds the run's OWN branch. The card's branch/head line is read from
+  // the run's own binding at each redraw — the meta is republished from the
+  // binding before the run loop, so the second card names the second branch
+  // from its first frame, never the value cached when the first plan bound it.
+  it("a resident run whose attach binds a branch other than the resolved one republishes the meta from the run's own binding, before the loop", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const firstHead = "7".repeat(40); // the first plan's head, off the thread's records
+    const secondSha = "c".repeat(40); // where the run's own branch actually is
+    residentFetchStub({
+      attach: () =>
+        new Response(
+          JSON.stringify({
+            workspace: "/workspace/threads/t/plan-two-u1",
+            ref: "plan/two/u1",
+            sha: secondSha,
+            user: "worker2",
+          }),
+          { status: 200 },
+        ),
+    });
+    const provider = capturingProvider();
+    const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
+    const registry = new RunRegistry({ genId: () => "run-binding", genToken: () => "tok" });
+    deps.runRegistry = registry;
+    // The resolver's answer is the FIRST plan's branch and head — what the
+    // thread's records say, not where this run's attach will bind.
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "plan/one/u1", headSha: firstHead });
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    const events = registry.snapshotById("run-binding")!.events;
+    const metas = events.filter((e) => e.type === "run_meta") as Array<{ ref?: string; headSha?: string }>;
+    // Reservation meta first (the head as resolved), then the binding's —
+    // readers take the latest, so every redraw names the run's own branch.
+    expect(metas.map((m) => m.ref)).toEqual(["plan/one/u1", "plan/two/u1"]);
+    expect(metas.map((m) => m.headSha)).toEqual([firstHead, secondSha]);
+    // Before the loop: head material, so the FIRST frame already has it.
+    const metaAt =
+      events.findIndex((e) => e.type === "run_meta") +
+      1 +
+      events.slice(events.findIndex((e) => e.type === "run_meta") + 1).findIndex((e) => e.type === "run_meta");
+    const loopAt = events.findIndex((e) => e.type === "span_start" && e.name === "run.agent");
+    expect(metaAt).toBeGreaterThan(-1);
+    expect(metaAt).toBeLessThan(loopAt);
+  });
+
   it("a resident run gets the agent's resident system variant naming the repo", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
