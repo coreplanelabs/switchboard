@@ -133,8 +133,19 @@ export function silentPromptRecords(sessionID: string, store: readonly unknown[]
 
 /** The proxy's words when a hung turn's late end is a failure rather than an interrupt (`interruptSettlesLate: "failed"`). */
 export const LATE_FAILURE_ERROR = "the proxy answered 400 after the interrupt";
-/** The proxy's turn-budget refusal as the server hands it on, when a hung turn's late end is that refusal (`interruptSettlesLate: "budget"`). */
+/** The proxy's turn-budget refusal as the server hands it on — its 403 and its words — when a hung turn's late end is that refusal (`interruptSettlesLate: "budget"`). */
 export const LATE_BUDGET_REFUSAL = "403 turn_budget_exhausted: the run is past its 60-turn guard (60 turns used)";
+/** The summary of a compaction the earlier execution wrote just before its interrupt, riding the late tail with `lateTailNoise`. */
+export const LATE_COMPACTION_SUMMARY = "the earlier execution's turns, summarised";
+
+/** The seam's word for a request the resident's Durable Object reset cut: the
+ *  container and the server unchanged, the request's outcome unknown. */
+function controlReset(operation: string): HarnessContainerControlResetError {
+  return new HarnessContainerControlResetError(
+    operation,
+    "control-reset: the resident's Durable Object was reset (a deploy); the container and its processes are as they were; the command's outcome is unknown",
+  );
+}
 
 /** How many feed bytes these records take as the fake writes them (one JSON line each): what a row's `logOffset` is computed from. */
 export function feedByteLength(records: readonly unknown[]): number {
@@ -234,24 +245,42 @@ export interface FakeServeOptions {
    *  moves the run's clock past the first-event bound, so the harness's next
    *  tick finds the silence. */
   silentAfterPrompt?: number;
-  /** A hung turn's interrupt is honoured late: what the pinned binary writes
-   *  when an interrupt lands on a running execution — an ask pending at the
-   *  interrupt failing `aborted` (`Tool execution interrupted`, no
-   *  `permission.replied`), the step failing `aborted`, the usage — then its
-   *  end (`interrupted`; or `failed` with the proxy's words, `LATE_FAILURE_ERROR`;
-   *  or `budget`, the proxy's turn-budget refusal) and the refills, all land
-   *  only when the NEXT `queue` prompt is posted (a post-turn's), before that
+  /** A hung turn's interrupt is honoured late: the aborted execution's tail —
+   *  for a hung model call (`hangModelCall`) the step failing `aborted` (`Step
+   *  interrupted`) and the usage, no tool event, since a call that never
+   *  answered produced none; for a hung tool call (`hangToolCall`) the same,
+   *  the allowed tool's own late success landing only AFTER the next
+   *  execution's `session.execution.started` — then its end (`interrupted`; or
+   *  `failed` with the proxy's words, `LATE_FAILURE_ERROR`; or `budget`, the
+   *  proxy's turn-budget refusal with its 403) and the refills in the measured
+   *  order, one permissions and one messages after the end, all landing only
+   *  when the NEXT `queue` prompt is posted (a post-turn's), before that
    *  prompt's execution starts — as a slow turn's tail lands after the run
    *  loop has moved on to the post-turn. Without it the hung turn is deaf. */
   interruptSettlesLate?: "interrupted" | "failed" | "budget";
-  /** The late tail also carries a tailer note (`stream closed`) and an event kind no table names, as a feed under a dropped stream would. */
+  /** The late tail also carries a tailer note (`stream closed`), an event kind no table names and a compaction of the earlier execution, as a feed under a dropped stream would. */
   lateTailNoise?: boolean;
+  /** The play whose `session.execution.started` the hung tool's late success (`hangToolCall`) lands after: the next play (2) unless given — 3 is the second post-turn. */
+  hungToolSettlesOnPlay?: number;
+  /** The resident's control plane resets under the run's first `queue` prompt
+   *  POST (a control reset, the container unchanged): `landed`, the server took
+   *  the prompt before the reset cut the answer; `lost`, the prompt never
+   *  reached it; `again`, lost, and the re-issued prompt meets the reset too. */
+  controlResetOnPrompt?: "landed" | "lost" | "again";
+  /** The resident's control plane resets under the run's first permission-reply
+   *  POST: `landed`, the server took the reply (the ask gone, the tool run);
+   *  `lost`, the ask still pending; `unlistable`, lost, and the pending-asks
+   *  GET the resolution reads meets the reset too. */
+  controlResetOnReply?: "landed" | "lost" | "unlistable";
   /** The interrupt POST answers 500: the server refused it — its word, whenever it comes. */
   interruptPostFails?: boolean;
   /** The interrupt POST answers only when the container kills the server —
-   *  and then as the connection reset the kill causes — so a note about it
+   *  `"refused"`: as the server's 500, already on the wire when the kill lands,
+   *  which the executor delivers a tick after the kill (the harness's `end()`
+   *  still waiting on the requests the loop posted); `true`: as the
+   *  connection reset the kill causes — so a note about it
    *  after the loop left would be the kill's own effect on the record. */
-  interruptAnswersAfterKill?: boolean;
+  interruptAnswersAfterKill?: boolean | "refused";
   /** The relay registry the run is opened on; a test hands one that already
    *  holds the run's registration with a relayed call still running, so a
    *  relaunch is seen to take it over rather than register anew. Fresh unless given. */
@@ -351,7 +380,8 @@ export interface ScriptedOpenCode {
 class ScriptedServe {
   private readonly store: Record<string, unknown>[] = [];
   private readonly replies = new Map<string, (decision: Decision) => void>();
-  private readonly pendingSteers: string[] = [];
+  /** Steers posted and not yet delivered to a play: `inStore` when the row already sits in the store (an idle session's steer). */
+  private readonly pendingSteers: { id: string; text: string; inStore: boolean }[] = [];
   private interrupted = false;
   /** The container was replaced with the last turn's call in flight: the play
    *  stops, having left that call open (no success event). */
@@ -371,7 +401,22 @@ class ScriptedServe {
   private readonly silentAfterPrompt: number | undefined;
   private readonly interruptSettlesLate: "interrupted" | "failed" | "budget" | undefined;
   private readonly lateTailNoise: boolean;
-  private readonly interruptAnswersAfterKill: boolean;
+  private readonly controlResetOnPrompt: "landed" | "lost" | "again" | undefined;
+  private readonly controlResetOnReply: "landed" | "lost" | "unlistable" | undefined;
+  /** How many prompt POSTs the control plane has reset under (`controlResetOnPrompt`). */
+  private promptResets = 0;
+  /** The first reply POST met the reset (`controlResetOnReply`). */
+  private replyReset = false;
+  /** The pending-asks GET the resolution reads meets the reset too (`controlResetOnReply: "unlistable"`). */
+  private permissionListResets = false;
+  /** The live play's asks pending on the server (by request id): what `GET …/permission` lists beside the recorded server's, and what an interrupt drops. */
+  private readonly liveAsks = new Map<string, Record<string, unknown>>();
+  /** A hung tool call (`hangToolCall`) the interrupt aborted with its call open: its late success is owed after the next execution's start. */
+  private hungTool: { callId: string; assistantMessageID: string } | undefined;
+  /** The hung tool's late success, emitted right after the `session.execution.started` of the play `hungToolSettlesOnPlay` names (`emitLateTail`). */
+  private settleAfterStart: (() => void) | undefined;
+  private readonly hungToolSettlesOnPlay: number;
+  private readonly interruptAnswersAfterKill: boolean | "refused";
   private readonly interruptPostFails: boolean;
   /** An execution is under way — a play has started and not returned: what the interrupt route answers `interrupted` for. */
   private executing = false;
@@ -427,7 +472,10 @@ class ScriptedServe {
     this.silentAfterPrompt = options.silentAfterPrompt;
     this.interruptSettlesLate = options.interruptSettlesLate;
     this.lateTailNoise = options.lateTailNoise === true;
-    this.interruptAnswersAfterKill = options.interruptAnswersAfterKill === true;
+    this.controlResetOnPrompt = options.controlResetOnPrompt;
+    this.controlResetOnReply = options.controlResetOnReply;
+    this.hungToolSettlesOnPlay = options.hungToolSettlesOnPlay ?? 2;
+    this.interruptAnswersAfterKill = options.interruptAnswersAfterKill ?? false;
     this.interruptPostFails = options.interruptPostFails === true;
     this.mutate = options.mutate;
     this.replacedWord = options.replacedWord ?? REPLACED_WORD;
@@ -701,14 +749,38 @@ class ScriptedServe {
     }
     if (req.method === "GET" && req.path === "/api/health")
       return j(200, { healthy: true, version: OPENCODE_VERSION, pid: 77 });
-    // The store and the pending asks as the server holds them: what a re-attach reads back.
-    if (req.method === "GET" && req.path.split("?")[0] === `/api/session/${this.sessionID}/message`)
+    // The store and the pending asks as the server holds them: what a re-attach
+    // and a reset's resolution read back. Measured against the pinned binary:
+    // newest first unless `order=asc`, 50 rows unless `limit` — at most 200, a
+    // 400 above — and a `cursor.next` to the following page.
+    if (req.method === "GET" && req.path.split("?")[0] === `/api/session/${this.sessionID}/message`) {
+      const query = new URLSearchParams(req.path.split("?")[1] ?? "");
+      const limit = query.has("limit") ? Number(query.get("limit")) : 50;
+      if (!Number.isInteger(limit) || limit < 1 || limit > 200)
+        return j(400, { _tag: "InvalidRequestError", message: "Expected a value less than or equal to 200" });
+      // The cursor carries the order, as the binary's does (its cursor is the
+      // last row's id with the order and direction, base64): a page reached by
+      // cursor keeps the order the first page asked for.
+      const cursor = /^c:(asc|desc):(\d+)$/.exec(String(query.get("cursor") ?? ""));
+      const order = cursor?.[1] ?? (query.get("order") === "asc" ? "asc" : "desc");
+      const ordered = order === "asc" ? [...this.store] : [...this.store].reverse();
+      const from = cursor ? Number(cursor[2]) : 0;
+      const next = from + limit < ordered.length ? `c:${order}:${from + limit}` : undefined;
       return j(200, {
-        data: [...this.store],
-        cursor: this.role === "recorded" && this.reattach.endlessStore ? { next: "more" } : {},
+        data: ordered.slice(from, from + limit),
+        cursor:
+          this.role === "recorded" && this.reattach.endlessStore
+            ? { next: "more" }
+            : next !== undefined
+              ? { next }
+              : {},
       });
-    if (req.method === "GET" && req.path === `/api/session/${this.sessionID}/permission`)
-      return j(200, { data: [...this.pendingAsks.values()] });
+    }
+    if (req.method === "GET" && req.path === `/api/session/${this.sessionID}/permission`) {
+      // The listing the harness resolves a reset reply by meets the reset too (`controlResetOnReply: "unlistable"`).
+      if (this.permissionListResets) throw controlReset("request");
+      return j(200, { data: [...this.pendingAsks.values(), ...this.liveAsks.values()] });
+    }
     if (req.method === "GET" && req.path === "/api/config") {
       // The document the launch actually wrote, so readiness holds the run's own config.
       const written = this.container.files.get(this.configPath());
@@ -737,15 +809,40 @@ class ScriptedServe {
     if (req.method === "POST" && req.path.endsWith("/prompt")) {
       const body = parseBody(req.body);
       const text = String(body.text ?? "");
+      let promptId: string | undefined;
       if (body.delivery === "steer") {
         // The steer POST the server never takes (F1): the follow-up drainer must
         // record it as undelivered and hand it back to the inbox, never as read.
         if (this.steerPostFails) return j(500, { error: "the store hiccuped" });
-        this.pendingSteers.push(text);
+        // Measured against the pinned binary: the answer names the user message
+        // the steer became; on an idle session its row is in the store at once
+        // (the execution it starts there is not modelled — the next play reads
+        // the row); into a running execution the row lands at delivery, the
+        // next step boundary.
+        const id = `msg_s${this.ordinal++}`;
+        const inStore = !this.executing;
+        if (inStore) this.store.push({ id, type: "user", text, time: { created: NOW } });
+        this.pendingSteers.push({ id, text, inStore });
         // A steer into the recorded server's execution lands at its next step
         // boundary: at once when nothing is in flight, else when the calls settle.
         this.stepBoundary();
-      } else {
+        return j(200, { data: { id, sessionID: this.sessionID, type: "user", payload: { text }, delivery: "steer" } });
+      }
+      {
+        // The resident's control plane resets under the prompt (`controlResetOnPrompt`):
+        // a lost prompt never reaches the server and the answer is the reset; a
+        // landed one is taken as any prompt is, the answer alone lost — the
+        // harness tells which from the store (harness-pi item 16, OpenCode's way).
+        const reset =
+          this.controlResetOnPrompt !== undefined && this.queuePrompts === 0 && this.promptResets === 0
+            ? this.controlResetOnPrompt
+            : this.controlResetOnPrompt === "again" && this.promptResets === 1
+              ? "lost"
+              : undefined;
+        if (reset === "lost" || reset === "again") {
+          this.promptResets++;
+          throw controlReset("request");
+        }
         this.queuePrompts++;
         // The prompt the server refuses (the harness must fail by name, not wait on the feed).
         if (this.promptPostFails === this.queuePrompts) return j(500, { error: "the store hiccuped" });
@@ -771,8 +868,10 @@ class ScriptedServe {
         // imported record already holds the conversation and the settlement, so
         // the continue's echo is elided (the mirror starts from the settlement
         // turn it primed). A fresh run's prompt is the request, a store turn.
-        if (!this.script.resume)
-          this.store.push({ id: `msg_u${this.store.length}`, type: "user", text, time: { created: NOW } });
+        if (!this.script.resume) {
+          promptId = `msg_u${this.store.length}`;
+          this.store.push({ id: promptId, type: "user", text, time: { created: NOW } });
+        }
         // A hung turn's late tail (`interruptSettlesLate`): the aborted
         // execution's last records land on the feed now — after the harness
         // moved on, before this prompt's execution starts — as the real server
@@ -785,8 +884,21 @@ class ScriptedServe {
         // after it starts a fresh one, as the real server does.
         this.interrupted = false;
         void this.play();
+        if (reset === "landed") {
+          this.promptResets++;
+          throw controlReset("request");
+        }
       }
-      return j(200, { data: { id: `inb_${this.ordinal++}` } });
+      // Measured: the answer names the user message the prompt became.
+      return j(200, {
+        data: {
+          id: promptId ?? `inb_${this.ordinal++}`,
+          sessionID: this.sessionID,
+          type: "user",
+          payload: { text },
+          delivery: "queue",
+        },
+      });
     }
     const reply = /\/permission\/([^/]+)\/reply$/.exec(req.path);
     if (req.method === "POST" && reply) {
@@ -799,6 +911,21 @@ class ScriptedServe {
       const decision: Decision = {
         reply: body.reply === "reject" ? "reject" : "once",
         ...(typeof body.message === "string" ? { message: body.message } : {}),
+      };
+      // The resident's control plane resets under the reply (`controlResetOnReply`):
+      // lost, the ask stays pending and the answer is the reset; landed, the
+      // reply is taken as any is and the answer alone lost; unlistable, lost,
+      // and the pending-asks GET the harness resolves by meets the reset too.
+      const replyReset =
+        this.controlResetOnReply !== undefined && !this.replyReset ? this.controlResetOnReply : undefined;
+      if (replyReset !== undefined) this.replyReset = true;
+      if (replyReset === "lost" || replyReset === "unlistable") {
+        this.permissionListResets = replyReset === "unlistable";
+        throw controlReset("request");
+      }
+      const taken = (): HarnessResponse => {
+        if (replyReset === "landed") throw controlReset("request");
+        return { status: 204, headers: {}, body: "" };
       };
       // An ask pending since the death, decided now: the tool runs or fails on
       // the recorded server as it would have under the dead generation's reply.
@@ -816,13 +943,13 @@ class ScriptedServe {
               ? { content: [{ type: "text", text: ownToolResultText(openCodeToolNameWord(call.name), call.input) }] }
               : { error: decision.message ?? "The user rejected permission to use this specific tool call." },
           );
-        return { status: 204, headers: {}, body: "" };
+        return taken();
       }
       const resolve = this.replies.get(reply[1]);
       if (resolve) {
         this.replies.delete(reply[1]);
         resolve(decision);
-        return { status: 204, headers: {}, body: "" };
+        return taken();
       }
       // A reply for an ask the server no longer holds — one an interrupt already
       // rejected, or one it never issued — is refused, as the real server refuses it.
@@ -845,14 +972,20 @@ class ScriptedServe {
         resolve({ reply: "reject" });
       }
       this.replies.clear();
-      if (this.pendingAsks.size > 0) {
-        this.pendingAsks.clear();
-        this.emitPermissions([]);
-      }
+      // The asks pending are dropped with the execution; the refills saying so
+      // follow the execution's end, in the measured order — never before the
+      // tool's failure.
+      this.pendingAsks.clear();
+      this.liveAsks.clear();
       // The interrupt the server refuses: its own word, a 500.
       if (this.interruptPostFails) return j(500, { error: "interrupt refused" });
       // The interrupt the kill cuts: its request answers only once the server
       // is killed, and then with the reset the kill caused.
+      if (this.interruptAnswersAfterKill === "refused")
+        return new Promise<HarnessResponse>((resolve) => {
+          this.container.onKill = () =>
+            void this.deps.sleep(this.deps.tickMs ?? 1).then(() => resolve(j(500, { error: "interrupt refused" })));
+        });
       if (this.interruptAnswersAfterKill)
         return new Promise<HarnessResponse>((_, reject) => {
           this.container.onKill = () =>
@@ -894,34 +1027,21 @@ class ScriptedServe {
   }
 
   /** The aborted execution's tail, landing once the next prompt is posted
-   *  (`interruptSettlesLate`) — what the pinned binary writes when an interrupt
-   *  lands on a running execution: an ask pending at the interrupt fails
-   *  `aborted` (`Tool execution interrupted`, `executed: false`, and no
-   *  `permission.replied`: the ask is dropped, not answered), the step fails
-   *  `aborted` (`Step interrupted`), the usage lands, then the execution's end
-   *  by the option's kind — interrupted, or failed with the proxy's words, or
-   *  the proxy's turn-budget refusal — and the two refills its terminal
-   *  transition causes. With `lateTailNoise`, a tailer note and an event kind
-   *  no table names ride the tail too. Every record names the session; none is
-   *  the next prompt's execution. */
+   *  (`interruptSettlesLate`), in the measured order — the pinned binary's
+   *  interrupt on a running execution: the step fails `aborted` (`Step
+   *  interrupted`), the usage lands, then the execution's end by the option's
+   *  kind — interrupted, or failed with the proxy's words, or the proxy's
+   *  turn-budget refusal with its 403 — and the two refills its terminal
+   *  transition causes, one permissions and one messages, after it. A hung
+   *  model call (`hangModelCall`) produced no tool, so no tool event rides
+   *  this tail; a hung tool call (`hangToolCall`) owes its allowed tool's late
+   *  success, which lands only after the NEXT execution's start
+   *  (`settleAfterStart`). With `lateTailNoise`, a tailer note, an event kind
+   *  no table names and a compaction of the earlier execution ride the tail
+   *  too. Every record names the session; none is the next prompt's execution. */
   private emitLateTail(): void {
     const sessionID = this.sessionID;
     const assistantMessageID = "msg_a_late";
-    this.emitEvent("session.tool.input.started", { sessionID, assistantMessageID, id: "c-ask", name: "shell" });
-    this.emitEvent("session.tool.called", {
-      sessionID,
-      assistantMessageID,
-      id: "c-ask",
-      input: { command: "echo late" },
-      executed: false,
-    });
-    this.emitEvent("session.tool.failed", {
-      sessionID,
-      assistantMessageID,
-      id: "c-ask",
-      executed: false,
-      error: { type: "aborted", message: "Tool execution interrupted" },
-    });
     this.emitEvent("session.step.failed", {
       sessionID,
       assistantMessageID,
@@ -938,13 +1058,26 @@ class ScriptedServe {
     if (this.lateTailNoise) {
       this.container.emit({ feed: "tailer", at: NOW, note: "stream closed" });
       this.emitEvent("made_up_late_kind", { sessionID });
+      this.emitEvent("session.compaction.ended", { sessionID, reason: "auto", text: LATE_COMPACTION_SUMMARY });
+    }
+    if (this.hungTool !== undefined) {
+      const { callId, assistantMessageID: hungMessageID } = this.hungTool;
+      this.hungTool = undefined;
+      this.settleAfterStart = () =>
+        this.emitEvent("session.tool.success", {
+          sessionID,
+          assistantMessageID: hungMessageID,
+          id: callId,
+          content: [{ type: "text", text: "slept" }],
+          executed: true,
+        });
     }
     if (this.interruptSettlesLate === "failed") {
       this.failExecution("provider.error", LATE_FAILURE_ERROR);
       return;
     }
     if (this.interruptSettlesLate === "budget") {
-      this.failExecution("provider.error", LATE_BUDGET_REFUSAL);
+      this.failExecution("provider.error", LATE_BUDGET_REFUSAL, 403);
       return;
     }
     this.emitEvent("session.execution.interrupted", { sessionID, reason: "user" });
@@ -956,8 +1089,11 @@ class ScriptedServe {
    *  the provider's words, then the two refills its terminal transition causes
    *  — the pending asks (none) and the store with the idle marker the failure
    *  left — and NO `session.idle`. */
-  private failExecution(type: string, message: string): void {
-    this.emitEvent("session.execution.failed", { sessionID: this.sessionID, error: { type, message } });
+  private failExecution(type: string, message: string, status?: number): void {
+    this.emitEvent("session.execution.failed", {
+      sessionID: this.sessionID,
+      error: { type, message, ...(status !== undefined ? { status } : {}) },
+    });
     this.store.push({ id: `msg_idle_${this.ordinal++}`, type: "idle", outcome: "failed", time: { created: NOW } });
     this.emitPermissions([]);
     this.emitMessages();
@@ -967,12 +1103,20 @@ class ScriptedServe {
     return new Promise((resolve) => this.replies.set(requestID, resolve));
   }
 
-  /** Any steers posted since the last turn, injected into the store as user
-   *  turns, so the model's next call sees them (as OpenCode delivers a steer at
-   *  the next step boundary). */
+  /** The assistant message id of a turn: unique across the session's plays,
+   *  as the binary's are — a post-turn's replay of the script must not bear the
+   *  hung turn's ids, since the bridge tells its own steps from an earlier
+   *  execution's by them. The first play keeps the bare shape the tests name. */
+  private stepId(index: number): string {
+    return this.plays === 1 ? `msg_a${index}` : `msg_p${this.plays}_a${index}`;
+  }
+
+  /** Any steers posted since the last turn whose rows are not in the store yet
+   *  (a steer into a running execution: delivered at the next step boundary),
+   *  injected as user turns so the model's next call sees them. */
   private flushSteers(): void {
-    for (const text of this.pendingSteers.splice(0))
-      this.store.push({ id: `msg_s${this.store.length}`, type: "user", text, time: { created: NOW } });
+    for (const steer of this.pendingSteers.splice(0))
+      if (!steer.inStore) this.store.push({ id: steer.id, type: "user", text: steer.text, time: { created: NOW } });
   }
 
   /** The store the model saw, as the completion request the proxy would carry. */
@@ -1000,15 +1144,20 @@ class ScriptedServe {
     this.playing = true;
     this.plays++;
     this.emitEvent("session.execution.started", { sessionID: this.sessionID });
+    // A hung tool call's late success (`hangToolCall` + `interruptSettlesLate`):
+    // the earlier execution's tool settling after THIS execution has started —
+    // the next one's, or a later one's (`hungToolSettlesOnPlay`).
+    if (this.settleAfterStart !== undefined && this.plays === this.hungToolSettlesOnPlay) {
+      const settle = this.settleAfterStart;
+      this.settleAfterStart = undefined;
+      settle();
+    }
     // The resident's control plane keeps resetting the feed with no progress
     // (harness-pi item 16): every drained feed read fails with a control reset,
     // so the bridge re-attaches until the runaway bound closes the run by name.
     // Nothing more is emitted; the bridge's loop hits the bound on its own.
     if (this.script.controlResetBoundOnFeed !== undefined) {
-      this.container.resetOnDrain = new HarnessContainerControlResetError(
-        "read",
-        "control-reset: the resident's Durable Object was reset (a deploy); the container and its processes are as they were; the command's outcome is unknown",
-      );
+      this.container.resetOnDrain = controlReset("read");
       return;
     }
     // The model reference is resolved when the execution asks for the model —
@@ -1085,7 +1234,7 @@ class ScriptedServe {
         this.recordModelCall();
         this.emitEvent("session.step.started", {
           sessionID: this.sessionID,
-          assistantMessageID: `msg_a${t}`,
+          assistantMessageID: this.stepId(t),
           agent: "switchboard",
         });
         if (this.script.softStopBeforeModelCall !== t + 1) {
@@ -1113,6 +1262,7 @@ class ScriptedServe {
       this.flushSteers();
       this.recordModelCall();
       await this.playTurn(this.script.turns[t], t);
+      if (this.hungTool !== undefined) return;
       if (this.replaced) {
         // The container was replaced with this turn's call in flight: rename the
         // container (so the verdict's was → now are two words) and arm the next
@@ -1160,10 +1310,16 @@ class ScriptedServe {
       sessionID: this.sessionID,
       ...(this.interrupted ? { reason: "user" } : {}),
     });
+    // An interrupted execution's terminal transition causes its refills, in the
+    // measured order: the pending asks (none now) and the store, after the end.
+    if (this.interrupted) {
+      this.emitPermissions([]);
+      this.emitMessages();
+    }
   }
 
   private async playTurn(turn: ModelTurn, index: number): Promise<void> {
-    const assistantMessageID = `msg_a${index}`;
+    const assistantMessageID = this.stepId(index);
     this.emitEvent("session.step.started", { sessionID: this.sessionID, assistantMessageID, agent: "switchboard" });
     const content: Record<string, unknown>[] = [];
     for (const part of turn.content) {
@@ -1173,6 +1329,8 @@ class ScriptedServe {
         content.push({ type: "text", text: part.text });
       } else if (part.type === "tool_use") {
         content.push(await this.playToolCall(part, assistantMessageID, index));
+        // The hung tool's step never ends: the turn is deaf until the interrupt's late tail.
+        if (this.hungTool !== undefined) return;
         if (this.interrupted || this.replaced) break;
       }
     }
@@ -1307,11 +1465,13 @@ class ScriptedServe {
       return this.toolContent(callId, ask.name, input, "completed", content);
     }
     this.emitPermissions([request]);
+    this.liveAsks.set(requestID, request);
     const decision = await this.waitReply(requestID);
-    this.emitPermissions([]);
+    this.liveAsks.delete(requestID);
     if (this.interruptedAsks.has(requestID)) {
       // The interrupt dropped the ask while it was pending: the binary emits no
-      // `permission.replied` and fails the tool `aborted`.
+      // `permission.replied` and fails the tool `aborted`; the refills that say
+      // the ask is gone follow the execution's end.
       this.interruptedAsks.delete(requestID);
       this.emitEvent("session.tool.failed", {
         sessionID: this.sessionID,
@@ -1322,7 +1482,35 @@ class ScriptedServe {
       });
       return this.toolContent(callId, ask.name, input, "error", "Tool execution interrupted", "aborted");
     }
+    this.emitPermissions([]);
     this.emitEvent("permission.replied", { sessionID: this.sessionID, requestID, reply: decision.reply });
+    // The allowed tool never settles (`hangToolCall`): the run's first play
+    // alone hangs here with the call open — the clock passes the loop's end,
+    // the write-up's steer is waited for, then the finale bound passes and the
+    // play waits for the harness's interrupt and stops, the step never ended.
+    // The tool's late success is owed to the next prompt's tail
+    // (`interruptSettlesLate`), landing after that execution's start.
+    if (this.script.hangToolCall === turnIndex + 1 && this.plays === 1 && decision.reply === "once") {
+      if (
+        this.deps.advanceClock === undefined ||
+        this.deps.finaleMs === undefined ||
+        this.deps.spendBudget === undefined
+      )
+        throw new Error(
+          "hangToolCall needs the driver's clock: hand the serve `advanceClock`, `spendBudget` and `finaleMs`",
+        );
+      for (let i = 0; i < 8; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+      this.deps.spendBudget();
+      for (let i = 0; i < 200 && this.pendingSteers.length === 0; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+      this.deps.advanceClock(this.deps.finaleMs + 1);
+      // Owed before the wait: the interrupt's late tail may be read at the next
+      // prompt before this play has ticked on.
+      this.hungTool = { callId, assistantMessageID };
+      this.hanging = true;
+      for (let i = 0; i < 2000 && !this.interrupted; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+      this.hanging = false;
+      return this.toolContent(callId, ask.name, input, "running", []);
+    }
     // The executor says replaced once while this call is in flight, but the
     // server still answers alive (ask 2): arm the next drained feed read
     // to fail once with the word while the server keeps answering, and do NOT

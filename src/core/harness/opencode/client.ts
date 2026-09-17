@@ -331,6 +331,60 @@ export function parseMessagesPage(body: string): { data: OpenCodeMessage[]; next
   return next === undefined ? { data } : { data, next };
 }
 
+/** One page of the store at a time, never the route's defaults. Measured
+ *  against the pinned binary: `GET …/message` answers newest first unless
+ *  `order=asc`, 50 rows unless `limit` — at most 200; a limit above it is a 400
+ *  (`InvalidRequestError`) — and a `cursor.next` to the following page. */
+export const STORE_PAGE_LIMIT = 200;
+/** How many pages a store may run to before the read gives up: a store that
+ *  does not end within them is refused, never continued on in part. */
+export const STORE_PAGES = 10_000;
+
+/** The session's store read whole, page by page from the oldest message
+ *  (`order=asc&limit=STORE_PAGE_LIMIT`, `cursor.next` followed to the end) —
+ *  what a re-attach aligns the mirror on and what a write the control plane's
+ *  reset left unknown is resolved from. Refused by name, never partial: a page
+ *  the server refuses, a page of another shape, a store that does not end
+ *  within `STORE_PAGES`. `get` is the seam's GET (idempotent: the seam re-sends
+ *  it once itself on a control reset). */
+export async function readSessionStore(
+  get: (path: string) => Promise<{ status: number; body: string }>,
+  sessionID: string,
+): Promise<{ ok: true; messages: OpenCodeMessage[] } | { ok: false; why: string }> {
+  const route = openCodeSessionRoutes(sessionID)["session.messages"].path;
+  const messages: OpenCodeMessage[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; ; page++) {
+    if (page === STORE_PAGES)
+      return {
+        ok: false,
+        why: `the session's store did not end within ${STORE_PAGES} pages; the run does not continue on a partial store`,
+      };
+    const query = `${cursor !== undefined ? `cursor=${encodeURIComponent(cursor)}` : "order=asc"}&limit=${STORE_PAGE_LIMIT}`;
+    const res = await get(`${route}?${query}`);
+    if (res.status < 200 || res.status >= 300)
+      return { ok: false, why: `the server refused the session (${res.status})` };
+    const listed = parseMessagesPage(res.body);
+    if (listed === undefined)
+      return { ok: false, why: "the session's messages answered something that is not the page shape" };
+    messages.push(...listed.data);
+    cursor = listed.next;
+    if (cursor === undefined) return { ok: true, messages };
+  }
+}
+
+/** The id of the user message a `POST …/prompt` became (`data.id`; measured
+ *  against the pinned binary for a `queue` prompt and a `steer` alike), or
+ *  nothing for a body of another shape. */
+export function parseMessageId(body: string): string | undefined {
+  try {
+    const value = JSON.parse(body) as { data?: { id?: unknown } } | null;
+    return typeof value?.data?.id === "string" ? value.data.id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** `GET …/permission` parsed — the session's pending asks — or nothing for a
  *  body of another shape; each ask carries a string `id` and `action`. */
 export function parsePermissionList(body: string): OpenCodePermissionRequest[] | undefined {

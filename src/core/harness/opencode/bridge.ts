@@ -45,10 +45,12 @@ import type { Clock, Span } from "../../trace/types.js";
 import { HarnessContainerReplacedError, type HarnessDeps, type HarnessRecord, type HarnessRun } from "../contract.js";
 import type { ProxyRefusalCode } from "../../../channels/modelProxy.js";
 import {
+  isControlReset,
   replacedBecause,
   replacedVerdict,
   saysTransportLost,
   type HarnessContainer,
+  type HarnessResponse,
   type ProbeWait,
   type ReplacedCondition,
   type ReplacedVerdict,
@@ -91,6 +93,9 @@ import {
   openCodePermissionReplyRoute,
   openCodeSessionRoutes,
   parseFeedRecord,
+  parseMessageId,
+  parsePermissionList,
+  readSessionStore,
   type OpenCodeAssistantMessage,
   type OpenCodeEvent,
   type OpenCodeFeedRecord,
@@ -148,6 +153,23 @@ export class OpenCodeRequestRefusedError extends Error {
   ) {
     super(`OpenCode refused the ${request} (${status}): ${redactAndCap(body, 200)}`);
     this.name = "OpenCodeRequestRefusedError";
+  }
+}
+
+/** A write the resident's control plane reset under — the prompt, a gate
+ *  reply — whose outcome the server's own state could not settle: the listing
+ *  the resolution reads failed, or the re-issued write met the reset again.
+ *  The run fails by this name, the `harness_error` naming the request; a blind
+ *  re-send would double a write that landed. */
+export class OpenCodeWriteUnresolvedError extends Error {
+  constructor(
+    readonly request: string,
+    detail: string,
+  ) {
+    super(
+      `${request} was in flight when the resident's control plane reset under the run and its outcome could not be resolved from the server (${detail}); the run cannot continue safely`,
+    );
+    this.name = "OpenCodeWriteUnresolvedError";
   }
 }
 
@@ -425,29 +447,37 @@ export class OpenCodeBridge {
   private fedTurns = 0;
   private readonly mirror: PiMirror;
   private turnCounted = 0;
-  /** Reading the feed a dead generation already read (a re-attach, before the
-   *  byte the feed had reached when this generation attached): its tool events
-   *  narrate again and nothing is re-decided — the asks it answered are its,
-   *  their echoes name its decisions, a call that settled ran under its watch,
-   *  and its execution's end or failure is history, not this generation's
-   *  settle. The loop sets this before each record it hands over. */
-  catchingUp = false;
-  /** Whose execution the feed's records belong to. `own`: the execution the
-   *  loop prompted — every record decides as it always has. `earlier`: the
-   *  loop's own execution has not started yet and the feed carries an earlier
-   *  one's tail — the write-up a previous loop interrupted at its finale,
-   *  which the pinned binary ends with the pending ask's tool failing
-   *  `aborted`, the step failing, the execution's end and the refills, landing
-   *  after a post-turn's prompt was posted. That exchange was this bot's own
-   *  previous loop's, decided then and on its record, so nothing of it is
-   *  this loop's to decide or narrate: no reply, no bypass, no settle, no tool
-   *  event; the store's refills still feed the mirror, a failure is noted as
-   *  the earlier execution's, and the records that carry no decision — a
-   *  tailer note, an event kind no table names — are surfaced as in every
-   *  mode. `catchingUp` (a dead generation's records on a re-attach) takes
-   *  precedence: its asks and echoes have rules of their own. The loop sets
-   *  both before each record it hands over. */
-  observing: "own" | "earlier" = "own";
+  /** Whose records the bridge is reading — the loop sets it before each record
+   *  it hands over:
+   *  - `own`: the execution the loop prompted; every record decides.
+   *  - `earlier`: the loop's own execution has not started (no
+   *    `session.execution.started` for the session yet) and the feed carries an
+   *    earlier execution's tail — the write-up a previous loop interrupted at
+   *    its finale, which the pinned binary ends with the step failing
+   *    `aborted`, the execution's end and the refills, landing after a
+   *    post-turn's prompt was posted. That exchange was this bot's own previous
+   *    loop's, decided then and on its record, so nothing of it is this loop's
+   *    to decide or narrate: no reply, no bypass, no settle, no tool event.
+   *  - `catching-up`: reading the feed a dead generation already read (a
+   *    re-attach, before the byte the feed had reached when this generation
+   *    attached): its tool events narrate again and nothing is re-decided — the
+   *    asks it answered are its, their echoes name its decisions, a call that
+   *    settled ran under its watch, and its execution's end or failure is
+   *    history, not this generation's settle.
+   *  In every mode the record's own state still lands — a compaction row, the
+   *  store's refills feeding the mirror — and what carries no decision is
+   *  surfaced: a tailer note, an unknown event kind, a failure said as whose it
+   *  was. */
+  observing: "own" | "earlier" | "catching-up" = "own";
+  /** The assistant message ids of this loop's own steps: every event of the
+   *  pinned binary's execution carries `assistantMessageID` (verified in its
+   *  schema: the step, text, reasoning and tool events share it), so the steps
+   *  this loop saw start, call or write — in `own` or `catching-up` mode, never
+   *  `earlier` — are its own by construction, and a settle naming any other
+   *  step is an earlier execution's, whenever it lands and however many turns
+   *  later: set aside, never this loop's bypass or result. Nothing is handed
+   *  turn to turn for it. */
+  private readonly ownSteps = new Set<string>();
   /** The asks pending on the server at the re-attach (by request id): the
    *  ones this generation decides even while catching up — every other ask met
    *  there was the dead generation's. */
@@ -540,6 +570,12 @@ export class OpenCodeBridge {
     this.mirror.prime(parts);
   }
 
+  /** Every store message id the refills carried: what the loop that follows
+   *  knows the store to hold before its own prompt (`OpenCodeConnection.knownMessageIds`). */
+  storeIds(): string[] {
+    return [...this.store.keys()];
+  }
+
   /** Settle every call still open when the container went under a running call
    *  (the replaced verdict): each open span ends `error` and its call is put on
    *  the record as a failed `tool_result` carrying `reason` — the restart note,
@@ -618,7 +654,7 @@ export class OpenCodeBridge {
       case "permissions":
         // An earlier execution's pending asks are not this loop's to answer —
         // and the pinned binary drops them at the interrupt anyway.
-        if (this.observing === "earlier" && !this.catchingUp) return { replies: [], settled: false };
+        if (this.observing === "earlier") return { replies: [], settled: false };
         return this.onPermissionsRefill(record.data);
       case "messages":
         return this.onMessagesRefill(record.data);
@@ -645,24 +681,44 @@ export class OpenCodeBridge {
       return out;
     }
     const data = isRecord(event.data) ? event.data : {};
-    if (this.observing === "earlier" && !this.catchingUp) return this.onEarlierEvent(event.type, data, out);
+    // An earlier execution's records decide nothing (`observing`); the mode is
+    // asked case by case below, so what every mode reads stays in one place.
+    const earlier = this.observing === "earlier";
+    // The step an event belongs to is this loop's own once seen starting,
+    // calling or writing in its own execution (or the dead generation's it
+    // continues); an earlier execution's steps are never learned, and a settle
+    // teaches nothing — it is the record judged by the steps learned before it
+    // — so an earlier execution's settle is told apart by its step.
+    if (
+      !earlier &&
+      event.type !== "session.tool.success" &&
+      event.type !== "session.tool.failed" &&
+      typeof data.assistantMessageID === "string"
+    )
+      this.ownSteps.add(data.assistantMessageID);
     switch (event.type) {
       case "session.tool.input.started":
+        // The name is learned in every mode: a settle is read by it.
         if (typeof data.id === "string" && typeof data.name === "string") this.toolNames.set(data.id, data.name);
         break;
       case "session.tool.called":
+        if (earlier) break;
         this.onToolCalled(data);
         break;
       case "session.text.ended":
         // The model's prose as it lands: emitted beside the turn's call as the
         // narration; a text-only turn's text is the answer, read from the store.
+        if (earlier) break;
         if (typeof data.text === "string" && data.text.trim())
           this.pendingNarration = this.pendingNarration ? `${this.pendingNarration}\n${data.text}` : data.text;
         break;
       case "session.step.started":
+        // An earlier execution's step is not this loop's `doingNow`.
+        if (earlier) break;
         this.stepOpen = true;
         break;
       case "session.step.ended":
+        if (earlier) break;
         this.pendingNarration = undefined;
         this.stepOpen = false;
         break;
@@ -672,13 +728,25 @@ export class OpenCodeBridge {
       case "session.tool.failed":
         this.onToolSettled(data, false, out);
         break;
-      case "permission.asked":
+      case "permission.asked": {
+        // Not this loop's to answer in `earlier` mode (the binary drops it at
+        // the interrupt anyway); in its own, an ask is answered whatever step it
+        // names — an ask left pending hangs the execution, and the gate decides
+        // per call.
+        if (earlier) break;
+        const source = isRecord(data.source) ? data.source : {};
+        if (typeof source.messageID === "string") this.ownSteps.add(source.messageID);
         this.onPermissionAsked(data as unknown as OpenCodePermissionRequest, out);
         break;
+      }
       case "permission.replied":
+        if (earlier) break;
         this.onPermissionReplied(data, out);
         break;
       case "session.compaction.ended":
+        // Record state, not a decision: the compaction row and its note land in
+        // every mode, so a rebuild from the record re-feeds nothing the store
+        // already compacted away.
         this.onCompactionEnded(data);
         break;
       case "session.compaction.failed":
@@ -688,6 +756,10 @@ export class OpenCodeBridge {
         this.note("harness_error", `OpenCode scheduled a model retry (${redactAndCap(errorMessage(data.error), 200)})`);
         break;
       case "session.step.failed":
+        // An earlier execution's step failing is the interrupt's doing — the
+        // wind-down the loop before wrote is on the record; said again it would
+        // be a second `harness_error` for one ending.
+        if (earlier) break;
         this.note("harness_error", `an OpenCode step failed: ${redactAndCap(errorMessage(data.error), 200)}`);
         break;
       case "session.execution.failed": {
@@ -700,8 +772,17 @@ export class OpenCodeBridge {
         // a loop that waited past it for an idle waited to its budget. The one
         // exception is the proxy's turn-budget refusal, which is the wind-down's
         // trigger: the write-up is steered and starts an execution of its own.
-        const error = { status: statusOf(data.error), message: errorMessage(data.error) };
-        this.stepOpen = false;
+        // An execution that is not this loop's own — an earlier one's tail, the
+        // dead generation's — failing is history, said for what it was and by
+        // whose it was, never this loop's settle.
+        const error = failureOf(data.error);
+        // The step is closed in every mode that opened one: the dead generation's
+        // failed step is no model call in flight for `doingNow`.
+        if (!earlier) this.stepOpen = false;
+        if (this.observing !== "own") {
+          this.note("harness_error", foreignFailureNote(this.observing, error));
+          break;
+        }
         if (isBudgetRefusal(error)) out.budgetStop = true;
         else {
           out.providerError = redactAndCap(error.message, 400);
@@ -712,37 +793,12 @@ export class OpenCodeBridge {
       case "session.execution.succeeded":
       case "session.execution.interrupted":
       case "session.idle":
+        if (earlier) break;
         this.stepOpen = false;
         out.settled = true;
         break;
       default:
         break;
-    }
-    return out;
-  }
-
-  /** An earlier execution's event (`observing: "earlier"`): nothing decides —
-   *  no reply, no bypass, no settle, no tool event — and nothing of the
-   *  loop's own state moves (a step of that execution is not this loop's
-   *  `doingNow`). A tool's name is learned, since a settle of it is still
-   *  read; its failure is said for what it is, an earlier execution's, with
-   *  the proxy's turn-budget refusal by its own name — the wind-down's trigger
-   *  of the loop before, never a failed model call. */
-  private onEarlierEvent(
-    type: string,
-    data: Record<string, unknown>,
-    out: OpenCodeBridgeObservation,
-  ): OpenCodeBridgeObservation {
-    if (type === "session.tool.input.started" && typeof data.id === "string" && typeof data.name === "string")
-      this.toolNames.set(data.id, data.name);
-    if (type === "session.execution.failed") {
-      const error = { status: statusOf(data.error), message: errorMessage(data.error) };
-      this.note(
-        "harness_error",
-        isBudgetRefusal(error)
-          ? `an earlier execution reached the proxy's turn budget (${redactAndCap(error.message, 400)}); continuing`
-          : `a model call of an earlier execution failed (${redactAndCap(error.message, 400)}); continuing`,
-      );
     }
     return out;
   }
@@ -775,6 +831,17 @@ export class OpenCodeBridge {
 
   private onToolSettled(data: Record<string, unknown>, ok: boolean, out: OpenCodeBridgeObservation): void {
     const callId = str(data.id);
+    // An earlier execution's call settling — in its tail, or late, after this
+    // loop's own execution started (the aborted tool's process finishing),
+    // however many turns later: its `assistantMessageID` names a step this
+    // loop never saw, so it is that execution's, decided by the loop before
+    // and on its record. Set aside, whatever mode this is; never this loop's
+    // result or bypass. (A step missed whole on a dropped stream would read
+    // the same way; the tailer's own note says the stream dropped.) A settle
+    // that names no step — none of the pinned binary's do — is judged as this
+    // loop's, the fail-closed side.
+    const step = typeof data.assistantMessageID === "string" ? data.assistantMessageID : undefined;
+    if (this.observing === "earlier" || (step !== undefined && !this.ownSteps.has(step))) return;
     const open = this.openTools.get(callId);
     this.openTools.delete(callId);
     const tool = open?.tool ?? openCodeToolNameWord(this.toolNames.get(callId) ?? "tool");
@@ -798,7 +865,7 @@ export class OpenCodeBridge {
     // this generation's to redo — unless the record shows the call in flight at
     // the death with its ask no longer pending: then it ran on a reply nobody
     // alive can be named for, and the run fails closed.
-    if (this.catchingUp) {
+    if (this.observing === "catching-up") {
       if (this.unattributableCalls.has(callId)) this.bypass(out, unattributableDetail(tool, callId));
       return;
     }
@@ -866,7 +933,7 @@ export class OpenCodeBridge {
     // and the echo that follows names its decision; for a call the record
     // shows in flight at the death, it was answered while the bot was away and
     // the echo that follows is the gate bypassed. Nothing is replied either way.
-    if (this.catchingUp && !this.pendingAtReattach.has(request.id)) {
+    if (this.observing === "catching-up" && !this.pendingAtReattach.has(request.id)) {
       const name = this.toolNames.get(callId) ?? request.action;
       const unattributable = !this.ledgerResults.has(callId) && !this.deps.relayedToolNames.has(name);
       if (unattributable) this.unattributableCalls.add(callId);
@@ -902,7 +969,7 @@ export class OpenCodeBridge {
     if (decided === undefined) {
       // A reply read while catching up whose ask sits before the row's offset
       // was the dead generation's exchange, vetted then; live, it is a forgery.
-      if (this.catchingUp) return;
+      if (this.observing === "catching-up") return;
       this.bypass(
         out,
         `a permission.replied for request ${requestID}, which the bot never decided — a reply the bot did not send (it raced the bot, or answered an ask the bot never saw)`,
@@ -1101,6 +1168,26 @@ function errorMessage(error: unknown): string {
 function statusOf(error: unknown): number | undefined {
   return isRecord(error) && typeof error.status === "number" ? error.status : undefined;
 }
+/** A `session.execution.failed`'s error as the budget test reads it: the status the proxy answered, when the server hands it on, and the words. */
+function failureOf(error: unknown): { status?: number; message: string } {
+  const status = statusOf(error);
+  return { ...(status !== undefined ? { status } : {}), message: errorMessage(error) };
+}
+
+/** The note for an execution failing that is not this loop's to settle on — an
+ *  earlier execution's tail (`earlier`) or the dead generation's
+ *  (`catching-up`): the proxy's turn-budget refusal by its own name, the
+ *  wind-down's trigger it was, never a failed model call. */
+function foreignFailureNote(whose: "earlier" | "catching-up", error: { status?: number; message: string }): string {
+  const words = redactAndCap(error.message, 400);
+  if (whose === "earlier")
+    return isBudgetRefusal(error)
+      ? `an earlier execution reached the proxy's turn budget (${words}); continuing`
+      : `a model call of an earlier execution failed (${words}); continuing`;
+  return isBudgetRefusal(error)
+    ? `the execution reached the proxy's turn budget while the bot was away (${words}); continuing`
+    : `a model call failed while the bot was away (${words}); continuing`;
+}
 
 /** The request's text — the seed's last user turn — as OpenCode's prompt. */
 export function openCodePromptText(messages: readonly ChatMessage[]): string {
@@ -1146,6 +1233,18 @@ export interface OpenCodeConnection {
    *  started (the survival clause): what the loop continues from instead of
    *  priming a rebuilt session. */
   reattach?: OpenCodeReattach;
+  /** Every store message id the harness knows the server holds — the
+   *  import's, a re-attach's store, the refills the loops before read, and the
+   *  message each steer this generation posted became (its answer names it) —
+   *  so a prompt the control plane's reset cut is told landed by a user message
+   *  with its text the loop did not know, and lost by none. Grown here as the
+   *  loop's own steers answer. */
+  knownMessageIds?: Set<string>;
+  /** The requests the loop posts and does not wait on (`post`: a steer, the
+   *  interrupt), each removed as it settles: the harness's `end()` joins them
+   *  after the kill that cuts the unanswered, so no answer can reach a record
+   *  the run has finished. */
+  posted?: Set<Promise<unknown>>;
 }
 
 /** What a re-attach found on the still-answering server and in its feed. */
@@ -1175,7 +1274,7 @@ export async function driveOpenCode(
    *  lease is the caller's carved minutes, it holds nothing back for a
    *  write-up, and it publishes no `lease` event — the loop's stands. */
   kind: "loop" | "turn" = "loop",
-): Promise<{ answer: string; remainingMs: () => number }> {
+): Promise<{ answer: string; remainingMs: () => number; storeIds: string[] }> {
   const now = () => deps.clock();
   const agentSpan = run.span?.start("run.agent");
   if (agentSpan) deps.bearers?.reparent(run.runId, agentSpan);
@@ -1328,19 +1427,28 @@ export async function driveOpenCode(
    *  server's own word and is a `harness_error` naming the request and the
    *  answer whenever it comes, the loop left or not — an interrupt the server
    *  refused was not sent as far as the record says; once the loop has left
-   *  it goes to the record alone, never to the card the ending closed (the
-   *  registry drops it once the run is finished). A request that failed on
-   *  its transport after the loop left is the caller's end of the process
-   *  cutting it — the interrupt an ending posted, reset by the kill that
-   *  follows — and says nothing the record does not already hold; the same
-   *  failure while the loop runs is noted. Measured against the pinned
-   *  binary: the interrupt answers 200 on an idle session too
+   *  it goes to the record alone, never to the card the ending closed. The
+   *  record is open for it: the run finishes only after the harness's `end()`,
+   *  which kills the server — cutting whatever has not answered — and returns
+   *  once every request posted here has settled (`OpenCodeConnection.posted`),
+   *  so no answer can come once the run is finished and the registry would
+   *  drop it. A request that failed on its transport after the loop left is
+   *  that kill cutting it and says nothing the record does not already hold;
+   *  the same failure while the loop runs is noted. Measured against the
+   *  pinned binary: the interrupt answers 200 on an idle session too
    *  (`{ interrupted: false }`), so an ending's interrupt after the execution
    *  ended by itself is no refusal. */
   const post = (what: string, route: { method: string; path: string }, body?: unknown) => {
-    void request(route, body).then(
+    const sent: Promise<void> = request(route, body).then(
       (res) => {
-        if (res.status >= 200 && res.status < 300) return;
+        if (res.status >= 200 && res.status < 300) {
+          // A steer's answer names the user message it became (measured): known
+          // from here, so a prompt the control plane's reset cuts is never told
+          // landed by a steer's row of the same text.
+          const id = parseMessageId(res.body);
+          if (id !== undefined) conn.knownMessageIds?.add(id);
+          return;
+        }
         const summary = `${what} did not reach the server: it answered ${res.status}${res.body.trim() ? ` (${redactAndCap(res.body, 200)})` : ""}`;
         if (left) emit({ type: "run_note", kind: "harness_error", summary });
         else note("harness_error", summary);
@@ -1353,6 +1461,8 @@ export async function driveOpenCode(
         );
       },
     );
+    conn.posted?.add(sent);
+    void sent.then(() => conn.posted?.delete(sent));
   };
   const startWriteUp = (w: WriteUp, instruction: string) => {
     writeUp = w;
@@ -1446,6 +1556,97 @@ export async function driveOpenCode(
     }
   };
 
+  let iterator = transport.lines[Symbol.asyncIterator]();
+  let pending: Promise<IteratorResult<string>> | undefined;
+  /** Re-attach to the still-live server in the container the run holds — the
+   *  resident's control plane reset under it, or a replaced word the server's
+   *  pid refuted (ask 2): a fresh tailer feed reader from the last
+   *  record boundary, so the same session continues, `relaunches` untouched. */
+  const reattachInPlace = (): void => {
+    // The old transport is closed so none of its queued reads land after the
+    // re-attach; the fresh one reads on from the last record boundary.
+    // The feed reader never writes on this transport, so nothing is unsent
+    // to carry over; the bridge's writes are HTTP requests of their own.
+    ({ transport } = reattachTransport(transport, {
+      container: conn.container,
+      paths: { ...conn.paths.tailer, log: conn.paths.feed },
+      pid: conn.tailerPid,
+      pollMs: deps.pollMs ?? 250,
+      sleep: deps.sleep,
+    }));
+    iterator = transport.lines[Symbol.asyncIterator]();
+    pending = undefined;
+  };
+  /** A write the resident's control plane reset under (`isControlReset`): the
+   *  container and the server are unchanged and the write's outcome is
+   *  unknown — never re-sent blind, since a write that landed would double (a
+   *  `queue` prompt runs the request twice). The feed is re-attached in place
+   *  under a `resumed` note; then the outcome is read off the server's own
+   *  state with an idempotent GET (the seam re-sends that once itself), and
+   *  the write re-issued only where the state says it never landed; a state
+   *  that cannot be read, or a re-issue that meets the reset again, fails the
+   *  run by name. OpenCode's counterpart of pi's echo (harness-pi item 16). */
+  const resetUnder = (): void => {
+    note("resumed", CONTROL_RESET_RESUMED_NOTE);
+    reattachInPlace();
+  };
+  /** Whether a `queue` prompt the reset cut landed. The store is read whole,
+   *  page by page (`readSessionStore`: `order=asc&limit=200`, the cursor
+   *  followed — measured against the pinned binary, whose default page is 50
+   *  rows newest first, so one unqueried page misses a landed prompt on a
+   *  long session), after every request this generation posted and did not
+   *  wait on has answered (`conn.posted`) — a steer's answer names the message
+   *  it became. Measured too: the store lists a `queue` prompt's user message
+   *  the moment the prompt is admitted, before its execution starts. So a user
+   *  message carrying the prompt's text that the loop did not know the store to
+   *  hold (`conn.knownMessageIds`: the import's, a re-attach's store, the
+   *  refills the loops before read, the steers posted) is the prompt landed,
+   *  and none is the prompt lost. A store that cannot be read whole leaves the
+   *  outcome unresolved. */
+  const promptLanded = async (text: string, what: string): Promise<boolean> => {
+    await Promise.allSettled([...(conn.posted ?? [])]);
+    const read = await readSessionStore((path) => request({ method: "GET", path }), conn.sessionID).catch(
+      (err: unknown): { ok: false; why: string } => ({
+        ok: false,
+        why: `the store could not be listed: ${redactAndCap(err instanceof Error ? err.message : String(err), 200)}`,
+      }),
+    );
+    if (!read.ok) throw new OpenCodeWriteUnresolvedError(what, read.why);
+    const known = conn.knownMessageIds ?? new Set<string>();
+    return read.messages.some((m) => m.type === "user" && !known.has(m.id) && (m as { text?: unknown }).text === text);
+  };
+  /** A gate reply the reset cut, resolved from the pending asks: still pending,
+   *  re-issued once (a 404 then is the ask dropped meanwhile — the binary's
+   *  interrupt — and decides nothing); gone, landed. The failure, if any. */
+  const resolveReplyAfterReset = async (
+    route: { method: string; path: string },
+    body: unknown,
+    requestID: string,
+  ): Promise<{ status: number } | Error | undefined> => {
+    const what = `the gate's reply for request ${requestID}`;
+    let listed: HarnessResponse;
+    try {
+      listed = await request(sessionRoutes["session.permission.list"]);
+    } catch (err) {
+      return new OpenCodeWriteUnresolvedError(
+        what,
+        `the pending asks could not be listed: ${redactAndCap(err instanceof Error ? err.message : String(err), 200)}`,
+      );
+    }
+    if (listed.status < 200 || listed.status >= 300)
+      return new OpenCodeWriteUnresolvedError(what, `the pending-asks listing answered ${listed.status}`);
+    if (!(parsePermissionList(listed.body) ?? []).some((ask) => ask.id === requestID)) return undefined;
+    try {
+      const res = await request(route, body);
+      if (res.status === 404) return undefined;
+      if (res.status < 200 || res.status >= 300) return { status: res.status };
+      return undefined;
+    } catch (again) {
+      if (again instanceof Error && isControlReset(again))
+        return new OpenCodeWriteUnresolvedError(what, "the re-issued reply met the reset again");
+      return again instanceof Error ? again : new Error(String(again));
+    }
+  };
   /** The bridge's replies posted, `once` or `reject`. A reply that does not
    *  land — the request threw, or the server answered outside 2xx — stops the
    *  run, fail closed: the ask is still pending, so the tool has not run and
@@ -1454,14 +1655,21 @@ export async function driveOpenCode(
   const postReplies = async (obs: OpenCodeBridgeObservation): Promise<OpenCodeReplyFailedError | undefined> => {
     for (const reply of obs.replies) {
       let failure: { status: number } | Error | undefined;
+      const route = openCodePermissionReplyRoute(conn.sessionID, reply.requestID);
+      const body = { reply: reply.reply, ...(reply.message ? { message: reply.message } : {}) };
       try {
-        const res = await request(openCodePermissionReplyRoute(conn.sessionID, reply.requestID), {
-          reply: reply.reply,
-          ...(reply.message ? { message: reply.message } : {}),
-        });
+        const res = await request(route, body);
         if (res.status < 200 || res.status >= 300) failure = { status: res.status };
       } catch (err) {
-        failure = err instanceof Error ? err : new Error(String(err));
+        if (err instanceof Error && isControlReset(err)) {
+          // The reset cut the reply's answer: the server's own state says
+          // whether it landed. The ask still pending, it did not, and is
+          // re-issued once; the ask gone, it did — or the interrupt dropped the
+          // ask (the binary's way; a reply to it answers 404, the answer, not a
+          // failure). Never re-sent blind.
+          resetUnder();
+          failure = await resolveReplyAfterReset(route, body, reply.requestID);
+        } else failure = err instanceof Error ? err : new Error(String(err));
       }
       if (failure !== undefined) {
         replyFailed = new OpenCodeReplyFailedError(reply.requestID, reply.callId, reply.reply, failure);
@@ -1501,38 +1709,46 @@ export async function driveOpenCode(
     // bound; a `steer` (a re-attach into an execution under way) lands at
     // that execution's next step boundary and is not bounded here.
     const delivery = conn.reattach?.delivery ?? "queue";
-    const admitted = await request(sessionRoutes["session.prompt"], {
+    const promptName = `the ${promptPhase}`;
+    const promptBody = {
       text: run.resume !== undefined ? CONTINUE_PROMPT : openCodePromptText(run.messages),
       delivery,
-    });
-    if (admitted.status < 200 || admitted.status >= 300) {
+    };
+    let admitted: HarnessResponse | "landed";
+    try {
+      admitted = await request(sessionRoutes["session.prompt"], promptBody);
+    } catch (err) {
+      if (!(err instanceof Error && isControlReset(err))) throw err;
+      resetUnder();
+      try {
+        if (delivery === "steer") {
+          // The re-attach's continue steered into an execution under way: pi's
+          // rule for a steer — never re-sent. The execution it nudged runs on
+          // to its end and the loop reads it there; a doubled continue would
+          // land twice as the model's next input.
+          admitted = "landed";
+        } else if (await promptLanded(promptBody.text, promptName)) admitted = "landed";
+        else {
+          try {
+            admitted = await request(sessionRoutes["session.prompt"], promptBody);
+          } catch (again) {
+            if (!(again instanceof Error && isControlReset(again))) throw again;
+            throw new OpenCodeWriteUnresolvedError(promptName, "the re-issued prompt met the reset again");
+          }
+        }
+      } catch (unresolved) {
+        if (unresolved instanceof OpenCodeWriteUnresolvedError)
+          note("harness_error", `${unresolved.message} — the run is stopped`);
+        throw unresolved;
+      }
+    }
+    if (admitted !== "landed" && (admitted.status < 200 || admitted.status >= 300)) {
       refused = new OpenCodeRequestRefusedError(promptPhase, admitted.status, admitted.body);
       note("harness_error", `${refused.message} — the run is stopped`);
       throw refused;
     }
-    if (delivery === "queue") awaiting = { phase: `the ${promptPhase}`, since: now() };
+    if (delivery === "queue") awaiting = { phase: promptName, since: now() };
     check();
-    let iterator = transport.lines[Symbol.asyncIterator]();
-    let pending: Promise<IteratorResult<string>> | undefined;
-    /** Re-attach to the still-live server in the container the run holds — the
-     *  resident's control plane reset under it, or a replaced word the server's
-     *  pid refuted (ask 2): a fresh tailer feed reader from the last
-     *  record boundary, so the same session continues, `relaunches` untouched. */
-    const reattachInPlace = (): void => {
-      // The old transport is closed so none of its queued reads land after the
-      // re-attach; the fresh one reads on from the last record boundary.
-      // The feed reader never writes on this transport, so nothing is unsent
-      // to carry over; the bridge's writes are HTTP requests of their own.
-      ({ transport } = reattachTransport(transport, {
-        container: conn.container,
-        paths: { ...conn.paths.tailer, log: conn.paths.feed },
-        pid: conn.tailerPid,
-        pollMs: deps.pollMs ?? 250,
-        sleep: deps.sleep,
-      }));
-      iterator = transport.lines[Symbol.asyncIterator]();
-      pending = undefined;
-    };
     /** A runaway guard on in-place re-attaches with no record read between them (harness-pi item 16). */
     let reattaches = 0;
     for (; ended === undefined;) {
@@ -1619,8 +1835,7 @@ export async function driveOpenCode(
       // Whose records these are, told to the bridge before it reads them: the
       // dead generation's (catching up on a re-attach), an earlier execution's
       // (before the loop's own has started), or the loop's own.
-      bridge.catchingUp = reattachCatchUp;
-      bridge.observing = executionOwned || reattachCatchUp ? "own" : "earlier";
+      bridge.observing = reattachCatchUp ? "catching-up" : executionOwned ? "own" : "earlier";
       const obs = bridge.observe(record);
       if (record.feed === "messages" && conn.saveOffset !== undefined) {
         const save = conn.saveOffset;
@@ -1632,12 +1847,11 @@ export async function driveOpenCode(
         post("the interrupt", sessionRoutes["session.interrupt"]);
         break;
       }
-      if (bridge.catchingUp) {
+      if (bridge.observing === "catching-up") {
         // The dead generation's execution ending, failing or hitting the budget
         // while the bot was away is a fact of the death, not this generation's
-        // settle: said where it failed, and the run goes on to its own end.
-        if (obs.providerError !== undefined)
-          note("harness_error", `a model call failed while the bot was away (${obs.providerError}); continuing`);
+        // settle: the bridge said it where it failed, and the run goes on to
+        // its own end.
         check();
         continue;
       }
@@ -1743,7 +1957,9 @@ export async function driveOpenCode(
     throw silent;
   }
   const remaining = () => deadline - now();
-  if (ended === "hard") return { answer: HARD_STOP_MESSAGE, remainingMs: remaining };
+  // What the next turn on this session inherits: the store as this loop knew it.
+  const handOver = () => ({ storeIds: bridge.storeIds() });
+  if (ended === "hard") return { answer: HARD_STOP_MESSAGE, remainingMs: remaining, ...handOver() };
   if (providerError !== undefined) throw new Error(`the model call failed: ${providerError}`);
   if (!settled && ended !== "finale") throw new Error("the OpenCode run ended before its execution settled");
   // Every refill the loop saw has landed as its steps, and the last text-only
@@ -1751,7 +1967,7 @@ export async function driveOpenCode(
   await bridge.flush();
   const text = bridge.answer() ?? "";
   const answer = writeUpAnswer(writeUp, text, run.agent.maxMinutes, writeUpFailed);
-  return { answer, remainingMs: remaining };
+  return { answer, remainingMs: remaining, ...handOver() };
 }
 
 /** The wind-downs that steer a write-up, and what each labels the answer with. */

@@ -879,20 +879,23 @@ describe("the loop — a refused request, a silent server, and a hung turn", () 
   });
 });
 
-// Feature: docs/reference/specs/harness.md item 13 — the bridge's `observing`
-// mode: before the loop's own execution has started, the feed is an earlier
-// execution's tail, and the bridge in `earlier` mode decides nothing of it —
-// no reply, no bypass, no settle, no tool event on the record — while the
-// store's refills still feed the mirror, a failure is noted as the earlier
-// execution's (the proxy's turn-budget refusal by its own name), and the
-// records that carry no decision — a tailer note, an event kind no table
-// names — are surfaced as in every mode.
-describe("the bridge in earlier mode — an earlier execution's tail is not this loop's to decide", () => {
+// Feature: docs/reference/specs/harness.md item 13 — the bridge's one
+// `observing` mode: `own` decides; `earlier` reads an earlier execution's tail
+// (before the loop's own execution has started) and decides nothing of it — no
+// reply, no bypass, no settle, no tool event; a settle is set aside whenever it
+// lands, own mode included, when its `assistantMessageID` names a step this
+// loop never saw start — an earlier execution's by construction; `catching-up`
+// reads the feed a dead generation already read. In every mode the record's
+// own state lands (a compaction row, the store's refills) and what carries no
+// decision is surfaced (a tailer note, an unknown kind, a failure said as whose
+// it was — the proxy's turn-budget refusal by its own name).
+describe("the bridge's observing mode — an earlier execution's tail is not this loop's to decide", () => {
   const earlier = () => {
     const h = harness();
     h.bridge.observing = "earlier";
     return h;
   };
+  const toolEvents = (events: RunEvent[]) => events.filter((e) => e.type === "tool_call" || e.type === "tool_result");
 
   it("an ask is not replied to and a tool that settles with no decision is no bypass; neither reaches the record as a tool event", () => {
     const { bridge, events } = earlier();
@@ -904,8 +907,68 @@ describe("the bridge in earlier mode — an earlier execution's tail is not this
       ev("session.tool.success", { sessionID: "ses_c", id: "c-old", content: [], executed: true }),
     );
     expect(settled.bypass).toBeUndefined();
-    expect(events.filter((e) => e.type === "tool_call" || e.type === "tool_result")).toEqual([]);
+    expect(toolEvents(events)).toEqual([]);
     expect(notes(events).filter((n) => n.kind === "tool_refused" || n.kind === "harness_error")).toEqual([]);
+  });
+
+  it("a call of the tail's step that settles only once the loop's own execution has started is that execution's still: set aside in own mode, no bypass, no tool event", () => {
+    const { bridge, events } = earlier();
+    bridge.observe(ev("session.step.started", { sessionID: "ses_c", assistantMessageID: "msg_old", agent: "x" }));
+    bridge.observe(
+      ev("session.tool.input.started", {
+        sessionID: "ses_c",
+        assistantMessageID: "msg_old",
+        id: "c-old",
+        name: "shell",
+      }),
+    );
+    bridge.observing = "own";
+    const late = bridge.observe(
+      ev("session.tool.success", {
+        sessionID: "ses_c",
+        assistantMessageID: "msg_old",
+        id: "c-old",
+        content: [{ type: "text", text: "slept" }],
+        executed: true,
+      }),
+    );
+    expect(late.bypass).toBeUndefined();
+    expect(toolEvents(events)).toEqual([]);
+    expect(notes(events).filter((n) => n.kind === "harness_error")).toEqual([]);
+  });
+
+  it("a settle whose step this loop never saw start — an earlier execution's, landing however late, no hand-over needed — is set aside in own mode, while a settle of the loop's own step with no decision is still the bypass it always was", () => {
+    const { bridge, events } = harness();
+    const prev = bridge.observe(
+      ev("session.tool.success", {
+        sessionID: "ses_c",
+        assistantMessageID: "msg_prev",
+        id: "c-prev",
+        content: [{ type: "text", text: "slept" }],
+        executed: true,
+      }),
+    );
+    expect(prev.bypass).toBeUndefined();
+    expect(toolEvents(events)).toEqual([]);
+    bridge.observe(ev("session.step.started", { sessionID: "ses_c", assistantMessageID: "msg_own", agent: "x" }));
+    bridge.observe(
+      ev("session.tool.input.started", {
+        sessionID: "ses_c",
+        assistantMessageID: "msg_own",
+        id: "c-new",
+        name: "shell",
+      }),
+    );
+    const undecided = bridge.observe(
+      ev("session.tool.success", {
+        sessionID: "ses_c",
+        assistantMessageID: "msg_own",
+        id: "c-new",
+        content: [],
+        executed: true,
+      }),
+    );
+    expect(undecided.bypass?.message).toMatch(/call c-new\) with no ask the bot answered/);
   });
 
   it("a settle, an interrupt and a permissions refill decide nothing; a failure is noted as an earlier execution's, the proxy's turn-budget refusal by its own name", () => {
@@ -935,12 +998,22 @@ describe("the bridge in earlier mode — an earlier execution's tail is not this
     ]);
   });
 
-  it("what carries no decision is surfaced as in every mode: a tailer note on the card, an unknown event kind as a harness_error; a messages refill still feeds the mirror", async () => {
+  it("what carries no decision is surfaced as in every mode — a tailer note on the card, an unknown event kind as a harness_error, a compaction as its note and its row, a failed compaction and a scheduled retry as notes — while the aborted execution's failed step is not said again, and a messages refill still feeds the mirror", async () => {
     const { bridge, events, progress, steps } = earlier();
     bridge.observe({ feed: "tailer", at: NOW, note: "stream closed" });
     expect(progress).toContain("opencode feed: stream closed");
     bridge.observe(ev("made_up_kind", { sessionID: "ses_c" }));
     expect(notes(events).some((n) => n.kind === "harness_error" && /made_up_kind/.test(n.summary))).toBe(true);
+    bridge.observe(
+      ev("session.compaction.ended", { sessionID: "ses_c", reason: "auto", text: "the earlier turns, summarised" }),
+    );
+    bridge.observe(ev("session.compaction.failed", { sessionID: "ses_c", error: { message: "no room" } }));
+    bridge.observe(ev("session.retry.scheduled", { sessionID: "ses_c", error: { message: "429" } }));
+    bridge.observe(
+      ev("session.step.failed", { sessionID: "ses_c", error: { type: "aborted", message: "Step interrupted" } }),
+    );
+    expect(notes(events).map((n) => n.kind)).toEqual(["harness_error", "compacted", "harness_error", "harness_error"]);
+    expect(notes(events).some((n) => /step failed/.test(n.summary))).toBe(false);
     bridge.observe({
       feed: "messages",
       at: NOW,
@@ -959,8 +1032,32 @@ describe("the bridge in earlier mode — an earlier execution's tail is not this
       ],
     });
     await bridge.flush();
-    expect(steps).toHaveLength(1);
+    expect(steps.some((s) => s.compaction?.summary === "the earlier turns, summarised")).toBe(true);
     expect(bridge.answer()).toBe("earlier answer");
+  });
+
+  it("catching up on a dead generation's feed, its execution failing is history the bridge says — a model call failed while the bot was away, or the proxy's turn budget reached while the bot was away — never this generation's settle, and its step is closed", () => {
+    const { bridge, events } = harness();
+    bridge.observing = "catching-up";
+    bridge.observe(ev("session.step.started", { sessionID: "ses_c", assistantMessageID: "msg_dead", agent: "x" }));
+    expect(bridge.doingNow()).toBe(MODEL_CALL_IN_FLIGHT);
+    const failed = bridge.observe(
+      ev("session.execution.failed", { sessionID: "ses_c", error: { message: "the proxy answered 400" } }),
+    );
+    expect(failed.settled).toBe(false);
+    expect(failed.providerError).toBeUndefined();
+    expect(bridge.doingNow()).toBeUndefined();
+    const budget = bridge.observe(
+      ev("session.execution.failed", {
+        sessionID: "ses_c",
+        error: { status: 403, message: "403 turn_budget_exhausted: the run is past its 60-turn guard" },
+      }),
+    );
+    expect(budget.budgetStop).toBeUndefined();
+    expect(notes(events).map((n) => n.summary)).toEqual([
+      "a model call failed while the bot was away (the proxy answered 400); continuing",
+      "the execution reached the proxy's turn budget while the bot was away (403 turn_budget_exhausted: the run is past its 60-turn guard); continuing",
+    ]);
   });
 });
 
