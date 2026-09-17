@@ -1,6 +1,7 @@
 import { LINEAR_TIMING } from "../../core/budgets.js";
 import { contentTypeFor } from "../../artifacts/contentType.js";
 import type { WorkItemRequest, WorkItemResult } from "../../core/workItems.js";
+import { linearPerson, linearTeamAllows } from "./access.js";
 import { linearWorkItems, type LinearWorkItemActor } from "./workItems.js";
 
 export interface LinearUpload {
@@ -39,6 +40,7 @@ export interface LinearActivity {
 
 /** Bound to one installation. Implementations keep its token at the edge. */
 export interface LinearApi {
+  canRead(sessionId: string, userId: string): Promise<boolean>;
   session(id: string): Promise<LinearSession>;
   activities(sessionId: string): Promise<LinearActivity[]>;
   activity(sessionId: string, content: LinearContent, options?: { ephemeral?: boolean; id?: string }): Promise<void>;
@@ -84,6 +86,38 @@ export class DirectLinearApi implements LinearApi {
       fetch: typeof fetch;
     },
   ) {}
+
+  async canRead(sessionId: string, userId: string): Promise<boolean> {
+    const data = await this.query(
+      `query SwitchboardSessionAccess($id: String!) {
+      organization { id }
+      agentSession(id: $id) { id dismissedAt appUser { id }
+        issue { team { id visibility restrictedBy { id } } } }
+    }`,
+      { id: sessionId },
+    );
+    const session = object(data.agentSession);
+    if (
+      object(data.organization).id !== this.deps.organizationId ||
+      session.id !== sessionId ||
+      object(session.appUser).id !== this.deps.appUserId ||
+      session.dismissedAt
+    )
+      return false;
+    // Other mention surfaces need their own visibility facts before their context can run.
+    const team = object(object(session.issue).team);
+    if (!string(team.id)) return false;
+    try {
+      const person = await linearPerson(
+        { organizationId: this.deps.organizationId, appUserId: this.deps.appUserId, query: this.query.bind(this) },
+        { id: userId, actions: [] },
+      );
+      return linearTeamAllows(person, "conversation:read", team);
+    } catch (error) {
+      if (error instanceof Error && error.message === "linear_human_required") return false;
+      throw error;
+    }
+  }
 
   workItems(_sessionId: string, actor: LinearWorkItemActor, input: WorkItemRequest): Promise<WorkItemResult> {
     return linearWorkItems(

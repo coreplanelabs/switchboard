@@ -9288,6 +9288,26 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     expect(deps.admission!.size).toBe(0);
   });
 
+  it("reports an unconsumed follow-up that cannot restart while its access lookup is unavailable", async () => {
+    const registry = new RunRegistry({ genId: () => "r1", genToken: () => "t" });
+    const { provider, requests, firstStarted, settle } = gatedProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.admission = new ThreadAdmission();
+    const first = fakeIO();
+    const run = dispatch(deps, threadMsg("write the report"), first.io);
+    await firstStarted;
+    const second = fakeIO();
+    second.io.checkAccess = vi.fn().mockResolvedValueOnce(true).mockRejectedValue(new Error("offline"));
+    await dispatch(deps, threadMsg("and also the numbers"), second.io);
+    await foldedIn(registry, "r1", "and also the numbers");
+    settle().fail(new Error("provider exploded"));
+    await run;
+    expect(requests).toHaveLength(1);
+    expect(second.replies.at(-1)).toContain("has not started");
+    expect(second.replies.at(-1)).toContain("send it again");
+  });
+
   it("after an operator stop, an unconsumed follow-up is not run — its sender is told the run was stopped before reading it", async () => {
     let ids = 0;
     const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
@@ -9403,6 +9423,96 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     };
     return { io, replies };
   }
+
+  it("rechecks restored channel access: denials close rows and outages leave them reclaimable", async () => {
+    for (const kind of ["resume", "restart"] as const)
+      for (const temporary of [false, true]) {
+        const ledger = new InMemoryRunLedger(() => 10_000);
+        await ledger.claim({
+          runId: "old",
+          threadKey: "slack:CX:1.0",
+          gen: "gen-OLD",
+          leaseMs: 30_000,
+          startedAt: 5_000,
+          phase: kind === "restart" ? "attaching" : "live",
+          meta: {
+            channelId: "slack:CX",
+            userId: "slack:UX",
+            threadKey: "slack:CX:1.0",
+            agent: "general",
+            model: "anthropic/general-model",
+          },
+          system: "stored prompt",
+          tools: [],
+        });
+        const messages: ChatMessage[] = [{ role: "user", content: [{ type: "text", text: "hello" }] }];
+        if (kind === "resume") {
+          await ledger.seed("old", "gen-OLD", [{ idx: 0, message: messages[0]! }]);
+          await ledger.step(
+            "old",
+            "gen-OLD",
+            {
+              step: 0,
+              seq: 0,
+              turnIndex: 1,
+              inFlight: [],
+              inboxConsumedSeq: 0,
+              remainingMs: 300_000,
+              turn: 0,
+              iteration: 0,
+            },
+            [],
+          );
+        }
+        ledger.live.get("old")!.leaseUntil = 0;
+        const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+        const provider = capturingProvider("must not run");
+        const { deps, writer } = wired(provider, { ledger });
+        const { io, replies } = ioWithCard();
+        io.history = vi.fn(async () => []);
+        io.checkAccess = vi.fn(async () => {
+          if (temporary) throw new Error("offline");
+          return false;
+        });
+        let options: Parameters<typeof dispatch>[3];
+        if (kind === "restart") options = { restart: { row: reclaimed.row, inbox: [] } };
+        else {
+          const plan = planResume({
+            transcript: { complete: true, compactions: [], turns: 1, messages },
+            lastStep: reclaimed.lastStep!,
+            tools: knownToolsFor(getAgent("general")),
+          });
+          if (plan.kind !== "resume") throw new Error(plan.kind);
+          options = {
+            resume: {
+              row: reclaimed.row,
+              lastStep: reclaimed.lastStep!,
+              plan,
+              events: [],
+              lastSeq: 0,
+              repoCtx: {},
+              inbox: [],
+            },
+          };
+        }
+        const outcome = await dispatch(deps, msg("hello"), io, options);
+        await writer.settled();
+        expect(io.history).not.toHaveBeenCalled();
+        expect(provider.requests).toHaveLength(0);
+        expect(io.checkAccess).toHaveBeenCalledWith("slack:UX");
+        if (temporary) {
+          expect(outcome).toMatchObject({ deferred: true });
+          expect(replies).toEqual([]);
+          expect(ledger.finished.has("old")).toBe(false);
+          expect((await ledger.reclaim("gen-next", 40_001, 30_000)).map((r) => r.row.runId)).toEqual(["old"]);
+        } else {
+          expect(outcome).toEqual({ status: "refused", refusal: "channel_access" });
+          expect(ledger.live.has("old")).toBe(false);
+          expect(ledger.finished.get("old")?.status).toBe("interrupted");
+          expect(replies).toHaveLength(1);
+        }
+      }
+  });
 
   it("claims the run once its prompt exists (system, tools, card, meta, seed), records each step before its tools, appends events, takes finishing before the reply and finishes through the ledger", async () => {
     const seen: {
@@ -15510,5 +15620,39 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
     const res = await pending;
     expect(res.outcome).toEqual({ status: "completed" });
     expect(activeRunCount()).toBe(0);
+  });
+});
+
+describe("current channel access before dispatch", () => {
+  it("refuses revoked access before commands, history, admission or model work", async () => {
+    for (const text of ["help", "write a report"]) {
+      const provider = capturingProvider("never");
+      const deps = makeDeps(YAML_FIXTURE, provider);
+      deps.admission = new ThreadAdmission();
+      const { io, replies } = fakeIO();
+      io.checkAccess = vi.fn(async () => false);
+      io.history = vi.fn(async () => []);
+      const outcome = await dispatch(deps, msg(text), io);
+      expect(outcome).toEqual({ status: "refused", refusal: "channel_access" });
+      expect(io.checkAccess).toHaveBeenCalledWith("slack:UX");
+      expect(io.history).not.toHaveBeenCalled();
+      expect(provider.requests).toHaveLength(0);
+      expect(deps.invoked).toEqual([]);
+      expect(deps.admission.size).toBe(0);
+      expect(replies).toEqual([expect.stringContaining("access to this conversation")]);
+    }
+  });
+  it("defers a failed access lookup without answering or consuming the request", async () => {
+    const provider = capturingProvider("allowed");
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const { io, replies } = fakeIO();
+    io.checkAccess = vi.fn().mockRejectedValueOnce(new Error("unavailable")).mockResolvedValue(true);
+    io.history = vi.fn(async () => []);
+    expect(await dispatch(deps, msg("write a report"), io)).toMatchObject({ deferred: true });
+    expect(io.history).not.toHaveBeenCalled();
+    expect(provider.requests).toHaveLength(0);
+    expect(replies).toEqual([]);
+    expect(await dispatch(deps, msg("write a report"), io)).not.toHaveProperty("deferred");
+    expect(replies).toEqual(["allowed"]);
   });
 });

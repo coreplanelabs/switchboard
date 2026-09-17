@@ -73,9 +73,17 @@ Every operation refreshes the person's team membership and public-team access.
 Even an administrator's Switchboard grant does not bypass Linear's private-team
 boundary. Subissue creation does not automatically delegate another run.
 
+Before a command, queued prompt or restored run starts, Switchboard checks the
+requester's current access to the session's issue team. Removed membership or an
+inactive account prevents execution. Temporary lookup failures keep queued and
+restored work available for retry. Sessions outside issues are not yet supported:
+their document or project visibility must be verified before their context can run.
+
 When a session already has an active run, its original requester can steer it.
 Another person’s prompt waits in the durable queue and starts a new turn under
 that person’s grants after the active run finishes. Stop bypasses waiting prompts.
+If a run fails with an unread follow-up and its next turn cannot check access,
+Switchboard reports that the follow-up has not started and asks you to resend it.
 
 Native Stop lets a person cancel their own active work through the shared
 `runs:stop` policy. Stopping another person's work requires `runs:write` and

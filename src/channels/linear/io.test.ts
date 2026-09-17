@@ -6,6 +6,7 @@ function fixture() {
   let now = 100;
   const api: LinearApi = {
     workItems: vi.fn(),
+    canRead: vi.fn(async () => true),
     upload: vi.fn(),
     session: vi.fn(),
     activities: vi.fn(async () => []),
@@ -23,6 +24,12 @@ function fixture() {
 }
 
 describe("Linear channel output", () => {
+  it("checks access for the transport requester on the bound session", async () => {
+    const { api, io } = fixture();
+    vi.mocked(api.canRead).mockResolvedValueOnce(false);
+    expect(await io.checkAccess("linear:org:person")).toBe(false);
+    expect(api.canRead).toHaveBeenCalledWith("s", "linear:org:person");
+  });
   it("acknowledges a steered follow-up without announcing that the active run has completed", async () => {
     const { api, io } = fixture();
     await io.acknowledge("Your follow-up reached the active run.");

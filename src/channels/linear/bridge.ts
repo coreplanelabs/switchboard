@@ -63,6 +63,9 @@ export class RemoteLinearApi implements LinearApi {
     private readonly transport: LinearTransport,
     private readonly organizationId: string,
   ) {}
+  canRead(sessionId: string, userId: string): Promise<boolean> {
+    return call(this.transport, { op: "canRead", organizationId: this.organizationId, sessionId, userId });
+  }
   session(sessionId: string): Promise<LinearSession> {
     return call(this.transport, { op: "session", organizationId: this.organizationId, sessionId });
   }
@@ -179,6 +182,7 @@ export async function handleLinearBridge(
       "defer",
       "complete",
       "session",
+      "canRead",
       "activities",
       "activity",
       "link",
@@ -204,6 +208,7 @@ export async function handleLinearBridge(
     else {
       const api = await deps.api(required(body.organizationId)),
         id = required(body.sessionId);
+      if (op === "canRead") return answer(200, { result: await api.canRead(id, required(body.userId)) });
       // Every operation proves ownership and current access again. A guessed
       // session id cannot make the bridge read a different app's conversation.
       const session = await api.session(id);

@@ -229,12 +229,15 @@ describe("spawnChild — the one path a child run is born through", () => {
       acknowledged.push(text);
     };
     ch.childIo.isolateFollowUps = true;
+    ch.childIo.checkAccess = async (id) => id === PARENT_MSG.userId;
     ch.childIo.workItems = (actor) => {
       actorIds.push(actor.id);
       return { request: async () => ({ items: [] }) };
     };
     const { dispatch } = fakeDispatch(async (_msg, io) => {
       expect(io.isolateFollowUps).toBe(true);
+      expect(await io.checkAccess?.(PARENT_MSG.userId)).toBe(true);
+      expect(await io.checkAccess?.("another-person")).toBe(false);
       await io.acknowledge?.("Still working");
       const actor = {
         kind: "user" as const,

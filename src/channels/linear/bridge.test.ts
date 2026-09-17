@@ -7,6 +7,7 @@ function fixture() {
   const inbox = new InMemoryLinearInbox();
   const api: LinearApi = {
     workItems: vi.fn(),
+    canRead: vi.fn(async () => true),
     upload: vi.fn(),
     session: vi.fn(async (id) => ({ id, appUserId: "bot" })),
     activities: vi.fn(async () => []),
@@ -19,6 +20,16 @@ function fixture() {
 }
 
 describe("Linear edge bridge", () => {
+  it("relays a requester access verdict and preserves lookup failure as retryable", async () => {
+    const { api, transport } = fixture();
+    const remote = new RemoteLinearApi(transport, "org");
+    vi.mocked(api.canRead).mockResolvedValueOnce(false);
+    expect(await remote.canRead("s", "linear:org:person")).toBe(false);
+    expect(api.canRead).toHaveBeenCalledWith("s", "linear:org:person");
+    expect(api.session).not.toHaveBeenCalled();
+    vi.mocked(api.canRead).mockRejectedValueOnce(new Error("rate limited"));
+    await expect(remote.canRead("s", "linear:org:person")).rejects.toThrow("linear_bridge_unavailable");
+  });
   it("round-trips a fenced no-effects deferral and refuses one after a run binding", async () => {
     const { inbox, transport, deps } = fixture();
     await inbox.accept({

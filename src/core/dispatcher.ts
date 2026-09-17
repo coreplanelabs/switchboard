@@ -24,6 +24,7 @@ import {
   type RestartContext,
   type ResumeContext,
 } from "./dispatch/admission.js";
+import { checkChannelAccess } from "./dispatch/channelAccess.js";
 import { answerChatCommand, type FastPathDeps } from "./dispatch/fastPath.js";
 import { actorIdsOf, cancelPending, consumeAndRun } from "./dispatch/confirm.js";
 import { postSettledOutcome } from "./dispatch/commandRun.js";
@@ -347,6 +348,21 @@ export async function dispatch(
     },
   };
   try {
+    if (io.checkAccess) {
+      const access = await root.span("dispatch.channel_access", () =>
+        checkChannelAccess(deps.runLedger, { msg, io, resume, restart }),
+      );
+      if (access === "retry") {
+        ended.deferred = true;
+        return ended;
+      }
+      if (access === "deny") {
+        await refuse("channel_access", () =>
+          io.reply("I can’t start work here because your access to this conversation could not be verified."),
+        );
+        return ended;
+      }
+    }
     // Stage A (dispatch/fastPath.ts): a message that names a registered chat
     // command is answered inline — never a model turn, and before the history
     // fetch, so a command costs none.
@@ -1399,18 +1415,32 @@ export async function dispatch(
         ...(restartRequest.restartOf !== undefined ? { restartOf: restartRequest.restartOf } : {}),
         ...(restartRequest.coordinator !== undefined ? { coordinator: restartRequest.coordinator } : {}),
       });
-      await dispatch(deps, restart.msg, io, restart.opts).catch((err: unknown) =>
-        console.error(
-          `[dispatch] ${msg.threadKey} restart from the request failed: ${err instanceof Error ? err.message : String(err)}`,
-        ),
-      );
+      await dispatch(deps, restart.msg, io, restart.opts)
+        .then(async (outcome) => {
+          if (outcome.deferred)
+            await io.reply(
+              "The request has not started because access could not be checked. Please send it again to retry.",
+            );
+        })
+        .catch((err: unknown) =>
+          console.error(
+            `[dispatch] ${msg.threadKey} restart from the request failed: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
     } else if (settled.kind === "handed-on") {
       const fresh = prepareFreshTurn(deps, { agent: settled.agent, pending: settled.pending, clock });
-      await dispatch(deps, fresh.msg, fresh.io, fresh.opts).catch((err: unknown) =>
-        console.error(
-          `[dispatch] ${msg.threadKey} fresh turn for unconsumed follow-ups failed: ${err instanceof Error ? err.message : String(err)}`,
-        ),
-      );
+      await dispatch(deps, fresh.msg, fresh.io, fresh.opts)
+        .then(async (outcome) => {
+          if (outcome.deferred)
+            await fresh.io.reply(
+              "The follow-up has not started because access could not be checked. Please send it again to retry.",
+            );
+        })
+        .catch((err: unknown) =>
+          console.error(
+            `[dispatch] ${msg.threadKey} fresh turn for unconsumed follow-ups failed: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
     }
     // A reservation never promoted (item 42): the dispatch ended before its
     // prompt existed — a refusal after the reserve, an attach that failed, a

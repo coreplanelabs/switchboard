@@ -40,6 +40,10 @@ export class LinearChannelIO implements ChannelIO {
     },
   ) {}
 
+  checkAccess(userId: string): Promise<boolean> {
+    return this.deps.api.canRead(this.deps.sessionId, userId);
+  }
+
   workItems(actor: Actor): WorkItems {
     const actions = effectiveGrants(actor).actions;
     const identity = { id: actor.id, actions: actions === "all" ? ("all" as const) : [...actions] };

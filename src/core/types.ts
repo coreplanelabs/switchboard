@@ -245,6 +245,9 @@ export interface ConfirmationOffer {
 }
 
 export interface ChannelIO {
+  /** Refresh platform access before reading context or running a command.
+   * False refuses the request; a failed lookup defers it for durable retry. */
+  checkAccess?(userId: string): Promise<boolean>;
   /** Queue another requester's follow-up until it can run with their own grants.
    * The adapter must durably retry a dispatch that returns `deferred`. */
   isolateFollowUps?: boolean;

@@ -5,7 +5,7 @@ Its OAuth app is the API identity; the dispatch actor is the authenticated perso
 the session. Native delegation names the app in `Issue.delegate` and preserves
 the human assignee.
 
-- **Code**: `src/channels/linear/oauth.ts`, `src/channels/linear/store.ts`, `src/channels/linear/webhook.ts`, `src/channels/linear/inbox.ts`, `src/channels/linear/api.ts`, `src/channels/linear/session.ts`, `src/channels/linear/io.ts`, `src/channels/linear/bridge.ts`, `src/channels/linear/consumer.ts`, `src/channels/linear/acknowledgement.ts`, `src/channels/linear/control.ts`, `src/channels/linear/recovery.ts`, `src/channels/linear/lifecycle.ts`, `src/channels/linear/workItems.ts`, `src/channels/linear/access.ts`, `src/core/workItems.ts`, `src/tools/workItems.ts`, `src/tools/toolsets.ts`, `src/tools/runnableTool.ts`, `src/core/dispatch/runLoop.ts`, `src/core/authz/policy.ts`, `src/index.ts`, `src/core/authz/actor.ts`, `src/core/authz/grants.ts`, `src/core/budgets.ts`, `deploy/cloudflare/linear.ts`, `deploy/cloudflare/worker.ts`, `deploy/cloudflare/wrangler.template.jsonc`.
+- **Code**: `src/channels/linear/oauth.ts`, `src/channels/linear/store.ts`, `src/channels/linear/webhook.ts`, `src/channels/linear/inbox.ts`, `src/channels/linear/api.ts`, `src/channels/linear/session.ts`, `src/channels/linear/io.ts`, `src/channels/linear/bridge.ts`, `src/channels/linear/consumer.ts`, `src/channels/linear/acknowledgement.ts`, `src/channels/linear/control.ts`, `src/channels/linear/recovery.ts`, `src/channels/linear/lifecycle.ts`, `src/channels/linear/workItems.ts`, `src/channels/linear/access.ts`, `src/core/dispatch/channelAccess.ts`, `src/core/workItems.ts`, `src/tools/workItems.ts`, `src/tools/toolsets.ts`, `src/tools/runnableTool.ts`, `src/core/dispatch/runLoop.ts`, `src/core/authz/policy.ts`, `src/index.ts`, `src/core/authz/actor.ts`, `src/core/authz/grants.ts`, `src/core/budgets.ts`, `deploy/cloudflare/linear.ts`, `deploy/cloudflare/worker.ts`, `deploy/cloudflare/wrangler.template.jsonc`.
 - **Tests**: `src/channels/linear/oauth.test.ts`, `src/channels/linear/store.test.ts`, `src/channels/linear/webhook.test.ts`, `src/channels/linear/inbox.test.ts`, `src/channels/linear/api.test.ts`, `src/channels/linear/session.test.ts`, `src/channels/linear/io.test.ts`, `src/channels/linear/bridge.test.ts`, `src/channels/linear/consumer.test.ts`, `src/channels/linear/acknowledgement.test.ts`, `src/channels/linear/control.test.ts`, `src/channels/linear/recovery.test.ts`, `src/channels/linear/lifecycle.test.ts`, `src/channels/linear/workItems.test.ts`, `src/tools/workItems.test.ts`, `src/core/dispatch/runLoop.test.ts`, `src/core/authz/actor.test.ts`.
 - **Docs**: [Delivery plan](../../plans/2026-09-17-001-linear-channel.md).
 
@@ -138,3 +138,21 @@ the human assignee.
 | 12: independent channel startup | `[unit]` `src/channels/startup.test.ts::*` |
 | Requester isolation before follow-up effects | `[unit]` `src/core/dispatch/admission.test.ts::admit — the thread admission claim::defers another requester without writing either inbox, locally or across generations` |
 | Requester-bound execution after deferral | `[unit]` `src/core/dispatcher.test.ts::thread admission (docs/reference/specs/thread-admission.md)::an isolated channel defers another person and later binds a fresh run to that person` |
+
+### Current requester access at dispatch
+
+Before a queued prompt, command or restored run reads history or starts model work,
+the Linear adapter refreshes the human's active status and session team's visibility
+and membership. The app's access cannot substitute for the person's. Unsupported
+session surfaces without an issue team are refused until their access can be proven.
+A temporary lookup failure defers delivery without run or inbox effects. A definite
+denial closes a restored row as interrupted so recovery cannot run it indefinitely.
+
+Proof: `[unit]` `src/channels/linear/api.test.ts::Linear API boundary::rechecks the requesting human and current team access before a session can run`,
+`src/core/dispatcher.test.ts::current channel access before dispatch::*`,
+`src/core/dispatcher.test.ts::run ledger write-through (docs/reference/specs/run-history.md item 35)::rechecks restored channel access: denials close rows and outages leave them reclaimable`.
+
+A follow-up already accepted into a run can remain unread when that run fails.
+If its internally handed-on turn cannot check access, it reports that it has not
+started and asks the requester to resend, rather than silently dropping the prompt.
+Proof: `[unit]` `src/core/dispatcher.test.ts::thread admission (docs/reference/specs/thread-admission.md)::reports an unconsumed follow-up that cannot restart while its access lookup is unavailable`.

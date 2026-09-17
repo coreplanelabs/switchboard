@@ -2,6 +2,47 @@ import { describe, expect, it, vi } from "vitest";
 import { DirectLinearApi } from "./api.js";
 
 describe("Linear API boundary", () => {
+  it("rechecks the requesting human and current team access before a session can run", async () => {
+    const team = { id: "private", visibility: "private", restrictedBy: null };
+    const user = {
+      id: "alice",
+      active: true,
+      app: false,
+      organization: { id: "org" },
+      canAccessAnyPublicTeam: false,
+      teams: { nodes: [{ id: "private" }], pageInfo: { hasNextPage: false } },
+    };
+    const session = { id: "s", appUser: { id: "bot" }, dismissedAt: null, issue: { team } };
+    const fetch = vi.fn<typeof globalThis.fetch>(async (_url, init) => {
+      const { query } = JSON.parse(String(init?.body));
+      return Response.json({
+        data: query.includes("SwitchboardPerson") ? { user } : { organization: { id: "org" }, agentSession: session },
+      });
+    });
+    const api = new DirectLinearApi({ organizationId: "org", appUserId: "bot", token: async () => "secret", fetch });
+    expect(await api.canRead("s", "linear:org:alice")).toBe(true);
+    user.teams.nodes = [];
+    expect(await api.canRead("s", "linear:org:alice")).toBe(false);
+    team.visibility = "public";
+    expect(await api.canRead("s", "linear:org:alice")).toBe(false);
+    user.canAccessAnyPublicTeam = true;
+    expect(await api.canRead("s", "linear:org:alice")).toBe(true);
+    user.active = false;
+    expect(await api.canRead("s", "linear:org:alice")).toBe(false);
+    user.active = true;
+    expect(await api.canRead("s", "linear:other:alice")).toBe(false);
+    expect(await api.canRead("s", "linear:org:bot")).toBe(false);
+    session.appUser.id = "other";
+    expect(await api.canRead("s", "linear:org:alice")).toBe(false);
+    session.appUser.id = "bot";
+    Object.assign(session, { dismissedAt: "now" });
+    expect(await api.canRead("s", "linear:org:alice")).toBe(false);
+    Object.assign(session, { dismissedAt: null, issue: null });
+    expect(await api.canRead("s", "linear:org:alice")).toBe(false);
+    fetch.mockResolvedValueOnce(new Response(null, { status: 429 }));
+    await expect(api.canRead("s", "linear:org:alice")).rejects.toThrow("linear_rate_limited");
+  });
+
   it("mints private file uploads and preserves signed storage headers without forwarding the OAuth token", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async () =>
       Response.json({
