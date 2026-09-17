@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ExecControlResetError, ExecInfraError, ExecSandboxRestartedError } from "./executor.js";
 import { ResidentExecutor, ResidentNeedsRefError, ResidentOperations, ResidentReuseRefusedError } from "./resident.js";
@@ -549,6 +550,33 @@ describe("ResidentExecutor.readFile / writeFile", () => {
     expect(err).toBeInstanceOf(ExecControlResetError);
     expect(err).not.toBeInstanceOf(ExecInfraError);
     expect((err as Error).message).toMatch(/^control-reset:/);
+  });
+
+  it("a 409 control-reset on /write re-attaches once and re-issues the same full-content put — safe because the whole file's bytes land again, never a delta; a second reset is the unknown outcome", async () => {
+    const reset = {
+      status: 409,
+      body: { error: "control-reset: the resident's Durable Object was reset (a deploy)", reason: "control-reset" },
+    };
+    const { calls } = stubFetch(reset, { body: ATTACH_OK }, { body: { ok: true } });
+    await new ResidentExecutor(OPTS).writeFile("f.txt", "hello");
+    expect(calls.map(route)).toEqual(["/write", "/attach", "/write"]);
+    // The re-issued put carries the whole content again, byte for byte (beside the thread's routing fields).
+    expect(JSON.parse(String(calls[2].init.body))).toMatchObject({ path: "f.txt", content: "hello" });
+
+    stubFetch(reset, { body: ATTACH_OK }, reset);
+    const err = await new ResidentExecutor(OPTS).writeFile("f.txt", "hello").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExecControlResetError);
+  });
+
+  it("the control-reset re-issue names its routes: /read (idempotent by shape) and /write (a full-content put, so the same bytes twice are the file once) and nothing else — the invariant a future delta write must break loudly", () => {
+    const src = readFileSync(new URL("./resident.ts", import.meta.url), "utf8");
+    // The set is explicit, and the re-issue is gated on it.
+    expect(src).toMatch(/const CONTROL_RESET_REISSUE_ROUTES = new Set\(\["\/read", "\/write"\]\);/);
+    expect(src).toMatch(/if \(!CONTROL_RESET_REISSUE_ROUTES\.has\(route\)\) throw new ExecControlResetError/);
+    // The invariant is stated where the set is: /write is a full-content put.
+    expect(src).toMatch(/full-content put/);
+    // And the put IS full-content: the body is the path and the whole content, no offset, mode or append.
+    expect(src).toMatch(/opWithReattach\("\/write", \{ path, content \}/);
   });
 
   it('control-reset then needs:"attach" on the re-issued read (a reset that also left the worktree evicted) is the precise worktree-unavailable infra error — the op\'s one re-attach is spent, never a generic status error', async () => {
