@@ -279,7 +279,7 @@ export async function salvageBudgetPush(
   executor: { exec: (cmd: string, opts?: ExecTraceOptions) => Promise<string> },
   opts: { branch: string },
   span?: Span,
-): Promise<{ pushed: boolean; summary: string }> {
+): Promise<{ pushed: boolean; summary: string; head?: string }> {
   const trace = span ? { span } : undefined;
   const run = (cmd: string) => executor.exec(cmd, trace);
   const probe = (cmd: string) => run(cmd).catch(() => "");
@@ -301,6 +301,7 @@ export async function salvageBudgetPush(
     const head = parseRevParseOutput(await probe("git rev-parse HEAD"));
     return {
       pushed: true,
+      ...(head !== undefined ? { head } : {}),
       summary: `the budget ended with work in the tree — ${
         dirty ? "committed the uncommitted work and pushed" : "pushed the unpushed commits"
       } to \`${opts.branch}\`${head !== undefined ? ` (${head.slice(0, 7)})` : ""}`,
@@ -576,6 +577,12 @@ export async function runCodingPrPostStep(input: {
   // name. Telling a run's push from a checkout for certain would take a
   // record of the remote before the run; nothing observes one today.
   const pushedBranch = branch !== undefined && branch !== base && pushed;
+  // The pushed head is a fact of the run before anything a pull request adds
+  // (run-history item 2; decision 0046): the branch the run pushed and the sha
+  // the remote holds — never a checkout sitting at the base's own tip —
+  // published whether or not a description or a pull request follows.
+  if (pushedBranch && branch !== undefined && headSha !== undefined)
+    input.publish({ type: "pushed_head", ref: branch, sha: headSha, by: "push", at: systemClock() });
   const ownPr = target.ownPr;
   // The workspace branch IS the thread's own pull request's head branch, as
   // GitHub named it. A workspace on the base — the thread returned to the

@@ -1139,6 +1139,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                 salvageBudgetPush(executor, { branch: target.branch }, span),
               );
       onEvent({ type: "run_note", kind: "budget_salvage", summary: salvaged.summary });
+      // The salvaged head is a fact of the run (run-history item 2): what renewal reads.
+      if (salvaged.pushed && "head" in salvaged && salvaged.head !== undefined && !("skipped" in target))
+        onEvent({ type: "pushed_head", ref: target.branch, sha: salvaged.head, by: "salvage" });
       if (salvaged.pushed) await observeWorkspaceNow();
     }
     // The description turn (docs/reference/specs/pr-description.md item 5,

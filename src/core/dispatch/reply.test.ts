@@ -156,6 +156,10 @@ describe("cardActivity", () => {
       kind: "line",
       text: "⏱ note",
     });
+    expect(cardActivity({ type: "pushed_head", ref: "fix/a", sha: "a".repeat(40), by: "salvage" })).toEqual({
+      kind: "line",
+      text: "⬆ pushed fix/a @ aaaaaaa",
+    });
   });
 
   it("activityText flattens a part for a text-only surface: the command on one line behind the `→ $` prefix, a line verbatim", () => {

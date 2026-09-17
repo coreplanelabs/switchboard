@@ -14,6 +14,7 @@ import {
   fitRecordToBudget,
   leaseOfEvents,
   prOfEvents,
+  pushedHeadsOf,
   routeOfEvents,
   type RunFailure,
   type RunProfileRecord,
@@ -341,6 +342,8 @@ export function assembleRunRecord(input: {
   const pr = prOfEvents(events);
   // The lease the harness started (run-history item 2): its `lease` event.
   const lease = leaseOfEvents(events);
+  // The heads the run pushed (run-history item 2): its `pushed_head` events.
+  const pushed = pushedHeadsOf(events);
   // The route the run ran under: the caller's (a sticky-carried decision has
   // no `route` event), else what the events say.
   const route = input.route ?? routeOfEvents(events);
@@ -392,6 +395,7 @@ export function assembleRunRecord(input: {
     ...(input.failure !== undefined ? { failure: input.failure } : {}),
     ...(pr !== undefined ? { pr } : {}),
     ...(lease !== undefined ? { lease } : {}),
+    ...(pushed !== undefined ? { pushed } : {}),
     // What the run cost (cost by user): summed here, before the budget can cut
     // a middle event, from every model.turn span the run published.
     usage: usageOfEvents(events),

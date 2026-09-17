@@ -19,6 +19,7 @@ import {
   normalizeStored,
   prOfEvents,
   pushedBranchesOf,
+  pushedHeadsOf,
   routeOfEvents,
   storedEventSeqs,
   toVisibilityFilter,
@@ -853,6 +854,21 @@ describe("the pull request on the record (docs/reference/specs/run-history.md it
       null,
     ];
     for (const pr of bad) expect(isRunRecord({ ...record(), pr })).toBe(false);
+  });
+
+  // run-history item 2 (decision 0046): the pushed heads a run recorded, the last per branch.
+  it("pushedHeadsOf lists the run's pushed heads, one per branch with the last sha winning, and nothing without one", () => {
+    expect(pushedHeadsOf([])).toBeUndefined();
+    expect(pushedHeadsOf([{ type: "input", messageId: "m1", text: "x" }])).toBeUndefined();
+    const events: RunEvent[] = [
+      { type: "pushed_head", ref: "fix/a", sha: "a".repeat(40), by: "push" },
+      { type: "pushed_head", ref: "fix/b", sha: "b".repeat(40), by: "push" },
+      { type: "pushed_head", ref: "fix/a", sha: "c".repeat(40), by: "salvage" },
+    ];
+    expect(pushedHeadsOf(events)).toEqual([
+      { ref: "fix/a", sha: "c".repeat(40) },
+      { ref: "fix/b", sha: "b".repeat(40) },
+    ]);
   });
 
   it("prOfEvents reads the last pr_opened event — the PR the post-step opened or edited — and nothing without one", () => {

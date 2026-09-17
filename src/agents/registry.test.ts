@@ -421,6 +421,10 @@ describe("coding prompts: checks by cost — push before the expensive ones (age
     expect(CHECKS_BY_COST).toMatch(/unpushed tree does not survive the run's end/);
     expect(CHECKS_BY_COST).toMatch(/Never start an operation whose expected duration does not fit/);
     expect(CHECKS_BY_COST).toMatch(/what did not run is CI's to gate/);
+    // decision 0046: at the wind-down note the tree is pushed before the answer, whatever state it is in
+    expect(CHECKS_BY_COST).toMatch(
+      /At the wind-down note, commit and push what compiles, say what does not, then answer/,
+    );
     // stack-agnostic: no package manager, test runner or language named
     expect(CHECKS_BY_COST).not.toMatch(/\b(npm|pnpm|yarn|bun|vitest|jest|pytest|cargo|go test|make)\b/);
     for (const sys of codingPrompts()) expect(sys).toContain(CHECKS_BY_COST);

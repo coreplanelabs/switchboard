@@ -85,6 +85,34 @@ function openSpy(result: Partial<OpenedPullRequest> | Error = {}) {
 }
 
 describe("runCodingPrPostStep (callable with explicit inputs)", () => {
+  // Feature: docs/reference/specs/run-history.md item 2 — the pushed head is a fact of the run
+  // (decision 0046): what renewal reads, whether or not a pull request opens.
+  it("a proven push publishes `pushed_head` with the branch and the sha before anything else, whether or not a description or a pull request follows; an unpushed tree publishes none", async () => {
+    const events: RunEvent[] = [];
+    const common = {
+      target: { repo: "acme/api", baseRef: undefined, bindingRef: "main", resolvedRef: "main" },
+      openPullRequest: openSpy().fn,
+      fetchRepoInfo: unreachable,
+      findOpenPr: noOpenPr,
+      updatePullRequest: noUpdate,
+      publish: (e: RunEvent) => events.push(e),
+      logKey: "t",
+    };
+    // pushed, no description: the head is recorded even though no pull request opens
+    await runCodingPrPostStep({ ...common, observed: observation(), description: undefined });
+    expect(events.filter((e) => e.type === "pushed_head")).toEqual([
+      { type: "pushed_head", ref: "feat/x", sha: HEAD, by: "push", at: expect.any(Number) },
+    ]);
+    // pushed, with a description: the head first, then the pull request
+    events.length = 0;
+    await runCodingPrPostStep({ ...common, observed: observation(), description: DESCRIPTION });
+    expect(events.map((e) => e.type).slice(0, 2)).toEqual(["pushed_head", "pr_opened"]);
+    // not pushed (the remote never saw the head): no pushed_head
+    events.length = 0;
+    await runCodingPrPostStep({ ...common, observed: observation({ remoteHead: undefined }), description: undefined });
+    expect(events.some((e) => e.type === "pushed_head")).toBe(false);
+  });
+
   it("description + observed pushed branch → PR opened from typed values, pr_opened published, note carries the URL", async () => {
     const spy = openSpy();
     const events: RunEvent[] = [];
@@ -135,8 +163,8 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       publish: (e) => events.push(e),
       logKey: "t",
     });
-    expect(events.map((e) => e.type)).toEqual(["pr_opened", "review_artifact"]);
-    const artifact = events[1];
+    expect(events.map((e) => e.type)).toEqual(["pushed_head", "pr_opened", "review_artifact"]);
+    const artifact = events[2];
     if (artifact.type !== "review_artifact" || artifact.artifact !== "pr_description") throw new Error("no artifact");
     expect(artifact).toMatchObject({
       origin: "submitted",
@@ -653,8 +681,9 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     expect(update).not.toHaveBeenCalled();
     expect(spy.calls).toHaveLength(1);
     expect(spy.calls[0]).toMatchObject({ repo: "acme/api", headBranch: "feat/y", base: "main" });
-    expect(published.map((e) => e.type)).toEqual(["pr_opened", "review_artifact"]);
-    expect(published[0]).toMatchObject({ type: "pr_opened", number: 52, created: true, head: "feat/y" });
+    expect(published.map((e) => e.type)).toEqual(["pushed_head", "pr_opened", "review_artifact"]);
+    expect(published[0]).toMatchObject({ type: "pushed_head", ref: "feat/y", by: "push" });
+    expect(published[1]).toMatchObject({ type: "pr_opened", number: 52, created: true, head: "feat/y" });
     expect(note).toMatch(/^🔀 PR opened: \S+\/pull\/52 /);
     expect(note).not.toMatch(/pushed past|\/pull\/41(?!\d)|\/compare\//);
   });
@@ -847,7 +876,15 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     expect(note).toContain("earlier state of its branch");
     expect(note).not.toContain("/compare/");
     expect(note).not.toContain("No PR was opened");
-    expect(events).toEqual([
+    // the pushed head is on the record before the pull request it updated
+    expect(events[0]).toEqual({
+      type: "pushed_head",
+      ref: expect.any(String),
+      sha: HEAD,
+      by: "push",
+      at: expect.any(Number),
+    });
+    expect(events.slice(1)).toEqual([
       expect.objectContaining({
         type: "pr_opened",
         url: "https://github.com/acme/api/pull/700",
@@ -860,7 +897,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     ]);
   });
 
-  it("no description + proven push + no open PR heads the branch → the compare-URL note, no event", async () => {
+  it("no description + proven push + no open PR heads the branch → the compare-URL note, the pushed head its only event", async () => {
     const spy = openSpy();
     const events: RunEvent[] = [];
     const findOpenPr = vi.fn(noOpenPr);
@@ -879,7 +916,8 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     expect(spy.calls).toHaveLength(0);
     expect(note).toContain("No PR was opened");
     expect(note).toContain("https://github.com/acme/api/compare/feat/x");
-    expect(events).toEqual([]);
+    // no pull request event; the push itself is still a fact of the run
+    expect(events.map((e) => e.type)).toEqual(["pushed_head"]);
   });
 
   it("no description + proven push, the open-PR lookup throws → degrades to the compare-URL note (logged, never thrown)", async () => {
@@ -902,7 +940,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     expect(note).toContain("No PR was opened");
     expect(note).toContain("https://github.com/acme/api/compare/feat/x");
     expect(note).not.toContain("/pull/");
-    expect(events).toEqual([]);
+    expect(events.map((e) => e.type)).toEqual(["pushed_head"]);
   });
 
   it("the open-PR lookup is asked ONLY for a description-less proven push — never when a description was submitted or the push is unproven", async () => {
@@ -1570,6 +1608,10 @@ describe("salvageBudgetPush — a ship coding child pushes what it has at the bu
       "git rev-list": "0\n",
       "git rev-parse HEAD": "abc123def456abc123def456abc123def456ab12\n",
     });
+    // the head rides the result too, for the `pushed_head` event the run loop publishes (decision 0046)
+    expect((await salvageBudgetPush(w.executor, { branch: "plan/p/u1" })).head).toBe(
+      "abc123def456abc123def456abc123def456ab12",
+    );
     const out = await salvageBudgetPush(w.executor, { branch: "plan/p/u1" });
     expect(out.pushed).toBe(true);
     expect(out.summary).toContain("committed the uncommitted work and pushed");
