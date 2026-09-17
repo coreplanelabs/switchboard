@@ -12960,20 +12960,29 @@ workspaceDir: __WORKDIR__
         { key: THREAD_B, url: "https://acme.slack.com/archives/CX/p91" },
       ]);
       const [ioA, ioB] = children;
+      // The wait reads its children through the one runs service; the reads
+      // are kept so the test can see the parent's wait begin.
+      const service = t.deps.runs!;
+      const read: string[] = [];
+      t.deps.runs = {
+        ...service,
+        getRun: (id, opts) => {
+          read.push(id);
+          return service.getRun(id, opts);
+        },
+      };
       const parentDone = dispatch(t.deps, inChannel("CX", "agent:conductor look into DOs and Workflows"), parent.io);
       // [B] answers at once; [A] is held, so the parent sits in await_runs by the time B has
       // replied (its spawn results came back at registration, long before). B's record is
       // flushed to the store so the reply below finds B however the registry has aged it.
       await vi.waitFor(() => expect(ioB.replies).toEqual(["B: a Workflow is a durable execution."]));
       await t.writer.settled();
-      // …and the parent is in its wait: the reply below must land while it awaits.
-      await vi.waitFor(() =>
-        expect(
-          (t.registry.snapshotById("run-parent")?.events ?? []).some(
-            (e) => e.type === "tool_call" && (e as { tool: string }).tool === "await_runs",
-          ),
-        ).toBe(true),
-      );
+      // …and the parent is in its wait: the reply below must land while it awaits. The wait
+      // counts follow-ups from the moment it starts, then reads each child — so its first
+      // read of B is the fact that a reply landing from here on is a follow-up to THIS wait.
+      // The `tool_call` event is not that fact: the bridge publishes it when pi announces the
+      // call, a poll before the tool itself runs.
+      await vi.waitFor(() => expect(read).toContain("run-B"));
       // The requester corrects [B] in its thread. The child ended, so this is a new run of it.
       await dispatch(
         t.deps,

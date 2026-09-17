@@ -469,10 +469,27 @@ export const awaitRunsTool: RunnableTool = {
         });
       }
       const ms = Math.min(AWAIT_POLL_MS, Math.max(0, decision.until - now));
-      await nextTick(wait, new Set(watch.pending()), ms, ctx.signal);
+      await nextTick(wait, endsAwaited(watch), ms, ctx.signal);
     }
   },
 };
+
+/** The runs whose ends the next tick listens for: each pending child — or, for
+ *  a child whose thread continued (agent-conductor item 10), the run now
+ *  speaking for it, `continuedBy`. The child itself has ended, and the
+ *  registry replays a finished run's end the moment a watch subscribes
+ *  (`waitCapabilityFor`): listening for the child would end every tick before
+ *  its sleep began, a loop of nothing but reads that starves the process's
+ *  timers — the continuation's own harness among them — until the registry
+ *  evicts the child. */
+function endsAwaited(watch: ChildrenWatch): ReadonlySet<string> {
+  return new Set(
+    watch.pending().map((id) => {
+      const state = watch.get(id);
+      return state?.kind === "running" && state.continuedBy !== undefined ? state.continuedBy : id;
+    }),
+  );
+}
 
 export const listRunsTool: RunnableTool = {
   name: "list_runs",
