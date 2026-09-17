@@ -12,7 +12,7 @@
 // the tools' capabilities are run.ts.
 import type { ResolvedRequest } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
-import { grantsSubject } from "../authz/actor.js";
+import { chatActorOf } from "../authz/actor.js";
 import type { CoordinatorTag } from "../coordinator/contract.js";
 import { budgetedAgent, type RunProfile } from "../../config/profile.js";
 import { parseModelRef } from "../provider.js";
@@ -626,7 +626,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     ...(uploadTicket ? { uploadTicket } : {}),
     web: webCapability(),
     skills: deps.skills,
-    github: githubCapabilityFor(deps, grantsSubject(msg)),
+    github: githubCapabilityFor(deps, chatActorOf(deps.config, msg)),
     agentName: agent.name,
     ...(spawn ? { spawn } : {}),
     ...(runs ? { runs } : {}),

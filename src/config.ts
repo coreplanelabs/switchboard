@@ -12,7 +12,7 @@ import type { RunHistoryConfig } from "./core/runStore.js";
 import type { AddressSeverity, ShipConfig } from "./core/shipPipeline.js";
 import type { SpawnConfig } from "./core/dispatch/spawn.js";
 import type { DashboardConfig } from "./core/dashboardAuthConfig.js";
-import { hasAction } from "./core/authz/authorize.js";
+import { effectiveGrants, hasAction } from "./core/authz/authorize.js";
 import {
   grantsIn,
   grantsTable,
@@ -24,7 +24,7 @@ import {
 } from "./core/authz/grants.js";
 import { ConfigDocumentClient, parseConfigLocation, stateWorkerFrom } from "./configDocument.js";
 import type { EnvRecord, Secrets } from "./secrets.js";
-import type { Grants } from "./core/authz/types.js";
+import type { Actor, Grants } from "./core/authz/types.js";
 import { isRunSchedule, SCHEDULES } from "./core/schedules.js";
 import { AGENTS } from "./agents/registry.js";
 import type { McpServerEntry } from "./mcp/registry.js";
@@ -957,21 +957,21 @@ export class ConfigStore {
 
   /** Every agent is open unless `restrict.agents` names it; a restricted agent
    *  runs only for a holder of `agent:run:<name>` (admins through `all`). */
-  canRunAgent(actorId: string, agentName: string): boolean {
-    return mayRunAgent(this.grants, this.grantsFor(actorId), agentName);
+  canRunAgent(actor: string | Actor, agentName: string): boolean {
+    return mayRunAgent(this.grants, this.grantsOf(actor), agentName);
   }
 
   /** Every repo is open unless `restrict.repos` names it; a restricted repo is
    *  used only by a holder whose `repos` axis names it (admins through `all`).
    *  A refused actor is refused BY NAME — never a silent per-thread fallback. */
-  canUseRepo(actorId: string, slug: string): boolean {
-    return mayUseRepo(this.grants, this.grantsFor(actorId), slug);
+  canUseRepo(actor: string | Actor, slug: string): boolean {
+    return mayUseRepo(this.grants, this.grantsOf(actor), slug);
   }
 
   /** The channel-config right, as the policy table's `config:write` row on
    *  `config-scope { channel }` reads it: held only where `grants` say so. */
-  canEditChannelConfig(userId: string): boolean {
-    return hasAction(this.grantsFor(userId).actions, "config:write");
+  canEditChannelConfig(actor: string | Actor): boolean {
+    return hasAction(this.grantsOf(actor).actions, "config:write");
   }
 
   /**
@@ -980,8 +980,18 @@ export class ConfigStore {
    * onboard`/`rebuild` provision billable always-on compute and bind GitHub
    * credentials.
    */
-  canManageRepos(userId: string): boolean {
-    return hasAction(this.grantsFor(userId).actions, "repo:write");
+  canManageRepos(actor: string | Actor): boolean {
+    return hasAction(this.grantsOf(actor).actions, "repo:write");
+  }
+
+  /** What a gate decides on: an actor id's `grants` entry, or a resolved
+   *  actor's EFFECTIVE grants — the intersection for an `agent` acting on a
+   *  person's behalf (a relayed message, authorization.md item 14), its own
+   *  grants for anyone else (a bound credential's, item 15). The dispatch path
+   *  always passes the actor `resolveChatActor` yields, so a person named by
+   *  forgeable text never lends a relay their grants at these gates either. */
+  private grantsOf(actor: string | Actor): Grants {
+    return typeof actor === "string" ? this.grantsFor(actor) : effectiveGrants(actor);
   }
 
   /** The one grants lookup: what `grants[<actorId>]` declares

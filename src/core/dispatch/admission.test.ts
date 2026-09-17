@@ -810,4 +810,26 @@ describe("steerRun — a run steers a live run through the inbox a thread reply 
     expect(ledger.pushes).toEqual([]);
     expect(claim.live.inbox.size).toBe(0);
   });
+
+  // authorization.md item 14: a relayed sender is the app ∩ the person at this gate too,
+  // and the relay rides the steer so the child keeps deciding the same way.
+  it("a relayed sender (postedBy) naming an admin is refused the restricted live agent — the app bounds the person — and an admitted steer carries postedBy on the row and the item", async () => {
+    const admission = new ThreadAdmission<DispatchFollowUp>();
+    const claim = admission.claim(CHILD_THREAD, { agent: "coding" });
+    claim.live.runId = "run-child";
+    const ledger = new RecordingLedger({ pushSeq: () => 15 });
+    const deps = { config: configStore(), runLedger: ledger, clock: () => NOW, admission };
+    const relayed = { ...sender, userId: "slack:UADMIN", postedBy: "slack:bot:B0CLAUDE" };
+    expect(await steerRun(deps, relayed, { ...target, agent: "coding" }, "narrow it")).toEqual({
+      kind: "refused",
+      reason: "live_agent_allowlist",
+    });
+    expect(ledger.pushes).toEqual([]);
+    const open = admission.claim("slack:CX:10.0", { agent: "general" });
+    open.live.runId = "run-open";
+    expect(
+      await steerRun(deps, relayed, { runId: "run-open", threadKey: "slack:CX:10.0", agent: "general" }, "go on"),
+    ).toMatchObject({ kind: "steered", where: "here" });
+    expect(ledger.pushes[0].message).toMatchObject({ userId: "slack:UADMIN", postedBy: "slack:bot:B0CLAUDE" });
+  });
 });

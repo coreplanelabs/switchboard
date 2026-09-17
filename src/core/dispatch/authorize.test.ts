@@ -132,6 +132,32 @@ describe("authorizeAgent — the agent gate, against the resolved agent", () => 
     );
   });
 
+  // authorization.md item 14: a relayed message decides on the app ∩ the person — an
+  // app nobody listed holds only the Slack baseline, so naming an admin in forgeable
+  // text runs no restricted agent; an unrestricted one still runs.
+  it("a relayed message (postedBy an unlisted app) naming an admin is refused a restricted agent, and admitted an open one", async () => {
+    const relayed = setup({ user: "slack:UADMIN" });
+    relayed.gate.msg = { ...relayed.message, postedBy: "slack:bot:B0CLAUDE" };
+    expect(await authorizeAgent(relayed.deps, { ...relayed.gate, agentName: "coding" })).toEqual({
+      kind: "refused",
+      reason: "agent_allowlist",
+    });
+    expect(await authorizeAgent(relayed.deps, { ...relayed.gate, agentName: "general" })).toEqual({ kind: "allowed" });
+    // Config can name the relay app: then the intersection with the admin admits it.
+    const granted = setup({ user: "slack:UADMIN" });
+    granted.deps.config = configStoreWith(`  "slack:bot:B0CLAUDE": { actions: ["agent:run:coding"] }`);
+    granted.gate.msg = { ...granted.message, postedBy: "slack:bot:B0CLAUDE" };
+    expect(await authorizeAgent(granted.deps, { ...granted.gate, agentName: "coding" })).toEqual({ kind: "allowed" });
+    // …but a plain user bounds the granted app too.
+    const bounded = setup({ user: "slack:UX" });
+    bounded.deps.config = configStoreWith(`  "slack:bot:B0CLAUDE": { actions: ["agent:run:coding"] }`);
+    bounded.gate.msg = { ...bounded.message, postedBy: "slack:bot:B0CLAUDE" };
+    expect(await authorizeAgent(bounded.deps, { ...bounded.gate, agentName: "coding" })).toEqual({
+      kind: "refused",
+      reason: "agent_allowlist",
+    });
+  });
+
   // authorization.md item 15: the gate asks about the credential, never the person it is bound to.
   it("a message from a credential bound to a person is gated by the credential's grants: naming an admin lends nothing, and a granted credential is not narrowed by an ungranted person", async () => {
     // The token holds nothing; the person it names holds everything → refused.

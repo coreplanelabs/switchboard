@@ -403,7 +403,7 @@ function steerFor(
     steer: (target, text) =>
       steerRun(
         {
-          config: { canRunAgent: () => opts.allow ?? true },
+          config: { canRunAgent: () => opts.allow ?? true, grantsFor: () => NO_GRANTS },
           runLedger: {
             pushInbox: async (runId, message) => {
               pushes.push({ runId, message });

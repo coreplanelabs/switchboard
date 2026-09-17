@@ -13,7 +13,7 @@
 import type { ConfigStore, ResolvedRequest } from "../../config.js";
 import { coordinatorFields, type CoordinatorTag } from "../coordinator/contract.js";
 import { AGENTS, type AgentDef } from "../../agents/registry.js";
-import { grantsSubject } from "../authz/actor.js";
+import { chatActorOf } from "../authz/actor.js";
 import { clipSourceLabel, type RunProfile } from "../../config/profile.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
 import {
@@ -620,6 +620,7 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
           ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
           ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
           ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
+          ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
           ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
           ...(repoCtx.ref !== undefined ? { ref: repoCtx.ref } : {}),
           ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
@@ -992,7 +993,7 @@ export async function composePrompt(deps: ProvisionDeps, ctx: PromptContext): Pr
       budget: directives.budget,
     },
     threadDirective: { agent: sticky.agent, model: sticky.model, effort: sticky.effort },
-    canEditChannelConfig: deps.config.canEditChannelConfig(grantsSubject(msg)),
+    canEditChannelConfig: deps.config.canEditChannelConfig(chatActorOf(deps.config, msg)),
     // The boundary in force and the budget this run actually has — the same
     // values the gate judged, so "how long do you have?" is answered from fact.
     ...(resolved.boundary ? { boundary: resolved.boundary } : {}),

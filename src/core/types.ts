@@ -94,9 +94,10 @@ export interface IncomingMessage {
    * `userId` (authorization.md item 15: an ingress token entry's `email`, the
    * CLI's `SWITCHBOARD_CLI_EMAIL`). Identity, never authority: the run, its
    * record and its costs are the person's; what the run may do is exactly what
-   * config grants this credential — `grantsSubject(msg)` is what every gate
-   * asks about. Absent when the sender and the credential are one (Slack, an
-   * unbound token) or when the request was relayed (`postedBy`).
+   * config grants this credential — every gate decides on the actor
+   * `resolveChatActor` builds from it. Absent when the sender and the
+   * credential are one (Slack, an unbound token) or when the request was
+   * relayed (`postedBy`).
    */
   authenticatedAs?: string;
   /** Images attached to the triggering message, if any. */

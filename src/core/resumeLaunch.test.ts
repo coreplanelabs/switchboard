@@ -123,6 +123,16 @@ describe("the pure pieces", () => {
       userName: "alice",
       authenticatedAs: "http:alice-ingress",
     });
+    // A relayed run resumes as the person with the relaying app beside them (authorization.md item 14).
+    const relayed = row({
+      meta: {
+        channelId: "slack:C1",
+        userId: "slack:UALICE",
+        threadKey: "slack:C1:1.0",
+        postedBy: "slack:bot:B0CLAUDE",
+      },
+    });
+    expect(resumeMessage(relayed, "")).toMatchObject({ userId: "slack:UALICE", postedBy: "slack:bot:B0CLAUDE" });
   });
 
   it("repoContextOf carries repo/ref/pr/headSha and nothing else", () => {

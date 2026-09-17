@@ -605,6 +605,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
     userId: instance.userId,
     ...(instance.userName !== undefined ? { userName: instance.userName } : {}),
     ...(instance.authenticatedAs !== undefined ? { authenticatedAs: instance.authenticatedAs } : {}),
+    ...(instance.postedBy !== undefined ? { postedBy: instance.postedBy } : {}),
     ...(instance.channelName !== undefined ? { channelName: instance.channelName } : {}),
     threadKey,
     ...(thread.sourceUrl !== undefined ? { sourceUrl: thread.sourceUrl } : {}),

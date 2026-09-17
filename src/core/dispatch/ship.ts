@@ -10,7 +10,7 @@
 // this branch and a bot death under a pipeline interrupts a child, never the
 // pipeline. The branch reads the run slice plus the seams only ship needs.
 import type { AgentDef } from "../../agents/registry.js";
-import { grantsSubject } from "../authz/actor.js";
+import { chatActorOf } from "../authz/actor.js";
 import type { RunProfile } from "../../config/profile.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
@@ -151,7 +151,7 @@ export async function runShipBranch(
       requestText: directives.text,
       repoCtx,
       gates: {
-        canRunAgent: (a) => deps.config.canRunAgent(grantsSubject(msg), a),
+        canRunAgent: (a) => deps.config.canRunAgent(chatActorOf(deps.config, msg), a),
         adminsHint: () => deps.config.adminsHint(),
       },
       repoInfo: deps.fetchRepoShipInfo ?? fetchRepoShipInfo,
@@ -286,6 +286,7 @@ export async function runShipBranch(
         ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
         ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
         ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
+        ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
         ...(entry.resume !== undefined ? { pr: entry.resume.pr } : {}),
         profile,
       },
@@ -345,7 +346,8 @@ export async function runShipBranch(
     outcome = await root.span("dispatch.ship_hand_off", () =>
       handOffToCoordinator(
         {
-          readFile: (repo, path, ref) => githubCapabilityFor(deps, grantsSubject(msg)).api.readFile(repo, path, ref),
+          readFile: (repo, path, ref) =>
+            githubCapabilityFor(deps, chatActorOf(deps.config, msg)).api.readFile(repo, path, ref),
           instances: deps.coordinatorInstances ?? new NullCoordinatorInstanceStore(),
           create: deps.createCoordinatorInstance ?? ((id) => createInstanceViaShim(shim(), id)),
           status: deps.fetchCoordinatorInstanceStatus ?? ((id) => fetchInstanceStatusViaShim(shim(), id)),

@@ -150,6 +150,8 @@ export interface CoordinatorInstance {
   /** The bound credential behind the person (authorization.md item 15), when
    *  there was one: every child is authorized under ITS grants, as the request was. */
   authenticatedAs?: string;
+  /** The app that relayed the request for the person (authorization.md item 14), when one did: every child is authorized under app ∩ person, as the request was. */
+  postedBy?: string;
   channelId: string;
   channelName?: string;
   /** The requesting thread: where the card lives and where a generated plan's
@@ -260,7 +262,7 @@ export function isCoordinatorInstance(v: unknown): v is CoordinatorInstance {
   if (r.kind !== "ship") return false;
   if (!isText(r.userId) || !isText(r.channelId) || !isText(r.threadKey)) return false;
   if (!isOptionalText(r.userName) || !isOptionalText(r.channelName) || !isOptionalText(r.sourceUrl)) return false;
-  if (!isOptionalText(r.authenticatedAs)) return false;
+  if (!isOptionalText(r.authenticatedAs) || !isOptionalText(r.postedBy)) return false;
   if (typeof r.repo !== "string" || !REPO_SLUG.test(r.repo)) return false;
   if (!isText(r.branch) || !isOptionalText(r.base)) return false;
   if (!isFinite(r.createdAt)) return false;

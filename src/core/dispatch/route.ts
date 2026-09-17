@@ -41,7 +41,7 @@
 // call, never a second route.
 import { AGENTS, COMPOUND_PRESET, type Identity, type MachineClass } from "../../agents/registry.js";
 import { HAND_BACK_PREFIX } from "./handBack.js";
-import { grantsSubject } from "../authz/actor.js";
+import { chatActorOf } from "../authz/actor.js";
 import { TOOLSETS } from "../../tools/toolsets.js";
 import { routingOn, type ConfigStore, type ResolvedRequest } from "../../config.js";
 import type { RouteAnswerMode } from "../../config/validate.js";
@@ -1031,11 +1031,13 @@ export async function routeRequest(deps: RouteDeps, ctx: RouteStageContext): Pro
     return { kind: "unrouted" };
   }
   const presets = routablePresets();
-  const allowed = presets.map((p) => p.name).filter((name) => deps.config.canRunAgent(grantsSubject(msg), name));
+  const allowed = presets
+    .map((p) => p.name)
+    .filter((name) => deps.config.canRunAgent(chatActorOf(deps.config, msg), name));
   // The compound form is the conductor's one door: offered when the requester
   // may run it (the same allowlist question every preset meets), its cap the
   // fan-out cap each part will be spawned under.
-  const compound = deps.config.canRunAgent(grantsSubject(msg), COMPOUND_PRESET)
+  const compound = deps.config.canRunAgent(chatActorOf(deps.config, msg), COMPOUND_PRESET)
     ? { maxParts: maxChildrenOf(cfg.spawn) }
     : undefined;
   // The connected data sources (record 0040): the caller's catalog — config

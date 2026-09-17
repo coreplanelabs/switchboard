@@ -24,6 +24,7 @@ import { MAX_INSTRUCTIONS_LENGTH } from "./config/validate.js";
 import { declaredProfile, effectiveProfile } from "./config/profile.js";
 import { AGENTS } from "./agents/registry.js";
 import { hasAction } from "./core/authz/authorize.js";
+import { resolveChatActor } from "./core/authz/actor.js";
 import { ALL_GRANTS } from "./core/authz/grants.js";
 import { NO_GRANTS } from "./core/authz/types.js";
 import {
@@ -271,6 +272,25 @@ describe("permission gates", () => {
     expect(s.canRunAgent("slack:URANDOM", "coding")).toBe(false);
     expect(s.canRunAgent("slack:UDEV", "coding")).toBe(true);
     expect(s.canRunAgent("slack:UADMIN", "coding")).toBe(true);
+  });
+
+  // authorization.md items 14 and 15: handed an Actor, a gate decides on its EFFECTIVE grants.
+  it("handed a resolved actor, the gates decide on its effective grants: a relay's app ∩ person, a bound credential's own", async () => {
+    const at = { channelId: "slack:CX", threadKey: "slack:CX:1.0" };
+    const relayForAdmin = resolveChatActor({ ...at, userId: "slack:UADMIN", postedBy: "slack:bot:B0CLAUDE" }, (id) =>
+      s.grantsFor(id),
+    );
+    expect(s.canRunAgent(relayForAdmin, "coding")).toBe(false); // the unlisted app bounds the admin
+    expect(s.canRunAgent(relayForAdmin, "review")).toBe(true); // an open agent stays open
+    expect(s.canEditChannelConfig(relayForAdmin)).toBe(false);
+    expect(s.canManageRepos(relayForAdmin)).toBe(false);
+    const admin = resolveChatActor({ ...at, userId: "slack:UADMIN" }, (id) => s.grantsFor(id));
+    expect(s.canRunAgent(admin, "coding")).toBe(true);
+    expect(s.canManageRepos(admin)).toBe(true);
+    const boundToAdmin = resolveChatActor({ ...at, userId: "slack:UADMIN", authenticatedAs: "http:nobody" }, (id) =>
+      s.grantsFor(id),
+    );
+    expect(s.canRunAgent(boundToAdmin, "coding")).toBe(false); // the credential's grants, not the admin's
   });
 
   it("restrictedAgentsFor names the restricted agents an actor may NOT run", async () => {

@@ -56,6 +56,8 @@ export interface LiveRunMeta {
   /** The bound credential behind the person (authorization.md item 15): a
    *  resume or restart dispatches under ITS grants again, never the person's. */
   authenticatedAs?: string;
+  /** The app that relayed the request for the person (authorization.md item 14): a resume or restart keeps app ∩ person at the gates. */
+  postedBy?: string;
   effort?: string;
   ref?: string;
   headSha?: string;

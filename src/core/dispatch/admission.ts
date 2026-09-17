@@ -12,7 +12,7 @@
 import type { ConfigStore } from "../../config.js";
 import type { CoordinatorTag } from "../coordinator/contract.js";
 import type { AgentDef } from "../../agents/registry.js";
-import { grantsSubject } from "../authz/actor.js";
+import { chatActorOf } from "../authz/actor.js";
 import type { RequestDirectives } from "../../directives.js";
 import type { LedgerRun, LedgerWriteThrough } from "../runLedger/writeThrough.js";
 import type { AppendableEvent, InboxItem, LiveRunRow, StepRecord } from "../runLedger/types.js";
@@ -337,7 +337,7 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
     // follow-up is read by the LIVE agent, so its sender must be allowed to
     // run that one too (invariant 3 — no path runs an agent for a user the
     // allowlist excludes, and "run" includes "is heard by").
-    if (!deps.config.canRunAgent(grantsSubject(msg), claim.live.agent)) {
+    if (!deps.config.canRunAgent(chatActorOf(deps.config, msg), claim.live.agent)) {
       await refuse("live_agent_allowlist", () =>
         io.reply(
           `🚫 You're not on the allowlist for the \`${claim.live.agent}\` agent, whose run is in flight in this thread. Ask ${deps.config.adminsHint()} for access.`,
@@ -431,7 +431,7 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
       startedAt: elsewhere.startedAt,
       runId: elsewhere.runId,
     };
-    if (!deps.config.canRunAgent(grantsSubject(msg), far.agent)) {
+    if (!deps.config.canRunAgent(chatActorOf(deps.config, msg), far.agent)) {
       await io.reply(
         `🚫 You're not on the allowlist for the \`${far.agent}\` agent, whose run is in flight in this thread. Ask ${deps.config.adminsHint()} for access.`,
       );
@@ -487,8 +487,9 @@ export interface SteerTarget {
 export interface SteerSender {
   userId: string;
   userName?: string;
-  /** The bound credential behind the person (authorization.md item 15); the steer's gate asks about it. */
+  /** The bound credential behind the person (item 15) and the app that relayed for them (item 14): the steer's gate decides on the actor they make. */
   authenticatedAs?: string;
+  postedBy?: string;
   channelId: string;
   channelName?: string;
   sourceUrl?: string;
@@ -521,7 +522,7 @@ export type SteerOutcome =
  */
 export async function steerRun(
   deps: {
-    config: Pick<ConfigStore, "canRunAgent">;
+    config: Pick<ConfigStore, "canRunAgent" | "grantsFor">;
     runLedger: Pick<LedgerWriteThrough, "pushInbox">;
     clock?: Clock;
     admission: ThreadAdmission<DispatchFollowUp>;
@@ -530,7 +531,7 @@ export async function steerRun(
   target: SteerTarget,
   text: string,
 ): Promise<SteerOutcome> {
-  if (!deps.config.canRunAgent(grantsSubject(sender), target.agent))
+  if (!deps.config.canRunAgent(chatActorOf(deps.config, { ...sender, threadKey: target.threadKey }), target.agent))
     return { kind: "refused", reason: "live_agent_allowlist" };
   const at = (deps.clock ?? systemClock)();
   const msg: IncomingMessage = {
@@ -538,6 +539,7 @@ export async function steerRun(
     userId: sender.userId,
     ...(sender.userName !== undefined ? { userName: sender.userName } : {}),
     ...(sender.authenticatedAs !== undefined ? { authenticatedAs: sender.authenticatedAs } : {}),
+    ...(sender.postedBy !== undefined ? { postedBy: sender.postedBy } : {}),
     ...(sender.channelName !== undefined ? { channelName: sender.channelName } : {}),
     threadKey: target.threadKey,
     text,
