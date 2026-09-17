@@ -385,11 +385,11 @@ export class RunRegistry {
    * (no stamps in the result); an unknown or evicted run yields the empty
    * result. Never throws.
    */
-  seal(id: string, opts: { replyOk?: boolean } = {}): SealResult {
+  seal(id: string, opts: { replyOk?: boolean; replyNote?: string } = {}): SealResult {
     this.sweep();
     const run = this.runs.get(id);
     if (!run) return { events: [] };
-    return this.sealRun(run, { replyOk: opts.replyOk, upsert: true });
+    return this.sealRun(run, { replyOk: opts.replyOk, replyNote: opts.replyNote, upsert: true });
   }
 
   /** Seal every finished-but-unsealed run (the drain, before exit); returns how
@@ -408,11 +408,15 @@ export class RunRegistry {
   /** The one seal: the public `seal()` (upsert) and the sweep (no upsert) both
    *  come here. `sealedAt` is stamped and the subscriber set copied-and-cleared
    *  BEFORE any callback fires, so a re-entrant call is a no-op. */
-  private sealRun(run: RunState, opts: { replyOk: boolean | undefined; upsert: boolean }): SealResult {
+  private sealRun(
+    run: RunState,
+    opts: { replyOk: boolean | undefined; replyNote?: string; upsert: boolean },
+  ): SealResult {
     if (!run.finished) return { events: [], eventCount: run.eventCount };
     if (run.sealedAt === undefined) {
       run.sealedAt = this.now();
       if (opts.replyOk !== undefined) run.replyOk = opts.replyOk;
+      if (opts.replyNote !== undefined) run.replyNote = opts.replyNote;
       const subs = [...run.subscribers];
       run.subscribers.clear();
       const frame = sealedFrameOf(run);

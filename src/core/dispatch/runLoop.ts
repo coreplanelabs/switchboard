@@ -68,7 +68,7 @@ import { runVerdictTurn } from "../verdictTurn.js";
 import { reviewPostOptedOut } from "../reviewPost.js";
 import { startReviewReadingDiff } from "../readingDiff.js";
 import { startReviewDescription } from "../reviewDescription.js";
-import { isSpanRecord, type RunEvent } from "../runEvents.js";
+import { isSpanRecord, redactAndCap, type RunEvent } from "../runEvents.js";
 import { oneLine } from "../redact.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "../runFriction.js";
 import { markdownOutput } from "../llmOutput/index.js";
@@ -93,6 +93,9 @@ import { registerFinishRecord } from "./record.js";
 import { artifactLink, cardActivity } from "./reply.js";
 import { stageIntoWorkspace, stagingIndex, type WorkspaceFiles } from "./staging.js";
 import { githubCapabilityFor, shutdownNotice, webCapability, type RunDeps } from "./run.js";
+
+/** Longest `run_failed` note summary kept on the stream: a reason, not a stack dump. */
+const RUN_FAILED_NOTE_MAX = 500;
 
 /** What the loop hands back once the run has answered: the answer as
  *  canonicalized for every projection, the head the review settled on, the
@@ -1278,6 +1281,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     else {
       runFailed = true;
       if (err instanceof ModelPolicyRefusedError) failure = { kind: "policy_refusal" };
+      // The record must say why a failed run failed even when the reply is
+      // never delivered (run-history.md): the error's message, redacted and
+      // capped, published before the finish below closes the stream.
+      registry.publish(run.id, {
+        type: "run_note",
+        kind: "run_failed",
+        summary: redactAndCap(err instanceof Error ? err.message : String(err), RUN_FAILED_NOTE_MAX),
+      });
     }
     // pi first: it runs in the workspace released next (a no-op once ended).
     await harnessSession?.end();

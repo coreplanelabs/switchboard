@@ -70,6 +70,8 @@ export interface FinishedFrame {
 export interface SealedFrame {
   sealedAt: number;
   replyOk?: boolean;
+  /** Why a `replyOk: false` reply was not delivered (e.g. "no channel to deliver to"). */
+  replyNote?: string;
 }
 /** Called once when the run finishes (immediately, for a run already finished). */
 export type RunFinishedListener = (frame: FinishedFrame) => void;
@@ -105,6 +107,8 @@ export interface RunState {
   sealedAt?: number;
   /** The first seal's `replyOk`, when one was given. */
   replyOk?: boolean;
+  /** The first seal's reason for a reply not delivered, when one was given. */
+  replyNote?: string;
   /** Terminal status given to `finish()`, projected onto the summary. */
   status?: RunStatus;
   /** Short human label for the runs index; set at create(). */

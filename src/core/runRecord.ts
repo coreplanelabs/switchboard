@@ -109,6 +109,9 @@ export interface RunRecord {
   receivedAt?: number;
   sealedAt?: number;
   replyOk?: boolean;
+  /** Why a `replyOk: false` reply was not delivered (e.g. "no channel to deliver
+   *  to", run-history.md item 38). Absent when the reply was delivered or none was made. */
+  replyNote?: string;
   stepCount?: number;
   schema?: number;
   status: RunStatus;
@@ -783,6 +786,7 @@ export function isRunRecord(v: unknown): v is RunRecord {
     if (r[key] !== undefined && !isFiniteNumber(r[key])) return false;
   }
   if (r.replyOk !== undefined && typeof r.replyOk !== "boolean") return false;
+  if (r.replyNote !== undefined && typeof r.replyNote !== "string") return false;
   for (const key of ["stepCount", "schema"] as const) {
     if (r[key] !== undefined && (!isFiniteNumber(r[key]) || !Number.isInteger(r[key]) || (r[key] as number) < 0))
       return false;

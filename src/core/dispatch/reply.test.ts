@@ -13,6 +13,7 @@ import {
   type ReplyDeps,
 } from "./reply.js";
 import type { ChannelIO } from "../types.js";
+import { nullChannelIO } from "../nullChannelIo.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -344,7 +345,8 @@ describe("deliverAnswer — the answer reaches the thread", () => {
     ending.register({
       runId: run.id,
       flipOnPostFinishFailure: true,
-      write: (seal) => void sealed.push(`replyOk=${seal.replyOk}`),
+      write: (seal) =>
+        void sealed.push(`replyOk=${seal.replyOk}${seal.replyNote !== undefined ? ` (${seal.replyNote})` : ""}`),
     });
     const replies: string[] = [];
     const closes: StatusUpdate[] = [];
@@ -391,6 +393,16 @@ describe("deliverAnswer — the answer reaches the thread", () => {
     expect(JSON.stringify(s.closes[0])).toContain("✓ step");
     expect(s.replies).toEqual(["the findings\n\n[Live run](https://sb.example/runs/run-d?t=tok)"]);
     expect(s.sealed).toEqual(["replyOk=true"]);
+    expect(s.releases).toEqual([1]);
+  });
+
+  // docs/reference/specs/run-history.md item 38: a resumed ingress run's reply
+  // has no channel to deliver to — the seal must not claim delivery.
+  it("a run replying on a null channel (no channel to deliver to) is sealed replyOk false with the reason, and the record carries it", async () => {
+    const s = finishedRun();
+    const io = nullChannelIO("slack:CX:1.0", () => {});
+    expect(await deliverAnswer({ ...s.ctx, io })).toEqual({ kind: "delivered" });
+    expect(s.sealed).toEqual(["replyOk=false (no channel to deliver to)"]);
     expect(s.releases).toEqual([1]);
   });
 

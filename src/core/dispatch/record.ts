@@ -360,6 +360,7 @@ export function assembleRunRecord(input: {
     finishedAt: input.finishedAt,
     ...(seal?.sealedAt !== undefined ? { sealedAt: seal.sealedAt } : {}),
     ...(seal?.replyOk !== undefined ? { replyOk: seal.replyOk } : {}),
+    ...(seal?.replyNote !== undefined ? { replyNote: seal.replyNote } : {}),
     ...(snap !== null ? { stepCount: snap.stepCount } : {}),
     status: input.status,
     eventCount: Math.max(snap?.eventCount ?? atFinish.length, seal?.eventCount ?? 0),
