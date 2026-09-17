@@ -38,6 +38,7 @@ import type {
   PiCompactionConfig,
   PiConfig,
   ReferencesConfig,
+  ReviewConfig,
   RoutingConfig,
   Scope,
   TracingConfig,
@@ -304,7 +305,7 @@ export function validateConfig(cfg: AppConfig): void {
   for (const key of unknownKeys(cfg, CONFIG_KEYS)) throw new Error(`config.yaml: unknown key \`${key}\``);
   validateScopeEfforts(cfg, "config.yaml");
   validateBoundaries(cfg, "config.yaml");
-  validateShipScopes(cfg, "config.yaml");
+  validateScopeBlocks(cfg, "config.yaml");
   validateHarnessWords(cfg, "config.yaml");
   validateMcpServers(cfg, "config.yaml");
   if (typeof cfg.organization !== "string" || cfg.organization.trim() === "") {
@@ -331,6 +332,7 @@ export function validateConfig(cfg: AppConfig): void {
   if (cfg.runHistory !== undefined) validateRunHistory(cfg.runHistory);
   if (cfg.tracing !== undefined) validateTracing(cfg.tracing);
   validateRuntimeOverrides(cfg.runtimeOverrides);
+  if (cfg.review !== undefined) validateReview(cfg.review);
   if (cfg.ship !== undefined) validateShip(cfg.ship);
   if (cfg.spawn !== undefined) validateSpawn(cfg.spawn);
   if (cfg.routing !== undefined) validateRouting(cfg.routing, cfg.providers);
@@ -524,7 +526,6 @@ export function validateRestrict(raw: unknown): Restriction {
 const SHIP_KEYS: Record<keyof ShipConfig, true> = {
   maxRounds: true,
   maxMinutes: true,
-  addressSeverity: true,
   grant: true,
 };
 
@@ -555,10 +556,31 @@ export function grantProblem(path: string, raw: unknown): string | undefined {
   return undefined;
 }
 
-/** Reject a malformed grant on a channel's or a user's `ship` block, naming the
- *  path (docs/reference/specs/routing-and-config.md item 2); the org's rides
- *  `validateShip`. A grant without `renewals` reads as zero at resolution. */
-export function validateShipScopes(
+/** The lever's old home, refused by name wherever a config still carries it —
+ *  the org block or a scope, `config.yaml` or the stored overrides — so a stale
+ *  key is never ignored into "no gate" (docs/reference/migrations.md, 1.245.0). */
+const ADDRESS_SEVERITY_MOVED = (path: string): string =>
+  `${path} moved to ${path.replace(/ship\.addressSeverity$/, "review.addressSeverity")} — the severity to address now gates every review's verdict, not ship alone (docs/reference/migrations.md)`;
+
+/** The severity to address is one of the ladder, or the path is refused by
+ *  name (docs/reference/specs/agent-review.md item 5a). */
+function addressSeverityProblem(path: string, value: unknown): string | undefined {
+  return value !== undefined && !isAddressSeverity(value)
+    ? `${path} must be one of ${ADDRESS_SEVERITIES.join(", ")} (docs/reference/specs/agent-review.md item 5a)`
+    : undefined;
+}
+
+/** The deployment's `review` block: the org's severity to address on the ladder. */
+export function validateReview(review: ReviewConfig): void {
+  const problem = addressSeverityProblem("review.addressSeverity", review.addressSeverity);
+  if (problem) throw new Error(`config.yaml: ${problem}`);
+}
+
+/** Reject a malformed `review.addressSeverity` or `ship.grant` on a channel's or
+ *  a user's scope, naming the path (docs/reference/specs/routing-and-config.md
+ *  item 2); the org's ride `validateReview` and `validateShip`. A grant without
+ *  `renewals` reads as zero at resolution. */
+export function validateScopeBlocks(
   layer: { channels?: Record<string, Scope>; users?: Record<string, Scope> },
   source: string,
 ): void {
@@ -567,6 +589,12 @@ export function validateShipScopes(
     ["users", layer.users],
   ] as const) {
     for (const [id, scope] of Object.entries(scopes ?? {})) {
+      const level = addressSeverityProblem(`${kind}.${id}.review.addressSeverity`, scope.review?.addressSeverity);
+      if (level) throw new Error(`${source}: ${level}`);
+      // A scope written before the key moved (`config set … --ship.addressSeverity`)
+      // is named, never silently ignored into "no gate".
+      if (scope.ship !== undefined && "addressSeverity" in scope.ship)
+        throw new Error(`${source}: ${ADDRESS_SEVERITY_MOVED(`${kind}.${id}.ship.addressSeverity`)}`);
       const grant = scope.ship?.grant;
       if (grant === undefined) continue;
       const problem = grantProblem(`${kind}.${id}.ship.grant`, grant);
@@ -588,6 +616,7 @@ function validateShip(ship: ShipConfig): void {
       throw new Error(
         "config.yaml: ship.coordinator is no longer a key — every agent:ship request runs on the plan runner; remove it (docs/reference/migrations.md)",
       );
+    if (key === "addressSeverity") throw new Error(`config.yaml: ${ADDRESS_SEVERITY_MOVED("ship.addressSeverity")}`);
     throw new Error(`config.yaml: ship.${key} is not a known key`);
   }
   const rounds = ship.maxRounds;
@@ -611,11 +640,6 @@ function validateShip(ship: ShipConfig): void {
       `config.yaml: ship.maxMinutes ${pipeline.maxMinutes} cannot hold the loop ship.maxRounds ${pipeline.maxRounds} allows — ` +
         `${held.need} minutes are needed (${ALLOWANCES.provision} to provision, the coding child's ${ASKS.coding}, and the reserve for ` +
         `${pipeline.maxRounds} review rounds at their floors); raise ship.maxMinutes or lower ship.maxRounds (docs/reference/specs/agent-ship.md item 8)`,
-    );
-  // The severity gate: the level an approve's findings are held to.
-  if (ship.addressSeverity !== undefined && !isAddressSeverity(ship.addressSeverity))
-    throw new Error(
-      `config.yaml: ship.addressSeverity must be one of ${ADDRESS_SEVERITIES.join(", ")} (docs/reference/specs/agent-ship.md item 9)`,
     );
   // The grant (decision 0046): renewals within the module's ceiling, a positive cap.
   if (ship.grant !== undefined) {

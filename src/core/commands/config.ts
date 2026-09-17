@@ -367,12 +367,14 @@ export const configSet = defineCommand({
         `per-agent harness: --harness.<agent> ${harnessWords} — which process drives that agent's runs (under me, your own runs only)`,
       ),
     boundary: boundaryOption,
-    ship: z
+    review: z
       .object({
         addressSeverity: z
           .enum(ADDRESS_SEVERITIES)
           .optional()
-          .describe("the severity agent:ship addresses before an approve stands (--ship.addressSeverity <level>)"),
+          .describe(
+            "the severity to address: a review's approve carrying a finding at or above it is a request_changes, and ship's rounds are held to it (--review.addressSeverity <level>)",
+          ),
       })
       .optional(),
     channel: channelOption,
@@ -415,7 +417,8 @@ export const configSet = defineCommand({
     // The word was held to the roster by the schema; the store holds a stored
     // document to the same rule at load, so the two paths cannot drift.
     if (options.harness) patch.harness = options.harness as Record<string, HarnessName>;
-    if (options.ship?.addressSeverity !== undefined) patch.ship = { addressSeverity: options.ship.addressSeverity };
+    if (options.review?.addressSeverity !== undefined)
+      patch.review = { addressSeverity: options.review.addressSeverity };
     if (options.boundary) {
       // The list arrives as one comma-separated token and the confirm class as
       // a bare word; the whole boundary is then held to the load-time rule, so

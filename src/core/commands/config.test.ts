@@ -971,18 +971,18 @@ describe("config set --harness.<agent> and config show's effective harness", () 
   });
 });
 
-// The severity agent:ship addresses before an approve stands:
-// `--ship.addressSeverity` on `config set`, per channel (gated) and per user,
-// resolved by the ship hand-off under a `severity:<level>` directive.
-describe("config set --ship.addressSeverity", () => {
+// The severity to address (agent-review.md item 5a): `--review.addressSeverity`
+// on `config set`, per channel (gated) and per user — the level every review's
+// verdict parser holds an approve to, under a `severity:<level>` directive.
+describe("config set --review.addressSeverity", () => {
   it("`me` is self-service: the level lands on the user scope beside the other settings, and a value outside the ladder is refused by name", async () => {
     const config = store();
     const commands = bind(config);
-    const { text } = await say(commands, "config set me --ship.addressSeverity major", chat(config, "slack:UX"));
-    expect(text).toContain('"ship":{"addressSeverity":"major"}');
-    expect(config.scopes("slack:CX", "slack:UX").user.ship).toEqual({ addressSeverity: "major" });
-    const bad = await say(commands, "config set me --ship.addressSeverity huge", chat(config, "slack:UX"));
+    const { text } = await say(commands, "config set me --review.addressSeverity major", chat(config, "slack:UX"));
+    expect(text).toContain('"review":{"addressSeverity":"major"}');
+    expect(config.scopes("slack:CX", "slack:UX").user.review).toEqual({ addressSeverity: "major" });
+    const bad = await say(commands, "config set me --review.addressSeverity huge", chat(config, "slack:UX"));
     expect(bad.text).toMatch(/addressSeverity/);
-    expect(config.scopes("slack:CX", "slack:UX").user.ship).toEqual({ addressSeverity: "major" });
+    expect(config.scopes("slack:CX", "slack:UX").user.review).toEqual({ addressSeverity: "major" });
   });
 });

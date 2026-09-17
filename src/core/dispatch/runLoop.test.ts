@@ -320,6 +320,7 @@ function setup(
     startedAt: NOW,
     loopStartedAt: NOW,
     channelVisibility: "unknown" as const,
+    addressSeverity: { level: "minor" as const, source: "org" as const },
     publishText: (type: "input" | "context" | "answer", text: string) => {
       published.push(`${type}:${text}`);
       registry.publish(run.id, type === "input" ? { type, messageId: "m1", text, at: NOW } : { type, text, at: NOW });

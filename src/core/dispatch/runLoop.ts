@@ -49,6 +49,8 @@ import { parseHandoff, type Handoff } from "../ship/handoff.js";
 import {
   parseDispositionsInput,
   parseVerdictInput,
+  type AddressSeverity,
+  type AddressSeveritySource,
   type FindingDisposition,
   type ReviewVerdict,
 } from "../reviewVerdict.js";
@@ -183,6 +185,11 @@ export interface RunLoopContext {
   /** When the loop took the card, after the claim: the activity clock's start (the "quiet for …" suffix counts from here, not from `startedAt`). */
   loopStartedAt: number;
   channelVisibility: ChannelVisibility;
+  /** The severity to address in force for this run (agent-review.md item 5a),
+   *  resolved by the dispatcher — directive > user > channel > org — for the
+   *  verdict parser: a submitted or restored approve carrying a finding at or
+   *  above it is a `request_changes`. */
+  addressSeverity: { level: AddressSeverity; source: AddressSeveritySource };
   publishText: RegisteredRun["publishText"];
   ending: RunEnding;
   /** This run's spawn capability, the requester's run reads, the steer into a
@@ -452,7 +459,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // re-validated through the same parsers the tools use, never trusted as-is.
   let verdict: ReviewVerdict | undefined =
     typeof restored.verdict === "object" && restored.verdict !== null
-      ? (parseVerdictInput(restored.verdict as Record<string, unknown>) ?? undefined)
+      ? (parseVerdictInput(restored.verdict as Record<string, unknown>, {
+          addressSeverity: ctx.addressSeverity.level,
+        }) ?? undefined)
       : undefined;
   const onVerdict = (v: ReviewVerdict) => {
     verdict = v;
@@ -646,6 +655,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     ...(wait ? { wait } : {}),
     ...(session ? { session } : {}),
     onVerdict,
+    addressSeverity: ctx.addressSeverity.level,
     onDigest,
     onPrDescription,
     onHandoff,

@@ -57,6 +57,56 @@ describe("submit_verdict tool", () => {
     ).resolves.toBe("verdict recorded: request_changes");
   });
 
+  // Feature: docs/reference/specs/agent-review.md item 5a — the severity gate
+  // at the tool: the dispatcher's level rides the context, the parser holds the
+  // approve to it, and the ack tells the model its verdict changed and why.
+  describe("the severity gate (agent-review item 5a)", () => {
+    const major = { id: "F3", severity: "major", file: "a.vue", line: 149, title: "drops the first key's ref" };
+    const ctxAt = (level: ToolContext["addressSeverity"], sink: (v: unknown) => void): ToolContext =>
+      ({ executor: {} as ToolContext["executor"], onVerdict: sink, addressSeverity: level }) as ToolContext;
+
+    it("without a level on the context the parser's default (minor) holds: an approve over a major is recorded as request_changes and the ack says so", async () => {
+      const got: Array<{ verdict: string; summary: string }> = [];
+      const out = await submitVerdictTool.run(
+        { verdict: "approve", summary: "ship it", findings: [major] },
+        ctxWith((v) => got.push(v)),
+      );
+      expect(got[0].verdict).toBe("request_changes");
+      expect(got[0].summary).toContain("downgraded from approve");
+      expect(String(out)).toContain("verdict recorded: request_changes");
+      expect(String(out)).toContain(
+        "downgraded from approve: finding F3 (major) at or above minor, the severity to address",
+      );
+    });
+
+    it("the context's level is the one the parser holds to: at `blocking` the same approve stands and the ack carries no downgrade", async () => {
+      const got: Array<{ verdict: string }> = [];
+      const out = await submitVerdictTool.run(
+        { verdict: "approve", summary: "ship it", findings: [major] },
+        ctxAt("blocking", (v) => got.push(v as { verdict: string })),
+      );
+      expect(got[0].verdict).toBe("approve");
+      expect(String(out)).toBe("verdict recorded: approve (1 finding)");
+    });
+
+    it("at `nit` even a nit downgrades; the sink receives the downgraded verdict, never the model's approve", async () => {
+      const got: Array<{ verdict: string }> = [];
+      await submitVerdictTool.run(
+        { verdict: "approve", summary: "s", findings: [{ ...major, id: "F1", severity: "nit" }] },
+        ctxAt("nit", (v) => got.push(v as { verdict: string })),
+      );
+      expect(got).toHaveLength(1);
+      expect(got[0].verdict).toBe("request_changes");
+    });
+
+    it("the description states the rule the code enforces: approve means nothing at or above the severity to address, minor by default; nits alone never block", () => {
+      expect(submitVerdictTool.description).toContain("no finding at or above the severity to address remains");
+      expect(submitVerdictTool.description).toContain("`minor` by default");
+      expect(submitVerdictTool.description).toContain("nits alone never block");
+      expect(submitVerdictTool.description).not.toContain("no blocking issues");
+    });
+  });
+
   // Feature: docs/reference/specs/agent-ship.md item 6 — the verdict enumerates findings
   // as typed entries with stable ids; the tool text is where the review agent
   // learns the id and severity contract.

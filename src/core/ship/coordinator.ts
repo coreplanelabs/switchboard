@@ -34,7 +34,18 @@ import type { Handoff } from "./handoff.js";
 import { progressOf, renderRenewal, renewalDecision, type PushedHeadFact, type RenewalDecision } from "./renewal.js";
 import type { RunStatus } from "../runRecord.js";
 import { normalizeHead, sameCommit } from "../reviewedHead.js";
-import { formatFinding, type Finding, type FindingDisposition, type ReviewVerdictKind } from "../reviewVerdict.js";
+import {
+  ADDRESS_SEVERITIES,
+  DEFAULT_ADDRESS_SEVERITY,
+  findingsAtOrAbove,
+  formatFinding,
+  isAddressSeverity,
+  type AddressSeverity,
+  type AddressSeveritySource,
+  type Finding,
+  type FindingDisposition,
+  type ReviewVerdictKind,
+} from "../reviewVerdict.js";
 import { parsePlanUnit, planUnitIds } from "./contract.js";
 import {
   carve,
@@ -598,26 +609,19 @@ export type CoordinatorNote =
  *  person can see whether the cap or the child is the problem. */
 export type ShipBudgetSpent = Readonly<Record<"coding" | "review" | "waiting", number>>;
 
-/** The severity ship must address before an approve stands (agent-ship item
- *  9's gate): an approve carrying a finding at or above this level continues
- *  into the findings step exactly as a request_changes does. Ordered most to
- *  least severe. */
-export const ADDRESS_SEVERITIES = ["blocking", "major", "minor", "nit"] as const;
-export type AddressSeverity = (typeof ADDRESS_SEVERITIES)[number];
-/** Where the level in force came from, most specific wins: a `severity:` directive on the request (`run`), the user's or the channel's config scope, the org's `ship.addressSeverity` (or its default). */
-export type AddressSeveritySource = "org" | "channel" | "user" | "run";
-export const DEFAULT_ADDRESS_SEVERITY: AddressSeverity = "minor";
-export const isAddressSeverity = (v: unknown): v is AddressSeverity =>
-  (ADDRESS_SEVERITIES as readonly unknown[]).includes(v);
-
-const severityRank = (s: AddressSeverity): number => ADDRESS_SEVERITIES.indexOf(s);
-/** The findings the gate acts on at `level`: at or above it. Every parsed
- *  finding carries one of the ladder's four levels — the verdict parser
- *  (`parseVerdictInput`) drops an entry with any other severity, `fyi` or none,
- *  with a note — so nothing outside the ladder ever reaches the gate. */
-export function findingsAtOrAbove(findings: readonly Finding[], level: AddressSeverity): Finding[] {
-  return findings.filter((f) => severityRank(f.severity) <= severityRank(level));
-}
+// The severity to address (agent-ship item 9's gate) is the verdict parser's
+// ladder (src/core/reviewVerdict.ts): the same level the parser holds a
+// submitted approve to, so a posted approve can carry a gated finding only
+// when it was parsed at a different level — the check below is defense in
+// depth behind the parser's. Re-exported here for the runner's callers.
+export {
+  ADDRESS_SEVERITIES,
+  DEFAULT_ADDRESS_SEVERITY,
+  findingsAtOrAbove,
+  isAddressSeverity,
+  type AddressSeverity,
+  type AddressSeveritySource,
+};
 
 export interface UnitSession {
   segment: number;

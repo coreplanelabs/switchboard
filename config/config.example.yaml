@@ -91,7 +91,13 @@ defaults:
 # written (one Opus-class call per review; meat caches by model + diff). `off`
 # records no reading diff at all. `SWITCHBOARD_READING_DIFF=git|meat|off` in
 # the environment overrides `provider` on a deployed bot. Needs `runHistory`.
+# `addressSeverity` is the severity to address (docs/reference/specs/agent-review.md
+# item 5a): a review's approve carrying a finding at or above it is posted as
+# `Changes requested:`, never `LGTM:`, and agent:ship holds its rounds to the same
+# level. Per channel/user: config set … --review.addressSeverity; per run:
+# severity:<level>.
 # review:
+#   addressSeverity: minor         # blocking | major | minor (default) | nit
 #   readingDiff:
 #     provider: git                # git (default) | meat | off
 #     meatModel: claude-opus-5     # meat's -model; Opus-class is the floor that actually abridges
@@ -342,9 +348,6 @@ workspaceDir: ./workspaces
 # ship:
 #   maxRounds: 3      # review rounds per unit
 #   maxMinutes: 120   # the ship preset's wall-clock budget in minutes (the registry's default)
-#   addressSeverity: minor  # the severity an approve's findings are held to (blocking|major|minor|nit);
-#                     # a finding at or above it sends the round into a fix step instead of merge-ready.
-#                     # Per channel/user: config set … --ship.addressSeverity; per run: severity:<level>.
 
 # Which harness each preset's runs are driven by, deployment-wide
 # (docs/reference/specs/harness.md item 8): a mapping of preset to a harness's

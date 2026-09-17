@@ -14,7 +14,7 @@
 // coding child from a review: the findings are a message, not a brief.
 
 import { parseDirectives } from "../../directives.js";
-import { formatFinding, type Finding, type FindingDisposition } from "../reviewVerdict.js";
+import { DEFAULT_ADDRESS_SEVERITY, formatFinding, type Finding, type FindingDisposition } from "../reviewVerdict.js";
 import { matchDispositions, type Brief } from "../ship/coordinator.js";
 import {
   contractFromPlan,
@@ -219,7 +219,13 @@ export async function composeChild(
         ...(prior ? { prior } : {}),
       });
       const contract = await contractFor(instance, unit, readers);
-      return { preset: "review", prompt: `${prUrl(instance.repo, brief.pr)}\n\n${turn}`, contract };
+      // The instance's severity to address rides the child's request as its
+      // `severity:` directive (agent-review.md item 5a), so the child's verdict
+      // parser holds the approve to the level the hand-off resolved — the
+      // runner's own gate (agent-ship item 9) then reads a verdict already held
+      // to it, never one parsed at the review thread's scope.
+      const severity = `severity:${instance.addressSeverity ?? DEFAULT_ADDRESS_SEVERITY}`;
+      return { preset: "review", prompt: `${prUrl(instance.repo, brief.pr)} ${severity}\n\n${turn}`, contract };
     }
     case "findings": {
       const review = await facts(readers, brief.reviewRunId);

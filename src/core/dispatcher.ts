@@ -72,6 +72,7 @@ import { afterReply, deliverAnswer, type ReplyDeps } from "./dispatch/reply.js";
 import { writeTombstone } from "./dispatch/record.js";
 import { runShipBranch, type ShipDeps } from "./dispatch/ship.js";
 import { shipPresetFor } from "./shipPipeline.js";
+import { resolveAddressSeverity } from "./reviewVerdict.js";
 import { DEFAULT_CONTRACT_MAX_CHARS, renderContract, type ChildContract } from "./ship/contract.js";
 import { withContractInFirstUserTurn } from "./ship/codingChild.js";
 import { prepareFreshTurn, settleThread, tellDropped } from "./dispatch/settle.js";
@@ -1180,12 +1181,26 @@ export async function dispatch(
         inbox: admitted.inbox,
       },
     );
+    // The severity to address for this run (agent-review.md item 5a): the
+    // request's `severity:` directive over the user's scope over the channel's
+    // over the org's `review.addressSeverity` — the one level the verdict
+    // parser holds an approve to, resolved here where the directives and the
+    // scopes both are. A ship review child carries its instance's level as
+    // its directive, so it resolves to the hand-off's answer.
+    const scopes = deps.config.scopes(msg.channelId, msg.userId);
+    const addressSeverity = resolveAddressSeverity({
+      org: deps.config.config.review?.addressSeverity,
+      channel: scopes.channel.review?.addressSeverity,
+      user: scopes.user.review?.addressSeverity,
+      run: directives.severity,
+    });
     // The agent loop (dispatch/runLoop.ts): the model turn, the follow-up inbox,
     // the settle and the post-steps, the finish. A throw propagates to the
     // outer catch after the workspace is released.
     const ran = await runLoop(deps, {
       msg,
       io,
+      addressSeverity,
       agent,
       profile,
       resolved,

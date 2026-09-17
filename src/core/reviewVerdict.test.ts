@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  ADDRESS_SEVERITIES,
   buildReviewPostBody,
   CHANGES_TOKEN,
+  FINDING_SEVERITIES,
+  findingsAtOrAbove,
   isFindingDispositionsShape,
   isReviewPostShape,
   isReviewVerdictShape,
@@ -12,6 +15,7 @@ import {
   redactDispositions,
   redactReviewPost,
   redactVerdict,
+  severityAtOrAbove,
   verdictLine,
 } from "./reviewVerdict.js";
 
@@ -196,12 +200,129 @@ describe("review verdict → post body", () => {
       expect(buildReviewPostBody("prose", v).startsWith("LGTM")).toBe(false);
     });
 
-    it("LGTM token contract holds with findings present: approve + non-blocking findings still starts with the exact token", () => {
+    it("LGTM token contract holds with findings present: approve + findings below the level still starts with the exact token", () => {
       const v = parseVerdictInput({ verdict: "approve", summary: "minor nits only", findings: [F2] })!;
       expect(v.verdict).toBe("approve");
       const body = buildReviewPostBody("prose", v);
       expect(body.startsWith(`${LGTM_TOKEN} minor nits only\n`)).toBe(true);
       expect(body).toContain("- [nit] F2 src/b.ts — Rename x");
+    });
+
+    // Feature: docs/reference/specs/agent-review.md item 5a — the severity gate
+    // lives where the verdict is parsed: an approve carrying a finding at or
+    // above the severity to address is a request_changes, whatever the
+    // reviewer's prose says, so `LGTM:` is never minted over a finding the loop
+    // must act on. Seen live: a `[major]` under an `LGTM:` line auto-approved
+    // a pull request.
+    describe("the severity gate — an approve is held to the severity to address (default minor)", () => {
+      const at = (severity: string) => ({
+        id: "F3",
+        severity,
+        file: "a.ts",
+        line: 149,
+        title: "drops the first key's ref",
+      });
+
+      it("by default an approve carrying a major finding is downgraded to request_changes naming the finding, its severity and the level", () => {
+        const v = parseVerdictInput({ verdict: "approve", summary: "ship it", findings: [at("major")] })!;
+        expect(v.verdict).toBe("request_changes");
+        expect(v.summary).toContain("ship it");
+        expect(v.summary).toMatch(/downgraded from approve/);
+        expect(v.summary).toContain("F3 (major)");
+        expect(v.summary).toContain("at or above minor");
+        expect(buildReviewPostBody("prose", v).startsWith(CHANGES_TOKEN)).toBe(true);
+      });
+
+      it("by default an approve carrying a minor finding is downgraded too — minor is the level, and the gate is at-or-above", () => {
+        const v = parseVerdictInput({ verdict: "approve", summary: "ok", findings: [at("minor")] })!;
+        expect(v.verdict).toBe("request_changes");
+        expect(buildReviewPostBody("prose", v).startsWith("LGTM")).toBe(false);
+      });
+
+      it("every level × every declared severity: the body starts with `LGTM:` exactly when the finding sits below the level", () => {
+        for (const level of ADDRESS_SEVERITIES) {
+          for (const severity of FINDING_SEVERITIES) {
+            const v = parseVerdictInput(
+              { verdict: "approve", summary: "s", findings: [at(severity)] },
+              { addressSeverity: level },
+            )!;
+            const below = FINDING_SEVERITIES.indexOf(severity) > FINDING_SEVERITIES.indexOf(level);
+            expect(v.verdict, `level ${level}, finding ${severity}`).toBe(below ? "approve" : "request_changes");
+            expect(buildReviewPostBody("p", v).startsWith(LGTM_TOKEN), `level ${level}, finding ${severity}`).toBe(
+              below,
+            );
+          }
+        }
+      });
+
+      it("the level in force widens or narrows the gate: at `major` a minor finding passes, at `nit` nothing passes", () => {
+        const loose = parseVerdictInput(
+          { verdict: "approve", summary: "s", findings: [at("minor")] },
+          { addressSeverity: "major" },
+        )!;
+        expect(loose.verdict).toBe("approve");
+        const strict = parseVerdictInput(
+          { verdict: "approve", summary: "s", findings: [{ ...at("nit"), id: "F9" }] },
+          { addressSeverity: "nit" },
+        )!;
+        expect(strict.verdict).toBe("request_changes");
+        expect(strict.summary).toContain("F9 (nit)");
+        expect(strict.summary).toContain("at or above nit");
+      });
+
+      it("the gate keys on the RAW declared severity: a major finding that drops for a missing title still poisons the approve", () => {
+        const v = parseVerdictInput({
+          verdict: "approve",
+          summary: "ok",
+          findings: [{ id: "F3", severity: "major", file: "a.ts" }],
+        })!;
+        expect(v.findings).toEqual([]);
+        expect(v.droppedFindings).toHaveLength(1);
+        expect(v.verdict).toBe("request_changes");
+        expect(v.summary).toContain("F3 (major)");
+      });
+
+      it("a severity outside the ladder (`fyi`) drops with a note and never opens the gate", () => {
+        const v = parseVerdictInput({
+          verdict: "approve",
+          summary: "ok",
+          findings: [{ id: "F1", severity: "fyi", file: "a.ts", title: "note" }],
+        })!;
+        expect(v.verdict).toBe("approve");
+        expect(v.findings).toEqual([]);
+        expect(v.droppedFindings![0]).toMatch(/invalid severity "fyi"/);
+      });
+
+      it("several gated findings are all named once, in order; findings below the level are not", () => {
+        const v = parseVerdictInput({
+          verdict: "approve",
+          summary: "ok",
+          findings: [
+            { id: "F1", severity: "nit", file: "a.ts", title: "n" },
+            { id: "F2", severity: "major", file: "a.ts", title: "m" },
+            { id: "F3", severity: "minor", file: "a.ts", title: "mi" },
+          ],
+        })!;
+        expect(v.verdict).toBe("request_changes");
+        expect(v.summary).toContain("F2 (major), F3 (minor)");
+        expect(v.summary).not.toContain("F1");
+      });
+
+      it("request_changes is untouched by the gate: no downgrade note is appended", () => {
+        const v = parseVerdictInput({ verdict: "request_changes", summary: "one bug", findings: [at("major")] })!;
+        expect(v.summary).toBe("one bug");
+      });
+
+      it("severityAtOrAbove and findingsAtOrAbove agree with the ladder; a value off the ladder is never at or above", () => {
+        expect(severityAtOrAbove("blocking", "minor")).toBe(true);
+        expect(severityAtOrAbove("minor", "minor")).toBe(true);
+        expect(severityAtOrAbove("nit", "minor")).toBe(false);
+        expect(severityAtOrAbove("fyi", "nit")).toBe(false);
+        expect(severityAtOrAbove(undefined, "nit")).toBe(false);
+        const all = FINDING_SEVERITIES.map((severity, i) => ({ id: `F${i}`, severity, file: "a", title: "t" }));
+        expect(findingsAtOrAbove(all, "major").map((f) => f.severity)).toEqual(["blocking", "major"]);
+        expect(findingsAtOrAbove(all, "nit")).toHaveLength(4);
+      });
     });
 
     it("request_changes with findings never yields an LGTM-prefixed body", () => {

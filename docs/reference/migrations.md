@@ -4,6 +4,10 @@ What an operator changes when a release breaks something: one section per such r
 
 A section says, in this order: what no longer works as it did, what replaces it, and the smallest edit that gets an installation from one to the other — a config key to rename, a command to re-run, a secret to add. Nothing else: history and reasons live in the changelog and the [decision records](../explanation/design-decisions.md).
 
+## 1.245.0
+
+- `ship.addressSeverity` is gone; the severity to address is `review.addressSeverity` ([agent-review](specs/agent-review.md) item 5a), because it now gates every review's verdict — an `approve` carrying a finding at or above the level (default `minor`) is posted as `Changes requested:`, never `LGTM:` — and not only ship's merge-ready step. A `config.yaml` or a stored override still carrying `ship.addressSeverity` (org block, channel or user scope) fails the load naming the move. The edit: rename the key under `review:` (`review:\n  addressSeverity: minor`), or re-run `config set channel|me --review.addressSeverity <level>` for a scope that had set it; a `severity:<level>` directive on a request is unchanged.
+
 ## 1.243.0
 
 - The state Worker's `POST /runs/usage-by-user` route is gone; the bot asks `POST /runs/usage` for one row per run and does the arithmetic itself ([run-history](specs/run-history.md) item 56). The bot and the memory Worker ship in the same release, so `deploy all --affected` carries both; a bot deployed against a memory Worker still on the old route fails its costs snapshot take with `route missing` (the status line and `costs.snapshot.alertChannel` say so, the previous snapshot keeps serving) until the Worker is deployed. A stored costs snapshot from before this release holds the old per-user rows and is refused on read, so the first minute after the deploy shows the costs page with no snapshot and then the loop takes a fresh one; nothing to edit.

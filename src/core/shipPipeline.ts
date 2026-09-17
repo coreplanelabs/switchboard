@@ -27,12 +27,6 @@ export interface ShipConfig {
   /** The ship preset's declared wall-clock budget in minutes (>= 1). Default:
    *  the registry's `AGENTS.ship.maxMinutes` (120). */
   maxMinutes?: number;
-  /** The severity ship must address before an approve stands:
-   *  an approve carrying a finding at or above this level continues into the
-   *  findings step exactly as a request_changes does. Default `minor`;
-   *  overridable per channel and per user (`config set … --ship.addressSeverity`)
-   *  and per run by a `severity:<level>` directive. */
-  addressSeverity?: AddressSeverity;
   /** The grant a ship request carries by default in this deployment (decision
    *  0046, the renewable lease): renewals and a cost cap; overridable per
    *  channel and per user (`ship.grant` on the scope) and, for the count alone,
@@ -50,32 +44,20 @@ import {
   ADDRESS_SEVERITIES,
   DEFAULT_ADDRESS_SEVERITY,
   isAddressSeverity,
+  resolveAddressSeverity,
   type AddressSeverity,
   type AddressSeveritySource,
-} from "./ship/coordinator.js";
+} from "./reviewVerdict.js";
+// The ladder and its resolution live with the verdict parser (agent-review.md
+// item 5a); ship reads the same lever, so its callers import them from here.
 export {
   ADDRESS_SEVERITIES,
   DEFAULT_ADDRESS_SEVERITY,
   isAddressSeverity,
+  resolveAddressSeverity,
   type AddressSeverity,
   type AddressSeveritySource,
 };
-
-/** The level in force and the layer that set it: the request's
- *  `severity:` directive wins, then the user's scope, the channel's, the org's
- *  `ship.addressSeverity` — the default counts as the org's. Resolved once by
- *  the hand-off and written on the instance beside `merge`. */
-export function resolveAddressSeverity(layers: {
-  org?: AddressSeverity;
-  channel?: AddressSeverity;
-  user?: AddressSeverity;
-  run?: AddressSeverity;
-}): { level: AddressSeverity; source: AddressSeveritySource } {
-  if (layers.run !== undefined) return { level: layers.run, source: "run" };
-  if (layers.user !== undefined) return { level: layers.user, source: "user" };
-  if (layers.channel !== undefined) return { level: layers.channel, source: "channel" };
-  return { level: layers.org ?? DEFAULT_ADDRESS_SEVERITY, source: "org" };
-}
 
 /** The grant in force and the layer that set it (decision 0046): the user's
  *  scope wins over the channel's over the org's `ship.grant`, the default (zero

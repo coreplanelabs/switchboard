@@ -19,18 +19,82 @@
 // a fix round can reference each finding by its stable id and answer it with
 // a typed disposition (`parseDispositionsInput` below). Findings validate
 // fail-closed PER finding — a malformed finding drops with a note, a
-// malformed array drops the whole field — and an `approve` carrying a
-// self-declared `blocking` finding is downgraded to `request_changes`, so the
-// posted body can never begin with `LGTM:` over a defect the reviewer itself
-// called blocking.
+// malformed array drops the whole field.
+//
+// THE SEVERITY GATE (docs/reference/specs/agent-review.md item 5a): an
+// `approve` carrying a finding at or above the severity to address — the
+// level in force for the run, `minor` by default — is downgraded to
+// `request_changes` HERE, where the verdict is parsed, so the posted body can
+// never begin with `LGTM:` over a finding the loop would have to act on. The
+// gate is keyed on the RAW entries' declared severity, so a finding that
+// fails validation for another reason still poisons the approve. The same
+// ladder is what ship's coordinator holds a posted approve to (agent-ship.md
+// item 9) — that check is now defense in depth behind this one.
 
 import { normalizeHead } from "./reviewedHead.js";
 import { redactSecrets } from "./redact.js";
 
 export type ReviewVerdictKind = "approve" | "request_changes";
 
+/** The severity ladder, most to least severe. One list serves the findings a
+ *  reviewer submits and the level the loop addresses: a finding's severity is
+ *  compared to the level in force on this ladder, so nothing outside it can
+ *  reach a gate — the parser drops an entry with any other severity (`fyi`,
+ *  none) with a note. */
 export const FINDING_SEVERITIES = ["blocking", "major", "minor", "nit"] as const;
 export type FindingSeverity = (typeof FINDING_SEVERITIES)[number];
+
+/** The severity to address (the loop's gate on a round): an approve carrying a
+ *  finding at or above this level is not an approve. Resolved once per run —
+ *  the request's `severity:` directive over the user's scope over the
+ *  channel's over the org's `review.addressSeverity` — and handed to the
+ *  verdict parser and ship's coordinator alike. */
+export const ADDRESS_SEVERITIES = FINDING_SEVERITIES;
+export type AddressSeverity = FindingSeverity;
+/** Where the level in force came from, most specific wins: a `severity:`
+ *  directive on the request (`run`), the user's or the channel's config scope,
+ *  the org's `review.addressSeverity` (or its default). */
+export type AddressSeveritySource = "org" | "channel" | "user" | "run";
+export const DEFAULT_ADDRESS_SEVERITY: AddressSeverity = "minor";
+export const isAddressSeverity = (v: unknown): v is AddressSeverity =>
+  (ADDRESS_SEVERITIES as readonly unknown[]).includes(v);
+
+const severityRank = (s: AddressSeverity): number => ADDRESS_SEVERITIES.indexOf(s);
+/** Whether a declared severity sits at or above the level in force on the
+ *  ladder — the one comparison every gate makes. A value outside the ladder is
+ *  never at or above anything. */
+export function severityAtOrAbove(severity: unknown, level: AddressSeverity): severity is AddressSeverity {
+  return isAddressSeverity(severity) && severityRank(severity) <= severityRank(level);
+}
+/** The findings a gate acts on at `level`: at or above it. */
+export function findingsAtOrAbove(findings: readonly Finding[], level: AddressSeverity): Finding[] {
+  return findings.filter((f) => severityAtOrAbove(f.severity, level));
+}
+
+/** The level in force and the layer that set it: the request's
+ *  `severity:` directive wins, then the user's scope, the channel's, the org's
+ *  `review.addressSeverity` — the default counts as the org's. Resolved once
+ *  per run by the dispatcher (every review's verdict parser reads it) and once
+ *  per ship request by the hand-off, which writes it on the instance beside
+ *  `merge` and hands it to each review child as its `severity:` directive. */
+export function resolveAddressSeverity(layers: {
+  org?: AddressSeverity;
+  channel?: AddressSeverity;
+  user?: AddressSeverity;
+  run?: AddressSeverity;
+}): { level: AddressSeverity; source: AddressSeveritySource } {
+  if (layers.run !== undefined) return { level: layers.run, source: "run" };
+  if (layers.user !== undefined) return { level: layers.user, source: "user" };
+  if (layers.channel !== undefined) return { level: layers.channel, source: "channel" };
+  return { level: layers.org ?? DEFAULT_ADDRESS_SEVERITY, source: "org" };
+}
+
+/** The gate's one sentence — `finding(s) <id> (<severity>)[, …] at or above
+ *  <level>, the severity to address` — as the downgraded summary carries it into
+ *  the posted body and the tool's ack repeats it to the model. */
+export function downgradeNote(d: { findings: readonly string[]; level: AddressSeverity }): string {
+  return `finding${d.findings.length === 1 ? "" : "s"} ${d.findings.join(", ")} at or above ${d.level}, the severity to address`;
+}
 
 export interface Finding {
   /** Stable id the reviewer assigned in order ("F1", "F2", …) — dispositions
@@ -63,50 +127,63 @@ export interface ReviewVerdict {
    *  reasons) — surfaced in the tool ack so the model can resubmit, never
    *  rendered into the posted body. */
   droppedFindings?: string[];
+  /** Parse note: the approve was downgraded by the severity gate — the gated
+   *  findings as `id (severity)` and the level in force. Surfaced in the tool
+   *  ack so the model knows its verdict changed; the summary carries the same
+   *  words into the posted body, so this never rides a record. */
+  downgraded?: { findings: string[]; level: AddressSeverity };
 }
 
 export const LGTM_TOKEN = "LGTM:";
 export const CHANGES_TOKEN = "Changes requested:";
 export const NO_VERDICT_LINE = "No verdict submitted — not approving.";
 
-/** Parse an arbitrary tool input into a verdict, or null when it is not one. */
-export function parseVerdictInput(input: Record<string, unknown>): ReviewVerdict | null {
+/** Parse an arbitrary tool input into a verdict, or null when it is not one.
+ *  `addressSeverity` is the level in force for the run (default `minor`): an
+ *  approve carrying a finding at or above it is parsed as `request_changes`. */
+export function parseVerdictInput(
+  input: Record<string, unknown>,
+  opts: { addressSeverity?: AddressSeverity } = {},
+): ReviewVerdict | null {
   const verdict = input.verdict;
   if (verdict !== "approve" && verdict !== "request_changes") return null;
+  const level = opts.addressSeverity ?? DEFAULT_ADDRESS_SEVERITY;
   const summary = typeof input.summary === "string" ? oneLine(input.summary) : "";
   const head = normalizeHead(input.head);
   const out: ReviewVerdict = { verdict, summary };
   if (head) out.head = head;
   if (input.findings !== undefined) {
-    const parsed = parseFindings(input.findings);
+    const parsed = parseFindings(input.findings, level);
     if (parsed.findings) out.findings = parsed.findings;
     if (parsed.dropped.length) out.droppedFindings = parsed.dropped;
-    // Verdict/severity consistency, fail-closed: an approve carrying a
-    // blocking finding downgrades so the posted body can never start with
-    // `LGTM:` over a self-declared blocking defect. Keyed on the RAW entries'
-    // declared severity, not the validated survivors — a blocking entry that
-    // itself failed validation and dropped still poisons the approve.
-    if (out.verdict === "approve" && parsed.blocking.length > 0) {
+    // The severity gate, fail-closed: an approve carrying a finding at or
+    // above the level in force downgrades, so the posted body can never start
+    // with `LGTM:` over a finding the loop has to address. Keyed on the RAW
+    // entries' declared severity, not the validated survivors — a gated entry
+    // that itself failed validation and dropped still poisons the approve.
+    if (out.verdict === "approve" && parsed.gated.length > 0) {
       out.verdict = "request_changes";
-      out.summary = oneLine(
-        `${out.summary} [downgraded from approve: blocking finding${parsed.blocking.length === 1 ? "" : "s"} ${parsed.blocking.join(", ")}]`,
-      );
+      out.downgraded = { findings: parsed.gated, level };
+      out.summary = oneLine(`${out.summary} [downgraded from approve: ${downgradeNote(out.downgraded)}]`);
     }
   }
   return out;
 }
 
 /** Fail-closed per finding: each malformed entry drops with a note naming its
- *  index (and id when readable); a non-array drops the whole field.
- *  `blocking` labels every raw entry that declared severity "blocking" —
- *  valid or not — for the approve downgrade above. */
-function parseFindings(value: unknown): { findings?: Finding[]; dropped: string[]; blocking: string[] } {
+ *  index (and id when readable); a non-array drops the whole field. `gated`
+ *  labels every raw entry whose declared severity sits at or above `level` —
+ *  valid or not — as `id (severity)`, for the approve downgrade above. */
+function parseFindings(
+  value: unknown,
+  level: AddressSeverity,
+): { findings?: Finding[]; dropped: string[]; gated: string[] } {
   if (!Array.isArray(value)) {
-    return { dropped: ["findings: dropped — not an array"], blocking: [] };
+    return { dropped: ["findings: dropped — not an array"], gated: [] };
   }
   const findings: Finding[] = [];
   const dropped: string[] = [];
-  const blocking: string[] = [];
+  const gated: string[] = [];
   value.forEach((raw, i) => {
     const parsed = parseFinding(raw);
     if (parsed.finding) {
@@ -116,9 +193,9 @@ function parseFindings(value: unknown): { findings?: Finding[]; dropped: string[
     }
     const label = parsed.finding?.id ?? parsed.id ?? `findings[${i}]`;
     const r = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : undefined;
-    if (r?.severity === "blocking") blocking.push(label);
+    if (severityAtOrAbove(r?.severity, level)) gated.push(`${label} (${r?.severity})`);
   });
-  return { findings, dropped, blocking };
+  return { findings, dropped, gated };
 }
 
 function parseFinding(
