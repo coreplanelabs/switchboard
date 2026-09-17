@@ -10,6 +10,11 @@ import type { RunRecord } from "../core/runRecord.js";
 import { RunRegistry } from "../core/runRegistry.js";
 import { InMemoryRunStore } from "../core/runStore.js";
 import { createRunsService, type RunRecordView } from "../core/runsService.js";
+import { NullRunHistoryWriter } from "../core/runHistoryWriter.js";
+import { createRunEnding } from "../core/runEnding.js";
+import { channelOf, startRequestRoot } from "../core/requestTrace.js";
+import { recordRoutedDecision, type RouteEventFields } from "../core/dispatch/commandRun.js";
+import type { FastPathDeps } from "../core/dispatch/fastPath.js";
 import type { ChannelIO, IncomingMessage } from "../core/types.js";
 import type { AccessIdentity } from "./accessAuth.js";
 import type { DispatchFn } from "./http.js";
@@ -392,6 +397,46 @@ describe("POST /threads/<id>/send — the body into dispatch() as this session (
     });
     expect(res.status).toBe(200);
     expect(JSON.parse(res.body)).toEqual({ reply: "To run this: config set me --agent review" });
+  });
+
+  it("a hand-back recorded through the real machinery (record 0044) is still 200 with the line — no view path, no run receipt — while the registry holds the record", async () => {
+    const line = "To run this: config set me --agent review";
+    const route: RouteEventFields = {
+      preset: "command",
+      reason: "command config.set",
+      model: "anthropic/m",
+      command: "config.set",
+      input: { args: ["me"], options: { agent: "review" } },
+      receipt: "config set me --agent review",
+      outcome: "hand_back",
+    };
+    const { handler, registry } = setup({
+      // What the route stage does for a hand-back: the decision recorded
+      // through the real inline-run machinery, told to announce nothing, then
+      // the line replied. The adapter's answer is judged against the real seam.
+      dispatch: async (_deps, msg, io) => {
+        const fastPath = {
+          runRegistry: registry,
+          runHistoryWriter: new NullRunHistoryWriter(),
+          clock: () => NOW,
+        } as unknown as FastPathDeps;
+        const trace = startRequestRoot({ clock: () => NOW }, { channel: channelOf(msg.channelId), receivedAt: NOW });
+        const ending = createRunEnding({ registry });
+        await recordRoutedDecision(fastPath, msg, io, { id: "config.set" }, route, line, ending, trace);
+        await ending.sealAfterReply(
+          async () => {},
+          () => io.reply(line),
+        );
+      },
+    });
+    const res = await request(handler, {
+      url: "/threads/conv-1/send",
+      method: "POST",
+      body: JSON.stringify({ text: "use the review agent for me" }),
+    });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ reply: line });
+    expect(registry.getById("id-1")).toMatchObject({ finished: true, status: "completed", agent: "command" });
   });
 
   it("a run gone from the registry before its token was read (discarded) is answered with its reply and receipt, never a dead view path", async () => {

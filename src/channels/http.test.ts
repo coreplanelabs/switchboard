@@ -16,6 +16,12 @@ import {
 import type { CoreDeps } from "../core/dispatcher.js";
 import { NO_GRANTS, type Grants } from "../core/authz/types.js";
 import type { ChannelIO, IncomingMessage } from "../core/types.js";
+import { RunRegistry } from "../core/runRegistry.js";
+import { NullRunHistoryWriter } from "../core/runHistoryWriter.js";
+import { createRunEnding } from "../core/runEnding.js";
+import { channelOf, startRequestRoot } from "../core/requestTrace.js";
+import { recordRoutedDecision, type RouteEventFields } from "../core/dispatch/commandRun.js";
+import type { FastPathDeps } from "../core/dispatch/fastPath.js";
 
 // Feature: docs/reference/specs/http-ingress.md — adapter #3 (HTTP). Auth is fail-closed +
 // constant-time; a token maps to a namespaced identity that flows into the same
@@ -588,7 +594,49 @@ describe("run receipt in the response", () => {
     io.runFinished({ id: "r", status: "stopped_soft" });
     expect(io.run()).toEqual({ id: "r", status: "stopped_soft" });
   });
+
+  it("a hand-back recorded through the real machinery (record 0044) still answers the line alone — no `run` receipt — while the registry holds the record", async () => {
+    const hb = handBackDispatch();
+    const res = await handleIngressRequest(request, deps, options(hb.fn));
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ reply: HAND_BACK_LINE });
+    expect(hb.registry.getById("hb-1")).toMatchObject({ finished: true, status: "completed", agent: "command" });
+  });
 });
+
+const HAND_BACK_LINE = "To run this: config set channel --models.coding anthropic/claude-opus-5";
+const HAND_BACK_ROUTE: RouteEventFields = {
+  preset: "command",
+  reason: "command config.set",
+  model: "anthropic/general-model",
+  command: "config.set",
+  input: { args: ["channel"], options: { models: { coding: "anthropic/claude-opus-5" } } },
+  receipt: "config set channel --models.coding anthropic/claude-opus-5",
+  outcome: "hand_back",
+};
+
+/** A dispatch that does for a hand-back exactly what the route stage does
+ *  (record 0044): records the decision through `recordRoutedDecision` — the
+ *  real inline-run machinery over a bare registry, told to announce nothing —
+ *  then replies the line. The adapter's shape is judged against the real seam. */
+function handBackDispatch() {
+  const registry = new RunRegistry({ genId: () => "hb-1", genToken: () => "t" });
+  const fn: DispatchFn = async (_deps, msg, io) => {
+    const fastPath = {
+      runRegistry: registry,
+      runHistoryWriter: new NullRunHistoryWriter(),
+      clock: () => 10_000,
+    } as unknown as FastPathDeps;
+    const trace = startRequestRoot({ clock: () => 10_000 }, { channel: channelOf(msg.channelId), receivedAt: 10_000 });
+    const ending = createRunEnding({ registry });
+    await recordRoutedDecision(fastPath, msg, io, { id: "config.set" }, HAND_BACK_ROUTE, HAND_BACK_LINE, ending, trace);
+    await ending.sealAfterReply(
+      async () => {},
+      () => io.reply(HAND_BACK_LINE),
+    );
+  };
+  return { fn, registry };
+}
 
 describe('async mode (`"async": true` → 202 Accepted, run continues in background)', () => {
   const good = authConfig({ tok: { subject: "alice" } });
@@ -746,5 +794,21 @@ describe('async mode (`"async": true` → 202 Accepted, run continues in backgro
     );
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ reply: "config reply" });
+  });
+
+  it("a hand-back recorded through the real machinery (record 0044) is still 200 with the line — never 202 with a run id — though the registry holds the record", async () => {
+    const hb = handBackDispatch();
+    const res = await handleIngressRequest(
+      {
+        method: "POST",
+        headers: bearer("tok"),
+        body: JSON.stringify({ text: "use opus for coding in this channel", async: true }),
+      },
+      deps,
+      { auth: good, dispatch: hb.fn },
+    );
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ reply: HAND_BACK_LINE });
+    expect(hb.registry.getById("hb-1")).toMatchObject({ finished: true, status: "completed", agent: "command" });
   });
 });

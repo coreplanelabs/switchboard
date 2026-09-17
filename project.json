@@ -212,7 +212,7 @@
       "when": "Part of `check:consistency`."
     },
     "load": {
-      "does": "Load harness: `-- history|resident|sandbox|e2e|cards|provider|pi|route`.",
+      "does": "Load harness: `-- history|resident|sandbox|e2e|cards|provider|pi|route|door`.",
       "when": "Capacity receipts (docs/reference/specs/load-harness.md)."
     }
   }

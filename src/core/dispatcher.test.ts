@@ -14326,7 +14326,7 @@ describe("the command menu through dispatch() (record 0036 unit 2; record 0039)"
     return { deps, registry, provider };
   };
 
-  it("a routed write is handed back as the line to paste: nothing invoked, no card, no thread claim, no run, no agent turn", async () => {
+  it("a routed write is handed back as the line to paste: nothing invoked, no card, no thread claim, no agent turn — the decision itself is a command record (record 0044)", async () => {
     const { deps, registry, provider } = wired();
     deps.routeModel = call("config_set", { scope: "channel", models: { coding: "anthropic/claude-opus-5" } });
     const { io, replies, statuses } = fakeIO();
@@ -14336,7 +14336,8 @@ describe("the command menu through dispatch() (record 0036 unit 2; record 0039)"
     expect(deps.invoked).toEqual([]);
     expect(statuses).toEqual([]);
     expect(provider.requests).toEqual([]);
-    expect(registry.snapshotById("r1")).toBeNull();
+    // The one run is the decision's record, no agent's: the door's counts suite proves its shape.
+    expect(registry.getById("r1")).toMatchObject({ agent: "command", finished: true, status: "completed" });
     expect(deps.admission!.size).toBe(0);
     // Nothing was written: the channel's config is as the fixture left it.
     expect(
@@ -14508,5 +14509,216 @@ describe("the command menu through dispatch() (record 0036 unit 2; record 0039)"
     expect(replies).toHaveLength(1);
     expect(replies[0]).not.toMatch(/^routed:/);
     expect(deps.invoked).toEqual(["config.show"]);
+  });
+});
+
+// Feature: docs/reference/specs/run-history.md item 2 and
+// docs/reference/specs/routing-and-config.md item 21 (record 0044, the counts
+// before anything is built): a door decision about a state change is a run
+// record — the hand-back invokes nothing and tells no surface; the typed line
+// that follows it in the same thread is a second record naming the first;
+// every other typed no-work command, and every routed read, is as it was.
+describe("the door's counts through dispatch(): a hand-back and its paste are run records (record 0044)", () => {
+  const HAND_BACK_LINE = "To run this: config set channel --models.coding anthropic/claude-opus-5";
+  const call = (tool: string, input: unknown) => vi.fn<RouteModel>(async () => ({ tool, input }));
+  const contentTypes = (events: readonly RunEvent[]) => events.filter((e) => !isSpanRecord(e)).map((e) => e.type);
+  /** The routed deps with a counting registry, a store the records land in and
+   *  the one runs service the dispatcher and stage A read the thread through. */
+  const wired = () => {
+    let n = 0;
+    const registry = new RunRegistry({ genId: () => `r${++n}`, genToken: () => "t" });
+    const provider = capturingProvider();
+    const deps = makeDeps(ROUTING_ON_YAML, provider);
+    deps.runRegistry = registry;
+    deps.admission = new ThreadAdmission();
+    const store = new InMemoryRunStore();
+    deps.runStore = store;
+    deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
+    const runs = createRunsService({ registry, store });
+    deps.runs = runs;
+    return { deps, registry, provider, store, runs };
+  };
+  /** The channel with the two run signals spied, so a test can say what the surface was told. */
+  const spiedIO = () => {
+    const f = fakeIO();
+    const started = vi.fn();
+    const finished = vi.fn();
+    f.io.runStarted = started;
+    f.io.runFinished = finished;
+    return { ...f, started, finished };
+  };
+  const handBack = async (deps: TestDeps) => {
+    deps.routeModel = call("config_set", { scope: "channel", models: { coding: "anthropic/claude-opus-5" } });
+    const io = spiedIO();
+    await dispatch(deps, msg("use opus for coding in this channel", "slack:UADMIN"), io.io);
+    return io;
+  };
+
+  it("a routed write handed back leaves one command record — completed, invoked nothing, route.outcome hand_back — and the channel is told of no run; the reply is the line it always was", async () => {
+    const { deps, registry, provider, runs } = wired();
+    const { replies, statuses, started, finished } = await handBack(deps);
+    expect(deps.routeModel).toHaveBeenCalledTimes(1);
+    expect(replies).toEqual([HAND_BACK_LINE]);
+    expect(deps.invoked).toEqual([]);
+    expect(statuses).toEqual([]);
+    expect(provider.requests).toEqual([]);
+    expect(deps.admission!.size).toBe(0);
+    expect(started).not.toHaveBeenCalled();
+    expect(finished).not.toHaveBeenCalled();
+    const snap = registry.snapshotById("r1");
+    expect(snap?.finished).toBe(true);
+    expect(registry.getById("r1")).toMatchObject({ status: "completed", agent: "command", threadKey: "slack:CX:1.0" });
+    expect(contentTypes(snap?.events ?? [])).toEqual(["input", "run_meta", "route", "answer"]);
+    expect(snap?.events.find((e) => e.type === "route")).toMatchObject({
+      type: "route",
+      preset: "command",
+      reason: "command config.set",
+      model: "anthropic/general-model",
+      command: "config.set",
+      input: { args: ["channel"], options: { models: { coding: "anthropic/claude-opus-5" } } },
+      receipt: "config set channel --models.coding anthropic/claude-opus-5",
+      outcome: "hand_back",
+    });
+    expect(snap?.events.find((e) => e.type === "answer")).toMatchObject({ text: HAND_BACK_LINE });
+    // It lists where the report will read it: `runs list agent=command`, the thread's newest.
+    const page = await runs.listRuns({
+      status: "finished",
+      visibleTo: { kind: "all" },
+      agent: "command",
+      threadKey: "slack:CX:1.0",
+      limit: 1,
+    });
+    expect(page.runs.map((r) => r.id)).toEqual(["r1"]);
+    // Nothing was written: the channel's config is as the fixture left it.
+    expect(
+      deps.config.resolve({ channelId: "slack:CX", userId: "slack:UADMIN", request: { agent: "coding" } }).modelRef,
+    ).not.toBe("anthropic/claude-opus-5");
+  });
+
+  it("the same thread's typed line — the paste — runs the command and leaves a second record with route.outcome pasted naming the hand-back, announced to no surface; the reply is the command's own", async () => {
+    const { deps, registry } = wired();
+    await handBack(deps);
+    const { io, replies, started, finished } = spiedIO();
+    await dispatch(deps, msg("config set channel --models.coding anthropic/claude-opus-5", "slack:UADMIN"), io);
+    expect(deps.invoked).toEqual(["config.set"]);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).not.toMatch(/^routed: |^To run this: /);
+    expect(
+      deps.config.resolve({ channelId: "slack:CX", userId: "slack:UADMIN", request: { agent: "coding" } }).modelRef,
+    ).toBe("anthropic/claude-opus-5");
+    const snap = registry.snapshotById("r2");
+    expect(snap?.finished).toBe(true);
+    expect(registry.getById("r2")).toMatchObject({ status: "completed", agent: "command" });
+    expect(contentTypes(snap?.events ?? [])).toEqual(["input", "run_meta", "route", "answer"]);
+    expect(snap?.events.find((e) => e.type === "route")).toMatchObject({
+      preset: "command",
+      reason: "pasted after hand-back",
+      model: "anthropic/general-model",
+      command: "config.set",
+      input: { args: ["channel"], options: { models: { coding: "anthropic/claude-opus-5" } } },
+      receipt: "config set channel --models.coding anthropic/claude-opus-5",
+      outcome: "pasted",
+      handBackRunId: "r1",
+    });
+    expect(snap?.events.find((e) => e.type === "answer")).toMatchObject({ text: replies[0] });
+    expect(started).not.toHaveBeenCalled();
+    expect(finished).not.toHaveBeenCalled();
+    expect(registry.snapshotById("r3")).toBeNull();
+  });
+
+  it("a different typed line in the thread runs and leaves no record — today's rule for a no-work command", async () => {
+    const { deps, registry } = wired();
+    await handBack(deps);
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("config set channel --models.review anthropic/claude-opus-5", "slack:UADMIN"), io);
+    expect(deps.invoked).toEqual(["config.set"]);
+    expect(replies).toHaveLength(1);
+    expect(registry.snapshotById("r2")).toBeNull();
+  });
+
+  it("a line over the receipt cap matches through the same cap: the hand-back's receipt and the typed line's are cut by one function", async () => {
+    const { deps, registry } = wired();
+    const long = `anthropic/${"x".repeat(ROUTE_RECEIPT_CAP + 100)}`;
+    deps.routeModel = call("config_set", { scope: "channel", models: { coding: long } });
+    const first = fakeIO();
+    await dispatch(deps, msg("use that long model name for coding here", "slack:UADMIN"), first.io);
+    expect(first.replies[0]).toMatch(/^To run this: config set channel --models\.coding anthropic\/x+…$/);
+    const { io } = fakeIO();
+    await dispatch(deps, msg(`config set channel --models.coding ${long}`, "slack:UADMIN"), io);
+    expect(deps.invoked).toEqual(["config.set"]);
+    expect(registry.snapshotById("r2")?.events.find((e) => e.type === "route")).toMatchObject({
+      outcome: "pasted",
+      handBackRunId: "r1",
+      receipt: first.replies[0]!.slice("To run this: ".length),
+    });
+  });
+
+  it("the newest command record decides: a routed read that ran between the hand-back and the typed line means no paste is recorded", async () => {
+    const { deps, registry } = wired();
+    await handBack(deps);
+    deps.routeModel = call("friction_report", { limit: 5 });
+    await dispatch(deps, msg("what friction keeps coming back in the last five runs", "slack:UADMIN"), fakeIO().io);
+    expect(registry.getById("r2")).toMatchObject({ agent: "command", finished: true });
+    await dispatch(
+      deps,
+      msg("config set channel --models.coding anthropic/claude-opus-5", "slack:UADMIN"),
+      fakeIO().io,
+    );
+    expect(deps.invoked).toEqual(["friction.report", "config.set"]);
+    expect(registry.snapshotById("r3")).toBeNull();
+  });
+
+  it("a typed command in a thread with no command run costs one bounded read — the thread's newest finished command run — and records nothing new", async () => {
+    const { deps, registry, runs } = wired();
+    const listRuns = vi.fn(runs.listRuns.bind(runs));
+    const getRunEvents = vi.fn(runs.getRunEvents.bind(runs));
+    deps.runs = { ...runs, listRuns, getRunEvents };
+    const { io } = fakeIO();
+    await dispatch(deps, msg("config set channel --models.coding anthropic/claude-opus-5", "slack:UADMIN"), io);
+    expect(deps.invoked).toEqual(["config.set"]);
+    expect(listRuns).toHaveBeenCalledTimes(1);
+    expect(listRuns.mock.calls[0]![0]).toEqual({
+      status: "finished",
+      visibleTo: { kind: "all" },
+      agent: "command",
+      threadKey: "slack:CX:1.0",
+      limit: 1,
+    });
+    expect(getRunEvents).not.toHaveBeenCalled();
+    expect(registry.snapshotById("r1")).toBeNull();
+  });
+
+  it("a read the store refuses never blocks the command: the line runs, the reply is its own, and nothing is recorded", async () => {
+    const { deps, registry, runs } = wired();
+    await handBack(deps);
+    deps.runs = {
+      ...runs,
+      listRuns: async () => {
+        throw new Error("store down");
+      },
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { io, replies } = fakeIO();
+      await dispatch(deps, msg("config set channel --models.coding anthropic/claude-opus-5", "slack:UADMIN"), io);
+      expect(deps.invoked).toEqual(["config.set"]);
+      expect(replies).toHaveLength(1);
+      expect(registry.snapshotById("r2")).toBeNull();
+      expect(warn.mock.calls.some((c) => String(c[0]).includes("store down"))).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("a routed read records nothing new: its route carries no outcome, so a log-only command stays log-only", async () => {
+    const { deps, registry, runs } = wired();
+    deps.routeModel = call("config_show", {});
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("show me the config for this channel", "slack:UADMIN"), io);
+    expect(deps.invoked).toEqual(["config.show"]);
+    expect(replies[0]!.split("\n")[0]).toBe("routed: config show");
+    expect(registry.snapshotById("r1")).toBeNull();
+    const page = await runs.listRuns({ status: "finished", visibleTo: { kind: "all" }, agent: "command" });
+    expect(page.runs).toEqual([]);
   });
 });

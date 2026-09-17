@@ -1568,6 +1568,17 @@ describe("the command menu — every chat command as a tool beside route (record
     expect(withMenu.system).not.toMatch(/runs_list|config_set/);
   });
 
+  it("the rule tells the model a question about a subject is not a call (record 0044): one sentence, once, and the offered tools and the route tool are exactly what they were", () => {
+    const withMenu = buildRoutePrompt({ ...base, commands: menu });
+    const sentence = "Call a command only when the request asks for what the command does";
+    expect(withMenu.system.split(sentence)).toHaveLength(2);
+    expect(withMenu.system).toContain("a question about a subject a command reports on is not a call");
+    // The rule rides the prompt alone: the tools offered are the menu's, the route tool the table's.
+    expect(withMenu.tools).toEqual(menu.map((c) => c.tool));
+    expect(withMenu.tool).toEqual(routeTool(presets, undefined));
+    expect(buildRoutePrompt(base).system).not.toContain(sentence);
+  });
+
   it("route(): a call to an offered command is a command decision — the input bound to the registry's { args, options } shape, no side effect — under an output cap that covers the offered tools", async () => {
     let seen: number | undefined;
     const model: RouteModel = async (_prompt, opts) => {
