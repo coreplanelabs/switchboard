@@ -1448,8 +1448,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           } catch (err) {
             // The three shapes, as the loop reads them (item 16): the word is
             // the verdict, a transport loss takes the one more command, and
-            // any other failure is the turn's, as it always was.
-            if (err instanceof HarnessControlFileLostError) note("harness_error", err.message);
+            // any other failure is the turn's, as it always was — a control
+            // file lost among them, noted once by the turn's own catch below.
             if (err instanceof Error && saysContainerReplaced(err)) {
               turnContainerSaid = err;
               break;
@@ -1519,6 +1519,14 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             bridge.closeOpenSpans((open) => replacedCallNote(open.tool));
             note("sandbox_restarted", turnReplaced.message);
             throw turnReplaced;
+          }
+          // The wait ends with the run's own stop: read it here once it has,
+          // as the loop does — the turn then ends as the stop, not as the
+          // transport failure the wait was judging.
+          turnCheck();
+          if (hardStopped) {
+            note("stopped", hardStopNote(), "hard");
+            return HARD_STOP_MESSAGE;
           }
           if (turnTransportLost !== undefined) {
             note(

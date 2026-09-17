@@ -552,6 +552,24 @@ describe("replacedVerdict — the one more command waits through a container tha
     expect(once.asked()).toBe(1);
   });
 
+  it("a sleep that rejects ends the wait with that failure — never a wait that hangs or an unhandled rejection — and the stop listener is removed", async () => {
+    const control = new AbortController();
+    const boom = new Error("the sleep was torn down");
+    const p = probe({ signal: control.signal });
+    const down = downThen(Number.POSITIVE_INFINITY, async () => "unreachable");
+    await expect(
+      replacedVerdict(down.container, "vm-a", {
+        ...p.wait,
+        sleep: async () => {
+          throw boom;
+        },
+      }),
+    ).rejects.toBe(boom);
+    expect(down.asked()).toBe(1);
+    // The abort listener the pause armed is gone with the failure: a later stop reaches nothing.
+    control.abort();
+  });
+
   it("without a probe to wait with, a container down under the command judges nothing, as any other failed command", async () => {
     const down = downThen(1, async () => "vm-b");
     await expect(replacedVerdict(down.container, "vm-a")).resolves.toBeUndefined();
@@ -735,22 +753,30 @@ describe("ExecHarnessContainer — each operation is one command over the execut
     await expect(c.identity()).rejects.toBeInstanceOf(HarnessContainerRuntimeReplacedError);
   });
 
-  it("identity throws the container down under the question — the platform's not-running or starting text, the transport lost, and any infra failure that reached no container (the Worker's 502 or its not-serviceable refusal while the isolate rolls) — as the typed HarnessContainerDownError, for the one more command to wait on; a command the container itself failed is still no name", async () => {
+  it("identity throws the container down under the question — the platform's not-running or starting text, the transport lost, and an infra failure that a wait can clear: the Worker unreachable (a 5xx, no answer in time) or its not-serviceable refusal while the isolate rolls — as the typed HarnessContainerDownError, for the one more command to wait on; a refusal no wait clears (an evicted worktree that needs an attach, the deploy-storm streak guard), a command the container itself failed, or an empty answer is still no name", async () => {
     const { executor } = recordingExecutor([
       new ExecInfraError("resident /exec: The container is not running, consider calling start()"),
       new ExecInfraError(
         "resident /exec: Peer closed WebSocket: 1006 WebSocket disconnected without sending Close frame.",
       ),
       new ExecInfraError("resident /exec HTTP 502"),
+      new ExecInfraError("resident /exec HTTP 503"),
       new ExecInfraError("resident /exec: not-serviceable: restore in progress"),
+      new ExecInfraError("resident /exec gave no answer within 90s"),
+      new ExecInfraError(
+        "resident /exec: worktree still unavailable after a re-attach (evicted: …) — the resident may be mid-restore; try again shortly.",
+      ),
+      new ExecInfraError(
+        "resident /exec: runtime replaced 2 times in a row with no successful operation between (…) — a deploy storm or a flapping resident, not a one-off deploy.",
+      ),
       "exit 1:\nno shell",
       "(no output)",
     ]);
     const c = new ExecHarnessContainer(executor);
-    await expect(c.identity()).rejects.toBeInstanceOf(HarnessContainerDownError);
-    await expect(c.identity()).rejects.toMatchObject({ operation: "identity" });
-    await expect(c.identity()).rejects.toBeInstanceOf(HarnessContainerDownError);
-    await expect(c.identity()).rejects.toBeInstanceOf(HarnessContainerDownError);
+    for (let i = 0; i < 6; i++) await expect(c.identity()).rejects.toBeInstanceOf(HarnessContainerDownError);
+    // A refusal waiting cannot clear names nothing, so the one more command judges at once.
+    expect(await c.identity()).toBeUndefined();
+    expect(await c.identity()).toBeUndefined();
     // A command the container ran and failed, or an empty answer, is no identity — the container answered.
     expect(await c.identity()).toBeUndefined();
     expect(await c.identity()).toBeUndefined();
